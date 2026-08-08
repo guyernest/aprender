@@ -237,16 +237,31 @@ equations:
   # --------------------------------------------------------------------------
   # 7. cosine_similarity_rows (plan 01-03)
   # --------------------------------------------------------------------------
+  # D12 RESOLUTION (2026-08-08, plan 01-08). The formula below previously read
+  # `out[b] = <a[b], c[b]> / max(||a[b]||_2 * ||c[b]||_2, eps)` — the PRODUCT
+  # clamped once. The implementation (plan 01-03, `autograd/ops/similarity.rs`)
+  # clamps each FACTOR independently, which is also what
+  # `torch.nn.functional.cosine_similarity` does and what 01-03's four-branch
+  # finite-difference gradchecks presuppose. The PROSE was wrong, not the code:
+  # this reword makes the contract describe the shipped derivative. Per D12's
+  # recorded fix direction, the implementation was NOT changed — changing it to
+  # match the old prose would destroy the per-input branch independence the FD
+  # tests prove.
   cosine_similarity_rows:
-    formula: out[b] = <a[b], c[b]> / max(||a[b]||_2 * ||c[b]||_2, eps)
+    formula: out[b] = <a[b], c[b]> / (max(||a[b]||_2, eps) * max(||c[b]||_2, eps))
     domain: a, c in R^{B x H} row-major, eps > 0
     codomain: R^{B}, each element in [-1, 1]
     invariants:
     - 'Row-major layout (LAYOUT-001)'
     - Graph connectivity — the output carries a CosineSimilarityBackward edge back to
       BOTH inputs; a one-sided edge silently freezes half the siamese encoder
-    - The epsilon floor guards the product of norms, so a zero row yields 0.0 rather
-      than NaN
+    - The epsilon floor is applied to EACH norm independently, so a zero row yields
+      0.0 rather than NaN. Per-factor and product clamping COINCIDE exactly wherever
+      both norms exceed eps — i.e. across the whole non-degenerate domain, which is
+      everything the encoder sees with real weights — and differ only when at least
+      one row is degenerate. Per-factor is the form that keeps a's clamp branch from
+      changing b's gradient, which is why the derivative is specified and tested that
+      way (01-03)
     - Values stay within [-1, 1] up to floating-point rounding
     preconditions:
     - 'a.len() > 0'
