@@ -374,13 +374,45 @@ pub(crate) struct MaskedMeanPoolBackward {
 
 impl GradFn for MaskedMeanPoolBackward {
     fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
-        let _ = grad_output;
-        // RED stub — the real backward lands in the GREEN commit.
-        let numel = self.batch * self.seq * self.hidden;
-        vec![Tensor::new(
-            &vec![0.0f32; numel],
-            &[self.batch, self.seq, self.hidden],
-        )]
+        let g = grad_output.data();
+        let (b, s, h) = (self.batch, self.seq, self.hidden);
+        let mut grad_in = vec![0.0f32; b * s * h];
+
+        for row in 0..b {
+            let base = row * s;
+            // Folded rather than `filter(..).count()`: the explicit `m == 1`
+            // predicate means a stray non-binary value could never inflate the
+            // divisor (the forward rejects those, but the divisor is the one
+            // place where being wrong is silent).
+            let count = self.mask[base..base + s]
+                .iter()
+                .fold(0usize, |acc, &m| acc + usize::from(m == 1));
+            if count == 0 {
+                // Unreachable: the forward rejects an all-padding row with a
+                // typed error before this struct is constructed. Skipping keeps
+                // the row at zero rather than dividing by zero, so even a future
+                // caller that bypassed the guard cannot inject NaN here.
+                continue;
+            }
+            // PER-ROW divisor. Hoisted per row precisely so it cannot silently
+            // become a single batch-wide constant.
+            let inv = 1.0 / count as f32;
+            let g_off = row * h;
+
+            for pos in 0..s {
+                if self.mask[base + pos] != 1 {
+                    // Padded positions keep their initialized 0.0 — gradient must
+                    // never leak into positions that carried no input.
+                    continue;
+                }
+                let dst = base * h + pos * h;
+                for j in 0..h {
+                    grad_in[dst + j] = g[g_off + j] * inv;
+                }
+            }
+        }
+
+        vec![Tensor::new(&grad_in, &[b, s, h])]
     }
 
     fn name(&self) -> &'static str {
