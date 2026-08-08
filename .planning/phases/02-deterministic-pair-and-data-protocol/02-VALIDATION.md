@@ -98,7 +98,7 @@ are declared as such rather than hidden behind a ceiling they do not meet.
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| Pinned TweetEval source acquisition from network | DATA-01 | Requires network fetch of pinned upstream source; CI stays offline (SAFE-02) | Run `cargo test -p apr-cli --lib data_tweeteval -- --ignored` with network; verify SHA-256 hashes match the manifest and the exclusion record shows exactly the train:70 ≡ validation:3 duplicate (plan 02-06 Task 2) |
+| Pinned TweetEval source acquisition from network | DATA-01 | Requires network fetch of pinned upstream source; CI stays offline (SAFE-02) | Run `cargo test -p apr-cli --lib data_tweeteval -- --ignored` with network; verify SHA-256 hashes match the manifest and the exclusion record shows exactly the train:70 ≡ validation:3 duplicate (plan 02-06 Task 3 — the real-duplicate golden; Task 2 is the adapter refactor) |
 
 *All other phase behaviors have automated verification.*
 
