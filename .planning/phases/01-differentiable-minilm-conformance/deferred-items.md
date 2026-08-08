@@ -232,3 +232,102 @@ tanh and erf forms, which is the entire premise of amendment A-03, not an
 implementation error.
 
 Anyone comparing the two activations point-by-point will meet this again.
+
+## From plan 01-05 (2026-08-08)
+
+Numbered from **D20** to leave room for the plan running in parallel with this
+one.
+
+### D20. `sentence_bert_config.json` is outside the frozen upstream file set, so the `max_seq_length` pin is skippable on a real checkout
+
+`upstream_manifest.json` (01-04) records digests for five files —
+`1_Pooling/config.json`, `config.json`, `model.safetensors`, `modules.json`,
+`tokenizer.json` — and `fetch_full_weights.py` copies exactly those. The
+upstream repo also publishes `sentence_bert_config.json`
+(`{"max_seq_length": 256, "do_lower_case": false}`), which is where the
+sentence-transformers sequence bound actually lives.
+
+ENC-01's mutation matrix requires that a wrong `max_seq_length` be rejected. It
+is — but because the D-10 checkout cannot contain the file, `MiniLmImport::open`
+validates it **only when present**. A checkout that simply omits it passes.
+
+That is safe today, and the reason is worth recording: the 256-token bound is
+applied by `MiniLmTokenizer` from this crate's own `MAX_SEQUENCE_LENGTH`
+constant, never read from the checkout, so deleting the file cannot change what
+the model does. It is nonetheless a check that an artifact can opt out of by
+omission, which is a weaker property than the other twenty-two pin fields have.
+
+Fix direction: add `sentence_bert_config.json` to `UPSTREAM_FILES` in
+`scripts/setfit_fixtures/slice_model.py`, regenerate `upstream_manifest.json`
+with its digest, and then make the file **required** in `open()`. That is a
+fixture-regeneration task (it changes a frozen manifest), which is why it was
+not done inside a plan whose scope is Rust.
+
+### D21. Two `tokenizers` versions now coexist in `Cargo.lock`
+
+`aprender-bench-tokenizer` pins `tokenizers = "0.22"` with
+`features = ["progress"]`; `aprender-core` now pins the workspace
+`tokenizers 0.23.1` with `default-features = false, features = ["fancy-regex"]`.
+Cargo resolves both, so `Cargo.lock` carries `tokenizers 0.22.2` and
+`tokenizers 0.23.1`.
+
+Not unified here on purpose: the bench crate's whole stated purpose is a
+head-to-head against **HF v0.22** (its own description and its results table say
+so), and it enables `progress`, which pulls `indicatif`. Silently bumping it
+would change what the published benchmark numbers mean.
+
+Fix direction: decide whether the benchmark is pinned to 0.22 as a historical
+baseline (in which case add a comment saying so, because right now it reads like
+drift) or should track the workspace pin (in which case re-run and re-publish
+the numbers).
+
+### D22. `cargo check -p aprender-core --all-features` cannot pass on macOS
+
+`--all-features` enables `audio-alsa`, which pulls `alsa-sys`, whose build
+script needs the Linux ALSA development headers:
+
+```
+error: failed to run custom build command for `alsa-sys v0.3.1`
+```
+
+Proven independent of this plan's changes: `cargo check -p aprender-core
+--no-default-features --features audio-alsa` — which touches no setfit code at
+all — fails identically.
+
+This is the same class as D5 but a different command and a different crate, so
+it is logged separately: D5 is about `cargo check --workspace` and
+`aprender-profile`. Any plan whose `<verification>` block names
+`-p aprender-core --all-features` will fail on a macOS developer box for reasons
+unrelated to that plan.
+
+Fix direction: name a platform-appropriate feature union in verification blocks,
+or add a `just check-features` recipe that excludes the OS-specific audio
+backends per platform.
+
+### D23. Every optional dependency in `aprender-core/Cargo.toml` is referenced by IMPLICIT feature name, and one `dep:` anywhere breaks them all
+
+Cargo synthesises an implicit feature per optional dependency **only while no
+feature uses the `dep:` prefix for it**. `aprender-core` referenced `sha2` by
+bare name from `format-encryption` and `hf-hub-integration`. The moment this plan
+wrote `setfit = ["dep:tokenizers", "dep:sha2"]`, the manifest stopped parsing:
+
+```
+feature `format-encryption` includes `sha2`, but `sha2` is an optional
+dependency without an implicit feature. Use `dep:sha2` to enable the dependency.
+```
+
+Fixed here by declaring `sha2 = ["dep:sha2"]` explicitly, which keeps the
+published feature surface byte-identical while allowing the unambiguous form.
+
+The trap is not specific to `sha2`. Every other optional dependency in that
+manifest is still referenced by bare name — `lz4_flex`, `zstd`, `half`,
+`ed25519-dalek`, `aes-gcm`, `argon2`, `x25519-dalek`, `hkdf`, `hf-hub`, `dirs`,
+`ureq`, `safetensors`, `wasm-bindgen`, `js-sys`, `alimentar`,
+`trueno-zram-core`, `hf-xet` — so the next plan that reaches for `dep:` on any
+of them meets the same wall. It is also an accidental public API surface: each
+of those names is an enableable feature of the published crate.
+
+Fix direction: convert the whole `[features]` block to explicit `dep:` form in
+one pass, declaring an explicit forwarding feature for any bare name that must
+remain enableable. Out of scope here because it touches every feature in the
+crate and this plan's blast radius should stay at `setfit`.
