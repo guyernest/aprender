@@ -191,6 +191,22 @@ provable-contracts = "0.3"  # Contract enforcement (dev-only)
 # Same publish-time cycle break as renacer above.
 entrenar = { path = "../aprender-train", package = "aprender-train" }
 serde_yaml = "0.9"  # YAML contract binding in tests (FALSIFY-SHIP-009 GATE-APR-PROV-004)
+# The IN-TREE contract crate, deliberately ALIASED (plan 01-08, D-14).
+#
+# `provable-contracts = "0.3"` above is the CRATES.IO package; the workspace is
+# at 0.63.0. `use provable_contracts::` in a test therefore resolves to a
+# registry crate, not to the schema this repository owns — the D10 failure class,
+# where the run is green and proves nothing about the code under change. Both
+# packages declare `[lib] name = "provable_contracts"`, so the in-tree one is
+# reachable only under a different dependency key.
+#
+# The setfit conformance harness generates its tolerance constants from
+# `contracts/setfit-encoder-conformance-v1.yaml` with the SAME deserializer
+# `pv validate` uses, so the generator cannot drift from pv's reading of the
+# contract. A bespoke serde_yaml re-parse was rejected as muda (CLAUDE.md:
+# re-implementing what `pv` already does) and would have been a second,
+# drift-prone reader of a schema the workspace already owns.
+setfit-contract-schema = { path = "../aprender-contracts", package = "aprender-contracts" }
 half = { workspace = true }  # IEEE f16 oracle for the convert_report f32_to_f16 RNE falsifier (PMAT-905)
 
 [features]
