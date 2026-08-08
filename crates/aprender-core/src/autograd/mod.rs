@@ -45,6 +45,16 @@ pub use grad_fn::GradFn;
 pub use graph::ComputationGraph;
 pub use tensor::{Tensor, TensorId};
 
+/// SetFit differentiable primitives (phase 01, contract
+/// `setfit-encoder-conformance-v1`).
+///
+/// Re-exported here rather than under `autograd::ops` because `ops` is private —
+/// every other operation in it is an inherent `Tensor` method, and these are the
+/// first free functions. They are deliberately NOT behind the `setfit` feature
+/// (D-03): the severed-graph debt they retire belongs to every consumer of
+/// `autograd`, not just the SetFit path.
+pub use ops::{additive_attention_mask, embedding_gather, OpError, NEG_MASK};
+
 use std::cell::RefCell;
 
 thread_local! {

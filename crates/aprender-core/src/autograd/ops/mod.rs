@@ -361,3 +361,25 @@ impl Tensor {
 }
 
 include!("activation.rs");
+
+// ============================================================================
+// SetFit differentiable primitives (phase 01)
+//
+// Model-agnostic and deliberately UNGATED (D-03) — they retire the CONCERNS.md
+// "embedding and pooling operations detach the graph" debt for every consumer,
+// not just the `setfit` feature. Each is bound to
+// `contracts/setfit-encoder-conformance-v1.yaml` via `#[contract]` (D-27) and
+// carries a per-element central-finite-difference test (D-04).
+// ============================================================================
+
+include!("op_error.rs");
+include!("embedding.rs");
+include!("masking.rs");
+
+#[cfg(test)]
+#[path = "tests_embedding_backward.rs"]
+mod tests_embedding_backward;
+
+#[cfg(test)]
+#[path = "tests_masking.rs"]
+mod tests_masking;
