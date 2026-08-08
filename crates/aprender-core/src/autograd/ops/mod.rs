@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use super::grad_fn::{
     AbsBackward, AddBackward, BroadcastAddBackward, DivBackward, EmbeddingBackward, ExpBackward,
-    GeluBackward, LeakyReluBackward, LogBackward, MatmulBackward, MeanBackward, MulBackward,
-    NegBackward, PowBackward, ReluBackward, SigmoidBackward, SoftmaxBackward, SqrtBackward,
-    SubBackward, SumBackward, TanhBackward, TransposeBackward, ViewBackward,
+    GeluBackward, LeakyReluBackward, LogBackward, MaskedMeanPoolBackward, MatmulBackward,
+    MeanBackward, MulBackward, NegBackward, PowBackward, ReluBackward, SigmoidBackward,
+    SoftmaxBackward, SqrtBackward, SubBackward, SumBackward, TanhBackward, TransposeBackward,
+    ViewBackward,
 };
 use super::tensor::Tensor;
 use super::{is_grad_enabled, with_graph};
@@ -375,6 +376,7 @@ include!("activation.rs");
 include!("op_error.rs");
 include!("embedding.rs");
 include!("masking.rs");
+include!("pooling.rs");
 
 #[cfg(test)]
 #[path = "tests_embedding_backward.rs"]
@@ -383,3 +385,7 @@ mod tests_embedding_backward;
 #[cfg(test)]
 #[path = "tests_masking.rs"]
 mod tests_masking;
+
+#[cfg(test)]
+#[path = "tests_pooling_backward.rs"]
+mod tests_pooling_backward;

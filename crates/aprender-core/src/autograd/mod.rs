@@ -53,7 +53,7 @@ pub use tensor::{Tensor, TensorId};
 /// first free functions. They are deliberately NOT behind the `setfit` feature
 /// (D-03): the severed-graph debt they retire belongs to every consumer of
 /// `autograd`, not just the SetFit path.
-pub use ops::{additive_attention_mask, embedding_gather, OpError, NEG_MASK};
+pub use ops::{additive_attention_mask, embedding_gather, masked_mean_pool, OpError, NEG_MASK};
 
 use std::cell::RefCell;
 

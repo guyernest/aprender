@@ -345,6 +345,49 @@ impl GradFn for MeanBackward {
     }
 }
 
+/// Gradient function for masked mean pooling over the sequence axis.
+///
+/// Obligation: OBLIG-ENC-03 masked pooling, contract
+/// `setfit-encoder-conformance-v1`, equation `masked_mean_pool`.
+///
+/// Forward reduces `[B, S, H]` to `[B, H]` by averaging only the VALID
+/// positions of each row: `out[b][h] = (Σ_s mask[b][s]·x[b][s][h]) / n_b`.
+///
+/// Backward therefore routes `grad_output[b][h] / n_b` to every valid position
+/// `(b, s, h)` and **exactly `0.0`** to every padded position. Two properties
+/// carry all the risk here:
+///
+/// * The divisor is **per row**. A single shared denominator is invisible on a
+///   uniform-length batch and wrong on every mixed-length one — which is every
+///   real one.
+/// * Padded positions must receive zero, not `grad/n`. Leaking gradient into
+///   padding trains the encoder on positions that carry no input.
+///
+/// `n_b > 0` is guaranteed by the forward, which rejects an all-padding row
+/// with a typed error before this struct is ever constructed.
+pub(crate) struct MaskedMeanPoolBackward {
+    pub(crate) mask: Vec<u8>,
+    pub(crate) batch: usize,
+    pub(crate) seq: usize,
+    pub(crate) hidden: usize,
+}
+
+impl GradFn for MaskedMeanPoolBackward {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let _ = grad_output;
+        // RED stub — the real backward lands in the GREEN commit.
+        let numel = self.batch * self.seq * self.hidden;
+        vec![Tensor::new(
+            &vec![0.0f32; numel],
+            &[self.batch, self.seq, self.hidden],
+        )]
+    }
+
+    fn name(&self) -> &'static str {
+        "MaskedMeanPoolBackward"
+    }
+}
+
 // ============================================================================
 // Activation Functions
 // ============================================================================

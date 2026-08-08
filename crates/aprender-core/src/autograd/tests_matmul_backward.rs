@@ -163,7 +163,21 @@
                 y_shape: vec![1],
             }
             .name(),
+            // Phase 01 SetFit primitives — a backward struct that is not
+            // registered here is one nobody notices going missing.
+            MaskedMeanPoolBackward {
+                mask: vec![1],
+                batch: 1,
+                seq: 1,
+                hidden: 1,
+            }
+            .name(),
         ];
+
+        assert!(
+            names.contains(&"MaskedMeanPoolBackward"),
+            "MaskedMeanPoolBackward must be registered in test_all_backward_names"
+        );
 
         // All names should be unique
         let unique: std::collections::HashSet<_> = names.iter().collect();
