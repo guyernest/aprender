@@ -9,10 +9,10 @@
 use std::sync::Arc;
 
 use super::grad_fn::{
-    AbsBackward, AddBackward, BroadcastAddBackward, DivBackward, ExpBackward, GeluBackward,
-    LeakyReluBackward, LogBackward, MatmulBackward, MeanBackward, MulBackward, NegBackward,
-    PowBackward, ReluBackward, SigmoidBackward, SoftmaxBackward, SqrtBackward, SubBackward,
-    SumBackward, TanhBackward, TransposeBackward, ViewBackward,
+    AbsBackward, AddBackward, BroadcastAddBackward, DivBackward, EmbeddingBackward, ExpBackward,
+    GeluBackward, LeakyReluBackward, LogBackward, MatmulBackward, MeanBackward, MulBackward,
+    NegBackward, PowBackward, ReluBackward, SigmoidBackward, SoftmaxBackward, SqrtBackward,
+    SubBackward, SumBackward, TanhBackward, TransposeBackward, ViewBackward,
 };
 use super::tensor::Tensor;
 use super::{is_grad_enabled, with_graph};
