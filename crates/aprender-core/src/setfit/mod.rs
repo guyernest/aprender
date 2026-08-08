@@ -121,12 +121,26 @@ impl FreezeGroup {
     /// has ten or more layers.
     #[must_use]
     pub fn name_prefixes(self) -> Vec<String> {
-        // RED STUB (plan 01-07 Task 2): an empty prefix set addresses nothing,
-        // which no test expects.
         match self {
-            Self::Embeddings | Self::LayerAttention(_) | Self::LayerFfn(_) | Self::LayerNorm(_) => {
-                Vec::new()
-            }
+            // The word/position/token-type tables AND the embeddings LayerNorm:
+            // ENC-04 treats them as one component, and 01-06's gradient gate
+            // aggregates them the same way.
+            Self::Embeddings => vec!["embeddings.".to_string()],
+            // `attention.self.*` is Q/K/V; `attention.output.dense.*` is the
+            // out-projection `MultiHeadAttention` applies inside forward_self.
+            // NOT `attention.output.LayerNorm.*` — that is LayerNorm(n).
+            Self::LayerAttention(n) => vec![
+                format!("encoder.layer.{n}.attention.self."),
+                format!("encoder.layer.{n}.attention.output.dense."),
+            ],
+            Self::LayerFfn(n) => vec![
+                format!("encoder.layer.{n}.intermediate."),
+                format!("encoder.layer.{n}.output.dense."),
+            ],
+            Self::LayerNorm(n) => vec![
+                format!("encoder.layer.{n}.attention.output.LayerNorm."),
+                format!("encoder.layer.{n}.output.LayerNorm."),
+            ],
         }
     }
 
@@ -203,11 +217,16 @@ impl SetFitMiniLm {
     /// Any typed [`SetFitError`] the ENC-01 pin, the tokenizer load or the
     /// tensor read produces, naming the field/file/tensor that failed.
     pub fn from_pretrained_dir(dir: &Path, root_seed: u64) -> Result<Self, SetFitError> {
-        // RED STUB (plan 01-07 Task 2). An error no test expects.
-        let _ = (dir, root_seed);
-        Err(SetFitError::RemapInvalid {
-            reason: "RED STUB: SetFitMiniLm::from_pretrained_dir is not implemented yet"
-                .to_string(),
+        // ONE source for both halves. `MiniLmImport::open` additionally requires
+        // these very bytes to hash to `PINNED_TOKENIZER_SHA256`, so the pairing
+        // is correct by construction and not by a check that could be skipped.
+        let tokenizer = MiniLmTokenizer::from_bytes(&read_model_file(dir, "tokenizer.json")?)?;
+        let import = MiniLmImport::open(dir)?;
+        let encoder = BertSentenceEncoder::from_import(&import, root_seed)?;
+        Ok(Self {
+            tokenizer,
+            encoder,
+            freeze: Vec::new(),
         })
     }
 
@@ -222,10 +241,27 @@ impl SetFitMiniLm {
     /// the remap does not describe this slice.
     #[cfg(feature = "conformance-fixtures")]
     pub fn from_slice_fixture(fixture_dir: &Path, root_seed: u64) -> Result<Self, SetFitError> {
-        // RED STUB (plan 01-07 Task 2). An error no test expects.
-        let _ = (fixture_dir, root_seed);
-        Err(SetFitError::RemapInvalid {
-            reason: "RED STUB: SetFitMiniLm::from_slice_fixture is not implemented yet".to_string(),
+        let tokenizer =
+            MiniLmTokenizer::from_bytes(&read_model_file(fixture_dir, "tokenizer.json")?)?;
+        let config =
+            SliceConfig::from_json_bytes(&read_model_file(fixture_dir, "slice_config.json")?)?;
+        let remap = VocabRemap::from_json_bytes(
+            &read_model_file(fixture_dir, "vocab_remap.json")?,
+            config.vocab,
+        )?;
+        // `open_slice_fixture` requires `config.tokenizer_sha256` to equal the
+        // pin, and the tokenizer above hashes the bytes from the same directory,
+        // so the two halves cannot disagree.
+        let import = MiniLmImport::open_slice_fixture(
+            &fixture_dir.join("slice_model.apr"),
+            &config,
+            &remap,
+        )?;
+        let encoder = BertSentenceEncoder::from_import(&import, root_seed)?;
+        Ok(Self {
+            tokenizer,
+            encoder,
+            freeze: Vec::new(),
         })
     }
 
@@ -312,14 +348,87 @@ impl SetFitMiniLm {
     /// `0..num_layers()`, or for a structurally valid group whose prefix set
     /// addresses zero named parameters (the naming-drift guard).
     pub fn apply_freeze(&mut self, groups: &[FreezeGroup]) -> Result<(), SetFitError> {
-        // RED STUB (plan 01-07 Task 2): accepts everything, changes nothing.
-        let _ = groups;
+        let layers = self.encoder.num_layers();
+        let all: Vec<String> = self
+            .encoder
+            .named_parameters()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+
+        // (1) Validate EVERY group before touching anything. This ordering is
+        //     what makes "no partial application" true: a validate-as-you-go
+        //     loop would already have frozen the valid prefix of the list by the
+        //     time it rejected a later group, leaving the model in a state no
+        //     caller asked for and no return value describes.
+        for g in groups {
+            if let Some(n) = g.layer() {
+                if n >= layers {
+                    return Err(SetFitError::FreezeGroupInvalid {
+                        reason: format!(
+                            "{g:?} names layer {n}, but this encoder has {layers} layers \
+                             (valid indices 0..{})",
+                            layers.saturating_sub(1)
+                        ),
+                    });
+                }
+            }
+            // Naming-drift guard. A structurally valid group that addresses
+            // nothing means 01-06's dotted names moved; a policy that silently
+            // freezes nothing is worse than one that fails, because the run
+            // still looks like a successful partial freeze.
+            if !all.iter().any(|name| g.matches(name)) {
+                return Err(SetFitError::FreezeGroupInvalid {
+                    reason: format!(
+                        "{g:?} addresses ZERO named parameters (prefixes {:?}); the encoder's \
+                         parameter naming has drifted from the freeze mapping",
+                        g.name_prefixes()
+                    ),
+                });
+            }
+        }
+
+        // (2) Normalize once. Sorting and deduplicating here is what delivers
+        //     order-insensitivity and duplicate-tolerance from ONE code path
+        //     instead of three special cases.
+        let mut normalized = groups.to_vec();
+        normalized.sort_unstable();
+        normalized.dedup();
+
+        // (3) Reset, then (4) apply. Resetting first is what delivers
+        //     REPLACEMENT semantics: a group absent from the new policy becomes
+        //     trainable again without anyone having to remember to un-freeze it.
+        self.set_all_requires_grad(true);
+        self.freeze = normalized;
+        let frozen = self.frozen_names();
+        for (name, t) in self.encoder.named_parameters_mut() {
+            if frozen.contains(&name) {
+                t.requires_grad_(false);
+            }
+        }
         Ok(())
     }
 
     /// Restore the D-20 default: every parameter trainable.
     pub fn clear_freeze(&mut self) {
-        // RED STUB (plan 01-07 Task 2).
+        self.freeze.clear();
+        self.set_all_requires_grad(true);
+    }
+
+    /// Names the current policy freezes, in `named_parameters()` order.
+    fn frozen_names(&self) -> Vec<String> {
+        self.encoder
+            .named_parameters()
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| self.freeze.iter().any(|g| g.matches(n)))
+            .collect()
+    }
+
+    fn set_all_requires_grad(&mut self, requires: bool) {
+        for (_, t) in self.encoder.named_parameters_mut() {
+            t.requires_grad_(requires);
+        }
     }
 
     /// The applied policy, normalized (deduplicated and sorted).
@@ -334,15 +443,22 @@ impl SetFitMiniLm {
     /// by EXCLUSION here rather than only by clearing a flag.
     #[must_use]
     pub fn trainable_parameters_mut(&mut self) -> Vec<(String, &mut Tensor)> {
-        // RED STUB (plan 01-07 Task 2): ignores the policy.
-        self.encoder.named_parameters_mut()
+        let frozen = self.frozen_names();
+        self.encoder
+            .named_parameters_mut()
+            .into_iter()
+            .filter(|(n, _)| !frozen.contains(n))
+            .collect()
     }
 
     /// Named parameters the freeze policy excludes from optimization.
     #[must_use]
     pub fn frozen_parameters(&self) -> Vec<(String, &Tensor)> {
-        // RED STUB (plan 01-07 Task 2): ignores the policy.
-        Vec::new()
+        self.encoder
+            .named_parameters()
+            .into_iter()
+            .filter(|(n, _)| self.freeze.iter().any(|g| g.matches(n)))
+            .collect()
     }
 }
 

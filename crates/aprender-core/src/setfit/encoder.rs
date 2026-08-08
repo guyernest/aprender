@@ -40,16 +40,13 @@
 //! That is also the mode the frozen fixtures were generated in (D-16). Training
 //! callers flip it explicitly with `set_training(true)`.
 
-// Same D-08 consequence import.rs records: `from_import` is `pub(crate)` under
-// the seal and has no non-test caller until 01-07's `SetFitMiniLm`, so a
-// library-only build walks everything it reaches — `site_seed`, `DROPOUT_P`,
-// `install_projection`, the site-name helpers — as unreachable. Targeted
-// `#[allow]`s were tried first and MEASURED to be whack-a-mole: silencing
-// `install_projection` and `EMBEDDINGS_DROPOUT_SITE` simply moved the finding to
-// `site_seed`, because the whole construction path hangs off one sealed entry
-// point. Widening the visibility to silence it would break the seal, which is
-// the wrong trade. Delete this the moment 01-07 wires `SetFitMiniLm`.
-#![allow(dead_code)]
+// D32 CLOSED (01-07): the module-wide `#![allow(dead_code)]` 01-06 added here is
+// GONE. 01-06 recorded that `from_import` was `pub(crate)` under the D-08 seal
+// with no non-test caller, so a library-only build walked the whole construction
+// path — `site_seed`, `DROPOUT_P`, `install_projection`, the site-name helpers —
+// as unreachable. `SetFitMiniLm::from_pretrained_dir` is now that caller, and
+// the removal was MEASURED rather than assumed: `cargo check -p aprender-core
+// --features setfit` reports zero dead-code findings in this file afterwards.
 
 use crate::autograd::{
     additive_attention_mask, embedding_gather, l2_normalize_rows, masked_mean_pool, OpError, Tensor,

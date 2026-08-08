@@ -32,21 +32,19 @@
 //! (01-07) are the public entry points and they load the tokenizer from the same
 //! source, so a mismatched tokenizer/encoder pair cannot be assembled.
 
-// The D-08 seal has a compile-time consequence: every constructor here is
-// `pub(crate)`, and its in-crate callers are the encoder (01-06) and
-// `SetFitMiniLm` (01-07), neither of which exists yet. A library-only build
-// therefore sees the constructors, their config wire types and their validation
-// helpers as unreachable and reports ~15 dead-code findings — none of which
-// describe a defect. Widening the visibility to silence them would break the
-// seal, which is the wrong trade. This allow is scoped to this module and stops
-// being needed the moment 01-06 wires the encoder to `MiniLmImport`.
+// D32 CLOSED (01-07): the module-wide `#![allow(dead_code)]` is GONE.
 //
-// 01-06 UPDATE, MEASURED not assumed: wiring the encoder cut the surface from
-// ~15 findings to exactly THREE — `VocabRemap::from_json_bytes`,
-// `SliceConfig::from_json_bytes` and `validate_pooling`. All three are still
-// reachable only from tests and from 01-07's `SetFitMiniLm`, so the allow is
-// still load-bearing and was NOT removed. 01-07 is the plan that can delete it.
-#![allow(dead_code)]
+// The history is worth keeping because it is the removal condition being met,
+// not a guess. 01-05 added the allow when every constructor here became
+// `pub(crate)` under the D-08 seal with no in-crate caller: ~15 findings, none
+// of them a defect. 01-06 wired the encoder and MEASURED the surface down to
+// exactly three — `VocabRemap::from_json_bytes`, `SliceConfig::from_json_bytes`
+// and `validate_pooling` — and left the allow in place because all three were
+// still reachable only from tests. `SetFitMiniLm::from_pretrained_dir` calls
+// `open` (which calls `validate_pooling`) and `from_slice_fixture` calls both
+// `from_json_bytes` constructors, so all three now have a library caller. Zero
+// dead-code findings remain in this file, measured with
+// `cargo check -p aprender-core --features setfit`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -221,6 +219,14 @@ impl VocabRemap {
 }
 
 /// Wire form of `vocab_remap.json`.
+///
+/// Gated exactly like its sole constructor, [`VocabRemap::from_json_bytes`]:
+/// `vocab_remap.json` belongs to the slice-fixture path, and a `--features
+/// setfit` build has no way to reach it. Keeping the gate on one half only is
+/// what left a genuine dead-code finding behind after 01-07 removed this
+/// module's `#![allow(dead_code)]` — the targeted `cfg` is the fix, not an
+/// allow.
+#[cfg(feature = "conformance-fixtures")]
 #[derive(serde::Deserialize)]
 struct VocabRemapWire {
     orig_to_slice: HashMap<u32, u32>,

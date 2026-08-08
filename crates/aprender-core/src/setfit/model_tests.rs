@@ -536,8 +536,11 @@ mod slice {
         // out-of-crate half of this proof is the positive compile probe recorded
         // in the SUMMARY: an in-crate call would compile identically even if
         // `forward_tokens_per_layer` were `pub(crate)`.
+        // The text must live inside the 97-row slice closure: "hello" does not
+        // (canonical id 7592), and the encoder correctly rejects it with
+        // VocabOutOfSlice rather than zero-filling — measured, not assumed.
         let m = model();
-        let batch = m.tokenize(&["hello"]).expect("tokenize");
+        let batch = m.tokenize(&TEXTS_A[..1]).expect("tokenize");
         let (embeddings_out, layer_outputs) = m
             .encoder()
             .forward_tokens_per_layer(&batch)
