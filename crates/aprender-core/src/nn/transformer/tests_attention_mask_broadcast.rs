@@ -214,7 +214,9 @@ fn attention_mask_broadcast_backward_yields_finite_grad_of_scores_shape() {
     let out = add_mask(&scores, &mask);
 
     // Non-uniform detached coefficients so the gradient is non-degenerate.
-    let c: Vec<f32> = (0..B * H * T * S).map(|i| 0.21 + 0.013 * (i as f32)).collect();
+    let c: Vec<f32> = (0..B * H * T * S)
+        .map(|i| 0.21 + 0.013 * (i as f32))
+        .collect();
     let c_tensor = Tensor::new(&c, &[B, H, T, S]);
     let loss = out.mul(&c_tensor).sum();
     loss.backward();
@@ -262,7 +264,10 @@ fn attention_mask_broadcast_equal_shapes_keep_existing_behavior_and_graph() {
             out.data()[i]
         );
     }
-    assert!(out.requires_grad_enabled(), "equal-shape path lost requires_grad");
+    assert!(
+        out.requires_grad_enabled(),
+        "equal-shape path lost requires_grad"
+    );
     assert!(out.grad_fn().is_some(), "equal-shape path lost its grad_fn");
 }
 
@@ -273,7 +278,9 @@ fn attention_mask_broadcast_2d_causal_mask_spreads_over_batch_and_heads() {
     autograd::clear_graph();
 
     const N: usize = 4;
-    let sd: Vec<f32> = (0..B * H * N * N).map(|i| 0.25 + 0.01 * (i as f32)).collect();
+    let sd: Vec<f32> = (0..B * H * N * N)
+        .map(|i| 0.25 + 0.01 * (i as f32))
+        .collect();
     let mut scores = Tensor::new(&sd, &[B, H, N, N]);
     scores.requires_grad_(true);
 
@@ -324,7 +331,9 @@ fn attention_mask_broadcast_handles_t_not_equal_to_s() {
     // T != S is the shape that a square-mask assumption silently gets wrong.
     const TT: usize = 3;
     const SS: usize = 7;
-    let sd: Vec<f32> = (0..B * H * TT * SS).map(|i| 0.5 + 0.002 * (i as f32)).collect();
+    let sd: Vec<f32> = (0..B * H * TT * SS)
+        .map(|i| 0.5 + 0.002 * (i as f32))
+        .collect();
     let scores = Tensor::new(&sd, &[B, H, TT, SS]);
 
     let md: Vec<f32> = (0..B * SS).map(|i| -(1.0 + (i as f32))).collect();
