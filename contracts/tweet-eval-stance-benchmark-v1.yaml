@@ -1,0 +1,126 @@
+metadata:
+  version: 1.0.0
+  created: '2026-08-07'
+  author: PAIML Engineering
+  description: Canonical TweetEval abortion stance data and evaluation contract
+  references:
+    - https://github.com/cardiffnlp/tweeteval
+    - https://aclanthology.org/2020.findings-emnlp.148/
+    - https://alt.qcri.org/semeval2016/task6/
+
+dataset:
+  id: tweet_eval_stance_abortion
+  target: Legalization of Abortion
+  task: single-label three-class stance classification
+  labels:
+    0: none
+    1: against
+    2: favor
+  canonical_revision: 4fbd22cd78421f05b1ecdb4fc5725bc7a7bd8f66
+
+equations:
+  official_f_avg:
+    formula: F_avg = (F1_against + F1_favor) / 2
+    domain: F1_against, F1_favor in [0, 1]
+    codomain: F_avg in [0, 1]
+    invariants:
+      - none is predicted and represented in the confusion matrix but excluded from the final average
+      - F_avg = 1 iff F1_against = F1_favor = 1
+      - F_avg is independent of class ordering only when label mapping is preserved explicitly
+
+profiles:
+  canonical:
+    recommended: true
+    splits:
+      train:
+        samples: 587
+        class_counts: { none: 159, against: 319, favor: 109 }
+      validation:
+        samples: 66
+        class_counts: { none: 18, against: 36, favor: 12 }
+      test:
+        samples: 280
+        class_counts: { none: 45, against: 189, favor: 46 }
+    invariants:
+      - validation is used for model selection
+      - test is evaluated only after model and hyperparameters are fixed
+  setfit:
+    recommended: false
+    purpose: compatibility with the SetFit Hugging Face wrapper
+    splits:
+      train:
+        samples: 587
+        class_counts: { none: 159, against: 319, favor: 109 }
+      test:
+        samples: 346
+        source_splits: [validation, test]
+        class_counts: { none: 63, against: 225, favor: 58 }
+    warning: validation and canonical test are merged; do not tune on this test split
+
+few_shot_protocol:
+  sampling: balanced without replacement from canonical train
+  shots_per_class: [8, 16, 32, 64]
+  seeds: [13, 17, 23, 29, 31, 37, 41, 43, 47, 53]
+
+provenance:
+  source_files:
+    - train_text.txt
+    - train_labels.txt
+    - val_text.txt
+    - val_labels.txt
+    - test_text.txt
+    - test_labels.txt
+  requirements:
+    - record the full upstream git revision
+    - record whether that revision was verified (downloaded) or merely asserted
+      by the caller via --source
+    - record SHA-256 for every source and generated split, hashed from the same
+      bytes that were parsed and count-checked
+    - do not vendor tweet text in aprender
+
+falsification_tests:
+  - id: FALSIFY-TWEET-EVAL-001
+    rule: canonical split conservation
+    prediction: split sizes are exactly 587, 66, and 280
+    test: network-free authored fixture converted by data_tweeteval unit test
+    if_fails: upstream drift, truncation, or incorrect source parsing
+  - id: FALSIFY-TWEET-EVAL-002
+    rule: canonical class distribution
+    prediction: every split has the exact contracted per-class counts
+    test: class_count_contract_rejects_modified_source (relabels one row, keeping
+      the row count identical, so the class-count branch is the one exercised;
+      length_mismatch_rejects_truncated_source covers the row-count branch)
+    if_fails: label mapping drift or corrupted source files
+  - id: FALSIFY-TWEET-EVAL-003
+    rule: SetFit compatibility layout
+    prediction: compatibility test has 346 rows and counts [63, 225, 58]
+    test: setfit_profile_merges_validation_and_test_only
+    if_fails: compatibility profile does not reproduce wrapper semantics
+  - id: FALSIFY-TWEET-EVAL-004
+    rule: official score selects only stance-bearing labels
+    prediction: F_avg equals the mean of class indices 1 and 2 F1
+    test: test_f1_average_for_explicit_classes
+    if_fails: benchmark score is not comparable with TweetEval/SemEval
+  - id: FALSIFY-TWEET-EVAL-005
+    rule: test isolation
+    prediction: canonical validation and test are emitted as distinct files
+    test: canonical_profile_preserves_fixed_splits_and_labels
+    if_fails: model selection can leak canonical test examples
+  - id: FALSIFY-TWEET-EVAL-006
+    rule: provenance is never asserted without verification
+    prediction: source.revision_verified is false whenever --source supplied the
+      files, and true only when this run downloaded the pinned revision
+    test: local_source_records_the_revision_as_unverified
+    if_fails: a manifest can attest arbitrary local data to an upstream revision
+  - id: FALSIFY-TWEET-EVAL-007
+    rule: force regenerates a self-consistent directory
+    prediction: canonical then setfit with --force leaves no validation.jsonl the
+      regenerated manifest does not describe
+    test: force_replaces_outputs_and_clears_stale_validation
+    if_fails: a stale split survives that contradicts benchmark-manifest.json
+
+qa_gate:
+  id: F-TWEET-EVAL-001
+  name: TweetEval Stance Benchmark Contract
+  pass_criteria: all seven falsification tests pass
+

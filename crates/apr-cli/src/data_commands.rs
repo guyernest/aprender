@@ -4,6 +4,24 @@
 /// Thin CLI wrappers around alimentar's data utilities.
 #[derive(Subcommand, Debug)]
 pub enum DataCommands {
+    /// Prepare the TweetEval abortion stance benchmark as aprender JSONL
+    TweetEvalStance {
+        /// Output directory for JSONL splits and benchmark-manifest.json
+        #[arg(short, long, value_name = "DIR")]
+        output: PathBuf,
+        /// Split layout: canonical (train/validation/test) or setfit (train/test)
+        #[arg(long, value_enum, default_value_t = TweetEvalStanceProfile::Canonical)]
+        profile: TweetEvalStanceProfile,
+        /// Existing canonical TweetEval abortion directory (disables download)
+        #[arg(long, value_name = "DIR")]
+        source: Option<PathBuf>,
+        /// Pinned TweetEval git revision used for provenance and downloads
+        #[arg(long, default_value = crate::commands::data_tweeteval::CANONICAL_REVISION)]
+        revision: String,
+        /// Replace benchmark files already present in the output directory
+        #[arg(long)]
+        force: bool,
+    },
     /// Audit a JSONL classification dataset for quality issues
     Audit {
         /// Path to JSONL data file
@@ -85,4 +103,13 @@ pub enum DataCommands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+}
+
+/// Supported layouts for the TweetEval abortion stance benchmark.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TweetEvalStanceProfile {
+    /// Original TweetEval train/validation/test splits (recommended).
+    Canonical,
+    /// SetFit wrapper layout: train plus validation+test merged as test.
+    Setfit,
 }

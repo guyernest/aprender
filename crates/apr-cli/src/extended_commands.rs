@@ -85,7 +85,7 @@ pub enum ExtendedCommands {
         /// Path to model file or checkpoint directory
         #[arg(value_name = "FILE")]
         file: PathBuf,
-        /// Dataset: wikitext-2, lambada, or custom
+        /// Dataset: wikitext-2, lambada, or custom (perplexity tasks); tweet-eval-stance (--task classify only)
         #[arg(long, default_value = "wikitext-2")]
         dataset: String,
         /// Custom text (when dataset=custom)
