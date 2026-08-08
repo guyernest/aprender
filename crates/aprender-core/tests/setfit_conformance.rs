@@ -48,9 +48,31 @@
 //! **Detected here:** wrong per-layer arithmetic (localized to the layer),
 //! a wrong activation form, a wrong pooling denominator, a wrong normalization
 //! epsilon branch, a severed autograd edge anywhere the pair objective's
-//! backward should reach, a wrong AdamW hyperparameter or decay coupling, a
-//! frozen parameter that moves, a tokenizer that disagrees with the pinned HF
-//! one, and a tolerance loosened without a contract edit.
+//! backward should reach, a frozen parameter that moves, a tokenizer that
+//! disagrees with the pinned HF one, and a tolerance loosened without a
+//! contract edit.
+//!
+//! **NOT detected here — AdamW hyperparameters or decay coupling.** This file
+//! previously claimed to detect them. It does not, and the claim was corrected
+//! rather than the gate, because the shortfall is structural (see D55):
+//!
+//! - The `optimizer_step` tolerance is `3.052e-05` while the entire step-1
+//!   displacement is `~lr = 2.017e-05`, i.e. the tolerance is 1.53x the effect
+//!   it measures. Root cause: `generate_fixtures.py:557` assigns the GRADIENT
+//!   family's f32/f64 delta to the optimizer family, so no f64 optimizer step
+//!   is ever run and the two `tolerances_measured.json` entries are byte-
+//!   identical. Deleting `weight_decay` entirely survives this suite.
+//! - Betas cannot be constrained by ANY single-step fixture at any tolerance.
+//!   With bias correction at step 1, `m_hat = (1-b1)g/(1-b1) = g` and
+//!   `v_hat = (1-b2)g^2/(1-b2) = g^2`, so the update is `lr*g/(|g|+eps)` for
+//!   every choice of b1/b2. Hardcoding `b1 = b2 = 0.5` survives both this
+//!   suite and the `--lib adamw` suite. Closing this needs a MULTI-STEP
+//!   fixture, not a tighter tolerance.
+//!
+//! AdamW correctness is owned by `contracts/adamw-kernel-v1` and its
+//! `falsify_aw_001_decoupled...` lib test, which is what actually catches a
+//! deleted decay term today. Do not read this file as a second line of defence
+//! for the optimizer until D55 is closed.
 //!
 //! **NOT detected here:** anything that is inert in EVAL mode. Every numerical
 //! fixture in this corpus was generated with dropout disabled (D-16), so a

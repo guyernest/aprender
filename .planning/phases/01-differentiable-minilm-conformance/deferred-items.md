@@ -838,3 +838,81 @@ every implementor rather than to `BertSentenceEncoder` alone.
 **84** mutants (9 caught, 3 missed), so this list is not exhaustive. A complete
 run of `setfit/encoder.rs` at the measured ~2.5 min/mutant needs ~3.5 hours. See
 the 01-08 SUMMARY for the full budget accounting.
+
+## From phase verification (2026-08-08)
+
+### D55. The ENC-04 optimizer-step obligation cannot fail — two independent causes
+
+Found by code review (CR-01) and extended by the phase verifier's mutation M4.
+Confirmed independently by the orchestrator. **This is the phase's one open
+gap; ENC-04 is PARTIALLY satisfied because of it.**
+
+**Cause 1 — the tolerance is larger than the effect it measures.**
+`scripts/setfit_fixtures/generate_fixtures.py:557` assigns `grad_delta` (the
+GRADIENT family's f32/f64 delta) to the optimizer family. No f64 optimizer step
+is ever run, and both families share `FAMILY_REDUCTION_WIDTH = 1024`, so the
+`gradients` and `optimizer_step` entries in `tolerances_measured.json` are
+byte-identical:
+
+```
+gradients      => {"max_abs_f32_f64_delta": 3.6317159e-07, "recommended_tolerance": 3.05175781e-05}
+optimizer_step => {"max_abs_f32_f64_delta": 3.6317159e-07, "recommended_tolerance": 3.05175781e-05}
+```
+
+Max per-element AdamW step-1 displacement is `2.017474e-05` against a
+`3.052e-05` tolerance — 1.526x. Verifier mutation **M1** (delete `weight_decay`)
+survives: 25 passed, exit 0. Mutation **M2** (halve `lr`) passes the post-step
+parity obligation but the enclosing test still fails at `loss_after`
+(1.688e-3 vs 7.63e-6) — so the OBLIGATION is vacuous while that one test is not.
+
+The `activation` family already carries a guard asserting its tolerance sits far
+below the effect it must separate (`generate_fixtures.py:320-324`).
+`optimizer_step` has no such guard. The pattern existed and was not applied
+uniformly.
+
+**Cause 2 — betas are unconstrainable by any single-step fixture (structural).**
+Verifier mutation **M4**: hardcoding `b1 = b2 = 0.5` survives BOTH the
+conformance suite (25 passed) and the pre-existing `--lib adamw` suite
+(26 passed). At step 1 with bias correction, `m_hat = (1-b1)g/(1-b1) = g` and
+`v_hat = (1-b2)g^2/(1-b2) = g^2`, so the update is `lr*g/(|g|+eps)` for every
+choice of betas. **No tolerance edit can fix this** — it requires a multi-step
+optimizer fixture.
+
+**Already applied:** the false "Detected here: ... a wrong AdamW hyperparameter
+or decay coupling" claim in `tests/setfit_conformance.rs` has been corrected to
+state the shortfall, so Phase 3 does not inherit a gate that advertises
+protection it does not provide.
+
+**Still open — needs a decision:**
+1. Fix the generator: run a real f64 optimizer step for the tolerance, add a
+   separation guard mirroring `:320-324`, and add a multi-step obligation that
+   can constrain betas. Requires regenerating a frozen fixture and a `pv diff`
+   semver bump on `setfit-encoder-conformance-v1`.
+2. Accept an override on the grounds that `contracts/adamw-kernel-v1` owns
+   AdamW correctness, and that its `falsify_aw_001_decoupled...` lib test is
+   what actually catches a deleted decay term today.
+
+Note the D-14 tension: tolerances were deliberately frozen BEFORE any Rust
+comparison existed. Option 1 edits a frozen tolerance after the fact — in the
+tightening direction, which is the opposite of the failure mode D-14 guards
+against, but it is still a governed change and should be made deliberately.
+
+**Blast radius:** Phase 2 is unblocked. Phase 3 (TRN-03) is NOT — it builds the
+training loop this gate is supposed to protect.
+
+### D56. `make tier2` / `make tier3` are RED at the phase base (inherited)
+
+Two acceptance criteria of plan 01-08 are UNMET. Verified inherited, not a phase
+regression: `make tier2` fails identically at phase base `e6dce92a0`, in
+`aprender-zram-core` (3 errors) and `aprender-present-terminal` (1 error), and
+this phase changed **0 files** in those crates or in `aprender-compute`.
+
+Consequence established by the verifier: `make tier2` exits 2 at line 188 and
+the log contains **no "Phase 1 SetFit" marker** — the gates wired at lines
+210-213 never execute. The tier3 contract path is green in isolation
+(`make contract-validate` exit 0), and the suite runs green via direct
+`cargo test -p aprender-core --test setfit_conformance --features setfit,conformance-fixtures`.
+
+So the Phase 1 gate exists and passes, but cannot currently be reached through
+the tier targets end-to-end. Fixing the two inherited crates is out of scope for
+this phase and belongs to whoever owns them.
