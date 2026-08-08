@@ -831,9 +831,12 @@ fn normalized_hash(input: &str) -> [u8; 32] {
 All other factual claims in this document are `[VERIFIED]` (tool-checked this session) or
 `[CITED]` (official docs), tagged inline.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Restructure timing for the pv-invalid contract (Finding F4)**
+   - **RESOLVED** — adopted by plan **02-01**: the tweet-eval contract restructure to a
+     pv-valid shape plus `$(CONTRACTS)` wiring is the first Phase 2 contract task,
+     honoring D-06 verbatim (the 813 lines land as-is first).
    - What we know: D-06 says the 813 lines land "as-is first"; `pv validate` rejects the contract
      today; tier3 doesn't reach it because `$(CONTRACTS)` is explicit.
    - What's unclear: whether to fix the contract inside the D-06 PR (small, but violates "as-is")
@@ -844,6 +847,9 @@ All other factual claims in this document are `[VERIFIED]` (tool-checked this se
      `pv diff`-tracked growth.
 
 2. **Do `unique` and `undersampling` ship in v1?** (explicit discretion item)
+   - **RESOLVED** — adopted by plan **02-07**: v1 ships `oversampling` only; the capacity
+     closed forms and `BudgetExceedsCapacity` typed error ship regardless (D-11), with
+     strategy as a versioned one-variant enum so later additions are non-breaking.
    - What we know: D-14 contracts the `oversampling` default; D-11 pins `unique` semantics *if
      present*; no v1 consumer needs the other strategies; every shipped strategy needs fixtures,
      property tests, and contract clauses.
@@ -853,13 +859,23 @@ All other factual claims in this document are `[VERIFIED]` (tool-checked this se
      `unique`/`undersampling` later is non-breaking.
 
 3. **Pair order across epochs** (explicit discretion item; Phase 3 consumes)
+   - **RESOLVED** — adopted by plan **02-07** under **Assumption A4**: one
+     epoch-independent stream per (selection, seed, policy, budget), consumed via
+     offsets. Freezing the 02-02 contract text does NOT wait on Phase 3: per A4, if
+     Phase 3 wants epoch reshuffle, adding `epoch` to the RNG domain string is a
+     versioned, non-breaking one-line policy extension, and the contract documents that
+     extension path explicitly.
    - What we know: pinned SetFit reuses the identical pair sequence every epoch (dataset built
      once, cycled; internal seed hardcoded — verified). D-09's replay tuple has no epoch term.
    - Recommendation: v1 = one stream per `(selection, seed, policy, budget)`, epoch-independent,
      consumed via offsets (shardable/resumable per D-20). Document that epoch-varying order is a
-     versioned policy extension. Confirm with Phase 3 planning before freezing the contract text.
+     versioned policy extension. Phase 3 confirmation is NOT required before freezing (see RESOLVED line above — A4
+     makes epoch reshuffle a non-breaking versioned extension).
 
 4. **`contracts/rand-philox-v1.yaml` does not exist in this repo**
+   - **RESOLVED** — adopted by plan **02-02**: the RNG derivation obligations are stated
+     inline in `contrastive-pair-protocol-v1.yaml`; no dangling cross-reference is
+     created (02-02 Task 1 forbids citing rand-philox-v1 in crate docs).
    - What we know: `aprender-rand` doc comments cite it; CONTEXT lists it as an existing contract
      to reference; a full-tree search finds nothing (it lives in the pre-monorepo trueno repo).
    - Recommendation: state the RNG derivation obligations directly inside
@@ -868,6 +884,9 @@ All other factual claims in this document are `[VERIFIED]` (tool-checked this se
      the original contract is optional hygiene, not a Phase 2 requirement.
 
 5. **CLI shape** (explicit discretion item)
+   - **RESOLVED** — adopted by plan **02-09**: `apr data select` + `apr data pairs`
+     under the existing namespace, dump as a flag per D-09, singleton-policy manifest
+     encoding as recommended below.
    - Recommendation: two subcommands under the existing `apr data` namespace —
      `apr data select --data <dir> --shots <8|16|32|64> --seed <u64> [--output <dir>] [--json]`
      writing `selection-manifest.json`, and
