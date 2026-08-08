@@ -523,25 +523,33 @@ assert_eq!(z1.data(), z2.data()); // deterministic in eval mode, bitwise
 | A6 | The `KernelContract` schema (or a modest extension) can host the frozen tolerance table so `pv diff` versions it | Pattern 5 | Medium — CLAUDE.md pre-authorizes schema extension as its own task if `pv validate` rejects; budget for it in planning (Open Question Q4) |
 | A7 | Slice-model fixture strategy (reduced hidden/heads/layers/vocab, fixtures generated from the SAME sliced checkpoint) satisfies D-09's "real weight values" intent at a few hundred KB | Pitfall 3 / Open Questions | Low — D-09 targets real value distributions vs synthetic shapes; full-dimension parity is separately covered by the D-10 gated ~90MB suite |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All five questions have a committed resolution or a plan-owned resolution path (annotated per
+question below); none block execution.
 
 1. **Does gradient flow survive batch>1 through existing MHA/LayerNorm broadcast paths?**
+   - **RESOLVED (empirical) — owner: plan 01-03 Task 3.** The ungated `batched_graph_spike.rs` integration test proves batch>1 grad flow end-to-end (per-parameter finite/non-zero grads at batch 2 with lengths 5/9, padding invariance); if broadcast backward is broken at B>1, fixing the responsible op/grad_fn is explicitly in-scope within that task (stated in its action).
    - What we know: shapes support `[B,S,E]` (`forward_qkv` reads `batch_size = query.shape()[0]`); backward tests exist but were not audited for B>1 coverage.
    - What's unclear: end-to-end grad correctness with a broadcast `[B,1,1,S]` additive mask and ND Linear flattening.
    - Recommendation: first plan = spike (Pitfall 2). If broadcast backward is broken, fixing it is in-scope for this phase (it's the "additive attention masking" primitive's proof).
 
 2. **How does the committed slice APR pass loading without weakening the ENC-01 pin?**
+   - **RESOLVED (design adopted) — owners: plan 01-05 Task 3 + plan 01-04 Tasks 1-2.** Test-only slice constructor (`from_slice_fixture`, 01-05 Task 3) bypasses only the architecture-pin equality; slice APR and all slice fixtures are generated from the SAME sliced torch model (01-04), so the real import path's ENC-01 pin is untouched.
    - What we know: slice dims can't equal the pinned architecture at a few-hundred-KB budget (one full 384-hidden layer alone is ~7MB F32).
    - Recommendation: test-only constructor bypassing only the architecture-pin equality (Pitfall 3); slice shape suggestion: 2 layers, hidden 64 (4 heads × 16), intermediate 256, vocab = fixture-token closure (~256 ids, remapped, remap table in fixture JSON), positions 64 → ≈0.5MB F32. Python generator slices the pinned checkpoint AND generates all slice fixtures from the same sliced torch model, so Rust-vs-Python parity is exact on the slice.
 
 3. **Seeding of attention-probs dropout inside SDPA (A5).**
+   - **RESOLVED (empirical) — owner: plan 01-03 Task 3 spike; contingency owned by plan 01-06 Task 2.** The spike inspects the SDPA dropout plumbing and records the A5 finding in the test doc comment + SUMMARY; if the internal dropout is unseedable, 01-06 Task 2 implements the preferred contingency (seeded dropout via an extension of MultiHeadAttention construction — never re-implementing attention).
    - Recommendation: resolve during the spike; prefer extending MHA construction with an optional seeded dropout over re-implementing attention.
 
 4. **Will `pv validate` accept `setfit-encoder-conformance-v1.yaml` with a tolerance table and references to six existing contracts?**
+   - **RESOLVED (procedural) — owner: plan 01-01 Task 1.** The contract is authored and `pv validate`d FIRST, before any Rust comparison is written; if pv rejects, the sanctioned path is restructure-to-KernelContract, and if the schema genuinely cannot host it the task STOPs and surfaces the schema-extension work (`aprender-contracts/src/schema/`) for user visibility — never a bash workaround.
    - What we know: existing contracts use `metadata.depends_on` for references (seen in `encoder-forward-v1.yaml`); schema kinds are enforced by `pv`.
    - Recommendation: draft the YAML early in planning and run `PV_BIN validate` before building tests against it; if rejected, the sanctioned path is a schema extension task in `aprender-contracts/src/schema/` (never a bash workaround).
 
 5. **`bert/load.rs` reuse shape (discretion area).**
+   - **RESOLVED (decision adopted: wrap) — owner: plan 01-05 Task 3.** `setfit/import.rs` reuses `bert/load.rs` per-tensor helpers via a wrapper; its typed error enum `#[from]`-wraps `BertLoadError`; `bert/` is not modified (D-01). Encoded in 01-05's key_links ("Q5: wrap").
    - Recommendation: wrap. Reuse its per-tensor fetch/shape helpers and `BertLoadError` from the new `setfit/import.rs`; the pinned-revision contract (config field equality, tokenizer bytes hash, module-graph policy, revision recording) lives in the new module with its own typed error enum that `#[from]`-wraps `BertLoadError`. Do not modify `bert/` (D-01).
 
 ## Environment Availability
