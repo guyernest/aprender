@@ -40,16 +40,13 @@
 //! That is also the mode the frozen fixtures were generated in (D-16). Training
 //! callers flip it explicitly with `set_training(true)`.
 
-// Same D-08 consequence import.rs records: `from_import` is `pub(crate)` under
-// the seal and has no non-test caller until 01-07's `SetFitMiniLm`, so a
-// library-only build walks everything it reaches — `site_seed`, `DROPOUT_P`,
-// `install_projection`, the site-name helpers — as unreachable. Targeted
-// `#[allow]`s were tried first and MEASURED to be whack-a-mole: silencing
-// `install_projection` and `EMBEDDINGS_DROPOUT_SITE` simply moved the finding to
-// `site_seed`, because the whole construction path hangs off one sealed entry
-// point. Widening the visibility to silence it would break the seal, which is
-// the wrong trade. Delete this the moment 01-07 wires `SetFitMiniLm`.
-#![allow(dead_code)]
+// D32 CLOSED (01-07): the module-wide `#![allow(dead_code)]` 01-06 added here is
+// GONE. 01-06 recorded that `from_import` was `pub(crate)` under the D-08 seal
+// with no non-test caller, so a library-only build walked the whole construction
+// path — `site_seed`, `DROPOUT_P`, `install_projection`, the site-name helpers —
+// as unreachable. `SetFitMiniLm::from_pretrained_dir` is now that caller, and
+// the removal was MEASURED rather than assumed: `cargo check -p aprender-core
+// --features setfit` reports zero dead-code findings in this file afterwards.
 
 use crate::autograd::{
     additive_attention_mask, embedding_gather, l2_normalize_rows, masked_mean_pool, OpError, Tensor,
@@ -63,7 +60,12 @@ use super::tokenizer::{SentenceBatch, MAX_SEQUENCE_LENGTH};
 
 /// Epsilon of the trailing L2 normalization, matching the pinned
 /// sentence-transformers `Normalize` module.
-const L2_EPS: f32 = 1e-12;
+///
+/// `pub(crate)` so the pair objective (01-07 `setfit/loss.rs`) clamps its cosine
+/// norms with the SAME constant this encoder normalized with, rather than a
+/// second literal that can drift. Same single-source-of-truth reasoning 01-06
+/// applied to the two pinned dropout probabilities.
+pub(crate) const L2_EPS: f32 = 1e-12;
 
 /// Dropout probability at every HF-verified site.
 ///
@@ -306,6 +308,27 @@ impl BertSentenceEncoder {
     #[must_use]
     pub fn root_seed(&self) -> u64 {
         self.root_seed
+    }
+
+    /// Number of encoder layers this model was built with.
+    ///
+    /// A READ accessor (the D-08 seal is about constructors). 01-07's
+    /// `FreezeGroup` validation needs it: `LayerAttention(7)` against a 2-layer
+    /// slice must be a typed rejection, and the only honest source for "how many
+    /// layers" is the encoder that was actually built.
+    #[must_use]
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Sha256 of the tokenizer this encoder is paired with.
+    ///
+    /// A READ accessor. It exists so the pairing `SetFitMiniLm` establishes can
+    /// be ASSERTED rather than assumed — the forward-time equality check is the
+    /// runtime half, this is what lets a test see the value it compares.
+    #[must_use]
+    pub fn tokenizer_sha256(&self) -> &str {
+        &self.tokenizer_sha256
     }
 
     /// Ordered dotted names of every ACTIVE dropout site.

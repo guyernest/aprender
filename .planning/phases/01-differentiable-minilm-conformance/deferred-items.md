@@ -505,3 +505,148 @@ Fix direction: pick one convention crate-wide. The safe one is "`train`/`eval`
 delegate to `set_training`, which is the only method a composite overrides";
 it makes the wrong thing impossible to write rather than merely documented.
 That is a change across every `impl Module`, hence deferred.
+
+## From plan 01-07 (2026-08-08)
+
+Numbered from **D40** as the orchestrator directed. D1-D14, D20-D23 and D30-D33
+are untouched. D1, D2, D5, D13, D14 and D30 were used as documented and are not
+re-logged. **D32 is CLOSED by this plan** — see the 01-07 SUMMARY.
+
+### D40. The plan's D-08 declaration `grep`, run as written, returns 8 matches on the pre-existing tree
+
+Plan 01-07 Task 2 specifies
+
+```
+grep -rnE --include='*.rs' '^[^/]*\bpub fn (from_bytes|open|open_slice_fixture|from_import)\b' \
+  crates/aprender-core/src/setfit/
+```
+
+and asserts it "must return no match". Measured on 2026-08-08 at the plan's base
+commit, before this plan changed anything relevant, it returns **8** matches:
+
+```
+setfit/encoder_tests.rs:57    !src.contains("pub fn from_import("),
+setfit/encoder_tests.rs:58    "D-08 seal broken: a bare `pub fn from_import(` exists in setfit/encoder.rs"
+setfit/tokenizer_tests.rs:354 !src.contains("pub fn from_bytes"),
+setfit/tokenizer_tests.rs:355 "D-08 seal broken: a bare `pub fn from_bytes` exists"
+setfit/import_tests.rs:631    !src.contains("pub fn open("),
+setfit/import_tests.rs:632    "D-08 seal broken: a bare `pub fn open(` exists in import.rs"
+setfit/import_tests.rs:639    !src.contains("pub fn open_slice_fixture("),
+setfit/import_tests.rs:640    "D-08 seal broken: a bare `pub fn open_slice_fixture(` exists"
+```
+
+Every one is a **string literal inside 01-05's and 01-06's own seal assertions**.
+None is a declaration. The `^[^/]*` prefix excludes `//` comments but has no
+notion of a string literal, and the plan's nine-row case table contains no
+string-literal row, so the table could not have caught it either.
+
+Two further wrinkles the same root cause produces:
+
+1. A test file that ships a must-MATCH case table under `src/setfit/` trips its
+   own gate. Observed here on the first run; worked around by assembling the
+   table rows at runtime from a `PUB_FN` constant so the source text stays clean.
+2. Tightening the pattern to exclude string literals is not straightforward: the
+   obvious "no `\"` before the match" rule rejects the plan's own row 3
+   (`#[cfg(feature = "conformance-fixtures")] pub fn open_slice_fixture(`), which
+   must MATCH.
+
+Resolved here by scoping the scan to non-test sources
+(`--exclude='*_tests.rs'`), which returns 0. The justification is not
+convenience: a `#[cfg(test)]` module is not compiled into the library at all, so
+it cannot reopen the seal for an out-of-crate consumer — and the compile probe,
+which is the primary evidence, is immune to the whole question.
+
+The plan's separate warning about crate-wide widening was RE-MEASURED and is
+exactly right: `crates/aprender-core/src/` yields 22 lines, of which 14 are the
+legitimate pre-existing declarations it lists (apr/mmap/bundle/onnx/gguf/hnsw
+readers) and 8 are the string literals above.
+
+Fix direction: phase plans that prescribe a guard regex should run it against
+the CURRENT tree before writing "must return no match" into an acceptance
+criterion, and case tables for source-scanning regexes should include a
+string-literal row. One command would have caught this — the same lesson D30 and
+D13 record for test filters, now for guard patterns.
+
+### D41. `pub(crate)` METHODS are rejected with E0624, not E0603
+
+Plan 01-07 requires the D-08 seal to be demonstrated red by an out-of-crate
+compile probe whose log "contains `E0603`". It does not. All four sealed
+constructors are **associated functions on public types**, and rustc's
+diagnostic for those is:
+
+```
+error[E0624]: associated function `open` is private
+   --> crates/aprender-core/tests/zz_seal_probe.rs:13:45
+    |
+ 13 |     let _ = aprender::setfit::MiniLmImport::open(Path::new("/nonexistent"));
+    |                                             ^^^^ private associated function
+    |
+   ::: crates/aprender-core/src/setfit/import.rs:398:5
+    |
+398 |     pub(crate) fn open(dir: &Path) -> Result<Self, SetFitError> {
+    |     ----------------------------------------------------------- private associated function defined here
+```
+
+E0603 is `... is private` for an item reached through a **module path** (a
+private module, a private free function, a private `use`). It would be the right
+code if the seal had been implemented by making the *module* private, which it
+was not.
+
+This matters because the probe was to be measured by
+`grep -c E0603 /tmp/seal_probe.log`. Against a perfectly sealed crate that
+returns **0**, which reads exactly like "the seal is not holding" — a false
+NEGATIVE on the phase's structural gate, in the same class as CLAUDE.md rule 1's
+"the run is green and proves nothing", only inverted.
+
+Measured here: the probe exits non-zero with **four E0624 errors, zero E0603**.
+
+Fix direction: 01-08 and any later plan that re-runs this probe should assert on
+`E0624` (or, more robustly, on `is private` plus a non-zero exit), and the
+acceptance criterion in 01-07-PLAN.md should be corrected if it is ever re-run.
+
+### D42. `requires_grad(false)` does NOT prevent a parameter from receiving a gradient
+
+Recorded because it inverts the intuition an optimizer author brings from torch,
+and because it was found by measurement rather than by reading.
+
+Freeze mutation D (this plan) made `trainable_parameters_mut()` ignore the freeze
+policy while leaving `apply_freeze`'s `requires_grad_(false)` in place. If the
+flag were sufficient, nothing would have changed. Instead
+`encoder.layer.1.attention.self.query.weight` **moved across the optimizer
+step**: the `Linear` weight still received a gradient, because the ops that
+consume it register the edge based on their INPUT requiring grad and then produce
+gradients for both operands regardless of the weight's own flag.
+
+The two halves are therefore not redundant. Exclusion from
+`trainable_parameters_mut()` is the load-bearing mechanism; the flag protects
+only those parameters whose consuming op checks it (notably `embedding_gather`,
+which is why `embeddings.word_embeddings.weight` stops receiving gradient
+entirely once frozen).
+
+Consequence for **01-08**: build the AdamW parameter set from
+`SetFitMiniLm::trainable_parameters_mut()`. Constructing it from
+`encoder().named_parameters_mut()` and relying on `requires_grad` to skip the
+frozen ones will silently train frozen weights, and the fixture parity gates
+cannot see it.
+
+Fix direction: none required in-tree — this is a coherent design given that the
+optimizer owns its parameter set. Recorded so nobody re-derives it from a
+confusing ENC-04 result.
+
+### D43. `mod.rs` is now 500+ lines and mixes module wiring with a public type
+
+`crates/aprender-core/src/setfit/mod.rs` was 57 lines of module declarations and
+re-exports. This plan added `FreezeGroup` and `SetFitMiniLm` to it, because the
+plan's `<must_haves>` artifact list names `mod.rs` as the file that must contain
+`pub struct SetFitMiniLm`. The result is a `mod.rs` that is both the module's
+table of contents and the home of its largest type, which is the opposite of the
+convention every other file in `src/setfit/` follows.
+
+Not fixed here: moving the type to `setfit/model.rs` and re-exporting it would
+change the artifact path the plan's must-haves assert, and a plan checker reading
+`contains: "pub struct SetFitMiniLm"` against `mod.rs` would then fail.
+
+Fix direction: a follow-up that moves `FreezeGroup` + `SetFitMiniLm` into
+`setfit/model.rs` with `pub use model::{FreezeGroup, SetFitMiniLm};` in `mod.rs`.
+The public API is unchanged by that move, so it is a pure refactor — but it must
+be paired with an update to 01-07's must-haves or it will read as a regression.
