@@ -133,6 +133,21 @@ impl Module for Dropout {
         input.mul(&mask)
     }
 
+    /// Dropout registers NO learnable parameters.
+    ///
+    /// Stated explicitly rather than inherited: `p`, the RNG, the seed, and the
+    /// training flag are all module state, never parameters. Naming any of them
+    /// would put non-learnable state into optimizer and freeze-group partitions
+    /// (ENC-05) — and would break the mode-flip byte-identity proof, since RNG
+    /// state legitimately changes across a forward pass.
+    fn named_parameters(&self) -> Vec<(String, &Tensor)> {
+        Vec::new()
+    }
+
+    fn named_parameters_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        Vec::new()
+    }
+
     fn train(&mut self) {
         self.training = true;
     }

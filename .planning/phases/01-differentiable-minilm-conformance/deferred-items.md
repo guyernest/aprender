@@ -3,21 +3,29 @@
 Out-of-scope discoveries logged during plan execution. **Not fixed** — they are
 pre-existing and unrelated to the changes that surfaced them.
 
+Plans 01-01 and 01-02 executed in parallel and independently surfaced D1 and D2.
+Two agents reaching the same finding from different code paths raises confidence
+that these are real and reproducible, not artifacts of one agent's environment.
+
 ## From plan 01-01 (2026-08-08)
 
 ### D1. `scripts/check_include_files.sh` is a no-op on macOS
 
-The script uses `grep -P` (PCRE), which BSD grep rejects:
+*Independently confirmed by plan 01-02.*
+
+The script uses `grep -P` / `grep -oP` (PCRE), which BSD grep rejects:
 
 ```
 grep: invalid option -- P
 OK: All 0 include!() files are tracked by git
 ```
 
-It then reports success over **zero** files. CB-510 exists because a gitignore
-pattern silently hid `include!()` sources from git and crates.io; on macOS this
-guard cannot detect that recurrence — it is theater there. It presumably works
-on the CI Linux runner, so the drift is platform-split rather than total.
+It then reports success over **zero** files, exiting 0. CB-510 exists because a
+gitignore pattern silently hid `include!()` sources from git and crates.io; on
+macOS this guard cannot detect that recurrence — it is theater there. It
+presumably works on the CI Linux runner, so the drift is platform-split rather
+than total. CLAUDE.md documents the repo as having 562 `include!()` files; the
+guard sees 0 of them on darwin.
 
 Discovered while adding four new `include!()` files under
 `crates/aprender-core/src/autograd/ops/`. Those were verified by hand instead
@@ -30,14 +38,17 @@ is exactly the kind that has been wrong five times before.
 
 ### D2. `cargo clippy -p aprender-core -- -D warnings` fails on `aprender-compute`
 
+*Independently confirmed by plan 01-02.*
+
 `aprender-compute` is a workspace path dependency, so command-line `-D warnings`
 applies to it too. It carries ~20 pre-existing findings (unreachable
-expressions, unused imports/constants, unused variables, dead functions), so the
-invocation named in the 01-01 plan's `<verification>` block exits 101 regardless
-of the state of `aprender-core`.
+expressions, unused imports/constants, unused variables, dead functions in
+cfg-gated NEON/AVX paths inactive on this target), so the invocation named in
+the 01-01 and 01-02 plans' `<verification>` blocks exits 101 regardless of the
+state of `aprender-core`.
 
 `aprender-core` itself is clean: `cargo clippy -p aprender-core --lib --tests`
-exits 0 and reports zero findings under `crates/aprender-core/src/autograd/`.
+exits 0 and reports zero findings in the touched files of either plan.
 
 Fix direction: clean `aprender-compute`, or scope the phase gate to
 `--lib --tests` on the crate under change. Do NOT paper over it with a
@@ -79,3 +90,27 @@ This is a latent trap for any future contract, not a defect in either contract.
 Fix direction: have `pv codegen` either namespace macros by contract stem or
 reject duplicate equation names across contracts outright. The current behaviour
 lets one contract silently redefine another's assertions.
+
+## From plan 01-02 (2026-08-08)
+
+### D5. `cargo check --workspace` fails on darwin (intentional platform gate)
+
+`crates/aprender-profile` hard-stops via
+`#[cfg(not(target_os = "linux"))] compile_error!("renacer requires Linux (ptrace syscall tracing)")`.
+
+This is an intentional platform gate, not a defect — but it means the
+`cargo check --workspace` command named in plan verification blocks can never
+pass on macOS. Verified instead with
+`cargo check --workspace --exclude aprender-profile` (exit 0, all other 77
+crates clean).
+
+Fix direction: phase verification blocks targeting macOS developers should name
+the `--exclude aprender-profile` form, or the repo should provide a
+`just check` recipe that applies the exclusion per-platform.
+
+### D6. Pre-existing warnings in `aprender-core` test builds
+
+- `f16_first_u16` never used — `serialization/safetensors_tests_core.rs:571`
+- unused `#[must_use]` return — `models/bert/embeddings.rs:128`
+
+Unrelated files, not caused by either plan's changes.
