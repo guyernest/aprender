@@ -64,7 +64,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 01-07-PLAN.md — Pair cosine-MSE loss, SetFitMiniLm bound type, freeze groups (wave 5)
+- [x] 01-07-PLAN.md — Pair cosine-MSE loss, SetFitMiniLm bound type, freeze groups (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
@@ -143,7 +143,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Differentiable MiniLM Conformance | 7/9 | In Progress|  |
+| 1. Differentiable MiniLM Conformance | 8/9 | In Progress|  |
 | 2. Deterministic Pair and Data Protocol | 0/TBD | Not started | - |
 | 3. Faithful Two-Stage Trainer and Head | 0/TBD | Not started | - |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
