@@ -89,30 +89,30 @@ without split leakage, provenance ambiguity, silent row loss, or Cartesian-produ
 Plans:
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — Land D-06 baseline as-is + pv-valid tweet-eval contract + $(CONTRACTS) wiring (wave 1)
+- [ ] 02-01-PLAN.md — Hash-attested D-06 baseline in its own PR + pv-valid tweet-eval contract + $(CONTRACTS) wiring + CLAUDE.md `pv diff` fix (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 02-02-PLAN.md — aprender-contrastive-data scaffold + contrastive-pair-protocol-v1 contract + D-04 boundary gates (wave 2)
+- [ ] 02-02-PLAN.md — aprender-contrastive-data scaffold (3 missing workspace deps + full module skeleton + widened error enum) + contrastive-pair-protocol-v1 contract + positive-allowlist D-04 gates (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 02-03-PLAN.md — Bytes→typed layer: schema, typestate splits, dual content hashes, dedup, access ledger (wave 3)
-- [ ] 02-04-PLAN.md — Measured + contracted SetFit pair-count fixture families + integrity verifier (wave 3)
+- [ ] 02-03-PLAN.md — Bytes→typed layer: schema, dual hashes, typestate splits, coalesced dedup, persistable ledger, PreparedDataset<Canonical|Compatibility> profile typestate (wave 3)
+- [ ] 02-04-PLAN.md — Measured + contracted SetFit pair-count fixture families (incl. K=N adversarial layout) + shared test models + integrity verifier (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 02-05-PLAN.md — Philox few-shot selection + materialized selection manifest + goldens (wave 4)
-- [ ] 02-06-PLAN.md — data_tweeteval thin-adapter relocation + real-duplicate golden + contract growth (wave 4)
+- [ ] 02-05-PLAN.md — Philox few-shot selection (frozen LE encoding, labeled SelectedExample) + non-circular manifest payload with persisted ledger + strict Selection::replay + goldens (wave 4)
+- [ ] 02-06-PLAN.md — data_tweeteval thin-adapter relocation on the D-05 seam + dataset-attestation ingest boundary + real-duplicate golden + contract growth (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 02-07-PLAN.md — Pair protocol: CanonicalPair, capacity/budget, singleton policy, streaming sampler, replay record (wave 5)
+- [ ] 02-07-PLAN.md — Pair protocol: fallible capacity, binding hard cap, total degenerate policy, O(K) streaming sampler, public state diagnostics, untrusted-pair DTO, tuple-committing replay hash (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 02-08-PLAN.md — Honesty gates: in-band leaky/materializing negatives, trybuild non-constructibility, scoped mutation (wave 6)
-- [ ] 02-09-PLAN.md — `apr data select` / `apr data pairs` CLI surface + documented workflow (wave 6)
+- [ ] 02-08-PLAN.md — Honesty gates: in-band leaky/materializing negatives (incl. K=N), trybuild non-constructibility, binding-coverage audit gate, bounded scoped mutation (wave 6)
+- [ ] 02-09-PLAN.md — `apr data select` / `apr data pairs` CLI surface: attested ingest, required contracted seed, atomic writes, strict replay + documented workflow (wave 6)
 
 ### Phase 3: Faithful Two-Stage Trainer and Head
 
