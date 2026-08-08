@@ -114,3 +114,52 @@ the `--exclude aprender-profile` form, or the repo should provide a
 - unused `#[must_use]` return — `models/bert/embeddings.rs:128`
 
 Unrelated files, not caused by either plan's changes.
+
+## From plan 01-09 (2026-08-08)
+
+### D7. `cargo test -p batuta-common` silently tests a **crates.io** crate
+
+`batuta-common` is not a package in this workspace. It is a dependency *alias*:
+
+```toml
+# Cargo.toml:288
+batuta-common = { path = "crates/aprender-common", version = "0.63.0", package = "aprender-common" }
+```
+
+The in-tree package is named `aprender-common` (with `[lib] name = "batuta_common"`).
+A real, unrelated `batuta-common` crate also exists on crates.io, so:
+
+```
+$ cargo pkgid -p batuta-common
+registry+https://github.com/rust-lang/crates.io-index#batuta-common@0.1.0
+```
+
+`cargo test -p batuta-common --lib erf` therefore **exits 0 having compiled and
+tested the registry crate**, not the local source. It was observed reporting
+"5 passed" while the four tests just added to `crates/aprender-common/src/math.rs`
+were never built. The correct invocation is `-p aprender-common`.
+
+This is the CLAUDE.md rule 8 class (a shadowed artifact is worse than a missing
+one): the run is green, the exit code is 0, and it proves nothing about the code
+under change. Anyone verifying a change to `crates/aprender-common/` by package
+alias will get a false green.
+
+Fix direction: either rename the local package to `batuta-common` (it already
+owns that lib name), or drop the alias and depend on `aprender-common` directly
+so no registry package can shadow the `-p` selector. Out of scope here because
+the alias is load-bearing across many crates' `use batuta_common::` paths.
+
+### D8. `Tensor::gelu` verified CORRECT — recorded to stop a future false alarm
+
+Not a defect; logged because the investigation cost real time and the wrong
+conclusion was very nearly recorded as one.
+
+`Tensor::gelu(1.0)` returns `0.8411920`, which looks wrong next to the exact GELU
+`0.8413447` and invites the reading "the tanh implementation has a 1.5e-4 bug".
+It does not. `0.8411920` is exactly what the tanh approximation evaluates to in
+f64 — verified against an independent reference at x = 1, -1 and 2 (matching to
+seven digits each). The 1.5e-4 gap is the *algorithmic* difference between the
+tanh and erf forms, which is the entire premise of amendment A-03, not an
+implementation error.
+
+Anyone comparing the two activations point-by-point will meet this again.
