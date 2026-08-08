@@ -473,4 +473,18 @@ mod tests {
             "mode flips must leave parameters byte-identical"
         );
     }
+
+    /// Cross-module reachability proof for the shared byte-identity helper defined
+    /// in `nn/tests_named_module.rs`. This test lives in a DIFFERENT module on
+    /// purpose: plan 01-06's encoder conformance tests call `snapshot_named` from
+    /// outside `nn`, so `pub(crate)` visibility must actually hold. A private fn
+    /// inside a `mod tests` block would fail to compile here.
+    #[test]
+    fn test_module_snapshot_named_helper_is_reachable_cross_module() {
+        let module = PositionalOnlyModule::new();
+        let snapshot = crate::nn::tests_named_module::snapshot_named(&module);
+        assert_eq!(snapshot.len(), module.parameters().len());
+        assert_eq!(snapshot[0].0, "0");
+        assert_eq!(snapshot[0].1.len(), 4); // [2, 2] of ones
+    }
 }

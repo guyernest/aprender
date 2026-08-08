@@ -56,6 +56,15 @@ impl Sequential {
         self
     }
 
+    /// Get a child module by index.
+    ///
+    /// Mirrors [`ModuleList::get`]. Needed to observe per-child state (for example
+    /// that `set_training` actually reached a `Dropout` child) without exposing the
+    /// internal `Vec<Box<dyn Module>>`.
+    pub fn get(&self, index: usize) -> Option<&dyn Module> {
+        self.modules.get(index).map(AsRef::as_ref)
+    }
+
     /// Get the number of modules.
     #[must_use]
     pub fn len(&self) -> usize {
