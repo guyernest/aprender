@@ -578,6 +578,7 @@ dependencies = [
  "apr-format",
  "aprender-common",
  "aprender-compute",
+ "aprender-contracts",
  "aprender-data",
  "aprender-profile",
  "aprender-quant",

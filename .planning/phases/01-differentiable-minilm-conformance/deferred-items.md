@@ -650,3 +650,191 @@ Fix direction: a follow-up that moves `FreezeGroup` + `SetFitMiniLm` into
 `setfit/model.rs` with `pub use model::{FreezeGroup, SetFitMiniLm};` in `mod.rs`.
 The public API is unchanged by that move, so it is a pure refactor — but it must
 be paired with an update to 01-07's must-haves or it will read as a regression.
+
+## From plan 01-08 (2026-08-08)
+
+Numbered from **D50** as the orchestrator directed. D1-D14, D20-D23, D30-D33 and
+D40-D43 are untouched. D1, D2, D5, D7, D10, D12, D13, D14, D22, D30, D41 and D42
+were used as documented and are not re-logged. **D12 is CLOSED by this plan** —
+the contract was reworded to the per-factor clamp and `pv validate` re-run clean.
+
+### D50. `make tier2` and `make tier3` are BOTH RED at this phase's base commit
+
+Measured on 2026-08-08, statuses captured directly (`cmd > file 2>&1; rc=$?`):
+
+| target | rc | dies at | cause |
+|---|---|---|---|
+| `make tier2` | 101 | recipe line 2, `cargo clippy -- -D warnings` | pre-existing findings in `aprender-compute` (unused imports in `q4k/gemv/mod.rs`, `blis/packing.rs`, `vector/ops/rounding.rs`) and an unreachable expression in `aprender-present-terminal/src/compute_block.rs:93` |
+| `make tier3` | 101 | recipe line 1, `cargo test --all` | 12 x `E0063` in `crates/aprender-serve/tests/driver_cpu.rs` (missing `post_attn_norm_weight`, `post_ffw_norm_weight`, `query_pre_attn_scalar`) plus `aprender-profile`'s intentional macOS `E0601` |
+
+Neither is attributable to this phase:
+`git diff <base>..HEAD -- crates/aprender-present-terminal/ crates/aprender-serve/`
+is **empty**. The tier2 cause is D2 recurring at tier scope (D2 recorded the same
+`-D warnings`-over-path-dependencies problem for `cargo clippy -p aprender-core`);
+the tier3 cause includes D5 recurring (`aprender-profile` is Linux-only).
+
+**Consequence for 01-08's acceptance criteria.** GNU make on this box is 3.81, so
+`.ONESHELL:` is ignored and each recipe line gets its own shell — a failing line
+stops the recipe. The Phase 1 lines this plan added therefore never execute under
+a plain `make tier2` / `make tier3`, and the criteria "make tier2 green" and
+"`make tier3` output shows the setfit contract validated" cannot be met on this
+machine no matter what this phase does. Evidence was provided instead by running
+both tiers with ONLY those two pre-existing-red steps disabled (rc=0 for both;
+tier3's output then shows `pv validate contracts/setfit-encoder-conformance-v1.yaml`
+-> "0 error(s), 0 warning(s)" and "Tier 3: PASSED"). The shipped Makefile is
+unmodified in those two lines.
+
+Fix direction: two separate tickets, neither in this phase's blast radius —
+(a) clean `aprender-compute` + `aprender-present-terminal` or scope tier2's clippy
+to the crates under change, and (b) repair `aprender-serve/tests/driver_cpu.rs`
+against the current `OwnedQuantizedLayer` / `GGUFConfig` shapes, plus exclude
+`aprender-profile` from `cargo test --all` on non-Linux.
+
+### D51. `cargo mutants` cannot see any op composed with `include!()`
+
+`crates/aprender-core/src/autograd/ops/mod.rs` pulls in seven files with
+`include!("activation.rs")`, `include!("embedding.rs")`, `include!("masking.rs")`,
+`include!("pooling.rs")`, `include!("normalize.rs")`, `include!("similarity.rs")`
+and `include!("op_error.rs")`. cargo-mutants parses sources with `syn` and follows
+`mod` declarations; it does **not** expand `include!`. Measured:
+
+```
+cargo mutants --list --package aprender-core -f '**/autograd/ops/*.rs'
+  -> 39 mutants, EVERY ONE in mod.rs
+```
+
+Zero mutants are generated for `embedding_gather`, `masked_mean_pool`,
+`l2_normalize_rows`, `cosine_similarity_rows`, `mse_loss`,
+`additive_attention_mask` or `apply_additive_mask`. **D-25's stated scope
+("autograd ops") is unreachable by file glob**, and a run that names it will
+report a confident green over code it never mutated — the "the run is green and
+proves nothing" class, with the emptiness hidden behind a plausible mutant count
+from a neighbouring file.
+
+01-01 and 01-03 chose `include!()` deliberately (the ops are one logical module
+split for reviewability), and 01-01 already recorded that `include!()` files are
+invisible to `check_include_files.sh` on macOS (D1). This is the same composition
+choice costing a different tool.
+
+Fix direction: convert the seven `include!`s to `#[path = "..."] mod` declarations
+— the crate already uses that form for its test modules and the public paths would
+be unchanged if each is `pub(crate) use`d — or drive mutation from whole-crate
+scope with an explicit exclusion list instead of a file glob.
+
+### D52. `cargo mutants -f <literal path>` silently lists ZERO mutants
+
+The plan's command reads
+`-f 'crates/aprender-core/src/setfit/encoder.rs'`. Run verbatim:
+
+```
+cargo mutants --list -f 'crates/aprender-core/src/autograd/ops/*.rs' \
+  -f 'crates/aprender-core/src/setfit/encoder.rs' \
+  -f 'crates/aprender-core/src/nn/transformer/positional_encoding.rs'
+-> rc=0, ZERO mutants listed
+```
+
+cargo-mutants 25.3.1 matches `--file` globs against the path with `**` semantics;
+a repo-root-relative literal matches nothing. The correct form is
+`-f '**/setfit/encoder.rs'`, which lists **84**.
+
+The failure mode is the dangerous direction: `rc=0` with an empty list, so
+`cargo mutants` would report "0 mutants tested, 0 missed" and a reader would
+record a perfect mutation score over nothing at all.
+
+Fix direction: any plan that prescribes a cargo-mutants glob should `--list` it
+first and assert a non-zero count before the run — one command, and it is the same
+lesson D40 records for guard regexes and D13/D30 record for test filters.
+
+### D53. `provable-contracts = "0.3"` in `aprender-core`'s dev-deps is the CRATES.IO crate
+
+`crates/aprender-core/Cargo.toml` carries `provable-contracts = "0.3"` under
+`[dev-dependencies]` while the workspace is at 0.63.0 and ships the same code
+in-tree as `crates/aprender-contracts` (whose `[lib] name` is also
+`provable_contracts`). So `use provable_contracts::…` in any aprender-core test
+resolves to the **registry** crate, not to the schema this repository owns.
+
+This is D10's class exactly — a green run against code that is not under change —
+and `crates/aprender-core/tests/contract_traits.rs:10` already does
+`use provable_contracts::traits::{…}`.
+
+01-08 needed the in-tree parser for its tolerance generator and could not simply
+write `use provable_contracts::`: both packages declare the same lib name, so the
+in-tree one is only reachable under a different dependency key. It was added as
+`setfit-contract-schema = { path = "../aprender-contracts", package = "aprender-contracts" }`
+with the reason recorded in the manifest.
+
+Fix direction: repoint the dev-dep at the path (`provable-contracts = { path =
+"../aprender-contracts", package = "aprender-contracts" }`) and re-run
+`contract_traits.rs`, which may well have been asserting against a two-years-stale
+API. Out of scope here because it changes what an existing test tests.
+
+### D54. Surviving mutants in `setfit/encoder.rs`, outside the graph-recording blocks
+
+01-08's D-25 breadth pass over `crates/aprender-core/src/setfit/encoder.rs`
+surfaced these MISSED mutants. **None is in a graph-recording block**, so none
+violates 01-08's acceptance criterion (Pass A over `add_mask`, `forward_layers`,
+`forward_tokens`, `forward_tokens_per_layer` and `encode` was 7 caught /
+1 unviable / **0 missed**). They are real coverage gaps in 01-06's encoder tests
+and are recorded rather than silently absorbed.
+
+**M1. `encoder.rs:524:14: replace > with >= in BertSentenceEncoder::validate`**
+
+```rust
+let max = self.max_seq();
+if s > max { return Err(SetFitError::OversizeInput { len: s, max }); }
+```
+
+With `>=` a batch of **exactly** `max_seq()` tokens (64 on the slice, 256 on the
+full pin) is rejected. No test feeds that boundary: 01-06's `max_seq` test drives
+a length *above* the bound to trigger rejection, and every corpus text is 9-20
+tokens. So the boundary itself is unpinned in both directions.
+
+This is not academic — 256 is the real production bound, and rejecting a
+legitimately 256-token input would look like a tokenizer bug, not a validation
+bug.
+
+Fix direction: one test in `src/setfit/encoder_tests.rs` that builds a batch of
+exactly `encoder.max_seq()` positions and asserts it is ACCEPTED, paired with the
+existing `max_seq + 1` rejection. Not added by 01-08 because
+`src/setfit/encoder_tests.rs` is 01-06's file and 01-08's acceptance criteria
+require `git diff --stat crates/aprender-core/src/` to be empty; reaching into a
+wave-4 plan's implementation is the B5 defect class the plan explicitly forbids.
+
+**M2. `encoder.rs:119:19: replace ^ with | in site_seed`**
+
+The per-dropout-site seed derivation mixes with XOR. Replacing it with OR still
+produces *a* deterministic seed, so every reproducibility test still passes — but
+OR is not a mixing function: it saturates toward all-ones and can collapse
+distinct sites onto the same stream.
+
+01-06's seeded-dropout tests assert same-seed/different-seed behaviour at the
+`MultiHeadAttention` level, and 01-08's fixtures are all eval-mode (dropout
+inert), so nothing observes the *distinctness* of the seven site streams.
+
+Fix direction: a test asserting the seven values `site_seed` produces for one
+root seed are pairwise distinct, and that two different root seeds produce
+disjoint sets. Same file-ownership constraint as M1.
+
+**M3. `encoder.rs:658:9: replace <impl Module for BertSentenceEncoder>::parameters_mut -> Vec<&mut Tensor> with vec![]`**
+
+The sibling `named_parameters_mut` mutation IS caught (line 735), because
+`SetFitMiniLm::trainable_parameters_mut()` — and therefore every optimizer in the
+phase — goes through the NAMED accessor. Nothing in the phase consumes the
+positional one, so emptying it is invisible.
+
+`nn/module.rs` states the invariant explicitly: *"`named_parameters()` has the
+same length as `Module::parameters`, and element `i` of each refers to the same
+tensor."* An empty `parameters_mut()` breaks that silently, and any future caller
+that reaches for the positional accessor (a generic optimizer, a
+`Sequential`-style composite, a checkpoint writer) gets nothing and reports
+success.
+
+Fix direction: one arity/identity test per `impl Module` —
+`parameters_mut().len() == named_parameters_mut().len()` and pairwise
+`Tensor::id()` equality — ideally as a shared helper so it is cheap to apply to
+every implementor rather than to `BertSentenceEncoder` alone.
+
+**Pass B was STOPPED at its declared wall-clock budget** after 12 of the file's
+**84** mutants (9 caught, 3 missed), so this list is not exhaustive. A complete
+run of `setfit/encoder.rs` at the measured ~2.5 min/mutant needs ~3.5 hours. See
+the 01-08 SUMMARY for the full budget accounting.
