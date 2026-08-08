@@ -644,4 +644,365 @@ mod slice {
             "the key bias ({k:e}) must be orders below the query bias ({q:e})"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Task 2: encode() pipeline
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encoder_encode_produces_unit_norm_rows() {
+        autograd::clear_graph();
+        let enc = encoder();
+        let batch = mixed_batch();
+        let e = enc.encode(&batch).expect("encode");
+        assert_eq!(e.shape(), &[batch.batch(), 64]);
+        for row in 0..batch.batch() {
+            let n = l2(&e.data()[row * 64..(row + 1) * 64]);
+            assert!(
+                (n - 1.0).abs() < 4.0 * f64::from(f32::EPSILON),
+                "row {row} has L2 norm {n}, not 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_encode_is_graph_connected() {
+        autograd::clear_graph();
+        let enc = encoder();
+        let e = enc.encode(&mixed_batch()).expect("encode");
+        assert!(
+            e.requires_grad_enabled(),
+            "pooling or normalization severed the graph"
+        );
+    }
+
+    #[test]
+    fn encoder_encode_adds_no_third_forward_path() {
+        let src = encoder_source();
+        let at = src.find("pub fn encode(").expect("encode");
+        let body_end = src[at..].find("\n    }").expect("end of encode") + at;
+        let body = &src[at..body_end];
+        assert!(
+            body.contains("self.forward_tokens("),
+            "encode must reach the layer stack through forward_tokens"
+        );
+        assert!(
+            !body.contains("self.layers"),
+            "encode must not iterate the layers itself"
+        );
+    }
+
+    #[test]
+    fn encoder_encode_is_bitwise_deterministic_in_eval_mode() {
+        autograd::clear_graph();
+        let mut enc = encoder();
+        enc.set_training(false);
+        let batch = mixed_batch();
+
+        let a = autograd::no_grad(|| enc.encode(&batch)).expect("encode");
+        let b = autograd::no_grad(|| enc.encode(&batch)).expect("encode");
+        for (i, (x, y)) in a.data().iter().zip(b.data().iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "element {i}: eval-mode encode is not deterministic ({x} vs {y})"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2: dropout policy and the ENC-05 mode contract
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encoder_mode_dropout_sites_are_one_plus_three_per_layer_and_unique() {
+        let enc = encoder();
+        let sites = enc.dropout_sites();
+        // 1 embeddings + {attention probs, attention output, FFN output} per
+        // layer. The slice has 2 layers, so 7. Read off the ACTIVE modules, not
+        // re-derived from a name list.
+        assert_eq!(
+            sites.len(),
+            1 + 3 * enc.layers.len(),
+            "expected 1 + 3*{} sites, got {sites:?}",
+            enc.layers.len()
+        );
+        assert_eq!(sites.len(), 7, "the slice has 2 encoder layers");
+        let mut unique = sites.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            sites.len(),
+            "duplicate site name in {sites:?}"
+        );
+        // HF-faithful names, so a reader can find the site in the reference.
+        assert_eq!(sites[0], "embeddings.dropout");
+        assert!(sites.contains(&"encoder.layer.1.attention.self.dropout".to_string()));
+        assert!(sites.contains(&"encoder.layer.1.attention.output.dropout".to_string()));
+        assert!(sites.contains(&"encoder.layer.1.output.dropout".to_string()));
+    }
+
+    #[test]
+    fn encoder_mode_every_site_has_its_own_stream() {
+        let enc = encoder();
+        // Derived from the DOTTED NAME, so no two sites share a mask even though
+        // they share a root seed. Sharing would make the whole policy one draw.
+        let mut seeds: Vec<u64> = enc
+            .layers
+            .iter()
+            .filter_map(|l| l.attention.attention_dropout_seed())
+            .collect();
+        assert_eq!(seeds.len(), enc.layers.len(), "every layer must be seeded");
+        seeds.sort_unstable();
+        seeds.dedup();
+        assert_eq!(seeds.len(), enc.layers.len(), "two layers share a stream");
+    }
+
+    /// Read the training flag off every dropout-bearing module DIRECTLY.
+    ///
+    /// Not a behavioural proxy: this is the assertion that fails if
+    /// `set_training` stops recursing into any one site.
+    fn site_modes(enc: &BertSentenceEncoder) -> Vec<(String, bool)> {
+        let mut out = vec![(
+            "embeddings.dropout".to_string(),
+            enc.embeddings_dropout.training(),
+        )];
+        for (i, layer) in enc.layers.iter().enumerate() {
+            out.push((
+                format!("encoder.layer.{i}.attention.self.dropout"),
+                layer.attention.training(),
+            ));
+            out.push((
+                format!("encoder.layer.{i}.attention.output.dropout"),
+                layer.attention_output_dropout.training(),
+            ));
+            out.push((
+                format!("encoder.layer.{i}.output.dropout"),
+                layer.output_dropout.training(),
+            ));
+        }
+        out
+    }
+
+    #[test]
+    fn encoder_mode_set_training_flips_every_dropout_site_recursively() {
+        let mut enc = encoder();
+
+        enc.set_training(true);
+        assert!(enc.training());
+        for (site, on) in site_modes(&enc) {
+            assert!(on, "`{site}` did not follow set_training(true)");
+        }
+
+        enc.set_training(false);
+        assert!(!enc.training());
+        for (site, on) in site_modes(&enc) {
+            assert!(!on, "`{site}` did not follow set_training(false)");
+        }
+    }
+
+    #[test]
+    fn encoder_mode_train_and_eval_spellings_also_propagate() {
+        // The crate convention is that train()/eval() are leaf-local and
+        // set_training is the channel. On a module whose whole point is dropout
+        // placement, an eval() that left dropout active would make every
+        // "inference" run stochastic with no error, so both spellings route
+        // through the one channel here.
+        let mut enc = encoder();
+        enc.train();
+        for (site, on) in site_modes(&enc) {
+            assert!(on, "`{site}` did not follow train()");
+        }
+        enc.eval();
+        for (site, on) in site_modes(&enc) {
+            assert!(!on, "`{site}` did not follow eval()");
+        }
+    }
+
+    #[test]
+    fn encoder_mode_parameters_are_byte_identical_across_train_eval_train() {
+        let mut enc = encoder();
+        // ENC-05: reuses 01-02's shared helper rather than a local copy.
+        let before = crate::nn::tests_named_module::snapshot_named(&enc);
+        enc.set_training(true);
+        let train = crate::nn::tests_named_module::snapshot_named(&enc);
+        enc.set_training(false);
+        let eval = crate::nn::tests_named_module::snapshot_named(&enc);
+        enc.set_training(true);
+        let again = crate::nn::tests_named_module::snapshot_named(&enc);
+
+        assert_eq!(before, train, "train() mutated a registered parameter");
+        assert_eq!(train, eval, "eval() mutated a registered parameter");
+        assert_eq!(eval, again, "train() mutated a registered parameter");
+        assert_eq!(again.len(), 37);
+    }
+
+    #[test]
+    fn encoder_mode_no_seed_or_rng_state_is_registered_as_a_parameter() {
+        // Pitfall 7: naming RNG state would put non-learnable values into
+        // optimizer and freeze partitions AND break the byte-identity proof
+        // above, since RNG state legitimately changes across a forward pass.
+        let enc = encoder();
+        for (name, _) in enc.named_parameters() {
+            assert!(
+                !name.contains("seed") && !name.contains("rng") && !name.contains("dropout"),
+                "module state leaked into named_parameters: {name}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2: seeded determinism (the A5 discharge)
+    // -----------------------------------------------------------------------
+
+    fn train_mode_tokens(seed: u64) -> Vec<f32> {
+        autograd::clear_graph();
+        let mut enc =
+            BertSentenceEncoder::from_import(&slice_import(), seed).expect("encoder must build");
+        enc.set_training(true);
+        autograd::no_grad(|| enc.forward_tokens(&mixed_batch()))
+            .expect("forward")
+            .data()
+            .to_vec()
+    }
+
+    #[test]
+    fn encoder_mode_same_root_seed_gives_bitwise_identical_train_mode_output() {
+        let a = train_mode_tokens(SEED);
+        let b = train_mode_tokens(SEED);
+        assert_eq!(a.len(), b.len());
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "element {i}: two encoders with root seed {SEED:#x} disagree ({x} vs {y}) — \
+                 at least one dropout site is drawing from the ambient RNG"
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_mode_a_different_root_seed_gives_a_different_train_mode_output() {
+        // The other side of the line: identical outputs would also be produced
+        // by an encoder whose dropout never fires at all.
+        let a = train_mode_tokens(SEED);
+        let b = train_mode_tokens(SEED ^ 0xdead_beef);
+        assert!(
+            a.iter()
+                .zip(b.iter())
+                .any(|(x, y)| x.to_bits() != y.to_bits()),
+            "changing the root seed changed nothing — dropout is inert in train mode"
+        );
+    }
+
+    #[test]
+    fn encoder_mode_train_mode_differs_from_eval_mode() {
+        // Without this, every determinism assertion above is satisfied by an
+        // encoder that simply never drops anything.
+        autograd::clear_graph();
+        let mut enc = encoder();
+        enc.set_training(false);
+        let batch = mixed_batch();
+        let evaluated = autograd::no_grad(|| enc.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+        enc.set_training(true);
+        let trained = autograd::no_grad(|| enc.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+        assert!(
+            evaluated
+                .iter()
+                .zip(trained.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-4),
+            "train and eval produced the same states — no dropout site is active"
+        );
+    }
+
+    #[test]
+    fn encoder_mode_the_seeded_stream_advances_across_forward_passes() {
+        // A seeded site that replayed one fixed mask every step would be
+        // reproducible and no longer dropout.
+        autograd::clear_graph();
+        let mut enc = encoder();
+        enc.set_training(true);
+        let batch = mixed_batch();
+        let first = autograd::no_grad(|| enc.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+        let second = autograd::no_grad(|| enc.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+        assert!(
+            first
+                .iter()
+                .zip(second.iter())
+                .any(|(a, b)| a.to_bits() != b.to_bits()),
+            "two consecutive train-mode passes gave identical output — the dropout \
+             stream is not advancing, so the same mask is replayed every step"
+        );
+    }
+
+    #[test]
+    fn encoder_mode_eval_passes_do_not_consume_the_dropout_stream() {
+        // Inference between training steps must not shift the stream, or a
+        // reproducible run would depend on how many times it was evaluated.
+        autograd::clear_graph();
+        let batch = mixed_batch();
+
+        let mut a =
+            BertSentenceEncoder::from_import(&slice_import(), SEED).expect("encoder must build");
+        a.set_training(true);
+        let baseline = autograd::no_grad(|| a.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+
+        let mut b =
+            BertSentenceEncoder::from_import(&slice_import(), SEED).expect("encoder must build");
+        b.set_training(false);
+        let _ = autograd::no_grad(|| b.forward_tokens(&batch)).expect("forward");
+        let _ = autograd::no_grad(|| b.forward_tokens(&batch)).expect("forward");
+        b.set_training(true);
+        let after_eval = autograd::no_grad(|| b.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+
+        for (i, (x, y)) in baseline.iter().zip(after_eval.iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "element {i}: two eval passes shifted the training dropout stream"
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_encode_dropout_drop_rate_sits_in_the_expected_band() {
+        // Statistics test, Rust-side only (D-16): p = 0.1 means ~10% of a large
+        // tensor's elements are zeroed. Measured over 100k elements so the band
+        // is not sampling noise.
+        use crate::nn::Module as _;
+        let n = 100_000;
+        let x = crate::autograd::Tensor::from_vec(vec![1.0f32; n], &[n]);
+        let d = crate::nn::Dropout::with_seed(0.1, site_seed_probe());
+        let y = d.forward(&x);
+        let dropped = y.data().iter().filter(|v| **v == 0.0).count();
+        #[allow(clippy::cast_precision_loss)]
+        let rate = dropped as f64 / n as f64;
+        assert!(
+            (0.08..=0.12).contains(&rate),
+            "empirical drop rate {rate} is outside [0.08, 0.12] for p = 0.1"
+        );
+    }
+
+    fn site_seed_probe() -> u64 {
+        super::super::site_seed(SEED, "embeddings.dropout")
+    }
 }

@@ -21,6 +21,8 @@
 //!
 //! - Vaswani, A., et al. (2017). Attention is all you need. `NeurIPS`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::dropout::Dropout;
 use super::linear::Linear;
 use super::module::Module;
@@ -33,6 +35,12 @@ use trueno::Matrix;
 /// ```text
 /// Attention(Q, K, V) = softmax(Q * K^T / sqrt(d_k)) * V
 /// ```
+///
+/// Unseeded: the attention-probs dropout draws from the ambient RNG, exactly as
+/// before plan 01-06. The signature is deliberately unchanged so every existing
+/// caller — `GroupedQueryAttention` and the attention contract tests — compiles
+/// and behaves identically; the seeded hook is a SEPARATE entry point rather
+/// than a seventh parameter (see [`scaled_dot_product_attention_seeded`]).
 #[provable_contracts_macros::contract("attention-kernel-v1", equation = "attention")]
 fn scaled_dot_product_attention(
     query: &Tensor,
@@ -41,6 +49,31 @@ fn scaled_dot_product_attention(
     attn_mask: Option<&Tensor>,
     dropout_p: f32,
     training: bool,
+) -> (Tensor, Tensor) {
+    scaled_dot_product_attention_seeded(query, key, value, attn_mask, dropout_p, training, None)
+}
+
+/// Scaled Dot-Product Attention with an optional seeded attention-probs dropout.
+///
+/// This is where the attention math lives; [`scaled_dot_product_attention`] is a
+/// delegator that passes `None`. Splitting rather than extending the existing
+/// signature was a deliberate choice (plan 01-06): the alternative required
+/// editing ten call sites across `attention_gqa.rs` and
+/// `tests_attention_contract.rs` — files this change has no business touching —
+/// while the alternative the plan warned against, re-deriving the dropout from
+/// outside, would mean re-implementing the `attn_weights @ V` product.
+///
+/// `dropout_seed` is consulted ONLY when `training && dropout_p > 0.0`, so an
+/// unseeded caller's numerics are untouched at every dropout setting.
+#[provable_contracts_macros::contract("attention-kernel-v1", equation = "attention")]
+fn scaled_dot_product_attention_seeded(
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+    attn_mask: Option<&Tensor>,
+    dropout_p: f32,
+    training: bool,
+    dropout_seed: Option<u64>,
 ) -> (Tensor, Tensor) {
     contract_pre_attention!(query.data());
     contract_pre_scaled_dot_product!();
@@ -64,7 +97,7 @@ fn scaled_dot_product_attention(
 
     // Apply dropout if training
     let attn_weights = if training && dropout_p > 0.0 {
-        apply_dropout(&attn_weights, dropout_p)
+        apply_dropout_seeded(&attn_weights, dropout_p, dropout_seed)
     } else {
         attn_weights
     };
@@ -105,7 +138,35 @@ pub struct MultiHeadAttention {
     /// Output projection
     out_proj: Linear,
 
+    /// Optional seed for the attention-probs dropout (plan 01-06, A5).
+    ///
+    /// `None` — the default — preserves the pre-01-06 behaviour exactly: the
+    /// ambient RNG, no reproducibility. `Some` makes the site's mask a function
+    /// of the seed and the call index, which is what the SetFit encoder's
+    /// deterministic dropout policy needs. Never a parameter (Pitfall 7): seeds
+    /// and RNG state are module state and must not appear in
+    /// `named_parameters`, or the ENC-05 mode-flip byte-identity proof would
+    /// compare values that legitimately change.
+    attention_dropout_seed: Option<u64>,
+
+    /// Number of times the seeded dropout has fired.
+    ///
+    /// Mixed into the per-call seed so the stream ADVANCES across forward
+    /// passes. Without it, a seeded site would replay one fixed mask on every
+    /// training step — reproducible, but no longer dropout. Two freshly built
+    /// modules with the same seed still produce the same sequence, which is the
+    /// property the determinism tests assert.
+    attention_dropout_calls: AtomicU64,
+
     training: bool,
+}
+
+/// Fold a call index into a site seed (`SplitMix64` finaliser).
+fn mix_call_seed(seed: u64, call: u64) -> u64 {
+    let mut z = seed ^ call.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 impl MultiHeadAttention {
@@ -137,6 +198,8 @@ impl MultiHeadAttention {
             k_proj: Linear::new(embed_dim, embed_dim),
             v_proj: Linear::new(embed_dim, embed_dim),
             out_proj: Linear::new(embed_dim, embed_dim),
+            attention_dropout_seed: None,
+            attention_dropout_calls: AtomicU64::new(0),
             training: true,
         }
     }
@@ -146,6 +209,28 @@ impl MultiHeadAttention {
     pub fn with_dropout(mut self, dropout_p: f32) -> Self {
         self.dropout_p = dropout_p;
         self
+    }
+
+    /// Make the attention-probs dropout reproducible from `seed` (plan 01-06).
+    ///
+    /// Opt-in and additive: a `MultiHeadAttention` built without this call keeps
+    /// the ambient-RNG behaviour it had before, at every dropout setting.
+    #[must_use]
+    pub fn with_attention_dropout_seed(mut self, seed: u64) -> Self {
+        self.attention_dropout_seed = Some(seed);
+        self
+    }
+
+    /// The attention-probs dropout seed, if one was installed.
+    #[must_use]
+    pub fn attention_dropout_seed(&self) -> Option<u64> {
+        self.attention_dropout_seed
+    }
+
+    /// The attention-probs dropout probability.
+    #[must_use]
+    pub fn dropout_p(&self) -> f32 {
+        self.dropout_p
     }
 
     /// Mutable access to the Q-projection (GH-326).
@@ -207,9 +292,27 @@ impl MultiHeadAttention {
         let k = reshape_for_attention(&k, batch_size, src_len, self.num_heads, self.head_dim);
         let v = reshape_for_attention(&v, batch_size, src_len, self.num_heads, self.head_dim);
 
-        // Scaled dot-product attention
-        let (attn_output, attn_weights) =
-            scaled_dot_product_attention(&q, &k, &v, attn_mask, self.dropout_p, self.training);
+        // Scaled dot-product attention. The call counter advances ONLY when the
+        // dropout will actually fire, so an eval-mode or p==0 forward leaves the
+        // stream exactly where it was — two encoders with the same seed stay in
+        // lockstep regardless of how many inference passes they ran.
+        let dropout_seed = if self.training && self.dropout_p > 0.0 {
+            self.attention_dropout_seed.map(|seed| {
+                let call = self.attention_dropout_calls.fetch_add(1, Ordering::Relaxed);
+                mix_call_seed(seed, call)
+            })
+        } else {
+            None
+        };
+        let (attn_output, attn_weights) = scaled_dot_product_attention_seeded(
+            &q,
+            &k,
+            &v,
+            attn_mask,
+            self.dropout_p,
+            self.training,
+            dropout_seed,
+        );
 
         // Reshape back: [batch, heads, seq, head_dim] -> [batch, seq, embed]
         let attn_output = reshape_from_attention(&attn_output, batch_size, tgt_len, self.embed_dim);

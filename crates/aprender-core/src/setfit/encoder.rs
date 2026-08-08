@@ -210,7 +210,12 @@ impl BertSentenceEncoder {
         for i in 0..dims.layers {
             let p = format!("encoder.layer.{i}");
 
-            let mut attention = MultiHeadAttention::new(h, dims.heads).with_dropout(DROPOUT_P);
+            // Site 2 lives INSIDE MultiHeadAttention, between softmax and @V.
+            // It was the one unseedable site (A5); the hook added by this plan
+            // is what makes the whole policy reproducible.
+            let mut attention = MultiHeadAttention::new(h, dims.heads)
+                .with_dropout(DROPOUT_P)
+                .with_attention_dropout_seed(site_seed(root_seed, &attention_probs_site(i)));
             install_projection(attention.q_proj_mut(), &read, &p, "query", h)?;
             install_projection(attention.k_proj_mut(), &read, &p, "key", h)?;
             install_projection(attention.v_proj_mut(), &read, &p, "value", h)?;
@@ -301,6 +306,36 @@ impl BertSentenceEncoder {
     #[must_use]
     pub fn root_seed(&self) -> u64 {
         self.root_seed
+    }
+
+    /// Ordered dotted names of every ACTIVE dropout site.
+    ///
+    /// Real introspection, not a re-derived name list: each entry is emitted
+    /// only if the module that implements it exists AND is active, so a site
+    /// that was never wired cannot appear. That distinction is the whole point —
+    /// a behavioural proxy ("the output changed") cannot tell "site missing"
+    /// from "site present but `p` effectively 0", and both are ways ENC-05's
+    /// dropout placement can be quietly wrong.
+    #[cfg(test)]
+    pub(crate) fn dropout_sites(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.embeddings_dropout.probability() > 0.0 {
+            out.push(EMBEDDINGS_DROPOUT_SITE.to_string());
+        }
+        for (i, layer) in self.layers.iter().enumerate() {
+            if layer.attention.dropout_p() > 0.0
+                && layer.attention.attention_dropout_seed().is_some()
+            {
+                out.push(attention_probs_site(i));
+            }
+            if layer.attention_output_dropout.probability() > 0.0 {
+                out.push(attention_output_site(i));
+            }
+            if layer.output_dropout.probability() > 0.0 {
+                out.push(ffn_output_site(i));
+            }
+        }
+        out
     }
 
     /// Graph-connected token states `[B, S, H]`.

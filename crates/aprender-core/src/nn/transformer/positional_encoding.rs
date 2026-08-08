@@ -516,6 +516,37 @@ pub(super) fn apply_dropout(x: &Tensor, p: f32) -> Tensor {
     crate::nn::functional::dropout(x, p, true)
 }
 
+/// Seeded variant of [`apply_dropout`] (plan 01-06, A5).
+///
+/// `nn::functional::dropout(x, p, training)` takes **no seed** — confirmed by
+/// inspection in 01-03's spike and by 01-09 — so the attention-probs dropout
+/// inside `scaled_dot_product_attention` was not reproducible. This is the hook
+/// that makes it so, added ADDITIVELY:
+///
+/// * `None` delegates to [`apply_dropout`] verbatim, so every existing caller is
+///   byte-for-byte unchanged. That is the whole default path.
+/// * `Some(seed)` routes through [`crate::nn::Dropout::with_seed`], the crate's
+///   audited seeded dropout — ONE PATH, not a second hand-rolled RNG loop. Its
+///   mask construction is the same PMAT-922 constant-mask `mul` that
+///   `functional::dropout` uses, so the only difference is which RNG produced
+///   the mask; the autograd edge is identical.
+///
+/// The result is a pure function of `(seed, p, x.len())`. `MultiHeadAttention`
+/// therefore mixes a per-call counter into the seed it passes, so the stream
+/// ADVANCES across forward passes instead of replaying one fixed mask.
+pub(super) fn apply_dropout_seeded(x: &Tensor, p: f32, seed: Option<u64>) -> Tensor {
+    match seed {
+        None => apply_dropout(x, p),
+        Some(seed) => {
+            use crate::nn::module::Module as _;
+            // RED STUB (plan 01-06 Task 2): the seed is accepted and ignored.
+            let _ = seed;
+            let _ = crate::nn::Dropout::with_seed(p, 0);
+            apply_dropout(x, p)
+        }
+    }
+}
+
 /// Reshape for multi-head attention: [batch, seq, embed] -> [batch, heads, seq, `head_dim`]
 pub(super) fn reshape_for_attention(
     x: &Tensor,
