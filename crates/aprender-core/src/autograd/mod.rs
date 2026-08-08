@@ -54,8 +54,8 @@ pub use tensor::{Tensor, TensorId};
 /// (D-03): the severed-graph debt they retire belongs to every consumer of
 /// `autograd`, not just the SetFit path.
 pub use ops::{
-    additive_attention_mask, embedding_gather, l2_normalize_rows, masked_mean_pool, OpError,
-    NEG_MASK,
+    additive_attention_mask, cosine_similarity_rows, embedding_gather, l2_normalize_rows,
+    masked_mean_pool, mse_loss, OpError, NEG_MASK,
 };
 
 use std::cell::RefCell;
