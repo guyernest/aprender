@@ -82,7 +82,7 @@ without split leakage, provenance ambiguity, silent row loss, or Cartesian-produ
   2. A user can select exactly 8, 16, 32, or 64 unique canonical-training examples per class for every contracted seed and replay the same ordered selected-ID manifest and semantic hashes.
   3. A user can replay positive and negative pair manifests whose endpoints are distinct selected training IDs, whose targets agree with class identity, whose unordered identities cannot conflict, and whose singleton-class behavior is explicit and versioned.
   4. A user can impose a per-epoch pair budget, and increasing the example count under a fixed budget retains `O(examples + pair budget)` state and storage instead of materializing a Cartesian product.
-  5. Validation/test endpoints, cross-split duplicate content, and the merged SetFit compatibility test used for model selection are rejected fail-closed, while the manifest proves canonical train/validation/test isolation.
+  5. Validation/test endpoints, cross-split duplicate content, and the merged SetFit compatibility test used for model selection are rejected fail-closed, while the manifest proves canonical train/validation/test isolation. (Per D-27, "rejected fail-closed" means excluded from the training pool — no selection or pair may span split roles, and pool exhaustion below `shots_per_class` is a typed error; prepare-time duplicate *content* is excluded and recorded, not fatal.)
 
 **Plans**: 9 plans in 6 waves
 
