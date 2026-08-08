@@ -345,6 +345,81 @@ impl GradFn for MeanBackward {
     }
 }
 
+/// Gradient function for masked mean pooling over the sequence axis.
+///
+/// Obligation: OBLIG-ENC-03 masked pooling, contract
+/// `setfit-encoder-conformance-v1`, equation `masked_mean_pool`.
+///
+/// Forward reduces `[B, S, H]` to `[B, H]` by averaging only the VALID
+/// positions of each row: `out[b][h] = (Σ_s mask[b][s]·x[b][s][h]) / n_b`.
+///
+/// Backward therefore routes `grad_output[b][h] / n_b` to every valid position
+/// `(b, s, h)` and **exactly `0.0`** to every padded position. Two properties
+/// carry all the risk here:
+///
+/// * The divisor is **per row**. A single shared denominator is invisible on a
+///   uniform-length batch and wrong on every mixed-length one — which is every
+///   real one.
+/// * Padded positions must receive zero, not `grad/n`. Leaking gradient into
+///   padding trains the encoder on positions that carry no input.
+///
+/// `n_b > 0` is guaranteed by the forward, which rejects an all-padding row
+/// with a typed error before this struct is ever constructed.
+pub(crate) struct MaskedMeanPoolBackward {
+    pub(crate) mask: Vec<u8>,
+    pub(crate) batch: usize,
+    pub(crate) seq: usize,
+    pub(crate) hidden: usize,
+}
+
+impl GradFn for MaskedMeanPoolBackward {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let g = grad_output.data();
+        let (b, s, h) = (self.batch, self.seq, self.hidden);
+        let mut grad_in = vec![0.0f32; b * s * h];
+
+        for row in 0..b {
+            let base = row * s;
+            // Folded rather than `filter(..).count()`: the explicit `m == 1`
+            // predicate means a stray non-binary value could never inflate the
+            // divisor (the forward rejects those, but the divisor is the one
+            // place where being wrong is silent).
+            let count = self.mask[base..base + s]
+                .iter()
+                .fold(0usize, |acc, &m| acc + usize::from(m == 1));
+            if count == 0 {
+                // Unreachable: the forward rejects an all-padding row with a
+                // typed error before this struct is constructed. Skipping keeps
+                // the row at zero rather than dividing by zero, so even a future
+                // caller that bypassed the guard cannot inject NaN here.
+                continue;
+            }
+            // PER-ROW divisor. Hoisted per row precisely so it cannot silently
+            // become a single batch-wide constant.
+            let inv = 1.0 / count as f32;
+            let g_off = row * h;
+
+            for pos in 0..s {
+                if self.mask[base + pos] != 1 {
+                    // Padded positions keep their initialized 0.0 — gradient must
+                    // never leak into positions that carried no input.
+                    continue;
+                }
+                let dst = base * h + pos * h;
+                for j in 0..h {
+                    grad_in[dst + j] = g[g_off + j] * inv;
+                }
+            }
+        }
+
+        vec![Tensor::new(&grad_in, &[b, s, h])]
+    }
+
+    fn name(&self) -> &'static str {
+        "MaskedMeanPoolBackward"
+    }
+}
+
 // ============================================================================
 // Activation Functions
 // ============================================================================
