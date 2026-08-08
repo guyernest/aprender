@@ -455,20 +455,167 @@ pub struct GateInput<'a> {
     pub layers: usize,
 }
 
-/// RED STUB — the ENC-04 gate is not implemented yet.
+/// The contracted component a name belongs to.
 ///
-/// Returns a fixed error no test expects, so every behavioural assertion in
-/// `gradient_gate`, `frozen_gate` and `detach_negative` is proven REACHABLE
-/// rather than the file merely failing to compile. The branch still builds at
-/// this commit, which matters because the orchestrator merges this worktree
-/// with others.
+/// Deliberately derived from [`FreezeGroup::matches`] rather than from a second
+/// prefix table: ENC-04's four components ARE 01-07's four freeze groups, and
+/// 01-07 asserts that partition covers every named parameter with no gaps. A
+/// private copy here could drift from the mapping the freeze policy uses, and
+/// then this gate and `frozen_gate` would be talking about different sets.
+pub fn component_of(name: &str, layers: usize) -> Option<String> {
+    if FreezeGroup::Embeddings.matches(name) {
+        return Some("embeddings".to_string());
+    }
+    for n in 0..layers {
+        if FreezeGroup::LayerAttention(n).matches(name) {
+            return Some(format!("layer{n}.attention"));
+        }
+        if FreezeGroup::LayerFfn(n).matches(name) {
+            return Some(format!("layer{n}.ffn"));
+        }
+        if FreezeGroup::LayerNorm(n).matches(name) {
+            return Some(format!("layer{n}.norm"));
+        }
+    }
+    None
+}
+
+/// **The canonical ENC-04 gate**, exactly as
+/// `OBLIG-ENC-04-GRADIENT-AND-STEP-GATE` states it:
+///
+/// * (a) finiteness, every tensor, no exemptions;
+/// * (b) non-zero AGGREGATE gradient L2 per contracted component;
+/// * (c) per-tensor non-zero for names ABSENT from `exemptions`;
+/// * (d)/(e) two-sided exemption: a name PRESENT in `exemptions` must itself
+///   satisfy `max|g| <= floor`, so an unexpectedly LARGE key-bias gradient is a
+///   failure rather than a pass — the list is a pinned prediction, not a mute
+///   button;
+/// * (f) when `deltas` is supplied, the same shape over post-step movement.
+///
+/// The earlier "non-zero gradient on every trainable tensor" phrasing is
+/// unsatisfiable against a CORRECT implementation (`attention.self.key.bias` has
+/// an analytically zero gradient by softmax shift invariance), which is why the
+/// exemption is data-driven and two-sided.
+///
+/// `gradient_gate`, `frozen_gate` and `detach_negative` all call THIS function,
+/// unmodified. That identity is what makes the D-24 negative evidence rather
+/// than theater: a second implementation could be wrong in exactly the way that
+/// lets both the positive and the negative pass.
 ///
 /// # Errors
 ///
-/// Always.
+/// A report NAMING every offending parameter. `detach_negative` asserts on those
+/// names, so the message content is part of the gate's contract.
 pub fn assert_encoder_updates(input: &GateInput) -> Result<(), String> {
-    let _ = input.grads.len();
-    Err("RED STUB: the ENC-04 gate is not implemented".to_string())
+    let mut problems: Vec<String> = Vec::new();
+
+    // ---- (a) finiteness, no exemptions ------------------------------------
+    let mut missing: Vec<&str> = Vec::new();
+    for (name, g) in input.grads {
+        match g {
+            None => missing.push(name),
+            Some(values) => {
+                if let Some(i) = values.iter().position(|v| !v.is_finite()) {
+                    problems.push(format!(
+                        "(a) `{name}` gradient element {i} is {} — not finite",
+                        values[i]
+                    ));
+                }
+            }
+        }
+    }
+    if !missing.is_empty() {
+        problems.push(format!(
+            "(a) {} parameter(s) received NO gradient: {}",
+            missing.len(),
+            missing.join(", ")
+        ));
+    }
+
+    // ---- (b) non-zero aggregate per contracted component ------------------
+    let mut aggregates: BTreeMap<String, f64> = BTreeMap::new();
+    let mut uncovered: Vec<&str> = Vec::new();
+    for (name, g) in input.grads {
+        match component_of(name, input.layers) {
+            Some(c) => {
+                let sq: f64 = g.as_ref().map_or(0.0, |v| {
+                    v.iter().map(|x| f64::from(*x) * f64::from(*x)).sum()
+                });
+                *aggregates.entry(c).or_insert(0.0) += sq;
+            }
+            None => uncovered.push(name),
+        }
+    }
+    if !uncovered.is_empty() {
+        problems.push(format!(
+            "the ENC-04 component partition does not cover: {} — the component mapping has \
+             drifted from the parameter names",
+            uncovered.join(", ")
+        ));
+    }
+    for (component, sq) in &aggregates {
+        if sq.sqrt() <= 0.0 {
+            problems.push(format!(
+                "(b) component `{component}` aggregate gradient L2 is {} — a severed graph \
+                 anywhere in the body drives some component aggregate to exactly zero",
+                sq.sqrt()
+            ));
+        }
+    }
+
+    // ---- (c) per-tensor non-zero, (d)/(e) two-sided exemption -------------
+    for (name, g) in input.grads {
+        let exempt = input.exemptions.iter().any(|e| e == name);
+        let Some(values) = g else {
+            continue; // already reported under (a)
+        };
+        if exempt {
+            let m = max_abs(values);
+            if m > input.floor {
+                problems.push(format!(
+                    "(e) `{name}` is on the analytically-zero list but max|g| = {m:e} > \
+                     zero_grad_floor {:e}",
+                    input.floor
+                ));
+            }
+        } else if l2(values) <= 0.0 {
+            problems.push(format!(
+                "(c) `{name}` has a zero gradient and is NOT on the analytically-zero list"
+            ));
+        }
+    }
+
+    // ---- (f) post-step movement, same shape -------------------------------
+    if let Some(deltas) = input.deltas {
+        let mut moved: BTreeMap<String, f64> = BTreeMap::new();
+        for (name, d) in deltas {
+            if let Some(c) = component_of(name, input.layers) {
+                *moved.entry(c).or_insert(0.0) += f64::from(*d);
+            }
+            if !input.exemptions.iter().any(|e| e == name) && *d <= 0.0 {
+                problems.push(format!(
+                    "(f) `{name}` did not move across the optimizer step and is not exempt"
+                ));
+            }
+        }
+        for (component, total) in &moved {
+            if *total <= 0.0 {
+                problems.push(format!(
+                    "(f) component `{component}` aggregate post-step delta is {total}"
+                ));
+            }
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "ENC-04 gate FAILED with {} finding(s):\n  {}",
+            problems.len(),
+            problems.join("\n  ")
+        ))
+    }
 }
 
 /// `(name, gradient)` for the model's TRAINABLE partition.
