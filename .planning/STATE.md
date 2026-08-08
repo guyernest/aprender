@@ -74,6 +74,7 @@ None yet.
 
 - [Phase 1]: Freeze numerical tolerances from pinned reference fixtures before examining Rust discrepancies; validate the real-weight mixed-batch graph before committing the full BERT refactor.
 - [Phase 2]: Decide and version singleton-class and bounded-oversampling behavior during phase planning.
+- [Phase 2 — KNOWN-RED, EXPECTED, NOT A REGRESSION]: `pre-release` Gate 5 (the VERIFYING `cargo package -p apr-cli`) fails from Phase 2 wave 2 through phase exit. Cause: `apr-cli` gains a dependency on the new `aprender-contrastive-data` crate, which is not on crates.io until the human-approved publish cascade lands it (RESEARCH Pitfall 8 / Finding F5). What IS gated and must stay green: `cargo package --no-verify` for both crates. Exit condition: publish `aprender-contrastive-data` BEFORE `apr-cli` — a human-approved release action; CLAUDE.md forbids self-serving the publish. `/gsd:verify-work` must read a red Gate 5 as this expected state. Mirrored in `must_haves.caveats` of plans 02-02 and 02-08 and in 02-VALIDATION.md.
 - [Phase 5]: Choose validation-only calibration and uncertainty estimators before collecting benchmark results.
 - [Cross-cutting]: Preserve CPU-only package/MSRV/feature combinations and executable contract conventions from the repository's pre-release and APR dogfood skills.
 

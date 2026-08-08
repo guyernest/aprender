@@ -24,6 +24,8 @@ uncommitted D-06 baseline files).
 | `src/buckets.rs` | model | batch | `crates/aprender-data/src/split.rs::stratified` (line 180) | role-match |
 | `src/select.rs` | service | batch/transform | `aprender-data/src/split.rs::stratified` + `aprender-rand/src/philox.rs` | role-match |
 | `src/pairs.rs` | service | streaming | none (RESEARCH.md Code Examples govern) | no analog |
+| `src/prepared.rs` | model (profile typestate) | transform | `crates/aprender-core/src/format/validated_vector.rs` (PhantomData + SOLE validating constructor + "There is no way to create …" prose) — this is the analog for `PreparedDataset<Canonical>` / `PreparedDataset<Compatibility>` and for stating impossibility in doc words | role-match (strong) |
+| `src/attestation.rs` | model + boundary validator | transform (bytes→verified identity) | `data_tweeteval.rs` manifest family (lines 64–113, nested Serialize structs + BTreeMap) for the record shape; `schema.rs`'s `deny_unknown_fields` boundary discipline for the untrusted-parse rule | role-match |
 | `src/rng.rs` | utility | request-response (pure fn) | `crates/aprender-rand/src/philox.rs` (`generate_at`) | exact |
 | `src/ledger.rs` | model (append-only record) | event-driven | none | no analog |
 | `src/manifest.rs` | model + serialization | transform | `data_tweeteval.rs` manifest structs (lines 64–113) | exact |
@@ -31,6 +33,11 @@ uncommitted D-06 baseline files).
 | `tests/negative_materializing.rs` | test (in-band negative) | — | same as above | exact discipline |
 | `tests/goldens/` + `manifest.sha256` | fixtures | — | `crates/aprender-core/tests/fixtures/setfit/` + verifier at `tests/setfit_conformance.rs:1199` | exact |
 | `tests/ui/` (trybuild) | test (compile-fail) | — | none — trybuild is a dev-dep of 2 crates but no `TestCases` harness exists | no analog |
+| `tests/common/mod.rs` | shared test module (NOT a test target) | — | `crates/aprender-core/tests/setfit_conformance.rs`'s `#[path = "..."]` module include — same problem, different idiom; `tests/common/mod.rs` is preferred because cargo already treats that path as a module | role-match |
+| `tests/reference_fixtures.rs` | test (integration, fixture integrity) | — | `crates/aprender-core/tests/setfit_conformance.rs:1199` manifest verification | exact |
+| `tests/pair_counts.rs` | test (integration, fixture-driven counts) | — | same as `reference_fixtures.rs`; exists because `tests/common/` is invisible to lib unit tests and `src/` may not touch the filesystem | exact |
+| `tests/setfit_reference/` + `manifest.sha256` | fixtures | — | `crates/aprender-core/tests/fixtures/setfit/` + its Phase 1 manifest writer | exact |
+| `allowed-deps.txt` | build config (positive allowlist) | — | none in-repo — the closest discipline is `Makefile setfit-feature-matrix`'s capture-then-check status handling, which the consuming target copies | no analog |
 
 ### Modified / extended files
 
@@ -46,6 +53,10 @@ uncommitted D-06 baseline files).
 | `Makefile` (tier2 line, `$(CONTRACTS)`, bytes-boundary check) | build config | — | tier2 block (~185–213), `setfit-feature-matrix` (~266–291), `CONTRACTS` (~874+) | exact |
 | `scripts/setfit_fixtures/generate_fixtures.py` (extend) | script | batch | itself (`main()` line 352, manifest writer lines 913–928) | exact (self) |
 | `#[contract]` annotations (in new crate source) | annotation | — | `crates/aprender-core/src/autograd/ops/pooling.rs:50–53` | exact |
+| `crates/apr-cli/src/commands/data_contrastive.rs` (new) | CLI command | request-response + file I/O | `crates/apr-cli/src/commands/data_tweeteval.rs` — read-once bytes, `create_new` no-clobber + `--force`, `written: Vec<PathBuf>` rollback, `--json` output shape | exact |
+| `contracts/aprender/binding.yaml` (append) | contract binding registry | config | its own existing entries (contract / equation / module_path / function / signature / status / notes) | exact (self) |
+| `docs/examples/tweet-eval-stance.md` (extend) | docs | — | itself — the D-06 baseline landed it in plan 02-01 | exact (self) |
+| `CLAUDE.md` (`pv diff` example fix, plan 02-01) | docs | — | itself; the corrected form comes from `crates/aprender-contracts-cli/src/cli.rs:73-78` | exact (self) |
 
 ## Pattern Assignments
 
