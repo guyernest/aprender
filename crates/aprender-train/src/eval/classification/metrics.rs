@@ -3,6 +3,18 @@
 use super::average::Average;
 use super::confusion::ConfusionMatrix;
 
+/// Average precomputed per-class F1 values over explicit class indices.
+///
+/// Returns `None` for an empty selection or an out-of-range class index.
+#[must_use]
+pub fn f1_average_for_classes(f1: &[f64], classes: &[usize]) -> Option<f64> {
+    if classes.is_empty() || classes.iter().any(|&class| class >= f1.len()) {
+        return None;
+    }
+    let total = classes.iter().map(|&class| f1[class]).sum::<f64>();
+    Some(total / classes.len() as f64)
+}
+
 /// Multi-class classification metrics
 #[derive(Clone, Debug)]
 pub struct MultiClassMetrics {
@@ -64,6 +76,20 @@ impl MultiClassMetrics {
     /// Get averaged F1
     pub fn f1_avg(&self, average: Average) -> f64 {
         self.average_metric(&self.f1, average)
+    }
+
+    /// Average F1 over an explicit subset of class indices.
+    ///
+    /// This supports benchmarks whose official score excludes a neutral or
+    /// background class. For example, TweetEval stance reports
+    /// `(F1_against + F1_favor) / 2`, corresponding to class indices `[1, 2]`
+    /// in the canonical abortion stance label mapping.
+    ///
+    /// Returns `None` when `classes` is empty or any requested class is not
+    /// present, preventing a silently mislabelled benchmark score.
+    #[must_use]
+    pub fn f1_avg_for_classes(&self, classes: &[usize]) -> Option<f64> {
+        f1_average_for_classes(&self.f1, classes)
     }
 
     fn average_metric(&self, values: &[f64], average: Average) -> f64 {

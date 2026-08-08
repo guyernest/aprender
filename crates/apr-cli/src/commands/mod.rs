@@ -40,6 +40,7 @@ pub mod modelfile;
 pub(crate) mod rm_gc_lint;
 
 pub(crate) mod data;
+pub(crate) mod data_tweeteval;
 pub(crate) mod diagnose;
 
 pub(crate) mod dry_sampling_classifier;

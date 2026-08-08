@@ -567,7 +567,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             cli.json,
         ),
         ExtendedCommands::Tokenize { command } => dispatch_tokenize_command(command, cli),
-        ExtendedCommands::Data { command } => dispatch_data_command(command, cli.json),
+        ExtendedCommands::Data { command } => dispatch_data_command(command, cli),
         ExtendedCommands::Pipeline { command } => dispatch_pipeline_command(command, cli),
         ExtendedCommands::Ppl { log_probs_file } => commands::ppl::run(log_probs_file, cli.json),
 
@@ -723,8 +723,24 @@ fn dispatch_experiment_command(
 }
 
 /// Dispatch `apr data` subcommands to alimentar-backed implementations.
-fn dispatch_data_command(command: &DataCommands, json: bool) -> std::result::Result<(), CliError> {
+fn dispatch_data_command(command: &DataCommands, cli: &Cli) -> std::result::Result<(), CliError> {
+    let json = cli.json;
     match command {
+        DataCommands::TweetEvalStance {
+            output,
+            profile,
+            source,
+            revision,
+            force,
+        } => commands::data_tweeteval::run(
+            output,
+            *profile,
+            source.as_deref(),
+            revision,
+            *force,
+            cli.offline,
+            json,
+        ),
         DataCommands::Audit {
             file,
             num_classes,
@@ -1219,6 +1235,7 @@ fn dispatch_profiling_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             #[cfg(feature = "training")]
             Some("classify") => eval::run_classify_eval(
                 &r,
+                dataset,
                 data.as_deref(),
                 model_size.as_deref(),
                 *num_classes,
