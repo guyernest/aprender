@@ -35,7 +35,12 @@ exclude = [
     "book/",
     # Test data and traces
     "golden_traces/",
-    "tokenizer.json",
+    # root-anchored: /tokenizer.json not tokenizer.json per CB-510.
+    # Cargo excludes use gitignore semantics, so a pattern with no `/` matches at
+    # ANY depth -- the bare form silently stripped
+    # tests/fixtures/setfit/tokenizer.json (loaded by the ENC-02 parity gate)
+    # from the package while leaving tokenizer_cases.json in.
+    "/tokenizer.json",
     "defect-report-*.json",
     "trace_*.json",
     "fuzz/",
