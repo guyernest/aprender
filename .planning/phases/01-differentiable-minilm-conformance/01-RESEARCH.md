@@ -466,7 +466,7 @@ fn central_diff_grad(f: impl Fn(&[f32]) -> f32, x: &[f32], i: usize, h: f32) -> 
 ### Controlled optimizer step + frozen-group byte identity (ENC-04, D-21)
 
 ```rust
-// AdamW API verified: crates/aprender-core/src/nn/optim/mod.rs:391 (struct), :350 (step_with_params)
+// AdamW API verified: crates/aprender-core/src/nn/optim/mod.rs:391 (struct); impl in rm_sprop.rs (decoupled decay :80, step_with_params :87) — do NOT use coupled-decay Adam
 let mut opt = AdamW::new(trainable_params, 2e-5);       // trainable set ONLY (freeze = exclusion)
 let frozen_before: Vec<Vec<f32>> = frozen.iter().map(|(_, t)| t.data().to_vec()).collect();
 loss.backward();
