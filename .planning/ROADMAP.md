@@ -55,8 +55,8 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 01-03-PLAN.md — normalize/cosine/MSE ops + batched mixed-length graph spike (wave 3)
-- [ ] 01-05-PLAN.md — setfit feature, tokenizer boundary (SentenceBatch), typed pinned import (wave 3)
+- [x] 01-03-PLAN.md — normalize/cosine/MSE ops + batched mixed-length graph spike (wave 3)
+- [x] 01-05-PLAN.md — setfit feature, tokenizer boundary (SentenceBatch), typed pinned import (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -143,7 +143,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Differentiable MiniLM Conformance | 4/9 | In Progress|  |
+| 1. Differentiable MiniLM Conformance | 6/9 | In Progress|  |
 | 2. Deterministic Pair and Data Protocol | 0/TBD | Not started | - |
 | 3. Faithful Two-Stage Trainer and Head | 0/TBD | Not started | - |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
