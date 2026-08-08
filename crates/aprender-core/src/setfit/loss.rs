@@ -69,20 +69,77 @@ pub(crate) const PAIR_COSINE_EPS: f32 = 1e-12;
     equation = "pair_cosine_mse"
 )]
 pub fn pair_cosine_mse(za: &Tensor, zb: &Tensor, labels: &[f32]) -> Result<Tensor, SetFitError> {
-    // RED STUB (plan 01-07 Task 1). Returns an error no test expects, so every
-    // assertion below is proven reachable rather than the file merely failing to
-    // compile, and the branch builds at every commit.
-    let _ = (za, zb, labels);
-    Err(SetFitError::RemapInvalid {
-        reason: "RED STUB: pair_cosine_mse is not implemented yet".to_string(),
-    })
-}
+    // ---- 1. Shapes, before anything is computed --------------------------
+    // `cosine_similarity_rows` would reject these too, but only AFTER this
+    // function has already consulted `za.shape()[0]` to size the label checks.
+    // Rejecting here keeps "no compute on mismatched inputs" a reachable
+    // property rather than a claim about an unreachable branch.
+    if za.shape().len() != 2 {
+        return Err(OpError::ShapeMismatch {
+            expected: vec![0, 0],
+            got: za.shape().to_vec(),
+        }
+        .into());
+    }
+    if zb.shape().len() != 2 {
+        return Err(OpError::ShapeMismatch {
+            expected: vec![0, 0],
+            got: zb.shape().to_vec(),
+        }
+        .into());
+    }
+    if za.shape() != zb.shape() {
+        return Err(OpError::ShapeMismatch {
+            expected: za.shape().to_vec(),
+            got: zb.shape().to_vec(),
+        }
+        .into());
+    }
+    let batch = za.shape()[0];
 
-/// Silence the unused-import warning while the RED stub is in place.
-#[allow(dead_code)]
-fn _red_stub_keeps_the_imports_live(a: &Tensor, b: &Tensor, t: &[f32]) -> Result<Tensor, OpError> {
-    let s = cosine_similarity_rows(a, b, PAIR_COSINE_EPS)?;
-    mse_loss(&s, t)
+    // ---- 2. Labels: length, then finiteness, then binary membership ------
+    if labels.len() != batch {
+        return Err(SetFitError::BatchInvalid {
+            reason: format!(
+                "labels has {} entries but the pair batch is {batch}",
+                labels.len()
+            ),
+        });
+    }
+    // EXPLICIT and FIRST. `NaN != 0.0 && NaN != 1.0` is true, so the membership
+    // test below happens to reject a NaN — incidentally, and with a diagnosis
+    // ("not in {0,1}") that describes the wrong problem.
+    if let Some(position) = labels.iter().position(|v| !v.is_finite()) {
+        return Err(SetFitError::BatchInvalid {
+            reason: format!(
+                "labels[{position}] is non-finite ({}); SetFit pair labels must be finite",
+                labels[position]
+            ),
+        });
+    }
+    if let Some(position) = labels.iter().position(|v| *v != 0.0 && *v != 1.0) {
+        return Err(SetFitError::BatchInvalid {
+            reason: format!(
+                "labels[{position}] is {}; SetFit pair labels are binary and must be \
+                 exactly 0.0 (negative pair) or 1.0 (positive pair)",
+                labels[position]
+            ),
+        });
+    }
+
+    // Domain established by the guards above.
+    contract_pre_pair_cosine_mse!(labels);
+
+    // ---- 3. Compose, never reimplement ----------------------------------
+    // Two calls, no arithmetic of our own: the epsilon-clamp branch structure
+    // and both backward edges are 01-03's, already gradchecked on all four
+    // clamp combinations. Inlining the math here would be a second copy of a
+    // derivative that took a dedicated plan to get right.
+    let similarity = cosine_similarity_rows(za, zb, PAIR_COSINE_EPS)?;
+    let loss = mse_loss(&similarity, labels)?;
+
+    contract_post_pair_cosine_mse!(loss.data());
+    Ok(loss)
 }
 
 #[cfg(all(test, feature = "setfit"))]

@@ -46,11 +46,11 @@ pub mod tokenizer;
 
 pub use encoder::BertSentenceEncoder;
 pub use error::SetFitError;
-pub use loss::pair_cosine_mse;
 pub use import::{
     MiniLmImport, ModelDims, SliceConfig, VocabRemap, PINNED_ACTIVATION, PINNED_MAX_SEQ_LENGTH,
     PINNED_REVISION, PINNED_TOKENIZER_SHA256,
 };
+pub use loss::pair_cosine_mse;
 pub use tokenizer::{
     InputProvenance, MiniLmTokenizer, SentenceBatch, TruncationFact, MAX_SEQUENCE_LENGTH,
 };

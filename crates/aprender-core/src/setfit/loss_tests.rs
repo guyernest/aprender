@@ -225,8 +225,14 @@ fn pair_loss_gradients_are_bitwise_those_of_the_explicit_composition() {
         let loss = build(&za, &zb, &labels);
         loss.backward();
         (
-            autograd::get_grad(za.id()).expect("za grad").data().to_vec(),
-            autograd::get_grad(zb.id()).expect("zb grad").data().to_vec(),
+            autograd::get_grad(za.id())
+                .expect("za grad")
+                .data()
+                .to_vec(),
+            autograd::get_grad(zb.id())
+                .expect("zb grad")
+                .data()
+                .to_vec(),
         )
     }
 
@@ -278,7 +284,10 @@ fn pair_loss_rejects_a_nan_label_naming_non_finiteness_not_membership() {
         reason.contains("non-finite"),
         "the NaN rejection must name non-finiteness, got {reason}"
     );
-    assert!(reason.contains('1'), "the position must be named, got {reason}");
+    assert!(
+        reason.contains('1'),
+        "the position must be named, got {reason}"
+    );
 }
 
 #[test]
