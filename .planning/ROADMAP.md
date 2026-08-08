@@ -45,8 +45,8 @@ SetFit trainer is exposed.
 Plans:
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Conformance contract skeleton (ten equations) + gather/mask/pool autograd ops (wave 1)
-- [ ] 01-02-PLAN.md — Module trait named traversal (positional-fallback default) + train/eval propagation (wave 1)
+- [x] 01-01-PLAN.md — Conformance contract skeleton (ten equations) + gather/mask/pool autograd ops (wave 1)
+- [x] 01-02-PLAN.md — Module trait named traversal (positional-fallback default) + train/eval propagation (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -143,7 +143,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Differentiable MiniLM Conformance | 0/9 | Not started | - |
+| 1. Differentiable MiniLM Conformance | 2/9 | In Progress|  |
 | 2. Deterministic Pair and Data Protocol | 0/TBD | Not started | - |
 | 3. Faithful Two-Stage Trainer and Head | 0/TBD | Not started | - |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
