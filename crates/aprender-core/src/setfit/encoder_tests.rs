@@ -821,6 +821,55 @@ mod slice {
     }
 
     #[test]
+    fn encoder_mode_every_site_is_actually_applied_in_the_forward() {
+        // `dropout_sites()` proves each site EXISTS and is active. It cannot
+        // prove the forward pass ever calls it — a site constructed, mode-flipped
+        // and then never applied would satisfy both the count test and the
+        // recursion test. This turns exactly one site on at a time against an
+        // otherwise eval-mode encoder: if that site is not on the forward path,
+        // the output does not move.
+        autograd::clear_graph();
+        let batch = mixed_batch();
+        let run = |enc: &BertSentenceEncoder| -> Vec<f32> {
+            autograd::no_grad(|| enc.forward_tokens(&batch))
+                .expect("forward")
+                .data()
+                .to_vec()
+        };
+
+        let names = encoder().dropout_sites();
+        assert_eq!(names.len(), 7);
+        for (index, name) in names.iter().enumerate() {
+            let mut enc = encoder();
+            enc.set_training(false);
+            let base = run(&enc);
+
+            match index {
+                0 => enc.embeddings_dropout.set_training(true),
+                _ => {
+                    let layer = (index - 1) / 3;
+                    match (index - 1) % 3 {
+                        0 => enc.layers[layer].attention.set_training(true),
+                        1 => enc.layers[layer]
+                            .attention_output_dropout
+                            .set_training(true),
+                        _ => enc.layers[layer].output_dropout.set_training(true),
+                    }
+                }
+            }
+
+            let moved = run(&enc);
+            assert!(
+                base.iter()
+                    .zip(moved.iter())
+                    .any(|(a, b)| a.to_bits() != b.to_bits()),
+                "turning `{name}` on changed nothing — the site is constructed and \
+                 mode-aware but never applied in forward_layers"
+            );
+        }
+    }
+
+    #[test]
     fn encoder_mode_parameters_are_byte_identical_across_train_eval_train() {
         let mut enc = encoder();
         // ENC-05: reuses 01-02's shared helper rather than a local copy.

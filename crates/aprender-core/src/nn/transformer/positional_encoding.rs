@@ -539,10 +539,7 @@ pub(super) fn apply_dropout_seeded(x: &Tensor, p: f32, seed: Option<u64>) -> Ten
         None => apply_dropout(x, p),
         Some(seed) => {
             use crate::nn::module::Module as _;
-            // RED STUB (plan 01-06 Task 2): the seed is accepted and ignored.
-            let _ = seed;
-            let _ = crate::nn::Dropout::with_seed(p, 0);
-            apply_dropout(x, p)
+            crate::nn::Dropout::with_seed(p, seed).forward(x)
         }
     }
 }

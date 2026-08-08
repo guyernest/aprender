@@ -20,6 +20,44 @@ fn qkv(batch: usize, seq: usize, embed: usize) -> Tensor {
     Tensor::new(&data, &[batch, seq, embed])
 }
 
+/// A `MultiHeadAttention` with DETERMINISTIC weights.
+///
+/// `MultiHeadAttention::new` builds four `Linear::new` projections, which draw
+/// random weights. Two freshly constructed modules therefore differ *before*
+/// any dropout runs — the first draft of these tests compared two such modules
+/// and measured the weight initialiser, not the dropout hook. Installing fixed
+/// weights makes the seed the only thing that varies.
+fn deterministic_mha(dropout_p: f32, seed: Option<u64>) -> MultiHeadAttention {
+    const EMBED: usize = 16;
+    let mut mha = MultiHeadAttention::new(EMBED, 2).with_dropout(dropout_p);
+    if let Some(seed) = seed {
+        mha = mha.with_attention_dropout_seed(seed);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    fn weights(salt: usize) -> Tensor {
+        let w: Vec<f32> = (0..EMBED * EMBED)
+            .map(|i| (((i + salt) % 23) as f32).mul_add(0.017, -0.19))
+            .collect();
+        Tensor::new(&w, &[EMBED, EMBED])
+    }
+    #[allow(clippy::cast_precision_loss)]
+    fn bias(salt: usize) -> Tensor {
+        let b: Vec<f32> = (0..EMBED)
+            .map(|i| (((i + salt) % 7) as f32).mul_add(0.011, -0.03))
+            .collect();
+        Tensor::new(&b, &[EMBED])
+    }
+    mha.q_proj_mut().set_weight(weights(0));
+    mha.q_proj_mut().set_bias(bias(0));
+    mha.k_proj_mut().set_weight(weights(3));
+    mha.k_proj_mut().set_bias(bias(1));
+    mha.v_proj_mut().set_weight(weights(7));
+    mha.v_proj_mut().set_bias(bias(2));
+    mha.out_proj_mut().set_weight(weights(11));
+    mha.out_proj_mut().set_bias(bias(3));
+    mha
+}
+
 #[test]
 fn mha_seeded_dropout_defaults_to_none() {
     let mha = MultiHeadAttention::new(16, 2);
@@ -41,9 +79,7 @@ fn mha_seeded_dropout_builder_installs_the_seed() {
 fn mha_seeded_dropout_same_seed_gives_bitwise_identical_output() {
     let x = qkv(2, 5, 16);
     let run = || {
-        let mha = MultiHeadAttention::new(16, 2)
-            .with_dropout(0.3)
-            .with_attention_dropout_seed(0x5eed);
+        let mha = deterministic_mha(0.3, Some(0x5eed));
         assert!(
             mha.training(),
             "MultiHeadAttention::new starts in train mode"
@@ -69,9 +105,7 @@ fn mha_seeded_dropout_different_seeds_give_different_output() {
     // module whose dropout never fires.
     let x = qkv(2, 5, 16);
     let run = |seed: u64| {
-        let mha = MultiHeadAttention::new(16, 2)
-            .with_dropout(0.3)
-            .with_attention_dropout_seed(seed);
+        let mha = deterministic_mha(0.3, Some(seed));
         let (out, _) = mha.forward_self(&x, None);
         out.data().to_vec()
     };
@@ -90,9 +124,7 @@ fn mha_seeded_dropout_stream_advances_across_calls() {
     // A seeded site that replayed one fixed mask on every forward would be
     // reproducible and would no longer be dropout.
     let x = qkv(2, 5, 16);
-    let mha = MultiHeadAttention::new(16, 2)
-        .with_dropout(0.3)
-        .with_attention_dropout_seed(0x5eed);
+    let mha = deterministic_mha(0.3, Some(0x5eed));
     let (first, _) = mha.forward_self(&x, None);
     let (second, _) = mha.forward_self(&x, None);
     assert!(
@@ -113,22 +145,27 @@ fn mha_seeded_dropout_absent_seed_leaves_the_existing_path_untouched() {
     // At `dropout_p == 0.0` — which is `MultiHeadAttention::new`'s default and
     // what GroupedQueryAttention and the attention contract tests use — the
     // dropout branch is not entered at all, so the presence or absence of a seed
-    // cannot change a single bit. Asserted rather than argued.
+    // cannot change a single BIT. Asserted rather than argued, on identical
+    // weights so the comparison is about the hook and not the initialiser.
     let x = qkv(2, 5, 16);
-    let plain = MultiHeadAttention::new(16, 2);
-    let seeded = MultiHeadAttention::new(16, 2).with_attention_dropout_seed(0x5eed);
-    // Same weights: both are constructed from the same deterministic init path.
-    for (p, s) in plain.parameters().iter().zip(seeded.parameters().iter()) {
-        assert_eq!(p.shape(), s.shape());
-    }
+    let plain = deterministic_mha(0.0, None);
+    let seeded = deterministic_mha(0.0, Some(0x5eed));
     let (a, _) = plain.forward_self(&x, None);
     let (b, _) = seeded.forward_self(&x, None);
     assert_eq!(a.shape(), b.shape());
+    for (i, (p, q)) in a.data().iter().zip(b.data().iter()).enumerate() {
+        assert_eq!(
+            p.to_bits(),
+            q.to_bits(),
+            "element {i}: installing a seed changed the p == 0 path, so every \
+             pre-01-06 caller's numerics moved"
+        );
+    }
 
     // And an UNSEEDED module with dropout on still uses the ambient RNG, i.e.
     // two forwards differ. That is the behaviour that existed before this plan
     // and it must survive it.
-    let ambient = MultiHeadAttention::new(16, 2).with_dropout(0.3);
+    let ambient = deterministic_mha(0.3, None);
     assert_eq!(ambient.attention_dropout_seed(), None);
     let (u, _) = ambient.forward_self(&x, None);
     let (v, _) = ambient.forward_self(&x, None);
@@ -145,9 +182,7 @@ fn mha_seeded_dropout_absent_seed_leaves_the_existing_path_untouched() {
 #[test]
 fn mha_seeded_dropout_is_inert_in_eval_mode() {
     let x = qkv(2, 5, 16);
-    let mut mha = MultiHeadAttention::new(16, 2)
-        .with_dropout(0.3)
-        .with_attention_dropout_seed(0x5eed);
+    let mut mha = deterministic_mha(0.3, Some(0x5eed));
     mha.set_training(false);
     let (a, _) = mha.forward_self(&x, None);
     let (b, _) = mha.forward_self(&x, None);
