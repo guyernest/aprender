@@ -65,8 +65,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use aprender::autograd::Tensor;
-use aprender::setfit::{SentenceBatch, SetFitError, SetFitMiniLm};
+use aprender::autograd::{get_grad, Tensor};
+use aprender::nn::Module;
+use aprender::setfit::{FreezeGroup, SentenceBatch, SetFitError, SetFitMiniLm};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -76,10 +77,16 @@ use sha2::{Digest, Sha256};
 #[path = "setfit_conformance/tolerances_generated.rs"]
 pub mod tolerances_generated;
 
+#[path = "setfit_conformance/detach_negative.rs"]
+mod detach_negative;
 #[path = "setfit_conformance/forward_parity.rs"]
 mod forward_parity;
+#[path = "setfit_conformance/frozen_gate.rs"]
+mod frozen_gate;
 #[path = "setfit_conformance/full_weight_parity.rs"]
 mod full_weight_parity;
+#[path = "setfit_conformance/gradient_gate.rs"]
+mod gradient_gate;
 
 use tolerances_generated as tol;
 
@@ -256,6 +263,68 @@ pub struct LossFixture {
     pub mse: f32,
 }
 
+/// Which fixture and which cases a derived fixture was recorded from.
+///
+/// Asserted against what the gate actually tokenized, so a future fixture
+/// regeneration that moves the pair batch fails loudly instead of silently
+/// comparing against the wrong reference.
+#[derive(Debug, Deserialize)]
+pub struct SourcePointer {
+    pub fixture: String,
+    pub a_case_id: String,
+    pub b_case_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NamedGrad {
+    pub shape: Vec<usize>,
+    pub grad: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnalyticallyZero {
+    pub name: String,
+    pub max_abs_grad: f32,
+    pub justification: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GradientsFixture {
+    pub source: SourcePointer,
+    pub parameter_order: Vec<String>,
+    pub zero_grad_floor: f32,
+    pub analytically_zero: Vec<AnalyticallyZero>,
+    pub grads: BTreeMap<String, NamedGrad>,
+}
+
+impl GradientsFixture {
+    /// The exemption set, as DATA. Rust never decides its own exemptions.
+    pub fn exempt_names(&self) -> Vec<String> {
+        self.analytically_zero
+            .iter()
+            .map(|e| e.name.clone())
+            .collect()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdamWSpec {
+    pub lr: f32,
+    pub betas: Vec<f32>,
+    pub eps: f32,
+    pub weight_decay: f32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OptimizerStepFixture {
+    pub source: SourcePointer,
+    pub adamw: AdamWSpec,
+    pub all_trainable: bool,
+    pub loss_before: f32,
+    pub loss_after: f32,
+    pub post_step: BTreeMap<String, Vec<f32>>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct InvarianceSingle {
     pub case_id: String,
@@ -359,6 +428,103 @@ pub fn l2(v: &[f32]) -> f32 {
         .map(|x| f64::from(*x) * f64::from(*x))
         .sum::<f64>()
         .sqrt() as f32
+}
+
+pub fn max_abs(v: &[f32]) -> f32 {
+    v.iter().fold(0.0f32, |m, x| m.max(x.abs()))
+}
+
+// ===========================================================================
+// The ENC-04 gate — ONE implementation, shared by the positive and the negative
+// ===========================================================================
+
+/// One named tensor's gradient, or `None` when it received none at all.
+pub type NamedGrads = Vec<(String, Option<Vec<f32>>)>;
+
+/// Inputs to the canonical ENC-04 gate.
+pub struct GateInput<'a> {
+    /// Every named tensor in the partition under test, in traversal order.
+    pub grads: &'a NamedGrads,
+    /// Per-tensor post-step parameter movement, when a step was taken.
+    pub deltas: Option<&'a [(String, f32)]>,
+    /// `gradients.json.analytically_zero[].name` — DATA, never a Rust decision.
+    pub exemptions: &'a [String],
+    /// `gradients.json.zero_grad_floor`, carried by the contract obligation.
+    pub floor: f32,
+    /// Encoder layer count, used to name the contracted components.
+    pub layers: usize,
+}
+
+/// RED STUB — the ENC-04 gate is not implemented yet.
+///
+/// Returns a fixed error no test expects, so every behavioural assertion in
+/// `gradient_gate`, `frozen_gate` and `detach_negative` is proven REACHABLE
+/// rather than the file merely failing to compile. The branch still builds at
+/// this commit, which matters because the orchestrator merges this worktree
+/// with others.
+///
+/// # Errors
+///
+/// Always.
+pub fn assert_encoder_updates(input: &GateInput) -> Result<(), String> {
+    let _ = input.grads.len();
+    Err("RED STUB: the ENC-04 gate is not implemented".to_string())
+}
+
+/// `(name, gradient)` for the model's TRAINABLE partition.
+///
+/// **D42, and the single most important line in this harness.** The set comes
+/// from `trainable_parameters_mut()` — never from `encoder().named_parameters_mut()`
+/// filtered by `requires_grad`. 01-07's mutation D measured a `Linear` weight
+/// with the flag cleared still receiving a gradient and still MOVING across an
+/// optimizer step, because the ops consuming it register their edge on their
+/// INPUT requiring grad and then produce gradients for both operands regardless
+/// of the weight's own flag. Exclusion from this method is the load-bearing
+/// mechanism; the flag protects only parameters whose consuming op checks it
+/// (notably `embedding_gather`). Building the optimizer's parameter set the
+/// other way would silently train frozen weights, and NO fixture parity gate in
+/// this file could see it.
+pub fn trainable_grads(model: &mut SetFitMiniLm) -> NamedGrads {
+    model
+        .trainable_parameters_mut()
+        .into_iter()
+        .map(|(name, t)| (name, get_grad(t.id()).map(|g| g.data().to_vec())))
+        .collect()
+}
+
+/// Bitwise snapshot of every named parameter, in traversal order.
+pub fn snapshot(model: &SetFitMiniLm) -> Vec<(String, Vec<u32>)> {
+    model
+        .encoder()
+        .named_parameters()
+        .into_iter()
+        .map(|(n, t)| (n, t.data().iter().map(|v| v.to_bits()).collect()))
+        .collect()
+}
+
+/// The recorded pair batch, rebuilt through the tokenizer, with the derived
+/// fixture's `source` pointer asserted against what was actually loaded.
+pub struct PairBatch {
+    pub a: SentenceBatch,
+    pub b: SentenceBatch,
+    pub labels: Vec<f32>,
+}
+
+pub fn pair_batch(model: &SetFitMiniLm, source: &SourcePointer) -> PairBatch {
+    let loss: LossFixture = read_fixture("loss_pair.json");
+    assert_eq!(
+        source.fixture, "loss_pair.json",
+        "the derived fixture points at `{}`, not loss_pair.json — a regeneration moved the \
+         pair batch and this gate would be comparing against the wrong reference",
+        source.fixture
+    );
+    assert_eq!(source.a_case_id, loss.pair.a_case_id);
+    assert_eq!(source.b_case_id, loss.pair.b_case_id);
+    PairBatch {
+        a: batch_from_case(model, &loss.pair.a_texts).expect("tokenize a"),
+        b: batch_from_case(model, &loss.pair.b_texts).expect("tokenize b"),
+        labels: loss.pair.labels,
+    }
 }
 
 // ===========================================================================
