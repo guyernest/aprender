@@ -84,7 +84,35 @@ without split leakage, provenance ambiguity, silent row loss, or Cartesian-produ
   4. A user can impose a per-epoch pair budget, and increasing the example count under a fixed budget retains `O(examples + pair budget)` state and storage instead of materializing a Cartesian product.
   5. Validation/test endpoints, cross-split duplicate content, and the merged SetFit compatibility test used for model selection are rejected fail-closed, while the manifest proves canonical train/validation/test isolation.
 
-**Plans**: TBD
+**Plans**: 9 plans in 6 waves
+
+Plans:
+**Wave 1**
+
+- [ ] 02-01-PLAN.md — Land D-06 baseline as-is + pv-valid tweet-eval contract + $(CONTRACTS) wiring (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 02-02-PLAN.md — aprender-contrastive-data scaffold + contrastive-pair-protocol-v1 contract + D-04 boundary gates (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 02-03-PLAN.md — Bytes→typed layer: schema, typestate splits, dual content hashes, dedup, access ledger (wave 3)
+- [ ] 02-04-PLAN.md — Measured + contracted SetFit pair-count fixture families + integrity verifier (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 02-05-PLAN.md — Philox few-shot selection + materialized selection manifest + goldens (wave 4)
+- [ ] 02-06-PLAN.md — data_tweeteval thin-adapter relocation + real-duplicate golden + contract growth (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 02-07-PLAN.md — Pair protocol: CanonicalPair, capacity/budget, singleton policy, streaming sampler, replay record (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 02-08-PLAN.md — Honesty gates: in-band leaky/materializing negatives, trybuild non-constructibility, scoped mutation (wave 6)
+- [ ] 02-09-PLAN.md — `apr data select` / `apr data pairs` CLI surface + documented workflow (wave 6)
 
 ### Phase 3: Faithful Two-Stage Trainer and Head
 
@@ -144,7 +172,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
-| 2. Deterministic Pair and Data Protocol | 0/TBD | Not started | - |
+| 2. Deterministic Pair and Data Protocol | 0/9 | Planned | - |
 | 3. Faithful Two-Stage Trainer and Head | 0/TBD | Not started | - |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
