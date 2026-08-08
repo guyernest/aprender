@@ -71,6 +71,20 @@ fn encoder_does_not_import_the_asserting_bert_embeddings_path() {
 }
 
 #[test]
+fn encoder_dropout_probability_agrees_with_the_enc01_pin() {
+    use crate::setfit::import::{PINNED_ATTENTION_DROPOUT_PROB, PINNED_HIDDEN_DROPOUT_PROB};
+    // Compared at f32, the precision the model actually computes in: 0.1f32 and
+    // 0.1f64 are different numbers, so an f64 comparison would reject the pin's
+    // own value (the same narrowing rule 01-05 applied to layer_norm_eps).
+    #[allow(clippy::cast_possible_truncation)]
+    let hidden = PINNED_HIDDEN_DROPOUT_PROB as f32;
+    #[allow(clippy::cast_possible_truncation)]
+    let attention = PINNED_ATTENTION_DROPOUT_PROB as f32;
+    assert_eq!(super::DROPOUT_P, hidden, "hidden_dropout_prob");
+    assert_eq!(super::DROPOUT_P, attention, "attention_probs_dropout_prob");
+}
+
+#[test]
 fn encoder_defines_no_competing_op_error_conversion() {
     let src = encoder_source();
     // W5: SetFitError::Op + its From impl are 01-05's. A second conversion here
@@ -438,7 +452,9 @@ mod slice {
             .repeat(10)
             .trim_end()
             .to_string();
-        let batch = tokenizer().encode_batch(&[long.as_str()]).expect("tokenize");
+        let batch = tokenizer()
+            .encode_batch(&[long.as_str()])
+            .expect("tokenize");
         assert!(
             batch.seq() > enc.max_seq() && batch.seq() <= 256,
             "the probe must sit strictly between max_seq ({}) and 256, got {}",
@@ -531,7 +547,10 @@ mod slice {
         assert_eq!(grads.len(), 37, "the slice has 37 registered tensors");
         for (name, g) in &grads {
             if let Some(pos) = g.iter().position(|v| !v.is_finite()) {
-                panic!("`{name}`: non-finite gradient at element {pos} ({})", g[pos]);
+                panic!(
+                    "`{name}`: non-finite gradient at element {pos} ({})",
+                    g[pos]
+                );
             }
         }
     }
