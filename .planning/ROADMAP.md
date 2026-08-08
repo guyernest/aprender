@@ -50,8 +50,8 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-09-PLAN.md — Attention-mask broadcast repair + exact erf GELU op (wave 2)
-- [ ] 01-04-PLAN.md — Fixture corpus, slice APR, SHA-256 manifest, tolerance-first contract commit (wave 2)
+- [x] 01-09-PLAN.md — Attention-mask broadcast repair + exact erf GELU op (wave 2)
+- [x] 01-04-PLAN.md — Fixture corpus, slice APR, SHA-256 manifest, tolerance-first contract commit (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -143,7 +143,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Differentiable MiniLM Conformance | 2/9 | In Progress|  |
+| 1. Differentiable MiniLM Conformance | 4/9 | In Progress|  |
 | 2. Deterministic Pair and Data Protocol | 0/TBD | Not started | - |
 | 3. Faithful Two-Stage Trainer and Head | 0/TBD | Not started | - |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
