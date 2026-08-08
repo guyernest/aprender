@@ -78,7 +78,7 @@ without split leakage, provenance ambiguity, silent row loss, or Cartesian-produ
 **Requirements**: DATA-01, DATA-02, DATA-03, DATA-04, DATA-05, DATA-06
 **Success Criteria** (what must be TRUE):
 
-  1. A user can acquire the pinned TweetEval abortion-stance source and produce canonical 587/66/280 train/validation/test JSONL plus exact labels, hashes, and provenance without committing tweet text; malformed, duplicate, conflicting, or unknown data fails with typed errors.
+  1. A user can acquire the pinned TweetEval abortion-stance source and produce canonical 587/66/280 train/validation/test JSONL plus exact labels, hashes, and provenance without committing tweet text; malformed, duplicate-ID, conflicting, or unknown data fails with typed errors, while cross-split duplicate *content* is excluded from the training pool and recorded in the manifest (D-27).
   2. A user can select exactly 8, 16, 32, or 64 unique canonical-training examples per class for every contracted seed and replay the same ordered selected-ID manifest and semantic hashes.
   3. A user can replay positive and negative pair manifests whose endpoints are distinct selected training IDs, whose targets agree with class identity, whose unordered identities cannot conflict, and whose singleton-class behavior is explicit and versioned.
   4. A user can impose a per-epoch pair budget, and increasing the example count under a fixed budget retains `O(examples + pair budget)` state and storage instead of materializing a Cartesian product.

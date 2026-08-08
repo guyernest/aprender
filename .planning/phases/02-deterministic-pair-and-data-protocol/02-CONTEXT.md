@@ -187,6 +187,24 @@ Phase 2 **does** grow a user-facing surface — ROADMAP phrases every Phase 2 cr
   claims. A self-reported retained-state size is exactly as trustworthy as a self-reported
   decreasing loss.
 - **D-26:** **`cargo-mutants` scoped to the new crate**, per Phase 1's D-25.
+- **D-27:** **The DATA-02 / D-18 conflict resolves by splitting the semantics** (user decision,
+  2026-08-08, prompted by cross-AI review). DATA-02 and ROADMAP criterion 1 previously demanded a
+  typed failure for "cross-split duplicate content" while D-18 declared the same condition
+  excluded-and-recorded, "not fatal" — a direct contradiction between two locked statements, made
+  live by the real `train:70 ≡ val:3` duplicate the research found in canonical TweetEval.
+  The resolution:
+  - **Prepare-time duplicate *content* → exclude and record** (D-18 stands verbatim). Canonical
+    prep on real TweetEval SUCCEEDS, with the excluded IDs and reduced per-class pool sizes in the
+    manifest.
+  - **Typed failure is reserved for actual span** — any pair or selection whose endpoints would
+    cross split roles is fail-closed — **plus pool exhaustion**, when the reduced pool can no
+    longer supply `shots_per_class`.
+  - **ROADMAP criterion 5 is unchanged**: its "rejected fail-closed" refers to leakage into
+    training, which is exactly what DATA-06's typestate protects. Criterion 1 and DATA-02 were
+    amended to match this reading.
+  Rationale: preserves D-18's Phase 5 argument (hard-failing at selection time makes failures
+  seed-dependent, so cells die in the 40-cell completeness gate for reasons unrelated to the
+  method) without weakening the leakage guarantee, which was always the point of "fail-closed".
 
 ### Carried Forward from Phase 1 (not re-litigated)
 

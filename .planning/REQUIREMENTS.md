@@ -29,7 +29,10 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
   produce canonical train, validation, and test JSONL with exact labels, counts, hashes, and source
   provenance without committing tweet text
 - [ ] **DATA-02**: A user receives a typed failure for malformed rows, duplicate IDs, unknown labels,
-  invalid class counts, conflicting source roles, or cross-split duplicate content
+  invalid class counts, conflicting source roles, any pair or selection that would span splits, and
+  a training pool that can no longer supply `shots_per_class` after cross-split exclusion.
+  Prepare-time cross-split duplicate *content* is excluded from the training pool and recorded, not
+  fatal — see D-27 (resolves the DATA-02 / D-18 conflict; `pv`-checked via the exclusion record)
 - [ ] **DATA-03**: A user can select exactly 8, 16, 32, or 64 unique canonical-training examples
   per class using each contracted seed and receive a stable selected-ID manifest
 - [ ] **DATA-04**: A user can replay deterministic positive and negative pair generation where
@@ -168,23 +171,52 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
 
 ## Traceability
 
-Roadmap phase mapping will be populated during roadmap creation.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| ENC-01 through ENC-06 | TBD | Pending |
-| DATA-01 through DATA-06 | TBD | Pending |
-| TRN-01 through TRN-07 | TBD | Pending |
-| APR-01 through APR-05 | TBD | Pending |
-| OPS-01 through OPS-06 | TBD | Pending |
-| EVAL-01 through EVAL-05 | TBD | Pending |
-| SAFE-01 through SAFE-03 | TBD | Pending |
+| ENC-01 | Phase 1 | Pending |
+| ENC-02 | Phase 1 | Pending |
+| ENC-03 | Phase 1 | Pending |
+| ENC-04 | Phase 1 | Pending |
+| ENC-05 | Phase 1 | Pending |
+| ENC-06 | Phase 1 | Pending |
+| DATA-01 | Phase 2 | Pending |
+| DATA-02 | Phase 2 | Pending |
+| DATA-03 | Phase 2 | Pending |
+| DATA-04 | Phase 2 | Pending |
+| DATA-05 | Phase 2 | Pending |
+| DATA-06 | Phase 2 | Pending |
+| TRN-01 | Phase 3 | Pending |
+| TRN-02 | Phase 3 | Pending |
+| TRN-03 | Phase 3 | Pending |
+| TRN-04 | Phase 3 | Pending |
+| TRN-05 | Phase 3 | Pending |
+| TRN-06 | Phase 3 | Pending |
+| TRN-07 | Phase 3 | Pending |
+| APR-01 | Phase 4 | Pending |
+| APR-02 | Phase 4 | Pending |
+| APR-03 | Phase 4 | Pending |
+| APR-04 | Phase 4 | Pending |
+| APR-05 | Phase 4 | Pending |
+| OPS-01 | Phase 4 | Pending |
+| OPS-02 | Phase 4 | Pending |
+| OPS-03 | Phase 4 | Pending |
+| OPS-04 | Phase 4 | Pending |
+| OPS-05 | Phase 4 | Pending |
+| OPS-06 | Phase 4 | Pending |
+| EVAL-01 | Phase 5 | Pending |
+| EVAL-02 | Phase 5 | Pending |
+| EVAL-03 | Phase 5 | Pending |
+| EVAL-04 | Phase 5 | Pending |
+| EVAL-05 | Phase 5 | Pending |
+| SAFE-01 | Phase 4 | Pending |
+| SAFE-02 | Phase 4 | Pending |
+| SAFE-03 | Phase 3 | Pending |
 
 **Coverage:**
 - v1 requirements: 38 total
-- Mapped to phases: 0
-- Unmapped: 38 pending roadmap creation
+- Mapped to phases: 38
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-08-07*
-*Last updated: 2026-08-07 after initial definition*
+*Last updated: 2026-08-07 after roadmap creation*
