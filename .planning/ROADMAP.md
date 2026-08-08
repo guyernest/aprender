@@ -40,21 +40,22 @@ SetFit trainer is exposed.
   4. On a controlled non-degenerate pair batch, every contracted trainable embedding, attention, FFN, and normalization component receives a finite non-zero gradient and changes after one optimizer step, while frozen components remain byte-identical and sentence embeddings move in the loss-reducing direction.
   5. The cosine-similarity MSE objective remains a finite graph-connected tensor and its forward values and gradients, together with all new gather/mask/pool/normalize primitives, match frozen reference and finite-difference fixtures; deliberate detachment makes the gate fail.
 
-**Plans**: 8 plans in 6 waves
+**Plans**: 9 plans in 6 waves
 
 Plans:
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Conformance contract skeleton + gather/mask/pool autograd ops (wave 1)
-- [ ] 01-02-PLAN.md — Module trait named traversal + train/eval propagation (wave 1)
+- [ ] 01-01-PLAN.md — Conformance contract skeleton (ten equations) + gather/mask/pool autograd ops (wave 1)
+- [ ] 01-02-PLAN.md — Module trait named traversal (positional-fallback default) + train/eval propagation (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-03-PLAN.md — normalize/cosine/MSE ops + batched mixed-length graph spike (wave 2)
+- [ ] 01-09-PLAN.md — Attention-mask broadcast repair + exact erf GELU op (wave 2)
 - [ ] 01-04-PLAN.md — Fixture corpus, slice APR, SHA-256 manifest, tolerance-first contract commit (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
+- [ ] 01-03-PLAN.md — normalize/cosine/MSE ops + batched mixed-length graph spike (wave 3)
 - [ ] 01-05-PLAN.md — setfit feature, tokenizer boundary (SentenceBatch), typed pinned import (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
@@ -67,7 +68,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 01-08-PLAN.md — Conformance gates, detach-negative, mutation + tier wiring (wave 6)
+- [ ] 01-08-PLAN.md — Conformance gates (all-trainable + frozen), detach-negative, mutation + tier wiring (wave 6)
 
 ### Phase 2: Deterministic Pair and Data Protocol
 
@@ -142,7 +143,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Differentiable MiniLM Conformance | 0/8 | Not started | - |
+| 1. Differentiable MiniLM Conformance | 0/9 | Not started | - |
 | 2. Deterministic Pair and Data Protocol | 0/TBD | Not started | - |
 | 3. Faithful Two-Stage Trainer and Head | 0/TBD | Not started | - |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
