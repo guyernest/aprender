@@ -1,8 +1,29 @@
 metadata:
-  version: 1.0.0
+  # 1.1.0, and the bump is `pv diff`'s own suggestion, not a judgement call:
+  #   pv diff /tmp/tweet-eval-old.yaml contracts/tweet-eval-stance-benchmark-v1.yaml
+  #   -> "Contract diff: v1.0.0 -> v1.0.0 / Suggested bump: minor"
+  # (`pv diff` takes TWO FILESYSTEM PATHS — see crates/aprender-contracts-cli/src/cli.rs:73-78
+  # — so the old revision is materialized with `git show <rev>:<path> > /tmp/...` first.)
+  # MINOR rather than MAJOR because the change is purely ADDITIVE: five proof
+  # obligations and one Kani harness appear, and not one pre-existing assertion is
+  # weakened, tightened, or removed. All seven falsification tests survive verbatim.
+  # Four of the five obligations WRITE DOWN guarantees the loader already provides,
+  # so an implementation that satisfied 1.0.0 still satisfies 1.1.0. The exception
+  # worth flagging is OBLIG-TWEET-EVAL-SEED-SET's "supplied explicitly rather than
+  # defaulted" clause, which constrains tooling that does not exist yet (discharged
+  # by the required-`--seed` CLI design in plan 02-09) rather than anything shipping
+  # today — a forward obligation, not a retroactive strictening.
+  # The file keeps its -v1 name; setfit-encoder-conformance-v1.yaml sits at 2.0.0 on
+  # the same convention.
+  version: 1.1.0
   created: '2026-08-07'
   author: PAIML Engineering
-  description: Canonical TweetEval abortion stance data and evaluation contract
+  description: >
+    Canonical TweetEval abortion stance data and evaluation contract. Owns the
+    dataset-specific half of DATA-01 and DATA-02 (split and class conservation,
+    provenance honesty, hash-from-parsed-bytes, the contracted seed set); the
+    dataset-agnostic half moves to contrastive-pair-protocol-v1.yaml in Phase 2
+    (decision D-24).
   references:
     - https://github.com/cardiffnlp/tweeteval
     - https://aclanthology.org/2020.findings-emnlp.148/
@@ -78,6 +99,96 @@ provenance:
       bytes that were parsed and count-checked
     - do not vendor tweet text in aprender
 
+proof_obligations:
+
+  - type: conservation
+    property: >
+      OBLIG-TWEET-EVAL-COUNTS: the canonical profile emits exactly 587 train, 66
+      validation, and 280 test rows, with exactly the per-class counts declared
+      above — train [159, 319, 109], validation [18, 36, 12], test [45, 189, 46]
+      over label indices [0, 1, 2]. Both the row count and the class distribution
+      are checked, because they fail independently: a truncated source changes the
+      row count while a relabeled source keeps it identical. Any deviation is a
+      TYPED error raised BEFORE any output file is written — never a warning, never
+      a silently smaller split, and never a partially written output directory.
+      Discharged by FALSIFY-TWEET-EVAL-001 (row counts) and FALSIFY-TWEET-EVAL-002
+      (class counts, whose fixture relabels one row while holding the row count
+      fixed so the class-count branch is the one exercised).
+    formal: >
+      rows(train) == 587 && rows(validation) == 66 && rows(test) == 280 &&
+      class_counts(train) == [159, 319, 109] &&
+      class_counts(validation) == [18, 36, 12] &&
+      class_counts(test) == [45, 189, 46]
+    applies_to: all
+
+  - type: soundness
+    property: >
+      OBLIG-TWEET-EVAL-REVISION-HONESTY: the manifest field
+      `source.revision_verified` is true ONLY when this run actually fetched the
+      source files from the pinned revision
+      4fbd22cd78421f05b1ecdb4fc5725bc7a7bd8f66. A run served from a local
+      `--source` directory records false, because the revision is then merely
+      asserted by the caller and nothing in the run can corroborate it. The
+      revision STRING is still recorded in both cases — what changes is the claim
+      about it. This is the difference between provenance and a label: without it a
+      manifest could attest arbitrary local bytes to an upstream revision, and every
+      downstream reproducibility claim built on that manifest would be unfounded.
+      Discharged by FALSIFY-TWEET-EVAL-006.
+    formal: manifest.source.revision_verified == run_downloaded_from_pinned_revision
+    applies_to: all
+
+  - type: equivalence
+    property: >
+      OBLIG-TWEET-EVAL-HASH-FROM-PARSED-BYTES: every SHA-256 recorded in the
+      manifest is computed from the SAME in-memory byte buffer that was parsed and
+      count-checked. Each source file is read exactly ONCE; read-once is the
+      mechanism, not an optimization. Two reads of one source is a contract
+      violation even when the two reads happen to agree, because the recorded digest
+      would then describe content that never passed the class-count contract — and
+      on a source that changed between the reads the manifest would attest bytes the
+      dataset was never built from. The same discipline binds the generated split
+      digests: the JSONL bytes that are hashed are the bytes that are written.
+      Implemented at crates/apr-cli/src/commands/data_tweeteval.rs (the read-once
+      BTreeMap<String, Vec<u8>> buffer feeding both `sha256` and `load_split`).
+    formal: >
+      for every source file f: recorded_sha256[f] == sha256(buffer[f]) &&
+      parsed_rows[f] == parse(buffer[f])
+    applies_to: all
+
+  - type: determinism
+    property: >
+      OBLIG-TWEET-EVAL-SEED-SET: the contracted benchmark seed set is exactly
+      [13, 17, 23, 29, 31, 37, 41, 43, 47, 53] — ten seeds, no more and no fewer.
+      This list is not editorial: it is the value of `BENCHMARK_SEEDS` at
+      crates/apr-cli/src/commands/data_tweeteval.rs:45, which is the single source
+      of truth the manifest's `few_shot.seeds` field is emitted from. 42 is NOT a
+      contracted seed. Any tool that defaults a `--seed` argument to 42 — or to any
+      other value outside this set — is silently sampling OUTSIDE the contract while
+      appearing to honour it, which makes its results incomparable with every other
+      cell of the benchmark. A seed must therefore be supplied explicitly and
+      validated against this set rather than defaulted.
+    formal: >
+      contracted_seeds == [13, 17, 23, 29, 31, 37, 41, 43, 47, 53] &&
+      manifest.few_shot.seeds == contracted_seeds &&
+      42 not_in contracted_seeds
+    applies_to: all
+
+  - type: safety
+    property: >
+      OBLIG-TWEET-EVAL-LABEL-BOUNDS: for every row the loader ACCEPTS, the parsed
+      label index is a valid index into the three-element label map
+      ["none", "against", "favor"], and the per-class counter is only ever indexed
+      after that bound has been established. A label outside 0..3 is a typed error
+      naming the offending value, the split, and the row index — never an
+      out-of-bounds index, never a panic, and never a silent clamp to a neighbouring
+      class, which would corrupt the class distribution while still satisfying the
+      row count. The ordering is the property: the bound check must precede the
+      counter increment, so no arithmetic on an unvalidated index is reachable.
+    formal: >
+      for every accepted row r: 0 <= r.label && r.label < 3 &&
+      r.label_text == LABEL_NAMES[r.label]
+    applies_to: all
+
 falsification_tests:
   - id: FALSIFY-TWEET-EVAL-001
     rule: canonical split conservation
@@ -118,9 +229,81 @@ falsification_tests:
       regenerated manifest does not describe
     test: force_replaces_outputs_and_clears_stale_validation
     if_fails: a stale split survives that contradicts benchmark-manifest.json
+  - id: FALSIFY-TWEET-EVAL-008
+    rule: OBLIG-TWEET-EVAL-LABEL-BOUNDS — the label bound gates the counter
+    prediction: >
+      For label values drawn from 0..4 (bound 4, identical to KANI-TWEET-EVAL-001),
+      every label below 3 is accepted with label_text == LABEL_NAMES[label], and a
+      label of 3 is rejected with a typed error whose message contains "is outside
+      0..3". It never panics with an index-out-of-bounds, which is what would happen
+      if `counts[label] += 1` were reached before the bound check.
+    test: cargo test -p apr-cli --lib label_index
+    test_harness: cargo test -p apr-cli --lib label_index
+    expected_output: 'test result: ok'
+    if_fails: >
+      Either the label map lookup stopped gating the per-class counter (an
+      out-of-range label then panics rather than returning a typed error), or the
+      lookup began clamping instead of rejecting — which corrupts the class
+      distribution while leaving the row count intact, so FALSIFY-TWEET-EVAL-001
+      would still be green and only FALSIFY-TWEET-EVAL-002 would catch it. This is
+      also the ONLY executed evidence for KANI-TWEET-EVAL-001: cargo-kani is not
+      installed in this repository, so if this test is deleted or skipped, that
+      harness has no backing at all.
+
+kani_harnesses:
+  - id: KANI-TWEET-EVAL-001
+    obligation: OBLIG-TWEET-EVAL-LABEL-BOUNDS
+    property: >
+      The parsed label index is validated against the three-element label map
+      BEFORE it is used to index the per-class counter, so no accepted row can read
+      or write outside either buffer; a label at or above 3 returns a typed error
+      rather than indexing.
+
+      NOT YET EXECUTED IN THIS REPOSITORY. This harness is DECLARED, not
+      machine-checked: `cargo-kani` is not installed here and this repository
+      contains zero `#[kani::proof]` harnesses, so nothing has been proved by a
+      model checker. Read this entry as a specification of what a future Kani run
+      must establish, never as evidence that it has been established.
+
+      The executable evidence that stands in for it today is an identically bounded
+      proptest — the same bound of 4, i.e. label values drawn from 0..4, which
+      covers the three valid indices plus the first out-of-range one:
+      `cargo test -p apr-cli --lib label_index`
+      (commands::data_tweeteval::tests::label_index_is_in_bounds_or_a_typed_error),
+      declared as FALSIFY-TWEET-EVAL-008 above. It is randomized and bounded rather
+      than exhaustive, which is exactly the gap a real Kani run would close.
+
+      NOTE on the command form: `cargo test` accepts only ONE positional TESTNAME,
+      so `cargo test -p apr-cli --lib data_tweeteval label_index` is rejected with
+      "unexpected argument 'label_index' found". Use the single filter above, or
+      pass both filters to the harness: `cargo test -p apr-cli --lib --
+      data_tweeteval label_index`.
+    bound: 4
+    strategy: bounded_int
+    solver: cadical
+    harness: verify_label_index_in_bounds
 
 qa_gate:
   id: F-TWEET-EVAL-001
   name: TweetEval Stance Benchmark Contract
-  pass_criteria: all seven falsification tests pass
+  description: >
+    Dataset gate for the canonical TweetEval abortion-stance benchmark — split and
+    class conservation, provenance that is never asserted without verification,
+    digests taken from the bytes that were parsed, and a contracted seed set that
+    cannot be silently defaulted away.
+  checks:
+    - validation
+    - falsification
+  pass_criteria: >
+    pv validate exits 0; all eight falsification tests pass — the seven original
+    dataset tests plus FALSIFY-TWEET-EVAL-008, the label-bounds proptest that is the
+    only executed backing for KANI-TWEET-EVAL-001. No declared Kani harness in this
+    contract may be reported as machine-checked while cargo-kani is absent from the
+    repository: a harness entry whose named runnable proptest is not green is a
+    FAILED gate, not a pending one.
+  falsification: >
+    Move `counts[label] += 1` above the LABEL_NAMES bound check in
+    crates/apr-cli/src/commands/data_tweeteval.rs — FALSIFY-TWEET-EVAL-008 must turn
+    RED with an index-out-of-bounds panic rather than a typed error, proving the
+    test discriminates ordering and is not merely asserting a range.
 

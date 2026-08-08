@@ -810,4 +810,82 @@ mod tests {
         assert_eq!(dataset.validation.len(), 66);
         assert_eq!(dataset.test.len(), 280);
     }
+
+    /// Build a one-split raw source map from an explicit list of label strings.
+    ///
+    /// Text is synthetic and never empty, so the only validation branch this can
+    /// exercise is the label one — which is the point.
+    fn raw_split_with_labels(split: &str, labels: &[String]) -> BTreeMap<String, Vec<u8>> {
+        let mut text = String::new();
+        let mut label_lines = String::new();
+        for (index, label) in labels.iter().enumerate() {
+            text.push_str(&format!("authored fixture {split} sample {index}\n"));
+            label_lines.push_str(label);
+            label_lines.push('\n');
+        }
+        let mut raw = BTreeMap::new();
+        raw.insert(format!("{split}_text.txt"), text.into_bytes());
+        raw.insert(format!("{split}_labels.txt"), label_lines.into_bytes());
+        raw
+    }
+
+    proptest::proptest! {
+        /// OBLIG-TWEET-EVAL-LABEL-BOUNDS, and the runnable evidence standing in for
+        /// the DECLARED-but-never-executed KANI-TWEET-EVAL-001 (cargo-kani is not
+        /// installed in this repository and no `#[kani::proof]` harness exists here).
+        ///
+        /// Bounded identically to that harness — bound 4, i.e. label values drawn
+        /// from `0..4`, which covers the three valid indices plus the first
+        /// out-of-range one. Randomized and bounded, not exhaustive: closing that
+        /// gap is exactly what a real Kani run would add.
+        ///
+        /// The property is an ORDERING claim, not just a range claim. `load_split`
+        /// does `counts[label] += 1` immediately after resolving `label_text`, so if
+        /// the bound check did not strictly precede the increment, an out-of-range
+        /// label would panic with an index-out-of-bounds instead of returning a
+        /// typed error. proptest treats a panic as a failure, so this test
+        /// distinguishes "rejected properly" from "crashed".
+        #[test]
+        fn label_index_is_in_bounds_or_a_typed_error(
+            labels in proptest::collection::vec(0usize..4, 1usize..=8)
+        ) {
+            let label_strings: Vec<String> =
+                labels.iter().map(|label| label.to_string()).collect();
+            let raw = raw_split_with_labels("train", &label_strings);
+
+            let mut expected_counts = [0usize; 3];
+            for label in &labels {
+                if let Some(slot) = expected_counts.get_mut(*label) {
+                    *slot += 1;
+                }
+            }
+            let any_out_of_range = labels.iter().any(|label| *label >= LABEL_NAMES.len());
+
+            let result = load_split(&raw, "train", expected_counts);
+
+            if any_out_of_range {
+                let error = result.expect_err(
+                    "a label at or above LABEL_NAMES.len() must be REJECTED; accepting it \
+                     means the bound check does not gate the label map lookup",
+                );
+                let message = error.to_string();
+                // The message must NAME the offending value, because that is what
+                // makes a real corrupt-source failure diagnosable rather than red.
+                proptest::prop_assert!(
+                    message.contains("is outside 0..3"),
+                    "expected the out-of-range label diagnosis, got: {message}"
+                );
+            } else {
+                let samples = result.expect(
+                    "every label below LABEL_NAMES.len() is in bounds, and the expected \
+                     counts were computed from these very labels",
+                );
+                proptest::prop_assert_eq!(samples.len(), labels.len());
+                for sample in &samples {
+                    proptest::prop_assert!(sample.label < LABEL_NAMES.len());
+                    proptest::prop_assert_eq!(sample.label_text, LABEL_NAMES[sample.label]);
+                }
+            }
+        }
+    }
 }

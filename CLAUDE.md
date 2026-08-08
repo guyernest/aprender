@@ -428,9 +428,18 @@ pv validate contracts/apr-code-parity-v1.yaml    # schema + falsification gates
 pv lint contracts/                               # validate + audit + score on all
 pv status contracts/tensor-layout-v1.yaml        # equations, obligations, coverage
 pv query "tensor layout" --limit 5               # search contracts by intent
-pv diff contracts/apr-mcp-server-v1.yaml HEAD~3  # semver bump suggestion
 pv coverage                                      # cross-contract obligation coverage
+
+# `pv diff` takes TWO FILESYSTEM PATHS, never a git revision
+# (`Diff { old: PathBuf, new: PathBuf }` — crates/aprender-contracts-cli/src/cli.rs:73-78).
+# Materialize the old revision with `git show` first, then diff two real files:
+git show HEAD~3:contracts/apr-mcp-server-v1.yaml > /tmp/apr-mcp-server-old.yaml
+pv diff /tmp/apr-mcp-server-old.yaml contracts/apr-mcp-server-v1.yaml  # semver bump suggestion
 ```
+
+Passing a revision where a path is expected does not error usefully — `pv` tries to
+open `HEAD~3` as a file and reports `Failed to read contract file: No such file or
+directory`, which reads like a missing contract rather than a misused flag.
 
 40+ `pv` subcommands: `validate, scaffold, codegen, kani, probar, status, audit, diff, coverage, generate, graph, equations, lean, proof-status, lint, score, query, invariants, coq, fuzz, mirai, flux, tla, book, infer, roofline, pipeline, kaizen, certify, verify-structure, verify-pipeline, ...`.
 

@@ -914,7 +914,17 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/kv-cache-sizing-v1.yaml \
              contracts/backend-dispatch-v1.yaml \
              contracts/kv-cache-equivalence-v1.yaml \
-             contracts/setfit-encoder-conformance-v1.yaml
+             contracts/setfit-encoder-conformance-v1.yaml \
+             contracts/tweet-eval-stance-benchmark-v1.yaml
+
+# NOTE (plan 02-01, D-24): $(CONTRACTS) is an EXPLICIT HARDCODED LIST, not a glob
+# over contracts/*.yaml. A contract file that merely EXISTS in contracts/ is
+# validated by nothing. tweet-eval-stance-benchmark-v1.yaml sat in the tree
+# unreferenced and therefore unvalidated, and `pv validate` rejected it the whole
+# time (PROVABILITY-001 x2: no proof_obligations, no kani_harnesses) without any
+# gate ever noticing. The line above is what makes tier3 reach it — tier3 calls
+# `$(MAKE) contract-validate`, which iterates exactly this list. Every future phase
+# contract needs its own line here or it is decoration.
 
 contract-validate: ## Validate all kernel contracts (schema + staleness)
 	@echo "Validating kernel contracts..."
