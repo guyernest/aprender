@@ -185,15 +185,9 @@ impl std::fmt::Debug for MiniLmTokenizer {
 
 /// Lowercase-hex sha256 of a byte slice.
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        use std::fmt::Write as _;
-        // `write!` into a String is infallible; the Result is discarded rather
-        // than unwrapped so no panic path exists here.
-        let _ = write!(out, "{b:02x}");
-    }
-    out
+    // `GenericArray`'s LowerHex renders the digest directly — no per-byte loop and
+    // no infallible-Result discard to justify.
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 impl MiniLmTokenizer {

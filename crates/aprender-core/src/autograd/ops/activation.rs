@@ -183,19 +183,40 @@ impl Tensor {
     pub fn gelu_exact(&self) -> Tensor {
         contract_pre_gelu_exact!(self.data());
 
+        // 1 / sqrt(2*pi)
+        const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
+
         let src = self.data();
+        let needs_grad = is_grad_enabled() && self.requires_grad_enabled();
         let mut data = vec![0.0f32; src.len()];
+        // The local derivative d/dx [x*Phi(x)] = Phi(x) + x*phi(x) shares the erfc
+        // evaluation with the forward value and does not depend on grad_output, so it
+        // is computed here once rather than re-evaluating Cody's rational Chebyshev
+        // (plus two exp calls) per element in the backward pass.
+        let mut local_grad = if needs_grad {
+            Vec::with_capacity(src.len())
+        } else {
+            Vec::new()
+        };
         for (out, &x) in data.iter_mut().zip(src.iter()) {
             let xd = f64::from(x);
             // 1 + erf(t) == erfc(-t); the erfc form avoids the negative-tail cancellation.
-            *out = (0.5 * xd * batuta_common::math::erfc_precise(-xd / std::f64::consts::SQRT_2))
-                as f32;
+            let erfc = batuta_common::math::erfc_precise(-xd / std::f64::consts::SQRT_2);
+            *out = (0.5 * xd * erfc) as f32;
+            if needs_grad {
+                let phi = (-xd * xd / 2.0).exp() * INV_SQRT_2PI;
+                // Plain (not mul_add) arithmetic: the backward previously evaluated
+                // `phi_cap + xd * phi` with two roundings. An FMA here would fuse them
+                // and perturb the stored derivative, so this stays bit-identical.
+                #[allow(clippy::suboptimal_flops, reason = "preserves bit-identical rounding")]
+                local_grad.push(0.5 * erfc + xd * phi);
+            }
         }
         let mut result = Tensor::from_vec(data, self.shape());
 
-        if is_grad_enabled() && self.requires_grad_enabled() {
+        if needs_grad {
             result.requires_grad_(true);
-            let grad_fn = Arc::new(crate::autograd::grad_fn::GeluExactBackward { x: self.clone() });
+            let grad_fn = Arc::new(crate::autograd::grad_fn::GeluExactBackward { local_grad });
             result.set_grad_fn(grad_fn.clone());
 
             with_graph(|graph| {

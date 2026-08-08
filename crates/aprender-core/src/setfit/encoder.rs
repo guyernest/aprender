@@ -116,10 +116,10 @@ fn site_seed(root_seed: u64, site: &str) -> u64 {
         h ^= u64::from(*b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    let mut z = h ^ root_seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
+    // Same SplitMix64 finaliser that advances the stream in `MultiHeadAttention`.
+    // Shared rather than re-spelled: two copies of these constants would let the
+    // site derivation and the call advance drift apart silently.
+    crate::nn::transformer::mix_call_seed(h, root_seed)
 }
 
 // ---------------------------------------------------------------------------

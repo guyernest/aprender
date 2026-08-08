@@ -575,16 +575,15 @@ impl GradFn for CosineSimilarityBackward {
             let base = row * h;
             let na = f64::from(self.norms_a[row]);
             let nb = f64::from(self.norms_b[row]);
-            let da = if self.norms_a[row] > self.eps {
-                na
-            } else {
-                eps
-            };
-            let db = if self.norms_b[row] > self.eps {
-                nb
-            } else {
-                eps
-            };
+            // Bind the clamp predicates ONCE per row. They are row-invariant, and the
+            // forward's branch choice must be re-taken exactly — expressing that as a
+            // single named value per operand makes the identity checkable by reading
+            // rather than by diffing two textually separate comparisons, and drops 2*h
+            // redundant compares per row.
+            let a_projected = self.norms_a[row] > self.eps;
+            let b_projected = self.norms_b[row] > self.eps;
+            let da = if a_projected { na } else { eps };
+            let db = if b_projected { nb } else { eps };
             let sr = f64::from(s[row]);
             let gr = f64::from(g[row]);
 
@@ -593,7 +592,7 @@ impl GradFn for CosineSimilarityBackward {
                 let bi = f64::from(bd[base + j]);
 
                 // d s / d a_j
-                grad_a[base + j] = if self.norms_a[row] > self.eps {
+                grad_a[base + j] = if a_projected {
                     (gr * (bi / db - sr * ai / na) / na) as f32
                 } else {
                     // Clamped: d_a is the constant eps, so no projection term.
@@ -601,7 +600,7 @@ impl GradFn for CosineSimilarityBackward {
                 };
 
                 // d s / d b_j — its own branch, independent of a's.
-                grad_b[base + j] = if self.norms_b[row] > self.eps {
+                grad_b[base + j] = if b_projected {
                     (gr * (ai / da - sr * bi / nb) / nb) as f32
                 } else {
                     (gr * ai / (eps * da)) as f32
@@ -753,26 +752,24 @@ impl GradFn for GeluBackward {
 /// Computed in f64 and narrowed at store time, and `Phi` is evaluated as
 /// `0.5 * erfc(-x/sqrt(2))` to avoid the negative-tail cancellation that
 /// `1 + erf(x/sqrt(2))` suffers.
+///
+/// The local derivative does not depend on `grad_output`, and its `erfc` term is
+/// already evaluated by the forward pass, so [`Tensor::gelu_exact`] computes and
+/// stores it rather than re-running Cody's rational Chebyshev plus two `exp` calls
+/// per element here. Values are f64 and the arithmetic below is unchanged, so the
+/// emitted gradients are bit-identical to the recomputing form.
 pub(crate) struct GeluExactBackward {
-    pub(crate) x: Tensor,
+    /// `Phi(x) + x * phi(x)`, one entry per element of the forward input.
+    pub(crate) local_grad: Vec<f64>,
 }
 
 impl GradFn for GeluExactBackward {
     fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
-        // 1 / sqrt(2*pi)
-        const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
-
         let grad_data: Vec<f32> = grad_output
             .data()
             .iter()
-            .zip(self.x.data().iter())
-            .map(|(&g, &x)| {
-                let xd = f64::from(x);
-                let phi_cap =
-                    0.5 * batuta_common::math::erfc_precise(-xd / std::f64::consts::SQRT_2);
-                let phi = (-xd * xd / 2.0).exp() * INV_SQRT_2PI;
-                (f64::from(g) * (phi_cap + xd * phi)) as f32
-            })
+            .zip(self.local_grad.iter())
+            .map(|(&g, &d)| (f64::from(g) * d) as f32)
             .collect();
         vec![Tensor::new(&grad_data, grad_output.shape())]
     }

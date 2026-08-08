@@ -196,14 +196,6 @@ impl std::fmt::Debug for SetFitMiniLm {
     }
 }
 
-/// Read one file from a model directory, naming it in any failure.
-fn read_model_file(dir: &Path, name: &str) -> Result<Vec<u8>, SetFitError> {
-    std::fs::read(dir.join(name)).map_err(|e| SetFitError::ImportIo {
-        path: name.to_string(),
-        reason: e.to_string(),
-    })
-}
-
 impl SetFitMiniLm {
     /// Load a pinned all-MiniLM-L6-v2 checkout: tokenizer and encoder together.
     ///
@@ -220,7 +212,8 @@ impl SetFitMiniLm {
         // ONE source for both halves. `MiniLmImport::open` additionally requires
         // these very bytes to hash to `PINNED_TOKENIZER_SHA256`, so the pairing
         // is correct by construction and not by a check that could be skipped.
-        let tokenizer = MiniLmTokenizer::from_bytes(&read_model_file(dir, "tokenizer.json")?)?;
+        let tokenizer =
+            MiniLmTokenizer::from_bytes(&import::read_required(dir, "tokenizer.json")?)?;
         let import = MiniLmImport::open(dir)?;
         let encoder = BertSentenceEncoder::from_import(&import, root_seed)?;
         Ok(Self {
@@ -242,11 +235,13 @@ impl SetFitMiniLm {
     #[cfg(feature = "conformance-fixtures")]
     pub fn from_slice_fixture(fixture_dir: &Path, root_seed: u64) -> Result<Self, SetFitError> {
         let tokenizer =
-            MiniLmTokenizer::from_bytes(&read_model_file(fixture_dir, "tokenizer.json")?)?;
-        let config =
-            SliceConfig::from_json_bytes(&read_model_file(fixture_dir, "slice_config.json")?)?;
+            MiniLmTokenizer::from_bytes(&import::read_required(fixture_dir, "tokenizer.json")?)?;
+        let config = SliceConfig::from_json_bytes(&import::read_required(
+            fixture_dir,
+            "slice_config.json",
+        )?)?;
         let remap = VocabRemap::from_json_bytes(
-            &read_model_file(fixture_dir, "vocab_remap.json")?,
+            &import::read_required(fixture_dir, "vocab_remap.json")?,
             config.vocab,
         )?;
         // `open_slice_fixture` requires `config.tokenizer_sha256` to equal the

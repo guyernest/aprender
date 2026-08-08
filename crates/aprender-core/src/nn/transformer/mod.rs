@@ -162,7 +162,12 @@ pub struct MultiHeadAttention {
 }
 
 /// Fold a call index into a site seed (`SplitMix64` finaliser).
-fn mix_call_seed(seed: u64, call: u64) -> u64 {
+///
+/// Shared with `setfit::encoder::site_seed`, which derives the per-site stream this
+/// then advances. Both halves of the seeded-dropout scheme must use the same
+/// finaliser: if one is ever changed alone the failure mode is "the same seed gives
+/// different masks", which is exactly what the determinism gates exist to rule out.
+pub(crate) fn mix_call_seed(seed: u64, call: u64) -> u64 {
     let mut z = seed ^ call.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);

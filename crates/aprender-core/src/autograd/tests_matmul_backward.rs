@@ -136,7 +136,7 @@
             }
             .name(),
             crate::autograd::grad_fn::GeluExactBackward {
-                x: Tensor::from_slice(&[1.0]),
+                local_grad: vec![1.0],
             }
             .name(),
             SoftmaxBackward {

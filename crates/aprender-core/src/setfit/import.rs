@@ -631,7 +631,11 @@ const PINNED_MODEL_TYPE: &str = "bert";
 /// Weight-file names an open() checkout may carry, most specific first.
 const WEIGHT_FILE_CANDIDATES: [&str; 2] = ["full_model.apr", "model.apr"];
 
-fn read_required(dir: &Path, name: &str) -> Result<Vec<u8>, SetFitError> {
+/// Read one file from a model directory, naming it in any failure.
+///
+/// Shared with `setfit::from_pretrained_dir` / `from_slice_fixture`, which read the
+/// same directory — a change to how a missing file is reported belongs in one place.
+pub(super) fn read_required(dir: &Path, name: &str) -> Result<Vec<u8>, SetFitError> {
     std::fs::read(dir.join(name)).map_err(|e| SetFitError::ImportIo {
         path: name.to_string(),
         reason: e.to_string(),

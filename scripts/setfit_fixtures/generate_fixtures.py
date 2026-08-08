@@ -105,6 +105,23 @@ def family_floor(family: str) -> float:
     return FLOOR_K * math.sqrt(FAMILY_REDUCTION_WIDTH[family]) * EPS_F32
 
 
+def record_tolerance(tolerances: dict, family: str, delta: float) -> None:
+    """Record one family's measured delta, floor and recommended tolerance.
+
+    The family name is spelled ONCE per call site. The previous form repeated it
+    three times per block (dict key plus two `family_floor` arguments) across eight
+    near-identical blocks, so a mismatch between the key and the floor lookup would
+    silently record the wrong reduction width -- and `recommended_tolerance` is
+    exactly what the Rust conformance gates load.
+    """
+    floor = family_floor(family)
+    tolerances[family] = {
+        "max_abs_f32_f64_delta": delta,
+        "floor": floor,
+        "recommended_tolerance": max(10 * delta, floor),
+    }
+
+
 def flat(t: torch.Tensor) -> list[float]:
     """Row-major flattened f32 values."""
     return [float(v) for v in t.detach().to(torch.float32).reshape(-1).tolist()]
@@ -312,11 +329,7 @@ def main() -> None:
     if tanh_delta <= 1e-4:
         sys.exit(f"FATAL: exact-vs-tanh GELU gap {tanh_delta:.3e} is too small to gate on")
 
-    tolerances["activation"] = {
-        "max_abs_f32_f64_delta": act_delta,
-        "floor": family_floor("activation"),
-        "recommended_tolerance": max(10 * act_delta, family_floor("activation")),
-    }
+    record_tolerance(tolerances, "activation", act_delta)
     if tolerances["activation"]["recommended_tolerance"] >= tanh_delta / 10:
         sys.exit(
             "FATAL: activation tolerance is not far enough below the exact-vs-tanh gap; "
@@ -369,11 +382,7 @@ def main() -> None:
                 "final_tokens": flat(hs32[-1]),
             }
         )
-    tolerances["forward_per_layer"] = {
-        "max_abs_f32_f64_delta": fwd_delta,
-        "floor": family_floor("forward_per_layer"),
-        "recommended_tolerance": max(10 * fwd_delta, family_floor("forward_per_layer")),
-    }
+    record_tolerance(tolerances, "forward_per_layer", fwd_delta)
     jsonfmt.write(FIXTURE_DIR / "forward_per_layer.json", {"cases": fwd_cases})
 
     # ---------------------------------------------------------- pooling/normalize --
@@ -382,7 +391,7 @@ def main() -> None:
         c = cases[cid]
         hs32, m32 = run_slice(model32, c, remap, torch.float32)
         hs64, m64 = run_slice(model64, c, remap, torch.float64)
-        pooled32, norm32 = masked_mean(hs32[-1], m32), None
+        pooled32 = masked_mean(hs32[-1], m32)
         norm32 = l2_normalize(pooled32)
         pooled64 = masked_mean(hs64[-1], m64)
         pool_delta = max(pool_delta, max_abs_delta(norm32, l2_normalize(pooled64)))
@@ -394,11 +403,7 @@ def main() -> None:
                 "normalized": flat(norm32),
             }
         )
-    tolerances["pooling_normalize"] = {
-        "max_abs_f32_f64_delta": pool_delta,
-        "floor": family_floor("pooling_normalize"),
-        "recommended_tolerance": max(10 * pool_delta, family_floor("pooling_normalize")),
-    }
+    record_tolerance(tolerances, "pooling_normalize", pool_delta)
     jsonfmt.write(FIXTURE_DIR / "pooling_normalize.json", {"cases": pool_cases})
 
     # ---------------------------------------------------------- pair loss ---------
@@ -416,11 +421,7 @@ def main() -> None:
         max_abs_delta(cos32, cos64),
         max_abs_delta(mse32, F.mse_loss(cos64, labels.to(torch.float64))),
     )
-    tolerances["loss_pair"] = {
-        "max_abs_f32_f64_delta": loss_delta,
-        "floor": family_floor("loss_pair"),
-        "recommended_tolerance": max(10 * loss_delta, family_floor("loss_pair")),
-    }
+    record_tolerance(tolerances, "loss_pair", loss_delta)
     jsonfmt.write(
         FIXTURE_DIR / "loss_pair.json",
         {
@@ -507,11 +508,7 @@ def main() -> None:
     grad_delta = 0.0
     for (n, p), (_, p64) in zip(named, [(n, p) for n, p in g64.named_parameters() if not n.startswith("pooler.")]):
         grad_delta = max(grad_delta, max_abs_delta(p.grad, p64.grad))
-    tolerances["gradients"] = {
-        "max_abs_f32_f64_delta": grad_delta,
-        "floor": family_floor("gradients"),
-        "recommended_tolerance": max(10 * grad_delta, family_floor("gradients")),
-    }
+    record_tolerance(tolerances, "gradients", grad_delta)
 
     source_block = {"fixture": "loss_pair.json", "a_case_id": "loss_pair_a", "b_case_id": "loss_pair_b"}
     jsonfmt.write(
@@ -553,11 +550,16 @@ def main() -> None:
     post_step = {
         n: flat(p) for n, p in omodel.named_parameters() if not n.startswith("pooler.")
     }
-    tolerances["optimizer_step"] = {
-        "max_abs_f32_f64_delta": grad_delta,
-        "floor": family_floor("optimizer_step"),
-        "recommended_tolerance": max(10 * grad_delta, family_floor("optimizer_step")),
-    }
+    # D55 (OPEN): `grad_delta` is the GRADIENT family's f32/f64 delta -- no f64
+    # optimizer step is ever run, so this records a tolerance (3.052e-05) larger
+    # than the entire step-1 displacement it measures (~lr = 2.017e-05). Deleting
+    # weight_decay survives the resulting gate. Note also that betas cannot be
+    # constrained by ANY single-step fixture at any tolerance: with bias correction
+    # m_hat = g and v_hat = g^2 for every beta. Closing this needs a real f64 step,
+    # a separation guard like the `activation` one below, and a MULTI-STEP fixture.
+    # Left as-is deliberately: the tolerances are frozen artifacts (D-14) and
+    # regenerating one is a governed decision, not a cleanup.
+    record_tolerance(tolerances, "optimizer_step", grad_delta)
     jsonfmt.write(
         FIXTURE_DIR / "optimizer_step.json",
         {
@@ -586,11 +588,7 @@ def main() -> None:
     emb_batch = l2_normalize(masked_mean(hs_b[-1], m_b))
     row = corpus.INVARIANCE_TARGET_ROW
     inv_delta = float((emb_single[0].to(torch.float64) - emb_batch[row].to(torch.float64)).abs().max())
-    tolerances["batch_invariance"] = {
-        "max_abs_f32_f64_delta": inv_delta,
-        "floor": family_floor("batch_invariance"),
-        "recommended_tolerance": max(10 * inv_delta, family_floor("batch_invariance")),
-    }
+    record_tolerance(tolerances, "batch_invariance", inv_delta)
     jsonfmt.write(
         FIXTURE_DIR / "batch_invariance.json",
         {
@@ -616,14 +614,15 @@ def main() -> None:
 
     st = SentenceTransformer(REPO_ID, revision=REVISION, device="cpu")
     st.eval()
-    trio = corpus.CASES["full_model_trio"]
+    (full_case_id,) = corpus.FULL_MODEL_CASES
+    trio = corpus.CASES[full_case_id]
     with torch.no_grad():
         st_emb = torch.tensor(st.encode(trio, convert_to_numpy=True, normalize_embeddings=True))
 
     # Cross-check: our manual masked-mean + L2 pipeline must reproduce the real
     # SentenceTransformer forward. This is what turns A1 from an assumption into a
     # verified fact -- a wrong clamp constant or eps fails HERE, not in wave 6.
-    full_case = cases["full_model_trio"]
+    full_case = cases[full_case_id]
     bert = st[0].auto_model.eval()
     with torch.no_grad():
         out = bert(
@@ -641,15 +640,11 @@ def main() -> None:
             f"{st_vs_manual:.3e}. The ST pooling clamp / normalize eps read from source do not "
             "describe what the library actually does."
         )
-    tolerances["full_model_reference"] = {
-        "max_abs_f32_f64_delta": st_vs_manual,
-        "floor": family_floor("full_model_reference"),
-        "recommended_tolerance": max(10 * st_vs_manual, family_floor("full_model_reference")),
-    }
+    record_tolerance(tolerances, "full_model_reference", st_vs_manual)
     jsonfmt.write(
         FIXTURE_DIR / "full_model_reference.json",
         {
-            "case_id": "full_model_trio",
+            "case_id": full_case_id,
             "texts": list(trio),
             "shape": {"batch": st_emb.shape[0], "hidden": st_emb.shape[1]},
             "embeddings": flat(st_emb),
