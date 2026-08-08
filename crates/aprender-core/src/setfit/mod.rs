@@ -39,9 +39,14 @@
 //! assertions do not scan.
 
 pub mod error;
+pub mod import;
 pub mod tokenizer;
 
 pub use error::SetFitError;
+pub use import::{
+    MiniLmImport, ModelDims, SliceConfig, VocabRemap, PINNED_ACTIVATION, PINNED_MAX_SEQ_LENGTH,
+    PINNED_REVISION, PINNED_TOKENIZER_SHA256,
+};
 pub use tokenizer::{
     InputProvenance, MiniLmTokenizer, SentenceBatch, TruncationFact, MAX_SEQUENCE_LENGTH,
 };
