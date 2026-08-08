@@ -60,7 +60,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 01-06-PLAN.md — BertSentenceEncoder graph-connected forward + mode/dropout contract (wave 4)
+- [x] 01-06-PLAN.md — BertSentenceEncoder graph-connected forward + mode/dropout contract (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
@@ -143,7 +143,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Differentiable MiniLM Conformance | 6/9 | In Progress|  |
+| 1. Differentiable MiniLM Conformance | 7/9 | In Progress|  |
 | 2. Deterministic Pair and Data Protocol | 0/TBD | Not started | - |
 | 3. Faithful Two-Stage Trainer and Head | 0/TBD | Not started | - |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
