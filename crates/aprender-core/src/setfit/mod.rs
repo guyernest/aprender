@@ -41,10 +41,12 @@
 pub mod encoder;
 pub mod error;
 pub mod import;
+pub mod loss;
 pub mod tokenizer;
 
 pub use encoder::BertSentenceEncoder;
 pub use error::SetFitError;
+pub use loss::pair_cosine_mse;
 pub use import::{
     MiniLmImport, ModelDims, SliceConfig, VocabRemap, PINNED_ACTIVATION, PINNED_MAX_SEQ_LENGTH,
     PINNED_REVISION, PINNED_TOKENIZER_SHA256,

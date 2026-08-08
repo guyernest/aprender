@@ -63,7 +63,12 @@ use super::tokenizer::{SentenceBatch, MAX_SEQUENCE_LENGTH};
 
 /// Epsilon of the trailing L2 normalization, matching the pinned
 /// sentence-transformers `Normalize` module.
-const L2_EPS: f32 = 1e-12;
+///
+/// `pub(crate)` so the pair objective (01-07 `setfit/loss.rs`) clamps its cosine
+/// norms with the SAME constant this encoder normalized with, rather than a
+/// second literal that can drift. Same single-source-of-truth reasoning 01-06
+/// applied to the two pinned dropout probabilities.
+pub(crate) const L2_EPS: f32 = 1e-12;
 
 /// Dropout probability at every HF-verified site.
 ///
