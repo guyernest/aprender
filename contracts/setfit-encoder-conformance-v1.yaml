@@ -29,13 +29,46 @@ metadata:
     It REFERENCES the contracts listed in depends_on and edits none of them; their
     current consumers stay stable (D-23).
 
-    TOLERANCE POLICY (D-14): no numeric tolerance is pinned in this version. The
-    fixture tolerance table is added by plan 01-04 in its own commit, derived from
-    Python-side f32/f64 round-trip noise on the frozen reference fixtures, BEFORE any
-    Rust-vs-fixture comparison executes. `tolerance:` fields are OMITTED here rather
-    than defaulted, because the schema makes them optional and an invented number
-    would be a silently-passing comparison. A later widening is then a contract edit
+    TOLERANCE POLICY (D-14): the numeric tolerance table below is FROZEN. It was
+    measured by scripts/setfit_fixtures/generate_fixtures.py from the pinned reference
+    fixtures and committed in its own commit BEFORE any Rust-vs-fixture comparison
+    existed, so no value here was ever chosen by looking at a Rust discrepancy. The
+    source of record is crates/aprender-core/tests/fixtures/setfit/tolerances_measured.json,
+    whose bytes are covered by manifest.sha256. Widening any value is a contract edit
     that `pv diff` flags with a semver bump.
+
+    Each family's tolerance is `max(10 * measured_f32_f64_delta, floor)`, where
+
+        floor(W) = 8 * sqrt(W) * EPS_F32,   EPS_F32 = 1.1920928955078125e-07
+
+    and W is the family's characteristic reduction width. THE FLOOR IS MANDATORY, not
+    belt-and-braces: an f32/f64 round trip sums in the SAME order in both paths, so it
+    does not measure the Rust-vs-PyTorch reduction-ORDER differences that dominate real
+    parity error, and `10 * delta` alone can collapse to zero. That is not hypothetical
+    here — full_model_reference measured a delta of EXACTLY 0.0, so without a floor its
+    tolerance would have been 0.0 and the comparison silently disabled (T-1-07).
+
+    | family               |    W | measured delta | frozen tolerance |
+    |----------------------|------|----------------|------------------|
+    | tokenizer            |    - |            n/a | EXACT (none)     |
+    | activation           |    1 |   4.47239421e-07 |   4.47239421e-06 |
+    | forward_per_layer    |  256 |   7.05113256e-07 |   1.52587891e-05 |
+    | pooling_normalize    |   64 |   7.39103287e-08 |   7.62939453e-06 |
+    | loss_pair            |   64 |   1.51211275e-07 |   7.62939453e-06 |
+    | batch_invariance     |   64 |   5.21540642e-08 |   7.62939453e-06 |
+    | gradients            | 1024 |   3.63171590e-07 |   3.05175781e-05 |
+    | optimizer_step       | 1024 |   3.63171590e-07 |   3.05175781e-05 |
+    | full_model_reference | 1536 |   0.00000000e+00 |   3.73762473e-05 |
+
+    The tokenizer family admits NO tolerance: ids, type ids and masks are integers and
+    the comparison is exact integer equality.
+
+    ZERO-GRADIENT FLOOR (ENC-04): 6.1291398e-05, carried as the `tolerance` of
+    OBLIG-ENC-04-GRADIENT-AND-STEP-GATE because that is the threshold its (d)/(e)
+    clauses test against. It is one order of magnitude below the smallest genuinely
+    non-zero reference max|grad|, read off the observed distribution rather than
+    assumed. The measured exempt tensors sit at ~7e-11 — six orders of magnitude below
+    the floor, so the split is unambiguous.
   references:
   - 'Tunstall et al. (2022) Efficient Few-Shot Learning Without Prompts (SetFit)'
   - 'Reimers & Gurevych (2019) Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks'
@@ -329,6 +362,22 @@ proof_obligations:
     identifies shape-only testing as how overclaimed compatibility ships. Owned by
     plans 01-04 and 01-06.
   formal: for all layers l, |rust_layer_out[l] - fixture_layer_out[l]| <= tol_layer
+  tolerance: 1.52587891e-05
+  applies_to: all
+
+- type: equivalence
+  property: >
+    OBLIG-ENC-03-POOLED-EMBEDDING-PARITY: the masked mean pooled vector AND the
+    L2-normalized sentence embedding each match the frozen torch reference for the same
+    batch, within the pinned tolerance. Both stages are compared, not just the final
+    embedding: normalization is a contraction, so a wrong pooling denominator can be
+    partially masked by it, and comparing only the normalized output lets a
+    uniform-denominator bug survive on a mixed-length batch. The reference pipeline is
+    sentence-transformers 5.7.0 semantics read from source — sum(x*mask) /
+    clamp(mask.sum(), min=1e-9), then F.normalize(p=2, dim=1) with eps 1e-12. Owned by
+    plans 01-04 and 01-06.
+  formal: '|rust_pooled - fixture.pooled| <= tol_pool && |rust_normalized - fixture.normalized| <= tol_pool'
+  tolerance: 7.62939453e-06
   applies_to: all
 
 - type: equivalence
@@ -336,10 +385,15 @@ proof_obligations:
     OBLIG-ENC-03-ACTIVATION-PARITY: gelu_exact matches the frozen reference activation
     elementwise within the pinned tolerance across a sweep that includes the negative
     minimum near x = -0.75 and the saturating tails. A tanh-approximation implementation
-    is REJECTED here: the two forms differ by roughly 1e-3 near |x| ~ 2, which is orders
-    of magnitude above f32 round-trip noise, so this obligation separates them rather
-    than absorbing the difference into tolerance. Owned by plan 01-09.
+    is REJECTED here. The separation is now MEASURED rather than estimated: over the
+    committed [-6, 6] grid the exact-erf and tanh forms differ by at most 4.734993e-04,
+    attained near x = -2.699 (plan text predicted "roughly 1e-3 near |x| ~ 2"; the
+    measurement is recorded instead). That gap is ~106x the frozen tolerance below and
+    ~3 orders of magnitude above f32 round-trip noise, so this obligation SEPARATES the
+    two functions instead of absorbing the difference into tolerance. Owned by plan
+    01-09.
   formal: '|rust_gelu_exact(x) - 0.5*x*(1 + erf(x/sqrt(2)))| <= tol_activation'
+  tolerance: 4.47239421e-06
   applies_to: all
 
 - type: invariant
@@ -350,6 +404,7 @@ proof_obligations:
     denominator, a truncating mask zip, and any mask that fails to broadcast over heads
     or query positions (PF-014). Owned by plans 01-06 and 01-09.
   formal: '|encode([s])[0] - encode([s, other, longer])[0]| <= tol_padding'
+  tolerance: 7.62939453e-06
   applies_to: all
 
 - type: equivalence
@@ -362,6 +417,7 @@ proof_obligations:
     absent from the Rust traversal is a failure, not a skip. Owned by plans 01-04 and
     01-07.
   formal: for all names n, |rust_grad[n] - fixture_grad[n]| <= tol_grad
+  tolerance: 3.05175781e-05
   applies_to: all
 
 - type: invariant
@@ -404,6 +460,10 @@ proof_obligations:
     for all n: is_finite(grad[n]) AND for all components c: ||grad[c]||_2 > 0 AND
     for all n not in analytically_zero: ||grad[n]||_2 > 0 AND
     for all n in analytically_zero: max|grad[n]| <= zero_grad_floor
+  # This obligation's `tolerance` is the FROZEN zero_grad_floor from
+  # gradients.json, i.e. the threshold clauses (d) and (e) test against -- not a
+  # comparison epsilon. Post-step VALUE parity has its own obligation below.
+  tolerance: 6.1291398e-05
   rationale: >
     PROOF that attention.self.key.bias has an exactly-zero gradient in exact arithmetic.
     The key bias adds the SAME constant vector b_k to every key: k_j = W_k x_j + b_k.
@@ -414,6 +474,51 @@ proof_obligations:
     on b_k at all, and dL/db_k = 0 exactly. This is a property of correct attention, not
     a bug, which is precisely why the ENC-04 gate must exempt it by DATA rather than
     demand a non-zero gradient everywhere.
+  applies_to: all
+
+- type: equivalence
+  property: >
+    OBLIG-ENC-06-LOSS-FORWARD-PARITY: the tensor-valued pair objective matches the frozen
+    torch reference within the pinned tolerance, at BOTH stages — the per-row cosine
+    similarity vector and the scalar MSE reduction against the labels. Comparing only the
+    final scalar would let compensating per-row sign or ordering errors average out into a
+    matching mean, which is precisely the failure a single-scalar gate cannot see. The
+    reference batch is the non-degenerate pair recorded in loss_pair.json (labels
+    {1.0, 0.0}), rebuilt on the Rust side by tokenizing the recorded texts. Owned by
+    plans 01-04 and 01-07.
+  formal: '|rust_cosine - fixture.cosine| <= tol_loss && |rust_mse - fixture.mse| <= tol_loss'
+  tolerance: 7.62939453e-06
+  applies_to: all
+
+- type: equivalence
+  property: >
+    OBLIG-ENC-04-POST-STEP-PARAMETER-PARITY: after ONE controlled AdamW step (lr 2e-5,
+    betas (0.9, 0.999), eps 1e-8, weight_decay 0.01) on the recorded batch, every named
+    parameter matches optimizer_step.json.post_step within the pinned tolerance, and the
+    loss decreases from the recorded loss_before to loss_after. The recorded losses
+    matter: asserting merely "loss went down" compares against an unpinned expectation
+    that a broken optimizer can still satisfy. NOTE the fixture describes an ALL-TRAINABLE
+    model (D-20, SetFit's full-body default) and therefore cannot validate a Rust model
+    configured with frozen groups; the frozen-byte-identity proof uses a separate clean
+    model. Owned by plans 01-04 and 01-07.
+  formal: for all names n, |rust_param_after_step[n] - fixture.post_step[n]| <= tol_step
+  tolerance: 3.05175781e-05
+  applies_to: all
+
+- type: equivalence
+  property: >
+    OBLIG-ENC-01-FULL-MODEL-REFERENCE-PARITY: the FULL pinned checkpoint (6 layers, hidden
+    384, the real 30522-token vocabulary) encodes the recorded sentences to normalized
+    [3, 384] embeddings matching full_model_reference.json within the pinned tolerance.
+    This is the only obligation that exercises the real architecture rather than the
+    committed slice, so it is what stops a slice-shaped bug — a hardcoded 64-wide hidden,
+    a 2-head assumption, a 64-position ceiling — from passing the entire phase. It runs in
+    the D-10 gated suite against a locally fetched artifact (never vendored in git), fed by
+    scripts/setfit_fixtures/fetch_full_weights.py, whose full_manifest.json records the
+    source safetensors digest AND the produced APR digest so a run can prove which bytes
+    it tested. Owned by plans 01-04 and 01-07.
+  formal: '|rust_full_model_embeddings - fixture.embeddings| <= tol_full_model'
+  tolerance: 3.73762473e-05
   applies_to: all
 
 - type: invariant
