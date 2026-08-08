@@ -114,3 +114,68 @@ the `--exclude aprender-profile` form, or the repo should provide a
 - unused `#[must_use]` return — `models/bert/embeddings.rs:128`
 
 Unrelated files, not caused by either plan's changes.
+
+## From plan 01-04 (2026-08-08)
+
+### D7. `pv codegen` output is unformatted, so any drift check against the committed file is 61k lines of noise
+
+Plan 01-04 Task 3 required a codegen drift check. Running
+`pv codegen contracts/ -o <tmp>/generated_contracts.rs` and diffing against the
+committed `crates/aprender-core/src/generated_contracts.rs` reports **61,263
+changed lines** — which reads like massive semantic drift and is entirely
+formatting. `pv codegen` emits unformatted Rust
+(`debug_assert!(x, "msg")` on one line); the committed file has been rustfmt'd
+(same call wrapped across four lines).
+
+Proven cosmetic, not assumed: both sides define exactly **3415** macros with
+identical name sets, and the whitespace-normalized digests are IDENTICAL
+(`0474ab4a26e1c764a9f4abce9585ea27a4206627c6d895c3935ad05c24134d04`).
+
+Why it matters: this is a live trap for **plan 01-08 Task 1**, which is slated to
+"regenerate `generated_contracts.rs` as its own commit" if drift is detected. A
+naive `diff` will ALWAYS report drift, and acting on it would commit a 61k-line
+pure-reformatting churn that hides any real future change. It also means the
+repo currently has no usable way to detect genuine codegen drift.
+
+Fix direction: either have `pv codegen` run rustfmt on its output, or add a
+`make check-codegen-drift` that normalizes formatting (e.g. `rustfmt` the temp
+file, or compare macro-name sets + whitespace-normalized digests) before
+comparing. Until then, compare with
+`tr -d ' \n\t' < a | shasum -a 256` on both sides.
+
+### D8. `apr convert` cannot read SafeTensors, contradicting the documented example
+
+`CLAUDE.md` documents `apr convert model.safetensors --quantize int8 -o model-int8.apr`,
+but `apr convert --help` states the input is a "Path to .apr model file" and the
+call fails with `error: Validation failed: At least one of --quantize or
+--compress must be specified`. It is an APR→APR quantize/compress optimizer, not
+an importer. The working path for SafeTensors→APR is
+`apr import <file> -o <out> --arch bert` (used by `slice_model.py`, 37 tensors
+validated against `tensor-layout-v1.yaml`).
+
+Secondary inconsistency: `apr convert` accepts `-f/--force`, `apr import` has no
+force flag at all, so regeneration must `unlink` the output first.
+
+Fix direction: correct the `CLAUDE.md` example to use `apr import`, and either
+add `--force` to `apr import` or document the asymmetry.
+
+### D9. `apr import` misreports BERT's `layer_norm_eps` as `rms_norm_eps` and grades a valid model F
+
+Importing the sliced MiniLM (a faithful index-slice of real pinned weights)
+emits:
+
+```
+Warning: rms_norm_eps 0.000000000001 below minimum 1e-10 (model-metadata-bounds-v1)
+Score 4/100  Grade F
+```
+
+Two separate issues. (1) BERT uses **LayerNorm**, not RMSNorm, and its
+`layer_norm_eps` is `1e-12` — the pinned upstream `config.json` says so. The
+bound in `model-metadata-bounds-v1` (`min 1e-10`) therefore excludes a legitimate
+and extremely common value, and the message names the wrong parameter. (2) A
+structurally valid model that passes tensor-layout contract validation scores
+4/100 / grade F, so the score carries no signal for this artifact class.
+
+Not fixed here: the import succeeds (exit 0), the APR is correct (37 f32 tensors,
+HF dotted names preserved), and touching `model-metadata-bounds-v1` is outside
+this plan's single-contract scope.
