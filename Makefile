@@ -19,7 +19,7 @@ SHELL := /bin/bash
 # Multi-line recipes execute in same shell
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-regen contract-check dev-setup check-siblings
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-regen contract-check dev-setup check-siblings setfit-feature-matrix
 
 # Default target
 all: tier2
@@ -186,6 +186,31 @@ tier2:
 	@echo "Running Tier 2: Pre-commit checks..."
 	@PROPTEST_CASES=5 QUICKCHECK_TESTS=5 cargo test --lib
 	@cargo clippy -- -D warnings
+# Phase 1 SetFit conformance (D-26). The gates must live INSIDE a tier: a target
+# outside the tiers is a target that stops being run.
+#
+# PLACEMENT WAS MEASURED, not assumed (2026-08-08, warm tree):
+#   whole conformance suite, ONE invocation ......  7 s wall / 0.57 s test time
+#   one filtered invocation (e.g. gradient_gate_)   6 s wall / 0.44 s test time
+#   setfit:: lib module, conformance-fixtures .... 19 s wall / 1.72 s test time
+# The wall clock is dominated by cargo's per-invocation freshness check, not by
+# test execution. The pre-accepted tier2/tier3 SPLIT (user, 2026-08-07) would
+# therefore cost ~3 x 6 s = ~18 s for the three "fast" gates alone — WORSE than
+# the 7 s single run it was meant to avoid, because a `cargo test` line may carry
+# at most ONE positional filter (a second exits `error: unexpected argument`) and
+# the three gate prefixes do not share one. The fallback is NOT triggered: the
+# whole suite stays here, as one invocation. The plan's 10-30 s estimate for the
+# suite was 20-50x high.
+#
+# The lib line uses the MODULE PATH, not the plan's unscoped `--features setfit`
+# form (D30). Measured: `--lib --features setfit` runs 14202 tests in 119 s of
+# which 162 are this phase's, while `setfit::` selects exactly 162 in 19 s — and
+# 162 is precisely the feature-gated delta (14283 tests with conformance-fixtures
+# vs 14121 with default features), so the filter loses no coverage.
+	@echo "Phase 1 SetFit: encoder/tokenizer/import/loss/model unit gates..."
+	@cargo test -p aprender-core --lib --features conformance-fixtures setfit::
+	@echo "Phase 1 SetFit: fixture parity + ENC-04 gradient/frozen/detach gates..."
+	@cargo test -p aprender-core --features setfit,conformance-fixtures --test setfit_conformance
 	@if [ -d tests/golden ]; then \
 		if . scripts/apr_bin.sh 2>/dev/null; then \
 			echo "Running probar golden regression... ($$APR)"; \
@@ -210,6 +235,23 @@ tier3:
 	@bash scripts/check_build_rs_paths.sh
 	@echo "Checking self-hosted CI jobs pin a discriminating runner label..."
 	@bash scripts/check_runner_labels.sh
+# D-26: the contract gate must be REACHED, not merely listed. Before this line,
+# `contract-validate` was reachable only from `contract-check`, which no tier
+# depends on — so appending a contract to $(CONTRACTS) alone would have parked
+# the Phase 1 gate outside the tiers entirely.
+#
+# The BROAD form was chosen from evidence, not preference (W4). `make
+# contract-validate` was run STANDALONE first, with its status captured directly
+# (`make contract-validate > /tmp/cv.log 2>&1; rc=$$?`, never through a pipe —
+# CLAUDE.md rule 1): rc=0 in 8 s wall, all 41 pre-existing contracts reporting
+# "0 error(s), 0 warning(s)". Nothing is already red, so wiring the whole list
+# cannot make tier3 fail for a defect this phase did not cause, and 8 s is well
+# inside tier3's 1-5 minute budget. Had any contract been red, the narrow
+# `$(PV_BIN) validate contracts/setfit-encoder-conformance-v1.yaml` form would
+# have been used instead and the red contracts surfaced as their own finding.
+	@echo "Validating provable contracts (incl. the Phase 1 setfit gate, D-26)..."
+	@$(MAKE) contract-validate
+	@$(MAKE) setfit-feature-matrix
 	@if [ -d tests/golden ]; then \
 		if . scripts/apr_bin.sh 2>/dev/null; then \
 			echo "Running probar golden regression with profiling... ($$APR)"; \
@@ -219,6 +261,37 @@ tier3:
 		fi; \
 	fi
 	@echo "Tier 3: PASSED"
+
+# D-06: the setfit feature must be dependency-CLOSED and must not leak into a
+# minimal build. Wired into tier3 above.
+#
+# `--all-features` is deliberately ABSENT (D22): it enables `audio-alsa`, whose
+# `alsa-sys` build script needs the Linux ALSA headers, so on macOS it fails for
+# reasons that have nothing to do with this phase. Proven independent of setfit —
+# `cargo check -p aprender-core --no-default-features --features audio-alsa`,
+# which touches no setfit code at all, fails identically. The union below is the
+# platform-appropriate one D22's fix direction asks for and covers every feature
+# combination this phase introduces.
+setfit-feature-matrix: ## D-06: setfit feature isolation for aprender-core
+	@echo "Feature matrix: aprender-core setfit isolation (D-06)"
+	@cargo check -p aprender-core --no-default-features
+	@cargo check -p aprender-core --features setfit
+	@cargo check -p aprender-core --features conformance-fixtures
+	@cargo check -p aprender-core --features setfit,conformance-fixtures,model-tests
+	@echo "  negative: a no-default-features build must contain NO tokenizers node"
+# The tree is captured to a file and `cargo tree`'s own status checked FIRST.
+# Piping straight into `grep -q` would read grep's status, and a `cargo tree`
+# that failed outright would feed grep nothing — the guard would then pass
+# vacuously, which is exactly the CLAUDE.md rule 1 failure mode.
+	@cargo tree -p aprender-core --no-default-features -e normal \
+		> target/setfit-feature-matrix-tree.txt 2>&1 || \
+		{ echo "FAIL: cargo tree failed; the D-06 negative check would pass vacuously"; \
+		  cat target/setfit-feature-matrix-tree.txt; exit 1; }
+	@if grep -q tokenizers target/setfit-feature-matrix-tree.txt; then \
+		echo "FAIL: tokenizers leaked into a no-default-features build (D-06)"; \
+		grep -n tokenizers target/setfit-feature-matrix-tree.txt; exit 1; \
+	fi
+	@echo "setfit-feature-matrix: PASSED"
 
 # Tier 4: CI/CD (5-60 minutes, heavyweight)
 tier4: tier3
@@ -840,7 +913,8 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/qwen35-shapes-v1.yaml \
              contracts/kv-cache-sizing-v1.yaml \
              contracts/backend-dispatch-v1.yaml \
-             contracts/kv-cache-equivalence-v1.yaml
+             contracts/kv-cache-equivalence-v1.yaml \
+             contracts/setfit-encoder-conformance-v1.yaml
 
 contract-validate: ## Validate all kernel contracts (schema + staleness)
 	@echo "Validating kernel contracts..."
