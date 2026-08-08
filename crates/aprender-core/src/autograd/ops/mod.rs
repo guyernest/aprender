@@ -9,11 +9,11 @@
 use std::sync::Arc;
 
 use super::grad_fn::{
-    AbsBackward, AddBackward, BroadcastAddBackward, DivBackward, EmbeddingBackward, ExpBackward,
-    GeluBackward, LeakyReluBackward, LogBackward, MaskedMeanPoolBackward, MatmulBackward,
-    MeanBackward, MulBackward, NegBackward, PowBackward, ReluBackward, SigmoidBackward,
-    SoftmaxBackward, SqrtBackward, SubBackward, SumBackward, TanhBackward, TransposeBackward,
-    ViewBackward,
+    AbsBackward, AddBackward, BroadcastAddBackward, CosineSimilarityBackward, DivBackward,
+    EmbeddingBackward, ExpBackward, GeluBackward, L2NormalizeRowsBackward, LeakyReluBackward,
+    LogBackward, MaskedMeanPoolBackward, MatmulBackward, MeanBackward, MseBackward, MulBackward,
+    NegBackward, PowBackward, ReluBackward, SigmoidBackward, SoftmaxBackward, SqrtBackward,
+    SubBackward, SumBackward, TanhBackward, TransposeBackward, ViewBackward,
 };
 use super::tensor::Tensor;
 use super::{is_grad_enabled, with_graph};
@@ -377,10 +377,20 @@ include!("op_error.rs");
 include!("embedding.rs");
 include!("masking.rs");
 include!("pooling.rs");
+include!("normalize.rs");
+include!("similarity.rs");
 
 #[cfg(test)]
 #[path = "tests_embedding_backward.rs"]
 mod tests_embedding_backward;
+
+#[cfg(test)]
+#[path = "tests_similarity_backward.rs"]
+mod tests_similarity_backward;
+
+#[cfg(test)]
+#[path = "tests_normalize_backward.rs"]
+mod tests_normalize_backward;
 
 #[cfg(test)]
 #[path = "tests_masking.rs"]

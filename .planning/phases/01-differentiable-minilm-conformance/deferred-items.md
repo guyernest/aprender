@@ -232,3 +232,79 @@ tanh and erf forms, which is the entire premise of amendment A-03, not an
 implementation error.
 
 Anyone comparing the two activations point-by-point will meet this again.
+
+## From plan 01-03 (2026-08-08)
+
+### D12. Contract prose for `cosine_similarity_rows` clamps the PRODUCT; the implementation clamps each FACTOR
+
+`contracts/setfit-encoder-conformance-v1.yaml:241` states the formula as
+
+```
+out[b] = <a[b], c[b]> / max(||a[b]||_2 * ||c[b]||_2, eps)
+```
+
+while plan 01-03's `<interfaces>` block specifies, and 01-03 implements,
+
+```
+out[b] = <a[b], b[b]> / (max(||a[b]||_2, eps) * max(||b[b]||_2, eps))
+```
+
+The plan wins for execution (its derivative specification, its acceptance
+criteria, and its four-branch FD coverage all presuppose per-factor clamping),
+and per-factor clamping is what `torch.nn.functional.cosine_similarity`
+implements. But the two forms are not textually reconciled, and the contract is
+the phase gate.
+
+**Impact is confined to the degenerate branch.** Wherever both norms exceed
+`eps` — the entire non-degenerate domain, and everything the encoder will ever
+see with real weights — `max(n_a, eps) * max(n_b, eps) == n_a * n_b ==
+max(n_a * n_b, eps)`, so the two definitions agree exactly. They differ only
+when at least one row is degenerate, and the invariant `|out| <= 1` holds under
+both.
+
+Not fixed here: `contracts/` is deliberately untouched by this plan (01-04 owns
+the contract's tolerance commit and 01-01 authored the formula), and editing it
+from a parallel worktree risks a merge conflict with the agent that owns it.
+
+Fix direction: 01-04 or 01-08 should reword the YAML formula to the per-factor
+form and note in the equation's invariants that the two coincide above the
+clamp. Do NOT change the implementation to match the current prose — that would
+break the per-input branch independence the FD tests prove.
+
+### D13. `cargo test -p aprender-core --lib mse_loss` is not scoped to the new op
+
+The plan's `<verification>` block names `cargo test -p aprender-core --lib
+mse_loss`. That filter is a substring match and picks up **22** tests, only 11
+of which are 01-03's; the other 11 are pre-existing `mse_loss` tests elsewhere
+in the crate (`nn/loss.rs` and friends). At the RED gate the command reported
+`11 passed; 11 failed` — i.e. a naive reader could see 11 green tests and
+conclude something about the new op that was in fact entirely stubbed.
+
+The unambiguous form is `cargo test -p aprender-core --lib
+tests_similarity_backward` (the module path), which matches exactly the 28 tests
+this plan added. Both forms are recorded in the 01-03 SUMMARY.
+
+Same class as D10: a green exit code that proves less than it appears to.
+
+Fix direction: phase verification blocks should filter by test-module path
+rather than by op name whenever the op name is a common word already used
+elsewhere in the crate.
+
+### D14. `cargo test -- --nocapture` output is swallowed in this environment
+
+Measuring anything from a test's `println!` does not work here. A test invoked
+as `cargo test ... -- --ignored --nocapture` exits 0 and reports
+`1 passed`, but **none of the printed lines reach the log** — the `rtk` CLI
+proxy that wraps `cargo` in this environment filters test stdout as noise.
+
+This is a measurement hazard rather than a repo defect, but it is the exact
+class CLAUDE.md rule 1 warns about: the run is green, the exit code is right,
+and the evidence you asked for is silently absent. It cost one full
+build-and-run cycle before the cause was identified.
+
+Workaround used by 01-03: have the probe write to a file with
+`std::fs::File` + `writeln!` and read the file afterwards, instead of relying
+on stdout capture.
+
+Fix direction: none needed in-tree. Recorded so the next agent that needs a
+numeric measurement out of a test reaches for a file immediately.
