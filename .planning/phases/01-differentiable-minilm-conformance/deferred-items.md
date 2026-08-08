@@ -841,11 +841,12 @@ the 01-08 SUMMARY for the full budget accounting.
 
 ## From phase verification (2026-08-08)
 
-### D55. The ENC-04 optimizer-step obligation cannot fail — two independent causes
+### D55. The ENC-04 optimizer-step obligation cannot fail — two independent causes [CLOSED]
 
 Found by code review (CR-01) and extended by the phase verifier's mutation M4.
-Confirmed independently by the orchestrator. **This is the phase's one open
-gap; ENC-04 is PARTIALLY satisfied because of it.**
+Confirmed independently by the orchestrator. **Closed 2026-08-08 — see the
+resolution at the end of this entry. ENC-04 is now fully satisfied.** The
+diagnosis below is kept verbatim as the record of what was wrong.
 
 **Cause 1 — the tolerance is larger than the effect it measures.**
 `scripts/setfit_fixtures/generate_fixtures.py:557` assigns `grad_delta` (the
@@ -883,22 +884,68 @@ or decay coupling" claim in `tests/setfit_conformance.rs` has been corrected to
 state the shortfall, so Phase 3 does not inherit a gate that advertises
 protection it does not provide.
 
-**Still open — needs a decision:**
-1. Fix the generator: run a real f64 optimizer step for the tolerance, add a
-   separation guard mirroring `:320-324`, and add a multi-step obligation that
-   can constrain betas. Requires regenerating a frozen fixture and a `pv diff`
-   semver bump on `setfit-encoder-conformance-v1`.
-2. Accept an override on the grounds that `contracts/adamw-kernel-v1` owns
-   AdamW correctness, and that its `falsify_aw_001_decoupled...` lib test is
-   what actually catches a deleted decay term today.
+**RESOLVED — option 1 (fix the generator), 2026-08-08.**
 
-Note the D-14 tension: tolerances were deliberately frozen BEFORE any Rust
-comparison existed. Option 1 edits a frozen tolerance after the fact — in the
-tightening direction, which is the opposite of the failure mode D-14 guards
-against, but it is still a governed change and should be made deliberately.
+Contract `setfit-encoder-conformance-v1` **1.0.0 → 2.0.0** (`pv diff` classifies
+both changes as MAJOR; both are strictenings).
 
-**Blast radius:** Phase 2 is unblocked. Phase 3 (TRN-03) is NOT — it builds the
-training loop this gate is supposed to protect.
+*Cause 1 closed.* `generate_fixtures.py` now runs a real f64 AdamW step through
+the shared `adamw_trajectory()` helper and records the optimizer family's OWN
+delta. `FAMILY_REDUCTION_WIDTH["optimizer_step"]` drops 1024 → 1 (a post-step
+parameter is not a 1024-wide reduction: at step 1 the update saturates to
+`lr*sign(g)`, so gradient reduction noise does not reach it), and the family
+passes an explicit `scale` = the parameter magnitude it compares at. A new
+`assert_separation()` — the generalized form of the `activation` guard at
+`:320-324` — fails generation unless a tolerance sits 10x below the effect it
+gates, and is applied to both optimizer families.
+
+```
+optimizer_step  3.05175781e-05 -> 1.89172753e-06   (16x tighter; 10.6x below the displacement)
+```
+
+*Cause 2 closed.* New obligation `OBLIG-ENC-04-MULTISTEP-TRAJECTORY-PARITY`
+replays `MULTISTEP_N = 20` steps and compares the LOSS TRAJECTORY
+(`optimizer_multistep.json`, tolerance 7.62939453e-06). A loss trajectory rather
+than a second parameter dump because a max-abs parameter comparison is limited
+by its noisiest single element — measured, the betas mutation stays within 2.6x
+of the f32/f64 noise floor at every step count up to 50 — while the loss
+contracts the model into one number and accumulates divergence coherently. The
+generator runs the betas mutation itself and asserts the separation, so the
+margin is measured on every regeneration rather than asserted in a comment.
+
+**Re-mutation evidence (all run against the merged tree, exit codes captured
+directly, not through a pipe):**
+
+| Mutation | conformance suite | `--lib adamw` |
+|---|---|---|
+| M4 betas `(0.5, 0.5)` | **exit 101** — trajectory off 4.0513277e-4 vs 7.63e-6 tol | exit 0, 26 passed |
+| M5 update scale halved | **exit 101** — post-step off 1.001358e-5 vs 1.89e-6 tol | — |
+| M1 decay deleted | exit 0, 26 passed | **exit 101** — `falsify_aw_001` |
+
+M5 is the direct measure of what the tolerance fix bought: 1.001358e-5 sat
+comfortably inside the old 3.05e-5 tolerance and is now rejected.
+
+**M1 remains structurally undetectable here, and this is now stated rather than
+implied.** At `lr = 2e-5, wd = 0.01` the decay term is `lr*wd*|p| <= 1.747567e-07`
+— 3.36x the f32 ulp at the parameters it acts on — so no f32 reference
+comparison separates it at any step count. `adamw-kernel-v1`'s
+`falsify_aw_001_decoupled_weight_decay` owns it and was confirmed RED under M1.
+
+*Also hardened:* `assert_encoder_updates` clause (f) moved from `delta > 0` to a
+`[0.9, 1.1] x lr` band for non-exempt tensors (measured band across the fixture:
+`[1.00052, 1.00739] x lr`), gated by a new `GateInput::step_lr` so only a
+genuine first step asserts it. It carries its own negative test —
+`gradient_gate_clause_f_rejects_a_step_of_the_wrong_magnitude` — because the
+post-step parity assertion runs first and would otherwise mask a live mutation.
+
+Regeneration was byte-deterministic: only `tolerances_measured.json`,
+`manifest.sha256`, and the new `optimizer_multistep.json` changed. Every other
+fixture is unchanged, which is the D-13 evidence that this was a surgical edit
+and not a re-baseline.
+
+Suite: 25 -> 27 tests, exit 0. Full `-p aprender-core --lib`: 14120 passed, exit 0.
+
+**Blast radius:** Phase 3 (TRN-03) is now unblocked.
 
 ### D56. `make tier2` / `make tier3` are RED at the phase base (inherited)
 

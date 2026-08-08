@@ -49,30 +49,37 @@
 //! a wrong activation form, a wrong pooling denominator, a wrong normalization
 //! epsilon branch, a severed autograd edge anywhere the pair objective's
 //! backward should reach, a frozen parameter that moves, a tokenizer that
-//! disagrees with the pinned HF one, and a tolerance loosened without a
-//! contract edit.
+//! disagrees with the pinned HF one, a tolerance loosened without a contract
+//! edit, and — since D55 closed — a wrong AdamW learning rate, an update that
+//! is not sign-saturated at step 1, and wrong beta1/beta2.
 //!
-//! **NOT detected here — AdamW hyperparameters or decay coupling.** This file
-//! previously claimed to detect them. It does not, and the claim was corrected
-//! rather than the gate, because the shortfall is structural (see D55):
+//! **The optimizer's detection scope, precisely.** Each row was established by
+//! running the mutation against this suite, not by reading the assertions:
 //!
-//! - The `optimizer_step` tolerance is `3.052e-05` while the entire step-1
-//!   displacement is `~lr = 2.017e-05`, i.e. the tolerance is 1.53x the effect
-//!   it measures. Root cause: `generate_fixtures.py:557` assigns the GRADIENT
-//!   family's f32/f64 delta to the optimizer family, so no f64 optimizer step
-//!   is ever run and the two `tolerances_measured.json` entries are byte-
-//!   identical. Deleting `weight_decay` entirely survives this suite.
-//! - Betas cannot be constrained by ANY single-step fixture at any tolerance.
-//!   With bias correction at step 1, `m_hat = (1-b1)g/(1-b1) = g` and
-//!   `v_hat = (1-b2)g^2/(1-b2) = g^2`, so the update is `lr*g/(|g|+eps)` for
-//!   every choice of b1/b2. Hardcoding `b1 = b2 = 0.5` survives both this
-//!   suite and the `--lib adamw` suite. Closing this needs a MULTI-STEP
-//!   fixture, not a tighter tolerance.
+//! | Mutation | This suite | `--lib adamw` |
+//! |---|---|---|
+//! | betas hardcoded to `(0.5, 0.5)` | **RED** — trajectory off by 4.05e-04 vs 7.63e-06 tol | green |
+//! | update scale halved (`0.5 * lr`) | **RED** — post-step off by 1.00e-05 vs 1.89e-06 tol | — |
+//! | decoupled weight decay deleted | green (see below) | **RED** — `falsify_aw_001` |
 //!
-//! AdamW correctness is owned by `contracts/adamw-kernel-v1` and its
-//! `falsify_aw_001_decoupled...` lib test, which is what actually catches a
-//! deleted decay term today. Do not read this file as a second line of defence
-//! for the optimizer until D55 is closed.
+//! The betas row is what `OBLIG-ENC-04-MULTISTEP-TRAJECTORY-PARITY` exists for:
+//! at step 1 bias correction gives `m_hat = (1-b1)g/(1-b1) = g` and
+//! `v_hat = (1-b2)g^2/(1-b2) = g^2`, so the update is `lr*g/(|g|+eps)` for every
+//! choice of betas and NO single-step fixture can constrain them at any
+//! tolerance. Replaying 20 steps can, because the moments carry history from
+//! step 2 onward.
+//!
+//! The halved-update row is what the tolerance fix bought: the same mutation
+//! deviates 1.00e-05, which the pre-D55 tolerance of 3.05e-05 accepted.
+//!
+//! **Still NOT detected here — decoupled weight decay.** This is structural and
+//! not a tolerance to tighten: at `lr = 2e-5, wd = 0.01` the decay term is
+//! `lr*wd*|p| <= 1.75e-07`, about 3 f32 ulp of the parameters it acts on, and
+//! measurement puts it within 2.6x of the f32/f64 noise floor at every step
+//! count tried up to 50. No f32 reference comparison separates it. It is owned
+//! by `contracts/adamw-kernel-v1` and its `falsify_aw_001_decoupled...` lib
+//! test, which compares AdamW against Adam algebraically rather than against a
+//! reference, and which was confirmed RED under that mutation.
 //!
 //! **NOT detected here:** anything that is inert in EVAL mode. Every numerical
 //! fixture in this corpus was generated with dropout disabled (D-16), so a
@@ -347,6 +354,21 @@ pub struct OptimizerStepFixture {
     pub post_step: BTreeMap<String, Vec<f32>>,
 }
 
+/// `optimizer_multistep.json` — the trajectory that constrains the betas.
+///
+/// `separation` is not read by any assertion: it is the generator's measurement
+/// of what each mutation actually moves, carried into the fixture so a reader
+/// can see WHY this obligation is falsifiable (and why the decay control is
+/// recorded but not gated here) without re-deriving it.
+#[derive(Debug, Deserialize)]
+pub struct OptimizerMultistepFixture {
+    pub source: SourcePointer,
+    pub adamw: AdamWSpec,
+    pub all_trainable: bool,
+    pub steps: usize,
+    pub losses: Vec<f32>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct InvarianceSingle {
     pub case_id: String,
@@ -469,6 +491,12 @@ pub struct GateInput<'a> {
     pub grads: &'a NamedGrads,
     /// Per-tensor post-step parameter movement, when a step was taken.
     pub deltas: Option<&'a [(String, f32)]>,
+    /// The lr of the step that produced `deltas`, when that step was the FIRST
+    /// one taken by a fresh optimizer. Clause (f) then asserts each non-exempt
+    /// tensor moved by lr rather than merely by something positive. `None` from
+    /// callers that pass no deltas, and from any future caller stepping at t > 1,
+    /// where the update no longer saturates to `lr*sign(g)`.
+    pub step_lr: Option<f32>,
     /// `gradients.json.analytically_zero[].name` — DATA, never a Rust decision.
     pub exemptions: &'a [String],
     /// `gradients.json.zero_grad_floor`, carried by the contract obligation.
@@ -614,10 +642,32 @@ pub fn assert_encoder_updates(input: &GateInput) -> Result<(), String> {
             if let Some(c) = component_of(name, input.layers) {
                 *moved.entry(c).or_insert(0.0) += f64::from(*d);
             }
-            if !input.exemptions.iter().any(|e| e == name) && *d <= 0.0 {
+            if input.exemptions.iter().any(|e| e == name) {
+                continue;
+            }
+            if *d <= 0.0 {
                 problems.push(format!(
                     "(f) `{name}` did not move across the optimizer step and is not exempt"
                 ));
+                continue;
+            }
+            // D55 — `moved at all` is a very weak claim. At step 1 bias correction
+            // gives m_hat = g and v_hat = g², so the update SATURATES to lr*sign(g):
+            // every non-exempt tensor's max element must move by lr, not merely by
+            // something positive. Measured across the fixture the band is
+            // [1.00052, 1.00739] * lr — the residual is the decay term — so +/-10%
+            // is loose by more than an order of magnitude while still catching a
+            // wrong lr, a doubled step, or an update that is not sign-saturated.
+            // Reference-free: it needs no fixture, only the configured lr.
+            if let Some(lr) = input.step_lr {
+                let ratio = *d / lr;
+                if !(0.9..=1.1).contains(&ratio) {
+                    problems.push(format!(
+                        "(f) `{name}` moved {d:e}, which is {ratio:.4}x lr ({lr:e}); a step-1 \
+                         AdamW update saturates to lr*sign(g) for any tensor carrying a real \
+                         gradient, so this is outside [0.9, 1.1]x"
+                    ));
+                }
             }
         }
         for (component, total) in &moved {
@@ -951,6 +1001,11 @@ fn tolerance_bindings() -> Vec<(&'static str, f32, &'static str)> {
             "OPTIMIZER_STEP",
             tol::OPTIMIZER_STEP,
             "OBLIG-ENC-04-POST-STEP-PARAMETER-PARITY",
+        ),
+        (
+            "OPTIMIZER_MULTISTEP",
+            tol::OPTIMIZER_MULTISTEP,
+            "OBLIG-ENC-04-MULTISTEP-TRAJECTORY-PARITY",
         ),
         (
             "FULL_MODEL_REFERENCE",

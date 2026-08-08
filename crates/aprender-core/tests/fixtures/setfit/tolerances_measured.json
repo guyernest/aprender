@@ -25,9 +25,14 @@
     "recommended_tolerance": 3.05175781e-05
   },
   "optimizer_step": {
-    "max_abs_f32_f64_delta": 3.6317159e-07,
-    "floor": 3.05175781e-05,
-    "recommended_tolerance": 3.05175781e-05
+    "max_abs_f32_f64_delta": 1.89172753e-07,
+    "floor": 8.33323895e-07,
+    "recommended_tolerance": 1.89172753e-06
+  },
+  "optimizer_multistep": {
+    "max_abs_f32_f64_delta": 8.0179233e-08,
+    "floor": 7.62939453e-06,
+    "recommended_tolerance": 7.62939453e-06
   },
   "batch_invariance": {
     "max_abs_f32_f64_delta": 5.21540642e-08,

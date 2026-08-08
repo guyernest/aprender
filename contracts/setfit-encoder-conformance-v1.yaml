@@ -1,6 +1,10 @@
 contract: setfit-encoder-conformance
 metadata:
-  version: 1.0.0
+  # 2.0.0, not 1.1.0: `pv diff` classifies this as MAJOR. Both changes are strictenings
+  # — the post-step tolerance tightens 16x and a new obligation appears — so an
+  # implementation that satisfied 1.0.0 is not guaranteed to satisfy this. The file keeps
+  # its -v1 name; `tensor-layout-v1.yaml` sits at 2.0.0 on the same convention.
+  version: 2.0.0
   created: '2026-08-08'
   author: PAIML Engineering
   description: >
@@ -516,8 +520,41 @@ proof_obligations:
     model (D-20, SetFit's full-body default) and therefore cannot validate a Rust model
     configured with frozen groups; the frozen-byte-identity proof uses a separate clean
     model. Owned by plans 01-04 and 01-07.
+
+    D55: this tolerance was 3.05175781e-05 in 1.0.0 — the GRADIENT family's number,
+    inherited because generate_fixtures.py never ran an f64 optimizer step. That value
+    was 1.5x the ENTIRE step-1 displacement (2.01e-05) it gates, so the obligation could
+    not fail. 1.1.0 measures the optimizer family's own f32/f64 delta and the generator
+    now refuses to emit a tolerance that does not sit 10x below the measured
+    displacement. This obligation constrains lr, the sign and scale of the update, and
+    bias correction; it does NOT constrain beta1/beta2 (structurally impossible at one
+    step — see OBLIG-ENC-04-MULTISTEP-TRAJECTORY-PARITY) or decoupled weight decay
+    (~3 f32 ulp at this lr/wd — owned by adamw-kernel-v1's falsify_aw_001).
   formal: for all names n, |rust_param_after_step[n] - fixture.post_step[n]| <= tol_step
-  tolerance: 3.05175781e-05
+  tolerance: 1.89172753e-06
+  applies_to: all
+
+- type: equivalence
+  property: >
+    OBLIG-ENC-04-MULTISTEP-TRAJECTORY-PARITY: replaying 20 consecutive AdamW steps with
+    the SAME hyperparameters on the SAME recorded batch reproduces the recorded loss
+    trajectory in optimizer_multistep.json within the pinned tolerance, where losses[i]
+    is the loss BEFORE step i and the final entry is the loss after the last step.
+
+    This is the ONLY obligation in the phase that constrains beta1/beta2. At step 1 bias
+    correction makes the update beta-independent — m_hat = (1-b1)g/(1-b1) = g and
+    v_hat = (1-b2)g^2/(1-b2) = g^2 — so a single-step fixture cannot constrain the betas
+    at any tolerance, however tight. The moments only carry history from step 2 onward.
+
+    A loss trajectory rather than a second post-step parameter dump: the discriminating
+    power of a max-abs parameter comparison is set by its noisiest single element, and a
+    (0.5, 0.5) betas mutation stays inside that noise at every step count measured. The
+    loss contracts every parameter into one number and the trajectory accumulates the
+    divergence coherently. Measured at generation: the betas mutation moves the
+    trajectory 4.05e-04, which is 53x this tolerance; the generator's assert_separation
+    fails the build if that margin ever drops below 10x. Owned by plan 01-09.
+  formal: for all i, |rust_loss_trajectory[i] - fixture.losses[i]| <= tol_multistep
+  tolerance: 7.62939453e-06
   applies_to: all
 
 - type: equivalence

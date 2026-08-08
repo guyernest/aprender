@@ -185,6 +185,7 @@ fn frozen_gate_frozen_tensors_are_bitwise_unchanged_across_an_adamw_step() {
     super::assert_encoder_updates(&GateInput {
         grads: &grads,
         deltas: None,
+        step_lr: None,
         exemptions: &g.exempt_names(),
         floor: tol::ZERO_GRAD_FLOOR,
         layers,

@@ -27,7 +27,7 @@ use aprender::setfit::{pair_cosine_mse, SetFitMiniLm};
 
 use super::{
     assert_close, encode, max_abs, pair_batch, read_fixture, slice_model, snapshot, tol,
-    trainable_grads, GateInput, GradientsFixture, OptimizerStepFixture,
+    trainable_grads, GateInput, GradientsFixture, OptimizerMultistepFixture, OptimizerStepFixture,
 };
 
 /// Model A, freshly constructed and asserted all-trainable.
@@ -121,6 +121,7 @@ fn gradient_gate_enc04_holds_on_an_all_trainable_model() {
     super::assert_encoder_updates(&GateInput {
         grads: &grads,
         deltas: None,
+        step_lr: None,
         exemptions: &exemptions,
         floor: tol::ZERO_GRAD_FLOOR,
         layers,
@@ -277,6 +278,7 @@ fn gradient_gate_controlled_adamw_step_matches_the_frozen_reference() {
     super::assert_encoder_updates(&GateInput {
         grads: &grads,
         deltas: Some(&deltas),
+        step_lr: Some(lr),
         exemptions: &g.exempt_names(),
         floor: tol::ZERO_GRAD_FLOOR,
         layers,
@@ -304,5 +306,198 @@ fn gradient_gate_controlled_adamw_step_matches_the_frozen_reference() {
         "loss did not decrease across the controlled step: {} -> {}",
         o.loss_before,
         loss2.item()
+    );
+}
+
+/// Negative evidence for clause (f)'s step-magnitude band (D55).
+///
+/// The band is the reference-free half of the step gate, so it needs its own
+/// proof that it can turn red — the post-step parity assertion runs first and
+/// would mask a live mutation of the optimizer, which is exactly how the old
+/// `delta > 0` phrasing went unchallenged. This takes a REAL step, then reports
+/// one non-exempt tensor as having moved half as far, and requires the gate to
+/// reject it by name.
+#[test]
+fn gradient_gate_clause_f_rejects_a_step_of_the_wrong_magnitude() {
+    autograd::clear_graph();
+    let mut model = model_a();
+    let g: GradientsFixture = read_fixture("gradients.json");
+    let o: OptimizerStepFixture = read_fixture("optimizer_step.json");
+    let pair = pair_batch(&model, &o.source);
+    let layers = model.num_layers();
+    let lr = o.adamw.lr;
+
+    let before = snapshot(&model);
+    let za = encode(&model, &pair.a);
+    let zb = encode(&model, &pair.b);
+    let loss = pair_cosine_mse(&za, &zb, &pair.labels).expect("pair objective");
+    loss.backward();
+    let mut opt = {
+        let params: Vec<&mut Tensor> = model
+            .trainable_parameters_mut()
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        AdamW::new(params, lr)
+            .betas(o.adamw.betas[0], o.adamw.betas[1])
+            .eps(o.adamw.eps)
+            .weight_decay(o.adamw.weight_decay)
+    };
+    {
+        let mut named = model.trainable_parameters_mut();
+        let mut refs: Vec<&mut Tensor> = named.iter_mut().map(|(_, t)| &mut **t).collect();
+        opt.step_with_params(&mut refs);
+    }
+    let after = snapshot(&model);
+
+    let exemptions = g.exempt_names();
+    let mut deltas: Vec<(String, f32)> = before
+        .iter()
+        .map(|(name, b)| {
+            let a = &after
+                .iter()
+                .find(|(n, _)| n == name)
+                .expect("name present in both snapshots")
+                .1;
+            let d = b
+                .iter()
+                .zip(a.iter())
+                .map(|(x, y)| (f32::from_bits(*x) - f32::from_bits(*y)).abs())
+                .fold(0.0f32, f32::max);
+            (name.clone(), d)
+        })
+        .collect();
+
+    // Halve exactly one non-exempt tensor's movement. It stays strictly positive,
+    // so the ONLY clause that can reject it is the band.
+    let victim = deltas
+        .iter_mut()
+        .find(|(n, d)| *d > 0.0 && !exemptions.iter().any(|e| e == n))
+        .expect("at least one non-exempt tensor must have moved");
+    victim.1 *= 0.5;
+    let victim_name = victim.0.clone();
+
+    let grads = trainable_grads(&mut model);
+    let report = super::assert_encoder_updates(&GateInput {
+        grads: &grads,
+        deltas: Some(&deltas),
+        step_lr: Some(lr),
+        exemptions: &exemptions,
+        floor: tol::ZERO_GRAD_FLOOR,
+        layers,
+    })
+    .expect_err(
+        "clause (f) ACCEPTED a tensor that moved half of lr. The band is vacuous and a wrong \
+         learning rate would pass the reference-free half of this gate.",
+    );
+    assert!(
+        report.contains(&victim_name) && report.contains("(f)"),
+        "the failure does not name `{victim_name}` under clause (f): {report}"
+    );
+}
+
+/// `OBLIG-ENC-04-MULTISTEP-TRAJECTORY-PARITY` — the betas gate (D55).
+///
+/// The single-step gate above cannot see beta1/beta2 and no tolerance can make
+/// it: at step 1, bias correction gives `m_hat = (1-b1)g/(1-b1) = g` and
+/// `v_hat = (1-b2)g²/(1-b2) = g²`, so the update is `lr*g/(|g|+eps)` for EVERY
+/// choice of betas. The moments only start carrying history at step 2, which is
+/// why this replays a trajectory instead of tightening a number.
+///
+/// It compares losses, not parameters, deliberately. A max-abs parameter
+/// comparison is limited by its noisiest single element, and the generator
+/// measured a (0.5, 0.5) mutation staying inside that noise at every step count
+/// tried. The loss contracts the whole model into one number and the trajectory
+/// accumulates the divergence: the same mutation moves it 4.05e-04, which is 53x
+/// this tolerance.
+#[test]
+fn gradient_gate_multistep_trajectory_matches_the_frozen_reference() {
+    autograd::clear_graph();
+    let mut model = model_a();
+    let m: OptimizerMultistepFixture = read_fixture("optimizer_multistep.json");
+    assert!(
+        m.all_trainable,
+        "optimizer_multistep.json no longer describes an all-trainable trajectory"
+    );
+    assert_eq!(
+        m.losses.len(),
+        m.steps + 1,
+        "the trajectory must bracket every update: {} steps needs {} losses, fixture has {}",
+        m.steps,
+        m.steps + 1,
+        m.losses.len()
+    );
+    let pair = pair_batch(&model, &m.source);
+
+    assert_eq!(m.adamw.betas.len(), 2, "adamw.betas must be a pair");
+    let (lr, b1, b2, eps, wd) = (
+        m.adamw.lr,
+        m.adamw.betas[0],
+        m.adamw.betas[1],
+        m.adamw.eps,
+        m.adamw.weight_decay,
+    );
+    assert!(
+        (b1 - b2).abs() > f32::EPSILON,
+        "beta1 and beta2 are equal ({b1}); this trajectory would not distinguish them"
+    );
+
+    // ONE optimizer across every step. Rebuilding it per step would reset `t` and
+    // the moment buffers, which is exactly the state this obligation exists to
+    // exercise — the gate would then be 20 independent copies of step 1.
+    let mut opt = {
+        let params: Vec<&mut Tensor> = model
+            .trainable_parameters_mut()
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        AdamW::new(params, lr)
+            .betas(b1, b2)
+            .eps(eps)
+            .weight_decay(wd)
+    };
+
+    let mut observed: Vec<f32> = Vec::with_capacity(m.steps + 1);
+    for _ in 0..m.steps {
+        autograd::clear_graph();
+        let za = encode(&model, &pair.a);
+        let zb = encode(&model, &pair.b);
+        let loss = pair_cosine_mse(&za, &zb, &pair.labels).expect("pair objective");
+        observed.push(loss.item());
+        loss.backward();
+
+        let mut named = model.trainable_parameters_mut();
+        let mut refs: Vec<&mut Tensor> = named.iter_mut().map(|(_, t)| &mut **t).collect();
+        opt.step_with_params(&mut refs);
+    }
+    autograd::clear_graph();
+    let za = encode(&model, &pair.a);
+    let zb = encode(&model, &pair.b);
+    observed.push(
+        pair_cosine_mse(&za, &zb, &pair.labels)
+            .expect("pair objective")
+            .item(),
+    );
+
+    assert_close(
+        &observed,
+        &m.losses,
+        tol::OPTIMIZER_MULTISTEP,
+        "multi-step loss trajectory",
+    );
+
+    // The trajectory must actually descend. A gate that only compared against the
+    // reference would still pass if BOTH sides were a flat line, which is what a
+    // silently-no-op optimizer produces.
+    let (first, last) = (m.losses[0], m.losses[m.steps]);
+    assert!(
+        last < first,
+        "the fixture trajectory does not descend: {first} -> {last}"
+    );
+    assert!(
+        observed[m.steps] < observed[0],
+        "the Rust trajectory does not descend: {} -> {}",
+        observed[0],
+        observed[m.steps]
     );
 }

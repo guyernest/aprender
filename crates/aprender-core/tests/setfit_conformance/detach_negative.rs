@@ -69,6 +69,7 @@ fn detach_negative_the_gate_rejects_a_detached_encoder() {
     let result = super::assert_encoder_updates(&GateInput {
         grads: &grads,
         deltas: None,
+        step_lr: None,
         exemptions: &g.exempt_names(),
         floor: tol::ZERO_GRAD_FLOOR,
         layers,
@@ -143,6 +144,7 @@ fn detach_negative_the_connected_encoder_passes_the_same_call() {
     super::assert_encoder_updates(&GateInput {
         grads: &grads,
         deltas: None,
+        step_lr: None,
         exemptions: &g.exempt_names(),
         floor: tol::ZERO_GRAD_FLOOR,
         layers,

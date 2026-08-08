@@ -3,8 +3,8 @@
 //! Tolerance constants for the SetFit conformance harness (plan 01-08).
 //!
 //! Source contract: contracts/setfit-encoder-conformance-v1.yaml
-//! Contract metadata.version: 1.0.0
-//! Contract sha256: 51fa2cb79648bfc92e95d66740c2c89e46f9545b70922c876fb51220a94c3825
+//! Contract metadata.version: 2.0.0
+//! Contract sha256: be332adb98204e7a0d00ed25029373c9bcc31f870ceaf7ae73adb1a1c9900b5d
 //!
 //! Regenerate with:
 //!
@@ -38,16 +38,18 @@ pub const ZERO_GRAD_FLOOR: f32 = 6.12913980e-5;
 /// From `OBLIG-ENC-06-LOSS-FORWARD-PARITY`.
 pub const LOSS_PAIR: f32 = 7.62939453e-6;
 /// From `OBLIG-ENC-04-POST-STEP-PARAMETER-PARITY`.
-pub const OPTIMIZER_STEP: f32 = 3.05175781e-5;
+pub const OPTIMIZER_STEP: f32 = 1.89172753e-6;
+/// From `OBLIG-ENC-04-MULTISTEP-TRAJECTORY-PARITY`.
+pub const OPTIMIZER_MULTISTEP: f32 = 7.62939453e-6;
 /// From `OBLIG-ENC-01-FULL-MODEL-REFERENCE-PARITY`.
 pub const FULL_MODEL_REFERENCE: f32 = 3.73762473e-5;
 
 /// sha256 of the source contract at generation time.
 pub const CONTRACT_SHA256: &str =
-    "51fa2cb79648bfc92e95d66740c2c89e46f9545b70922c876fb51220a94c3825";
+    "be332adb98204e7a0d00ed25029373c9bcc31f870ceaf7ae73adb1a1c9900b5d";
 
 /// `metadata.version` of the source contract at generation time.
-pub const CONTRACT_VERSION: &str = "1.0.0";
+pub const CONTRACT_VERSION: &str = "2.0.0";
 
 /// The command that regenerates this file.
 pub const REGENERATE_COMMAND: &str = "APRENDER_REGEN_TOLERANCES=1 cargo test -p aprender-core --features setfit,conformance-fixtures --test setfit_conformance conformance_tolerances_regenerate -- --ignored";

@@ -70,6 +70,15 @@ ST_NORMALIZE_EPS = 1e-12
 # AdamW hyperparameters for the single controlled step (ENC-04).
 ADAMW = {"lr": 2e-5, "betas": [0.9, 0.999], "eps": 1e-8, "weight_decay": 0.01}
 
+# D55 — steps in the multi-step trajectory obligation. At step 1 bias correction makes
+# the update beta-INDEPENDENT (m_hat = g, v_hat = g^2 for every beta1/beta2), so no
+# single-step fixture at any tolerance can constrain the betas. The moments only start
+# to carry history from step 2 onward. 20 is where the measured beta separation is
+# ~5 orders of magnitude above f32 noise while the trajectory is still cheap to replay
+# in Rust; `assert_separation` re-measures it on every regeneration rather than trusting
+# this comment.
+MULTISTEP_N = 20
+
 # --- tolerance floors ---------------------------------------------------------------
 # WHY A FLOOR IS MANDATORY: `10 x observed f32/f64 delta` alone can produce ZERO (the two
 # paths coincide on a small case) or a value far tighter than legitimate Rust/PyTorch
@@ -87,6 +96,15 @@ ADAMW = {"lr": 2e-5, "betas": [0.9, 0.999], "eps": 1e-8, "weight_decay": 0.01}
 # the sequence length (<=64) for a pooled mean, the projection width for a forward pass
 # (256 = the slice FFN intermediate), and a whole-batch backward accumulation for
 # gradients / optimizer state. full_model_reference uses the FULL model's 1536-wide FFN.
+#
+# D55 — `optimizer_step` is W = 1, NOT 1024, and that is not a typo. A post-step
+# PARAMETER is not a 1024-wide reduction of anything. At step 1 bias correction gives
+# m_hat = g and v_hat = g^2, so the update is lr*g/(|g|+eps) -- it SATURATES to
+# lr*sign(g), and gradient reduction-order noise therefore does not propagate into it at
+# all. Inheriting the gradient family's W made the floor 3.05e-05 while the entire
+# displacement being gated is ~lr = 2.01e-05: a floor 1.5x the signal, i.e. a gate that
+# cannot fail. The residual really is pointwise f32 representation noise at the
+# parameter magnitude, which is why this family also passes an explicit `scale`.
 EPS_F32 = 1.1920928955078125e-07
 FLOOR_K = 8.0
 FAMILY_REDUCTION_WIDTH = {
@@ -95,17 +113,21 @@ FAMILY_REDUCTION_WIDTH = {
     "pooling_normalize": 64,
     "loss_pair": 64,
     "gradients": 1024,
-    "optimizer_step": 1024,
+    "optimizer_step": 1,
+    # A trajectory of pair losses: each entry is one loss_pair reduction.
+    "optimizer_multistep": 64,
     "batch_invariance": 64,
     "full_model_reference": 1536,
 }
 
 
-def family_floor(family: str) -> float:
-    return FLOOR_K * math.sqrt(FAMILY_REDUCTION_WIDTH[family]) * EPS_F32
+def family_floor(family: str, scale: float = 1.0) -> float:
+    return FLOOR_K * math.sqrt(FAMILY_REDUCTION_WIDTH[family]) * EPS_F32 * scale
 
 
-def record_tolerance(tolerances: dict, family: str, delta: float) -> None:
+def record_tolerance(
+    tolerances: dict, family: str, delta: float, scale: float = 1.0
+) -> None:
     """Record one family's measured delta, floor and recommended tolerance.
 
     The family name is spelled ONCE per call site. The previous form repeated it
@@ -113,13 +135,37 @@ def record_tolerance(tolerances: dict, family: str, delta: float) -> None:
     near-identical blocks, so a mismatch between the key and the floor lookup would
     silently record the wrong reduction width -- and `recommended_tolerance` is
     exactly what the Rust conformance gates load.
+
+    `scale` is the MAGNITUDE the family's comparison actually lives at. It is 1.0 for
+    every family that compares normalized or O(1) quantities, and is passed explicitly
+    by the optimizer families, which compare raw parameter values. Leaving it implicit
+    is what produced the vacuous D55 tolerance.
     """
-    floor = family_floor(family)
+    floor = family_floor(family, scale)
     tolerances[family] = {
         "max_abs_f32_f64_delta": delta,
         "floor": floor,
         "recommended_tolerance": max(10 * delta, floor),
     }
+
+
+def assert_separation(tolerances: dict, family: str, signal: float, what: str) -> None:
+    """Fail generation unless `family`'s tolerance sits 10x BELOW the signal it gates.
+
+    A tolerance at or above the effect it is supposed to resolve is not a loose gate,
+    it is an absent one -- the D55 defect in one line. The `activation` family has had
+    this guard since 01-04; every family whose tolerance must SEPARATE two behaviours
+    (rather than merely absorb round-off) needs it, and the optimizer families are
+    exactly that case.
+    """
+    tol = tolerances[family]["recommended_tolerance"]
+    if tol * 10 > signal:
+        sys.exit(
+            f"FATAL: {family} tolerance {tol:.6e} does not sit 10x below {what} "
+            f"({signal:.6e}); margin is {signal / tol:.2f}x. A gate at this tolerance "
+            "cannot distinguish the behaviour it claims to gate."
+        )
+    print(f"  {family}: tol {tol:.6e} separates {what} ({signal:.6e}) by {signal / tol:.1f}x")
 
 
 def flat(t: torch.Tensor) -> list[float]:
@@ -265,6 +311,41 @@ def pair_loss(model: BertModel, ca: dict, cb: dict, remap, dtype) -> torch.Tenso
     cos = F.cosine_similarity(za, zb, dim=1)
     labels = torch.tensor(corpus.LOSS_PAIR_LABELS, dtype=dtype)
     return F.mse_loss(cos, labels)
+
+
+def adamw_trajectory(steps, ca, cb, remap, dtype, **overrides):
+    """Run `steps` AdamW steps from a FRESH slice model on the recorded pair batch.
+
+    Returns `(post_step, losses)` where `losses[i]` is the loss measured BEFORE step i
+    and `losses[steps]` is the loss after the last step, so a trajectory of length
+    `steps + 1` brackets every update.
+
+    `overrides` replaces individual ADAMW hyperparameters. The generator uses that to
+    run the SAME mutations the conformance gate claims to detect (decay deleted, wrong
+    betas) and measure how far each one moves the trajectory -- so the separation this
+    fixture can prove is measured, never asserted from a comment.
+    """
+    hp = {**ADAMW, **overrides}
+    model = build_slice_model(dtype)
+    params = [p for n, p in model.named_parameters() if not n.startswith("pooler.")]
+    opt = torch.optim.AdamW(
+        params,
+        lr=hp["lr"],
+        betas=tuple(hp["betas"]),
+        eps=hp["eps"],
+        weight_decay=hp["weight_decay"],
+    )
+    losses = []
+    for _ in range(steps):
+        opt.zero_grad(set_to_none=True)
+        loss = pair_loss(model, ca, cb, remap, dtype)
+        losses.append(float(loss.detach().to(torch.float64)))
+        loss.backward()
+        opt.step()
+    with torch.no_grad():
+        losses.append(float(pair_loss(model, ca, cb, remap, dtype).detach().to(torch.float64)))
+    post = {n: p for n, p in model.named_parameters() if not n.startswith("pooler.")}
+    return post, losses
 
 
 # ------------------------------------------------------------------ main -----------
@@ -533,6 +614,11 @@ def main() -> None:
     # ---------------------------------------------------------- optimizer step ----
     omodel = build_slice_model(torch.float32)
     oparams = [p for n, p in omodel.named_parameters() if not n.startswith("pooler.")]
+    before_step = {
+        n: p.detach().clone()
+        for n, p in omodel.named_parameters()
+        if not n.startswith("pooler.")
+    }
     opt = torch.optim.AdamW(
         oparams,
         lr=ADAMW["lr"],
@@ -550,16 +636,36 @@ def main() -> None:
     post_step = {
         n: flat(p) for n, p in omodel.named_parameters() if not n.startswith("pooler.")
     }
-    # D55 (OPEN): `grad_delta` is the GRADIENT family's f32/f64 delta -- no f64
-    # optimizer step is ever run, so this records a tolerance (3.052e-05) larger
-    # than the entire step-1 displacement it measures (~lr = 2.017e-05). Deleting
-    # weight_decay survives the resulting gate. Note also that betas cannot be
-    # constrained by ANY single-step fixture at any tolerance: with bias correction
-    # m_hat = g and v_hat = g^2 for every beta. Closing this needs a real f64 step,
-    # a separation guard like the `activation` one below, and a MULTI-STEP fixture.
-    # Left as-is deliberately: the tolerances are frozen artifacts (D-14) and
-    # regenerating one is a governed decision, not a cleanup.
-    record_tolerance(tolerances, "optimizer_step", grad_delta)
+
+    # D55 (CLOSED) — the optimizer family measures its OWN f32/f64 delta.
+    # It previously reused `grad_delta`, so no f64 optimizer step was ever run and the
+    # recorded tolerance (3.052e-05) exceeded the entire step-1 displacement (~lr =
+    # 2.01e-05) it was supposed to resolve. The `scale` is the parameter magnitude the
+    # comparison actually lives at; see the FAMILY_REDUCTION_WIDTH note on why W = 1.
+    post64, _ = adamw_trajectory(1, ca, cb, remap, torch.float64)
+    step_delta = 0.0
+    for n, p in omodel.named_parameters():
+        if n.startswith("pooler."):
+            continue
+        step_delta = max(step_delta, max_abs_delta(p, post64[n]))
+    max_abs_param = max(
+        float(p.detach().abs().max())
+        for n, p in omodel.named_parameters()
+        if not n.startswith("pooler.")
+    )
+    record_tolerance(tolerances, "optimizer_step", step_delta, scale=max_abs_param)
+
+    # The displacement this gate must resolve. Measured against the pre-step snapshot,
+    # not predicted from lr: a step that silently did nothing would otherwise be gated
+    # by a tolerance derived from the step it failed to take.
+    max_displacement = max(
+        float((p.detach() - before_step[n]).abs().max())
+        for n, p in omodel.named_parameters()
+        if not n.startswith("pooler.")
+    )
+    assert_separation(
+        tolerances, "optimizer_step", max_displacement, "the step-1 displacement"
+    )
     jsonfmt.write(
         FIXTURE_DIR / "optimizer_step.json",
         {
@@ -577,6 +683,73 @@ def main() -> None:
             "loss_before": float(loss_before.detach()),
             "loss_after": float(loss_after.detach()),
             "post_step": post_step,
+        },
+    )
+
+    # ------------------------------------------------------ optimizer multi-step --
+    # D55 — the obligation that makes the BETAS falsifiable.
+    #
+    # Why a loss TRAJECTORY and not a second post-step parameter dump: the discriminating
+    # power of a max-abs parameter comparison is set by its noisiest single element, and
+    # both mutations below stay inside that noise at every step count measured (the
+    # weight-decay term peaks at 2.6x the f32/f64 delta at N = 50). The loss contracts
+    # every parameter into one number and the trajectory accumulates the divergence
+    # coherently, which buys ~5 orders of magnitude on the betas -- and it costs 21
+    # floats instead of 1.6 MB.
+    _, traj32 = adamw_trajectory(MULTISTEP_N, ca, cb, remap, torch.float32)
+    _, traj64 = adamw_trajectory(MULTISTEP_N, ca, cb, remap, torch.float64)
+    traj_delta = max(abs(a - b) for a, b in zip(traj32, traj64))
+    record_tolerance(tolerances, "optimizer_multistep", traj_delta)
+
+    # Run the mutations THIS obligation claims to detect and measure the separation.
+    # `assert_separation` then fails generation if the recorded tolerance could not
+    # actually tell them apart -- the check that D55 was missing.
+    _, traj_betas = adamw_trajectory(
+        MULTISTEP_N, ca, cb, remap, torch.float32, betas=[0.5, 0.5]
+    )
+    betas_signal = max(abs(a - b) for a, b in zip(traj32, traj_betas))
+    assert_separation(
+        tolerances, "optimizer_multistep", betas_signal, "a betas (0.5, 0.5) trajectory"
+    )
+
+    # The decay control is measured and RECORDED but deliberately not asserted here.
+    # At this lr/weight_decay the decay term is ~3 f32 ulp of the parameters it acts on,
+    # so no tolerance over this fixture can separate it. Deleting decoupled decay is
+    # caught instead by `falsify_aw_001_decoupled_weight_decay` (adamw-kernel-v1), which
+    # compares AdamW against Adam algebraically rather than against a f32 reference.
+    _, traj_nodecay = adamw_trajectory(
+        MULTISTEP_N, ca, cb, remap, torch.float32, weight_decay=0.0
+    )
+    decay_signal = max(abs(a - b) for a, b in zip(traj32, traj_nodecay))
+
+    jsonfmt.write(
+        FIXTURE_DIR / "optimizer_multistep.json",
+        {
+            "source": source_block,
+            "note": (
+                f"{MULTISTEP_N} consecutive AdamW steps on the SAME recorded pair batch, "
+                "from a fresh all-trainable slice model. `losses[i]` is the loss measured "
+                "BEFORE step i, and the final entry is the loss after the last step, so the "
+                "trajectory brackets every update. This is the only obligation in the phase "
+                "that constrains beta1/beta2: at step 1 bias correction makes the update "
+                "beta-independent (m_hat = g, v_hat = g^2), so a single-step fixture cannot "
+                "constrain them at ANY tolerance. `separation` records what the mutations "
+                "actually move, measured during generation."
+            ),
+            "adamw": ADAMW,
+            "all_trainable": True,
+            "steps": MULTISTEP_N,
+            "losses": traj32,
+            "separation": {
+                "f32_f64_noise": traj_delta,
+                "betas_0.5_0.5": betas_signal,
+                "weight_decay_0": decay_signal,
+                "decay_not_gated_here": (
+                    "the decay term is ~3 f32 ulp of the parameters it acts on at this "
+                    "lr/weight_decay, so no tolerance over this fixture separates it; "
+                    "adamw-kernel-v1's falsify_aw_001 owns that defect"
+                ),
+            },
         },
     )
 
