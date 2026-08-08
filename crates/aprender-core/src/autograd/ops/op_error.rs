@@ -113,6 +113,56 @@ pub enum OpError {
         /// Flattened index of the offending element.
         position: usize,
     },
+
+    /// The epsilon floor was not a positive, finite number (plan 01-03).
+    ///
+    /// `l2_normalize_rows` and `cosine_similarity_rows` divide by
+    /// `max(norm, eps)`. A zero, negative, `NaN` or infinite `eps` therefore
+    /// removes the only guard standing between a zero-norm row and a `NaN` (or,
+    /// with a negative `eps`, silently flips the sign of a whole row). The floor
+    /// is an explicit parameter with no hidden default precisely so that it can
+    /// be validated here.
+    ///
+    /// # Why the value is stored as BITS rather than as an `f32`
+    ///
+    /// Two independent reasons, both of which bite:
+    ///
+    /// 1. `OpError` derives `Eq`. An `f32` field would forbid that derive for
+    ///    the whole enum, changing the API of seven pre-existing variants for
+    ///    the sake of one.
+    /// 2. `NaN != NaN` under `PartialEq`. Had the variant carried an `f32`,
+    ///    `assert_eq!(err, OpError::InvalidEpsilon { eps: f32::NAN })` would be
+    ///    **unsatisfiable against a correct implementation** — for exactly the
+    ///    `NaN` input this variant exists to reject. That is the same class of
+    ///    self-defeating assertion the ENC-04 gradient gate was rewritten to
+    ///    avoid.
+    ///
+    /// [`OpError::epsilon`] recovers the original value for display or
+    /// inspection.
+    InvalidEpsilon {
+        /// IEEE-754 bit pattern of the offending epsilon.
+        eps_bits: u32,
+    },
+}
+
+impl OpError {
+    /// Build an [`OpError::InvalidEpsilon`] from the offending value.
+    pub(crate) fn invalid_epsilon(eps: f32) -> Self {
+        Self::InvalidEpsilon {
+            eps_bits: eps.to_bits(),
+        }
+    }
+
+    /// Recover the epsilon carried by [`OpError::InvalidEpsilon`].
+    ///
+    /// Returns `None` for every other variant.
+    #[must_use]
+    pub fn epsilon(&self) -> Option<f32> {
+        match self {
+            Self::InvalidEpsilon { eps_bits } => Some(f32::from_bits(*eps_bits)),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for OpError {
@@ -159,6 +209,11 @@ impl std::fmt::Display for OpError {
             Self::NonFiniteInput { position } => write!(
                 f,
                 "OpError::NonFiniteInput(non-finite value at flat position {position})"
+            ),
+            Self::InvalidEpsilon { eps_bits } => write!(
+                f,
+                "OpError::InvalidEpsilon({}; the epsilon floor must be finite and > 0)",
+                f32::from_bits(*eps_bits)
             ),
         }
     }

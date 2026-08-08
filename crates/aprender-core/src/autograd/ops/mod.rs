@@ -377,10 +377,15 @@ include!("op_error.rs");
 include!("embedding.rs");
 include!("masking.rs");
 include!("pooling.rs");
+include!("normalize.rs");
 
 #[cfg(test)]
 #[path = "tests_embedding_backward.rs"]
 mod tests_embedding_backward;
+
+#[cfg(test)]
+#[path = "tests_normalize_backward.rs"]
+mod tests_normalize_backward;
 
 #[cfg(test)]
 #[path = "tests_masking.rs"]
