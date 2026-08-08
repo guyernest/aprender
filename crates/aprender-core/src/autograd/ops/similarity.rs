@@ -57,9 +57,111 @@
     equation = "cosine_similarity_rows"
 )]
 pub fn cosine_similarity_rows(a: &Tensor, b: &Tensor, eps: f32) -> Result<Tensor, OpError> {
-    // ---- RED STUB (plan 01-03 Task 2) ------------------------------------
-    let _ = (a, b, eps);
-    Err(OpError::ShapeOverflow { dims: Vec::new() })
+    // ---- 1. Shape --------------------------------------------------------
+    if a.shape().len() != 2 {
+        return Err(OpError::ShapeMismatch {
+            expected: vec![0, 0],
+            got: a.shape().to_vec(),
+        });
+    }
+    if b.shape().len() != 2 {
+        return Err(OpError::ShapeMismatch {
+            expected: vec![0, 0],
+            got: b.shape().to_vec(),
+        });
+    }
+    if a.shape() != b.shape() {
+        return Err(OpError::ShapeMismatch {
+            expected: a.shape().to_vec(),
+            got: b.shape().to_vec(),
+        });
+    }
+    let batch = a.shape()[0];
+    let hidden = a.shape()[1];
+    if batch == 0 {
+        return Err(OpError::ZeroDimension { which: "batch" });
+    }
+    if hidden == 0 {
+        return Err(OpError::ZeroDimension { which: "hidden" });
+    }
+
+    // ---- 2. The epsilon floor --------------------------------------------
+    // `eps <= 0.0` is FALSE for NaN, so the finiteness test is not redundant.
+    if !(eps.is_finite() && eps > 0.0) {
+        return Err(OpError::invalid_epsilon(eps));
+    }
+
+    // ---- 3. Value-level guards -------------------------------------------
+    let ad = a.data();
+    let bd = b.data();
+    if let Some(position) = ad.iter().position(|v| !v.is_finite()) {
+        return Err(OpError::NonFiniteInput { position });
+    }
+    if let Some(position) = bd.iter().position(|v| !v.is_finite()) {
+        return Err(OpError::NonFiniteInput { position });
+    }
+
+    // Domain proven by the guards above; asserted here rather than at entry so a
+    // `debug_assert!` cannot turn a fail-closed error into a debug panic.
+    contract_pre_cosine_similarity_rows!(ad);
+
+    // ---- 4. Forward (row-major, LAYOUT-001) ------------------------------
+    // Norms and the dot product accumulate in f64 for the same reason
+    // `l2_normalize_rows` does: a 1e-20 component squares to a subnormal in f32
+    // and would silently round the norm to zero, deciding the clamp branch on a
+    // fabricated value.
+    let mut out = vec![0.0f32; batch];
+    let mut norms_a = Vec::with_capacity(batch);
+    let mut norms_b = Vec::with_capacity(batch);
+
+    for row in 0..batch {
+        let base = row * hidden;
+        let (mut sa, mut sb, mut dot) = (0.0f64, 0.0f64, 0.0f64);
+        for j in 0..hidden {
+            let (x, y) = (f64::from(ad[base + j]), f64::from(bd[base + j]));
+            sa += x * x;
+            sb += y * y;
+            dot += x * y;
+        }
+        let na = sa.sqrt() as f32;
+        let nb = sb.sqrt() as f32;
+
+        // Each factor is clamped INDEPENDENTLY. `n > eps` selects the projected
+        // branch for that input; `n == eps` is assigned to the constant branch.
+        let da = if na > eps { na } else { eps };
+        let db = if nb > eps { nb } else { eps };
+
+        out[row] = (dot / (f64::from(da) * f64::from(db))) as f32;
+        norms_a.push(na);
+        norms_b.push(nb);
+    }
+
+    let mut result = Tensor::from_vec(out, &[batch]);
+
+    // ---- 5. Record the graph edge ----------------------------------------
+    if is_grad_enabled() && (a.requires_grad_enabled() || b.requires_grad_enabled()) {
+        result.requires_grad_(true);
+        let grad_fn = Arc::new(CosineSimilarityBackward {
+            a: a.clone(),
+            b: b.clone(),
+            similarity: result.clone(),
+            norms_a,
+            norms_b,
+            eps,
+            batch,
+            hidden,
+        });
+        result.set_grad_fn(grad_fn.clone());
+
+        with_graph(|graph| {
+            graph.register_tensor(a.clone());
+            graph.register_tensor(b.clone());
+            graph.record(result.id(), grad_fn, vec![a.id(), b.id()]);
+        });
+    }
+
+    contract_post_cosine_similarity_rows!(result.data());
+    Ok(result)
 }
 
 /// Mean squared error between a graph-connected `[B]` prediction and a detached
@@ -93,7 +195,63 @@ pub fn cosine_similarity_rows(a: &Tensor, b: &Tensor, eps: f32) -> Result<Tensor
 ///   same rule `masked_mean_pool` documents.
 #[provable_contracts_macros::contract("setfit-encoder-conformance-v1", equation = "mse_loss")]
 pub fn mse_loss(pred: &Tensor, target: &[f32]) -> Result<Tensor, OpError> {
-    // ---- RED STUB (plan 01-03 Task 2) ------------------------------------
-    let _ = (pred, target);
-    Err(OpError::ShapeOverflow { dims: Vec::new() })
+    // ---- 1. Shape --------------------------------------------------------
+    if pred.shape().len() != 1 {
+        return Err(OpError::ShapeMismatch {
+            expected: vec![0],
+            got: pred.shape().to_vec(),
+        });
+    }
+    let n = pred.shape()[0];
+    if n == 0 {
+        return Err(OpError::ZeroDimension { which: "batch" });
+    }
+    if target.len() != n {
+        return Err(OpError::LengthMismatch {
+            ids: n,
+            mask: target.len(),
+        });
+    }
+
+    // ---- 2. Value-level guards -------------------------------------------
+    // The TARGET is scanned: labels are caller-supplied and untrusted, and a
+    // NaN label would poison every parameter gradient with a NaN traceable to
+    // nothing. `pred` is a computed graph intermediate and is deliberately NOT
+    // scanned — the same rule `masked_mean_pool` documents.
+    if let Some(position) = target.iter().position(|v| !v.is_finite()) {
+        return Err(OpError::NonFiniteInput { position });
+    }
+
+    contract_pre_mse_loss!(target);
+
+    // ---- 3. Forward (reduction to [1], the `Tensor::mean` shape) ---------
+    let p = pred.data();
+    let inv_n = 1.0f64 / n as f64;
+    let mut acc = 0.0f64;
+    for i in 0..n {
+        let d = f64::from(p[i]) - f64::from(target[i]);
+        acc += d * d;
+    }
+    let mut result = Tensor::from_vec(vec![(acc * inv_n) as f32], &[1]);
+
+    // ---- 4. Record the graph edge ----------------------------------------
+    // Returning a Tensor rather than an f32 is the entire point (PF-001): an
+    // f32 cannot carry this edge, and a training loop built on one reports a
+    // falling loss while every upstream weight stays frozen.
+    if is_grad_enabled() && pred.requires_grad_enabled() {
+        result.requires_grad_(true);
+        let grad_fn = Arc::new(MseBackward {
+            pred: pred.clone(),
+            target: target.to_vec(),
+        });
+        result.set_grad_fn(grad_fn.clone());
+
+        with_graph(|graph| {
+            graph.register_tensor(pred.clone());
+            graph.record(result.id(), grad_fn, vec![pred.id()]);
+        });
+    }
+
+    contract_inv_mse_loss!(result.data());
+    Ok(result)
 }

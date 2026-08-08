@@ -510,6 +510,156 @@ impl GradFn for L2NormalizeRowsBackward {
     }
 }
 
+/// Gradient function for row-wise cosine similarity with per-factor epsilon
+/// floors.
+///
+/// Obligation: OBLIG-ENC-06 pair loss, contract
+/// `setfit-encoder-conformance-v1`, equation `cosine_similarity_rows`.
+///
+/// Forward: `s[r] = <a[r], b[r]> / (max(n_a, eps) * max(n_b, eps))`.
+///
+/// # Two independent branch decisions, not one
+///
+/// Each norm is clamped separately, so with `d_a = max(n_a, eps)` and
+/// `d_b = max(n_b, eps)`:
+///
+/// ```text
+/// n_a >  eps :  ds/da_i = ( b_i/d_b - s * a_i/n_a ) / n_a
+/// n_a <= eps :  ds/da_i =   b_i / (eps * d_b)
+/// ```
+///
+/// and symmetrically for `b`. Above the clamp `d_a` is a function of `a`, and
+/// differentiating it is what produces the `s * a_i/n_a` projection term; below
+/// the clamp `d_a` is the literal constant `eps` and that term does not exist.
+/// Crucially the decisions do NOT couple: `a`'s branch changes only `a`'s
+/// gradient. All four combinations are reachable and all four are covered in
+/// `tests_similarity_backward.rs`.
+///
+/// # Both inputs, always
+///
+/// This backward returns TWO gradients, in the order the inputs were recorded.
+/// Dropping the second would freeze one branch of a siamese encoder while the
+/// loss still fell — the failure mode is a slow, plausible-looking training run
+/// rather than a crash, which is why the gradchecks assert both sides by name.
+///
+/// When `a` and `b` are the same tensor the graph accumulates both
+/// contributions into one entry, which is the correct total derivative of
+/// `s(a, a)`.
+pub(crate) struct CosineSimilarityBackward {
+    pub(crate) a: Tensor,
+    pub(crate) b: Tensor,
+    /// The forward output `s`, shape `[batch]`.
+    pub(crate) similarity: Tensor,
+    /// RAW per-row norms of `a`, BEFORE the epsilon floor.
+    pub(crate) norms_a: Vec<f32>,
+    /// RAW per-row norms of `b`, BEFORE the epsilon floor.
+    pub(crate) norms_b: Vec<f32>,
+    pub(crate) eps: f32,
+    pub(crate) batch: usize,
+    pub(crate) hidden: usize,
+}
+
+impl GradFn for CosineSimilarityBackward {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let g = grad_output.data();
+        let ad = self.a.data();
+        let bd = self.b.data();
+        let s = self.similarity.data();
+        let (n_rows, h) = (self.batch, self.hidden);
+        let eps = f64::from(self.eps);
+
+        let mut grad_a = vec![0.0f32; n_rows * h];
+        let mut grad_b = vec![0.0f32; n_rows * h];
+
+        for row in 0..n_rows {
+            let base = row * h;
+            let na = f64::from(self.norms_a[row]);
+            let nb = f64::from(self.norms_b[row]);
+            let da = if self.norms_a[row] > self.eps {
+                na
+            } else {
+                eps
+            };
+            let db = if self.norms_b[row] > self.eps {
+                nb
+            } else {
+                eps
+            };
+            let sr = f64::from(s[row]);
+            let gr = f64::from(g[row]);
+
+            for j in 0..h {
+                let ai = f64::from(ad[base + j]);
+                let bi = f64::from(bd[base + j]);
+
+                // d s / d a_j
+                grad_a[base + j] = if self.norms_a[row] > self.eps {
+                    (gr * (bi / db - sr * ai / na) / na) as f32
+                } else {
+                    // Clamped: d_a is the constant eps, so no projection term.
+                    (gr * bi / (eps * db)) as f32
+                };
+
+                // d s / d b_j — its own branch, independent of a's.
+                grad_b[base + j] = if self.norms_b[row] > self.eps {
+                    (gr * (ai / da - sr * bi / nb) / nb) as f32
+                } else {
+                    (gr * ai / (eps * da)) as f32
+                };
+            }
+        }
+
+        vec![
+            Tensor::new(&grad_a, &[n_rows, h]),
+            Tensor::new(&grad_b, &[n_rows, h]),
+        ]
+    }
+
+    fn name(&self) -> &'static str {
+        "CosineSimilarityBackward"
+    }
+}
+
+/// Gradient function for the tensor-valued MSE reduction.
+///
+/// Obligation: OBLIG-ENC-06 pair loss, contract
+/// `setfit-encoder-conformance-v1`, equation `mse_loss`.
+///
+/// `L = (1/n) Σ (pred_i - target_i)²`, so `dL/dpred_i = 2(pred_i - target_i)/n`.
+///
+/// The target is stored as plain `f32` data rather than as a `Tensor`, so it
+/// cannot receive gradient by CONSTRUCTION rather than by convention — there is
+/// no id to record and nothing for the tape to route into.
+pub(crate) struct MseBackward {
+    pub(crate) pred: Tensor,
+    pub(crate) target: Vec<f32>,
+}
+
+impl GradFn for MseBackward {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let p = self.pred.data();
+        let n = p.len();
+        // The forward guarantees n > 0 (an empty mean is rejected with a typed
+        // error before this struct is constructed), but a zero here would be a
+        // silent NaN rather than a loud one.
+        let scale = if n == 0 {
+            0.0f64
+        } else {
+            2.0 / n as f64 * f64::from(grad_output.data()[0])
+        };
+
+        let grad: Vec<f32> = (0..n)
+            .map(|i| ((f64::from(p[i]) - f64::from(self.target[i])) * scale) as f32)
+            .collect();
+
+        vec![Tensor::new(&grad, self.pred.shape())]
+    }
+
+    fn name(&self) -> &'static str {
+        "MseBackward"
+    }
+}
+
 // ============================================================================
 // Activation Functions
 // ============================================================================
