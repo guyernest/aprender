@@ -17,7 +17,7 @@ only then permits complete TweetEval comparison claims against the existing 9B L
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Differentiable MiniLM Conformance** - Prove the pinned encoder's shared batched Rust path matches fixtures and updates named parameters through the graph.
+- [x] **Phase 1: Differentiable MiniLM Conformance** - Prove the pinned encoder's shared batched Rust path matches fixtures and updates named parameters through the graph. (completed 2026-08-08)
 - [ ] **Phase 2: Deterministic Pair and Data Protocol** - Make few-shot selection and bounded pair generation reproducible, provenance-complete, leakage-safe, and non-quadratic.
 - [ ] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit.
 - [ ] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs.
@@ -68,7 +68,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 01-08-PLAN.md — Conformance gates (all-trainable + frozen), detach-negative, mutation + tier wiring (wave 6)
+- [x] 01-08-PLAN.md — Conformance gates (all-trainable + frozen), detach-negative, mutation + tier wiring (wave 6)
 
 ### Phase 2: Deterministic Pair and Data Protocol
 
@@ -143,7 +143,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Differentiable MiniLM Conformance | 8/9 | In Progress|  |
+| 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 0/TBD | Not started | - |
 | 3. Faithful Two-Stage Trainer and Head | 0/TBD | Not started | - |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
