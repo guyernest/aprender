@@ -504,6 +504,44 @@ impl GradFn for GeluBackward {
     }
 }
 
+/// Gradient function for the EXACT (erf) GELU — `Tensor::gelu_exact`.
+///
+/// `d/dx [x * Phi(x)] = Phi(x) + x * phi(x)`, where
+/// `Phi(x) = 0.5 * (1 + erf(x/sqrt(2)))` and `phi(x) = exp(-x^2/2) / sqrt(2*pi)`.
+///
+/// Distinct from [`GeluBackward`], which differentiates the tanh APPROXIMATION.
+/// Computed in f64 and narrowed at store time, and `Phi` is evaluated as
+/// `0.5 * erfc(-x/sqrt(2))` to avoid the negative-tail cancellation that
+/// `1 + erf(x/sqrt(2))` suffers.
+pub(crate) struct GeluExactBackward {
+    pub(crate) x: Tensor,
+}
+
+impl GradFn for GeluExactBackward {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        // 1 / sqrt(2*pi)
+        const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
+
+        let grad_data: Vec<f32> = grad_output
+            .data()
+            .iter()
+            .zip(self.x.data().iter())
+            .map(|(&g, &x)| {
+                let xd = f64::from(x);
+                let phi_cap =
+                    0.5 * batuta_common::math::erfc_precise(-xd / std::f64::consts::SQRT_2);
+                let phi = (-xd * xd / 2.0).exp() * INV_SQRT_2PI;
+                (f64::from(g) * (phi_cap + xd * phi)) as f32
+            })
+            .collect();
+        vec![Tensor::new(&grad_data, grad_output.shape())]
+    }
+
+    fn name(&self) -> &'static str {
+        "GeluExactBackward"
+    }
+}
+
 /// Gradient function for Softmax over last dimension of 2D tensor
 /// For y = softmax(x), the gradient is:
 /// ∂`L/∂x_i` = `y_i` * (`g_i` - `Σ_j` `g_j` * `y_j`)
