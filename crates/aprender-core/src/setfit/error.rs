@@ -124,6 +124,23 @@ pub enum SetFitError {
         reason: String,
     },
 
+    /// A requested freeze group could not be applied (01-07, D-22).
+    ///
+    /// Two conditions reach here, and both are configuration errors rather than
+    /// data errors: a layer index outside the encoder's layer range, and a
+    /// structurally valid group whose prefix set addresses **zero** named
+    /// parameters. The second is the naming-drift guard — a policy that
+    /// silently freezes nothing is worse than one that fails, because the
+    /// resulting run looks like a successful partial freeze.
+    ///
+    /// The stored freeze policy and every `requires_grad` flag are left
+    /// UNCHANGED when this is returned: validation completes for every group
+    /// before any flag is touched, so there is no partial application.
+    FreezeGroupInvalid {
+        /// Which group failed and why.
+        reason: String,
+    },
+
     /// A differentiable op rejected its arguments.
     Op(OpError),
 }
@@ -200,6 +217,9 @@ impl std::fmt::Display for SetFitError {
             ),
             Self::RemapInvalid { reason } => {
                 write!(f, "SetFitError::RemapInvalid({reason})")
+            }
+            Self::FreezeGroupInvalid { reason } => {
+                write!(f, "SetFitError::FreezeGroupInvalid({reason})")
             }
             // Forward the op's own diagnostic verbatim (W5).
             Self::Op(e) => write!(f, "SetFitError::Op({e})"),

@@ -54,3 +54,298 @@ pub use loss::pair_cosine_mse;
 pub use tokenizer::{
     InputProvenance, MiniLmTokenizer, SentenceBatch, TruncationFact, MAX_SEQUENCE_LENGTH,
 };
+
+use std::path::Path;
+
+use crate::autograd::Tensor;
+use crate::nn::Module;
+
+// ---------------------------------------------------------------------------
+// Freeze groups (D-20 / D-21 / D-22)
+// ---------------------------------------------------------------------------
+
+/// A named, validated slice of the encoder's parameters (D-22).
+///
+/// A structured enum, deliberately **not** a glob/string DSL. A string pattern
+/// API has two failure modes this cannot have: a typo silently addresses
+/// nothing, and a pattern that is correct today silently re-addresses a
+/// different set the moment a name changes upstream. Every variant here maps to
+/// an exact prefix set over the HF dotted names 01-06 pins against
+/// `gradients.json`'s `parameter_order`, and a group that matches zero names is
+/// a typed error rather than a no-op.
+///
+/// The four variants are exactly ENC-04's components: the embeddings block, and
+/// per layer the attention, feed-forward and normalization sub-blocks. Coarser
+/// policies ("freeze the bottom two layers") are expressible as a list of
+/// groups, so no additional API is needed for them.
+///
+/// `Ord` is derived because [`SetFitMiniLm::apply_freeze`] normalizes its
+/// argument by sorting and deduplicating — that single step is what makes the
+/// policy order-insensitive and duplicate-tolerant without three special cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FreezeGroup {
+    /// `embeddings.*` — the word/position/token-type tables and the embeddings
+    /// LayerNorm.
+    Embeddings,
+    /// `encoder.layer.N.attention.self.*` plus
+    /// `encoder.layer.N.attention.output.dense.*`.
+    ///
+    /// NOT `attention.output.LayerNorm`, which belongs to [`Self::LayerNorm`].
+    /// The boundary matters: freezing a block's normalization along with its
+    /// projections is a different experiment from freezing the projections
+    /// alone, and a mapping that quietly included it would make the two
+    /// indistinguishable.
+    LayerAttention(usize),
+    /// `encoder.layer.N.intermediate.*` plus `encoder.layer.N.output.dense.*`.
+    LayerFfn(usize),
+    /// Both LayerNorms of layer N: `attention.output.LayerNorm.*` and
+    /// `output.LayerNorm.*`.
+    LayerNorm(usize),
+}
+
+impl FreezeGroup {
+    /// The layer index this group addresses, or `None` for [`Self::Embeddings`].
+    #[must_use]
+    pub fn layer(self) -> Option<usize> {
+        match self {
+            Self::Embeddings => None,
+            Self::LayerAttention(n) | Self::LayerFfn(n) | Self::LayerNorm(n) => Some(n),
+        }
+    }
+
+    /// The exact HF dotted-name prefixes this group addresses.
+    ///
+    /// THE single definition of the group -> parameter mapping; nothing else in
+    /// this module hardcodes a prefix. Every prefix ends with `.` on purpose, so
+    /// `encoder.layer.1.` cannot match `encoder.layer.10.…` when a future model
+    /// has ten or more layers.
+    #[must_use]
+    pub fn name_prefixes(self) -> Vec<String> {
+        // RED STUB (plan 01-07 Task 2): an empty prefix set addresses nothing,
+        // which no test expects.
+        match self {
+            Self::Embeddings | Self::LayerAttention(_) | Self::LayerFfn(_) | Self::LayerNorm(_) => {
+                Vec::new()
+            }
+        }
+    }
+
+    /// True when `name` falls inside this group.
+    #[must_use]
+    pub fn matches(self, name: &str) -> bool {
+        self.name_prefixes().iter().any(|p| name.starts_with(p))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The bound model (D-08)
+// ---------------------------------------------------------------------------
+
+/// A MiniLM tokenizer bound to the encoder built from the SAME source.
+///
+/// # The seal, in one sentence
+///
+/// [`MiniLmTokenizer::from_bytes`], [`MiniLmImport::open`],
+/// [`MiniLmImport::open_slice_fixture`] and [`BertSentenceEncoder::from_import`]
+/// are all `pub(crate)`, so the only way an out-of-crate caller obtains a
+/// tokenizer paired with an encoder is through this type — which loads both
+/// halves from one directory. A mismatched pair is therefore **not
+/// constructible** rather than merely detected (D-08 as written, user decision
+/// 2026-08-08). The `tokenizer_sha256` equality the encoder enforces at every
+/// forward call is kept as defense in depth against IN-crate misuse.
+///
+/// # Freeze policy
+///
+/// Default is all-trainable (D-20). [`Self::apply_freeze`] has REPLACEMENT
+/// semantics: the argument fully defines the policy, so any group not listed
+/// becomes trainable again. It is idempotent, order-insensitive and
+/// duplicate-tolerant, and `apply_freeze(&[])` is exactly [`Self::clear_freeze`].
+///
+/// Freezing is BY EXCLUSION: a frozen parameter is dropped from
+/// [`Self::trainable_parameters_mut`] — the set an optimizer is built from — and
+/// additionally has `requires_grad` cleared. The exclusion is the load-bearing
+/// half; the flag is the belt to its braces.
+pub struct SetFitMiniLm {
+    tokenizer: MiniLmTokenizer,
+    encoder: BertSentenceEncoder,
+    /// Normalized (sorted, deduplicated) freeze policy. Empty means D-20's
+    /// all-trainable default.
+    freeze: Vec<FreezeGroup>,
+}
+
+impl std::fmt::Debug for SetFitMiniLm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetFitMiniLm")
+            .field("encoder", &self.encoder)
+            .field("freeze", &self.freeze)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Read one file from a model directory, naming it in any failure.
+fn read_model_file(dir: &Path, name: &str) -> Result<Vec<u8>, SetFitError> {
+    std::fs::read(dir.join(name)).map_err(|e| SetFitError::ImportIo {
+        path: name.to_string(),
+        reason: e.to_string(),
+    })
+}
+
+impl SetFitMiniLm {
+    /// Load a pinned all-MiniLM-L6-v2 checkout: tokenizer and encoder together.
+    ///
+    /// Returns a model in **eval** mode, matching HuggingFace
+    /// `from_pretrained`, which is also the mode the frozen fixtures were
+    /// generated in (D-16). Training callers flip it with
+    /// [`Self::set_training`].
+    ///
+    /// # Errors
+    ///
+    /// Any typed [`SetFitError`] the ENC-01 pin, the tokenizer load or the
+    /// tensor read produces, naming the field/file/tensor that failed.
+    pub fn from_pretrained_dir(dir: &Path, root_seed: u64) -> Result<Self, SetFitError> {
+        // RED STUB (plan 01-07 Task 2). An error no test expects.
+        let _ = (dir, root_seed);
+        Err(SetFitError::RemapInvalid {
+            reason: "RED STUB: SetFitMiniLm::from_pretrained_dir is not implemented yet"
+                .to_string(),
+        })
+    }
+
+    /// Load the frozen conformance slice: tokenizer and encoder together.
+    ///
+    /// Reads `tokenizer.json`, `slice_config.json`, `vocab_remap.json` and
+    /// `slice_model.apr` from `fixture_dir`. Returns a model in eval mode.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_pretrained_dir`], plus [`SetFitError::RemapInvalid`] if
+    /// the remap does not describe this slice.
+    #[cfg(feature = "conformance-fixtures")]
+    pub fn from_slice_fixture(fixture_dir: &Path, root_seed: u64) -> Result<Self, SetFitError> {
+        // RED STUB (plan 01-07 Task 2). An error no test expects.
+        let _ = (fixture_dir, root_seed);
+        Err(SetFitError::RemapInvalid {
+            reason: "RED STUB: SetFitMiniLm::from_slice_fixture is not implemented yet".to_string(),
+        })
+    }
+
+    /// Sha256 of the tokenizer half of this pair.
+    #[must_use]
+    pub fn tokenizer_sha256(&self) -> &str {
+        self.tokenizer.tokenizer_sha256()
+    }
+
+    /// Encoder layers, for freeze-group validation and introspection.
+    #[must_use]
+    pub fn num_layers(&self) -> usize {
+        self.encoder.num_layers()
+    }
+
+    /// Whether the encoder is in training mode.
+    #[must_use]
+    pub fn training(&self) -> bool {
+        self.encoder.training()
+    }
+
+    /// Tokenize once, then encode: `[B, H]` unit-norm sentence embeddings.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitError::BatchInvalid`] for an empty input list, plus anything the
+    /// encoder's boundary validation or the pooling/normalize primitives reject.
+    pub fn encode_texts(&self, texts: &[&str]) -> Result<Tensor, SetFitError> {
+        let batch = self.tokenizer.encode_batch(texts)?;
+        self.encoder.encode(&batch)
+    }
+
+    /// ENC-05 mode propagation, forwarded to the encoder.
+    pub fn set_training(&mut self, training: bool) {
+        self.encoder.set_training(training);
+    }
+
+    // -----------------------------------------------------------------------
+    // Conformance-only READ accessors
+    //
+    // Borrows out, never construction. They exist because the lower-level
+    // constructors are sealed and 01-08's out-of-crate harness still needs
+    // per-layer introspection and the tokenized batch. Gated on
+    // `conformance-fixtures`, not on `setfit`, so an ordinary consumer never
+    // sees them.
+    // -----------------------------------------------------------------------
+
+    /// Borrow the encoder — 01-08 reaches `forward_tokens_per_layer` through it.
+    #[cfg(feature = "conformance-fixtures")]
+    #[must_use]
+    pub fn encoder(&self) -> &BertSentenceEncoder {
+        &self.encoder
+    }
+
+    /// Tokenize with THIS model's tokenizer.
+    ///
+    /// The returned batch is already stamped with the matching
+    /// `tokenizer_sha256` and its fields are `pub(crate)` (01-05 W1), so an
+    /// out-of-crate caller can read it but cannot re-point the stamp. A
+    /// mismatched pair is therefore not assemblable from this accessor either.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitError::BatchInvalid`] for an empty list;
+    /// [`SetFitError::TokenizerLoad`] if the tokenizer fails on an input.
+    #[cfg(feature = "conformance-fixtures")]
+    pub fn tokenize(&self, texts: &[&str]) -> Result<SentenceBatch, SetFitError> {
+        self.tokenizer.encode_batch(texts)
+    }
+
+    // -----------------------------------------------------------------------
+    // Freeze policy
+    // -----------------------------------------------------------------------
+
+    /// Replace the freeze policy.
+    ///
+    /// See the type docs for the semantics. Validation of EVERY group completes
+    /// before any flag is touched, so a rejected call leaves the previous policy
+    /// and every `requires_grad` exactly as it found them.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitError::FreezeGroupInvalid`] for a layer index outside
+    /// `0..num_layers()`, or for a structurally valid group whose prefix set
+    /// addresses zero named parameters (the naming-drift guard).
+    pub fn apply_freeze(&mut self, groups: &[FreezeGroup]) -> Result<(), SetFitError> {
+        // RED STUB (plan 01-07 Task 2): accepts everything, changes nothing.
+        let _ = groups;
+        Ok(())
+    }
+
+    /// Restore the D-20 default: every parameter trainable.
+    pub fn clear_freeze(&mut self) {
+        // RED STUB (plan 01-07 Task 2).
+    }
+
+    /// The applied policy, normalized (deduplicated and sorted).
+    #[must_use]
+    pub fn freeze_policy(&self) -> Vec<FreezeGroup> {
+        self.freeze.clone()
+    }
+
+    /// Named parameters an optimizer should update, honoring the freeze policy.
+    ///
+    /// This is the set 01-08's AdamW is built from, which is why freezing works
+    /// by EXCLUSION here rather than only by clearing a flag.
+    #[must_use]
+    pub fn trainable_parameters_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        // RED STUB (plan 01-07 Task 2): ignores the policy.
+        self.encoder.named_parameters_mut()
+    }
+
+    /// Named parameters the freeze policy excludes from optimization.
+    #[must_use]
+    pub fn frozen_parameters(&self) -> Vec<(String, &Tensor)> {
+        // RED STUB (plan 01-07 Task 2): ignores the policy.
+        Vec::new()
+    }
+}
+
+#[cfg(all(test, feature = "setfit"))]
+#[path = "model_tests.rs"]
+mod model_tests;

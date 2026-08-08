@@ -313,6 +313,27 @@ impl BertSentenceEncoder {
         self.root_seed
     }
 
+    /// Number of encoder layers this model was built with.
+    ///
+    /// A READ accessor (the D-08 seal is about constructors). 01-07's
+    /// `FreezeGroup` validation needs it: `LayerAttention(7)` against a 2-layer
+    /// slice must be a typed rejection, and the only honest source for "how many
+    /// layers" is the encoder that was actually built.
+    #[must_use]
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Sha256 of the tokenizer this encoder is paired with.
+    ///
+    /// A READ accessor. It exists so the pairing `SetFitMiniLm` establishes can
+    /// be ASSERTED rather than assumed — the forward-time equality check is the
+    /// runtime half, this is what lets a test see the value it compares.
+    #[must_use]
+    pub fn tokenizer_sha256(&self) -> &str {
+        &self.tokenizer_sha256
+    }
+
     /// Ordered dotted names of every ACTIVE dropout site.
     ///
     /// Real introspection, not a re-derived name list: each entry is emitted
