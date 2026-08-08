@@ -302,6 +302,55 @@ fn import_pin_accepts_a_config_carrying_a_brand_new_unknown_field() {
     );
 }
 
+/// End-to-end open of the REAL 86.7 MB pinned checkout, when one has been
+/// materialised (D-10, `scripts/setfit_fixtures/fetch_full_weights.py`).
+///
+/// Every other pin test proves a REJECTION or stops at the missing-weights
+/// boundary. This is the only test that drives `open()` all the way through
+/// 37 real tensor reads and the finiteness scan, so without it "the pin
+/// accepts the pinned model" would be an inference rather than a measurement.
+/// It skips loudly rather than failing when the checkout is absent, because the
+/// artifact is deliberately not vendored.
+#[test]
+fn import_pin_opens_the_real_pinned_checkout_when_materialised() {
+    let Some(dir) = real_checkout_dir() else {
+        eprintln!(
+            "SKIP import_pin_opens_the_real_pinned_checkout_when_materialised: \
+             no checkout at $APRENDER_MINILM_DIR (run scripts/setfit_fixtures/fetch_full_weights.py)"
+        );
+        return;
+    };
+    let import = MiniLmImport::open(&dir).expect("the real pinned checkout must open");
+    let preset = BertConfig::minilm_l6();
+    assert_eq!(import.dims().hidden, preset.hidden_dim);
+    assert_eq!(import.dims().layers, preset.num_layers);
+    assert_eq!(import.dims().heads, preset.num_heads);
+    assert_eq!(import.dims().vocab, preset.vocab_size);
+    assert_eq!(import.revision(), PINNED_REVISION);
+    assert_eq!(import.tokenizer_sha256(), PINNED_TOKENIZER_SHA256);
+    assert!(
+        import.vocab_remap().is_none(),
+        "the full-pin path must NOT carry a slice remap"
+    );
+}
+
+/// `$APRENDER_MINILM_DIR`, or the default the D-10 script writes to.
+fn real_checkout_dir() -> Option<PathBuf> {
+    let dir = std::env::var("APRENDER_MINILM_DIR").map_or_else(
+        |_| {
+            dirs_home()
+                .map(|h| h.join(".cache/aprender/minilm-l6-v2-1110a243"))
+                .unwrap_or_default()
+        },
+        PathBuf::from,
+    );
+    (dir.join("config.json").exists() && dir.join("full_model.apr").exists()).then_some(dir)
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
 // ---------------------------------------------------------------------------
 // The mutation matrix — one field per test
 // ---------------------------------------------------------------------------

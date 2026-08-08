@@ -164,14 +164,24 @@ impl std::fmt::Display for SetFitError {
                 f,
                 "SetFitError::TokenizerHashMismatch(expected {expected}, got {got})"
             ),
+            // Each of the three below names the CONFIG KEY it read, not only the
+            // offending value: a rejection that says `"gelu_new"` without saying
+            // which field carried it is not actionable, and the ENC-01 mutation
+            // tests assert on the field name for exactly that reason.
             Self::UnsupportedPooling { got } => {
                 write!(f, "SetFitError::UnsupportedPooling({got})")
             }
             Self::UnsupportedArchitecture { got } => {
-                write!(f, "SetFitError::UnsupportedArchitecture({got})")
+                write!(
+                    f,
+                    "SetFitError::UnsupportedArchitecture(architectures = {got}; only BertModel is pinned)"
+                )
             }
             Self::UnsupportedActivation { got } => {
-                write!(f, "SetFitError::UnsupportedActivation({got})")
+                write!(
+                    f,
+                    "SetFitError::UnsupportedActivation(hidden_act = \"{got}\" is not the pinned exact-erf \"gelu\")"
+                )
             }
             Self::BatchInvalid { reason } => {
                 write!(f, "SetFitError::BatchInvalid({reason})")
