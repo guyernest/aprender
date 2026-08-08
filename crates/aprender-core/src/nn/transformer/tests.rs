@@ -442,6 +442,8 @@ mod tests_alibi_mha;
 mod tests_attention_backward_gradflow;
 #[path = "tests_attention_contract.rs"]
 mod tests_attention_contract;
+#[path = "tests_attention_mask_broadcast.rs"]
+mod tests_attention_mask_broadcast;
 #[path = "tests_attention_scaling_contract.rs"]
 mod tests_attention_scaling_contract;
 #[path = "tests_decoder_grad_flow.rs"]
