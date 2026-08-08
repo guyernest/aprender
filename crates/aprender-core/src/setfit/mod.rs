@@ -39,5 +39,9 @@
 //! assertions do not scan.
 
 pub mod error;
+pub mod tokenizer;
 
 pub use error::SetFitError;
+pub use tokenizer::{
+    InputProvenance, MiniLmTokenizer, SentenceBatch, TruncationFact, MAX_SEQUENCE_LENGTH,
+};
