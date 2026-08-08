@@ -263,6 +263,79 @@ impl Module for MultiHeadAttention {
         params
     }
 
+    /// Semantic names prefixed `q_proj.` / `k_proj.` / `v_proj.` / `out_proj.`,
+    /// in exactly the order `parameters()` above uses.
+    ///
+    /// MHA sits on the BERT encoder path, so freeze groups address these tensors
+    /// by prefix. A positional fallback here (`"0".."7"`) would make a
+    /// `LayerAttention(n)` prefix match zero tensors — silently training or
+    /// freezing the wrong set with no error raised.
+    fn named_parameters(&self) -> Vec<(String, &Tensor)> {
+        let mut params: Vec<(String, &Tensor)> = self
+            .q_proj
+            .named_parameters()
+            .into_iter()
+            .map(|(n, t)| (format!("q_proj.{n}"), t))
+            .collect();
+        params.extend(
+            self.k_proj
+                .named_parameters()
+                .into_iter()
+                .map(|(n, t)| (format!("k_proj.{n}"), t)),
+        );
+        params.extend(
+            self.v_proj
+                .named_parameters()
+                .into_iter()
+                .map(|(n, t)| (format!("v_proj.{n}"), t)),
+        );
+        params.extend(
+            self.out_proj
+                .named_parameters()
+                .into_iter()
+                .map(|(n, t)| (format!("out_proj.{n}"), t)),
+        );
+        params
+    }
+
+    fn named_parameters_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut params: Vec<(String, &mut Tensor)> = self
+            .q_proj
+            .named_parameters_mut()
+            .into_iter()
+            .map(|(n, t)| (format!("q_proj.{n}"), t))
+            .collect();
+        params.extend(
+            self.k_proj
+                .named_parameters_mut()
+                .into_iter()
+                .map(|(n, t)| (format!("k_proj.{n}"), t)),
+        );
+        params.extend(
+            self.v_proj
+                .named_parameters_mut()
+                .into_iter()
+                .map(|(n, t)| (format!("v_proj.{n}"), t)),
+        );
+        params.extend(
+            self.out_proj
+                .named_parameters_mut()
+                .into_iter()
+                .map(|(n, t)| (format!("out_proj.{n}"), t)),
+        );
+        params
+    }
+
+    /// Record the mode locally and propagate it to the four projections through
+    /// the `set_training` channel.
+    fn set_training(&mut self, training: bool) {
+        self.training = training;
+        self.q_proj.set_training(training);
+        self.k_proj.set_training(training);
+        self.v_proj.set_training(training);
+        self.out_proj.set_training(training);
+    }
+
     fn train(&mut self) {
         self.training = true;
     }

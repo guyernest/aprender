@@ -102,6 +102,49 @@ impl Module for Sequential {
             .collect()
     }
 
+    /// Prefix each child's names with the child's index and a dot.
+    ///
+    /// Indices are positions in the container, NOT positions among
+    /// parameter-bearing children: a parameterless child (a `Dropout`, say)
+    /// contributes no names but still consumes its index, so `[Linear, Dropout,
+    /// Linear]` yields `0.*` and `2.*`. Renumbering would silently re-address
+    /// every downstream freeze group when a dropout layer is added or removed.
+    fn named_parameters(&self) -> Vec<(String, &Tensor)> {
+        self.modules
+            .iter()
+            .enumerate()
+            .flat_map(|(i, m)| {
+                m.named_parameters()
+                    .into_iter()
+                    .map(move |(name, tensor)| (format!("{i}.{name}"), tensor))
+            })
+            .collect()
+    }
+
+    fn named_parameters_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        self.modules
+            .iter_mut()
+            .enumerate()
+            .flat_map(|(i, m)| {
+                m.named_parameters_mut()
+                    .into_iter()
+                    .map(move |(name, tensor)| (format!("{i}.{name}"), tensor))
+            })
+            .collect()
+    }
+
+    /// Recurse via `set_training`, not via `train`/`eval`.
+    ///
+    /// The channel matters: a child that overrides only `set_training` (any
+    /// composite built on this trait) would be skipped by a `child.eval()` walk,
+    /// leaving a nested `Dropout` active during evaluation.
+    fn set_training(&mut self, training: bool) {
+        self.training = training;
+        for module in &mut self.modules {
+            module.set_training(training);
+        }
+    }
+
     fn train(&mut self) {
         self.training = true;
         for module in &mut self.modules {
