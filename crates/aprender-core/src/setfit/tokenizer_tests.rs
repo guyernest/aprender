@@ -191,7 +191,9 @@ fn tokenizer_parity_rejects_bytes_that_are_not_a_tokenizer() {
 fn sentence_batch_carries_the_producing_tokenizer_identity() {
     let fixture = load_cases();
     let tok = tokenizer();
-    let batch = tok.encode_batch(&["A quick brown fox jumps over the lazy dog."]).expect("encode_batch");
+    let batch = tok
+        .encode_batch(&["A quick brown fox jumps over the lazy dog."])
+        .expect("encode_batch");
     assert_eq!(batch.tokenizer_sha256(), tok.tokenizer_sha256());
     assert_eq!(batch.tokenizer_sha256(), fixture.tokenizer_sha256);
 }
@@ -226,7 +228,10 @@ fn sentence_batch_reports_original_length_for_a_truncated_input() {
 
     assert_eq!(batch.seq(), MAX_SEQUENCE_LENGTH);
     assert_eq!(batch.input_ids().len(), MAX_SEQUENCE_LENGTH);
-    assert!(batch.truncation()[0].truncated, "row must report truncation");
+    assert!(
+        batch.truncation()[0].truncated,
+        "row must report truncation"
+    );
     assert_eq!(
         batch.truncation()[0].original_len,
         case.original_token_counts[0]
@@ -264,7 +269,9 @@ fn sentence_batch_provenance_is_the_sha256_of_each_input_in_order() {
 #[test]
 fn sentence_batch_empty_text_list_is_rejected_not_panicked() {
     let tok = tokenizer();
-    let err = tok.encode_batch(&[]).expect_err("empty batch must be rejected");
+    let err = tok
+        .encode_batch(&[])
+        .expect_err("empty batch must be rejected");
     assert!(
         matches!(err, SetFitError::BatchInvalid { .. }),
         "expected BatchInvalid, got {err}"
@@ -279,7 +286,10 @@ fn sentence_batch_empty_text_list_is_rejected_not_panicked() {
 fn sentence_batch_rows_are_row_major_and_arity_consistent() {
     let tok = tokenizer();
     let batch = tok
-        .encode_batch(&["Short text.", "A noticeably longer sentence that forces the batch to pad the shorter rows."])
+        .encode_batch(&[
+            "Short text.",
+            "A noticeably longer sentence that forces the batch to pad the shorter rows.",
+        ])
         .expect("encode_batch");
     let n = batch.batch() * batch.seq();
     assert_eq!(batch.input_ids().len(), n);

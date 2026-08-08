@@ -209,9 +209,52 @@ impl MiniLmTokenizer {
     /// `tokenizers` serialization, or if truncation/padding cannot be
     /// configured on it.
     pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, SetFitError> {
-        let _ = bytes;
-        Err(SetFitError::BatchInvalid {
-            reason: "MiniLmTokenizer::from_bytes is not implemented".to_string(),
+        let mut inner =
+            tokenizers::Tokenizer::from_bytes(bytes).map_err(|e| SetFitError::TokenizerLoad {
+                reason: e.to_string(),
+            })?;
+
+        // Truncation and padding come from the tokenizers API, never from
+        // hand-rolled slicing: the library reserves room for the post-processor's
+        // special tokens, so the padded row is exactly MAX_SEQUENCE_LENGTH with
+        // [CLS]/[SEP] intact. Hand-rolling would silently drop [SEP].
+        inner
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: MAX_SEQUENCE_LENGTH,
+                strategy: tokenizers::TruncationStrategy::LongestFirst,
+                stride: 0,
+                direction: tokenizers::TruncationDirection::Right,
+            }))
+            .map_err(|e| SetFitError::TokenizerLoad {
+                reason: format!("cannot configure truncation: {e}"),
+            })?;
+        inner.with_padding(Some(tokenizers::PaddingParams {
+            strategy: tokenizers::PaddingStrategy::BatchLongest,
+            direction: tokenizers::PaddingDirection::Right,
+            pad_to_multiple_of: None,
+            pad_id: 0,
+            pad_type_id: 0,
+            pad_token: "[PAD]".to_string(),
+        }));
+
+        // Second view over the SAME bytes with neither truncation nor padding.
+        // Used only to recover the true length of rows the first pass cut; see
+        // the truncation-fact strategy in the module docs.
+        let mut untruncated =
+            tokenizers::Tokenizer::from_bytes(bytes).map_err(|e| SetFitError::TokenizerLoad {
+                reason: e.to_string(),
+            })?;
+        untruncated
+            .with_truncation(None)
+            .map_err(|e| SetFitError::TokenizerLoad {
+                reason: format!("cannot clear truncation: {e}"),
+            })?;
+        untruncated.with_padding(None);
+
+        Ok(Self {
+            inner,
+            untruncated,
+            tokenizer_sha256: sha256_hex(bytes),
         })
     }
 
@@ -232,9 +275,140 @@ impl MiniLmTokenizer {
     /// returns a malformed encoding; [`SetFitError::TokenizerLoad`] if the
     /// underlying tokenizer fails on an input.
     pub fn encode_batch(&self, texts: &[&str]) -> Result<SentenceBatch, SetFitError> {
-        let _ = texts;
-        Err(SetFitError::BatchInvalid {
-            reason: "MiniLmTokenizer::encode_batch is not implemented".to_string(),
+        if texts.is_empty() {
+            return Err(SetFitError::BatchInvalid {
+                reason: "empty text list: a batch needs at least one input".to_string(),
+            });
+        }
+
+        let encodings = self.inner.encode_batch(texts.to_vec(), true).map_err(|e| {
+            SetFitError::TokenizerLoad {
+                reason: format!("encode_batch failed: {e}"),
+            }
+        })?;
+
+        if encodings.len() != texts.len() {
+            return Err(SetFitError::BatchInvalid {
+                reason: format!(
+                    "tokenizer returned {} encodings for {} inputs",
+                    encodings.len(),
+                    texts.len()
+                ),
+            });
+        }
+
+        let batch = texts.len();
+        let seq = encodings[0].get_ids().len();
+        if seq == 0 {
+            return Err(SetFitError::BatchInvalid {
+                reason: "tokenizer produced a zero-length row".to_string(),
+            });
+        }
+
+        // BatchLongest padding must make every row the same width. Checked
+        // rather than assumed: an unequal row would silently corrupt the
+        // row-major flattening below.
+        for (i, e) in encodings.iter().enumerate() {
+            if e.get_ids().len() != seq {
+                return Err(SetFitError::BatchInvalid {
+                    reason: format!(
+                        "row {i} has length {} but row 0 has {seq}; padding did not apply",
+                        e.get_ids().len()
+                    ),
+                });
+            }
+        }
+
+        // Which rows were actually cut. `get_overflowing()` is non-empty exactly
+        // when truncation removed content.
+        let cut: Vec<usize> = encodings
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.get_overflowing().is_empty())
+            .map(|(i, _)| i)
+            .collect();
+
+        // Recover true lengths for cut rows only. The naive single-pass formula
+        // `ids.len() + sum(overflowing.len())` is WRONG here: measured against
+        // the frozen `truncation_long` fixture it reports 512 for a 482-token
+        // input, because post-processing adds [CLS]/[SEP] to each overflow chunk
+        // and padding then widens each chunk to the batch-longest width.
+        //
+        // For a row that was NOT cut, the true length is the number of kept
+        // positions, i.e. the attention-mask population count. It is emphatically
+        // NOT `get_ids().len()`, which is the batch-longest PADDED width — that
+        // reads 20 for a 5-token input in the frozen `mixed_length_pair` case.
+        let mut original_lens: Vec<usize> = encodings
+            .iter()
+            .map(|e| e.get_attention_mask().iter().filter(|m| **m == 1).count())
+            .collect();
+        if !cut.is_empty() {
+            let cut_texts: Vec<&str> = cut.iter().map(|i| texts[*i]).collect();
+            let full = self
+                .untruncated
+                .encode_batch(cut_texts, true)
+                .map_err(|e| SetFitError::TokenizerLoad {
+                    reason: format!("untruncated pass failed: {e}"),
+                })?;
+            if full.len() != cut.len() {
+                return Err(SetFitError::BatchInvalid {
+                    reason: "untruncated pass returned a different row count".to_string(),
+                });
+            }
+            for (slot, e) in cut.iter().zip(full.iter()) {
+                original_lens[*slot] = e.get_ids().len();
+            }
+        }
+
+        let n = batch
+            .checked_mul(seq)
+            .ok_or_else(|| SetFitError::BatchInvalid {
+                reason: format!("batch {batch} x seq {seq} overflows usize"),
+            })?;
+        let mut input_ids = Vec::with_capacity(n);
+        let mut token_type_ids = Vec::with_capacity(n);
+        let mut attention_mask = Vec::with_capacity(n);
+        let mut truncation = Vec::with_capacity(batch);
+        let mut provenance = Vec::with_capacity(batch);
+
+        for (i, e) in encodings.iter().enumerate() {
+            input_ids.extend_from_slice(e.get_ids());
+            token_type_ids.extend_from_slice(e.get_type_ids());
+            // tokenizers reports the mask as u32; narrow it explicitly and reject
+            // anything that is not 0/1 rather than truncating a stray value into
+            // a plausible-looking keep.
+            for (pos, m) in e.get_attention_mask().iter().enumerate() {
+                let bit = u8::try_from(*m).map_err(|_| SetFitError::BatchInvalid {
+                    reason: format!("attention mask value {m} at row {i} position {pos}"),
+                })?;
+                if bit > 1 {
+                    return Err(SetFitError::BatchInvalid {
+                        reason: format!(
+                            "non-binary attention mask value {bit} at row {i} position {pos}"
+                        ),
+                    });
+                }
+                attention_mask.push(bit);
+            }
+            truncation.push(TruncationFact {
+                truncated: !e.get_overflowing().is_empty(),
+                original_len: original_lens[i],
+            });
+            provenance.push(InputProvenance {
+                index: i,
+                text_sha256: sha256_hex(texts[i].as_bytes()),
+            });
+        }
+
+        Ok(SentenceBatch {
+            input_ids,
+            token_type_ids,
+            attention_mask,
+            batch,
+            seq,
+            truncation,
+            provenance,
+            tokenizer_sha256: self.tokenizer_sha256.clone(),
         })
     }
 }
