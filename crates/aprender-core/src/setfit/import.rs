@@ -40,6 +40,12 @@
 // describe a defect. Widening the visibility to silence them would break the
 // seal, which is the wrong trade. This allow is scoped to this module and stops
 // being needed the moment 01-06 wires the encoder to `MiniLmImport`.
+//
+// 01-06 UPDATE, MEASURED not assumed: wiring the encoder cut the surface from
+// ~15 findings to exactly THREE — `VocabRemap::from_json_bytes`,
+// `SliceConfig::from_json_bytes` and `validate_pooling`. All three are still
+// reachable only from tests and from 01-07's `SetFitMiniLm`, so the allow is
+// still load-bearing and was NOT removed. 01-07 is the plan that can delete it.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -601,9 +607,14 @@ impl MiniLmImport {
 /// is embedded byte-identically in the tests (digest-checked against
 /// `upstream_manifest.json`) and asserted to be ACCEPTED, so a wrong constant
 /// here fails `import_pin_accepts_the_real_config_with_its_unmodelled_extra_fields`.
-const PINNED_HIDDEN_DROPOUT_PROB: f64 = 0.1;
+/// `pub(crate)` (plan 01-06): the encoder places dropout at the four
+/// HF-verified sites and must use the SAME probability the pin enforces. Two
+/// unlinked copies of a pinned number is precisely how one of them drifts, so
+/// `encoder_dropout_probability_agrees_with_the_enc01_pin` asserts equality at
+/// `f32` rather than trusting two literals to stay in step.
+pub(crate) const PINNED_HIDDEN_DROPOUT_PROB: f64 = 0.1;
 /// See [`PINNED_HIDDEN_DROPOUT_PROB`].
-const PINNED_ATTENTION_DROPOUT_PROB: f64 = 0.1;
+pub(crate) const PINNED_ATTENTION_DROPOUT_PROB: f64 = 0.1;
 /// The pinned position-embedding scheme. `relative_key` and friends change the
 /// attention computation itself, so they are rejected rather than ignored.
 const PINNED_POSITION_EMBEDDING_TYPE: &str = "absolute";

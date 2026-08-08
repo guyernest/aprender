@@ -460,3 +460,5 @@ mod tests_position_contract;
 mod tests_rope_contract;
 #[path = "tests_rope_ext_contract.rs"]
 mod tests_rope_ext_contract;
+#[path = "tests_seeded_attention_dropout.rs"]
+mod tests_seeded_attention_dropout;

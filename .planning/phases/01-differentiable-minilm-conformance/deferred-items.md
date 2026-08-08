@@ -406,3 +406,102 @@ Fix direction: convert the whole `[features]` block to explicit `dep:` form in
 one pass, declaring an explicit forwarding feature for any bare name that must
 remain enableable. Out of scope here because it touches every feature in the
 crate and this plan's blast radius should stay at `setfit`.
+
+## From plan 01-06 (2026-08-08)
+
+Numbered from **D30** as the orchestrator directed.
+
+### D30. This plan's own `<verification>` filter is not scoped to this plan — D13 recurring
+
+`cargo test -p aprender-core --lib --features conformance-fixtures encoder_`
+is the command 01-06's verification block names. Measured, it runs **149**
+tests. Only **42** of them belong to this plan; the other 107 are pre-existing
+tests whose *path* contains `encoder_` — `transformer_encoder_...`,
+`bert_encoder_...` and friends. A reader seeing "149 passed" learns almost
+nothing about the encoder.
+
+This is exactly D13, one plan later, in a verification block written after D13
+was logged. The unambiguous form is the module path:
+
+```
+cargo test -p aprender-core --lib --features conformance-fixtures \
+  setfit::encoder::encoder_tests      # 42, exactly this plan's
+cargo test -p aprender-core --lib mha_seeded_dropout_   # 10, exactly this plan's
+```
+
+Both forms are recorded in the 01-06 SUMMARY; every count reported there was
+taken with the module-path form.
+
+Fix direction: the phase's plan template should require a module-path filter,
+not a name-prefix filter, whenever the prefix is a word the crate already uses.
+`grep -c` the existing test corpus for a candidate prefix before writing it into
+a verification block — that check costs one command and would have caught this
+and D13.
+
+### D31. Two freshly constructed `nn` modules do NOT have the same weights
+
+`Linear::new` (and therefore `MultiHeadAttention::new`,
+`TransformerEncoderLayer::new`, …) draws **random** initial weights. Any test
+that builds two modules and compares their outputs is measuring the
+initialiser, not whatever it meant to measure.
+
+This cost a cycle here and was caught only because the failure message printed
+the two values: the first draft of
+`mha_seeded_dropout_same_seed_gives_bitwise_identical_output` compared two
+identically-seeded `MultiHeadAttention`s and failed with
+`-0.1428478 vs -0.3084763` — a difference far larger than any dropout mask
+could explain. Worse, the *sibling* test
+(`..._different_seeds_give_different_output`) PASSED, for the wrong reason,
+and the RED measurement taken against the pair was invalid until both were
+rewritten and RED was re-measured.
+
+The general principle (CLAUDE.md rule 2: prove the mechanism engaged) was
+known; the specific instance still went wrong, because "same seed" reads like
+it controls everything about the module when it controls only the dropout.
+
+Workaround used: a `deterministic_mha` helper that installs fixed weights via
+`q_proj_mut().set_weight(...)` before comparing. `crates/aprender-core/tests/
+batched_graph_spike.rs` does the same thing for the same reason.
+
+Fix direction: none needed in-tree — this is correct behaviour for an
+initialiser. Recorded so the next agent comparing two `nn` modules reaches for
+explicit weights immediately rather than after a confusing failure.
+
+### D32. The D-08 seal makes a whole construction path look dead, and the `#[allow]` cannot be narrowed
+
+01-05 recorded `#![allow(dead_code)]` in `setfit/import.rs` with the removal
+condition "stops being needed the moment 01-06 wires the encoder to
+`MiniLmImport`". Measured after wiring: the surface fell from ~15 findings to
+exactly **three** — `VocabRemap::from_json_bytes`, `SliceConfig::from_json_bytes`
+and `validate_pooling` — so the allow is still load-bearing and was NOT removed.
+The comment in `import.rs` now records the measurement.
+
+`setfit/encoder.rs` needed the same allow for the same reason, and a *targeted*
+version was tried first and measured to be whack-a-mole: annotating
+`install_projection` and `EMBEDDINGS_DROPOUT_SITE` simply moved the finding to
+`site_seed`. The cause is structural — `from_import` is `pub(crate)` under the
+seal and has no non-test caller, so dead-code analysis walks the entire
+construction path it reaches.
+
+Fix direction: 01-07 is the plan that can delete both allows, because
+`SetFitMiniLm` is the first non-test caller of either constructor. It should
+delete them and re-run clippy rather than assume they became unnecessary.
+
+### D33. `Module::train`/`eval` recurse on `Sequential` but not on `MultiHeadAttention`
+
+01-02 established `set_training` as the propagation channel (D-17) and left
+`train`/`eval` leaf-local — but `Sequential::eval()` already recursed via
+`child.eval()` (01-02 recorded this) while `MultiHeadAttention::eval()` sets
+only its own flag. So the crate has two conventions and no way to tell which a
+given composite follows.
+
+That is a live footgun for any module whose behaviour depends on mode:
+`model.eval()` returning a model with dropout still active produces stochastic
+"inference" with no error anywhere. `BertSentenceEncoder` therefore routes both
+spellings through `set_training`, and a test asserts it — but that is one
+module opting out of an inconsistency, not a fix.
+
+Fix direction: pick one convention crate-wide. The safe one is "`train`/`eval`
+delegate to `set_training`, which is the only method a composite overrides";
+it makes the wrong thing impossible to write rather than merely documented.
+That is a change across every `impl Module`, hence deferred.
