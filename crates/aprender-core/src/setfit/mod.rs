@@ -38,10 +38,12 @@
 //! a free function — that would reopen the seal through a path the source
 //! assertions do not scan.
 
+pub mod encoder;
 pub mod error;
 pub mod import;
 pub mod tokenizer;
 
+pub use encoder::BertSentenceEncoder;
 pub use error::SetFitError;
 pub use import::{
     MiniLmImport, ModelDims, SliceConfig, VocabRemap, PINNED_ACTIVATION, PINNED_MAX_SEQ_LENGTH,
