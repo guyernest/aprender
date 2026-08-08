@@ -178,6 +178,13 @@ sha2 = "0.10"
 # Chat templates
 minijinja = { version = "2.14", features = ["loader", "serde"] }
 
+# HuggingFace tokenizers (SetFit / MiniLM conformance, Phase 1 ENC-02).
+# `default-features = false` is load-bearing, not tidiness: the default set is
+# [progressbar, onig, esaxx_fast], which pulls the `onig` C library and the
+# `esaxx-rs` C++ build script into every consumer. `fancy-regex` is the pure-Rust
+# regex backend the WordPiece/BERT path needs, and is the ONLY feature enabled.
+tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
+
 # Contracts
 provable-contracts = "0.3"
 provable-contracts-macros = "0.3"

@@ -149,6 +149,12 @@ hf-xet = { workspace = true, optional = true }
 # SafeTensors format parsing (optional, for HF model comparison)
 safetensors = { version = "0.4", optional = true }
 
+# HuggingFace tokenizers (optional, `setfit` feature only — Phase 1 ENC-02).
+# Workspace pin carries `default-features = false, features = ["fancy-regex"]`
+# so no onig/esaxx native toolchain is required. D-06: a build without `setfit`
+# must not contain a `tokenizers` node at all.
+tokenizers = { workspace = true, optional = true }
+
 # WASM bindings for noise generator (optional, spec: noise-generator-apr-wasm-spec.md)
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
@@ -190,6 +196,13 @@ half = { workspace = true }  # IEEE f16 oracle for the convert_report f32_to_f16
 [features]
 default = ["parallel"]
 parallel = ["rayon"]  # Enable parallel graph algorithms (disable for WASM)
+# `sha2` was an IMPLICIT feature (cargo synthesises one per optional dependency)
+# that `format-encryption` and `hf-hub-integration` referenced by bare name. The
+# moment any feature writes `dep:sha2`, cargo stops synthesising the implicit
+# one and those two references fail to resolve. Declaring it explicitly keeps
+# the published feature surface byte-identical while letting `setfit` use the
+# unambiguous `dep:` form.
+sha2 = ["dep:sha2"]
 datasets = ["alimentar"]  # Enable data loading from alimentar
 format-compression = ["lz4_flex", "zstd", "apr-format/compression"]  # Enable LZ4/ZSTD compression for .apr format (spec §3.3, GH-146); forward to apr-format so container I/O actually compresses
 format-signing = ["ed25519-dalek"]  # Enable Ed25519 signatures for .apr format (spec §4.2)
@@ -224,6 +237,20 @@ chaos-basic = []
 chaos-network = ["chaos-basic"]
 chaos-byzantine = ["chaos-basic"]
 chaos-full = ["chaos-network", "chaos-byzantine"]
+
+# SetFit / MiniLM differentiable conformance (Phase 1, contract
+# setfit-encoder-conformance-v1).
+#
+# `dep:sha2` is NOT optional polish. `sha2` is declared optional above and is
+# otherwise enabled only by `format-encryption` and `hf-hub-integration`; the
+# setfit module hashes tokenizer bytes and input text in PRODUCTION code, so
+# `cargo check -p aprender-core --features setfit` would not compile without it.
+# The feature is declared dependency-CLOSED: enabling `setfit` alone must build.
+setfit = ["dep:tokenizers", "dep:sha2"]
+# Conformance fixtures gate the test-only slice constructor, which lives inside
+# `#[cfg(feature = "setfit")] mod setfit` — so this must IMPLY setfit rather than
+# being an empty marker that could be enabled alone and gate nothing.
+conformance-fixtures = ["setfit"]
 
 # WASM support: enable getrandom's "js" feature for browser environments
 [target.'cfg(target_arch = "wasm32")'.dependencies]
