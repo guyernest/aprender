@@ -58,10 +58,88 @@
     equation = "l2_normalize_rows"
 )]
 pub fn l2_normalize_rows(x: &Tensor, eps: f32) -> Result<Tensor, OpError> {
-    // ---- RED STUB (plan 01-03 Task 1) ------------------------------------
-    // Deliberately fails every call so that every assertion in
-    // `tests_normalize_backward.rs` is proven reachable and meaningful before
-    // any of them can pass. Replaced wholesale by the GREEN commit.
-    let _ = (x, eps);
-    Err(OpError::ShapeOverflow { dims: Vec::new() })
+    // ---- 1. Shape --------------------------------------------------------
+    let shape = x.shape();
+    if shape.len() != 2 {
+        return Err(OpError::ShapeMismatch {
+            expected: vec![0, 0],
+            got: shape.to_vec(),
+        });
+    }
+    let batch = shape[0];
+    let hidden = shape[1];
+    if batch == 0 {
+        return Err(OpError::ZeroDimension { which: "batch" });
+    }
+    if hidden == 0 {
+        return Err(OpError::ZeroDimension { which: "hidden" });
+    }
+
+    // ---- 2. The epsilon floor --------------------------------------------
+    // `eps <= 0.0` is FALSE for NaN, so the finiteness test is not redundant.
+    if !(eps.is_finite() && eps > 0.0) {
+        return Err(OpError::invalid_epsilon(eps));
+    }
+
+    // ---- 3. Value-level guards -------------------------------------------
+    let xd = x.data();
+    if let Some(position) = xd.iter().position(|v| !v.is_finite()) {
+        return Err(OpError::NonFiniteInput { position });
+    }
+
+    // Domain is proven by the guards above, so the contract precondition cannot
+    // fire. Asserted HERE rather than at entry deliberately: at entry a
+    // `debug_assert!` would turn a fail-closed typed error into a debug panic on
+    // exactly the hostile inputs this op exists to reject.
+    contract_pre_l2_normalize_rows!(xd);
+
+    // ---- 4. Forward (row-major, LAYOUT-001) ------------------------------
+    // The sum of squares accumulates in f64. In f32 a legitimate embedding of
+    // magnitude 1e-20 squares to 1e-40, which is subnormal and rounds toward
+    // zero — the row's norm would collapse to 0 and the clamp decision would be
+    // made on a fabricated value. f64 has ~300 decades of headroom here.
+    let mut out = vec![0.0f32; batch * hidden];
+    let mut norms = Vec::with_capacity(batch);
+
+    for row in 0..batch {
+        let base = row * hidden;
+        let sumsq: f64 = xd[base..base + hidden]
+            .iter()
+            .map(|&v| f64::from(v) * f64::from(v))
+            .sum();
+        let n = sumsq.sqrt() as f32;
+
+        // The clamp. `n > eps` selects the projected branch; `n == eps` is
+        // assigned to the constant branch. The backward re-takes this exact
+        // comparison from the stored raw norm.
+        let d = if n > eps { n } else { eps };
+        let inv = 1.0 / f64::from(d);
+        for j in 0..hidden {
+            out[base + j] = (f64::from(xd[base + j]) * inv) as f32;
+        }
+        norms.push(n);
+    }
+
+    let mut result = Tensor::from_vec(out, &[batch, hidden]);
+
+    // ---- 5. Record the graph edge ----------------------------------------
+    if is_grad_enabled() && x.requires_grad_enabled() {
+        result.requires_grad_(true);
+        let grad_fn = Arc::new(L2NormalizeRowsBackward {
+            output: result.clone(),
+            norms,
+            eps,
+            batch,
+            hidden,
+        });
+        result.set_grad_fn(grad_fn.clone());
+
+        with_graph(|graph| {
+            graph.register_tensor(x.clone());
+            graph.record(result.id(), grad_fn, vec![x.id()]);
+        });
+    }
+
+    contract_post_l2_normalize_rows!(result.data());
+    Ok(result)
 }

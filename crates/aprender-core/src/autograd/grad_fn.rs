@@ -420,6 +420,96 @@ impl GradFn for MaskedMeanPoolBackward {
     }
 }
 
+/// Gradient function for row-wise L2 normalization with an epsilon floor.
+///
+/// Obligation: OBLIG-ENC-03 L2 normalization, contract
+/// `setfit-encoder-conformance-v1`, equation `l2_normalize_rows`.
+///
+/// Forward: `y[b] = x[b] / max(||x[b]||_2, eps)`.
+///
+/// # The derivative is PIECEWISE, and the two branches are different functions
+///
+/// With `n = ||x_row||_2` and `d = max(n, eps)`:
+///
+/// ```text
+/// n >  eps :  dy/dx = (I - y yᵀ) / n     # d = n depends on x
+/// n <= eps :  dy/dx = I / eps            # d is a CONSTANT
+/// ```
+///
+/// Above the clamp the denominator is itself a function of `x`, and
+/// differentiating it through the quotient rule is what produces the `y yᵀ`
+/// projection term. Below the clamp the denominator is the literal constant
+/// `eps`: the map is the plain linear scaling `x ↦ x / eps`, and the projection
+/// term does not exist. Applying `(I - y yᵀ)/n` there is not a loose
+/// approximation — it is the derivative of a function that is not being
+/// evaluated, and at small `n` it inflates the gradient by a factor of
+/// `eps / n`, which is unbounded.
+///
+/// That error is **invisible to any finite-difference test that never visits
+/// the clamped branch**, which is every FD test written against well-scaled
+/// embeddings. `tests_normalize_backward.rs` therefore carries a dedicated
+/// below-clamp gradcheck, a boundary case at `n == eps`, and a mixed-branch
+/// batch.
+///
+/// # Why the RAW norm is stored
+///
+/// The branch must be the one the FORWARD took. The clamped output carries no
+/// record of which side it came from — a clamped row and an unclamped row are
+/// both just rows of numbers — so re-deriving the decision from `y` alone is
+/// impossible. `norms` holds the raw `n` per row and the identical `n > eps`
+/// comparison is re-taken here.
+pub(crate) struct L2NormalizeRowsBackward {
+    /// The normalized output `y` (shape `[batch, hidden]`).
+    pub(crate) output: Tensor,
+    /// RAW per-row L2 norm, BEFORE the epsilon floor was applied.
+    pub(crate) norms: Vec<f32>,
+    /// The epsilon floor the forward was called with.
+    pub(crate) eps: f32,
+    pub(crate) batch: usize,
+    pub(crate) hidden: usize,
+}
+
+impl GradFn for L2NormalizeRowsBackward {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let g = grad_output.data();
+        let y = self.output.data();
+        let (b, h) = (self.batch, self.hidden);
+        let mut grad_in = vec![0.0f32; b * h];
+
+        for row in 0..b {
+            let base = row * h;
+            let n = self.norms[row];
+
+            if n > self.eps {
+                // ABOVE the clamp — projected form: (g - y·<g,y>) / n.
+                let mut dot = 0.0f64;
+                for j in 0..h {
+                    dot += f64::from(g[base + j]) * f64::from(y[base + j]);
+                }
+                let inv_n = 1.0f64 / f64::from(n);
+                for j in 0..h {
+                    grad_in[base + j] =
+                        ((f64::from(g[base + j]) - f64::from(y[base + j]) * dot) * inv_n) as f32;
+                }
+            } else {
+                // AT or BELOW the clamp — the denominator is the constant eps,
+                // so there is NO projection term. Deliberately not a "small n"
+                // special case of the branch above: it is a different function.
+                let inv_eps = 1.0f64 / f64::from(self.eps);
+                for j in 0..h {
+                    grad_in[base + j] = (f64::from(g[base + j]) * inv_eps) as f32;
+                }
+            }
+        }
+
+        vec![Tensor::new(&grad_in, &[b, h])]
+    }
+
+    fn name(&self) -> &'static str {
+        "L2NormalizeRowsBackward"
+    }
+}
+
 // ============================================================================
 // Activation Functions
 // ============================================================================

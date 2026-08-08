@@ -176,11 +176,23 @@
                 hidden: 1,
             }
             .name(),
+            crate::autograd::grad_fn::L2NormalizeRowsBackward {
+                output: Tensor::new(&[1.0], &[1, 1]),
+                norms: vec![1.0],
+                eps: 1e-12,
+                batch: 1,
+                hidden: 1,
+            }
+            .name(),
         ];
 
         assert!(
             names.contains(&"MaskedMeanPoolBackward"),
             "MaskedMeanPoolBackward must be registered in test_all_backward_names"
+        );
+        assert!(
+            names.contains(&"L2NormalizeRowsBackward"),
+            "L2NormalizeRowsBackward must be registered in test_all_backward_names"
         );
 
         // All names should be unique
