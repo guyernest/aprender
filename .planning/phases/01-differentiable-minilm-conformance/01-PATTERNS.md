@@ -13,7 +13,7 @@
 | `crates/aprender-core/src/autograd/ops/pooling.rs` (new) | autograd op | reduction | `crates/aprender-core/src/autograd/ops/mod.rs:339-361` (`mean`) + `grad_fn.rs` reduction backwards | exact |
 | `crates/aprender-core/src/autograd/ops/normalize.rs` (new) | autograd op | rowwise transform | `crates/aprender-core/src/autograd/ops/mod.rs:24-50` (`add` shape) + `grad_fn.rs:1146+` (`SoftmaxLastDimBackward` rowwise loop) | exact |
 | `crates/aprender-core/src/autograd/ops/similarity.rs` (new) | autograd op ×2 (cosine, MSE) | reduction | same op pattern; backward rowwise loop per `SoftmaxLastDimBackward` | exact |
-| `crates/aprender-core/src/autograd/grad_fn.rs` (modify: 4 new `*Backward` structs) | autograd backward | transform | `EmbeddingBackward` at `grad_fn.rs:1100-1130` | exact |
+| `crates/aprender-core/src/autograd/grad_fn.rs` (modify: 5 new `*Backward` structs — `MaskedMeanPool`, `L2NormalizeRows`, `CosineSimilarity`, `Mse`, `GeluExact`; count updated 2026-08-08 after plan 01-09 added the exact-erf GELU backward) | autograd backward | transform | `EmbeddingBackward` at `grad_fn.rs:1100-1130` | exact |
 | `crates/aprender-core/src/autograd/ops/tests_*_backward.rs` (new, 6 files) | test (gradcheck) | transform | `crates/aprender-core/src/nn/conv/tests_pool_flatten_backward_gradflow.rs` | exact |
 | `crates/aprender-core/src/nn/module.rs` (modify: named traversal + `set_training`) | trait | n/a | itself (`module.rs:31-96`) + leaf impl `nn/linear.rs:285-303` | exact |
 | `crates/aprender-core/src/nn/{linear.rs, normalization/, dropout/mod.rs, container.rs}` (modify: named impls) | module impls | n/a | `nn/linear.rs:285-297` (`parameters`/`parameters_mut` ordering) | exact |
