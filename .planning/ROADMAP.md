@@ -132,8 +132,11 @@ evidence.
 **Plans**: 10 plans in 7 waves
 
 Plans:
-**Wave 1** *(the phase branch `gsd/phase-3-two-stage-trainer` must exist and be checked out BEFORE
-this wave starts — no plan creates it; see each wave-1 plan's `<wave_1_concurrency>` block)*
+**Wave 1** *(**orchestrator owns the branch**: create `gsd/phase-3-two-stage-trainer` from the
+current HEAD of `gsd/phase-2-contract-gate` BEFORE dispatching this wave, and record the base SHA in
+the phase SUMMARY set — no plan creates it, all three CHECK and stop. Sequential execution is the
+recommended default; per-executor `git worktree` if true parallelism is wanted. See each wave-1
+plan's `<wave_1_concurrency>` block.)*
 
 - [ ] 03-01-PLAN.md — f64 L-BFGS widening with a frozen f32 golden trajectory and the four-channel non-finite matrix (wave 1)
 - [ ] 03-02-PLAN.md — Keyed Philox dropout with the forward-ordinal (branch) coordinate + fixed-pool GEMM thread-count falsification gate (wave 1)

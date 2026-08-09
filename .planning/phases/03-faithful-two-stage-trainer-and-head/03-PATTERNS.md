@@ -810,11 +810,15 @@ builders; and `SetFitMiniLm::from_slice_fixture` (setfit/mod.rs:236) with `fixtu
 (model_tests.rs:403) for the network-free encoder. Both are already `pub`, so no test-support
 backdoor is required.
 
-### `crates/aprender-train/tests/setfit_calibration.rs` — calibration matrix target (03-05 T3)
+### `calibration_matrix_epsilon_basis` — `#[ignore]`-marked in-crate lib test (03-05 T3)
 
-**Analog:** none in-repo; it exists because the matrix (>= 12 full tuning runs) must not sit on the
-default `evidence_` unit filter. Closest discipline: the Makefile's heavy scoped targets wired into
-tier3 rather than tier2.
+**Analog:** none in-repo for the matrix itself; it exists because >= 12 full tuning runs must not sit
+on the default `evidence_` unit filter. It is deliberately NOT an out-of-crate integration target
+(revision 3 / N-01): `run_tuning` is `pub(crate)` and `calibration_variants()` is `#[cfg(test)]`, so
+`tests/` cannot reach either, and every widening that would fix that is forbidden elsewhere in the
+phase. `#[ignore]` achieves the same isolation with zero visibility change. Closest in-repo
+discipline: the Makefile's heavy scoped targets kept out of the fast path — the same reasoning,
+applied at the test-attribute level instead of the Make-target level.
 
 ### `crates/aprender-train/tests/setfit_repro.rs` and `crates/aprender-core/tests/gemm_thread_determinism.rs` — subprocess harnesses (03-10 T2, 03-02 T3)
 
