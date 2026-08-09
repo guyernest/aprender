@@ -57,6 +57,13 @@ members = [
     "crates/aprender-verify",
     "crates/aprender-verify-ml",
     "crates/aprender-data",
+    # --- Phase 2 (DATA-01..DATA-06): deterministic contrastive data protocol ---
+    # D-01: contrastive/Siamese DATA CONSTRUCTION as a general capability.
+    # Deliberately NOT folded into aprender-data (D-02): that crate carries
+    # arrow/parquet/zstd/s3/streaming/federated weight which must not flow into
+    # aprender-train (Phase 3) or a future Lambda consumer. See 02-CONTEXT.md D-01/D-02
+    # and 02-RESEARCH.md Finding F3 for the corrected dependency-edge evidence.
+    "crates/aprender-contrastive-data",
     "crates/aprender-simulate",
     "crates/aprender-distribute",
     "crates/aprender-registry",
@@ -152,6 +159,10 @@ rand_chacha = "0.9"
 proptest = "1.6"
 criterion = { version = "0.7", features = ["html_reports"] }
 tempfile = "3.14"
+# Compile-fail testing. Already a per-crate dev-dep of aprender-contracts-macros and
+# aprender-test-derive at the same "1"; hoisted here in Phase 2 so a typestate crate can
+# prove "cannot be constructed" with a reviewable .stderr snapshot instead of prose.
+trybuild = "1"
 
 # Data formats
 half = { version = "2.4", default-features = false, features = ["std"] }
@@ -174,6 +185,11 @@ zstd = "0.13"
 
 # Crypto
 sha2 = "0.10"
+
+# Unicode NFC. Already declared per-crate at the same "0.1" by aprender-train and
+# apr-cli (BPE corpus preprocessing); hoisted here in Phase 2 for the D-17 normalized
+# content hash (`nfc-trim-ws-v1`). Hoisting does not change either consumer's resolution.
+unicode-normalization = "0.1"
 
 # Chat templates
 minijinja = { version = "2.14", features = ["loader", "serde"] }
@@ -237,6 +253,12 @@ aprender-db = { path = "crates/aprender-db", version = "0.63.0" }
 aprender-graph = { path = "crates/aprender-graph", version = "0.63.0" }
 aprender-rag = { path = "crates/aprender-rag", version = "0.63.0" }
 aprender-data = { path = "crates/aprender-data", version = "0.63.0" }
+# Phase 2 D-01: deterministic, leakage-safe contrastive data construction.
+aprender-contrastive-data = { path = "crates/aprender-contrastive-data", version = "0.63.0" }
+# aprender-rand (lib name `trueno_rand`) is a workspace MEMBER (see [workspace] members
+# above) but had NO [workspace.dependencies] entry until Phase 2 — every consumer would
+# have had to re-declare the path. D-20 makes it the RNG for contrastive sampling.
+aprender-rand = { path = "crates/aprender-rand", version = "0.63.0" }
 
 # Additional external deps needed by sub-crates
 serde_yaml_ng = "0.10"

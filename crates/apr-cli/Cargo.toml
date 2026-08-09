@@ -230,6 +230,8 @@ dhat = { version = "0.3", optional = true }
 # Data loading, splitting, imbalance detection (apr data subcommands)
 # GH-344: path dep via .cargo/config.toml.dev-overrides; CI uses checkout+symlink
 alimentar = { workspace = true }
+# Phase 2: contrastive data protocol — apr data select/pairs + TweetEval adapter core
+aprender-contrastive-data = { workspace = true }
 half = "2.4.1"
 # YAML config parsing (distillation configs, ALB-011)
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }

@@ -261,6 +261,7 @@ dependencies = [
  "aprender-common",
  "aprender-compute",
  "aprender-contracts",
+ "aprender-contrastive-data",
  "aprender-core",
  "aprender-data",
  "aprender-explain",
@@ -567,6 +568,21 @@ dependencies = [
  "quote",
  "syn 2.0.118",
  "trybuild",
+]
+
+[[package]]
+name = "aprender-contrastive-data"
+version = "0.63.0"
+dependencies = [
+ "aprender-rand",
+ "proptest",
+ "provable-contracts-macros 0.3.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "trybuild",
+ "unicode-normalization",
 ]
 
 [[package]]
