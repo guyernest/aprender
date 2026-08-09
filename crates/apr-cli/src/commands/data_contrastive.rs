@@ -40,10 +40,10 @@ use aprender_contrastive_data::ledger::{AccessLedger, AccessRecord};
 use aprender_contrastive_data::manifest::{
     dump_pairs, pair_manifest_hash, PairReplayRecord, SelectedExampleRecord, SelectionManifest,
 };
-use aprender_contrastive_data::pairs::{PairConfig, PairSampler};
+use aprender_contrastive_data::pairs::{EmittedKinds, PairConfig, PairSampler};
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
 use aprender_contrastive_data::select::{FewShotSelector, Selection, SelectionConfig};
-use aprender_contrastive_data::split::{CompatibilityTest, SplitRole};
+use aprender_contrastive_data::split::{CompatibilityTest, SplitRole, Test, Train, Validation};
 use colored::Colorize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -220,12 +220,40 @@ fn read_required(path: &Path) -> Result<Vec<u8>> {
 /// expects. Handling that case here is what lets a compatibility directory be read far
 /// enough to be refused by PROFILE — "no such file: compatibility_test.jsonl" would be a
 /// true statement about the wrong problem.
-fn role_file(role: &str) -> String {
+///
+/// # An ALLOWLIST, not a sanitizer
+///
+/// The role reaching this function comes from `dataset_attestation.splits`, which is
+/// attacker-controlled bytes until the crate has verified them — and the caller joins the
+/// result onto `--data`. `Path::join` REPLACES the base when handed an absolute component,
+/// so a manifest declaring `"role": "/etc/passwd"` would have read `/etc/passwd.jsonl`, and
+/// `"../../.."` would have escaped the directory: a file-existence oracle, and an unbounded
+/// read if the target is a FIFO.
+///
+/// Enumerating the four legal roles is what closes that, rather than stripping bad
+/// characters. A sanitizer has to anticipate every encoding of "leave this directory"; an
+/// allowlist only has to know the roles this protocol defines, and it fails closed on
+/// anything it has never heard of.
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] naming the role, when it is not one of the four defined
+/// by the split protocol.
+fn role_file(role: &str) -> Result<String> {
     if role == CompatibilityTest::ROLE {
-        "test.jsonl".to_string()
-    } else {
-        format!("{role}.jsonl")
+        return Ok("test.jsonl".to_string());
     }
+    if role == Train::ROLE || role == Validation::ROLE || role == Test::ROLE {
+        return Ok(format!("{role}.jsonl"));
+    }
+    Err(CliError::ValidationFailed(format!(
+        "attestation declares split role {role:?}, which is not one of \
+         {:?}, {:?}, {:?}, {:?}. Refusing to derive a path from it.",
+        Train::ROLE,
+        Validation::ROLE,
+        Test::ROLE,
+        CompatibilityTest::ROLE,
+    )))
 }
 
 /// Open a prepared benchmark directory through the crate's attested boundary.
@@ -259,7 +287,7 @@ fn read_attested_canonical(
     for role in attestation.splits.keys() {
         buffers.insert(
             role.clone(),
-            read_required(&data_dir.join(role_file(role)))?,
+            read_required(&data_dir.join(role_file(role)?))?,
         );
     }
     PreparedDataset::<Canonical>::from_attested_bytes(&attestation_bytes, &buffers, ledger)
@@ -291,10 +319,9 @@ fn allowed_shots_text() -> String {
 ///
 /// [`CliError::ValidationFailed`] naming the offending value and the allowed set.
 fn validate_shots(shots: u32) -> Result<()> {
-    if data_tweeteval::FEW_SHOT_SIZES
-        .iter()
-        .any(|size| u64::try_from(*size).is_ok_and(|size| size == u64::from(shots)))
-    {
+    // `usize::try_from` rather than a cast: on a 16-bit target a `u32` shot count does not
+    // fit, and such a value is not in the list anyway.
+    if usize::try_from(shots).is_ok_and(|shots| data_tweeteval::FEW_SHOT_SIZES.contains(&shots)) {
         return Ok(());
     }
     Err(CliError::ValidationFailed(format!(
@@ -586,16 +613,38 @@ fn read_selection_manifest(path: &Path) -> Result<SelectionManifest> {
     SelectionManifest::from_bytes(&bytes).map_err(|e| dataset_error(&e))
 }
 
-/// Count the two pair kinds by STREAMING the sampler.
+/// The two pair-kind counts, from the layout rather than from a third pass over the stream.
 ///
-/// Two `u64`s and nothing else: collecting the stream to count it would reintroduce the
-/// `O(budget)` memory in the command whose job is to show it is absent.
+/// `emitted_kinds` plus the resolved budget determine the split exactly: the interleave is
+/// `2t -> positive`, `2t + 1 -> negative` in the `both` case, and every ordinal is one kind
+/// in the two degenerate cases. A positive draw puts both endpoints in ONE class and a
+/// negative draw's second endpoint skips the first endpoint's contiguous block, so the
+/// derived `1.0`/`0.0` target is the kind — counting it by streaming re-derived the whole
+/// pair space to learn `ceil(budget/2)`. At the default hard cap that was 1,048,576 wasted
+/// Philox draws on top of the passes `pair_manifest_hash` and `--dump` already make.
+///
+/// `EmittedKinds` is `#[non_exhaustive]`, so a variant this build does not know falls back
+/// to the streaming count rather than to a guess.
 ///
 /// # Errors
 ///
-/// Whatever `pair_at` raises. It cannot raise for an ordinal below the resolved budget,
-/// but the error is propagated rather than asserted away.
+/// Whatever `pair_at` raises on the fallback path. It cannot raise for an ordinal below the
+/// resolved budget, but the error is propagated rather than asserted away.
 fn count_kinds(sampler: &PairSampler<'_>) -> Result<(u64, u64)> {
+    let budget = sampler.budget();
+    match sampler.layout().emitted_kinds() {
+        EmittedKinds::Both => Ok((budget.div_ceil(2), budget / 2)),
+        EmittedKinds::PositivesOnly => Ok((budget, 0)),
+        EmittedKinds::NegativesOnly => Ok((0, budget)),
+        _ => count_kinds_by_streaming(sampler),
+    }
+}
+
+/// The fallback count, used only for an `EmittedKinds` variant this build predates.
+///
+/// Two `u64`s and nothing else: collecting the stream to count it would reintroduce the
+/// `O(budget)` memory in the command whose job is to show it is absent.
+fn count_kinds_by_streaming(sampler: &PairSampler<'_>) -> Result<(u64, u64)> {
     let mut positives = 0_u64;
     let mut negatives = 0_u64;
     for ordinal in 0..sampler.budget() {
@@ -1534,6 +1583,92 @@ mod tests {
             .map(|ordinal| sampler.pair_at(ordinal).expect("pair"))
             .collect();
         assert_eq!(validated, mine);
+    }
+
+    /// A role from an untrusted attestation can never become a path outside `--data`.
+    ///
+    /// `Path::join` REPLACES the base when the component is absolute, so before the
+    /// allowlist a manifest declaring `"role": "/etc/passwd"` read `/etc/passwd.jsonl`.
+    /// The mirror matters as much as the rejections: without it, a `role_file` that
+    /// refused everything would pass this test while breaking every real directory.
+    #[test]
+    fn role_file_refuses_any_role_that_could_escape_the_data_directory() {
+        let data_dir = Path::new("/benchmark/data");
+
+        for hostile in [
+            "/etc/passwd",
+            "../../../etc/passwd",
+            "..",
+            "train/../../escape",
+            "sub/dir",
+            "",
+            "TRAIN",
+            "train ",
+        ] {
+            let refused = role_file(hostile);
+            assert!(
+                refused.is_err(),
+                "role {hostile:?} was accepted and would resolve to {:?}",
+                refused.map(|f| data_dir.join(f))
+            );
+        }
+
+        // The mirror: every role the protocol actually defines still resolves, and stays
+        // a single component inside the data directory.
+        for (role, want) in [
+            (Train::ROLE, "train.jsonl"),
+            (Validation::ROLE, "validation.jsonl"),
+            (Test::ROLE, "test.jsonl"),
+            (CompatibilityTest::ROLE, "test.jsonl"),
+        ] {
+            let file = role_file(role).expect("a protocol role resolves");
+            assert_eq!(file, want, "role {role:?}");
+            assert_eq!(
+                data_dir.join(&file).parent(),
+                Some(data_dir),
+                "role {role:?} escaped to {:?}",
+                data_dir.join(&file)
+            );
+        }
+    }
+
+    /// The DERIVED kind counts must equal the STREAMED ones they replaced.
+    ///
+    /// `count_kinds` stopped measuring the stream and started deriving from `emitted_kinds`
+    /// plus the budget. That is only sound while the derivation agrees with the interleave
+    /// it assumes (`2t -> positive`, `2t + 1 -> negative`); nothing else in the tree pins
+    /// the two together, so a change to `pair_at`'s ordering would silently make every
+    /// reported `positives`/`negatives` wrong while the whole suite stayed green.
+    ///
+    /// This is the mirror for that optimization: `count_kinds_by_streaming` is still the
+    /// ground truth, and this test is what keeps the fast path honest. Odd budgets are
+    /// included deliberately — `div_ceil` and `/` differ exactly there, so an even-only
+    /// test would pass under a swapped pair of expressions.
+    #[test]
+    fn the_derived_kind_counts_equal_the_streamed_ones() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+        let selection = replayed_selection(&data, &manifest);
+
+        for budget in [1_u64, 2, 3, 7, 64, 255] {
+            let cfg = PairConfig {
+                budget: Some(budget),
+                ..PairConfig::new(selection.root_seed())
+            };
+            let sampler = PairSampler::new(&selection, &cfg).expect("sampler");
+
+            let derived = count_kinds(&sampler).expect("derived counts");
+            let streamed = count_kinds_by_streaming(&sampler).expect("streamed counts");
+            assert_eq!(
+                derived, streamed,
+                "budget {budget}: derived {derived:?} but the stream says {streamed:?}"
+            );
+            assert_eq!(
+                derived.0 + derived.1,
+                budget,
+                "budget {budget}: the two kinds must account for every ordinal"
+            );
+        }
     }
 
     #[test]

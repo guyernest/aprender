@@ -477,31 +477,62 @@ impl Selection {
             });
         }
 
+        let ledger_hash = digest_from_hex(&payload.ledger_hash).ok_or_else(|| {
+            ContrastiveDataError::SelectionReplayMismatch {
+                field: "ledger_hash".to_string(),
+            }
+        })?;
+        // The payload carries BOTH the persisted records and their digest, and nothing
+        // above compares the two. Without this, a manifest whose `ledger_hash` does not
+        // describe its own `access_ledger` replays clean and hands the unearned digest to
+        // the returned `Selection` — where `SelectionManifest::from_selection` then treats
+        // it as the ledger this selection was actually taken under.
+        let mut persisted = AccessLedger::new();
+        for record in &payload.access_ledger {
+            persisted.record(
+                &record.role,
+                &record.profile,
+                &record.purpose,
+                &record.fingerprint_hex,
+            );
+        }
+        if persisted.ledger_hash() != ledger_hash {
+            return Err(ContrastiveDataError::SelectionReplayMismatch {
+                field: "access_ledger".to_string(),
+            });
+        }
+
         ledger.record(
             Train::ROLE,
             Canonical::PROFILE,
             REPLAY_PURPOSE,
             &payload.dataset_fingerprint,
         );
-        let ledger_hash = digest_from_hex(&payload.ledger_hash).ok_or_else(|| {
-            ContrastiveDataError::SelectionReplayMismatch {
-                field: "ledger_hash".to_string(),
-            }
-        })?;
         Self::assemble(recorded, payload.clone(), ledger_hash)
     }
 }
 
-/// Parse a 64-character lowercase hex digest.
+/// Parse a 64-character LOWERCASE hex digest.
+///
+/// Uppercase is refused rather than accepted case-insensitively: every producer in this
+/// crate renders through [`hex`], which is lowercase, so an uppercase digest cannot have
+/// come from an honest writer. Accepting it would admit a manifest whose bytes differ from
+/// the canonical form while its parsed value looks identical.
 fn digest_from_hex(text: &str) -> Option<[u8; 32]> {
     let bytes = text.as_bytes();
     if bytes.len() != 64 {
         return None;
     }
+    let nibble = |byte: u8| -> Option<u32> {
+        if byte.is_ascii_uppercase() {
+            return None;
+        }
+        char::from(byte).to_digit(16)
+    };
     let mut digest = [0_u8; 32];
     for (index, slot) in digest.iter_mut().enumerate() {
-        let high = char::from(bytes[index * 2]).to_digit(16)?;
-        let low = char::from(bytes[index * 2 + 1]).to_digit(16)?;
+        let high = nibble(bytes[index * 2])?;
+        let low = nibble(bytes[index * 2 + 1])?;
         *slot = (high * 16 + low) as u8;
     }
     Some(digest)
@@ -548,6 +579,24 @@ fn check_provenance(
         return Err(ContrastiveDataError::FingerprintMismatch {
             expected: payload.validation_fingerprint.clone(),
             got: validation_fingerprint,
+        });
+    }
+    // The label MAP and the normalization tag are payload fields in their own right: the
+    // dataset fingerprint is computed from the DATASET, so matching it says nothing about
+    // what this payload wrote down. Without these two comparisons a manifest could carry
+    // renamed classes — or claim a normalization version this build does not implement —
+    // and still survive the full recomputation below, because neither value reaches the
+    // draw. Every downstream consumer reads its class names from the payload, so a
+    // silently wrong map is a mislabeled benchmark rather than a cosmetic defect.
+    if payload.label_names.as_slice() != dataset.label_names() {
+        return Err(ContrastiveDataError::SelectionReplayMismatch {
+            field: "label_names".to_string(),
+        });
+    }
+    if payload.normalization_version != CONTENT_NORMALIZATION_VERSION {
+        return Err(ContrastiveDataError::UnsupportedNormalizationVersion {
+            got: payload.normalization_version.clone(),
+            supported: CONTENT_NORMALIZATION_VERSION,
         });
     }
     let recorded = hex(&payload.exclusions.hash());
@@ -1451,6 +1500,87 @@ mod manifest_replay_tests {
                 assert_ne!(got, expected);
             }
             other => panic!("expected FingerprintMismatch, got {other:?}"),
+        }
+    }
+
+    /// A renamed CLASS survives every fingerprint, so only a direct comparison catches it.
+    ///
+    /// The dataset fingerprint is computed from the DATASET, not from the payload, and the
+    /// numeric labels the recomputation compares are unchanged — so before the
+    /// `label_names` rung existed this manifest replayed clean and every downstream reader
+    /// of `Selection::payload().label_names` got the wrong class names.
+    #[test]
+    fn manifest_replay_rejects_a_renamed_label() {
+        let err = reject(|manifest, dataset| {
+            assert_eq!(
+                manifest.payload.label_names,
+                dataset.label_names().to_vec(),
+                "the fixture must start in agreement, or this test proves nothing"
+            );
+            manifest.payload.label_names[1] = "opposed".to_string();
+            reseal(manifest);
+        });
+        match err {
+            ContrastiveDataError::SelectionReplayMismatch { field } => {
+                assert_eq!(field, "label_names");
+            }
+            other => panic!("expected SelectionReplayMismatch on label_names, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_an_unsupported_normalization_version() {
+        let err = reject(|manifest, _| {
+            manifest.payload.normalization_version = "nfc-trim-ws-v2".to_string();
+            reseal(manifest);
+        });
+        match err {
+            ContrastiveDataError::UnsupportedNormalizationVersion { got, supported } => {
+                assert_eq!(got, "nfc-trim-ws-v2");
+                assert_eq!(supported, crate::hash::CONTENT_NORMALIZATION_VERSION);
+            }
+            other => panic!("expected UnsupportedNormalizationVersion, got {other:?}"),
+        }
+    }
+
+    /// The payload carries the persisted records AND their digest; they must agree.
+    #[test]
+    fn manifest_replay_rejects_a_ledger_hash_that_does_not_describe_its_own_records() {
+        let err = reject(|manifest, _| {
+            manifest
+                .payload
+                .access_ledger
+                .push(crate::ledger::AccessRecord {
+                    role: "train".to_string(),
+                    profile: "canonical".to_string(),
+                    purpose: "fabricated".to_string(),
+                    fingerprint_hex: "aa".repeat(32),
+                });
+            // `ledger_hash` is deliberately LEFT ALONE, which is exactly the tampering the
+            // rung exists for: the envelope digest is resealed, so every other check passes.
+            reseal(manifest);
+        });
+        match err {
+            ContrastiveDataError::SelectionReplayMismatch { field } => {
+                assert_eq!(field, "access_ledger");
+            }
+            other => panic!("expected SelectionReplayMismatch on access_ledger, got {other:?}"),
+        }
+    }
+
+    /// Every producer renders through `hex`, which is lowercase; an uppercase digest cannot
+    /// have come from one, so it is refused rather than parsed case-insensitively.
+    #[test]
+    fn manifest_replay_rejects_an_uppercase_ledger_hash() {
+        let err = reject(|manifest, _| {
+            manifest.payload.ledger_hash = manifest.payload.ledger_hash.to_uppercase();
+            reseal(manifest);
+        });
+        match err {
+            ContrastiveDataError::SelectionReplayMismatch { field } => {
+                assert_eq!(field, "ledger_hash");
+            }
+            other => panic!("expected SelectionReplayMismatch on ledger_hash, got {other:?}"),
         }
     }
 

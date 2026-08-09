@@ -262,13 +262,23 @@ pub enum PairStrategy {
 
 impl PairStrategy {
     /// The wire name.
+    ///
+    /// Matched on `self` rather than returned as a constant: both of these values are
+    /// written verbatim into every [`PairReplayRecord`](crate::manifest::PairReplayRecord),
+    /// so a second variant added to this `#[non_exhaustive]` enum must not be able to
+    /// inherit `oversampling`'s name and version silently. The `match` makes that a
+    /// compile error instead.
     pub fn as_str(self) -> &'static str {
-        "oversampling"
+        match self {
+            Self::Oversampling => "oversampling",
+        }
     }
 
     /// The version tag recorded beside the name.
     pub fn strategy_version(self) -> u32 {
-        1
+        match self {
+            Self::Oversampling => 1,
+        }
     }
 }
 
@@ -283,13 +293,20 @@ pub enum SingletonPolicy {
 
 impl SingletonPolicy {
     /// The wire name.
+    ///
+    /// Matched on `self` for the same reason [`PairStrategy::as_str`] is: a second variant
+    /// must not be able to inherit this one's wire name and version tag by default.
     pub fn as_str(self) -> &'static str {
-        "negatives_only"
+        match self {
+            Self::NegativesOnly => "negatives_only",
+        }
     }
 
     /// The version tag recorded beside the name.
     pub fn policy_version(self) -> u32 {
-        1
+        match self {
+            Self::NegativesOnly => 1,
+        }
     }
 }
 

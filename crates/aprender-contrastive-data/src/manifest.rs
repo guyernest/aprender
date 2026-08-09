@@ -433,16 +433,34 @@ impl PairReplayRecord {
                 supported: DEGENERATE_POLICY_VERSION,
             });
         }
+        if self.budget == 0 {
+            return Err(ContrastiveDataError::ZeroBudget);
+        }
+        // The RESOLVED budget is replayed, and the cap is set to exactly it. The record
+        // does not persist the original cap (D-09) because the resolved budget subsumes it:
+        // what a replay has to reproduce is the stream, and the stream is a function of the
+        // budget that was actually used.
+        //
+        // A CLAMPED run must be replayed through the DEFAULT route, not as an explicit
+        // budget. Both routes resolve to the same number — for a clamped record the closed
+        // form exceeded the cap, so `min(closed_form, budget) == budget` — but an explicit
+        // budget resolves with `default_was_clamped == false`, so
+        // `from_sampler(to_config(record))` would silently re-describe a clamped artifact
+        // as an unclamped one. Replaying with `budget: None` and the cap pinned at the
+        // resolved value reproduces the flag as well as the stream. A forged record whose
+        // layout does not actually clamp resolves to a different budget and is then caught
+        // by `assert_record_describes`.
+        let (budget, hard_cap) = if self.default_was_clamped {
+            (None, Some(self.budget))
+        } else {
+            (Some(self.budget), Some(self.budget))
+        };
         Ok(PairConfig {
             root_seed: self.root_seed,
             strategy,
             singleton_policy: policy,
-            // The RESOLVED budget is replayed explicitly, and the cap is set to exactly it.
-            // The record does not persist the original cap (D-09) because the resolved
-            // budget subsumes it: what a replay has to reproduce is the stream, and the
-            // stream is a function of the budget that was actually used.
-            budget: Some(self.budget),
-            hard_cap: Some(self.budget.max(1)),
+            budget,
+            hard_cap,
         })
     }
 }

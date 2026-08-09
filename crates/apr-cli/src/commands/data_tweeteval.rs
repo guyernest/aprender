@@ -763,17 +763,27 @@ fn write_outputs(
     fs::create_dir_all(output_dir)?;
 
     // A benchmark directory is only meaningful as a whole: splits plus the
-    // manifest that describes them. Roll back anything already written so a
+    // manifest that describes them. Roll back anything this run CREATED so a
     // failure part-way through does not leave a half-written dataset that the
     // next non-`--force` run then refuses to replace.
+    //
+    // Only files this run created are removed. Under `--force` the writes below
+    // truncate files that were already there, and deleting those on a later failure
+    // would destroy a previously complete benchmark to clean up an incomplete one —
+    // strictly worse than the half-written state the rollback exists to avoid. The
+    // overwritten bytes are already lost either way; leaving the file in place at
+    // least keeps `--force` recoverable by re-running it.
     let mut written: Vec<PathBuf> = Vec::new();
     for (name, bytes) in split_bytes {
         let path = output_dir.join(format!("{name}.jsonl"));
+        let pre_existing = path.exists();
         if let Err(error) = write_file(&path, bytes, force) {
             remove_all(&written);
             return Err(error);
         }
-        written.push(path);
+        if !pre_existing {
+            written.push(path);
+        }
     }
     if force && profile == TweetEvalStanceProfile::Setfit {
         let stale_validation = output_dir.join("validation.jsonl");
@@ -790,11 +800,14 @@ fn write_outputs(
     })?;
     manifest_bytes.push(b'\n');
     let manifest_path = output_dir.join(MANIFEST_FILE);
+    let manifest_pre_existing = manifest_path.exists();
     if let Err(error) = write_file(&manifest_path, &manifest_bytes, force) {
         remove_all(&written);
         return Err(error);
     }
-    written.push(manifest_path);
+    if !manifest_pre_existing {
+        written.push(manifest_path);
+    }
 
     if let Err(error) = verify_prepared_directory(output_dir, profile) {
         remove_all(&written);
