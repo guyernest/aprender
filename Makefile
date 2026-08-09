@@ -213,13 +213,15 @@ tier2:
 	@cargo test -p aprender-core --features setfit,conformance-fixtures --test setfit_conformance
 # Phase 2 contrastive-data (D-26 again — a gate outside the tiers stops being run).
 #
-# RUNTIME WAS MEASURED, not estimated (2026-08-08, warm tree, three consecutive
-# runs): 2 s / 2 s / 2 s wall, rc=0 each time. As in the Phase 1 block above the
-# wall clock is dominated by cargo's per-invocation freshness check rather than
-# by test execution — at the time of measurement the crate carried only its
-# determinism doctest. Re-measure and update this number when the crate's suite
-# grows; a tier2 line whose comment records a stale number is worse than one
-# with no comment, because it will be trusted.
+# RUNTIME WAS RE-MEASURED, not estimated (2026-08-09, warm tree, three consecutive
+# runs): 1 s / 2 s / 1 s wall, rc=0 each time. The prior note recorded 2 s / 2 s / 2 s
+# when the crate carried only its determinism doctest; plan 02-03 grew the suite to
+# 67 lib tests + 5 doctests and the wall clock did NOT move. That is the same effect
+# the Phase 1 block describes, now measured across a 72x growth in test count: the
+# wall clock is cargo's per-invocation freshness check, not test execution (0.02 s
+# lib + 0.76 s doc of actual test time inside a 1-2 s invocation). Re-measure and
+# update when the suite grows again; a tier2 line whose comment records a stale
+# number is worse than one with no comment, because it will be trusted.
 #
 # UNFILTERED on purpose. The Phase 1 lines above take a module filter because
 # they select 162 of 14202 tests in a large crate. Here the whole crate IS this
