@@ -40,7 +40,7 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
   Prepare-time cross-split duplicate *content* is excluded from the training pool and recorded, not
   fatal — see D-27 (resolves the DATA-02 / D-18 conflict; `pv`-checked via the exclusion record)
 
-- [ ] **DATA-03**: A user can select exactly 8, 16, 32, or 64 unique canonical-training examples
+- [x] **DATA-03**: A user can select exactly 8, 16, 32, or 64 unique canonical-training examples
   per class using each contracted seed and receive a stable selected-ID manifest
 
 - [ ] **DATA-04**: A user can replay deterministic positive and negative pair generation where
@@ -216,7 +216,7 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
 | ENC-06 | Phase 1 | Pending |
 | DATA-01 | Phase 2 | Complete |
 | DATA-02 | Phase 2 | Complete |
-| DATA-03 | Phase 2 | Pending |
+| DATA-03 | Phase 2 | Complete |
 | DATA-04 | Phase 2 | Pending |
 | DATA-05 | Phase 2 | Pending |
 | DATA-06 | Phase 2 | Complete |

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-08-09T01:58:30.678Z"
-last_activity: "2026-08-09 -- 02-04 complete: measured + contracted SetFit pair-count fixture families (6 layouts each, incl. the K=N adversarial row) under manifest.sha256, shared typed models in tests/common, and a cwd-independent Rust verifier; 79 crate tests green, cross-crate baseline 14,102"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-08-09T02:45:52.321Z"
+last_activity: "2026-08-09 -- 02-05 complete: counter-based Philox derivation with a frozen little-endian encoding, labeled partial Fisher-Yates selection over one PreparedDataset<Canonical>, the non-circular selection manifest with a persisted access ledger, strict replay with twelve distinct rejections, and four goldens whose ordered-id digests were derived by an independent implementation; 140 crate tests green, cross-crate baseline 14,161"
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 18
-  completed_plans: 13
-  percent: 72
+  completed_plans: 14
+  percent: 78
 ---
 
 # Project State
@@ -26,13 +26,13 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 02 (deterministic-pair-and-data-protocol) — EXECUTING
-Plan: 5 of 9
-Status: Ready to execute — 02-04 complete
-Last activity: 2026-08-09 -- 02-04 complete: measured + contracted SetFit pair-count fixture families (6 layouts each, incl. the K=N adversarial row) under manifest.sha256, shared typed models in tests/common, and a cwd-independent Rust verifier; 79 crate tests green, cross-crate baseline 14,102
+Plan: 6 of 9
+Status: Ready to execute — 02-05 complete
+Last activity: 2026-08-09 -- 02-05 complete: counter-based Philox derivation with a frozen little-endian encoding, labeled partial Fisher-Yates selection over one PreparedDataset<Canonical>, the non-circular selection manifest with a persisted access ledger, strict replay with twelve distinct rejections, and four goldens whose ordered-id digests were derived by an independent implementation; 140 crate tests green, cross-crate baseline 14,161
 
-Working branch: `gsd/phase-2-contract-gate` @ c104221f4 (waves 3-6 fork from here; see 02-01-SUMMARY.md for the branch/PR policy)
+Working branch: `gsd/phase-2-contract-gate` @ dc44dd6c4 (waves 3-6 fork from here; see 02-01-SUMMARY.md for the branch/PR policy)
 
-Progress: [███████░░░] 72%
+Progress: [████████░░] 78%
 
 ## Performance Metrics
 
@@ -57,6 +57,7 @@ Progress: [███████░░░] 72%
 *Updated after each plan completion*
 | Phase 02 P03 | 55m | 3 tasks | 6 files |
 | Phase 02 P04 | ~50m | 2 tasks | 15 files |
+| Phase 02 P05 | ~2h10m | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-03: SplitFingerprintInput ordering is discharged by BTreeMap iteration order via Split::exact_hash_pairs(), not a caller-side sort — An ordering obligation left to callers can be silently omitted, and a wrong order yields a plausible-looking wrong digest. There is now no unsorted path to construct the input from.
 - [Phase 02]: 02-04: reference fixtures record MEASURED pinned-setfit behavior in one family and Aprender's contracted closed forms in another; every number must agree three ways (measurement, closed form read out of sampler.py, contract literal) or the generator aborts
 - [Phase 02]: 02-04: fixtures are keyed by fixture_id rather than by class layout, because 8_4_8 and 8_4_8_maxpairs100 share [8,4,8] and a layout-keyed map would silently drop one
+- [Phase 02]: 02-05: permutation invariance is claimed for the SELECTION, not the semantic hash — the payload embeds a dataset fingerprint that digests each split's JSONL in ingest order, so a permuted file is legitimately a different dataset; the test asserts both halves
+- [Phase 02]: 02-05: the selection AccessRecord carries the DATASET fingerprint, not the validation-split digest the plan named, so one ledger field does not mean two things depending on which code path wrote it; D-19 evidence is discharged via validation_witness().dataset_fingerprint_hex() and profile
+- [Phase 02]: 02-05: RNG byte-encoding and ordered-selection goldens are ALGORITHM-DERIVED (independent Python from the contract text, cross-checked with shasum); the four payload.json goldens are capture-and-blessed byte forms, and the SUMMARY labels which is which
 
 ### Pending Todos
 
@@ -135,6 +139,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-08-09T01:57:49.657Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-08-09T02:45:52.318Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None
