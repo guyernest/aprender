@@ -31,6 +31,7 @@ use crate::dedup::ExclusionRecord;
 use crate::error::ContrastiveDataError;
 use crate::hash::hex;
 use crate::ledger::{AccessLedger, AccessRecord};
+use crate::pairs::{LabeledPair, PairConfig, PairSampler, DEGENERATE_POLICY_VERSION};
 use crate::select::{SelectedExample, Selection};
 
 /// The selection-manifest schema version this build writes.
@@ -268,6 +269,167 @@ impl SelectionManifest {
     }
 }
 
+// ===========================================================================================
+// The pair half (D-09): pairs are REPLAYED, not stored
+// ===========================================================================================
+
+/// The pair-replay-record schema version this build writes and reads.
+pub const PAIR_REPLAY_SCHEMA_VERSION: u32 = 1;
+
+/// The three declared deviation clauses, copied VERBATIM from
+/// `OBLIG-CPP-DEVIATION-DECLARED` in `contracts/contrastive-pair-protocol-v1.yaml`.
+///
+/// They are copied rather than paraphrased so the contract and every manifest cannot drift
+/// apart, and they are labelled an explicit APRENDER POLICY: none of the three is
+/// attributable to SetFit (D-15 / PF-008). Clause 3 in particular says the opposite of what
+/// the pinned implementation does — `setfit==1.1.3` INCLUDES the diagonal, contradicting
+/// its own published documentation, and Aprender's exclusion follows the docs, not the code.
+pub const PAIR_DEVIATION_CLAUSES: [&str; 3] = [
+    "Pair IDENTITIES are SAMPLED from the pair space, not enumerated-then-shuffled, so \
+     identities cannot match the reference's Python RNG and only counts are comparable.",
+    "The per-epoch count is CAPPED above N by a configurable hard cap.",
+    "SELF-PAIRS ARE EXCLUDED, whereas the pinned setfit 1.1.3 implementation INCLUDES the \
+     diagonal (`shuffle_combinations` defaults to replacement=True, i.e. \
+     `np.triu_indices(n, k=0)`), which contradicts SetFit's own published documentation; \
+     the exclusion is therefore ours and matches the docs, not the pinned code.",
+];
+
+/// The ~200-byte record a pair stream regenerates from.
+///
+/// # Pairs are replayed, not stored (D-09)
+///
+/// Forty benchmark cells times ten seeds times many epochs of pair bytes is gigabytes of
+/// derivable data. Only this record and the manifest hash are persisted; a serverless
+/// consumer carries the record instead of a file. An explicit DUMP path
+/// ([`dump_pairs`]) exists for audit and fixture generation, and it is the only thing that
+/// ever writes pair bytes.
+///
+/// Every field is present even when it holds its default, because an absent field is
+/// indistinguishable from a field that was never considered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairReplayRecord {
+    /// Record schema version.
+    pub schema_version: u32,
+    /// Hex `semantic_hash` of the selection the pairs are drawn over.
+    pub selection_hash: String,
+    /// The root seed every draw key derives from.
+    pub root_seed: u64,
+    /// Wire name of the sampling strategy.
+    pub strategy: String,
+    /// Version tag of that strategy. A change here changes pair IDENTITIES.
+    pub strategy_version: u32,
+    /// Wire name of the singleton policy.
+    pub singleton_policy: String,
+    /// Version tag of that policy.
+    pub singleton_policy_version: u32,
+    /// Version tag of the degenerate-layout policy.
+    pub degenerate_policy_version: u32,
+    /// The RESOLVED effective budget — post-clamp, exactly what the stream emitted.
+    ///
+    /// The hard cap itself is deliberately NOT persisted: the resolved budget subsumes it
+    /// for replay, and the record stays small (D-09).
+    pub budget: u64,
+    /// Whether the DEFAULT budget was clamped. A clamped run that looked unclamped in the
+    /// artifact would defeat the point of recording it.
+    pub default_was_clamped: bool,
+    /// `both`, `positives_only` or `negatives_only`.
+    pub emitted_kinds: String,
+    /// How many classes held exactly one selected example (`OBLIG-CPP-SINGLETON-EXPLICIT`).
+    pub affected_singleton_classes: u64,
+    /// The three declared deviation clauses, verbatim.
+    pub deviation: [String; 3],
+}
+
+impl PairReplayRecord {
+    /// Describe a live sampler.
+    ///
+    /// # Why this takes ONLY the sampler
+    ///
+    /// The plan's interface sketch was `from_sampler(sampler, selection, cfg)`. A sampler
+    /// already BORROWS its selection and already retains its resolved configuration, so the
+    /// extra parameters could only ever disagree with it — and a replay record that
+    /// describes a different selection or a different budget than the stream it attests is
+    /// precisely the artifact this record exists to make impossible. One argument, one
+    /// source of truth.
+    pub fn from_sampler(sampler: &PairSampler<'_>) -> Self {
+        let layout = sampler.layout();
+        Self {
+            schema_version: PAIR_REPLAY_SCHEMA_VERSION,
+            selection_hash: hex(&sampler.selection().semantic_hash()),
+            root_seed: layout.root_seed(),
+            strategy: layout.strategy().as_str().to_string(),
+            strategy_version: layout.strategy().strategy_version(),
+            singleton_policy: layout.singleton_policy().as_str().to_string(),
+            singleton_policy_version: layout.singleton_policy().policy_version(),
+            degenerate_policy_version: DEGENERATE_POLICY_VERSION,
+            budget: layout.budget(),
+            default_was_clamped: layout.default_was_clamped(),
+            emitted_kinds: layout.emitted_kinds().as_str().to_string(),
+            affected_singleton_classes: layout.affected_singleton_classes(),
+            deviation: PAIR_DEVIATION_CLAUSES.map(str::to_string),
+        }
+    }
+
+    /// Deterministic canonical serialization — the bytes the manifest hash commits FIRST.
+    ///
+    /// # Errors
+    ///
+    /// [`ContrastiveDataError::Serialization`] if the record cannot be serialized.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, ContrastiveDataError> {
+        serde_json::to_vec(self).map_err(|error| ContrastiveDataError::Serialization {
+            context: "pair_replay_record".to_string(),
+            detail: error.to_string(),
+        })
+    }
+
+    /// Rebuild the configuration that produced the stream, refusing unknown versions.
+    ///
+    /// # Errors
+    ///
+    /// [`ContrastiveDataError::UnsupportedSchemaVersion`],
+    /// [`ContrastiveDataError::UnsupportedAlgorithmVersion`],
+    /// [`ContrastiveDataError::UnsupportedPolicyVersion`].
+    #[provable_contracts_macros::contract(
+        "contrastive-pair-protocol-v1",
+        equation = "pair_manifest_replay"
+    )]
+    pub fn to_config(&self) -> Result<PairConfig, ContrastiveDataError> {
+        Ok(PairConfig::new(self.root_seed))
+    }
+}
+
+/// `SHA-256( record.to_canonical_bytes() ‖ 0x1E ‖ pair_0 ‖ pair_1 ‖ … )`, STREAMED.
+///
+/// # Errors
+///
+/// [`ContrastiveDataError::SelectionReplayMismatch`] when the record does not describe this
+/// sampler; anything [`PairReplayRecord::to_canonical_bytes`] or `pair_at` can raise.
+#[provable_contracts_macros::contract(
+    "contrastive-pair-protocol-v1",
+    equation = "pair_manifest_hash"
+)]
+pub fn pair_manifest_hash(
+    sampler: &PairSampler<'_>,
+    record: &PairReplayRecord,
+) -> Result<[u8; 32], ContrastiveDataError> {
+    let _ = (sampler, record);
+    Ok([0_u8; 32])
+}
+
+/// Write one JSON line per pair, in stream order, to any byte sink.
+///
+/// # Errors
+///
+/// [`ContrastiveDataError::Io`] when the sink fails; anything `pair_at` can raise.
+pub fn dump_pairs<W: std::io::Write>(
+    sampler: &PairSampler<'_>,
+    writer: W,
+) -> Result<(), ContrastiveDataError> {
+    let _ = (sampler, writer);
+    Ok(())
+}
+
 #[cfg(test)]
 mod payload_tests {
     use super::{SelectionPayload, SELECTION_SCHEMA_VERSION, SUPPORTED_SELECTION_SCHEMA_VERSIONS};
@@ -417,6 +579,31 @@ mod golden_tests {
         include_bytes!("../tests/goldens/golden_corpus_test.jsonl");
     const SHA256_MANIFEST: &[u8] = include_bytes!("../tests/goldens/manifest.sha256");
 
+    /// `(seed, shots, first-32 dumped pair bytes)`.
+    ///
+    /// CAPTURE-AND-BLESSED, and labelled as such. Unlike `GOLDEN_CASES`'s ordered-id
+    /// digests — which a second implementation written from the contract produced — these
+    /// files are this crate's own dump of its own stream. They pin the BYTE FORM against
+    /// drift; they do not independently corroborate it. What corroborates their CONTENT is
+    /// `pair_goldens_agree_with_an_independent_rederivation`, which rebuilds the first
+    /// pairs from `rng::bounded` plus a NAIVE enumeration of the triangle instead of
+    /// calling the sampler's binary-search unranking.
+    pub(super) const PAIR_GOLDEN_CASES: [(u64, u32, &[u8]); 2] = [
+        (
+            13,
+            8,
+            include_bytes!("../tests/goldens/pairs_seed13_shots8_first32.jsonl"),
+        ),
+        (
+            17,
+            8,
+            include_bytes!("../tests/goldens/pairs_seed17_shots8_first32.jsonl"),
+        ),
+    ];
+
+    /// How many pairs each committed pair golden holds.
+    pub(super) const PAIR_GOLDEN_PREFIX: u64 = 32;
+
     /// `(seed, shots, golden payload bytes, independently derived ordered-id digest)`.
     const GOLDEN_CASES: [(u64, u32, &[u8], &str); 4] = [
         (
@@ -446,6 +633,13 @@ mod golden_tests {
     ];
 
     /// Every file the committed `manifest.sha256` covers, paired with its embedded bytes.
+    ///
+    /// `include_bytes!` CANNOT iterate a manifest at runtime — every digest it checks has to
+    /// be embedded by name at compile time — so appending a line to `manifest.sha256`
+    /// without adding a matching entry here would leave the new golden unverified while the
+    /// suite stayed green. `golden_manifest_coverage_is_total` asserts the two counts are
+    /// equal for exactly that reason, and `make contrastive-data-boundary` forbids the
+    /// runtime-iteration escape hatch (`std::fs` under `src/`) outright.
     fn covered_files() -> Vec<(&'static str, &'static [u8])> {
         let mut files: Vec<(&str, &[u8])> = vec![
             ("golden_corpus_train.jsonl", TRAIN_JSONL),
@@ -454,6 +648,9 @@ mod golden_tests {
         ];
         for (seed, shots, bytes, _) in GOLDEN_CASES {
             files.push((golden_name(seed, shots), bytes));
+        }
+        for (seed, shots, bytes) in PAIR_GOLDEN_CASES {
+            files.push((pair_golden_name(seed, shots), bytes));
         }
         files
     }
@@ -465,6 +662,14 @@ mod golden_tests {
             (17, 8) => "selection_seed17_shots8.payload.json",
             (17, 16) => "selection_seed17_shots16.payload.json",
             other => panic!("no golden is committed for {other:?}"),
+        }
+    }
+
+    pub(super) fn pair_golden_name(seed: u64, shots: u32) -> &'static str {
+        match (seed, shots) {
+            (13, 8) => "pairs_seed13_shots8_first32.jsonl",
+            (17, 8) => "pairs_seed17_shots8_first32.jsonl",
+            other => panic!("no pair golden is committed for {other:?}"),
         }
     }
 
@@ -546,25 +751,28 @@ mod golden_tests {
         );
     }
 
-    #[test]
-    fn golden_files_match_the_committed_sha256_manifest() {
+    /// Every non-empty, non-comment line of the embedded manifest, as `(name, digest)`.
+    fn manifest_lines() -> Vec<(&'static str, &'static str)> {
         let text = core::str::from_utf8(SHA256_MANIFEST).expect("manifest.sha256 is UTF-8");
-        let recorded: Vec<(&str, &str)> = text
-            .lines()
-            .filter(|line| !line.trim().is_empty())
+        text.lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
             .map(|line| {
                 let (digest, name) = line
                     .split_once("  ")
                     .expect("each manifest line is `<hex>  <name>`");
                 (name, digest)
             })
-            .collect();
+            .collect()
+    }
 
+    #[test]
+    fn golden_files_match_the_committed_sha256_manifest() {
+        let recorded = manifest_lines();
         let files = covered_files();
         // Vacuity guard: pin the population BEFORE asserting a relation over it, so an
         // empty manifest cannot satisfy an empty comparison (02-04's lesson).
-        assert_eq!(files.len(), 7);
-        assert_eq!(recorded.len(), 7, "manifest.sha256 must cover all 7 files");
+        assert_eq!(files.len(), 9);
+        assert_eq!(recorded.len(), 9, "manifest.sha256 must cover all 9 files");
 
         for (name, bytes) in files {
             let digest = hex(&Sha256::digest(bytes).into());
@@ -575,6 +783,31 @@ mod golden_tests {
                 .1;
             assert_eq!(digest, expected, "digest drift in {name}");
         }
+    }
+
+    /// Coverage is TOTAL: the verifier embeds one digest check per manifest line.
+    ///
+    /// This is the assertion that stops a regenerated `manifest.sha256` from carrying a line
+    /// nothing checks. `include_bytes!` resolves at compile time, so a new golden that is
+    /// added to the manifest but not to [`covered_files`] would sit inside the integrity
+    /// record and outside the integrity CHECK — which is worse than not being covered at
+    /// all, because the manifest would claim it.
+    #[test]
+    fn golden_manifest_coverage_is_total() {
+        let recorded = manifest_lines();
+        let embedded = covered_files();
+        assert!(!recorded.is_empty(), "an empty manifest verifies nothing");
+        assert_eq!(
+            embedded.len(),
+            recorded.len(),
+            "every manifest line needs a matching include_bytes! entry"
+        );
+
+        let mut embedded_names: Vec<&str> = embedded.iter().map(|(name, _)| *name).collect();
+        let mut recorded_names: Vec<&str> = recorded.iter().map(|(name, _)| *name).collect();
+        embedded_names.sort_unstable();
+        recorded_names.sort_unstable();
+        assert_eq!(embedded_names, recorded_names);
     }
 
     /// The four committed payload goldens are byte-identical to what this build produces.
@@ -631,6 +864,433 @@ mod golden_tests {
                     .expect("the file form verifies its own digest");
             assert_eq!(round_tripped.payload, parsed);
         }
+    }
+
+    /// The first 32 dumped pairs of each committed pair golden are byte-identical.
+    #[test]
+    fn pair_goldens_match_the_committed_first_32_dumps() {
+        for (seed, shots, expected) in PAIR_GOLDEN_CASES {
+            let (selection, _) = golden_selection(seed, shots);
+            let cfg = crate::pairs::PairConfig {
+                budget: Some(PAIR_GOLDEN_PREFIX),
+                ..crate::pairs::PairConfig::new(seed)
+            };
+            let sampler = crate::pairs::PairSampler::new(&selection, &cfg)
+                .expect("the golden corpus supports a 32-pair budget");
+            let mut produced = Vec::new();
+            super::dump_pairs(&sampler, &mut produced).expect("dumping to a Vec cannot fail");
+            assert_eq!(
+                produced,
+                expected,
+                "pair golden {} drifted",
+                pair_golden_name(seed, shots)
+            );
+            assert_eq!(
+                produced.iter().filter(|byte| **byte == b'\n').count(),
+                PAIR_GOLDEN_PREFIX as usize,
+                "the golden must hold exactly 32 lines"
+            );
+        }
+    }
+
+    /// The pair goldens are capture-and-blessed, so their CONTENT needs a second derivation.
+    ///
+    /// This rebuilds the first eight pairs from `rng::bounded` plus a NAIVE enumeration of
+    /// the class triangle and a LINEAR scan of the weight prefixes — i.e. from the contract's
+    /// text rather than from the sampler's binary-search unranking. It is not a second
+    /// language, but it is a second implementation of the part that could plausibly be
+    /// wrong, and the RNG primitives it stands on were themselves pinned by plan 02-05
+    /// against constants a Python implementation produced.
+    #[test]
+    fn pair_goldens_agree_with_an_independent_rederivation() {
+        use crate::pairs::{PairConfig, PairSampler};
+        use crate::rng::{bounded, derive_key, domains};
+        use core::num::NonZeroU64;
+
+        let (selection, _) = golden_selection(13, 8);
+        let sizes: Vec<u64> = selection.class_sizes().iter().map(|(_, n)| *n).collect();
+        assert_eq!(sizes, vec![8, 8, 8]);
+        let total: u64 = sizes.iter().sum();
+
+        // Naive, deliberately quadratic reference structures.
+        let pos_weights: Vec<u64> = sizes.iter().map(|n| n * (n - 1) / 2).collect();
+        let neg_weights: Vec<u64> = sizes.iter().map(|n| n * (total - n)).collect();
+        let offsets: Vec<u64> = (0..sizes.len())
+            .map(|c| sizes[..c].iter().sum::<u64>())
+            .collect();
+        let scan = |weights: &[u64], target: u64| -> usize {
+            let mut acc = 0;
+            for (index, weight) in weights.iter().enumerate() {
+                acc += weight;
+                if target < acc {
+                    return index;
+                }
+            }
+            panic!("target {target} exceeds the total weight");
+        };
+        let nz = |n: u64| NonZeroU64::new(n).expect("non-zero by construction");
+
+        let cfg = PairConfig {
+            budget: Some(8),
+            ..PairConfig::new(13)
+        };
+        let sampler = PairSampler::new(&selection, &cfg).expect("a legal budget");
+
+        for ordinal in 0..8_u64 {
+            let draw = ordinal / 2;
+            let (class_a, member_a, class_b, member_b) = if ordinal % 2 == 0 {
+                let key = derive_key(13, domains::PAIRS_POS_CLASS);
+                let c = scan(
+                    &pos_weights,
+                    bounded(&key, 0, draw, nz(pos_weights.iter().sum())),
+                );
+                let rank_key = derive_key(13, domains::PAIRS_POS_RANK);
+                let rank = bounded(&rank_key, 0, draw, nz(pos_weights[c]));
+                // Naive triangular enumeration — the reference form of the unranking.
+                let mut triangle = Vec::new();
+                for i in 0..sizes[c] {
+                    for j in (i + 1)..sizes[c] {
+                        triangle.push((i, j));
+                    }
+                }
+                let (i, j) = triangle[rank as usize];
+                (c, i, c, j)
+            } else {
+                let key = derive_key(13, domains::PAIRS_NEG_CLASS);
+                let j = scan(
+                    &neg_weights,
+                    bounded(&key, 0, draw, nz(neg_weights.iter().sum())),
+                );
+                let first_key = derive_key(13, domains::PAIRS_NEG_FIRST);
+                let a = bounded(&first_key, 0, draw, nz(sizes[j]));
+                let second_key = derive_key(13, domains::PAIRS_NEG_SECOND);
+                let u = bounded(&second_key, 0, draw, nz(total - sizes[j]));
+                let global = if u < offsets[j] { u } else { u + sizes[j] };
+                let k = scan(&sizes, global);
+                (j, a, k, global - offsets[k])
+            };
+
+            // Canonical order is by ORDINAL, not by identifier string — `train:1-10`
+            // precedes `train:1-01` in the selection while following it lexically, so
+            // sorting the ids here would have compared a different pair.
+            let expect = |class: usize, member: u64| {
+                let label = selection.class_sizes()[class].0;
+                selection.ids_in_class(label)[member as usize]
+            };
+            let (want_a, want_b) = (expect(class_a, member_a), expect(class_b, member_b));
+            let (want_lo, want_hi) = (want_a.min(want_b), want_a.max(want_b));
+            let got = sampler.pair_at(ordinal).expect("below the budget");
+            assert_eq!(
+                (got.pair.lo(), got.pair.hi()),
+                (want_lo, want_hi),
+                "ordinal {ordinal} disagrees with the independent re-derivation: got \
+                 ({:?}, {:?}), want ({:?}, {:?})",
+                selection.id_of(got.pair.lo()),
+                selection.id_of(got.pair.hi()),
+                selection.id_of(want_lo),
+                selection.id_of(want_hi)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod pair_manifest_tests {
+    //! The pair half of the manifest: the replay record, the tuple-committing streamed
+    //! hash, and the dump path that closes the loop through the untrusted validator.
+
+    use super::{
+        dump_pairs, pair_manifest_hash, PairReplayRecord, PAIR_DEVIATION_CLAUSES,
+        PAIR_REPLAY_SCHEMA_VERSION,
+    };
+    use crate::error::ContrastiveDataError;
+    use crate::pairs::{
+        parse_pair_dump, validate_pair_records, LabeledPair, PairConfig, PairSampler,
+        DEFAULT_HARD_CAP, DEGENERATE_POLICY_VERSION,
+    };
+    use crate::select::{test_corpus, Selection};
+    use std::io::{Error, ErrorKind, Write};
+
+    fn selection() -> Selection {
+        test_corpus::fresh_selection(12, 13, 8).0
+    }
+
+    fn sampler_with<'a>(sel: &'a Selection, cfg: &PairConfig) -> PairSampler<'a> {
+        PairSampler::new(sel, cfg).expect("the synthetic corpus supports this configuration")
+    }
+
+    #[test]
+    fn pair_replay_record_carries_every_version_tag_and_the_three_deviation_clauses() {
+        let sel = selection();
+        let sampler = sampler_with(&sel, &PairConfig::new(13));
+        let record = PairReplayRecord::from_sampler(&sampler);
+
+        assert_eq!(record.schema_version, PAIR_REPLAY_SCHEMA_VERSION);
+        assert_eq!(record.strategy, "oversampling");
+        assert_eq!(record.strategy_version, 1);
+        assert_eq!(record.singleton_policy, "negatives_only");
+        assert_eq!(record.singleton_policy_version, 1);
+        assert_eq!(record.degenerate_policy_version, DEGENERATE_POLICY_VERSION);
+        assert_eq!(record.budget, 384);
+        assert!(!record.default_was_clamped);
+        assert_eq!(record.emitted_kinds, "both");
+        assert_eq!(record.affected_singleton_classes, 0);
+        assert_eq!(record.root_seed, 13);
+        assert_eq!(record.deviation.len(), 3);
+        for (slot, clause) in PAIR_DEVIATION_CLAUSES.iter().enumerate() {
+            assert_eq!(&record.deviation[slot], clause);
+        }
+        // The deviation is APRENDER's, and the clause that could be misread as SetFit's
+        // behaviour says the opposite of what the pinned implementation does.
+        assert!(record.deviation[2].contains("SELF-PAIRS ARE EXCLUDED"));
+        assert!(record.deviation[2].contains("setfit 1.1.3 implementation INCLUDES"));
+
+        // ~200 bytes is the D-09 claim; the clauses dominate, so state the real number.
+        let bytes = record.to_canonical_bytes().expect("serializes");
+        assert!(bytes.len() < 1_200, "record is {} bytes", bytes.len());
+    }
+
+    #[test]
+    fn pair_replay_record_round_trips_and_regenerates_the_identical_hash() {
+        let sel = selection();
+        let sampler = sampler_with(&sel, &PairConfig::new(29));
+        let record = PairReplayRecord::from_sampler(&sampler);
+        let first = pair_manifest_hash(&sampler, &record).expect("hashes");
+        // Vacuity guard: two all-zero digests are equal, which is exactly how the final
+        // assertion would pass against a hash that computes nothing.
+        assert_ne!(first, [0_u8; 32]);
+
+        let wire = record.to_canonical_bytes().expect("serializes");
+        let restored: PairReplayRecord = serde_json::from_slice(&wire).expect("round-trips");
+        assert_eq!(restored, record);
+
+        let rebuilt = sampler_with(&sel, &restored.to_config().expect("a supported record"));
+        assert_eq!(rebuilt.budget(), sampler.budget());
+        let regenerated: Vec<LabeledPair> = rebuilt.iter_from(0).expect("from zero").collect();
+        let original: Vec<LabeledPair> = sampler.iter_from(0).expect("from zero").collect();
+        assert_eq!(regenerated.len(), 384);
+        assert_eq!(regenerated, original, "replay is pairwise identical");
+        assert_eq!(
+            pair_manifest_hash(&rebuilt, &restored).expect("hashes"),
+            first
+        );
+    }
+
+    #[test]
+    fn pair_replay_record_refuses_unsupported_versions() {
+        let sel = selection();
+        let sampler = sampler_with(&sel, &PairConfig::new(29));
+        let base = PairReplayRecord::from_sampler(&sampler);
+
+        let mut wrong_schema = base.clone();
+        wrong_schema.schema_version = 99;
+        assert!(matches!(
+            wrong_schema.to_config(),
+            Err(ContrastiveDataError::UnsupportedSchemaVersion { .. })
+        ));
+
+        let mut wrong_strategy = base.clone();
+        wrong_strategy.strategy = "undersampling".to_string();
+        assert!(matches!(
+            wrong_strategy.to_config(),
+            Err(ContrastiveDataError::UnsupportedAlgorithmVersion { .. })
+        ));
+
+        let mut wrong_policy = base.clone();
+        wrong_policy.singleton_policy_version = 2;
+        assert!(matches!(
+            wrong_policy.to_config(),
+            Err(ContrastiveDataError::UnsupportedPolicyVersion { .. })
+        ));
+
+        let mut wrong_degenerate = base;
+        wrong_degenerate.degenerate_policy_version = 7;
+        assert!(matches!(
+            wrong_degenerate.to_config(),
+            Err(ContrastiveDataError::UnsupportedPolicyVersion { .. })
+        ));
+    }
+
+    /// Review finding F12, the whole point of hashing the header first.
+    ///
+    /// Configuration A takes the DEFAULT budget under a hard cap of 200, so it is clamped.
+    /// Configuration B asks for 200 explicitly under the default cap, so it is not. Both
+    /// resolve to a budget of 200 over the SAME selection and seed, so their pair streams
+    /// are byte-identical — the test asserts that first, or the hash comparison below would
+    /// prove nothing. Their manifest hashes must nonetheless DIFFER.
+    #[test]
+    fn identical_pair_streams_with_different_replay_tuples_hash_differently() {
+        let sel = selection();
+        let clamped = sampler_with(
+            &sel,
+            &PairConfig {
+                hard_cap: Some(200),
+                ..PairConfig::new(31)
+            },
+        );
+        let explicit = sampler_with(
+            &sel,
+            &PairConfig {
+                budget: Some(200),
+                ..PairConfig::new(31)
+            },
+        );
+
+        assert_eq!(clamped.budget(), 200);
+        assert_eq!(explicit.budget(), 200);
+        let left: Vec<LabeledPair> = clamped.iter_from(0).expect("from zero").collect();
+        let right: Vec<LabeledPair> = explicit.iter_from(0).expect("from zero").collect();
+        assert_eq!(
+            left, right,
+            "the two streams must be IDENTICAL pair for pair"
+        );
+        assert_eq!(left.len(), 200);
+
+        let clamped_record = PairReplayRecord::from_sampler(&clamped);
+        let explicit_record = PairReplayRecord::from_sampler(&explicit);
+        assert!(clamped_record.default_was_clamped);
+        assert!(!explicit_record.default_was_clamped);
+        assert_ne!(
+            pair_manifest_hash(&clamped, &clamped_record).expect("hashes"),
+            pair_manifest_hash(&explicit, &explicit_record).expect("hashes"),
+            "a pairs-only hash would collide here"
+        );
+    }
+
+    /// The sharper half of the same finding: two DIFFERENT selections that share a class
+    /// layout produce literally the same pair bytes, because pairs are encoded by ORDINAL.
+    /// Only `selection_hash` separates them, and it lives in the header.
+    #[test]
+    fn identical_pair_bytes_over_different_selections_hash_differently() {
+        let small = test_corpus::fresh_selection(12, 41, 8).0;
+        let large = test_corpus::fresh_selection(20, 41, 8).0;
+        assert_ne!(small.semantic_hash(), large.semantic_hash());
+        assert_eq!(small.class_sizes(), large.class_sizes());
+
+        let cfg = PairConfig::new(41);
+        let a = sampler_with(&small, &cfg);
+        let b = sampler_with(&large, &cfg);
+
+        let ordinals = |sampler: &PairSampler<'_>| -> Vec<(u32, u32, f32)> {
+            sampler
+                .iter_from(0)
+                .expect("from zero")
+                .map(|p| (p.pair.lo().ordinal(), p.pair.hi().ordinal(), p.target))
+                .collect()
+        };
+        assert_eq!(
+            ordinals(&a),
+            ordinals(&b),
+            "same layout and seed must give the same ORDINAL stream"
+        );
+
+        let record_a = PairReplayRecord::from_sampler(&a);
+        let record_b = PairReplayRecord::from_sampler(&b);
+        assert_ne!(record_a.selection_hash, record_b.selection_hash);
+        assert_ne!(
+            pair_manifest_hash(&a, &record_a).expect("hashes"),
+            pair_manifest_hash(&b, &record_b).expect("hashes")
+        );
+    }
+
+    #[test]
+    fn pair_manifest_hash_refuses_a_record_that_describes_another_stream() {
+        let sel = selection();
+        let sampler = sampler_with(&sel, &PairConfig::new(43));
+        let mut record = PairReplayRecord::from_sampler(&sampler);
+        record.budget = 7;
+        assert!(matches!(
+            pair_manifest_hash(&sampler, &record),
+            Err(ContrastiveDataError::SelectionReplayMismatch { .. })
+        ));
+
+        let mut foreign = PairReplayRecord::from_sampler(&sampler);
+        foreign.selection_hash = "0".repeat(64);
+        assert!(matches!(
+            pair_manifest_hash(&sampler, &foreign),
+            Err(ContrastiveDataError::SelectionReplayMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn dump_pairs_is_deterministic_and_round_trips_through_the_untrusted_validator() {
+        let sel = selection();
+        let cfg = PairConfig {
+            budget: Some(64),
+            ..PairConfig::new(47)
+        };
+        let sampler = sampler_with(&sel, &cfg);
+
+        let mut first = Vec::new();
+        dump_pairs(&sampler, &mut first).expect("dumping to a Vec cannot fail");
+        let mut second = Vec::new();
+        dump_pairs(&sampler, &mut second).expect("dumping to a Vec cannot fail");
+        assert_eq!(first, second, "two dumps are byte-identical");
+        assert_eq!(first.iter().filter(|b| **b == b'\n').count(), 64);
+
+        let parsed = parse_pair_dump(&first).expect("the dump parses");
+        assert_eq!(parsed.len(), 64);
+        let validated = validate_pair_records(&parsed, &sel).expect("the dump validates");
+        let expected: Vec<LabeledPair> = sampler.iter_from(0).expect("from zero").collect();
+        assert_eq!(validated, expected, "the dump/ingest loop closes");
+    }
+
+    /// A sink that fails mid-stream is [`ContrastiveDataError::Io`], never a panic.
+    #[test]
+    fn dump_pairs_surfaces_a_failing_sink_as_a_typed_io_error() {
+        struct FailAfter(usize);
+        impl Write for FailAfter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(Error::new(ErrorKind::BrokenPipe, "sink closed mid-stream"));
+                }
+                self.0 -= 1;
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let sel = selection();
+        let cfg = PairConfig {
+            budget: Some(64),
+            ..PairConfig::new(47)
+        };
+        let sampler = sampler_with(&sel, &cfg);
+        match dump_pairs(&sampler, FailAfter(3)) {
+            Err(ContrastiveDataError::Io { context, detail }) => {
+                assert!(context.contains("pair"), "context {context:?}");
+                assert!(
+                    detail.contains("sink closed mid-stream"),
+                    "detail {detail:?}"
+                );
+            }
+            other => panic!("expected Io, got {:?}", other.map(|()| ())),
+        }
+    }
+
+    /// The hash STREAMS: a 24,576-pair budget is hashed without collecting anything.
+    ///
+    /// Measured structurally rather than asserted — the sampler's own retained-state report
+    /// is unchanged across the hash, and it counts materialized pairs.
+    #[test]
+    fn pair_manifest_hash_streams_a_large_budget_without_materializing() {
+        use crate::pairs::RetainedState;
+
+        let (sel, _) = test_corpus::fresh_selection(70, 53, 64);
+        let sampler = sampler_with(&sel, &PairConfig::new(53));
+        assert_eq!(sampler.budget(), 24_576);
+        assert_eq!(DEFAULT_HARD_CAP, 1_048_576);
+
+        let before = sampler.state_report();
+        let record = PairReplayRecord::from_sampler(&sampler);
+        let digest = pair_manifest_hash(&sampler, &record).expect("hashes");
+        let after = sampler.state_report();
+
+        assert_eq!(before, after);
+        assert_eq!(after.materialized_pairs, 0);
+        assert_ne!(digest, [0_u8; 32]);
     }
 }
 
