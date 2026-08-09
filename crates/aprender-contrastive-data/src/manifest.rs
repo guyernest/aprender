@@ -195,7 +195,21 @@ impl SelectionManifest {
         sel: &Selection,
         ledger: &AccessLedger,
     ) -> Result<Self, ContrastiveDataError> {
-        todo!("RED: implemented in the GREEN commit of task 3")
+        let live = ledger.ledger_hash();
+        if live != sel.ledger_hash() {
+            return Err(ContrastiveDataError::SemanticHashMismatch {
+                expected: hex(&sel.ledger_hash()),
+                got: hex(&live),
+            });
+        }
+        Ok(Self {
+            semantic_hash: hex(&sel.semantic_hash()),
+            volatile: VolatileMetadata {
+                created_at: String::new(),
+                tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            payload: sel.payload().clone(),
+        })
     }
 
     /// The on-disk byte form: pretty JSON plus a terminating newline.
@@ -208,7 +222,14 @@ impl SelectionManifest {
     ///
     /// [`ContrastiveDataError::Serialization`] if the envelope cannot be serialized.
     pub fn to_file_bytes(&self) -> Result<Vec<u8>, ContrastiveDataError> {
-        todo!("RED: implemented in the GREEN commit of task 3")
+        let mut bytes = serde_json::to_vec_pretty(self).map_err(|error| {
+            ContrastiveDataError::Serialization {
+                context: "selection_manifest".to_string(),
+                detail: error.to_string(),
+            }
+        })?;
+        bytes.push(b'\n');
+        Ok(bytes)
     }
 
     /// Parse the full file form, verifying the digest BEFORE returning.
@@ -221,7 +242,13 @@ impl SelectionManifest {
     /// [`ContrastiveDataError::Serialization`] on malformed or extended JSON;
     /// [`ContrastiveDataError::SemanticHashMismatch`] when the digest disagrees.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ContrastiveDataError> {
-        todo!("RED: implemented in the GREEN commit of task 3")
+        let manifest: Self =
+            serde_json::from_slice(bytes).map_err(|error| ContrastiveDataError::Serialization {
+                context: "selection_manifest".to_string(),
+                detail: error.to_string(),
+            })?;
+        manifest.verify_digest()?;
+        Ok(manifest)
     }
 
     /// Recompute `SHA-256(payload.to_canonical_bytes())` and compare it to the envelope.
@@ -229,7 +256,15 @@ impl SelectionManifest {
     /// Over the manifest's OWN payload bytes — never over a payload rebuilt from live
     /// state. See `Selection::replay` for why a live rebuild would be unsatisfiable.
     pub(crate) fn verify_digest(&self) -> Result<(), ContrastiveDataError> {
-        todo!("RED: implemented in the GREEN commit of task 3")
+        let digest: [u8; 32] = Sha256::digest(self.payload.to_canonical_bytes()?).into();
+        let recomputed = hex(&digest);
+        if recomputed == self.semantic_hash {
+            return Ok(());
+        }
+        Err(ContrastiveDataError::SemanticHashMismatch {
+            expected: self.semantic_hash.clone(),
+            got: recomputed,
+        })
     }
 }
 

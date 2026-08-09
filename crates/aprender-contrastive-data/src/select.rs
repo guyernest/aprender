@@ -442,7 +442,38 @@ impl Selection {
         dataset: &PreparedDataset<Canonical>,
         ledger: &mut AccessLedger,
     ) -> Result<Self, ContrastiveDataError> {
-        todo!("RED: implemented in the GREEN commit of task 3")
+        let payload = &manifest.payload;
+        check_versions(payload)?;
+        check_provenance(payload, dataset)?;
+
+        let buckets = ClassBuckets::from_prepared(dataset);
+        check_membership(payload, dataset, &buckets)?;
+        check_uniqueness(payload)?;
+        check_class_balance(payload)?;
+        check_class_ordering(payload)?;
+        let recorded = rebuild_examples(payload, dataset)?;
+
+        manifest.verify_digest()?;
+
+        let recomputed = compute_ordered(dataset, payload.root_seed, payload.shots_per_class)?;
+        if recomputed != recorded {
+            return Err(ContrastiveDataError::SelectionReplayMismatch {
+                field: "ordered_examples".to_string(),
+            });
+        }
+
+        ledger.record(
+            Train::ROLE,
+            Canonical::PROFILE,
+            REPLAY_PURPOSE,
+            &payload.dataset_fingerprint,
+        );
+        let ledger_hash = digest_from_hex(&payload.ledger_hash).ok_or_else(|| {
+            ContrastiveDataError::SelectionReplayMismatch {
+                field: "ledger_hash".to_string(),
+            }
+        })?;
+        Self::assemble(recorded, payload.clone(), ledger_hash)
     }
 }
 
