@@ -3,7 +3,7 @@ status: partial
 phase: 02-deterministic-pair-and-data-protocol
 source: [02-VERIFICATION.md]
 started: 2026-08-09T08:33:23Z
-updated: 2026-08-09T08:33:23Z
+updated: 2026-08-09T09:05:00Z
 ---
 
 ## Current Test
@@ -63,12 +63,63 @@ expected: Either a K=512 case exists and passes, or FALSIFY-CPP-007 states a bou
 actually tests.
 result: [pending]
 
+### 4. Triage three code-review blockers (02-REVIEW.md)
+
+The independent code review found 3 blockers and 14 warnings across 34 files. The library core
+held up under adversarial reading — zero hash-ordered collections, checked capacity arithmetic,
+digest-before-parse, genuinely O(K) retained state, correct union-find coalescing. The defects
+cluster at the edges.
+
+- **CR-01 path traversal (security).** `data_contrastive.rs:256-262` joins each untrusted
+  `attestation.splits` role onto `--data` *before* `preflight` validates the role set.
+  `Path::join` with an absolute component replaces the base, so a crafted `"role": "/etc/shadow"`
+  reads `/etc/shadow.jsonl`, and `"../../.."` escapes. Gives a file-existence oracle and an
+  unbounded read / FIFO hang. The correct pattern already exists in
+  `data_tweeteval::verify_prepared_directory`.
+- **CR-02 `--force` re-prepare destroys the prior benchmark.** `data_tweeteval.rs` `write_file`
+  (line 813) truncates in place, then `remove_all` (line 807) *unlinks* those paths when
+  `verify_prepared_directory` fails — so a "rollback" destroys files that pre-existed the run.
+  This phase built a correct `atomic_write_with` next door and did not use it here.
+- **CR-03 the new tier2/tier3 gates cannot fail under GNU Make 4.x.** VERIFIED by the
+  orchestrator on this host with both make versions installed:
+
+  ```
+  SHELL := /bin/bash ; .ONESHELL: ; recipe = { false ; @echo "done" }
+  make  3.81 (macOS default)      -> exit=2   failure caught
+  gmake 4.4.1 (Linux dev + CI)    -> exit=0   failure SWALLOWED
+  ```
+
+  `.ONESHELL:` (Makefile:20) with no `.SHELLFLAGS` override runs the whole recipe in one shell
+  with default `-c` and no `-e`, so only the LAST line's status survives. Both tier recipes end
+  in `@echo "Tier N: PASSED"`, which always succeeds. Under Make 4.x that disarms every gate in
+  them: tier2's `cargo test --lib`, clippy, and the Phase 1 + Phase 2 suites; tier3's
+  `cargo test --all`, clippy, all four `check_*.sh` scripts, `contract-validate`, the new
+  BLOCKING `contract-audit-phase2`, `setfit-feature-matrix` and `contrastive-data-boundary`.
+
+  **Scope limit, measured:** CI does NOT currently invoke `make tier2`/`tier3` (it runs cargo
+  directly), so no CI status check is vacuously green today. The defect bites Linux developers
+  running the tiers locally, and would bite CI the moment the tiers are wired in — which D-26's
+  own rationale ("a gate outside the tiers is a target that stops being run") encourages.
+
+  This is why plan 02-08's gate-failure proof passed honestly and still did not transfer: it was
+  measured standalone on macOS make 3.81, which ignores `.ONESHELL:`. CLAUDE.md rule 4 —
+  extending a guard's scope requires re-mutating in the new scope.
+
+  The reviewer's fix is one line, `.SHELLFLAGS := -e -u -o pipefail -c`. NOT applied: it changes
+  failure semantics for every recipe in a 1000+ line Makefile (`-u` in particular will trip on
+  unset variables, and several targets rely on `|| true`). It needs its own verification pass
+  across all targets on BOTH make versions, then re-mutation in the new scope.
+
+expected: A human triages the three blockers — CR-01 and CR-02 as gap-closure code fixes, CR-03
+as its own Makefile-hardening task with a full-target re-verification pass.
+result: [pending]
+
 ## Summary
 
-total: 3
+total: 4
 passed: 0
 issues: 0
-pending: 3
+pending: 4
 skipped: 0
 blocked: 0
 
