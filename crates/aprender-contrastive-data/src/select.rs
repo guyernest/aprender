@@ -102,6 +102,21 @@ pub struct SelectedExample {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SelectedId(u32);
 
+impl SelectedId {
+    /// The zero-based position of this row in its selection's ordered list.
+    ///
+    /// Exposed so pair bytes can be encoded and hashed by ORDINAL rather than by
+    /// variable-length identifier — the pair manifest already commits the selection's
+    /// semantic hash, so the ordinals are unambiguous inside it.
+    ///
+    /// This is an accessor, not a constructor: reading the number cannot mint a
+    /// `SelectedId`, so the type remains proof of membership in the selection that
+    /// produced it.
+    pub fn ordinal(self) -> u32 {
+        self.0
+    }
+}
+
 /// A completed few-shot selection.
 #[derive(Debug, Clone)]
 pub struct Selection {
