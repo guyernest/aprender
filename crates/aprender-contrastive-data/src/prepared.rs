@@ -173,6 +173,14 @@ pub struct PreparedDataset<P: DatasetProfile> {
     splits: P::Splits,
     exclusions: ExclusionRecord,
     fingerprint: DatasetFingerprint,
+    /// The declared label map, retained.
+    ///
+    /// Retained rather than reconstructed from row `label_text` values, because a class
+    /// whose split happens to contain no rows would simply vanish from a reconstruction —
+    /// and the selection payload contracts a LABEL MAP, not "the labels that happened to
+    /// appear". The map is already absorbed into `fingerprint`, so retaining it adds no
+    /// new identity, only access to one that was already committed to.
+    label_names: Vec<String>,
     profile: PhantomData<P>,
 }
 
@@ -244,8 +252,14 @@ impl PreparedDataset<Canonical> {
             },
             exclusions,
             fingerprint,
+            label_names: decls.label_names.clone(),
             profile: PhantomData,
         })
+    }
+
+    /// The declared label map, in label order.
+    pub fn label_names(&self) -> &[String] {
+        &self.label_names
     }
 
     /// The training split — the only selection pool.
@@ -399,8 +413,14 @@ impl PreparedDataset<Compatibility> {
             },
             exclusions,
             fingerprint,
+            label_names: decls.label_names.clone(),
             profile: PhantomData,
         })
+    }
+
+    /// The declared label map, in label order.
+    pub fn label_names(&self) -> &[String] {
+        &self.label_names
     }
 
     /// The training split.

@@ -37,7 +37,31 @@ impl ClassBuckets {
     /// Only `PreparedDataset<Canonical>` has buckets to build: a compatibility dataset is
     /// a different type and cannot be passed (D-19).
     pub fn from_prepared(dataset: &PreparedDataset<Canonical>) -> Self {
-        todo!("RED: implemented in the GREEN commit of task 2")
+        let train = dataset.train();
+        let excluded: BTreeSet<&str> = dataset
+            .exclusions()
+            .excluded_train_ids()
+            .iter()
+            .map(String::as_str)
+            .collect();
+
+        // Every DECLARED label gets a bucket, empty or not — see the module docs.
+        let mut buckets: BTreeMap<usize, Vec<String>> = (0..train.class_counts().len())
+            .map(|label| (label, Vec::new()))
+            .collect();
+
+        for row in train.rows() {
+            if excluded.contains(row.id.as_str()) {
+                continue;
+            }
+            buckets.entry(row.label).or_default().push(row.id.clone());
+        }
+
+        for ids in buckets.values_mut() {
+            ids.sort_unstable();
+        }
+
+        Self { buckets }
     }
 
     /// `(label, pool_size)` for every declared class, ascending by label.

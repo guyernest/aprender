@@ -145,7 +145,10 @@ impl SelectionPayload {
         equation = "selection_canonical_payload"
     )]
     pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, ContrastiveDataError> {
-        todo!("RED: implemented in the GREEN commit of task 2")
+        serde_json::to_vec(self).map_err(|error| ContrastiveDataError::Serialization {
+            context: "selection_payload".to_string(),
+            detail: error.to_string(),
+        })
     }
 }
 

@@ -144,7 +144,37 @@ impl FewShotSelector {
         cfg: &SelectionConfig,
         ledger: &mut AccessLedger,
     ) -> Result<Selection, ContrastiveDataError> {
-        todo!("RED: implemented in the GREEN commit of task 2")
+        let ordered = compute_ordered(dataset, cfg.root_seed, cfg.shots_per_class)?;
+
+        let dataset_fingerprint = dataset.fingerprint().hex();
+        ledger.record(
+            Train::ROLE,
+            Canonical::PROFILE,
+            SELECT_PURPOSE,
+            &dataset_fingerprint,
+        );
+        let ledger_hash = ledger.ledger_hash();
+
+        let payload = SelectionPayload {
+            schema_version: SELECTION_SCHEMA_VERSION,
+            algorithm_version: SELECTION_ALGORITHM_VERSION,
+            profile: Canonical::PROFILE.to_string(),
+            dataset_fingerprint,
+            validation_fingerprint: dataset.validation_witness().fingerprint_hex(),
+            label_names: dataset.label_names().to_vec(),
+            normalization_version: CONTENT_NORMALIZATION_VERSION.to_string(),
+            root_seed: cfg.root_seed,
+            shots_per_class: cfg.shots_per_class,
+            ordered_examples: ordered
+                .iter()
+                .map(SelectedExampleRecord::from_example)
+                .collect(),
+            exclusions: dataset.exclusions().clone(),
+            access_ledger: ledger.records().to_vec(),
+            ledger_hash: hex(&ledger_hash),
+        };
+
+        Selection::assemble(ordered, payload, ledger_hash)
     }
 }
 
@@ -159,7 +189,64 @@ pub(crate) fn compute_ordered(
     root_seed: u64,
     shots_per_class: u32,
 ) -> Result<Vec<SelectedExample>, ContrastiveDataError> {
-    todo!("RED: implemented in the GREEN commit of task 2")
+    if !ALLOWED_SHOTS.contains(&shots_per_class) {
+        return Err(ContrastiveDataError::InvalidShots {
+            got: shots_per_class as usize,
+            allowed: ALLOWED_SHOTS_TEXT,
+        });
+    }
+    let shots = shots_per_class as usize;
+
+    let buckets = ClassBuckets::from_prepared(dataset);
+    for (label, pool) in buckets.class_sizes() {
+        if (pool as usize) < shots {
+            return Err(ContrastiveDataError::CrossSplitDuplicateUnderflow {
+                class_label: label,
+                pool: pool as usize,
+                shots,
+            });
+        }
+    }
+
+    let train = dataset.train();
+    let labels = buckets.labels();
+    let mut ordered = Vec::with_capacity(shots.saturating_mul(labels.len()));
+
+    for label in labels {
+        let key = derive_key(root_seed, &domains::select(label));
+        let mut work: Vec<&str> = buckets.ids(label).iter().map(String::as_str).collect();
+        let pool_len = work.len();
+
+        for i in 0..shots {
+            // Unreachable given the fail-closed check above (`pool_len >= shots > i`), but
+            // typed rather than asserted so the invariant cannot be broken silently by a
+            // future edit to the pre-check.
+            let remaining = NonZeroU64::new((pool_len - i) as u64).ok_or_else(|| {
+                ContrastiveDataError::ArithmeticOverflow {
+                    operation: format!("selection_remaining_pool/class-{label}"),
+                }
+            })?;
+            let j = i + bounded(&key, 0, i as u64, remaining) as usize;
+            work.swap(i, j);
+        }
+
+        for id in work.into_iter().take(shots) {
+            // Also unreachable: the bucket was built from this very split's rows.
+            let missing = || ContrastiveDataError::SelectionReplayMismatch {
+                field: format!("row_hashes/{id}"),
+            };
+            let exact_hash = *train.exact_hash_of(id).ok_or_else(missing)?;
+            let normalized_hash = *train.normalized_hash_of(id).ok_or_else(missing)?;
+            ordered.push(SelectedExample {
+                id: id.to_string(),
+                label,
+                exact_hash,
+                normalized_hash,
+            });
+        }
+    }
+
+    Ok(ordered)
 }
 
 impl Selection {
@@ -169,7 +256,29 @@ impl Selection {
         payload: SelectionPayload,
         ledger_hash: [u8; 32],
     ) -> Result<Self, ContrastiveDataError> {
-        todo!("RED: implemented in the GREEN commit of task 2")
+        let semantic_hash: [u8; 32] = Sha256::digest(payload.to_canonical_bytes()?).into();
+
+        let mut by_id = BTreeMap::new();
+        let mut by_class: BTreeMap<usize, Vec<SelectedId>> = BTreeMap::new();
+        for (ordinal, example) in ordered.iter().enumerate() {
+            let selected = SelectedId(ordinal as u32);
+            by_id.insert(example.id.clone(), selected);
+            by_class.entry(example.label).or_default().push(selected);
+        }
+        let class_sizes = by_class
+            .iter()
+            .map(|(label, ids)| (*label, ids.len() as u64))
+            .collect();
+
+        Ok(Self {
+            ordered,
+            by_id,
+            by_class,
+            class_sizes,
+            payload,
+            semantic_hash,
+            ledger_hash,
+        })
     }
 
     /// The ordered selected examples: classes ascending, draw order within a class.
