@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-07-PLAN.md
-last_updated: "2026-08-09T04:43:45.601Z"
-last_activity: "2026-08-09 -- 02-07 complete: O(K) streaming pair sampler with externally measurable retained state, binding hard cap, total degenerate policy, untrusted-pair validation, and a tuple-committing replay hash"
+stopped_at: Completed 02-08-PLAN.md
+last_updated: "2026-08-09T06:31:59.709Z"
+last_activity: "2026-08-09 -- 02-08 complete: in-band leaky and materializing negatives with their mirrors and the K = N capacity case, five reviewed trybuild compile-fail proofs, all 25 Phase 2 equations bound behind a blocking tier3 audit, and a completed 529-mutant scoped run"
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 18
-  completed_plans: 16
-  percent: 89
+  completed_plans: 17
+  percent: 94
 ---
 
 # Project State
@@ -26,21 +26,21 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 02 (deterministic-pair-and-data-protocol) — EXECUTING
-Plan: 8 of 9
-Status: Ready to execute — 02-07 complete, wave 5 closed
-Last activity: 2026-08-09 -- 02-07 complete: O(K) streaming pair sampler with externally measurable retained state, binding hard cap, total degenerate policy, untrusted-pair validation, and a tuple-committing replay hash
+Plan: 9 of 9
+Status: Ready to execute — 02-08 complete, wave 6 half closed (02-09 remains)
+Last activity: 2026-08-09 -- 02-08 complete: in-band leaky and materializing negatives with their mirrors and the K = N capacity case, five reviewed trybuild compile-fail proofs, all 25 Phase 2 equations bound behind a blocking tier3 audit, and a completed 529-mutant scoped run
 
-Working branch: `gsd/phase-2-contract-gate` @ 9b5b1d5c6 (wave 6 forks from here; see 02-01-SUMMARY.md for the branch/PR policy)
+Working branch: `gsd/phase-2-contract-gate` @ c947861bf (02-09 continues on this branch; see 02-01-SUMMARY.md for the branch/PR policy)
 
-Progress: [█████████░] 89%
+Progress: [█████████░] 94%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 7 (this milestone's execution log; Phase 1 predates metric capture)
-- Average duration: ~1h27m
-- Total execution time: ~10.2 hours
+- Total plans completed: 8 (this milestone's execution log; Phase 1 predates metric capture)
+- Average duration: ~1h32m
+- Total execution time: ~12.0 hours
 
 **By Phase:**
 
@@ -51,8 +51,8 @@ Progress: [█████████░] 89%
 
 **Recent Trend:**
 
-- Last 5 plans: 02-03 (55m, 3 tasks, 6 files), 02-04 (~50m, 2 tasks, 15 files), 02-05 (~2h10m, 3 tasks, 15 files), 02-06 (~1h50m, 3 tasks, 6 files), 02-07 (~2h45m, 3 tasks, 11 files)
-- Trend: the three long plans (02-05, 02-06, 02-07) are the three that had to derive evidence independently — a second implementation, an induced mutation, or a scaling measurement — rather than assert it
+- Last 5 plans: 02-04 (~50m, 2 tasks, 15 files), 02-05 (~2h10m, 3 tasks, 15 files), 02-06 (~1h50m, 3 tasks, 6 files), 02-07 (~2h45m, 3 tasks, 11 files), 02-08 (~1h45m, 3 tasks, 15 files)
+- Trend: the three long plans (02-05, 02-06, 02-07) are the three that had to derive evidence independently — a second implementation, an induced mutation, or a scaling measurement — rather than assert it. 02-08 is shorter than that trend only because the 35-minute mutation run overlapped nothing else; four separate gate failures were still induced and observed
 
 *Updated after each plan completion*
 | Phase 02 P03 | 55m | 3 tasks | 6 files |
@@ -60,6 +60,7 @@ Progress: [█████████░] 89%
 | Phase 02 P05 | ~2h10m | 3 tasks | 15 files |
 | Phase 02 P06 | ~1h50m | 3 tasks | 6 files |
 | Phase 02 P07 | ~2h45m | 3 tasks | 11 files |
+| Phase 02 P08 | ~1h45m | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -100,6 +101,11 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-07: the pair manifest hash refuses a record whose selection_hash or budget does not describe the sampler it is handed; hashing stream X under record Y would be the exact failure the header-inside-the-digest design exists to prevent
 - [Phase 02]: 02-07: both untrusted_pair_ingest and split_span_fail_closed are STACKED on the public validate_pair_records — the contract macro accepts two attributes (verified by compiling both forms), and a binding that names a private helper is harder to audit
 - [Phase 02]: 02-07: the GSD SDK state handlers damaged STATE.md more severely than env note 7 records — state.update-progress reported percent 89 while writing 20 into the frontmatter and leaving the body bar at 83, state.record-metric flipped status to 'completed' mid-phase, state.advance-plan clobbered last_activity to a bare date and left stopped_at on the previous plan, and add-decision tagged all five entries [Phase ?]. Every field was repaired by hand and read back. Plans 02-08/02-09: run the handlers, then READ THE FILE and repair
+- [Phase 02]: 02-08: the capacity bound is the contract's c*(examples+classes), not the plan's c*(examples+budget) — a bound containing the budget cannot express the same obligation's budget-independence clause and grows the allowance exactly when the pair space grows
+- [Phase 02]: 02-08: the blocking tier3 binding gate is the SCOPED contract-audit-phase2; the repo-wide contract-audit prints 132 BIND-001 errors across 38 of 44 contracts and exits 0 anyway (its loop never reads the audit status) — logged as D-ITEM-04, not fixed
+- [Phase 02]: 02-08: cargo-mutants ran at --timeout 20 rather than the planned 60, from a measured sample — 9 percent of mutants hang, and 48 hangs x 60 s alone exceeds the whole 2700 s wall budget; the full 529-mutant run then COMPLETED
+- [Phase 02]: 02-08: 10 of 22 surviving mutants are individually justified as unobservable (disjoint-bit OR/XOR, union-by-size balancing, single-variant enums, an accessor no constructible Selection can make non-zero) and were re-run to confirm they still survive; 12 were killed and a targeted re-run reported 14/14 caught
+- [Phase 02]: 02-08: official_f_avg binds to entrenar::eval::classification::metrics::f1_average_for_classes with NO #[contract] attribute added to aprender-train; the plan's ClassificationMetrics does not exist, the type is MultiClassMetrics
 
 ### Pending Todos
 
@@ -113,10 +119,15 @@ Recent decisions affecting current work:
   crate. Mark each at the plan that actually closes it (02-03 ingest/dedup, 02-05 selection,
   02-06 typestate/attestation, 02-07 pairs/budget, 02-09 CLI).
 
-- [Phase 2]: `make contract-audit` is red (BIND-001) for `official_f_avg` and for all ten Phase 1
-  setfit equations, which have no entries in `contracts/aprender/binding.yaml`. Pre-existing at
-  HEAD and reachable from no tier, so 02-01 surfaced rather than fixed it. Worth a dedicated
-  binding-registry pass.
+- [Phase 2 — PARTIALLY CLOSED BY 02-08]: `official_f_avg` and all 24
+  contrastive-pair-protocol equations are now BOUND, and `make contract-audit-phase2` (blocking,
+  in tier3) keeps them bound. The REPO-WIDE `make contract-audit` is not fixed and is worse than
+  this entry recorded: measured, it reports **132 BIND-001 errors across 38 of the 44 contracts**
+  — 10 of them Phase 1's setfit equations — and **exits 0 anyway**, because its loop body never
+  reads the audit's status. It is a target that prints failures and reports success. Logged as
+  D-ITEM-04 in the phase's `deferred-items.md`; the honest fix is to make it read its status and
+  then either bind the 132 or mark them `status: pending` (a BIND-004 warning, not a BIND-001
+  error). Still worth a dedicated binding-registry pass.
 
 - [Repo-wide]: No `#[kani::proof]` harness exists anywhere in `crates/` and `cargo-kani` is not
   installed, yet contracts declare harnesses. 02-01's and 02-02's contracts now say so explicitly
@@ -136,9 +147,10 @@ Recent decisions affecting current work:
 - [Phase 1]: Freeze numerical tolerances from pinned reference fixtures before examining Rust discrepancies; validate the real-weight mixed-batch graph before committing the full BERT refactor.
 - [Phase 2]: Decide and version singleton-class and bounded-oversampling behavior during phase planning.
 - [Phase 2 — KNOWN-RED, EXPECTED, NOT A REGRESSION — **WIDENED BY MEASUREMENT IN 02-02**]: `pre-release` Gate 5 fails from Phase 2 wave 2 through phase exit. Cause: `apr-cli` gains a dependency on the new `aprender-contrastive-data` crate, which is not on crates.io until the human-approved publish cascade lands it (RESEARCH Pitfall 8 / Finding F5). **CORRECTION (02-02, measured):** it is NOT only the verifying form. `cargo package --no-verify -p apr-cli` ALSO fails — `--no-verify` skips the packaged-crate BUILD, not the MANIFEST RESOLUTION that rewrites the path dep into a registry dep, and resolution is where it breaks (`no matching package named 'aprender-contrastive-data' found`). Control-verified: with the dependency line temporarily removed the identical command exits 0 and packages 581 files. So ANY `cargo package -p apr-cli`, verifying or not, is red. What IS gated and must stay green: `cargo package --no-verify -p aprender-contrastive-data` (rc=0, 19 files). Exit condition unchanged: publish `aprender-contrastive-data` BEFORE `apr-cli` — a human-approved release action; CLAUDE.md forbids self-serving the publish. `/gsd:verify-work` must read a red Gate 5 as this expected state. Mirrored in `must_haves.caveats` of plans 02-02 and 02-08 and in 02-VALIDATION.md; plan 02-08's acceptance criterion "both `cargo package --no-verify` runs exit 0" is falsified and should be read as the crate-only form.
+- [Cross-cutting — HOST-SPECIFIC, PRE-EXISTING, NOT A REGRESSION]: `cargo check --workspace` cannot exit 0 on Darwin. `crates/aprender-profile/src/main.rs:6` is a `compile_error!("renacer requires Linux (ptrace syscall tracing)")` under `#[cfg(not(target_os = "linux"))]`, and the consequent E0601 (`main` not found) is its shadow rather than a second defect. Control measured at 02-08: `cargo check --workspace --exclude aprender-profile` exits **0**. Any plan whose acceptance criterion names a bare `cargo check --workspace` should be read as the `--exclude aprender-profile` form on this host.
 - [Phase 5]: Choose validation-only calibration and uncertainty estimators before collecting benchmark results.
 - [Cross-cutting]: Preserve CPU-only package/MSRV/feature combinations and executable contract conventions from the repository's pre-release and APR dogfood skills.
-- make tier2 is RED on arm64: 25 pre-existing clippy errors across 5 crates untouched by phase 2 (aprender-compute 19, zram-core 3, core 1, present-terminal 1, serve 1). All arch-gated SIMD; CI runs X64-Linux-only so these aarch64-live arms are never linted. Proven independent of 02-03. See deferred-items D-ITEM-02.
+- make tier2 is RED on arm64: pre-existing clippy errors across 5 crates untouched by phase 2. Re-measured at 02-08: **24 errors, 44 locations** — aprender-compute 38, zram-core 3, present-terminal 1, core 1, serve 1; **zero in aprender-contrastive-data**, whose only appearance in the tier2 log is its `Checking` line. All arch-gated SIMD; CI runs X64-Linux-only so these aarch64-live arms are never linted. Proven independent of 02-03. See deferred-items D-ITEM-02.
 
 ## Deferred Items
 
@@ -152,6 +164,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-08-09T04:42:33.243Z
-Stopped at: Completed 02-06-PLAN.md
+Last session: 2026-08-09T06:31:31.176Z
+Stopped at: Completed 02-08-PLAN.md
 Resume file: None
