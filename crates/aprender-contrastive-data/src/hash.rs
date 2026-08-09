@@ -21,7 +21,13 @@
 //! them differ even for a one-split dataset — so a split fingerprint can never be mistaken
 //! for a dataset fingerprint by a consumer comparing hex strings.
 
-#[allow(unused_imports)]
+// TEMPORARY, removed by the prepared-dataset task of this same plan. The two raw-parts
+// input structs and both `compute` entry points are exercised by this module's own tests
+// but have no non-test caller until `prepared.rs` assembles them from its typed splits.
+// Without this the crate would warn on a leaf module that is, by design, finished before
+// its consumer exists.
+#![allow(dead_code)]
+
 use sha2::{Digest, Sha256};
 
 /// The version tag of the normalization pipeline behind [`normalized_hash`].
@@ -38,21 +44,85 @@ const DATASET_FP_DOMAIN: &[u8] = b"apr-dataset-fp-v1\0";
 const SPLIT_FP_DOMAIN: &[u8] = b"apr-split-fp-v1\0";
 
 /// SHA-256 over the raw bytes of `input`. Identity and provenance.
+///
+/// This is the digest that appears in fingerprints and attestations, so it must describe
+/// the bytes as stored — no trimming, no normalization, no case folding.
 pub fn exact_hash(input: &str) -> [u8; 32] {
-    let _ = input;
-    [0u8; 32]
+    Sha256::digest(input.as_bytes()).into()
 }
 
 /// SHA-256 over the `nfc-trim-ws-v1` normalization of `input`. Leakage detection.
+///
+/// The pipeline is exactly: NFC, then trim, then collapse every internal whitespace run to
+/// a single `U+0020`. `split_whitespace` performs the last two steps in one pass and uses
+/// the Unicode `White_Space` property, so a non-breaking space collapses like a plain one.
+///
+/// # There is deliberately NO casefolding (D-17)
+///
+/// Casefolding would collide legitimately distinct short posts — the corpus this protocol
+/// was designed against is social-media length, where `"Yes"` and `"yes"` are routinely
+/// different rows by different authors. A false leakage positive silently REMOVES a
+/// training row and shrinks a class pool, which is a worse outcome than the retweet
+/// variant this normalization is here to catch.
+#[provable_contracts_macros::contract(
+    "contrastive-pair-protocol-v1",
+    equation = "normalized_content_hash"
+)]
 pub fn normalized_hash(input: &str) -> [u8; 32] {
-    let _ = input;
-    [0u8; 32]
+    use unicode_normalization::UnicodeNormalization;
+
+    let composed: String = input.nfc().collect();
+    let collapsed = composed.split_whitespace().collect::<Vec<_>>().join(" ");
+    Sha256::digest(collapsed.as_bytes()).into()
 }
 
 /// Lowercase hex rendering of a digest.
 pub fn hex(digest: &[u8; 32]) -> String {
-    let _ = digest;
-    String::new()
+    use core::fmt::Write as _;
+
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            // Writing into a String is infallible; the Result exists only to satisfy the
+            // `Write` trait, and discarding it here keeps the signature total.
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
+/// Absorb one length-prefixed field.
+///
+/// Every variable-length field is prefixed with its length so that two different
+/// decompositions of the same concatenated bytes cannot produce the same digest. Without
+/// it, `role="tr"` + `id="ain:0"` and `role="train"` + `id=":0"` would hash identically.
+fn absorb_field(hasher: &mut Sha256, field: &[u8]) {
+    hasher.update((field.len() as u64).to_le_bytes());
+    hasher.update(field);
+}
+
+/// The ONE per-split absorption routine, shared by both fingerprint entry points.
+///
+/// "The same construction with a different domain tag" is a fact about this function
+/// rather than a claim in a comment: `SplitFingerprint::compute` and
+/// `DatasetFingerprint::compute` both call it, and neither has a private copy that could
+/// drift.
+fn absorb_split(hasher: &mut Sha256, input: &SplitFingerprintInput<'_>) {
+    debug_assert!(
+        input.rows.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+        "SplitFingerprintInput::rows must be sorted ascending by id before hashing"
+    );
+
+    absorb_field(hasher, input.role.as_bytes());
+    absorb_field(hasher, input.source_hash);
+    hasher.update((input.class_counts.len() as u64).to_le_bytes());
+    for count in input.class_counts {
+        hasher.update(count.to_le_bytes());
+    }
+    hasher.update((input.rows.len() as u64).to_le_bytes());
+    for (id, row_hash) in input.rows {
+        absorb_field(hasher, id.as_bytes());
+        absorb_field(hasher, row_hash);
+    }
 }
 
 /// Raw parts describing ONE split, in absorption order.
@@ -89,9 +159,30 @@ impl DatasetFingerprint {
         hex(&self.0)
     }
 
+    /// Absorb the profile, the ordered label names, the normalization version, and then
+    /// every split's raw parts in ascending role order through [`absorb_split`].
     pub(crate) fn compute(input: &DatasetFingerprintInput<'_>) -> Self {
-        let _ = input;
-        Self([0u8; 32])
+        debug_assert!(
+            input
+                .splits
+                .windows(2)
+                .all(|pair| pair[0].role <= pair[1].role),
+            "DatasetFingerprintInput::splits must be ordered by ascending role name"
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(DATASET_FP_DOMAIN);
+        absorb_field(&mut hasher, input.profile.as_bytes());
+        hasher.update((input.label_names.len() as u64).to_le_bytes());
+        for name in input.label_names {
+            absorb_field(&mut hasher, name.as_bytes());
+        }
+        absorb_field(&mut hasher, input.normalization_version.as_bytes());
+        hasher.update((input.splits.len() as u64).to_le_bytes());
+        for split in input.splits {
+            absorb_split(&mut hasher, split);
+        }
+        Self(hasher.finalize().into())
     }
 }
 
@@ -105,9 +196,13 @@ impl SplitFingerprint {
         hex(&self.0)
     }
 
+    /// Absorb the SAME raw parts a dataset fingerprint absorbs for this split, under a
+    /// different domain tag.
     pub(crate) fn compute(input: &SplitFingerprintInput<'_>) -> Self {
-        let _ = input;
-        Self([0u8; 32])
+        let mut hasher = Sha256::new();
+        hasher.update(SPLIT_FP_DOMAIN);
+        absorb_split(&mut hasher, input);
+        Self(hasher.finalize().into())
     }
 }
 
@@ -120,7 +215,11 @@ mod hash_tests {
     use proptest::prelude::{prop_assert_eq, proptest, Strategy};
 
     fn label_names() -> Vec<String> {
-        vec!["none".to_string(), "against".to_string(), "favor".to_string()]
+        vec![
+            "none".to_string(),
+            "against".to_string(),
+            "favor".to_string(),
+        ]
     }
 
     fn sample_rows() -> Vec<(&'static str, [u8; 32])> {
@@ -249,10 +348,10 @@ mod hash_tests {
 
     #[test]
     fn hash_dataset_fingerprint_is_sensitive_to_a_row_id() {
-        assert_fingerprint_changes(
-            |parts| parts.rows[0].0 = "train:9",
-            "a row id",
-        );
+        // Mutating the LAST id keeps the ascending-by-id ordering that `compute`
+        // debug-asserts, so this test exercises identity sensitivity rather than the
+        // caller's ordering obligation.
+        assert_fingerprint_changes(|parts| parts.rows[1].0 = "train:9", "a row id");
     }
 
     #[test]

@@ -62,8 +62,46 @@ pub fn parse_jsonl_bytes(
     bytes: &[u8],
     split: &str,
 ) -> Result<Vec<LabeledExample>, ContrastiveDataError> {
-    let _ = (bytes, split);
-    Ok(Vec::new())
+    let mut rows = Vec::new();
+    for (index, line) in jsonl_lines(bytes).enumerate() {
+        // Gate 1a: the row must be UTF-8 before it can be anything else.
+        let text = core::str::from_utf8(line).map_err(|_| ContrastiveDataError::InvalidUtf8 {
+            split: split.to_string(),
+            index,
+        })?;
+        // Gate 1b: strict schema. An unknown field is a schema change, not a nuisance.
+        let row: LabeledExample =
+            serde_json::from_str(text).map_err(|error| ContrastiveDataError::MalformedRow {
+                split: split.to_string(),
+                index,
+                reason: error.to_string(),
+            })?;
+        // Gate 1c: a whitespace-only example carries no signal and would hash to the
+        // normalization of the empty string, colliding with every other blank row.
+        if row.input.trim().is_empty() {
+            return Err(ContrastiveDataError::EmptyInput {
+                split: split.to_string(),
+                index,
+            });
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+/// Split a JSONL buffer into row slices.
+///
+/// A single trailing `\n` terminates the last row rather than introducing an empty one —
+/// `encode_jsonl` always emits it, so treating it as a row would make the round-trip
+/// asymmetric. Any OTHER blank line is left in place and fails as a malformed row, because
+/// silently skipping blanks would let a truncated upload look like a shorter dataset.
+fn jsonl_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let trimmed = match bytes.split_last() {
+        Some((b'\n', head)) => head,
+        _ => bytes,
+    };
+    let empty = trimmed.is_empty();
+    trimmed.split(|byte| *byte == b'\n').filter(move |_| !empty)
 }
 
 /// Canonically encode rows as JSONL: `serde_json::to_writer` per row, then `b'\n'`.
@@ -75,8 +113,17 @@ pub fn parse_jsonl_bytes(
 ///
 /// [`ContrastiveDataError::Serialization`] if a row cannot be serialized.
 pub fn encode_jsonl(rows: &[LabeledExample]) -> Result<Vec<u8>, ContrastiveDataError> {
-    let _ = rows;
-    Ok(Vec::new())
+    let mut bytes = Vec::new();
+    for row in rows {
+        serde_json::to_writer(&mut bytes, row).map_err(|error| {
+            ContrastiveDataError::Serialization {
+                context: format!("encode_jsonl row {:?}", row.id),
+                detail: error.to_string(),
+            }
+        })?;
+        bytes.push(b'\n');
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -114,7 +161,8 @@ mod schema_tests {
             "{\"id\":\"train:0\",\"input\":\"a\",\"label\":0,\"label_text\":\"none\",\"source_split\":\"train\"}\n",
             "{\"id\":\"train:1\",\"input\":\"b\",\"label\":0,\"label_text\":\"none\",\"source_split\":\"train\",\"extra\":1}\n",
         );
-        let err = parse_jsonl_bytes(bytes.as_bytes(), "train").expect_err("unknown field must fail");
+        let err =
+            parse_jsonl_bytes(bytes.as_bytes(), "train").expect_err("unknown field must fail");
         match err {
             ContrastiveDataError::MalformedRow {
                 split,
@@ -123,7 +171,10 @@ mod schema_tests {
             } => {
                 assert_eq!(split, "train");
                 assert_eq!(index, 1);
-                assert!(reason.contains("extra"), "reason must name the field: {reason}");
+                assert!(
+                    reason.contains("extra"),
+                    "reason must name the field: {reason}"
+                );
             }
             other => panic!("expected MalformedRow, got {other:?}"),
         }
@@ -132,7 +183,8 @@ mod schema_tests {
     #[test]
     fn schema_parse_rejects_missing_field() {
         let bytes = "{\"id\":\"train:0\",\"input\":\"a\",\"label\":0,\"label_text\":\"none\"}\n";
-        let err = parse_jsonl_bytes(bytes.as_bytes(), "train").expect_err("missing field must fail");
+        let err =
+            parse_jsonl_bytes(bytes.as_bytes(), "train").expect_err("missing field must fail");
         assert!(matches!(
             err,
             ContrastiveDataError::MalformedRow { index: 0, .. }
@@ -185,14 +237,14 @@ mod schema_tests {
     #[test]
     fn schema_encode_emits_one_newline_terminated_line_per_row() {
         let bytes = encode_jsonl(&canonical_two_rows()).expect("encode must succeed");
-        assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 2);
+        assert_eq!(bytes.split(|byte| *byte == b'\n').count() - 1, 2);
         assert_eq!(bytes.last().copied(), Some(b'\n'));
     }
 
     #[test]
     fn schema_field_order_matches_the_committed_baseline() {
-        let bytes = encode_jsonl(&[row("train:0", "a", 2, "favor", "train")])
-            .expect("encode must succeed");
+        let bytes =
+            encode_jsonl(&[row("train:0", "a", 2, "favor", "train")]).expect("encode must succeed");
         let line = String::from_utf8(bytes).expect("encoded JSONL is UTF-8");
         assert_eq!(
             line,
