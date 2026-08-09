@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-08-09T00:33:05.864Z"
-last_activity: "2026-08-09 -- 02-02 complete: aprender-contrastive-data crate scaffolded and publishable, contrastive-pair-protocol-v1 pv-green, D-04 enforced inside tier3"
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-08-09T01:32:08.739Z"
+last_activity: "2026-08-09 -- 02-03 complete: bytes-to-typed data layer (JSONL codec, both content hashes, 5-gate split ladder, access ledger, union-find dedup, PreparedDataset typestate); 72 crate tests green, cross-crate baseline 14,102"
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 18
-  completed_plans: 11
-  percent: 61
+  completed_plans: 12
+  percent: 67
 ---
 
 # Project State
@@ -26,13 +26,13 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 02 (deterministic-pair-and-data-protocol) — EXECUTING
-Plan: 3 of 9
-Status: Ready to execute — 02-02 complete
-Last activity: 2026-08-09 -- 02-02 complete: aprender-contrastive-data crate scaffolded and publishable, contrastive-pair-protocol-v1 pv-green, D-04 enforced inside tier3
+Plan: 4 of 9
+Status: Ready to execute — 02-03 complete
+Last activity: 2026-08-09 -- 02-03 complete: bytes-to-typed data layer (JSONL codec, both content hashes, 5-gate split ladder, access ledger, union-find dedup, PreparedDataset typestate); 72 crate tests green, cross-crate baseline 14,102
 
 Working branch: `gsd/phase-2-contract-gate` @ c104221f4 (waves 3-6 fork from here; see 02-01-SUMMARY.md for the branch/PR policy)
 
-Progress: [██████░░░░] 61%
+Progress: [███████░░░] 67%
 
 ## Performance Metrics
 
@@ -55,6 +55,7 @@ Progress: [██████░░░░] 61%
 - Trend: faster — 02-02 had no network work and no PR round-trip
 
 *Updated after each plan completion*
+| Phase 02 P03 | 55m | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,8 @@ Recent decisions affecting current work:
 - [Phase 2]: Both CB-510 guard scripts pass VACUOUSLY on macOS — they use GNU grep -P, BSD grep exits 2, the trailing || true swallows it, and they report 0 include!() files where the true count is 1768. Logged as D-ITEM-01; compensating direct evidence taken for the new crate.
 - [Phase 2]: The binding registry ACCEPTS module_path: aprender_contrastive_data::* under target_crate: aprender (bound 0->1, BIND-001 24->23, no namespace complaint), so plan 02-08 proceeds as written. Traps: contract: must be the BARE filename (a ../ prefix parses and binds nothing) and status: accepts only implemented|partial|not_implemented|pending.
 - [Phase 2]: D-04 is enforced by two POSITIVE checks — a dependency allowlist compared against the resolved cargo tree closure, and a src/-wide fs/net/path symbol ban with NO cfg(test) exemption. All four failure modes were induced, observed and reverted before the gate was trusted.
+- [Phase 02]: 02-03: DatasetProfile carries an associated type Splits, so PreparedDataset<Compatibility> has no validation field at all rather than an Option+expect() — Makes D-19 structural rather than a runtime invariant, and makes 02-08's trybuild non-constructibility gate provable: proving a field is always None needs whole-program reasoning, proving it does not exist is a type error.
+- [Phase 02]: 02-03: SplitFingerprintInput ordering is discharged by BTreeMap iteration order via Split::exact_hash_pairs(), not a caller-side sort — An ordering obligation left to callers can be silently omitted, and a wrong order yields a plausible-looking wrong digest. There is now no unsorted path to construct the input from.
 
 ### Pending Todos
 
@@ -115,6 +118,7 @@ Recent decisions affecting current work:
 - [Phase 2 — KNOWN-RED, EXPECTED, NOT A REGRESSION — **WIDENED BY MEASUREMENT IN 02-02**]: `pre-release` Gate 5 fails from Phase 2 wave 2 through phase exit. Cause: `apr-cli` gains a dependency on the new `aprender-contrastive-data` crate, which is not on crates.io until the human-approved publish cascade lands it (RESEARCH Pitfall 8 / Finding F5). **CORRECTION (02-02, measured):** it is NOT only the verifying form. `cargo package --no-verify -p apr-cli` ALSO fails — `--no-verify` skips the packaged-crate BUILD, not the MANIFEST RESOLUTION that rewrites the path dep into a registry dep, and resolution is where it breaks (`no matching package named 'aprender-contrastive-data' found`). Control-verified: with the dependency line temporarily removed the identical command exits 0 and packages 581 files. So ANY `cargo package -p apr-cli`, verifying or not, is red. What IS gated and must stay green: `cargo package --no-verify -p aprender-contrastive-data` (rc=0, 19 files). Exit condition unchanged: publish `aprender-contrastive-data` BEFORE `apr-cli` — a human-approved release action; CLAUDE.md forbids self-serving the publish. `/gsd:verify-work` must read a red Gate 5 as this expected state. Mirrored in `must_haves.caveats` of plans 02-02 and 02-08 and in 02-VALIDATION.md; plan 02-08's acceptance criterion "both `cargo package --no-verify` runs exit 0" is falsified and should be read as the crate-only form.
 - [Phase 5]: Choose validation-only calibration and uncertainty estimators before collecting benchmark results.
 - [Cross-cutting]: Preserve CPU-only package/MSRV/feature combinations and executable contract conventions from the repository's pre-release and APR dogfood skills.
+- make tier2 is RED on arm64: 25 pre-existing clippy errors across 5 crates untouched by phase 2 (aprender-compute 19, zram-core 3, core 1, present-terminal 1, serve 1). All arch-gated SIMD; CI runs X64-Linux-only so these aarch64-live arms are never linted. Proven independent of 02-03. See deferred-items D-ITEM-02.
 
 ## Deferred Items
 
@@ -128,6 +132,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-08-09T00:33:05.838Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-08-09T01:31:10.012Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None
