@@ -214,16 +214,21 @@ tier2:
 # Phase 2 contrastive-data (D-26 again — a gate outside the tiers stops being run).
 #
 # RUNTIME WAS RE-MEASURED, not estimated (2026-08-09, warm tree, three consecutive
-# runs): 1.75 s / 1.78 s / 1.74 s wall, rc=0 each time. History of this line, because
+# runs): 3.08 s / 3.00 s / 3.00 s wall, rc=0 each time. History of this line, because
 # the trend is the point: 2/2/2 s with one determinism doctest, 1/2/1 s after plan
-# 02-03 grew it to 67 lib + 5 doc, and now 1.75 s after plan 02-05 took it to 126 lib
-# + 7 integration + 7 doc (1 further test is #[ignore]d — the golden regenerator).
-# Actual test execution inside that 1.75 s is 1.17 s lib + 0.23 s doc; the rest is
+# 02-03 grew it to 67 lib + 5 doc, 1.75 s after plan 02-05 took it to 126 lib + 7
+# integration + 7 doc, and now 3.0 s after plan 02-07 took it to 206 lib + 11
+# integration + 7 doc (1 further test is #[ignore]d — the golden regenerator).
+# Actual test execution inside that 3.0 s is 1.22 s lib + 1.07 s doc; the rest is
 # cargo's per-invocation freshness check. The step is still comfortably tier2-shaped.
-# The lib figure now includes a proptest sweep over the seed space, which is why it
-# moved at all. Re-measure and update when the suite grows again; a tier2 line whose
-# comment records a stale number is worse than one with no comment, because it will
-# be trusted.
+# The 1.75 -> 3.0 s step is the pair sampler's two heaviest properties: a 40,000-draw
+# marginal-equivalence measurement on layout [3,5,7] (which is what proves the O(K)
+# negative scheme preserves D-14's n_j*n_k class-pair weights rather than merely
+# being faster) and a 24,576-pair streamed manifest hash. Both are deliberate: a
+# cheaper marginal test could not distinguish the weighted scheme from a uniform one.
+# Re-measure and update when the suite grows again; a tier2 line whose comment
+# records a stale number is worse than one with no comment, because it will be
+# trusted.
 #
 # UNFILTERED on purpose. The Phase 1 lines above take a module filter because
 # they select 162 of 14202 tests in a large crate. Here the whole crate IS this
