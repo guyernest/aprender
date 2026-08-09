@@ -128,7 +128,7 @@ workspace suite to tier3 and rename this step honestly), so it gets its own tick
 
 **Found:** plan 02-08, Task 3 (2026-08-09). **Pre-existing**, not caused by this phase.
 
-The repo-wide binding-coverage target (`Makefile`, `contract-audit`) iterates all 46
+The repo-wide binding-coverage target (`Makefile`, `contract-audit`) iterates all 44
 contracts in `$(CONTRACTS)` and its loop body is:
 
 ```make
@@ -144,7 +144,7 @@ code is that of the trailing `echo`. Measured directly
 
 ```
 rc=0
-132 [ERROR] BIND-001 lines, across 38 of the 46 contracts
+132 [ERROR] BIND-001 lines, across 38 of the 44 contracts
 ```
 
 Attributed by contract, the ten largest: `setfit-encoder-conformance-v1` 10,

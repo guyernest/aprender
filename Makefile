@@ -214,18 +214,23 @@ tier2:
 # Phase 2 contrastive-data (D-26 again — a gate outside the tiers stops being run).
 #
 # RUNTIME WAS RE-MEASURED, not estimated (2026-08-09, warm tree, three consecutive
-# runs): 3.08 s / 3.00 s / 3.00 s wall, rc=0 each time. History of this line, because
+# runs): 6.48 s / 6.34 s / 6.46 s wall, rc=0 each time. History of this line, because
 # the trend is the point: 2/2/2 s with one determinism doctest, 1/2/1 s after plan
 # 02-03 grew it to 67 lib + 5 doc, 1.75 s after plan 02-05 took it to 126 lib + 7
-# integration + 7 doc, and now 3.0 s after plan 02-07 took it to 206 lib + 11
-# integration + 7 doc (1 further test is #[ignore]d — the golden regenerator).
-# Actual test execution inside that 3.0 s is 1.22 s lib + 1.07 s doc; the rest is
-# cargo's per-invocation freshness check. The step is still comfortably tier2-shaped.
-# The 1.75 -> 3.0 s step is the pair sampler's two heaviest properties: a 40,000-draw
+# integration + 7 doc, 3.0 s after plan 02-07 took it to 206 lib + 11 integration +
+# 7 doc, and now 6.4 s after plan 02-08 took it to 212 lib + 24 integration + 7 doc
+# across EIGHT suites (1 further test is #[ignore]d — the golden regenerator).
+# Actual test execution inside that 6.4 s is 1.18 s lib + 0.23 s trybuild + 3.33 s
+# doc; the rest is cargo's per-invocation freshness check over eight targets. The
+# step is still comfortably tier2-shaped.
+# The 1.75 -> 3.0 s step was the pair sampler's two heaviest properties: a 40,000-draw
 # marginal-equivalence measurement on layout [3,5,7] (which is what proves the O(K)
 # negative scheme preserves D-14's n_j*n_k class-pair weights rather than merely
-# being faster) and a 24,576-pair streamed manifest hash. Both are deliberate: a
-# cheaper marginal test could not distinguish the weighted scheme from a uniform one.
+# being faster) and a 24,576-pair streamed manifest hash. The 3.0 -> 6.4 s step is
+# `tests/ui.rs`: trybuild spawns a nested cargo build for the five compile-fail
+# programs that pin DATA-06's non-constructibility. All three costs are deliberate —
+# a cheaper marginal test could not distinguish the weighted scheme from a uniform
+# one, and a compile-fail claim that is not compiled is not a claim.
 # Re-measure and update when the suite grows again; a tier2 line whose comment
 # records a stale number is worse than one with no comment, because it will be
 # trusted.
@@ -1101,7 +1106,7 @@ contract-audit: ## Audit binding coverage (equations -> implementations)
 # WHY THIS IS SCOPED, AND WHY THE REPO-WIDE `contract-audit` IS NOT WIRED.
 # Measured, not assumed (`make contract-audit > /tmp/ca-repo.log 2>&1; rc=$$?`,
 # status captured directly): it reports **132 BIND-001 errors across 38 of the
-# 46 contracts** — 10 in Phase 1's setfit-encoder-conformance-v1.yaml, the rest
+# 44 contracts** — 10 in Phase 1's setfit-encoder-conformance-v1.yaml, the rest
 # spread over the kernel contracts — and **exits 0 anyway**, because its loop
 # body ends in `;` and never reads the audit's status. So the broad target is
 # today a vacuous gate: it prints failures and reports success. Making it
