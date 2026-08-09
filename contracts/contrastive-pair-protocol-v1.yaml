@@ -853,11 +853,21 @@ proof_obligations:
     ZeroBudget, ZeroHardCap, BudgetExceedsHardCap, BudgetExceedsCapacity,
     OrdinalOutOfRange, PairTargetMismatch. Version, arithmetic and plumbing:
     UnsupportedSchemaVersion, UnsupportedPolicyVersion, UnsupportedAlgorithmVersion,
-    ArithmeticOverflow, Serialization, Io. The enum is #[non_exhaustive]: this list is an
-    exhaustive INITIAL design, not a permanent freeze. A later plan MAY add a variant
-    provided it (1) records the addition and its reason in that plan's SUMMARY and
-    (2) extends this obligation's list. Extending the taxonomy is a contract change.
-    Owned by plan 02-02.
+    UnsupportedNormalizationVersion, ArithmeticOverflow, Serialization, Io. The enum is
+    #[non_exhaustive]: this list is an exhaustive INITIAL design, not a permanent freeze.
+    A later plan MAY add a variant provided it (1) records the addition and its reason in
+    that plan's SUMMARY and (2) extends this obligation's list. Extending the taxonomy is
+    a contract change. Owned by plan 02-02.
+
+    TAXONOMY EXTENSION, plan 02-06: UnsupportedNormalizationVersion. The dataset
+    attestation carries the content-normalization tag its exclusion record was computed
+    under, and that tag is a STRING rather than an integer, so UnsupportedSchemaVersion
+    (whose got/supported are u32) cannot carry it. It is a separate failure in substance
+    too: a foreign schema version means the artifact's FIELDS are unknown, while a foreign
+    normalization version means a known field MEANS something else — an exclusion record
+    computed under different collapsing rules would otherwise be replayed as if it had been
+    computed under these ones, which is exactly the drift D-17 versions the pipeline to
+    prevent. Raised only by attestation::preflight; discharged by FALSIFY-CPP-015.
   formal: 'forall fallible paths f: f returns Result<_, ContrastiveDataError> && no panic on caller input'
   applies_to: all
 

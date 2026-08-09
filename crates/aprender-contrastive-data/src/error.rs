@@ -363,6 +363,23 @@ pub enum ContrastiveDataError {
         supported: u32,
     },
 
+    /// An artifact was produced under a content-normalization pipeline this build does
+    /// not implement.
+    ///
+    /// Distinct from [`Self::UnsupportedSchemaVersion`] because the normalization version
+    /// is a STRING tag rather than an integer, and because it changes what the exclusion
+    /// record MEANS rather than what the artifact's fields are. Silently accepting a
+    /// foreign tag would let an exclusion record computed under different collapsing rules
+    /// be replayed as if it had been computed under these ones (D-17: the normalization is
+    /// contracted and versioned so it cannot drift).
+    #[error("unsupported content normalization version: got {got:?}, supported {supported:?}")]
+    UnsupportedNormalizationVersion {
+        /// Tag read from the artifact.
+        got: String,
+        /// Tag this build implements.
+        supported: &'static str,
+    },
+
     /// A versioned policy enum value this build does not implement.
     #[error("unsupported {policy} policy version: got {got}, supported {supported}")]
     UnsupportedPolicyVersion {

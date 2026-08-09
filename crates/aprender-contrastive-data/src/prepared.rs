@@ -215,7 +215,31 @@ impl PreparedDataset<Canonical> {
         let train = Split::<Train>::from_rows(train, &decls.train)?;
         let validation = Split::<Validation>::from_rows(validation, &decls.validation)?;
         let test = Split::<Test>::from_rows(test, &decls.test)?;
+        Ok(Self::from_validated_splits(
+            train,
+            validation,
+            test,
+            &decls.label_names,
+            ledger,
+        ))
+    }
 
+    /// Assemble from splits that have ALREADY passed the ingest ladder.
+    ///
+    /// The SINGLE assembly point. Both doors land here — `from_labeled_rows`, which
+    /// ingests typed rows, and `attestation`'s `from_attested_bytes`, which ingests
+    /// attested buffers through [`Split::from_jsonl_bytes`] — so the fingerprint, the
+    /// exclusion record and the ledger records cannot differ by which door a caller used.
+    /// Two assembly paths that agree today are two that will disagree eventually.
+    ///
+    /// Infallible: every rejection already happened in the ladder.
+    pub(crate) fn from_validated_splits(
+        train: Split<Train>,
+        validation: Split<Validation>,
+        test: Split<Test>,
+        label_names: &[String],
+        ledger: &mut AccessLedger,
+    ) -> Self {
         let fingerprint = {
             let train_pairs = train.exact_hash_pairs();
             let validation_pairs = validation.exact_hash_pairs();
@@ -227,7 +251,7 @@ impl PreparedDataset<Canonical> {
             ];
             DatasetFingerprint::compute(&DatasetFingerprintInput {
                 profile: Canonical::PROFILE,
-                label_names: &decls.label_names,
+                label_names,
                 normalization_version: CONTENT_NORMALIZATION_VERSION,
                 splits: &splits,
             })
@@ -244,7 +268,7 @@ impl PreparedDataset<Canonical> {
             ledger.record(role, Canonical::PROFILE, "ingest", &fingerprint_hex);
         }
 
-        Ok(Self {
+        Self {
             splits: CanonicalSplits {
                 train,
                 validation,
@@ -252,9 +276,9 @@ impl PreparedDataset<Canonical> {
             },
             exclusions,
             fingerprint,
-            label_names: decls.label_names.clone(),
+            label_names: label_names.to_vec(),
             profile: PhantomData,
-        })
+        }
     }
 
     /// The declared label map, in label order.
@@ -380,7 +404,24 @@ impl PreparedDataset<Compatibility> {
         let train = Split::<Train>::from_rows(train, &decls.train)?;
         let compatibility_test =
             Split::<CompatibilityTest>::from_rows(compatibility_test, &decls.compatibility_test)?;
+        Ok(Self::from_validated_splits(
+            train,
+            compatibility_test,
+            &decls.label_names,
+            ledger,
+        ))
+    }
 
+    /// Assemble from splits that have ALREADY passed the ingest ladder.
+    ///
+    /// The compatibility profile's single assembly point, for the same reason the
+    /// canonical one has exactly one.
+    pub(crate) fn from_validated_splits(
+        train: Split<Train>,
+        compatibility_test: Split<CompatibilityTest>,
+        label_names: &[String],
+        ledger: &mut AccessLedger,
+    ) -> Self {
         let fingerprint = {
             let train_pairs = train.exact_hash_pairs();
             let compatibility_pairs = compatibility_test.exact_hash_pairs();
@@ -390,7 +431,7 @@ impl PreparedDataset<Compatibility> {
             ];
             DatasetFingerprint::compute(&DatasetFingerprintInput {
                 profile: Compatibility::PROFILE,
-                label_names: &decls.label_names,
+                label_names,
                 normalization_version: CONTENT_NORMALIZATION_VERSION,
                 splits: &splits,
             })
@@ -406,16 +447,16 @@ impl PreparedDataset<Compatibility> {
             ledger.record(role, Compatibility::PROFILE, "ingest", &fingerprint_hex);
         }
 
-        Ok(Self {
+        Self {
             splits: CompatibilitySplits {
                 train,
                 compatibility_test,
             },
             exclusions,
             fingerprint,
-            label_names: decls.label_names.clone(),
+            label_names: label_names.to_vec(),
             profile: PhantomData,
-        })
+        }
     }
 
     /// The declared label map, in label order.

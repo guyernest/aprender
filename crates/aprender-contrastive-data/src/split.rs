@@ -104,12 +104,10 @@ impl<R: SplitRole> Split<R> {
     ///
     /// Any variant of the gate ladder in [`validate_ingest_ladder`], plus the parse-time
     /// variants from `schema::parse_jsonl_bytes`.
-    // SCOPED, TEMPORARY: within this plan the only callers are tests. The non-test caller is
-    // `PreparedDataset::from_attested_bytes`, which plan 02-06 adds — this is the untrusted-input
-    // door it lands in. Remove this allow in 02-06 rather than widening it; if 02-06 lands and the
-    // allow is still needed, the attested-bytes path did NOT route through the gate ladder and that
-    // is a defect, not a lint to silence.
-    #[allow(dead_code)]
+    // The scoped `#[allow(dead_code)]` plan 02-03 left here is GONE, and its absence is the
+    // signal it was placed for: `PreparedDataset::from_attested_bytes` (plan 02-06,
+    // `attestation.rs`) is the non-test caller, so the attested-bytes path really does route
+    // through this gate ladder rather than around it.
     pub(crate) fn from_jsonl_bytes(
         bytes: &[u8],
         decl: &SplitDeclaration,
