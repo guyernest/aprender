@@ -44,7 +44,6 @@ pub struct AccessRecord {
 /// The canonical wire form. A struct, not a map, so field order is fixed by the type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 struct LedgerWire {
     schema_version: u32,
     records: Vec<AccessRecord>,
@@ -78,14 +77,29 @@ impl AccessLedger {
         &self.records
     }
 
-    /// Deterministic canonical serialization.
+    /// Deterministic canonical serialization — the artifact a later phase's selection
+    /// lock reads.
+    ///
+    /// Compact JSON over a struct with a fixed field order and a `Vec` whose order IS the
+    /// access order. There is no map to iterate and no timestamp to drift, so two runs
+    /// that touched the same splits in the same order produce byte-identical output.
     ///
     /// # Errors
     ///
     /// [`ContrastiveDataError::Serialization`] if the ledger cannot be serialized.
+    #[provable_contracts_macros::contract(
+        "contrastive-pair-protocol-v1",
+        equation = "access_ledger_persistence"
+    )]
     pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, ContrastiveDataError> {
-        let _ = LEDGER_SCHEMA_VERSION;
-        Ok(Vec::new())
+        let wire = LedgerWire {
+            schema_version: LEDGER_SCHEMA_VERSION,
+            records: self.records.clone(),
+        };
+        serde_json::to_vec(&wire).map_err(|error| ContrastiveDataError::Serialization {
+            context: "access_ledger".to_string(),
+            detail: error.to_string(),
+        })
     }
 
     /// Parse a canonical ledger.
@@ -95,13 +109,35 @@ impl AccessLedger {
     /// [`ContrastiveDataError::Serialization`] on malformed bytes, or
     /// [`ContrastiveDataError::UnsupportedSchemaVersion`] on a future schema.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ContrastiveDataError> {
-        let _ = bytes;
-        Ok(Self::default())
+        let wire: LedgerWire =
+            serde_json::from_slice(bytes).map_err(|error| ContrastiveDataError::Serialization {
+                context: "access_ledger".to_string(),
+                detail: error.to_string(),
+            })?;
+        if wire.schema_version != LEDGER_SCHEMA_VERSION {
+            return Err(ContrastiveDataError::UnsupportedSchemaVersion {
+                field: "access_ledger".to_string(),
+                got: wire.schema_version,
+                supported: LEDGER_SCHEMA_VERSION,
+            });
+        }
+        Ok(Self {
+            records: wire.records,
+        })
     }
 
-    /// SHA-256 of the canonical bytes.
+    /// SHA-256 of [`Self::to_canonical_bytes`].
+    ///
+    /// Total rather than fallible: the canonical form is a `u32` and a vector of structs
+    /// of `String`s, which has no non-string map key and no non-finite float, so
+    /// `serde_json` has no failure mode to report. The `expect` documents that reasoning
+    /// at the one place it is relied upon rather than pushing a `Result` into every
+    /// caller that only ever wants a digest.
     pub fn ledger_hash(&self) -> [u8; 32] {
-        Sha256::digest(b"").into()
+        let bytes = self
+            .to_canonical_bytes()
+            .expect("AccessLedger canonical form is strings and integers; serialization is total");
+        Sha256::digest(bytes).into()
     }
 }
 

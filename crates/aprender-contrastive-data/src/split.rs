@@ -23,14 +23,20 @@
 //! compile-fail proof of "cannot be constructed" is unobtainable against an expression
 //! that compiles.
 
+// TEMPORARY, removed by the prepared-dataset task of this same plan. Both constructors
+// are `pub(crate)` BY DESIGN and their only non-test caller is `prepared.rs`, which does
+// not exist yet. The warning is therefore reporting the intended access boundary rather
+// than dead code.
+#![allow(dead_code)]
+
 use core::marker::PhantomData;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
 use crate::error::ContrastiveDataError;
 use crate::hash::{exact_hash, normalized_hash};
-use crate::schema::{parse_jsonl_bytes, LabeledExample};
+use crate::schema::{encode_jsonl, parse_jsonl_bytes, LabeledExample};
 
 /// A split role. Implemented only by the four zero-sized marker types below.
 pub trait SplitRole {
@@ -92,30 +98,60 @@ pub struct Split<R: SplitRole> {
 }
 
 impl<R: SplitRole> Split<R> {
+    /// Ingest untrusted JSONL bytes.
+    ///
+    /// `source_hash = SHA-256(bytes)` — the digest is taken from THE SAME buffer that is
+    /// then parsed and count-checked. Reading a source twice, or hashing a re-encoding
+    /// here, would let the recorded digest describe content that never passed the ladder.
+    /// That discipline came across the seam from `data_tweeteval.rs` and this comment
+    /// travels with it deliberately.
+    ///
+    /// # Errors
+    ///
+    /// Any variant of the gate ladder in [`validate_ingest_ladder`], plus the parse-time
+    /// variants from `schema::parse_jsonl_bytes`.
     pub(crate) fn from_jsonl_bytes(
         bytes: &[u8],
         decl: &SplitDeclaration,
     ) -> Result<Self, ContrastiveDataError> {
         let source_hash: [u8; 32] = Sha256::digest(bytes).into();
         let rows = parse_jsonl_bytes(bytes, R::ROLE)?;
-        Self::assemble(rows, decl, source_hash)
+        validate_ingest_ladder(&rows, R::ROLE, decl)?;
+        Ok(Self::assemble(rows, decl, source_hash))
     }
 
+    /// Ingest rows the caller already decoded from a dataset-specific source format.
+    ///
+    /// **`source_hash = SHA-256(encode_jsonl(&rows)?)`** — the canonical re-encoding of the
+    /// ACCEPTED rows, never an ad-hoc digest. This derivation is load-bearing, not a
+    /// stylistic choice: plan 02-06 reaches a dataset through `from_attested_bytes` (which
+    /// lands in [`Split::from_jsonl_bytes`]) and through `from_labeled_rows` (which lands
+    /// here), and its fingerprint-reproduction test asserts the two agree. They can only
+    /// agree because `encode_jsonl(parse_jsonl_bytes(b)?)? == b` for canonical input, so
+    /// re-encoding recovers exactly the buffer the other door hashed. Inventing a second
+    /// digest rule here would make that test unsatisfiable.
+    ///
+    /// The ladder runs BEFORE the re-encoding, so a rejected split never produces a hash
+    /// at all.
+    ///
+    /// # Errors
+    ///
+    /// Any variant of the gate ladder, or
+    /// [`ContrastiveDataError::Serialization`] if the accepted rows cannot be re-encoded.
     pub(crate) fn from_rows(
         rows: Vec<LabeledExample>,
         decl: &SplitDeclaration,
     ) -> Result<Self, ContrastiveDataError> {
-        let source_hash: [u8; 32] = Sha256::digest(b"").into();
-        Self::assemble(rows, decl, source_hash)
+        validate_ingest_ladder(&rows, R::ROLE, decl)?;
+        let source_hash: [u8; 32] = Sha256::digest(encode_jsonl(&rows)?).into();
+        Ok(Self::assemble(rows, decl, source_hash))
     }
 
-    fn assemble(
-        rows: Vec<LabeledExample>,
-        decl: &SplitDeclaration,
-        source_hash: [u8; 32],
-    ) -> Result<Self, ContrastiveDataError> {
-        validate_ingest_ladder(&rows, R::ROLE, decl)?;
-
+    /// Build the value from rows the ladder has ALREADY accepted.
+    ///
+    /// Infallible by construction: every rejection happens in the ladder, so there is no
+    /// state in which a partially built split exists.
+    fn assemble(rows: Vec<LabeledExample>, decl: &SplitDeclaration, source_hash: [u8; 32]) -> Self {
         let mut exact_hashes = BTreeMap::new();
         let mut normalized_hashes = BTreeMap::new();
         let mut class_counts = vec![0u64; decl.label_names.len()];
@@ -127,14 +163,14 @@ impl<R: SplitRole> Split<R> {
             }
         }
 
-        Ok(Self {
+        Self {
             rows,
             source_hash,
             exact_hashes,
             normalized_hashes,
             class_counts,
             role: PhantomData,
-        })
+        }
     }
 
     /// The validated rows, in ingest order.
@@ -164,12 +200,109 @@ impl<R: SplitRole> Split<R> {
 }
 
 /// The ONE validating gate ladder, shared by both constructors.
+///
+/// Both doors into a split call this same function, which is why every defect class
+/// produces an identical typed error whichever door the caller used. Two ladders that
+/// agree today are two ladders that will disagree eventually.
+///
+/// The ladder, in order:
+///
+/// - **Gate 1** — UTF-8, strict JSON schema, and whitespace-only `input`. The bytes path
+///   ran the first two inside `schema::parse_jsonl_bytes`; the empty-input check is
+///   repeated here so the typed-rows path, which never sees a parser, rejects identically.
+/// - **Gate 2** — every row's embedded `source_split` equals the role being built. This is
+///   the point of the whole function: the typestate makes leakage inexpressible for a
+///   library caller, but honest-looking bytes with a mislabeled role would otherwise
+///   become a `Split<Train>` the compiler is perfectly happy with (D-16).
+/// - **Gate 3** — no repeated id within the split.
+/// - **Gate 4** — the numeric label is inside the declared map, AND `label_text` equals
+///   `label_names[label]`. The second half is separate on purpose: an in-range label with
+///   contradicting text is what a hand-edited mirror looks like.
+/// - **Gate 5** — exact per-class counts against the declaration.
+///
+/// # Errors
+///
+/// [`ContrastiveDataError::EmptyInput`], [`ContrastiveDataError::SplitRoleMismatch`],
+/// [`ContrastiveDataError::DuplicateId`], [`ContrastiveDataError::UnknownLabel`],
+/// [`ContrastiveDataError::LabelTextMismatch`], or
+/// [`ContrastiveDataError::InvalidClassCounts`].
+#[provable_contracts_macros::contract(
+    "contrastive-pair-protocol-v1",
+    equation = "split_ingest_boundary"
+)]
 fn validate_ingest_ladder(
     rows: &[LabeledExample],
     role: &str,
     decl: &SplitDeclaration,
 ) -> Result<(), ContrastiveDataError> {
-    let _ = (rows, role, decl);
+    // Gate 1 (tail): whitespace-only text. A blank row normalizes to the empty string and
+    // would therefore collide with every other blank row in the leakage detector.
+    for (index, row) in rows.iter().enumerate() {
+        if row.input.trim().is_empty() {
+            return Err(ContrastiveDataError::EmptyInput {
+                split: role.to_string(),
+                index,
+            });
+        }
+    }
+
+    // Gate 2: split-role span. The compiler must never be the only defense.
+    for row in rows {
+        if row.source_split != role {
+            return Err(ContrastiveDataError::SplitRoleMismatch {
+                expected_role: role.to_string(),
+                embedded_role: row.source_split.clone(),
+            });
+        }
+    }
+
+    // Gate 3: duplicate ids. A BTreeSet keeps the first offender deterministic.
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for row in rows {
+        if !seen.insert(row.id.as_str()) {
+            return Err(ContrastiveDataError::DuplicateId {
+                split: role.to_string(),
+                id: row.id.clone(),
+            });
+        }
+    }
+
+    // Gate 4: label validity and label_text agreement.
+    for (index, row) in rows.iter().enumerate() {
+        let expected_text =
+            decl.label_names
+                .get(row.label)
+                .ok_or_else(|| ContrastiveDataError::UnknownLabel {
+                    split: role.to_string(),
+                    index,
+                    label: row.label,
+                })?;
+        if row.label_text != *expected_text {
+            return Err(ContrastiveDataError::LabelTextMismatch {
+                split: role.to_string(),
+                index,
+                label: row.label,
+                expected_text: expected_text.clone(),
+                got_text: row.label_text.clone(),
+            });
+        }
+    }
+
+    // Gate 5: exact per-class counts.
+    let mut observed = vec![0usize; decl.label_names.len()];
+    for row in rows {
+        if let Some(slot) = observed.get_mut(row.label) {
+            *slot += 1;
+        }
+    }
+    if observed != decl.expected_class_counts {
+        return Err(ContrastiveDataError::InvalidClassCounts {
+            split: role.to_string(),
+            expected: decl.expected_class_counts.clone(),
+            got: observed,
+        });
+    }
+
     Ok(())
 }
 
