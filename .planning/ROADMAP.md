@@ -103,7 +103,7 @@ Plans:
 **Wave 4** *(blocked on Wave 3 completion)*
 
 - [x] 02-05-PLAN.md — Philox few-shot selection (frozen LE encoding, labeled SelectedExample) + non-circular manifest payload with persisted ledger + strict Selection::replay + goldens (wave 4)
-- [ ] 02-06-PLAN.md — data_tweeteval thin-adapter relocation on the D-05 seam + dataset-attestation ingest boundary + real-duplicate golden + contract growth (wave 4)
+- [x] 02-06-PLAN.md — data_tweeteval thin-adapter relocation on the D-05 seam + dataset-attestation ingest boundary + real-duplicate golden + contract growth (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
@@ -172,7 +172,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
-| 2. Deterministic Pair and Data Protocol | 5/9 | In Progress|  |
+| 2. Deterministic Pair and Data Protocol | 6/9 | In Progress|  |
 | 3. Faithful Two-Stage Trainer and Head | 0/TBD | Not started | - |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |

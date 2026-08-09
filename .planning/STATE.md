@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-08-09T02:45:52.321Z"
-last_activity: "2026-08-09 -- 02-05 complete: counter-based Philox derivation with a frozen little-endian encoding, labeled partial Fisher-Yates selection over one PreparedDataset<Canonical>, the non-circular selection manifest with a persisted access ledger, strict replay with twelve distinct rejections, and four goldens whose ordered-id digests were derived by an independent implementation; 140 crate tests green, cross-crate baseline 14,161"
+stopped_at: Completed 02-06-PLAN.md
+last_updated: "2026-08-09T03:41:33.600Z"
+last_activity: "2026-08-09 -- 02-06 complete: crate-owned dataset attestation boundary (from_attested_bytes re-derives profile, schema version, per-split digests, class counts, exclusion hash and fingerprint before any split is exposed, digest check demonstrated to precede parsing by induced mutation); data_tweeteval.rs relocated onto the D-05 seam with canonical JSONL byte parity proven against an independently re-derived wire format; manifest at schema_version 2 with no version-1 migration; the real train:70 = validation:3 duplicate golden RUN and GREEN against the live pinned revision; tweet-eval contract v2.0.0 with 9 obligations and 13 falsification tests; cross-crate baseline 14,186"
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 18
-  completed_plans: 14
-  percent: 78
+  completed_plans: 15
+  percent: 83
 ---
 
 # Project State
@@ -26,21 +26,21 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 02 (deterministic-pair-and-data-protocol) — EXECUTING
-Plan: 6 of 9
-Status: Ready to execute — 02-05 complete
-Last activity: 2026-08-09 -- 02-05 complete: counter-based Philox derivation with a frozen little-endian encoding, labeled partial Fisher-Yates selection over one PreparedDataset<Canonical>, the non-circular selection manifest with a persisted access ledger, strict replay with twelve distinct rejections, and four goldens whose ordered-id digests were derived by an independent implementation; 140 crate tests green, cross-crate baseline 14,161
+Plan: 7 of 9
+Status: Ready to execute — 02-06 complete
+Last activity: 2026-08-09 -- 02-06 complete: attested dataset boundary, D-05 relocation with byte parity, real-duplicate golden run green on live data, tweet-eval contract v2.0.0
 
-Working branch: `gsd/phase-2-contract-gate` @ dc44dd6c4 (waves 3-6 fork from here; see 02-01-SUMMARY.md for the branch/PR policy)
+Working branch: `gsd/phase-2-contract-gate` @ e939a53ae (waves 5-6 fork from here; see 02-01-SUMMARY.md for the branch/PR policy)
 
-Progress: [████████░░] 78%
+Progress: [████████░░] 83%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 2 (this milestone's execution log; Phase 1 predates metric capture)
-- Average duration: ~58m
-- Total execution time: ~1.9 hours
+- Total plans completed: 6 (this milestone's execution log; Phase 1 predates metric capture)
+- Average duration: ~1h15m
+- Total execution time: ~7.4 hours
 
 **By Phase:**
 
@@ -51,13 +51,14 @@ Progress: [████████░░] 78%
 
 **Recent Trend:**
 
-- Last 5 plans: 02-01 (1h20m, 2 tasks, 14 files), 02-02 (~35m, 4 tasks, 19 files)
-- Trend: faster — 02-02 had no network work and no PR round-trip
+- Last 5 plans: 02-02 (~35m, 4 tasks, 19 files), 02-03 (55m, 3 tasks, 6 files), 02-04 (~50m, 2 tasks, 15 files), 02-05 (~2h10m, 3 tasks, 15 files), 02-06 (~1h50m, 3 tasks, 6 files)
+- Trend: the two long plans (02-05, 02-06) are the two that had to derive evidence independently rather than assert it
 
 *Updated after each plan completion*
 | Phase 02 P03 | 55m | 3 tasks | 6 files |
 | Phase 02 P04 | ~50m | 2 tasks | 15 files |
 | Phase 02 P05 | ~2h10m | 3 tasks | 15 files |
+| Phase 02 P06 | ~1h50m | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -87,6 +88,11 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-05: permutation invariance is claimed for the SELECTION, not the semantic hash — the payload embeds a dataset fingerprint that digests each split's JSONL in ingest order, so a permuted file is legitimately a different dataset; the test asserts both halves
 - [Phase 02]: 02-05: the selection AccessRecord carries the DATASET fingerprint, not the validation-split digest the plan named, so one ledger field does not mean two things depending on which code path wrote it; D-19 evidence is discharged via validation_witness().dataset_fingerprint_hex() and profile
 - [Phase 02]: 02-05: RNG byte-encoding and ordered-selection goldens are ALGORITHM-DERIVED (independent Python from the contract text, cross-checked with shasum); the four payload.json goldens are capture-and-blessed byte forms, and the SUMMARY labels which is which
+- [Phase 02]: 02-06: from_attested_bytes routes through Split::from_jsonl_bytes rather than re-using from_labeled_rows, which required extracting a pub(crate) from_validated_splits in prepared.rs — the plan forbade touching prepared.rs, but that constraint's stated reason (wave-4 parallelism with 02-05) had already expired, and without the change the attested path would not have gone through the byte-ingest door and the cross-path fingerprint test would have been a tautology
+- [Phase 02]: 02-06: the setfit compatibility profile's merged rows now carry source_split compatibility_test instead of validation/test — an unavoidable consequence of D-19's distinct role plus the crate's role gate, declared by the schema_version 1->2 bump and pinned by a test; canonical row bytes are unchanged and proven byte-for-byte
+- [Phase 02]: 02-06: write_outputs re-opens the directory it just wrote through PreparedDataset::from_attested_bytes and rolls back on rejection — without a production caller the attestation read path and the schema-version gate would have been test-only dead code
+- [Phase 02]: 02-06: ContrastiveDataError gains UnsupportedNormalizationVersion (a String tag cannot ride in UnsupportedSchemaVersion's u32), with OBLIG-CPP-ERROR-TAXONOMY extended per the process error.rs itself mandates
+- [Phase 02]: 02-06: every crate-level test command in the tweet-eval contract carries --lib, because the bare filter form emits a 'test result: ok' line from a suite that ran ZERO matching tests and would satisfy the expected_output grep vacuously
 
 ### Pending Todos
 
@@ -139,6 +145,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-08-09T02:45:52.318Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-08-09T03:39:15.336Z
+Stopped at: Completed 02-06-PLAN.md
 Resume file: None
