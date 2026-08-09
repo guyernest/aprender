@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 02-08-PLAN.md
-last_updated: "2026-08-09T06:31:59.709Z"
-last_activity: "2026-08-09 -- 02-08 complete: in-band leaky and materializing negatives with their mirrors and the K = N capacity case, five reviewed trybuild compile-fail proofs, all 25 Phase 2 equations bound behind a blocking tier3 audit, and a completed 529-mutant scoped run"
+status: verifying
+stopped_at: Completed 02-09-PLAN.md
+last_updated: "2026-08-09T07:51:06.696Z"
+last_activity: "2026-08-09 -- 02-09 complete: `apr data select` / `apr data pairs` shipped as thin adapters over the attested boundary; every Phase 2 ROADMAP criterion demonstrated by a real CLI run against the live pinned TweetEval revision"
 progress:
   total_phases: 5
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 18
-  completed_plans: 17
-  percent: 94
+  completed_plans: 18
+  percent: 100
 ---
 
 # Project State
@@ -25,22 +25,22 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 02 (deterministic-pair-and-data-protocol) — EXECUTING
-Plan: 9 of 9
-Status: Ready to execute — 02-08 complete, wave 6 half closed (02-09 remains)
-Last activity: 2026-08-09 -- 02-08 complete: in-band leaky and materializing negatives with their mirrors and the K = N capacity case, five reviewed trybuild compile-fail proofs, all 25 Phase 2 equations bound behind a blocking tier3 audit, and a completed 529-mutant scoped run
+Phase: 02 (deterministic-pair-and-data-protocol) — COMPLETE, awaiting verification
+Plan: 9 of 9 — all executed
+Status: Phase complete — ready for `/gsd:verify-work`
+Last activity: 2026-08-09 -- 02-09 complete: `apr data select` / `apr data pairs` shipped as thin adapters over the attested boundary; every Phase 2 ROADMAP criterion demonstrated by a real CLI run against the live pinned TweetEval revision
 
-Working branch: `gsd/phase-2-contract-gate` @ c947861bf (02-09 continues on this branch; see 02-01-SUMMARY.md for the branch/PR policy)
+Working branch: `gsd/phase-2-contract-gate` @ 2ba6781f6 (last code/docs commit; the plan-completion commit follows). All nine plans rode this one branch — see 02-01-SUMMARY.md for the branch/PR policy. **The Phase 2 PR has NOT been opened; per 02-01 that is the human's call after the verifier runs.**
 
-Progress: [█████████░] 94%
+Progress: [██████████] 100% (18 of 18 PLANNED plans; phases 3-5 are not yet planned, so this is not milestone completion)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 8 (this milestone's execution log; Phase 1 predates metric capture)
-- Average duration: ~1h32m
-- Total execution time: ~12.0 hours
+- Total plans completed: 9 (this milestone's execution log; Phase 1 predates metric capture)
+- Average duration: ~1h40m
+- Total execution time: ~14.8 hours
 
 **By Phase:**
 
@@ -51,8 +51,8 @@ Progress: [█████████░] 94%
 
 **Recent Trend:**
 
-- Last 5 plans: 02-04 (~50m, 2 tasks, 15 files), 02-05 (~2h10m, 3 tasks, 15 files), 02-06 (~1h50m, 3 tasks, 6 files), 02-07 (~2h45m, 3 tasks, 11 files), 02-08 (~1h45m, 3 tasks, 15 files)
-- Trend: the three long plans (02-05, 02-06, 02-07) are the three that had to derive evidence independently — a second implementation, an induced mutation, or a scaling measurement — rather than assert it. 02-08 is shorter than that trend only because the 35-minute mutation run overlapped nothing else; four separate gate failures were still induced and observed
+- Last 5 plans: 02-05 (~2h10m, 3 tasks, 15 files), 02-06 (~1h50m, 3 tasks, 6 files), 02-07 (~2h45m, 3 tasks, 11 files), 02-08 (~1h45m, 3 tasks, 15 files), 02-09 (~2h45m, 3 tasks, 6 files)
+- Trend: the long plans are the ones that had to derive evidence independently — a second implementation, an induced mutation, a scaling measurement — rather than assert it. 02-09 matches 02-07's length for a different reason: it is the first plan whose evidence is a real CLI run against live pinned data rather than a test, and roughly 20 minutes of it was an ENOSPC stop-and-report (the phase's second; both were `target/debug/incremental` at ~25 GB)
 
 *Updated after each plan completion*
 | Phase 02 P03 | 55m | 3 tasks | 6 files |
@@ -61,6 +61,7 @@ Progress: [█████████░] 94%
 | Phase 02 P06 | ~1h50m | 3 tasks | 6 files |
 | Phase 02 P07 | ~2h45m | 3 tasks | 11 files |
 | Phase 02 P08 | ~1h45m | 3 tasks | 15 files |
+| Phase 02 P09 | ~2h45m | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -106,18 +107,32 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-08: cargo-mutants ran at --timeout 20 rather than the planned 60, from a measured sample — 9 percent of mutants hang, and 48 hangs x 60 s alone exceeds the whole 2700 s wall budget; the full 529-mutant run then COMPLETED
 - [Phase 02]: 02-08: 10 of 22 surviving mutants are individually justified as unobservable (disjoint-bit OR/XOR, union-by-size balancing, single-variant enums, an accessor no constructible Selection can make non-zero) and were re-run to confirm they still survive; 12 were killed and a targeted re-run reported 14/14 caught
 - [Phase 02]: 02-08: official_f_avg binds to entrenar::eval::classification::metrics::f1_average_for_classes with NO #[contract] attribute added to aprender-train; the plan's ClassificationMetrics does not exist, the type is MultiClassMetrics
+- [Phase 02]: 02-09: apr data select and apr data pairs are pure filesystem adapters — 0 occurrences of Sha256, swap(, unrank or json! in non-comment lines, exactly ONE fs::rename site, zero File::create, zero unwrap(); all semantics including the on-disk manifest envelope, budget resolution and the manifest->Selection path stay in the crate
+- [Phase 02]: 02-09: the seed MODE is DERIVED from the recorded root_seed rather than stored beside it — SelectionPayload is crate-owned and deny_unknown_fields, adding a field would need a schema bump invalidating 02-05's goldens, and a stored mode could only ever disagree with the seed printed next to it
+- [Phase 02]: 02-09: cli.offline is deliberately NOT threaded into either command — neither opens a socket (the crate cannot; make contrastive-data-boundary enforces it), so an offline switch would advertise a capability that does not exist
+- [Phase 02]: 02-09: the split ROLE SET is read out of the attestation rather than hardcoded as a canonical triple, so a compatibility directory is refused by PROFILE instead of dying on a missing filename — a true statement about the wrong problem
+- [Phase 02]: 02-09: atomic_write takes a FILL CLOSURE (atomic_write_with) rather than a byte slice, so --dump streams dump_pairs into the temp file instead of buffering up to ~60 MB; one rename site, so Task 2's three write-safety proofs still cover both artifacts
+- [Phase 02]: 02-09: the plan's Task 3 replay rejections are unreachable from the CLI because SelectionManifest::from_bytes verifies the digest BEFORE returning — the tests reseal forged payloads with the crate's public hash::exact_hash, which reaches the membership, row-hash and recomputation rungs without naming Sha256 in apr-cli
+- [Phase 02]: 02-09: Task 3 had NO executable RED (its tests could not compile until the interface existed, the same produced-before-consumed constraint the checker found in Task 1); its gates are falsified by three induced mutations instead, and the SUMMARY says so rather than manufacturing a RED after the fact
+- [Phase 02]: 02-09: scripts/check_apr_bin_pinned.sh does NOT scan docs — measured with a two-sided control (a bare apr added to the doc is silent; a bare @apr Makefile recipe fires BARE-APR Makefile:1282), both reverted; nobody should later assume documentation is covered
+- [Phase 02]: 02-09: the GSD state handlers corrupted STATE.md a THIRD time and in a NEW way — update-progress reported percent 100 while writing 40 into the frontmatter (and 94/20 on the earlier call: it writes the PHASE percentage into a field the body renders as a PLAN percentage), record-session silently ignored its positional stopped-at argument, record-metric REJECTS the documented positional form and needs --phase/--plan/--duration flags, and advance-plan clobbered last_activity to a bare date. Every field repaired by hand and read back
 
 ### Pending Todos
 
-- [Phase 2]: DATA-01 through DATA-06 deliberately left UNCHECKED in REQUIREMENTS.md after 02-01
-  AND after 02-02. Plan 02-01's frontmatter claims DATA-01/02 and plan 02-02's claims
-  DATA-02..DATA-06, but every one of those requirements is phrased "a user can/receives …" and
-  02-02 shipped no behavior at all: it produced a crate whose thirteen modules are `//!`-doc stubs,
-  a contract, and two build gates. The typed error variants EXIST but nothing raises them; the
-  equations are AUTHORED but nothing implements them. Checking those boxes now would put five
-  false claims in the traceability table and would make the Phase 2 exit gate green on an empty
-  crate. Mark each at the plan that actually closes it (02-03 ingest/dedup, 02-05 selection,
-  02-06 typestate/attestation, 02-07 pairs/budget, 02-09 CLI).
+- [Phase 2 — CLOSED BY 02-09, the policy held]: DATA-01 through DATA-06 were deliberately left
+  UNCHECKED after 02-01 and 02-02, because those plans shipped a crate of `//!`-doc stubs and
+  checking the boxes would have put five false claims in the traceability table. The policy was
+  to mark each at the plan that actually closes it, and that is what happened: 02-06 closed
+  DATA-01/02, 02-05 closed DATA-03, 02-07 closed DATA-04/05, 02-08 closed DATA-06. **02-09
+  re-audited all six against the shipped behaviour before letting the table stand**, and each is
+  genuinely delivered at the "a user can…" tier this milestone demands — every one was
+  demonstrated in 02-09 by a real `apr` run against the live pinned TweetEval revision
+  (587/66/280 with provenance; ten contracted seeds each replaying its own hash; a 256-pair dump
+  audited endpoint-by-endpoint against the splits; a fixed budget holding while examples grow 8x;
+  and the compatibility, mixed, forged and stale directories each refused fail-closed on BOTH
+  commands). `requirements mark-complete DATA-03 DATA-04 DATA-05` returned
+  `updated: false, already_complete` and REQUIREMENTS.md is byte-unchanged. **Nothing was closed
+  to make the table look finished, and nothing is left open.**
 
 - [Phase 2 — PARTIALLY CLOSED BY 02-08]: `official_f_avg` and all 24
   contrastive-pair-protocol equations are now BOUND, and `make contract-audit-phase2` (blocking,
@@ -142,9 +157,24 @@ Recent decisions affecting current work:
   D-ITEM-01 in the phase's `deferred-items.md`; fix is a repo-wide shell-portability change with
   its own must-match/must-not-match case table (CLAUDE.md rule 7). Worth a dedicated ticket.
 
+- [Repo-wide — SURFACED BY 02-09]: `scripts/check_apr_bin_pinned.sh` does **not** scan
+  documentation. Measured with a two-sided control rather than read: a bare `apr data select …`
+  added to `docs/examples/tweet-eval-stance.md` leaves it green (rc=0, 28 files), while a bare
+  `@apr qa model.apr` added as a Makefile recipe fires `BARE-APR Makefile:1282`. Both probes
+  reverted. This is the guard's stated design ("the invariant is what CI executes, not that
+  nobody may ever type apr"), so it is a scope note rather than a defect — but a reader who
+  assumes docs are covered will be wrong, and the docs are where a user copies commands from.
+  Worth deciding deliberately whether user-facing docs should be in scope.
+
 ### Blockers/Concerns
 
 - [Phase 1]: Freeze numerical tolerances from pinned reference fixtures before examining Rust discrepancies; validate the real-weight mixed-batch graph before committing the full BERT refactor.
+- [Host — RECURRING, hit TWICE in this phase]: `target/debug/incremental` regrows to ~25 GB and
+  fills the volume; 02-09 stopped mid-plan with `ld: write() failed, errno=28` at 546 MiB free.
+  Nothing was deleted by the executor (standing instruction) and the run was reported as a
+  checkpoint with measured numbers; the coordinator reclaimed ~21 GB. **Mitigation adopted for
+  the rest of the plan and recommended for Phase 3: `export CARGO_INCREMENTAL=0`** — the cache
+  did not regrow and 15 GB was still free at plan end.
 - [Phase 2]: Decide and version singleton-class and bounded-oversampling behavior during phase planning.
 - [Phase 2 — KNOWN-RED, EXPECTED, NOT A REGRESSION — **WIDENED BY MEASUREMENT IN 02-02**]: `pre-release` Gate 5 fails from Phase 2 wave 2 through phase exit. Cause: `apr-cli` gains a dependency on the new `aprender-contrastive-data` crate, which is not on crates.io until the human-approved publish cascade lands it (RESEARCH Pitfall 8 / Finding F5). **CORRECTION (02-02, measured):** it is NOT only the verifying form. `cargo package --no-verify -p apr-cli` ALSO fails — `--no-verify` skips the packaged-crate BUILD, not the MANIFEST RESOLUTION that rewrites the path dep into a registry dep, and resolution is where it breaks (`no matching package named 'aprender-contrastive-data' found`). Control-verified: with the dependency line temporarily removed the identical command exits 0 and packages 581 files. So ANY `cargo package -p apr-cli`, verifying or not, is red. What IS gated and must stay green: `cargo package --no-verify -p aprender-contrastive-data` (rc=0, 19 files). Exit condition unchanged: publish `aprender-contrastive-data` BEFORE `apr-cli` — a human-approved release action; CLAUDE.md forbids self-serving the publish. `/gsd:verify-work` must read a red Gate 5 as this expected state. Mirrored in `must_haves.caveats` of plans 02-02 and 02-08 and in 02-VALIDATION.md; plan 02-08's acceptance criterion "both `cargo package --no-verify` runs exit 0" is falsified and should be read as the crate-only form.
 - [Cross-cutting — HOST-SPECIFIC, PRE-EXISTING, NOT A REGRESSION]: `cargo check --workspace` cannot exit 0 on Darwin. `crates/aprender-profile/src/main.rs:6` is a `compile_error!("renacer requires Linux (ptrace syscall tracing)")` under `#[cfg(not(target_os = "linux"))]`, and the consequent E0601 (`main` not found) is its shadow rather than a second defect. Control measured at 02-08: `cargo check --workspace --exclude aprender-profile` exits **0**. Any plan whose acceptance criterion names a bare `cargo check --workspace` should be read as the `--exclude aprender-profile` form on this host.
@@ -164,6 +194,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-08-09T06:31:31.176Z
-Stopped at: Completed 02-08-PLAN.md
+Last session: 2026-08-09T07:51:06.696Z
+Stopped at: Completed 02-09-PLAN.md — Phase 2 is code-complete on `gsd/phase-2-contract-gate`; next step is `/gsd:verify-work`, then the human opens the Phase 2 PR
 Resume file: None
