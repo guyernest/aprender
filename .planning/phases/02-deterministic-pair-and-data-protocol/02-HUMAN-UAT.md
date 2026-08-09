@@ -125,9 +125,15 @@ blocked: 0
 
 ## Gaps
 
-None. The verifier found no gaps, no blockers, and no debt markers anywhere in the phase
-diff, and scored 5/5 ROADMAP success criteria VERIFIED (31/32 must-haves). Phase 3 is not
-blocked by any of the three items above.
+**Goal verification: no gaps.** The verifier found no gaps, no debt markers, and no blockers
+against the phase goal anywhere in the diff, scoring 5/5 ROADMAP success criteria VERIFIED
+(31/32 must-haves). Phase 3 is not blocked by any item in this file.
+
+**Code review: 3 blockers, 14 warnings** — see item 4 and `02-REVIEW.md`. These are a separate
+lens from goal verification: the phase does what it set out to do, and CR-01/CR-02 are latent
+defects on paths functional verification did not exercise (a hostile attestation, and a
+`--force` re-prepare over pre-existing files). CR-03 is a build-gate defect. None of the three
+falsifies a ROADMAP success criterion, which is why the two reports differ without conflicting.
 
 FINDING-W1 (a stale module-doc comment claiming `run_pairs` was still a placeholder) was a
 plain defect rather than a decision and was fixed directly in `f3ee9c0d2`.
