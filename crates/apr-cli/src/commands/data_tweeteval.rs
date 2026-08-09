@@ -75,10 +75,15 @@ const SOURCE_FILES: [&str; 6] = [
 const TRAIN_COUNTS: [usize; 3] = [159, 319, 109];
 const VALIDATION_COUNTS: [usize; 3] = [18, 36, 12];
 const TEST_COUNTS: [usize; 3] = [45, 189, 46];
-const FEW_SHOT_SIZES: [usize; 4] = [8, 16, 32, 64];
-const BENCHMARK_SEEDS: [u64; 10] = [13, 17, 23, 29, 31, 37, 41, 43, 47, 53];
+/// The contracted few-shot sizes. Written into every benchmark manifest's `few_shot`
+/// section, and the list `apr data select` pre-flights `--shots` against.
+pub(crate) const FEW_SHOT_SIZES: [usize; 4] = [8, 16, 32, 64];
+/// The ten contracted benchmark seeds. Written into every benchmark manifest's `few_shot`
+/// section, and the list `apr data select` validates `--seed` against. **42 is not among
+/// them**, which is why `--seed` has no default.
+pub(crate) const BENCHMARK_SEEDS: [u64; 10] = [13, 17, 23, 29, 31, 37, 41, 43, 47, 53];
 /// The manifest filename, named once so the writer and the reader cannot disagree.
-const MANIFEST_FILE: &str = "benchmark-manifest.json";
+pub(crate) const MANIFEST_FILE: &str = "benchmark-manifest.json";
 
 #[derive(Debug)]
 struct CanonicalDataset {
@@ -659,7 +664,7 @@ fn build_outputs(
 ///
 /// There is no migration from version 1. A version-1 manifest predates the cross-split
 /// exclusion record, so any value synthesized for it would be an unattested guess.
-fn attestation_bytes_from_manifest(bytes: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn attestation_bytes_from_manifest(bytes: &[u8]) -> Result<Vec<u8>> {
     let manifest: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
         CliError::ValidationFailed(format!("{MANIFEST_FILE} is not valid JSON: {error}"))
     })?;
@@ -843,30 +848,61 @@ fn title_case(name: &str) -> String {
     }
 }
 
+/// Synthetic canonical TweetEval SOURCE trees, shared by this module's tests and by
+/// `data_contrastive`'s.
+///
+/// It lives outside `mod tests` because `apr data select` needs a real attested benchmark
+/// directory to test against, and the only honest way to obtain one is to run this
+/// command over a source tree that satisfies the contracted class counts. Duplicating the
+/// writer in the other module would put the counts in two places, which is the defect
+/// `split_decl` exists to avoid.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod fixtures {
+    use super::{TEST_COUNTS, TRAIN_COUNTS, VALIDATION_COUNTS};
+    use std::fs;
+    use std::path::Path;
 
-    fn write_fixture_split(root: &Path, split: &str, counts: [usize; 3]) {
+    /// The text prefix the in-file fixture has always used. Named rather than inlined so
+    /// the canonical fixture's bytes — and every digest taken over them — are provably
+    /// unchanged by the move.
+    pub(crate) const DEFAULT_TAG: &str = "authored fixture";
+
+    fn write_fixture_split(root: &Path, split: &str, counts: [usize; 3], tag: &str) {
         let mut texts = String::new();
         let mut labels = String::new();
         let mut index = 0usize;
         for (label, count) in counts.into_iter().enumerate() {
             for _ in 0..count {
-                texts.push_str(&format!("authored fixture {split} sample {index}\n"));
+                texts.push_str(&format!("{tag} {split} sample {index}\n"));
                 labels.push_str(&format!("{label}\n"));
                 index += 1;
             }
         }
-        fs::write(root.join(format!("{split}_text.txt")), texts).unwrap();
-        fs::write(root.join(format!("{split}_labels.txt")), labels).unwrap();
+        fs::write(root.join(format!("{split}_text.txt")), texts)
+            .expect("fixture source text is writable");
+        fs::write(root.join(format!("{split}_labels.txt")), labels)
+            .expect("fixture source labels are writable");
     }
 
-    fn write_canonical_fixture(root: &Path) {
-        write_fixture_split(root, "train", TRAIN_COUNTS);
-        write_fixture_split(root, "val", VALIDATION_COUNTS);
-        write_fixture_split(root, "test", TEST_COUNTS);
+    /// A canonical source tree with the historical text.
+    pub(crate) fn write_canonical_fixture(root: &Path) {
+        write_canonical_fixture_tagged(root, DEFAULT_TAG);
     }
+
+    /// A canonical source tree whose row TEXT differs by `tag`, so two trees prepared this
+    /// way have different split digests. That is what makes a genuinely MIXED benchmark
+    /// directory constructible: copy one preparation's `validation.jsonl` over another's.
+    pub(crate) fn write_canonical_fixture_tagged(root: &Path, tag: &str) {
+        write_fixture_split(root, "train", TRAIN_COUNTS, tag);
+        write_fixture_split(root, "val", VALIDATION_COUNTS, tag);
+        write_fixture_split(root, "test", TEST_COUNTS, tag);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::write_canonical_fixture;
+    use super::*;
 
     fn line_count(path: &Path) -> usize {
         fs::read_to_string(path).unwrap().lines().count()
