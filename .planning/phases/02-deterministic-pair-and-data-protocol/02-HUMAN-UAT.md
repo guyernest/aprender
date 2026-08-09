@@ -3,7 +3,7 @@ status: partial
 phase: 02-deterministic-pair-and-data-protocol
 source: [02-VERIFICATION.md]
 started: 2026-08-09T08:33:23Z
-updated: 2026-08-09T09:05:00Z
+updated: 2026-08-09T10:40:00Z
 ---
 
 ## Current Test
@@ -70,16 +70,20 @@ held up under adversarial reading — zero hash-ordered collections, checked cap
 digest-before-parse, genuinely O(K) retained state, correct union-find coalescing. The defects
 cluster at the edges.
 
-- **CR-01 path traversal (security).** `data_contrastive.rs:256-262` joins each untrusted
-  `attestation.splits` role onto `--data` *before* `preflight` validates the role set.
-  `Path::join` with an absolute component replaces the base, so a crafted `"role": "/etc/shadow"`
-  reads `/etc/shadow.jsonl`, and `"../../.."` escapes. Gives a file-existence oracle and an
-  unbounded read / FIFO hang. The correct pattern already exists in
-  `data_tweeteval::verify_prepared_directory`.
-- **CR-02 `--force` re-prepare destroys the prior benchmark.** `data_tweeteval.rs` `write_file`
-  (line 813) truncates in place, then `remove_all` (line 807) *unlinks* those paths when
-  `verify_prepared_directory` fails — so a "rollback" destroys files that pre-existed the run.
-  This phase built a correct `atomic_write_with` next door and did not use it here.
+- **CR-01 path traversal (security) — FIXED in `3868dc453`.** `role_file` is now an allowlist
+  over the four protocol split roles and is fallible; an unknown role fails closed instead of
+  becoming a path. Previously the untrusted `attestation.splits` role was joined onto `--data`
+  via `format!("{role}.jsonl")`, and `Path::join` replaces the base on an absolute component,
+  so `"role": "/etc/passwd"` read `/etc/passwd.jsonl` and `"../../.."` escaped. Mutation-tested:
+  restoring the unguarded `format!` turns the new test RED with the traversal quoted verbatim.
+  The test carries a mirror, so a `role_file` that refused *everything* could not pass it.
+  **Note this survived the `/code-review --fix` pass** — it was reported in the first review and
+  not re-reported in the second, which is a reminder that "the review came back clean" is not
+  the same as "the earlier finding was addressed".
+- **CR-02 `--force` re-prepare destroys the prior benchmark — FIXED in `3868dc453`.**
+  `write_outputs`' rollback now removes only files the run actually CREATED, never pre-existing
+  ones truncated under `--force`. Previously a failed `verify_prepared_directory` deleted all
+  four files, leaving the user with no benchmark directory having started with a complete one.
 - **CR-03 the new tier2/tier3 gates cannot fail under GNU Make 4.x.** VERIFIED by the
   orchestrator on this host with both make versions installed:
 
@@ -110,8 +114,16 @@ cluster at the edges.
   unset variables, and several targets rely on `|| true`). It needs its own verification pass
   across all targets on BOTH make versions, then re-mutation in the new scope.
 
-expected: A human triages the three blockers — CR-01 and CR-02 as gap-closure code fixes, CR-03
-as its own Makefile-hardening task with a full-target re-verification pass.
+CR-01 and CR-02 are now closed in code with mutation-tested guards, so what remains of this
+item is **CR-03 only**. A second `/code-review --fix` pass also closed six further correctness
+findings (renamed-class replay, unearned ledger hash, a clamp lost on rebuild, uppercase digest
+acceptance, and two constant-returning enum accessors), each with a regression test proven RED
+before restore.
+
+expected: A human triages CR-03 as its own Makefile-hardening task — apply
+`.SHELLFLAGS := -e -u -o pipefail -c`, then re-verify every target on BOTH make 3.81 and
+gmake 4.4.1, and re-mutate the gates in the new scope rather than trusting the earlier
+standalone proofs.
 result: [pending]
 
 ## Summary
