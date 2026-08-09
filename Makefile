@@ -17,6 +17,26 @@ SHELL := /bin/bash
 .DELETE_ON_ERROR:
 
 # Multi-line recipes execute in same shell
+# CR-03: `.ONESHELL:` runs a whole recipe in ONE shell, and the default `.SHELLFLAGS` is
+# `-c` with no `-e`. That shell does not stop at the first failure, so the recipe's status
+# is whatever its LAST line returned — and every tier recipe ends in `@echo "Tier N: PASSED"`,
+# which always succeeds. Measured on this repo with both makes installed:
+#
+#   SHELL := /bin/bash ; .ONESHELL: ; recipe = { false ; @echo "done" }
+#     make  3.81 (macOS default) -> exit=2   (3.81 predates .ONESHELL and ignores it)
+#     gmake 4.4.1 (Linux)        -> exit=0   FAILURE SWALLOWED
+#
+# Under Make 4.x that disarmed every gate D-26 deliberately moved INTO the tiers.
+#
+# `-e` ONLY, deliberately. `-u` and `-o pipefail` are separate hardening with a much larger
+# blast radius here: 35 recipes reference `$$VAR` (a `-u` risk) and 5 pipe into `head`/`tail`,
+# where the reader closing the pipe SIGPIPEs the writer and `pipefail` turns that into a
+# failure. Adding them needs its own verification pass across all 85 targets on BOTH makes.
+# `-e` alone restores the per-line abort semantics 3.81 already had, which is the defect.
+#
+# `.SHELLFLAGS` arrived in Make 3.82, so 3.81 ignores this line — harmless, since 3.81 also
+# ignores `.ONESHELL:` and therefore never had the bug.
+.SHELLFLAGS := -e -c
 .ONESHELL:
 
 .PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix

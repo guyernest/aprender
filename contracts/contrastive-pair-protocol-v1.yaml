@@ -1017,9 +1017,9 @@ falsification_tests:
     emits negatives only and its retained state stays within c * (N + K); no array of
     size proportional to K*K is ever allocated. positive_capacity is 0,
     negative_capacity is C(512, 2) = 130816, and the run does not error.
-  test: cargo test -p aprender-contrastive-data pairs
-  test_harness: cargo test -p aprender-contrastive-data pairs
-  expected_output: 'test result: ok'
+  test: cargo test -p aprender-contrastive-data --test negative_materializing falsify_cpp_007
+  test_harness: cargo test -p aprender-contrastive-data --test negative_materializing falsify_cpp_007
+  expected_output: 'test result: ok. 1 passed'
   if_fails: >
     The negative sampler is enumerating unordered CLASS pairs — the rejected O(K^2)
     design. At the 3-class layouts every other test uses, K^2 = 9 and K = 3 are

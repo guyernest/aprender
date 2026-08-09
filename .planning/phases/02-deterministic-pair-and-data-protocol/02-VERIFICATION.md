@@ -31,7 +31,7 @@ findings:
   - id: FINDING-D1
     severity: deviation
     title: "setfit profile row bytes changed (source_split: validation/test -> compatibility_test)"
-    status: uncertain
+    status: accepted
     where: "crates/apr-cli/src/commands/data_tweeteval.rs:543-545"
   - id: FINDING-W1
     severity: warning
@@ -57,6 +57,19 @@ findings:
     severity: info
     title: "VERIFICATION HAZARD (new, not previously recorded): `diff` under the rtk hook reports \"[ok] Files are identical\" with rc=0 for files whose SHA-256 digests differ. Any emptiness/equality assertion made through `diff` in this repo is unsound. Use `cmp`, `shasum`, or Python."
     where: "environment"
+overrides:
+  - must_have: "The JSONL row output is byte-identical to the D-06 baseline"
+    reason: >
+      Scoped to the canonical profile, where it holds and is proven by independent
+      re-derivation (FALSIFY-TWEET-EVAL-011). The setfit profile's merged rows deliberately
+      carry source_split "compatibility_test" instead of "validation"/"test": D-19 requires
+      Split<CompatibilityTest> and 02-03 Gate 2 requires source_split == role, so the two
+      cannot both hold. Declared by the schema_version 1->2 bump with an enforced
+      no-migration rejection, disclosed in contracts/tweet-eval-stance-benchmark-v1.yaml
+      under profiles.setfit.row_source_split, and pinned by a passing test. Row ids and
+      manifest source_splits preserve full provenance.
+    accepted_by: "Guy Ernest"
+    accepted_at: "2026-08-09T11:05:00Z"
 ---
 
 # Phase 2: Deterministic Pair and Data Protocol — Verification Report

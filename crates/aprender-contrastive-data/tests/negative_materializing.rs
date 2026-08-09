@@ -39,7 +39,7 @@
 mod common;
 
 use aprender_contrastive_data::pairs::{
-    PairConfig, PairLayout, PairSampler, RetainedState, SamplerStateReport,
+    EmittedKinds, PairConfig, PairKind, PairLayout, PairSampler, RetainedState, SamplerStateReport,
 };
 
 // ===============================================================================
@@ -443,6 +443,94 @@ fn honest_state_is_linear_in_the_class_count_across_three_all_singleton_layouts(
     assert_eq!(totals, vec![24, 96, 384]);
     assert_eq!(totals[1], totals[0] * 4, "4x in K must be 4x in state");
     assert_eq!(totals[2], totals[1] * 4, "and again");
+}
+
+/// FALSIFY-CPP-007, at the layout the contract actually names.
+///
+/// The obligation was discharged in substance at K = 32 and K = 128, but the recorded
+/// PREDICTION is about N = 512 under a fixed budget of 64, and its headline number —
+/// `negative_capacity == C(512, 2) == 130816` — appeared nowhere in the tree. A prediction
+/// no test produces cannot fail for the reason it claims, which is the defect class this
+/// phase kept finding elsewhere in the repo; leaving it in our own contract would be the
+/// same theater.
+///
+/// Every literal here is read from the contract, not from a first run: `positive_capacity`
+/// 0 (no class has two members), `negative_capacity` 130816, negatives-only emission, and
+/// retained state inside `c * (N + K)`. The rejected O(K^2) design would need one entry per
+/// unordered class pair — 130,816 of them — so the same gate call that passes here is what
+/// it fails.
+#[test]
+fn falsify_cpp_007_pairs_at_n_512_singletons_stays_bounded() {
+    const N: usize = 512;
+    const BUDGET: u64 = 64;
+    // C(512, 2) = 512 * 511 / 2. Written as the product so a reader can check it, and
+    // asserted against the contract's literal so neither can drift alone.
+    const EXPECTED_NEGATIVE_CAPACITY: u64 = (N as u64) * (N as u64 - 1) / 2;
+    assert_eq!(
+        EXPECTED_NEGATIVE_CAPACITY, 130_816,
+        "the contract's C(512,2) literal"
+    );
+
+    let sizes = common::all_singleton_layout(N);
+    let subject = layout(&sizes, BUDGET);
+
+    // The gate — the SAME call both implementations go through, never self-reported.
+    let report = check_capacity_invariant(&subject, N as u64, N)
+        .unwrap_or_else(|e| panic!("K = N = {N} must be bounded: {e}"));
+
+    assert_eq!(subject.budget(), BUDGET, "the budget is FIXED, not derived");
+    assert_eq!(
+        subject.positive_capacity(),
+        0,
+        "no singleton class can furnish a positive pair"
+    );
+    assert_eq!(
+        subject.negative_capacity(),
+        EXPECTED_NEGATIVE_CAPACITY,
+        "negative_capacity must be C(512,2)"
+    );
+    assert_eq!(
+        subject.emitted_kinds(),
+        EmittedKinds::NegativesOnly,
+        "positives are impossible at this layout"
+    );
+
+    // Linear, not quadratic: the K = 128 case above retains 384 entries, so K = 512 must
+    // retain 4x that and not 4^2x. Anchored to the measured smaller case rather than to a
+    // blessed constant, so the two move together or the test says so.
+    let retained = report.total_retained_entries();
+    assert_eq!(
+        retained, 1536,
+        "K = 512 must retain 4x the K = 128 total (384), not 16x"
+    );
+    assert!(
+        (retained as u64) < EXPECTED_NEGATIVE_CAPACITY / 10,
+        "retained {retained} is not comfortably below the {EXPECTED_NEGATIVE_CAPACITY} \
+         entries the rejected class-pair design would need"
+    );
+
+    // "and the run does not error" — the contract says the stream works, not merely that
+    // the arrays are small. Drain the whole fixed budget.
+    let drawn: Vec<_> = (0..BUDGET)
+        .map(|ordinal| {
+            subject
+                .raw_pair_at(ordinal)
+                .unwrap_or_else(|e| panic!("ordinal {ordinal} must draw at K = N: {e}"))
+        })
+        .collect();
+    assert_eq!(drawn.len(), BUDGET as usize);
+    assert!(
+        drawn.iter().all(|p| p.kind == PairKind::Negative),
+        "every emitted pair at an all-singleton layout must be a negative"
+    );
+    // Endpoints must land in DIFFERENT classes -- at K = N that is also the leakage check,
+    // since same-class would mean a singleton paired with itself.
+    assert!(
+        drawn
+            .iter()
+            .all(|p| p.first.class_index != p.second.class_index),
+        "a negative pair must span two classes"
+    );
 }
 
 // ===============================================================================
