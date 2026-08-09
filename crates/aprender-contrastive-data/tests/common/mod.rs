@@ -35,6 +35,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use aprender_contrastive_data::ledger::AccessLedger;
+use aprender_contrastive_data::prepared::{Canonical, CanonicalDeclarations, PreparedDataset};
+use aprender_contrastive_data::schema::LabeledExample;
+use aprender_contrastive_data::select::{FewShotSelector, Selection, SelectionConfig};
+use aprender_contrastive_data::split::SplitDeclaration;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -276,4 +281,109 @@ pub fn contracted_layout(fixture_id: &str) -> Vec<u64> {
         .unwrap_or_else(|| panic!("no contracted fixture with id `{fixture_id}`"))
         .layout
         .clone()
+}
+
+/// The `negative_capacity` a committed contracted fixture records, by `fixture_id`.
+///
+/// Read rather than typed for the same reason as [`contracted_layout`]: the K = N capacity
+/// gate names 496 — the length of the REJECTED class-pair array at 32 singleton classes —
+/// and a 496 typed into the test would prove only that someone typed it twice.
+pub fn contracted_negative_capacity(fixture_id: &str) -> u64 {
+    load_contracted()
+        .get(fixture_id)
+        .unwrap_or_else(|| panic!("no contracted fixture with id `{fixture_id}`"))
+        .negative_capacity
+}
+
+// ===========================================================================================
+// Synthetic canonical datasets and selections (plan 02-08's in-band negatives)
+// ===========================================================================================
+
+/// The label map every synthetic corpus declares, truncated to the requested class count.
+pub const SYNTHETIC_LABEL_NAMES: [&str; 3] = ["none", "against", "favor"];
+
+/// One synthetic row. Every `input` is distinct across roles, classes and indices, so a
+/// synthetic corpus contains no cross-split duplicate and every class pool stays full —
+/// which matters, because a silently shrunken pool would change what a selection can draw
+/// and turn a capacity measurement into a measurement of the dedup pass instead.
+fn synthetic_row(role: &str, label: usize, index: usize) -> LabeledExample {
+    LabeledExample {
+        id: synthetic_id(role, label, index),
+        input: format!("synthetic {role} post class {label} item {index}"),
+        label,
+        label_text: SYNTHETIC_LABEL_NAMES[label].to_string(),
+        source_split: role.to_string(),
+    }
+}
+
+/// The id a synthetic row carries. Public so a test can name a row it must NOT find.
+pub fn synthetic_id(role: &str, label: usize, index: usize) -> String {
+    format!("{role}:{label}-{index}")
+}
+
+/// A canonical dataset with `classes` classes, `train_per_class` training rows per class,
+/// and exactly one validation and one test row per class.
+///
+/// Built through the real `from_labeled_rows` door — the full five-gate ingest ladder, the
+/// dedup pass, the fingerprint — rather than by assembling internals, so a negative written
+/// against it is a negative against the shipped path.
+pub fn synthetic_dataset(
+    classes: usize,
+    train_per_class: usize,
+    ledger: &mut AccessLedger,
+) -> PreparedDataset<Canonical> {
+    assert!(
+        classes >= 1 && classes <= SYNTHETIC_LABEL_NAMES.len(),
+        "synthetic corpora declare at most {} classes",
+        SYNTHETIC_LABEL_NAMES.len()
+    );
+    let label_names: Vec<String> = SYNTHETIC_LABEL_NAMES[..classes]
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let rows = |role: &str, per_class: usize| -> Vec<LabeledExample> {
+        (0..classes)
+            .flat_map(|label| (0..per_class).map(move |index| synthetic_row(role, label, index)))
+            .collect()
+    };
+    let decl = |per_class: usize| SplitDeclaration {
+        expected_class_counts: vec![per_class; classes],
+        label_names: label_names.clone(),
+    };
+    PreparedDataset::<Canonical>::from_labeled_rows(
+        rows("train", train_per_class),
+        rows("validation", 1),
+        rows("test", 1),
+        &CanonicalDeclarations {
+            train: decl(train_per_class),
+            validation: decl(1),
+            test: decl(1),
+            label_names,
+        },
+        ledger,
+    )
+    .unwrap_or_else(|e| panic!("a synthetic corpus must be a valid canonical dataset: {e}"))
+}
+
+/// A completed selection over a synthetic corpus.
+///
+/// `shots_per_class` must be one of `{8, 16, 32, 64}` and `train_per_class` must be at
+/// least that, or `FewShotSelector::select` refuses before drawing.
+pub fn synthetic_selection(
+    classes: usize,
+    train_per_class: usize,
+    root_seed: u64,
+    shots_per_class: u32,
+) -> Selection {
+    let mut ledger = AccessLedger::new();
+    let prepared = synthetic_dataset(classes, train_per_class, &mut ledger);
+    FewShotSelector::select(
+        &prepared,
+        &SelectionConfig {
+            root_seed,
+            shots_per_class,
+        },
+        &mut ledger,
+    )
+    .unwrap_or_else(|e| panic!("a synthetic corpus must support this selection: {e}"))
 }
