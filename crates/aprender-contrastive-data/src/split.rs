@@ -46,20 +46,20 @@ pub trait SplitRole {
 }
 
 /// The training split — the only split a selection pool may draw from.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Train;
 
 /// The validation split. Its existence is what a canonical dataset proves.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Validation;
 
 /// The held-out test split.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Test;
 
 /// The merged compatibility test split (D-19) — a role DISTINCT from [`Test`], so a
 /// compatibility corpus can never be mistaken for a canonical one by name alone.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompatibilityTest;
 
 impl SplitRole for Train {
@@ -196,6 +196,19 @@ impl<R: SplitRole> Split<R> {
     /// Observed per-class row counts, indexed by class label.
     pub fn class_counts(&self) -> &[u64] {
         &self.class_counts
+    }
+
+    /// `(id, exact_hash)` pairs sorted ascending by id — the shape a fingerprint input
+    /// wants.
+    ///
+    /// Built straight off the internal `BTreeMap`, whose iteration order IS ascending by
+    /// id, so the caller's ordering obligation is discharged by the data structure rather
+    /// than by a sort the caller could forget.
+    pub(crate) fn exact_hash_pairs(&self) -> Vec<(&str, [u8; 32])> {
+        self.exact_hashes
+            .iter()
+            .map(|(id, digest)| (id.as_str(), *digest))
+            .collect()
     }
 }
 
