@@ -31,7 +31,10 @@ use crate::dedup::ExclusionRecord;
 use crate::error::ContrastiveDataError;
 use crate::hash::hex;
 use crate::ledger::{AccessLedger, AccessRecord};
-use crate::pairs::{LabeledPair, PairConfig, PairSampler, DEGENERATE_POLICY_VERSION};
+use crate::pairs::{
+    LabeledPair, PairConfig, PairSampler, PairStrategy, SingletonPolicy, UntrustedPairRecord,
+    DEGENERATE_POLICY_VERSION,
+};
 use crate::select::{SelectedExample, Selection};
 
 /// The selection-manifest schema version this build writes.
@@ -395,11 +398,111 @@ impl PairReplayRecord {
         equation = "pair_manifest_replay"
     )]
     pub fn to_config(&self) -> Result<PairConfig, ContrastiveDataError> {
-        Ok(PairConfig::new(self.root_seed))
+        if self.schema_version != PAIR_REPLAY_SCHEMA_VERSION {
+            return Err(ContrastiveDataError::UnsupportedSchemaVersion {
+                field: "pair_replay".to_string(),
+                got: self.schema_version,
+                supported: PAIR_REPLAY_SCHEMA_VERSION,
+            });
+        }
+        let strategy = PairStrategy::Oversampling;
+        if self.strategy != strategy.as_str()
+            || self.strategy_version != strategy.strategy_version()
+        {
+            // A strategy this build does not implement changes pair IDENTITIES, not merely
+            // which pairs are legal, which is why it is the ALGORITHM variant.
+            return Err(ContrastiveDataError::UnsupportedAlgorithmVersion {
+                got: self.strategy_version,
+                supported: strategy.strategy_version(),
+            });
+        }
+        let policy = SingletonPolicy::NegativesOnly;
+        if self.singleton_policy != policy.as_str()
+            || self.singleton_policy_version != policy.policy_version()
+        {
+            return Err(ContrastiveDataError::UnsupportedPolicyVersion {
+                policy: "singleton".to_string(),
+                got: self.singleton_policy_version,
+                supported: policy.policy_version(),
+            });
+        }
+        if self.degenerate_policy_version != DEGENERATE_POLICY_VERSION {
+            return Err(ContrastiveDataError::UnsupportedPolicyVersion {
+                policy: "degenerate".to_string(),
+                got: self.degenerate_policy_version,
+                supported: DEGENERATE_POLICY_VERSION,
+            });
+        }
+        Ok(PairConfig {
+            root_seed: self.root_seed,
+            strategy,
+            singleton_policy: policy,
+            // The RESOLVED budget is replayed explicitly, and the cap is set to exactly it.
+            // The record does not persist the original cap (D-09) because the resolved
+            // budget subsumes it: what a replay has to reproduce is the stream, and the
+            // stream is a function of the budget that was actually used.
+            budget: Some(self.budget),
+            hard_cap: Some(self.budget.max(1)),
+        })
     }
 }
 
+/// One pair's canonical byte encoding: `lo` and `hi` ordinals, then the target's bits.
+///
+/// Twelve little-endian bytes. Ordinals rather than identifier strings because the record
+/// already commits `selection_hash`, so the ordinals are unambiguous inside the digest —
+/// and because a fixed-width encoding needs no delimiter and therefore has no concatenation
+/// ambiguity of its own.
+fn pair_canonical_bytes(pair: &LabeledPair) -> [u8; 12] {
+    let mut out = [0_u8; 12];
+    out[0..4].copy_from_slice(&pair.pair.lo().ordinal().to_le_bytes());
+    out[4..8].copy_from_slice(&pair.pair.hi().ordinal().to_le_bytes());
+    out[8..12].copy_from_slice(&pair.target.to_bits().to_le_bytes());
+    out
+}
+
+/// Refuse a record that does not describe this sampler.
+///
+/// Without this the hash would happily attest a stream using somebody else's header, which
+/// is the exact failure the header-inside-the-digest design exists to prevent.
+fn assert_record_describes(
+    sampler: &PairSampler<'_>,
+    record: &PairReplayRecord,
+) -> Result<(), ContrastiveDataError> {
+    let expected = hex(&sampler.selection().semantic_hash());
+    if record.selection_hash != expected {
+        return Err(ContrastiveDataError::SelectionReplayMismatch {
+            field: "pair_replay.selection_hash".to_string(),
+        });
+    }
+    if record.budget != sampler.budget() {
+        return Err(ContrastiveDataError::SelectionReplayMismatch {
+            field: "pair_replay.budget".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// `SHA-256( record.to_canonical_bytes() ‖ 0x1E ‖ pair_0 ‖ pair_1 ‖ … )`, STREAMED.
+///
+/// # Why the header is INSIDE the digest (review finding F12)
+///
+/// Hashing pair bytes alone would let two different replay tuples that happen to emit the
+/// same identities claim the same manifest hash — so the manifest could attest a stream
+/// while saying nothing about how it was produced, which is a strictly weaker statement
+/// than the one the hash is supposed to make. Two tests pin this: one pair of
+/// configurations whose streams are identical because both resolve to the same budget by
+/// different routes, and one pair of DIFFERENT selections whose ordinal streams are
+/// literally byte-identical because they share a class layout.
+///
+/// The `0x1E` (ASCII record separator) removes the record/stream boundary ambiguity that
+/// plain concatenation would leave.
+///
+/// # Streamed, never collected
+///
+/// Pairs are fed to the hasher as they are produced. Collecting them would reintroduce the
+/// `O(budget)` memory the whole design exists to avoid, in the one place nobody would look
+/// for it.
 ///
 /// # Errors
 ///
@@ -413,21 +516,63 @@ pub fn pair_manifest_hash(
     sampler: &PairSampler<'_>,
     record: &PairReplayRecord,
 ) -> Result<[u8; 32], ContrastiveDataError> {
-    let _ = (sampler, record);
-    Ok([0_u8; 32])
+    assert_record_describes(sampler, record)?;
+    let mut hasher = Sha256::new();
+    hasher.update(record.to_canonical_bytes()?);
+    hasher.update([PAIR_MANIFEST_SEPARATOR]);
+    for ordinal in 0..sampler.budget() {
+        hasher.update(pair_canonical_bytes(&sampler.pair_at(ordinal)?));
+    }
+    Ok(hasher.finalize().into())
 }
+
+/// ASCII record separator, between the replay header and the streamed pairs.
+const PAIR_MANIFEST_SEPARATOR: u8 = 0x1E;
 
 /// Write one JSON line per pair, in stream order, to any byte sink.
 ///
+/// This is D-09's explicit audit and fixture path — the only thing in the protocol that
+/// ever writes pair bytes. It takes a `std::io::Write` rather than a path: bytes-out is
+/// permitted by D-04 while the filesystem stays in `apr-cli`.
+///
+/// The line schema is [`UntrustedPairRecord`], the SAME type
+/// [`parse_pair_dump`](crate::pairs::parse_pair_dump) reads, so the writer and the untrusted
+/// reader cannot drift apart into two schemas that almost agree.
+///
 /// # Errors
 ///
-/// [`ContrastiveDataError::Io`] when the sink fails; anything `pair_at` can raise.
+/// [`ContrastiveDataError::Io`] when the sink fails — a caller's broken pipe is surfaced as
+/// a typed error, never swallowed and never a panic;
+/// [`ContrastiveDataError::Serialization`] if a record cannot be encoded.
 pub fn dump_pairs<W: std::io::Write>(
     sampler: &PairSampler<'_>,
-    writer: W,
+    mut writer: W,
 ) -> Result<(), ContrastiveDataError> {
-    let _ = (sampler, writer);
-    Ok(())
+    let selection = sampler.selection();
+    let io = |context: &str, error: &std::io::Error| ContrastiveDataError::Io {
+        context: context.to_string(),
+        detail: error.to_string(),
+    };
+    for ordinal in 0..sampler.budget() {
+        let labeled = sampler.pair_at(ordinal)?;
+        let record = UntrustedPairRecord {
+            lo: selection.id_of(labeled.pair.lo()).to_string(),
+            hi: selection.id_of(labeled.pair.hi()).to_string(),
+            target: labeled.target,
+        };
+        let mut line =
+            serde_json::to_vec(&record).map_err(|error| ContrastiveDataError::Serialization {
+                context: format!("pair_dump/{ordinal}"),
+                detail: error.to_string(),
+            })?;
+        line.push(b'\n');
+        writer
+            .write_all(&line)
+            .map_err(|error| io(&format!("pair_dump/{ordinal}"), &error))?;
+    }
+    writer
+        .flush()
+        .map_err(|error| io("pair_dump/flush", &error))
 }
 
 #[cfg(test)]
@@ -562,7 +707,7 @@ mod payload_tests {
 /// --ignored`, and it must be a reviewed diff.
 #[cfg(test)]
 mod golden_tests {
-    use super::{SelectionManifest, SelectionPayload};
+    use super::{count_lines, SelectionManifest, SelectionPayload};
     use crate::hash::hex;
     use crate::ledger::AccessLedger;
     use crate::prepared::{Canonical, CanonicalDeclarations, PreparedDataset};
@@ -886,7 +1031,7 @@ mod golden_tests {
                 pair_golden_name(seed, shots)
             );
             assert_eq!(
-                produced.iter().filter(|byte| **byte == b'\n').count(),
+                count_lines(&produced),
                 PAIR_GOLDEN_PREFIX as usize,
                 "the golden must hold exactly 32 lines"
             );
@@ -994,13 +1139,29 @@ mod golden_tests {
     }
 }
 
+/// Newline count of a byte buffer.
+///
+/// Written as an explicit loop rather than an iterator chain because clippy's
+/// `naive_bytecount` fires on the chain and suggests the `bytecount` crate — a new runtime
+/// dependency the D-04 allowlist would (correctly) reject for a test-only line count.
+#[cfg(test)]
+fn count_lines(bytes: &[u8]) -> usize {
+    let mut lines = 0;
+    for byte in bytes {
+        if *byte == b'\n' {
+            lines += 1;
+        }
+    }
+    lines
+}
+
 #[cfg(test)]
 mod pair_manifest_tests {
     //! The pair half of the manifest: the replay record, the tuple-committing streamed
     //! hash, and the dump path that closes the loop through the untrusted validator.
 
     use super::{
-        dump_pairs, pair_manifest_hash, PairReplayRecord, PAIR_DEVIATION_CLAUSES,
+        count_lines, dump_pairs, pair_manifest_hash, PairReplayRecord, PAIR_DEVIATION_CLAUSES,
         PAIR_REPLAY_SCHEMA_VERSION,
     };
     use crate::error::ContrastiveDataError;
@@ -1226,7 +1387,7 @@ mod pair_manifest_tests {
         let mut second = Vec::new();
         dump_pairs(&sampler, &mut second).expect("dumping to a Vec cannot fail");
         assert_eq!(first, second, "two dumps are byte-identical");
-        assert_eq!(first.iter().filter(|b| **b == b'\n').count(), 64);
+        assert_eq!(count_lines(&first), 64);
 
         let parsed = parse_pair_dump(&first).expect("the dump parses");
         assert_eq!(parsed.len(), 64);
@@ -1266,7 +1427,8 @@ mod pair_manifest_tests {
                     "detail {detail:?}"
                 );
             }
-            other => panic!("expected Io, got {:?}", other.map(|()| ())),
+            Ok(()) => panic!("a failing sink must not be swallowed"),
+            Err(other) => panic!("expected Io, got {other:?}"),
         }
     }
 

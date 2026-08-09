@@ -30,6 +30,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aprender_contrastive_data::ledger::AccessLedger;
+use aprender_contrastive_data::manifest::dump_pairs;
+use aprender_contrastive_data::pairs::{PairConfig, PairSampler};
 use aprender_contrastive_data::prepared::{Canonical, CanonicalDeclarations, PreparedDataset};
 use aprender_contrastive_data::schema::parse_jsonl_bytes;
 use aprender_contrastive_data::select::{FewShotSelector, SelectionConfig};
@@ -38,6 +40,18 @@ use sha2::{Digest, Sha256};
 
 /// `(root_seed, shots_per_class)` for every committed golden.
 const CASES: [(u64, u32); 4] = [(13, 8), (13, 16), (17, 8), (17, 16)];
+
+/// `(root_seed, shots_per_class)` for every committed PAIR golden (plan 02-07 Task 3).
+///
+/// These must be regenerated alongside the selection goldens, not separately: the manifest
+/// this file writes covers every name in `names`, so omitting the pair goldens here would
+/// silently drop them from `manifest.sha256` on the next re-baseline and turn the
+/// `include_bytes!` verifier red for a reason that has nothing to do with drift.
+const PAIR_CASES: [(u64, u32); 2] = [(13, 8), (17, 8)];
+
+/// How many pairs each committed pair golden holds. Must equal `PAIR_GOLDEN_PREFIX` in
+/// `src/manifest.rs`'s verifier.
+const PAIR_PREFIX: u64 = 32;
 
 const CORPUS_FILES: [&str; 3] = [
     "golden_corpus_train.jsonl",
@@ -88,6 +102,10 @@ fn golden_name(seed: u64, shots: u32) -> String {
     format!("selection_seed{seed}_shots{shots}.payload.json")
 }
 
+fn pair_golden_name(seed: u64, shots: u32) -> String {
+    format!("pairs_seed{seed}_shots{shots}_first{PAIR_PREFIX}.jsonl")
+}
+
 #[test]
 #[ignore = "writes the committed goldens; run explicitly with --ignored to re-baseline"]
 fn regenerate_selection_goldens() {
@@ -111,6 +129,32 @@ fn regenerate_selection_goldens() {
             .to_canonical_bytes()
             .expect("payload serializes");
         let name = golden_name(seed, shots);
+        fs::write(dir.join(&name), &bytes).unwrap_or_else(|e| panic!("write {name}: {e}"));
+        println!("wrote {name}: {} bytes", bytes.len());
+        names.push(name);
+    }
+
+    for (seed, shots) in PAIR_CASES {
+        let mut ledger = AccessLedger::new();
+        let prepared = dataset(&mut ledger);
+        let selection = FewShotSelector::select(
+            &prepared,
+            &SelectionConfig {
+                root_seed: seed,
+                shots_per_class: shots,
+            },
+            &mut ledger,
+        )
+        .expect("the golden corpus must support this selection");
+        let cfg = PairConfig {
+            budget: Some(PAIR_PREFIX),
+            ..PairConfig::new(seed)
+        };
+        let sampler =
+            PairSampler::new(&selection, &cfg).expect("the golden corpus supports 32 pairs");
+        let mut bytes = Vec::new();
+        dump_pairs(&sampler, &mut bytes).expect("dumping to a Vec cannot fail");
+        let name = pair_golden_name(seed, shots);
         fs::write(dir.join(&name), &bytes).unwrap_or_else(|e| panic!("write {name}: {e}"));
         println!("wrote {name}: {} bytes", bytes.len());
         names.push(name);
