@@ -19,7 +19,7 @@ SHELL := /bin/bash
 # Multi-line recipes execute in same shell
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-regen contract-check dev-setup check-siblings setfit-feature-matrix
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix
 
 # Default target
 all: tier2
@@ -276,6 +276,17 @@ tier3:
 # have been used instead and the red contracts surfaced as their own finding.
 	@echo "Validating provable contracts (incl. the Phase 1 setfit gate, D-26)..."
 	@$(MAKE) contract-validate
+# Review finding F9 (plan 02-08): `contract-validate` above checks contract
+# SHAPE and says nothing about whether an equation is bound to an
+# implementation, so both Phase 2 contracts could have been "valid" with all 25
+# equations bound to nothing. This is the BLOCKING coverage gate. It is the
+# SCOPED form on purpose — the repo-wide `contract-audit` reports 132 unbound
+# equations across 38 contracts and exits 0 anyway; see that target's comment
+# block for the measurement and why neither wiring it nor fixing it belongs to
+# this phase. Same evidence discipline as the two blocks around it: run
+# standalone first (rc=0, 9 s cold / ~1 s warm), and its failure mode induced,
+# observed and reverted before it was wired.
+	@$(MAKE) contract-audit-phase2
 	@$(MAKE) setfit-feature-matrix
 # D-04 (Phase 2), wired here for the same reason the line above exists: a target
 # outside the tiers is a target that stops being run. Same evidence discipline as
@@ -1043,6 +1054,13 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/tweet-eval-stance-benchmark-v1.yaml \
              contracts/contrastive-pair-protocol-v1.yaml
 
+# The two Phase 2 contracts, audited as a BLOCKING tier3 gate by
+# `contract-audit-phase2` below. Deliberately a separate, narrower list than
+# $(CONTRACTS) — see that target's comment block for the measurement that
+# forced the narrowing.
+PHASE2_CONTRACTS := contracts/contrastive-pair-protocol-v1.yaml \
+                    contracts/tweet-eval-stance-benchmark-v1.yaml
+
 # NOTE (plan 02-01, D-24): $(CONTRACTS) is an EXPLICIT HARDCODED LIST, not a glob
 # over contracts/*.yaml. A contract file that merely EXISTS in contracts/ is
 # validated by nothing. tweet-eval-stance-benchmark-v1.yaml sat in the tree
@@ -1073,6 +1091,60 @@ contract-audit: ## Audit binding coverage (equations -> implementations)
 	done
 	@echo ""
 	@echo "Binding audit complete"
+
+# D-26 / review finding F9 (plan 02-08). `pv validate` checks contract SHAPE;
+# it says nothing about whether an equation is bound to any implementation. A
+# schema-valid contract with no binding is a claim that nothing checks, which
+# is exactly the failure class the Phase 2 gates exist to close. This target is
+# BLOCKING and is wired into tier3.
+#
+# WHY THIS IS SCOPED, AND WHY THE REPO-WIDE `contract-audit` IS NOT WIRED.
+# Measured, not assumed (`make contract-audit > /tmp/ca-repo.log 2>&1; rc=$$?`,
+# status captured directly): it reports **132 BIND-001 errors across 38 of the
+# 46 contracts** — 10 in Phase 1's setfit-encoder-conformance-v1.yaml, the rest
+# spread over the kernel contracts — and **exits 0 anyway**, because its loop
+# body ends in `;` and never reads the audit's status. So the broad target is
+# today a vacuous gate: it prints failures and reports success. Making it
+# blocking would turn tier3 red on 132 pre-existing unbound equations this phase
+# did not create; leaving it non-blocking keeps a target that checks nothing.
+# Neither is this plan's to fix — logged in the phase's deferred-items.md.
+# Scoping to the two contracts this phase OWNS is the gate it can honestly stand
+# behind, and neither Phase 2 contract appears anywhere in those 132.
+#
+# EVIDENCE DISCIPLINE, same as the D-26 and D-04 blocks near tier3. Run
+# STANDALONE first with the status captured directly
+# (`make contract-audit-phase2 > /tmp/cap2.log 2>&1; rc=$$?`, never through a
+# pipe — CLAUDE.md rule 1): rc=0, 24/24 equations bound for
+# contrastive-pair-protocol-v1 and 1/1 for tweet-eval-stance-benchmark-v1.
+# Wall time 9 s cold (pv is rebuilt by $(PV_BIN)), then 1 s / 0 s / 1 s over
+# three warm runs — nothing against tier3's 1-5 minute budget, and tier3 has
+# already built pv via `contract-validate` two lines earlier.
+#
+# ITS FAILURE MODE WAS INDUCED, OBSERVED AND REVERTED before it was trusted,
+# because a gate that has only ever been seen passing is not evidence: deleting
+# the `pair_manifest_hash` entry from $(BINDING) turned it rc=1 with
+# "[ERROR] BIND-001: Equation 'pair_manifest_hash' ... has no binding entry",
+# naming the deleted equation. That check matters more than usual here — plan
+# 02-02 found that a `contract:` field carrying a `../` prefix parses cleanly
+# and binds NOTHING, so this gate could otherwise have been green while
+# inspecting nothing at all.
+contract-audit-phase2: ## Audit Phase 2 binding coverage (BLOCKING, wired into tier3)
+	@echo "Auditing binding coverage for the Phase 2 contracts..."
+	@unbound=""; \
+	for contract in $(PHASE2_CONTRACTS); do \
+		echo "  $$contract"; \
+		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+		status=$$?; \
+		if [ "$$status" -ne 0 ]; then \
+			unbound="$$unbound $$contract"; \
+		fi; \
+	done; \
+	if [ -n "$$unbound" ]; then \
+		echo "FAIL: unbound equations remain in:$$unbound"; \
+		echo "Every equation of a Phase 2 contract needs an entry in $(BINDING)."; \
+		exit 1; \
+	fi; \
+	echo "Phase 2 binding audit: every equation is bound"
 
 contract-regen: ## Regenerate wired test files from contracts
 	@echo "Regenerating contract test files..."

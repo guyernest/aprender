@@ -123,3 +123,45 @@ green tier2 — would reasonably believe the workspace lib suite had run.
 multi-minute one and would change the pre-commit tier's cost profile, which the existing
 tier2 comments show was deliberately measured. Needs a decision (widen tier2, or move the
 workspace suite to tier3 and rename this step honestly), so it gets its own ticket.
+
+## D-ITEM-04 — `make contract-audit` reports 132 unbound equations and exits 0
+
+**Found:** plan 02-08, Task 3 (2026-08-09). **Pre-existing**, not caused by this phase.
+
+The repo-wide binding-coverage target (`Makefile`, `contract-audit`) iterates all 46
+contracts in `$(CONTRACTS)` and its loop body is:
+
+```make
+	@for contract in $(CONTRACTS); do \
+		echo ""; \
+		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+	done
+```
+
+The audit's status is never read — no `|| exit 1`, no captured `$$?` — so the target's exit
+code is that of the trailing `echo`. Measured directly
+(`make contract-audit > /tmp/ca-repo.log 2>&1; rc=$?`, never through a pipe):
+
+```
+rc=0
+132 [ERROR] BIND-001 lines, across 38 of the 46 contracts
+```
+
+Attributed by contract, the ten largest: `setfit-encoder-conformance-v1` 10,
+`hybrid-layer-dispatch-v1` 6, then `model-config-algebra-v1`, `tensor-shape-flow-v1`,
+`gated-delta-net-v1`, `tensor-inventory-v1`, `performance-grading-v1`, `lora-algebra-v1`,
+`q4k-q6k-superblock-v1`, `sampling-algorithms-v1`, `qwen35-shapes-v1` and
+`kv-cache-sizing-v1` at 5 each. **Neither Phase 2 contract appears** — both are fully bound
+as of this plan.
+
+So the target that exists to prove equations are implemented prints 132 failures and
+reports success. No tier calls it, which limits the damage, but `make contract-check`
+(`contract-validate contract-test contract-audit`) does — and it too would report PASS.
+
+**Why not fixed here:** the one-line fix (read the status) immediately turns
+`contract-check` red on 132 pre-existing unbound equations spread over 38 contracts this
+phase does not own, and binding them is a repo-wide archaeology exercise per kernel. Plan
+02-08 therefore added the SCOPED `contract-audit-phase2` — blocking, wired into tier3, its
+failure mode induced and observed — and left the broad target alone. The honest repo-wide
+fix is: make `contract-audit` read its status, and either bind the 132 or record each with
+`status: pending` (a BIND-004 warning rather than a BIND-001 error). Own PMAT ticket.
