@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 02-09-PLAN.md
-last_updated: "2026-08-09T07:51:06.696Z"
+stopped_at: Phase 3 context gathered
+last_updated: "2026-08-09T18:22:45.601Z"
 last_activity: "2026-08-09 -- 02-09 complete: `apr data select` / `apr data pairs` shipped as thin adapters over the attested boundary; every Phase 2 ROADMAP criterion demonstrated by a real CLI run against the live pinned TweetEval revision"
 progress:
   total_phases: 5
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 18
   completed_plans: 18
-  percent: 100
+  percent: 40
 ---
 
 # Project State
@@ -177,6 +177,7 @@ Recent decisions affecting current work:
   checkpoint with measured numbers; the coordinator reclaimed ~21 GB. **Mitigation adopted for
   the rest of the plan and recommended for Phase 3: `export CARGO_INCREMENTAL=0`** — the cache
   did not regrow and 15 GB was still free at plan end.
+
 - [Phase 2]: Decide and version singleton-class and bounded-oversampling behavior during phase planning.
 - [Phase 2 — KNOWN-RED, EXPECTED, NOT A REGRESSION — **WIDENED BY MEASUREMENT IN 02-02**]: `pre-release` Gate 5 fails from Phase 2 wave 2 through phase exit. Cause: `apr-cli` gains a dependency on the new `aprender-contrastive-data` crate, which is not on crates.io until the human-approved publish cascade lands it (RESEARCH Pitfall 8 / Finding F5). **CORRECTION (02-02, measured):** it is NOT only the verifying form. `cargo package --no-verify -p apr-cli` ALSO fails — `--no-verify` skips the packaged-crate BUILD, not the MANIFEST RESOLUTION that rewrites the path dep into a registry dep, and resolution is where it breaks (`no matching package named 'aprender-contrastive-data' found`). Control-verified: with the dependency line temporarily removed the identical command exits 0 and packages 581 files. So ANY `cargo package -p apr-cli`, verifying or not, is red. What IS gated and must stay green: `cargo package --no-verify -p aprender-contrastive-data` (rc=0, 19 files). Exit condition unchanged: publish `aprender-contrastive-data` BEFORE `apr-cli` — a human-approved release action; CLAUDE.md forbids self-serving the publish. `/gsd:verify-work` must read a red Gate 5 as this expected state. Mirrored in `must_haves.caveats` of plans 02-02 and 02-08 and in 02-VALIDATION.md; plan 02-08's acceptance criterion "both `cargo package --no-verify` runs exit 0" is falsified and should be read as the crate-only form.
 - [Cross-cutting — HOST-SPECIFIC, PRE-EXISTING, NOT A REGRESSION]: `cargo check --workspace` cannot exit 0 on Darwin. `crates/aprender-profile/src/main.rs:6` is a `compile_error!("renacer requires Linux (ptrace syscall tracing)")` under `#[cfg(not(target_os = "linux"))]`, and the consequent E0601 (`main` not found) is its shadow rather than a second defect. Control measured at 02-08: `cargo check --workspace --exclude aprender-profile` exits **0**. Any plan whose acceptance criterion names a bare `cargo check --workspace` should be read as the `--exclude aprender-profile` form on this host.
@@ -196,6 +197,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-08-09T07:51:06.696Z
-Stopped at: Completed 02-09-PLAN.md — Phase 2 is code-complete on `gsd/phase-2-contract-gate`; next step is `/gsd:verify-work`, then the human opens the Phase 2 PR
-Resume file: None
+Last session: 2026-08-09T18:22:45.598Z
+Stopped at: Phase 3 context gathered
+Resume file: .planning/phases/03-faithful-two-stage-trainer-and-head/03-CONTEXT.md
