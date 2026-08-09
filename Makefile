@@ -211,6 +211,22 @@ tier2:
 	@cargo test -p aprender-core --lib --features conformance-fixtures setfit::
 	@echo "Phase 1 SetFit: fixture parity + ENC-04 gradient/frozen/detach gates..."
 	@cargo test -p aprender-core --features setfit,conformance-fixtures --test setfit_conformance
+# Phase 2 contrastive-data (D-26 again — a gate outside the tiers stops being run).
+#
+# RUNTIME WAS MEASURED, not estimated (2026-08-08, warm tree, three consecutive
+# runs): 2 s / 2 s / 2 s wall, rc=0 each time. As in the Phase 1 block above the
+# wall clock is dominated by cargo's per-invocation freshness check rather than
+# by test execution — at the time of measurement the crate carried only its
+# determinism doctest. Re-measure and update this number when the crate's suite
+# grows; a tier2 line whose comment records a stale number is worse than one
+# with no comment, because it will be trusted.
+#
+# UNFILTERED on purpose. The Phase 1 lines above take a module filter because
+# they select 162 of 14202 tests in a large crate. Here the whole crate IS this
+# phase, a filter would exclude the doctests, and `cargo test` accepts at most
+# one positional anyway.
+	@echo "Phase 2 contrastive-data: protocol unit gates..."
+	@cargo test -p aprender-contrastive-data
 	@if [ -d tests/golden ]; then \
 		if . scripts/apr_bin.sh 2>/dev/null; then \
 			echo "Running probar golden regression... ($$APR)"; \
@@ -252,6 +268,14 @@ tier3:
 	@echo "Validating provable contracts (incl. the Phase 1 setfit gate, D-26)..."
 	@$(MAKE) contract-validate
 	@$(MAKE) setfit-feature-matrix
+# D-04 (Phase 2), wired here for the same reason the line above exists: a target
+# outside the tiers is a target that stops being run. Same evidence discipline as
+# the D-26 block — `make contrastive-data-boundary` was run STANDALONE first with
+# its status captured directly (`> /tmp/cdb-standalone.log 2>&1; rc=$$?`, never
+# through a pipe): rc=0 in 1 s wall. Nothing was already red, and 1 s is nothing
+# against tier3's 1-5 minute budget. Its four failure modes were each induced,
+# observed and reverted rather than assumed — see the target's own comment block.
+	@$(MAKE) contrastive-data-boundary
 	@if [ -d tests/golden ]; then \
 		if . scripts/apr_bin.sh 2>/dev/null; then \
 			echo "Running probar golden regression with profiling... ($$APR)"; \
@@ -292,6 +316,98 @@ setfit-feature-matrix: ## D-06: setfit feature isolation for aprender-core
 		grep -n tokenizers target/setfit-feature-matrix-tree.txt; exit 1; \
 	fi
 	@echo "setfit-feature-matrix: PASSED"
+
+# D-04: the aprender-contrastive-data bytes boundary. Wired into tier3 above.
+#
+# BOTH HALVES ARE POSITIVE CHECKS, and that is the whole design. The first draft
+# of this gate was a dependency DENY-list plus a grep that skipped #[cfg(test)],
+# and both can report PASS while the property is false: a deny-list only ever
+# catches the hazards someone already enumerated, so the first dependency nobody
+# thought to name passes silently; and a cfg-blind grep cannot actually tell test
+# code from library code, so it either exempts too much or claims a precision it
+# does not have. Replaced by (a) a POSITIVE allowlist compared against the
+# resolved closure, so a new transitive dependency fails by DEFAULT, and (b) a
+# src/-wide symbol ban with NO cfg(test) exemption, which turns "the public API
+# contains no path types" into a mechanical consequence.
+#
+# EVERY FAILURE MODE WAS OBSERVED, not assumed (2026-08-08, each mutation applied,
+# run, and reverted):
+#   add `tempfile` to [dependencies] ........ FAIL, prints tempfile as an offender
+#   `use std::path::PathBuf;` in src/schema.rs FAIL, names schema.rs and the line
+#   the same line inside #[cfg(test)] mod tests FAIL (no exemption, by design)
+#   rename allowed-deps.txt away ............ FAIL with a missing-allowlist message,
+#                                             NOT a vacuous pass on an empty list
+# Standalone timing before wiring: 1 s wall, rc=0.
+contrastive-data-boundary: ## D-04: bytes boundary for aprender-contrastive-data (positive allowlist + src symbol ban)
+	@echo "Bytes boundary: aprender-contrastive-data (D-04)"
+	@mkdir -p target
+# (a) DEPENDENCY ALLOWLIST. cargo tree's OWN status is checked FIRST. Piping it
+# into the comparison would read the comparison's status (CLAUDE.md rule 1), and
+# a cargo tree that failed outright would feed an EMPTY closure into a subset
+# test — which passes vacuously and silently disarms the supply-chain half.
+	@cargo tree -p aprender-contrastive-data -e normal --prefix none --no-dedupe \
+		> target/contrastive-data-tree.txt 2>&1 || \
+		{ echo "FAIL: cargo tree failed; the D-04 dependency check would pass vacuously"; \
+		  cat target/contrastive-data-tree.txt; exit 1; }
+	@if [ ! -s target/contrastive-data-tree.txt ]; then \
+		echo "FAIL: cargo tree produced no output; the D-04 dependency check would pass vacuously"; \
+		exit 1; \
+	fi
+	@awk 'NF { print $$1 }' target/contrastive-data-tree.txt | sort -u \
+		> target/contrastive-data-deps.txt
+	@if [ ! -f crates/aprender-contrastive-data/allowed-deps.txt ]; then \
+		echo "FAIL: crates/aprender-contrastive-data/allowed-deps.txt is MISSING."; \
+		echo "      Without it every dependency would be admitted and this gate would"; \
+		echo "      report PASS while checking nothing."; \
+		exit 1; \
+	fi
+	@grep -v '^[[:space:]]*#' crates/aprender-contrastive-data/allowed-deps.txt \
+		| grep -v '^[[:space:]]*$$' | sort -u > target/contrastive-data-allowed.txt
+	@if [ ! -s target/contrastive-data-allowed.txt ]; then \
+		echo "FAIL: allowed-deps.txt has no entries. An empty allowlist cannot admit even"; \
+		echo "      the crate itself, so this is a broken gate rather than a strict one."; \
+		exit 1; \
+	fi
+	@comm -23 target/contrastive-data-deps.txt target/contrastive-data-allowed.txt \
+		> target/contrastive-data-offenders.txt
+	@if [ -s target/contrastive-data-offenders.txt ]; then \
+		echo "FAIL: packages in the resolved normal-dependency closure but ABSENT from"; \
+		echo "      crates/aprender-contrastive-data/allowed-deps.txt (D-04):"; \
+		sed 's/^/        /' target/contrastive-data-offenders.txt; \
+		echo "      Do NOT widen the allowlist just to turn this green: the allowlist"; \
+		echo "      entry IS the review. Read what the package pulls in first."; \
+		exit 1; \
+	fi
+	@echo "  deps:   resolved closure is a subset of allowed-deps.txt"
+# (b) SOURCE SURFACE BAN. Matches are taken with true line numbers first, then
+# comment lines are dropped from the RESULTS, so a doc comment can neither trip
+# the gate nor satisfy it and the reported line number still points at the real
+# file. There is deliberately NO #[cfg(test)] exemption — tests that genuinely
+# need a filesystem belong in tests/ (outside the library boundary) or in apr-cli.
+	@find crates/aprender-contrastive-data/src -type f -name '*.rs' \
+		> target/contrastive-data-srcfiles.txt 2>&1 || \
+		{ echo "FAIL: could not enumerate src/; the D-04 source check would pass vacuously"; \
+		  exit 1; }
+	@if [ ! -s target/contrastive-data-srcfiles.txt ]; then \
+		echo "FAIL: no .rs files found under crates/aprender-contrastive-data/src;"; \
+		echo "      the D-04 source check would pass vacuously"; \
+		exit 1; \
+	fi
+	@: > target/contrastive-data-symbols.txt
+	@while IFS= read -r srcfile; do \
+		{ grep -nE 'std::fs|std::net|std::path' "$$srcfile" || true; \
+		  grep -nwE 'Path|PathBuf' "$$srcfile" || true; } \
+		| grep -vE '^[0-9]+:[[:space:]]*//' \
+		| sed "s|^|$$srcfile:|" >> target/contrastive-data-symbols.txt || true; \
+	done < target/contrastive-data-srcfiles.txt
+	@if [ -s target/contrastive-data-symbols.txt ]; then \
+		echo "FAIL: forbidden filesystem/network/path symbols under src/ (D-04)."; \
+		echo "      The crate is bytes-in/bytes-out; apr-cli owns every fs adapter."; \
+		sort -u target/contrastive-data-symbols.txt | sed 's/^/        /'; \
+		exit 1; \
+	fi
+	@echo "  source: no fs/net/path symbols under src/ (no cfg(test) exemption)"
+	@echo "contrastive-data-boundary: PASSED"
 
 # Tier 4: CI/CD (5-60 minutes, heavyweight)
 tier4: tier3
@@ -915,7 +1031,8 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/backend-dispatch-v1.yaml \
              contracts/kv-cache-equivalence-v1.yaml \
              contracts/setfit-encoder-conformance-v1.yaml \
-             contracts/tweet-eval-stance-benchmark-v1.yaml
+             contracts/tweet-eval-stance-benchmark-v1.yaml \
+             contracts/contrastive-pair-protocol-v1.yaml
 
 # NOTE (plan 02-01, D-24): $(CONTRACTS) is an EXPLICIT HARDCODED LIST, not a glob
 # over contracts/*.yaml. A contract file that merely EXISTS in contracts/ is
