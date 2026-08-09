@@ -878,3 +878,426 @@ proof_obligations:
     02-08.
   formal: 'manifest.deviation_clauses == [sampled_identities, capped_count, self_pairs_excluded] && attribution == "aprender"'
   applies_to: all
+
+# ============================================================================
+# COMMAND FORM. Every `test:` below carries AT MOST ONE positional filter.
+# `cargo test` accepts exactly one TESTNAME; a second positional exits with
+# "error: unexpected argument '<name>' found" — verified against this crate
+# on 2026-08-08, not assumed. Two filters require the `--` form
+# (`cargo test -p <crate> -- a b`), which libtest treats as a UNION, so it is
+# the wrong tool for naming one test. A contract that names an invocation
+# which cannot run is the same defect these gates exist to catch.
+# ============================================================================
+falsification_tests:
+
+- id: FALSIFY-CPP-001
+  rule: 'OBLIG-CPP-BYTES-BOUNDARY — the D-04 boundary is enforced, not aspirational'
+  prediction: >
+    `make contrastive-data-boundary` exits 0 against the crate as shipped. Adding any
+    dependency absent from allowed-deps.txt (e.g. tempfile) makes it exit non-zero and
+    PRINT the offending package name; adding `use std::path::PathBuf;` anywhere under
+    src/ — including inside a `#[cfg(test)] mod tests` block — makes it exit non-zero
+    naming the file and line; and renaming allowed-deps.txt makes it FAIL rather than
+    pass on an empty allowlist.
+  test: make contrastive-data-boundary
+  test_harness: make contrastive-data-boundary
+  expected_output: 'contrastive-data-boundary: PASSED'
+  if_fails: >
+    Either a filesystem/network/async dependency entered the closure a serverless
+    consumer inherits, or the crate grew a path-shaped API and stopped being wrappable.
+    Do not widen allowed-deps.txt to make the gate green — the allowlist entry IS the
+    review, so adding a line without reading what the package pulls in converts the
+    control into a rubber stamp.
+
+- id: FALSIFY-CPP-002
+  rule: 'OBLIG-CPP-LEAKAGE-NOT-CONSTRUCTIBLE — compatibility-profile selection does not compile'
+  prediction: >
+    The trybuild suite compiles a program that passes a
+    `PreparedDataset<Compatibility>` to selection and one that calls
+    `validation_witness()` on it. BOTH fail to compile, and the committed .stderr
+    snapshots pin the messages (no method named `validation_witness`; mismatched types
+    Canonical vs Compatibility). The mirror case — the identical call against
+    `PreparedDataset<Canonical>` — COMPILES.
+  test: cargo test -p aprender-contrastive-data --test ui
+  test_harness: cargo test -p aprender-contrastive-data --test ui
+  expected_output: 'test result: ok'
+  if_fails: >
+    If the compile-fail cases now compile, the profile has regressed from a type
+    parameter to a runtime field and DATA-06's "cannot be constructed" has silently
+    become "is rejected at run time" — a strictly weaker guarantee that no runtime test
+    can distinguish. If the MIRROR case fails to compile, the type parameter has made
+    the honest path unusable and the gate would pass by rejecting everything.
+
+- id: FALSIFY-CPP-003
+  rule: 'OBLIG-CPP-BOUNDARY-VALIDATION — mislabeled source_split in honest bytes is typed'
+  prediction: >
+    Constructing a train split from bytes whose rows embed
+    `"source_split": "validation"` returns
+    Err(SplitRoleMismatch{expected_role: "train", embedded_role: "validation"}) — it does
+    NOT return a Split<Train>, and it does not warn. The sibling ingest classes each
+    return their own variant naming split and index: InvalidUtf8, MalformedRow,
+    EmptyInput, UnknownLabel, LabelTextMismatch, DuplicateId, InvalidClassCounts.
+  test: cargo test -p aprender-contrastive-data split
+  test_harness: cargo test -p aprender-contrastive-data split
+  expected_output: 'test result: ok'
+  if_fails: >
+    The typestate is being trusted to do a job it cannot do. It constrains code, not
+    bytes; deserialized object-storage input carries whatever role string an attacker or
+    a buggy exporter wrote. Validate the embedded role against the role being constructed
+    at the boundary, before the typed value exists.
+
+- id: FALSIFY-CPP-004
+  rule: 'OBLIG-CPP-ATTESTATION-BEFORE-EXPOSURE — every attested field is re-derived'
+  prediction: >
+    Flipping one byte in any supplied split buffer makes `from_attested_bytes` return
+    SplitHashMismatch naming that split; substituting a compatibility attestation returns
+    ProfileMismatch; omitting a named split returns MissingSplit; a bumped schema version
+    returns UnsupportedSchemaVersion; and a doctored exclusion record returns
+    ExclusionRecordMismatch. In every case NO split is exposed to the caller first.
+  test: cargo test -p aprender-contrastive-data attestation
+  test_harness: cargo test -p aprender-contrastive-data attestation
+  expected_output: 'test result: ok'
+  if_fails: >
+    The attestation is being quoted rather than recomputed, which makes it decoration:
+    it then proves only that someone wrote a JSON file, not that the bytes in hand are
+    the bytes it describes. Re-derive every field from the supplied buffers before
+    exposing anything.
+
+- id: FALSIFY-CPP-005
+  rule: 'OBLIG-CPP-DUP-GROUP-COALESCED — an exact+normalized duplicate is ONE group'
+  prediction: >
+    On a fixture where one train row is byte-identical to a validation row, the exclusion
+    record contains exactly ONE group (recording that both detection kinds fired) and the
+    affected class pool decreases by exactly ONE. On the pinned canonical dataset the
+    real duplicate (train row 70 = validation row 3) reduces the `none` pool from 159 to
+    158 — never to 157 — and the manifest's excluded_ids list is NOT empty.
+  test: cargo test -p aprender-contrastive-data dedup
+  test_harness: cargo test -p aprender-contrastive-data dedup
+  expected_output: 'test result: ok'
+  if_fails: >
+    A pool that shrinks by two for one duplicate means the exact-hash and normalized-hash
+    groupings ran independently and double-counted. That understates every pool, and near
+    the boundary it manufactures a CrossSplitDuplicateUnderflow that the data does not
+    contain — a failure invented by the detector. Group by connected component over the
+    UNION of both edge kinds.
+
+- id: FALSIFY-CPP-006
+  rule: 'OBLIG-CPP-CAPACITY-INVARIANT — the in-band materializing sampler is RED'
+  prediction: >
+    The MaterializingSampler, which builds the Cartesian product, EXCEEDS the retained-
+    state ceiling and its gate assertion fails, while the honest sampler passes the
+    identical gate at the identical size. Retained state is read from the public
+    `state_report()` structural diagnostics, and scaling N by 10x under a FIXED budget
+    leaves the honest sampler's retained state growing linearly in N and not at all in
+    the budget.
+  test: cargo test -p aprender-contrastive-data --test negative_materializing
+  test_harness: cargo test -p aprender-contrastive-data --test negative_materializing
+  expected_output: 'test result: ok'
+  if_fails: >
+    If the materializing variant PASSES, the memory gate cannot distinguish a streaming
+    sampler from one that enumerates, and every "O(examples + budget)" claim in this
+    phase is unevidenced. If the honest sampler fails, the ceiling is wrong or the
+    sampler started retaining per-draw state. A self-reported size is exactly as
+    trustworthy as a self-reported decreasing loss — measure structurally.
+
+- id: FALSIFY-CPP-007
+  rule: 'OBLIG-CPP-KN-ADVERSARIAL — the invariant holds at K ~ N, not just at K = 3'
+  prediction: >
+    With N = 512 singleton classes (n = [1; 512]) and a FIXED budget of 64, the sampler
+    emits negatives only and its retained state stays within c * (N + K); no array of
+    size proportional to K*K is ever allocated. positive_capacity is 0,
+    negative_capacity is C(512, 2) = 130816, and the run does not error.
+  test: cargo test -p aprender-contrastive-data pairs
+  test_harness: cargo test -p aprender-contrastive-data pairs
+  expected_output: 'test result: ok'
+  if_fails: >
+    The negative sampler is enumerating unordered CLASS pairs — the rejected O(K^2)
+    design. At the 3-class layouts every other test uses, K^2 = 9 and K = 3 are
+    indistinguishable, so this is the only shape of test that can see the defect.
+    Replace the class-pair prefix sums with the per-class weights n_c * (S - n_c) plus
+    the block-skipping offset map.
+
+- id: FALSIFY-CPP-008
+  rule: 'OBLIG-CPP-LEAKY-RED — the in-band leaky sampler is RED, and the mirror is GREEN'
+  prediction: >
+    The LeakySampler, which reaches for a validation id, is rejected by the endpoint-
+    membership gate with EndpointNotInSelection, and the error message NAMES the
+    offending identifier. The mirror test asserts the IDENTICAL gate call ACCEPTS the
+    honest sampler.
+  test: cargo test -p aprender-contrastive-data --test negative_leaky
+  test_harness: cargo test -p aprender-contrastive-data --test negative_leaky
+  expected_output: 'test result: ok'
+  if_fails: >
+    If the leaky variant is accepted, "no leakage" is a claim about which inputs the
+    suite happened to try, not a property of the code. If the mirror fails, the gate
+    rejects everything and its passing half proves nothing. If the error does not name
+    the id, a real leak is red but undiagnosable.
+
+- id: FALSIFY-CPP-009
+  rule: 'OBLIG-CPP-BUDGET-FAIL-CLOSED — an explicit over-cap budget FAILS, never clamps'
+  prediction: >
+    With hard_cap = 10000 and an explicit budget of 20000, pair-stream construction
+    returns Err(BudgetExceedsHardCap{budget: 20000, hard_cap: 10000}). It does NOT
+    return a stream of 10000 pairs. Separately hard_cap = 0 returns ZeroHardCap, an
+    explicit budget of 0 returns ZeroBudget, and a single class of size 1 returns
+    NoPairCapacity.
+  test: cargo test -p aprender-contrastive-data pairs
+  test_harness: cargo test -p aprender-contrastive-data pairs
+  expected_output: 'test result: ok'
+  if_fails: >
+    A silent clamp keeps the DoS ceiling while discarding a number the user typed, so
+    the run succeeds and produces a different dataset than the one requested — the worst
+    reproducibility outcome available, because nothing is red and the manifest looks
+    fine. Fail loudly and let the user raise --hard-cap deliberately.
+
+- id: FALSIFY-CPP-010
+  rule: 'OBLIG-CPP-BUDGET-FAIL-CLOSED — the DEFAULT budget clamps, and says so'
+  prediction: >
+    With n = [64,64,64] the closed form is 24576 (positives 6048, negatives 12288). Under
+    the default hard cap of 1048576 the effective default budget is 24576 and the
+    manifest records clamp_engaged = false. Under an explicit hard_cap of 10000 the
+    effective default budget is 10000 and the manifest records clamp_engaged = true. The
+    8-shot layout n = [8,8,8] gives 384 with the clamp inactive.
+  test: cargo test -p aprender-contrastive-data pairs
+  test_harness: cargo test -p aprender-contrastive-data pairs
+  expected_output: 'test result: ok'
+  if_fails: >
+    If 384 or 24576 is wrong, the closed form diverged from D-14 and every downstream
+    epoch-length comparison is meaningless. If clamp_engaged is absent or always false,
+    a clamped run is indistinguishable from an unclamped one in the artifact, which
+    defeats the point of recording it.
+
+- id: FALSIFY-CPP-011
+  rule: 'OBLIG-CPP-REPLAY-DETERMINISM — draw i is a pure function of i'
+  prediction: >
+    For a fixed (root_seed, domain), draw ordinal i is byte-identical across repeated
+    calls, across process runs, and across 1 vs N worker threads; drawing ordinals in
+    reverse or in random order yields the same values as drawing them in sequence. The
+    frozen key derivation reproduces its committed test vectors, and the bounded draw
+    returns values strictly below its NonZeroU64 bound for every ordinal in the sweep.
+  test: cargo test -p aprender-contrastive-data rng
+  test_harness: cargo test -p aprender-contrastive-data rng
+  expected_output: 'test result: ok'
+  if_fails: >
+    Any order-dependence means a stateful stream crept back in and worker independence
+    is being defended by discipline rather than by construction — exactly what D-20/D-21
+    exist to prevent. A key-derivation vector mismatch means an endianness or tag-
+    encoding assumption drifted, which silently changes every sampled id while every
+    other test stays green.
+
+- id: FALSIFY-CPP-012
+  rule: 'OBLIG-CPP-SELECTION-REPLAY-STRICT — a manifest no seed could have produced is rejected'
+  prediction: >
+    Replay accepts an untouched manifest. Reordering two selected ids, swapping one id
+    for another legitimate pool member, editing a per-row hash, dropping one row so a
+    class is short, or editing the exclusion record each returns a typed error naming the
+    disagreeing field — SelectionReplayMismatch, SemanticHashMismatch, or
+    ExclusionRecordMismatch as appropriate.
+  test: cargo test -p aprender-contrastive-data select
+  test_harness: cargo test -p aprender-contrastive-data select
+  expected_output: 'test result: ok'
+  if_fails: >
+    A replay that only re-checks the semantic hash accepts any internally consistent
+    hand-edited manifest, which is precisely the artifact this gate exists to reject.
+    Recompute the selection from (dataset, root_seed, shots) and compare the ordered
+    list.
+
+- id: FALSIFY-CPP-013
+  rule: 'OBLIG-CPP-LEDGER-PERSISTED — the ledger is inside the hashed payload'
+  prediction: >
+    The serialized selection manifest contains the access-ledger records and
+    ledger_hash == SHA256(ledger canonical bytes), and ledger_hash sits INSIDE the hashed
+    payload — so mutating any ledger record changes the selection's semantic_hash and
+    replay rejects it. The ledger records the split roles touched and the profile
+    identity.
+  test: cargo test -p aprender-contrastive-data ledger
+  test_harness: cargo test -p aprender-contrastive-data ledger
+  expected_output: 'test result: ok'
+  if_fails: >
+    A ledger that lives only in memory, or one recorded outside the hashed region, can be
+    edited after the fact without invalidating anything. The downstream selection-lock
+    gate reads this artifact after the producing process has exited; if it is not
+    committed by the hash, it is a note, not evidence.
+
+- id: FALSIFY-CPP-014
+  rule: 'OBLIG-CPP-SINGLETON-EXPLICIT — singleton handling is recorded, never silent'
+  prediction: >
+    For a selection containing a class of exactly one example, the manifest records
+    singleton_policy = negatives_only, singleton_policy_version = 1, and the count of
+    affected classes; the singleton class contributes zero positives and still appears in
+    negatives. The value is present even when zero classes are affected.
+  test: cargo test -p aprender-contrastive-data pairs
+  test_harness: cargo test -p aprender-contrastive-data pairs
+  expected_output: 'test result: ok'
+  if_fails: >
+    An absent field is indistinguishable from a field nobody considered, and a dataset
+    whose singleton classes were quietly dropped from the positive stream looks identical
+    to one that had none. If the singleton produced a positive self-pair, the
+    CanonicalPair constructor is not the sole path into the stream.
+
+- id: FALSIFY-CPP-015
+  rule: 'OBLIG-CPP-ERROR-TAXONOMY — every failure is a typed variant, never a panic'
+  prediction: >
+    Every enumerated variant of ContrastiveDataError is reachable from at least one test,
+    each Display message names the specific offender (split, index, id, expected and got),
+    and no hostile input — empty buffer, truncated JSON, absurd label, duplicate id,
+    zero budget, overflowing class sizes — produces a panic or an untyped string.
+  test: cargo test -p aprender-contrastive-data error
+  test_harness: cargo test -p aprender-contrastive-data error
+  expected_output: 'test result: ok'
+  if_fails: >
+    A panic on caller input is unrecoverable in a serverless consumer and takes the whole
+    invocation with it. A message that omits the offender turns a five-second fix into a
+    bisect. If a variant is unreachable, either the code path that should raise it is
+    missing or the variant is dead and should be removed by a recorded contract change.
+
+- id: FALSIFY-CPP-016
+  rule: 'OBLIG-CPP-DEVIATION-DECLARED — fixtures record MEASURED reference behavior'
+  prediction: >
+    The reference fixture family records the pinned setfit 1.1.3 MEASURED counts
+    including self-pairs (for classes of 8/4/8: 82 stored positives = 62 + 20 self-pairs,
+    128 negatives, epoch length 256), and a SEPARATE family records Aprender's contracted
+    counts with self-pairs excluded. Every fixture's digest is covered by
+    manifest.sha256 and verified in-test.
+  test: cargo test -p aprender-contrastive-data --test reference_fixtures
+  test_harness: cargo test -p aprender-contrastive-data --test reference_fixtures
+  expected_output: 'test result: ok'
+  if_fails: >
+    A fixture asserting "no self-pairs" against the REFERENCE is red on day one, because
+    the pinned implementation includes the diagonal and contradicts its own
+    documentation. A fixture hand-written from the docs is worse: it is green and it
+    falsely attests reference parity. Record what was measured, and keep Aprender's
+    contracted counts in their own family.
+
+- id: FALSIFY-CPP-017
+  rule: 'OBLIG-CPP-DEVIATION-DECLARED — the degenerate-layout divergence is visible and versioned'
+  prediction: >
+    On class layout [4, 1] the two fixture families DISAGREE, deliberately and by exactly
+    these numbers: the pinned reference epoch length is 22 (11 stored positives, of which
+    5 are self-pairs), while Aprender's contracted default budget is 12
+    (positives C(4,2) + C(1,2) = 6, negatives 4*1 = 4, 2 * max(6, 4) = 12). Both numbers
+    are present in the fixtures and the test asserts the divergence rather than either
+    number alone.
+  test: cargo test -p aprender-contrastive-data --test reference_fixtures
+  test_harness: cargo test -p aprender-contrastive-data --test reference_fixtures
+  expected_output: 'test result: ok'
+  if_fails: >
+    If the two families now AGREE on [4, 1], either the reference fixture was regenerated
+    from the docs instead of the pinned code, or Aprender started emitting self-pairs. If
+    the test asserts only one number, the divergence has become invisible and the next
+    reader will "fix" the correct side.
+
+- id: FALSIFY-CPP-018
+  rule: 'OBLIG-CPP-LEAKAGE-NOT-CONSTRUCTIBLE — the runtime half, for bytes rather than code'
+  prediction: >
+    The compatibility profile produces NO validation split at all, and
+    PreparedDataset<Compatibility> exposes no validation_witness. Attempting to build a
+    canonical PreparedDataset from compatibility bytes returns ProfileMismatch or
+    ConflictingSourceRole rather than a canonical dataset, so the compile-time guarantee
+    is not bypassable by feeding the canonical constructor the wrong bytes.
+  test: cargo test -p aprender-contrastive-data prepared
+  test_harness: cargo test -p aprender-contrastive-data prepared
+  expected_output: 'test result: ok'
+  if_fails: >
+    A compile-time guarantee with a runtime back door is not a guarantee: the trybuild
+    snapshot stays green while a caller reaches the same state through the canonical
+    constructor. Both halves must hold.
+
+- id: FALSIFY-CPP-019
+  rule: 'KANI-CPP-001 backing proptest — canonical pair ordering, bound 4'
+  prediction: >
+    Over all endpoint values in [0, 4), CanonicalPair::new(a, b) yields lo < hi whenever
+    a != b, yields the SAME value for (a, b) and (b, a), and returns
+    Err(SelfPair{id: a}) whenever a == b. No input in the bounded space produces lo == hi
+    or lo > hi.
+  test: cargo test -p aprender-contrastive-data canonical_pair_ordering
+  test_harness: cargo test -p aprender-contrastive-data canonical_pair_ordering
+  expected_output: 'test result: ok'
+  if_fails: >
+    Either the constructor stopped canonicalizing — so the two orientations of one
+    unordered pair became two distinct values, and a conflicting-label pair becomes
+    expressible — or the equality branch stopped rejecting, which resurrects the
+    self-pairs D-12 makes structurally impossible. This proptest is the RUNNABLE evidence
+    for KANI-CPP-001, which is declared and not executed.
+
+- id: FALSIFY-CPP-020
+  rule: 'KANI-CPP-002 backing proptest — capacity closed forms never wrap, bound 4'
+  prediction: >
+    Over all class-size vectors of length up to 4 with entries in [0, 4),
+    positive_capacity and negative_capacity return Ok with values equal to a naive
+    reference enumeration, and for adversarial vectors near u64::MAX they return
+    Err(ArithmeticOverflow{operation}) rather than a wrapped value. No input produces a
+    silent wrap.
+  test: cargo test -p aprender-contrastive-data capacity_no_overflow
+  test_harness: cargo test -p aprender-contrastive-data capacity_no_overflow
+  expected_output: 'test result: ok'
+  if_fails: >
+    A wrapped capacity is not an obviously wrong huge number — it is a small, plausible
+    one, and it would silently under-sample forever while every balance and membership
+    test stayed green. Use checked arithmetic at every step and return the typed error.
+    This proptest is the RUNNABLE evidence for KANI-CPP-002, which is declared and not
+    executed.
+
+kani_harnesses:
+- id: KANI-CPP-001
+  obligation: OBLIG-CPP-ERROR-TAXONOMY
+  property: >
+    CanonicalPair::new never yields lo == hi and never yields lo > hi — the equal case is
+    rejected with SelfPair before any value is constructed, and the unequal case is
+    ordered.
+
+    DECLARED AND NOT EXECUTED HERE. cargo-kani is not installed in this repository and
+    there is not one #[kani::proof] harness anywhere under crates/ (verified 2026-08-08).
+    Nothing in this entry is a machine-checked proof. The RUNNABLE evidence is the
+    identically bounded proptest named by FALSIFY-CPP-019,
+    `cargo test -p aprender-contrastive-data canonical_pair_ordering`, which sweeps the
+    same bound of 4. A harness whose named proptest is not green is a FAILED gate, not a
+    pending one.
+  bound: 4
+  strategy: bounded_int
+  solver: cadical
+  harness: verify_canonical_pair_ordering
+- id: KANI-CPP-002
+  obligation: OBLIG-CPP-BUDGET-FAIL-CLOSED
+  property: >
+    positive_capacity and negative_capacity never wrap for class sizes within the
+    harness bound — every multiplication, addition and subtraction is checked, and
+    overflow is the typed ArithmeticOverflow rather than a wrapped u64.
+
+    DECLARED AND NOT EXECUTED HERE, for the same reason as KANI-CPP-001. The RUNNABLE
+    evidence is the identically bounded proptest named by FALSIFY-CPP-020,
+    `cargo test -p aprender-contrastive-data capacity_no_overflow`, which sweeps class
+    vectors of length up to 4 with entries below 4 plus the adversarial near-u64::MAX
+    cases. Read no claim of machine-checked verification into this entry.
+  bound: 4
+  strategy: bounded_int
+  solver: cadical
+  harness: verify_capacity_no_overflow
+
+qa_gate:
+  id: F-CONTRASTIVE-001
+  name: contrastive-pair-protocol-v1 Contract
+  description: >
+    Phase 2 gate — the contrastive data protocol is deterministic, leakage-safe,
+    provenance-complete, and non-quadratic, and both of its fakeable claims are
+    disproven by in-band negatives rather than asserted.
+  checks:
+  - validation
+  - falsification
+  pass_criteria: >
+    pv validate exits 0; every falsification test above is green; AND both in-band
+    negative variants are RED under the SAME gates that ACCEPT the honest
+    implementations — the leaky sampler must be rejected by the endpoint-membership gate
+    with EndpointNotInSelection naming the offending id, and the materializing sampler
+    must exceed the retained-state ceiling at a size where the streaming sampler passes.
+    A run in which either negative is green is a FAILED gate, not a passing one, because
+    a gate that has only ever been observed passing is not evidence. Equally, a run in
+    which the MIRROR half fails is a failed gate: a gate that rejects everything would
+    otherwise satisfy the negative half by accident.
+  falsification: >
+    Replace the O(K) negative sampler's per-class weight array with an enumeration of
+    unordered class pairs — every 3-class test stays green and FALSIFY-CPP-007 (K ~ N,
+    512 singleton classes) must turn RED. Independently, delete the equality branch of
+    CanonicalPair::new so (x, x) becomes constructible — FALSIFY-CPP-019 must turn RED.
+    Independently, silently clamp an explicit over-cap budget instead of returning
+    BudgetExceedsHardCap — FALSIFY-CPP-009 must turn RED.
