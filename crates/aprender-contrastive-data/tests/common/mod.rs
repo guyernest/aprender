@@ -244,3 +244,36 @@ pub fn load_measured() -> BTreeMap<String, MeasuredFixture> {
 pub fn load_contracted() -> BTreeMap<String, ContractedFixture> {
     load_family("aprender_contracted_", |f| f.fixture_id.clone())
 }
+
+// ===========================================================================================
+// Shared pair-layout builders (plan 02-07 Task 2; consumed by plan 02-08's capacity gate)
+// ===========================================================================================
+
+/// The adversarial budget the K ≈ N capacity case is measured under.
+///
+/// FIXED and small on purpose: retained state must be independent of the budget, so holding
+/// the budget constant while K varies is what turns the K-scaling measurement into evidence
+/// about K rather than about how much work was requested.
+pub const ADVERSARIAL_BUDGET: u64 = 16;
+
+/// `[1; k]` — the K = N layout in which every class is a singleton.
+///
+/// This is the shape a class-PAIR sampler fails and a three-class fixture set can never
+/// expose: at K = 3, `K²` and `K` are indistinguishable. Positive capacity is 0 here, so the
+/// stream is negatives-only by the degenerate policy rather than by an error.
+pub fn all_singleton_layout(k: usize) -> Vec<u64> {
+    vec![1; k]
+}
+
+/// The class layout of a committed contracted fixture, by `fixture_id`.
+///
+/// Reading the layout from the fixture rather than typing it keeps the two artifacts
+/// cross-checking: a fixture that is re-baselined without its consumer noticing is exactly
+/// what the manifest and these loaders exist to prevent.
+pub fn contracted_layout(fixture_id: &str) -> Vec<u64> {
+    load_contracted()
+        .get(fixture_id)
+        .unwrap_or_else(|| panic!("no contracted fixture with id `{fixture_id}`"))
+        .layout
+        .clone()
+}

@@ -9,6 +9,11 @@
 //! The fixture models live in `tests/common/mod.rs`, NOT here: each file under `tests/`
 //! is its own crate, so plans 02-07 and 02-08 could not import them from this one.
 
+// `tests/common/mod.rs` is compiled into EVERY integration-test crate that names it, so an
+// item this file does not call is dead code HERE while being live in `pair_counts.rs` (and,
+// from plan 02-08, in the negative gates). The allow is on the module so the shared
+// definitions stay in one place instead of being duplicated per consumer.
+#[allow(dead_code)]
 mod common;
 
 use common::{ContractedFixture, MeasuredFixture};

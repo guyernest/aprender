@@ -23,10 +23,12 @@
 //! every balance and membership test stayed green.
 
 use core::cmp::Ordering;
+use core::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::ContrastiveDataError;
+use crate::rng::{bounded, derive_key, domains};
 use crate::select::{SelectedId, Selection};
 
 /// The default pair hard cap: 2²⁰.
@@ -587,18 +589,53 @@ impl PairLayout {
         class_sizes: &[u64],
         cfg: &PairConfig,
     ) -> Result<Self, ContrastiveDataError> {
-        let _ = class_sizes;
+        let positive_capacity = positive_capacity(class_sizes)?;
+        let negative_capacity = negative_capacity(class_sizes)?;
+        let emitted_kinds = classify_degenerate(positive_capacity, negative_capacity)?;
+        let (budget, default_was_clamped) = resolve_budget(cfg, class_sizes)?;
+
+        let mut total_examples: u64 = 0;
+        for &n in class_sizes {
+            total_examples = total_examples
+                .checked_add(n)
+                .ok_or_else(|| overflow("pair_layout/total_examples"))?;
+        }
+
+        // Three O(K) arrays and nothing else. There is deliberately NO array indexed by
+        // class PAIRS: that is the rejected O(K²) design, which is fine at K = 3 and fatal
+        // at K ≈ N, the all-singleton layout.
+        let mut offsets = Vec::with_capacity(class_sizes.len());
+        let mut pos_prefix = Vec::with_capacity(class_sizes.len());
+        let mut neg_prefix = Vec::with_capacity(class_sizes.len());
+        let (mut running, mut pos_running, mut neg_running) = (0_u64, 0_u64, 0_u64);
+        for &n in class_sizes {
+            offsets.push(running);
+            pos_running += n * n.saturating_sub(1) / 2;
+            pos_prefix.push(pos_running);
+            // w_c = n_c · (S − n_c). Σ_c w_c == 2 · negative_capacity, which is why the
+            // running total is checked: the capacity itself can fit while its double does
+            // not.
+            let weight = n
+                .checked_mul(total_examples - n)
+                .ok_or_else(|| overflow("pair_layout/negative_class_weight"))?;
+            neg_running = neg_running
+                .checked_add(weight)
+                .ok_or_else(|| overflow("pair_layout/negative_weight_total"))?;
+            neg_prefix.push(neg_running);
+            running += n;
+        }
+
         Ok(Self {
-            offsets: Vec::new(),
-            pos_prefix: Vec::new(),
-            neg_prefix: Vec::new(),
-            total_examples: 0,
-            positive_capacity: 0,
-            negative_capacity: 0,
-            budget: 0,
-            default_was_clamped: false,
-            emitted_kinds: EmittedKinds::Both,
-            affected_singleton_classes: 0,
+            offsets,
+            pos_prefix,
+            neg_prefix,
+            total_examples,
+            positive_capacity,
+            negative_capacity,
+            budget,
+            default_was_clamped,
+            emitted_kinds,
+            affected_singleton_classes: class_sizes.iter().filter(|n| **n == 1).count() as u64,
             strategy: cfg.strategy,
             singleton_policy: cfg.singleton_policy,
             root_seed: cfg.root_seed,
@@ -675,16 +712,178 @@ impl PairLayout {
 
     /// The pair at `ordinal`, in layout space.
     ///
+    /// # The interleave
+    ///
+    /// When both kinds are available, ordinal `2t` is positive draw `t` and `2t + 1` is
+    /// negative draw `t` — matching the pinned reference's `zip_longest` and giving strict
+    /// balance at every even prefix. When only one kind is available, ordinal `m` is draw
+    /// `m` of that kind.
+    ///
+    /// # One stream per `(selection, seed, policy, budget)`
+    ///
+    /// The stream is EPOCH-INDEPENDENT: consumers advance by offset rather than by epoch,
+    /// which is also what makes it shardable and resumable without replaying the prefix. A
+    /// consumer that wants a different order across epochs adds `epoch` to the domain
+    /// string — a versioned, non-breaking policy extension (Open Question 3 / Assumption
+    /// A4), documented here rather than left to be discovered.
+    ///
     /// # Errors
     ///
     /// [`ContrastiveDataError::OrdinalOutOfRange`] at or beyond the resolved budget.
     #[provable_contracts_macros::contract("contrastive-pair-protocol-v1", equation = "pair_stream")]
     pub fn raw_pair_at(&self, ordinal: u64) -> Result<RawPair, ContrastiveDataError> {
-        Err(ContrastiveDataError::OrdinalOutOfRange {
-            ordinal,
-            budget: self.budget,
+        if ordinal >= self.budget {
+            return Err(ContrastiveDataError::OrdinalOutOfRange {
+                ordinal,
+                budget: self.budget,
+            });
+        }
+        // PRECONDITIONS OF THE INNER PATH, stated because they are what makes it total:
+        // `ordinal < budget` (checked immediately above), and every capacity, weight and
+        // offset was computed with checked arithmetic in `from_class_sizes`. `iter_from`
+        // relies on exactly this to yield infallibly.
+        match self.emitted_kinds {
+            EmittedKinds::Both => {
+                if ordinal % 2 == 0 {
+                    self.positive_draw(ordinal / 2)
+                } else {
+                    self.negative_draw(ordinal / 2)
+                }
+            }
+            EmittedKinds::PositivesOnly => self.positive_draw(ordinal),
+            EmittedKinds::NegativesOnly => self.negative_draw(ordinal),
+        }
+    }
+
+    /// Positive draw `t`: class by `C(n_k, 2)` weight, then triangular unranking.
+    fn positive_draw(&self, t: u64) -> Result<RawPair, ContrastiveDataError> {
+        let total = nonzero(self.positive_capacity, "positive_draw/total_weight")?;
+        let key = derive_key(self.root_seed, domains::PAIRS_POS_CLASS);
+        let target = bounded(&key, 0, t, total);
+        let class_index = self.pos_prefix.partition_point(|prefix| *prefix <= target);
+
+        let n = self.class_size(class_index);
+        let capacity = nonzero(n * n.saturating_sub(1) / 2, "positive_draw/class_capacity")?;
+        let rank_key = derive_key(self.root_seed, domains::PAIRS_POS_RANK);
+        let rank = bounded(&rank_key, 0, t, capacity);
+        let (first, second) = triangular_unrank(n, rank);
+
+        Ok(RawPair {
+            kind: PairKind::Positive,
+            first: RawEndpoint {
+                class_index,
+                member_index: first,
+            },
+            second: RawEndpoint {
+                class_index,
+                member_index: second,
+            },
         })
     }
+
+    /// Negative draw `t` — `O(K)`, NOT `O(K²)`.
+    ///
+    /// Draw the first class `j` against the per-class weights `w_c = n_c · (S − n_c)`, draw
+    /// the first endpoint uniformly inside `j`, then draw `u` uniformly in `[0, S − n_j)`
+    /// and map it to a global bucket index that SKIPS class `j`'s contiguous block
+    /// (`u < offset_j ? u : u + n_j`), resolving the second class by binary search over the
+    /// `O(K)` offset array.
+    ///
+    /// # Why this is equivalent to D-14's `n_j · n_k` class-pair weights
+    ///
+    /// `P(class j) = w_j / Σ_c w_c`, and given `j` the first endpoint is uniform over its
+    /// `n_j` members while the second is uniform over the `S − n_j` members outside it. So
+    /// every ORDERED cross-class endpoint pair has probability
+    /// `[n_j(S − n_j) / Σw] · (1/n_j) · (1/(S − n_j)) = 1 / Σw` — uniform. There are
+    /// `Σ_c n_c(S − n_c) = 2 · Σ_{j<k} n_j n_k` such ordered pairs, so each UNORDERED class
+    /// pair `{j, k}` receives weight proportional to `2 · n_j · n_k`, i.e. exactly the
+    /// `n_j · n_k` weight D-14 specifies. The rewrite is a representation change, not a
+    /// semantics change; `negative_draw_marginals_match_the_n_j_times_n_k_class_pair_weights`
+    /// measures it rather than restating this algebra.
+    ///
+    /// THE REJECTED ALTERNATIVE, named so it is not reinvented: prefix sums over enumerated
+    /// unordered class pairs. That is `O(K²)` retained state — fine at K = 3, fatal at
+    /// K ≈ N. It is forbidden here.
+    fn negative_draw(&self, t: u64) -> Result<RawPair, ContrastiveDataError> {
+        let total_weight = self.neg_prefix.last().copied().unwrap_or_default();
+        let total = nonzero(total_weight, "negative_draw/total_weight")?;
+        let key = derive_key(self.root_seed, domains::PAIRS_NEG_CLASS);
+        let target = bounded(&key, 0, t, total);
+        let first_class = self.neg_prefix.partition_point(|prefix| *prefix <= target);
+
+        let n_j = nonzero(
+            self.class_size(first_class),
+            "negative_draw/first_class_size",
+        )?;
+        let first_key = derive_key(self.root_seed, domains::PAIRS_NEG_FIRST);
+        let member_index = bounded(&first_key, 0, t, n_j);
+
+        let outside = nonzero(
+            self.total_examples - n_j.get(),
+            "negative_draw/outside_first_class",
+        )?;
+        let second_key = derive_key(self.root_seed, domains::PAIRS_NEG_SECOND);
+        let drawn = bounded(&second_key, 0, t, outside);
+        let offset_j = self.offsets.get(first_class).copied().unwrap_or_default();
+        let global = if drawn < offset_j {
+            drawn
+        } else {
+            drawn + n_j.get()
+        };
+        let second_class = self.class_of_global(global);
+
+        Ok(RawPair {
+            kind: PairKind::Negative,
+            first: RawEndpoint {
+                class_index: first_class,
+                member_index,
+            },
+            second: RawEndpoint {
+                class_index: second_class,
+                member_index: global - self.offsets.get(second_class).copied().unwrap_or_default(),
+            },
+        })
+    }
+
+    /// The LAST class whose offset is at or below `global` — which is what skips empty
+    /// classes, since they share the offset of the class after them.
+    fn class_of_global(&self, global: u64) -> usize {
+        self.offsets
+            .partition_point(|offset| *offset <= global)
+            .saturating_sub(1)
+    }
+}
+
+/// A non-zero bound, or a typed error naming which draw could not be made.
+fn nonzero(value: u64, operation: &str) -> Result<NonZeroU64, ContrastiveDataError> {
+    NonZeroU64::new(value).ok_or_else(|| overflow(operation))
+}
+
+/// Pairs of a class of `n` whose first member is strictly below `i`: `i·(2n−1−i)/2`.
+///
+/// Computed in `u128` because the intermediate `i·(2n−1−i)` reaches `2·C(n,2)`, which can
+/// exceed `u64` while the result cannot.
+fn triangular_prefix(n: u64, i: u64) -> u64 {
+    let doubled = u128::from(i) * (2 * u128::from(n) - 1 - u128::from(i));
+    (doubled / 2) as u64
+}
+
+/// Map `rank ∈ [0, C(n,2))` to the ordered member pair `(i, j)` with `i < j < n`.
+///
+/// Integer binary search, never `sqrt`: a floating-point closed form would make the pair
+/// identities host-fragile for exactly the reason `next_f32` draws are forbidden.
+/// Precondition: `n >= 2` and `rank < C(n, 2)`, both guaranteed by the weighted class draw.
+fn triangular_unrank(n: u64, rank: u64) -> (u64, u64) {
+    let (mut lo, mut hi) = (0_u64, n.saturating_sub(2));
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        if triangular_prefix(n, mid) <= rank {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    (lo, lo + 1 + (rank - triangular_prefix(n, lo)))
 }
 
 impl RetainedState for PairLayout {
@@ -895,11 +1094,88 @@ pub struct UntrustedPairRecord {
 ///
 /// [`ContrastiveDataError::MalformedRow`] naming the line index and the parser message.
 pub fn parse_pair_dump(bytes: &[u8]) -> Result<Vec<UntrustedPairRecord>, ContrastiveDataError> {
-    let _ = bytes;
-    Ok(Vec::new())
+    let text = core::str::from_utf8(bytes).map_err(|error| ContrastiveDataError::MalformedRow {
+        split: PAIR_DUMP_SPLIT.to_string(),
+        index: 0,
+        reason: error.to_string(),
+    })?;
+    let mut records = Vec::new();
+    for (index, line) in text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+    {
+        let record: UntrustedPairRecord =
+            serde_json::from_str(line).map_err(|error| ContrastiveDataError::MalformedRow {
+                split: PAIR_DUMP_SPLIT.to_string(),
+                index,
+                reason: error.to_string(),
+            })?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// The `split` name every pair-dump parse error carries.
+pub(crate) const PAIR_DUMP_SPLIT: &str = "pair_dump";
+
+/// Both endpoints of an untrusted record, resolved against the selection.
+///
+/// This is D-27's typed arm: for in-process construction the span guarantee is STRUCTURAL
+/// (a [`SelectedId`] cannot name an unselected row), but a deserialized record can name
+/// anything at all, so membership becomes a typed error naming the offending identifier.
+/// "Leakage detected" is not diagnosable; `pair endpoint "validation:3" is not in the
+/// selection` is.
+///
+/// `found_in` is deliberately `"unknown"`: this validator's universe is the Selection, so
+/// it can prove ABSENCE but cannot locate the identifier. Claiming to know where a rejected
+/// id came from would be a nicer message than the evidence supports.
+///
+/// The `split_span_fail_closed` `#[contract]` annotation sits on the PUBLIC
+/// [`validate_pair_records`] that calls this, not here — see that function's docs for why.
+fn assert_endpoints_in_selection(
+    rec: &UntrustedPairRecord,
+    sel: &Selection,
+) -> Result<(SelectedId, SelectedId), ContrastiveDataError> {
+    let resolve = |id: &str| {
+        sel.selected_id(id)
+            .ok_or_else(|| ContrastiveDataError::EndpointNotInSelection {
+                id: id.to_string(),
+                found_in: "unknown".to_string(),
+            })
+    };
+    Ok((resolve(&rec.lo)?, resolve(&rec.hi)?))
 }
 
 /// Validate untrusted pair records against the selection they claim to belong to.
+///
+/// Validation order: membership of BOTH endpoints
+/// ([`assert_endpoints_in_selection`], `split_span_fail_closed`), then distinctness and
+/// canonical ordering through [`CanonicalPair::new`], then agreement of the declared target
+/// with the one DERIVED from the endpoints' classes.
+///
+/// # The target check is not redundant with membership
+///
+/// A record naming two legitimate same-class endpoints while declaring target `0.0` is a
+/// semantically poisoned pair made entirely of valid parts. A gate that only checked
+/// membership would pass it.
+///
+/// # A swapped record is normalized, not refused
+///
+/// Orientation carries no information — that is the entire point of canonicalization
+/// (D-12) — so `(b, a)` validates to the same [`LabeledPair`] as `(a, b)`. Refusing it
+/// would be rejecting a spelling, not a threat.
+///
+/// # Two contract equations, stacked on one function
+///
+/// `untrusted_pair_ingest` is the whole ladder; `split_span_fail_closed` is its membership
+/// arm, implemented by [`assert_endpoints_in_selection`] just above. The macro DOES accept
+/// stacked attributes (verified by compiling both forms), so both annotations sit here — on
+/// the PUBLIC entry point — rather than one of them on a private helper: plan 02-08's
+/// binding registry and its `validate_pair_records` key-link both need an auditable public
+/// path, and a binding that names a private function is harder to check from outside.
+/// `split_span_fail_closed`'s other, STRUCTURAL arm needs no annotation at all, because it
+/// is a type ([`SelectedId`]'s private constructor) rather than a function.
 ///
 /// # Errors
 ///
@@ -909,12 +1185,33 @@ pub fn parse_pair_dump(bytes: &[u8]) -> Result<Vec<UntrustedPairRecord>, Contras
     "contrastive-pair-protocol-v1",
     equation = "untrusted_pair_ingest"
 )]
+#[provable_contracts_macros::contract(
+    "contrastive-pair-protocol-v1",
+    equation = "split_span_fail_closed"
+)]
 pub fn validate_pair_records(
     recs: &[UntrustedPairRecord],
     sel: &Selection,
 ) -> Result<Vec<LabeledPair>, ContrastiveDataError> {
-    let _ = (recs, sel);
-    Ok(Vec::new())
+    let mut validated = Vec::with_capacity(recs.len());
+    for rec in recs {
+        let (lo, hi) = assert_endpoints_in_selection(rec, sel)?;
+        let pair = CanonicalPair::new(lo, hi)?;
+        let derived_target = derive_target(sel, &pair);
+        if rec.target != derived_target {
+            return Err(ContrastiveDataError::PairTargetMismatch {
+                lo: rec.lo.clone(),
+                hi: rec.hi.clone(),
+                declared_target: rec.target,
+                derived_target,
+            });
+        }
+        validated.push(LabeledPair {
+            pair,
+            target: derived_target,
+        });
+    }
+    Ok(validated)
 }
 
 #[cfg(test)]

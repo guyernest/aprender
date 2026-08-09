@@ -92,6 +92,11 @@ fn the_k_equals_n_adversarial_row_comes_from_the_fixture_not_a_literal() {
     );
     assert_eq!(fixture.n_examples, 32);
     assert_eq!(fixture.n_classes, 32);
+    // The shared builder plan 02-08's capacity gate uses must agree with the fixture, or
+    // the two artifacts would be measuring different layouts while both looking green.
+    assert_eq!(common::all_singleton_layout(32), fixture.layout);
+    assert_eq!(common::contracted_layout("singletons_32"), fixture.layout);
+    assert!(common::ADVERSARIAL_BUDGET < fixture.resolved_budget);
 
     assert_eq!(
         positive_capacity(&fixture.layout).expect("no overflow"),
