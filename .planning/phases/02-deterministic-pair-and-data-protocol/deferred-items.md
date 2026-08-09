@@ -43,3 +43,83 @@ must-match/must-not-match case table per CLAUDE.md rule 7. Worth its own PMAT ti
 to git and to `cargo package` (verified via `git ls-files --others --exclude-standard`,
 `git check-ignore` on each file, and the 19-entry `.crate` listing). The CB-510 property
 this plan needed is therefore established by direct evidence, not by the vacuous guards.
+
+## D-ITEM-02 — `make tier2`'s clippy step is RED on arm64 and unlintable in CI
+
+**Found:** plan 02-03, final verification (2026-08-09). **Pre-existing**, not caused by
+this phase.
+
+`cargo clippy -- -D warnings` (tier2 step 2) fails with **25 errors across 5 crates**:
+
+```
+crates/aprender-compute      (19)  backends/q4k, backends/q6k, blis/*, brick/*, hardware, vector/ops
+crates/aprender-zram-core     (3)  src/lz4/neon.rs:246,303,318 — ptr_as_ptr
+crates/aprender-core          (1)  src/demo/reliable/performance.rs:126
+crates/aprender-present-terminal (1) src/compute_block.rs:93
+crates/aprender-serve         (1)  src/quantize/simd_backend.rs:47
+```
+
+Zero are in `aprender-contrastive-data`. Every location is inside **architecture-gated
+SIMD code**: the lints are `unused_imports` / `dead_code` / `unreachable_expression` /
+`unused_variables` on the x86 side (`MR_512V2`, `NR_512V2`, `matmul_q4k_f32_parallel`,
+`pack_b_block_nr16`, …) plus `ptr_as_ptr` on the NEON side. Host is `arm64`; on arm64 the
+x86 dispatch arms become dead and the NEON arms become live, so a different set of code
+is linted than on x86_64.
+
+**Proof it is independent of this plan** (not inferred — measured):
+- `cargo clippy -p aprender-zram-core -- -D warnings` → **rc=101, 4 errors**, and
+  `cargo tree -p aprender-zram-core` contains **zero** references to
+  `aprender-contrastive-data`. The failure reproduces with this phase's crate entirely
+  absent from the dependency graph.
+- `git log d50a0d818^..HEAD -- crates/aprender-zram-core crates/aprender-compute` is
+  **empty**: no commit in this plan touched any failing crate. `src/lz4/neon.rs` last
+  changed in `47d63b434`.
+
+**Why CI never catches it:** every `runs-on` in `.github/workflows/ci.yml` is
+`[self-hosted, X64, Linux, clean-room]`. The aarch64-live arms are therefore **never
+clippy-linted by CI at all**, so `ci / gate` is green while every arm64 developer's
+`make tier2` is red. This is CLAUDE.md Verification Discipline rule 5 — the guard does not
+scan the surface where the decision is made — with the twist that the *unscanned surface*
+is an entire CPU architecture.
+
+**Why not fixed here:** 25 errors across 5 crates untouched by this plan, all in SIMD
+dispatch that needs per-arch review (several are genuinely dead x86 helpers that may want
+`#[cfg]` gating rather than an allow). Needs its own PMAT ticket, plus an arm64 CI lane —
+fixing the lints without adding the lane just means they silently return.
+
+**Compensating measurement for plan 02-03:** every OTHER tier2 step was run individually
+and passed, so the only red is the pre-existing one above:
+
+| tier2 step | rc | result |
+|---|---|---|
+| `cargo test --lib` (root facade) | 0 | 0 tests — see D-ITEM-03 |
+| `cargo clippy -- -D warnings` | **2** | **25 pre-existing arm64 errors** |
+| setfit lib gate | 0 | 162 passed |
+| setfit conformance gate | 0 | 27 passed, 1 ignored |
+| `cargo test -p aprender-contrastive-data` | 0 | 72 passed (67 lib + 5 doc) |
+
+Additionally `cargo clippy -p aprender-contrastive-data --all-targets -- -D warnings`
+is **rc=0**, so this plan's own code is clippy-clean at the strict setting.
+
+## D-ITEM-03 — tier2's headline `cargo test --lib` runs ZERO tests
+
+**Found:** plan 02-03, final verification (2026-08-09). **Pre-existing.**
+
+`make tier2` step 1 is `PROPTEST_CASES=5 QUICKCHECK_TESTS=5 cargo test --lib`. Run from
+the workspace root, that selects **only the root facade package** (`[lib] name =
+"aprender"`, `path = "src/lib.rs"`, Cargo.toml:561) — not the workspace. Measured output:
+
+```
+Running unittests src/lib.rs (target/debug/deps/aprender-f0487d1dd47661b1)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The line that reads like "run the unit tests before committing" executes **zero** of the
+repo's 25,300+ tests. The real coverage in tier2 comes only from the three explicitly
+`-p`-scoped gate lines appended below it. Anyone reading the Makefile — or trusting a
+green tier2 — would reasonably believe the workspace lib suite had run.
+
+`--workspace` is the obvious fix but is NOT a drive-by: it turns a sub-second step into a
+multi-minute one and would change the pre-commit tier's cost profile, which the existing
+tier2 comments show was deliberately measured. Needs a decision (widen tier2, or move the
+workspace suite to tier3 and rename this step honestly), so it gets its own ticket.
