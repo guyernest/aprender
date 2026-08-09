@@ -43,11 +43,11 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
 - [x] **DATA-03**: A user can select exactly 8, 16, 32, or 64 unique canonical-training examples
   per class using each contracted seed and receive a stable selected-ID manifest
 
-- [ ] **DATA-04**: A user can replay deterministic positive and negative pair generation where
+- [x] **DATA-04**: A user can replay deterministic positive and negative pair generation where
   positive labels match, negative labels differ, endpoints differ, unordered identities are
   canonical, and singleton-class behavior is explicit
 
-- [ ] **DATA-05**: A user can set a maximum pair budget per epoch and pair generation remains
+- [x] **DATA-05**: A user can set a maximum pair budget per epoch and pair generation remains
   `O(examples + pair budget)` in state and storage rather than materializing a Cartesian product
 
 - [x] **DATA-06**: A user cannot use validation/test examples as training pairs or use the merged
@@ -217,8 +217,8 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
 | DATA-01 | Phase 2 | Complete |
 | DATA-02 | Phase 2 | Complete |
 | DATA-03 | Phase 2 | Complete |
-| DATA-04 | Phase 2 | Pending |
-| DATA-05 | Phase 2 | Pending |
+| DATA-04 | Phase 2 | Complete |
+| DATA-05 | Phase 2 | Complete |
 | DATA-06 | Phase 2 | Complete |
 | TRN-01 | Phase 3 | Pending |
 | TRN-02 | Phase 3 | Pending |

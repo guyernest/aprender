@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-06-PLAN.md
-last_updated: "2026-08-09T03:41:33.600Z"
-last_activity: "2026-08-09 -- 02-06 complete: crate-owned dataset attestation boundary (from_attested_bytes re-derives profile, schema version, per-split digests, class counts, exclusion hash and fingerprint before any split is exposed, digest check demonstrated to precede parsing by induced mutation); data_tweeteval.rs relocated onto the D-05 seam with canonical JSONL byte parity proven against an independently re-derived wire format; manifest at schema_version 2 with no version-1 migration; the real train:70 = validation:3 duplicate golden RUN and GREEN against the live pinned revision; tweet-eval contract v2.0.0 with 9 obligations and 13 falsification tests; cross-crate baseline 14,186"
+stopped_at: Completed 02-07-PLAN.md
+last_updated: "2026-08-09T04:43:45.601Z"
+last_activity: "2026-08-09 -- 02-07 complete: O(K) streaming pair sampler with externally measurable retained state, binding hard cap, total degenerate policy, untrusted-pair validation, and a tuple-committing replay hash"
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 18
-  completed_plans: 15
-  percent: 83
+  completed_plans: 16
+  percent: 89
 ---
 
 # Project State
@@ -26,21 +26,21 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 02 (deterministic-pair-and-data-protocol) — EXECUTING
-Plan: 7 of 9
-Status: Ready to execute — 02-06 complete
-Last activity: 2026-08-09 -- 02-06 complete: attested dataset boundary, D-05 relocation with byte parity, real-duplicate golden run green on live data, tweet-eval contract v2.0.0
+Plan: 8 of 9
+Status: Ready to execute — 02-07 complete, wave 5 closed
+Last activity: 2026-08-09 -- 02-07 complete: O(K) streaming pair sampler with externally measurable retained state, binding hard cap, total degenerate policy, untrusted-pair validation, and a tuple-committing replay hash
 
-Working branch: `gsd/phase-2-contract-gate` @ e939a53ae (waves 5-6 fork from here; see 02-01-SUMMARY.md for the branch/PR policy)
+Working branch: `gsd/phase-2-contract-gate` @ 9b5b1d5c6 (wave 6 forks from here; see 02-01-SUMMARY.md for the branch/PR policy)
 
-Progress: [████████░░] 83%
+Progress: [█████████░] 89%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 6 (this milestone's execution log; Phase 1 predates metric capture)
-- Average duration: ~1h15m
-- Total execution time: ~7.4 hours
+- Total plans completed: 7 (this milestone's execution log; Phase 1 predates metric capture)
+- Average duration: ~1h27m
+- Total execution time: ~10.2 hours
 
 **By Phase:**
 
@@ -51,14 +51,15 @@ Progress: [████████░░] 83%
 
 **Recent Trend:**
 
-- Last 5 plans: 02-02 (~35m, 4 tasks, 19 files), 02-03 (55m, 3 tasks, 6 files), 02-04 (~50m, 2 tasks, 15 files), 02-05 (~2h10m, 3 tasks, 15 files), 02-06 (~1h50m, 3 tasks, 6 files)
-- Trend: the two long plans (02-05, 02-06) are the two that had to derive evidence independently rather than assert it
+- Last 5 plans: 02-03 (55m, 3 tasks, 6 files), 02-04 (~50m, 2 tasks, 15 files), 02-05 (~2h10m, 3 tasks, 15 files), 02-06 (~1h50m, 3 tasks, 6 files), 02-07 (~2h45m, 3 tasks, 11 files)
+- Trend: the three long plans (02-05, 02-06, 02-07) are the three that had to derive evidence independently — a second implementation, an induced mutation, or a scaling measurement — rather than assert it
 
 *Updated after each plan completion*
 | Phase 02 P03 | 55m | 3 tasks | 6 files |
 | Phase 02 P04 | ~50m | 2 tasks | 15 files |
 | Phase 02 P05 | ~2h10m | 3 tasks | 15 files |
 | Phase 02 P06 | ~1h50m | 3 tasks | 6 files |
+| Phase 02 P07 | ~2h45m | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -93,6 +94,12 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-06: write_outputs re-opens the directory it just wrote through PreparedDataset::from_attested_bytes and rolls back on rejection — without a production caller the attestation read path and the schema-version gate would have been test-only dead code
 - [Phase 02]: 02-06: ContrastiveDataError gains UnsupportedNormalizationVersion (a String tag cannot ride in UnsupportedSchemaVersion's u32), with OBLIG-CPP-ERROR-TAXONOMY extended per the process error.rs itself mandates
 - [Phase 02]: 02-06: every crate-level test command in the tweet-eval contract carries --lib, because the bare filter form emits a 'test result: ok' line from a suite that ran ZERO matching tests and would satisfy the expected_output grep vacuously
+- [Phase 02]: 02-07: PairLayout is a separate PUBLIC type holding the sampler's whole retained state, because a Selection always carries shots_per_class in EVERY class and therefore cannot express the K = N all-singleton layout DATA-05 must survive — without it plan 02-08's headline capacity gate would be unwritable from outside the crate
+- [Phase 02]: 02-07: negative_capacity accumulates the running prefix rather than (S^2 - sum n^2)/2 — same O(K), same quantity, but it overflows exactly when the RESULT does; a test pins the two derivations against each other wherever the second is computable
+- [Phase 02]: 02-07: NoPairCapacity is checked BEFORE the default budget resolves, following the degenerate equation's invariant prose rather than its formula line, which would have reported ZeroBudget for a layout with no pair space at all
+- [Phase 02]: 02-07: the pair manifest hash refuses a record whose selection_hash or budget does not describe the sampler it is handed; hashing stream X under record Y would be the exact failure the header-inside-the-digest design exists to prevent
+- [Phase 02]: 02-07: both untrusted_pair_ingest and split_span_fail_closed are STACKED on the public validate_pair_records — the contract macro accepts two attributes (verified by compiling both forms), and a binding that names a private helper is harder to audit
+- [Phase 02]: 02-07: the GSD SDK state handlers damaged STATE.md more severely than env note 7 records — state.update-progress reported percent 89 while writing 20 into the frontmatter and leaving the body bar at 83, state.record-metric flipped status to 'completed' mid-phase, state.advance-plan clobbered last_activity to a bare date and left stopped_at on the previous plan, and add-decision tagged all five entries [Phase ?]. Every field was repaired by hand and read back. Plans 02-08/02-09: run the handlers, then READ THE FILE and repair
 
 ### Pending Todos
 
@@ -145,6 +152,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-08-09T03:39:15.336Z
+Last session: 2026-08-09T04:42:33.243Z
 Stopped at: Completed 02-06-PLAN.md
 Resume file: None
