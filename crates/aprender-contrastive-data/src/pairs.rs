@@ -22,6 +22,8 @@
 //! is a small, plausible-looking one, and it would silently under-sample forever while
 //! every balance and membership test stayed green.
 
+use core::cmp::Ordering;
+
 use crate::error::ContrastiveDataError;
 use crate::select::SelectedId;
 
@@ -63,9 +65,18 @@ impl CanonicalPair {
     /// # Errors
     ///
     /// [`ContrastiveDataError::SelfPair`] when both endpoints are the same ordinal.
-    #[provable_contracts_macros::contract("contrastive-pair-protocol-v1", equation = "canonical_pair")]
+    #[provable_contracts_macros::contract(
+        "contrastive-pair-protocol-v1",
+        equation = "canonical_pair"
+    )]
     pub fn new(a: SelectedId, b: SelectedId) -> Result<Self, ContrastiveDataError> {
-        Ok(Self { lo: a, hi: b })
+        match a.cmp(&b) {
+            Ordering::Less => Ok(Self { lo: a, hi: b }),
+            Ordering::Greater => Ok(Self { lo: b, hi: a }),
+            Ordering::Equal => Err(ContrastiveDataError::SelfPair {
+                id: u64::from(a.ordinal()),
+            }),
+        }
     }
 
     /// The lower endpoint.
@@ -104,31 +115,87 @@ fn overflow(operation: &str) -> ContrastiveDataError {
 
 /// `Σ_k C(n_k, 2)` — the number of distinct same-class unordered pairs.
 ///
+/// `O(K)` in the number of classes. Self-pairs are EXCLUDED, hence `n(n−1)/2` rather than
+/// `n(n+1)/2`: that exclusion is an Aprender policy (deviation clause 3), NOT SetFit's
+/// behaviour — the pinned `setfit==1.1.3` enumerates `np.triu_indices(n, 0)` and therefore
+/// includes the diagonal, contradicting its own published documentation.
+///
+/// A singleton class contributes exactly 0, which is what makes
+/// [`SingletonPolicy::NegativesOnly`] fall out of the arithmetic instead of needing a
+/// special case.
+///
 /// # Errors
 ///
 /// [`ContrastiveDataError::ArithmeticOverflow`] naming the operation that overflowed.
-#[provable_contracts_macros::contract("contrastive-pair-protocol-v1", equation = "positive_capacity")]
-pub fn positive_capacity(_class_sizes: &[u64]) -> Result<u64, ContrastiveDataError> {
-    Ok(0)
+#[provable_contracts_macros::contract(
+    "contrastive-pair-protocol-v1",
+    equation = "positive_capacity"
+)]
+pub fn positive_capacity(class_sizes: &[u64]) -> Result<u64, ContrastiveDataError> {
+    let mut total: u64 = 0;
+    for &n in class_sizes {
+        // `n * (n - 1)` is always even, so the halving is exact and loses nothing.
+        let product = n
+            .checked_mul(n.saturating_sub(1))
+            .ok_or_else(|| overflow("positive_capacity/class_product"))?;
+        total = total
+            .checked_add(product / 2)
+            .ok_or_else(|| overflow("positive_capacity/total"))?;
+    }
+    Ok(total)
 }
 
 /// `Σ_{j<k} n_j · n_k` — the number of distinct cross-class unordered pairs.
 ///
+/// # Why the running-prefix evaluation order
+///
+/// The contract's formula line gives the algebraically equivalent `(S² − Σ n_k²) / 2`.
+/// Both are `O(K)` and neither enumerates class PAIRS — the property the contract's
+/// invariant actually protects — but `S²` overflows `u64` long before the true capacity
+/// does, so it would report `ArithmeticOverflow` for layouts whose answer fits perfectly
+/// well. This function therefore accumulates `Σ_k n_k · (Σ_{j<k} n_j)`, which overflows
+/// exactly when the RESULT does. `negative_capacity_agrees_with_the_sum_of_squares_derivation`
+/// pins the two against each other wherever the second is computable at all, so the
+/// evaluation order cannot drift into a different quantity.
+///
 /// # Errors
 ///
 /// [`ContrastiveDataError::ArithmeticOverflow`] naming the operation that overflowed.
-#[provable_contracts_macros::contract("contrastive-pair-protocol-v1", equation = "negative_capacity")]
-pub fn negative_capacity(_class_sizes: &[u64]) -> Result<u64, ContrastiveDataError> {
-    Ok(0)
+#[provable_contracts_macros::contract(
+    "contrastive-pair-protocol-v1",
+    equation = "negative_capacity"
+)]
+pub fn negative_capacity(class_sizes: &[u64]) -> Result<u64, ContrastiveDataError> {
+    let mut seen: u64 = 0;
+    let mut total: u64 = 0;
+    for &n in class_sizes {
+        let cross = n
+            .checked_mul(seen)
+            .ok_or_else(|| overflow("negative_capacity/cross_product"))?;
+        total = total
+            .checked_add(cross)
+            .ok_or_else(|| overflow("negative_capacity/total"))?;
+        seen = seen
+            .checked_add(n)
+            .ok_or_else(|| overflow("negative_capacity/running_total"))?;
+    }
+    Ok(total)
 }
 
 /// The RAW closed form `2 · max(positive_capacity, negative_capacity)`, before any clamp.
 ///
+/// This is D-14's oversampling count. Note it is NOT the contracted default budget —
+/// [`effective_default_budget`] is, because the contracted equation includes the cap.
+///
 /// # Errors
 ///
 /// [`ContrastiveDataError::ArithmeticOverflow`] naming the operation that overflowed.
-pub fn default_epoch_budget(_class_sizes: &[u64]) -> Result<u64, ContrastiveDataError> {
-    Ok(0)
+pub fn default_epoch_budget(class_sizes: &[u64]) -> Result<u64, ContrastiveDataError> {
+    let pos = positive_capacity(class_sizes)?;
+    let neg = negative_capacity(class_sizes)?;
+    pos.max(neg)
+        .checked_mul(2)
+        .ok_or_else(|| overflow("default_epoch_budget/balanced_total"))
 }
 
 /// The CONTRACTED default: `min(closed_form, hard_cap)`.
@@ -137,23 +204,42 @@ pub fn default_epoch_budget(_class_sizes: &[u64]) -> Result<u64, ContrastiveData
 ///
 /// [`ContrastiveDataError::ZeroHardCap`] for a zero cap;
 /// [`ContrastiveDataError::ArithmeticOverflow`] from the closed form.
-#[provable_contracts_macros::contract("contrastive-pair-protocol-v1", equation = "default_epoch_budget")]
+#[provable_contracts_macros::contract(
+    "contrastive-pair-protocol-v1",
+    equation = "default_epoch_budget"
+)]
 pub fn effective_default_budget(
-    _class_sizes: &[u64],
-    _hard_cap: u64,
+    class_sizes: &[u64],
+    hard_cap: u64,
 ) -> Result<u64, ContrastiveDataError> {
-    Ok(0)
+    if hard_cap == 0 {
+        return Err(ContrastiveDataError::ZeroHardCap);
+    }
+    Ok(default_epoch_budget(class_sizes)?.min(hard_cap))
 }
 
 /// Pre-provisioned capacity check for the `unique` strategy, which does NOT ship in v1.
 ///
+/// # Scope note, so this is not mistaken for dead API
+///
+/// D-11 locks the `unique` strategy's semantics *if it is present*, and the research
+/// recommendation adopted by this plan ships `oversampling` only. The capacity check ships
+/// anyway because D-11's hard part — a closed-form capacity that fails closed instead of
+/// rejection-looping — is needed for the cap regardless, and because a typed error variant
+/// no code path can raise is a claim nothing checks. It is public, documented and tested.
+///
 /// # Errors
 ///
 /// [`ContrastiveDataError::BudgetExceedsCapacity`] when the budget exceeds `pos + neg`.
-pub fn unique_capacity_check(
-    _class_sizes: &[u64],
-    _budget: u64,
-) -> Result<(), ContrastiveDataError> {
+pub fn unique_capacity_check(class_sizes: &[u64], budget: u64) -> Result<(), ContrastiveDataError> {
+    let pos = positive_capacity(class_sizes)?;
+    let neg = negative_capacity(class_sizes)?;
+    let capacity = pos
+        .checked_add(neg)
+        .ok_or_else(|| overflow("unique_capacity_check/total"))?;
+    if budget > capacity {
+        return Err(ContrastiveDataError::BudgetExceedsCapacity { budget, capacity });
+    }
     Ok(())
 }
 
@@ -266,15 +352,80 @@ impl PairConfig {
 /// [`ContrastiveDataError::ZeroHardCap`], [`ContrastiveDataError::ZeroBudget`],
 /// [`ContrastiveDataError::BudgetExceedsHardCap`], [`ContrastiveDataError::NoPairCapacity`],
 /// [`ContrastiveDataError::ArithmeticOverflow`].
-#[provable_contracts_macros::contract("contrastive-pair-protocol-v1", equation = "budget_resolution")]
+/// # The cap BINDS an explicit budget — it does not clamp it
+///
+/// Silent clamping would keep the cap's denial-of-service role while discarding a number
+/// the user typed: the run would succeed and produce a DIFFERENT dataset than the one
+/// requested, with nothing red and a manifest that looks fine. That is the worst
+/// reproducibility outcome available. Dropping the cap for explicit budgets would remove
+/// its DoS role entirely. Failing loudly and letting the user raise `--hard-cap` keeps both
+/// properties, and makes the decision visible in the command that was run.
+///
+/// # Ordering, and one place the contract's formula and its invariants disagree
+///
+/// The formula line orders `effective budget == 0 -> ZeroBudget` before
+/// `pos == 0 and neg == 0 -> NoPairCapacity`, but the same equation's invariant prose says
+/// "pos == 0 AND neg == 0 ... is `NoPairCapacity{...}`. There is nothing to emit." Taken
+/// literally, the formula's order would report `ZeroBudget` for `[1]` under a DEFAULT
+/// budget — because the closed form is then 0 — which names the request when the layout is
+/// what is wrong. This function follows the invariant: a zero cap (configuration defect)
+/// first, then an explicit zero or over-cap budget (request defects, wrong whatever the
+/// layout is), then absent capacity, then resolution. Each rung names the thing the reader
+/// has to change.
+#[provable_contracts_macros::contract(
+    "contrastive-pair-protocol-v1",
+    equation = "budget_resolution"
+)]
 pub fn resolve_budget(
-    _cfg: &PairConfig,
-    _class_sizes: &[u64],
+    cfg: &PairConfig,
+    class_sizes: &[u64],
 ) -> Result<(u64, bool), ContrastiveDataError> {
-    Ok((0, false))
+    let hard_cap = cfg.resolved_hard_cap();
+    if hard_cap == 0 {
+        return Err(ContrastiveDataError::ZeroHardCap);
+    }
+    if let Some(budget) = cfg.budget {
+        if budget == 0 {
+            return Err(ContrastiveDataError::ZeroBudget);
+        }
+        if budget > hard_cap {
+            return Err(ContrastiveDataError::BudgetExceedsHardCap { budget, hard_cap });
+        }
+    }
+
+    let pos = positive_capacity(class_sizes)?;
+    let neg = negative_capacity(class_sizes)?;
+    classify_degenerate(pos, neg)?;
+
+    match cfg.budget {
+        Some(budget) => Ok((budget, false)),
+        None => {
+            let closed_form = default_epoch_budget(class_sizes)?;
+            let resolved = closed_form.min(hard_cap);
+            if resolved == 0 {
+                // Unreachable while `classify_degenerate` above accepts only layouts with
+                // capacity, but typed rather than asserted so a future edit to that rung
+                // cannot silently produce an empty stream.
+                return Err(ContrastiveDataError::ZeroBudget);
+            }
+            Ok((resolved, closed_form > hard_cap))
+        }
+    }
 }
 
-/// Which kinds a layout can emit.
+/// Which kinds a layout can emit — total over every degenerate case.
+///
+/// * `pos == 0 && neg == 0` — a single class of size ≤ 1, or no examples at all — is
+///   [`ContrastiveDataError::NoPairCapacity`]. There is nothing to emit, and reporting a
+///   budget problem here would point at the wrong file.
+/// * `pos == 0 && neg > 0` — every class a singleton, the K ≈ N adversarial layout — emits
+///   NEGATIVES ONLY. It is not an error: the layout is legal and its pair space is
+///   non-empty. This is [`SingletonPolicy::NegativesOnly`] arriving as arithmetic.
+/// * `neg == 0 && pos > 0` — one class with two or more members — emits POSITIVES ONLY.
+/// * otherwise both kinds alternate.
+///
+/// `emitted_kinds` is recorded even in the ordinary both-kinds case, so its absence cannot
+/// be confused with the ordinary case.
 ///
 /// # Errors
 ///
@@ -283,11 +434,16 @@ pub fn resolve_budget(
     "contrastive-pair-protocol-v1",
     equation = "pair_stream_degenerate_policy"
 )]
-pub fn classify_degenerate(
-    _pos: u64,
-    _neg: u64,
-) -> Result<EmittedKinds, ContrastiveDataError> {
-    Ok(EmittedKinds::Both)
+pub fn classify_degenerate(pos: u64, neg: u64) -> Result<EmittedKinds, ContrastiveDataError> {
+    match (pos, neg) {
+        (0, 0) => Err(ContrastiveDataError::NoPairCapacity {
+            positive_capacity: 0,
+            negative_capacity: 0,
+        }),
+        (0, _) => Ok(EmittedKinds::NegativesOnly),
+        (_, 0) => Ok(EmittedKinds::PositivesOnly),
+        _ => Ok(EmittedKinds::Both),
+    }
 }
 
 #[cfg(test)]
@@ -355,7 +511,10 @@ mod pair_tests {
     fn negative_capacity_matches_the_contracted_closed_form() {
         assert_eq!(negative_capacity(&[8, 4, 8]).expect("no overflow"), 128);
         assert_eq!(negative_capacity(&[8, 8, 8]).expect("no overflow"), 192);
-        assert_eq!(negative_capacity(&[64, 64, 64]).expect("no overflow"), 12288);
+        assert_eq!(
+            negative_capacity(&[64, 64, 64]).expect("no overflow"),
+            12288
+        );
         assert_eq!(negative_capacity(&[4, 1]).expect("no overflow"), 4);
         assert_eq!(negative_capacity(&[6]).expect("no overflow"), 0);
         assert_eq!(negative_capacity(&[1; 32]).expect("no overflow"), 496);
@@ -437,9 +596,15 @@ mod pair_tests {
         };
 
         named(positive_capacity(&[u64::MAX]), "positive_capacity");
-        named(positive_capacity(&[u64::MAX - 1, u64::MAX - 1]), "positive_capacity");
+        named(
+            positive_capacity(&[u64::MAX - 1, u64::MAX - 1]),
+            "positive_capacity",
+        );
         named(negative_capacity(&[u64::MAX, 2]), "negative_capacity");
-        named(negative_capacity(&[u64::MAX / 2, u64::MAX / 2]), "negative_capacity");
+        named(
+            negative_capacity(&[u64::MAX / 2, u64::MAX / 2]),
+            "negative_capacity",
+        );
         // pos and neg BOTH fit; only the doubling overflows, so the error must name the
         // balancing step rather than one of the capacities.
         named(

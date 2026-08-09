@@ -19,6 +19,11 @@
 //!
 //! Run with `cargo test -p aprender-contrastive-data --test pair_counts`.
 
+// `tests/common/mod.rs` is compiled into EVERY integration-test crate that names it, so
+// the loaders this file does not call (`manifest_drift`, `fixture_files`, ...) are dead
+// code HERE while being the whole point of `reference_fixtures.rs`. The allow is on the
+// module rather than on individual items so the shared module stays a single definition.
+#[allow(dead_code)]
 mod common;
 
 use aprender_contrastive_data::pairs::{
