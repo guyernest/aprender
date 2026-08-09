@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-08-09T01:32:08.739Z"
-last_activity: "2026-08-09 -- 02-03 complete: bytes-to-typed data layer (JSONL codec, both content hashes, 5-gate split ladder, access ledger, union-find dedup, PreparedDataset typestate); 72 crate tests green, cross-crate baseline 14,102"
+stopped_at: Completed 02-04-PLAN.md
+last_updated: "2026-08-09T01:58:30.678Z"
+last_activity: "2026-08-09 -- 02-04 complete: measured + contracted SetFit pair-count fixture families (6 layouts each, incl. the K=N adversarial row) under manifest.sha256, shared typed models in tests/common, and a cwd-independent Rust verifier; 79 crate tests green, cross-crate baseline 14,102"
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 18
-  completed_plans: 12
-  percent: 67
+  completed_plans: 13
+  percent: 72
 ---
 
 # Project State
@@ -26,13 +26,13 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 02 (deterministic-pair-and-data-protocol) — EXECUTING
-Plan: 4 of 9
-Status: Ready to execute — 02-03 complete
-Last activity: 2026-08-09 -- 02-03 complete: bytes-to-typed data layer (JSONL codec, both content hashes, 5-gate split ladder, access ledger, union-find dedup, PreparedDataset typestate); 72 crate tests green, cross-crate baseline 14,102
+Plan: 5 of 9
+Status: Ready to execute — 02-04 complete
+Last activity: 2026-08-09 -- 02-04 complete: measured + contracted SetFit pair-count fixture families (6 layouts each, incl. the K=N adversarial row) under manifest.sha256, shared typed models in tests/common, and a cwd-independent Rust verifier; 79 crate tests green, cross-crate baseline 14,102
 
 Working branch: `gsd/phase-2-contract-gate` @ c104221f4 (waves 3-6 fork from here; see 02-01-SUMMARY.md for the branch/PR policy)
 
-Progress: [███████░░░] 67%
+Progress: [███████░░░] 72%
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress: [███████░░░] 67%
 
 *Updated after each plan completion*
 | Phase 02 P03 | 55m | 3 tasks | 6 files |
+| Phase 02 P04 | ~50m | 2 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,8 @@ Recent decisions affecting current work:
 - [Phase 2]: D-04 is enforced by two POSITIVE checks — a dependency allowlist compared against the resolved cargo tree closure, and a src/-wide fs/net/path symbol ban with NO cfg(test) exemption. All four failure modes were induced, observed and reverted before the gate was trusted.
 - [Phase 02]: 02-03: DatasetProfile carries an associated type Splits, so PreparedDataset<Compatibility> has no validation field at all rather than an Option+expect() — Makes D-19 structural rather than a runtime invariant, and makes 02-08's trybuild non-constructibility gate provable: proving a field is always None needs whole-program reasoning, proving it does not exist is a type error.
 - [Phase 02]: 02-03: SplitFingerprintInput ordering is discharged by BTreeMap iteration order via Split::exact_hash_pairs(), not a caller-side sort — An ordering obligation left to callers can be silently omitted, and a wrong order yields a plausible-looking wrong digest. There is now no unsorted path to construct the input from.
+- [Phase 02]: 02-04: reference fixtures record MEASURED pinned-setfit behavior in one family and Aprender's contracted closed forms in another; every number must agree three ways (measurement, closed form read out of sampler.py, contract literal) or the generator aborts
+- [Phase 02]: 02-04: fixtures are keyed by fixture_id rather than by class layout, because 8_4_8 and 8_4_8_maxpairs100 share [8,4,8] and a layout-keyed map would silently drop one
 
 ### Pending Todos
 
@@ -132,6 +135,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-08-09T01:31:10.012Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-08-09T01:57:49.657Z
+Stopped at: Completed 02-04-PLAN.md
 Resume file: None
