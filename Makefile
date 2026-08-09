@@ -341,7 +341,7 @@ tier3:
 # which touches no setfit code at all, fails identically. The union below is the
 # platform-appropriate one D22's fix direction asks for and covers every feature
 # combination this phase introduces.
-setfit-feature-matrix: ## D-06: setfit feature isolation for aprender-core
+setfit-feature-matrix: ## D-06/D-05: setfit feature isolation for aprender-core AND aprender-train
 	@echo "Feature matrix: aprender-core setfit isolation (D-06)"
 	@cargo check -p aprender-core --no-default-features
 	@cargo check -p aprender-core --features setfit
@@ -360,6 +360,91 @@ setfit-feature-matrix: ## D-06: setfit feature isolation for aprender-core
 		echo "FAIL: tokenizers leaked into a no-default-features build (D-06)"; \
 		grep -n tokenizers target/setfit-feature-matrix-tree.txt; exit 1; \
 	fi
+# ─── Phase 3 D-05: the same closure obligation, one crate up ────────────────
+#
+# `setfit` now has to propagate through a 37-module crate that also carries
+# GPU/LoRA/distill/server. Three legs, and one of them is not the shape the
+# plan first asked for — the reason is recorded here rather than in a commit
+# message, because a reader of this Makefile is who needs it.
+#
+# A literal `--all-features` leg is NOT buildable on the CPU profile: this
+# crate's feature list includes `cuda`, `gpu`, `nvml` and `wasm`, which need
+# toolchains a CPU host does not have. Leg (c) is the honest substitute — every
+# CPU-buildable feature co-enabled with setfit, which IS the D-05 risk surface.
+# Measured 2026-08-09 before wiring, exactly as the D-04 block below was: the
+# same feature list WITHOUT setfit (the control) exits 0, and WITH setfit it
+# also exits 0. Nothing pre-existing was inherited and nothing was hidden.
+	@echo "Feature matrix: aprender-train setfit closure (Phase 3 D-05)"
+	@cargo check -p aprender-train --features setfit
+	@cargo check -p aprender-train --features setfit,cpu-fallback,gguf,monitor,tui,citl,server,tracing,ruchy-sessions,parquet,hub,viz
+# Leg (a) is a two-sided DIFF, not a plain green check, and that is deliberate.
+#
+# Measured 2026-08-09: `cargo check -p aprender-train --no-default-features` is
+# RED at HEAD with 8 errors, ALL of them `presentar_terminal` unlinked under
+# `src/monitor/tui/` — because `src/monitor/mod.rs:45` declares `pub mod tui;`
+# UNCONDITIONALLY while its only dependency is gated behind the `tui` feature.
+# That is a pre-existing defect in a module Phase 3 does not own (deferred-items
+# D-ITEM-05), so wiring the plain leg would import someone else's red into this
+# phase's gate. Dropping the leg would hide it. What IS this phase's business is
+# that enabling `setfit` adds NOTHING to that build — so the leg asserts the two
+# diagnostic streams are byte-identical, and goes RED the moment setfit leaks
+# into the minimal build. Statuses are read from `$$?` on the line AFTER the
+# redirect and never through a pipe or an `if !` (CLAUDE.md rule 1) — the first
+# draft of this leg used `if ! cargo check; then rc=$$?; fi`, where `$$?` is the
+# status of the NEGATION and is therefore always 0. The vacuity check below is
+# what caught it, which is the whole reason it is here.
+	@echo "  leg (a): minimal-build setfit-diff"
+	@cargo check -p aprender-train --no-default-features \
+	      > target/sfm-train-min-control.log 2>&1; ctl_rc=$$?; \
+	cargo check -p aprender-train --no-default-features --features setfit \
+	      > target/sfm-train-min-setfit.log 2>&1; sf_rc=$$?; \
+	grep -A1 -E '^error' target/sfm-train-min-control.log \
+	      > target/sfm-train-min-control.errs || true; \
+	grep -A1 -E '^error' target/sfm-train-min-setfit.log \
+	      > target/sfm-train-min-setfit.errs || true; \
+	if [ "$$ctl_rc" != "0" ] && [ ! -s target/sfm-train-min-control.errs ]; then \
+	  echo "FAIL: the minimal build failed (rc=$$ctl_rc) but produced no diagnostics to compare;"; \
+	  echo "      this guard would pass vacuously. Inspect target/sfm-train-min-control.log."; \
+	  exit 1; \
+	fi; \
+	if [ "$$ctl_rc" = "0" ] && [ -s target/sfm-train-min-control.errs ]; then \
+	  echo "FAIL: the minimal build exited 0 yet emitted diagnostics; the comparison is not"; \
+	  echo "      measuring what it claims. Inspect target/sfm-train-min-control.log."; \
+	  exit 1; \
+	fi; \
+	if [ "$$ctl_rc" != "$$sf_rc" ]; then \
+	  echo "FAIL: enabling setfit changed the minimal build's exit status ($$ctl_rc -> $$sf_rc) (D-05 leakage)"; \
+	  exit 1; \
+	fi; \
+	if ! diff -u target/sfm-train-min-control.errs target/sfm-train-min-setfit.errs; then \
+	  echo "FAIL: enabling setfit changed the minimal build's diagnostics (D-05 leakage)"; \
+	  exit 1; \
+	fi; \
+	echo "    identical with and without setfit (control rc=$$ctl_rc, setfit rc=$$sf_rc)"
+# The dependency-closure negative, two-sided. The positive half is what stops
+# the negative half passing for the wrong reason: a `cargo tree` invocation that
+# silently stopped resolving these packages would satisfy an absence-only check
+# forever. Both trees are captured to files and `cargo tree`'s own status is
+# checked FIRST, same discipline as the aprender-core block above.
+	@echo "  negative: a DEFAULT aprender-train build must contain NO contrastive-data, rand or tokenizers node"
+	@cargo tree -p aprender-train -e normal \
+		> target/sfm-train-tree-default.txt 2>&1 || \
+		{ echo "FAIL: cargo tree failed; the D-05 closure check would pass vacuously"; \
+		  cat target/sfm-train-tree-default.txt; exit 1; }
+	@cargo tree -p aprender-train --features setfit -e normal \
+		> target/sfm-train-tree-setfit.txt 2>&1 || \
+		{ echo "FAIL: cargo tree --features setfit failed; the D-05 closure check would pass vacuously"; \
+		  cat target/sfm-train-tree-setfit.txt; exit 1; }
+	@if grep -qE 'aprender-contrastive-data|aprender-rand|tokenizers' target/sfm-train-tree-default.txt; then \
+		echo "FAIL: a setfit-only dependency leaked into the DEFAULT aprender-train build (D-05)"; \
+		grep -nE 'aprender-contrastive-data|aprender-rand|tokenizers' target/sfm-train-tree-default.txt; exit 1; \
+	fi
+	@for node in aprender-contrastive-data aprender-rand tokenizers; do \
+		if ! grep -q "$$node" target/sfm-train-tree-setfit.txt; then \
+			echo "FAIL: --features setfit did NOT pull in $$node; the absence check above is vacuous (D-05)"; \
+			exit 1; \
+		fi; \
+	done
 	@echo "setfit-feature-matrix: PASSED"
 
 # D-04: the aprender-contrastive-data bytes boundary. Wired into tier3 above.
