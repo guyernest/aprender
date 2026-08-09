@@ -84,7 +84,18 @@ impl DomainKey {
     equation = "rng_key_derivation"
 )]
 pub fn derive_key(root_seed: u64, domain: &str) -> DomainKey {
-    todo!("RED: implemented in the GREEN commit of task 1")
+    let mut hasher = Sha256::new();
+    hasher.update(DOMAIN_TAG);
+    hasher.update(root_seed.to_le_bytes());
+    hasher.update(domain.as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+
+    // Indexing is safe by construction: a SHA-256 digest is exactly 32 bytes, so both
+    // 4-byte windows exist. `try_into` on a fixed-size slice cannot fail here, and the
+    // fallback keeps the function total without an `unwrap`.
+    let lane0 = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    let lane1 = u32::from_le_bytes([digest[4], digest[5], digest[6], digest[7]]);
+    DomainKey([lane0, lane1])
 }
 
 /// One Philox 4x32-10 output block at `(key, stream_id, ordinal)`.
@@ -93,7 +104,8 @@ pub fn derive_key(root_seed: u64, domain: &str) -> DomainKey {
 /// on nothing else — not on how many draws preceded it, not on which thread asks, not on
 /// the order the ordinals are requested in.
 pub fn draw(key: &DomainKey, stream_id: u32, ordinal: u64) -> [u32; 4] {
-    todo!("RED: implemented in the GREEN commit of task 1")
+    let counter = [ordinal as u32, (ordinal >> 32) as u32, stream_id, 0];
+    Philox4x32::generate_at(key.0, counter)
 }
 
 /// Assemble a 64-bit value from an output block: lane 0 is the LOW half.
@@ -101,7 +113,7 @@ pub fn draw(key: &DomainKey, stream_id: u32, ordinal: u64) -> [u32; 4] {
 /// Frozen for the same reason the seed encoding is — the opposite convention is equally
 /// natural and would silently produce a different, equally plausible-looking stream.
 fn assemble64(lanes: [u32; 4]) -> u64 {
-    todo!("RED: implemented in the GREEN commit of task 1")
+    (u64::from(lanes[1]) << 32) | u64::from(lanes[0])
 }
 
 /// A uniform-ish draw in `[0, n)` by 64-bit multiply-shift.
@@ -146,7 +158,8 @@ fn assemble64(lanes: [u32; 4]) -> u64 {
 /// ```
 #[provable_contracts_macros::contract("contrastive-pair-protocol-v1", equation = "bounded_draw")]
 pub fn bounded(key: &DomainKey, stream_id: u32, ordinal: u64, n: NonZeroU64) -> u64 {
-    todo!("RED: implemented in the GREEN commit of task 1")
+    let x = assemble64(draw(key, stream_id, ordinal));
+    ((u128::from(x) * u128::from(n.get())) >> 64) as u64
 }
 
 /// The six frozen domain strings of protocol v1.
@@ -171,7 +184,7 @@ pub mod domains {
         equation = "rng_domain_strings"
     )]
     pub fn select(label: usize) -> String {
-        todo!("RED: implemented in the GREEN commit of task 1")
+        format!("select/{label}")
     }
 
     /// Positive-pair class choice.
@@ -210,6 +223,7 @@ mod rng_tests {
     const KEY_14_SELECT_0: [u32; 2] = [1_239_703_332, 3_359_937_302];
     const BLOCK_AT_ORDINAL_7: [u32; 4] =
         [1_281_016_082, 3_815_106_876, 1_099_144_567, 2_908_329_261];
+    const ASSEMBLED_AT_ORDINAL_7: u64 = 16_385_759_264_445_743_378;
     const BOUNDED_7_587: u64 = 521;
     const BOUNDED_7_24576: u64 = 21_830;
     const BOUNDED_HIGH_ORDINAL_587: u64 = 419;
@@ -228,11 +242,10 @@ mod rng_tests {
         // Counter layout and Philox invocation.
         assert_eq!(draw(&key, 0, 7), BLOCK_AT_ORDINAL_7);
 
-        // Lane assembly: lane 0 is the LOW half.
-        assert_eq!(
-            assemble64(BLOCK_AT_ORDINAL_7),
-            (u64::from(BLOCK_AT_ORDINAL_7[1]) << 32) | u64::from(BLOCK_AT_ORDINAL_7[0])
-        );
+        // Lane assembly: lane 0 is the LOW half. Pinned as a VALUE rather than restated
+        // as `(lanes[1] << 32) | lanes[0]`, which would only re-derive the implementation
+        // and would stay green if both sides were swapped together.
+        assert_eq!(assemble64(BLOCK_AT_ORDINAL_7), ASSEMBLED_AT_ORDINAL_7);
 
         // Multiply-shift, including one case that exercises the HIGH ordinal word and a
         // non-zero stream id — the two counter lanes a naive implementation drops.
