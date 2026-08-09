@@ -4,6 +4,15 @@
 Run:  uv run python slice_model.py && uv run python generate_fixtures.py
 Developer workflow only -- never wired into CI (D-12).
 
+A SECOND, INDEPENDENT MODE lives at the bottom of this file (Phase 2, plan 02-04):
+
+    uv run python generate_fixtures.py --pairs [--rebaseline]
+
+It emits the SetFit pair-count reference fixtures into
+crates/aprender-contrastive-data/tests/setfit_reference/ and touches NOTHING under
+crates/aprender-core/tests/fixtures/setfit/. It needs no torch model and no network. See
+the section banner above ``PAIR_FIXTURE_DIR`` for why there are two fixture families.
+
 WHY ONE PASS
 ------------
 Every slice-driven fixture must come from the SAME sliced torch model that produced the
@@ -56,6 +65,7 @@ from slice_model import (
     BUILD_DIR,
     FIXTURE_DIR,
     REPO_ID,
+    REPO_ROOT,
     REVISION,
     fetch_pinned,
     sha256_file,
@@ -909,24 +919,595 @@ def verify_joins() -> None:
     print("join integrity: every fixture case_id resolves with matching texts and ids")
 
 
-def write_manifest() -> None:
-    files = sorted(p for p in FIXTURE_DIR.iterdir() if p.is_file() and p.name != "manifest.sha256")
+def write_manifest(directory: Path = FIXTURE_DIR) -> None:
+    """Write `manifest.sha256` over every file in `directory` except the manifest itself.
+
+    Paths are recorded as BARE FILENAMES, i.e. relative to the manifest file's own
+    directory. That is what makes a consumer's resolution rule well-defined: resolve each
+    entry against the directory the manifest was read from, and the check is independent
+    of the caller's working directory. `shasum -a 256 -c` only agrees with that rule when
+    it is run FROM this directory, which is why the self-verification below passes
+    `cwd=directory` and why every documented convenience invocation states the `cd`.
+
+    `directory` defaults to the Phase 1 fixture tree so the Phase 1 call site is unchanged.
+    """
+    files = sorted(p for p in directory.iterdir() if p.is_file() and p.name != "manifest.sha256")
     lines = []
     for p in files:
         h = hashlib.sha256(p.read_bytes()).hexdigest()
         lines.append(f"{h}  {p.name}")
-    (FIXTURE_DIR / "manifest.sha256").write_text("\n".join(lines) + "\n")
+    (directory / "manifest.sha256").write_text("\n".join(lines) + "\n")
 
     proc = subprocess.run(
         ["shasum", "-a", "256", "-c", "manifest.sha256"],
-        cwd=FIXTURE_DIR,
+        cwd=directory,
         capture_output=True,
         text=True,
     )
     if proc.returncode != 0:
         sys.exit(f"FATAL: manifest self-verification failed\n{proc.stdout}\n{proc.stderr}")
-    print(f"manifest.sha256 covers {len(files)} files; shasum -c passed")
+    print(f"{directory.name}/manifest.sha256 covers {len(files)} files; shasum -c passed")
+
+
+# ====================================================================================
+# PHASE 2 / plan 02-04 -- SetFit PAIR-COUNT reference fixtures
+# ====================================================================================
+#
+#   uv run python generate_fixtures.py --pairs              # dry run: temp dir + diff
+#   uv run python generate_fixtures.py --pairs --rebaseline # deliberate replacement
+#
+# This section is INDEPENDENT of the Phase 1 corpus above. It writes into its own
+# output directory (crates/aprender-contrastive-data/tests/setfit_reference/) and never
+# touches crates/aprender-core/tests/fixtures/setfit/. Running `--pairs` therefore cannot
+# re-baseline a Phase 1 fixture even by accident.
+#
+# WHY TWO FAMILIES
+# ----------------
+# `setfit_measured_*.json` records what the pinned setfit 1.1.3 sampler DOES.
+# `aprender_contracted_*.json` records what Aprender's contract SAYS.
+# They disagree, on purpose, and the disagreement is the artifact. The pinned
+# implementation includes the diagonal (`shuffle_combinations(..., replacement=True)` ->
+# `np.triu_indices(n, 0)`), contradicting SetFit's own published documentation. A fixture
+# hand-written from those docs would be green and would falsely attest reference parity;
+# a fixture asserting "no self-pairs" against the reference would be red on day one.
+# So: measure one family, compute the other, and keep them in separate files.
+#
+# WHY EVERY RECORDED COUNT IS RNG-INDEPENDENT
+# -------------------------------------------
+# `shuffle_combinations` permutes with a HARDCODED `np.random.RandomState(seed=42)`, so
+# the trainer seed never reaches pair identity. The permutation changes only the ORDER in
+# which the triangle is walked -- and every number recorded here is a cardinality of that
+# triangle, not a function of its order. The one exception is `self_pair_count` under a
+# `max_pairs` cap, where WHICH 50 positives were kept does depend on the permutation;
+# that fixture lists the field in `rng_dependent_fields` rather than pretending otherwise.
+#
+# THREE-WAY AGREEMENT, OR FATAL
+# -----------------------------
+# Each measured number must equal (a) a closed form derived from reading sampler.py, and
+# (b) where the plan/contract states one, a hardcoded literal. Measurement alone would
+# turn a broken venv into a new baseline; the literal alone would let a wrong closed form
+# through. Disagreement aborts, printing all three.
+#
+# INTEGRITY
+# ---------
+# manifest.sha256 covers every emitted file, with paths relative to the manifest's own
+# directory. The CANONICAL check is the Rust verifier
+# (crates/aprender-contrastive-data/tests/reference_fixtures.rs), which resolves each
+# entry against the manifest file's directory and so is working-directory-independent.
+# The shell convenience is, and must include, the `cd`:
+#     cd crates/aprender-contrastive-data/tests/setfit_reference && \
+#         shasum -a 256 -c manifest.sha256
+
+PAIR_FIXTURE_DIR = (
+    REPO_ROOT / "crates" / "aprender-contrastive-data" / "tests" / "setfit_reference"
+)
+UV_LOCK_PATH = Path(__file__).resolve().parent / "uv.lock"
+
+SETFIT_PIN = "1.1.3"
+
+# contracts/contrastive-pair-protocol-v1.yaml, equation `default_epoch_budget`.
+DEFAULT_HARD_CAP = 1048576
+
+# Copied VERBATIM in substance from OBLIG-CPP-DEVIATION-DECLARED in
+# contracts/contrastive-pair-protocol-v1.yaml so the contract and the fixtures cannot
+# drift into two different stories. Attribution is "aprender" in every clause: PF-008
+# forbids attributing our exclusion to SetFit, whose pinned code does the opposite.
+DEVIATION_ATTRIBUTION = "aprender"
+DEVIATION_CLAUSES = [
+    {
+        "clause_id": "sampled_identities",
+        "statement": (
+            "Pair IDENTITIES are SAMPLED from the pair space, not enumerated-then-shuffled, "
+            "so identities cannot match the reference's Python RNG and only counts are "
+            "comparable."
+        ),
+    },
+    {
+        "clause_id": "capped_count",
+        "statement": "The per-epoch count is CAPPED above N by a configurable hard cap.",
+    },
+    {
+        "clause_id": "self_pairs_excluded",
+        "statement": (
+            "SELF-PAIRS ARE EXCLUDED, whereas the pinned setfit 1.1.3 implementation "
+            "INCLUDES the diagonal (`shuffle_combinations` defaults to replacement=True, "
+            "i.e. `np.triu_indices(n, k=0)`), which contradicts SetFit's own published "
+            "documentation; the exclusion is therefore ours and matches the docs, not the "
+            "pinned code."
+        ),
+    },
+]
+
+REFERENCE_NOTES = [
+    "shuffle_combinations permutes with a HARDCODED np.random.RandomState(seed=42); the "
+    "trainer seed does not reach pair identity at all (setfit/sampler.py:29).",
+    "Enumeration materializes the FULL O(N^2) index triangle via np.triu_indices(n, 0) "
+    "BEFORE any max_pairs cap can apply (setfit/sampler.py:28), so the cap bounds what is "
+    "STORED, never what is allocated.",
+    "replacement defaults to True, so k=0 and the diagonal is included: every example "
+    "yields a positive pair with itself.",
+    "oversampling sets len_pos = len_neg = max(len(pos_pairs), len(neg_pairs)); the "
+    "shorter list is cycled, so the epoch length is 2 * that maximum.",
+]
+
+
+# --- closed forms -------------------------------------------------------------------
+# Both families are derived here from FIRST PRINCIPLES -- the Aprender contract for one,
+# a reading of setfit/sampler.py for the other. Neither is derived from Aprender's Rust
+# implementation, which does not exist yet (plan 02-07 builds it against these files). A
+# fixture produced by recording Rust's output would make every downstream conformance
+# claim circular.
+
+
+def contracted_positive_capacity(sizes: list[int]) -> int:
+    """Sum of C(n_k, 2) -- self-pairs EXCLUDED (Aprender policy, deviation clause 3)."""
+    return sum(n * (n - 1) // 2 for n in sizes)
+
+
+def contracted_negative_capacity(sizes: list[int]) -> int:
+    """Sum over j<k of n_j * n_k, computed in O(K) from S and the sum of squares."""
+    total = sum(sizes)
+    return (total * total - sum(n * n for n in sizes)) // 2
+
+
+def predicted_reference_counts(sizes: list[int], max_pairs: int) -> dict:
+    """Predict the pinned sampler's cardinalities by READING setfit/sampler.py.
+
+    Enumeration is over `np.triu_indices(n, 0)`, i.e. every (i, j) with i <= j exactly
+    once. A pair is positive iff the two labels agree, so:
+
+        stored_pos = sum_k [ C(n_k, 2) + n_k ]   (the +n_k is the diagonal)
+        stored_neg = sum_{j<k} n_j * n_k
+
+    With `max_pairs != -1` each list is capped at `max_pairs // 2` and the walk stops only
+    once BOTH are full, so each list reaches min(cap, its full cardinality) regardless of
+    the permutation. Only i <= j is ever produced, so both orientations of one unordered
+    pair can never both appear: the orientation-duplicate count is identically 0.
+    """
+    n_examples = sum(sizes)
+    full_pos = contracted_positive_capacity(sizes) + n_examples
+    full_neg = contracted_negative_capacity(sizes)
+    cap = -1 if max_pairs == -1 else max_pairs // 2
+    stored_pos = full_pos if cap == -1 else min(cap, full_pos)
+    stored_neg = full_neg if cap == -1 else min(cap, full_neg)
+    balanced = max(stored_pos, stored_neg)
+    return {
+        "stored_pos": stored_pos,
+        "stored_neg": stored_neg,
+        "self_pair_count": n_examples if cap == -1 else None,  # None => RNG-dependent
+        "orientation_duplicate_count": 0,
+        "len_pos": balanced,
+        "len_neg": balanced,
+        "total": 2 * balanced,
+    }
+
+
+# --- the layouts ---------------------------------------------------------------------
+# `literals` are the numbers stated by plan 02-04 and by
+# contracts/contrastive-pair-protocol-v1.yaml (FALSIFY-CPP-016 / -017 / the K~N
+# prediction). They are checked against BOTH the closed form and the measurement.
+PAIR_LAYOUTS = [
+    {
+        "fixture_id": "8_4_8",
+        "layout": [8, 4, 8],
+        "max_pairs": -1,
+        "why": (
+            "SetFit's own documented worked example. The docs claim 62 positives / 128 "
+            "negatives / 256 total; the total is right and the composition is not."
+        ),
+        "literals": {"stored_pos": 82, "stored_neg": 128, "total": 256, "self_pair_count": 20},
+        "contracted_literals": {
+            "positive_capacity": 62,
+            "negative_capacity": 128,
+            "default_epoch_budget": 256,
+        },
+    },
+    {
+        "fixture_id": "4_1",
+        "layout": [4, 1],
+        "max_pairs": -1,
+        "why": (
+            "The Pitfall 2 divergence case: a singleton class. The reference gives the "
+            "singleton a positive SELF-pair; Aprender gives it none, so a singleton class "
+            "contributes zero positive capacity -- while the four-member class still "
+            "contributes its six positives."
+        ),
+        "literals": {"total": 22, "stored_pos": 11, "self_pair_count": 5, "stored_neg": 4},
+        "contracted_literals": {
+            "positive_capacity": 6,
+            "negative_capacity": 4,
+            "default_epoch_budget": 12,
+        },
+    },
+    {
+        "fixture_id": "8_8_8",
+        "layout": [8, 8, 8],
+        "max_pairs": -1,
+        "why": "The 8-shot 3-class layout of this milestone. D-14's worked value: 384.",
+        "literals": {"total": 384},
+        "contracted_literals": {"default_epoch_budget": 384},
+    },
+    {
+        "fixture_id": "64_64_64",
+        "layout": [64, 64, 64],
+        "max_pairs": -1,
+        "why": "The 64-shot 3-class layout. D-14's worked value: 24,576.",
+        "literals": {"total": 24576},
+        "contracted_literals": {"default_epoch_budget": 24576},
+    },
+    {
+        "fixture_id": "8_4_8_maxpairs100",
+        "layout": [8, 4, 8],
+        "max_pairs": 100,
+        "why": (
+            "The cap's semantics: max_pairs // 2 PER LIST, not max_pairs in total, and it "
+            "bounds what is stored rather than what is enumerated."
+        ),
+        "literals": {"stored_pos": 50, "stored_neg": 50, "total": 100},
+        "contracted_literals": {
+            "positive_capacity": 62,
+            "negative_capacity": 128,
+            "default_epoch_budget": 256,
+        },
+    },
+    {
+        "fixture_id": "singletons_32",
+        "layout": [1] * 32,
+        "max_pairs": -1,
+        "why": (
+            "The K = N adversarial layout (32 classes, 32 examples). This is the row plan "
+            "02-08 measures an O(K^2) sampler against; a three-class fixture set could "
+            "never expose one. Aprender's positive capacity is 0 here, so the stream is "
+            "negatives-only -- and note the two families agree on the TOTAL (992) while "
+            "disagreeing on every pair in it."
+        ),
+        "literals": {},
+        "contracted_literals": {
+            "positive_capacity": 0,
+            "negative_capacity": 496,
+            "default_epoch_budget": 992,
+        },
+    },
+]
+
+
+def _uv_version() -> str:
+    """A version string alone does not identify an environment; record the resolver too."""
+    proc = subprocess.run(["uv", "--version"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.exit(f"FATAL: `uv --version` failed (rc={proc.returncode})\n{proc.stderr}")
+    return proc.stdout.strip()
+
+
+def _check(fixture_id: str, field: str, measured, predicted, literal) -> None:
+    """Three-way agreement or FATAL, printing every number that disagreed."""
+    if predicted is not None and measured != predicted:
+        sys.exit(
+            f"FATAL: {fixture_id}.{field} -- the pinned venv does not match the closed form "
+            f"read out of setfit/sampler.py.\n  measured : {measured}\n  closed form: {predicted}\n"
+            "This means the installed sampler is not the pinned setfit 1.1.3, or its "
+            "semantics changed. Do NOT re-baseline; fix the environment."
+        )
+    if literal is not None and measured != literal:
+        sys.exit(
+            f"FATAL: {fixture_id}.{field} -- the measurement contradicts the number stated "
+            f"by plan 02-04 / contracts/contrastive-pair-protocol-v1.yaml.\n"
+            f"  measured: {measured}\n  contract: {literal}\n"
+            "Surface the discrepancy; do NOT edit the fixture to match code."
+        )
+
+
+def measure_reference(sizes: list[int], max_pairs: int) -> dict:
+    """Run the PINNED sampler and record its cardinalities."""
+    from setfit.sampler import ContrastiveDataset
+
+    labels = [k for k, n in enumerate(sizes) for _ in range(n)]
+    sentences = [f"s{i}" for i in range(len(labels))]
+    ds = ContrastiveDataset(
+        sentences,
+        labels,
+        multilabel=False,
+        sampling_strategy="oversampling",
+        max_pairs=max_pairs,
+    )
+    self_pairs = sum(1 for p in ds.pos_pairs if p["sentence_1"] == p["sentence_2"])
+
+    seen: set[tuple[str, str]] = set()
+    orientation_duplicates = 0
+    for p in list(ds.pos_pairs) + list(ds.neg_pairs):
+        a, b = p["sentence_1"], p["sentence_2"]
+        if a != b and (b, a) in seen:
+            orientation_duplicates += 1
+        seen.add((a, b))
+
+    return {
+        "stored_pos": len(ds.pos_pairs),
+        "stored_neg": len(ds.neg_pairs),
+        "self_pair_count": self_pairs,
+        "orientation_duplicate_count": orientation_duplicates,
+        "len_pos": ds.len_pos_pairs,
+        "len_neg": ds.len_neg_pairs,
+        "total": len(ds),
+    }
+
+
+def build_pair_fixtures() -> dict[str, dict]:
+    """Build every pair-count fixture payload in memory. Nothing is written here."""
+    import setfit
+
+    if setfit.__version__ != SETFIT_PIN:
+        sys.exit(
+            f"FATAL: setfit {setfit.__version__} is installed but the reference pin is "
+            f"{SETFIT_PIN}. Every number below is an artifact of the pinned version."
+        )
+    if not UV_LOCK_PATH.exists():
+        sys.exit(f"FATAL: {UV_LOCK_PATH} is missing; the environment cannot be attested")
+
+    attestation = {
+        "setfit_version": setfit.__version__,
+        "uv_lock_sha256": sha256_file(UV_LOCK_PATH),
+        "uv_version": _uv_version(),
+    }
+    print(
+        f"environment attestation: setfit {attestation['setfit_version']}, "
+        f"uv.lock {attestation['uv_lock_sha256'][:12]}, {attestation['uv_version']}"
+    )
+
+    payloads: dict[str, dict] = {}
+    for spec in PAIR_LAYOUTS:
+        fid = spec["fixture_id"]
+        sizes = list(spec["layout"])
+        max_pairs = spec["max_pairs"]
+
+        measured = measure_reference(sizes, max_pairs)
+        predicted = predicted_reference_counts(sizes, max_pairs)
+        for field, value in measured.items():
+            _check(fid, field, value, predicted.get(field), spec["literals"].get(field))
+
+        rng_dependent = [] if max_pairs == -1 else ["self_pair_count"]
+        payloads[f"setfit_measured_{fid}.json"] = {
+            "fixture_family": "setfit_measured",
+            "fixture_id": fid,
+            "layout": sizes,
+            "n_examples": sum(sizes),
+            "n_classes": len(sizes),
+            "sampling_strategy": "oversampling",
+            "multilabel": False,
+            "max_pairs": max_pairs,
+            "stored_pos": measured["stored_pos"],
+            "stored_neg": measured["stored_neg"],
+            "self_pair_count": measured["self_pair_count"],
+            "orientation_duplicate_count": measured["orientation_duplicate_count"],
+            "len_pos": measured["len_pos"],
+            "len_neg": measured["len_neg"],
+            "total": measured["total"],
+            "rng_dependent_fields": rng_dependent,
+            "why_this_layout": spec["why"],
+            "derivation": (
+                "MEASURED by executing setfit.sampler.ContrastiveDataset in the hash-locked "
+                "venv, then cross-checked against a closed form read out of "
+                "setfit/sampler.py: stored_pos = sum_k [C(n_k,2) + n_k] (the +n_k is the "
+                "included diagonal), stored_neg = sum_{j<k} n_j*n_k, each capped at "
+                "max_pairs//2 when max_pairs != -1, and total = 2*max(stored_pos, "
+                "stored_neg) under the oversampling strategy. The two agree, or this file "
+                "is not written."
+            ),
+            "reference_notes": list(REFERENCE_NOTES),
+            **attestation,
+        }
+
+        pos_cap = contracted_positive_capacity(sizes)
+        neg_cap = contracted_negative_capacity(sizes)
+        closed_form = 2 * max(pos_cap, neg_cap)
+        default_budget = min(closed_form, DEFAULT_HARD_CAP)
+        explicit_budget = None if max_pairs == -1 else max_pairs
+        resolved = default_budget if explicit_budget is None else explicit_budget
+
+        if pos_cap == 0 and neg_cap == 0:
+            degenerate, res_pos, res_neg = "no_capacity", 0, 0
+        elif pos_cap == 0:
+            degenerate, res_pos, res_neg = "negatives_only", 0, resolved
+        elif neg_cap == 0:
+            degenerate, res_pos, res_neg = "positives_only", resolved, 0
+        else:
+            degenerate = None
+            res_pos, res_neg = (resolved + 1) // 2, resolved // 2
+
+        for field, value in (
+            ("positive_capacity", pos_cap),
+            ("negative_capacity", neg_cap),
+            ("default_epoch_budget", default_budget),
+        ):
+            literal = spec["contracted_literals"].get(field)
+            if literal is not None and value != literal:
+                sys.exit(
+                    f"FATAL: {fid}.{field} closed form {value} contradicts the contracted "
+                    f"value {literal}. Surface the discrepancy; do not edit the fixture."
+                )
+
+        measured_total = measured["total"]
+        if resolved != measured_total:
+            divergence = (
+                f"DIVERGES: Aprender's resolved budget is {resolved} while the pinned "
+                f"reference's epoch length is {measured_total}. Deliberate, and covered by "
+                "deviation clauses 2 and 3."
+            )
+        elif res_pos != measured["len_pos"] or res_neg != measured["len_neg"]:
+            divergence = (
+                f"Totals coincide at {resolved}, composition does not: Aprender emits "
+                f"{res_pos} positives / {res_neg} negatives, the reference emits "
+                f"{measured['len_pos']} / {measured['len_neg']} -- and every one of its "
+                f"'positives' here is a self-pair. Agreement on a total is not agreement."
+            )
+        else:
+            divergence = (
+                f"Agrees with the reference epoch length ({measured_total}) because "
+                "negatives dominate this layout, so the excluded diagonal never reaches "
+                "the max()."
+            )
+
+        payloads[f"aprender_contracted_{fid}.json"] = {
+            "fixture_family": "aprender_contracted",
+            "fixture_id": fid,
+            "layout": sizes,
+            "n_examples": sum(sizes),
+            "n_classes": len(sizes),
+            "positive_capacity": pos_cap,
+            "negative_capacity": neg_cap,
+            "closed_form_budget": closed_form,
+            "hard_cap": DEFAULT_HARD_CAP,
+            "clamp_engaged": closed_form > DEFAULT_HARD_CAP,
+            "explicit_budget": explicit_budget,
+            "default_epoch_budget": default_budget,
+            "resolved_budget": resolved,
+            "resolved_pos_count": res_pos,
+            "resolved_neg_count": res_neg,
+            "degenerate_case": degenerate,
+            "self_pairs_excluded": True,
+            "measured_counterpart": f"setfit_measured_{fid}.json",
+            "measured_total": measured_total,
+            "divergence_note": divergence,
+            "deviation_attribution": DEVIATION_ATTRIBUTION,
+            "deviation_clauses": [dict(c) for c in DEVIATION_CLAUSES],
+            "why_this_layout": spec["why"],
+            "derivation": (
+                "COMPUTED from the closed forms in "
+                "contracts/contrastive-pair-protocol-v1.yaml: positive_capacity = "
+                "sum_k C(n_k,2) with self-pairs EXCLUDED, negative_capacity = "
+                "sum_{j<k} n_j*n_k, closed_form_budget = 2*max(pos, neg), "
+                "default_epoch_budget = min(closed_form, hard_cap). No Aprender Rust code "
+                "is executed to produce these numbers -- they are the reference the Rust "
+                "sampler is measured against, so deriving them from it would be circular."
+            ),
+            **attestation,
+        }
+
+    return payloads
+
+
+def _diff_against_committed(staged: Path, committed: Path) -> list[str]:
+    """Return a human-readable diff of `staged` vs `committed`. Empty list == identical."""
+    import difflib
+
+    staged_files = {p.name for p in staged.iterdir() if p.is_file()}
+    committed_files = (
+        {p.name for p in committed.iterdir() if p.is_file()} if committed.exists() else set()
+    )
+    report: list[str] = []
+    for name in sorted(staged_files | committed_files):
+        new = staged / name
+        old = committed / name
+        if name not in committed_files:
+            report.append(f"+ ADDED    {name}")
+            continue
+        if name not in staged_files:
+            report.append(f"- REMOVED  {name}  (no longer emitted by the generator)")
+            continue
+        if new.read_bytes() == old.read_bytes():
+            continue
+        report.append(f"~ CHANGED  {name}")
+        report.extend(
+            line.rstrip("\n")
+            for line in difflib.unified_diff(
+                old.read_text().splitlines(keepends=True),
+                new.read_text().splitlines(keepends=True),
+                fromfile=f"committed/{name}",
+                tofile=f"regenerated/{name}",
+                n=1,
+            )
+        )
+    return report
+
+
+def main_pairs(rebaseline: bool) -> None:
+    """Emit into a temp dir, diff against the committed tree, replace only on request.
+
+    Re-baselining a reference fixture is how a wrong implementation becomes the new
+    truth, so it is a separate, deliberate act with a reviewable diff in front of it.
+    Dry-run exit status: 0 when the committed tree already matches, 1 when it does not.
+    """
+    import shutil
+    import tempfile
+
+    payloads = build_pair_fixtures()
+
+    staging = Path(tempfile.mkdtemp(prefix="apr-pair-fixtures-"))
+    try:
+        for name, payload in payloads.items():
+            jsonfmt.write(staging / name, payload)
+        write_manifest(staging)
+
+        report = _diff_against_committed(staging, PAIR_FIXTURE_DIR)
+        rel = PAIR_FIXTURE_DIR.relative_to(REPO_ROOT)
+        if not report:
+            print(f"\n{rel}: IDENTICAL -- {len(payloads)} fixtures + manifest already committed")
+            return
+
+        print(f"\ndiff vs committed {rel}:")
+        for line in report:
+            print(f"  {line}")
+
+        if not rebaseline:
+            print(
+                "\nDRY RUN -- nothing was written. Re-run with --rebaseline to replace the "
+                "committed fixtures, and review the diff above as part of that change."
+            )
+            sys.exit(1)
+
+        PAIR_FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+        for stale in PAIR_FIXTURE_DIR.iterdir():
+            if stale.is_file() and stale.name not in payloads and stale.name != "manifest.sha256":
+                stale.unlink()
+        for name in list(payloads) + ["manifest.sha256"]:
+            shutil.copyfile(staging / name, PAIR_FIXTURE_DIR / name)
+
+        proc = subprocess.run(
+            ["shasum", "-a", "256", "-c", "manifest.sha256"],
+            cwd=PAIR_FIXTURE_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            sys.exit(
+                f"FATAL: manifest does not verify in the committed tree\n{proc.stdout}\n{proc.stderr}"
+            )
+        print(f"\nREBASELINED {rel}: {len(payloads)} fixtures + manifest, shasum -c passed")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+USAGE = """usage:
+  uv run python generate_fixtures.py                        Phase 1 ENC-01..06 corpus
+  uv run python generate_fixtures.py --pairs                pair-count fixtures (dry run)
+  uv run python generate_fixtures.py --pairs --rebaseline   pair-count fixtures (replace)
+"""
 
 
 if __name__ == "__main__":
-    main()
+    args = sys.argv[1:]
+    if not args:
+        main()
+    elif args[0] == "--pairs" and set(args[1:]) <= {"--rebaseline"}:
+        main_pairs(rebaseline="--rebaseline" in args)
+    else:
+        sys.exit(USAGE)
