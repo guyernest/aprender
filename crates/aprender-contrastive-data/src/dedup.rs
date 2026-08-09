@@ -28,14 +28,15 @@
 //! dataset. The only real failure is a reduced pool that can no longer supply the
 //! requested shots, and that is raised where the shots are known: at selection.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::ContrastiveDataError;
-use crate::hash::CONTENT_NORMALIZATION_VERSION;
+use crate::hash::{exact_hash, normalized_hash, CONTENT_NORMALIZATION_VERSION};
 use crate::schema::LabeledExample;
+use crate::split::{SplitRole, Train};
 
 /// Which detection kinds fired inside one duplicate component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,19 +112,167 @@ impl ExclusionRecord {
     }
 }
 
+/// A minimal disjoint-set forest over row ordinals.
+///
+/// Union by size with path halving. The structure is a `Vec`, not a map, so nothing here
+/// depends on hash iteration order (PF-006).
+struct DisjointSet {
+    parent: Vec<usize>,
+    size: Vec<usize>,
+}
+
+impl DisjointSet {
+    fn new(len: usize) -> Self {
+        Self {
+            parent: (0..len).collect(),
+            size: vec![1; len],
+        }
+    }
+
+    fn find(&mut self, mut node: usize) -> usize {
+        while self.parent[node] != node {
+            let grandparent = self.parent[self.parent[node]];
+            self.parent[node] = grandparent;
+            node = grandparent;
+        }
+        node
+    }
+
+    fn union(&mut self, left: usize, right: usize) {
+        let (mut a, mut b) = (self.find(left), self.find(right));
+        if a == b {
+            return;
+        }
+        if self.size[a] < self.size[b] {
+            core::mem::swap(&mut a, &mut b);
+        }
+        self.parent[b] = a;
+        self.size[a] += self.size[b];
+    }
+}
+
+/// One row, flattened across splits, with both of its content hashes.
+struct FlatRow<'a> {
+    role: &'a str,
+    id: &'a str,
+    label: usize,
+    exact: [u8; 32],
+    normalized: [u8; 32],
+}
+
 /// Coalesce cross-split duplicate content into connected components.
 ///
 /// Deterministic and total. `splits` is `(role, rows)` for every split of one dataset.
+///
+/// Edges come from two sources — equal exact hashes and equal normalized hashes — and are
+/// merged into ONE disjoint-set forest before any group is emitted. A component that spans
+/// at least two distinct split roles is a duplicate group; a component confined to one role
+/// is a within-split repetition, which is not evaluation leakage and is left alone.
+///
+/// Only TRAIN rows are removed, and only from the selection pool: the evaluation splits
+/// keep every row they arrived with, because shrinking an evaluation split would change
+/// what a reported score means (D-18).
+#[provable_contracts_macros::contract(
+    "contrastive-pair-protocol-v1",
+    equation = "cross_split_exclusion"
+)]
 pub(crate) fn coalesced_exclusions(
     splits: &[(&'static str, &[LabeledExample])],
 ) -> ExclusionRecord {
-    let _ = splits;
+    let flat: Vec<FlatRow<'_>> = splits
+        .iter()
+        .flat_map(|(role, rows)| {
+            rows.iter().map(move |row| FlatRow {
+                role,
+                id: row.id.as_str(),
+                label: row.label,
+                exact: exact_hash(&row.input),
+                normalized: normalized_hash(&row.input),
+            })
+        })
+        .collect();
+
+    // Both edge kinds go into ONE forest. Bucketing by hash uses BTreeMap so the union
+    // order — and therefore nothing observable, but also nothing accidental — is fixed.
+    let mut forest = DisjointSet::new(flat.len());
+    for key in [
+        |row: &FlatRow<'_>| row.exact,
+        |row: &FlatRow<'_>| row.normalized,
+    ] {
+        let mut buckets: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
+        for (index, row) in flat.iter().enumerate() {
+            buckets.entry(key(row)).or_default().push(index);
+        }
+        for members in buckets.values() {
+            for pair in members.windows(2) {
+                forest.union(pair[0], pair[1]);
+            }
+        }
+    }
+
+    let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for index in 0..flat.len() {
+        let root = forest.find(index);
+        components.entry(root).or_default().push(index);
+    }
+
+    let mut groups: Vec<DuplicateGroup> = Vec::new();
+    let mut excluded_train_ids: BTreeSet<String> = BTreeSet::new();
+    for members in components.values() {
+        let roles: BTreeSet<&str> = members.iter().map(|index| flat[*index].role).collect();
+        if roles.len() < 2 {
+            continue;
+        }
+
+        let detected_by = DetectionKinds {
+            exact: shares_a_key(members, &flat, |row| row.exact),
+            normalized: shares_a_key(members, &flat, |row| row.normalized),
+        };
+        let labels: BTreeSet<usize> = members.iter().map(|index| flat[*index].label).collect();
+        let mut member_pairs: Vec<(String, String)> = members
+            .iter()
+            .map(|index| (flat[*index].role.to_string(), flat[*index].id.to_string()))
+            .collect();
+        member_pairs.sort();
+
+        for index in members {
+            if flat[*index].role == Train::ROLE {
+                excluded_train_ids.insert(flat[*index].id.to_string());
+            }
+        }
+
+        groups.push(DuplicateGroup {
+            members: member_pairs,
+            detected_by,
+            label_conflict: labels.len() > 1,
+        });
+    }
+    groups.sort_by(|left, right| left.members.cmp(&right.members));
+
+    let mut reduced_pools: BTreeMap<usize, u64> = BTreeMap::new();
+    for row in flat.iter().filter(|row| row.role == Train::ROLE) {
+        let entry = reduced_pools.entry(row.label).or_insert(0);
+        if !excluded_train_ids.contains(row.id) {
+            *entry += 1;
+        }
+    }
+
     ExclusionRecord {
-        excluded_train_ids: Vec::new(),
-        groups: Vec::new(),
-        reduced_pools: BTreeMap::new(),
+        excluded_train_ids: excluded_train_ids.into_iter().collect(),
+        groups,
+        reduced_pools,
         normalization_version: CONTENT_NORMALIZATION_VERSION.to_string(),
     }
+}
+
+/// True when at least two members of the component share the given hash.
+fn shares_a_key(
+    members: &[usize],
+    flat: &[FlatRow<'_>],
+    key: impl Fn(&FlatRow<'_>) -> [u8; 32],
+) -> bool {
+    let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
+    members.iter().any(|index| !seen.insert(key(&flat[*index])))
 }
 
 #[cfg(test)]

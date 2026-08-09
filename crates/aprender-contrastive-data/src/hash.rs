@@ -21,13 +21,6 @@
 //! them differ even for a one-split dataset — so a split fingerprint can never be mistaken
 //! for a dataset fingerprint by a consumer comparing hex strings.
 
-// TEMPORARY, removed by the prepared-dataset task of this same plan. The two raw-parts
-// input structs and both `compute` entry points are exercised by this module's own tests
-// but have no non-test caller until `prepared.rs` assembles them from its typed splits.
-// Without this the crate would warn on a leaf module that is, by design, finished before
-// its consumer exists.
-#![allow(dead_code)]
-
 use sha2::{Digest, Sha256};
 
 /// The version tag of the normalization pipeline behind [`normalized_hash`].

@@ -23,12 +23,6 @@
 //! compile-fail proof of "cannot be constructed" is unobtainable against an expression
 //! that compiles.
 
-// TEMPORARY, removed by the prepared-dataset task of this same plan. Both constructors
-// are `pub(crate)` BY DESIGN and their only non-test caller is `prepared.rs`, which does
-// not exist yet. The warning is therefore reporting the intended access boundary rather
-// than dead code.
-#![allow(dead_code)]
-
 use core::marker::PhantomData;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -110,6 +104,12 @@ impl<R: SplitRole> Split<R> {
     ///
     /// Any variant of the gate ladder in [`validate_ingest_ladder`], plus the parse-time
     /// variants from `schema::parse_jsonl_bytes`.
+    // SCOPED, TEMPORARY: within this plan the only callers are tests. The non-test caller is
+    // `PreparedDataset::from_attested_bytes`, which plan 02-06 adds — this is the untrusted-input
+    // door it lands in. Remove this allow in 02-06 rather than widening it; if 02-06 lands and the
+    // allow is still needed, the attested-bytes path did NOT route through the gate ladder and that
+    // is a defect, not a lint to silence.
+    #[allow(dead_code)]
     pub(crate) fn from_jsonl_bytes(
         bytes: &[u8],
         decl: &SplitDeclaration,

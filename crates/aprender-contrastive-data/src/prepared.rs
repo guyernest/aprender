@@ -34,7 +34,10 @@ use std::collections::BTreeMap;
 
 use crate::dedup::{coalesced_exclusions, ExclusionRecord};
 use crate::error::ContrastiveDataError;
-use crate::hash::{DatasetFingerprint, SplitFingerprint};
+use crate::hash::{
+    DatasetFingerprint, DatasetFingerprintInput, SplitFingerprint, SplitFingerprintInput,
+    CONTENT_NORMALIZATION_VERSION,
+};
 use crate::ledger::AccessLedger;
 use crate::schema::LabeledExample;
 use crate::split::{
@@ -176,9 +179,24 @@ pub struct PreparedDataset<P: DatasetProfile> {
 impl PreparedDataset<Canonical> {
     /// Ingest three typed split row sets under the canonical profile.
     ///
+    /// The CLI has already decoded its dataset-specific source format into typed rows —
+    /// D-05 keeps paired `*_text.txt` / `*_labels.txt` decoding on the CLI side, so this
+    /// crate never sees a dataset-specific format and never touches a byte it was not
+    /// handed.
+    ///
+    /// Ordering matters twice, and both orders are ascending by role name because that is
+    /// what `DatasetFingerprint::compute` debug-asserts: the fingerprint inputs and the
+    /// dedup inputs. The ledger, by contrast, records in INGEST order (train, validation,
+    /// test), because a log of what happened should read in the order it happened.
+    ///
     /// # Errors
     ///
-    /// Any gate-ladder variant from the split boundary.
+    /// Any gate-ladder variant from the split boundary. Nothing is recorded in the ledger
+    /// on the failing path: a dataset that was rejected was never accessed.
+    #[provable_contracts_macros::contract(
+        "contrastive-pair-protocol-v1",
+        equation = "prepared_dataset_typestate"
+    )]
     pub fn from_labeled_rows(
         train: Vec<LabeledExample>,
         validation: Vec<LabeledExample>,
@@ -186,10 +204,47 @@ impl PreparedDataset<Canonical> {
         decls: &CanonicalDeclarations,
         ledger: &mut AccessLedger,
     ) -> Result<Self, ContrastiveDataError> {
-        let _ = (train, validation, test, decls, ledger, coalesced_exclusions);
-        Err(ContrastiveDataError::Serialization {
-            context: "prepared_dataset".to_string(),
-            detail: "not implemented".to_string(),
+        let train = Split::<Train>::from_rows(train, &decls.train)?;
+        let validation = Split::<Validation>::from_rows(validation, &decls.validation)?;
+        let test = Split::<Test>::from_rows(test, &decls.test)?;
+
+        let fingerprint = {
+            let train_pairs = train.exact_hash_pairs();
+            let validation_pairs = validation.exact_hash_pairs();
+            let test_pairs = test.exact_hash_pairs();
+            let splits = [
+                fingerprint_input::<Test>(&test, &test_pairs),
+                fingerprint_input::<Train>(&train, &train_pairs),
+                fingerprint_input::<Validation>(&validation, &validation_pairs),
+            ];
+            DatasetFingerprint::compute(&DatasetFingerprintInput {
+                profile: Canonical::PROFILE,
+                label_names: &decls.label_names,
+                normalization_version: CONTENT_NORMALIZATION_VERSION,
+                splits: &splits,
+            })
+        };
+
+        let exclusions = coalesced_exclusions(&[
+            (Test::ROLE, test.rows()),
+            (Train::ROLE, train.rows()),
+            (Validation::ROLE, validation.rows()),
+        ]);
+
+        let fingerprint_hex = fingerprint.hex();
+        for role in [Train::ROLE, Validation::ROLE, Test::ROLE] {
+            ledger.record(role, Canonical::PROFILE, "ingest", &fingerprint_hex);
+        }
+
+        Ok(Self {
+            splits: CanonicalSplits {
+                train,
+                validation,
+                test,
+            },
+            exclusions,
+            fingerprint,
+            profile: PhantomData,
         })
     }
 
@@ -308,10 +363,43 @@ impl PreparedDataset<Compatibility> {
         decls: &CompatibilityDeclarations,
         ledger: &mut AccessLedger,
     ) -> Result<Self, ContrastiveDataError> {
-        let _ = (train, compatibility_test, decls, ledger);
-        Err(ContrastiveDataError::Serialization {
-            context: "prepared_dataset".to_string(),
-            detail: "not implemented".to_string(),
+        let train = Split::<Train>::from_rows(train, &decls.train)?;
+        let compatibility_test =
+            Split::<CompatibilityTest>::from_rows(compatibility_test, &decls.compatibility_test)?;
+
+        let fingerprint = {
+            let train_pairs = train.exact_hash_pairs();
+            let compatibility_pairs = compatibility_test.exact_hash_pairs();
+            let splits = [
+                fingerprint_input::<CompatibilityTest>(&compatibility_test, &compatibility_pairs),
+                fingerprint_input::<Train>(&train, &train_pairs),
+            ];
+            DatasetFingerprint::compute(&DatasetFingerprintInput {
+                profile: Compatibility::PROFILE,
+                label_names: &decls.label_names,
+                normalization_version: CONTENT_NORMALIZATION_VERSION,
+                splits: &splits,
+            })
+        };
+
+        let exclusions = coalesced_exclusions(&[
+            (CompatibilityTest::ROLE, compatibility_test.rows()),
+            (Train::ROLE, train.rows()),
+        ]);
+
+        let fingerprint_hex = fingerprint.hex();
+        for role in [Train::ROLE, CompatibilityTest::ROLE] {
+            ledger.record(role, Compatibility::PROFILE, "ingest", &fingerprint_hex);
+        }
+
+        Ok(Self {
+            splits: CompatibilitySplits {
+                train,
+                compatibility_test,
+            },
+            exclusions,
+            fingerprint,
+            profile: PhantomData,
         })
     }
 
@@ -354,15 +442,28 @@ impl PreparedDataset<Compatibility> {
     }
 }
 
-/// The single-split fingerprint of one split, built from that split's own accessors.
-fn split_fingerprint_of<R: SplitRole>(split: &Split<R>) -> SplitFingerprint {
-    let pairs = split.exact_hash_pairs();
-    SplitFingerprint::compute(&crate::hash::SplitFingerprintInput {
+/// One split's raw parts, in the shape both fingerprints absorb.
+///
+/// `pairs` is passed in rather than built here so the caller controls its lifetime: the
+/// dataset fingerprint needs every split's pairs alive at once.
+fn fingerprint_input<'a, R: SplitRole>(
+    split: &'a Split<R>,
+    pairs: &'a [(&'a str, [u8; 32])],
+) -> SplitFingerprintInput<'a> {
+    SplitFingerprintInput {
         role: R::ROLE,
         source_hash: split.source_hash(),
         class_counts: split.class_counts(),
-        rows: &pairs,
-    })
+        rows: pairs,
+    }
+}
+
+/// The single-split fingerprint of one split, built from THE SAME raw parts that went into
+/// the dataset fingerprint — which is what makes the two digests provably describe the same
+/// bytes under different domain tags rather than merely look related.
+fn split_fingerprint_of<R: SplitRole>(split: &Split<R>) -> SplitFingerprint {
+    let pairs = split.exact_hash_pairs();
+    SplitFingerprint::compute(&fingerprint_input::<R>(split, &pairs))
 }
 
 #[cfg(test)]
