@@ -24,8 +24,10 @@
 
 use core::cmp::Ordering;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::ContrastiveDataError;
-use crate::select::SelectedId;
+use crate::select::{SelectedId, Selection};
 
 /// The default pair hard cap: 2²⁰.
 ///
@@ -446,6 +448,475 @@ pub fn classify_degenerate(pos: u64, neg: u64) -> Result<EmittedKinds, Contrasti
     }
 }
 
+// ===========================================================================================
+// 4. Structural diagnostics (D-25, review finding F14)
+// ===========================================================================================
+
+/// STRUCTURAL counts of what a sampler RETAINS. Nothing here is self-reported "memory used".
+///
+/// # Why this is unconditionally public
+///
+/// Plan 02-08's capacity gate is an INTEGRATION test, and every file under `tests/` is its
+/// own crate. A `#[cfg(test)]` introspection method on the library would therefore be
+/// invisible to it, and the phase's headline boundedness gate could not be written at all.
+/// The three sanctioned options were a `test-support` feature plus a self dev-dependency
+/// (a known duplicate-crate hazard under feature unification), a `#[cfg(test)]` method
+/// (unusable, as above), and this: a small, stable, public diagnostics object. A gate whose
+/// evidence a cargo trick could silently unhook is not a gate.
+///
+/// # What each field counts
+///
+/// * `bucket_entries` — per-EXAMPLE entries the sampler retains a handle to. [`PairSampler`]
+///   holds one borrowed slice per class covering every selected row, so it reports the
+///   total example count. A bare [`PairLayout`] addresses an abstract index space and
+///   retains none, so it reports 0. A sampler that COPIES rows reports its copy.
+/// * `positive_weight_entries`, `negative_weight_entries`, `class_offset_entries` — the
+///   three `O(K)` arrays. A class-PAIR design would report `~K²/2` in the negative slot,
+///   which is exactly how the rejected design is detected at K ≈ N.
+/// * `materialized_pairs` — pairs held in memory. An honest streaming sampler reports 0
+///   forever, whatever the budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SamplerStateReport {
+    /// Per-example bucket entries retained (see the type docs).
+    pub bucket_entries: usize,
+    /// Length of the positive class-weight array.
+    pub positive_weight_entries: usize,
+    /// Length of the negative class-weight array.
+    pub negative_weight_entries: usize,
+    /// Length of the class-offset array.
+    pub class_offset_entries: usize,
+    /// Pairs held in memory. Honest samplers report 0.
+    pub materialized_pairs: usize,
+}
+
+impl SamplerStateReport {
+    /// The single number the capacity invariant is stated over.
+    pub fn total_retained_entries(&self) -> usize {
+        self.bucket_entries
+            .saturating_add(self.positive_weight_entries)
+            .saturating_add(self.negative_weight_entries)
+            .saturating_add(self.class_offset_entries)
+            .saturating_add(self.materialized_pairs)
+    }
+}
+
+/// A sampler that can be asked what it retains.
+///
+/// Implemented by [`PairLayout`] and [`PairSampler`] here, and by plan 02-08's in-band
+/// `MaterializingSampler`, so the capacity gate is literally the SAME call for the honest
+/// and the deliberately-wrong implementation. That is the whole point: a gate that reads a
+/// different accessor for each subject is comparing two claims, not one property.
+pub trait RetainedState {
+    /// The structural report.
+    fn state_report(&self) -> SamplerStateReport;
+}
+
+// ===========================================================================================
+// 5. The O(K) layout — the sampler's entire retained state
+// ===========================================================================================
+
+/// Which half of the interleave a drawn pair came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairKind {
+    /// Both endpoints in one class.
+    Positive,
+    /// Endpoints in two different classes.
+    Negative,
+}
+
+/// One endpoint in LAYOUT space: a class index plus a member index inside that class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawEndpoint {
+    /// Position of the class in ascending label order.
+    pub class_index: usize,
+    /// Position of the member inside that class's sorted bucket.
+    pub member_index: u64,
+}
+
+/// A drawn pair in LAYOUT space, before any [`Selection`] is consulted.
+///
+/// Public because it is what makes the sampler's adversarial layouts reachable from OUTSIDE
+/// the crate: a `Selection` always has `shots_per_class ∈ {8, 16, 32, 64}` members in every
+/// class, so the K = N all-singleton layout DATA-05 must survive cannot be expressed as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawPair {
+    /// Positive or negative.
+    pub kind: PairKind,
+    /// The first endpoint drawn.
+    pub first: RawEndpoint,
+    /// The second endpoint drawn.
+    pub second: RawEndpoint,
+}
+
+/// The `O(K)` structural core of the pair sampler over a class-size layout.
+///
+/// # Why this is a separate public type
+///
+/// `PairSampler` borrows a [`Selection`], and a `Selection` always carries
+/// `shots_per_class ∈ {8, 16, 32, 64}` rows in EVERY class. The adversarial layout DATA-05
+/// has to survive — K = N, every class a singleton, under a fixed small budget — is
+/// therefore not expressible as a `Selection` at all. Splitting the retained state out into
+/// a layout that can be built from bare class sizes is what keeps that case reachable from
+/// outside the crate, which is a requirement of plan 02-08's capacity gate rather than a
+/// convenience. It is also the honest factoring: this struct IS the sampler's state, and
+/// `PairSampler` is a borrowed identity mapping on top of it.
+#[derive(Debug, Clone)]
+pub struct PairLayout {
+    offsets: Vec<u64>,
+    pos_prefix: Vec<u64>,
+    neg_prefix: Vec<u64>,
+    total_examples: u64,
+    positive_capacity: u64,
+    negative_capacity: u64,
+    budget: u64,
+    default_was_clamped: bool,
+    emitted_kinds: EmittedKinds,
+    affected_singleton_classes: u64,
+    strategy: PairStrategy,
+    singleton_policy: SingletonPolicy,
+    root_seed: u64,
+}
+
+impl PairLayout {
+    /// Build the layout from bare per-class sizes, resolving the budget once.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`resolve_budget`] and the capacity functions can raise.
+    pub fn from_class_sizes(
+        class_sizes: &[u64],
+        cfg: &PairConfig,
+    ) -> Result<Self, ContrastiveDataError> {
+        let _ = class_sizes;
+        Ok(Self {
+            offsets: Vec::new(),
+            pos_prefix: Vec::new(),
+            neg_prefix: Vec::new(),
+            total_examples: 0,
+            positive_capacity: 0,
+            negative_capacity: 0,
+            budget: 0,
+            default_was_clamped: false,
+            emitted_kinds: EmittedKinds::Both,
+            affected_singleton_classes: 0,
+            strategy: cfg.strategy,
+            singleton_policy: cfg.singleton_policy,
+            root_seed: cfg.root_seed,
+        })
+    }
+
+    /// The resolved effective budget.
+    pub fn budget(&self) -> u64 {
+        self.budget
+    }
+
+    /// Whether the DEFAULT budget was clamped by the hard cap.
+    pub fn default_was_clamped(&self) -> bool {
+        self.default_was_clamped
+    }
+
+    /// Which kinds this layout emits.
+    pub fn emitted_kinds(&self) -> EmittedKinds {
+        self.emitted_kinds
+    }
+
+    /// How many classes hold exactly one member.
+    pub fn affected_singleton_classes(&self) -> u64 {
+        self.affected_singleton_classes
+    }
+
+    /// Number of classes, `K`.
+    pub fn class_count(&self) -> usize {
+        self.offsets.len()
+    }
+
+    /// Total examples across all classes, `S`.
+    pub fn total_examples(&self) -> u64 {
+        self.total_examples
+    }
+
+    /// `Σ_k C(n_k, 2)`.
+    pub fn positive_capacity(&self) -> u64 {
+        self.positive_capacity
+    }
+
+    /// `Σ_{j<k} n_j · n_k`.
+    pub fn negative_capacity(&self) -> u64 {
+        self.negative_capacity
+    }
+
+    /// The configured strategy.
+    pub fn strategy(&self) -> PairStrategy {
+        self.strategy
+    }
+
+    /// The configured singleton policy.
+    pub fn singleton_policy(&self) -> SingletonPolicy {
+        self.singleton_policy
+    }
+
+    /// The root seed every draw key derives from.
+    pub fn root_seed(&self) -> u64 {
+        self.root_seed
+    }
+
+    /// Members in class `class_index`, or 0 for an out-of-range index.
+    pub fn class_size(&self, class_index: usize) -> u64 {
+        let Some(start) = self.offsets.get(class_index) else {
+            return 0;
+        };
+        let end = self
+            .offsets
+            .get(class_index + 1)
+            .copied()
+            .unwrap_or(self.total_examples);
+        end - start
+    }
+
+    /// The pair at `ordinal`, in layout space.
+    ///
+    /// # Errors
+    ///
+    /// [`ContrastiveDataError::OrdinalOutOfRange`] at or beyond the resolved budget.
+    #[provable_contracts_macros::contract("contrastive-pair-protocol-v1", equation = "pair_stream")]
+    pub fn raw_pair_at(&self, ordinal: u64) -> Result<RawPair, ContrastiveDataError> {
+        Err(ContrastiveDataError::OrdinalOutOfRange {
+            ordinal,
+            budget: self.budget,
+        })
+    }
+}
+
+impl RetainedState for PairLayout {
+    fn state_report(&self) -> SamplerStateReport {
+        SamplerStateReport {
+            bucket_entries: 0,
+            positive_weight_entries: self.pos_prefix.len(),
+            negative_weight_entries: self.neg_prefix.len(),
+            class_offset_entries: self.offsets.len(),
+            materialized_pairs: 0,
+        }
+    }
+}
+
+// ===========================================================================================
+// 6. The borrowed sampler
+// ===========================================================================================
+
+/// The bounded, deterministic pair stream over ONE [`Selection`].
+///
+/// Borrowing the selection is the mechanism, not a detail: a [`SelectedId`] can only be
+/// obtained from the selection that produced it, so an endpoint naming a row that was never
+/// selected is not rejected — it is inexpressible (`split_span_fail_closed`, structural
+/// half). The typed half, for untrusted replayed bytes, is [`validate_pair_records`].
+#[derive(Debug)]
+pub struct PairSampler<'a> {
+    selection: &'a Selection,
+    layout: PairLayout,
+    class_ids: Vec<&'a [SelectedId]>,
+}
+
+impl<'a> PairSampler<'a> {
+    /// Build a sampler over a completed selection.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`PairLayout::from_class_sizes`] can raise.
+    #[provable_contracts_macros::contract(
+        "contrastive-pair-protocol-v1",
+        equation = "singleton_policy"
+    )]
+    pub fn new(sel: &'a Selection, cfg: &PairConfig) -> Result<Self, ContrastiveDataError> {
+        let sizes: Vec<u64> = sel.class_sizes().iter().map(|(_, n)| *n).collect();
+        let layout = PairLayout::from_class_sizes(&sizes, cfg)?;
+        let class_ids: Vec<&'a [SelectedId]> = sel
+            .class_sizes()
+            .iter()
+            .map(|(label, _)| sel.ids_in_class(*label))
+            .collect();
+        Ok(Self {
+            selection: sel,
+            layout,
+            class_ids,
+        })
+    }
+
+    /// The structural layout underneath.
+    pub fn layout(&self) -> &PairLayout {
+        &self.layout
+    }
+
+    /// The selection this sampler is bound to.
+    pub fn selection(&self) -> &'a Selection {
+        self.selection
+    }
+
+    /// The resolved effective budget.
+    pub fn budget(&self) -> u64 {
+        self.layout.budget()
+    }
+
+    /// Which kinds the stream emits.
+    pub fn emitted_kinds(&self) -> EmittedKinds {
+        self.layout.emitted_kinds()
+    }
+
+    /// How many classes hold exactly one selected example.
+    pub fn affected_singleton_classes(&self) -> u64 {
+        self.layout.affected_singleton_classes()
+    }
+
+    /// Whether the DEFAULT budget was clamped.
+    pub fn default_was_clamped(&self) -> bool {
+        self.layout.default_was_clamped()
+    }
+
+    /// The pair at `ordinal`. Pure: the same ordinal always yields the same pair.
+    ///
+    /// # Errors
+    ///
+    /// [`ContrastiveDataError::OrdinalOutOfRange`] at or beyond the resolved budget.
+    pub fn pair_at(&self, ordinal: u64) -> Result<LabeledPair, ContrastiveDataError> {
+        let raw = self.layout.raw_pair_at(ordinal)?;
+        let a = self.endpoint(raw.first)?;
+        let b = self.endpoint(raw.second)?;
+        let pair = CanonicalPair::new(a, b)?;
+        Ok(LabeledPair {
+            target: derive_target(self.selection, &pair),
+            pair,
+        })
+    }
+
+    /// A cursor from `offset` to the budget.
+    ///
+    /// # Errors
+    ///
+    /// [`ContrastiveDataError::OrdinalOutOfRange`] when `offset > budget`.
+    pub fn iter_from(&self, offset: u64) -> Result<PairIter<'_, 'a>, ContrastiveDataError> {
+        let budget = self.layout.budget();
+        if offset > budget {
+            return Err(ContrastiveDataError::OrdinalOutOfRange {
+                ordinal: offset,
+                budget,
+            });
+        }
+        Ok(PairIter {
+            sampler: self,
+            cursor: offset,
+            budget,
+        })
+    }
+
+    /// Resolve a layout-space endpoint to a selected ordinal.
+    fn endpoint(&self, raw: RawEndpoint) -> Result<SelectedId, ContrastiveDataError> {
+        let bucket =
+            self.class_ids
+                .get(raw.class_index)
+                .ok_or(ContrastiveDataError::OrdinalOutOfRange {
+                    ordinal: raw.class_index as u64,
+                    budget: self.class_ids.len() as u64,
+                })?;
+        bucket.get(raw.member_index as usize).copied().ok_or(
+            ContrastiveDataError::OrdinalOutOfRange {
+                ordinal: raw.member_index,
+                budget: bucket.len() as u64,
+            },
+        )
+    }
+}
+
+impl RetainedState for PairSampler<'_> {
+    fn state_report(&self) -> SamplerStateReport {
+        SamplerStateReport {
+            bucket_entries: self.class_ids.iter().map(|ids| ids.len()).sum(),
+            ..self.layout.state_report()
+        }
+    }
+}
+
+/// A borrowed cursor over one sampler.
+#[derive(Debug)]
+pub struct PairIter<'s, 'a> {
+    sampler: &'s PairSampler<'a>,
+    cursor: u64,
+    budget: u64,
+}
+
+impl Iterator for PairIter<'_, '_> {
+    type Item = LabeledPair;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor >= self.budget {
+            return None;
+        }
+        let item = self.sampler.pair_at(self.cursor).expect(
+            "iter_from validated offset <= budget and PairSampler::new validated every \
+             capacity and bucket size, so pair_at below the budget is total",
+        );
+        self.cursor += 1;
+        Some(item)
+    }
+}
+
+/// The 1.0 / 0.0 target, DERIVED from the endpoints' classes.
+fn derive_target(sel: &Selection, pair: &CanonicalPair) -> f32 {
+    if sel.label_of(pair.lo()) == sel.label_of(pair.hi()) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+// ===========================================================================================
+// 7. The untrusted-input boundary (review finding F13)
+// ===========================================================================================
+
+/// A pair as it arrives from replayed or dumped bytes — NOT a [`LabeledPair`].
+///
+/// A trusted pair type with a private constructor CANNOT REPRESENT poisoned input, so
+/// "validating at the boundary" is impossible without an untrusted representation to
+/// validate FROM. That is why this DTO exists rather than deserializing straight into
+/// [`CanonicalPair`], and it is what makes plan 02-08's endpoint-poisoning test
+/// constructible at all.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UntrustedPairRecord {
+    /// The lower endpoint's row identifier, as written.
+    pub lo: String,
+    /// The upper endpoint's row identifier, as written.
+    pub hi: String,
+    /// The target the bytes CLAIM. Checked against the derived one, never trusted.
+    pub target: f32,
+}
+
+/// Parse a JSONL pair dump into untrusted records.
+///
+/// # Errors
+///
+/// [`ContrastiveDataError::MalformedRow`] naming the line index and the parser message.
+pub fn parse_pair_dump(bytes: &[u8]) -> Result<Vec<UntrustedPairRecord>, ContrastiveDataError> {
+    let _ = bytes;
+    Ok(Vec::new())
+}
+
+/// Validate untrusted pair records against the selection they claim to belong to.
+///
+/// # Errors
+///
+/// [`ContrastiveDataError::EndpointNotInSelection`], [`ContrastiveDataError::SelfPair`],
+/// [`ContrastiveDataError::PairTargetMismatch`].
+#[provable_contracts_macros::contract(
+    "contrastive-pair-protocol-v1",
+    equation = "untrusted_pair_ingest"
+)]
+pub fn validate_pair_records(
+    recs: &[UntrustedPairRecord],
+    sel: &Selection,
+) -> Result<Vec<LabeledPair>, ContrastiveDataError> {
+    let _ = (recs, sel);
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod pair_tests {
     use super::{
@@ -773,13 +1244,632 @@ mod pair_tests {
 }
 
 #[cfg(test)]
+mod pair_stream_tests {
+    //! The streaming sampler: interleave, purity, structure, and the `O(K)` evidence.
+    //!
+    //! Layouts other than `K × shots` are exercised through [`PairLayout`] rather than
+    //! through a `Selection`, because a `Selection` always carries the same
+    //! `shots_per_class ∈ {8, 16, 32, 64}` in every class — so `[4, 1]`, `[6]` and the
+    //! K = N `[1; 32]` layout the DATA-05 bound must survive cannot be built as one.
+
+    use super::{
+        classify_degenerate, negative_capacity, parse_pair_dump, positive_capacity,
+        validate_pair_records, EmittedKinds, LabeledPair, PairConfig, PairKind, PairLayout,
+        PairSampler, RawPair, RetainedState, UntrustedPairRecord, DEFAULT_HARD_CAP,
+    };
+    use crate::error::ContrastiveDataError;
+    use crate::select::{test_corpus, Selection};
+    use std::collections::BTreeMap;
+
+    fn layout(sizes: &[u64], cfg: &PairConfig) -> PairLayout {
+        PairLayout::from_class_sizes(sizes, cfg).expect("a legal layout builds")
+    }
+
+    fn default_layout(sizes: &[u64]) -> PairLayout {
+        layout(sizes, &PairConfig::new(13))
+    }
+
+    fn capped_layout(sizes: &[u64], budget: u64) -> PairLayout {
+        layout(
+            sizes,
+            &PairConfig {
+                budget: Some(budget),
+                ..PairConfig::new(13)
+            },
+        )
+    }
+
+    fn all_raw(layout: &PairLayout) -> Vec<RawPair> {
+        (0..layout.budget())
+            .map(|ordinal| {
+                layout
+                    .raw_pair_at(ordinal)
+                    .expect("every ordinal below the budget resolves")
+            })
+            .collect()
+    }
+
+    fn selection_8_shots() -> Selection {
+        test_corpus::fresh_selection(12, 13, 8).0
+    }
+
+    // -- budget wiring ---------------------------------------------------------------------
+
+    #[test]
+    fn pair_sampler_default_budget_is_the_effective_default_for_its_selection() {
+        let selection = selection_8_shots();
+        let sampler =
+            PairSampler::new(&selection, &PairConfig::new(29)).expect("8 shots x 3 classes");
+        assert_eq!(selection.class_sizes(), [(0, 8), (1, 8), (2, 8)]);
+        assert_eq!(sampler.budget(), 384);
+        assert!(!sampler.default_was_clamped());
+        assert_eq!(sampler.emitted_kinds(), EmittedKinds::Both);
+        assert_eq!(sampler.affected_singleton_classes(), 0);
+    }
+
+    #[test]
+    fn pair_sampler_uses_the_clamped_budget_not_the_closed_form() {
+        let selection = selection_8_shots();
+        let cfg = PairConfig {
+            hard_cap: Some(100),
+            ..PairConfig::new(29)
+        };
+        let sampler = PairSampler::new(&selection, &cfg).expect("a clamped default is legal");
+        assert_eq!(sampler.budget(), 100, "the CLAMPED value is what is used");
+        assert!(sampler.default_was_clamped());
+        assert_eq!(sampler.iter_from(0).expect("from zero").count(), 100);
+    }
+
+    #[test]
+    fn pair_sampler_refuses_an_explicit_budget_above_the_hard_cap() {
+        let selection = selection_8_shots();
+        let cfg = PairConfig {
+            budget: Some(20_000),
+            hard_cap: Some(10_000),
+            ..PairConfig::new(29)
+        };
+        match PairSampler::new(&selection, &cfg) {
+            Err(ContrastiveDataError::BudgetExceedsHardCap { budget, hard_cap }) => {
+                assert_eq!((budget, hard_cap), (20_000, 10_000));
+            }
+            other => panic!("expected BudgetExceedsHardCap, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn pair_layout_counts_affected_singleton_classes_even_when_zero() {
+        assert_eq!(default_layout(&[8, 4, 8]).affected_singleton_classes(), 0);
+        assert_eq!(default_layout(&[4, 1]).affected_singleton_classes(), 1);
+        assert_eq!(default_layout(&[1; 32]).affected_singleton_classes(), 32);
+        assert_eq!(
+            default_layout(&[5, 1, 1, 4]).affected_singleton_classes(),
+            2
+        );
+    }
+
+    // -- interleave and balance ------------------------------------------------------------
+
+    #[test]
+    fn pair_stream_alternates_positive_at_even_ordinals_and_negative_at_odd() {
+        let layout = default_layout(&[8, 4, 8]);
+        assert_eq!(layout.budget(), 256);
+        for (ordinal, raw) in all_raw(&layout).into_iter().enumerate() {
+            let want = if ordinal % 2 == 0 {
+                PairKind::Positive
+            } else {
+                PairKind::Negative
+            };
+            assert_eq!(raw.kind, want, "ordinal {ordinal}");
+        }
+    }
+
+    /// `|#pos − #neg| ≤ 1` at EVERY prefix and `== 0` at every EVEN prefix. Stated this way
+    /// rather than as "strict 1:1" because that would be false for an odd budget and the
+    /// test would then have to be quietly relaxed.
+    #[test]
+    fn pair_stream_balance_holds_at_every_prefix_including_an_odd_budget() {
+        for budget in [255_u64, 256] {
+            let layout = capped_layout(&[8, 4, 8], budget);
+            let (mut pos, mut neg) = (0_i64, 0_i64);
+            for (ordinal, raw) in all_raw(&layout).into_iter().enumerate() {
+                match raw.kind {
+                    PairKind::Positive => pos += 1,
+                    PairKind::Negative => neg += 1,
+                }
+                assert!((pos - neg).abs() <= 1, "budget {budget} prefix {ordinal}");
+                if ordinal % 2 == 1 {
+                    assert_eq!(pos, neg, "even prefix of budget {budget}");
+                }
+            }
+            let expected_pos = i64::try_from(budget.div_ceil(2)).expect("small");
+            assert_eq!(pos, expected_pos, "ceil(B/2) positives at budget {budget}");
+            assert_eq!(
+                neg,
+                i64::try_from(budget / 2).expect("small"),
+                "floor(B/2) negatives at budget {budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn positives_only_and_negatives_only_streams_emit_exactly_one_kind() {
+        let positives = capped_layout(&[6], 25);
+        assert_eq!(positives.emitted_kinds(), EmittedKinds::PositivesOnly);
+        assert!(all_raw(&positives)
+            .iter()
+            .all(|raw| raw.kind == PairKind::Positive));
+        assert_eq!(all_raw(&positives).len(), 25);
+
+        let negatives = capped_layout(&[1; 32], 17);
+        assert_eq!(negatives.emitted_kinds(), EmittedKinds::NegativesOnly);
+        assert!(all_raw(&negatives)
+            .iter()
+            .all(|raw| raw.kind == PairKind::Negative));
+        assert_eq!(all_raw(&negatives).len(), 17);
+    }
+
+    // -- structure -------------------------------------------------------------------------
+
+    #[test]
+    fn positives_share_a_class_and_negatives_do_not() {
+        for sizes in [vec![8_u64, 4, 8], vec![4, 1], vec![2, 2], vec![3, 5, 7]] {
+            let layout = capped_layout(&sizes, 400);
+            let raws = all_raw(&layout);
+            // Vacuity guard: pin the population before asserting a relation over it. An
+            // empty stream satisfies every clause below (02-04's lesson).
+            assert_eq!(raws.len(), 400, "{sizes:?} must actually emit 400 pairs");
+            assert!(raws.iter().any(|raw| raw.kind == PairKind::Positive));
+            assert!(raws.iter().any(|raw| raw.kind == PairKind::Negative));
+            for raw in raws {
+                match raw.kind {
+                    PairKind::Positive => {
+                        assert_eq!(raw.first.class_index, raw.second.class_index, "{sizes:?}");
+                        assert_ne!(
+                            raw.first.member_index, raw.second.member_index,
+                            "a positive pair is never a self-pair ({sizes:?})"
+                        );
+                    }
+                    PairKind::Negative => {
+                        assert_ne!(raw.first.class_index, raw.second.class_index, "{sizes:?}");
+                    }
+                }
+                assert!(raw.first.member_index < layout.class_size(raw.first.class_index));
+                assert!(raw.second.member_index < layout.class_size(raw.second.class_index));
+            }
+        }
+    }
+
+    /// The singleton class contributes no positives (its `C(1,2) = 0` weight is zero) but
+    /// does appear in negatives — `NegativesOnly` observed structurally, not asserted.
+    #[test]
+    fn a_singleton_class_never_appears_in_a_positive_pair_but_does_in_negatives() {
+        let layout = capped_layout(&[4, 1], 200);
+        let singleton = 1_usize;
+        let mut negatives_touching_singleton = 0;
+        for raw in all_raw(&layout) {
+            match raw.kind {
+                PairKind::Positive => {
+                    assert_ne!(raw.first.class_index, singleton);
+                    assert_ne!(raw.second.class_index, singleton);
+                }
+                PairKind::Negative => {
+                    if raw.first.class_index == singleton || raw.second.class_index == singleton {
+                        negatives_touching_singleton += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            negatives_touching_singleton, 100,
+            "every negative in a two-class layout must touch the singleton"
+        );
+    }
+
+    #[test]
+    fn targets_are_derived_from_selection_label_of_for_every_emitted_pair() {
+        let selection = selection_8_shots();
+        let cfg = PairConfig {
+            budget: Some(200),
+            ..PairConfig::new(31)
+        };
+        let sampler = PairSampler::new(&selection, &cfg).expect("a legal budget");
+        let mut same = 0;
+        for labeled in sampler.iter_from(0).expect("from zero") {
+            let lo = selection.label_of(labeled.pair.lo());
+            let hi = selection.label_of(labeled.pair.hi());
+            let want = if lo == hi { 1.0 } else { 0.0 };
+            assert_eq!(labeled.target, want);
+            assert!(labeled.pair.lo() < labeled.pair.hi());
+            same += usize::from(lo == hi);
+        }
+        assert_eq!(
+            same, 100,
+            "both kinds must actually occur or this proves nothing"
+        );
+    }
+
+    // -- purity and range --------------------------------------------------------------------
+
+    #[test]
+    fn pair_at_is_pure_and_order_independent() {
+        let selection = selection_8_shots();
+        let sampler = PairSampler::new(&selection, &PairConfig::new(37)).expect("legal");
+        let pick = |ordinal: u64| sampler.pair_at(ordinal).expect("below the budget");
+
+        let forward: Vec<LabeledPair> = (0..24).map(pick).collect();
+        let shuffled: Vec<LabeledPair> = [17_u64, 3, 22, 0, 11].iter().map(|i| pick(*i)).collect();
+        for (slot, ordinal) in [17_usize, 3, 22, 0, 11].into_iter().enumerate() {
+            assert_eq!(shuffled[slot], forward[ordinal], "ordinal {ordinal}");
+        }
+
+        let resumed: Vec<LabeledPair> = sampler
+            .iter_from(10)
+            .expect("mid-stream")
+            .take(14)
+            .collect();
+        assert_eq!(resumed, forward[10..24].to_vec());
+    }
+
+    #[test]
+    fn pair_at_and_iter_from_beyond_the_budget_are_typed_errors() {
+        let selection = selection_8_shots();
+        let sampler = PairSampler::new(&selection, &PairConfig::new(41)).expect("legal");
+        let budget = sampler.budget();
+        // Vacuity guard: with a zero budget EVERY ordinal is out of range, so the clauses
+        // below would hold against a sampler that emits nothing at all.
+        assert_eq!(budget, 384);
+
+        for ordinal in [budget, budget + 1] {
+            match sampler.pair_at(ordinal) {
+                Err(ContrastiveDataError::OrdinalOutOfRange {
+                    ordinal: got,
+                    budget: cap,
+                }) => {
+                    assert_eq!((got, cap), (ordinal, budget));
+                }
+                other => panic!("expected OrdinalOutOfRange, got {:?}", other.map(|_| ())),
+            }
+        }
+        // `offset == budget` is a legal EMPTY cursor; only beyond it is an error.
+        assert_eq!(sampler.iter_from(budget).expect("empty cursor").count(), 0);
+        assert!(matches!(
+            sampler.iter_from(budget + 1),
+            Err(ContrastiveDataError::OrdinalOutOfRange { .. })
+        ));
+    }
+
+    // -- O(K) evidence: the DATA-05 blocker (review finding F1) -------------------------------
+
+    /// A class-PAIR design would report `C(32, 2) = 496` here. This is the layout that
+    /// separates `O(K)` from `O(K²)`; at K = 3 the two are indistinguishable.
+    #[test]
+    fn state_report_weight_arrays_are_k_long_at_k_equals_n() {
+        let layout = capped_layout(&[1; 32], 16);
+        let report = layout.state_report();
+        assert_eq!(report.negative_weight_entries, 32);
+        assert_eq!(report.class_offset_entries, 32);
+        assert_eq!(report.positive_weight_entries, 32);
+        assert_eq!(report.materialized_pairs, 0);
+        assert_eq!(
+            negative_capacity(&[1; 32]).expect("no overflow"),
+            496,
+            "the rejected design's array length, named so the contrast is explicit"
+        );
+        assert!(report.total_retained_entries() < 496);
+    }
+
+    /// Non-quadratic growth proven by SCALING, not by inspection: at K = 8, 32 and 128
+    /// all-singleton layouts under the SAME fixed budget, retained state grows LINEARLY.
+    ///
+    /// The honest sampler retains exactly three K-long arrays and no per-example entries,
+    /// so `total_retained_entries() == 3K` and the ratio between successive K values must
+    /// equal the ratio of the K values themselves. A class-pair design would retain
+    /// `~K²/2` and the 4× step from 8 to 32 would show as ~16×.
+    #[test]
+    fn state_report_grows_linearly_in_k_under_a_fixed_budget() {
+        let budget = 16_u64;
+        let mut totals = Vec::new();
+        for k in [8_usize, 32, 128] {
+            let sizes = vec![1_u64; k];
+            let layout = capped_layout(&sizes, budget);
+            assert_eq!(layout.budget(), budget, "the budget is held FIXED across K");
+            let total = layout.state_report().total_retained_entries();
+            assert_eq!(total, 3 * k, "three O(K) arrays and nothing else");
+            totals.push(total);
+        }
+        assert_eq!(totals, vec![24, 96, 384]);
+        // 4x in K must be 4x in state. Quadratic growth would be 16x.
+        assert_eq!(
+            totals[1] * 8 / 32,
+            totals[0],
+            "8 -> 32 is linear, not quadratic"
+        );
+        assert_eq!(totals[2] * 32 / 128, totals[1], "32 -> 128 is linear");
+    }
+
+    #[test]
+    fn state_report_does_not_grow_with_the_budget_consumed() {
+        let selection = selection_8_shots();
+        let sampler = PairSampler::new(&selection, &PairConfig::new(43)).expect("legal");
+        let before = sampler.state_report();
+        let drained = sampler.iter_from(0).expect("from zero").count();
+        let after = sampler.state_report();
+
+        assert_eq!(drained, 384);
+        assert_eq!(
+            before, after,
+            "retained state is independent of pairs emitted"
+        );
+        assert_eq!(
+            after.materialized_pairs, 0,
+            "the honest sampler stores no pairs"
+        );
+        assert_eq!(after.bucket_entries, 24, "one handle per selected example");
+        assert_eq!(after.total_retained_entries(), 24 + 3 * 3);
+    }
+
+    /// The same report, at a layout whose pair space dwarfs its examples: 192 examples,
+    /// 24,576 pairs. A materializing sampler is quadratic HERE; the honest one is not.
+    #[test]
+    fn state_report_is_flat_where_the_pair_space_dwarfs_the_examples() {
+        let (selection, _) = test_corpus::fresh_selection(70, 47, 64);
+        let sampler = PairSampler::new(&selection, &PairConfig::new(47)).expect("64 shots");
+        assert_eq!(sampler.budget(), 24_576);
+        let report = sampler.state_report();
+        assert_eq!(report.total_retained_entries(), 192 + 3 * 3);
+        assert_eq!(report.materialized_pairs, 0);
+    }
+
+    // -- marginal equivalence of the O(K) negative scheme -------------------------------------
+
+    /// The O(K) rewrite is a REPRESENTATION change, not a semantics change. Sampling ordered
+    /// cross-class endpoint pairs uniformly induces weight `n_j · n_k` on each unordered
+    /// class pair, which is exactly what D-14 specifies. This test measures that empirically
+    /// rather than restating the algebra.
+    #[test]
+    fn negative_draw_marginals_match_the_n_j_times_n_k_class_pair_weights() {
+        let sizes = [3_u64, 5, 7];
+        let draws = 40_000_u64;
+        let layout = capped_layout(&sizes, draws);
+        assert_eq!(layout.emitted_kinds(), EmittedKinds::Both);
+
+        let mut counts: BTreeMap<(usize, usize), u64> = BTreeMap::new();
+        let mut negatives = 0_u64;
+        for raw in all_raw(&layout) {
+            if raw.kind != PairKind::Negative {
+                continue;
+            }
+            negatives += 1;
+            let (a, b) = (raw.first.class_index, raw.second.class_index);
+            *counts.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+
+        let total_weight = negative_capacity(&sizes).expect("no overflow") as f64;
+        assert_eq!(counts.len(), 3, "all three class pairs must be reached");
+        for ((j, k), hits) in &counts {
+            let expected = (sizes[*j] * sizes[*k]) as f64 / total_weight;
+            let observed = *hits as f64 / negatives as f64;
+            assert!(
+                (observed - expected).abs() < 0.02,
+                "class pair ({j},{k}): expected {expected:.4}, observed {observed:.4}"
+            );
+        }
+        // A uniform-over-class-pairs bug would give 1/3 each; the ordering below rules it out.
+        assert!(counts[&(1, 2)] > counts[&(0, 2)]);
+        assert!(counts[&(0, 2)] > counts[&(0, 1)]);
+    }
+
+    #[test]
+    fn negative_draw_reaches_every_cross_class_endpoint_pair() {
+        let layout = capped_layout(&[2, 2], 400);
+        let mut seen: BTreeMap<(u64, u64), u64> = BTreeMap::new();
+        for raw in all_raw(&layout) {
+            if raw.kind != PairKind::Negative {
+                continue;
+            }
+            let (mut a, mut b) = (
+                layout_global(&layout, raw.first.class_index, raw.first.member_index),
+                layout_global(&layout, raw.second.class_index, raw.second.member_index),
+            );
+            if a > b {
+                core::mem::swap(&mut a, &mut b);
+            }
+            *seen.entry((a, b)).or_default() += 1;
+        }
+        assert_eq!(
+            seen.len(),
+            4,
+            "all four cross-class endpoint pairs of [2,2] must be reachable, saw {seen:?}"
+        );
+    }
+
+    fn layout_global(layout: &PairLayout, class_index: usize, member_index: u64) -> u64 {
+        (0..class_index).map(|c| layout.class_size(c)).sum::<u64>() + member_index
+    }
+
+    // -- the untrusted boundary (review finding F13) -------------------------------------------
+
+    fn honest_records(sampler: &PairSampler<'_>, count: u64) -> Vec<UntrustedPairRecord> {
+        let selection = sampler.selection();
+        sampler
+            .iter_from(0)
+            .expect("from zero")
+            .take(count as usize)
+            .map(|labeled| UntrustedPairRecord {
+                lo: selection.id_of(labeled.pair.lo()).to_string(),
+                hi: selection.id_of(labeled.pair.hi()).to_string(),
+                target: labeled.target,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn validate_pair_records_accepts_the_samplers_own_pairs() {
+        let selection = selection_8_shots();
+        let sampler = PairSampler::new(&selection, &PairConfig::new(53)).expect("legal");
+        let records = honest_records(&sampler, 40);
+        // Vacuity guard: two empty vectors are equal, which is exactly how this assertion
+        // would pass against a validator that returns nothing (02-04's lesson).
+        assert_eq!(records.len(), 40);
+        let validated = validate_pair_records(&records, &selection).expect("honest records pass");
+        assert_eq!(validated.len(), 40);
+
+        let expected: Vec<LabeledPair> =
+            sampler.iter_from(0).expect("from zero").take(40).collect();
+        assert_eq!(validated, expected);
+    }
+
+    #[test]
+    fn validate_pair_records_rejects_an_endpoint_outside_the_selection() {
+        let selection = selection_8_shots();
+        let sampler = PairSampler::new(&selection, &PairConfig::new(53)).expect("legal");
+        let mut records = honest_records(&sampler, 10);
+        records[4].lo = "validation:1".to_string();
+
+        match validate_pair_records(&records, &selection) {
+            Err(ContrastiveDataError::EndpointNotInSelection { id, found_in }) => {
+                assert_eq!(id, "validation:1");
+                assert!(!found_in.is_empty());
+            }
+            other => panic!(
+                "expected EndpointNotInSelection, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+    }
+
+    #[test]
+    fn validate_pair_records_rejects_a_self_pair() {
+        let selection = selection_8_shots();
+        let sampler = PairSampler::new(&selection, &PairConfig::new(53)).expect("legal");
+        let mut records = honest_records(&sampler, 10);
+        records[2].hi = records[2].lo.clone();
+
+        assert!(matches!(
+            validate_pair_records(&records, &selection),
+            Err(ContrastiveDataError::SelfPair { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_pair_records_rejects_a_target_that_disagrees_with_the_endpoints() {
+        let selection = selection_8_shots();
+        let sampler = PairSampler::new(&selection, &PairConfig::new(53)).expect("legal");
+        let mut records = honest_records(&sampler, 10);
+        let flipped = 1.0 - records[0].target;
+        records[0].target = flipped;
+
+        match validate_pair_records(&records, &selection) {
+            Err(ContrastiveDataError::PairTargetMismatch {
+                lo,
+                hi,
+                declared_target,
+                derived_target,
+            }) => {
+                assert_eq!(lo, records[0].lo);
+                assert_eq!(hi, records[0].hi);
+                assert_eq!(declared_target, flipped);
+                assert_eq!(derived_target, 1.0 - flipped);
+            }
+            other => panic!("expected PairTargetMismatch, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// Orientation carries no information (D-12), so a swapped record is NORMALIZED rather
+    /// than refused — and must produce the identical `LabeledPair`.
+    #[test]
+    fn validate_pair_records_canonicalizes_a_swapped_record() {
+        let selection = selection_8_shots();
+        let sampler = PairSampler::new(&selection, &PairConfig::new(53)).expect("legal");
+        let records = honest_records(&sampler, 4);
+        let swapped: Vec<UntrustedPairRecord> = records
+            .iter()
+            .map(|rec| UntrustedPairRecord {
+                lo: rec.hi.clone(),
+                hi: rec.lo.clone(),
+                target: rec.target,
+            })
+            .collect();
+        assert_ne!(swapped, records);
+        assert_eq!(
+            validate_pair_records(&swapped, &selection).expect("swapped records normalize"),
+            validate_pair_records(&records, &selection).expect("honest records pass")
+        );
+    }
+
+    #[test]
+    fn parse_pair_dump_round_trips_and_rejects_an_unknown_field() {
+        let selection = selection_8_shots();
+        let sampler = PairSampler::new(&selection, &PairConfig::new(53)).expect("legal");
+        let records = honest_records(&sampler, 3);
+
+        let mut bytes = Vec::new();
+        for rec in &records {
+            bytes.extend_from_slice(
+                serde_json::to_string(rec)
+                    .expect("a record serializes")
+                    .as_bytes(),
+            );
+            bytes.push(b'\n');
+        }
+        assert_eq!(parse_pair_dump(&bytes).expect("well-formed"), records);
+
+        let poisoned = br#"{"lo":"a","hi":"b","target":1.0,"rogue":7}"#;
+        match parse_pair_dump(poisoned) {
+            Err(ContrastiveDataError::MalformedRow { index, reason, .. }) => {
+                assert_eq!(index, 0);
+                assert!(
+                    reason.contains("rogue"),
+                    "reason {reason:?} must name the field"
+                );
+            }
+            other => panic!(
+                "deny_unknown_fields must reject, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+    }
+
+    #[test]
+    fn degenerate_layouts_are_refused_or_classified_at_construction() {
+        for sizes in [vec![1_u64], vec![]] {
+            assert!(matches!(
+                PairLayout::from_class_sizes(&sizes, &PairConfig::new(13)),
+                Err(ContrastiveDataError::NoPairCapacity { .. })
+            ));
+        }
+        let singletons = default_layout(&[1; 32]);
+        assert_eq!(singletons.emitted_kinds(), EmittedKinds::NegativesOnly);
+        assert_eq!(singletons.budget(), 992);
+        assert_eq!(
+            classify_degenerate(
+                positive_capacity(&[1; 32]).expect("no overflow"),
+                negative_capacity(&[1; 32]).expect("no overflow")
+            )
+            .expect("legal"),
+            singletons.emitted_kinds()
+        );
+
+        let one_class = default_layout(&[6]);
+        assert_eq!(one_class.emitted_kinds(), EmittedKinds::PositivesOnly);
+        assert_eq!(one_class.budget(), 30);
+        assert_eq!(one_class.total_examples(), 6);
+        assert_eq!(one_class.class_count(), 1);
+        assert_eq!(DEFAULT_HARD_CAP, 1_048_576);
+    }
+}
+
+#[cfg(test)]
 mod pair_proptests {
     //! The RUNNABLE evidence behind the two DECLARED-not-executed Kani harnesses
     //! (`KANI-CPP-001`, `KANI-CPP-002`). `cargo-kani` is not installed in this repository
     //! and there is no `#[kani::proof]` harness anywhere under `crates/`, so these
     //! proptests — bounded identically at 4 — are the evidence, not a placeholder for it.
 
-    use super::{negative_capacity, positive_capacity, CanonicalPair};
+    use super::{
+        negative_capacity, positive_capacity, CanonicalPair, PairConfig, PairKind, PairLayout,
+        RetainedState,
+    };
     use crate::error::ContrastiveDataError;
     use crate::select::{test_corpus, SelectedId};
     use proptest::collection::vec as prop_vec;
@@ -839,6 +1929,45 @@ mod pair_proptests {
             let (want_pos, want_neg) = naive_capacities(&sizes);
             prop_assert_eq!(positive_capacity(&sizes).expect("bounded sizes never overflow"), want_pos);
             prop_assert_eq!(negative_capacity(&sizes).expect("bounded sizes never overflow"), want_neg);
+        }
+
+        /// Every structural pair invariant, swept over the five contracted layout shapes
+        /// and a random ordinal: the balanced case, the singleton case, the single-class
+        /// case, the K = N case, and a two-class case.
+        #[test]
+        fn pair_stream_invariants_hold_across_layouts(
+            which in 0_usize..5,
+            ordinal in 0_u64..200,
+        ) {
+            let sizes: Vec<u64> = match which {
+                0 => vec![8, 4, 8],
+                1 => vec![4, 1],
+                2 => vec![6],
+                3 => vec![1; 32],
+                _ => vec![2, 2],
+            };
+            let cfg = PairConfig { budget: Some(200), ..PairConfig::new(59) };
+            let layout = PairLayout::from_class_sizes(&sizes, &cfg)
+                .expect("every one of these layouts has capacity");
+            let raw = layout.raw_pair_at(ordinal).expect("ordinal < 200 == budget");
+
+            let (a, b) = (raw.first, raw.second);
+            prop_assert!(a.member_index < layout.class_size(a.class_index));
+            prop_assert!(b.member_index < layout.class_size(b.class_index));
+            match raw.kind {
+                PairKind::Positive => {
+                    prop_assert_eq!(a.class_index, b.class_index);
+                    prop_assert!(a.member_index < b.member_index);
+                    prop_assert!(layout.class_size(a.class_index) >= 2);
+                }
+                PairKind::Negative => prop_assert!(a.class_index != b.class_index),
+            }
+            // Purity: the same ordinal, asked again, is the same pair.
+            prop_assert_eq!(raw, layout.raw_pair_at(ordinal).expect("pure"));
+            // Retained state is three K-long arrays whatever the ordinal.
+            let report = layout.state_report();
+            prop_assert_eq!(report.negative_weight_entries, sizes.len());
+            prop_assert_eq!(report.materialized_pairs, 0);
         }
     }
 
