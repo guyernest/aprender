@@ -36,10 +36,14 @@ use crate::output;
 use aprender_contrastive_data::attestation::DatasetAttestation;
 use aprender_contrastive_data::dedup::ExclusionRecord;
 use aprender_contrastive_data::error::ContrastiveDataError;
+use aprender_contrastive_data::hash::hex;
 use aprender_contrastive_data::ledger::{AccessLedger, AccessRecord};
-use aprender_contrastive_data::manifest::{SelectedExampleRecord, SelectionManifest};
+use aprender_contrastive_data::manifest::{
+    dump_pairs, pair_manifest_hash, PairReplayRecord, SelectedExampleRecord, SelectionManifest,
+};
+use aprender_contrastive_data::pairs::{PairConfig, PairSampler};
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
-use aprender_contrastive_data::select::{FewShotSelector, SelectionConfig};
+use aprender_contrastive_data::select::{FewShotSelector, Selection, SelectionConfig};
 use aprender_contrastive_data::split::{CompatibilityTest, SplitRole};
 use colored::Colorize;
 use serde::Serialize;
@@ -115,12 +119,15 @@ fn temp_path(target: &Path) -> PathBuf {
 /// `create_new` on the TEMP as well: two concurrent runs must not share one scratch file,
 /// and a leftover scratch file from a crashed run is a diagnosable error rather than
 /// silent reuse.
-fn write_and_sync(temp: &Path, bytes: &[u8]) -> Result<()> {
+fn fill_and_sync<F>(temp: &Path, fill: F) -> Result<()>
+where
+    F: FnOnce(&mut fs::File) -> Result<()>,
+{
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(temp)?;
-    file.write_all(bytes)?;
+    fill(&mut file)?;
     file.sync_all()?;
     if induced_prerename_failure() {
         return Err(CliError::Io(std::io::Error::other(
@@ -130,7 +137,7 @@ fn write_and_sync(temp: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Write `bytes` to `target` atomically, with no-clobber by default.
+/// Produce `target` atomically from a streaming writer, with no-clobber by default.
 ///
 /// The temp file lives in the destination directory because `rename` is only atomic within
 /// one filesystem; a temp in `/tmp` would silently degrade to a copy across a mount point,
@@ -139,11 +146,19 @@ fn write_and_sync(temp: &Path, bytes: &[u8]) -> Result<()> {
 /// Every failure path removes the temp, so an interrupted write leaves neither a partial
 /// artifact nor a stray file for the next `--force`-less run to trip over.
 ///
+/// `fill` takes the open file rather than a byte slice so `--dump` can stream a
+/// million-pair audit dump through `dump_pairs` without ever holding it in memory. A
+/// buffering dump would reintroduce the `O(budget)` allocation the protocol exists to
+/// avoid, in the one command whose job is to demonstrate its absence.
+///
 /// # Errors
 ///
 /// [`CliError::ValidationFailed`] when `target` exists and `force` is false;
-/// [`CliError::Io`] for any create, write, sync or rename failure.
-fn atomic_write(target: &Path, bytes: &[u8], force: bool) -> Result<()> {
+/// [`CliError::Io`] for any create, write, sync or rename failure; whatever `fill` raises.
+fn atomic_write_with<F>(target: &Path, force: bool, fill: F) -> Result<()>
+where
+    F: FnOnce(&mut fs::File) -> Result<()>,
+{
     if !force && target.exists() {
         return Err(CliError::ValidationFailed(format!(
             "Refusing to replace existing file {} (pass --force to replace it)",
@@ -155,13 +170,25 @@ fn atomic_write(target: &Path, bytes: &[u8], force: bool) -> Result<()> {
 
     let temp = temp_path(target);
     let result =
-        write_and_sync(&temp, bytes).and_then(|()| fs::rename(&temp, target).map_err(CliError::Io));
+        fill_and_sync(&temp, fill).and_then(|()| fs::rename(&temp, target).map_err(CliError::Io));
     if result.is_err() {
         // Best-effort: the write has already failed, and a cleanup failure must not
         // replace the reason it failed.
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+/// The byte form of [`atomic_write_with`], for artifacts small enough to already be in
+/// memory (every manifest is).
+///
+/// # Errors
+///
+/// The same set as [`atomic_write_with`].
+fn atomic_write(target: &Path, bytes: &[u8], force: bool) -> Result<()> {
+    atomic_write_with(target, force, |file| {
+        file.write_all(bytes).map_err(CliError::Io)
+    })
 }
 
 // ==========================================================================================
@@ -475,6 +502,277 @@ pub(crate) fn run_select(
     Ok(())
 }
 
+// ==========================================================================================
+// apr data pairs
+// ==========================================================================================
+
+/// What one `apr data pairs` run produced. Small by construction: the pair STREAM is never
+/// held, only summarized.
+struct PairsOutcome {
+    record: PairReplayRecord,
+    manifest_hash: String,
+    budget: u64,
+    hard_cap: u64,
+    positives: u64,
+    negatives: u64,
+}
+
+/// `apr data pairs --json`.
+#[derive(Serialize)]
+struct PairsReport<'a> {
+    command: &'static str,
+    selection: String,
+    data: String,
+    selection_hash: &'a str,
+    pair_manifest_hash: &'a str,
+    root_seed: u64,
+    strategy: &'a str,
+    strategy_version: u32,
+    budget: u64,
+    hard_cap: u64,
+    default_was_clamped: bool,
+    emitted_kinds: &'a str,
+    positives: u64,
+    negatives: u64,
+    singleton_policy: &'a str,
+    singleton_policy_version: u32,
+    degenerate_policy_version: u32,
+    affected_singleton_classes: u64,
+    /// The three declared deviation clauses, verbatim from the contract via the crate.
+    deviation: &'a [String; 3],
+    dump: Option<String>,
+}
+
+/// Map a pair-configuration failure, adding the FLAG the user has to change.
+///
+/// The crate cannot name a CLI flag, and an error that states a constraint without naming
+/// the knob that satisfies it is diagnosable but not actionable. The constraint itself is
+/// still entirely the crate's: `resolve_budget` decides, this only translates.
+fn pair_config_error(error: &ContrastiveDataError) -> CliError {
+    let remedy = match error {
+        ContrastiveDataError::BudgetExceedsHardCap { .. } => {
+            " — raise --hard-cap or lower --budget. The cap BINDS an explicit budget rather \
+             than clamping it, so that a run can never quietly emit fewer pairs than asked for"
+        }
+        ContrastiveDataError::ZeroBudget => {
+            " — pass --budget <N> with N >= 1, or omit --budget for the contracted default"
+        }
+        ContrastiveDataError::ZeroHardCap => {
+            " — pass --hard-cap <N> with N >= 1, or omit --hard-cap for the contracted default"
+        }
+        _ => "",
+    };
+    CliError::ValidationFailed(format!("contrastive data: {error}{remedy}"))
+}
+
+/// Read the selection manifest, verifying its envelope digest before it can be used.
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] when the file is absent or its digest disagrees with its
+/// payload; [`CliError::Io`] for any other read failure.
+fn read_selection_manifest(path: &Path) -> Result<SelectionManifest> {
+    let bytes = fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CliError::ValidationFailed(format!(
+                "{} not found. Write one with `apr data select --data <DIR> --shots <N> \
+                 --seed <SEED>`.",
+                path.display()
+            ))
+        } else {
+            CliError::Io(error)
+        }
+    })?;
+    SelectionManifest::from_bytes(&bytes).map_err(|e| dataset_error(&e))
+}
+
+/// Count the two pair kinds by STREAMING the sampler.
+///
+/// Two `u64`s and nothing else: collecting the stream to count it would reintroduce the
+/// `O(budget)` memory in the command whose job is to show it is absent.
+///
+/// # Errors
+///
+/// Whatever `pair_at` raises. It cannot raise for an ordinal below the resolved budget,
+/// but the error is propagated rather than asserted away.
+fn count_kinds(sampler: &PairSampler<'_>) -> Result<(u64, u64)> {
+    let mut positives = 0_u64;
+    let mut negatives = 0_u64;
+    for ordinal in 0..sampler.budget() {
+        let labeled = sampler.pair_at(ordinal).map_err(|e| dataset_error(&e))?;
+        // The target is exactly 1.0 or 0.0, derived by the crate from class identity;
+        // the midpoint comparison avoids a float equality lint without changing meaning.
+        if labeled.target > 0.5 {
+            positives += 1;
+        } else {
+            negatives += 1;
+        }
+    }
+    Ok((positives, negatives))
+}
+
+/// Replay the selection strictly, build the bounded stream, and summarize it.
+///
+/// This is the whole of `apr data pairs` except the reporting, and every step is a crate
+/// call: `SelectionManifest::from_bytes` (digest), `from_attested_bytes` (dataset
+/// identity), `Selection::replay` (the strict ladder ending in a full recomputation),
+/// `PairSampler::new` (which applies `resolve_budget`, so the zero and over-cap cases
+/// surface from ONE place), `pair_manifest_hash`, `dump_pairs`.
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] for any of those rejections or an existing dump file
+/// without `--force`; [`CliError::Io`] for a read or write failure.
+fn pairs_outcome(
+    selection_path: &Path,
+    data: &Path,
+    budget: Option<u64>,
+    hard_cap: Option<u64>,
+    dump: Option<&Path>,
+    force: bool,
+) -> Result<PairsOutcome> {
+    let manifest = read_selection_manifest(selection_path)?;
+    let mut ledger = AccessLedger::new();
+    let dataset = read_attested_canonical(data, &mut ledger)?;
+    // STRICT replay is the only route from manifest bytes back to a `Selection`. The CLI
+    // never constructs one — it cannot: `Selection::assemble` is crate-private.
+    let selection =
+        Selection::replay(&manifest, &dataset, &mut ledger).map_err(|e| dataset_error(&e))?;
+
+    let cfg = PairConfig {
+        budget,
+        hard_cap,
+        ..PairConfig::new(selection.root_seed())
+    };
+    let sampler = PairSampler::new(&selection, &cfg).map_err(|e| pair_config_error(&e))?;
+
+    let record = PairReplayRecord::from_sampler(&sampler);
+    let digest = pair_manifest_hash(&sampler, &record).map_err(|e| dataset_error(&e))?;
+    let (positives, negatives) = count_kinds(&sampler)?;
+
+    if let Some(path) = dump {
+        atomic_write_with(path, force, |file| {
+            dump_pairs(&sampler, file).map_err(|e| dataset_error(&e))
+        })?;
+    }
+
+    Ok(PairsOutcome {
+        manifest_hash: hex(&digest),
+        budget: sampler.budget(),
+        hard_cap: cfg.resolved_hard_cap(),
+        positives,
+        negatives,
+        record,
+    })
+}
+
+/// Render the `--json` report for a pair run.
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] if the report cannot be serialized.
+fn pairs_report_json(
+    selection_path: &Path,
+    data: &Path,
+    outcome: &PairsOutcome,
+    dump: Option<&Path>,
+) -> Result<String> {
+    let record = &outcome.record;
+    let report = PairsReport {
+        command: "data-pairs",
+        selection: selection_path.display().to_string(),
+        data: data.display().to_string(),
+        selection_hash: &record.selection_hash,
+        pair_manifest_hash: &outcome.manifest_hash,
+        root_seed: record.root_seed,
+        strategy: &record.strategy,
+        strategy_version: record.strategy_version,
+        budget: outcome.budget,
+        hard_cap: outcome.hard_cap,
+        default_was_clamped: record.default_was_clamped,
+        emitted_kinds: &record.emitted_kinds,
+        positives: outcome.positives,
+        negatives: outcome.negatives,
+        singleton_policy: &record.singleton_policy,
+        singleton_policy_version: record.singleton_policy_version,
+        degenerate_policy_version: record.degenerate_policy_version,
+        affected_singleton_classes: record.affected_singleton_classes,
+        deviation: &record.deviation,
+        dump: dump.map(|path| path.display().to_string()),
+    };
+    serde_json::to_string_pretty(&report).map_err(|error| {
+        CliError::ValidationFailed(format!("Failed to encode the pair report: {error}"))
+    })
+}
+
+/// Human-readable `apr data pairs` output.
+fn render_pairs_human(
+    selection_path: &Path,
+    data: &Path,
+    outcome: &PairsOutcome,
+    dump: Option<&Path>,
+) {
+    let record = &outcome.record;
+    output::section("Contrastive Pair Stream");
+    println!();
+    output::kv("Selection", selection_path.display());
+    output::kv("Data", data.display());
+    output::kv("Selection hash", &record.selection_hash);
+    output::kv("Pair manifest hash", &outcome.manifest_hash);
+    output::kv("Root seed", record.root_seed);
+    output::kv(
+        "Strategy",
+        format!("{} (v{})", record.strategy, record.strategy_version),
+    );
+    output::kv(
+        "Budget",
+        format!(
+            "{} pair(s) per epoch, hard cap {}{}",
+            outcome.budget,
+            outcome.hard_cap,
+            if record.default_was_clamped {
+                " (the DEFAULT budget was clamped by the cap)"
+            } else {
+                ""
+            }
+        ),
+    );
+    output::kv("Emitted kinds", &record.emitted_kinds);
+    output::kv(
+        "Counts",
+        format!(
+            "{} positive, {} negative",
+            outcome.positives, outcome.negatives
+        ),
+    );
+    output::kv(
+        "Singleton policy",
+        format!(
+            "{} (v{}), {} affected class(es)",
+            record.singleton_policy,
+            record.singleton_policy_version,
+            record.affected_singleton_classes
+        ),
+    );
+    output::kv(
+        "Degenerate policy",
+        format!("v{}", record.degenerate_policy_version),
+    );
+    if let Some(path) = dump {
+        output::kv("Dump", path.display());
+    }
+    println!();
+    println!("Declared deviations from the pinned SetFit reference (Aprender policy):");
+    for (index, clause) in record.deviation.iter().enumerate() {
+        println!("  {}. {clause}", index + 1);
+    }
+    println!();
+    println!(
+        "{} Pairs are REPLAYED from this tuple, not stored; only the hash above is persisted.",
+        "OK".green()
+    );
+}
+
 /// Replay a selection manifest against its dataset and report the bounded pair stream.
 ///
 /// # Errors
@@ -492,10 +790,13 @@ pub(crate) fn run_pairs(
     force: bool,
     json_output: bool,
 ) -> Result<()> {
-    let _ = (selection, data, budget, hard_cap, dump, force, json_output);
-    Err(CliError::ValidationFailed(
-        "apr data pairs is not yet implemented (plan 02-09 Task 3)".to_string(),
-    ))
+    let outcome = pairs_outcome(selection, data, budget, hard_cap, dump, force)?;
+    if json_output {
+        println!("{}", pairs_report_json(selection, data, &outcome, dump)?);
+    } else {
+        render_pairs_human(selection, data, &outcome, dump);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -505,6 +806,10 @@ mod tests {
         self, fixtures, CANONICAL_REVISION, LABEL_NAMES, MANIFEST_FILE,
     };
     use crate::TweetEvalStanceProfile;
+    use aprender_contrastive_data::hash::{exact_hash, hex, normalized_hash};
+    use aprender_contrastive_data::manifest::SelectedExampleRecord;
+    use aprender_contrastive_data::pairs::{parse_pair_dump, validate_pair_records};
+    use aprender_contrastive_data::select::Selection;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -1038,5 +1343,474 @@ mod tests {
             .map(|row| row.id.as_str())
             .collect();
         assert_eq!(written, selection.ordered_ids());
+    }
+
+    // --------------------------------------------------------------------------------
+    // `apr data pairs`
+    // --------------------------------------------------------------------------------
+
+    /// A selected canonical directory plus the manifest `apr data select` wrote into it.
+    fn selected(root: &Path) -> (PathBuf, PathBuf) {
+        let data = canonical_dir(root);
+        run_select(&data, 8, 13, false, None, false, false).expect("select succeeds");
+        let manifest = data.join(SELECTION_MANIFEST_FILE);
+        (data, manifest)
+    }
+
+    /// Rewrite a selection manifest with a RESEALED envelope digest.
+    ///
+    /// Resealing matters: `SelectionManifest::from_bytes` verifies the digest before it
+    /// returns, so an un-resealed edit never reaches `Selection::replay` at all and would
+    /// test the parser instead of the replay ladder. The digest is recomputed with the
+    /// CRATE's own `hash::exact_hash` — `semantic_hash` is SHA-256 over
+    /// `payload.to_canonical_bytes()` — so this module still implements no hashing.
+    fn reseal(path: &Path, mutate: impl FnOnce(&mut SelectionManifest)) {
+        let bytes = fs::read(path).expect("selection manifest readable");
+        let mut manifest =
+            SelectionManifest::from_bytes(&bytes).expect("the honest manifest parses");
+        mutate(&mut manifest);
+        let payload = manifest
+            .payload
+            .to_canonical_bytes()
+            .expect("payload serializes");
+        let text = core::str::from_utf8(&payload).expect("canonical payload is UTF-8");
+        manifest.semantic_hash = hex(&exact_hash(text));
+        fs::write(path, manifest.to_file_bytes().expect("envelope serializes"))
+            .expect("selection manifest writable");
+        // The forgery must be internally consistent, or every test below would be
+        // measuring the parser rather than the ladder it targets.
+        let reread = fs::read(path).expect("re-read");
+        SelectionManifest::from_bytes(&reread).expect("the resealed forgery parses cleanly");
+    }
+
+    /// A training row of class `label` that the selection did NOT pick, with its real
+    /// content hashes read out of `train.jsonl`.
+    fn unselected_row(
+        data: &Path,
+        manifest: &SelectionManifest,
+        label: usize,
+    ) -> SelectedExampleRecord {
+        let taken: Vec<&str> = manifest
+            .payload
+            .ordered_examples
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect();
+        let jsonl = fs::read_to_string(data.join("train.jsonl")).expect("train split readable");
+        for line in jsonl.lines() {
+            let row: serde_json::Value = serde_json::from_str(line).expect("train row is JSON");
+            let id = row["id"].as_str().expect("row id");
+            let row_label =
+                usize::try_from(row["label"].as_u64().expect("row label")).expect("label fits");
+            let input = row["input"].as_str().expect("row input");
+            if row_label == label && !taken.contains(&id) {
+                return SelectedExampleRecord {
+                    id: id.to_string(),
+                    label,
+                    exact_hash: hex(&exact_hash(input)),
+                    normalized_hash: hex(&normalized_hash(input)),
+                };
+            }
+        }
+        panic!("the fixture must hold an unselected row of class {label}");
+    }
+
+    fn replayed_selection(data: &Path, manifest_path: &Path) -> Selection {
+        let bytes = fs::read(manifest_path).expect("selection manifest readable");
+        let manifest = SelectionManifest::from_bytes(&bytes).expect("manifest parses");
+        let mut ledger = AccessLedger::new();
+        let dataset = read_attested_canonical(data, &mut ledger).expect("attested directory");
+        Selection::replay(&manifest, &dataset, &mut ledger).expect("strict replay succeeds")
+    }
+
+    #[test]
+    fn pairs_reports_a_stable_hash_and_the_two_kind_counts() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+
+        let first =
+            pairs_outcome(&manifest, &data, None, None, None, false).expect("pairs succeeds");
+        let second =
+            pairs_outcome(&manifest, &data, None, None, None, false).expect("pairs succeeds again");
+
+        assert_eq!(
+            first.manifest_hash, second.manifest_hash,
+            "two runs over the same inputs commit to the same tuple"
+        );
+        assert_eq!(first.manifest_hash.len(), 64, "the hash is rendered as hex");
+        assert!(first.budget > 0);
+        assert_eq!(
+            first.positives + first.negatives,
+            first.budget,
+            "every emitted pair is counted exactly once"
+        );
+        assert!(
+            first.positives > 0 && first.negatives > 0,
+            "3x8 emits both kinds"
+        );
+        assert_eq!(first.record.emitted_kinds, "both");
+        assert_eq!(first.record.deviation.len(), 3);
+    }
+
+    #[test]
+    fn a_different_seed_commits_to_a_different_pair_manifest_hash() {
+        let temp = TempDir::new().expect("tempdir");
+        let data = canonical_dir(temp.path());
+        run_select(&data, 8, 13, false, None, false, false).expect("select at 13");
+        let thirteen = pairs_outcome(
+            &data.join(SELECTION_MANIFEST_FILE),
+            &data,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("pairs at 13");
+        run_select(&data, 8, 17, false, None, true, false).expect("select at 17");
+        let seventeen = pairs_outcome(
+            &data.join(SELECTION_MANIFEST_FILE),
+            &data,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("pairs at 17");
+
+        assert_ne!(
+            thirteen.manifest_hash, seventeen.manifest_hash,
+            "the selection hash is inside the digest, so a different selection cannot \
+             collide with it"
+        );
+    }
+
+    #[test]
+    fn an_odd_budget_splits_the_two_kinds_by_exactly_one() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+
+        let outcome =
+            pairs_outcome(&manifest, &data, Some(255), None, None, false).expect("pairs succeeds");
+
+        assert_eq!(outcome.budget, 255);
+        let delta = outcome.positives.abs_diff(outcome.negatives);
+        assert_eq!(delta, 1, "an odd budget cannot be split evenly");
+    }
+
+    #[test]
+    fn the_dump_round_trips_through_parse_pair_dump_and_validate_pair_records() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+        let dump = temp.path().join("pairs.jsonl");
+
+        run_pairs(&manifest, &data, Some(64), None, Some(&dump), false, false)
+            .expect("pairs with --dump succeeds");
+
+        let bytes = fs::read(&dump).expect("dump readable");
+        assert_eq!(
+            bytes.iter().filter(|b| **b == b'\n').count(),
+            64,
+            "one JSON line per pair, in stream order"
+        );
+        let records = parse_pair_dump(&bytes).expect("the dump parses as untrusted records");
+        let selection = replayed_selection(&data, &manifest);
+        let validated = validate_pair_records(&records, &selection)
+            .expect("every endpoint is in the selection");
+        assert_eq!(validated.len(), 64);
+
+        // The mirror: the validated pairs ARE the sampler's own stream, pair for pair.
+        // Without this, "the dump parses" would be satisfied by a dump of anything.
+        let cfg = PairConfig {
+            budget: Some(64),
+            ..PairConfig::new(selection.root_seed())
+        };
+        let sampler = PairSampler::new(&selection, &cfg).expect("sampler");
+        let mine: Vec<_> = (0..64)
+            .map(|ordinal| sampler.pair_at(ordinal).expect("pair"))
+            .collect();
+        assert_eq!(validated, mine);
+    }
+
+    #[test]
+    fn the_json_report_carries_the_hash_the_budget_the_policies_and_the_deviation() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+        let outcome =
+            pairs_outcome(&manifest, &data, None, None, None, false).expect("pairs succeeds");
+
+        let json = pairs_report_json(&manifest, &data, &outcome, None).expect("report serializes");
+        for needle in [
+            "\"pair_manifest_hash\"",
+            "\"budget\"",
+            "\"default_was_clamped\"",
+            "\"hard_cap\"",
+            "\"emitted_kinds\"",
+            "\"positives\"",
+            "\"negatives\"",
+            "\"singleton_policy\"",
+            "\"singleton_policy_version\"",
+            "\"degenerate_policy_version\"",
+            "\"deviation\"",
+            "\"selection_hash\"",
+        ] {
+            assert!(
+                json.contains(needle),
+                "the --json report must carry {needle}"
+            );
+        }
+        assert!(json.contains(&outcome.manifest_hash));
+        assert!(
+            json.contains("SELF-PAIRS ARE EXCLUDED"),
+            "the three deviation clauses are copied verbatim, not summarized"
+        );
+    }
+
+    // ---- rejections -----------------------------------------------------------------
+
+    #[test]
+    fn a_hand_edited_manifest_is_refused_before_any_replay_work() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+        let bytes = fs::read(&manifest).expect("manifest readable");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("manifest JSON");
+        value["payload"]["root_seed"] = serde_json::Value::from(17_u64);
+        fs::write(
+            &manifest,
+            serde_json::to_vec_pretty(&value).expect("re-encode"),
+        )
+        .expect("manifest writable");
+
+        let error = run_pairs(&manifest, &data, None, None, None, false, false)
+            .expect_err("an edited manifest is not a manifest");
+        let text = message(&error);
+        assert!(
+            text.contains("semantic hash") || text.contains("hash mismatch"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_resealed_manifest_naming_an_absent_id_is_refused_and_the_id_is_named() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+        reseal(&manifest, |m| {
+            m.payload.ordered_examples[0].id = "train:999999".to_string();
+        });
+
+        let error = run_pairs(&manifest, &data, None, None, None, false, false)
+            .expect_err("an id outside the selection pool is refused");
+        let text = message(&error);
+        assert!(text.contains("train:999999"), "the id is named: {text}");
+    }
+
+    #[test]
+    fn a_resealed_manifest_with_a_wrong_row_hash_is_refused_and_the_id_is_named() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+        let victim = {
+            let bytes = fs::read(&manifest).expect("readable");
+            SelectionManifest::from_bytes(&bytes)
+                .expect("parses")
+                .payload
+                .ordered_examples[0]
+                .id
+                .clone()
+        };
+        reseal(&manifest, |m| {
+            m.payload.ordered_examples[0].exact_hash = "0".repeat(64);
+        });
+
+        let error = run_pairs(&manifest, &data, None, None, None, false, false)
+            .expect_err("a recorded row hash that disagrees with the split is refused");
+        let text = message(&error);
+        assert!(text.contains(&victim), "the row is named: {text}");
+        assert!(text.contains("hash"), "{text}");
+    }
+
+    #[test]
+    fn a_resealed_manifest_with_a_wrong_ordered_list_is_caught_only_by_recomputation() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+
+        // The CONTROL first: the untouched manifest replays. Without it, "the forgery is
+        // refused" would also be satisfied by a fixture that had become unusable.
+        pairs_outcome(&manifest, &data, None, None, None, false)
+            .expect("the honest manifest replays");
+
+        let substitute = {
+            let bytes = fs::read(&manifest).expect("readable");
+            let parsed = SelectionManifest::from_bytes(&bytes).expect("parses");
+            unselected_row(&data, &parsed, 0)
+        };
+        reseal(&manifest, |m| {
+            // Same class, same count, same ordering, REAL row hashes, resealed envelope.
+            // Every static rung of the ladder accepts this; only recomputing the ordered
+            // list from the seed rejects it.
+            m.payload.ordered_examples[0] = substitute.clone();
+        });
+
+        let error = run_pairs(&manifest, &data, None, None, None, false, false)
+            .expect_err("a selection no seed could have produced is refused");
+        let text = message(&error);
+        assert!(
+            text.contains("ordered_examples") || text.contains("replay"),
+            "the recomputation rung is what fired: {text}"
+        );
+    }
+
+    #[test]
+    fn replaying_against_a_different_dataset_directory_is_a_fingerprint_mismatch() {
+        let temp = TempDir::new().expect("tempdir");
+        let (_data, manifest) = selected(temp.path());
+        let other = prepare(
+            temp.path(),
+            "other",
+            "a different preparation",
+            TweetEvalStanceProfile::Canonical,
+        );
+
+        let error = run_pairs(&manifest, &other, None, None, None, false, false)
+            .expect_err("a selection may only be replayed against the dataset it was drawn from");
+        let text = message(&error);
+        assert!(text.contains("fingerprint"), "{text}");
+    }
+
+    #[test]
+    fn a_compatibility_directory_fails_at_attested_ingest_for_pairs_too() {
+        let temp = TempDir::new().expect("tempdir");
+        let (_data, manifest) = selected(temp.path());
+        let compat = compatibility_dir(temp.path());
+
+        let error = run_pairs(&manifest, &compat, None, None, None, false, false)
+            .expect_err("the pairs path uses the same attested door");
+        let text = message(&error);
+        assert!(text.contains("profile"), "{text}");
+        assert!(text.contains("compatibility"), "{text}");
+    }
+
+    #[test]
+    fn a_stale_schema_directory_fails_at_attested_ingest_for_pairs_too() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+        edit_manifest(&data, |value| {
+            value["schema_version"] = serde_json::Value::from(1_u64);
+        });
+
+        let error = run_pairs(&manifest, &data, None, None, None, false, false)
+            .expect_err("a version-1 directory has no migration on either command");
+        let text = message(&error);
+        assert!(text.contains("apr data tweet-eval-stance"), "{text}");
+    }
+
+    #[test]
+    fn a_zero_budget_and_a_zero_hard_cap_are_distinct_typed_errors() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+
+        let zero_budget = message(
+            &run_pairs(&manifest, &data, Some(0), None, None, false, false)
+                .expect_err("a zero budget emits nothing"),
+        );
+        assert!(zero_budget.contains("budget"), "{zero_budget}");
+
+        let zero_cap = message(
+            &run_pairs(&manifest, &data, None, Some(0), None, false, false)
+                .expect_err("a zero cap can never be satisfied"),
+        );
+        assert!(
+            zero_cap.contains("hard_cap") || zero_cap.contains("hard-cap"),
+            "{zero_cap}"
+        );
+        assert_ne!(
+            zero_budget, zero_cap,
+            "a request defect and a configuration defect are different messages"
+        );
+    }
+
+    #[test]
+    fn a_budget_above_the_hard_cap_names_both_numbers_and_the_flag_to_raise() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+
+        let error = run_pairs(&manifest, &data, Some(500), Some(100), None, false, false)
+            .expect_err("the cap BINDS an explicit budget; it does not clamp it");
+        let text = message(&error);
+        assert!(text.contains("500"), "{text}");
+        assert!(text.contains("100"), "{text}");
+        assert!(
+            text.contains("--hard-cap"),
+            "the remedy names the flag: {text}"
+        );
+    }
+
+    #[test]
+    fn a_missing_selection_manifest_names_the_command_that_writes_one() {
+        let temp = TempDir::new().expect("tempdir");
+        let data = canonical_dir(temp.path());
+
+        let error = run_pairs(
+            &data.join(SELECTION_MANIFEST_FILE),
+            &data,
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect_err("there is no selection to replay");
+        let text = message(&error);
+        assert!(text.contains(SELECTION_MANIFEST_FILE), "{text}");
+        assert!(text.contains("apr data select"), "actionable: {text}");
+    }
+
+    // ---- the dump inherits Task 2's write safety ------------------------------------
+
+    #[test]
+    fn the_dump_is_not_clobbered_without_force_and_force_replaces_it() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+        let dump = temp.path().join("pairs.jsonl");
+        fs::write(&dump, b"pre-existing\n").expect("dump seeded");
+
+        let error = run_pairs(&manifest, &data, Some(8), None, Some(&dump), false, false)
+            .expect_err("no-clobber is the default for the dump too");
+        assert!(message(&error).contains("--force"), "{}", message(&error));
+        assert_eq!(
+            fs::read(&dump).expect("dump readable"),
+            b"pre-existing\n",
+            "the refused write changed nothing"
+        );
+
+        run_pairs(&manifest, &data, Some(8), None, Some(&dump), true, false)
+            .expect("--force replaces the dump");
+        assert_eq!(
+            fs::read_to_string(&dump)
+                .expect("dump readable")
+                .lines()
+                .count(),
+            8
+        );
+    }
+
+    #[test]
+    fn an_induced_mid_write_failure_on_the_dump_leaves_no_artifact_and_no_temp_file() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, manifest) = selected(temp.path());
+        let dumps = temp.path().join("dumps");
+        fs::create_dir_all(&dumps).expect("dump dir");
+        let dump = dumps.join("pairs.jsonl");
+
+        FAIL_BEFORE_RENAME.with(|flag| flag.set(true));
+        let error = run_pairs(&manifest, &data, Some(8), None, Some(&dump), false, false)
+            .expect_err("the induced failure must surface on the dump path too");
+        FAIL_BEFORE_RENAME.with(|flag| flag.set(false));
+
+        assert!(message(&error).contains("induced"), "{}", message(&error));
+        assert!(!dump.exists(), "no partial dump survives");
+        assert_eq!(
+            fs::read_dir(&dumps).expect("dump dir").count(),
+            0,
+            "no temp file was left behind"
+        );
     }
 }
