@@ -1454,6 +1454,80 @@ mod pair_manifest_tests {
         assert_eq!(after.materialized_pairs, 0);
         assert_ne!(digest, [0_u8; 32]);
     }
+
+    /// The twelve-byte pair encoding, field by field (plan 02-08 mutation triage).
+    ///
+    /// `cargo mutants` found `pair_canonical_bytes -> [0; 12]` and `-> [1; 12]` both
+    /// surviving. Under either, the digest depends on the record and the pair COUNT and on
+    /// NOTHING ABOUT THE PAIRS — the streamed-stream half of the attestation would attest
+    /// nothing at all, and every existing hash test still passed because each of them
+    /// varies the HEADER. The gap is precisely that no test varied the stream while holding
+    /// the header fixed.
+    #[test]
+    fn the_pair_wire_encoding_is_lo_then_hi_then_target_bits_little_endian() {
+        let sel = selection();
+        let sampler = sampler_with(&sel, &PairConfig::new(13));
+        let pair = sampler.pair_at(0).expect("ordinal 0 is inside any budget");
+
+        let bytes = super::pair_canonical_bytes(&pair);
+        assert_eq!(&bytes[0..4], &pair.pair.lo().ordinal().to_le_bytes());
+        assert_eq!(&bytes[4..8], &pair.pair.hi().ordinal().to_le_bytes());
+        assert_eq!(&bytes[8..12], &pair.target.to_bits().to_le_bytes());
+
+        // Field ORDER is the part a re-derivation cannot check, so it is pinned against a
+        // second pair whose ordinals differ: lo must move the first four bytes and hi the
+        // second four, not the reverse.
+        let other = sampler.pair_at(1).expect("ordinal 1 is inside this budget");
+        assert_ne!(pair.pair, other.pair, "the two ordinals must differ");
+        let other_bytes = super::pair_canonical_bytes(&other);
+        assert_ne!(
+            bytes, other_bytes,
+            "two different pairs must not encode to the same twelve bytes"
+        );
+    }
+
+    /// The same HEADER over two DIFFERENT streams must not collide (02-08 triage).
+    ///
+    /// The behavioural half of the test above. `assert_record_describes` compares only
+    /// `selection_hash` and `budget`, so one record legitimately describes both samplers
+    /// here — same selection, same budget, different pair seed. If the pair bytes did not
+    /// reach the hasher, these two digests would be equal.
+    #[test]
+    fn two_streams_under_one_header_produce_different_manifest_hashes() {
+        let sel = selection();
+        let budget = 64;
+        let cfg_of = |seed: u64| PairConfig {
+            budget: Some(budget),
+            ..PairConfig::new(seed)
+        };
+        let first = sampler_with(&sel, &cfg_of(13));
+        let second = sampler_with(&sel, &cfg_of(17));
+
+        // Vacuity guard: the streams must genuinely differ, or the digests would be equal
+        // for an entirely honest reason.
+        let stream = |s: &PairSampler<'_>| -> Vec<(u32, u32, u32)> {
+            (0..budget)
+                .map(|ordinal| {
+                    let p = s.pair_at(ordinal).expect("inside the budget");
+                    (
+                        p.pair.lo().ordinal(),
+                        p.pair.hi().ordinal(),
+                        p.target.to_bits(),
+                    )
+                })
+                .collect()
+        };
+        assert_ne!(stream(&first), stream(&second));
+
+        let header = PairReplayRecord::from_sampler(&first);
+        let a = pair_manifest_hash(&first, &header).expect("hashes");
+        let b = pair_manifest_hash(&second, &header)
+            .expect("the header describes both samplers: same selection, same budget");
+        assert_ne!(
+            a, b,
+            "the streamed pairs must reach the digest, not just the header"
+        );
+    }
 }
 
 #[cfg(test)]

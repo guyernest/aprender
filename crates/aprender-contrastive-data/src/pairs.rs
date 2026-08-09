@@ -1538,6 +1538,47 @@ mod pair_tests {
             other => panic!("expected BudgetExceedsCapacity, got {other:?}"),
         }
     }
+
+    /// The clamp flag at the exact boundary (plan 02-08 mutation triage).
+    ///
+    /// `cargo mutants` found `closed_form > hard_cap` -> `>=` surviving: at
+    /// `closed_form == hard_cap` the `min` picks the same number either way, so nothing
+    /// downstream changes EXCEPT the reported flag. That flag is copied verbatim into the
+    /// replay record, and a record claiming `default_was_clamped: true` for a run that was
+    /// not clamped is a manifest asserting the stream differs from the request — the same
+    /// class of quiet untruth the binding hard cap exists to prevent.
+    #[test]
+    fn a_default_budget_exactly_equal_to_the_hard_cap_is_not_reported_as_clamped() {
+        let sizes = [8_u64, 8, 8];
+        let closed = default_epoch_budget(&sizes).expect("[8,8,8] never overflows");
+        assert_eq!(closed, 384, "2 * max(84, 192)");
+
+        let at_the_boundary = resolve_budget(
+            &PairConfig {
+                hard_cap: Some(closed),
+                ..PairConfig::new(13)
+            },
+            &sizes,
+        )
+        .expect("a cap equal to the closed form resolves");
+        assert_eq!(at_the_boundary, (closed, false), "== is NOT a clamp");
+
+        // One below, and it genuinely is — without this the assertion above would also
+        // hold against a resolver that never reports a clamp at all.
+        let one_below = resolve_budget(
+            &PairConfig {
+                hard_cap: Some(closed - 1),
+                ..PairConfig::new(13)
+            },
+            &sizes,
+        )
+        .expect("a cap one below the closed form resolves");
+        assert_eq!(
+            one_below,
+            (closed - 1, true),
+            "one below, the clamp engages"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2153,6 +2194,53 @@ mod pair_stream_tests {
         assert_eq!(one_class.total_examples(), 6);
         assert_eq!(one_class.class_count(), 1);
         assert_eq!(DEFAULT_HARD_CAP, 1_048_576);
+    }
+
+    /// Every capacity accessor pinned on TWO layouts (plan 02-08 mutation triage).
+    ///
+    /// `cargo mutants` found `PairLayout::class_count -> 1`,
+    /// `PairLayout::positive_capacity -> 0 | 1` and `PairLayout::negative_capacity -> 0 | 1`
+    /// all surviving: the closed-form FUNCTIONS were pinned everywhere, but the accessors
+    /// that hand their results to `PairReplayRecord::from_sampler` were not, so a manifest
+    /// could have recorded a capacity of 0 for a layout with 192 negative pairs and nothing
+    /// would have been red.
+    ///
+    /// Two layouts rather than one, deliberately: a single layout is satisfied by an
+    /// accessor returning the right constant, and returning a constant is exactly the
+    /// mutation being killed.
+    #[test]
+    fn layout_capacity_accessors_agree_with_the_closed_forms_on_two_layouts() {
+        for sizes in [vec![8_u64, 8, 8], vec![8_u64, 4, 8]] {
+            let subject = default_layout(&sizes);
+            assert_eq!(
+                subject.class_count(),
+                sizes.len(),
+                "class_count for {sizes:?}"
+            );
+            assert_eq!(
+                subject.positive_capacity(),
+                positive_capacity(&sizes).expect("no overflow"),
+                "positive_capacity for {sizes:?}"
+            );
+            assert_eq!(
+                subject.negative_capacity(),
+                negative_capacity(&sizes).expect("no overflow"),
+                "negative_capacity for {sizes:?}"
+            );
+        }
+
+        // The two layouts must actually DISAGREE, or "agrees on two layouts" is one claim
+        // wearing two hats.
+        let even = default_layout(&[8, 8, 8]);
+        let uneven = default_layout(&[8, 4, 8]);
+        assert_eq!(
+            (even.positive_capacity(), even.negative_capacity()),
+            (84, 192)
+        );
+        assert_eq!(
+            (uneven.positive_capacity(), uneven.negative_capacity()),
+            (62, 128)
+        );
     }
 }
 

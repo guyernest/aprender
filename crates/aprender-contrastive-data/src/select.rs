@@ -1216,6 +1216,69 @@ mod select_tests {
         assert_eq!(selection.len(), 24);
     }
 
+    /// `SelectedId::ordinal` IS the position in the ordered list (plan 02-08 triage).
+    ///
+    /// `cargo mutants` found `SelectedId::ordinal -> 0` and `-> 1` both surviving. The
+    /// ordinal is what the pair wire format encodes and what `SelfPair` names, so a
+    /// constant ordinal would make every pair a self-pair on paper while the identifiers
+    /// stayed correct — and nothing asserted the accessor.
+    #[test]
+    fn selected_id_ordinals_are_the_positions_in_the_ordered_list() {
+        let mut ledger = AccessLedger::new();
+        let dataset = test_corpus::dataset(12, &mut ledger);
+        let selection = test_corpus::select(&dataset, 13, 8, &mut ledger);
+        assert_eq!(
+            selection.len(),
+            24,
+            "pin the population before relating over it"
+        );
+
+        let mut seen = std::collections::BTreeSet::new();
+        for (index, row) in selection.examples().iter().enumerate() {
+            let selected = selection
+                .selected_id(&row.id)
+                .expect("every selected example resolves to an ordinal");
+            assert_eq!(
+                selected.ordinal() as usize,
+                index,
+                "the ordinal of {} must be its position",
+                row.id
+            );
+            assert_eq!(selection.id_of(selected), row.id, "and it must round-trip");
+            assert!(seen.insert(selected.ordinal()), "ordinals must be distinct");
+        }
+        assert_eq!(seen.len(), 24);
+    }
+
+    /// The validation fingerprint is the witness digest, not a placeholder (02-08 triage).
+    ///
+    /// `cargo mutants` found `validation_fingerprint_hex -> ""` and `-> "xyzzy"` surviving.
+    /// That field is what a replay compares to prove the manifest describes a dataset with
+    /// THIS validation split (D-19); an empty string would have compared equal to another
+    /// empty string and the isolation evidence would have been two placeholders agreeing.
+    #[test]
+    fn the_validation_fingerprint_is_the_witness_digest_and_differs_from_the_dataset_one() {
+        let mut ledger = AccessLedger::new();
+        let dataset = test_corpus::dataset(12, &mut ledger);
+        let selection = test_corpus::select(&dataset, 13, 8, &mut ledger);
+
+        let expected = dataset.validation_witness().fingerprint_hex();
+        assert_eq!(selection.validation_fingerprint_hex(), expected);
+        assert_eq!(expected.len(), 64, "SHA-256 rendered as lowercase hex");
+        assert!(
+            expected
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "not lowercase hex: {expected}"
+        );
+        // Different domain tags over the same bytes, so a swap of the two fields is
+        // detectable rather than invisible.
+        assert_ne!(
+            selection.validation_fingerprint_hex(),
+            selection.dataset_fingerprint_hex()
+        );
+    }
+
     proptest! {
         /// Determinism over the seed space, not only over the ten contracted seeds.
         #[test]
