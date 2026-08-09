@@ -18,7 +18,7 @@ only then permits complete TweetEval comparison claims against the existing 9B L
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Differentiable MiniLM Conformance** - Prove the pinned encoder's shared batched Rust path matches fixtures and updates named parameters through the graph. (completed 2026-08-08)
-- [x] **Phase 2: Deterministic Pair and Data Protocol** - Make few-shot selection and bounded pair generation reproducible, provenance-complete, leakage-safe, and non-quadratic. (completed 2026-08-09)
+- [ ] **Phase 2: Deterministic Pair and Data Protocol** - Make few-shot selection and bounded pair generation reproducible, provenance-complete, leakage-safe, and non-quadratic. (code-complete 2026-08-09; verification returned `human_needed` — 4 items pending in `02-HUMAN-UAT.md`)
 - [ ] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit.
 - [ ] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs.
 - [ ] **Phase 5: Benchmark and Claims Gate** - Produce the complete reproducible 40-cell SetFit-versus-9B-LoRA evidence set and reject incomplete or unequal claims.
