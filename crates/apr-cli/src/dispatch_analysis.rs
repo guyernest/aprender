@@ -741,6 +741,43 @@ fn dispatch_data_command(command: &DataCommands, cli: &Cli) -> std::result::Resu
             cli.offline,
             json,
         ),
+        // `cli.offline` is deliberately NOT passed to these two arms. Neither command
+        // opens a socket — `aprender-contrastive-data` cannot (the D-04 bytes boundary is
+        // enforced by `make contrastive-data-boundary`) and the adapter only reads local
+        // files. Threading `offline` through so it could be ignored would advertise a
+        // network switch on a command that has no network to switch off.
+        DataCommands::Select {
+            data,
+            shots,
+            seed,
+            any_seed,
+            output,
+            force,
+        } => commands::data_contrastive::run_select(
+            data,
+            *shots,
+            *seed,
+            *any_seed,
+            output.as_deref(),
+            *force,
+            json,
+        ),
+        DataCommands::Pairs {
+            selection,
+            data,
+            budget,
+            hard_cap,
+            dump,
+            force,
+        } => commands::data_contrastive::run_pairs(
+            selection,
+            data,
+            *budget,
+            *hard_cap,
+            dump.as_deref(),
+            *force,
+            json,
+        ),
         DataCommands::Audit {
             file,
             num_classes,
