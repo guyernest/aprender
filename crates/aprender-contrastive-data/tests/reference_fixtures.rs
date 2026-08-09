@@ -87,8 +87,16 @@ fn assert_measured_counts(f: &MeasuredFixture) {
     // twice that maximum. Asserted rather than trusted: this is the relation that makes
     // `total` meaningful.
     assert_eq!(f.len_pos, f.len_neg, "{id}: oversampling must balance");
-    assert_eq!(f.len_pos, f.stored_pos.max(f.stored_neg), "{id}: len != max");
-    assert_eq!(f.total, f.len_pos + f.len_neg, "{id}: total != len_pos+len_neg");
+    assert_eq!(
+        f.len_pos,
+        f.stored_pos.max(f.stored_neg),
+        "{id}: len != max"
+    );
+    assert_eq!(
+        f.total,
+        f.len_pos + f.len_neg,
+        "{id}: total != len_pos+len_neg"
+    );
     // `np.triu_indices` walks i <= j, so one unordered pair cannot appear both ways.
     assert_eq!(f.orientation_duplicate_count, 0, "{id}: orientation dup");
     assert!(
@@ -99,7 +107,10 @@ fn assert_measured_counts(f: &MeasuredFixture) {
     // positives survive depends on the reference's hardcoded permutation, so the fixture
     // must say so instead of pretending the number is layout-derived.
     if f.max_pairs == -1 {
-        assert!(f.rng_dependent_fields.is_empty(), "{id}: unexpected rng dep");
+        assert!(
+            f.rng_dependent_fields.is_empty(),
+            "{id}: unexpected rng dep"
+        );
         assert_eq!(f.self_pair_count, f.n_examples, "{id}: diagonal incomplete");
     } else {
         assert_eq!(
@@ -116,11 +127,17 @@ fn assert_measured_provenance(f: &MeasuredFixture) {
         f.derivation.contains("MEASURED"),
         "{id}: a measured fixture must say it was measured, not computed"
     );
-    assert!(f.reference_notes.len() >= 4, "{id}: reference notes missing");
+    assert!(
+        f.reference_notes.len() >= 4,
+        "{id}: reference notes missing"
+    );
     assert!(!f.why_this_layout.is_empty(), "{id}: layout unexplained");
     assert_eq!(f.setfit_version, "1.1.3", "{id}: wrong reference pin");
     assert_eq!(f.uv_lock_sha256.len(), 64, "{id}: uv.lock digest malformed");
-    assert!(f.uv_version.starts_with("uv "), "{id}: uv version malformed");
+    assert!(
+        f.uv_version.starts_with("uv "),
+        "{id}: uv version malformed"
+    );
 }
 
 #[test]
@@ -152,18 +169,26 @@ fn every_measured_fixture_deserializes_and_is_internally_consistent() {
 fn assert_contracted_shape(f: &ContractedFixture) {
     let id = &f.fixture_id;
     assert_eq!(f.fixture_family, "aprender_contracted", "{id}: family");
-    assert!(f.self_pairs_excluded, "{id}: self-pairs are excluded (D-14)");
+    assert!(
+        f.self_pairs_excluded,
+        "{id}: self-pairs are excluded (D-14)"
+    );
     assert_eq!(
         f.n_examples,
         f.layout.iter().sum::<u64>(),
         "{id}: n_examples disagrees with the layout"
     );
+    assert_eq!(f.n_classes, f.layout.len() as u64, "{id}: n_classes wrong");
+    assert!(!f.why_this_layout.is_empty(), "{id}: layout unexplained");
     assert_eq!(
         f.measured_counterpart,
         format!("setfit_measured_{id}.json"),
         "{id}: counterpart filename must resolve"
     );
-    assert!(!f.divergence_note.is_empty(), "{id}: divergence unexplained");
+    assert!(
+        !f.divergence_note.is_empty(),
+        "{id}: divergence unexplained"
+    );
     assert!(
         f.derivation.contains("COMPUTED"),
         "{id}: a contracted fixture is computed from closed forms, never measured"
@@ -243,12 +268,17 @@ fn every_contracted_fixture_deserializes_and_is_internally_consistent() {
 
     let worked = &contracted["8_4_8"];
     assert_eq!(worked.positive_capacity, 62, "contracted [8,4,8] positives");
-    assert_eq!(worked.negative_capacity, 128, "contracted [8,4,8] negatives");
-    assert_eq!(worked.default_epoch_budget, 256, "contracted [8,4,8] budget");
+    assert_eq!(
+        worked.negative_capacity, 128,
+        "contracted [8,4,8] negatives"
+    );
+    assert_eq!(
+        worked.default_epoch_budget, 256,
+        "contracted [8,4,8] budget"
+    );
     assert_eq!(contracted["8_8_8"].default_epoch_budget, 384, "8-shot D-14");
     assert_eq!(
-        contracted["64_64_64"].default_epoch_budget,
-        24576,
+        contracted["64_64_64"].default_epoch_budget, 24576,
         "64-shot D-14"
     );
 }
@@ -273,8 +303,11 @@ fn layout_4_1_divergence_is_recorded_in_both_families() {
         "the [4,1] families must DISAGREE; if they now agree, either the reference \
          fixture was regenerated from the docs or Aprender started emitting self-pairs"
     );
-    assert_eq!(c.measured_total, m.total, "the contracted row must quote the \
-         measured number it diverges from, so the divergence is visible in one file");
+    assert_eq!(
+        c.measured_total, m.total,
+        "the contracted row must quote the \
+         measured number it diverges from, so the divergence is visible in one file"
+    );
 }
 
 #[test]
@@ -285,7 +318,10 @@ fn k_equals_n_adversarial_layout_has_a_contracted_reference_row() {
     let f = &contracted["singletons_32"];
     assert_eq!(f.layout.len(), 32, "K = N = 32");
     assert!(f.layout.iter().all(|&n| n == 1), "every class a singleton");
-    assert_eq!(f.positive_capacity, 0, "a singleton contributes no positives");
+    assert_eq!(
+        f.positive_capacity, 0,
+        "a singleton contributes no positives"
+    );
     assert_eq!(f.negative_capacity, 496, "C(32, 2)");
     assert_eq!(f.default_epoch_budget, 992, "2 * 496");
     assert_eq!(
@@ -294,7 +330,10 @@ fn k_equals_n_adversarial_layout_has_a_contracted_reference_row() {
         "pos == 0 and neg > 0 is a DEFINED degenerate case, not an error"
     );
     assert_eq!(f.resolved_pos_count, 0, "no positives can be emitted");
-    assert_eq!(f.resolved_neg_count, 992, "so the whole budget is negatives");
+    assert_eq!(
+        f.resolved_neg_count, 992,
+        "so the whole budget is negatives"
+    );
 }
 
 #[test]
@@ -318,7 +357,10 @@ fn loaders_pair_up_every_fixture_and_carry_the_environment_attestation() {
 
     for (id, m) in &measured {
         let c = &contracted[id];
-        assert_eq!(m.layout, c.layout, "{id}: the two families must share a layout");
+        assert_eq!(
+            m.layout, c.layout,
+            "{id}: the two families must share a layout"
+        );
         // A version string alone does not identify an environment: the same `setfit
         // 1.1.3` resolves differently under a different lockfile or resolver.
         assert_eq!(m.setfit_version, c.setfit_version, "{id}: setfit pin");

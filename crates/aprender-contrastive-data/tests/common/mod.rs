@@ -33,9 +33,13 @@
 //! library boundary; reading committed fixtures off disk here is correct and intended.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+const MANIFEST: &str = "manifest.sha256";
 
 /// One clause of the three-clause deviation from SetFit
 /// (`OBLIG-CPP-DEVIATION-DECLARED`).
@@ -117,31 +121,126 @@ pub struct ContractedFixture {
 }
 
 /// The directory holding the committed fixtures and their manifest.
+///
+/// `CARGO_MANIFEST_DIR` is substituted at COMPILE time, so this is the crate's own
+/// directory no matter where the test binary is later invoked from. That is the whole
+/// mechanism behind the working-directory independence described at the top of this file.
 pub fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/setfit_reference")
 }
 
+fn read_bytes(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `(expected_digest, file_name)` for every manifest line, in file order.
+fn manifest_entries() -> Vec<(String, String)> {
+    let dir = fixture_dir();
+    let text =
+        String::from_utf8(read_bytes(&dir.join(MANIFEST))).expect("manifest.sha256 must be UTF-8");
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            match (parts.next(), parts.next()) {
+                (Some(digest), Some(name)) => Some((digest.to_string(), name.to_string())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// Every problem found while checking `manifest.sha256`. Empty means clean.
+///
+/// Each listed path is resolved against the MANIFEST FILE's own directory, which is what
+/// the generator promises when it writes bare filenames. Returning the problems instead
+/// of asserting inline lets the caller report every drifted file in one run — a bisect
+/// that reveals one name per invocation is a slow way to learn that four files moved.
 pub fn manifest_drift() -> Vec<String> {
-    vec!["stub: manifest verification is not implemented".to_string()]
+    let dir = fixture_dir();
+    let mut problems = Vec::new();
+    for (want, name) in manifest_entries() {
+        let path = dir.join(&name);
+        if !path.is_file() {
+            problems.push(format!(
+                "{name}: listed in the manifest but absent from disk"
+            ));
+            continue;
+        }
+        let got = sha256_hex(&read_bytes(&path));
+        if got != want {
+            problems.push(format!(
+                "{name}: digest drift — manifest {want}, on disk {got}"
+            ));
+        }
+    }
+    if problems.is_empty() && manifest_entries().is_empty() {
+        problems.push("manifest.sha256 lists no files at all".to_string());
+    }
+    problems
 }
 
 /// Names of the fixture files present on disk, excluding the manifest itself.
 pub fn fixture_files() -> Vec<String> {
-    Vec::new()
+    let dir = fixture_dir();
+    let entries =
+        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()));
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type().ok()?.is_file() {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (name != MANIFEST).then_some(name)
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 /// Names listed in the manifest, in file order.
 pub fn manifest_names() -> Vec<String> {
-    Vec::new()
+    manifest_entries()
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect()
+}
+
+/// Deserialize every fixture whose file name starts with `prefix`, keyed by fixture id.
+///
+/// Keyed by `fixture_id` rather than by the raw layout vector on purpose: `8_4_8` and
+/// `8_4_8_maxpairs100` share the class layout `[8, 4, 8]`, so a layout-keyed map would
+/// silently drop one of them and shrink the evidence base without failing anything.
+fn load_family<T: DeserializeOwned>(prefix: &str, key_of: fn(&T) -> String) -> BTreeMap<String, T> {
+    let dir = fixture_dir();
+    let mut out = BTreeMap::new();
+    for name in fixture_files() {
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let bytes = read_bytes(&dir.join(&name));
+        let value: T = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("{name} does not match the shared fixture model: {e}"));
+        let key = key_of(&value);
+        assert!(
+            out.insert(key.clone(), value).is_none(),
+            "two fixtures claim fixture_id `{key}`"
+        );
+    }
+    out
 }
 
 /// Every measured fixture, keyed by `fixture_id`.
 pub fn load_measured() -> BTreeMap<String, MeasuredFixture> {
-    BTreeMap::new()
+    load_family("setfit_measured_", |f| f.fixture_id.clone())
 }
 
 /// Every contracted fixture, keyed by `fixture_id`.
 pub fn load_contracted() -> BTreeMap<String, ContractedFixture> {
-    BTreeMap::new()
+    load_family("aprender_contracted_", |f| f.fixture_id.clone())
 }
