@@ -22,13 +22,12 @@
 //! and temp cleanup on every error path. `apr data pairs --dump` calls the same helper, so
 //! the three write-safety properties are proven once instead of once per artifact.
 //!
-//! # `run_pairs` is still Task 1's placeholder
+//! # `run_pairs`
 //!
-//! Plan 02-09 Task 3 fills it in without changing its signature. The two std placeholder
-//! macros are deliberately NOT used — both abort the process, and panicking macros are
-//! banned by repo policy — so the body returns a structured `CliError` instead. Naming
-//! them literally here would also trip this plan's own acceptance grep, which is a
-//! self-needle of the kind plan 02-08 had to fix twice.
+//! Implemented by plan 02-09 Task 3 at the signature Task 1 declared: bounded pair
+//! generation with strict replay and a streaming `--dump`. Every error path returns a
+//! structured `CliError` rather than panicking — the std placeholder macros abort the
+//! process and are banned by repo policy, so no code path here may reintroduce them.
 
 use crate::commands::data_tweeteval;
 use crate::error::{CliError, Result};
