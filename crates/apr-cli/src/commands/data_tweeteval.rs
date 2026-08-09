@@ -1429,4 +1429,88 @@ mod tests {
         assert_eq!(exclusions["reduced_pools"]["1"], 319);
         assert_eq!(exclusions["reduced_pools"]["2"], 109);
     }
+
+    /// The real pinned dataset, prepared end to end.
+    ///
+    /// This is the live golden for D-27's exclude-and-record half: canonical TweetEval
+    /// abortion-stance contains EXACTLY ONE cross-split duplicate group, and an empty
+    /// `excluded_train_ids` on real data is the Pitfall-3 warning sign this test exists to
+    /// turn red.
+    #[test]
+    #[ignore = "opt-in network test against the pinned canonical TweetEval revision"]
+    fn pinned_upstream_records_exactly_one_coalesced_duplicate_group() {
+        use aprender_contrastive_data::hash::{exact_hash, hex};
+        use aprender_contrastive_data::schema::parse_jsonl_bytes;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let output = temp.path().join("output");
+        fs::create_dir(&source).unwrap();
+        download_source(&source, CANONICAL_REVISION).unwrap();
+
+        run(
+            &output,
+            TweetEvalStanceProfile::Canonical,
+            Some(&source),
+            CANONICAL_REVISION,
+            false,
+            true,
+            false,
+        )
+        .expect("preparing the real pinned dataset must SUCCEED despite the duplicate (D-27)");
+
+        let manifest = read_manifest(&output);
+        let exclusions = &manifest["exclusions"];
+
+        assert_eq!(
+            exclusions["excluded_train_ids"],
+            serde_json::json!(["train:70"]),
+            "an EMPTY excluded set on real data is the Pitfall 3 warning sign"
+        );
+        assert_eq!(
+            exclusions["groups"].as_array().map(Vec::len),
+            Some(1),
+            "union-find coalescing: the exact and normalized edges are ONE component, not two"
+        );
+        let group = &exclusions["groups"][0];
+        assert_eq!(
+            group["members"],
+            serde_json::json!([["train", "train:70"], ["validation", "validation:3"]])
+        );
+        assert_eq!(group["detected_by"]["exact"], true);
+        assert_eq!(group["detected_by"]["normalized"], true);
+        assert_eq!(group["label_conflict"], false);
+
+        assert_eq!(exclusions["reduced_pools"]["0"], 158);
+        assert_eq!(exclusions["reduced_pools"]["1"], 319);
+        assert_eq!(exclusions["reduced_pools"]["2"], 109);
+        for label in ["0", "1", "2"] {
+            let pool = exclusions["reduced_pools"][label].as_u64().unwrap();
+            assert!(
+                pool >= 64,
+                "class {label} pool {pool} cannot supply 64 shots"
+            );
+        }
+
+        // The duplicate is recorded by HASH, never by tweet text: this asserts the
+        // measured SHA-256 of the shared content without the content entering the repo.
+        let train = parse_jsonl_bytes(&fs::read(output.join("train.jsonl")).unwrap(), "train")
+            .expect("the train split parses");
+        let validation = parse_jsonl_bytes(
+            &fs::read(output.join("validation.jsonl")).unwrap(),
+            "validation",
+        )
+        .expect("the validation split parses");
+        let train_row = train.iter().find(|row| row.id == "train:70").unwrap();
+        let validation_row = validation
+            .iter()
+            .find(|row| row.id == "validation:3")
+            .unwrap();
+        const DUPLICATE_SHA256: &str =
+            "e3af840b5398272c89e5e1e3e1730c26b0f5bc856d3d46531a2a64dd8844a2c3";
+        assert_eq!(hex(&exact_hash(&train_row.input)), DUPLICATE_SHA256);
+        assert_eq!(hex(&exact_hash(&validation_row.input)), DUPLICATE_SHA256);
+        assert_eq!(train_row.label_text, "none");
+        assert_eq!(validation_row.label_text, "none");
+    }
 }

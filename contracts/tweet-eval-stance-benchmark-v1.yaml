@@ -15,7 +15,25 @@ metadata:
   # today — a forward obligation, not a retroactive strictening.
   # The file keeps its -v1 name; setfit-encoder-conformance-v1.yaml sits at 2.0.0 on
   # the same convention.
-  version: 1.1.0
+  #
+  # 2.0.0 (plan 02-06), and MAJOR is again `pv diff`'s own suggestion rather than a
+  # judgement call:
+  #   git show 4ea35e1ee40aa19fef9905090ac0f96adb612acf:contracts/tweet-eval-stance-benchmark-v1.yaml \
+  #     > /tmp/tweet-eval-prev.yaml
+  #   cargo run --release -p aprender-contracts-cli --bin pv -- diff \
+  #     /tmp/tweet-eval-prev.yaml contracts/tweet-eval-stance-benchmark-v1.yaml
+  #   -> "Contract diff: v1.1.0 -> v1.1.0 / Suggested bump: major"
+  # MAJOR is also the right answer on the merits, which is worth stating because a tool's
+  # suggestion is easy to accept for the wrong reason. Two things genuinely BREAK a
+  # 1.x consumer: `benchmark-manifest.json` moves to schema_version 2 with no migration
+  # path (a 1.x reader is refused, deliberately), and every row of the setfit profile's
+  # merged split now carries source_split "compatibility_test" instead of
+  # "validation"/"test". The canonical profile's row bytes are UNCHANGED and that is
+  # proven byte-for-byte, so the break is scoped and declared rather than incidental.
+  # Two obligations were also REWORDED rather than only added — HASH-FROM-PARSED-BYTES
+  # and LABEL-BOUNDS both now describe the post-D-05 seam — which is why `pv diff`
+  # reports them as one removal plus one addition each.
+  version: 2.0.0
   created: '2026-08-07'
   author: PAIML Engineering
   description: >
@@ -77,6 +95,19 @@ profiles:
         source_splits: [validation, test]
         class_counts: { none: 63, against: 225, favor: 58 }
     warning: validation and canonical test are merged; do not tune on this test split
+    row_source_split: compatibility_test
+    row_source_split_note: >
+      From schema_version 2 onward every row of the merged file carries
+      source_split "compatibility_test", NOT "validation"/"test" as it did under
+      schema_version 1. This is D-19 made structural: the merged split ingests as a
+      DISTINCT split role, so a reader of these bytes cannot mistake them for a canonical
+      test split, and the crate's role gate refuses to build a Split<Test> from them. Row
+      IDS are unchanged and still name the canonical split each row came from
+      (validation:N / test:N), and `source_splits` above still records the provenance, so
+      nothing is lost — but this IS an output-byte change for the setfit profile and the
+      schema_version bump is what declares it. The canonical profile's row bytes are
+      unchanged and that is proven byte-for-byte
+      (FALSIFY-TWEET-EVAL-011).
 
 few_shot_protocol:
   sampling: balanced without replacement from canonical train
@@ -148,8 +179,17 @@ proof_obligations:
       on a source that changed between the reads the manifest would attest bytes the
       dataset was never built from. The same discipline binds the generated split
       digests: the JSONL bytes that are hashed are the bytes that are written.
-      Implemented at crates/apr-cli/src/commands/data_tweeteval.rs (the read-once
-      BTreeMap<String, Vec<u8>> buffer feeding both `sha256` and `load_split`).
+      SOURCE-file digests are implemented at
+      crates/apr-cli/src/commands/data_tweeteval.rs (the read-once
+      BTreeMap<String, Vec<u8>> buffer feeding both `sha256` and `load_split`); there is
+      exactly ONE `fs::read` outside that file's test module, inside `read_required`.
+      SPLIT digests moved across the D-05 seam in plan 02-06 and are now derived by
+      aprender-contrastive-data: `Split::from_rows` takes SHA-256 of the canonical
+      re-encoding of the rows it ACCEPTED, `Split::from_jsonl_bytes` takes SHA-256 of the
+      buffer it is about to parse, and the two agree because
+      encode_jsonl(parse_jsonl_bytes(b)) == b for canonical input. The manifest QUOTES
+      those digests out of `dataset_attestation` rather than computing a second set, so a
+      split entry cannot describe bytes the attestation does not.
     formal: >
       for every source file f: recorded_sha256[f] == sha256(buffer[f]) &&
       parsed_rows[f] == parse(buffer[f])
@@ -177,18 +217,176 @@ proof_obligations:
     property: >
       OBLIG-TWEET-EVAL-LABEL-BOUNDS: for every row the loader ACCEPTS, the parsed
       label index is a valid index into the three-element label map
-      ["none", "against", "favor"], and the per-class counter is only ever indexed
-      after that bound has been established. A label outside 0..3 is a typed error
-      naming the offending value, the split, and the row index — never an
-      out-of-bounds index, never a panic, and never a silent clamp to a neighbouring
-      class, which would corrupt the class distribution while still satisfying the
-      row count. The ordering is the property: the bound check must precede the
-      counter increment, so no arithmetic on an unvalidated index is reachable.
+      ["none", "against", "favor"], and NOTHING indexes on that value before the bound
+      has been established. A label outside 0..3 is a typed error naming the offending
+      value, the split, and the row index — never an out-of-bounds index, never a panic,
+      and never a silent clamp to a neighbouring class, which would corrupt the class
+      distribution while still satisfying the row count.
+
+      The ordering is the property. In `load_split` the FIRST use of a parsed label is
+      the FALLIBLE lookup `LABEL_NAMES.get(label).copied().ok_or_else(...)`; replacing it
+      with the infallible `LABEL_NAMES[label]` turns a corrupt source into an
+      index-out-of-bounds panic instead of a typed error, and that substitution is the
+      mutation FALSIFY-TWEET-EVAL-008 discriminates.
+
+      PLAN 02-06 NOTE: before the D-05 relocation the indexed operation named here was a
+      local `counts[label] += 1` immediately after the lookup. Per-class counting is now
+      the crate's Gate 5 (`aprender-contrastive-data`), where the increment goes through
+      `observed.get_mut(row.label)` and is itself total. The obligation is unchanged in
+      substance — an unvalidated label index reaches no indexing operation — but the
+      falsifying mutation moved with the code, so the recipe above is the current one.
     formal: >
       for every accepted row r: 0 <= r.label && r.label < 3 &&
       r.label_text == LABEL_NAMES[r.label]
     applies_to: all
 
+  - type: conservation
+    property: >
+      OBLIG-TWEET-EVAL-DUP-EXCLUSION: canonical preparation of the pinned revision
+      SUCCEEDS in the presence of cross-split duplicate content, and records exactly what
+      it removed. This is D-27's exclude-and-record half, resting on D-18 verbatim:
+      prepare-time duplicate CONTENT is excluded from the TRAINING SELECTION POOL and
+      recorded in the manifest, never fatal. Typed failure is reserved for actual split
+      SPAN and for pool exhaustion, which are different conditions.
+
+      For revision 4fbd22cd78421f05b1ecdb4fc5725bc7a7bd8f66 the measured facts are exact
+      and are asserted as such: EXACTLY ONE duplicate group, whose members are
+      train:70 and validation:3, both labeled `none`, sharing the content SHA-256
+      e3af840b5398272c89e5e1e3e1730c26b0f5bc856d3d46531a2a64dd8844a2c3. The duplicate is
+      identified BY HASH and by row id only — the tweet text is not recorded here or
+      anywhere else in this repository, per the licensing constraint in `provenance`
+      below.
+
+      `groups().len() == 1` is a load-bearing assertion, not a count. Grouping
+      independently by exact hash and by normalized hash would report TWO groups for this
+      one duplicate, because an exact duplicate is necessarily also a normalized
+      duplicate; the union-find coalescing in `aprender-contrastive-data::dedup` is what
+      makes it one component, and a pool decremented once rather than twice.
+      `detected_by` therefore records BOTH kinds as having fired, and
+      `label_conflict` is false.
+
+      The reduced training pools are none 158 (159 minus the one excluded row),
+      against 319, favor 109 — every one of which still supplies the largest contracted
+      shot count, 64. An EMPTY `excluded_train_ids` on the real pinned data is a
+      DETECTOR FAILURE, not a clean dataset, and must turn this obligation red.
+    formal: >
+      prepare(canonical, pinned_revision) == Ok &&
+      |exclusions.groups| == 1 &&
+      exclusions.groups[0].members == [(train, "train:70"), (validation, "validation:3")] &&
+      exclusions.groups[0].detected_by == { exact: true, normalized: true } &&
+      exclusions.groups[0].label_conflict == false &&
+      exclusions.excluded_train_ids == ["train:70"] &&
+      exclusions.reduced_pools == { 0: 158, 1: 319, 2: 109 } &&
+      min(exclusions.reduced_pools.values) >= 64
+    applies_to: all
+
+  - type: safety
+    property: >
+      OBLIG-TWEET-EVAL-CONFLICTING-ROLES: a source that claims two split roles at once is
+      a TYPED error, never a coerced or silently relabelled split. Two distinct
+      conditions are covered, and they are distinct on purpose:
+
+      (1) ROW-LEVEL. A row whose embedded `source_split` is not the role being
+      constructed is `SplitRoleMismatch`, naming both roles. The phantom-typed
+      `Split<R>` makes leakage inexpressible for a library CALLER, but honest-looking
+      bytes with a mislabeled role would otherwise become a `Split<Train>` the compiler
+      is perfectly happy with (D-16), so the runtime gate is what makes the typestate
+      mean anything for deserialized input.
+
+      (2) ATTESTATION-LEVEL. An attestation or a buffer map naming a role the declared
+      profile does not emit — a `compatibility_test` entry inside a canonical
+      attestation, say — is `ConflictingSourceRole`, naming the profile and the offending
+      role, rather than an inert extra key that a later iteration over the map would
+      quietly honour.
+
+      This closes the third of the three DATA-02 failure classes D-07 scoped to Phase 2
+      (the other two being duplicate IDs and cross-split duplicate content).
+    formal: >
+      forall rows r in split(role R): r.source_split == R else SplitRoleMismatch(R, r.source_split) &&
+      forall roles k in attestation.splits union buffers: k in profile.ROLES else ConflictingSourceRole(profile, k)
+    applies_to: all
+
+  - type: soundness
+    property: >
+      OBLIG-TWEET-EVAL-SCHEMA-VERSION: `benchmark-manifest.json` declares
+      `schema_version: 2`; the supported set is exactly [2]; and a manifest declaring any
+      other version is a TYPED refusal naming that set and the remediation command, with
+      NO migration performed.
+
+      The version constant is CRATE-OWNED —
+      `aprender_contrastive_data::attestation::DATASET_ATTESTATION_SCHEMA_VERSION` and
+      `SUPPORTED_DATASET_ATTESTATION_SCHEMA_VERSIONS`. `apr-cli` REFERENCES them and
+      declares no parallel list, because two lists of supported versions are two lists
+      that will eventually disagree and the one that matters is the one the attested
+      boundary itself enforces.
+
+      There is deliberately no version-1 shim. A version-1 manifest predates the
+      cross-split exclusion record: recomputing the record from its splits would produce a
+      value the original preparation never attested to, and defaulting it to "nothing was
+      excluded" would assert something that is FALSE for this dataset (see
+      OBLIG-TWEET-EVAL-DUP-EXCLUSION). Either way the upgraded artifact would be an
+      unattested guess wearing an attestation's clothes, which is strictly worse than a
+      refusal. The remedy is to re-prepare with `--force`.
+
+      Version 2 is also the version that declares the setfit profile's row-level
+      `source_split` change recorded under `profiles.setfit.row_source_split`.
+    formal: >
+      manifest.schema_version == DATASET_ATTESTATION_SCHEMA_VERSION == 2 &&
+      SUPPORTED_DATASET_ATTESTATION_SCHEMA_VERSIONS == [2] &&
+      read(manifest with schema_version != 2) == Err naming [2] and "--force" &&
+      no field of a rejected manifest is inferred, defaulted, or upgraded
+    applies_to: all
+
+  - type: soundness
+    property: >
+      OBLIG-TWEET-EVAL-ATTESTATION: canonical splits are exposed to later commands
+      (`apr data select`, `apr data pairs`) ONLY through
+      `PreparedDataset::<P>::from_attested_bytes`, which re-derives profile, schema
+      version, per-split JSONL SHA-256, per-class counts, the cross-split exclusion
+      digest and the dataset fingerprint from the supplied buffers BEFORE any
+      `Split<R>` accessor exists.
+
+      The threat is a MIXED OR FORGED DIRECTORY, and row-level checks alone cannot see
+      it: a directory whose `train.jsonl` came from one preparation and
+      `validation.jsonl` from another passes every row-level gate — each file is
+      well-formed, each row carries the right role, each class count is internally
+      consistent — while the two files do not describe one dataset. The attested split
+      digests and the whole-dataset fingerprint are what turn that into a typed
+      `SplitHashMismatch` or `FingerprintMismatch`.
+
+      ORDER is part of the obligation. The per-split digest comparison runs BEFORE the
+      buffer is parsed, so a substituted file is diagnosed as "these are not the bytes you
+      attested" rather than as "row 4 is malformed" — the second diagnosis sends a reader
+      hunting a data-quality problem in a file that is simply the wrong file. An
+      attestation that is merely QUOTED BACK proves nothing; every field is re-derived.
+
+      The prepare command holds ITSELF to this boundary: after writing, it re-opens the
+      directory through `from_attested_bytes` and rolls the write back if the boundary
+      rejects it, so a directory this command emits is one the gate has actually opened.
+    formal: >
+      exposes(Split<R>) => from_attested_bytes returned Ok &&
+      split_hash_check precedes parse(buffer) &&
+      forall attested fields f: recomputed(f) == attested(f) &&
+      prepare writes D => from_attested_bytes(D) == Ok
+    applies_to: all
+
+# ============================================================================
+# COMMAND FORM. Every `test:` below carries AT MOST ONE positional filter —
+# `cargo test` accepts exactly one TESTNAME and a second positional exits with
+# "error: unexpected argument '<name>' found" (verified, not assumed; see
+# KANI-TWEET-EVAL-001's note).
+#
+# Every crate-level command also carries `--lib`, and that is a VACUITY guard
+# rather than a stylistic choice. Measured 2026-08-09 on this tree:
+#   cargo test -p aprender-contrastive-data attestation
+#     -> three suites, printing "test result: ok. 18 passed", then
+#        "test result: ok. 0 passed; 1 filtered out", then
+#        "test result: ok. 1 passed; 6 filtered out"
+# An `expected_output: 'test result: ok'` grep is satisfied by the MIDDLE line,
+# which ran zero matching tests. With `--lib` there is exactly one suite and one
+# result line, with a real count (18 and 24 respectively). A gate that a
+# zero-test suite can satisfy is theater.
+# ============================================================================
 falsification_tests:
   - id: FALSIFY-TWEET-EVAL-001
     rule: canonical split conservation
@@ -241,14 +439,129 @@ falsification_tests:
     test_harness: cargo test -p apr-cli --lib label_index
     expected_output: 'test result: ok'
     if_fails: >
-      Either the label map lookup stopped gating the per-class counter (an
-      out-of-range label then panics rather than returning a typed error), or the
-      lookup began clamping instead of rejecting — which corrupts the class
+      Either the fallible `LABEL_NAMES.get(label)` lookup was replaced by an infallible
+      index (an out-of-range label then panics rather than returning a typed error), or
+      the lookup began clamping instead of rejecting — which corrupts the class
       distribution while leaving the row count intact, so FALSIFY-TWEET-EVAL-001
       would still be green and only FALSIFY-TWEET-EVAL-002 would catch it. This is
       also the ONLY executed evidence for KANI-TWEET-EVAL-001: cargo-kani is not
       installed in this repository, so if this test is deleted or skipped, that
       harness has no backing at all.
+
+  - id: FALSIFY-TWEET-EVAL-009
+    rule: >
+      OBLIG-TWEET-EVAL-DUP-EXCLUSION — the one real cross-split duplicate is excluded and
+      recorded, and preparation still succeeds
+    prediction: >
+      Preparing the REAL pinned revision (opt-in, network) returns Ok, and the manifest's
+      `exclusions` section carries excluded_train_ids ["train:70"], EXACTLY ONE group
+      whose members are train:70 and validation:3 with detected_by {exact, normalized}
+      both true and label_conflict false, and reduced_pools {0: 158, 1: 319, 2: 109} —
+      each at or above the largest contracted shot count of 64. The shared content
+      SHA-256 is asserted to be
+      e3af840b5398272c89e5e1e3e1730c26b0f5bc856d3d46531a2a64dd8844a2c3, computed from the
+      written rows rather than quoted from any stored text.
+    test: cargo test -p apr-cli --lib data_tweeteval -- --ignored
+    test_harness: cargo test -p apr-cli --lib data_tweeteval -- --ignored
+    expected_output: 'test result: ok'
+    if_fails: >
+      An EMPTY excluded set means the detector stopped seeing a duplicate that is
+      demonstrably present, so every later "no leakage" claim rests on a check that found
+      nothing. TWO groups instead of one means the exact and normalized edges stopped
+      being coalesced, which double-decrements the class pool and can invent a
+      CrossSplitDuplicateUnderflow that is not in the data. A pool below 64 means the
+      benchmark's largest cell can no longer be sampled. A FAILED prepare means D-27 was
+      re-read as "duplicate content is fatal", which hands upstream data quality a veto
+      over DATA-01. This test is `#[ignore]`d and therefore NOT part of the offline
+      suite (SAFE-02); running it is a deliberate act and its result must be quoted, not
+      assumed.
+
+  - id: FALSIFY-TWEET-EVAL-010
+    rule: >
+      OBLIG-TWEET-EVAL-SCHEMA-VERSION — version 2 is written, version 1 is refused, and
+      nothing is migrated
+    prediction: >
+      `manifest_is_schema_version_two_with_an_attestation_and_an_exclusion_record`
+      observes schema_version 2 equal to the CRATE constant, a dataset_attestation
+      section whose per-split sha256 is the same string the splits section quotes, and an
+      exclusions section carrying the normalization version.
+      `a_schema_version_one_manifest_is_rejected_without_migration` first proves the
+      manifest this build wrote IS readable (so the rejection is attributable to the
+      version alone), then flips schema_version to 1 and requires an error naming "[2]"
+      and "--force".
+    test: cargo test -p apr-cli --lib data_tweeteval
+    test_harness: cargo test -p apr-cli --lib data_tweeteval
+    expected_output: 'test result: ok'
+    if_fails: >
+      A silently accepted version-1 manifest means an exclusion record was synthesized
+      rather than attested, and a downstream selection would then be locked against
+      evidence nobody produced. A CLI-side copy of the supported set reappearing (grep for
+      SUPPORTED_BENCHMARK_SCHEMA_VERSIONS, which must not exist) means the version gate
+      and the boundary can drift apart.
+
+  - id: FALSIFY-TWEET-EVAL-011
+    rule: >
+      D-05 relocation is byte-neutral for the canonical profile, and its ONE deliberate
+      change for the setfit profile is declared
+    prediction: >
+      `canonical_jsonl_rows_are_byte_identical_to_the_d06_baseline` compares
+      train/validation/test JSONL against the D-06 wire format re-derived by string
+      formatting in the test itself — not by calling the encoder under test — and they
+      are byte-equal.
+      `setfit_merged_split_carries_the_compatibility_role_and_keeps_id_provenance`
+      pins the declared change: every merged row's source_split is "compatibility_test",
+      row ids still read validation:N / test:N, the manifest still records
+      source_splits [validation, test], and the train split's bytes are untouched.
+    test: cargo test -p apr-cli --lib data_tweeteval
+    test_harness: cargo test -p apr-cli --lib data_tweeteval
+    expected_output: 'test result: ok'
+    if_fails: >
+      A field reordering, a renamed key, or a quoting change in the relocated encoder
+      silently invalidates every dataset already produced on a developer machine while
+      every count-based test stays green. That is precisely the class of regression the
+      D-06 baseline was landed as a standalone tracked commit to make visible.
+
+  - id: FALSIFY-TWEET-EVAL-012
+    rule: >
+      OBLIG-TWEET-EVAL-ATTESTATION — a mixed, forged or edited directory is a typed error,
+      and the split-hash check precedes parsing
+    prediction: >
+      The nine rejection tests in `aprender-contrastive-data::attestation` each produce
+      their specific variant: ProfileMismatch at both doors, UnsupportedSchemaVersion
+      naming the supported set, MissingSplit naming the role, SplitHashMismatch for a
+      buffer swapped in from another VALID dataset and for a buffer that is not JSON at
+      all, FingerprintMismatch, ExclusionRecordMismatch, and InvalidClassCounts. The
+      corrupt-buffer case yields SplitHashMismatch rather than MalformedRow, which is
+      what proves the digest comparison runs first. A rejected dataset leaves NO access
+      record in the ledger.
+    test: cargo test -p aprender-contrastive-data --lib attestation
+    test_harness: cargo test -p aprender-contrastive-data --lib attestation
+    expected_output: 'test result: ok'
+    if_fails: >
+      Without the per-split digests a directory assembled from two different preparations
+      passes every row-level gate, and the selection built on it would be attributed to a
+      dataset that never existed. If the corrupt-buffer case starts reporting MalformedRow
+      the digest check has moved after the parse, and the diagnosis now points at the
+      wrong problem. Induced-mutation evidence for exactly this ordering is recorded in
+      plan 02-06's SUMMARY.
+
+  - id: FALSIFY-TWEET-EVAL-013
+    rule: OBLIG-TWEET-EVAL-CONFLICTING-ROLES — a source claiming two roles is a typed error
+    prediction: >
+      `split_rejects_rows_whose_embedded_role_is_another_split` requires
+      SplitRoleMismatch naming BOTH the expected and the embedded role, and
+      `split_role_span_is_fail_closed` requires the same for a whole dataset built with a
+      compatibility split in the canonical test position, leaving the access ledger empty.
+      The attestation-level half is
+      `attestation_rejects_a_role_outside_the_profile` (ConflictingSourceRole), covered by
+      FALSIFY-TWEET-EVAL-012's command.
+    test: cargo test -p aprender-contrastive-data --lib split
+    test_harness: cargo test -p aprender-contrastive-data --lib split
+    expected_output: 'test result: ok'
+    if_fails: >
+      A mislabeled source_split that is accepted becomes a Split<Train> the compiler is
+      happy with, and the typestate stops meaning anything for deserialized input — which
+      is the entire reason D-16 requires all three layers rather than the types alone.
 
 kani_harnesses:
   - id: KANI-TWEET-EVAL-001
@@ -289,21 +602,37 @@ qa_gate:
   description: >
     Dataset gate for the canonical TweetEval abortion-stance benchmark — split and
     class conservation, provenance that is never asserted without verification,
-    digests taken from the bytes that were parsed, and a contracted seed set that
-    cannot be silently defaulted away.
+    digests taken from the bytes that were parsed, a contracted seed set that
+    cannot be silently defaulted away, the one real cross-split duplicate excluded and
+    recorded, and canonical splits reachable only through an attested boundary.
   checks:
     - validation
     - falsification
   pass_criteria: >
-    pv validate exits 0; all eight falsification tests pass — the seven original
-    dataset tests plus FALSIFY-TWEET-EVAL-008, the label-bounds proptest that is the
-    only executed backing for KANI-TWEET-EVAL-001. No declared Kani harness in this
-    contract may be reported as machine-checked while cargo-kani is absent from the
-    repository: a harness entry whose named runnable proptest is not green is a
-    FAILED gate, not a pending one.
+    pv validate exits 0; all thirteen falsification tests pass — the seven original
+    dataset tests, FALSIFY-TWEET-EVAL-008 (the label-bounds proptest that is the only
+    executed backing for KANI-TWEET-EVAL-001), and FALSIFY-TWEET-EVAL-009..013 added by
+    plan 02-06. No declared Kani harness in this contract may be reported as
+    machine-checked while cargo-kani is absent from the repository: a harness entry whose
+    named runnable proptest is not green is a FAILED gate, not a pending one.
+
+    FALSIFY-TWEET-EVAL-009 is `#[ignore]`d and requires network, so CI stays offline
+    (SAFE-02). It is a gate on the RELEASE path and on any change to dedup, the D-05
+    seam, or the pinned revision — not on every commit. A report that claims it passed
+    must quote its output; "the suite is green" does not include it.
   falsification: >
-    Move `counts[label] += 1` above the LABEL_NAMES bound check in
-    crates/apr-cli/src/commands/data_tweeteval.rs — FALSIFY-TWEET-EVAL-008 must turn
-    RED with an index-out-of-bounds panic rather than a typed error, proving the
-    test discriminates ordering and is not merely asserting a range.
+    Replace `LABEL_NAMES.get(label).copied().ok_or_else(...)` with `LABEL_NAMES[label]`
+    in `load_split` (crates/apr-cli/src/commands/data_tweeteval.rs) —
+    FALSIFY-TWEET-EVAL-008 must turn RED with an index-out-of-bounds panic rather than a
+    typed error, proving the test discriminates ordering and is not merely asserting a
+    range. (Before plan 02-06 the equivalent mutation was moving a local
+    `counts[label] += 1` above the bound check; per-class counting now lives at the
+    crate's ingest boundary, so the recipe moved with the code.)
+
+    For FALSIFY-TWEET-EVAL-012, disable the per-split digest comparison in
+    `attestation::verified_split` — the corrupt-buffer case must turn RED reporting
+    MalformedRow and the mixed-directory case must turn RED reporting
+    FingerprintMismatch, proving the two tests discriminate the ORDER of the ladder and
+    not merely that something was rejected. Both were induced, observed and reverted in
+    plan 02-06 rather than assumed.
 
