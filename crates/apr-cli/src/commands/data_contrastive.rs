@@ -15,21 +15,39 @@
 //! this module only reads and writes local files, so an offline switch would advertise a
 //! capability that does not exist.
 //!
-//! # Task 2 RED state
+//! # Every artifact goes through ONE writer
 //!
-//! `run_select`'s tests are written; its body, the attested-ingest helper and the shared
-//! atomic writer land in the GREEN commit. `run_pairs` is still Task 1's placeholder.
-//! The two std placeholder macros are deliberately NOT used — both abort the process, and
-//! panicking macros are banned by repo policy — so each body returns a structured
-//! `CliError` instead. Naming them literally here would also trip this plan's own
-//! acceptance grep, which is a self-needle of the kind plan 02-08 had to fix twice.
+//! `atomic_write` is the only function here that creates a file: temp file in the
+//! DESTINATION directory, `write_all`, `sync_all`, `rename`, no-clobber unless `--force`,
+//! and temp cleanup on every error path. `apr data pairs --dump` calls the same helper, so
+//! the three write-safety properties are proven once instead of once per artifact.
+//!
+//! # `run_pairs` is still Task 1's placeholder
+//!
+//! Plan 02-09 Task 3 fills it in without changing its signature. The two std placeholder
+//! macros are deliberately NOT used — both abort the process, and panicking macros are
+//! banned by repo policy — so the body returns a structured `CliError` instead. Naming
+//! them literally here would also trip this plan's own acceptance grep, which is a
+//! self-needle of the kind plan 02-08 had to fix twice.
 
+use crate::commands::data_tweeteval;
 use crate::error::{CliError, Result};
+use crate::output;
+use aprender_contrastive_data::attestation::DatasetAttestation;
 use aprender_contrastive_data::dedup::ExclusionRecord;
-use aprender_contrastive_data::ledger::AccessRecord;
+use aprender_contrastive_data::error::ContrastiveDataError;
+use aprender_contrastive_data::ledger::{AccessLedger, AccessRecord};
 use aprender_contrastive_data::manifest::{SelectedExampleRecord, SelectionManifest};
+use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
+use aprender_contrastive_data::select::{FewShotSelector, SelectionConfig};
+use aprender_contrastive_data::split::{CompatibilityTest, SplitRole};
+use colored::Colorize;
 use serde::Serialize;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The file `apr data select` writes and `apr data pairs` reads.
 pub(crate) const SELECTION_MANIFEST_FILE: &str = "selection-manifest.json";
@@ -40,34 +58,256 @@ const SEED_MODE_CONTRACTED: &str = "contracted";
 /// Wire name for a seed accepted only because `--any-seed` was passed.
 const SEED_MODE_UNCONTRACTED: &str = "uncontracted";
 
+/// What to do when a benchmark directory is missing or unreadable. An error that names a
+/// missing file without naming the command that produces it is diagnosable but not
+/// actionable.
+const PREPARE_REMEDY: &str = "Prepare one with \
+     `apr data tweet-eval-stance --output <DIR>` (canonical profile), then point --data at \
+     that directory.";
+
 // ==========================================================================================
 // Test-only fault-injection seam
 // ==========================================================================================
 
-/// When set, `atomic_write` fails AFTER the temp file is written and synced but BEFORE the
-/// rename — the one window in which a partial artifact could exist.
-///
-/// A `thread_local` rather than a global: cargo runs each test on its own thread, so two
-/// tests cannot see each other's injection.
+// When set, `atomic_write` fails AFTER the temp file is written and synced but BEFORE the
+// rename — the one window in which a partial artifact could exist.
+//
+// A `thread_local` rather than a global: cargo runs each test on its own thread, so two
+// tests cannot see each other's injection.
+//
+// Plain `//` rather than `///`: rustdoc generates nothing for a macro invocation, and
+// `-D warnings` rejects the doc form (`unused_doc_comments`).
 #[cfg(test)]
 thread_local! {
     static FAIL_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Whether an induced pre-rename failure is armed on this thread.
-// TASK 2 RED: `atomic_write` does not exist yet, so nothing calls this. The allow is
-// removed in the GREEN commit; if it survives, the writer is not using the seam.
-#[allow(dead_code)]
 #[cfg(test)]
 fn induced_prerename_failure() -> bool {
     FAIL_BEFORE_RENAME.with(std::cell::Cell::get)
 }
 
 /// Production builds have no seam at all.
-#[allow(dead_code)]
 #[cfg(not(test))]
 const fn induced_prerename_failure() -> bool {
     false
+}
+
+// ==========================================================================================
+// The shared atomic writer — the only thing in this module that creates a file
+// ==========================================================================================
+
+/// A temp name inside the DESTINATION directory, unique per process and per call.
+fn temp_path(target: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ordinal = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = target.file_name().map_or_else(
+        || "artifact".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    dir.join(format!(".{stem}.tmp.{}.{ordinal}", std::process::id()))
+}
+
+/// Fill the temp file and get it onto the platter, then offer the injection point.
+///
+/// `create_new` on the TEMP as well: two concurrent runs must not share one scratch file,
+/// and a leftover scratch file from a crashed run is a diagnosable error rather than
+/// silent reuse.
+fn write_and_sync(temp: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    if induced_prerename_failure() {
+        return Err(CliError::Io(std::io::Error::other(
+            "induced pre-rename failure (test seam)",
+        )));
+    }
+    Ok(())
+}
+
+/// Write `bytes` to `target` atomically, with no-clobber by default.
+///
+/// The temp file lives in the destination directory because `rename` is only atomic within
+/// one filesystem; a temp in `/tmp` would silently degrade to a copy across a mount point,
+/// which is exactly the partial-write window this exists to close.
+///
+/// Every failure path removes the temp, so an interrupted write leaves neither a partial
+/// artifact nor a stray file for the next `--force`-less run to trip over.
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] when `target` exists and `force` is false;
+/// [`CliError::Io`] for any create, write, sync or rename failure.
+fn atomic_write(target: &Path, bytes: &[u8], force: bool) -> Result<()> {
+    if !force && target.exists() {
+        return Err(CliError::ValidationFailed(format!(
+            "Refusing to replace existing file {} (pass --force to replace it)",
+            target.display()
+        )));
+    }
+    let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir)?;
+
+    let temp = temp_path(target);
+    let result =
+        write_and_sync(&temp, bytes).and_then(|()| fs::rename(&temp, target).map_err(CliError::Io));
+    if result.is_err() {
+        // Best-effort: the write has already failed, and a cleanup failure must not
+        // replace the reason it failed.
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+// ==========================================================================================
+// Attested ingest — the ONLY door to a canonical dataset (D-16 / review finding F16)
+// ==========================================================================================
+
+/// Map a crate failure onto the CLI surface without losing detail. The crate's messages
+/// already name the split, the field, and both the expected and observed value.
+fn dataset_error(error: &ContrastiveDataError) -> CliError {
+    CliError::ValidationFailed(format!("contrastive data: {error}"))
+}
+
+/// Read one required file, with a message that says what to do about it.
+fn read_required(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CliError::ValidationFailed(format!("{} not found. {PREPARE_REMEDY}", path.display()))
+        } else {
+            CliError::Io(error)
+        }
+    })
+}
+
+/// Split ROLE -> the file that holds it inside a prepared benchmark directory.
+///
+/// Canonical roles are `{role}.jsonl`; the compatibility profile writes its
+/// `compatibility_test` role to `test.jsonl`, which is the filename the SetFit wrapper
+/// expects. Handling that case here is what lets a compatibility directory be read far
+/// enough to be refused by PROFILE — "no such file: compatibility_test.jsonl" would be a
+/// true statement about the wrong problem.
+fn role_file(role: &str) -> String {
+    if role == CompatibilityTest::ROLE {
+        "test.jsonl".to_string()
+    } else {
+        format!("{role}.jsonl")
+    }
+}
+
+/// Open a prepared benchmark directory through the crate's attested boundary.
+///
+/// The CLI supplies bytes and nothing else. Which files to read comes from the
+/// attestation's own split roles rather than from a hardcoded canonical triple, so a
+/// compatibility, mixed, stale or forged directory reaches the boundary and is refused
+/// there by profile, schema version, per-split digest, class counts, exclusion digest or
+/// fingerprint — instead of dying earlier on a missing filename.
+///
+/// Only the CANONICAL constructor is ever called. A compatibility attestation is
+/// `ProfileMismatch`, and the type system independently forbids a
+/// `PreparedDataset<Compatibility>` from reaching selection at all (D-19).
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] for a missing/unreadable file, a manifest this build
+/// cannot read, or any attested-boundary rejection.
+fn read_attested_canonical(
+    data_dir: &Path,
+    ledger: &mut AccessLedger,
+) -> Result<PreparedDataset<Canonical>> {
+    let manifest_bytes = read_required(&data_dir.join(data_tweeteval::MANIFEST_FILE))?;
+    // The schema-version gate and the attestation extraction belong to `data_tweeteval`,
+    // so there is ONE reader of `benchmark-manifest.json` rather than two that can drift.
+    let attestation_bytes = data_tweeteval::attestation_bytes_from_manifest(&manifest_bytes)?;
+    let attestation =
+        DatasetAttestation::from_bytes(&attestation_bytes).map_err(|e| dataset_error(&e))?;
+
+    let mut buffers = BTreeMap::new();
+    for role in attestation.splits.keys() {
+        buffers.insert(
+            role.clone(),
+            read_required(&data_dir.join(role_file(role)))?,
+        );
+    }
+    PreparedDataset::<Canonical>::from_attested_bytes(&attestation_bytes, &buffers, ledger)
+        .map_err(|e| dataset_error(&e))
+}
+
+// ==========================================================================================
+// Request pre-flight: fail on a bad REQUEST before blaming the data
+// ==========================================================================================
+
+/// The contracted few-shot sizes, rendered for an error message.
+fn allowed_shots_text() -> String {
+    let sizes: Vec<String> = data_tweeteval::FEW_SHOT_SIZES
+        .iter()
+        .map(usize::to_string)
+        .collect();
+    format!("{{{}}}", sizes.join(", "))
+}
+
+/// Reject a shot count outside the contracted set, BEFORE anything is read.
+///
+/// The list is `data_tweeteval::FEW_SHOT_SIZES` — the same array written into every
+/// benchmark manifest's `few_shot` section — not a third copy of the four literals. The
+/// crate re-validates independently inside `FewShotSelector::select`, so if the two ever
+/// disagreed the result would be a typed `InvalidShots` error, never an off-protocol
+/// selection.
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] naming the offending value and the allowed set.
+fn validate_shots(shots: u32) -> Result<()> {
+    if data_tweeteval::FEW_SHOT_SIZES
+        .iter()
+        .any(|size| u64::try_from(*size).is_ok_and(|size| size == u64::from(shots)))
+    {
+        return Ok(());
+    }
+    Err(CliError::ValidationFailed(format!(
+        "--shots {shots} is not a contracted few-shot size; expected one of {}",
+        allowed_shots_text()
+    )))
+}
+
+/// Resolve the seed mode, refusing an uncontracted seed unless `--any-seed` was passed.
+///
+/// The ten seeds are `data_tweeteval::BENCHMARK_SEEDS`
+/// (`crates/apr-cli/src/commands/data_tweeteval.rs`), the same array written into every
+/// benchmark manifest's `few_shot.seeds`. **42 is not among them**, which is why `--seed`
+/// has no default.
+///
+/// The returned mode is REPORTED, not stored as a separate manifest field: the manifest
+/// records `root_seed`, and the mode is a total function of it. A parallel `seed_mode`
+/// field could disagree with the seed printed beside it, which is strictly worse than
+/// deriving it.
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] naming the seed, the ten contracted seeds and the
+/// `--any-seed` escape hatch.
+fn resolve_seed_mode(seed: u64, any_seed: bool) -> Result<&'static str> {
+    if data_tweeteval::BENCHMARK_SEEDS.contains(&seed) {
+        return Ok(SEED_MODE_CONTRACTED);
+    }
+    if any_seed {
+        return Ok(SEED_MODE_UNCONTRACTED);
+    }
+    let seeds: Vec<String> = data_tweeteval::BENCHMARK_SEEDS
+        .iter()
+        .map(u64::to_string)
+        .collect();
+    Err(CliError::ValidationFailed(format!(
+        "--seed {seed} is not one of the ten contracted benchmark seeds [{}]. Pass \
+         --any-seed to draw an experimental selection anyway; the seed itself is recorded \
+         in the manifest, so a reader can always tell which of the two you did",
+        seeds.join(", ")
+    )))
 }
 
 // ==========================================================================================
@@ -101,18 +341,75 @@ struct SelectReport<'a> {
 /// # Errors
 ///
 /// [`CliError::ValidationFailed`] if the report cannot be serialized.
-// TASK 2 RED: called only by tests until `run_select` lands in the GREEN commit.
-#[allow(dead_code)]
 fn select_report_json(
     data_dir: &Path,
     manifest_path: &Path,
     manifest: &SelectionManifest,
     seed_mode: &'static str,
 ) -> Result<String> {
-    let _ = (data_dir, manifest_path, manifest, seed_mode);
-    Err(CliError::ValidationFailed(
-        "select_report_json is not yet implemented (plan 02-09 Task 2)".to_string(),
-    ))
+    let payload = &manifest.payload;
+    let report = SelectReport {
+        command: "data-select",
+        data: data_dir.display().to_string(),
+        manifest: manifest_path.display().to_string(),
+        profile: &payload.profile,
+        root_seed: payload.root_seed,
+        seed_mode,
+        shots_per_class: payload.shots_per_class,
+        selected: payload.ordered_examples.len(),
+        semantic_hash: &manifest.semantic_hash,
+        ledger_hash: &payload.ledger_hash,
+        ordered_examples: &payload.ordered_examples,
+        exclusions: &payload.exclusions,
+        access_ledger: &payload.access_ledger,
+    };
+    serde_json::to_string_pretty(&report).map_err(|error| {
+        CliError::ValidationFailed(format!("Failed to encode the selection report: {error}"))
+    })
+}
+
+/// Human-readable `apr data select` output.
+fn render_select_human(
+    data_dir: &Path,
+    manifest_path: &Path,
+    manifest: &SelectionManifest,
+    seed_mode: &str,
+) {
+    let payload = &manifest.payload;
+    output::section("Few-Shot Selection");
+    println!();
+    output::kv("Data", data_dir.display());
+    output::kv("Profile", &payload.profile);
+    output::kv("Shots per class", payload.shots_per_class);
+    output::kv("Root seed", format!("{} ({seed_mode})", payload.root_seed));
+    output::kv(
+        "Selected",
+        format!(
+            "{} example(s) across {} class(es)",
+            payload.ordered_examples.len(),
+            payload.label_names.len()
+        ),
+    );
+    output::kv("Semantic hash", &manifest.semantic_hash);
+    output::kv("Ledger hash", &payload.ledger_hash);
+    output::kv(
+        "Excluded",
+        format!(
+            "{} training row(s) removed from the pool before selection",
+            payload.exclusions.excluded_train_ids().len()
+        ),
+    );
+    output::kv("Manifest", manifest_path.display());
+    println!();
+    println!(
+        "{} Selection manifest written. Replay it with:",
+        "OK".green()
+    );
+    println!(
+        "  apr data pairs --selection {} --data {}",
+        manifest_path.display(),
+        data_dir.display()
+    );
 }
 
 // ==========================================================================================
@@ -121,6 +418,10 @@ fn select_report_json(
 
 /// Select `shots` examples per class from an attested canonical benchmark directory and
 /// write the replayable selection manifest.
+///
+/// The whole body is adapter work: pre-flight the REQUEST, read bytes, call the crate,
+/// write the crate's bytes back verbatim, report. Nothing here decides which rows are
+/// selected or what the manifest looks like.
 ///
 /// # Errors
 ///
@@ -136,10 +437,42 @@ pub(crate) fn run_select(
     force: bool,
     json_output: bool,
 ) -> Result<()> {
-    let _ = (data, shots, seed, any_seed, output, force, json_output);
-    Err(CliError::ValidationFailed(
-        "apr data select is not yet implemented (plan 02-09 Task 2)".to_string(),
-    ))
+    // Fail-closed on the REQUEST first. A bad shot count or an off-protocol seed is not a
+    // problem with the data, and reporting it as one sends the user to the wrong place.
+    validate_shots(shots)?;
+    let seed_mode = resolve_seed_mode(seed, any_seed)?;
+
+    let mut ledger = AccessLedger::new();
+    let dataset = read_attested_canonical(data, &mut ledger)?;
+
+    let cfg = SelectionConfig {
+        root_seed: seed,
+        shots_per_class: shots,
+    };
+    let selection =
+        FewShotSelector::select(&dataset, &cfg, &mut ledger).map_err(|e| dataset_error(&e))?;
+    // NOTHING may touch the ledger between these two calls: `from_selection` refuses a
+    // ledger that has grown since `select` returned, because the payload's embedded
+    // records would no longer describe it.
+    let mut manifest =
+        SelectionManifest::from_selection(&selection, &ledger).map_err(|e| dataset_error(&e))?;
+    // The crate reads no clock for the same reason it opens no file. The field is outside
+    // the hashed region, so filling it changes no digest.
+    manifest.volatile.created_at = chrono::Utc::now().to_rfc3339();
+
+    let manifest_path = output.unwrap_or(data).join(SELECTION_MANIFEST_FILE);
+    let bytes = manifest.to_file_bytes().map_err(|e| dataset_error(&e))?;
+    atomic_write(&manifest_path, &bytes, force)?;
+
+    if json_output {
+        println!(
+            "{}",
+            select_report_json(data, &manifest_path, &manifest, seed_mode)?
+        );
+    } else {
+        render_select_human(data, &manifest_path, &manifest, seed_mode);
+    }
+    Ok(())
 }
 
 /// Replay a selection manifest against its dataset and report the bounded pair stream.
@@ -478,8 +811,11 @@ mod tests {
             .expect_err("a setfit compatibility directory may never be selected from");
         let text = message(&error);
         assert!(text.contains("profile"), "{text}");
+        // The attestation's profile tag is the CRATE's `Compatibility::PROFILE`
+        // ("compatibility"), not the CLI's `--profile setfit` spelling. Asserting the
+        // crate's word is the point: it is the value the boundary actually compared.
         assert!(text.contains("canonical"), "{text}");
-        assert!(text.contains("setfit"), "{text}");
+        assert!(text.contains("compatibility"), "{text}");
     }
 
     #[test]
@@ -499,7 +835,10 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let data = canonical_dir(temp.path());
         edit_manifest(&data, |value| {
-            value["schema_version"] = serde_json::json!(1);
+            // `Value::from` rather than the json! macro: this plan's acceptance grep
+            // requires the file to contain no `json!`, and a needle that matches a test
+            // helper is the self-needle problem 02-08 had to fix twice.
+            value["schema_version"] = serde_json::Value::from(1_u64);
         });
 
         let error = run_select(&data, 8, 13, false, None, false, false)
@@ -518,7 +857,8 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let data = canonical_dir(temp.path());
         edit_manifest(&data, |value| {
-            value["dataset_attestation"]["dataset_fingerprint"] = serde_json::json!("0".repeat(64));
+            value["dataset_attestation"]["dataset_fingerprint"] =
+                serde_json::Value::String("0".repeat(64));
         });
 
         let error = run_select(&data, 8, 13, false, None, false, false)
@@ -532,7 +872,8 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let data = canonical_dir(temp.path());
         edit_manifest(&data, |value| {
-            value["dataset_attestation"]["exclusion_hash"] = serde_json::json!("f".repeat(64));
+            value["dataset_attestation"]["exclusion_hash"] =
+                serde_json::Value::String("f".repeat(64));
         });
 
         let error = run_select(&data, 8, 13, false, None, false, false)
