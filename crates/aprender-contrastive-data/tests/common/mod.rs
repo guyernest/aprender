@@ -168,7 +168,12 @@ fn manifest_entries() -> Vec<(String, String)> {
 pub fn manifest_drift() -> Vec<String> {
     let dir = fixture_dir();
     let mut problems = Vec::new();
-    for (want, name) in manifest_entries() {
+    // Read the manifest ONCE. The vacuity guard below needs to know whether it listed
+    // anything, and re-calling `manifest_entries()` to find out re-read and re-parsed the
+    // whole file for a question the first read already answered.
+    let entries = manifest_entries();
+    let entry_count = entries.len();
+    for (want, name) in entries {
         let path = dir.join(&name);
         if !path.is_file() {
             problems.push(format!(
@@ -183,7 +188,7 @@ pub fn manifest_drift() -> Vec<String> {
             ));
         }
     }
-    if problems.is_empty() && manifest_entries().is_empty() {
+    if problems.is_empty() && entry_count == 0 {
         problems.push("manifest.sha256 lists no files at all".to_string());
     }
     problems

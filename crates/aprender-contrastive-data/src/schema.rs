@@ -7,8 +7,9 @@
 //! # Field names and order are load-bearing
 //!
 //! [`LabeledExample`]'s five fields are `id, input, label, label_text, source_split`, in
-//! that order, matching the committed `StanceSample` baseline in
-//! `crates/apr-cli/src/commands/data_tweeteval.rs` exactly. `serde_json` emits struct
+//! that order, matching the field order of the D-06 baseline row struct this type absorbed
+//! (`StanceSample`, formerly in `crates/apr-cli/src/commands/data_tweeteval.rs`, removed in
+//! plan 02-06 once the adapter read through this type instead). `serde_json` emits struct
 //! fields in declaration order, so keeping the order means relocated JSONL output stays
 //! **byte-compatible** with datasets already produced on developer machines. Reordering
 //! the fields is a manifest `schema_version` bump, never a silent edit.

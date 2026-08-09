@@ -560,6 +560,13 @@ pub fn dump_pairs<W: std::io::Write>(
             hi: selection.id_of(labeled.pair.hi()).to_string(),
             target: labeled.target,
         };
+        // Serialized into a per-line `Vec` and then written, NOT via `serde_json::to_writer`.
+        // `to_writer` folds a sink failure into a `serde_json::Error`, so a broken pipe
+        // mid-dump would surface as `Serialization` instead of `Io` — the user loses the
+        // one signal that says "the destination died", and
+        // `dump_pairs_surfaces_a_failing_sink_as_a_typed_io_error` fails. The allocation is
+        // one small `Vec` per pair against a syscall the caller's `BufWriter` already
+        // coalesces, which is the cheaper half to keep.
         let mut line =
             serde_json::to_vec(&record).map_err(|error| ContrastiveDataError::Serialization {
                 context: format!("pair_dump/{ordinal}"),

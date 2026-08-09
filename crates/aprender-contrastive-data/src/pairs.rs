@@ -28,7 +28,7 @@ use core::num::NonZeroU64;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ContrastiveDataError;
-use crate::rng::{bounded, derive_key, domains};
+use crate::rng::{bounded, derive_key, domains, DomainKey};
 use crate::select::{SelectedId, Selection};
 
 /// The default pair hard cap: 2²⁰.
@@ -577,6 +577,44 @@ pub struct PairLayout {
     strategy: PairStrategy,
     singleton_policy: SingletonPolicy,
     root_seed: u64,
+    /// The five domain keys, derived once at construction.
+    ///
+    /// Each is a pure function of `root_seed` and a `&'static str` domain constant, so it is
+    /// invariant for the life of the layout. Deriving them per draw cost a full SHA-256 each
+    /// — two per positive draw and three per negative — which dominated the Philox block they
+    /// feed. `select.rs` already hoists its key out of the Fisher-Yates loop; this is the same
+    /// move in the one place it was missed.
+    ///
+    /// This is O(1) state — five 8-byte keys, independent of K and of the budget — so the
+    /// D-14 capacity invariant and `state_report()` (which enumerates only structural counts)
+    /// are unaffected.
+    keys: PairKeys,
+}
+
+/// The five domain-separated Philox keys a [`PairLayout`] draws with.
+///
+/// Held as one struct rather than five fields so the derivation order stays adjacent to the
+/// domain constants it mirrors, and so adding a sixth domain is one edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PairKeys {
+    pos_class: DomainKey,
+    pos_rank: DomainKey,
+    neg_class: DomainKey,
+    neg_first: DomainKey,
+    neg_second: DomainKey,
+}
+
+impl PairKeys {
+    /// Derive all five from the root seed. Order matches [`domains`].
+    fn derive(root_seed: u64) -> Self {
+        Self {
+            pos_class: derive_key(root_seed, domains::PAIRS_POS_CLASS),
+            pos_rank: derive_key(root_seed, domains::PAIRS_POS_RANK),
+            neg_class: derive_key(root_seed, domains::PAIRS_NEG_CLASS),
+            neg_first: derive_key(root_seed, domains::PAIRS_NEG_FIRST),
+            neg_second: derive_key(root_seed, domains::PAIRS_NEG_SECOND),
+        }
+    }
 }
 
 impl PairLayout {
@@ -639,6 +677,7 @@ impl PairLayout {
             strategy: cfg.strategy,
             singleton_policy: cfg.singleton_policy,
             root_seed: cfg.root_seed,
+            keys: PairKeys::derive(cfg.root_seed),
         })
     }
 
@@ -758,14 +797,12 @@ impl PairLayout {
     /// Positive draw `t`: class by `C(n_k, 2)` weight, then triangular unranking.
     fn positive_draw(&self, t: u64) -> Result<RawPair, ContrastiveDataError> {
         let total = nonzero(self.positive_capacity, "positive_draw/total_weight")?;
-        let key = derive_key(self.root_seed, domains::PAIRS_POS_CLASS);
-        let target = bounded(&key, 0, t, total);
+        let target = bounded(&self.keys.pos_class, 0, t, total);
         let class_index = self.pos_prefix.partition_point(|prefix| *prefix <= target);
 
         let n = self.class_size(class_index);
         let capacity = nonzero(n * n.saturating_sub(1) / 2, "positive_draw/class_capacity")?;
-        let rank_key = derive_key(self.root_seed, domains::PAIRS_POS_RANK);
-        let rank = bounded(&rank_key, 0, t, capacity);
+        let rank = bounded(&self.keys.pos_rank, 0, t, capacity);
         let (first, second) = triangular_unrank(n, rank);
 
         Ok(RawPair {
@@ -807,23 +844,20 @@ impl PairLayout {
     fn negative_draw(&self, t: u64) -> Result<RawPair, ContrastiveDataError> {
         let total_weight = self.neg_prefix.last().copied().unwrap_or_default();
         let total = nonzero(total_weight, "negative_draw/total_weight")?;
-        let key = derive_key(self.root_seed, domains::PAIRS_NEG_CLASS);
-        let target = bounded(&key, 0, t, total);
+        let target = bounded(&self.keys.neg_class, 0, t, total);
         let first_class = self.neg_prefix.partition_point(|prefix| *prefix <= target);
 
         let n_j = nonzero(
             self.class_size(first_class),
             "negative_draw/first_class_size",
         )?;
-        let first_key = derive_key(self.root_seed, domains::PAIRS_NEG_FIRST);
-        let member_index = bounded(&first_key, 0, t, n_j);
+        let member_index = bounded(&self.keys.neg_first, 0, t, n_j);
 
         let outside = nonzero(
             self.total_examples - n_j.get(),
             "negative_draw/outside_first_class",
         )?;
-        let second_key = derive_key(self.root_seed, domains::PAIRS_NEG_SECOND);
-        let drawn = bounded(&second_key, 0, t, outside);
+        let drawn = bounded(&self.keys.neg_second, 0, t, outside);
         let offset_j = self.offsets.get(first_class).copied().unwrap_or_default();
         let global = if drawn < offset_j {
             drawn
@@ -955,20 +989,11 @@ impl<'a> PairSampler<'a> {
         self.layout.budget()
     }
 
-    /// Which kinds the stream emits.
-    pub fn emitted_kinds(&self) -> EmittedKinds {
-        self.layout.emitted_kinds()
-    }
-
-    /// How many classes hold exactly one selected example.
-    pub fn affected_singleton_classes(&self) -> u64 {
-        self.layout.affected_singleton_classes()
-    }
-
-    /// Whether the DEFAULT budget was clamped.
-    pub fn default_was_clamped(&self) -> bool {
-        self.layout.default_was_clamped()
-    }
+    // `emitted_kinds`, `affected_singleton_classes` and `default_was_clamped` are NOT
+    // forwarded here. They are layout properties and production already reads them through
+    // `sampler.layout()` (see `PairReplayRecord::from_sampler`); forwarding copies existed
+    // with test-only callers, which is one public surface per property too many. `budget()`
+    // below stays because the sampler genuinely resolves it.
 
     /// The pair at `ordinal`. Pure: the same ordinal always yields the same pair.
     ///
@@ -1640,9 +1665,9 @@ mod pair_stream_tests {
             PairSampler::new(&selection, &PairConfig::new(29)).expect("8 shots x 3 classes");
         assert_eq!(selection.class_sizes(), [(0, 8), (1, 8), (2, 8)]);
         assert_eq!(sampler.budget(), 384);
-        assert!(!sampler.default_was_clamped());
-        assert_eq!(sampler.emitted_kinds(), EmittedKinds::Both);
-        assert_eq!(sampler.affected_singleton_classes(), 0);
+        assert!(!sampler.layout().default_was_clamped());
+        assert_eq!(sampler.layout().emitted_kinds(), EmittedKinds::Both);
+        assert_eq!(sampler.layout().affected_singleton_classes(), 0);
     }
 
     #[test]
@@ -1654,7 +1679,7 @@ mod pair_stream_tests {
         };
         let sampler = PairSampler::new(&selection, &cfg).expect("a clamped default is legal");
         assert_eq!(sampler.budget(), 100, "the CLAMPED value is what is used");
-        assert!(sampler.default_was_clamped());
+        assert!(sampler.layout().default_was_clamped());
         assert_eq!(sampler.iter_from(0).expect("from zero").count(), 100);
     }
 

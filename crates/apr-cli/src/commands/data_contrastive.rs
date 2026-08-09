@@ -48,7 +48,7 @@ use colored::Colorize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -146,9 +146,11 @@ where
 /// artifact nor a stray file for the next `--force`-less run to trip over.
 ///
 /// `fill` takes the open file rather than a byte slice so `--dump` can stream a
-/// million-pair audit dump through `dump_pairs` without ever holding it in memory. A
-/// buffering dump would reintroduce the `O(budget)` allocation the protocol exists to
-/// avoid, in the one command whose job is to demonstrate its absence.
+/// million-pair audit dump through `dump_pairs` without ever holding it in memory.
+/// Accumulating the WHOLE dump before writing would reintroduce the `O(budget)` allocation
+/// the protocol exists to avoid, in the one command whose job is to demonstrate its absence.
+/// A fixed-size `BufWriter` is a different thing and is used at the `--dump` call site: its
+/// buffer does not grow with the budget, so it coalesces syscalls without retaining pairs.
 ///
 /// # Errors
 ///
@@ -510,7 +512,6 @@ pub(crate) fn run_select(
 struct PairsOutcome {
     record: PairReplayRecord,
     manifest_hash: String,
-    budget: u64,
     hard_cap: u64,
     positives: u64,
     negatives: u64,
@@ -651,13 +652,18 @@ fn pairs_outcome(
 
     if let Some(path) = dump {
         atomic_write_with(path, force, |file| {
-            dump_pairs(&sampler, file).map_err(|e| dataset_error(&e))
+            // A FIXED-SIZE buffer, not an O(budget) one: without it every pair is its own
+            // `write(2)`, which is ~24.6k syscalls at the default cell and ~326k across the
+            // benchmark grid. `dump_pairs` flushes explicitly before returning, and
+            // `fill_and_sync` calls `sync_all` only after this closure returns, so the
+            // ordering that makes the write atomic is unchanged.
+            let mut buffered = BufWriter::new(&mut *file);
+            dump_pairs(&sampler, &mut buffered).map_err(|e| dataset_error(&e))
         })?;
     }
 
     Ok(PairsOutcome {
         manifest_hash: hex(&digest),
-        budget: sampler.budget(),
         hard_cap: cfg.resolved_hard_cap(),
         positives,
         negatives,
@@ -686,7 +692,7 @@ fn pairs_report_json(
         root_seed: record.root_seed,
         strategy: &record.strategy,
         strategy_version: record.strategy_version,
-        budget: outcome.budget,
+        budget: outcome.record.budget,
         hard_cap: outcome.hard_cap,
         default_was_clamped: record.default_was_clamped,
         emitted_kinds: &record.emitted_kinds,
@@ -727,7 +733,7 @@ fn render_pairs_human(
         "Budget",
         format!(
             "{} pair(s) per epoch, hard cap {}{}",
-            outcome.budget,
+            outcome.record.budget,
             outcome.hard_cap,
             if record.default_was_clamped {
                 " (the DEFAULT budget was clamped by the cap)"
@@ -1437,10 +1443,10 @@ mod tests {
             "two runs over the same inputs commit to the same tuple"
         );
         assert_eq!(first.manifest_hash.len(), 64, "the hash is rendered as hex");
-        assert!(first.budget > 0);
+        assert!(first.record.budget > 0);
         assert_eq!(
             first.positives + first.negatives,
-            first.budget,
+            first.record.budget,
             "every emitted pair is counted exactly once"
         );
         assert!(
@@ -1491,7 +1497,7 @@ mod tests {
         let outcome =
             pairs_outcome(&manifest, &data, Some(255), None, None, false).expect("pairs succeeds");
 
-        assert_eq!(outcome.budget, 255);
+        assert_eq!(outcome.record.budget, 255);
         let delta = outcome.positives.abs_diff(outcome.negatives);
         assert_eq!(delta, 1, "an odd budget cannot be split evenly");
     }

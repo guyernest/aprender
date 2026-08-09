@@ -58,8 +58,16 @@ const C_EXAMPLES: usize = 1;
 const C_CLASSES: usize = 3;
 
 /// Slack for fixed-size scalar state that `state_report()` does not enumerate at all — the
-/// iterator's `cursor` and `budget`, and the layout's ten scalar fields. Named rather than
-/// rounded so it is a stated allowance and not a fudge factor tuned until the test passed.
+/// iterator's `cursor` and `budget`, the layout's ten scalar parameters, and the five
+/// precomputed domain keys (8 bytes each, derived once at construction rather than per draw).
+/// Named rather than rounded so it is a stated allowance and not a fudge factor tuned until
+/// the test passed.
+///
+/// This allowance does not track the field count and must not be grown to match it: the
+/// bound applies to the STRUCTURAL counts `state_report()` returns, and no O(1) field
+/// appears in any of them. What matters is that this state is fixed-size — a field added
+/// here is free, a field indexed by class or by pair is not and would show up in the
+/// per-class or per-example terms instead.
 const C_CONST: usize = 8;
 
 /// `C_EXAMPLES * examples + C_CLASSES * classes + C_CONST`.

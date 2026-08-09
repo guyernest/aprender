@@ -718,8 +718,12 @@ pub(crate) mod test_corpus {
 
     /// The ten contracted benchmark seeds.
     ///
-    /// Cited verbatim from `crates/apr-cli/src/commands/data_tweeteval.rs:45`
-    /// (`const BENCHMARK_SEEDS: [u64; 10]`). Note that **42 is not among them**.
+    /// Cited verbatim from `BENCHMARK_SEEDS` in
+    /// `crates/apr-cli/src/commands/data_tweeteval.rs`. Note that **42 is not among them**.
+    ///
+    /// Cited by SYMBOL, not by line: the original citation pinned a line number that was
+    /// already wrong when written and has drifted twice since. A reference that rots
+    /// silently is worse than a slightly less precise one.
     pub(crate) const CONTRACTED_SEEDS: [u64; 10] = [13, 17, 23, 29, 31, 37, 41, 43, 47, 53];
 
     pub(crate) fn label_names() -> Vec<String> {
