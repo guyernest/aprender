@@ -818,7 +818,7 @@ fixture must pin:  sklearn version, C, n, K, X (fixed design matrix), max_iter, 
 | A5 | rand's StdRng non-portability across versions (exact policy wording) | Pitfall 2 | Weakens one of two reasons to replace the mask source; the stateful-draw argument stands alone regardless |
 | A6 | `aprender-train` participates in the crates.io publish cascade (no `publish = false` found; workspace version) | Pitfall 9 | If it is actually never published, the Gate-5 extension is moot — the caveat costs one sentence either way |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 All eight discretion items, resolved to recommendations (1–3 are the load-bearing ones):
 

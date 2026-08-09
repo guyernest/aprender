@@ -187,6 +187,13 @@ surfaces on the mandatory CPU profile.
 **Goal**: Users can audit and recompute a complete, selection-safe TweetEval comparison between the
 verified SetFit APR and the existing 9B LoRA path across every contracted shot and seed.
 **Depends on**: Phase 4
+**Blocked by a Phase 3 gate until a contract edit lands**: Phase 3's SetFit-identity gate
+freezes its per-parameter update thresholds against a CALIBRATED REGIME, and by user decision
+that regime contains only the fixture encoder's architecture fingerprint. A benchmark run against
+the production `all-MiniLM-L6-v2` therefore returns `UncalibratedRegime` and fails closed rather
+than returning a verdict. Unblocking it requires calibrating on the production encoder and adding
+its fingerprint to `contracts/setfit-train-lifecycle-v1.yaml` — a deliberate, `pv diff`-flagged
+contract edit per Phase 3 D-10(c), never an inline relaxation by a Phase 5 executor.
 **Requirements**: EVAL-01, EVAL-02, EVAL-03, EVAL-04, EVAL-05
 **Success Criteria** (what must be TRUE):
 

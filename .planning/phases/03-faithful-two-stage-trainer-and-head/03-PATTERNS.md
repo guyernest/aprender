@@ -1,8 +1,10 @@
 # Phase 3: Faithful Two-Stage Trainer and Head - Pattern Map
 
 **Mapped:** 2026-08-09
-**Files analyzed:** 19 new/modified files
-**Analogs found:** 16 / 19 (2 partial, 1 no-analog)
+**Revised:** 2026-08-09 (revision 2 — re-synced to the 10-plan / 7-wave structure produced by the
+cross-AI review replan; the original map was written against the 9-plan structure)
+**Files analyzed:** 27 new/modified files (19 original + 8 added by the replan)
+**Analogs found:** 24 / 27 (3 partial, 0 no-analog after revision 2)
 
 All analog excerpts below were read directly from HEAD this session. Line numbers are pinned
 against the working tree at branch `gsd/phase-2-contract-gate`.
@@ -333,7 +335,7 @@ its Cargo.toml — so no new dep line is needed; use it directly and keep one co
 
 ---
 
-### `crates/aprender-train/src/train/setfit/verify.rs` — ReloadVerify trait + serde impl (D-07)
+### `crates/aprender-train/src/train/setfit/verify.rs` — sealed `SetFitCodec` + trusted verify policy (D-07 as amended)
 
 **Analog (partial):** `ledger.rs` round-trip pair `to_canonical_bytes` / `from_bytes`
 (lines 94-127) — the serialize-with-schema-version, parse-with-version-check shape:
@@ -347,9 +349,14 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Self, ContrastiveDataError> {
 }
 ```
 No in-repo trait seam analog exists for "close, reload from bytes, re-encode, re-predict, compare
-within contracted tolerances" — define the trait so Phase 4's APR impl is a drop-in (bytes in,
-verified model out; tolerances from the contract, per the Ph1 D-14 frozen-tolerance discipline in
-`contracts/setfit-encoder-conformance-v1.yaml`).
+within contracted tolerances". **Revision 2:** the seam is no longer a single `ReloadVerify` trait.
+D-07 was amended so the implementable half is a SEALED, three-method pure codec (`SetFitCodec`:
+`format_id` / `serialize` / `deserialize`) carrying no hashing, no comparison and no tolerance, while
+artifact hashing, the drop-reload-rebuild-compare sequence, the round-trip closure check and the
+minting of `ArtifactReloadedAndVerified` stay in trusted crate-internal policy. The sealing analog IS
+in-repo: `SelectedId`'s private constructor (`select.rs:103-118`) — a type whose provenance is a
+property of who may construct it. Tolerances still come from the contract per the Ph1 D-14
+frozen-tolerance discipline in `contracts/setfit-encoder-conformance-v1.yaml`.
 
 ---
 
@@ -745,3 +752,78 @@ it, reusing the pieces above (RESEARCH "Alternatives Considered", D-05 named the
 **Pattern extraction date:** 2026-08-09
 **Upstream inputs:** `03-CONTEXT.md` (16 locked decisions), `03-RESEARCH.md` (verified assets,
 8 resolved discretion questions, 12 pitfalls)
+
+---
+
+## Revision 2 Addendum — files created by the cross-AI review replan
+
+The replan added eight files with no pattern assignment in the original map. Each is listed with its
+owning plan/task and its closest in-repo analog; every analog named here also appears in that task's
+`read_first`.
+
+### `crates/aprender-train/src/train/setfit/tune.rs` — `run_tuning`, the stage-one loop (03-05 T2)
+
+The phase's largest new function, and the one the original map omitted entirely.
+
+**Analog (decision, not copy):** `crates/aprender-train/src/train/trainer/core.rs` and
+`crates/aprender-train/src/train/train_loop/basic.rs` — the existing generic trainer. 03-CONTEXT.md's
+canonical refs direct reading both "before deciding whether the SetFit trainer composes with it or
+sits beside it", and RESEARCH's Alternatives table answers: **sit beside it.** `Trainer` owns
+`Vec<Tensor>` parameters plus a `Box<dyn Optimizer>`; the SetFit loop needs BORROWED NAMED parameters
+from `SetFitMiniLm::trainable_parameters_mut()` and evidence capture between the optimizer step and
+the gradient clear, which the generic loop has no seam for. Reuse `AdamW`, `clip_grad_norm_refs` and
+the scheduler directly — D-05 named those pieces, not the `Trainer`.
+
+**Analog (structure):** `crates/aprender-core/src/optim/lbfgs.rs` — sequential indexed numeric loops
+with no `par_iter`, the house style for anything whose reduction order is load-bearing.
+
+**Complexity note:** the specified body (6 pre-loop steps + a 13-step per-batch body) breaches the
+project ceiling of cyclomatic 10, so 03-05 T2 prescribes the decomposition
+(`preflight` / `snapshot_initial` / `baseline_encode` / `run_batch` / `absorb_batch_digests`) rather
+than leaving it to be discovered at 03-10's `pmat analyze complexity` gate.
+
+### `crates/aprender-train/src/train/setfit/bundle.rs` — `SetFitBundle` (03-08 T1)
+
+**Analog:** `ledger.rs` `to_canonical_bytes` / `from_bytes` (lines 94-127) for the
+schema-versioned canonical wire form, and `attestation.rs` (:73, :87) for the
+`deny_unknown_fields` wire-struct precedent. The bounded-deserialization limits have no in-repo
+analog — they are new, and contracted in 03-08 T3 as `bundle_limits`.
+
+### `crates/aprender-train/src/train/setfit/evaluate.rs` — trusted validation evaluator (03-09 T1)
+
+**Analog:** `prepared.rs::validation_witness` (:327) + `ValidationWitness::fingerprint_hex` (:155) —
+a borrowed witness whose existence proves which split a fact came from. The evaluator extends the
+same idea from existence to computation: the metric is computed under the witness rather than
+asserted beside it.
+
+### `crates/aprender-train/src/train/setfit/thresholds.rs` — frozen threshold source (03-06 T2)
+
+**Analog:** Ph1 D-14's frozen-tolerance discipline in
+`contracts/setfit-encoder-conformance-v1.yaml`, plus `tolerances_measured.json` in the Phase 1
+fixture set. The new element is the direction of truth: the YAML is authoritative and the Rust
+constants are checked against it by a `serde_yaml` parse, rather than two hand-kept copies.
+
+### `crates/aprender-train/src/train/setfit/test_fixtures.rs` — shared trainer fixture (03-05 T1)
+
+**Analog:** `crates/aprender-contrastive-data/tests/common/` — Phase 2's synthetic-row dataset
+builders; and `SetFitMiniLm::from_slice_fixture` (setfit/mod.rs:236) with `fixtures_dir()`
+(model_tests.rs:403) for the network-free encoder. Both are already `pub`, so no test-support
+backdoor is required.
+
+### `crates/aprender-train/tests/setfit_calibration.rs` — calibration matrix target (03-05 T3)
+
+**Analog:** none in-repo; it exists because the matrix (>= 12 full tuning runs) must not sit on the
+default `evidence_` unit filter. Closest discipline: the Makefile's heavy scoped targets wired into
+tier3 rather than tier2.
+
+### `crates/aprender-train/tests/setfit_repro.rs` and `crates/aprender-core/tests/gemm_thread_determinism.rs` — subprocess harnesses (03-10 T2, 03-02 T3)
+
+**Analog:** the `std::env::current_exe()` child-spawn pattern; 03-02's harness is written first and
+03-10's reuses its shape. Both follow CLAUDE.md Verification Discipline rule 1 (direct rc capture)
+and rule 2 (prove the mechanism engaged — `THREADS` and `PARTITIONS` lines, fixed pool sizes).
+
+### `scripts/gen_multinomial_sklearn_fixture.py` — sklearn reference generator (03-04 T2)
+
+**Analog:** `scripts/setfit_fixtures/generate_fixtures.py` and its `uv.lock` / `.python-version` —
+Phase 1's pinned Python fixture workflow. The revision adds PEP 723 self-pinning so the script
+declares its own dependency versions instead of relying on a recipe recorded elsewhere.
