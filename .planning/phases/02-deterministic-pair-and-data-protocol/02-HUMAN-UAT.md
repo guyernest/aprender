@@ -3,7 +3,7 @@ status: partial
 phase: 02-deterministic-pair-and-data-protocol
 source: [02-VERIFICATION.md]
 started: 2026-08-09T08:33:23Z
-updated: 2026-08-09T10:40:00Z
+updated: 2026-08-09T12:15:00Z
 ---
 
 ## Current Test
@@ -30,7 +30,10 @@ would be actively wrong.
 
 expected: A human accepts the deviation (ready-to-paste override YAML is in
 02-VERIFICATION.md), or rejects it and specifies how D-19 should otherwise be satisfied.
-result: [pending]
+result: ACCEPTED (Guy Ernest, 2026-08-09). Override written into 02-VERIFICATION.md
+frontmatter and FINDING-D1 status flipped uncertain -> accepted. The must_have is now scoped
+to the canonical profile, where byte-identity holds and is proven by independent
+re-derivation.
 
 ### 2. Approve the crates.io publish cascade
 
@@ -45,7 +48,13 @@ self-serving the publish cascade, so no executor attempted it.
 
 expected: A human approves and runs the publish cascade in that order, or defers it and
 accepts Gate 5 staying red until they do.
-result: [pending]
+result: APPROVED, BUT NOT AUTOMATED — correction on the record. The approval assumed CI
+publishes after the PR merges. It does not: there is no `release.yml`, no
+`CARGO_REGISTRY_TOKEN` anywhere in `.github/`, and `binary-release.yml`'s own header says it
+is "Decoupled from `cargo publish`". Publishing is the manual `make publish` target
+(Makefile:1189), which CLAUDE.md requires asking before. **Merging the PR will not publish
+anything and Gate 5 will stay red** until someone runs the cascade by hand, in the order
+`aprender-contrastive-data` then `apr-cli`. STILL PENDING that manual run.
 
 ### 3. Resolve the untested FALSIFY-CPP-007 prediction (FINDING-W2)
 
@@ -61,7 +70,17 @@ them is a scope call, not a mechanical fix.
 
 expected: Either a K=512 case exists and passes, or FALSIFY-CPP-007 states a bound the suite
 actually tests.
-result: [pending]
+result: RESOLVED. `falsify_cpp_007_pairs_at_n_512_singletons_stays_bounded` asserts every
+number the contract names — positive_capacity 0, negative_capacity C(512,2) = 130816,
+negatives-only emission — plus linear growth (1536 retained = 4x the K=128 total of 384, not
+16x) and a full drain of the fixed 64 budget. Mutation-tested: perturbing negative_capacity
+gives "left: 130305, right: 130816".
+
+A second defect surfaced while fixing this and was also fixed: the contract's OWN declared
+harness, `cargo test -p aprender-contrastive-data pairs`, selected ZERO tests from
+`negative_materializing.rs`. The evidence command named by the contract could not have
+reached the new test either. Repointed at
+`--test negative_materializing falsify_cpp_007`, which selects 1.
 
 ### 4. Triage three code-review blockers (02-REVIEW.md)
 
@@ -124,14 +143,37 @@ expected: A human triages CR-03 as its own Makefile-hardening task — apply
 `.SHELLFLAGS := -e -u -o pipefail -c`, then re-verify every target on BOTH make 3.81 and
 gmake 4.4.1, and re-mutate the gates in the new scope rather than trusting the earlier
 standalone proofs.
-result: [pending]
+result: RESOLVED, with a narrower fix than the reviewer proposed. Applied
+`.SHELLFLAGS := -e -c`, NOT `-e -u -o pipefail -c`. Blast radius measured over all 85
+targets: 35 recipes reference a shell variable (a `-u` risk) and 5 pipe into `head`/`tail`,
+where the reader closing the pipe SIGPIPEs the writer and `pipefail` converts that into a
+failure. `-e` alone restores the per-line abort semantics make 3.81 already had, which is
+the actual defect; `-u` and `pipefail` are separate hardening that would need their own pass.
+
+Re-mutated in the NEW scope rather than trusting the standalone proof (CLAUDE.md rule 4).
+`tier2` already contains a real failure — 19 arm64 clippy errors in `aprender-compute` — so
+it is a live mutation needing no synthetic one:
+
+```
+gmake 4.4.1, before: rc=0, prints "Tier 2: PASSED"   <- over 19 compile errors
+gmake 4.4.1, after:  rc=2
+```
+
+make 3.81 is unaffected: `.SHELLFLAGS` arrived in 3.82, and 3.81 also predates `.ONESHELL`
+so it never had the bug. Verified it parses, the gate runs rc=0, and tier2 is rc=2 as before.
+
+Scope, for the CLI-compatibility concern: this is BUILD-GATE ONLY. No CLI surface, no
+library API, no algorithm behaviour changes — nothing downstream of `apr` or the crates is
+affected. The visible change is that Linux developers running `make tier2`/`tier3` now see
+real failures instead of a false pass. `bashrs` is not installed here so the Makefile shell
+could not be linted; shellcheck was NOT substituted.
 
 ## Summary
 
 total: 4
-passed: 0
+passed: 3
 issues: 0
-pending: 4
+pending: 1
 skipped: 0
 blocked: 0
 
