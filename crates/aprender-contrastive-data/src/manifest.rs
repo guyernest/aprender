@@ -25,12 +25,13 @@
 //! iteration order. Two identical runs produce byte-identical payloads.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::dedup::ExclusionRecord;
 use crate::error::ContrastiveDataError;
 use crate::hash::hex;
-use crate::ledger::AccessRecord;
-use crate::select::SelectedExample;
+use crate::ledger::{AccessLedger, AccessRecord};
+use crate::select::{SelectedExample, Selection};
 
 /// The selection-manifest schema version this build writes.
 pub const SELECTION_SCHEMA_VERSION: u32 = 1;
@@ -152,6 +153,86 @@ impl SelectionPayload {
     }
 }
 
+/// The OUTER envelope: digest, unhashed volatile block, payload.
+///
+/// This is the on-disk form of `selection-manifest.json`. A consumer writes
+/// [`Self::to_file_bytes`] verbatim and composes no JSON of its own, so there is exactly
+/// one serializer and no second place for the byte form to drift.
+///
+/// The three fields are public because forging one must be *possible* for the defence to
+/// be meaningful: [`Selection::replay`](crate::select::Selection::replay) is what makes a
+/// forged manifest useless, not the privacy of a struct field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectionManifest {
+    /// Lowercase hex of `SHA-256(payload.to_canonical_bytes())`.
+    pub semantic_hash: String,
+    /// Volatile metadata. NEVER part of the digest.
+    pub volatile: VolatileMetadata,
+    /// The hashed payload.
+    pub payload: SelectionPayload,
+}
+
+impl SelectionManifest {
+    /// Wrap the payload a [`Selection`](crate::select::Selection) already retains.
+    ///
+    /// This is a WRAP, not a rebuild. The selection carries the exact payload its
+    /// `semantic_hash` was taken over, so re-deriving one here could only introduce a way
+    /// for the two to disagree.
+    ///
+    /// # The ledger guard
+    ///
+    /// The payload embeds `access_ledger` and `ledger_hash` describing the ledger **as it
+    /// stood when `select` finished**. If the caller has appended to that ledger since,
+    /// the payload no longer attests the ledger being handed in, and wrapping it would
+    /// publish a manifest whose persisted ledger is quietly stale. That is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`ContrastiveDataError::SemanticHashMismatch`] when
+    /// `ledger.ledger_hash() != sel.ledger_hash()`.
+    pub fn from_selection(
+        sel: &Selection,
+        ledger: &AccessLedger,
+    ) -> Result<Self, ContrastiveDataError> {
+        todo!("RED: implemented in the GREEN commit of task 3")
+    }
+
+    /// The on-disk byte form: pretty JSON plus a terminating newline.
+    ///
+    /// Pretty rather than compact because this file is reviewed in diffs; the DIGEST is
+    /// taken over the payload's own compact canonical bytes, so the file's whitespace can
+    /// be chosen for humans without weakening anything.
+    ///
+    /// # Errors
+    ///
+    /// [`ContrastiveDataError::Serialization`] if the envelope cannot be serialized.
+    pub fn to_file_bytes(&self) -> Result<Vec<u8>, ContrastiveDataError> {
+        todo!("RED: implemented in the GREEN commit of task 3")
+    }
+
+    /// Parse the full file form, verifying the digest BEFORE returning.
+    ///
+    /// A caller therefore cannot hold a `SelectionManifest` parsed from bytes whose digest
+    /// does not match its payload.
+    ///
+    /// # Errors
+    ///
+    /// [`ContrastiveDataError::Serialization`] on malformed or extended JSON;
+    /// [`ContrastiveDataError::SemanticHashMismatch`] when the digest disagrees.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ContrastiveDataError> {
+        todo!("RED: implemented in the GREEN commit of task 3")
+    }
+
+    /// Recompute `SHA-256(payload.to_canonical_bytes())` and compare it to the envelope.
+    ///
+    /// Over the manifest's OWN payload bytes — never over a payload rebuilt from live
+    /// state. See `Selection::replay` for why a live rebuild would be unsatisfiable.
+    pub(crate) fn verify_digest(&self) -> Result<(), ContrastiveDataError> {
+        todo!("RED: implemented in the GREEN commit of task 3")
+    }
+}
+
 #[cfg(test)]
 mod payload_tests {
     use super::{SelectionPayload, SELECTION_SCHEMA_VERSION, SUPPORTED_SELECTION_SCHEMA_VERSIONS};
@@ -254,5 +335,396 @@ mod payload_tests {
         text.insert_str(1, r#""extra":true,"#);
         let err = serde_json::from_str::<SelectionPayload>(&text);
         assert!(err.is_err(), "deny_unknown_fields must reject an added key");
+    }
+}
+
+/// The FROZEN golden corpus and the four committed selection goldens.
+///
+/// # No filesystem, by construction
+///
+/// Every byte here arrives through `include_bytes!`, whose paths resolve against THIS
+/// SOURCE FILE at compile time. The verifier is therefore working-directory independent
+/// and adds no `std::fs` to `src/` — which `make contrastive-data-boundary` bans outright,
+/// with no `cfg(test)` exemption.
+///
+/// # What is algorithm-derived and what is capture-and-blessed
+///
+/// Stated plainly, because the two are not equally strong evidence:
+///
+/// * **Algorithm-derived.** [`GOLDEN_CASES`]'s `ordered_ids_sha256` values were computed
+///   by an independent Python implementation written from the contract equations
+///   (`rng_key_derivation`, `bounded_draw`, `few_shot_selection`) and from Salmon et al.
+///   (2011), which never read this crate's source. They pin the SELECTION itself — which
+///   rows, in which order — against a second implementation.
+/// * **Capture-and-blessed.** The `*.payload.json` files are this crate's own canonical
+///   serialization of those selections, written once by `tests/goldens_regenerate.rs`.
+///   They pin the BYTE FORM against future drift; they do not independently corroborate
+///   it. Their content is corroborated by the digests above.
+///
+/// Re-baselining is `cargo test -p aprender-contrastive-data --test goldens_regenerate --
+/// --ignored`, and it must be a reviewed diff.
+#[cfg(test)]
+mod golden_tests {
+    use super::{SelectionManifest, SelectionPayload};
+    use crate::hash::hex;
+    use crate::ledger::AccessLedger;
+    use crate::prepared::{Canonical, CanonicalDeclarations, PreparedDataset};
+    use crate::schema::parse_jsonl_bytes;
+    use crate::select::{FewShotSelector, Selection, SelectionConfig};
+    use crate::split::SplitDeclaration;
+    use sha2::{Digest, Sha256};
+
+    pub(super) const TRAIN_JSONL: &[u8] =
+        include_bytes!("../tests/goldens/golden_corpus_train.jsonl");
+    pub(super) const VALIDATION_JSONL: &[u8] =
+        include_bytes!("../tests/goldens/golden_corpus_validation.jsonl");
+    pub(super) const TEST_JSONL: &[u8] =
+        include_bytes!("../tests/goldens/golden_corpus_test.jsonl");
+    const SHA256_MANIFEST: &[u8] = include_bytes!("../tests/goldens/manifest.sha256");
+
+    /// `(seed, shots, golden payload bytes, independently derived ordered-id digest)`.
+    const GOLDEN_CASES: [(u64, u32, &[u8], &str); 4] = [
+        (
+            13,
+            8,
+            include_bytes!("../tests/goldens/selection_seed13_shots8.payload.json"),
+            "1c99eec4d905430e4b5d05471a01af99f27b4ef65707767f2765cb10ef57701c",
+        ),
+        (
+            13,
+            16,
+            include_bytes!("../tests/goldens/selection_seed13_shots16.payload.json"),
+            "1ea9826fd29e0a298c911097d973e3ca4eb7d804bd542b481264804cd658ffaa",
+        ),
+        (
+            17,
+            8,
+            include_bytes!("../tests/goldens/selection_seed17_shots8.payload.json"),
+            "7bb11c386e9622d151c83d6a3471b56a21da5c32fc86c9f5b62d97e91d64c763",
+        ),
+        (
+            17,
+            16,
+            include_bytes!("../tests/goldens/selection_seed17_shots16.payload.json"),
+            "ca7c7c4c291beb63b9e878428e46f6a9217c23d0742043dd9e7489398f9dd301",
+        ),
+    ];
+
+    /// Every file the committed `manifest.sha256` covers, paired with its embedded bytes.
+    fn covered_files() -> Vec<(&'static str, &'static [u8])> {
+        let mut files: Vec<(&str, &[u8])> = vec![
+            ("golden_corpus_train.jsonl", TRAIN_JSONL),
+            ("golden_corpus_validation.jsonl", VALIDATION_JSONL),
+            ("golden_corpus_test.jsonl", TEST_JSONL),
+        ];
+        for (seed, shots, bytes, _) in GOLDEN_CASES {
+            files.push((golden_name(seed, shots), bytes));
+        }
+        files
+    }
+
+    fn golden_name(seed: u64, shots: u32) -> &'static str {
+        match (seed, shots) {
+            (13, 8) => "selection_seed13_shots8.payload.json",
+            (13, 16) => "selection_seed13_shots16.payload.json",
+            (17, 8) => "selection_seed17_shots8.payload.json",
+            (17, 16) => "selection_seed17_shots16.payload.json",
+            other => panic!("no golden is committed for {other:?}"),
+        }
+    }
+
+    /// The golden corpus's declarations. FROZEN alongside the corpus files.
+    pub(super) fn declarations() -> CanonicalDeclarations {
+        let label_names = ["none", "against", "favor"]
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<String>>();
+        let decl = |counts: Vec<usize>| SplitDeclaration {
+            expected_class_counts: counts,
+            label_names: label_names.clone(),
+        };
+        CanonicalDeclarations {
+            train: decl(vec![20, 20, 20]),
+            validation: decl(vec![1, 1, 1]),
+            test: decl(vec![1, 1, 1]),
+            label_names,
+        }
+    }
+
+    pub(super) fn golden_dataset(ledger: &mut AccessLedger) -> PreparedDataset<Canonical> {
+        let parse = |bytes: &[u8], role: &str| {
+            parse_jsonl_bytes(bytes, role).expect("the golden corpus must parse")
+        };
+        PreparedDataset::<Canonical>::from_labeled_rows(
+            parse(TRAIN_JSONL, "train"),
+            parse(VALIDATION_JSONL, "validation"),
+            parse(TEST_JSONL, "test"),
+            &declarations(),
+            ledger,
+        )
+        .expect("the golden corpus must be a valid canonical dataset")
+    }
+
+    pub(super) fn golden_selection(seed: u64, shots: u32) -> (Selection, AccessLedger) {
+        let mut ledger = AccessLedger::new();
+        let dataset = golden_dataset(&mut ledger);
+        let selection = FewShotSelector::select(
+            &dataset,
+            &SelectionConfig {
+                root_seed: seed,
+                shots_per_class: shots,
+            },
+            &mut ledger,
+        )
+        .expect("the golden corpus must support 8 and 16 shots");
+        (selection, ledger)
+    }
+
+    /// The corpus carries exactly one cross-split duplicate, so the goldens exercise a
+    /// NON-EMPTY exclusion record rather than only the easy path.
+    #[test]
+    fn golden_corpus_has_the_shape_the_goldens_were_derived_from() {
+        let mut ledger = AccessLedger::new();
+        let dataset = golden_dataset(&mut ledger);
+        assert_eq!(dataset.train().rows().len(), 60);
+        assert_eq!(dataset.validation().rows().len(), 3);
+        assert_eq!(dataset.test().rows().len(), 3);
+        assert_eq!(
+            dataset.exclusions().excluded_train_ids(),
+            ["train:0-07".to_string()],
+            "the frozen corpus must exclude exactly this row"
+        );
+        assert_eq!(dataset.exclusions().reduced_pools().get(&0), Some(&19));
+
+        // Two rows carry a whitespace variant, so the goldens pin the NORMALIZED hash as a
+        // value distinct from the exact one. Without them every recorded pair would be
+        // identical and the goldens would say nothing about `nfc-trim-ws-v1`.
+        let train = dataset.train();
+        let differing = train
+            .rows()
+            .iter()
+            .filter(|row| train.exact_hash_of(&row.id) != train.normalized_hash_of(&row.id))
+            .count();
+        assert_eq!(
+            differing, 2,
+            "the frozen corpus must contain exactly two whitespace-variant rows"
+        );
+    }
+
+    #[test]
+    fn golden_files_match_the_committed_sha256_manifest() {
+        let text = core::str::from_utf8(SHA256_MANIFEST).expect("manifest.sha256 is UTF-8");
+        let recorded: Vec<(&str, &str)> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let (digest, name) = line
+                    .split_once("  ")
+                    .expect("each manifest line is `<hex>  <name>`");
+                (name, digest)
+            })
+            .collect();
+
+        let files = covered_files();
+        // Vacuity guard: pin the population BEFORE asserting a relation over it, so an
+        // empty manifest cannot satisfy an empty comparison (02-04's lesson).
+        assert_eq!(files.len(), 7);
+        assert_eq!(recorded.len(), 7, "manifest.sha256 must cover all 7 files");
+
+        for (name, bytes) in files {
+            let digest = hex(&Sha256::digest(bytes).into());
+            let expected = recorded
+                .iter()
+                .find(|(entry, _)| *entry == name)
+                .unwrap_or_else(|| panic!("manifest.sha256 has no entry for {name}"))
+                .1;
+            assert_eq!(digest, expected, "digest drift in {name}");
+        }
+    }
+
+    /// The four committed payload goldens are byte-identical to what this build produces.
+    #[test]
+    fn golden_selection_payload_bytes_match_the_committed_goldens() {
+        for (seed, shots, expected, _) in GOLDEN_CASES {
+            let (selection, _) = golden_selection(seed, shots);
+            let produced = selection
+                .payload()
+                .to_canonical_bytes()
+                .expect("payload serializes");
+            assert_eq!(
+                produced,
+                expected,
+                "golden {} drifted",
+                golden_name(seed, shots)
+            );
+        }
+    }
+
+    /// The independently derived half: which rows, in which order.
+    ///
+    /// These digests came from a Python implementation of the contract equations that has
+    /// never read this crate. If this test and the byte-golden test disagree, the byte
+    /// golden is the one that was re-blessed.
+    #[test]
+    fn golden_ordered_ids_match_the_independently_derived_digests() {
+        for (seed, shots, _, expected) in GOLDEN_CASES {
+            let (selection, _) = golden_selection(seed, shots);
+            let joined = selection.ordered_ids().join("\n");
+            let digest = hex(&Sha256::digest(joined.as_bytes()).into());
+            assert_eq!(
+                digest, expected,
+                "seed {seed} shots {shots}: ordered ids disagree with the reference derivation"
+            );
+            assert_eq!(selection.len() as u32, shots * 3);
+        }
+    }
+
+    /// A golden payload must parse back into the payload it was written from, so a golden
+    /// cannot be a well-formed file describing something else.
+    #[test]
+    fn golden_payloads_round_trip_into_equal_manifests() {
+        for (seed, shots, bytes, _) in GOLDEN_CASES {
+            let (selection, ledger) = golden_selection(seed, shots);
+            let parsed: SelectionPayload =
+                serde_json::from_slice(bytes).expect("a golden payload must parse");
+            assert_eq!(&parsed, selection.payload());
+
+            let manifest =
+                SelectionManifest::from_selection(&selection, &ledger).expect("wrap succeeds");
+            let round_tripped =
+                SelectionManifest::from_bytes(&manifest.to_file_bytes().expect("file bytes"))
+                    .expect("the file form verifies its own digest");
+            assert_eq!(round_tripped.payload, parsed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::{SelectionManifest, VolatileMetadata};
+    use crate::error::ContrastiveDataError;
+    use crate::hash::hex;
+    use crate::ledger::AccessLedger;
+    use crate::select::test_corpus;
+
+    fn wrapped() -> (SelectionManifest, AccessLedger) {
+        let mut ledger = AccessLedger::new();
+        let dataset = test_corpus::dataset(12, &mut ledger);
+        let selection = test_corpus::select(&dataset, 23, 8, &mut ledger);
+        let manifest =
+            SelectionManifest::from_selection(&selection, &ledger).expect("the wrap succeeds");
+        (manifest, ledger)
+    }
+
+    /// `created_at` lives OUTSIDE the hashed region, so two manifests of the same
+    /// selection that differ only in when they were written are the same artifact.
+    #[test]
+    fn manifest_semantic_hash_ignores_volatile_metadata() {
+        let (mut first, _) = wrapped();
+        let (mut second, _) = wrapped();
+        first.volatile = VolatileMetadata {
+            created_at: "2026-08-09T00:00:00Z".to_string(),
+            tool_version: "0.0.1-alpha".to_string(),
+        };
+        second.volatile = VolatileMetadata {
+            created_at: "2031-01-01T12:34:56Z".to_string(),
+            tool_version: "9.9.9".to_string(),
+        };
+
+        assert_ne!(first.volatile, second.volatile);
+        assert_eq!(first.semantic_hash, second.semantic_hash);
+        assert_eq!(first.payload, second.payload);
+        first.verify_digest().expect("digest still verifies");
+        second.verify_digest().expect("digest still verifies");
+    }
+
+    /// Checker warning 2: the payload attests the ledger as it stood when `select`
+    /// finished, so a ledger that has grown since is not the one it describes.
+    #[test]
+    fn manifest_from_selection_refuses_a_ledger_that_has_drifted() {
+        let mut ledger = AccessLedger::new();
+        let dataset = test_corpus::dataset(12, &mut ledger);
+        let selection = test_corpus::select(&dataset, 29, 8, &mut ledger);
+        SelectionManifest::from_selection(&selection, &ledger).expect("the matching ledger wraps");
+
+        ledger.record("train", "canonical", "something-else", "aa");
+        let err = SelectionManifest::from_selection(&selection, &ledger)
+            .expect_err("a drifted ledger must be refused");
+        match err {
+            ContrastiveDataError::SemanticHashMismatch { expected, got } => {
+                assert_eq!(expected, hex(&selection.ledger_hash()));
+                assert_eq!(got, hex(&ledger.ledger_hash()));
+                assert_ne!(expected, got);
+            }
+            other => panic!("expected SemanticHashMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_file_form_round_trips_every_payload_field() {
+        let (manifest, _) = wrapped();
+        let bytes = manifest.to_file_bytes().expect("file bytes");
+        assert_eq!(
+            bytes.last(),
+            Some(&b'\n'),
+            "the file form ends in a newline"
+        );
+
+        let restored = SelectionManifest::from_bytes(&bytes).expect("round-trip");
+        assert_eq!(restored, manifest);
+        assert_eq!(restored.payload, manifest.payload);
+
+        // Two file forms differing ONLY in volatile metadata parse to equal payloads and
+        // equal digests.
+        let mut other = manifest.clone();
+        other.volatile.created_at = "1999-12-31T23:59:59Z".to_string();
+        let other_bytes = other.to_file_bytes().expect("file bytes");
+        assert_ne!(other_bytes, bytes);
+        let other_restored = SelectionManifest::from_bytes(&other_bytes).expect("round-trip");
+        assert_eq!(other_restored.payload, restored.payload);
+        assert_eq!(other_restored.semantic_hash, restored.semantic_hash);
+    }
+
+    #[test]
+    fn manifest_from_bytes_rejects_a_digest_that_disagrees_with_its_payload() {
+        let (mut manifest, _) = wrapped();
+        let honest = manifest.semantic_hash.clone();
+        manifest.semantic_hash = "0".repeat(64);
+        let bytes = manifest.to_file_bytes().expect("file bytes");
+
+        let err = SelectionManifest::from_bytes(&bytes)
+            .expect_err("a disagreeing digest must be refused before the value is returned");
+        match err {
+            ContrastiveDataError::SemanticHashMismatch { expected, got } => {
+                assert_eq!(expected, "0".repeat(64));
+                assert_eq!(got, honest);
+            }
+            other => panic!("expected SemanticHashMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_from_bytes_rejects_an_unknown_envelope_field() {
+        let (manifest, _) = wrapped();
+        let mut text =
+            String::from_utf8(manifest.to_file_bytes().expect("file bytes")).expect("UTF-8");
+        text.insert_str(1, r#""rogue":1,"#);
+        let err = SelectionManifest::from_bytes(text.as_bytes())
+            .expect_err("deny_unknown_fields must reject an added envelope key");
+        assert!(matches!(err, ContrastiveDataError::Serialization { .. }));
+    }
+
+    /// Review finding F7: the persisted ledger is a real ledger, not a decorative copy.
+    #[test]
+    fn manifest_persisted_ledger_reproduces_its_hash_through_access_ledger() {
+        let (manifest, live) = wrapped();
+        let records = serde_json::to_string(&manifest.payload.access_ledger)
+            .expect("the persisted records serialize");
+        let wire = format!(r#"{{"schema_version":1,"records":{records}}}"#);
+        let rebuilt = AccessLedger::from_bytes(wire.as_bytes())
+            .expect("the persisted records parse as a ledger");
+
+        assert_eq!(rebuilt.records(), live.records());
+        assert_eq!(hex(&rebuilt.ledger_hash()), manifest.payload.ledger_hash);
     }
 }

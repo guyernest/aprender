@@ -35,7 +35,7 @@
 //! so neither can regress unnoticed.
 
 use core::num::NonZeroU64;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
@@ -43,7 +43,10 @@ use crate::buckets::ClassBuckets;
 use crate::error::ContrastiveDataError;
 use crate::hash::{hex, CONTENT_NORMALIZATION_VERSION};
 use crate::ledger::AccessLedger;
-use crate::manifest::{SelectedExampleRecord, SelectionPayload, SELECTION_SCHEMA_VERSION};
+use crate::manifest::{
+    SelectedExampleRecord, SelectionManifest, SelectionPayload, SELECTION_SCHEMA_VERSION,
+    SUPPORTED_SELECTION_SCHEMA_VERSIONS,
+};
 use crate::prepared::{Canonical, DatasetProfile, PreparedDataset};
 use crate::rng::{bounded, derive_key, domains};
 use crate::split::{SplitRole, Train};
@@ -60,6 +63,9 @@ const ALLOWED_SHOTS_TEXT: &str = "{8, 16, 32, 64}";
 
 /// The access-ledger purpose recorded by a selection.
 const SELECT_PURPOSE: &str = "select";
+
+/// The access-ledger purpose recorded by a replay.
+const REPLAY_PURPOSE: &str = "select-replay";
 
 /// What a caller asks a selection for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +396,260 @@ impl Selection {
     pub fn ids_in_class(&self, label: usize) -> &[SelectedId] {
         self.by_class.get(&label).map_or(&[], Vec::as_slice)
     }
+
+    /// STRICT replay: the sole sanctioned path from manifest bytes back to a `Selection`.
+    ///
+    /// Consumes a CANONICAL prepared dataset. A compatibility dataset is not rejected here
+    /// — it cannot be passed, because it is a different type (D-19).
+    ///
+    /// The ladder, in order, each step with its own typed error:
+    ///
+    /// 1. supported `schema_version`, then `algorithm_version` equal to this build's
+    ///    ([`ContrastiveDataError::UnsupportedSchemaVersion`] /
+    ///    [`ContrastiveDataError::UnsupportedAlgorithmVersion`]). A different algorithm
+    ///    version is refused, never silently skipped past the recomputation below;
+    /// 2. profile, dataset fingerprint, validation fingerprint, exclusion record;
+    /// 3. membership of every id in the post-exclusion train pool, then id uniqueness,
+    ///    then per-class balance, then class-ascending ordering, then both per-row hashes;
+    /// 4. `semantic_hash`;
+    /// 5. a full deterministic RECOMPUTATION of the ordered list.
+    ///
+    /// # Why step 4 hashes the manifest's OWN payload bytes
+    ///
+    /// The payload embeds the access ledger and its hash as they stood when `select`
+    /// finished. Replay appends its own record, so by the time this check runs the LIVE
+    /// ledger has diverged from the recorded one by construction. A rule that rebuilt the
+    /// payload from the live ledger could therefore never pass — it would reject every
+    /// honest manifest and take the CLI's replay path down with it. The digest is
+    /// recomputed over `manifest.payload.to_canonical_bytes()` and nothing else.
+    ///
+    /// # Why step 5 exists at all
+    ///
+    /// Steps 1-4 accept any manifest that is internally consistent. A hand-edited manifest
+    /// with recomputed hashes IS internally consistent. Step 5 is what makes the artifact
+    /// evidence: a selection no seed could have produced is refused even when every digest
+    /// in it agrees.
+    ///
+    /// # Errors
+    ///
+    /// The variant named by whichever step disagrees first; see the ladder above.
+    #[provable_contracts_macros::contract(
+        "contrastive-pair-protocol-v1",
+        equation = "selection_replay"
+    )]
+    pub fn replay(
+        manifest: &SelectionManifest,
+        dataset: &PreparedDataset<Canonical>,
+        ledger: &mut AccessLedger,
+    ) -> Result<Self, ContrastiveDataError> {
+        todo!("RED: implemented in the GREEN commit of task 3")
+    }
+}
+
+/// Parse a 64-character lowercase hex digest.
+fn digest_from_hex(text: &str) -> Option<[u8; 32]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, slot) in digest.iter_mut().enumerate() {
+        let high = char::from(bytes[index * 2]).to_digit(16)?;
+        let low = char::from(bytes[index * 2 + 1]).to_digit(16)?;
+        *slot = (high * 16 + low) as u8;
+    }
+    Some(digest)
+}
+
+/// Step 1: versions.
+fn check_versions(payload: &SelectionPayload) -> Result<(), ContrastiveDataError> {
+    if !SUPPORTED_SELECTION_SCHEMA_VERSIONS.contains(&payload.schema_version) {
+        return Err(ContrastiveDataError::UnsupportedSchemaVersion {
+            field: "selection".to_string(),
+            got: payload.schema_version,
+            supported: SELECTION_SCHEMA_VERSION,
+        });
+    }
+    if payload.algorithm_version != SELECTION_ALGORITHM_VERSION {
+        return Err(ContrastiveDataError::UnsupportedAlgorithmVersion {
+            got: payload.algorithm_version,
+            supported: SELECTION_ALGORITHM_VERSION,
+        });
+    }
+    Ok(())
+}
+
+/// Step 2: profile, both fingerprints, exclusion record.
+fn check_provenance(
+    payload: &SelectionPayload,
+    dataset: &PreparedDataset<Canonical>,
+) -> Result<(), ContrastiveDataError> {
+    if payload.profile != Canonical::PROFILE {
+        return Err(ContrastiveDataError::ProfileMismatch {
+            expected: Canonical::PROFILE.to_string(),
+            got: payload.profile.clone(),
+        });
+    }
+    let dataset_fingerprint = dataset.fingerprint().hex();
+    if payload.dataset_fingerprint != dataset_fingerprint {
+        return Err(ContrastiveDataError::FingerprintMismatch {
+            expected: payload.dataset_fingerprint.clone(),
+            got: dataset_fingerprint,
+        });
+    }
+    let validation_fingerprint = dataset.validation_witness().fingerprint_hex();
+    if payload.validation_fingerprint != validation_fingerprint {
+        return Err(ContrastiveDataError::FingerprintMismatch {
+            expected: payload.validation_fingerprint.clone(),
+            got: validation_fingerprint,
+        });
+    }
+    let recorded = hex(&payload.exclusions.hash());
+    let actual = hex(&dataset.exclusions().hash());
+    if recorded != actual {
+        return Err(ContrastiveDataError::ExclusionRecordMismatch {
+            expected: recorded,
+            got: actual,
+        });
+    }
+    Ok(())
+}
+
+/// Where an id lives, when it is not in the post-exclusion training pool.
+fn locate(dataset: &PreparedDataset<Canonical>, id: &str) -> &'static str {
+    if dataset.train().exact_hash_of(id).is_some() {
+        return "train, but excluded from the selection pool";
+    }
+    if dataset.validation().exact_hash_of(id).is_some() {
+        return "validation";
+    }
+    if dataset.test().exact_hash_of(id).is_some() {
+        return "test";
+    }
+    "nowhere"
+}
+
+/// Step 3a: every recorded id is in the post-exclusion training pool.
+fn check_membership(
+    payload: &SelectionPayload,
+    dataset: &PreparedDataset<Canonical>,
+    buckets: &ClassBuckets,
+) -> Result<(), ContrastiveDataError> {
+    let pool: BTreeSet<&str> = buckets
+        .labels()
+        .into_iter()
+        .flat_map(|label| buckets.ids(label).iter().map(String::as_str))
+        .collect();
+    for record in &payload.ordered_examples {
+        if !pool.contains(record.id.as_str()) {
+            return Err(ContrastiveDataError::EndpointNotInSelection {
+                id: record.id.clone(),
+                found_in: locate(dataset, &record.id).to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Step 3b: no repeated id.
+fn check_uniqueness(payload: &SelectionPayload) -> Result<(), ContrastiveDataError> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for record in &payload.ordered_examples {
+        if !seen.insert(record.id.as_str()) {
+            return Err(ContrastiveDataError::DuplicateId {
+                split: "selection".to_string(),
+                id: record.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Step 3c: exactly `shots_per_class` rows of every declared class.
+fn check_class_balance(payload: &SelectionPayload) -> Result<(), ContrastiveDataError> {
+    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+    for record in &payload.ordered_examples {
+        *counts.entry(record.label).or_default() += 1;
+    }
+    let classes = payload.label_names.len();
+    let got: Vec<usize> = (0..classes)
+        .map(|label| counts.get(&label).copied().unwrap_or(0))
+        .collect();
+    let expected = vec![payload.shots_per_class as usize; classes];
+    if got != expected || counts.len() != classes {
+        return Err(ContrastiveDataError::InvalidClassCounts {
+            split: "selection".to_string(),
+            expected,
+            got,
+        });
+    }
+    Ok(())
+}
+
+/// Step 3d: labels never decrease, i.e. the classes are concatenated ascending.
+fn check_class_ordering(payload: &SelectionPayload) -> Result<(), ContrastiveDataError> {
+    let out_of_order = payload
+        .ordered_examples
+        .windows(2)
+        .any(|pair| pair[1].label < pair[0].label);
+    if out_of_order {
+        return Err(ContrastiveDataError::SelectionReplayMismatch {
+            field: "class_order".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Step 3e: both recorded hashes equal the split's own, and the typed list is rebuilt.
+fn rebuild_examples(
+    payload: &SelectionPayload,
+    dataset: &PreparedDataset<Canonical>,
+) -> Result<Vec<SelectedExample>, ContrastiveDataError> {
+    let train = dataset.train();
+    let mut rebuilt = Vec::with_capacity(payload.ordered_examples.len());
+    for record in &payload.ordered_examples {
+        let exact_hash = compare_row_hash(
+            &record.id,
+            &record.exact_hash,
+            train.exact_hash_of(&record.id),
+        )?;
+        let normalized_hash = compare_row_hash(
+            &record.id,
+            &record.normalized_hash,
+            train.normalized_hash_of(&record.id),
+        )?;
+        rebuilt.push(SelectedExample {
+            id: record.id.clone(),
+            label: record.label,
+            exact_hash,
+            normalized_hash,
+        });
+    }
+    Ok(rebuilt)
+}
+
+/// One recorded hex digest against the split's own value.
+fn compare_row_hash(
+    id: &str,
+    recorded_hex: &str,
+    actual: Option<&[u8; 32]>,
+) -> Result<[u8; 32], ContrastiveDataError> {
+    // `actual` is always `Some` here: membership was checked before this step runs.
+    let actual = actual
+        .copied()
+        .ok_or_else(|| ContrastiveDataError::RowHashMismatch {
+            id: id.to_string(),
+            expected: recorded_hex.to_string(),
+            got: "row absent from the training split".to_string(),
+        })?;
+    if hex(&actual) == recorded_hex {
+        return Ok(actual);
+    }
+    Err(ContrastiveDataError::RowHashMismatch {
+        id: id.to_string(),
+        expected: recorded_hex.to_string(),
+        got: hex(&actual),
+    })
 }
 
 #[cfg(test)]
@@ -919,5 +1179,393 @@ mod select_tests {
             prop_assert_eq!(first.ordered_ids(), second.ordered_ids());
             prop_assert_eq!(first.semantic_hash(), second.semantic_hash());
         }
+    }
+}
+
+#[cfg(test)]
+mod manifest_replay_tests {
+    //! Strict-replay evidence: one round trip, one pre-populated-ledger case, and the
+    //! TWELVE distinct rejections of the validation ladder.
+    //!
+    //! Twelve rather than eleven because `dataset_fingerprint` and `validation_fingerprint`
+    //! hold different values — the whole-dataset digest and the validation split's own —
+    //! so tampering with each is a genuinely different test rather than the same one twice.
+    //!
+    //! Every negative constructs a `SelectionManifest` VALUE directly rather than parsing
+    //! one, because `from_bytes` verifies the digest and would reject most of these before
+    //! `replay` ever ran. Replay must defend itself against a manifest that is already in
+    //! memory.
+
+    use super::test_corpus;
+    use super::{Selection, SelectionConfig};
+    use crate::error::ContrastiveDataError;
+    use crate::ledger::AccessLedger;
+    use crate::manifest::{SelectedExampleRecord, SelectionManifest};
+    use crate::prepared::{Canonical, PreparedDataset};
+
+    struct Fixture {
+        dataset: PreparedDataset<Canonical>,
+        ledger: AccessLedger,
+        manifest: SelectionManifest,
+        selection: Selection,
+    }
+
+    fn fixture() -> Fixture {
+        let mut ledger = AccessLedger::new();
+        let dataset = test_corpus::dataset(12, &mut ledger);
+        let selection = test_corpus::select(&dataset, 31, 8, &mut ledger);
+        let manifest =
+            SelectionManifest::from_selection(&selection, &ledger).expect("the wrap succeeds");
+        Fixture {
+            dataset,
+            ledger,
+            manifest,
+            selection,
+        }
+    }
+
+    /// Recompute the envelope digest so a tampered payload is INTERNALLY CONSISTENT.
+    fn reseal(manifest: &mut SelectionManifest) {
+        use sha2::{Digest, Sha256};
+        let digest: [u8; 32] = Sha256::digest(
+            manifest
+                .payload
+                .to_canonical_bytes()
+                .expect("payload serializes"),
+        )
+        .into();
+        manifest.semantic_hash = crate::hash::hex(&digest);
+    }
+
+    fn reject(
+        mutate: impl FnOnce(&mut SelectionManifest, &PreparedDataset<Canonical>),
+    ) -> ContrastiveDataError {
+        let mut fixture = fixture();
+        mutate(&mut fixture.manifest, &fixture.dataset);
+        Selection::replay(&fixture.manifest, &fixture.dataset, &mut fixture.ledger)
+            .expect_err("the tampered manifest must be refused")
+    }
+
+    #[test]
+    fn manifest_replay_round_trips_through_the_file_form() {
+        let mut fixture = fixture();
+        let bytes = fixture.manifest.to_file_bytes().expect("file bytes");
+        let parsed = SelectionManifest::from_bytes(&bytes).expect("the digest verifies");
+
+        let replayed = Selection::replay(&parsed, &fixture.dataset, &mut fixture.ledger)
+            .expect("an honest manifest replays");
+
+        assert_eq!(replayed.examples(), fixture.selection.examples());
+        assert_eq!(replayed.semantic_hash(), fixture.selection.semantic_hash());
+        assert_eq!(replayed.ledger_hash(), fixture.selection.ledger_hash());
+        assert_eq!(replayed.ordered_ids(), fixture.selection.ordered_ids());
+    }
+
+    /// Checker warning 2, stated as a test: replay appends its OWN record, so the live
+    /// ledger has already diverged from the recorded one. A digest rule that rebuilt the
+    /// payload from the live ledger could never pass this.
+    #[test]
+    fn manifest_replay_succeeds_against_a_ledger_that_has_already_moved_on() {
+        let mut fixture = fixture();
+        fixture
+            .ledger
+            .record("train", "canonical", "unrelated-later-work", "aa");
+        assert_ne!(
+            crate::hash::hex(&fixture.ledger.ledger_hash()),
+            fixture.manifest.payload.ledger_hash,
+            "the fixture must actually have diverged, or this test is vacuous"
+        );
+        let before = fixture.ledger.records().len();
+
+        let replayed = Selection::replay(&fixture.manifest, &fixture.dataset, &mut fixture.ledger)
+            .expect("replay must not depend on the live ledger");
+
+        assert_eq!(replayed.ordered_ids(), fixture.selection.ordered_ids());
+        assert_eq!(fixture.ledger.records().len(), before + 1);
+        assert_eq!(
+            fixture
+                .ledger
+                .records()
+                .last()
+                .expect("a record was appended")
+                .purpose,
+            "select-replay"
+        );
+    }
+
+    #[test]
+    fn manifest_replay_rejects_a_compatibility_profile() {
+        let err = reject(|manifest, _| manifest.payload.profile = "compatibility".to_string());
+        match err {
+            ContrastiveDataError::ProfileMismatch { expected, got } => {
+                assert_eq!(expected, "canonical");
+                assert_eq!(got, "compatibility");
+            }
+            other => panic!("expected ProfileMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_an_altered_dataset_fingerprint() {
+        let err = reject(|manifest, _| manifest.payload.dataset_fingerprint = "ab".repeat(32));
+        match err {
+            ContrastiveDataError::FingerprintMismatch { expected, got } => {
+                assert_eq!(expected, "ab".repeat(32));
+                assert_ne!(got, expected);
+            }
+            other => panic!("expected FingerprintMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_an_altered_validation_fingerprint() {
+        let err = reject(|manifest, dataset| {
+            // Pin that the two fields really are different values, so this test cannot be
+            // an accidental duplicate of the one above.
+            assert_ne!(
+                manifest.payload.dataset_fingerprint,
+                manifest.payload.validation_fingerprint
+            );
+            assert_eq!(
+                manifest.payload.dataset_fingerprint,
+                dataset.fingerprint().hex()
+            );
+            manifest.payload.validation_fingerprint = "cd".repeat(32);
+        });
+        match err {
+            ContrastiveDataError::FingerprintMismatch { expected, got } => {
+                assert_eq!(expected, "cd".repeat(32));
+                assert_ne!(got, expected);
+            }
+            other => panic!("expected FingerprintMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_an_altered_exclusion_record() {
+        let err = reject(|manifest, _| {
+            let mut other_ledger = AccessLedger::new();
+            let other = test_corpus::dataset_with_cross_split_duplicate(12, &mut other_ledger);
+            assert_ne!(
+                other.exclusions(),
+                &manifest.payload.exclusions,
+                "the substituted record must actually differ"
+            );
+            manifest.payload.exclusions = other.exclusions().clone();
+        });
+        match err {
+            ContrastiveDataError::ExclusionRecordMismatch { expected, got } => {
+                assert_ne!(expected, got);
+            }
+            other => panic!("expected ExclusionRecordMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_an_id_outside_the_selection_pool() {
+        let err = reject(|manifest, dataset| {
+            let row = dataset.validation().rows()[0].clone();
+            manifest.payload.ordered_examples[0] = SelectedExampleRecord {
+                id: row.id,
+                label: 0,
+                exact_hash: manifest.payload.ordered_examples[0].exact_hash.clone(),
+                normalized_hash: manifest.payload.ordered_examples[0].normalized_hash.clone(),
+            };
+        });
+        match err {
+            ContrastiveDataError::EndpointNotInSelection { id, found_in } => {
+                assert_eq!(id, "validation:0");
+                assert_eq!(found_in, "validation");
+            }
+            other => panic!("expected EndpointNotInSelection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_a_duplicated_id() {
+        let err = reject(|manifest, _| {
+            manifest.payload.ordered_examples[1] = manifest.payload.ordered_examples[0].clone();
+        });
+        match err {
+            ContrastiveDataError::DuplicateId { split, id } => {
+                assert_eq!(split, "selection");
+                assert!(id.starts_with("train:0-"), "{id}");
+            }
+            other => panic!("expected DuplicateId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_an_unbalanced_class() {
+        let err = reject(|manifest, _| {
+            manifest.payload.ordered_examples.remove(0);
+        });
+        match err {
+            ContrastiveDataError::InvalidClassCounts {
+                split,
+                expected,
+                got,
+            } => {
+                assert_eq!(split, "selection");
+                assert_eq!(expected, vec![8, 8, 8]);
+                assert_eq!(got, vec![7, 8, 8]);
+            }
+            other => panic!("expected InvalidClassCounts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_examples_swapped_across_classes() {
+        let err = reject(|manifest, _| {
+            let rows = &mut manifest.payload.ordered_examples;
+            assert_eq!((rows[0].label, rows[8].label), (0, 1));
+            rows.swap(0, 8);
+        });
+        match err {
+            ContrastiveDataError::SelectionReplayMismatch { field } => {
+                assert_eq!(field, "class_order");
+            }
+            other => panic!("expected SelectionReplayMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_a_tampered_row_hash() {
+        let err = reject(|manifest, _| {
+            manifest.payload.ordered_examples[3].exact_hash = "0".repeat(64);
+        });
+        match err {
+            ContrastiveDataError::RowHashMismatch { id, expected, got } => {
+                assert!(id.starts_with("train:0-"), "{id}");
+                assert_eq!(expected, "0".repeat(64));
+                assert_ne!(got, expected);
+            }
+            other => panic!("expected RowHashMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_an_unsupported_schema_version() {
+        let err = reject(|manifest, _| manifest.payload.schema_version = 99);
+        match err {
+            ContrastiveDataError::UnsupportedSchemaVersion {
+                field,
+                got,
+                supported,
+            } => {
+                assert_eq!(field, "selection");
+                assert_eq!((got, supported), (99, 1));
+            }
+            other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_replay_rejects_an_unsupported_algorithm_version() {
+        let err = reject(|manifest, _| manifest.payload.algorithm_version = 99);
+        match err {
+            ContrastiveDataError::UnsupportedAlgorithmVersion { got, supported } => {
+                assert_eq!((got, supported), (99, 1));
+            }
+            other => panic!("expected UnsupportedAlgorithmVersion, got {other:?}"),
+        }
+    }
+
+    /// The case a membership-plus-hash check alone would have ACCEPTED, and the whole
+    /// reason replay recomputes the selection rather than merely auditing the manifest.
+    ///
+    /// Every earlier rung passes: the substituted row is in the pool, unique, correctly
+    /// labelled, correctly hashed, the class counts and ordering are untouched, and the
+    /// envelope digest is recomputed so the manifest is internally consistent. It is
+    /// simply not a selection any seed could have produced.
+    #[test]
+    fn manifest_replay_rejects_a_consistent_but_unreachable_ordered_list() {
+        let err = reject(|manifest, dataset| {
+            let selected: Vec<&str> = manifest
+                .payload
+                .ordered_examples
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect();
+            let substitute = dataset
+                .train()
+                .rows()
+                .iter()
+                .find(|row| row.label == 0 && !selected.contains(&row.id.as_str()))
+                .expect("the pool is larger than the selection")
+                .clone();
+            manifest.payload.ordered_examples[0] = SelectedExampleRecord {
+                exact_hash: crate::hash::hex(
+                    dataset
+                        .train()
+                        .exact_hash_of(&substitute.id)
+                        .expect("the row is in the split"),
+                ),
+                normalized_hash: crate::hash::hex(
+                    dataset
+                        .train()
+                        .normalized_hash_of(&substitute.id)
+                        .expect("the row is in the split"),
+                ),
+                id: substitute.id,
+                label: 0,
+            };
+            reseal(manifest);
+            manifest
+                .verify_digest()
+                .expect("the forgery is internally consistent — that is the point");
+        });
+        match err {
+            ContrastiveDataError::SelectionReplayMismatch { field } => {
+                assert_eq!(field, "ordered_examples");
+            }
+            other => panic!("expected SelectionReplayMismatch, got {other:?}"),
+        }
+    }
+
+    /// The digest rung itself, reached only when every structural rung has passed.
+    #[test]
+    fn manifest_replay_rejects_a_digest_that_disagrees_with_its_payload() {
+        let err = reject(|manifest, _| manifest.semantic_hash = "f".repeat(64));
+        match err {
+            ContrastiveDataError::SemanticHashMismatch { expected, got } => {
+                assert_eq!(expected, "f".repeat(64));
+                assert_ne!(got, expected);
+            }
+            other => panic!("expected SemanticHashMismatch, got {other:?}"),
+        }
+    }
+
+    /// A replayed selection is a full-fidelity `Selection`, not a shell.
+    #[test]
+    fn manifest_replay_returns_a_usable_selection() {
+        let mut fixture = fixture();
+        let replayed = Selection::replay(&fixture.manifest, &fixture.dataset, &mut fixture.ledger)
+            .expect("an honest manifest replays");
+
+        assert_eq!(replayed.class_sizes(), fixture.selection.class_sizes());
+        assert_eq!(replayed.root_seed(), 31);
+        assert_eq!(replayed.shots_per_class(), 8);
+        let first = replayed.ordered_ids()[0].to_string();
+        let selected = replayed
+            .selected_id(&first)
+            .expect("the replayed selection indexes its own rows");
+        assert_eq!(replayed.id_of(selected), first);
+        assert_eq!(replayed.label_of(selected), 0);
+
+        // And it is the SAME selection a fresh run produces from the same inputs.
+        let mut fresh_ledger = AccessLedger::new();
+        let fresh_dataset = test_corpus::dataset(12, &mut fresh_ledger);
+        let fresh = super::FewShotSelector::select(
+            &fresh_dataset,
+            &SelectionConfig {
+                root_seed: 31,
+                shots_per_class: 8,
+            },
+            &mut fresh_ledger,
+        )
+        .expect("a fresh selection succeeds");
+        assert_eq!(fresh.examples(), replayed.examples());
+        assert_eq!(fresh.semantic_hash(), replayed.semantic_hash());
     }
 }
