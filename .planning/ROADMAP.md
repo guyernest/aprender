@@ -129,35 +129,41 @@ evidence.
   4. The shared binary/multiclass head reports explicit convergence or typed failure, finite logits and probabilities summing to one, stable ordered-label semantics, and reference-matching regularization behavior.
   5. Two clean CPU runs reproduce selected IDs, ordered pairs and batches, step count, declared loss trace, semantic hashes, and predictions, and canonical test access remains blocked until canonical-validation selection emits a selection-lock record.
 
-**Plans**: 9 plans in 6 waves
+**Plans**: 10 plans in 7 waves
 
 Plans:
-**Wave 1**
+**Wave 1** *(the phase branch `gsd/phase-3-two-stage-trainer` must exist and be checked out BEFORE
+this wave starts — no plan creates it; see each wave-1 plan's `<wave_1_concurrency>` block)*
 
-- [ ] 03-01-PLAN.md — f64 L-BFGS widening (contracted, first wave per D-03) (wave 1)
-- [ ] 03-02-PLAN.md — Keyed Philox dropout mask source (D-15) + GEMM thread-count falsification gate (D-13/A3) (wave 1)
-- [ ] 03-03-PLAN.md — aprender-train setfit feature + typestate skeleton + 12-knob SetFitTrainConfig + scheduler/reduce/epoch primitives (wave 1)
+- [ ] 03-01-PLAN.md — f64 L-BFGS widening with a frozen f32 golden trajectory and the four-channel non-finite matrix (wave 1)
+- [ ] 03-02-PLAN.md — Keyed Philox dropout with the forward-ordinal (branch) coordinate + fixed-pool GEMM thread-count falsification gate (wave 1)
+- [ ] 03-03-PLAN.md — aprender-train setfit feature + typestate skeleton + 12-knob config with validated deserialization + scheduler/reduce/epoch primitives (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 03-04-PLAN.md — MultinomialLogisticRegression head + sklearn factor-of-2 falsification + multinomial-head-v1 contract + PHASE3_CONTRACTS wiring (wave 2)
-- [ ] 03-05-PLAN.md — tune_encoder loop + fixed-order evidence capture (record-only) + epsilon instrumentation basis (wave 2)
+- [ ] 03-04-PLAN.md — MultinomialLogisticRegression head + central-difference gradient suite + sklearn factor-of-2 falsification + multinomial-head-v1 contract (wave 2)
+- [ ] 03-05-PLAN.md — tune_encoder loop with a pinned step order and in-band execution digests + evidence capture + the epsilon calibration matrix (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 03-06-PLAN.md — setfit-train-lifecycle-v1 contract (frozen epsilon/k/margin) + armed evidence gate + in-band negatives + FrozenProbeRun (SAFE-03) (wave 3)
+- [ ] 03-06-PLAN.md — setfit-train-lifecycle-v1 contract (per-class epsilon + calibration regime) + armed evidence gate + in-band negatives + FrozenProbeRun (SAFE-03) (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 03-07-PLAN.md — Encode-once head input + fit_head transition (pair multiplicity inexpressible) + pair-weighted in-band negative (wave 4)
+- [ ] 03-07-PLAN.md — Encode-once head input with an encode ledger + fit_head transition (pair multiplicity inexpressible) + pair-weighted in-band negative (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 03-08-PLAN.md — ReloadVerify seam + serde round-trip + ArtifactReloadedAndVerified + hash-committing SelectionLock/token (wave 5)
+- [ ] 03-08-PLAN.md — Sealed SetFitCodec seam + complete bundle + bytes-reconstruction path + ArtifactReloadedAndVerified + recorded-digest accessors (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 03-09-PLAN.md — trybuild non-constructibility proofs + cross-process two-clean-runs gate + scoped mutation + tier wiring (wave 6)
+- [ ] 03-09-PLAN.md — Trusted validation evaluator + candidate-committing SelectionLock + object-bound CanonicalTestToken (TRN-07) (wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 03-10-PLAN.md — trybuild non-constructibility proofs (7 cases) + cross-process two-clean-runs gate + adjusted-score mutation + full-suite closing audit (wave 7)
+
 
 ### Phase 4: APR Artifact and Production Parity
 
@@ -201,6 +207,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
-| 3. Faithful Two-Stage Trainer and Head | 0/9 | Planned | - |
+| 3. Faithful Two-Stage Trainer and Head | 0/10 | Planned | - |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |

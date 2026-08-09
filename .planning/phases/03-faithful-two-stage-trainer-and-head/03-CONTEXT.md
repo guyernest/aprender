@@ -64,7 +64,12 @@ before training begins.
 
 - **D-04:** Regularization is parameterized **natively** — public API is mean-NLL + `λ‖W‖²` with an
   **unpenalized intercept** — and the sklearn relation is **one contracted equation with its own
-  falsification test**: `λ = 1/(C·n)`, sum-vs-mean, intercept exclusion. Rationale: a general
+  falsification test**: `λ = 1/(2·C·n)`, sum-vs-mean, intercept exclusion.
+  **Amended (phase-3 review):** the relation was written `1/(C·n)`; the correct constant is
+  `1/(2·C·n)`, because sklearn's penalty carries a half inside `r(W) = ½‖W‖²_F` while aprender's
+  native form is `λ‖W‖²_F`. Both reviewers independently flagged the factor of two and plan 03-04
+  already implements the corrected constant; this amendment makes CONTEXT agree with the contract
+  instead of silently contradicting it. Rationale: a general
   `classification::` type should not inherit sklearn's idiosyncratic `C` forever, and this repo has
   the exact precedent for validating a numerical relation against a Python reference —
   `crates/aprender-core/src/glm/glm_tests.rs:280` catches a swapped IRLS link derivative against
@@ -105,7 +110,17 @@ before training begins.
   from bytes, re-encode, re-predict, compare within contracted tolerances. Phase 3 ships a
   **serde-based implementation** of that trait so the round-trip invariant is written and gated in
   the phase whose criterion demands it; **Phase 4 supplies the APR implementation of the same
-  trait**, swapping the format rather than inventing the check. Shipping the real
+  seam**, swapping the format rather than inventing the check.
+  **Amended (phase-3 review):** the seam is split in two. The implementable half is a pure
+  **codec** (`SetFitCodec`: bytes <-> bundle, plus a format id) carrying **no comparison policy,
+  no tolerances and no hashing**. The verification policy — artifact hashing, close, reload,
+  re-encode, re-predict, compare, and minting `ArtifactReloadedAndVerified` — stays in trusted
+  crate-internal lifecycle code no external implementor can override. The codec trait is
+  **sealed** for Phase 3 (un-sealing later is non-breaking; sealing later is not), and Phase 4's
+  APR codec lands as a thin adapter module inside `aprender-train/src/train/setfit/` that calls
+  `aprender-core`'s APR format code — the FORMAT stays in core, only the adapter moves. Reason: a
+  public unsealed verifier whose `reload()` the implementor controls can return the pre-close
+  bundle unchanged and mint the final state without a real persistence boundary ever existing. Shipping the real
   `setfit-apr-v1` here was rejected: it would freeze the artifact schema before the consumers that
   must read it (APR-03/APR-04) have been designed.
 
@@ -129,7 +144,24 @@ before training begins.
   live component would be invisible.
 
 - **D-10:** The threshold is **relative to the initial norm with a contracted ε**:
-  `‖Δθ‖ / ‖θ_init‖ > ε` per parameter, alongside finite non-zero gradient norms. ε is frozen in the
+  `‖Δθ‖ / max(‖θ_init‖, s_class) > ε_class` per parameter, alongside finite non-zero gradient
+  norms and a strict `‖Δθ‖ > 0`.
+  **Amended (phase-3 review), three changes:**
+  (a) **Denominator floor.** A bare `‖θ_init‖` denominator is undefined for an exactly
+  zero-initialized parameter (transformer biases are the standard case): it yields NaN/Inf, and
+  `NaN > ε` is false, so a legitimate run would be rejected. The denominator becomes
+  `max(‖θ_init‖, s_class)` with `s_class` a contracted positive per-class scale floor, and
+  `‖Δθ‖ > 0` is required as a separate strict predicate.
+  (b) **ε is per parameter class, not one global number.** This decision's own argument —
+  "LayerNorm gains and embedding tables differ by orders of magnitude" — applies to a single
+  relative ε exactly as it applies to a single absolute floor. Classes derive from the HF dotted
+  name prefix: embedding tables / LayerNorm / dense-and-attention.
+  (c) **ε carries its calibration regime.** A number measured on one architecture at one
+  shot/epoch setting does not generalize: a sparse embedding table's relative delta shrinks as the
+  vocabulary grows, so a fixture-derived ε can make the *legal* lifecycle unusable at production
+  scale. The contract records the calibrated regime (architecture fingerprints, seeds, shot/epoch
+  boundaries); the gate **fails closed** with a typed `UncalibratedRegime` error for a run outside
+  it. Extending to a new architecture is a deliberate contract edit that `pv diff` flags. ε is frozen in the
   contract per the Ph1 D-14 tolerance discipline (committed before any comparison runs; loosening it
   requires a contract edit `pv diff` flags). Scale-free is required, not preferred: LayerNorm gains
   and embedding tables differ by orders of magnitude, so one absolute floor is necessarily wrong
@@ -152,8 +184,12 @@ before training begins.
   delta, the worst-offending parameter name, the ε and contract version used, and a **hash of the
   complete per-parameter table**. The full table is emitted separately as machine-readable JSON.
   This keeps the APR small (APR-01 specifies an oversized-artifact rejection) and the 40 rows
-  readable, while the detail stays auditable and the hash makes the summary non-forgeable against
-  it. Directly mirrors Phase 2 D-09: replay the detail, persist the hash.
+  readable, while the detail stays auditable and the hash **binds** the summary to it.
+  **Amended (phase-3 review):** "non-forgeable" overclaims. A SHA-256 stored beside the mutable
+  content it hashes is **tamper-evidence and linkage**, not authenticity — whoever edits the table
+  can recompute the hash. It catches accidental divergence and un-recomputed edits; genuine
+  non-forgeability needs an anchor outside the artifact, which arrives with Phase 4's APR
+  checksum. Contract and plan wording say "binding", never "non-forgeable". Directly mirrors Phase 2 D-09: replay the detail, persist the hash.
 
 ### Determinism and Selection Lock (TRN-06, TRN-07)
 
@@ -168,9 +204,20 @@ before training begins.
   existing parallel reductions live in `aprender-compute`. Where this capability lands — and whether
   `aprender-compute` should own it — is unresolved and needs research.
 
-- **D-14:** The **selection lock is hash-committing, with a typestate token**. The record commits to
-  the chosen configuration, the **artifact hash**, the validation metric that selected it, and the
-  selection-run hashes. Canonical test access requires a token minted **only** from a lock whose
+- **D-14:** The **selection lock is hash-committing, with a typestate token**. The record commits to the **full candidate
+  history** — every candidate's configuration hash, artifact hash and canonical-validation
+  evaluation — plus the deterministic **selection rule**, the chosen candidate, the dataset and
+  validation-split fingerprints, and the access-ledger hash.
+  **Amended (phase-3 review), three changes:**
+  (a) A single chosen metric cannot prove validation-only selection, so the lock commits the
+  candidate list and applies the selection rule itself — a hand-picked "winner" is unexpressible
+  because there is no `chosen` parameter.
+  (b) A validation metric is **computed by a trusted evaluator** from the verified artifact and
+  the `Split<Validation>`, never supplied as a caller-asserted `f64`. Possessing a validation
+  split does not prove a number was computed from it.
+  (c) Token minting takes the **verified run object**, not caller-supplied hash bytes, and reads
+  that object's own artifact hash. A `[u8; 32]` parameter lets a caller hand over the locked hash
+  and then evaluate a completely different artifact. Canonical test access requires a token minted **only** from a lock whose
   artifact hash **matches the model about to be evaluated** — so lock, keep tuning, then test
   **invalidates** rather than passes. An existence-only record was rejected precisely because that
   sequence would sail through it. This gives Phase 5's "any post-test-selected cell invalidates the
@@ -180,7 +227,13 @@ before training begins.
 
 - **D-15:** **Dropout stays ON during encoder tuning**, matching SetFit's reference recipe, with
   masks drawn from `aprender-rand` keyed by `(root_seed, "dropout", layer, step, block)` so mask
-  element *i* is a pure function of its index. That construction is what makes dropout compatible
+  element *i* is a pure function of its index.
+  **Amended (phase-3 review) — clarification, not a change of direction:** `block` is the
+  **forward-call ordinal** `2*step + branch`, where `branch` is 0 for the pair's A sentence and 1
+  for its B sentence. The coordinate is load-bearing and the first plan draft dropped it: the two
+  siamese branches are two separate encoder forwards at the same `step`, so a key without it hands
+  corresponding elements the identical mask in both branches — artificial correlation and a silent
+  deviation from the reference recipe, while still looking perfectly deterministic. That construction is what makes dropout compatible
   with D-13's bitwise-at-any-thread-count guarantee — replay-exact and thread-count independent by
   the same mechanism D-20 chose for sampling. Disabling dropout was rejected as an undeclared
   deviation from the reference recipe (PF-008 treats that as a claims defect). Note this closes the
