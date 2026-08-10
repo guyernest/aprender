@@ -34,6 +34,7 @@
 
 pub mod config;
 pub mod epoch;
+pub mod evidence;
 pub mod reduce;
 pub mod tune;
 

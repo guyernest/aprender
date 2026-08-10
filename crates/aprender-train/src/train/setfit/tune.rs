@@ -1215,6 +1215,38 @@ mod tests {
         assert_eq!(out.frozen_count, 0, "the D-20 default freezes nothing");
         assert_eq!(out.initial_snapshot.len(), 37);
         assert!(out.snapshot_bytes > 0);
+
+        // The tuned encoder and the consumed max_length ride out with the record, because
+        // 03-06 mints `SetFitRun<EncoderTuned>` from the first and 03-08's bundle records the
+        // second. Asserted here so neither is carried untested until then.
+        assert_eq!(out.encoder.num_layers(), 2);
+        assert_eq!(
+            out.max_length,
+            super::super::config::pinned_max_length(),
+            "the consumed max_length must be the pinned one",
+        );
+    }
+
+    /// The recorded snapshot accounting, and the full-encoder projection it implies.
+    ///
+    /// The fixture's own figure is asserted; the production figure it scales to is stated so
+    /// Phase 5 does not discover it. 22.7 M parameters x 4 B is ~91 MB for the snapshot
+    /// ALONE, and peak tuning memory is that plus the live parameters plus AdamW's two moment
+    /// buffers — about four copies of the model.
+    #[test]
+    fn tune_snapshot_memory_accounting_is_recorded() {
+        let out = tune(fx::default_variant(), TuningProbes::NONE);
+        let elements: usize = out.initial_snapshot.values().map(Vec::len).sum();
+        assert_eq!(
+            out.snapshot_bytes,
+            elements * 4,
+            "the recorded byte count must be the f32 element count",
+        );
+        assert!(
+            out.snapshot_bytes > 100_000 && out.snapshot_bytes < 2_000_000,
+            "the 2-layer slice snapshot is expected in the hundreds of KB, got {} bytes",
+            out.snapshot_bytes,
+        );
     }
 
     /// A non-CPU resolved device is a typed error naming the device.
