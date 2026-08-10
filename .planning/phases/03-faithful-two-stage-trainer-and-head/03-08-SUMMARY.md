@@ -526,3 +526,27 @@ claimed.
   `ReloadNotFromBytes` and must amend the contract deliberately), and the sealing consequence
   above (the codec lands as an adapter module inside `aprender-train`; the format stays in
   `aprender-core`).
+
+## Self-Check: PASSED
+
+All five created files exist on disk, and all five commits are in `git log --all`:
+
+| Artifact | Result |
+|----------|--------|
+| `crates/aprender-train/src/train/setfit/bundle.rs` | FOUND |
+| `crates/aprender-train/src/train/setfit/bundle_tests.rs` | FOUND |
+| `crates/aprender-train/src/train/setfit/verify.rs` | FOUND |
+| `crates/aprender-train/src/train/setfit/verify_tests.rs` | FOUND |
+| `.planning/phases/03-faithful-two-stage-trainer-and-head/03-08-SUMMARY.md` | FOUND |
+| `6599fbc4b` Task 1 | FOUND |
+| `ead8cf252` Task 2 RED | FOUND |
+| `2ef3a39b6` Task 2 GREEN | FOUND |
+| `1a223ab9f` Task 3 | FOUND |
+| `28a8881e6` SUMMARY | FOUND |
+
+`git diff --diff-filter=D` across all five commits is empty: no tracked file was deleted.
+`git status --short` is clean; no generated artifact is left untracked (the `.snap.new` files
+the known-red `prune::snapshot_tests` produce are gitignored).
+
+STATE.md and ROADMAP.md are deliberately untouched — this plan ran as a parallel worktree
+executor and the orchestrator owns those writes.
