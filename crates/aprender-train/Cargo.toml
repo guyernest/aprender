@@ -160,6 +160,22 @@ insta = { version = "1.42", features = ["json", "yaml"] }  # Snapshot testing fo
 dirs = "5.0"  # Cache directory detection for examples
 jugar-probar = "1.0"  # TUI snapshot testing (ENT-140)
 provable-contracts = { version = "0.2" }  # Contract trait enforcement (Section 23)
+# Phase 3 (03-05): the deterministic SetFit trainer fixture loads a REAL MiniLM slice via
+# `SetFitMiniLm::from_slice_fixture`, which aprender-core gates behind
+# `conformance-fixtures` — NOT behind `setfit`. Measured, not assumed: the constructor is
+# `#[cfg(feature = "conformance-fixtures")]` (aprender-core/src/setfit/mod.rs:237), so the
+# plan's "it is `pub`, so cross-crate reuse needs no new door" is true of its VISIBILITY and
+# false of its REACHABILITY.
+#
+# A dev-dependency is the only mechanism that enables a dependency's feature for TEST builds
+# alone: cargo rejects optional dev-dependencies, and adding `aprender/conformance-fixtures`
+# to the `setfit` feature would hand PRODUCTION builds a test-only constructor plus the
+# `encoder()`/`tokenize()` conformance accessors — the test-support backdoor 03-10 exists to
+# reject. The D-05 closure guards in `make setfit-feature-matrix` traverse `-e normal`, which
+# does not follow dev edges, so the shipped dependency set is unchanged.
+aprender = { path = "../aprender-core", version = "0.63.0", package = "aprender-core", features = [
+    "conformance-fixtures",
+] }
 
 [[bench]]
 name = "monitor_bench"

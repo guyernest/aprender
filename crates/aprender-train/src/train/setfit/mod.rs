@@ -36,6 +36,13 @@ pub mod config;
 pub mod epoch;
 pub mod reduce;
 
+/// The deterministic, network-free, synthetic-text fixture every Phase 3 trainer test uses.
+///
+/// `#[cfg(test)]` and nothing weaker: 03-10's acceptance criteria reject a `#[doc(hidden)]`
+/// test-support door on the shipped surface.
+#[cfg(test)]
+pub(crate) mod test_fixtures;
+
 use core::fmt;
 use core::marker::PhantomData;
 
