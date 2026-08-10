@@ -132,9 +132,7 @@ pub fn epoch_pair_order(root_seed: u64, epoch: u32, n_pairs: u64) -> Vec<u64> {
         return order;
     }
     let key = derive_epoch_key(root_seed, DOMAIN_EPOCH_SHUFFLE);
-    let mut ordinal = 0_u64;
-    let mut i = n_pairs - 1;
-    while i >= 1 {
+    for (i, ordinal) in (1..n_pairs).rev().zip(0_u64..) {
         // `i + 1` is in `2..=n_pairs`, so it is never zero.
         let bound = NonZeroU64::new(i + 1).unwrap_or(NonZeroU64::MIN);
         let j = bounded_draw(key, epoch, ordinal, bound);
@@ -147,8 +145,6 @@ pub fn epoch_pair_order(root_seed: u64, epoch: u32, n_pairs: u64) -> Vec<u64> {
             break;
         };
         order.swap(i_index, j_index);
-        ordinal += 1;
-        i -= 1;
     }
     order
 }

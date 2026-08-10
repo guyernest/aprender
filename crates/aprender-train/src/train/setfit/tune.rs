@@ -55,7 +55,7 @@ use aprender::setfit::{pair_cosine_mse, FreezeGroup, SetFitMiniLm};
 use aprender_contrastive_data::pairs::PairSampler;
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
 use aprender_contrastive_data::select::Selection;
-use ndarray::Array1;
+use ndarray::{Array1, ArrayView1};
 use sha2::{Digest, Sha256};
 
 use crate::optim::{
@@ -129,8 +129,6 @@ pub(crate) struct StepObservation {
     pub(crate) forward_ordinals: (u64, u64),
     /// The PRE-clip global gradient norm `clip_grad_norm_refs` returned.
     pub(crate) pre_clip_norm: f32,
-    /// Whether the parameter registry hash still matched the pre-loop value.
-    pub(crate) registry_hash_held: bool,
 }
 
 /// Everything stage one recorded. Record-only: no verdict, no threshold, no `Duration`.
@@ -279,7 +277,7 @@ impl ParamBridge {
     /// gradient from the previous step cannot be stepped on twice.
     fn load(&mut self, params: &[(String, &mut CoreTensor)]) {
         for (slot, (_, param)) in self.tensors.iter_mut().zip(params.iter()) {
-            slot.data_mut().assign(&Array1::from_vec(param.data().to_vec()));
+            slot.data_mut().assign(&ArrayView1::from(param.data()));
             match autograd::get_grad(param.id()) {
                 Some(grad) => slot.set_grad(Array1::from_vec(grad.data().to_vec())),
                 None => slot.zero_grad(),
@@ -597,10 +595,9 @@ fn run_batch(
 
     // (m) record.
     ctx.loss_trace.push(loss_value);
-    ctx.pre_clip_norms.push(pre_clip.0);
+    ctx.pre_clip_norms.push(pre_clip);
     ctx.steps.push(StepObservation {
-        pre_clip_norm: pre_clip.0,
-        registry_hash_held: pre_clip.1,
+        pre_clip_norm: pre_clip,
         forward_ordinals: (ordinal_a, ordinal_b),
         ..observation
     });
@@ -628,7 +625,6 @@ fn observe_step_top(ctx: &mut TuneCtx<'_>, applied_lr: f32) -> StepObservation {
         applied_lr,
         forward_ordinals: (0, 0),
         pre_clip_norm: 0.0,
-        registry_hash_held: false,
     }
 }
 
@@ -648,8 +644,8 @@ fn forward_branch(
 
 /// Steps (g) through (j): gradient norms, registry assertion, clip, optimizer step.
 ///
-/// Returns `(pre_clip_global_norm, registry_hash_held)`.
-fn apply_optimizer(ctx: &mut TuneCtx<'_>) -> Result<(f32, bool), SetFitTrainError> {
+/// Returns the PRE-clip global gradient norm.
+fn apply_optimizer(ctx: &mut TuneCtx<'_>) -> Result<f32, SetFitTrainError> {
     let TuneCtx {
         encoder,
         bridge,
@@ -678,8 +674,7 @@ fn apply_optimizer(ctx: &mut TuneCtx<'_>) -> Result<(f32, bool), SetFitTrainErro
 
     // (h) the registry must not have moved: AdamW's moment state is POSITIONAL, so a
     // reordered registry silently pairs moments with the wrong parameters (T-3-54).
-    let held = registry_hash_of(&params) == *registry_hash;
-    if !held {
+    if registry_hash_of(&params) != *registry_hash {
         return Err(SetFitTrainError::ParameterRegistryMoved);
     }
 
@@ -691,7 +686,7 @@ fn apply_optimizer(ctx: &mut TuneCtx<'_>) -> Result<(f32, bool), SetFitTrainErro
     adamw.step_refs(&mut refs);
     drop(refs);
     bridge.store(&mut params);
-    Ok((pre_clip, held))
+    Ok(pre_clip)
 }
 
 // ===========================================================================================
@@ -1138,7 +1133,6 @@ mod tests {
                 "step {}: the tape was not cleared",
                 step.global_step,
             );
-            assert!(step.registry_hash_held, "the registry must not move");
         }
 
         // (ii) step 0 runs at the SCHEDULED rate, which with warmup_steps > 0 is exactly 0.0

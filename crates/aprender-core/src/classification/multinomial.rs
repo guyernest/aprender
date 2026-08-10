@@ -510,14 +510,19 @@ impl SoftmaxNllProblem<'_> {
     }
 
     /// Fills `logits` with `z_i = W x_i + b` for row `i`, accumulating in `f64`.
-    fn logits_for_row(&self, x: &Vector<f64>, row: usize, logits: &mut [f64]) {
+    /// `row_f64` is a caller-owned scratch of length `n_features`: widening the row once
+    /// per row rather than once per class keeps the inner loop uniformly `f64`. The
+    /// widening is exact, so the accumulated result is bit-identical either way.
+    fn logits_for_row(&self, x: &Vector<f64>, row: usize, row_f64: &mut [f64], logits: &mut [f64]) {
         let d = self.n_features;
         let off = self.intercept_offset();
-        let features = &self.features[row];
+        for (dst, &src) in row_f64.iter_mut().zip(self.features[row].iter()) {
+            *dst = f64::from(src);
+        }
         for c in 0..self.n_classes {
             let mut z = x[off + c];
             for j in 0..d {
-                z += x[c * d + j] * f64::from(features[j]);
+                z += x[c * d + j] * row_f64[j];
             }
             logits[c] = z;
         }
@@ -534,9 +539,10 @@ impl SoftmaxNllProblem<'_> {
         let k = self.n_classes;
         let n = self.features.len();
         let mut logits = vec![0.0_f64; k];
+        let mut row_f64 = vec![0.0_f64; self.n_features];
         let mut nll = 0.0_f64;
         for i in 0..n {
-            self.logits_for_row(x, i, &mut logits);
+            self.logits_for_row(x, i, &mut row_f64, &mut logits);
             // -log p_{i, y_i} = logsumexp(z_i) - z_{i, y_i}
             nll += log_sum_exp(&logits) - logits[self.class_indices[i]];
         }
@@ -574,9 +580,10 @@ impl SoftmaxNllProblem<'_> {
         let mut g = vec![0.0_f64; self.n_params()];
         let mut logits = vec![0.0_f64; k];
         let mut probs = vec![0.0_f64; k];
+        let mut row_f64 = vec![0.0_f64; self.n_features];
 
         for i in 0..n {
-            self.logits_for_row(x, i, &mut logits);
+            self.logits_for_row(x, i, &mut row_f64, &mut logits);
             softmax_into(&logits, &mut probs);
             let y_i = self.class_indices[i];
             let row = &self.features[i];
@@ -746,10 +753,8 @@ pub struct MultinomialLogisticRegression {
     weights: Vec<f32>,
     /// `K` intercepts, stored at the APR artifact width.
     intercepts: Vec<f32>,
-    /// The `f64` solve output, kept out of the public surface. Used by the gauge and
-    /// gradient assertions, which must not be confounded by the `f32` downcast.
-    weights_f64: Vec<f64>,
-    /// The `f64` intercepts, likewise private.
+    /// The `f64` intercepts, kept out of the public surface: the gauge and gradient
+    /// assertions must not be confounded by the `f32` downcast.
     intercepts_f64: Vec<f64>,
     /// Ordered labels; index == weight-matrix row.
     labels: Vec<String>,
@@ -772,7 +777,6 @@ impl MultinomialLogisticRegression {
             n_features: None,
             weights: Vec::new(),
             intercepts: Vec::new(),
-            weights_f64: Vec::new(),
             intercepts_f64: Vec::new(),
             labels: Vec::new(),
             report: None,
@@ -912,9 +916,8 @@ impl MultinomialLogisticRegression {
 
         let off = problem.intercept_offset();
         let solution = result.solution.as_slice();
-        self.weights_f64 = solution[..off].to_vec();
         self.intercepts_f64 = solution[off..].to_vec();
-        self.weights = self.weights_f64.iter().map(|&w| w as f32).collect();
+        self.weights = solution[..off].iter().map(|&w| w as f32).collect();
         self.intercepts = self.intercepts_f64.iter().map(|&b| b as f32).collect();
         self.labels = ordered_labels.to_vec();
         self.n_features = Some(d);

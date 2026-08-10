@@ -158,7 +158,7 @@ fn scaled_dot_product_attention_seeded(
 /// shape mismatch rather than silently truncating.
 fn apply_attention_dropout_masks(x: &Tensor, masks: &dyn AttentionDropoutMasks) -> Tensor {
     let mask_data = masks.attention_dropout_mask(x.data().len());
-    let mask = Tensor::new(&mask_data, x.shape());
+    let mask = Tensor::from_vec(mask_data, x.shape());
     x.mul(&mask)
 }
 

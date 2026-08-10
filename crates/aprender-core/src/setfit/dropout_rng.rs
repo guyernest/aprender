@@ -416,12 +416,10 @@ pub fn forward_ordinal(step: u64, branch: u32) -> Result<u32, DropoutRngError> {
 /// [`DropoutRngError::ForwardOrdinalOverflow`] naming `ordinal` when it is at or
 /// above `u32::MAX`.
 pub fn checked_forward_ordinal(ordinal: u64) -> Result<u32, DropoutRngError> {
-    if ordinal >= u64::from(u32::MAX) {
-        return Err(DropoutRngError::ForwardOrdinalOverflow { observed: ordinal });
+    match u32::try_from(ordinal) {
+        Ok(narrowed) if narrowed < u32::MAX => Ok(narrowed),
+        _ => Err(DropoutRngError::ForwardOrdinalOverflow { observed: ordinal }),
     }
-    // Below u32::MAX by the check above, so the conversion is total.
-    u32::try_from(ordinal)
-        .map_err(|_| DropoutRngError::ForwardOrdinalOverflow { observed: ordinal })
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +576,7 @@ impl SiteDropout {
             return input.clone();
         }
         let mask_data = self.mask(input.data().len());
-        let mask = Tensor::new(&mask_data, input.shape());
+        let mask = Tensor::from_vec(mask_data, input.shape());
         input.mul(&mask)
     }
 }

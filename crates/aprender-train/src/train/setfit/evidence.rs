@@ -585,10 +585,11 @@ impl EvidenceSummary {
 
 /// Smallest value, or `0.0` for an empty slice.
 fn min_of(values: &[f64]) -> f64 {
-    values.iter().copied().fold(f64::INFINITY, f64::min).min(
-        // An empty slice must not report +inf, which would serialize as `null`.
-        if values.is_empty() { 0.0 } else { f64::INFINITY },
-    )
+    // An empty slice must not report +inf, which would serialize as `null`.
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.iter().copied().fold(f64::INFINITY, f64::min)
 }
 
 /// Largest value, or `0.0` for an empty slice.

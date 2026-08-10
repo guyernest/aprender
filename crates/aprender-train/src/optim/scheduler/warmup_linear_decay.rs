@@ -113,11 +113,8 @@ pub fn warmup_steps_from_ratio(total_steps: u64, ratio: f64) -> u64 {
 impl LRScheduler for WarmupLinearDecayLR {
     fn get_lr(&self) -> f32 {
         if self.current_step < self.warmup_steps {
-            // Guarded for symmetry with the cosine analog: unreachable inside this branch,
-            // because `current_step < warmup_steps` already implies `warmup_steps > 0`.
-            if self.warmup_steps == 0 {
-                return self.lr_max;
-            }
+            // `current_step < warmup_steps` already implies `warmup_steps > 0`, so the
+            // division below is total. The zero-warmup case falls through to the decay arm.
             // Reference fidelity: at step 0 this is exactly 0.0.
             #[allow(clippy::cast_precision_loss)]
             let progress = self.current_step as f32 / self.warmup_steps as f32;

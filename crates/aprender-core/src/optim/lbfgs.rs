@@ -196,8 +196,8 @@ impl<T: LbfgsFloat> WolfeSearch<T> {
         let mut alpha_lo = T::ZERO;
         let mut alpha_hi = T::INF;
 
+        let mut x_new = zeros::<T>(x.len());
         for _ in 0..self.max_iter {
-            let mut x_new = zeros::<T>(x.len());
             for i in 0..x.len() {
                 x_new[i] = x[i] + alpha * d[i];
             }
