@@ -694,3 +694,26 @@ Checking either box now would put a false claim in the traceability table.
 *Phase: 03-faithful-two-stage-trainer-and-head*
 *Plan: 05*
 *Completed: 2026-08-09*
+
+## Self-Check: PASSED
+
+Files verified present on disk:
+
+- `crates/aprender-train/src/train/setfit/test_fixtures.rs` — FOUND (19.9K)
+- `crates/aprender-train/src/train/setfit/tune.rs` — FOUND (56.3K)
+- `crates/aprender-train/src/train/setfit/evidence.rs` — FOUND (49.8K)
+- `.planning/phases/03-faithful-two-stage-trainer-and-head/03-05-SUMMARY.md` — FOUND (43.3K)
+
+Commits verified in `git log`:
+
+- `d32eb431c` — FOUND (Task 1)
+- `6f948de52` — FOUND (Task 2)
+- `623d529da` — FOUND (Task 3)
+- `b312a4498` — FOUND (snapshot accounting + D-ITEM-06)
+
+Diff against base `66ef41495` touches exactly eight files — this plan's five declared
+`files_modified`, plus `crates/aprender-train/Cargo.toml` (deviation 4, mechanically required),
+`deferred-items.md` (D-ITEM-06) and this SUMMARY. **`STATE.md`, `ROADMAP.md` and
+`REQUIREMENTS.md` are NOT in the diff** — the orchestrator owns those writes. Nothing owned by
+the parallel plan 03-04 (`classification/`, `contracts/`, `binding.yaml`, `Makefile`) was
+touched. **Zero file deletions** across the whole range. `git status --short` clean.
