@@ -149,7 +149,7 @@ plan's `<wave_1_concurrency>` block.)*
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 03-06-PLAN.md — setfit-train-lifecycle-v1 contract (per-class epsilon + calibration regime) + armed evidence gate + in-band negatives + FrozenProbeRun (SAFE-03) (wave 3)
+- [x] 03-06-PLAN.md — setfit-train-lifecycle-v1 contract (per-class epsilon + calibration regime) + armed evidence gate + in-band negatives + FrozenProbeRun (SAFE-03) (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -216,6 +216,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
-| 3. Faithful Two-Stage Trainer and Head | 5/10 | In Progress|  |
+| 3. Faithful Two-Stage Trainer and Head | 6/10 | In Progress|  |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
