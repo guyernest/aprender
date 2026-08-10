@@ -158,6 +158,22 @@ impl HeadDataset {
         &self.witness
     }
 
+    /// Hand the probe's two halves to the caller by MOVE: embeddings and the RECORDED ledger.
+    ///
+    /// A separate destructor from [`Self::into_evidence_parts`] because the two callers want
+    /// different halves — stage two wants the labels and the ledger and drops the embeddings,
+    /// 03-08's verify probe wants the embeddings and the ledger and already has the labels.
+    /// One destructor returning all four would hand each caller a `Vec` it has to remember to
+    /// ignore.
+    ///
+    /// The ids come from HERE rather than from `selection.ordered_ids()` on purpose. The
+    /// ledger was written window by window as the encoder was fed; a list rebuilt from the
+    /// selection would agree with the selection by construction and could not see a windowing
+    /// defect at all, which is the whole reason the ledger is recorded in band.
+    pub(crate) fn into_probe_parts(self) -> (Vec<Vec<f32>>, Vec<String>) {
+        (self.embeddings, self.encode_ledger)
+    }
+
     /// Hand the evidence-bound parts to the caller by MOVE.
     ///
     /// `fit_head` drops this dataset on the next line, so cloning the labels and the ledger

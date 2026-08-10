@@ -400,18 +400,37 @@ fn verify_policy_closes_the_live_model_before_it_reloads() {
     let close_at = body.find("close(").expect("the policy must close the artifact");
     let deserialize_at =
         body.find("codec.deserialize(").expect("the policy must reload from bytes");
+    let closure_at = body
+        .find("close_round_trip(codec, &reloaded, &bytes)")
+        .expect("the policy must re-serialize the reloaded bundle and compare the bytes");
     let rebuild_at = body
         .find("rebuild_from(&reloaded)")
         .expect("the policy must rebuild from the RELOADED bundle");
     let probe_at = body
-        .find("probe_model(\n        &mut rebuilt_encoder")
+        .find("probe_model(&mut rebuilt_encoder")
         .expect("the policy must re-probe the REBUILT model");
     let compare_at = body.find("compare_probes(").expect("the policy must compare");
     assert!(
-        close_at < deserialize_at && deserialize_at < rebuild_at && rebuild_at < probe_at,
-        "the order must be close -> deserialize -> rebuild -> re-probe",
+        close_at < deserialize_at && deserialize_at < closure_at && closure_at < rebuild_at,
+        "the order must be close -> deserialize -> closure check -> rebuild; the closure \
+         check has to precede the rebuild, or a codec whose cache described a behaviourally \
+         identical model would pass the comparison and never be seen",
     );
+    assert!(rebuild_at < probe_at, "the re-probe must follow the rebuild");
     assert!(probe_at < compare_at, "the comparison must come last");
+
+    // The closure check compares the RE-SERIALIZED bytes against the HASHED ones.
+    let closure_fn =
+        src.find("fn close_round_trip<C: SetFitCodec>(").expect("close_round_trip must exist");
+    let closure_body = &src[closure_fn..closure_fn + 900];
+    assert!(
+        closure_body.contains("codec.serialize(reloaded)"),
+        "the closure check must call the codec's serialize a SECOND time",
+    );
+    assert!(
+        closure_body.contains("if reserialized == hashed"),
+        "the closure check must compare the two byte streams",
+    );
 
     // `rebuild_from` reads the reloaded bundle and nothing else.
     let rebuild_fn = src.find("fn rebuild_from(").expect("rebuild_from must exist");

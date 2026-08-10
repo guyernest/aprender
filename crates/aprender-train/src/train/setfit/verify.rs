@@ -282,10 +282,27 @@ fn probe_model(
 ) -> Result<VerifyProbe, SetFitTrainError> {
     let input =
         head_input::head_dataset(encoder, dataset, selection, config.requested().batch_size())?;
-    let embeddings = input.embeddings().to_vec();
+    // Both halves MOVED out together, from the one object the encode filled. Copying
+    // the embeddings and re-deriving the ids from the selection would give two lists
+    // that agree by construction and could not disagree with each other.
+    let (embeddings, ids) = input.into_probe_parts();
     let probabilities = head.predict_proba(&embeddings).map_err(SetFitTrainError::HeadFit)?;
     let labels = head.predict(&embeddings).map_err(SetFitTrainError::HeadFit)?;
-    Ok(VerifyProbe { ids: input.encode_ledger().to_vec(), embeddings, probabilities, labels })
+    Ok(VerifyProbe { ids, embeddings, probabilities, labels })
+}
+
+/// Whether `delta` is inside `bound`, with an INCOMPARABLE delta counting as outside.
+///
+/// Written through `partial_cmp` rather than as `delta <= bound` so the NaN case is
+/// visible rather than implied. A NaN difference means at least one of the two
+/// values was non-finite, which is a divergence in every sense that matters; a
+/// bare `delta > bound` test would silently accept it, because every comparison
+/// with NaN is false.
+fn within(delta: f64, bound: f64) -> bool {
+    matches!(
+        delta.partial_cmp(&bound),
+        Some(core::cmp::Ordering::Less | core::cmp::Ordering::Equal)
+    )
 }
 
 /// Compare two probes at `tolerance`, naming the first divergence.
@@ -336,7 +353,7 @@ fn compare_probes(
             if delta > max_embedding {
                 max_embedding = delta;
             }
-            if !(delta <= tolerance.embedding_abs) {
+            if !within(f64::from(delta), f64::from(tolerance.embedding_abs)) {
                 return Err(diverged(
                     "embedding",
                     row,
@@ -366,7 +383,7 @@ fn compare_probes(
             if delta > max_probability {
                 max_probability = delta;
             }
-            if !(delta <= tolerance.probability_abs) {
+            if !within(delta, tolerance.probability_abs) {
                 return Err(diverged(
                     "probability",
                     row,
@@ -386,6 +403,41 @@ fn compare_probes(
     }
 
     Ok((max_embedding, max_probability))
+}
+
+/// THE round-trip closure check: `serialize(deserialize(b)) == b`, byte for byte.
+///
+/// # What it establishes, and what it does not
+///
+/// It establishes that the value the codec returned is one whose serialization IS
+/// the hashed artifact. A codec cannot therefore substitute an arbitrary object
+/// for the artifact's contents — the substitute would have to re-serialize to the
+/// same bytes, which is the definition of being the same bundle.
+///
+/// It does NOT establish durability. An in-process codec that round-trips
+/// faithfully through a buffer it never writes anywhere satisfies this and is
+/// indistinguishable from one that wrote a file, because nothing here observes the
+/// filesystem. Durability is a claim about I/O and it is out of this seam's scope.
+///
+/// # Errors
+///
+/// [`SetFitTrainError::ReloadNotFromBytes`], carrying both lengths and the offset
+/// of the first difference; or [`SetFitTrainError::Codec`] if the re-serialization
+/// itself fails.
+fn close_round_trip<C: SetFitCodec>(
+    codec: &C,
+    reloaded: &SetFitBundle,
+    hashed: &[u8],
+) -> Result<(), SetFitTrainError> {
+    let reserialized = codec.serialize(reloaded).map_err(SetFitTrainError::Codec)?;
+    if reserialized == hashed {
+        return Ok(());
+    }
+    Err(SetFitTrainError::ReloadNotFromBytes {
+        hashed_len: hashed.len(),
+        reserialized_len: reserialized.len(),
+        first_diff_offset: hashed.iter().zip(reserialized.iter()).position(|(a, b)| a != b),
+    })
 }
 
 /// Rebuild a model and head from a reloaded bundle, and from nothing else.
@@ -447,13 +499,28 @@ pub(crate) fn run_verify_policy<C: SetFitCodec>(
     // (2) Reload FROM BYTES.
     let reloaded = codec.deserialize(&bytes).map_err(SetFitTrainError::Codec)?;
 
-    // (3) Rebuild from the reloaded bundle and from nothing else.
+    // (3) ROUND-TRIP CLOSURE CHECK, before anything downstream trusts the value.
+    //
+    // Re-serialize what the codec handed back and require the result to equal the
+    // bytes that were hashed. A faithful codec satisfies this by construction --
+    // it is the serialize/deserialize identity the bundle's own tests prove -- and
+    // it is what makes the reloaded value provably a FUNCTION OF THE HASHED BYTES
+    // rather than of anything the codec had lying around.
+    //
+    // It runs HERE, not after the comparison, because the comparison judges the
+    // rebuilt model against the pre-close one: a codec whose cache described a
+    // behaviourally identical model would pass that and still not be returning
+    // the artifact. Measured before this check existed: a codec ignoring its input
+    // entirely minted the final state.
+    close_round_trip(codec, &reloaded, &bytes)?;
+
+    // (4) Rebuild from the reloaded bundle and from nothing else.
     let (mut rebuilt_encoder, rebuilt_head) = rebuild_from(&reloaded)?;
 
-    // (4) Re-encode and re-predict FROM THE REBUILT MODEL.
+    // (5) Re-encode and re-predict FROM THE REBUILT MODEL.
     let after = probe_model(&mut rebuilt_encoder, &rebuilt_head, dataset, selection, config)?;
 
-    // (5) Compare at the trusted tolerance.
+    // (6) Compare at the trusted tolerance.
     let (max_embedding_abs_diff, max_probability_abs_diff) =
         compare_probes(&probe, &after, tolerance)?;
 
@@ -466,7 +533,8 @@ pub(crate) fn run_verify_policy<C: SetFitCodec>(
         max_probability_abs_diff,
         tolerance_embedding_abs: tolerance.embedding_abs,
         tolerance_probability_abs: tolerance.probability_abs,
-        round_trip_closed: false,
+        // Reached only past `close_round_trip`, which returns `Err` otherwise.
+        round_trip_closed: true,
     };
     Ok(VerifiedOutcome {
         encoder: rebuilt_encoder,
