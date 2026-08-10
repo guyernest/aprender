@@ -69,7 +69,7 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
   any ordered label set with `K >= 2`, with finite logits/probabilities and explicit convergence or
   failure
 
-- [ ] **TRN-05**: The classifier head is fit exactly once per unique selected training example using
+- [x] **TRN-05**: The classifier head is fit exactly once per unique selected training example using
   the tuned encoder in evaluation/no-gradient mode, so pair multiplicity cannot reweight the head
   dataset
 
@@ -224,7 +224,7 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
 | TRN-02 | Phase 3 | Pending |
 | TRN-03 | Phase 3 | Pending |
 | TRN-04 | Phase 3 | Pending |
-| TRN-05 | Phase 3 | Pending |
+| TRN-05 | Phase 3 | Complete |
 | TRN-06 | Phase 3 | Pending |
 | TRN-07 | Phase 3 | Pending |
 | APR-01 | Phase 4 | Pending |
