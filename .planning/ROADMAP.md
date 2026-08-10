@@ -153,7 +153,7 @@ plan's `<wave_1_concurrency>` block.)*
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 03-07-PLAN.md — Encode-once head input with an encode ledger + fit_head transition (pair multiplicity inexpressible) + pair-weighted in-band negative (wave 4)
+- [x] 03-07-PLAN.md — Encode-once head input with an encode ledger + fit_head transition (pair multiplicity inexpressible) + pair-weighted in-band negative (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
@@ -216,6 +216,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
-| 3. Faithful Two-Stage Trainer and Head | 6/10 | In Progress|  |
+| 3. Faithful Two-Stage Trainer and Head | 7/10 | In Progress|  |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
