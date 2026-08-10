@@ -1094,6 +1094,59 @@ bindings:
     no Kani harness. Measured against the pre-1.1.0 implementation, three of five f32 channels
     were RED: a NaN objective at x0 reported Converged, and a non-finite gradient (at x0 and at
     a line-search trial point) reported Stalled.'
+- contract: multinomial-head-v1.yaml
+  equation: softmax_nll_objective
+  module_path: aprender::classification::multinomial
+  function: objective
+  signature: 'fn objective(&self, x: &Vector<f64>) -> f64'
+  status: implemented
+  notes: 'Carries the #[contract] annotation. Method on the crate-private SoftmaxNllProblem,
+    which is the handle L-BFGS is given; the public surface is MultinomialLogisticRegression::fit.
+    The mean-NLL scaling, the log-sum-exp shift and the intercept-excluded penalty all live
+    here, and Regularization::resolve_lambda supplies the lambda = 1/(2*C*n) side of the
+    contracted relation.'
+- contract: multinomial-head-v1.yaml
+  equation: analytic_gradient
+  module_path: aprender::classification::multinomial
+  function: gradient
+  signature: 'fn gradient(&self, x: &Vector<f64>) -> Vector<f64>'
+  status: implemented
+  notes: 'Carries the #[contract] annotation. The ONE hand-written derivative in phase 3.
+    Validated pointwise against central differences rather than only against a reference
+    optimum — see FALSIFY-MH-004/005/006, including the in-band negative that must be RED
+    at lambda > 0 and GREEN at lambda = 0.'
+- contract: multinomial-head-v1.yaml
+  equation: label_order_semantics
+  module_path: aprender::classification::multinomial
+  function: argmax_lowest_index
+  signature: 'fn argmax_lowest_index(values: &[f64]) -> usize'
+  status: implemented
+  notes: 'The strict > comparison IS the lowest-index tie-break. Bound to the free function
+    rather than to predict(), because that function is where the semantics live and it is
+    exercised both directly and end-to-end against an EXACT tie (FALSIFY-MH-007).'
+- contract: multinomial-head-v1.yaml
+  equation: convergence_error_mapping
+  module_path: aprender::classification::multinomial
+  function: fit
+  signature: 'fn fit(&mut self, features: &[Vec<f32>], class_indices: &[usize], ordered_labels:
+    &[String], regularization: Regularization) -> Result<HeadFitReport, HeadFitError>'
+  status: implemented
+  notes: 'The exhaustive match over ConvergenceStatus lives here, so the compiler checks the
+    mapping is total. Includes the declared deviation from scikit-learn: MaxIterations is an
+    error, not a warning. No #[contract] annotation — the equation is about the mapping fit
+    performs, and annotating a &mut self method that returns a Result adds nothing the match
+    does not already guarantee.'
+- contract: multinomial-head-v1.yaml
+  equation: logit_finiteness
+  module_path: aprender::classification::multinomial
+  function: predict_proba
+  signature: 'fn predict_proba(&self, features: &[Vec<f32>]) -> Result<Vec<Vec<f64>>, HeadFitError>'
+  status: implemented
+  notes: 'f64 accumulation from the f32 store with the finiteness check placed BEFORE the
+    softmax. Measured: f32 operands cannot overflow f64 (max |product| ~ 1.16e77), so
+    NonFiniteLogit is reachable only via a non-finite feature value; the near-f32::MAX row
+    instead witnesses the property, returning finite probabilities where the f32 accumulation
+    is +inf.'
 critical_path:
 - softmax
 - rmsnorm
