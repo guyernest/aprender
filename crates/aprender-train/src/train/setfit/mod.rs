@@ -55,6 +55,7 @@ pub(crate) mod test_fixtures;
 use core::fmt;
 use core::marker::PhantomData;
 
+use aprender::classification::{HeadFitError, HeadFitReport, MultinomialLogisticRegression};
 use aprender::setfit::SetFitMiniLm;
 use aprender_contrastive_data::pairs::resolve_budget;
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
@@ -114,9 +115,90 @@ impl sealed::Sealed for EncoderTuned {}
 impl sealed::Sealed for HeadFitted {}
 impl sealed::Sealed for ArtifactReloadedAndVerified {}
 
+/// The evidence a state that has produced none carries.
+///
+/// A NAMED unit rather than a bare `()`. It reads better at the use site, and it is what
+/// makes B-3's guard non-vacuous: with `type Evidence = ();` written out, a scan for an
+/// anonymous tuple evidence type matches the deliberate empty case and can therefore never
+/// distinguish it from an accidental `(A, B)`. Naming the empty case leaves the scan free to
+/// mean exactly one thing.
+pub type NoEvidence = ();
+
 impl LifecycleState for Prepared {
-    type Evidence = ();
+    type Evidence = NoEvidence;
     const STATE: &'static str = "prepared";
+}
+
+/// Everything stage two produced, and the complete chain it stands on.
+///
+/// # A NAMED struct, not a `(PassedEvidence, HeadFitReport)` tuple (B-3)
+///
+/// `SetFitRun`'s field list is fixed, so `Evidence` is the ONLY home stage-two state has. A
+/// two-tuple has no slot for the fitted head, the ordered labels, the effective lambda, the
+/// encode ledger or the encode-call count — every one of which this plan and 03-08 require an
+/// accessor for. Anything dropped here becomes something a downstream plan RECOMPUTES, which
+/// is exactly the false green the in-band evidence discipline exists to remove.
+///
+/// Every field is private and every accessor hands out a shared borrow. There is no `Option`
+/// anywhere: the absent-field pattern says a state that has not produced a thing has no field
+/// for it, rather than a `None` every reader has to `expect` on.
+#[derive(Debug)]
+pub struct HeadFittedEvidence {
+    passed: tune::PassedEvidence,
+    head: MultinomialLogisticRegression,
+    report: HeadFitReport,
+    effective_lambda: f64,
+    ordered_labels: Vec<String>,
+    encode_ledger: Vec<String>,
+    encode_call_count: usize,
+}
+
+impl HeadFittedEvidence {
+    /// The complete stage-one chain this head was fitted on top of.
+    #[must_use]
+    pub fn passed(&self) -> &tune::PassedEvidence {
+        &self.passed
+    }
+
+    /// The fitted head. A SHARED borrow: predict through it, never re-fit it.
+    #[must_use]
+    pub fn head(&self) -> &MultinomialLogisticRegression {
+        &self.head
+    }
+
+    /// The optimizer's deterministic record of the fit.
+    #[must_use]
+    pub fn report(&self) -> &HeadFitReport {
+        &self.report
+    }
+
+    /// The L2 coefficient the fit actually minimized under.
+    ///
+    /// Recorded rather than left to be recomputed. Without it nothing downstream can state
+    /// which objective produced these weights, and 03-08's bundle would have to re-derive it
+    /// — a second derivation of the one number TRN-05 is about.
+    #[must_use]
+    pub fn effective_lambda(&self) -> f64 {
+        self.effective_lambda
+    }
+
+    /// The declared label map the head's weight rows are indexed by.
+    #[must_use]
+    pub fn ordered_labels(&self) -> &[String] {
+        &self.ordered_labels
+    }
+
+    /// The ordered identifiers actually handed to the encoder (D-08's exactly-once proof).
+    #[must_use]
+    pub fn encode_ledger(&self) -> &[String] {
+        &self.encode_ledger
+    }
+
+    /// How many times the encoder was invoked while building the head's input.
+    #[must_use]
+    pub fn encode_call_count(&self) -> usize {
+        self.encode_call_count
+    }
 }
 
 impl LifecycleState for EncoderTuned {
@@ -129,6 +211,11 @@ impl LifecycleState for EncoderTuned {
     /// rather than conventional.
     type Evidence = tune::PassedEvidence;
     const STATE: &'static str = "encoder_tuned";
+}
+
+impl LifecycleState for HeadFitted {
+    type Evidence = HeadFittedEvidence;
+    const STATE: &'static str = "head_fitted";
 }
 
 /// A SetFit training run in lifecycle state `S`.
@@ -309,6 +396,72 @@ impl SetFitRun<Prepared> {
     }
 }
 
+impl SetFitRun<EncoderTuned> {
+    /// Fit the multiclass head on each unique selected row, exactly once (D-08, TRN-05).
+    ///
+    /// # Pair multiplicity is INEXPRESSIBLE, not rejected
+    ///
+    /// This function takes NO parameters beyond `self`. Everything it fits on comes from the
+    /// run it consumes: the dataset, the selection and the resolved configuration. There is
+    /// no argument a caller could pass that says "weight this row twice", and no field on
+    /// `SetFitRun` that could carry one — the pair stream is stage one's input and it does
+    /// not survive into this state at all. A runtime check against multiplicity would need a
+    /// multiplicity to check; the point is that there is nowhere for one to live.
+    ///
+    /// The adversarial half of that claim is `negative.rs`, which builds the pair-weighted
+    /// fitter from the only surface that can still express it — raw embedding rows plus the
+    /// public head — and shows it moves the coefficients at an IDENTICAL lambda.
+    ///
+    /// # The effective lambda tracks UNIQUE ROWS
+    ///
+    /// `SklearnEquivalentC { c }` resolves through `head_input::resolve_lambda` against the
+    /// encode-once row count, so the reference default `C = 1.0` over a 24-row selection is
+    /// `lambda = 1/48` whatever the pair budget is. The resolved value is handed to the head
+    /// as `Regularization::Lambda`, so the head does not re-resolve it against its own row
+    /// count and there is exactly one place the choice of `n` is made.
+    ///
+    /// # Errors
+    ///
+    /// Anything the encode-once input rejects (see `head_input::head_dataset`), plus
+    /// [`SetFitTrainError::HeadFit`] carrying the head's own typed failure — a head that
+    /// cannot converge is an error, never a warning and never a silently accepted fit.
+    pub fn fit_head(self) -> Result<SetFitRun<HeadFitted>, SetFitTrainError> {
+        self.fit_head_with_iteration_budget(head_input::HEAD_MAX_ITER)
+    }
+
+    /// The same body at a caller-chosen L-BFGS budget.
+    ///
+    /// `#[cfg(test)]`: the non-convergence path has to be reachable to be proven typed, and
+    /// the honest way to reach it is a tiny iteration budget. Shipping this as a public knob
+    /// would put a door on the surface whose only use is to make the head fail.
+    #[cfg(test)]
+    pub(crate) fn fit_head_with_max_iter(
+        self,
+        max_iter: usize,
+    ) -> Result<SetFitRun<HeadFitted>, SetFitTrainError> {
+        self.fit_head_with_iteration_budget(max_iter)
+    }
+
+    fn fit_head_with_iteration_budget(
+        self,
+        max_iter: usize,
+    ) -> Result<SetFitRun<HeadFitted>, SetFitTrainError> {
+        let Self { mut encoder, dataset, selection, config, evidence: passed, _state } = self;
+        let head_input::FittedHead { head, report, lambda, input } =
+            head_input::fit_on_selection(&mut encoder, &dataset, &selection, &config, max_iter)?;
+        let evidence = HeadFittedEvidence {
+            passed,
+            head,
+            report,
+            effective_lambda: lambda,
+            ordered_labels: input.ordered_labels().to_vec(),
+            encode_ledger: input.encode_ledger().to_vec(),
+            encode_call_count: input.encode_call_count(),
+        };
+        Ok(SetFitRun { encoder, dataset, selection, config, evidence, _state: PhantomData })
+    }
+}
+
 /// The short source-revision tag of the pinned MiniLM slice the epsilons were measured on.
 ///
 /// The first eight hex digits of `1110a243fdf4706b3f48f1d95db1a4f5529b4d41`, the upstream
@@ -448,6 +601,13 @@ pub enum SetFitTrainError {
         /// The offending row identifier.
         id: String,
     },
+    /// The multiclass head refused the fit, with its own typed reason.
+    ///
+    /// The inner [`HeadFitError`] is preserved rather than rendered to a string, because
+    /// TRN-04's whole point is that a caller can distinguish "your data was bad" from "the
+    /// optimizer ran out of budget" from "the arithmetic went non-finite" without matching on
+    /// message text.
+    HeadFit(HeadFitError),
     /// The head's encode window size was zero.
     ///
     /// `ResolvedSetFitConfig` cannot carry a zero batch size, so this is unreachable from the
@@ -594,6 +754,12 @@ impl fmt::Display for SetFitTrainError {
                 "selected id `{id}` resolves to a row whose exact content hash disagrees \
                  with the selection's — the same name, different bytes \
                  (contract setfit-train-lifecycle-v1, requirement TRN-01)",
+            ),
+            Self::HeadFit(inner) => write!(
+                f,
+                "the multiclass head refused the fit: {inner}; a head that does not converge \
+                 is an error rather than a warning, so no coefficients were produced \
+                 (contract setfit-train-lifecycle-v1, requirement TRN-04)",
             ),
             Self::HeadEncodeBatchSizeZero => write!(
                 f,
@@ -843,5 +1009,350 @@ mod tests {
                 "`{cell}` must not borrow a measured cell's epsilons",
             );
         }
+    }
+
+    // =======================================================================================
+    // Stage two — plan 03-07, TRN-05
+    // =======================================================================================
+
+    use aprender::optim::ConvergenceStatus;
+    use aprender_contrastive_data::ledger::AccessLedger;
+
+    use config::HeadRegularization;
+
+    /// The reference default the fixture configures the head with.
+    const REFERENCE_C: f64 = 1.0;
+    /// 3 classes x 8 shots.
+    const SELECTED_ROWS: usize = 24;
+
+    /// A complete calibrated pipeline: prepare -> tune_encoder -> fit_head.
+    fn head_fitted_run(variant: fx::CalibrationVariant) -> SetFitRun<HeadFitted> {
+        fx::prepared_run(variant, None)
+            .tune_encoder()
+            .expect("a run at a measured seed and cell must pass the evidence gate")
+            .fit_head()
+            .expect("the head must fit on the fixture's 24 encode-once rows")
+    }
+
+    /// Embedding rows for arbitrary probe texts, through the run's OWN encoder.
+    fn probe_rows(run: &SetFitRun<HeadFitted>, texts: &[&str]) -> Vec<Vec<f32>> {
+        let embedded = run.encoder().encode_texts(texts).expect("probe texts encode");
+        let hidden = embedded.shape()[1];
+        embedded.data().chunks(hidden).map(<[f32]>::to_vec).collect()
+    }
+
+    /// The pipeline reaches `HeadFitted`, and the head answers with a real distribution.
+    #[test]
+    fn fit_head_completes_the_pipeline_and_probabilities_sum_to_one() {
+        let run = head_fitted_run(fx::calibrated_variant());
+        assert_eq!(run.state_name(), "head_fitted");
+
+        let texts: Vec<&str> =
+            run.dataset().test().rows().iter().map(|r| r.input.as_str()).collect();
+        assert!(!texts.is_empty(), "the fixture's test split must have rows to probe with");
+        let rows = probe_rows(&run, &texts);
+        let probs =
+            run.evidence().head().predict_proba(&rows).expect("the fitted head must predict");
+
+        assert_eq!(probs.len(), rows.len());
+        for (row, p) in probs.iter().enumerate() {
+            assert_eq!(p.len(), 3, "row {row}: one probability per declared class");
+            assert!(p.iter().all(|v| v.is_finite()), "row {row}: {p:?} is not finite");
+            let total: f64 = p.iter().sum();
+            assert!((total - 1.0).abs() < 1e-6, "row {row}: probabilities sum to {total}");
+        }
+        assert_eq!(run.evidence().report().status, ConvergenceStatus::Converged);
+    }
+
+    /// Two identical pipelines agree BITWISE on the stored `f32` head.
+    #[test]
+    fn fit_head_two_identical_pipelines_agree_bitwise() {
+        let first = head_fitted_run(fx::calibrated_variant());
+        let second = head_fitted_run(fx::calibrated_variant());
+
+        assert!(!first.evidence().head().weights().is_empty(), "a fitted head has weights");
+        assert_eq!(
+            first.evidence().head().weights(),
+            second.evidence().head().weights(),
+            "the whole path — pair stream, tuning, encode-once, L-BFGS from a zero start — \
+             contains no randomness, so two identical runs must store identical f32 weights",
+        );
+        assert_eq!(first.evidence().head().intercepts(), second.evidence().head().intercepts());
+        assert_eq!(first.evidence().encode_ledger(), second.evidence().encode_ledger());
+        assert_eq!(first.evidence().effective_lambda(), second.evidence().effective_lambda());
+    }
+
+    /// The effective lambda resolves against UNIQUE ROWS: `C = 1` over 24 rows is exactly 1/48.
+    #[test]
+    fn fit_head_lambda_resolves_against_unique_rows_to_one_over_forty_eight() {
+        let reg = HeadRegularization::SklearnEquivalentC { c: REFERENCE_C };
+        assert_eq!(
+            head_input::resolve_lambda(&reg, SELECTED_ROWS),
+            1.0 / 48.0,
+            "lambda = 1/(2*C*n) with n = 24 unique rows",
+        );
+
+        let run = head_fitted_run(fx::calibrated_variant());
+        // `n` is PINNED to the selection's own length, not to a literal.
+        assert_eq!(run.selection().len(), SELECTED_ROWS);
+        assert_eq!(run.evidence().encode_ledger().len(), run.selection().len());
+        assert_eq!(
+            run.evidence().effective_lambda(),
+            head_input::resolve_lambda(&reg, run.selection().len()),
+            "the fit's lambda must be the one the unique-row count resolves to",
+        );
+        assert_eq!(run.evidence().effective_lambda(), 1.0 / 48.0);
+
+        // The pair budget resolves to a DIFFERENT number, which is what makes the assertion
+        // above discriminating rather than a coincidence of the fixture.
+        let budget = run
+            .config()
+            .requested()
+            .pair_config()
+            .budget
+            .expect("the fixture pins an explicit budget") as usize;
+        assert_ne!(budget, SELECTED_ROWS);
+        assert_ne!(head_input::resolve_lambda(&reg, budget), 1.0 / 48.0);
+    }
+
+    /// The pair budget does not reach the head's objective.
+    ///
+    /// # Why this is asserted against `fit_on_selection` and not against `fit_head`
+    ///
+    /// The plan asked for "varying the pair budget leaves the fitted weights bitwise
+    /// unchanged" end to end. That statement is FALSE end to end, and asserting it would have
+    /// been asserting something untrue: the budget is stage ONE's input, so two budgets take
+    /// different numbers of optimizer steps and hand stage two two different encoders. The
+    /// head's weights are then legitimately different, for a reason that has nothing to do
+    /// with TRN-05.
+    ///
+    /// What IS true, and what TRN-05 actually claims, is that stage two never reads the
+    /// budget: given the SAME encoder, two configurations differing only in pair budget
+    /// produce the same lambda and the same coefficients, bitwise. That is asserted here
+    /// against the very function `fit_head` runs. The end-to-end half — the recorded lambda
+    /// is budget-independent even when the encoder is not — is asserted below it.
+    #[test]
+    fn fit_head_pair_budget_does_not_reach_the_head_objective() {
+        let mut ledger = AccessLedger::new();
+        let dataset = fx::synthetic_dataset(&mut ledger);
+        let selection = fx::fixture_selection(fx::FIXTURE_SEED, 8);
+        let mut encoder = fx::slice_encoder(fx::FIXTURE_SEED);
+
+        let base = fx::calibrated_variant();
+        let resolved = |budget: u64| {
+            fx::config_for(fx::CalibrationVariant { budget, ..base }, None)
+                .resolve()
+                .expect("the fixture configuration resolves on a cpu host")
+        };
+        let (small, large) = (resolved(12), resolved(20));
+        assert_ne!(
+            small.requested().pair_config().budget,
+            large.requested().pair_config().budget,
+            "the two configurations must actually differ in the budget",
+        );
+
+        let fit = |config: &config::ResolvedSetFitConfig, encoder: &mut _| {
+            head_input::fit_on_selection(
+                encoder,
+                &dataset,
+                &selection,
+                config,
+                head_input::HEAD_MAX_ITER,
+            )
+            .expect("stage two must fit at either budget")
+        };
+        let a = fit(&small, &mut encoder);
+        let b = fit(&large, &mut encoder);
+
+        assert_eq!(a.lambda, 1.0 / 48.0);
+        assert_eq!(a.lambda, b.lambda, "the budget must not move the head's L2 coefficient");
+        assert_eq!(
+            a.head.weights(),
+            b.head.weights(),
+            "the budget must not move a single coefficient of the head",
+        );
+        assert_eq!(a.head.intercepts(), b.head.intercepts());
+        assert_eq!(a.input.encode_ledger(), b.input.encode_ledger());
+
+        // End to end: two complete pipelines at different budgets record the SAME lambda,
+        // even though their encoders — and therefore their coefficients — differ.
+        let e2e = |budget: u64| {
+            fx::prepared_run(fx::CalibrationVariant { budget, ..base }, None)
+                .tune_encoder()
+                .expect("both budgets clear the evidence gate at a calibrated seed and cell")
+                .fit_head()
+                .expect("both budgets fit a head")
+        };
+        let (run_small, run_large) = (e2e(12), e2e(20));
+        assert_eq!(
+            run_small.evidence().effective_lambda(),
+            run_large.evidence().effective_lambda(),
+            "the recorded objective must be budget-independent",
+        );
+        assert_eq!(run_small.evidence().effective_lambda(), 1.0 / 48.0);
+        assert_eq!(
+            run_small.evidence().encode_ledger(),
+            run_large.evidence().encode_ledger(),
+            "the head's input is the same 24 unique rows at either budget",
+        );
+    }
+
+    /// A head that cannot converge is a TYPED error, never a silently accepted fit.
+    #[test]
+    fn fit_head_a_head_that_cannot_converge_surfaces_the_typed_error() {
+        let tuned = fx::prepared_run(fx::calibrated_variant(), None)
+            .tune_encoder()
+            .expect("the calibrated cell passes the evidence gate");
+        match tuned.fit_head_with_max_iter(1) {
+            Err(SetFitTrainError::HeadFit(HeadFitError::NotConverged {
+                iterations,
+                gradient_norm,
+                tol,
+            })) => {
+                assert_eq!(iterations, 1, "the budget was one iteration");
+                assert!(
+                    gradient_norm > tol,
+                    "a non-convergence must report a gradient norm ({gradient_norm:e}) above \
+                     the tolerance ({tol:e})",
+                );
+            }
+            other => panic!(
+                "a one-iteration budget must surface HeadFitError::NotConverged inside \
+                 SetFitTrainError; a warning-and-return would hand back coefficients from a \
+                 fit that never finished. Got {other:?}",
+            ),
+        }
+    }
+
+    /// The evidence carries the exactly-once proof and the whole stage-one chain.
+    #[test]
+    fn fit_head_evidence_carries_the_ledger_the_labels_and_the_passed_chain() {
+        let run = head_fitted_run(fx::calibrated_variant());
+        let evidence = run.evidence();
+
+        let mut ledger: Vec<&str> = evidence.encode_ledger().iter().map(String::as_str).collect();
+        assert_eq!(ledger.len(), SELECTED_ROWS);
+        ledger.sort_unstable();
+        let mut selected = run.selection().ordered_ids();
+        selected.sort_unstable();
+        assert_eq!(ledger, selected, "the ledger must survive the transition intact");
+
+        let batch = run.config().requested().batch_size() as usize;
+        assert_eq!(evidence.encode_call_count(), SELECTED_ROWS.div_ceil(batch));
+        assert_eq!(evidence.ordered_labels(), run.dataset().label_names());
+        assert_eq!(evidence.ordered_labels(), evidence.head().labels());
+        assert!(
+            Thresholds::frozen().is_calibrated(&evidence.passed().summary().calibration_regime_id),
+            "the complete stage-one chain must survive into HeadFitted, not just a verdict",
+        );
+    }
+
+    /// The setfit module directory.
+    fn setfit_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/train/setfit")
+    }
+
+    /// This module's own source, with its test module removed.
+    ///
+    /// A source guard that reads the file it lives in finds every needle IN ITSELF. Scanning
+    /// the whole of `mod.rs` for `pub fn fit_head(self)` would be satisfied by the assertion
+    /// that spells it and would stay green if the transition were deleted; the first draft of
+    /// this test did exactly that, and its `pub struct HeadFittedEvidence` count came back as
+    /// 2. The cut is what turns the scan back into evidence about the shipped code.
+    fn shipped_mod_source() -> String {
+        let text = std::fs::read_to_string(setfit_dir().join("mod.rs")).expect("mod.rs readable");
+        let header = format!("\nmod {} {{", "tests");
+        let cut = text.find(&header).expect("mod.rs ends with its test module");
+        text[..cut].to_string()
+    }
+
+    /// The same source with every comment removed.
+    ///
+    /// A structural guard has to scan the DECLARATIONS, not the prose about them: this
+    /// module's doc comments legitimately quote the shapes the guard forbids, and a scan that
+    /// counts them is red for writing the explanation. `negative_leaky.rs` established the
+    /// same `split("//")` discipline in Phase 2.
+    fn shipped_mod_code() -> String {
+        shipped_mod_source()
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The structural claims, read off the SHIPPED source rather than trusted.
+    #[test]
+    fn fit_head_signature_and_evidence_shape_are_pinned() {
+        let shipped = shipped_mod_code();
+
+        assert_eq!(
+            shipped.matches("pub fn fit_head(self) -> Result<SetFitRun<HeadFitted>").count(),
+            1,
+            "fit_head must exist and take ZERO non-self parameters; a pair-shaped argument \
+             would make multiplicity expressible again",
+        );
+        assert_eq!(shipped.matches("pub struct HeadFittedEvidence").count(), 1);
+
+        // B-3. The needle is the ASSOCIATED TYPE declaration, `type Evidence = (`, not the
+        // looser `Evidence = (` the plan wrote: the loose form also matches the deliberate
+        // `pub type NoEvidence = ();` — a substring straddling a word boundary — and so can
+        // never distinguish the empty case from an accidental `(A, B)`.
+        let tuple_evidence = format!("{}{}", "type Evidence = ", "(");
+        assert_eq!(
+            shipped.matches(&tuple_evidence).count(),
+            0,
+            "no lifecycle state may declare an anonymous tuple as its evidence (B-3)",
+        );
+        // The guard is two-sided: it must FIRE on the shape it forbids.
+        assert_eq!(
+            format!("    {tuple_evidence});").matches(&tuple_evidence).count(),
+            1,
+            "the needle must match the forbidden declaration, or the count above is 0 for \
+             the wrong reason",
+        );
+        let optional_evidence = format!("{}{}", "Option<HeadFittedEvidence", ">");
+        assert!(!shipped.contains(&optional_evidence), "the evidence is never optional");
+
+        // Exactly one lambda resolution across the whole module directory, shared with the
+        // adversary. Assembled at runtime so this file's own copy is not one of them.
+        let resolver = format!("{}{}", "fn resolve_", "lambda");
+        let mut sites = 0;
+        for entry in std::fs::read_dir(setfit_dir()).expect("the setfit module is readable") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                sites += std::fs::read_to_string(&path)
+                    .expect("every module file is readable")
+                    .matches(&resolver)
+                    .count();
+            }
+        }
+        assert_eq!(
+            sites, 1,
+            "a second lambda resolution is how the adversarial control silently stops \
+             isolating multiplicity",
+        );
+
+        // The six fields the plan names, plus the effective lambda 03-08's bundle needs.
+        let source = shipped_mod_source();
+        let declaration = source
+            .split_once("pub struct HeadFittedEvidence {")
+            .expect("the evidence struct is declared")
+            .1
+            .split_once("\n}")
+            .expect("the declaration is closed")
+            .0;
+        for field in [
+            "passed:",
+            "head:",
+            "report:",
+            "effective_lambda:",
+            "ordered_labels:",
+            "encode_ledger:",
+            "encode_call_count:",
+        ] {
+            assert!(declaration.contains(field), "HeadFittedEvidence must carry `{field}`");
+        }
+        assert!(!declaration.contains("Option<"), "no field of the evidence may be optional");
+        assert!(!declaration.contains("pub "), "every field of the evidence is private");
     }
 }

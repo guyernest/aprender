@@ -35,10 +35,14 @@
 //! lives in `negative.rs`.
 
 use aprender::autograd;
+use aprender::classification::{
+    HeadFitReport, MultinomialLogisticRegression, Regularization, DEFAULT_MAX_ITER,
+};
 use aprender::setfit::SetFitMiniLm;
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
 use aprender_contrastive_data::select::Selection;
 
+use super::config::{HeadRegularization, ResolvedSetFitConfig};
 use super::tune::selection_texts;
 use super::SetFitTrainError;
 
@@ -239,6 +243,88 @@ fn push_rows(
         out.push(row.to_vec());
     }
     Ok(())
+}
+
+// ===========================================================================================
+// The head's objective: ONE lambda, resolved against the UNIQUE row count
+// ===========================================================================================
+
+/// THE single resolution of the head's L2 coefficient.
+///
+/// One function, called by the trusted fit and by `negative.rs`'s adversary alike. A second
+/// resolution site is how the adversarial control silently stops isolating multiplicity: an
+/// adversary that re-resolved `SklearnEquivalentC` against its own DUPLICATED row count would
+/// be minimizing a different objective, and the difference it reported would be a lambda
+/// shift wearing multiplicity's name. That is why the adversary takes a plain `f64`.
+///
+/// The `lambda = 1 / (2 * C * n)` arithmetic is NOT restated here — it is
+/// `Regularization::resolve_lambda` in `aprender-core`, where the half-constant, the
+/// sum-versus-mean convention and the unpenalized intercept are contracted together. What
+/// this function owns, and the only thing it owns, is the choice of `n`: the UNIQUE selected
+/// row count, never a pair count and never a duplicated row count.
+pub(crate) fn resolve_lambda(regularization: &HeadRegularization, unique_rows: usize) -> f64 {
+    core_regularization(regularization).resolve_lambda(unique_rows)
+}
+
+/// The core head's request form for a configured knob.
+fn core_regularization(regularization: &HeadRegularization) -> Regularization {
+    match *regularization {
+        HeadRegularization::Lambda(lambda) => Regularization::Lambda(lambda),
+        HeadRegularization::SklearnEquivalentC { c } => Regularization::SklearnEquivalentC { c },
+    }
+}
+
+/// The head's iteration budget on the shipped path — scikit-learn's own default.
+pub(crate) const HEAD_MAX_ITER: usize = DEFAULT_MAX_ITER;
+
+/// Stage two's product, before the typestate wraps it.
+#[derive(Debug)]
+pub(crate) struct FittedHead {
+    /// The fitted head itself.
+    pub(crate) head: MultinomialLogisticRegression,
+    /// The optimizer's deterministic record.
+    pub(crate) report: HeadFitReport,
+    /// The L2 coefficient the fit actually minimized under.
+    pub(crate) lambda: f64,
+    /// The encode-once input it was fitted on.
+    pub(crate) input: HeadDataset,
+}
+
+/// Encode the selection exactly once and fit the multiclass head on it.
+///
+/// `pub(crate)` and separate from the transition on purpose. `fit_head` cannot be called
+/// twice with the same tuned encoder — it consumes the run — so an invariance claim of the
+/// form "changing knob X leaves the head unchanged" is only expressible against this
+/// function. Sharing one body means the property is asserted about the code the transition
+/// actually runs, not about a second implementation written for the test.
+///
+/// # Errors
+///
+/// Anything [`head_dataset`] rejects, plus [`SetFitTrainError::HeadFit`] carrying the head's
+/// own typed failure.
+pub(crate) fn fit_on_selection(
+    encoder: &mut SetFitMiniLm,
+    dataset: &PreparedDataset<Canonical>,
+    selection: &Selection,
+    config: &ResolvedSetFitConfig,
+    max_iter: usize,
+) -> Result<FittedHead, SetFitTrainError> {
+    let requested = config.requested();
+    let input = head_dataset(encoder, dataset, selection, requested.batch_size())?;
+    // `input.n()` is the encode-once row count and nothing else can be substituted for it
+    // here: the budget lives on `requested`, but this function never reads it.
+    let lambda = resolve_lambda(&requested.head_regularization(), input.n());
+    let mut head =
+        MultinomialLogisticRegression::new(input.ordered_labels().len()).with_max_iter(max_iter);
+    let report = head
+        .fit(
+            input.embeddings(),
+            input.class_indices(),
+            input.ordered_labels(),
+            Regularization::Lambda(lambda),
+        )
+        .map_err(SetFitTrainError::HeadFit)?;
+    Ok(FittedHead { head, report, lambda, input })
 }
 
 /// The class index of every selected row, checked against the DECLARED label map.
@@ -570,21 +656,47 @@ mod tests {
         ));
     }
 
-    /// The module names no multiplicity-shaped input anywhere in its signatures.
-    #[test]
-    fn head_input_names_no_multiplicity_shaped_parameter() {
+    /// This module's own source, with its test module removed.
+    ///
+    /// The cut is what makes the scan below evidence. A guard that reads the file it lives in
+    /// finds every needle IN ITSELF: `text.contains("no_grad")` is satisfied by the assertion
+    /// that spells it, and would stay green if the mechanism were deleted from the code. The
+    /// header is assembled at runtime for the same reason.
+    fn shipped_source() -> String {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/train/setfit/head_input.rs");
         let text = std::fs::read_to_string(&path).expect("this module is readable");
-        // Assembled at runtime so the scan cannot trip on itself.
+        let header = format!("\nmod {} {{", "tests");
+        let cut = text.find(&header).expect("this module ends with its test module");
+        text[..cut].to_string()
+    }
+
+    /// The module names no multiplicity-shaped input anywhere, and the mechanism is present.
+    #[test]
+    fn head_input_names_no_multiplicity_shaped_parameter() {
+        // The pair-type scan covers the WHOLE file, tests included: there is no reason for
+        // this module to mention the type at all. Assembled so it cannot match itself.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/train/setfit/head_input.rs");
+        let whole = std::fs::read_to_string(&path).expect("this module is readable");
         let needle = format!("{}{}", "P", "air");
         assert!(
-            !text.contains(&needle),
+            !whole.contains(&needle),
             "head_input.rs mentions the pair type at all; stage two's input must be \
              expressible only from the selection",
         );
-        for mechanism in ["no_grad", "detach", "label_names"] {
-            assert!(text.contains(mechanism), "`{mechanism}` must be in the code path");
+
+        let shipped = shipped_source();
+        for mechanism in ["no_grad", "detach", "label_names", "set_training(false)"] {
+            assert!(
+                shipped.contains(mechanism),
+                "`{mechanism}` must be in the SHIPPED code path, not only in a test that \
+                 mentions it",
+            );
         }
+        // And exactly one lambda resolution lives here (03-07 task 2 shares it with the
+        // adversary; a second site is how the control stops isolating multiplicity).
+        let resolver = format!("{}{}", "fn resolve_", "lambda");
+        assert_eq!(shipped.matches(&resolver).count(), 1);
     }
 }
