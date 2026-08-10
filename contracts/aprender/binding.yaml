@@ -1147,6 +1147,121 @@ bindings:
     NonFiniteLogit is reachable only via a non-finite feature value; the near-f32::MAX row
     instead witnesses the property, returning finite probabilities where the f32 accumulation
     is +inf.'
+# --- setfit-train-lifecycle-v1: the stage-one evidence gate (plan 03-06) ---
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: evidence_gate
+  module_path: entrenar::train::setfit::tune
+  function: validate_evidence
+  signature: 'fn validate_evidence(evidence: &UpdateEvidence, thresholds: &Thresholds) -> Result<PassedEvidence, SetFitTrainError>'
+  status: implemented
+  notes: 'THE single validating function; every future door calls it. Flipped to implemented by
+    plan 03-06 task 2, which arms it. Recorded as not_implemented here deliberately: task 1
+    freezes the thresholds and task 2 arms the comparison, and the contract must be committed
+    BEFORE the first pass/fail comparison runs against it. The #[contract] annotation is
+    metadata-only in this repo (build.rs cannot find its binding.yaml, so CONTRACT_* env vars
+    are never set), which is why the enforcement is the named test and not the attribute.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: calibration_regime
+  module_path: entrenar::train::setfit::tune
+  function: validate_evidence
+  signature: 'fn validate_evidence(evidence: &UpdateEvidence, thresholds: &Thresholds) -> Result<PassedEvidence, SetFitTrainError>'
+  status: implemented
+  notes: 'The regime membership check is the FIRST statement of validate_evidence, so an
+    out-of-regime run is refused before any threshold measured elsewhere is applied to it. Same
+    task-2 flip as evidence_gate.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: embedding_delta_floor
+  module_path: entrenar::train::setfit::tune
+  function: validate_evidence
+  signature: 'fn validate_evidence(evidence: &UpdateEvidence, thresholds: &Thresholds) -> Result<PassedEvidence, SetFitTrainError>'
+  status: implemented
+  notes: 'Run-level aggregate, evaluated after every per-parameter predicate so a failure names
+    the offending parameter first. Same task-2 flip.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: gradient_free_parameters
+  module_path: entrenar::train::setfit::evidence
+  function: classify_parameter
+  signature: 'fn classify_parameter(name: &str) -> Result<ParameterClass, EvidenceError>'
+  status: implemented
+  notes: 'ParameterClass::AttentionKeyBias plus the fail-closed mapping. The class boundary
+    rests on softmax shift-invariance (dL/db_k = 0 in exact arithmetic) and is pinned by
+    evidence_attention_key_bias_is_gradient_free_relative_to_its_own_block, which runs in every
+    cargo test rather than behind --ignored. Its failure mode was induced (classify the QUERY
+    bias as gradient-free instead) and observed RED at 3.446e-3 against 1.824e-10.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: pair_loss_endpoint
+  module_path: entrenar::train::setfit::evidence
+  function: from_tune_output
+  signature: 'fn from_tune_output(out: &TuneOutput, calibration_regime_id: &str) -> Result<UpdateEvidence, EvidenceError>'
+  status: implemented
+  notes: 'RECORDED ONLY, and deliberately not armed. first_k_mean, last_k_mean and k are carried
+    in the evidence table so a reader can see the loss endpoints; no verdict arm reads them. The
+    measured cross-seed spread of (last_k - first_k) is 0.4933 with the sign flipping between
+    seeds, so any threshold wide enough to tolerate it could not fail a real run.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: execution_digests
+  module_path: entrenar::train::setfit::tune
+  function: run_batch
+  signature: 'fn run_batch(...) -> Result<(), SetFitTrainError>'
+  status: implemented
+  notes: 'consumed_pair_digest is absorbed inside the pair-pull loop AT THE DRAW and
+    batch_boundary_digest at batch open, never recomputed from configuration. Falsified by
+    inducing the recomputation (absorb the configured ordinal instead of the drawn one), which
+    turns tune_digest_is_recorded_not_recomputed red with the two digests printed identical.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: loss_trace_hash
+  module_path: entrenar::train::setfit::evidence
+  function: from_tune_output
+  signature: 'fn from_tune_output(out: &TuneOutput, calibration_regime_id: &str) -> Result<UpdateEvidence, EvidenceError>'
+  status: implemented
+  notes: 'SHA-256 over the f32 little-endian bit patterns in step order. The digest is MOVED
+    from the recorded TuneOutput; nothing here recomputes one. No wall-clock type appears in
+    the evidence module at all, so reproducibility is structural rather than maintained by care.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: dropout_mask_derivation
+  module_path: aprender::setfit::dropout_rng
+  function: derive_key
+  signature: 'fn derive_key(root_seed: u64, site: &str) -> DomainKey'
+  status: implemented
+  notes: 'Cross-crate into aprender-core. Domain tag apr-setfit-dropout-v1 with a NUL
+    terminator, forward ordinal 2*step+branch in Philox counter lane 2 so the two pair branches
+    draw from different streams. Goldens frozen inline in the contract and pinned by
+    dropout_rng_byte_encoding_golden_is_frozen, which requires --features setfit; without that
+    flag the filter matches zero tests and still reports ok, which is a vacuous pass.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: epoch_shuffle_derivation
+  module_path: entrenar::train::setfit::epoch
+  function: epoch_pair_order
+  signature: 'fn epoch_pair_order(root_seed: u64, epoch: u32, n: u64) -> Vec<u64>'
+  status: implemented
+  notes: 'Domain tag apr-setfit-train-v1 with a NUL terminator, Fisher-Yates with bounded
+    draws. The goldens pin epoch separation and seed separation, so a derivation that ignored
+    either coordinate is red even though it would still emit a valid-looking permutation.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: knob_defaults
+  module_path: entrenar::train::setfit::config
+  function: reference_defaults
+  signature: 'fn reference_defaults(root_seed: u64) -> Self'
+  status: implemented
+  notes: 'The twelve-knob reference recipe. The defaults are REFERENCE-CITED, not faithful:
+    assumption A1 (that the setfit path does not override the HF defaults) is UNCONFIRMED.
+    Confirmation was attempted and could not be completed offline, since `import setfit` fails
+    in this environment and the pinned reference fixtures record sampler.py measurements only.
+    The contract carries the cheap confirmation recipe.'
+# --- linear-probe-classifier-v1: the SAFE-03 frozen baseline (plan 03-06 task 3) ---
+- contract: linear-probe-classifier-v1.yaml
+  equation: linear_probe
+  module_path: entrenar::train::setfit::baseline
+  function: fit
+  signature: 'fn fit(self) -> Result<(MultinomialLogisticRegression, FrozenProbeReport), SetFitTrainError>'
+  status: implemented
+  notes: 'FrozenProbeRun — a separate type that is NOT a SetFitRun state and has no conversion
+    to one. Encodes the selected rows in eval mode inside autograd::no_grad with no tuning step,
+    fits MultinomialLogisticRegression on the frozen embeddings, and reports kind
+    "frozen_linear_probe". Flipped to implemented by plan 03-06 task 3. Recorded here because
+    task 1 adds this contract to PHASE3_CONTRACTS, and the audit going RED on this very
+    equation is what proved the scoped audit actually reaches this file rather than appearing
+    to.'
 critical_path:
 - softmax
 - rmsnorm

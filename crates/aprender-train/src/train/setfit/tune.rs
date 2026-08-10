@@ -69,7 +69,9 @@ use super::config::{
     ResolvedSetFitConfig, ADAMW_BETA1, ADAMW_BETA2, ADAMW_EPSILON, ADAMW_WEIGHT_DECAY,
 };
 use super::epoch::epoch_pair_order;
+use super::evidence::{EvidenceRow, EvidenceSummary, ParameterClass, UpdateEvidence, Verdict};
 use super::reduce;
+use super::thresholds::Thresholds;
 use super::SetFitTrainError;
 
 /// The floor learning rate the reference schedule decays to.
@@ -841,7 +843,10 @@ fn tune_with_probes(
 ///
 /// `SelectedExample` carries no text (Phase 2 `select.rs`), so the strings come from the
 /// dataset's train split, matched by row id.
-fn selection_texts(dataset: &PreparedDataset<Canonical>, selection: &Selection) -> Vec<String> {
+pub(crate) fn selection_texts(
+    dataset: &PreparedDataset<Canonical>,
+    selection: &Selection,
+) -> Vec<String> {
     let by_id: BTreeMap<&str, &str> =
         dataset.train().rows().iter().map(|row| (row.id.as_str(), row.input.as_str())).collect();
     selection
@@ -914,6 +919,181 @@ fn endpoint_means(trace: &[f32]) -> (f64, f64, usize) {
     let first = reduce::mean_in_index_order(&trace[..k]);
     let last = reduce::mean_in_index_order(&trace[trace.len() - k..]);
     (first, last, k)
+}
+
+// ===========================================================================================
+// The evidence gate (plan 03-06) — THE single validating function
+// ===========================================================================================
+
+/// The one parameter a rejection blames, with everything needed to act on it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FailedParameter {
+    /// The HF dotted name.
+    pub name: String,
+    /// The class whose epsilon it was compared against.
+    pub class: String,
+    /// Its measured relative delta.
+    pub relative_delta: f64,
+    /// The contracted epsilon for that class.
+    pub eps: f64,
+}
+
+/// Proof that a run's evidence PASSED the gate.
+///
+/// Constructible only by [`validate_evidence`], and the only thing
+/// `SetFitRun<EncoderTuned>` will accept as its evidence. Non-constructibility elsewhere is
+/// what makes "the encoder demonstrably moved" a type-level fact rather than a convention.
+///
+/// # It OWNS the complete record
+///
+/// Not a verdict flag beside a discarded table. Every run-level field survives here —
+/// `loss_trace_hash`, both execution digests, `batch_boundary_list`,
+/// `parameter_registry_hash`, `step_count`, the endpoint means and `k`, the embedding-delta
+/// aggregates, `pre_clip_norm_max` and `calibration_regime_id` — because every accessor a
+/// later plan exposes must resolve to a field on this chain. Anything dropped here becomes
+/// something a downstream executor RECOMPUTES, which is exactly the false-green the in-band
+/// digests exist to remove.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PassedEvidence {
+    table: UpdateEvidence,
+    summary: EvidenceSummary,
+}
+
+impl PassedEvidence {
+    /// The complete per-parameter table.
+    #[must_use]
+    pub(crate) fn table(&self) -> &UpdateEvidence {
+        &self.table
+    }
+
+    /// The bound summary.
+    #[must_use]
+    pub(crate) fn summary(&self) -> &EvidenceSummary {
+        &self.summary
+    }
+}
+
+/// Validate a run's evidence against the frozen thresholds. THE gate.
+///
+/// Exactly one such function exists in this crate, and every future door calls it. A second
+/// validating function would be a second policy, and the one nobody remembered to update is
+/// the one a bad run would come through.
+///
+/// # Order is load-bearing
+///
+/// 1. The calibration-regime check, FIRST, before any number is compared. Thresholds measured
+///    on one architecture are not evidence about another, so an unrecognised regime is refused
+///    rather than judged leniently.
+/// 2. The trainable set must be non-empty (SAFE-03 automatic under D-09).
+/// 3. The GATED set must be non-empty. A run whose only trainable parameters are
+///    analytically gradient-free has nothing that can testify, and passing it would be a
+///    vacuous verdict rather than a lenient one.
+/// 4. Per-parameter predicates: finite gradient norms, strict movement, and the class epsilon.
+/// 5. The run-level embedding-delta floor, last, so a failure names a parameter first.
+///
+/// # Errors
+///
+/// [`SetFitTrainError::UncalibratedRegime`], [`SetFitTrainError::NoTrainableParameters`],
+/// [`SetFitTrainError::NoTestifyingParameters`] or [`SetFitTrainError::EvidenceRejected`].
+#[cfg_attr(
+    feature = "setfit",
+    provable_contracts_macros::contract("setfit-train-lifecycle-v1", equation = "evidence_gate")
+)]
+pub(crate) fn validate_evidence(
+    evidence: &UpdateEvidence,
+    thresholds: &Thresholds,
+    trainable_count: usize,
+    frozen_count: usize,
+) -> Result<PassedEvidence, SetFitTrainError> {
+    // (1) FAIL CLOSED OUTSIDE THE CALIBRATED REGIME — before any comparison.
+    if !thresholds.is_calibrated(&evidence.calibration_regime_id) {
+        return Err(SetFitTrainError::UncalibratedRegime {
+            observed: evidence.calibration_regime_id.clone(),
+            calibrated: thresholds.calibrated_regimes().iter().map(|s| (*s).to_string()).collect(),
+        });
+    }
+
+    let mut summary = EvidenceSummary::of(evidence, trainable_count, frozen_count)
+        .map_err(|e| SetFitTrainError::Evidence { reason: e.to_string() })?;
+    // Pessimistic until proven otherwise: every early return below leaves `Fail` stamped, so
+    // a path that forgets to set it cannot emit a summary that claims to have passed.
+    summary.verdict = Verdict::Fail;
+
+    // (2) An empty trainable set is unpassable. SAFE-03 is structural, not a caller's habit.
+    if trainable_count == 0 || evidence.rows.is_empty() {
+        return Err(SetFitTrainError::NoTrainableParameters { trainable_count });
+    }
+
+    // (3) An all-ungated trainable set is unpassable too. Without this, freezing everything
+    // EXCEPT the key biases would leave the gate with nothing to check and yield a pass.
+    let gated: Vec<&EvidenceRow> =
+        evidence.rows.values().filter(|r| thresholds.of(r.class).gated).collect();
+    if gated.is_empty() {
+        return Err(SetFitTrainError::NoTestifyingParameters {
+            trainable_count,
+            ungated_count: evidence.rows.len(),
+        });
+    }
+
+    // (4) Per-parameter predicates. The worst offender is reported by the SMALLEST margin
+    // relative to its own class epsilon, so the blame lands on the parameter that is furthest
+    // from passing rather than on whichever name sorts first.
+    let mut worst: Option<(f64, FailedParameter)> = None;
+    for row in &gated {
+        let entry = thresholds.of(row.class);
+        let Some(eps) = entry.eps else {
+            // Unreachable while `gated` and `eps.is_some()` agree, which thresholds.rs
+            // asserts. Fail closed rather than skip: a gated class without a threshold must
+            // never be silently waved through.
+            return Err(SetFitTrainError::NoTestifyingParameters {
+                trainable_count,
+                ungated_count: evidence.rows.len(),
+            });
+        };
+
+        let finite = row.grad_norm_max.is_finite() && row.grad_norm_mean.is_finite();
+        let passes = finite && row.moved && row.relative_delta > eps;
+        if passes {
+            continue;
+        }
+        let margin = if eps > 0.0 { row.relative_delta / eps } else { f64::INFINITY };
+        let candidate = FailedParameter {
+            name: row.name.clone(),
+            class: row.class.tag().to_string(),
+            relative_delta: row.relative_delta,
+            eps,
+        };
+        match &worst {
+            Some((best_margin, _)) if *best_margin <= margin => {}
+            _ => worst = Some((margin, candidate)),
+        }
+    }
+
+    if let Some((_, offender)) = worst {
+        return Err(SetFitTrainError::EvidenceRejected {
+            summary: Box::new(summary),
+            table: Box::new(evidence.clone()),
+            worst: offender,
+        });
+    }
+
+    // (5) The run-level sparse aggregate, LAST.
+    let floor = thresholds.embedding_delta_floor();
+    if evidence.embedding_delta_median <= floor {
+        return Err(SetFitTrainError::EvidenceRejected {
+            summary: Box::new(summary),
+            table: Box::new(evidence.clone()),
+            worst: FailedParameter {
+                name: "<embedding class aggregate>".to_string(),
+                class: ParameterClass::Embedding.tag().to_string(),
+                relative_delta: evidence.embedding_delta_median,
+                eps: floor,
+            },
+        });
+    }
+
+    summary.verdict = Verdict::Pass;
+    Ok(PassedEvidence { table: evidence.clone(), summary })
 }
 
 #[cfg(test)]

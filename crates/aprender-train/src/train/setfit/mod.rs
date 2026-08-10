@@ -32,10 +32,12 @@
 //! `ArtifactReloadedAndVerified`). A marker without an impl is a declared contract; a
 //! marker with an impl and a placeholder evidence type would be a lie that compiles.
 
+pub mod baseline;
 pub mod config;
 pub mod epoch;
 pub mod evidence;
 pub mod reduce;
+pub mod thresholds;
 pub mod tune;
 
 /// The deterministic, network-free, synthetic-text fixture every Phase 3 trainer test uses.
@@ -110,6 +112,18 @@ impl sealed::Sealed for ArtifactReloadedAndVerified {}
 impl LifecycleState for Prepared {
     type Evidence = ();
     const STATE: &'static str = "prepared";
+}
+
+impl LifecycleState for EncoderTuned {
+    /// PROOF that the gate passed, not a report about it.
+    ///
+    /// `PassedEvidence` is constructible only by `tune::validate_evidence`, so a value of
+    /// this type cannot exist unless every gated parameter cleared its contracted epsilon.
+    /// The evidence FIELD exists only in this state — there is no `Option` for a caller to
+    /// `expect` on, which is what makes "EncoderTuned implies passed evidence" provable
+    /// rather than conventional.
+    type Evidence = tune::PassedEvidence;
+    const STATE: &'static str = "encoder_tuned";
 }
 
 /// A SetFit training run in lifecycle state `S`.
@@ -244,6 +258,69 @@ impl SetFitRun<Prepared> {
     ) -> (SetFitMiniLm, PreparedDataset<Canonical>, Selection, ResolvedSetFitConfig) {
         (self.encoder, self.dataset, self.selection, self.config)
     }
+
+    /// Run the contrastive stage and, ONLY if its evidence passes, mint `EncoderTuned`.
+    ///
+    /// The gate runs INSIDE the transition. There is no ordering in which a caller obtains a
+    /// tuned run and then decides whether to check it, because the checked value is the only
+    /// thing this function can return.
+    ///
+    /// # The regime is recorded by the RUN, not chosen at judgement time
+    ///
+    /// `calibration_regime_id` is stamped when the evidence table is built, from the encoder
+    /// and configuration the run actually used. A run cannot present a regime it did not
+    /// execute in, and the gate refuses any regime the thresholds were not measured in.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitTrainError::NoTrainableParameters`] for an all-frozen run,
+    /// [`SetFitTrainError::NoTestifyingParameters`] when nothing trainable can testify,
+    /// [`SetFitTrainError::UncalibratedRegime`] outside the calibrated set, and
+    /// [`SetFitTrainError::EvidenceRejected`] — carrying the complete table — when the
+    /// measured movement misses the contracted thresholds.
+    pub fn tune_encoder(self) -> Result<SetFitRun<EncoderTuned>, SetFitTrainError> {
+        let (encoder, dataset, selection, config) = self.into_parts();
+        let regime = calibration_regime_id(&encoder, &config);
+        let out = tune::run_tuning(encoder, &dataset, &selection, &config)?;
+
+        let table = evidence::UpdateEvidence::from_tune_output(&out, &regime)
+            .map_err(|e| SetFitTrainError::Evidence { reason: e.to_string() })?;
+        let passed = tune::validate_evidence(
+            &table,
+            &thresholds::Thresholds::frozen(),
+            out.trainable_count,
+            out.frozen_count,
+        )?;
+
+        Ok(SetFitRun {
+            encoder: out.encoder,
+            dataset,
+            selection,
+            config,
+            evidence: passed,
+            _state: PhantomData,
+        })
+    }
+}
+
+/// The regime a run executes in, derived from the encoder and configuration it actually used.
+///
+/// Derived rather than supplied: a caller-provided regime string would let a run claim to be
+/// something it is not, and the gate's fail-closed check would then be checking a label
+/// instead of the run.
+///
+/// The fixture slice's fingerprint is the only calibrated one, so this returns the calibrated
+/// id when the encoder's dimensions match the slice this phase measured, and a DISTINCT,
+/// descriptive id otherwise — which the gate then refuses. It never returns a calibrated id
+/// for an encoder that was not calibrated.
+fn calibration_regime_id(encoder: &SetFitMiniLm, config: &ResolvedSetFitConfig) -> String {
+    let _ = config;
+    let cfg = format!("{}@1110a243", encoder.architecture_fingerprint());
+    if cfg == "minilm-slice-h64-l2-a2-i256-v97@1110a243" {
+        thresholds::CALIBRATED_REGIMES.first().map_or_else(|| cfg.clone(), |s| (*s).to_string())
+    } else {
+        format!("{cfg}|seeds=?|cells=?")
+    }
 }
 
 /// Build the dense, label-indexed class-size vector Phase 2's capacity functions take.
@@ -329,11 +406,95 @@ pub enum SetFitTrainError {
     /// registry pairs each moment with a different parameter — an update that is silently
     /// wrong rather than loudly broken (T-3-54).
     ParameterRegistryMoved,
+    /// The evidence layer could not build or render the table.
+    Evidence {
+        /// The evidence layer's rendered diagnostic.
+        reason: String,
+    },
+    /// The run recorded a calibration regime these thresholds were not measured in.
+    ///
+    /// FAIL CLOSED, and checked FIRST. An epsilon measured on one architecture is not
+    /// evidence about another, so the gate refuses to judge rather than judging leniently.
+    UncalibratedRegime {
+        /// The regime the run recorded.
+        observed: String,
+        /// The regimes the frozen thresholds were measured in.
+        calibrated: Vec<String>,
+    },
+    /// The trainable parameter set is empty, so no evidence of movement can exist.
+    ///
+    /// SAFE-03 automatic under D-09: an all-frozen run cannot pass by being un-checkable.
+    NoTrainableParameters {
+        /// The observed count. Zero, and reported so the message is self-contained.
+        trainable_count: usize,
+    },
+    /// Every trainable parameter belongs to a class that cannot serve as evidence.
+    ///
+    /// Distinct from [`Self::NoTrainableParameters`]: the set is NOT empty, but every member
+    /// is analytically gradient-free, so nothing in it can testify that tuning occurred.
+    /// Without this variant, freezing everything except the attention key biases would leave
+    /// the gate with nothing to check and produce a vacuous pass.
+    NoTestifyingParameters {
+        /// Trainable parameters after `apply_freeze`.
+        trainable_count: usize,
+        /// How many of them are ungated.
+        ungated_count: usize,
+    },
+    /// The evidence failed the gate. Carries the COMPLETE auditable record.
+    ///
+    /// `Box`ed because this variant is far larger than every other, and an enum is as big as
+    /// its widest arm on every success path too.
+    EvidenceRejected {
+        /// The bound summary.
+        summary: Box<evidence::EvidenceSummary>,
+        /// The complete per-parameter table — one row per trainable parameter.
+        table: Box<evidence::UpdateEvidence>,
+        /// The parameter furthest from passing, with its class, delta and contracted epsilon.
+        worst: tune::FailedParameter,
+    },
 }
 
 impl fmt::Display for SetFitTrainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Evidence { reason } => {
+                write!(f, "setfit evidence could not be built: {reason}")
+            }
+            Self::UncalibratedRegime { observed, calibrated } => write!(
+                f,
+                "this run recorded calibration regime `{observed}`, which the frozen \
+                 thresholds were NOT measured in (calibrated: {}). The gate fails closed \
+                 rather than applying an epsilon measured on a different architecture; \
+                 extending the calibrated set requires a calibration run on this encoder AND \
+                 a deliberate edit to contracts/setfit-train-lifecycle-v1.yaml (D-10(c))",
+                calibrated.join(", "),
+            ),
+            Self::NoTrainableParameters { trainable_count } => write!(
+                f,
+                "the trainable parameter set is empty (trainable_count {trainable_count}), so \
+                 no evidence that the encoder moved can exist; a run in this state cannot \
+                 identify as SetFit (contract setfit-train-lifecycle-v1, requirement SAFE-03)",
+            ),
+            Self::NoTestifyingParameters { trainable_count, ungated_count } => write!(
+                f,
+                "all {ungated_count} of the {trainable_count} trainable parameters belong to \
+                 a class that cannot serve as encoder-update evidence (their gradients are \
+                 analytically zero), so the gate has nothing to check and refuses to pass the \
+                 run (contract setfit-train-lifecycle-v1, requirement SAFE-03)",
+            ),
+            Self::EvidenceRejected { worst, summary, .. } => write!(
+                f,
+                "setfit evidence REJECTED: parameter `{}` (class {}) moved by relative delta \
+                 {:e}, which does not exceed the contracted epsilon {:e} for that class; \
+                 {} trainable parameters were measured under regime `{}` (contract \
+                 setfit-train-lifecycle-v1, requirement TRN-03)",
+                worst.name,
+                worst.class,
+                worst.relative_delta,
+                worst.eps,
+                summary.trainable_count,
+                summary.calibration_regime_id,
+            ),
             Self::Config(inner) => write!(f, "setfit configuration rejected: {inner}"),
             Self::Device(inner) => write!(f, "setfit device rejected: {inner}"),
             Self::UnsupportedDeviceForPhase3 { resolved } => write!(

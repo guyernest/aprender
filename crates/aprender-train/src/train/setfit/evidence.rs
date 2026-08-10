@@ -86,18 +86,35 @@ pub(crate) enum ParameterClass {
     LayerNormBias,
     /// `*.attention.self.*.weight`, `*.dense.weight`.
     ProjectionWeight,
-    /// `*.attention.self.*.bias`, `*.dense.bias`.
+    /// `*.attention.self.query.bias`, `*.attention.self.value.bias`, `*.dense.bias`.
     ProjectionBias,
+    /// `*.attention.self.key.bias` — the ANALYTICALLY GRADIENT-FREE class.
+    ///
+    /// Split out of [`Self::ProjectionBias`] on a mechanism, not on a failing margin. Softmax
+    /// is invariant to a constant shift of its inputs, and adding the key bias `b_k` to every
+    /// key contributes `q_i . b_k` to the pre-softmax logit of EVERY key `j` for a given query
+    /// `i` — the same amount for all `j`. The shift cancels, so `dL/db_k = 0` in exact
+    /// arithmetic. The query bias does not have this property (`(q + b_q) . k_j` varies with
+    /// `j`), and neither does the value bias (it adds a constant to the attention output,
+    /// which the downstream layers see), which is why this class is the key bias ALONE and not
+    /// "attention biases".
+    ///
+    /// Measured on the fixture slice: `grad_norm_max` 2.290e-10 for
+    /// `encoder.layer.1.attention.self.key.bias` against 8.007e-3 for
+    /// `encoder.layer.0.attention.self.query.weight` in the same block — 3.5e7x smaller, which
+    /// is f32 cancellation residue rather than a small gradient.
+    AttentionKeyBias,
 }
 
 impl ParameterClass {
     /// Every class, in `Ord` order — the iteration order every report uses.
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Embedding,
         Self::LayerNormWeight,
         Self::LayerNormBias,
         Self::ProjectionWeight,
         Self::ProjectionBias,
+        Self::AttentionKeyBias,
     ];
 
     /// Whether the denominator is restricted to the delta's support.
@@ -124,7 +141,8 @@ impl ParameterClass {
             | Self::LayerNormWeight
             | Self::LayerNormBias
             | Self::ProjectionWeight
-            | Self::ProjectionBias => 1.0,
+            | Self::ProjectionBias
+            | Self::AttentionKeyBias => 1.0,
         }
     }
 
@@ -136,6 +154,7 @@ impl ParameterClass {
             Self::LayerNormBias => "layer_norm_bias",
             Self::ProjectionWeight => "projection_weight",
             Self::ProjectionBias => "projection_bias",
+            Self::AttentionKeyBias => "attention_key_bias",
         }
     }
 }
@@ -207,6 +226,15 @@ pub(crate) fn classify_parameter(name: &str) -> Result<ParameterClass, EvidenceE
         return match leaf {
             "weight" => Ok(ParameterClass::LayerNormWeight),
             "bias" => Ok(ParameterClass::LayerNormBias),
+            _ => Err(unclassified()),
+        };
+    }
+    // BEFORE the general projection branch: the key BIAS is gradient-free, the key WEIGHT is
+    // not (only a constant shift of the logits cancels, and `W_k x` is not constant in x).
+    if name.contains(".attention.self.key.") {
+        return match leaf {
+            "weight" => Ok(ParameterClass::ProjectionWeight),
+            "bias" => Ok(ParameterClass::AttentionKeyBias),
             _ => Err(unclassified()),
         };
     }
@@ -443,7 +471,14 @@ fn row_for(name: &str, record: &ParamRecord) -> Result<EvidenceRow, EvidenceErro
 #[non_exhaustive]
 pub(crate) enum Verdict {
     /// No threshold has been frozen, so no verdict is available.
+    ///
+    /// Still reachable: `EvidenceSummary::of` builds an UNJUDGED summary, and only the gate
+    /// promotes it. A summary that never reached the gate must not claim a verdict.
     Unjudged,
+    /// Every gated parameter cleared its contracted epsilon.
+    Pass,
+    /// At least one gated parameter missed it, or the run-level floor was not met.
+    Fail,
 }
 
 /// Min / median / worst relative delta for one class.
@@ -597,19 +632,30 @@ fn median_of(values: &[f64]) -> f64 {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    use aprender::setfit::FreezeGroup;
+
     use crate::train::setfit::test_fixtures as fx;
-    use crate::train::setfit::tune::run_tuning;
+    use crate::train::setfit::thresholds::Thresholds;
+    use crate::train::setfit::tune::{run_tuning, validate_evidence};
+    use crate::train::setfit::{EncoderTuned, SetFitRun, SetFitTrainError};
 
     /// Every name the fixture encoder emits, with its expected class. A CASE TABLE, not a
     /// spot check: a mapping tested on three names is a mapping that has not been tested.
-    const CASE_TABLE: [(&str, ParameterClass); 14] = [
+    const CASE_TABLE: [(&str, ParameterClass); 18] = [
         ("embeddings.word_embeddings.weight", ParameterClass::Embedding),
         ("embeddings.position_embeddings.weight", ParameterClass::Embedding),
         ("embeddings.token_type_embeddings.weight", ParameterClass::Embedding),
         ("embeddings.LayerNorm.weight", ParameterClass::LayerNormWeight),
         ("embeddings.LayerNorm.bias", ParameterClass::LayerNormBias),
         ("encoder.layer.0.attention.self.query.weight", ParameterClass::ProjectionWeight),
-        ("encoder.layer.0.attention.self.key.bias", ParameterClass::ProjectionBias),
+        ("encoder.layer.0.attention.self.key.bias", ParameterClass::AttentionKeyBias),
+        ("encoder.layer.1.attention.self.key.bias", ParameterClass::AttentionKeyBias),
+        // The BOUNDARY of the split, tested from both sides: the key WEIGHT is an ordinary
+        // projection weight, and the query/value biases are ordinary projection biases. Only
+        // the key BIAS is gradient-free.
+        ("encoder.layer.0.attention.self.key.weight", ParameterClass::ProjectionWeight),
+        ("encoder.layer.0.attention.self.query.bias", ParameterClass::ProjectionBias),
+        ("encoder.layer.0.attention.self.value.bias", ParameterClass::ProjectionBias),
         ("encoder.layer.0.attention.self.value.weight", ParameterClass::ProjectionWeight),
         ("encoder.layer.0.attention.output.dense.weight", ParameterClass::ProjectionWeight),
         ("encoder.layer.0.attention.output.LayerNorm.bias", ParameterClass::LayerNormBias),
@@ -879,6 +925,58 @@ mod tests {
         );
     }
 
+    /// The split is a MECHANISM, and this is the measurement that pins it.
+    ///
+    /// `AttentionKeyBias` exists because softmax is invariant to a constant shift of its
+    /// inputs, so the key bias contributes the same amount to every key's pre-softmax logit
+    /// for a given query and `dL/db_k = 0` in exact arithmetic. If that reasoning is right,
+    /// the key bias's gradient must be orders of magnitude below its OWN BLOCK's query bias,
+    /// which has no such invariance since `(q + b_q) . k_j` varies with `j`.
+    ///
+    /// This runs in every `cargo test`, not behind `--ignored`, because it is the load-bearing
+    /// justification for a class boundary that removes parameters from the gate. If a future
+    /// encoder, kernel or reduction order makes the key bias gradient real, the split loses
+    /// its basis and this test says so instead of the boundary quietly becoming folklore.
+    #[test]
+    fn evidence_attention_key_bias_is_gradient_free_relative_to_its_own_block() {
+        let evidence = evidence_for(fx::default_variant(), None);
+
+        let key_rows = evidence.rows_of_class(ParameterClass::AttentionKeyBias);
+        let bias_rows = evidence.rows_of_class(ParameterClass::ProjectionBias);
+        assert!(!key_rows.is_empty(), "the fixture must emit key biases");
+        assert!(!bias_rows.is_empty(), "and ordinary projection biases to compare against");
+
+        let key_worst = max_of(&key_rows.iter().map(|r| r.grad_norm_max).collect::<Vec<f64>>());
+        let bias_best = min_of(&bias_rows.iter().map(|r| r.grad_norm_max).collect::<Vec<f64>>());
+
+        // Non-vacuity FIRST: an all-zero comparison would satisfy any ratio.
+        assert!(bias_best > 0.0, "the comparison class must have real gradients");
+        assert!(key_worst > 0.0, "and the key bias must have a measurable residue, not a hole");
+
+        assert!(
+            key_worst * 1e4 < bias_best,
+            "the key bias gradient ({key_worst:e}) is not >=1e4x below the smallest ordinary \
+             projection-bias gradient ({bias_best:e}); the shift-invariance argument the \
+             AttentionKeyBias split rests on no longer holds and the class must be re-derived",
+        );
+
+        // The OTHER half of the boundary: only the key BIAS is split out. The key WEIGHT and
+        // the query/value biases stay ordinary, so the split cannot silently widen into
+        // "attention parameters are exempt".
+        assert_eq!(
+            classify_parameter("encoder.layer.0.attention.self.key.weight"),
+            Ok(ParameterClass::ProjectionWeight),
+        );
+        assert_eq!(
+            classify_parameter("encoder.layer.0.attention.self.query.bias"),
+            Ok(ParameterClass::ProjectionBias),
+        );
+        assert_eq!(
+            classify_parameter("encoder.layer.0.attention.self.value.bias"),
+            Ok(ParameterClass::ProjectionBias),
+        );
+    }
+
     /// The summary is `Unjudged` and carries no epsilon in this plan.
     #[test]
     fn evidence_summary_is_unjudged_with_no_epsilon() {
@@ -887,7 +985,13 @@ mod tests {
         assert_eq!(summary.verdict, Verdict::Unjudged);
         assert_eq!(summary.epsilon_used, None);
         assert_eq!(summary.contract_version, EVIDENCE_CONTRACT_VERSION);
-        assert_eq!(summary.per_class.len(), 5, "all five classes are populated");
+        assert_eq!(
+            summary.per_class.len(),
+            ParameterClass::ALL.len(),
+            "every class the mapping can emit must be populated by the fixture; a class with \
+             no rows would have its epsilon frozen against nothing",
+        );
+        assert_eq!(ParameterClass::ALL.len(), 6, "five classes plus the gradient-free split");
         assert!(!summary.worst_param_name.is_empty());
         for (class, stats) in &summary.per_class {
             assert!(stats.count > 0, "{class}");
@@ -907,6 +1011,325 @@ mod tests {
         assert_eq!(median_of(&[3.0, 1.0, 2.0]), 2.0);
         assert_eq!(median_of(&[4.0, 1.0, 3.0, 2.0]), 2.5);
         assert!(min_of(&[]).is_finite(), "an empty min must serialize as a number");
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The armed gate (plan 03-06) — negative / control / mirror
+    //
+    // Ph1 D-24 / Ph2 D-25 discipline: each negative is REJECTED and its message NAMES the
+    // offender, a CONTROL with the same setup minus the poison PASSES, and a MIRROR shows the
+    // untouched path is unchanged by the gate's presence. All of them run in every `cargo
+    // test` — a gate that is only ever exercised on the honest path is not evidence.
+    // -----------------------------------------------------------------------------------
+
+    /// The reference-defaults control run, built once and reused.
+    ///
+    /// A full `tune_encoder` pass per test would repeat the fixture load and the tuning loop
+    /// several times over for no additional evidence.
+    fn control_run() -> Result<SetFitRun<EncoderTuned>, SetFitTrainError> {
+        fx::prepared_run(fx::default_variant(), None).tune_encoder()
+    }
+
+    /// CONTROL: a reference-defaults fixture run passes the gate and mints `EncoderTuned`.
+    ///
+    /// Without this the three negatives below would be satisfied by a gate that rejects
+    /// everything, which is the failure mode that makes a rejection-only test suite worthless.
+    #[test]
+    fn negative_control_reference_run_passes_the_gate() {
+        let run = control_run().expect("the reference-defaults fixture run must pass the gate");
+        let passed = run.evidence();
+        let summary = passed.summary();
+
+        assert_eq!(summary.verdict, Verdict::Pass, "the control's verdict must be Pass");
+        assert_eq!(summary.contract_version, EVIDENCE_CONTRACT_VERSION);
+        assert!(
+            Thresholds::frozen().is_calibrated(&summary.calibration_regime_id),
+            "the control must run inside the calibrated regime, got `{}`",
+            summary.calibration_regime_id,
+        );
+
+        // The per-class epsilon actually applied is the CONTRACT's, not a local literal.
+        let frozen = Thresholds::frozen();
+        for class in ParameterClass::ALL {
+            let entry = frozen.of(class);
+            let Some(eps) = entry.eps else { continue };
+            for row in passed.table().rows_of_class(class) {
+                assert!(
+                    row.relative_delta > eps,
+                    "{}: {} passed the gate at relative delta {:e} which does not exceed the \
+                     contracted epsilon {eps:e}",
+                    class.tag(),
+                    row.name,
+                    row.relative_delta,
+                );
+            }
+        }
+
+        // The summary is BOUND to the table it summarizes.
+        assert_eq!(
+            summary.table_hash,
+            hex::encode(passed.table().table_hash().expect("table hash")),
+            "the summary must bind to its own table",
+        );
+        assert_eq!(summary.trainable_count, passed.table().rows.len());
+    }
+
+    /// NEGATIVE 1 — an all-frozen run cannot pass by being un-checkable (SAFE-03, D-09).
+    #[test]
+    fn negative_all_frozen_run_has_no_trainable_parameters() {
+        let variant = fx::default_variant();
+        // Every group of every layer, plus the embeddings: the complete freeze.
+        let mut policy = vec![FreezeGroup::Embeddings];
+        for layer in 0..fx::slice_encoder(variant.root_seed).num_layers() {
+            policy.push(FreezeGroup::LayerAttention(layer));
+            policy.push(FreezeGroup::LayerFfn(layer));
+            policy.push(FreezeGroup::LayerNorm(layer));
+        }
+        let run = fx::prepared_run_with_freeze(variant, policy);
+        match run.tune_encoder() {
+            Err(SetFitTrainError::NoTrainableParameters { trainable_count }) => {
+                assert_eq!(trainable_count, 0, "the message must report the observed count");
+                let rendered =
+                    SetFitTrainError::NoTrainableParameters { trainable_count }.to_string();
+                assert!(rendered.contains("trainable_count 0"), "rendered: {rendered}");
+                assert!(rendered.contains("SAFE-03"), "the diagnosis must name what it enforces");
+            }
+            other => panic!("an all-frozen run must be rejected as unpassable, got {other:?}"),
+        }
+    }
+
+    /// NEGATIVE 2 — a 1e-30-learning-rate run is rejected and the message NAMES the offender.
+    #[test]
+    fn negative_null_learning_rate_run_is_rejected_naming_the_offender() {
+        let run = fx::prepared_run(fx::default_variant(), Some(1e-30));
+        match run.tune_encoder() {
+            Err(SetFitTrainError::EvidenceRejected { worst, summary, table }) => {
+                // The offender is named by its DOTTED HF name, not an index.
+                assert!(
+                    worst.name.contains('.'),
+                    "the offender must be named by its dotted HF name, got `{}`",
+                    worst.name,
+                );
+                // Its class is one the contract actually gates.
+                let frozen = Thresholds::frozen();
+                let class = ParameterClass::ALL
+                    .into_iter()
+                    .find(|c| c.tag() == worst.class)
+                    .unwrap_or_else(|| panic!("unknown class `{}`", worst.class));
+                assert!(frozen.of(class).gated, "an ungated class must never be blamed");
+
+                // The measured delta and the CONTRACTED epsilon are both present and consistent.
+                assert_eq!(
+                    Some(worst.eps),
+                    frozen.of(class).eps,
+                    "the blamed epsilon must be the contract's value for that class",
+                );
+                assert!(
+                    worst.relative_delta <= worst.eps,
+                    "the offender must actually have missed its threshold: {:e} vs {:e}",
+                    worst.relative_delta,
+                    worst.eps,
+                );
+                // At 1e-30 every update underflows the parameter ULP, so the delta is exactly 0.
+                assert_eq!(worst.relative_delta, 0.0, "a 1e-30 run moves nothing at f32 scale");
+
+                // AUDITABLE FAILURE: the COMPLETE record travels inside the error.
+                assert_eq!(
+                    table.rows.len(),
+                    summary.trainable_count,
+                    "the failed table must carry ONE ROW PER TRAINABLE PARAMETER so a rejection \
+                     can be investigated rather than merely reported",
+                );
+                assert!(table.rows.len() > 1, "non-vacuity: the fixture has many parameters");
+                assert!(table.rows.contains_key(&worst.name), "the offender must be IN the table");
+                assert_eq!(summary.verdict, Verdict::Fail);
+                // Run-level facts survive the rejection too.
+                assert!(!table.loss_trace_hash.is_empty());
+                assert!(!table.consumed_pair_digest.is_empty());
+                assert!(!table.batch_boundary_list.is_empty());
+
+                let rendered =
+                    SetFitTrainError::EvidenceRejected { worst, summary, table }.to_string();
+                assert!(rendered.contains("REJECTED"), "rendered: {rendered}");
+                assert!(rendered.contains("TRN-03"), "the diagnosis must name its requirement");
+            }
+            other => panic!("a 1e-30 run must be rejected by the gate, got {other:?}"),
+        }
+    }
+
+    /// NEGATIVE 2b — a run in which EVERY gated parameter MOVED is still rejected, by the
+    /// epsilon and by nothing else.
+    ///
+    /// This test exists because mutating the gate exposed a hole in the set above. Deleting
+    /// the `relative_delta > eps` comparison outright left every other negative GREEN: the
+    /// 1e-30 run has bit-for-bit zero deltas so the strict movement predicate catches it
+    /// before the threshold is ever consulted, and even a real 1e-8 run contains some
+    /// parameters that did not move at all, so it too is rejected without the epsilon.
+    ///
+    /// The only witness that isolates the threshold is a table in which EVERYTHING moved and
+    /// everything fell short. It is built from the CONTROL's real table, with every relative
+    /// delta scaled below its class epsilon and `moved` left true, so the sole reason to
+    /// reject it is the comparison this test exists to protect.
+    #[test]
+    fn negative_a_run_that_moved_everywhere_but_fell_short_is_rejected_by_the_epsilon() {
+        let out = tune_output(fx::default_variant(), None);
+        let frozen = Thresholds::frozen();
+
+        // CONTROL: unmodified, this table passes.
+        let good = UpdateEvidence::from_tune_output(&out, &regime_id()).expect("evidence");
+        validate_evidence(&good, &frozen, out.trainable_count, out.frozen_count)
+            .expect("CONTROL: the reference table passes before it is scaled down");
+
+        // The poison: everything still MOVED, everything now falls short.
+        let mut short = good.clone();
+        for row in short.rows.values_mut() {
+            row.relative_delta *= 1e-3;
+            assert!(row.moved, "the scaling must not disturb the movement predicate");
+            assert!(row.delta_norm > 0.0);
+        }
+        short.embedding_delta_median *= 1e-3;
+
+        // Non-vacuity: EVERY gated row moved, so nothing here is rejectable by `moved`.
+        let gated_rows: Vec<&EvidenceRow> =
+            short.rows.values().filter(|r| frozen.of(r.class).gated).collect();
+        assert!(!gated_rows.is_empty());
+        assert!(
+            gated_rows.iter().all(|r| r.moved && r.delta_norm > 0.0),
+            "if any gated parameter failed to move, the strict predicate could reject this \
+             table and the epsilon would again go untested",
+        );
+        assert!(
+            gated_rows.iter().all(|r| r.grad_norm_max.is_finite()),
+            "and every gradient is finite, so the finiteness predicate cannot reject it either",
+        );
+
+        match validate_evidence(&short, &frozen, out.trainable_count, out.frozen_count) {
+            Err(SetFitTrainError::EvidenceRejected { worst, .. }) => {
+                let class = ParameterClass::ALL
+                    .into_iter()
+                    .find(|c| c.tag() == worst.class)
+                    .unwrap_or_else(|| panic!("unknown class `{}`", worst.class));
+                assert_eq!(Some(worst.eps), frozen.of(class).eps);
+                assert!(
+                    worst.relative_delta > 0.0,
+                    "the blamed parameter MOVED ({:e}); only the threshold rejected it",
+                    worst.relative_delta,
+                );
+                assert!(worst.relative_delta <= worst.eps);
+            }
+            other => panic!(
+                "a table in which everything moved but fell short of its epsilon MUST be \
+                 rejected; got {other:?}. If this returned Ok, the epsilon comparison is not \
+                 doing anything and every frozen threshold in the contract is decoration.",
+            ),
+        }
+    }
+
+    /// NEGATIVE 3 — an out-of-regime run is refused BEFORE any threshold is compared.
+    ///
+    /// Driven through `validate_evidence` directly with a doctored regime id, because the point
+    /// is the ORDER of the checks: the table handed in is the CONTROL's, which passes every
+    /// threshold. If the regime check ran second, this table would pass and the test would be
+    /// green for the wrong reason.
+    #[test]
+    fn negative_uncalibrated_regime_is_refused_before_any_comparison() {
+        let out = tune_output(fx::default_variant(), None);
+        let frozen = Thresholds::frozen();
+
+        let good = UpdateEvidence::from_tune_output(&out, &regime_id()).expect("evidence");
+        validate_evidence(&good, &frozen, out.trainable_count, out.frozen_count)
+            .expect("CONTROL: this very table passes when its regime is calibrated");
+
+        let foreign =
+            "minilm-full-h384-l6-a12-i1536-v30522@production|seeds=1,42,7|cells=s16e2b8,s8e1b4";
+        let bad = UpdateEvidence::from_tune_output(&out, foreign).expect("evidence");
+        match validate_evidence(&bad, &frozen, out.trainable_count, out.frozen_count) {
+            Err(SetFitTrainError::UncalibratedRegime { observed, calibrated }) => {
+                assert_eq!(observed, foreign);
+                assert_eq!(calibrated.len(), 1, "exactly one calibrated fingerprint");
+                assert!(!calibrated.contains(&foreign.to_string()));
+                let rendered =
+                    SetFitTrainError::UncalibratedRegime { observed, calibrated }.to_string();
+                assert!(rendered.contains("D-10(c)"), "rendered: {rendered}");
+            }
+            other => panic!("an out-of-regime run must fail closed, got {other:?}"),
+        }
+    }
+
+    /// NEGATIVE 3b — a trainable set of ONLY gradient-free parameters is unpassable.
+    ///
+    /// The hole the `attention_key_bias` exclusion would otherwise open: freeze everything the
+    /// gate checks, leave only what it cannot check, and a naive `for p in gated { .. }` loop
+    /// passes vacuously because it iterates over nothing.
+    #[test]
+    fn negative_only_gradient_free_parameters_cannot_testify() {
+        let out = tune_output(fx::default_variant(), None);
+        let full = UpdateEvidence::from_tune_output(&out, &regime_id()).expect("evidence");
+
+        let mut ungated_only = full.clone();
+        ungated_only.rows.retain(|_, r| r.class == ParameterClass::AttentionKeyBias);
+        let kept = ungated_only.rows.len();
+        assert!(kept > 0, "non-vacuity: the fixture must emit key biases");
+
+        match validate_evidence(&ungated_only, &Thresholds::frozen(), kept, out.frozen_count) {
+            Err(SetFitTrainError::NoTestifyingParameters { trainable_count, ungated_count }) => {
+                assert_eq!(trainable_count, kept);
+                assert_eq!(ungated_count, kept);
+            }
+            other => panic!("an all-ungated trainable set must be unpassable, got {other:?}"),
+        }
+    }
+
+    /// MIRROR — arming the gate changed nothing about what the loop records.
+    ///
+    /// Two independent passing runs agree bit-for-bit on every recorded digest. The gate READS
+    /// the evidence; if it had started to influence what the loop consumed, these would diverge.
+    #[test]
+    fn negative_mirror_two_passing_runs_agree_on_every_digest() {
+        let first = control_run().expect("first control run");
+        let second = control_run().expect("second control run");
+        let (a, b) = (first.evidence().table(), second.evidence().table());
+
+        assert_eq!(a.loss_trace_hash, b.loss_trace_hash, "loss trace");
+        assert_eq!(a.consumed_pair_digest, b.consumed_pair_digest, "consumed pairs");
+        assert_eq!(a.batch_boundary_digest, b.batch_boundary_digest, "batch boundaries");
+        assert_eq!(a.batch_boundary_list, b.batch_boundary_list, "readable boundary list");
+        assert_eq!(a.parameter_registry_hash, b.parameter_registry_hash, "registry");
+        assert_eq!(a.step_count, b.step_count, "step count");
+
+        // Non-vacuity: the digests are real, not two empty strings compared to each other.
+        assert_eq!(a.loss_trace_hash.len(), 64, "a SHA-256 renders as 64 hex characters");
+        assert!(a.step_count > 0, "the mirror must compare runs that actually ran");
+
+        // And the whole table hash agrees, which covers every per-parameter measurement at once.
+        assert_eq!(
+            a.table_hash().expect("hash"),
+            b.table_hash().expect("hash"),
+            "two identical runs must produce identical evidence bytes",
+        );
+    }
+
+    /// `PassedEvidence` retains the run-level fields every downstream accessor resolves to.
+    ///
+    /// W-06: anything dropped here becomes something a later plan RECOMPUTES, which is exactly
+    /// the false-green the in-band digests exist to remove.
+    #[test]
+    fn evidence_gate_passed_evidence_carries_the_complete_record() {
+        let run = control_run().expect("control");
+        let table = run.evidence().table();
+
+        assert!(!table.loss_trace_hash.is_empty());
+        assert!(!table.consumed_pair_digest.is_empty());
+        assert!(!table.batch_boundary_digest.is_empty());
+        assert!(!table.batch_boundary_list.is_empty(), "03-08's recorded boundary source");
+        assert!(!table.parameter_registry_hash.is_empty());
+        assert!(table.step_count > 0);
+        assert!(table.k > 0);
+        assert!(table.first_k_mean.is_finite() && table.last_k_mean.is_finite());
+        assert!(table.embedding_delta_min.is_finite());
+        assert!(table.embedding_delta_median > 0.0);
+        assert!(table.pre_clip_norm_max.is_finite());
+        assert!(!table.calibration_regime_id.is_empty());
     }
 
     // -----------------------------------------------------------------------------------
@@ -949,9 +1372,42 @@ mod tests {
         )
     }
 
+    /// The largest `relative_delta` that pure `f32` REPRESENTATION ROUNDING can produce for
+    /// this row, and therefore the floor a frozen epsilon has to clear to mean anything.
+    ///
+    /// Rigorous rather than estimated: rounding each element to the nearest `f32` perturbs it
+    /// by at most half a ULP, i.e. `|dx_i| <= (EPSILON/2)|x_i|`, so
+    /// `||dTheta||_2 <= (EPSILON/2)||theta||_2` and the ratio is bounded by
+    /// `(EPSILON/2) * init_norm / max(denom_used, scale_floor_used)`. Every input is a field
+    /// the evidence row already records, so this is MEASURED from the run rather than assumed
+    /// from a nominal parameter magnitude.
+    ///
+    /// Plan 03-05 flagged `projection_bias` as unfreezable because `min/10` "sits close to f32
+    /// resolution" while its predicate actually tested `median/min > 100` — a spread statistic
+    /// that says nothing about resolution. This is the quantity that claim is about.
+    fn rounding_noise_floor(row: &EvidenceRow) -> f64 {
+        let denom = row.denom_used.max(row.scale_floor_used);
+        (f64::from(f32::EPSILON) / 2.0) * row.init_norm / denom
+    }
+
     /// The learning rate of the null control. Chosen by the plan; measured below to be far
     /// under the `f32` resolution of every parameter, which is what makes it a null.
     const CONTROL_LR: f64 = 1e-30;
+
+    /// A SECOND control, at a small but fully REPRESENTABLE learning rate.
+    ///
+    /// `CONTROL_LR` is a numerical null: at 1e-30 every per-element update underflows the
+    /// parameter's ULP, so the measured delta is bit-for-bit zero and the matrix bounds
+    /// epsilon from ABOVE only (03-05's concern 3). 1e-8 is 2000x below the reference 2e-5 —
+    /// a run that is not meaningfully training — but it is large enough that AdamW writes a
+    /// different `f32` back. It therefore gives a REAL lower bound: whatever a
+    /// nearly-not-training run can produce, a frozen epsilon must sit above.
+    ///
+    /// It is also the measurement that decides what the gradient-free class may assert. If a
+    /// parameter's `||dTheta|| > 0` is true at 1e-8 just as it is at 2e-5, that predicate does
+    /// not distinguish training from not-training FOR THAT PARAMETER, and arming it would be
+    /// the same vacuity that disqualified the pair-loss endpoint statistic.
+    const NEAR_NULL_LR: f64 = 1e-8;
 
     /// THE calibration matrix — `#[ignore]`d, and deliberately so.
     ///
@@ -974,13 +1430,20 @@ mod tests {
         report.push_str(&format!("\nCALIBRATION REGIME: {}\n", regime_id()));
         report.push_str(
             "\ncell             class                real_min      real_median   real_max      \
-             ctrl_max      support_frac  all_moved\n",
+             ctrl_max      nnull_max     nnull_moved   noise_floor   support_frac  \
+             all_moved\n",
         );
 
         // Cross-cell aggregates, per class, that plan 03-06 freezes epsilon from.
         let mut real_min_across: BTreeMap<&'static str, f64> = BTreeMap::new();
         let mut ctrl_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
         let mut median_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        // The rounding-noise floor the frozen epsilon has to clear, per class, worst cell.
+        let mut noise_floor_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        // The near-null (1e-8) control's worst case per class — the REAL lower bound.
+        let mut near_null_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        // Whether EVERY near-null run still satisfies the strict `||dTheta|| > 0` predicate.
+        let mut near_null_moved_all: BTreeMap<&'static str, bool> = BTreeMap::new();
         // WHICH parameter sets each class's lower bound. Without the name, 03-06 knows the
         // number but not what to widen if the margin turns out to be too narrow.
         let mut binding_param: BTreeMap<&'static str, String> = BTreeMap::new();
@@ -991,7 +1454,8 @@ mod tests {
         for variant in &variants {
             let real = evidence_for(*variant, None);
             let control = evidence_for(*variant, Some(CONTROL_LR));
-            cells_run += 2;
+            let near_null = evidence_for(*variant, Some(NEAR_NULL_LR));
+            cells_run += 3;
 
             let endpoint_delta = real.last_k_mean - real.first_k_mean;
             endpoint_deltas.push(endpoint_delta);
@@ -1007,8 +1471,10 @@ mod tests {
             for class in ParameterClass::ALL {
                 let real_rows = real.rows_of_class(class);
                 let control_rows = control.rows_of_class(class);
+                let near_null_rows = near_null.rows_of_class(class);
                 assert!(!real_rows.is_empty(), "{class} has no rows");
                 assert_eq!(real_rows.len(), control_rows.len());
+                assert_eq!(real_rows.len(), near_null_rows.len());
 
                 let real_values: Vec<f64> = real_rows.iter().map(|r| r.relative_delta).collect();
                 let control_values: Vec<f64> =
@@ -1016,11 +1482,20 @@ mod tests {
                 let support: Vec<f64> =
                     real_rows.iter().map(|r| r.delta_support_fraction).collect();
 
+                let near_null_values: Vec<f64> =
+                    near_null_rows.iter().map(|r| r.relative_delta).collect();
                 let real_min = min_of(&real_values);
                 let control_max = max_of(&control_values);
+                let near_null_max = max_of(&near_null_values);
+                let near_null_moved = near_null_rows.iter().all(|r| r.moved);
+
+                let cell_noise_floor = max_of(
+                    &real_rows.iter().map(|r| rounding_noise_floor(r)).collect::<Vec<f64>>(),
+                );
 
                 report.push_str(&format!(
-                    "seed{:<3} {:<9} {:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.4} {}\n",
+                    "seed{:<3} {:<9} {:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} \
+                     {:<13} {:<13.3e} {:<13.4} {}\n",
                     variant.root_seed,
                     variant.label,
                     class.tag(),
@@ -1028,6 +1503,9 @@ mod tests {
                     median_of(&real_values),
                     max_of(&real_values),
                     control_max,
+                    near_null_max,
+                    near_null_moved,
+                    cell_noise_floor,
                     median_of(&support),
                     real_rows.iter().all(|r| r.moved),
                 ));
@@ -1035,6 +1513,8 @@ mod tests {
                 // (c) SEPARATION, per class and per cell.
                 assert!(
                     control_max < real_min,
+                    // near_null is reported, not asserted: whether it separates is the
+                    // question this matrix exists to answer, not a property to presume.
                     "seed {} cell {} class {}: the 1e-30 control's max relative delta \
                      ({control_max:e}) is not below the real run's min ({real_min:e})",
                     variant.root_seed,
@@ -1054,12 +1534,28 @@ mod tests {
                         })
                         .map_or_else(String::new, |r| {
                             format!(
-                                "{} (seed {} cell {})",
-                                r.name, variant.root_seed, variant.label
+                                "{} (seed {} cell {}) delta_norm={:.3e} init_norm={:.3e} \
+                                 grad_norm_max={:.3e} grad_norm_mean={:.3e} steps_observed={} \
+                                 noise_floor={:.3e}",
+                                r.name,
+                                variant.root_seed,
+                                variant.label,
+                                r.delta_norm,
+                                r.init_norm,
+                                r.grad_norm_max,
+                                r.grad_norm_mean,
+                                r.steps_observed,
+                                rounding_noise_floor(r),
                             )
                         });
                     binding_param.insert(class.tag(), binding);
                 }
+                let slot = noise_floor_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
+                *slot = slot.max(cell_noise_floor);
+                let slot = near_null_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
+                *slot = slot.max(near_null_max);
+                let slot = near_null_moved_all.entry(class.tag()).or_insert(true);
+                *slot = *slot && near_null_moved;
                 let slot = ctrl_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
                 *slot = slot.max(control_max);
                 let slot = median_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
@@ -1080,23 +1576,36 @@ mod tests {
 
         report.push_str("\nCROSS-CELL EPSILON BASIS (03-06 freezes from these)\n");
         report.push_str(
-            "class                worst_ctrl    best_real     10x_lower     10x_upper     \
-             supports_margin  median/min\n",
+            "class                worst_ctrl    worst_nnull   best_real     10x_lower     \
+             10x_upper     noise_floor   eps/noise     nnull_moved   supports_margin  \
+             median/min\n",
         );
         for class in ParameterClass::ALL {
             let worst_ctrl = ctrl_max_across.get(class.tag()).copied().unwrap_or(0.0);
             let best_real = real_min_across.get(class.tag()).copied().unwrap_or(0.0);
             let worst_median = median_max_across.get(class.tag()).copied().unwrap_or(0.0);
-            let lower = worst_ctrl * 10.0;
+            let worst_nnull = near_null_max_across.get(class.tag()).copied().unwrap_or(0.0);
+            // The lower edge is the WORSE of the two controls: a frozen epsilon has to sit
+            // above anything a not-really-training run produced, and the 1e-8 control is the
+            // one that produces anything at all.
+            let lower = worst_ctrl.max(worst_nnull) * 10.0;
             let upper = best_real / 10.0;
             let spread = if best_real > 0.0 { worst_median / best_real } else { f64::INFINITY };
+            let noise_floor = noise_floor_across.get(class.tag()).copied().unwrap_or(0.0);
+            let eps_over_noise =
+                if noise_floor > 0.0 { upper / noise_floor } else { f64::INFINITY };
             report.push_str(&format!(
-                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<16} {:.1e}\n",
+                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.2e} \
+                 {:<13} {:<16} {:.1e}\n",
                 class.tag(),
                 worst_ctrl,
+                worst_nnull,
                 best_real,
                 lower,
                 upper,
+                noise_floor,
+                eps_over_noise,
+                near_null_moved_all.get(class.tag()).copied().unwrap_or(false),
                 lower < upper,
                 spread,
             ));
@@ -1131,6 +1640,47 @@ mod tests {
                     worst_median / best_real,
                     best_real,
                     best_real / 10.0,
+                ));
+            }
+        }
+        // The flag that actually tests the claim `WIDE-SPREAD` makes in prose. `median/min` is a
+        // spread statistic; it can be large for a class whose slowest member still moves far
+        // above rounding noise, and small for one that does not move at all. THIS is the
+        // freeze blocker: an epsilon at or under the rounding-noise floor cannot reject any
+        // parameter that moved by even one ULP, so the class's gate would be a restatement of
+        // the strict `||dTheta|| > 0` predicate wearing a threshold's name.
+        for class in ParameterClass::ALL {
+            let best_real = real_min_across.get(class.tag()).copied().unwrap_or(0.0);
+            let noise_floor = noise_floor_across.get(class.tag()).copied().unwrap_or(0.0);
+            let eps = best_real / 10.0;
+            if noise_floor > 0.0 && eps <= noise_floor {
+                flagged += 1;
+                report.push_str(&format!(
+                    "  EPS-BELOW-NOISE {}: the 10x-margin epsilon {:.3e} is at or under the \
+                     f32 rounding-noise floor {:.3e} (ratio {:.2e}); this class cannot be \
+                     frozen at this width\n",
+                    class.tag(),
+                    eps,
+                    noise_floor,
+                    eps / noise_floor,
+                ));
+            }
+        }
+        // Does the strict `||dTheta|| > 0` predicate DISCRIMINATE for this class? If a
+        // 1e-8 run — 2000x below the reference rate, not meaningfully training — still moves
+        // every member of the class, then `moved()` is true for reasons that have nothing to
+        // do with tuning and arming it for that class asserts something that cannot fail.
+        for class in ParameterClass::ALL {
+            if near_null_moved_all.get(class.tag()).copied().unwrap_or(false) {
+                flagged += 1;
+                report.push_str(&format!(
+                    "  MOVED-ALONE-INSUFFICIENT {}: every member still satisfies \
+                     ||dTheta|| > 0 under the 1e-8 near-null control (worst relative delta \
+                     {:.3e}), so the strict predicate ALONE does not separate training from \
+                     not-training for this class -- the class's epsilon is what does, and \
+                     this is the measurement that shows the epsilon is not decoration\n",
+                    class.tag(),
+                    near_null_max_across.get(class.tag()).copied().unwrap_or(0.0),
                 ));
             }
         }
