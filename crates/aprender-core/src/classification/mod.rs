@@ -747,6 +747,8 @@ mod linear_svm;
 pub use linear_svm::*;
 mod svc_rbf;
 pub use svc_rbf::{Kernel, MultiClassSVC, SVCRbf};
+pub mod multinomial;
+pub use multinomial::*;
 mod sets;
 #[cfg(test)]
 mod svc_rbf_sklearn_fixture;
@@ -754,6 +756,10 @@ mod svc_rbf_sklearn_fixture;
 #[cfg(test)]
 #[path = "tests_logreg_contract.rs"]
 mod tests_logreg_contract;
+
+#[cfg(test)]
+#[path = "tests_multinomial_contract.rs"]
+mod tests_multinomial_contract;
 
 // Estimator impl so LogisticRegression works with generic cross_validate /
 // grid_search (Pillar 1). Labels round-trip through f32; inherent API unchanged.

@@ -39,7 +39,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix
 
 # Default target
 all: tier2
@@ -312,6 +312,12 @@ tier3:
 # standalone first (rc=0, 9 s cold / ~1 s warm), and its failure mode induced,
 # observed and reverted before it was wired.
 	@$(MAKE) contract-audit-phase2
+# Phase 3's equivalent, wired here for exactly the reason the line above exists:
+# a target outside the tiers is a target that stops being run. Scoped to
+# $(PHASE3_CONTRACTS). Same evidence discipline — run standalone with the status
+# captured directly, and its failure mode induced, observed and reverted rather
+# than assumed. See the target's own comment block.
+	@$(MAKE) contract-audit-phase3
 	@$(MAKE) setfit-feature-matrix
 # D-04 (Phase 2), wired here for the same reason the line above exists: a target
 # outside the tiers is a target that stops being run. Same evidence discipline as
@@ -1162,7 +1168,8 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/kv-cache-equivalence-v1.yaml \
              contracts/setfit-encoder-conformance-v1.yaml \
              contracts/tweet-eval-stance-benchmark-v1.yaml \
-             contracts/contrastive-pair-protocol-v1.yaml
+             contracts/contrastive-pair-protocol-v1.yaml \
+             contracts/multinomial-head-v1.yaml
 
 # The two Phase 2 contracts, audited as a BLOCKING tier3 gate by
 # `contract-audit-phase2` below. Deliberately a separate, narrower list than
@@ -1170,6 +1177,22 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
 # forced the narrowing.
 PHASE2_CONTRACTS := contracts/contrastive-pair-protocol-v1.yaml \
                     contracts/tweet-eval-stance-benchmark-v1.yaml
+
+# The Phase 3 contracts, audited as a BLOCKING tier3 gate by
+# `contract-audit-phase3` below. Same narrowing rationale as PHASE2_CONTRACTS:
+# scoped to what this phase OWNS, because the repo-wide `contract-audit` is
+# vacuous (see that target's comment block).
+#
+# 03-02 HAND-OFF, resolved by measurement rather than assumption (plan 03-04
+# task 3, W-04). `test -f
+# .planning/phases/03-faithful-two-stage-trainer-and-head/03-02-SUMMARY.md`
+# returned rc=0 (the file exists, 28303 bytes), and a grep for the heading
+# `CONTINGENCY FIRED` in it returned rc=1 — the heading is ABSENT. 03-02's GEMM
+# partition-determinism gate was therefore GREEN, `contracts/gemm-partition-determinism-v1.yaml`
+# was deliberately never authored (`ls` rc=1), and there is nothing for this
+# phase to wire on its behalf. Recorded explicitly because "I did not see a
+# heading" and "I did not look" are indistinguishable afterwards.
+PHASE3_CONTRACTS := contracts/multinomial-head-v1.yaml
 
 # NOTE (plan 02-01, D-24): $(CONTRACTS) is an EXPLICIT HARDCODED LIST, not a glob
 # over contracts/*.yaml. A contract file that merely EXISTS in contracts/ is
@@ -1255,6 +1278,51 @@ contract-audit-phase2: ## Audit Phase 2 binding coverage (BLOCKING, wired into t
 		exit 1; \
 	fi; \
 	echo "Phase 2 binding audit: every equation is bound"
+
+# Phase 3's twin of contract-audit-phase2, and it exists for the same reason:
+# `contract-validate` checks contract SHAPE and says nothing about whether an
+# equation is bound to any implementation, so multinomial-head-v1.yaml could be
+# "valid" with all five equations bound to nothing at all. BLOCKING, wired into
+# tier3 immediately after the Phase 2 audit.
+#
+# The loop reads the audit's STATUS (`status=$$?` on its own line). That is not
+# incidental: the repo-wide `contract-audit` target ends its loop body in `;`,
+# never reads the status, and therefore reports success while printing 132
+# BIND-001 errors. Copying that shape would have produced a gate that cannot
+# fail.
+#
+# EVIDENCE DISCIPLINE, matching the Phase 2 block above. Run STANDALONE first
+# with the status captured directly (`make contract-audit-phase3 > /tmp/cap3.log
+# 2>&1; rc=$$?`, never through a pipe — CLAUDE.md rule 1): rc=0, 5/5 equations
+# bound, 8 obligations, 12 falsification tests. Wall time ~1 s warm; tier3 has
+# already built pv via `contract-validate` two lines earlier.
+#
+# ITS FAILURE MODE WAS INDUCED, OBSERVED AND REVERTED before it was trusted,
+# because a gate that has only ever been seen passing is not evidence. Deleting
+# the `analytic_gradient` entry from $(BINDING) turned it **rc=2** (make's status
+# for a failed recipe, not the recipe's own 1 — measured, not assumed) with
+# "[ERROR] BIND-001: Equation 'analytic_gradient' in multinomial-head-v1.yaml has
+# no binding entry" and "FAIL: unbound equations remain in:
+# contracts/multinomial-head-v1.yaml", naming the deleted equation; "Bound
+# equations" fell 5 -> 4. $(BINDING) was then restored and verified BYTE-IDENTICAL
+# by sha256 (dfbce939bdc9a291...) and the target re-run green at rc=0.
+contract-audit-phase3: ## Audit Phase 3 binding coverage (BLOCKING, wired into tier3)
+	@echo "Auditing binding coverage for the Phase 3 contracts..."
+	@unbound=""; \
+	for contract in $(PHASE3_CONTRACTS); do \
+		echo "  $$contract"; \
+		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+		status=$$?; \
+		if [ "$$status" -ne 0 ]; then \
+			unbound="$$unbound $$contract"; \
+		fi; \
+	done; \
+	if [ -n "$$unbound" ]; then \
+		echo "FAIL: unbound equations remain in:$$unbound"; \
+		echo "Every equation of a Phase 3 contract needs an entry in $(BINDING)."; \
+		exit 1; \
+	fi; \
+	echo "Phase 3 binding audit: every equation is bound"
 
 contract-regen: ## Regenerate wired test files from contracts
 	@echo "Regenerating contract test files..."
