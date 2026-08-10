@@ -129,39 +129,116 @@ pub(crate) fn head_dataset(
 
     let ordered_labels = dataset.label_names().to_vec();
     let class_indices = class_indices_of(&ordered_labels, selection)?;
-    let texts = selection_texts(dataset, selection)?;
-    let ids = selection.ordered_ids();
 
-    // SKELETON (plan 03-07 task 1, RED): one encode over everything, no ledger, no eval
-    // forcing, no no_grad. Every property this module exists to establish is absent.
-    let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let tape_before = autograd::graph_tape_len();
-    let training_observed = encoder.training();
-    let embedded = encoder
-        .encode_texts(&text_refs)
-        .map_err(|e| SetFitTrainError::Encoder { reason: e.to_string() })?;
-    let hidden = embedded.shape()[1];
-    let embeddings: Vec<Vec<f32>> = embedded.data().chunks(hidden).map(<[f32]>::to_vec).collect();
-    let tape_after = autograd::graph_tape_len();
+    // The id and the text of each selected row, in selection order, held together in ONE
+    // vector. The windows below are slices of THIS vector, and both the ledger entry and the
+    // encoder's input come from the same slice — so a windowing defect that duplicates one
+    // row and drops another shows up in the ledger and in the embeddings together. A ledger
+    // rebuilt afterwards from `selection.ordered_ids()` would agree with the selection by
+    // construction and could not see that defect at all.
+    let texts = selection_texts(dataset, selection)?;
+    let rows: Vec<(&str, &str)> =
+        selection.ordered_ids().into_iter().zip(texts.iter().map(String::as_str)).collect();
+    debug_assert_eq!(rows.len(), selection.len(), "one row per selected example");
+
+    // Eval mode BEFORE anything is encoded. The transition owns the encoder's mode; it is
+    // left in eval on the way out, which is the state every later read expects.
+    encoder.set_training(false);
+    let encoded = encode_once(encoder, &rows, batch)?;
 
     Ok(HeadDataset {
-        n: embeddings.len(),
-        embeddings,
+        n: encoded.embeddings.len(),
+        embeddings: encoded.embeddings,
         class_indices,
         ordered_labels,
-        encode_ledger: Vec::new(),
-        encode_call_count: 0,
+        encode_ledger: encoded.encode_ledger,
+        encode_call_count: encoded.encode_call_count,
+        witness: encoded.witness,
+    })
+}
+
+/// The encode's outputs and the observations taken while it ran.
+struct Encoded {
+    embeddings: Vec<Vec<f32>>,
+    encode_ledger: Vec<String>,
+    encode_call_count: usize,
+    witness: EncodeWitness,
+}
+
+/// One encoder invocation per consecutive window, inside `no_grad`, detaching every result.
+fn encode_once(
+    encoder: &SetFitMiniLm,
+    rows: &[(&str, &str)],
+    batch: usize,
+) -> Result<Encoded, SetFitTrainError> {
+    let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(rows.len());
+    let mut encode_ledger: Vec<String> = Vec::with_capacity(rows.len());
+    let mut encode_call_count = 0_usize;
+    let mut training_observed = false;
+    let mut requires_grad_observed = false;
+
+    let tape_before = autograd::graph_tape_len();
+    let result = autograd::no_grad(|| -> Result<(), SetFitTrainError> {
+        for window in rows.chunks(batch) {
+            // The ledger is written HERE, from the window that is about to be encoded.
+            for (id, _) in window {
+                encode_ledger.push((*id).to_string());
+            }
+            training_observed |= encoder.training();
+            encode_call_count += 1;
+            let window_texts: Vec<&str> = window.iter().map(|&(_, text)| text).collect();
+            let embedded = encoder
+                .encode_texts(&window_texts)
+                .map_err(|e| SetFitTrainError::Encoder { reason: e.to_string() })?;
+            // Detach before anything is stored, so no graph node survives into the head's
+            // input even if a future encoder change starts recording under `no_grad`.
+            let detached = embedded.detach();
+            requires_grad_observed |= detached.requires_grad_enabled();
+            push_rows(&mut embeddings, &detached, window.len())?;
+        }
+        Ok(())
+    });
+    result?;
+    let tape_after = autograd::graph_tape_len();
+
+    Ok(Encoded {
+        embeddings,
+        encode_ledger,
+        encode_call_count,
         witness: EncodeWitness {
             training_observed,
-            requires_grad_observed: embedded.requires_grad_enabled(),
+            requires_grad_observed,
             tape_before,
             tape_after,
         },
     })
-    .map(|d| {
-        let _ = &ids;
-        d
-    })
+}
+
+/// Split a `[B, H]` embedding tensor into `expected` owned rows.
+///
+/// The shape is CHECKED rather than indexed. A `[B, H]` that arrived with the wrong `B` would
+/// otherwise silently push a different number of rows than the ledger recorded, which is the
+/// one way the two could disagree without any windowing defect.
+fn push_rows(
+    out: &mut Vec<Vec<f32>>,
+    embedded: &autograd::Tensor,
+    expected: usize,
+) -> Result<(), SetFitTrainError> {
+    let shape = embedded.shape();
+    let malformed = |reason: String| SetFitTrainError::Encoder { reason };
+    if shape.len() != 2 {
+        return Err(malformed(format!("expected a [B, H] embedding, got shape {shape:?}")));
+    }
+    let (rows, hidden) = (shape[0], shape[1]);
+    if rows != expected || hidden == 0 {
+        return Err(malformed(format!(
+            "expected {expected} embedding rows of non-zero width, got shape {shape:?}"
+        )));
+    }
+    for row in embedded.data().chunks(hidden) {
+        out.push(row.to_vec());
+    }
+    Ok(())
 }
 
 /// The class index of every selected row, checked against the DECLARED label map.
