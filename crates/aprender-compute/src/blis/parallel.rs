@@ -75,32 +75,25 @@ pub(crate) fn gemm_should_run_serial(m: usize, n: usize, k: usize) -> bool {
     flops < 8_000_000 || (flops < 64_000_000 && n < 192)
 }
 
-/// Parallel BLIS GEMM using Rayon
+/// THE M-partitioning decision of [`gemm_blis_parallel`], in one place.
+///
+/// Extracted (not copied) so the determinism-gate accessor below and the GEMM
+/// itself cannot disagree. A hand-mirrored second implementation would drift,
+/// and a drifted copy makes the gate's evidence unreliable in exactly the way
+/// it exists to prevent — it would report a partitioning the kernel never used.
+///
+/// Pure and side-effect free apart from reading `rayon::current_num_threads()`
+/// and the physical core count, which is precisely the environment dependence
+/// the gate measures.
+///
+/// # Behaviour is unchanged
+///
+/// This is a lift of the existing statements, verbatim and in order: the
+/// `max_threads` FLOP ladder, `HeijunkaScheduler::default()`, the
+/// `num_threads.min(max_threads)` cap, the partition-size choice and the
+/// `partition_m` call.
 #[cfg(feature = "parallel")]
-pub fn gemm_blis_parallel(
-    m: usize,
-    n: usize,
-    k: usize,
-    a: &[f32],
-    b: &[f32],
-    c: &mut [f32],
-) -> Result<(), TruenoError> {
-    use rayon::prelude::*;
-    contract_pre_amdahl_speedup!();
-
-    // Dimension validation
-    if a.len() != m * k || b.len() != k * n || c.len() != m * n {
-        return Err(TruenoError::InvalidInput("Dimension mismatch".to_string()));
-    }
-
-    // Single-threaded threshold: 8M FLOPs ≈ 200³.
-    // Rayon dispatch costs ~3µs. For GEMM ≤128 (~4M FLOP, ~35µs compute),
-    // rayon overhead dominates. GEMM 256+ (33M FLOP, ~300µs) benefits.
-    let flops = m * n * k;
-    if gemm_should_run_serial(m, n, k) {
-        return gemm_blis(m, n, k, a, b, c, None);
-    }
-
+fn gemm_m_partitions(m: usize, n: usize, k: usize) -> Vec<std::ops::Range<usize>> {
     // Scale thread count to problem size and cache topology.
     // cgp profile scaling measurements (2026-04-05, Threadripper 7960X 24C/48T):
     //
@@ -112,6 +105,7 @@ pub fn gemm_blis_parallel(
     // overhead (~40µs per thread::scope) dominate when compute < 1ms.
     // Root cause for 1024 12T regression: cross-CCD L3 thrashing. 8T fits
     // in a single CCD (12 cores, 32MB L3). 12+ threads span both CCDs.
+    let flops = m * n * k;
     let phys_cores = num_cpus::get_physical();
     let max_threads = if flops < 64_000_000 {
         // 256³ and below: barely benefits from parallelism
@@ -135,7 +129,82 @@ pub fn gemm_blis_parallel(
     let mut scheduler = HeijunkaScheduler::default();
     scheduler.num_threads = scheduler.num_threads.min(max_threads);
     let ps = if m <= MC { MR.max(m / scheduler.num_threads) } else { MC };
-    let partitions = scheduler.partition_m(m, ps);
+    scheduler.partition_m(m, ps)
+}
+
+/// How many M-partitions `gemm_blis_parallel` would use for these dimensions.
+///
+/// # Internal determinism-gate observation hook — NOT public API
+///
+/// `#[doc(hidden)]` and **exempt from semver**: it may change or disappear in any
+/// release. Its sole consumer is
+/// `crates/aprender-core/tests/gemm_thread_determinism.rs`, which proves that
+/// `Tensor::matmul` is byte-identical across rayon pool sizes.
+///
+/// It CANNOT be `pub(crate)` — the caller is a different crate, so a crate-private
+/// item is unreachable and the gate would not compile. That is stated here so the
+/// next reader does not "tighten" the visibility and turn a passing gate into a
+/// build failure.
+///
+/// # Why the gate needs it
+///
+/// Identical hashes across pool sizes prove nothing about the hazard if every
+/// pool size partitioned the work identically — the parallel path would simply
+/// never have been exercised differently. This is the mechanism-engaged evidence
+/// (CLAUDE.md verification discipline 2): a run that cannot show the partitioning
+/// MOVED cannot claim to have falsified a partitioning hazard.
+///
+/// Returns `1` for a GEMM the dispatcher sends down the serial path, which is
+/// what that path effectively does with M.
+#[doc(hidden)]
+#[cfg(feature = "parallel")]
+pub fn gemm_partition_count_for(m: usize, n: usize, k: usize) -> usize {
+    if gemm_should_run_serial(m, n, k) {
+        return 1;
+    }
+    gemm_m_partitions(m, n, k).len()
+}
+
+/// Non-parallel fallback for the determinism-gate accessor.
+///
+/// Without `parallel` there is no rayon pool and no M-partitioning at all, so the
+/// answer is a constant `1`. The gate then observes an unchanging partition count
+/// and reports SKIPPED-WITH-EVIDENCE rather than claiming a falsification.
+#[doc(hidden)]
+#[cfg(not(feature = "parallel"))]
+pub fn gemm_partition_count_for(_m: usize, _n: usize, _k: usize) -> usize {
+    1
+}
+
+/// Parallel BLIS GEMM using Rayon
+#[cfg(feature = "parallel")]
+pub fn gemm_blis_parallel(
+    m: usize,
+    n: usize,
+    k: usize,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+) -> Result<(), TruenoError> {
+    use rayon::prelude::*;
+    contract_pre_amdahl_speedup!();
+
+    // Dimension validation
+    if a.len() != m * k || b.len() != k * n || c.len() != m * n {
+        return Err(TruenoError::InvalidInput("Dimension mismatch".to_string()));
+    }
+
+    // Single-threaded threshold: 8M FLOPs ≈ 200³.
+    // Rayon dispatch costs ~3µs. For GEMM ≤128 (~4M FLOP, ~35µs compute),
+    // rayon overhead dominates. GEMM 256+ (33M FLOP, ~300µs) benefits.
+    if gemm_should_run_serial(m, n, k) {
+        return gemm_blis(m, n, k, a, b, c, None);
+    }
+
+    // The thread cap and the M-partitioning both live in `gemm_m_partitions`, so
+    // `gemm_partition_count_for` reports the partitioning this call ACTUALLY uses
+    // rather than a second implementation of it.
+    let partitions = gemm_m_partitions(m, n, k);
 
     // NEGATIVE RESULT (2026-04-06): shared-B per (jc,pc) block REGRESSED 597→318 GFLOPS.
     // Root cause: Rayon barrier after each K-tile pack forces thread synchronization.

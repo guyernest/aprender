@@ -155,6 +155,15 @@ safetensors = { version = "0.4", optional = true }
 # must not contain a `tokenizers` node at all.
 tokenizers = { workspace = true, optional = true }
 
+# Counter-based Philox RNG (lib name `trueno_rand`), `setfit` feature only —
+# Phase 3 TRN-06. The SetFit encoder's dropout masks are derived from
+# (root_seed, site, forward_ordinal, element) through Philox 4x32-10 rather than
+# drawn from a stateful `Mutex<StdRng>`, so a `rand` version bump cannot move the
+# loss trace and mask element `i` is a pure function of its index. Leaf crate
+# (deps: thiserror only), so the edge is acyclic. Optional and reached ONLY
+# through `setfit`: a build without that feature must not contain the node.
+aprender-rand = { workspace = true, optional = true }
+
 # WASM bindings for noise generator (optional, spec: noise-generator-apr-wasm-spec.md)
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
@@ -208,6 +217,13 @@ serde_yaml = "0.9"  # YAML contract binding in tests (FALSIFY-SHIP-009 GATE-APR-
 # drift-prone reader of a schema the workspace already owns.
 setfit-contract-schema = { path = "../aprender-contracts", package = "aprender-contracts" }
 half = { workspace = true }  # IEEE f16 oracle for the convert_report f32_to_f16 RNE falsifier (PMAT-905)
+# Phase 3 (03-02): the `gemm_thread_determinism` integration test hashes each
+# GEMM output's LE f32 bytes so the parent can compare children byte-for-byte.
+# `sha2` is already an OPTIONAL runtime dep (setfit/format-encryption/hf-hub), and
+# an optional runtime dep is NOT available to `tests/` unless the feature is on —
+# so the plain `cargo test --test gemm_thread_determinism` build needs this
+# dev-dependency. Workspace-pinned: no new external package enters the tree.
+sha2 = { workspace = true }
 
 [features]
 default = ["parallel"]
@@ -262,7 +278,12 @@ chaos-full = ["chaos-network", "chaos-byzantine"]
 # setfit module hashes tokenizer bytes and input text in PRODUCTION code, so
 # `cargo check -p aprender-core --features setfit` would not compile without it.
 # The feature is declared dependency-CLOSED: enabling `setfit` alone must build.
-setfit = ["dep:tokenizers", "dep:sha2"]
+#
+# `dep:aprender-rand` (Phase 3, TRN-06) is the same kind of entry: `setfit/dropout_rng`
+# uses Philox 4x32-10 in PRODUCTION code, so the feature would not build without it.
+# `cargo check -p aprender-core --no-default-features` is the standing proof that
+# neither node reaches a build that did not ask for `setfit`.
+setfit = ["dep:tokenizers", "dep:sha2", "dep:aprender-rand"]
 # Conformance fixtures gate the test-only slice constructor, which lives inside
 # `#[cfg(feature = "setfit")] mod setfit` — so this must IMPLY setfit rather than
 # being an empty marker that could be enabled alone and gate nothing.

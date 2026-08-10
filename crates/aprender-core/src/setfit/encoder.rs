@@ -48,12 +48,16 @@
 // the removal was MEASURED rather than assumed: `cargo check -p aprender-core
 // --features setfit` reports zero dead-code findings in this file afterwards.
 
+use std::sync::Arc;
+
 use crate::autograd::{
     additive_attention_mask, embedding_gather, l2_normalize_rows, masked_mean_pool, OpError, Tensor,
 };
 use crate::models::bert::load::read_tensor;
-use crate::nn::{Dropout, LayerNorm, Linear, Module, MultiHeadAttention};
+use crate::nn::transformer::AttentionDropoutMasks;
+use crate::nn::{LayerNorm, Linear, Module, MultiHeadAttention};
 
+use super::dropout_rng::{self, SiteDropout};
 use super::error::SetFitError;
 use super::import::{MiniLmImport, ModelDims, VocabRemap};
 use super::tokenizer::{SentenceBatch, MAX_SEQUENCE_LENGTH};
@@ -100,26 +104,36 @@ fn ffn_output_site(layer: usize) -> String {
     format!("encoder.layer.{layer}.output.dropout")
 }
 
-/// Derive a site's RNG seed from the root seed and its DOTTED NAME.
+// THE site-keying decision (plan 03-02, resolving what 03-RESEARCH left open).
+//
+// There is now EXACTLY ONE derivation on the SetFit dropout path:
+// `dropout_rng::derive_key(root_seed, dotted_site)`, i.e. a truncated SHA-256
+// over `b"apr-setfit-dropout-v1\0" ‖ root_seed_le ‖ site`.
+//
+// Phase 1's `site_seed` — FNV-1a over the name folded through SplitMix64's
+// finaliser (`nn::transformer::mix_call_seed`) — is GONE, along with
+// `mix_call_seed` itself, which had no other caller in the workspace (measured,
+// not assumed: the only two call sites were this function and the per-call seed
+// advance inside `MultiHeadAttention`, both replaced here). Keeping both would
+// have left two half-documented schemes deriving streams for the same four
+// sites, and the failure mode of that is a site quietly keyed by the WRONG one
+// after a refactor, which no test distinguishes from a legitimately different
+// mask.
+//
+// What survives from `site_seed` is its actual insight, carried into
+// `derive_key`'s documentation: key on the DOTTED NAME, never on a position.
+
+/// The four dotted dropout sites of one encoder, in construction order.
 ///
-/// Non-positional on purpose: inserting a layer must not renumber the streams of
-/// the layers after it. The trade is that RENAMING a site changes its stream,
-/// which is acceptable — the names are the HF ones and are pinned by the
-/// parameter-order gate — whereas positional drift is not, because it silently
-/// re-addresses every site downstream of an edit.
+/// Kept as a free function so the site names have exactly one spelling: the
+/// builders above produce them and this is the only place they are turned into
+/// mask sources.
 ///
-/// FNV-1a over the name, folded with the root seed through SplitMix64's
-/// finaliser so a one-character name change moves the whole stream.
-fn site_seed(root_seed: u64, site: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in site.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    // Same SplitMix64 finaliser that advances the stream in `MultiHeadAttention`.
-    // Shared rather than re-spelled: two copies of these constants would let the
-    // site derivation and the call advance drift apart silently.
-    crate::nn::transformer::mix_call_seed(h, root_seed)
+/// # Errors
+///
+/// [`SetFitError::DropoutRng`] if `p` is not a usable dropout rate.
+fn site_dropout(root_seed: u64, site: &str, p: f32) -> Result<Arc<SiteDropout>, SetFitError> {
+    Ok(Arc::new(SiteDropout::new(root_seed, site, p)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -132,11 +146,18 @@ fn site_seed(root_seed: u64, site: &str) -> u64 {
 /// applies it inside `forward_self`, so this struct holds only what comes after.
 struct EncoderLayer {
     attention: MultiHeadAttention,
-    attention_output_dropout: Dropout,
+    /// Site 2, ALSO installed into `attention` as its mask source.
+    ///
+    /// Held here as well as there so introspection can read the site's dotted
+    /// name and derived key directly. `MultiHeadAttention` sees it as an opaque
+    /// `dyn AttentionDropoutMasks`, which is the right shape for `nn/` and the
+    /// wrong shape for asking "which stream is this?".
+    attention_probs_dropout: Arc<SiteDropout>,
+    attention_output_dropout: Arc<SiteDropout>,
     attention_layer_norm: LayerNorm,
     intermediate: Linear,
     output_dense: Linear,
-    output_dropout: Dropout,
+    output_dropout: Arc<SiteDropout>,
     output_layer_norm: LayerNorm,
 }
 
@@ -150,7 +171,7 @@ pub struct BertSentenceEncoder {
     position_embeddings: Tensor,
     token_type_embeddings: Tensor,
     embeddings_layer_norm: LayerNorm,
-    embeddings_dropout: Dropout,
+    embeddings_dropout: Arc<SiteDropout>,
     layers: Vec<EncoderLayer>,
     dims: ModelDims,
     /// `Some` for a slice fixture; `None` for the full pin.
@@ -160,6 +181,11 @@ pub struct BertSentenceEncoder {
     tokenizer_sha256: String,
     root_seed: u64,
     training: bool,
+    /// D-15's `block`, mirrored so it can be read back.
+    ///
+    /// The authoritative copy lives in each [`SiteDropout`]; this field exists so
+    /// a caller can ask what it last set without reaching into a site.
+    forward_ordinal: u64,
 }
 
 impl std::fmt::Debug for BertSentenceEncoder {
@@ -213,11 +239,23 @@ impl BertSentenceEncoder {
             let p = format!("encoder.layer.{i}");
 
             // Site 2 lives INSIDE MultiHeadAttention, between softmax and @V.
-            // It was the one unseedable site (A5); the hook added by this plan
-            // is what makes the whole policy reproducible.
+            // It was the one unseedable site (A5). 01-06 reached it with a
+            // construction-time u64 seed; 03-02 hands it the SAME mask source
+            // the other three sites use, so the forward ordinal reaches all four
+            // and D-15's branch independence does not hold at three sites and
+            // silently fail at the fourth.
+            let attention_probs_dropout =
+                site_dropout(root_seed, &attention_probs_site(i), DROPOUT_P)?;
+            // The `Arc<SiteDropout>` is UNSIZE-COERCED to `Arc<dyn ...>` at this
+            // binding. The fully-qualified `Arc::clone(&x)` form does NOT compile
+            // here: it unifies its type parameter with the annotated `dyn` type
+            // and then fails on the `&Arc<SiteDropout>` argument, before any
+            // coercion can apply. The method form resolves `T` from the receiver
+            // and coerces the result, which is the whole difference.
+            let attention_masks: Arc<dyn AttentionDropoutMasks> = attention_probs_dropout.clone();
             let mut attention = MultiHeadAttention::new(h, dims.heads)
                 .with_dropout(DROPOUT_P)
-                .with_attention_dropout_seed(site_seed(root_seed, &attention_probs_site(i)));
+                .with_attention_dropout_masks(attention_masks);
             install_projection(attention.q_proj_mut(), &read, &p, "query", h)?;
             install_projection(attention.k_proj_mut(), &read, &p, "key", h)?;
             install_projection(attention.v_proj_mut(), &read, &p, "value", h)?;
@@ -251,17 +289,16 @@ impl BertSentenceEncoder {
 
             layers.push(EncoderLayer {
                 attention,
-                attention_output_dropout: Dropout::with_seed(
+                attention_probs_dropout,
+                attention_output_dropout: site_dropout(
+                    root_seed,
+                    &attention_output_site(i),
                     DROPOUT_P,
-                    site_seed(root_seed, &attention_output_site(i)),
-                ),
+                )?,
                 attention_layer_norm,
                 intermediate,
                 output_dense,
-                output_dropout: Dropout::with_seed(
-                    DROPOUT_P,
-                    site_seed(root_seed, &ffn_output_site(i)),
-                ),
+                output_dropout: site_dropout(root_seed, &ffn_output_site(i), DROPOUT_P)?,
                 output_layer_norm,
             });
         }
@@ -277,16 +314,14 @@ impl BertSentenceEncoder {
                 &[dims.type_vocab, h],
             )?,
             embeddings_layer_norm,
-            embeddings_dropout: Dropout::with_seed(
-                DROPOUT_P,
-                site_seed(root_seed, EMBEDDINGS_DROPOUT_SITE),
-            ),
+            embeddings_dropout: site_dropout(root_seed, EMBEDDINGS_DROPOUT_SITE, DROPOUT_P)?,
             layers,
             dims,
             remap: import.vocab_remap().cloned(),
             tokenizer_sha256: import.tokenizer_sha256().to_string(),
             root_seed,
             training: true,
+            forward_ordinal: 0,
         };
         // HF `from_pretrained` hands back an eval-mode model; so does this.
         encoder.set_training(false);
@@ -308,6 +343,71 @@ impl BertSentenceEncoder {
     #[must_use]
     pub fn root_seed(&self) -> u64 {
         self.root_seed
+    }
+
+    /// The forward-call ordinal every dropout site currently draws at (D-15).
+    #[must_use]
+    pub fn forward_ordinal(&self) -> u64 {
+        self.forward_ordinal
+    }
+
+    /// Point every dropout site at forward-call ordinal `forward_ordinal`.
+    ///
+    /// This is D-15's `block` coordinate, `2 * training_step + branch`, and it is
+    /// what makes the SetFit dropout policy replay-exact AND independent between
+    /// the pair objective's two siamese branches. Use
+    /// [`super::dropout_rng::forward_ordinal`] to compute it from a
+    /// `(step, branch)` pair rather than open-coding the arithmetic.
+    ///
+    /// Advancing it is the caller's job precisely because the encoder cannot know
+    /// it. A self-advancing counter would make the mask a function of how many
+    /// forwards had run — including forwards from an unrelated evaluation — and
+    /// that is the property TRN-06 needs to NOT have.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitError::DropoutRng`] if `forward_ordinal` does not fit the `u32`
+    /// counter lane. Validation happens ONCE before any site is touched, so a
+    /// rejected call leaves every site at its previous ordinal rather than
+    /// half-advanced.
+    pub fn set_forward_ordinal(&mut self, forward_ordinal: u64) -> Result<(), SetFitError> {
+        // Validate first, apply second. A validate-as-you-go loop would already
+        // have moved the embeddings site by the time it rejected, leaving the
+        // encoder in a mixed-ordinal state no caller asked for.
+        dropout_rng::checked_forward_ordinal(forward_ordinal)?;
+        for site in self.dropout_modules() {
+            site.set_forward_ordinal(forward_ordinal)?;
+        }
+        self.forward_ordinal = forward_ordinal;
+        Ok(())
+    }
+
+    /// Every dropout site of this encoder, in construction order.
+    ///
+    /// ONE traversal, used by both the mode channel and the ordinal channel: a
+    /// second hand-written loop is how a newly added site ends up following one
+    /// and not the other.
+    ///
+    /// Written as an iterator chain rather than a `for` loop on purpose. This is
+    /// a TRAVERSAL, not the compute path, and
+    /// `encoder_has_exactly_one_layer_loop` asserts TEXTUALLY that the shared-ref
+    /// layer-loop header occurs exactly once in this file, inside
+    /// `forward_layers`. Spelling a bookkeeping walk the same way as the one
+    /// compute loop would either break that gate or, worse, invite someone to
+    /// weaken it to "at least one". (The header is deliberately not quoted in
+    /// this comment either — the gate counts occurrences in the SOURCE TEXT, and
+    /// a doc comment is source text. That is not pedantry: it is how this very
+    /// paragraph first turned the gate red.)
+    fn dropout_modules(&self) -> Vec<&Arc<SiteDropout>> {
+        std::iter::once(&self.embeddings_dropout)
+            .chain(self.layers.iter().flat_map(|l| {
+                [
+                    &l.attention_probs_dropout,
+                    &l.attention_output_dropout,
+                    &l.output_dropout,
+                ]
+            }))
+            .collect()
     }
 
     /// Number of encoder layers this model was built with.
@@ -347,7 +447,8 @@ impl BertSentenceEncoder {
         }
         for (i, layer) in self.layers.iter().enumerate() {
             if layer.attention.dropout_p() > 0.0
-                && layer.attention.attention_dropout_seed().is_some()
+                && layer.attention.has_attention_dropout_masks()
+                && layer.attention_probs_dropout.probability() > 0.0
             {
                 out.push(attention_probs_site(i));
             }
@@ -801,17 +902,21 @@ impl Module for BertSentenceEncoder {
     /// train -> eval -> train snapshot test.
     fn set_training(&mut self, training: bool) {
         self.training = training;
-        self.embeddings_dropout.set_training(training);
+        // The four dotted dropout sites, through the ONE traversal the ordinal
+        // channel also uses. `SiteDropout::set_training` takes `&self` because
+        // the flag is an atomic coordinate, not accumulated state.
+        for site in self.dropout_modules() {
+            site.set_training(training);
+        }
         self.embeddings_layer_norm.set_training(training);
         for layer in &mut self.layers {
-            // MultiHeadAttention owns site 2 (attention probs) and propagates
-            // into its four projections.
+            // MultiHeadAttention gates site 2 on ITS OWN flag — the mask source's
+            // flag is irrelevant there — so the attention module still has to be
+            // flipped explicitly.
             layer.attention.set_training(training);
-            layer.attention_output_dropout.set_training(training);
             layer.attention_layer_norm.set_training(training);
             layer.intermediate.set_training(training);
             layer.output_dense.set_training(training);
-            layer.output_dropout.set_training(training);
             layer.output_layer_norm.set_training(training);
         }
     }

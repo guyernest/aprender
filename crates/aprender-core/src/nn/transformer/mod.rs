@@ -21,7 +21,7 @@
 //!
 //! - Vaswani, A., et al. (2017). Attention is all you need. `NeurIPS`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use super::dropout::Dropout;
 use super::linear::Linear;
@@ -53,7 +53,33 @@ fn scaled_dot_product_attention(
     scaled_dot_product_attention_seeded(query, key, value, attn_mask, dropout_p, training, None)
 }
 
-/// Scaled Dot-Product Attention with an optional seeded attention-probs dropout.
+/// A source of attention-probs dropout masks (plan 03-02, D-15).
+///
+/// The site between softmax and `@V` lives INSIDE [`MultiHeadAttention`], so it
+/// is the one dropout site an outside module cannot reach — plan 01-06's `A5`.
+/// 01-06 solved that with a `u64` seed installed at CONSTRUCTION, mixed with a
+/// per-call counter. That hook is REPLACED here rather than extended, because a
+/// construction-time seed cannot express a coordinate that changes per forward
+/// call: with two siamese forwards per training step, the counter has to carry
+/// the forward ORDINAL, and only the caller knows it.
+///
+/// Implementations return the INVERTED-DROPOUT MULTIPLIERS (`0.0` dropped,
+/// `1/(1-p)` kept), not a boolean mask, so the scale is the mask source's
+/// business and this module never re-derives it from a `p` that might disagree.
+///
+/// `pub(crate)` deliberately: the only production implementation is
+/// `setfit::dropout_rng::SiteDropout`, which is behind the `setfit` feature, and
+/// exposing the trait publicly would put an unimplementable extension point on
+/// `MultiHeadAttention`'s published surface.
+pub(crate) trait AttentionDropoutMasks: std::fmt::Debug + Send + Sync {
+    /// Exactly `len` inverted-dropout multipliers for one attention-probs draw.
+    ///
+    /// Called once per forward pass that fires dropout, with `len` equal to the
+    /// attention-weight tensor's element count.
+    fn attention_dropout_mask(&self, len: usize) -> Vec<f32>;
+}
+
+/// Scaled Dot-Product Attention with an optional attention-probs mask source.
 ///
 /// This is where the attention math lives; [`scaled_dot_product_attention`] is a
 /// delegator that passes `None`. Splitting rather than extending the existing
@@ -63,8 +89,10 @@ fn scaled_dot_product_attention(
 /// while the alternative the plan warned against, re-deriving the dropout from
 /// outside, would mean re-implementing the `attn_weights @ V` product.
 ///
-/// `dropout_seed` is consulted ONLY when `training && dropout_p > 0.0`, so an
-/// unseeded caller's numerics are untouched at every dropout setting.
+/// `dropout_masks` is consulted ONLY when `training && dropout_p > 0.0`, so an
+/// un-hooked caller's numerics are untouched at every dropout setting; that
+/// branch still routes through `apply_dropout_seeded(.., None)`, the pre-01-06
+/// ambient-RNG path, verbatim.
 #[provable_contracts_macros::contract("attention-kernel-v1", equation = "attention")]
 fn scaled_dot_product_attention_seeded(
     query: &Tensor,
@@ -73,7 +101,7 @@ fn scaled_dot_product_attention_seeded(
     attn_mask: Option<&Tensor>,
     dropout_p: f32,
     training: bool,
-    dropout_seed: Option<u64>,
+    dropout_masks: Option<&dyn AttentionDropoutMasks>,
 ) -> (Tensor, Tensor) {
     contract_pre_attention!(query.data());
     contract_pre_scaled_dot_product!();
@@ -97,7 +125,12 @@ fn scaled_dot_product_attention_seeded(
 
     // Apply dropout if training
     let attn_weights = if training && dropout_p > 0.0 {
-        apply_dropout_seeded(&attn_weights, dropout_p, dropout_seed)
+        match dropout_masks {
+            Some(masks) => apply_attention_dropout_masks(&attn_weights, masks),
+            // The pre-01-06 ambient-RNG path, reached through the same helper it
+            // always was, so "an un-hooked caller is unchanged" stays structural.
+            None => apply_dropout_seeded(&attn_weights, dropout_p, None),
+        }
     } else {
         attn_weights
     };
@@ -107,6 +140,26 @@ fn scaled_dot_product_attention_seeded(
 
     contract_post_attention!(output.data());
     (output, attn_weights)
+}
+
+/// Apply an [`AttentionDropoutMasks`] draw to the attention weights.
+///
+/// The multipliers become a non-grad CONSTANT tensor applied with the
+/// autograd-aware [`Tensor::mul`] — the identical PMAT-922 shape
+/// `nn::Dropout::forward` uses. Baking the scaled values into a fresh
+/// `Tensor::new` leaf would SEVER the graph and freeze every parameter upstream
+/// of attention in training mode, which is exactly the defect PMAT-922 recorded.
+///
+/// # Panics
+///
+/// Never at runtime for a correct source: the length is taken FROM `x`, so a
+/// source that honours its contract cannot return the wrong count. A source that
+/// does not is a programming error in this crate, and `Tensor::new` reports the
+/// shape mismatch rather than silently truncating.
+fn apply_attention_dropout_masks(x: &Tensor, masks: &dyn AttentionDropoutMasks) -> Tensor {
+    let mask_data = masks.attention_dropout_mask(x.data().len());
+    let mask = Tensor::new(&mask_data, x.shape());
+    x.mul(&mask)
 }
 
 /// Multi-Head Attention (Vaswani et al., 2017).
@@ -138,40 +191,28 @@ pub struct MultiHeadAttention {
     /// Output projection
     out_proj: Linear,
 
-    /// Optional seed for the attention-probs dropout (plan 01-06, A5).
+    /// Optional mask source for the attention-probs dropout (plan 03-02, D-15).
     ///
     /// `None` — the default — preserves the pre-01-06 behaviour exactly: the
     /// ambient RNG, no reproducibility. `Some` makes the site's mask a function
-    /// of the seed and the call index, which is what the SetFit encoder's
-    /// deterministic dropout policy needs. Never a parameter (Pitfall 7): seeds
-    /// and RNG state are module state and must not appear in
-    /// `named_parameters`, or the ENC-05 mode-flip byte-identity proof would
-    /// compare values that legitimately change.
-    attention_dropout_seed: Option<u64>,
-
-    /// Number of times the seeded dropout has fired.
+    /// of whatever coordinates the source was built with, which is what the
+    /// SetFit encoder's deterministic dropout policy needs. Never a parameter
+    /// (Pitfall 7): mask sources and RNG state are module state and must not
+    /// appear in `named_parameters`, or the ENC-05 mode-flip byte-identity proof
+    /// would compare values that legitimately change.
     ///
-    /// Mixed into the per-call seed so the stream ADVANCES across forward
-    /// passes. Without it, a seeded site would replay one fixed mask on every
-    /// training step — reproducible, but no longer dropout. Two freshly built
-    /// modules with the same seed still produce the same sequence, which is the
-    /// property the determinism tests assert.
-    attention_dropout_calls: AtomicU64,
+    /// # Why this replaced the 01-06 `Option<u64>` seed
+    ///
+    /// A seed fixed at construction plus an internal per-call counter made the
+    /// mask a function of HOW MANY forwards had run, which is not a coordinate
+    /// any caller can name. The SetFit pair objective runs two encoder forwards
+    /// per training step (one per siamese branch), so replay-exactness requires
+    /// the mask to be a function of `(step, branch)` — supplied by the OWNER of
+    /// the source, not accumulated here. The counter is gone with the seed: this
+    /// module no longer holds any RNG state at all.
+    attention_dropout_masks: Option<Arc<dyn AttentionDropoutMasks>>,
 
     training: bool,
-}
-
-/// Fold a call index into a site seed (`SplitMix64` finaliser).
-///
-/// Shared with `setfit::encoder::site_seed`, which derives the per-site stream this
-/// then advances. Both halves of the seeded-dropout scheme must use the same
-/// finaliser: if one is ever changed alone the failure mode is "the same seed gives
-/// different masks", which is exactly what the determinism gates exist to rule out.
-pub(crate) fn mix_call_seed(seed: u64, call: u64) -> u64 {
-    let mut z = seed ^ call.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
 }
 
 impl MultiHeadAttention {
@@ -203,8 +244,7 @@ impl MultiHeadAttention {
             k_proj: Linear::new(embed_dim, embed_dim),
             v_proj: Linear::new(embed_dim, embed_dim),
             out_proj: Linear::new(embed_dim, embed_dim),
-            attention_dropout_seed: None,
-            attention_dropout_calls: AtomicU64::new(0),
+            attention_dropout_masks: None,
             training: true,
         }
     }
@@ -216,20 +256,42 @@ impl MultiHeadAttention {
         self
     }
 
-    /// Make the attention-probs dropout reproducible from `seed` (plan 01-06).
+    /// Draw the attention-probs dropout from `masks` (plan 03-02, D-15).
     ///
     /// Opt-in and additive: a `MultiHeadAttention` built without this call keeps
     /// the ambient-RNG behaviour it had before, at every dropout setting.
+    ///
+    /// `pub(crate)`, unlike 01-06's `with_attention_dropout_seed` which this
+    /// replaces: [`AttentionDropoutMasks`] has exactly one production
+    /// implementation and it lives behind the `setfit` feature, so a public
+    /// builder here would advertise an extension point an out-of-crate caller
+    /// has no way to satisfy.
+    ///
+    /// The `dead_code` allow is SCOPED to the configuration where the lint is
+    /// right rather than blanket: with `setfit` off there is genuinely no
+    /// production caller in a library build — the encoder that installs a source
+    /// is behind that feature, and this module's own tests are `cfg(test)`. A bare
+    /// `#[allow(dead_code)]` would additionally suppress the lint in the build
+    /// where a real caller is supposed to exist, which is when it would matter.
     #[must_use]
-    pub fn with_attention_dropout_seed(mut self, seed: u64) -> Self {
-        self.attention_dropout_seed = Some(seed);
+    #[cfg_attr(not(feature = "setfit"), allow(dead_code))]
+    pub(crate) fn with_attention_dropout_masks(
+        mut self,
+        masks: Arc<dyn AttentionDropoutMasks>,
+    ) -> Self {
+        self.attention_dropout_masks = Some(masks);
         self
     }
 
-    /// The attention-probs dropout seed, if one was installed.
+    /// Whether an attention-probs mask source is installed.
+    ///
+    /// A READ accessor. The introspection that used to read the SEED value now
+    /// reads presence here and identity from the source itself, which is
+    /// strictly more honest: two sites with the same seed were indistinguishable
+    /// from one site, whereas two sources carry their own dotted names.
     #[must_use]
-    pub fn attention_dropout_seed(&self) -> Option<u64> {
-        self.attention_dropout_seed
+    pub(crate) fn has_attention_dropout_masks(&self) -> bool {
+        self.attention_dropout_masks.is_some()
     }
 
     /// The attention-probs dropout probability.
@@ -297,18 +359,13 @@ impl MultiHeadAttention {
         let k = reshape_for_attention(&k, batch_size, src_len, self.num_heads, self.head_dim);
         let v = reshape_for_attention(&v, batch_size, src_len, self.num_heads, self.head_dim);
 
-        // Scaled dot-product attention. The call counter advances ONLY when the
-        // dropout will actually fire, so an eval-mode or p==0 forward leaves the
-        // stream exactly where it was — two encoders with the same seed stay in
-        // lockstep regardless of how many inference passes they ran.
-        let dropout_seed = if self.training && self.dropout_p > 0.0 {
-            self.attention_dropout_seed.map(|seed| {
-                let call = self.attention_dropout_calls.fetch_add(1, Ordering::Relaxed);
-                mix_call_seed(seed, call)
-            })
-        } else {
-            None
-        };
+        // Scaled dot-product attention. The mask source is consulted only when
+        // the dropout will actually fire; because it is STATELESS, an eval-mode
+        // or p==0 forward consumes nothing at all — two encoders at the same
+        // forward ordinal stay in lockstep regardless of how many inference
+        // passes ran between training steps.
+        let dropout_masks: Option<&dyn AttentionDropoutMasks> =
+            self.attention_dropout_masks.as_deref();
         let (attn_output, attn_weights) = scaled_dot_product_attention_seeded(
             &q,
             &k,
@@ -316,7 +373,7 @@ impl MultiHeadAttention {
             attn_mask,
             self.dropout_p,
             self.training,
-            dropout_seed,
+            dropout_masks,
         );
 
         // Reshape back: [batch, heads, seq, head_dim] -> [batch, seq, embed]
@@ -464,6 +521,11 @@ impl std::fmt::Debug for MultiHeadAttention {
             .field("num_heads", &self.num_heads)
             .field("head_dim", &self.head_dim)
             .field("dropout_p", &self.dropout_p)
+            // Whether site 2 is hooked, not WHAT it is hooked to. A module whose
+            // attention dropout silently fell back to the ambient RNG used to be
+            // indistinguishable here from one that did not, and that is the exact
+            // failure this plan's determinism gates exist to catch.
+            .field("seeded_attention_dropout", &self.has_attention_dropout_masks())
             .finish_non_exhaustive()
     }
 }
