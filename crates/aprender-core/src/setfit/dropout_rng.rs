@@ -128,11 +128,29 @@ pub enum DropoutRngError {
 
     /// `p` was below 1.0 and still produced a non-finite inverted-dropout scale.
     ///
-    /// The case a bare `p >= 1.0` check misses. `p = 1.0 - 1e-40` rounds to
-    /// `1.0` in `f32` arithmetic on the `1.0 - p` subtraction, so the scale
-    /// `1/(1-p)` is `+inf` and every KEPT element becomes `inf` — a silent
-    /// all-NaN forward pass one multiplication later. Validation therefore
-    /// rejects on the computed SCALE, not only on the rate.
+    /// # This guard is UNREACHABLE for `f32`, and that is a measurement
+    ///
+    /// The plan this module implements asked for a rate check that rejects on the
+    /// computed SCALE rather than only on `p >= 1.0`, naming `p = 1.0 - 1e-40` as
+    /// the value a bare rate check would miss. **The named mechanism does not
+    /// hold, and it was measured rather than argued** (CLAUDE.md verification
+    /// discipline 2 and 6):
+    ///
+    /// * `1e-40` is subnormal in `binary32` (`9.9999461e-41`), and
+    ///   `1.0 - 1e-40` evaluates to **exactly `1.0`** — in `f64` as well as `f32`.
+    ///   So that value never reaches this clause; `p >= 1.0` catches it.
+    /// * The largest `f32` strictly below 1.0 is `0x3F7F_FFFF` = `0.99999994`.
+    ///   For it, `1.0 - p` is exactly `2^-24` and the scale is exactly `2^24`
+    ///   (`16777216`) — finite. Since `1.0 - p` is monotone in `p`, that is the
+    ///   worst case, so **no finite `f32` in `[0, 1)` produces a non-finite
+    ///   scale**. Pinned by `dropout_rng_rate_scale_guard_is_unreachable_for_f32`.
+    ///
+    /// It is retained anyway, deliberately: it costs one comparison, it is the
+    /// literal statement of the T-3-07 mitigation, and it stops being vacuous the
+    /// moment the rate's type widens or the scale's formula changes. What it must
+    /// NOT do is imply that a `p < 1.0` case exists which it catches — a guard
+    /// believed to cover a case it cannot reach is worse than no guard, because it
+    /// buys confidence nothing paid for.
     RateScaleNotFinite {
         /// The offending rate.
         observed: f32,
@@ -280,10 +298,8 @@ fn assemble64(lanes: [u32; 4]) -> u64 {
 ///
 /// # The rule is spelled out because the obvious phrasing was ambiguous
 ///
-/// The first draft said `round(p * 2^64)`. That is underspecified twice over: it
-/// does not state the rounding mode, and `p * 2^64` as an `f64` product cannot
-/// represent most results exactly, so "round" and "truncate" disagree on a set
-/// of rates nobody would think to test. The rule here is instead:
+/// The first draft said `round(p * 2^64)`, which does not state a rounding mode.
+/// The rule here is instead:
 ///
 /// ```text
 /// threshold = clamp(floor(p * 18446744073709551616.0), 0, 2^64)   // as u128
@@ -292,6 +308,24 @@ fn assemble64(lanes: [u32; 4]) -> u64 {
 /// with `p` widened to `f64` first. Rust's `f64 -> u128` `as` cast is DEFINED
 /// (round toward zero, saturating at both ends), so this is bit-reproducible on
 /// every target — no `unsafe`, no UB, no platform-dependent intrinsic.
+///
+/// ## Where the rounding mode is actually observable (measured)
+///
+/// `p * 2^64` is an EXACT `f64` operation — multiplying by a power of two only
+/// shifts the exponent, so no bits are lost and the product is representable.
+/// The product is additionally an INTEGER whenever its magnitude is at least
+/// `2^52`, i.e. whenever `p >= 2^-12` (`0.000244140625`). Every rate this
+/// encoder uses is far above that, so at `p = 0.1` and `p = 0.5` the `.floor()`
+/// **cannot be observed at all**: `floor`, `ceil` and `round` return the same
+/// number.
+///
+/// That was not obvious and it was not assumed — replacing `.floor()` with
+/// `.ceil()` left the entire suite GREEN, and only then was the exactness
+/// argument worked out and a rate below `2^-12` added to the goldens
+/// (`p = 1e-5`, where the product is `184467440737095.53` and the two modes
+/// genuinely differ). Stating the mode therefore remains necessary — small rates
+/// are reachable, e.g. in an ablation — but the interesting fact is that for the
+/// production rates the threshold is EXACT, with no rounding decision at all.
 ///
 /// # Why `u128` and not `u64`
 ///
@@ -318,9 +352,10 @@ pub fn keep_threshold(p: f64) -> u128 {
 ///
 /// Rejects, with the offending value named, when any of these holds:
 /// `!p.is_finite()`, `p < 0.0`, `p >= 1.0`, or the computed `f32` scale is not
-/// finite. The last clause is not redundant: `p = 1.0 - 1e-40` passes `p < 1.0`
-/// (it is a perfectly ordinary `f32` strictly below one) and still yields an
-/// infinite scale, because `1.0 - p` underflows to `0.0` in `f32`.
+/// finite. The fourth clause is a deliberately-retained belt to the third's
+/// braces and, for `f32`, is provably unreachable — see
+/// [`DropoutRngError::RateScaleNotFinite`], which records the measurement instead
+/// of the plausible-but-false story it replaced.
 ///
 /// Kept elements are multiplied by the returned scale, matching
 /// [`crate::nn::Dropout`]'s inverted-dropout semantics exactly, so switching a
@@ -556,5 +591,506 @@ impl SiteDropout {
 impl AttentionDropoutMasks for SiteDropout {
     fn attention_dropout_mask(&self, len: usize) -> Vec<f32> {
         self.mask(len)
+    }
+}
+
+#[cfg(test)]
+mod dropout_rng_tests {
+    use super::{
+        assemble64, checked_forward_ordinal, derive_key, draw, forward_ordinal, keep_threshold,
+        validate_rate, DropoutRngError, SiteDropout,
+    };
+    use crate::autograd::Tensor;
+
+    /// The site the goldens below are pinned on.
+    const GOLDEN_SITE: &str = "embeddings.dropout";
+    const GOLDEN_SEED: u64 = 13;
+
+    // -----------------------------------------------------------------------
+    // Goldens
+    //
+    // DERIVATION (recorded so a future re-baseline is reviewable rather than
+    // invisible). Every constant in this block was produced by an INDEPENDENT
+    // Python implementation written from this module's frozen-encoding table and
+    // the Philox 4x32-10 definition in Salmon et al. (2011), NOT by running the
+    // Rust code under test and blessing its output:
+    //
+    // ```python
+    // import hashlib, math, struct
+    // TAG = b"apr-setfit-dropout-v1\x00"
+    // M0, M1, W0, W1, MASK32 = 0xD2511F53, 0xCD9E8D57, 0x9E3779B9, 0xBB67AE85, 0xFFFFFFFF
+    //
+    // def derive_key(seed, site):
+    //     d = hashlib.sha256(TAG + struct.pack('<Q', seed) + site.encode()).digest()
+    //     return [struct.unpack('<I', d[0:4])[0], struct.unpack('<I', d[4:8])[0]]
+    //
+    // def rnd(c, k):
+    //     p0, p1 = M0 * c[0], M1 * c[2]
+    //     return [((p1 >> 32) & MASK32) ^ c[1] ^ k[0], p1 & MASK32,
+    //             ((p0 >> 32) & MASK32) ^ c[3] ^ k[1], p0 & MASK32]
+    //
+    // def philox(c, k):
+    //     c, k = list(c), list(k)
+    //     for r in range(10):
+    //         c = rnd(c, k)
+    //         if r < 9:
+    //             k = [(k[0] + W0) & MASK32, (k[1] + W1) & MASK32]
+    //     return c
+    //
+    // def draw(k, ordinal, element):
+    //     return philox([element & MASK32, (element >> 32) & MASK32, ordinal, 0], k)
+    //
+    // assemble64 = lambda l: ((l[1] << 32) | l[0]) & 0xFFFFFFFFFFFFFFFF
+    // keep_threshold = lambda p: min(max(math.floor(p * 18446744073709551616.0), 0), 1 << 64)
+    // ```
+    //
+    // CROSS-CHECK, independent of that script: `shasum -a 256` over the literal
+    // bytes `apr-setfit-dropout-v1\0` ‖ `0d 00 00 00 00 00 00 00` ‖
+    // `embeddings.dropout` yields
+    // `32f3baa5 f961657e af38b482 d6c503aa 1df69d97 83cca03e 544bc1cd a5c2ee59`.
+    // Reading its first two 4-byte windows LITTLE-ENDIAN gives exactly
+    // `KEY_13_EMBEDDINGS` below — so the key encoding is pinned by two
+    // derivations that share no code.
+    //
+    // If any of this goes red, an endianness, truncation, counter-layout,
+    // lane-assembly or threshold decision changed. That is a versioned contract
+    // change, never a re-blessing.
+    // -----------------------------------------------------------------------
+
+    const KEY_13_EMBEDDINGS: [u32; 2] = [0xa5ba_f332, 0x7e65_61f9];
+    const KEY_13_LAYER0_ATTN: [u32; 2] = [0xd0cf_7225, 0x1ade_02c9];
+    const KEY_14_EMBEDDINGS: [u32; 2] = [0x3a40_a784, 0x1322_f43f];
+
+    const BLOCK_ORD0_ELEM0: [u32; 4] = [3_836_206_948, 4_227_518_855, 1_470_901_809, 3_372_378_841];
+    const ASSEMBLED_ORD0_ELEM0: u64 = 18_157_055_229_284_573_028;
+    const BLOCK_ORD7_ELEM3: [u32; 4] = [2_242_403_448, 2_398_921_103, 4_169_238_919, 3_718_170_778];
+    /// Exercises the HIGH element word AND a non-zero ordinal — the two counter
+    /// lanes a naive implementation drops.
+    const BLOCK_ORD1_HIGH_ELEM: [u32; 4] =
+        [1_286_292_542, 2_418_118_001, 4_129_126_676, 3_075_353_215];
+
+    // `math.floor(p * 2**64)` for each rate. Note that 0.1 as an `f64` LITERAL and
+    // `f64::from(0.1_f32)` are DIFFERENT numbers and therefore different
+    // thresholds; both are pinned, because the encoder's `DROPOUT_P` is an `f32`
+    // and the widening is part of the derivation rather than an accident.
+    const THRESHOLD_P0: u128 = 0;
+    const THRESHOLD_P0_1_F64: u128 = 1_844_674_407_370_955_264;
+    const THRESHOLD_P0_5: u128 = 9_223_372_036_854_775_808;
+    const THRESHOLD_DROPOUT_P: u128 = 1_844_674_434_858_745_856;
+    const THRESHOLD_P1: u128 = 1_u128 << 64;
+    /// `math.floor(1e-5 * 2**64)` — the ONLY golden here that can see the
+    /// rounding mode. `1e-5 * 2^64 = 184467440737095.53`, so `floor` and `ceil`
+    /// differ by one; at every production rate the product is an exact integer
+    /// and the mode is unobservable. Added after a `.floor()` -> `.ceil()`
+    /// mutation left the whole suite green.
+    const THRESHOLD_P1E_5: u128 = 184_467_440_737_095;
+
+    fn site(p: f32) -> SiteDropout {
+        SiteDropout::new(GOLDEN_SEED, GOLDEN_SITE, p).expect("test rates are valid")
+    }
+
+    // -----------------------------------------------------------------------
+    // Byte encoding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dropout_rng_byte_encoding_golden_is_frozen() {
+        assert_eq!(
+            derive_key(GOLDEN_SEED, GOLDEN_SITE).lanes(),
+            KEY_13_EMBEDDINGS
+        );
+        assert_eq!(
+            derive_key(GOLDEN_SEED, "encoder.layer.0.attention.self.dropout").lanes(),
+            KEY_13_LAYER0_ATTN,
+            "site separation"
+        );
+        assert_eq!(
+            derive_key(14, GOLDEN_SITE).lanes(),
+            KEY_14_EMBEDDINGS,
+            "seed separation"
+        );
+
+        let key = derive_key(GOLDEN_SEED, GOLDEN_SITE);
+        assert_eq!(draw(&key, 0, 0), BLOCK_ORD0_ELEM0, "counter layout");
+        assert_eq!(
+            draw(&key, 7, 3),
+            BLOCK_ORD7_ELEM3,
+            "ordinal + element lanes"
+        );
+        assert_eq!(
+            draw(&key, 1, 12_345_678_901),
+            BLOCK_ORD1_HIGH_ELEM,
+            "the HIGH element word must reach counter lane 1"
+        );
+
+        // Lane assembly pinned as a VALUE, not restated as
+        // `(lanes[1] << 32) | lanes[0]` — that would only re-derive the
+        // implementation and would stay green if both sides were swapped.
+        assert_eq!(assemble64(BLOCK_ORD0_ELEM0), ASSEMBLED_ORD0_ELEM0);
+    }
+
+    #[test]
+    fn dropout_rng_tag_is_this_modules_own_and_not_phase_twos() {
+        // A cross-phase domain collision is a silent seed-reuse bug: the pair
+        // sampler and a dropout site would share a key wherever they share a root
+        // seed and a domain string, correlating two streams the design assumes are
+        // independent. Asserted by VALUE against the digest the contrastive tag
+        // would have produced for the same (seed, name).
+        let ours = derive_key(GOLDEN_SEED, GOLDEN_SITE).lanes();
+        let phase_two_tag_would_give = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(b"apr-contrastive-v1\0");
+            h.update(GOLDEN_SEED.to_le_bytes());
+            h.update(GOLDEN_SITE.as_bytes());
+            let d: [u8; 32] = h.finalize().into();
+            [
+                u32::from_le_bytes([d[0], d[1], d[2], d[3]]),
+                u32::from_le_bytes([d[4], d[5], d[6], d[7]]),
+            ]
+        };
+        assert_ne!(
+            ours, phase_two_tag_would_give,
+            "this module derived the SAME key Phase 2's tag would — the domain tag \
+             is not separating the phases"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Threshold
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dropout_rng_threshold_goldens_are_frozen() {
+        assert_eq!(keep_threshold(0.0), THRESHOLD_P0);
+        assert_eq!(keep_threshold(0.1), THRESHOLD_P0_1_F64);
+        assert_eq!(keep_threshold(0.5), THRESHOLD_P0_5);
+        assert_eq!(keep_threshold(f64::from(0.1_f32)), THRESHOLD_DROPOUT_P);
+        assert_ne!(
+            THRESHOLD_P0_1_F64, THRESHOLD_DROPOUT_P,
+            "the f32 and f64 spellings of 0.1 must NOT collapse to one threshold — \
+             if they do, the widening step was silently dropped"
+        );
+
+        // The rounding MODE, which none of the rates above can see: `p * 2^64` is
+        // an exact exponent shift and is integral for every `p >= 2^-12`. This is
+        // the one golden that distinguishes floor from ceil, and it exists
+        // because a `.floor()` -> `.ceil()` mutation was measured to leave the
+        // rest of this suite green.
+        assert_eq!(keep_threshold(1e-5), THRESHOLD_P1E_5);
+        assert_ne!(
+            keep_threshold(1e-5),
+            THRESHOLD_P1E_5 + 1,
+            "the threshold is rounding AWAY from zero"
+        );
+
+        // `p == 1.0` maps to exactly 2^64 (drop everything). In a u64 this value
+        // wraps to 0, which means drop NOTHING: the exact inversion of the intent,
+        // produced silently. That is why the threshold is a u128.
+        assert_eq!(keep_threshold(1.0), THRESHOLD_P1);
+        assert!(THRESHOLD_P1 > u128::from(u64::MAX));
+
+        // Total on garbage, without an `as` cast surprise.
+        assert_eq!(keep_threshold(f64::NAN), 0);
+        assert_eq!(keep_threshold(-0.5), 0);
+        assert_eq!(keep_threshold(f64::INFINITY), 0);
+    }
+
+    #[test]
+    fn dropout_rng_threshold_is_the_drop_boundary_not_the_keep_boundary() {
+        // The band that would catch an inverted comparison. p = 0.9 must drop
+        // ~90 % of a large mask; a flipped `>=` keeps ~90 % and every other test
+        // here still passes.
+        let s = SiteDropout::new(GOLDEN_SEED, GOLDEN_SITE, 0.9).expect("0.9 is valid");
+        let mask = s.mask_at(0, 20_000);
+        let dropped = mask.iter().filter(|v| **v == 0.0).count();
+        assert!(
+            (17_400..=18_600).contains(&dropped),
+            "dropped {dropped} of 20000 at p = 0.9; expected ~18000, so the keep \
+             comparison is inverted or the threshold is wrong"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Purity, replay, separation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dropout_rng_mask_element_is_a_pure_function_of_its_index() {
+        // THE property that makes worker-count independence structural. A stateful
+        // stream fails it, and no amount of "we always draw in order" discipline
+        // would make it true.
+        let s = site(0.3);
+        for (ordinal, len) in [(0_u32, 64_usize), (1, 64), (7, 256), (4_242, 33)] {
+            let sequential = s.mask_at(ordinal, len);
+            for i in [0_usize, 1, 5, len / 2, len - 1] {
+                assert_eq!(
+                    s.mask_element(ordinal, i as u64),
+                    sequential[i],
+                    "element {i} at ordinal {ordinal} differs when computed directly"
+                );
+            }
+            // Out-of-order requests give the in-order answers.
+            let shuffled: Vec<f32> = [len - 1, 0, len / 2]
+                .iter()
+                .map(|i| s.mask_element(ordinal, *i as u64))
+                .collect();
+            assert_eq!(
+                shuffled,
+                vec![sequential[len - 1], sequential[0], sequential[len / 2]]
+            );
+        }
+    }
+
+    #[test]
+    fn dropout_rng_replay_is_bitwise_and_every_coordinate_separates() {
+        let base = SiteDropout::new(7, "embeddings.dropout", 0.25).expect("valid");
+        let a = base.mask_at(4, 512);
+        let b = base.mask_at(4, 512);
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(x.to_bits(), y.to_bits(), "element {i}: replay is not exact");
+        }
+        // A SECOND, independently constructed site replays it too — otherwise
+        // "replay" would only mean "this object is idempotent".
+        let twin = SiteDropout::new(7, "embeddings.dropout", 0.25).expect("valid");
+        assert_eq!(a, twin.mask_at(4, 512));
+
+        // Changing any ONE coordinate changes the mask.
+        let other_seed = SiteDropout::new(8, "embeddings.dropout", 0.25).expect("valid");
+        let other_site =
+            SiteDropout::new(7, "encoder.layer.0.output.dropout", 0.25).expect("valid");
+        assert_ne!(a, other_seed.mask_at(4, 512), "root seed does not separate");
+        assert_ne!(a, other_site.mask_at(4, 512), "site does not separate");
+        assert_ne!(a, base.mask_at(5, 512), "forward ordinal does not separate");
+    }
+
+    // -----------------------------------------------------------------------
+    // Branch independence — the load-bearing D-15 gate
+    // -----------------------------------------------------------------------
+
+    /// Masks at `2*step` and `2*step + 1` must differ like INDEPENDENT draws.
+    ///
+    /// Not "not equal": two streams that collapsed to one would give distance 0,
+    /// but so would a hundred subtler defects give a distance that is merely
+    /// small. Two independent inverted-dropout masks of length `n` at rate `p`
+    /// disagree at each position with probability `2p(1-p)` (one kept, one
+    /// dropped, either way round), so the distance is `Binomial(n, 2p(1-p))`. The
+    /// band below is `±4 standard deviations` around that mean, computed FROM
+    /// `(n, p)` rather than from the observed value — a band read off a first run
+    /// would pass by construction.
+    ///
+    /// Both rates are exercised, because one failing (or passing) input is an
+    /// anecdote.
+    #[test]
+    fn dropout_rng_branches_of_one_step_draw_independent_masks() {
+        const LEN: usize = 512;
+        for (p, step) in [(0.1_f32, 3_u64), (0.5, 3), (0.1, 0), (0.5, 17)] {
+            let s = SiteDropout::new(GOLDEN_SEED, GOLDEN_SITE, p).expect("valid rate");
+            let branch_a = forward_ordinal(step, 0).expect("2*step fits");
+            let branch_b = forward_ordinal(step, 1).expect("2*step+1 fits");
+            assert_eq!(u64::from(branch_a), 2 * step, "branch A is 2*step");
+            assert_eq!(u64::from(branch_b), 2 * step + 1, "branch B is 2*step + 1");
+
+            let mask_a = s.mask_at(branch_a, LEN);
+            let mask_b = s.mask_at(branch_b, LEN);
+            let hamming = mask_a
+                .iter()
+                .zip(mask_b.iter())
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+
+            let q = 2.0 * f64::from(p) * (1.0 - f64::from(p));
+            let n = LEN as f64;
+            let mean = n * q;
+            let sd = (n * q * (1.0 - q)).sqrt();
+            let lo = (mean - 4.0 * sd).max(1.0);
+            let hi = mean + 4.0 * sd;
+            assert!(
+                (lo..=hi).contains(&(hamming as f64)),
+                "p = {p}, step = {step}: Hamming distance {hamming} is outside \
+                 [{lo:.1}, {hi:.1}] (mean {mean:.1}, sd {sd:.2}). A distance of 0 \
+                 means the two siamese branches collapsed onto ONE stream and are \
+                 sharing a mask — D-15's whole point"
+            );
+        }
+    }
+
+    #[test]
+    fn dropout_rng_forward_ordinal_is_monotone_in_step_and_branch() {
+        let mut previous = None;
+        for step in 0_u64..8 {
+            for branch in 0_u32..2 {
+                let ordinal = forward_ordinal(step, branch).expect("small ordinals fit");
+                if let Some(prev) = previous {
+                    assert!(ordinal > prev, "2*{step}+{branch} is not monotone");
+                }
+                previous = Some(ordinal);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dropout_rng_eval_mode_is_the_identity_and_consumes_nothing() {
+        let s = site(0.5);
+        let x = Tensor::new(&[0.25_f32, -1.5, 3.0, 7.75], &[4]);
+        s.set_training(false);
+        let y = s.forward(&x);
+        for (i, (a, b)) in x.data().iter().zip(y.data().iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "element {i}: eval is not identity"
+            );
+        }
+        // "Consumes nothing" is structural here: the ordinal is a coordinate, so
+        // an eval pass cannot move it. Asserted anyway, because that IS the
+        // property `nn::Dropout`'s Mutex<StdRng> could not offer.
+        assert_eq!(s.current_forward_ordinal(), 0);
+
+        // And training mode is not the identity, or the assertion above is
+        // satisfied by a site that never drops anything.
+        s.set_training(true);
+        let z = s.forward(&x);
+        assert!(
+            x.data()
+                .iter()
+                .zip(z.data().iter())
+                .any(|(a, b)| a.to_bits() != b.to_bits()),
+            "train mode was also the identity — no element was dropped or scaled"
+        );
+    }
+
+    #[test]
+    fn dropout_rng_rate_zero_keeps_everything_unscaled() {
+        let s = site(0.0);
+        assert_eq!(s.scale(), 1.0);
+        assert_eq!(s.threshold(), 0);
+        assert!(
+            s.mask_at(0, 1_000).iter().all(|v| *v == 1.0),
+            "p = 0 dropped or rescaled an element"
+        );
+        // The forward is the identity too — at p == 0 by the early return, and it
+        // would be identical elementwise anyway.
+        let x = Tensor::new(&[1.0_f32, 2.0, 3.0], &[3]);
+        let y = s.forward(&x);
+        assert_eq!(x.data(), y.data());
+    }
+
+    // -----------------------------------------------------------------------
+    // Rate edges
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dropout_rng_rate_one_is_a_typed_error_naming_the_value() {
+        let err = validate_rate(1.0).expect_err("p = 1.0 must be rejected");
+        assert_eq!(err, DropoutRngError::RateAtOrAboveOne { observed: 1.0 });
+        assert!(err.to_string().contains('1'), "got {err}");
+        assert!(SiteDropout::new(1, "s", 1.0).is_err());
+    }
+
+    /// `p = 1.0 - 1e-40` — the value the plan named — IS rejected, and the
+    /// message names it. The MECHANISM is not the one the plan predicted, and
+    /// this test says which one it is.
+    #[test]
+    fn dropout_rng_rate_just_below_one_is_a_typed_error_naming_the_value() {
+        let p: f32 = 1.0 - 1e-40;
+        // Measured, not assumed: `1e-40` is subnormal in binary32 and the
+        // subtraction rounds straight back to 1.0 — in f64 too. So this value
+        // never reaches the scale clause; the rate clause catches it.
+        assert_eq!(p.to_bits(), 1.0_f32.to_bits(), "1.0 - 1e-40 is exactly 1.0");
+        let err = validate_rate(p).expect_err("must be rejected");
+        assert_eq!(err, DropoutRngError::RateAtOrAboveOne { observed: p });
+        let text = err.to_string();
+        assert!(
+            text.contains('1'),
+            "the message must name the value: {text}"
+        );
+    }
+
+    /// The scale guard cannot fire for any finite `f32` rate below 1.0.
+    ///
+    /// Pins the measurement that corrected the plan's stated mechanism, so nobody
+    /// later "fixes" the near-one test by asserting a variant that is unreachable.
+    #[test]
+    fn dropout_rng_rate_scale_guard_is_unreachable_for_f32() {
+        // The largest f32 strictly below 1.0.
+        let worst = f32::from_bits(0x3F7F_FFFF);
+        assert!(worst < 1.0);
+        assert_eq!(1.0 - worst, 2.0_f32.powi(-24));
+        let scale = validate_rate(worst).expect("the worst case is still valid");
+        assert_eq!(
+            scale, 16_777_216.0,
+            "1/(1-p) at the boundary is exactly 2^24"
+        );
+        assert!(scale.is_finite());
+
+        // Monotonicity does the rest: `1.0 - p` shrinks as `p` grows, so the
+        // boundary above is the largest scale any accepted rate can produce.
+        for bits in [0x3F7F_FFFEu32, 0x3F7F_FFF0, 0x3F7F_FF00, 0x3F00_0000] {
+            let p = f32::from_bits(bits);
+            let s = validate_rate(p).expect("still below one");
+            assert!(s.is_finite() && s <= 16_777_216.0, "p = {p} gave scale {s}");
+        }
+    }
+
+    #[test]
+    fn dropout_rng_rate_rejects_nan_infinity_and_negatives_by_name() {
+        // NaN is compared by PREDICATE, not by `==`: `NaN != NaN`, so an
+        // `assert_eq!` on the whole variant fails even when the code is right —
+        // and would have been "fixed" by weakening the assertion to `is_err()`,
+        // which no longer checks WHICH variant fired.
+        match validate_rate(f32::NAN).expect_err("NaN") {
+            DropoutRngError::RateNotFinite { observed } => assert!(observed.is_nan()),
+            other => panic!("NaN must be RateNotFinite, got {other}"),
+        }
+        assert_eq!(
+            validate_rate(f32::INFINITY).expect_err("inf"),
+            DropoutRngError::RateNotFinite {
+                observed: f32::INFINITY
+            }
+        );
+        let err = validate_rate(-0.25).expect_err("negative");
+        assert_eq!(err, DropoutRngError::RateNegative { observed: -0.25 });
+        assert!(err.to_string().contains("-0.25"), "got {err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Forward-ordinal overflow
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dropout_rng_forward_ordinal_overflow_is_a_typed_error_naming_the_value() {
+        // The boundary is EXCLUSIVE at u32::MAX, so the accepted set and the
+        // representable set are the same and nobody has to reason about the wrap
+        // point. An accepted wrap would silently reuse an early step's masks —
+        // the one failure of this scheme that looks perfectly reproducible.
+        let limit = u64::from(u32::MAX);
+        assert!(checked_forward_ordinal(limit - 1).is_ok());
+
+        for observed in [limit, limit + 1, u64::MAX] {
+            let err = checked_forward_ordinal(observed).expect_err("must be rejected");
+            assert_eq!(err, DropoutRngError::ForwardOrdinalOverflow { observed });
+            assert!(
+                err.to_string().contains(&observed.to_string()),
+                "the message must name the observed ordinal: {err}"
+            );
+        }
+
+        // And through the two callers that a training loop actually uses.
+        let s = site(0.1);
+        assert!(s.set_forward_ordinal(limit).is_err());
+        assert_eq!(
+            s.current_forward_ordinal(),
+            0,
+            "a rejected ordinal must leave the site where it was"
+        );
+        assert!(
+            forward_ordinal(u64::MAX / 2, 1).is_err(),
+            "2*step must be checked before it can wrap into a SMALL ordinal"
+        );
     }
 }

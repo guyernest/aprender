@@ -1031,6 +1031,95 @@ mod slice {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // 03-02 Task 2: the two ENCODER-LEVEL gates on the counter-based masks
+    //
+    // `dropout_rng`'s own tests prove the derivation. These two prove it reaches
+    // a REAL forward pass over the slice weights — a mask source can be perfect
+    // and still be wired to nothing, which is exactly the failure `dropout_sites`
+    // alone cannot see.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encoder_dropout_rng_same_forward_ordinal_replays_bitwise() {
+        autograd::clear_graph();
+        let mut enc = encoder();
+        enc.set_training(true);
+        let batch = mixed_batch();
+
+        let ordinal = crate::setfit::dropout_rng::forward_ordinal(21, 0).expect("2*21 fits u32");
+        enc.set_forward_ordinal(u64::from(ordinal))
+            .expect("ordinal fits");
+        let first = autograd::no_grad(|| enc.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+
+        // Move away and come back: a site holding hidden state would not land on
+        // the same mask, and "twice in a row is the same" would not catch it.
+        enc.set_forward_ordinal(999).expect("ordinal fits");
+        let _ = autograd::no_grad(|| enc.forward_tokens(&batch)).expect("forward");
+        enc.set_forward_ordinal(u64::from(ordinal))
+            .expect("ordinal fits");
+        let again = autograd::no_grad(|| enc.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+
+        assert_eq!(first.len(), again.len());
+        for (i, (a, b)) in first.iter().zip(again.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "element {i}: a real train-mode forward at forward ordinal {ordinal} \
+                 did not replay bitwise ({a} vs {b}) — TRN-06's two-clean-runs \
+                 guarantee is not reachable from here"
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_dropout_rng_the_two_branches_of_one_step_differ() {
+        // D-15 at the level that matters. `pair_cosine_mse(za, zb, labels)` takes
+        // TWO [B,H] matrices, so ONE training step runs TWO encoder forwards. If
+        // both branches drew the same masks the pair objective would see an
+        // artificial correlation between its two halves — and every determinism
+        // test in this file would still be green.
+        autograd::clear_graph();
+        let mut enc = encoder();
+        enc.set_training(true);
+        let batch = mixed_batch();
+        let step = 21_u64;
+
+        let a_ordinal = crate::setfit::dropout_rng::forward_ordinal(step, 0).expect("fits");
+        let b_ordinal = crate::setfit::dropout_rng::forward_ordinal(step, 1).expect("fits");
+        assert_eq!(u64::from(a_ordinal) + 1, u64::from(b_ordinal));
+
+        enc.set_forward_ordinal(u64::from(a_ordinal)).expect("fits");
+        let branch_a = autograd::no_grad(|| enc.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+        enc.set_forward_ordinal(u64::from(b_ordinal)).expect("fits");
+        let branch_b = autograd::no_grad(|| enc.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+
+        let differing = branch_a
+            .iter()
+            .zip(branch_b.iter())
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert!(
+            differing * 2 > branch_a.len(),
+            "only {differing} of {} activations differ between the A and B branches \
+             of step {step} — the two siamese forwards are sharing a dropout \
+             stream, so the pair objective's halves are correlated",
+            branch_a.len()
+        );
+    }
+
     #[test]
     fn encoder_mode_eval_passes_do_not_consume_the_dropout_stream() {
         // Inference between training steps must not shift the stream, or a
