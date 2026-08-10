@@ -157,7 +157,7 @@ plan's `<wave_1_concurrency>` block.)*
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 03-08-PLAN.md — Sealed SetFitCodec seam + complete bundle + bytes-reconstruction path + ArtifactReloadedAndVerified + recorded-digest accessors (wave 5)
+- [x] 03-08-PLAN.md — Sealed SetFitCodec seam + complete bundle + bytes-reconstruction path + ArtifactReloadedAndVerified + recorded-digest accessors (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
@@ -216,6 +216,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
-| 3. Faithful Two-Stage Trainer and Head | 7/10 | In Progress|  |
+| 3. Faithful Two-Stage Trainer and Head | 8/10 | In Progress|  |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
