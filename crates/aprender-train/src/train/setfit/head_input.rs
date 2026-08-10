@@ -24,8 +24,13 @@
 //! OBSERVED while they run rather than described afterwards: [`EncodeWitness`] records the
 //! encoder's own `training()` flag sampled inside every window, the `requires_grad_enabled()`
 //! flag of every detached embedding tensor, and the autograd tape length immediately before
-//! the first encode and immediately after the last. A test compares the tape lengths and,
-//! independently, the gradient of every trainable parameter across the call.
+//! the first encode and immediately after the last.
+//!
+//! The witness is then CHECKED, on the shipped path, before the input is returned. An
+//! observation nothing acts on is a comment with a struct around it, and it would leave the
+//! reproducibility of the head's embeddings resting on a test that a future encoder change
+//! could quietly stop covering. A test additionally compares the tape length and the gradient
+//! of every trainable parameter across the whole call.
 //!
 //! # There is no multiplicity-shaped input here
 //!
@@ -61,6 +66,33 @@ pub(crate) struct EncodeWitness {
     pub(crate) tape_before: usize,
     /// Autograd tape length immediately after the last encode.
     pub(crate) tape_after: usize,
+}
+
+impl EncodeWitness {
+    /// Refuse the input unless all three mechanisms actually held.
+    ///
+    /// The witness is CHECKED on the shipped path, not merely recorded for a test to look at.
+    /// An observation nothing acts on is a comment with a struct around it: if a future
+    /// encoder change starts recording under `no_grad`, or a mode flip is added above the
+    /// encode, the head's input silently stops being reproducible and every provenance claim
+    /// built on it becomes false. This makes that a typed refusal instead.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitTrainError::HeadEncodeNotIsolated`], naming which of the three failed.
+    fn require_isolated(&self) -> Result<(), SetFitTrainError> {
+        if self.training_observed
+            || self.requires_grad_observed
+            || self.tape_after != self.tape_before
+        {
+            return Err(SetFitTrainError::HeadEncodeNotIsolated {
+                training_observed: self.training_observed,
+                requires_grad_observed: self.requires_grad_observed,
+                tape_growth: self.tape_after.saturating_sub(self.tape_before),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// The head's fitting input: one embedding row per unique selected row, in selection order.
@@ -150,7 +182,7 @@ pub(crate) fn head_dataset(
     encoder.set_training(false);
     let encoded = encode_once(encoder, &rows, batch)?;
 
-    Ok(HeadDataset {
+    let built = HeadDataset {
         n: encoded.embeddings.len(),
         embeddings: encoded.embeddings,
         class_indices,
@@ -158,7 +190,11 @@ pub(crate) fn head_dataset(
         encode_ledger: encoded.encode_ledger,
         encode_call_count: encoded.encode_call_count,
         witness: encoded.witness,
-    })
+    };
+    // Read back through the accessor the tests read, so the gate and the assertions are
+    // looking at the same value rather than at two copies of it.
+    built.witness().require_isolated()?;
+    Ok(built)
 }
 
 /// The encode's outputs and the observations taken while it ran.
@@ -643,6 +679,38 @@ mod tests {
                 "a selection whose ids name no row must fail closed; a silent skip is exactly \
                  the omission the ledger exists to catch. Got {other:?}",
             ),
+        }
+    }
+
+    /// The witness GATE fires on each of the three defects, and only on those.
+    ///
+    /// The shipped encode cannot produce any of them, so the gate would otherwise only ever
+    /// be observed passing — which is the same "never seen red" problem the in-band negative
+    /// discipline exists for. The case table is run both ways.
+    #[test]
+    fn head_input_the_encode_witness_refuses_a_non_isolated_encode() {
+        let clean = EncodeWitness {
+            training_observed: false,
+            requires_grad_observed: false,
+            tape_before: 7,
+            tape_after: 7,
+        };
+        assert!(clean.require_isolated().is_ok(), "an isolated encode must be accepted");
+
+        let cases = [
+            ("training mode", EncodeWitness { training_observed: true, ..clean.clone() }),
+            ("live gradients", EncodeWitness { requires_grad_observed: true, ..clean.clone() }),
+            ("tape growth", EncodeWitness { tape_after: 9, ..clean.clone() }),
+        ];
+        for (name, witness) in cases {
+            match witness.require_isolated() {
+                Err(SetFitTrainError::HeadEncodeNotIsolated { tape_growth, .. }) => {
+                    if name == "tape growth" {
+                        assert_eq!(tape_growth, 2, "the refusal must report the growth");
+                    }
+                }
+                other => panic!("`{name}` must be refused, got {other:?}"),
+            }
         }
     }
 

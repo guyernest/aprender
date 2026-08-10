@@ -52,6 +52,13 @@ pub mod tune;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
+/// The in-band pair-weighted fitter TRN-05's structural claim is measured against.
+///
+/// `#[cfg(test)]`: a pair-weighted head fitter must not be reachable from a shipped build by
+/// any door, including a `#[doc(hidden)]` one.
+#[cfg(test)]
+mod negative;
+
 use core::fmt;
 use core::marker::PhantomData;
 
@@ -608,6 +615,21 @@ pub enum SetFitTrainError {
     /// optimizer ran out of budget" from "the arithmetic went non-finite" without matching on
     /// message text.
     HeadFit(HeadFitError),
+    /// The head's encode did not run isolated from training mode and the autograd graph.
+    ///
+    /// Unreachable while `head_dataset` sets eval mode, wraps the encode in `no_grad` and
+    /// detaches every result — which is exactly why it is a CHECK rather than a comment. The
+    /// three mechanisms are observed while they run and refused if any is absent, so a future
+    /// encoder change that starts recording under `no_grad` fails closed instead of silently
+    /// making the head's input irreproducible (T-3-24).
+    HeadEncodeNotIsolated {
+        /// The encoder reported training mode inside an encode window.
+        training_observed: bool,
+        /// A stored embedding tensor still required gradients after `detach`.
+        requires_grad_observed: bool,
+        /// Operations the encode appended to the autograd tape.
+        tape_growth: usize,
+    },
     /// The head's encode window size was zero.
     ///
     /// `ResolvedSetFitConfig` cannot carry a zero batch size, so this is unreachable from the
@@ -760,6 +782,19 @@ impl fmt::Display for SetFitTrainError {
                 "the multiclass head refused the fit: {inner}; a head that does not converge \
                  is an error rather than a warning, so no coefficients were produced \
                  (contract setfit-train-lifecycle-v1, requirement TRN-04)",
+            ),
+            Self::HeadEncodeNotIsolated {
+                training_observed,
+                requires_grad_observed,
+                tape_growth,
+            } => write!(
+                f,
+                "the head's encode did not run isolated (training mode observed: \
+                 {training_observed}; embeddings still requiring grad: \
+                 {requires_grad_observed}; autograd tape grew by {tape_growth} operations), so \
+                 its embeddings are not reproducible and the head fitted on them could not be \
+                 replayed \
+                 (contract setfit-train-lifecycle-v1, requirement TRN-05)",
             ),
             Self::HeadEncodeBatchSizeZero => write!(
                 f,
