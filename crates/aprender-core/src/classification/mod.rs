@@ -747,11 +747,9 @@ mod linear_svm;
 pub use linear_svm::*;
 mod svc_rbf;
 pub use svc_rbf::{Kernel, MultiClassSVC, SVCRbf};
-mod sets;
 pub mod multinomial;
-pub use multinomial::{
-    HeadFitError, HeadFitReport, HeadInputError, MultinomialLogisticRegression, Regularization,
-};
+pub use multinomial::*;
+mod sets;
 #[cfg(test)]
 mod svc_rbf_sklearn_fixture;
 

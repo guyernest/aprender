@@ -3,9 +3,9 @@
 //! This is a **general, dataset-agnostic** classification capability. SetFit is its
 //! first consumer, not its owner (phase-3 decision D-01). The binary
 //! [`LogisticRegression`](super::LogisticRegression) that lives alongside it is
-//! deliberately left untouched: it is binary-only, plain gradient descent, and
-//! returns `Result<(), String>` where this head is required to fail with a *typed*
-//! error.
+//! deliberately left untouched: it is binary-only, plain gradient descent, and reports
+//! failure as an untyped string where this head is required to fail with a *typed*
+//! error that a caller can branch on.
 //!
 //! # Objective
 //!
@@ -239,10 +239,9 @@ impl fmt::Display for HeadInputError {
             Self::TooFewClasses { k } => {
                 write!(f, "n_classes = {k}, but a multinomial head requires K >= 2")
             }
-            Self::LabelCountMismatch { labels, k } => write!(
-                f,
-                "ordered_labels has {labels} entries but n_classes = {k}"
-            ),
+            Self::LabelCountMismatch { labels, k } => {
+                write!(f, "ordered_labels has {labels} entries but n_classes = {k}")
+            }
             Self::EmptyLabel { index } => {
                 write!(f, "ordered_labels[{index}] is the empty string")
             }
@@ -258,10 +257,7 @@ impl fmt::Display for HeadInputError {
             Self::RowCountMismatch {
                 rows,
                 class_indices,
-            } => write!(
-                f,
-                "{rows} feature rows but {class_indices} class indices"
-            ),
+            } => write!(f, "{rows} feature rows but {class_indices} class indices"),
             Self::ZeroFeatureDimension => write!(f, "the feature dimension is 0"),
             Self::RaggedRow {
                 row,
@@ -277,10 +273,9 @@ impl fmt::Display for HeadInputError {
             Self::InfiniteFeature { row, col, value } => {
                 write!(f, "features[{row}][{col}] is {value} (not finite)")
             }
-            Self::LabelIndexOutOfRange { row, index, k } => write!(
-                f,
-                "class_indices[{row}] = {index}, not in 0..{k}"
-            ),
+            Self::LabelIndexOutOfRange { row, index, k } => {
+                write!(f, "class_indices[{row}] = {index}, not in 0..{k}")
+            }
             Self::UnrepresentedClass { class } => write!(
                 f,
                 "class {class} has no rows; every class in 0..K must be represented"
@@ -531,21 +526,76 @@ impl SoftmaxNllProblem<'_> {
     /// `J(W, b) = (1/n) * sum_i NLL_i + lambda * ||W||_F^2` (intercept unpenalized).
     ///
     /// Contract: `contracts/multinomial-head-v1.yaml`, equation `softmax_nll_objective`.
-    #[provable_contracts_macros::contract("multinomial-head-v1", equation = "softmax_nll_objective")]
+    #[provable_contracts_macros::contract(
+        "multinomial-head-v1",
+        equation = "softmax_nll_objective"
+    )]
     pub(crate) fn objective(&self, x: &Vector<f64>) -> f64 {
-        // RED PHASE STUB — the GREEN commit implements this.
-        let _ = x;
-        0.0
+        let k = self.n_classes;
+        let n = self.features.len();
+        let mut logits = vec![0.0_f64; k];
+        let mut nll = 0.0_f64;
+        for i in 0..n {
+            self.logits_for_row(x, i, &mut logits);
+            // -log p_{i, y_i} = logsumexp(z_i) - z_{i, y_i}
+            nll += log_sum_exp(&logits) - logits[self.class_indices[i]];
+        }
+        // The penalty covers the W block ONLY: the intercept block starts at
+        // `intercept_offset()` and is deliberately excluded.
+        let mut penalty = 0.0_f64;
+        for p in 0..self.intercept_offset() {
+            penalty += x[p] * x[p];
+        }
+        nll / n as f64 + self.lambda * penalty
     }
 
     /// Analytic gradient of [`Self::objective`].
     ///
+    /// ```text
+    /// dJ/dW[k][j] = (1/n) * sum_i (p_{i,k} - [k == y_i]) * x_i[j]  +  2*lambda*W[k][j]
+    /// dJ/db[k]    = (1/n) * sum_i (p_{i,k} - [k == y_i])
+    /// ```
+    ///
+    /// The penalty contributes `2*lambda*W` to the weight block and **exactly 0** to
+    /// the intercept block. Validated against central differences in
+    /// `tests_multinomial_contract.rs`, not merely against a converged reference
+    /// optimum — a subtly wrong gradient can still reach the right optimum on some
+    /// configurations.
+    ///
     /// Contract: `contracts/multinomial-head-v1.yaml`, equation `analytic_gradient`.
     #[provable_contracts_macros::contract("multinomial-head-v1", equation = "analytic_gradient")]
     pub(crate) fn gradient(&self, x: &Vector<f64>) -> Vector<f64> {
-        // RED PHASE STUB — the GREEN commit implements this.
-        let _ = x;
-        Vector::from_vec(vec![0.0; self.n_params()])
+        let k = self.n_classes;
+        let d = self.n_features;
+        let n = self.features.len();
+        let off = self.intercept_offset();
+        let inv_n = 1.0 / n as f64;
+
+        let mut g = vec![0.0_f64; self.n_params()];
+        let mut logits = vec![0.0_f64; k];
+        let mut probs = vec![0.0_f64; k];
+
+        for i in 0..n {
+            self.logits_for_row(x, i, &mut logits);
+            softmax_into(&logits, &mut probs);
+            let y_i = self.class_indices[i];
+            let row = &self.features[i];
+            for c in 0..k {
+                let indicator = if c == y_i { 1.0 } else { 0.0 };
+                let residual = (probs[c] - indicator) * inv_n;
+                for j in 0..d {
+                    g[c * d + j] += residual * f64::from(row[j]);
+                }
+                g[off + c] += residual;
+            }
+        }
+
+        // Penalty: 2*lambda*W on the weight block, nothing on the intercept block.
+        for p in 0..off {
+            g[p] += 2.0 * self.lambda * x[p];
+        }
+
+        Vector::from_vec(g)
     }
 }
 
@@ -570,17 +620,112 @@ fn validate_fit_inputs(
     ordered_labels: &[String],
     regularization: Regularization,
 ) -> Result<ValidatedFit, HeadInputError> {
-    // RED PHASE STUB — the GREEN commit implements this.
-    let _ = (
-        n_classes,
-        features,
-        class_indices,
-        ordered_labels,
-        regularization,
-    );
+    // --- label set ------------------------------------------------------
+    if n_classes < 2 {
+        return Err(HeadInputError::TooFewClasses { k: n_classes });
+    }
+    if ordered_labels.len() != n_classes {
+        return Err(HeadInputError::LabelCountMismatch {
+            labels: ordered_labels.len(),
+            k: n_classes,
+        });
+    }
+    for (index, label) in ordered_labels.iter().enumerate() {
+        if label.is_empty() {
+            return Err(HeadInputError::EmptyLabel { index });
+        }
+    }
+    for first in 0..ordered_labels.len() {
+        for second in (first + 1)..ordered_labels.len() {
+            if ordered_labels[first] == ordered_labels[second] {
+                return Err(HeadInputError::DuplicateLabel {
+                    first,
+                    second,
+                    label: ordered_labels[first].clone(),
+                });
+            }
+        }
+    }
+
+    // --- shape ----------------------------------------------------------
+    if features.is_empty() {
+        return Err(HeadInputError::EmptyDataset);
+    }
+    if features.len() != class_indices.len() {
+        return Err(HeadInputError::RowCountMismatch {
+            rows: features.len(),
+            class_indices: class_indices.len(),
+        });
+    }
+    let n_features = features[0].len();
+    if n_features == 0 {
+        return Err(HeadInputError::ZeroFeatureDimension);
+    }
+    for (row, values) in features.iter().enumerate() {
+        if values.len() != n_features {
+            return Err(HeadInputError::RaggedRow {
+                row,
+                expected: n_features,
+                found: values.len(),
+            });
+        }
+    }
+
+    // --- feature values -------------------------------------------------
+    for (row, values) in features.iter().enumerate() {
+        for (col, &v) in values.iter().enumerate() {
+            if v.is_nan() {
+                return Err(HeadInputError::NanFeature { row, col });
+            }
+            if !v.is_finite() {
+                return Err(HeadInputError::InfiniteFeature { row, col, value: v });
+            }
+        }
+    }
+
+    // --- class indices --------------------------------------------------
+    let mut represented = vec![false; n_classes];
+    for (row, &index) in class_indices.iter().enumerate() {
+        if index >= n_classes {
+            return Err(HeadInputError::LabelIndexOutOfRange {
+                row,
+                index,
+                k: n_classes,
+            });
+        }
+        represented[index] = true;
+    }
+    for (class, seen) in represented.iter().enumerate() {
+        if !seen {
+            return Err(HeadInputError::UnrepresentedClass { class });
+        }
+    }
+
+    // --- regularization -------------------------------------------------
+    // Finiteness is checked FIRST in both arms: `NaN < 0.0` and `NaN <= 0.0` are both
+    // false, so a NaN would otherwise slip past the sign checks.
+    match regularization {
+        Regularization::Lambda(lambda) => {
+            if !lambda.is_finite() {
+                return Err(HeadInputError::NonFiniteLambda { lambda });
+            }
+            if lambda < 0.0 {
+                return Err(HeadInputError::NegativeLambda { lambda });
+            }
+        }
+        Regularization::SklearnEquivalentC { c } => {
+            if !c.is_finite() {
+                return Err(HeadInputError::NonFiniteC { c });
+            }
+            if c <= 0.0 {
+                return Err(HeadInputError::NonPositiveC { c });
+            }
+        }
+    }
+
     Ok(ValidatedFit {
-        n_features: 0,
-        lambda: 0.0,
+        n_features,
+        lambda: regularization.resolve_lambda(features.len()),
     })
 }
 
@@ -691,12 +836,14 @@ impl MultinomialLogisticRegression {
         self.report.as_ref()
     }
 
-    /// The `f64` weights from the solve, deliberately crate-private.
-    pub(crate) fn weights_f64(&self) -> &[f64] {
-        &self.weights_f64
-    }
-
-    /// The `f64` intercepts from the solve, deliberately crate-private.
+    /// The `f64` intercepts from the solve, deliberately kept off the public surface.
+    ///
+    /// `#[cfg(test)]` because the only reason to reach past the stored `f32` artifact
+    /// is to assert a property the `f32` downcast would mask: the intercept gauge's
+    /// 1e-9 band is tighter than `f32` resolution at O(1) magnitudes, so asserting it
+    /// on the stored `f32` values would be asserting the rounding, not the gauge.
+    /// Widen the gate if a later plan needs this outside tests.
+    #[cfg(test)]
     pub(crate) fn intercepts_f64(&self) -> &[f64] {
         &self.intercepts_f64
     }
@@ -712,22 +859,111 @@ impl MultinomialLogisticRegression {
         ordered_labels: &[String],
         regularization: Regularization,
     ) -> Result<HeadFitReport, HeadFitError> {
-        // RED PHASE STUB — the GREEN commit implements this.
-        let _ = (features, class_indices, ordered_labels, regularization);
-        Err(HeadFitError::NotConverged {
-            iterations: 0,
-            gradient_norm: 0.0,
-            tol: self.tol,
-        })
+        let validated = validate_fit_inputs(
+            self.n_classes,
+            features,
+            class_indices,
+            ordered_labels,
+            regularization,
+        )?;
+        let d = validated.n_features;
+        let problem = SoftmaxNllProblem {
+            features,
+            class_indices,
+            n_classes: self.n_classes,
+            n_features: d,
+            lambda: validated.lambda,
+        };
+
+        // x0 = zeros. Fixed, not sampled: the fit path contains no randomness of any
+        // kind, which is what makes two identical fits bitwise identical.
+        let x0 = Vector::from_vec(vec![0.0_f64; problem.n_params()]);
+        let mut solver = LbfgsF64::new(self.max_iter, self.tol, self.history_size);
+        let result = solver.minimize(
+            |x: &Vector<f64>| problem.objective(x),
+            |x: &Vector<f64>| problem.gradient(x),
+            &x0,
+        );
+
+        match result.status {
+            ConvergenceStatus::Converged => {}
+            ConvergenceStatus::MaxIterations => {
+                return Err(HeadFitError::NotConverged {
+                    iterations: result.iterations,
+                    gradient_norm: result.gradient_norm,
+                    tol: self.tol,
+                })
+            }
+            ConvergenceStatus::Stalled => {
+                return Err(HeadFitError::Stalled {
+                    iterations: result.iterations,
+                    gradient_norm: result.gradient_norm,
+                })
+            }
+            ConvergenceStatus::NumericalError => {
+                return Err(HeadFitError::NumericalError {
+                    iterations: result.iterations,
+                })
+            }
+            status @ (ConvergenceStatus::Running | ConvergenceStatus::UserTerminated) => {
+                return Err(HeadFitError::Internal { status })
+            }
+        }
+
+        let off = problem.intercept_offset();
+        let solution = result.solution.as_slice();
+        self.weights_f64 = solution[..off].to_vec();
+        self.intercepts_f64 = solution[off..].to_vec();
+        self.weights = self.weights_f64.iter().map(|&w| w as f32).collect();
+        self.intercepts = self.intercepts_f64.iter().map(|&b| b as f32).collect();
+        self.labels = ordered_labels.to_vec();
+        self.n_features = Some(d);
+
+        let report = HeadFitReport {
+            status: result.status,
+            iterations: result.iterations,
+            final_grad_norm: result.gradient_norm,
+            objective: result.objective_value,
+        };
+        self.report = Some(report.clone());
+        Ok(report)
     }
 
     /// Per-row class probabilities, computed with `f64` logit accumulation.
     ///
     /// Each returned row is finite and sums to 1 within `1e-6`.
     pub fn predict_proba(&self, features: &[Vec<f32>]) -> Result<Vec<Vec<f64>>, HeadFitError> {
-        // RED PHASE STUB — the GREEN commit implements this.
-        let _ = features;
-        Err(HeadFitError::NotFitted)
+        let d = self.n_features.ok_or(HeadFitError::NotFitted)?;
+        let k = self.n_classes;
+        let mut out = Vec::with_capacity(features.len());
+        let mut logits = vec![0.0_f64; k];
+        for (row, values) in features.iter().enumerate() {
+            if values.len() != d {
+                return Err(HeadFitError::InvalidInput(
+                    HeadInputError::FeatureDimMismatch {
+                        row,
+                        expected: d,
+                        found: values.len(),
+                    },
+                ));
+            }
+            for c in 0..k {
+                // Accumulate in f64 from the f32 store: a finite f32 row whose f32
+                // dot product would overflow still yields a finite logit here.
+                let mut z = f64::from(self.intercepts[c]);
+                for j in 0..d {
+                    z += f64::from(self.weights[c * d + j]) * f64::from(values[j]);
+                }
+                if !z.is_finite() {
+                    return Err(HeadFitError::NonFiniteLogit { row, class: c });
+                }
+                logits[c] = z;
+            }
+            let mut probs = vec![0.0_f64; k];
+            softmax_into(&logits, &mut probs);
+            out.push(probs);
+        }
+        Ok(out)
     }
 
     /// Per-row predicted class indices, breaking exact ties to the lowest index.
@@ -739,7 +975,10 @@ impl MultinomialLogisticRegression {
     /// Per-row predicted labels, breaking exact ties to the lowest label index.
     pub fn predict(&self, features: &[Vec<f32>]) -> Result<Vec<String>, HeadFitError> {
         let indices = self.predict_indices(features)?;
-        Ok(indices.into_iter().map(|i| self.labels[i].clone()).collect())
+        Ok(indices
+            .into_iter()
+            .map(|i| self.labels[i].clone())
+            .collect())
     }
 }
 
@@ -778,7 +1017,11 @@ mod tests {
             vec![1.8, 0.3],
         ];
         let class_indices = vec![0, 0, 0, 1, 1, 1, 2, 2, 2];
-        (features, class_indices, labels(&["against", "favor", "none"]))
+        (
+            features,
+            class_indices,
+            labels(&["against", "favor", "none"]),
+        )
     }
 
     /// A separable K=2 toy set — TRN-04's K >= 2 lower bound as a working fit path.
@@ -853,7 +1096,10 @@ mod tests {
         let sum: f64 = out.iter().sum();
         for (c, p) in out.iter().enumerate() {
             assert!(p.is_finite(), "probability[{c}] = {p} is not finite");
-            assert!((0.0..=1.0).contains(p), "probability[{c}] = {p} out of [0,1]");
+            assert!(
+                (0.0..=1.0).contains(p),
+                "probability[{c}] = {p} out of [0,1]"
+            );
         }
         assert!((sum - 1.0).abs() < 1e-12, "probabilities sum to {sum}");
         assert_eq!(argmax_lowest_index(&out), 1, "largest logit is index 1");
@@ -939,7 +1185,10 @@ mod tests {
         }
         let predicted = head.predict(&x).expect("predict");
         for (i, label) in predicted.iter().enumerate() {
-            assert!(l.contains(label), "row {i} predicted {label:?}, not in {l:?}");
+            assert!(
+                l.contains(label),
+                "row {i} predicted {label:?}, not in {l:?}"
+            );
             assert_eq!(label, &l[y[i]], "row {i} misclassified on separable data");
         }
     }
@@ -1138,15 +1387,21 @@ mod tests {
 
         let bits_a: Vec<u32> = a.weights().iter().map(|w| w.to_bits()).collect();
         let bits_b: Vec<u32> = b.weights().iter().map(|w| w.to_bits()).collect();
-        assert_eq!(bits_a, bits_b, "stored f32 weights are not bitwise identical");
+        assert_eq!(
+            bits_a, bits_b,
+            "stored f32 weights are not bitwise identical"
+        );
 
         let ib_a: Vec<u32> = a.intercepts().iter().map(|v| v.to_bits()).collect();
         let ib_b: Vec<u32> = b.intercepts().iter().map(|v| v.to_bits()).collect();
-        assert_eq!(ib_a, ib_b, "stored f32 intercepts are not bitwise identical");
+        assert_eq!(
+            ib_a, ib_b,
+            "stored f32 intercepts are not bitwise identical"
+        );
     }
 
     /// The report is hashable-by-construction: no wall-clock field, and its canonical
-    /// JSON is stable across two independent runs of the same fit.
+    /// JSON is byte-identical across two independent runs of the same fit.
     #[test]
     fn head_fit_report_serializes_stably_across_two_runs() {
         let (x, y, l) = k3_separable();
@@ -1165,8 +1420,72 @@ mod tests {
             ja.contains("final_grad_norm") && ja.contains("objective"),
             "report JSON missing expected fields: {ja}"
         );
+        // The discrete fields survive a round trip exactly. The f64 fields do NOT
+        // always — see `json_roundtrip_of_an_f64_is_not_bit_exact` for the measured
+        // reason, and hash the SERIALIZED BYTES rather than a reloaded report.
         let round: HeadFitReport = serde_json::from_str(&ja).expect("deserialize");
-        assert_eq!(round, ra);
+        assert_eq!(round.status, ra.status);
+        assert_eq!(round.iterations, ra.iterations);
+        assert!(
+            (round.objective - ra.objective).abs() <= f64::EPSILON * ra.objective.abs().max(1.0),
+            "objective drifted more than one ULP on round trip"
+        );
+    }
+
+    /// MEASURED, not assumed: `serde_json`'s float parser is not correctly rounded, so
+    /// `from_str(to_string(x))` can differ from `x` by one ULP.
+    ///
+    /// This head's own converged gradient norm is such a value. Concretely, on
+    /// serde_json 1.0:
+    ///
+    /// ```text
+    /// v            = 2.1531120041346774e-5   bits 0x3ef693b74d831429
+    /// to_string(v) = "0.000021531120041346774"      (ryu, positional, exact)
+    /// from_str(..) = 2.1531120041346778e-5   bits 0x3ef693b74d83142a   (+1 ULP)
+    /// ```
+    ///
+    /// The **serialization** is exact and deterministic — which is what
+    /// [`HeadFitReport`]'s stability claim rests on — but the **parse** is not. Any
+    /// reproducibility record must therefore hash the emitted bytes, never a report
+    /// that has been through a reload. Phase 3's reload-and-compare boundary is
+    /// exactly where this trap bites: a reloaded artifact compared bitwise against an
+    /// in-memory one would report a spurious mismatch.
+    #[test]
+    fn json_roundtrip_of_an_f64_is_not_bit_exact() {
+        // A value that round-trips cleanly, so the test is not merely asserting that
+        // everything is broken.
+        let clean = 0.11346603265462092_f64;
+        let s_clean = serde_json::to_string(&clean).expect("serialize");
+        let back_clean: f64 = serde_json::from_str(&s_clean).expect("deserialize");
+        assert_eq!(
+            back_clean.to_bits(),
+            clean.to_bits(),
+            "{s_clean} should round-trip"
+        );
+
+        // The value that does not.
+        let lossy = 2.1531120041346774e-5_f64;
+        assert_eq!(lossy.to_bits(), 0x3ef6_93b7_4d83_1429);
+        let s_lossy = serde_json::to_string(&lossy).expect("serialize");
+        assert_eq!(
+            s_lossy, "0.000021531120041346774",
+            "the SERIALIZED form is the stable, exact one; if this changed, re-measure \
+             the whole observation below rather than patching the constant"
+        );
+        let back_lossy: f64 = serde_json::from_str(&s_lossy).expect("deserialize");
+        assert_eq!(
+            back_lossy.to_bits(),
+            0x3ef6_93b7_4d83_142a,
+            "serde_json's float parse is no longer one ULP high for {s_lossy}. If it is \
+             now exact, the dependency was fixed: delete this test and tighten the \
+             report round-trip assertion back to a full equality."
+        );
+        assert_ne!(back_lossy.to_bits(), lossy.to_bits());
+        assert_eq!(
+            back_lossy.to_bits() - lossy.to_bits(),
+            1,
+            "the drift must be exactly one ULP"
+        );
     }
 
     #[test]
@@ -1204,7 +1523,13 @@ mod tests {
     fn invalid_k_less_than_two() {
         let (x, y, _) = k3_separable();
         let mut head = MultinomialLogisticRegression::new(1);
-        let e = expect_input_error(&mut head, &x, &y, &labels(&["only"]), Regularization::Lambda(0.0));
+        let e = expect_input_error(
+            &mut head,
+            &x,
+            &y,
+            &labels(&["only"]),
+            Regularization::Lambda(0.0),
+        );
         assert_eq!(e, HeadInputError::TooFewClasses { k: 1 });
     }
 
@@ -1415,16 +1740,9 @@ mod tests {
             &x,
             &y,
             &l,
-            Regularization::SklearnEquivalentC {
-                c: f64::INFINITY,
-            },
+            Regularization::SklearnEquivalentC { c: f64::INFINITY },
         );
-        assert_eq!(
-            e,
-            HeadInputError::NonFiniteC {
-                c: f64::INFINITY
-            }
-        );
+        assert_eq!(e, HeadInputError::NonFiniteC { c: f64::INFINITY });
     }
 
     #[test]
@@ -1478,7 +1796,9 @@ mod tests {
         }
         let wrapped = HeadFitError::from(HeadInputError::EmptyDataset);
         assert!(wrapped.to_string().starts_with("invalid input:"));
-        assert!(HeadFitError::NotFitted.to_string().contains("not been fitted"));
+        assert!(HeadFitError::NotFitted
+            .to_string()
+            .contains("not been fitted"));
         assert!(HeadFitError::NonFiniteLogit { row: 2, class: 1 }
             .to_string()
             .contains("row 2, class 1"));
@@ -1554,4 +1874,3 @@ mod tests {
         }
     }
 }
-
