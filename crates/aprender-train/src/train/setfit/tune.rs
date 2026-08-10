@@ -1229,10 +1229,17 @@ mod tests {
 
     /// The recorded snapshot accounting, and the full-encoder projection it implies.
     ///
-    /// The fixture's own figure is asserted; the production figure it scales to is stated so
-    /// Phase 5 does not discover it. 22.7 M parameters x 4 B is ~91 MB for the snapshot
-    /// ALONE, and peak tuning memory is that plus the live parameters plus AdamW's two moment
-    /// buffers — about four copies of the model.
+    /// # Peak tuning memory is FIVE copies of the trainable parameters, not four
+    ///
+    /// The live parameters, the initial snapshot, [`ParamBridge`]'s mirror, and AdamW's two
+    /// moment buffers. The bridge is the copy an earlier count missed: it exists because the
+    /// two crates have separate `Tensor` types, so it is a real cost of reusing the reference
+    /// optimizer rather than reimplementing it, and it should be named rather than absorbed
+    /// into a round number.
+    ///
+    /// For `all-MiniLM-L6-v2` at ~22.7 M trainable parameters that is ~90.8 MB per copy and
+    /// ~454 MB at peak. Stated here so Phase 5 does not discover it on a memory-constrained
+    /// host.
     #[test]
     fn tune_snapshot_memory_accounting_is_recorded() {
         let out = tune(fx::default_variant(), TuningProbes::NONE);
@@ -1242,11 +1249,11 @@ mod tests {
             elements * 4,
             "the recorded byte count must be the f32 element count",
         );
-        assert!(
-            out.snapshot_bytes > 100_000 && out.snapshot_bytes < 2_000_000,
-            "the 2-layer slice snapshot is expected in the hundreds of KB, got {} bytes",
-            out.snapshot_bytes,
-        );
+        // The exact figure for the pinned slice, so the SUMMARY's number is asserted rather
+        // than transcribed: 3 embedding tables (6208 + 4096 + 128) + embeddings LayerNorm
+        // (128) + 2 layers x 49984.
+        assert_eq!(elements, 110_528, "the pinned slice's trainable element count");
+        assert_eq!(out.snapshot_bytes, 442_112, "and its snapshot in bytes");
     }
 
     /// A non-CPU resolved device is a typed error naming the device.
