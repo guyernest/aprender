@@ -33,6 +33,8 @@
 //! marker with an impl and a placeholder evidence type would be a lie that compiles.
 
 pub mod config;
+pub mod epoch;
+pub mod reduce;
 
 use core::fmt;
 use core::marker::PhantomData;
