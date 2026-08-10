@@ -38,12 +38,14 @@
 //! a free function — that would reopen the seal through a path the source
 //! assertions do not scan.
 
+pub mod dropout_rng;
 pub mod encoder;
 pub mod error;
 pub mod import;
 pub mod loss;
 pub mod tokenizer;
 
+pub use dropout_rng::{DropoutRngError, SiteDropout};
 pub use encoder::BertSentenceEncoder;
 pub use error::SetFitError;
 pub use import::{
@@ -292,6 +294,29 @@ impl SetFitMiniLm {
     /// ENC-05 mode propagation, forwarded to the encoder.
     pub fn set_training(&mut self, training: bool) {
         self.encoder.set_training(training);
+    }
+
+    /// Point every dropout site at forward-call ordinal `forward_ordinal` (D-15).
+    ///
+    /// The ordinal is `2 * training_step + branch`, with `branch` 0 for the pair's
+    /// A sentence and 1 for its B sentence — see
+    /// [`dropout_rng::forward_ordinal`]. Two coordinates, not one, because
+    /// [`pair_cosine_mse`] takes TWO `[B,H]` matrices: a training step runs two
+    /// separate encoder forwards, and keying on the step alone would hand both
+    /// siamese branches the identical mask at every element.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitError::DropoutRng`] if the ordinal does not fit the `u32` counter
+    /// lane; every site is left at its previous ordinal in that case.
+    pub fn set_forward_ordinal(&mut self, forward_ordinal: u64) -> Result<(), SetFitError> {
+        self.encoder.set_forward_ordinal(forward_ordinal)
+    }
+
+    /// The forward-call ordinal every dropout site currently draws at.
+    #[must_use]
+    pub fn forward_ordinal(&self) -> u64 {
+        self.encoder.forward_ordinal()
     }
 
     // -----------------------------------------------------------------------

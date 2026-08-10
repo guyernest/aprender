@@ -598,6 +598,7 @@ dependencies = [
  "aprender-data",
  "aprender-profile",
  "aprender-quant",
+ "aprender-rand",
  "aprender-train",
  "aprender-zram-core",
  "argon2",

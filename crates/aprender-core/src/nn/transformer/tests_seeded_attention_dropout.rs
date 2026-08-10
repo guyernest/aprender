@@ -1,13 +1,77 @@
-//! Seeded attention-probs dropout (plan 01-06, amendment A5).
+//! Seeded attention-probs dropout (plan 01-06 amendment A5; MIGRATED by 03-02).
 //!
 //! `nn::functional::dropout(x, p, training)` takes no seed, so the dropout
 //! inside `scaled_dot_product_attention` was not reproducible. This file covers
 //! the hook that fixes that, and — just as importantly — the claim that callers
 //! who do NOT opt in are unaffected.
 //!
-//! These tests are ungated: the hook lives in `nn/`, not behind `setfit`.
+//! # What 03-02 changed here, and why it could not be left alone
+//!
+//! 01-06's hook took a `u64` SEED at construction and mixed a per-call counter
+//! into it. Plan 03-02 replaces that with an [`AttentionDropoutMasks`] source,
+//! because a construction-time seed cannot carry D-15's forward-call ordinal —
+//! the SetFit pair objective runs two encoder forwards per training step, and
+//! keying on "how many calls have happened" is not a coordinate any caller can
+//! name or replay. The three call sites that used the `u64` API therefore
+//! MIGRATE; they are not preserved verbatim, because the API they called is the
+//! thing being replaced.
+//!
+//! What the tests still assert is unchanged in substance: seeded determinism,
+//! replay equality, stream separation, and that an un-hooked caller's numerics
+//! did not move. The mask VALUES legitimately differ from 01-06's.
+//!
+//! These tests are ungated: the hook lives in `nn/`, not behind `setfit`. The
+//! mask source below is therefore a local one — `setfit::dropout_rng` is behind a
+//! feature these tests must not require, and depending on it would also make a
+//! failure here ambiguous between the hook and the derivation.
 
 use super::*;
+
+use std::sync::Arc;
+
+/// A deterministic, index-pure mask source for these ungated tests.
+///
+/// `SplitMix64` over `(seed, block, index)`, spelled out here so the file needs
+/// no RNG dependency and so a failure localizes to the HOOK rather than to
+/// whatever `setfit::dropout_rng` happens to derive. `block` stands in for the
+/// forward ordinal the SetFit encoder supplies.
+#[derive(Debug)]
+struct ProbeMasks {
+    seed: u64,
+    block: u64,
+    p: f32,
+}
+
+impl ProbeMasks {
+    fn new(seed: u64, block: u64, p: f32) -> Arc<Self> {
+        Arc::new(Self { seed, block, p })
+    }
+
+    fn bits(&self, i: u64) -> u64 {
+        let mut z = self.seed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ self.block.wrapping_mul(0xbf58_476d_1ce4_e5b9)
+            ^ i.wrapping_mul(0x94d0_49bb_1331_11eb);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+}
+
+impl AttentionDropoutMasks for ProbeMasks {
+    fn attention_dropout_mask(&self, len: usize) -> Vec<f32> {
+        let threshold = (f64::from(self.p) * 18_446_744_073_709_551_616.0_f64) as u128;
+        let scale = 1.0 / (1.0 - self.p);
+        (0..len)
+            .map(|i| {
+                if u128::from(self.bits(i as u64)) >= threshold {
+                    scale
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+}
 
 /// Deterministic inputs, so a failure is about the hook and not about which
 /// random tensor happened to be drawn.
@@ -28,10 +92,15 @@ fn qkv(batch: usize, seq: usize, embed: usize) -> Tensor {
 /// and measured the weight initialiser, not the dropout hook. Installing fixed
 /// weights makes the seed the only thing that varies.
 fn deterministic_mha(dropout_p: f32, seed: Option<u64>) -> MultiHeadAttention {
+    deterministic_mha_at(dropout_p, seed, 0)
+}
+
+/// [`deterministic_mha`] at an explicit forward-ordinal `block` (D-15).
+fn deterministic_mha_at(dropout_p: f32, seed: Option<u64>, block: u64) -> MultiHeadAttention {
     const EMBED: usize = 16;
     let mut mha = MultiHeadAttention::new(EMBED, 2).with_dropout(dropout_p);
     if let Some(seed) = seed {
-        mha = mha.with_attention_dropout_seed(seed);
+        mha = mha.with_attention_dropout_masks(ProbeMasks::new(seed, block, dropout_p));
     }
     #[allow(clippy::cast_precision_loss)]
     fn weights(salt: usize) -> Tensor {
@@ -61,18 +130,18 @@ fn deterministic_mha(dropout_p: f32, seed: Option<u64>) -> MultiHeadAttention {
 #[test]
 fn mha_seeded_dropout_defaults_to_none() {
     let mha = MultiHeadAttention::new(16, 2);
-    assert_eq!(
-        mha.attention_dropout_seed(),
-        None,
-        "the hook must be opt-in; a default seed would change every existing caller"
+    assert!(
+        !mha.has_attention_dropout_masks(),
+        "the hook must be opt-in; a default mask source would change every existing caller"
     );
     assert_eq!(mha.dropout_p(), 0.0, "MultiHeadAttention::new default");
 }
 
 #[test]
 fn mha_seeded_dropout_builder_installs_the_seed() {
-    let mha = MultiHeadAttention::new(16, 2).with_attention_dropout_seed(0xabcd);
-    assert_eq!(mha.attention_dropout_seed(), Some(0xabcd));
+    let mha = MultiHeadAttention::new(16, 2)
+        .with_attention_dropout_masks(ProbeMasks::new(0xabcd, 0, 0.3));
+    assert!(mha.has_attention_dropout_masks());
 }
 
 #[test]
@@ -120,22 +189,41 @@ fn mha_seeded_dropout_different_seeds_give_different_output() {
 }
 
 #[test]
-fn mha_seeded_dropout_stream_advances_across_calls() {
-    // A seeded site that replayed one fixed mask on every forward would be
-    // reproducible and would no longer be dropout.
+fn mha_seeded_dropout_stream_advances_with_the_forward_ordinal() {
+    // MIGRATED (03-02). 01-06 asserted that two consecutive forwards on ONE
+    // module differ, because the module advanced an internal per-call counter.
+    // Under D-15 the coordinate is the caller's forward ordinal, so the honest
+    // form of "the stream advances" is: the SAME module at a DIFFERENT ordinal
+    // draws a different mask. A site that ignored the ordinal would replay one
+    // fixed mask every step — reproducible, and no longer dropout.
     let x = qkv(2, 5, 16);
-    let mha = deterministic_mha(0.3, Some(0x5eed));
-    let (first, _) = mha.forward_self(&x, None);
-    let (second, _) = mha.forward_self(&x, None);
+    let at_zero = deterministic_mha_at(0.3, Some(0x5eed), 0);
+    let at_one = deterministic_mha_at(0.3, Some(0x5eed), 1);
+    let (first, _) = at_zero.forward_self(&x, None);
+    let (second, _) = at_one.forward_self(&x, None);
     assert!(
         first
             .data()
             .iter()
             .zip(second.data().iter())
             .any(|(p, q)| p.to_bits() != q.to_bits()),
-        "two consecutive train-mode forwards gave identical output — the per-call \
-         counter is not advancing the stream"
+        "two forward ordinals gave identical output — the ordinal is not reaching \
+         the mask source"
     );
+
+    // And the other half, which 01-06 could not state at all: at the SAME
+    // ordinal the module is now REPLAY-EXACT across calls. This is the property
+    // TRN-06's bitwise two-clean-runs guarantee is built on, and an internal
+    // counter made it structurally impossible.
+    let (again, _) = at_zero.forward_self(&x, None);
+    for (i, (p, q)) in first.data().iter().zip(again.data().iter()).enumerate() {
+        assert_eq!(
+            p.to_bits(),
+            q.to_bits(),
+            "element {i}: a second forward at the same ordinal moved — the mask \
+             source is carrying hidden state"
+        );
+    }
 }
 
 #[test]
@@ -166,7 +254,7 @@ fn mha_seeded_dropout_absent_seed_leaves_the_existing_path_untouched() {
     // two forwards differ. That is the behaviour that existed before this plan
     // and it must survive it.
     let ambient = deterministic_mha(0.3, None);
-    assert_eq!(ambient.attention_dropout_seed(), None);
+    assert!(!ambient.has_attention_dropout_masks());
     let (u, _) = ambient.forward_self(&x, None);
     let (v, _) = ambient.forward_self(&x, None);
     assert!(
@@ -197,10 +285,11 @@ fn mha_seeded_dropout_is_inert_in_eval_mode() {
 
 #[test]
 fn mha_seeded_dropout_seed_is_not_a_registered_parameter() {
-    // Pitfall 7: seeds and RNG state are module state. Naming them would put
-    // non-learnable values into optimizer and freeze partitions and break the
+    // Pitfall 7: mask sources and RNG state are module state. Naming them would
+    // put non-learnable values into optimizer and freeze partitions and break the
     // ENC-05 mode-flip byte-identity proof.
-    let mha = MultiHeadAttention::new(16, 2).with_attention_dropout_seed(0x5eed);
+    let mha = MultiHeadAttention::new(16, 2)
+        .with_attention_dropout_masks(ProbeMasks::new(0x5eed, 0, 0.3));
     let names: Vec<String> = mha.named_parameters().into_iter().map(|(n, _)| n).collect();
     assert_eq!(
         names,

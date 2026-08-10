@@ -748,15 +748,27 @@ mod slice {
         let enc = encoder();
         // Derived from the DOTTED NAME, so no two sites share a mask even though
         // they share a root seed. Sharing would make the whole policy one draw.
-        let mut seeds: Vec<u64> = enc
+        //
+        // MIGRATED (03-02): 01-06 read the per-site u64 SEED off the attention
+        // module. That API is gone; the stream identity now IS the derived Philox
+        // key, so this reads the key. Strictly stronger — a seed collision and a
+        // key collision are the same defect, but the key is what the mask
+        // actually depends on, whereas the seed was one derivation removed.
+        assert!(
+            enc.layers
+                .iter()
+                .all(|l| l.attention.has_attention_dropout_masks()),
+            "every layer must have an attention-probs mask source"
+        );
+        let mut lanes: Vec<[u32; 2]> = enc
             .layers
             .iter()
-            .filter_map(|l| l.attention.attention_dropout_seed())
+            .map(|l| l.attention_probs_dropout.key().lanes())
             .collect();
-        assert_eq!(seeds.len(), enc.layers.len(), "every layer must be seeded");
-        seeds.sort_unstable();
-        seeds.dedup();
-        assert_eq!(seeds.len(), enc.layers.len(), "two layers share a stream");
+        assert_eq!(lanes.len(), enc.layers.len(), "every layer must be keyed");
+        lanes.sort_unstable();
+        lanes.dedup();
+        assert_eq!(lanes.len(), enc.layers.len(), "two layers share a stream");
     }
 
     /// Read the training flag off every dropout-bearing module DIRECTLY.
@@ -973,8 +985,12 @@ mod slice {
 
     #[test]
     fn encoder_mode_the_seeded_stream_advances_across_forward_passes() {
-        // A seeded site that replayed one fixed mask every step would be
-        // reproducible and no longer dropout.
+        // MIGRATED (03-02, D-15). 01-06's seeded sites advanced an INTERNAL
+        // per-call counter, so two consecutive passes differed by construction.
+        // Under D-15 the coordinate is the caller-supplied forward ordinal
+        // `2*step + branch`, so "the stream advances" now means: advancing the
+        // ordinal changes the mask. A site that ignored the ordinal would replay
+        // one fixed mask every step — reproducible, and no longer dropout.
         autograd::clear_graph();
         let mut enc = encoder();
         enc.set_training(true);
@@ -983,6 +999,7 @@ mod slice {
             .expect("forward")
             .data()
             .to_vec();
+        enc.set_forward_ordinal(1).expect("ordinal 1 fits u32");
         let second = autograd::no_grad(|| enc.forward_tokens(&batch))
             .expect("forward")
             .data()
@@ -992,9 +1009,26 @@ mod slice {
                 .iter()
                 .zip(second.iter())
                 .any(|(a, b)| a.to_bits() != b.to_bits()),
-            "two consecutive train-mode passes gave identical output — the dropout \
-             stream is not advancing, so the same mask is replayed every step"
+            "advancing the forward ordinal changed nothing — the ordinal is not \
+             reaching the dropout sites, so the same mask is replayed every step"
         );
+
+        // The half 01-06 could not state: at the SAME ordinal a repeat pass is
+        // BITWISE identical. That is TRN-06's two-clean-runs guarantee, and an
+        // internal counter made it structurally impossible.
+        enc.set_forward_ordinal(0).expect("ordinal 0 fits u32");
+        let replayed = autograd::no_grad(|| enc.forward_tokens(&batch))
+            .expect("forward")
+            .data()
+            .to_vec();
+        for (i, (a, b)) in first.iter().zip(replayed.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "element {i}: returning to ordinal 0 did not replay the mask — a \
+                 dropout site is carrying hidden state"
+            );
+        }
     }
 
     #[test]
@@ -1037,10 +1071,15 @@ mod slice {
         // Statistics test, Rust-side only (D-16): p = 0.1 means ~10% of a large
         // tensor's elements are zeroed. Measured over 100k elements so the band
         // is not sampling noise.
-        use crate::nn::Module as _;
+        //
+        // MIGRATED (03-02): measured on the SITE THE ENCODER ACTUALLY USES.
+        // 01-06 probed `nn::Dropout::with_seed(0.1, site_seed(..))`, which after
+        // this plan is no longer on the SetFit path at all — the measurement
+        // would have been of a module the encoder never calls.
         let n = 100_000;
         let x = crate::autograd::Tensor::from_vec(vec![1.0f32; n], &[n]);
-        let d = crate::nn::Dropout::with_seed(0.1, site_seed_probe());
+        let d = super::super::dropout_rng::SiteDropout::new(SEED, "embeddings.dropout", 0.1)
+            .expect("0.1 is a valid dropout rate");
         let y = d.forward(&x);
         let dropped = y.data().iter().filter(|v| **v == 0.0).count();
         #[allow(clippy::cast_precision_loss)]
@@ -1049,9 +1088,5 @@ mod slice {
             (0.08..=0.12).contains(&rate),
             "empirical drop rate {rate} is outside [0.08, 0.12] for p = 0.1"
         );
-    }
-
-    fn site_seed_probe() -> u64 {
-        super::super::site_seed(SEED, "embeddings.dropout")
     }
 }

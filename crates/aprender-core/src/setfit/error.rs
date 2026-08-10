@@ -141,6 +141,25 @@ pub enum SetFitError {
         reason: String,
     },
 
+    /// A dropout-mask derivation rejected its coordinates (03-02, TRN-06).
+    ///
+    /// Two conditions reach here: an unusable dropout RATE at construction, and a
+    /// forward-call ORDINAL that does not fit the `u32` counter lane.
+    ///
+    /// The payload is the rendered [`super::dropout_rng::DropoutRngError`] rather
+    /// than the error itself, and that is a deliberate trade. `SetFitError`
+    /// derives `Eq`, which the whole crate's rejection tests compare on;
+    /// `DropoutRngError` carries `f32` payloads and therefore cannot be `Eq`.
+    /// Wrapping it directly would have forced `Eq` off `SetFitError` and rewritten
+    /// assertions across the module for one variant's benefit. The typed error is
+    /// still available UNWRAPPED at the `dropout_rng` boundary, which is where the
+    /// rate and ordinal gates are actually tested, and the rendered message keeps
+    /// naming the offending value.
+    DropoutRng {
+        /// The rendered `DropoutRngError`, naming the offending value.
+        reason: String,
+    },
+
     /// A differentiable op rejected its arguments.
     Op(OpError),
 }
@@ -148,6 +167,14 @@ pub enum SetFitError {
 impl From<OpError> for SetFitError {
     fn from(e: OpError) -> Self {
         Self::Op(e)
+    }
+}
+
+impl From<super::dropout_rng::DropoutRngError> for SetFitError {
+    fn from(e: super::dropout_rng::DropoutRngError) -> Self {
+        Self::DropoutRng {
+            reason: e.to_string(),
+        }
     }
 }
 
@@ -220,6 +247,11 @@ impl std::fmt::Display for SetFitError {
             }
             Self::FreezeGroupInvalid { reason } => {
                 write!(f, "SetFitError::FreezeGroupInvalid({reason})")
+            }
+            // Forward the dropout derivation's own diagnostic verbatim: the
+            // offending rate or ordinal is already named inside `reason`.
+            Self::DropoutRng { reason } => {
+                write!(f, "SetFitError::DropoutRng({reason})")
             }
             // Forward the op's own diagnostic verbatim (W5).
             Self::Op(e) => write!(f, "SetFitError::Op({e})"),
