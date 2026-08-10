@@ -843,7 +843,10 @@ fn tune_with_probes(
 ///
 /// `SelectedExample` carries no text (Phase 2 `select.rs`), so the strings come from the
 /// dataset's train split, matched by row id.
-fn selection_texts(dataset: &PreparedDataset<Canonical>, selection: &Selection) -> Vec<String> {
+pub(crate) fn selection_texts(
+    dataset: &PreparedDataset<Canonical>,
+    selection: &Selection,
+) -> Vec<String> {
     let by_id: BTreeMap<&str, &str> =
         dataset.train().rows().iter().map(|row| (row.id.as_str(), row.input.as_str())).collect();
     selection

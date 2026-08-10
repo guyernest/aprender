@@ -32,6 +32,7 @@
 //! `ArtifactReloadedAndVerified`). A marker without an impl is a declared contract; a
 //! marker with an impl and a placeholder evidence type would be a lie that compiles.
 
+pub mod baseline;
 pub mod config;
 pub mod epoch;
 pub mod evidence;

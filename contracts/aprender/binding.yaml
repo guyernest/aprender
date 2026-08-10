@@ -1253,8 +1253,8 @@ bindings:
   equation: linear_probe
   module_path: entrenar::train::setfit::baseline
   function: fit
-  signature: 'fn fit(self) -> Result<FrozenProbeReport, FrozenProbeError>'
-  status: not_implemented
+  signature: 'fn fit(self) -> Result<(MultinomialLogisticRegression, FrozenProbeReport), SetFitTrainError>'
+  status: implemented
   notes: 'FrozenProbeRun — a separate type that is NOT a SetFitRun state and has no conversion
     to one. Encodes the selected rows in eval mode inside autograd::no_grad with no tuning step,
     fits MultinomialLogisticRegression on the frozen embeddings, and reports kind
