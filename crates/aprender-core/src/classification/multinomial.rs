@@ -516,8 +516,15 @@ impl SoftmaxNllProblem<'_> {
     fn logits_for_row(&self, x: &Vector<f64>, row: usize, row_f64: &mut [f64], logits: &mut [f64]) {
         let d = self.n_features;
         let off = self.intercept_offset();
-        for (dst, &src) in row_f64.iter_mut().zip(self.features[row].iter()) {
-            *dst = f64::from(src);
+        // Indexed rather than zipped. A `zip` stops at the SHORTER side, so a feature row
+        // narrower than `n_features` would silently leave the previous row's values in the
+        // reused scratch and compute a logit from another example's features. Validation
+        // rejects ragged input, but a scratch buffer that reads correct while carrying stale
+        // data is the wrong shape for a "single gate" invariant to rest on: indexing panics
+        // loudly instead.
+        let features = &self.features[row];
+        for j in 0..d {
+            row_f64[j] = f64::from(features[j]);
         }
         for c in 0..self.n_classes {
             let mut z = x[off + c];
@@ -856,6 +863,15 @@ impl MultinomialLogisticRegression {
     ///
     /// Returns the [`HeadFitReport`] on convergence, or a typed [`HeadFitError`]
     /// otherwise. Non-convergence is an **error**, not a warning.
+    ///
+    /// # A failed `fit` leaves the head UNFITTED
+    ///
+    /// The fitted state is discarded on entry, before anything can fail. Otherwise a head
+    /// that fitted once and was then re-fitted with data the gate rejects would keep the
+    /// PREVIOUS fit's weights, `n_features`, labels and report — so `predict` would answer
+    /// with a model the caller believes it failed to build, and `report()` would describe a
+    /// converged run that the last call did not perform. `NotFitted` is the honest answer
+    /// after a rejected fit, and it is only reachable if the state is cleared here.
     pub fn fit(
         &mut self,
         features: &[Vec<f32>],
@@ -863,6 +879,13 @@ impl MultinomialLogisticRegression {
         ordered_labels: &[String],
         regularization: Regularization,
     ) -> Result<HeadFitReport, HeadFitError> {
+        self.n_features = None;
+        self.weights.clear();
+        self.intercepts.clear();
+        self.intercepts_f64.clear();
+        self.labels.clear();
+        self.report = None;
+
         let validated = validate_fit_inputs(
             self.n_classes,
             features,

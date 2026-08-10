@@ -474,6 +474,19 @@ impl SetFitTrainConfig {
         freeze_policy.sort_unstable();
         freeze_policy.dedup();
 
+        // Knob 7's OTHER canonicalization, and it closes a round-trip hole rather than a
+        // hashing one. `PairConfigWire` does not carry `pair_config.root_seed` — the wire
+        // form has exactly one seed field, and `TryFrom` rebuilds the `PairConfig` from the
+        // top-level `root_seed`. So a value constructed with a pair seed that DISAGREED with
+        // `root_seed` (both fields are public on `PairConfig`) would serialize, deserialize,
+        // and come back with a DIFFERENT pair-sampling stream — silently, and with the
+        // provenance record still claiming to describe the original run. Normalizing here
+        // makes construction agree with deserialization, so serialize -> deserialize is an
+        // identity for every value of this type. Knob 10 is THE root seed; every RNG domain
+        // derives from it, and there is no coherent request for a second one.
+        let mut pair_config = request.pair_config;
+        pair_config.root_seed = request.root_seed;
+
         Ok(Self {
             encoder_lr: request.encoder_lr,
             epochs: request.epochs,
@@ -481,7 +494,7 @@ impl SetFitTrainConfig {
             warmup_ratio: request.warmup_ratio,
             grad_clip_max_norm: request.grad_clip_max_norm,
             max_length: request.max_length,
-            pair_config: request.pair_config,
+            pair_config,
             freeze_policy,
             head_regularization: request.head_regularization,
             root_seed: request.root_seed,

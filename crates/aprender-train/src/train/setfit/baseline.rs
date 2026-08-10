@@ -137,7 +137,7 @@ impl FrozenProbeRun {
     ) -> Result<(MultinomialLogisticRegression, FrozenProbeReport), SetFitTrainError> {
         // The SAME text resolution the tuning loop uses, so a probe and a SetFit run encode
         // identical strings in identical order — which is what makes the two comparable at all.
-        let owned = super::tune::selection_texts(&self.dataset, &self.selection);
+        let owned = super::tune::selection_texts(&self.dataset, &self.selection)?;
         let texts: Vec<&str> = owned.iter().map(String::as_str).collect();
         let class_indices: Vec<usize> = self.selection.examples().iter().map(|e| e.label).collect();
 

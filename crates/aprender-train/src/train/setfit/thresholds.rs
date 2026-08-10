@@ -24,6 +24,7 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(test)]
 use serde::Deserialize;
 
 use super::evidence::ParameterClass;
@@ -33,6 +34,7 @@ use super::evidence::ParameterClass;
 /// `include_str!` rather than a runtime read: a test that silently skips when a file is absent
 /// is a test that proves nothing, and a path that resolves differently under `cargo test` and
 /// under the packaged crate is a defect waiting for a release.
+#[cfg(test)]
 pub(crate) const CONTRACT_YAML: &str =
     include_str!("../../../../../contracts/setfit-train-lifecycle-v1.yaml");
 
@@ -143,28 +145,33 @@ impl Thresholds {
 // ===========================================================================================
 
 /// Just enough of the contract to reach the frozen numbers.
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct ContractFile {
     equations: ContractEquations,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct ContractEquations {
     evidence_gate: EvidenceGateEquation,
     calibration_regime: CalibrationRegimeEquation,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct EvidenceGateEquation {
     frozen_thresholds: BTreeMap<String, ContractClassThreshold>,
     embedding_delta_floor_value: f64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct CalibrationRegimeEquation {
     calibrated_regimes: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct ContractClassThreshold {
     eps: Option<f64>,

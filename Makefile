@@ -1170,7 +1170,8 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/tweet-eval-stance-benchmark-v1.yaml \
              contracts/contrastive-pair-protocol-v1.yaml \
              contracts/multinomial-head-v1.yaml \
-             contracts/setfit-train-lifecycle-v1.yaml
+             contracts/setfit-train-lifecycle-v1.yaml \
+             contracts/linear-probe-classifier-v1.yaml
 
 # The two Phase 2 contracts, audited as a BLOCKING tier3 gate by
 # `contract-audit-phase2` below. Deliberately a separate, narrower list than
@@ -1314,13 +1315,30 @@ contract-audit-phase2: ## Audit Phase 2 binding coverage (BLOCKING, wired into t
 # contracts/multinomial-head-v1.yaml", naming the deleted equation; "Bound
 # equations" fell 5 -> 4. $(BINDING) was then restored and verified BYTE-IDENTICAL
 # by sha256 (dfbce939bdc9a291...) and the target re-run green at rc=0.
+#
+# THE `set +e` AROUND THE AUDIT IS LOAD-BEARING, and it is a correction to the
+# shape copied from the Phase 2 target. This Makefile sets `.SHELLFLAGS := -e -c`
+# (line 40), so a failing `$(PV_BIN) audit` inside the loop body ABORTS the whole
+# recipe before `status=$$?` on the next line can run: `unbound` never
+# accumulates, the remaining contracts are never audited, and the summarising
+# "FAIL: unbound equations remain in:" line is unreachable. Reproduced directly:
+# `bash -e -c 'for i in 1 2; do echo iter=$$i; false; status=$$?; echo st=$$status;
+# done; echo REACHED_END'` prints ONLY `iter=1` and exits 1. The gate still fails
+# closed, so this was never a false green — but it reported one contract where
+# three were asked for. `set +e` for exactly the audit call restores the
+# accumulate-then-report behaviour the loop is written for, and the status is
+# still read from `$$?` on its own line, never through a pipe (CLAUDE.md rule 1).
+# `contract-audit-phase2` above carries the same latent defect and is left for a
+# change that owns that target.
 contract-audit-phase3: ## Audit Phase 3 binding coverage (BLOCKING, wired into tier3)
 	@echo "Auditing binding coverage for the Phase 3 contracts..."
 	@unbound=""; \
 	for contract in $(PHASE3_CONTRACTS); do \
 		echo "  $$contract"; \
+		set +e; \
 		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
 		status=$$?; \
+		set -e; \
 		if [ "$$status" -ne 0 ]; then \
 			unbound="$$unbound $$contract"; \
 		fi; \

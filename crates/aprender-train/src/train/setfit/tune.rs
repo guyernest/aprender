@@ -132,6 +132,11 @@ pub(crate) struct StepObservation {
 }
 
 /// Everything stage one recorded. Record-only: no verdict, no threshold, no `Duration`.
+///
+// The recorded fields are the source plan 03-08 persists into the bundle and 03-09
+// evaluates from. They are written here and read there, so they read as dead until that
+// plan lands; drop this allow once 03-08 consumes them.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct TuneOutput {
     /// The tuned encoder.
@@ -726,7 +731,7 @@ fn tune_with_probes(
         requested.freeze_policy(),
     )?;
 
-    let texts = selection_texts(dataset, selection);
+    let texts = selection_texts(dataset, selection)?;
     let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let batch_size = requested.batch_size() as usize;
 
@@ -838,17 +843,34 @@ fn tune_with_probes(
 ///
 /// `SelectedExample` carries no text (Phase 2 `select.rs`), so the strings come from the
 /// dataset's train split, matched by row id.
+///
+/// # A missing id is an ERROR, never an empty string
+///
+/// An earlier form substituted `String::new()` for an id the dataset does not carry. That is
+/// silent corruption of the one input the whole run is measured on: the encoder would embed
+/// an empty sentence, the pair objective would train on it, the loss trace and both execution
+/// digests would be perfectly reproducible, and nothing would announce that a row went
+/// missing. `SetFitRun::prepare` already rejects such a selection at the door — which is
+/// exactly why the fallback was unreachable and therefore untestable as a behaviour, and why
+/// it must not be a fallback at all.
+///
+/// # Errors
+///
+/// [`SetFitTrainError::SelectionRowMissing`] naming the first id that does not resolve.
 pub(crate) fn selection_texts(
     dataset: &PreparedDataset<Canonical>,
     selection: &Selection,
-) -> Vec<String> {
+) -> Result<Vec<String>, SetFitTrainError> {
     let by_id: BTreeMap<&str, &str> =
         dataset.train().rows().iter().map(|row| (row.id.as_str(), row.input.as_str())).collect();
     selection
         .examples()
         .iter()
         .map(|example| {
-            by_id.get(example.id.as_str()).map_or_else(String::new, |t| (*t).to_string())
+            by_id.get(example.id.as_str()).map_or_else(
+                || Err(SetFitTrainError::SelectionRowMissing { id: example.id.clone() }),
+                |t| Ok((*t).to_string()),
+            )
         })
         .collect()
 }
@@ -954,6 +976,9 @@ pub struct PassedEvidence {
     summary: EvidenceSummary,
 }
 
+// Accessors for plan 03-08's persistence seam: it writes the table and the bound summary
+// into the bundle. Drop this allow once that plan calls them.
+#[allow(dead_code)]
 impl PassedEvidence {
     /// The complete per-parameter table.
     #[must_use]
@@ -1046,7 +1071,17 @@ pub(crate) fn validate_evidence(
             });
         };
 
-        let finite = row.grad_norm_max.is_finite() && row.grad_norm_mean.is_finite();
+        // Every measured number the verdict rests on has to be finite, not only the gradient
+        // norms. `relative_delta` is the value COMPARED against the epsilon, and `+inf > eps`
+        // is TRUE — so a parameter that diverged to infinity while its recorded gradient
+        // norms stayed finite would have passed the SetFit-identity gate outright. (The NaN
+        // side already fails closed, because `moved` is `delta_norm > 0.0` and every NaN
+        // comparison is false; the infinity side did not.)
+        let finite = row.grad_norm_max.is_finite()
+            && row.grad_norm_mean.is_finite()
+            && row.init_norm.is_finite()
+            && row.delta_norm.is_finite()
+            && row.relative_delta.is_finite();
         let passes = finite && row.moved && row.relative_delta > eps;
         if passes {
             continue;
@@ -1072,9 +1107,11 @@ pub(crate) fn validate_evidence(
         });
     }
 
-    // (5) The run-level sparse aggregate, LAST.
+    // (5) The run-level sparse aggregate, LAST. Non-finite fails closed for the same reason
+    // the per-parameter guard above does: `+inf <= floor` is false, so a diverged embedding
+    // class would otherwise clear the run-level floor by having blown up.
     let floor = thresholds.embedding_delta_floor();
-    if evidence.embedding_delta_median <= floor {
+    if !evidence.embedding_delta_median.is_finite() || evidence.embedding_delta_median <= floor {
         return Err(SetFitTrainError::EvidenceRejected {
             summary: Box::new(summary),
             table: Box::new(evidence.clone()),
@@ -1168,7 +1205,7 @@ mod tests {
     fn tune_gradients_reach_the_parameters_through_the_graph() {
         let (mut encoder, dataset, selection, config) =
             fx::prepared_run(fx::default_variant(), None).into_parts();
-        let texts = selection_texts(&dataset, &selection);
+        let texts = selection_texts(&dataset, &selection).expect("every selected id resolves");
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
 
         autograd::clear_graph();

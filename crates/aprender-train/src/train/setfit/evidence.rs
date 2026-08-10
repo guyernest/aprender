@@ -57,7 +57,6 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::reduce;
 use super::tune::{ParamRecord, TuneOutput};
 
 /// The schema version of the evidence wire form.
@@ -77,7 +76,7 @@ pub(crate) const EVIDENCE_CONTRACT_VERSION: &str = "setfit-train-lifecycle-v1";
 /// is noisier. `Ord` so the class map iterates deterministically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ParameterClass {
+pub enum ParameterClass {
     /// `embeddings.*_embeddings.weight` — the SPARSE class.
     Embedding,
     /// `*.LayerNorm.weight`.
@@ -283,7 +282,7 @@ pub(crate) fn moved(record: &ParamRecord) -> bool {
 /// One parameter's row. Fixed field order; the wire form is the canonical form.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct EvidenceRow {
+pub struct EvidenceRow {
     /// The HF dotted name.
     pub(crate) name: String,
     /// The class the per-class epsilon is frozen for.
@@ -321,7 +320,7 @@ pub(crate) struct EvidenceRow {
 /// event order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct UpdateEvidence {
+pub struct UpdateEvidence {
     /// Wire schema version.
     pub(crate) schema_version: u32,
     /// Per-parameter rows, in name order.
@@ -469,7 +468,7 @@ fn row_for(name: &str, record: &ParamRecord) -> Result<EvidenceRow, EvidenceErro
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub(crate) enum Verdict {
+pub enum Verdict {
     /// No threshold has been frozen, so no verdict is available.
     ///
     /// Still reachable: `EvidenceSummary::of` builds an UNJUDGED summary, and only the gate
@@ -484,7 +483,7 @@ pub(crate) enum Verdict {
 /// Min / median / worst relative delta for one class.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ClassStats {
+pub struct ClassStats {
     /// Smallest relative delta in the class.
     pub(crate) min: f64,
     /// Median relative delta in the class.
@@ -500,7 +499,7 @@ pub(crate) struct ClassStats {
 /// The D-12 summary, BOUND to its table by [`Self::table_hash`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct EvidenceSummary {
+pub struct EvidenceSummary {
     /// Wire schema version.
     pub(crate) schema_version: u32,
     /// The verdict. `Unjudged` in this plan.
@@ -606,6 +605,17 @@ fn max_of(values: &[f64]) -> f64 {
 /// `sort_by` with a total comparator rather than `partial_cmp().unwrap()`: every value here is
 /// finite by construction, and a comparator that panics on the one input that violates that
 /// assumption turns a measurement into a crash.
+///
+/// # The even-count average stays in f64
+///
+/// An earlier form routed the two middle values through `reduce::sum_in_index_order`, which
+/// takes `&[f32]` — so it NARROWED two `f64` relative deltas to `f32` before averaging them.
+/// That is the exact defect `reduce`'s own module doc exists to prevent: a relative delta
+/// below `f32::MIN_POSITIVE` (reachable for a near-frozen parameter, since the denominator is
+/// floored at 1.0) flushes to zero, and the median that the run-level embedding floor is
+/// compared against would report no movement for a parameter that moved. The two middles are
+/// added in `f64` here, in index order, which is what the reduction discipline asks for at
+/// this width.
 fn median_of(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -616,16 +626,7 @@ fn median_of(values: &[f64]) -> f64 {
     if sorted.len() % 2 == 1 {
         sorted[mid]
     } else {
-        reduce::sum_in_index_order(&[
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                sorted[mid - 1] as f32
-            },
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                sorted[mid] as f32
-            },
-        ]) / 2.0
+        (sorted[mid - 1] + sorted[mid]) / 2.0
     }
 }
 
@@ -734,6 +735,13 @@ mod tests {
     /// THE zero-init proof: a parameter whose initial tensor is exactly zero has a FINITE,
     /// non-NaN relative delta.
     #[test]
+    // The 0.0/0.0 below is the SUBJECT of this test, not an accident: it demonstrates the
+    // NaN the un-floored ratio produces and that `NaN > eps` is false. Computing it any
+    // other way would stop demonstrating the artifact.
+    // Likewise the negated comparison: `!(NaN > eps)` IS the incomparability being
+    // demonstrated. `partial_cmp` would state it in a form that no longer shows the artifact
+    // the un-floored ratio produces.
+    #[allow(clippy::zero_divided_by_zero, clippy::neg_cmp_op_on_partial_ord)]
     fn evidence_relative_delta_is_finite_at_zero_initialization() {
         let zero_init = record(0.0, 0.0, 0.25, 40);
         for class in ParameterClass::ALL {
