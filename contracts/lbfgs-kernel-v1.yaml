@@ -164,8 +164,7 @@ falsification_tests:
     width, LbfgsF64 converges with gradient norm < 1e-10 while LBFGS (f32) cannot reach
     1e-10 at all. Measured on this host - f32 MaxIterations at grad_norm 6.12e-9, f64
     Converged at grad_norm 2.73e-11 in 14 iterations.
-  test: falsify_lbfgs_001_f64_1e10_width_is_real
-  command: cargo test -p aprender-core --lib falsify_lbfgs_001_f64
+  test: cargo test -p aprender-core --lib falsify_lbfgs_001_f64_1e10_width_is_real
   if_fails: LbfgsF64 is f32 arithmetic behind an f64 signature, i.e. the widening is a
     cast rather than a real precision change
 - id: FALSIFY-LB-008
@@ -173,16 +172,15 @@ falsification_tests:
   prediction: At an f32-REACHABLE tolerance (1e-6) BOTH widths converge on the same
     problem, so a 1e-6 assertion demonstrates nothing about precision. This entry exists
     so FALSIFY-LB-007 cannot silently be loosened back into vacuity.
-  test: falsify_lbfgs_001_f64_tolerance_1e6_cannot_distinguish_widths
-  command: cargo test -p aprender-core --lib falsify_lbfgs_001_f64_tolerance
+  test: cargo test -p aprender-core --lib falsify_lbfgs_001_f64_tolerance_1e6_cannot_distinguish_widths
   if_fails: The tolerance chosen for the width claim no longer separates the widths
 - id: FALSIFY-LB-009
   rule: Non-finite input status (equation nonfinite_input_status)
   prediction: For each of the four channels (x0, objective return, gradient return,
     line-search trial point) in each of the two widths, minimize returns
-    ConvergenceStatus::NumericalError and does not panic
-  test: falsify_lbfgs_003_nonfinite_<channel>_<width>, ten cases
-  command: cargo test -p aprender-core --lib nonfinite
+    ConvergenceStatus::NumericalError and does not panic. Ten runnable cases named
+    falsify_lbfgs_003_nonfinite_CHANNEL_WIDTH.
+  test: cargo test -p aprender-core --lib nonfinite
   if_fails: A poisoned input is reported as Converged or Stalled. Both were observed on
     the pre-1.1.0 implementation - a NaN objective at x0 reported Converged, and a
     non-finite gradient reported Stalled.
