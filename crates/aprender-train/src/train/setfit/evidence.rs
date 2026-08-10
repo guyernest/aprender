@@ -949,6 +949,24 @@ mod tests {
         )
     }
 
+    /// The largest `relative_delta` that pure `f32` REPRESENTATION ROUNDING can produce for
+    /// this row, and therefore the floor a frozen epsilon has to clear to mean anything.
+    ///
+    /// Rigorous rather than estimated: rounding each element to the nearest `f32` perturbs it
+    /// by at most half a ULP, i.e. `|dx_i| <= (EPSILON/2)|x_i|`, so
+    /// `||dTheta||_2 <= (EPSILON/2)||theta||_2` and the ratio is bounded by
+    /// `(EPSILON/2) * init_norm / max(denom_used, scale_floor_used)`. Every input is a field
+    /// the evidence row already records, so this is MEASURED from the run rather than assumed
+    /// from a nominal parameter magnitude.
+    ///
+    /// Plan 03-05 flagged `projection_bias` as unfreezable because `min/10` "sits close to f32
+    /// resolution" while its predicate actually tested `median/min > 100` — a spread statistic
+    /// that says nothing about resolution. This is the quantity that claim is about.
+    fn rounding_noise_floor(row: &EvidenceRow) -> f64 {
+        let denom = row.denom_used.max(row.scale_floor_used);
+        (f64::from(f32::EPSILON) / 2.0) * row.init_norm / denom
+    }
+
     /// The learning rate of the null control. Chosen by the plan; measured below to be far
     /// under the `f32` resolution of every parameter, which is what makes it a null.
     const CONTROL_LR: f64 = 1e-30;
@@ -974,13 +992,15 @@ mod tests {
         report.push_str(&format!("\nCALIBRATION REGIME: {}\n", regime_id()));
         report.push_str(
             "\ncell             class                real_min      real_median   real_max      \
-             ctrl_max      support_frac  all_moved\n",
+             ctrl_max      noise_floor   support_frac  all_moved\n",
         );
 
         // Cross-cell aggregates, per class, that plan 03-06 freezes epsilon from.
         let mut real_min_across: BTreeMap<&'static str, f64> = BTreeMap::new();
         let mut ctrl_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
         let mut median_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        // The rounding-noise floor the frozen epsilon has to clear, per class, worst cell.
+        let mut noise_floor_across: BTreeMap<&'static str, f64> = BTreeMap::new();
         // WHICH parameter sets each class's lower bound. Without the name, 03-06 knows the
         // number but not what to widen if the margin turns out to be too narrow.
         let mut binding_param: BTreeMap<&'static str, String> = BTreeMap::new();
@@ -1019,8 +1039,13 @@ mod tests {
                 let real_min = min_of(&real_values);
                 let control_max = max_of(&control_values);
 
+                let cell_noise_floor = max_of(
+                    &real_rows.iter().map(|r| rounding_noise_floor(r)).collect::<Vec<f64>>(),
+                );
+
                 report.push_str(&format!(
-                    "seed{:<3} {:<9} {:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.4} {}\n",
+                    "seed{:<3} {:<9} {:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} \
+                     {:<13.4} {}\n",
                     variant.root_seed,
                     variant.label,
                     class.tag(),
@@ -1028,6 +1053,7 @@ mod tests {
                     median_of(&real_values),
                     max_of(&real_values),
                     control_max,
+                    cell_noise_floor,
                     median_of(&support),
                     real_rows.iter().all(|r| r.moved),
                 ));
@@ -1054,12 +1080,24 @@ mod tests {
                         })
                         .map_or_else(String::new, |r| {
                             format!(
-                                "{} (seed {} cell {})",
-                                r.name, variant.root_seed, variant.label
+                                "{} (seed {} cell {}) delta_norm={:.3e} init_norm={:.3e} \
+                                 grad_norm_max={:.3e} grad_norm_mean={:.3e} steps_observed={} \
+                                 noise_floor={:.3e}",
+                                r.name,
+                                variant.root_seed,
+                                variant.label,
+                                r.delta_norm,
+                                r.init_norm,
+                                r.grad_norm_max,
+                                r.grad_norm_mean,
+                                r.steps_observed,
+                                rounding_noise_floor(r),
                             )
                         });
                     binding_param.insert(class.tag(), binding);
                 }
+                let slot = noise_floor_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
+                *slot = slot.max(cell_noise_floor);
                 let slot = ctrl_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
                 *slot = slot.max(control_max);
                 let slot = median_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
@@ -1081,7 +1119,7 @@ mod tests {
         report.push_str("\nCROSS-CELL EPSILON BASIS (03-06 freezes from these)\n");
         report.push_str(
             "class                worst_ctrl    best_real     10x_lower     10x_upper     \
-             supports_margin  median/min\n",
+             noise_floor   eps/noise     supports_margin  median/min\n",
         );
         for class in ParameterClass::ALL {
             let worst_ctrl = ctrl_max_across.get(class.tag()).copied().unwrap_or(0.0);
@@ -1090,13 +1128,19 @@ mod tests {
             let lower = worst_ctrl * 10.0;
             let upper = best_real / 10.0;
             let spread = if best_real > 0.0 { worst_median / best_real } else { f64::INFINITY };
+            let noise_floor = noise_floor_across.get(class.tag()).copied().unwrap_or(0.0);
+            let eps_over_noise =
+                if noise_floor > 0.0 { upper / noise_floor } else { f64::INFINITY };
             report.push_str(&format!(
-                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<16} {:.1e}\n",
+                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.2e} {:<16} \
+                 {:.1e}\n",
                 class.tag(),
                 worst_ctrl,
                 best_real,
                 lower,
                 upper,
+                noise_floor,
+                eps_over_noise,
                 lower < upper,
                 spread,
             ));
@@ -1131,6 +1175,29 @@ mod tests {
                     worst_median / best_real,
                     best_real,
                     best_real / 10.0,
+                ));
+            }
+        }
+        // The flag that actually tests the claim `WIDE-SPREAD` makes in prose. `median/min` is a
+        // spread statistic; it can be large for a class whose slowest member still moves far
+        // above rounding noise, and small for one that does not move at all. THIS is the
+        // freeze blocker: an epsilon at or under the rounding-noise floor cannot reject any
+        // parameter that moved by even one ULP, so the class's gate would be a restatement of
+        // the strict `||dTheta|| > 0` predicate wearing a threshold's name.
+        for class in ParameterClass::ALL {
+            let best_real = real_min_across.get(class.tag()).copied().unwrap_or(0.0);
+            let noise_floor = noise_floor_across.get(class.tag()).copied().unwrap_or(0.0);
+            let eps = best_real / 10.0;
+            if noise_floor > 0.0 && eps <= noise_floor {
+                flagged += 1;
+                report.push_str(&format!(
+                    "  EPS-BELOW-NOISE {}: the 10x-margin epsilon {:.3e} is at or under the \
+                     f32 rounding-noise floor {:.3e} (ratio {:.2e}); this class cannot be \
+                     frozen at this width\n",
+                    class.tag(),
+                    eps,
+                    noise_floor,
+                    eps / noise_floor,
                 ));
             }
         }
