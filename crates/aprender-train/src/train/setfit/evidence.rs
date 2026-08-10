@@ -1,0 +1,1159 @@
+//! The canonical SetFit-identity evidence table and its binding hash (D-09, D-10, D-12).
+//!
+//! Contract: `setfit-train-lifecycle-v1` (authored in plan 03-06). Requirement: TRN-03.
+//!
+//! # The relative-delta formula, and why it has a floored, support-restricted denominator
+//!
+//! ```text
+//! relative_delta(p) = ||dTheta_p||_2 / max(denom(p), s_class(p))
+//!
+//! denom(p) = ||theta_init_p restricted to the SUPPORT of dTheta_p||_2   for the SPARSE class
+//!          = ||theta_init_p||_2                                          otherwise
+//! ```
+//!
+//! Two properties follow, and both are load-bearing.
+//!
+//! **It is FINITE at zero initialization.** The naive `||dTheta|| / ||theta_init||` is `0/0`
+//! or `x/0` for a bias initialized to exactly zero. `NaN > eps` is FALSE, so an un-floored
+//! form would have silently REJECTED every run containing a zero-init parameter — a gate that
+//! fails closed for the wrong reason is worse than one that does not exist, because the
+//! diagnosis points at the model instead of at the metric. The positive contracted floor
+//! `s_class` removes the case entirely: when the initial norm is below unit scale the ratio
+//! degrades gracefully into an ABSOLUTE movement measure, which is the right question to ask
+//! about a parameter that started at zero.
+//!
+//! **For the sparse class it is INVARIANT to vocabulary size.** A whole-table denominator
+//! would make the embedding class's ratio a function of how many rows the table has: a
+//! few-shot batch touches a handful of rows regardless, so `||dTheta||` is fixed while
+//! `||theta_init||` grows as `sqrt(V)`, and a ratio calibrated on a 97-row fixture would be
+//! roughly `sqrt(30522/97) ~ 17.7` times too large for the production encoder. Restricting
+//! the denominator to the rows the delta actually touched cancels the vocabulary factor,
+//! which is what makes a fixture-calibrated epsilon transferable at all. Every row records
+//! its observed `delta_support_fraction` so the claim stays checkable rather than asserted:
+//! see `evidence_sparse_denominator_is_restricted_to_the_support`.
+//!
+//! A parameter that did not move AT ALL is never SetFit, whatever its ratio says, so the
+//! strict predicate `||dTheta||_2 > 0` is recorded ALONGSIDE the ratio rather than folded
+//! into it.
+//!
+//! # The summary's hash BINDS it to the table
+//!
+//! [`EvidenceSummary::table_hash`] is the SHA-256 of the full canonical table bytes. Editing
+//! a row and leaving the summary alone produces a summary whose hash does not match its
+//! table, and `evidence_hash_binds_the_summary_to_the_table` proves the detection. That is
+//! tamper-EVIDENCE and linkage. It is not a signature and it does not make the pair
+//! unforgeable: anyone who can edit the table can recompute the hash. The distinction is
+//! recorded because the earlier wording of D-12 overclaimed it.
+//!
+//! # No wall-clock field, anywhere
+//!
+//! Every field of every serialized struct here is a hash, a count or a measured norm. A
+//! timing field would make two identical runs serialize differently and would take TRN-06's
+//! bitwise claim with it.
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use super::reduce;
+use super::tune::{ParamRecord, TuneOutput};
+
+/// The schema version of the evidence wire form.
+pub(crate) const EVIDENCE_SCHEMA_VERSION: u32 = 1;
+
+/// The contract this evidence discharges.
+pub(crate) const EVIDENCE_CONTRACT_VERSION: &str = "setfit-train-lifecycle-v1";
+
+// ===========================================================================================
+// Parameter classification
+// ===========================================================================================
+
+/// The parameter classes epsilon is frozen per, in plan 03-06.
+///
+/// Five rather than three, because weight and bias initializations differ by orders of
+/// magnitude within the same block and a single epsilon over both would be set by whichever
+/// is noisier. `Ord` so the class map iterates deterministically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ParameterClass {
+    /// `embeddings.*_embeddings.weight` — the SPARSE class.
+    Embedding,
+    /// `*.LayerNorm.weight`.
+    LayerNormWeight,
+    /// `*.LayerNorm.bias`.
+    LayerNormBias,
+    /// `*.attention.self.*.weight`, `*.dense.weight`.
+    ProjectionWeight,
+    /// `*.attention.self.*.bias`, `*.dense.bias`.
+    ProjectionBias,
+}
+
+impl ParameterClass {
+    /// Every class, in `Ord` order — the iteration order every report uses.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Embedding,
+        Self::LayerNormWeight,
+        Self::LayerNormBias,
+        Self::ProjectionWeight,
+        Self::ProjectionBias,
+    ];
+
+    /// Whether the denominator is restricted to the delta's support.
+    ///
+    /// Only the embedding tables. Every other parameter here is dense: a batch that touches
+    /// the block at all touches every element of it, so the support IS the whole tensor and
+    /// restricting would be a no-op dressed up as a policy.
+    pub(crate) fn is_sparse(self) -> bool {
+        matches!(self, Self::Embedding)
+    }
+
+    /// The contracted positive scale floor `s_class`.
+    ///
+    /// Unit for every class in v1, and stated as a per-class table anyway because plan 03-06
+    /// freezes a per-class EPSILON and the two want to be read side by side. The value is 1.0
+    /// rather than something smaller because it only ENGAGES when the (possibly
+    /// support-restricted) initial norm is below unit scale — that is, for a parameter that
+    /// started at or near zero — and unit scale is where the ratio's meaning changes from
+    /// "fraction of the initial magnitude" to "absolute movement". Making the transition
+    /// happen at 1.0 puts it somewhere a reader can name.
+    pub(crate) fn scale_floor(self) -> f64 {
+        match self {
+            Self::Embedding
+            | Self::LayerNormWeight
+            | Self::LayerNormBias
+            | Self::ProjectionWeight
+            | Self::ProjectionBias => 1.0,
+        }
+    }
+
+    /// The stable string this class serializes as.
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::Embedding => "embedding",
+            Self::LayerNormWeight => "layer_norm_weight",
+            Self::LayerNormBias => "layer_norm_bias",
+            Self::ProjectionWeight => "projection_weight",
+            Self::ProjectionBias => "projection_bias",
+        }
+    }
+}
+
+impl fmt::Display for ParameterClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.tag())
+    }
+}
+
+/// Failure modes of the evidence layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub(crate) enum EvidenceError {
+    /// A parameter name matched no class.
+    ///
+    /// FAIL CLOSED. A default bucket would absorb a renamed parameter into whichever class
+    /// happened to be the fallback, and the epsilon frozen for that class would then be
+    /// applied to something it was never measured on — silently, since nothing about the
+    /// output would change shape.
+    UnclassifiedParameter {
+        /// The offending dotted name.
+        name: String,
+    },
+    /// The canonical bytes could not be produced.
+    Serialization {
+        /// The renderer's diagnostic.
+        reason: String,
+    },
+}
+
+impl fmt::Display for EvidenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnclassifiedParameter { name } => write!(
+                f,
+                "parameter `{name}` matches no parameter class; the encoder's dotted naming \
+                 has drifted from the class mapping and a per-class epsilon cannot be applied \
+                 to it (contract setfit-train-lifecycle-v1, requirement TRN-03)",
+            ),
+            Self::Serialization { reason } => write!(
+                f,
+                "the evidence table could not be rendered canonically: {reason} \
+                 (contract setfit-train-lifecycle-v1, requirement TRN-03)",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EvidenceError {}
+
+/// Classify a parameter by its HF dotted name. Pure, total on its accepted domain, fail-closed
+/// everywhere else.
+///
+/// # Errors
+///
+/// [`EvidenceError::UnclassifiedParameter`] for any name outside the mapping.
+pub(crate) fn classify_parameter(name: &str) -> Result<ParameterClass, EvidenceError> {
+    let unclassified = || EvidenceError::UnclassifiedParameter { name: name.to_string() };
+    let leaf = name.rsplit('.').next().unwrap_or("");
+
+    // The embedding TABLES only. `embeddings.LayerNorm.weight` lives under the same prefix
+    // and is deliberately NOT sparse, which is why this test is on the suffix rather than on
+    // the `embeddings.` prefix alone.
+    if name.starts_with("embeddings.") && name.ends_with("_embeddings.weight") {
+        return Ok(ParameterClass::Embedding);
+    }
+    if name.contains(".LayerNorm.") {
+        return match leaf {
+            "weight" => Ok(ParameterClass::LayerNormWeight),
+            "bias" => Ok(ParameterClass::LayerNormBias),
+            _ => Err(unclassified()),
+        };
+    }
+    if name.contains(".dense.") || name.contains(".attention.self.") {
+        return match leaf {
+            "weight" => Ok(ParameterClass::ProjectionWeight),
+            "bias" => Ok(ParameterClass::ProjectionBias),
+            _ => Err(unclassified()),
+        };
+    }
+    Err(unclassified())
+}
+
+// ===========================================================================================
+// The relative delta
+// ===========================================================================================
+
+/// The denominator actually used, and the floor that was applied to it.
+///
+/// Returned as a pair rather than folded into the ratio so the evidence row can record BOTH
+/// and a reader can tell a small ratio caused by a large denominator from one caused by a
+/// small delta.
+pub(crate) fn denominator_of(record: &ParamRecord, class: ParameterClass) -> (f64, f64) {
+    let raw = if class.is_sparse() { record.init_norm_on_support } else { record.init_norm };
+    (raw, class.scale_floor())
+}
+
+/// `||dTheta|| / max(denom, s_class)` — THE formula, defined exactly once.
+pub(crate) fn relative_delta(record: &ParamRecord, class: ParameterClass) -> f64 {
+    let (raw, floor) = denominator_of(record, class);
+    record.delta_norm / raw.max(floor)
+}
+
+/// The strict predicate: did this parameter move AT ALL?
+///
+/// Separate from the ratio on purpose. A parameter whose delta is exactly zero has a ratio of
+/// exactly zero too, but the two facts answer different questions and 03-06 gates on both.
+pub(crate) fn moved(record: &ParamRecord) -> bool {
+    record.delta_norm > 0.0
+}
+
+// ===========================================================================================
+// The canonical table
+// ===========================================================================================
+
+/// One parameter's row. Fixed field order; the wire form is the canonical form.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EvidenceRow {
+    /// The HF dotted name.
+    pub(crate) name: String,
+    /// The class the per-class epsilon is frozen for.
+    pub(crate) class: ParameterClass,
+    /// Elements in the tensor.
+    pub(crate) element_count: u64,
+    /// `||theta_init||_2` over the whole tensor.
+    pub(crate) init_norm: f64,
+    /// `||theta_final - theta_init||_2`.
+    pub(crate) delta_norm: f64,
+    /// Elements whose delta is not exactly zero.
+    pub(crate) delta_support_count: u64,
+    /// `delta_support_count / element_count`.
+    pub(crate) delta_support_fraction: f64,
+    /// The denominator BEFORE the floor was applied.
+    pub(crate) denom_used: f64,
+    /// The contracted floor for this class.
+    pub(crate) scale_floor_used: f64,
+    /// `delta_norm / max(denom_used, scale_floor_used)`.
+    pub(crate) relative_delta: f64,
+    /// The strict `||dTheta|| > 0` predicate.
+    pub(crate) moved: bool,
+    /// Largest per-step PRE-clip gradient norm.
+    pub(crate) grad_norm_max: f64,
+    /// Index-order mean of the per-step PRE-clip gradient norms.
+    pub(crate) grad_norm_mean: f64,
+    /// Steps at which this parameter had a gradient.
+    pub(crate) steps_observed: u64,
+}
+
+/// The full evidence table: per-parameter rows plus the run-level recorded facts.
+///
+/// `rows` is a `BTreeMap`, so name ordering is discharged STRUCTURALLY rather than by a sort
+/// somebody has to remember to call. `batch_boundary_list` is a `Vec` and its order IS the
+/// event order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateEvidence {
+    /// Wire schema version.
+    pub(crate) schema_version: u32,
+    /// Per-parameter rows, in name order.
+    pub(crate) rows: BTreeMap<String, EvidenceRow>,
+    /// Hex SHA-256 of the loss trace's LE `f32` bits, in step order.
+    pub(crate) loss_trace_hash: String,
+    /// Hex SHA-256 of the pairs actually consumed, absorbed at the draw.
+    pub(crate) consumed_pair_digest: String,
+    /// Hex SHA-256 of the batch boundaries actually opened.
+    pub(crate) batch_boundary_digest: String,
+    /// `(epoch, start_ordinal, len)` per batch, in the order the batches opened.
+    ///
+    /// The RECORDED source for plan 03-08's `batch_boundaries()` accessor. Without it that
+    /// accessor would have to recompute the boundaries from configuration, which is the
+    /// false-green the in-band digests exist to remove.
+    pub(crate) batch_boundary_list: Vec<(u32, u64, u32)>,
+    /// Hex SHA-256 of the ordered trainable parameter names.
+    pub(crate) parameter_registry_hash: String,
+    /// Optimizer steps taken.
+    pub(crate) step_count: u64,
+    /// Mean of the first `k` losses.
+    pub(crate) first_k_mean: f64,
+    /// Mean of the last `k` losses.
+    pub(crate) last_k_mean: f64,
+    /// The endpoint window.
+    pub(crate) k: usize,
+    /// Smallest relative delta among the sparse class.
+    pub(crate) embedding_delta_min: f64,
+    /// Median relative delta among the sparse class.
+    pub(crate) embedding_delta_median: f64,
+    /// Largest relative delta among the sparse class.
+    pub(crate) embedding_delta_max: f64,
+    /// Largest PRE-clip global gradient norm across steps.
+    pub(crate) pre_clip_norm_max: f64,
+    /// The regime this evidence was measured under.
+    pub(crate) calibration_regime_id: String,
+}
+
+impl UpdateEvidence {
+    /// Build the table from a recorded [`TuneOutput`].
+    ///
+    /// Every digest is MOVED from the recorded output; nothing here recomputes one.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceError::UnclassifiedParameter`] if any parameter name matches no class.
+    pub(crate) fn from_tune_output(
+        out: &TuneOutput,
+        calibration_regime_id: &str,
+    ) -> Result<Self, EvidenceError> {
+        let mut rows = BTreeMap::new();
+        for (name, record) in &out.per_name {
+            rows.insert(name.clone(), row_for(name, record)?);
+        }
+        let embedding_deltas: Vec<f64> =
+            rows.values().filter(|r| r.class.is_sparse()).map(|r| r.relative_delta).collect();
+        Ok(Self {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            rows,
+            loss_trace_hash: hex::encode(out.loss_trace_hash),
+            consumed_pair_digest: hex::encode(out.consumed_pair_digest),
+            batch_boundary_digest: hex::encode(out.batch_boundary_digest),
+            batch_boundary_list: out.batch_boundaries.clone(),
+            parameter_registry_hash: hex::encode(out.parameter_registry_hash),
+            step_count: out.step_count,
+            first_k_mean: out.first_k_mean,
+            last_k_mean: out.last_k_mean,
+            k: out.endpoint_k,
+            embedding_delta_min: min_of(&embedding_deltas),
+            embedding_delta_median: median_of(&embedding_deltas),
+            embedding_delta_max: max_of(&embedding_deltas),
+            pre_clip_norm_max: max_of(
+                &out.pre_clip_norms.iter().map(|v| f64::from(*v)).collect::<Vec<f64>>(),
+            ),
+            calibration_regime_id: calibration_regime_id.to_string(),
+        })
+    }
+
+    /// The canonical bytes.
+    ///
+    /// `serde_json` over a fixed-field-order struct with `BTreeMap` rows. Two runs producing
+    /// the same measurements produce the same bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceError::Serialization`].
+    pub(crate) fn to_canonical_bytes(&self) -> Result<Vec<u8>, EvidenceError> {
+        serde_json::to_vec(self).map_err(|e| EvidenceError::Serialization { reason: e.to_string() })
+    }
+
+    /// SHA-256 of the canonical bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceError::Serialization`].
+    pub(crate) fn table_hash(&self) -> Result<[u8; 32], EvidenceError> {
+        let mut hasher = Sha256::new();
+        hasher.update(self.to_canonical_bytes()?);
+        Ok(hasher.finalize().into())
+    }
+
+    /// Rows of one class, in name order.
+    pub(crate) fn rows_of_class(&self, class: ParameterClass) -> Vec<&EvidenceRow> {
+        self.rows.values().filter(|r| r.class == class).collect()
+    }
+}
+
+/// Build one row. The single place a `ParamRecord` becomes evidence.
+fn row_for(name: &str, record: &ParamRecord) -> Result<EvidenceRow, EvidenceError> {
+    let class = classify_parameter(name)?;
+    let (denom_used, scale_floor_used) = denominator_of(record, class);
+    #[allow(clippy::cast_precision_loss)]
+    let fraction = if record.element_count == 0 {
+        0.0
+    } else {
+        record.delta_support_count as f64 / record.element_count as f64
+    };
+    Ok(EvidenceRow {
+        name: name.to_string(),
+        class,
+        element_count: record.element_count,
+        init_norm: record.init_norm,
+        delta_norm: record.delta_norm,
+        delta_support_count: record.delta_support_count,
+        delta_support_fraction: fraction,
+        denom_used,
+        scale_floor_used,
+        relative_delta: relative_delta(record, class),
+        moved: moved(record),
+        grad_norm_max: record.grad_norm_max,
+        grad_norm_mean: record.grad_norm_mean,
+        steps_observed: record.steps_observed,
+    })
+}
+
+// ===========================================================================================
+// The summary (D-12)
+// ===========================================================================================
+
+/// The verdict. `Unjudged` is the only arm plan 03-05 can produce.
+///
+/// `Pass`/`Fail` arrive in plan 03-06, together with the frozen per-class epsilon they
+/// compare against. Shipping them now would invite a comparison against a threshold that does
+/// not exist yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub(crate) enum Verdict {
+    /// No threshold has been frozen, so no verdict is available.
+    Unjudged,
+}
+
+/// Min / median / worst relative delta for one class.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClassStats {
+    /// Smallest relative delta in the class.
+    pub(crate) min: f64,
+    /// Median relative delta in the class.
+    pub(crate) median: f64,
+    /// Largest relative delta in the class. "Worst" in the D-12 sense: furthest from frozen.
+    pub(crate) worst: f64,
+    /// Rows in the class.
+    pub(crate) count: usize,
+    /// Whether EVERY row of the class satisfies the strict `||dTheta|| > 0` predicate.
+    pub(crate) all_moved: bool,
+}
+
+/// The D-12 summary, BOUND to its table by [`Self::table_hash`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EvidenceSummary {
+    /// Wire schema version.
+    pub(crate) schema_version: u32,
+    /// The verdict. `Unjudged` in this plan.
+    pub(crate) verdict: Verdict,
+    /// Trainable parameters after `apply_freeze`.
+    pub(crate) trainable_count: usize,
+    /// Frozen parameters after `apply_freeze`.
+    pub(crate) frozen_count: usize,
+    /// Per-class statistics, in class order.
+    pub(crate) per_class: BTreeMap<String, ClassStats>,
+    /// The name of the row with the SMALLEST relative delta — the one a gate would reject
+    /// first.
+    pub(crate) worst_param_name: String,
+    /// The frozen epsilon, when one exists. `None` while unjudged.
+    pub(crate) epsilon_used: Option<f64>,
+    /// The regime this evidence was measured under.
+    pub(crate) calibration_regime_id: String,
+    /// The contract this evidence discharges.
+    pub(crate) contract_version: String,
+    /// Hex SHA-256 of the full canonical table, BINDING this summary to it.
+    pub(crate) table_hash: String,
+}
+
+impl EvidenceSummary {
+    /// Summarize a table.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceError::Serialization`] from the binding hash.
+    pub(crate) fn of(
+        evidence: &UpdateEvidence,
+        trainable_count: usize,
+        frozen_count: usize,
+    ) -> Result<Self, EvidenceError> {
+        let mut per_class = BTreeMap::new();
+        for class in ParameterClass::ALL {
+            let rows = evidence.rows_of_class(class);
+            if rows.is_empty() {
+                continue;
+            }
+            let values: Vec<f64> = rows.iter().map(|r| r.relative_delta).collect();
+            per_class.insert(
+                class.tag().to_string(),
+                ClassStats {
+                    min: min_of(&values),
+                    median: median_of(&values),
+                    worst: max_of(&values),
+                    count: rows.len(),
+                    all_moved: rows.iter().all(|r| r.moved),
+                },
+            );
+        }
+        let worst_param_name = evidence
+            .rows
+            .values()
+            .min_by(|a, b| {
+                a.relative_delta
+                    .partial_cmp(&b.relative_delta)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.name.cmp(&b.name))
+            })
+            .map_or_else(String::new, |r| r.name.clone());
+
+        Ok(Self {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            verdict: Verdict::Unjudged,
+            trainable_count,
+            frozen_count,
+            per_class,
+            worst_param_name,
+            epsilon_used: None,
+            calibration_regime_id: evidence.calibration_regime_id.clone(),
+            contract_version: EVIDENCE_CONTRACT_VERSION.to_string(),
+            table_hash: hex::encode(evidence.table_hash()?),
+        })
+    }
+}
+
+// ===========================================================================================
+// Fixed-order statistics
+// ===========================================================================================
+
+/// Smallest value, or `0.0` for an empty slice.
+fn min_of(values: &[f64]) -> f64 {
+    values.iter().copied().fold(f64::INFINITY, f64::min).min(
+        // An empty slice must not report +inf, which would serialize as `null`.
+        if values.is_empty() { 0.0 } else { f64::INFINITY },
+    )
+}
+
+/// Largest value, or `0.0` for an empty slice.
+fn max_of(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+}
+
+/// Median, in a FIXED order: sort ascending, then the middle, averaging the two middles for an
+/// even count. `0.0` for an empty slice.
+///
+/// `sort_by` with a total comparator rather than `partial_cmp().unwrap()`: every value here is
+/// finite by construction, and a comparator that panics on the one input that violates that
+/// assumption turns a measurement into a crash.
+fn median_of(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 1 {
+        sorted[mid]
+    } else {
+        reduce::sum_in_index_order(&[
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                sorted[mid - 1] as f32
+            },
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                sorted[mid] as f32
+            },
+        ]) / 2.0
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::*;
+    use crate::train::setfit::test_fixtures as fx;
+    use crate::train::setfit::tune::run_tuning;
+
+    /// Every name the fixture encoder emits, with its expected class. A CASE TABLE, not a
+    /// spot check: a mapping tested on three names is a mapping that has not been tested.
+    const CASE_TABLE: [(&str, ParameterClass); 14] = [
+        ("embeddings.word_embeddings.weight", ParameterClass::Embedding),
+        ("embeddings.position_embeddings.weight", ParameterClass::Embedding),
+        ("embeddings.token_type_embeddings.weight", ParameterClass::Embedding),
+        ("embeddings.LayerNorm.weight", ParameterClass::LayerNormWeight),
+        ("embeddings.LayerNorm.bias", ParameterClass::LayerNormBias),
+        ("encoder.layer.0.attention.self.query.weight", ParameterClass::ProjectionWeight),
+        ("encoder.layer.0.attention.self.key.bias", ParameterClass::ProjectionBias),
+        ("encoder.layer.0.attention.self.value.weight", ParameterClass::ProjectionWeight),
+        ("encoder.layer.0.attention.output.dense.weight", ParameterClass::ProjectionWeight),
+        ("encoder.layer.0.attention.output.LayerNorm.bias", ParameterClass::LayerNormBias),
+        ("encoder.layer.1.intermediate.dense.weight", ParameterClass::ProjectionWeight),
+        ("encoder.layer.1.intermediate.dense.bias", ParameterClass::ProjectionBias),
+        ("encoder.layer.1.output.dense.weight", ParameterClass::ProjectionWeight),
+        ("encoder.layer.1.output.LayerNorm.weight", ParameterClass::LayerNormWeight),
+    ];
+
+    fn record(init_norm: f64, support_norm: f64, delta_norm: f64, support: u64) -> ParamRecord {
+        ParamRecord {
+            element_count: 100,
+            init_norm,
+            init_norm_on_support: support_norm,
+            delta_norm,
+            delta_support_count: support,
+            grad_norm_max: 0.0,
+            grad_norm_mean: 0.0,
+            steps_observed: 0,
+        }
+    }
+
+    #[test]
+    fn evidence_classify_parameter_case_table() {
+        for (name, expected) in CASE_TABLE {
+            assert_eq!(classify_parameter(name), Ok(expected), "case table row `{name}`",);
+        }
+    }
+
+    /// Every name the fixture ACTUALLY emits is covered by the case table AND classifiable.
+    ///
+    /// Without this the case table is a list of names somebody typed, which can drift from the
+    /// encoder's real naming without anything turning red.
+    #[test]
+    fn evidence_case_table_covers_every_name_the_fixture_emits() {
+        let mut encoder = fx::slice_encoder(fx::FIXTURE_SEED);
+        let names: Vec<String> =
+            encoder.trainable_parameters_mut().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names.len(), 37);
+        for name in &names {
+            classify_parameter(name)
+                .unwrap_or_else(|e| panic!("the fixture emits an unclassifiable name: {e}"));
+        }
+        // And every SHAPE of name in the table really occurs: no table row is fiction.
+        for (name, _) in CASE_TABLE {
+            assert!(
+                names.iter().any(|n| n == name),
+                "case-table row `{name}` is not a name the fixture emits",
+            );
+        }
+    }
+
+    /// An unmatched name is a typed error, NOT a default bucket.
+    #[test]
+    fn evidence_unclassified_parameter_fails_closed() {
+        for name in [
+            "",
+            "classifier.weight",
+            "encoder.layer.0.attention.self.query.gamma",
+            "embeddings.word_embeddings.bias",
+            "pooler.dense",
+        ] {
+            match classify_parameter(name) {
+                Err(EvidenceError::UnclassifiedParameter { name: reported }) => {
+                    assert_eq!(reported, name);
+                }
+                other => panic!("`{name}` must be unclassified, got {other:?}"),
+            }
+        }
+        // Non-vacuity: a neighbouring valid name IS classified, so the rejections above are
+        // not "everything is rejected".
+        assert!(classify_parameter("pooler.dense.weight").is_ok());
+    }
+
+    /// THE zero-init proof: a parameter whose initial tensor is exactly zero has a FINITE,
+    /// non-NaN relative delta.
+    #[test]
+    fn evidence_relative_delta_is_finite_at_zero_initialization() {
+        let zero_init = record(0.0, 0.0, 0.25, 40);
+        for class in ParameterClass::ALL {
+            let value = relative_delta(&zero_init, class);
+            assert!(
+                value.is_finite(),
+                "{class}: relative delta must be finite at zero init, got {value}",
+            );
+            assert!(!value.is_nan(), "{class}: and not NaN");
+            assert_eq!(
+                value,
+                0.25 / class.scale_floor(),
+                "{class}: the floor must be what divides",
+            );
+        }
+
+        // The un-floored form has TWO failure modes at zero init, and they fail in OPPOSITE
+        // directions. Both are demonstrated here rather than asserted from memory, because
+        // the plan's prose named only one of them and named it as the only one.
+        //
+        // (1) delta > 0, init == 0  ->  +inf, which is GREATER than every threshold. A
+        //     parameter that crawled 1e-45 away from zero would pass the gate outright.
+        let moved_from_zero = zero_init.delta_norm / zero_init.init_norm;
+        assert!(moved_from_zero.is_infinite());
+        assert!(
+            moved_from_zero > 1e-3,
+            "the un-floored form ACCEPTS any movement from a zero init, however small",
+        );
+        // (2) delta == 0, init == 0  ->  NaN, and `NaN > eps` is FALSE. A parameter that did
+        //     not move is rejected — correctly, but for a reason the diagnosis cannot state,
+        //     and by the same expression that wrongly accepted case (1).
+        let never_moved = 0.0_f64 / 0.0_f64;
+        assert!(never_moved.is_nan());
+        assert!(
+            !(never_moved > 1e-3),
+            "NaN > eps is FALSE, so the un-floored form's rejection is a NaN artifact",
+        );
+
+        // The floored form gives a finite, ORDERED answer in both cases, and the strict
+        // predicate — not the ratio — is what distinguishes them.
+        let floored_moved = relative_delta(&zero_init, ParameterClass::LayerNormBias);
+        let floored_still =
+            relative_delta(&record(0.0, 0.0, 0.0, 0), ParameterClass::LayerNormBias);
+        assert!(floored_moved.is_finite() && floored_still.is_finite());
+        assert!(floored_moved > floored_still);
+        assert!(moved(&zero_init));
+        assert!(!moved(&record(0.0, 0.0, 0.0, 0)));
+    }
+
+    /// The companion: a zeroed AND unchanged parameter fails the strict predicate.
+    #[test]
+    fn evidence_strict_predicate_rejects_a_parameter_that_did_not_move() {
+        let frozen = record(0.0, 0.0, 0.0, 0);
+        assert!(!moved(&frozen), "a zero delta is not movement");
+        assert!(
+            relative_delta(&frozen, ParameterClass::LayerNormBias).is_finite(),
+            "and its ratio is still finite, which is exactly why the two predicates differ",
+        );
+        assert_eq!(relative_delta(&frozen, ParameterClass::LayerNormBias), 0.0);
+
+        let moved_a_little = record(0.0, 0.0, f64::MIN_POSITIVE, 1);
+        assert!(moved(&moved_a_little));
+    }
+
+    /// The sparse denominator uses ONLY the rows the delta touched.
+    #[test]
+    fn evidence_sparse_denominator_is_restricted_to_the_support() {
+        // A 2-of-N support: the whole-table norm is 100.0, the support-restricted norm 3.0.
+        let sparse = record(100.0, 3.0, 6.0, 2);
+        let (denom, floor) = denominator_of(&sparse, ParameterClass::Embedding);
+        assert_eq!(denom, 3.0, "the sparse denominator must be support-restricted");
+        assert_eq!(floor, 1.0);
+        assert_eq!(relative_delta(&sparse, ParameterClass::Embedding), 2.0);
+
+        // Every dense class uses the whole tensor.
+        for class in ParameterClass::ALL.into_iter().filter(|c| !c.is_sparse()) {
+            let (denom, _) = denominator_of(&sparse, class);
+            assert_eq!(denom, 100.0, "{class} must use the whole initial tensor");
+        }
+    }
+
+    /// Vocabulary-size invariance, which is the transfer argument in one assertion.
+    ///
+    /// Two embedding tables with the SAME touched rows and the SAME delta, differing only in
+    /// how many untouched rows they carry, must produce the SAME relative delta.
+    #[test]
+    fn evidence_sparse_relative_delta_is_invariant_to_vocabulary_size() {
+        let small_vocab = record(10.0, 3.0, 6.0, 2);
+        let mut large_vocab = record(500.0, 3.0, 6.0, 2);
+        large_vocab.element_count = 1_000_000;
+
+        assert_eq!(
+            relative_delta(&small_vocab, ParameterClass::Embedding),
+            relative_delta(&large_vocab, ParameterClass::Embedding),
+            "the sparse ratio must not depend on the untouched rows",
+        );
+        // Control: the whole-table form DOES depend on them, so the invariance above is a
+        // property of the support restriction and not of the numbers chosen.
+        assert_ne!(
+            small_vocab.delta_norm / small_vocab.init_norm,
+            large_vocab.delta_norm / large_vocab.init_norm,
+        );
+    }
+
+    /// Canonical bytes are bitwise stable across two identical runs.
+    #[test]
+    fn evidence_canonical_bytes_are_stable_across_two_runs() {
+        let a = evidence_for(fx::default_variant(), None);
+        let b = evidence_for(fx::default_variant(), None);
+        assert_eq!(
+            a.to_canonical_bytes().expect("bytes"),
+            b.to_canonical_bytes().expect("bytes"),
+            "two identical runs must serialize identically",
+        );
+        assert_eq!(a.table_hash().expect("hash"), b.table_hash().expect("hash"));
+        assert_eq!(a.rows.len(), 37, "non-vacuity: the table has rows");
+    }
+
+    /// A single-field mutation changes `table_hash`, and the summary detects the divergence.
+    #[test]
+    fn evidence_hash_binds_the_summary_to_the_table() {
+        let evidence = evidence_for(fx::default_variant(), None);
+        let summary = EvidenceSummary::of(&evidence, 37, 0).expect("summary");
+        assert_eq!(summary.table_hash, hex::encode(evidence.table_hash().expect("h")));
+
+        let mut tampered = evidence.clone();
+        let key = tampered.rows.keys().next().cloned().expect("the table has rows");
+        let row = tampered.rows.get_mut(&key).expect("row");
+        row.relative_delta += 1.0;
+
+        assert_ne!(
+            evidence.table_hash().expect("h"),
+            tampered.table_hash().expect("h"),
+            "a single-field mutation must change the table hash",
+        );
+        assert_ne!(
+            summary.table_hash,
+            hex::encode(tampered.table_hash().expect("h")),
+            "so the untouched summary no longer matches the edited table",
+        );
+    }
+
+    /// `deny_unknown_fields` rejects an extended payload — verified with a SUBSTITUTION that
+    /// is asserted to have applied, so this cannot become a test of the valid payload.
+    #[test]
+    fn evidence_deny_unknown_fields_rejects_an_extended_payload() {
+        let evidence = evidence_for(fx::default_variant(), None);
+        let json = String::from_utf8(evidence.to_canonical_bytes().expect("bytes")).expect("utf8");
+
+        serde_json::from_str::<UpdateEvidence>(&json).expect("the valid payload must round-trip");
+
+        let extended =
+            json.replacen("{\"schema_version\":", "{\"injected\":1,\"schema_version\":", 1);
+        assert_ne!(extended, json, "the substitution must have applied");
+        assert!(
+            serde_json::from_str::<UpdateEvidence>(&extended).is_err(),
+            "an unknown field must be rejected",
+        );
+    }
+
+    /// No wall-clock field survives into the wire form.
+    #[test]
+    fn evidence_wire_form_carries_no_wall_clock_field() {
+        let evidence = evidence_for(fx::default_variant(), None);
+        let json = String::from_utf8(evidence.to_canonical_bytes().expect("bytes")).expect("utf8");
+        for banned in ["elapsed", "seconds", "nanos", "millis", "timestamp", "_at\""] {
+            assert!(!json.contains(banned), "the evidence wire form must not contain `{banned}`",);
+        }
+        let summary = EvidenceSummary::of(&evidence, 37, 0).expect("summary");
+        let summary_json = serde_json::to_string(&summary).expect("summary json");
+        for banned in ["elapsed", "seconds", "nanos", "millis", "timestamp"] {
+            assert!(!summary_json.contains(banned), "summary contains `{banned}`");
+        }
+    }
+
+    /// The digests are MOVED from the recorded output, not recomputed.
+    #[test]
+    fn evidence_digests_come_from_the_recorded_output() {
+        let out = tune_output(fx::default_variant(), None);
+        let evidence = UpdateEvidence::from_tune_output(&out, "test").expect("evidence");
+        assert_eq!(evidence.consumed_pair_digest, hex::encode(out.consumed_pair_digest));
+        assert_eq!(evidence.batch_boundary_digest, hex::encode(out.batch_boundary_digest));
+        assert_eq!(evidence.loss_trace_hash, hex::encode(out.loss_trace_hash));
+        assert_eq!(evidence.parameter_registry_hash, hex::encode(out.parameter_registry_hash));
+        assert_eq!(evidence.batch_boundary_list, out.batch_boundaries);
+        assert_eq!(evidence.step_count, out.step_count);
+        assert!(
+            !evidence.batch_boundary_list.is_empty(),
+            "03-08's batch_boundaries() accessor needs a recorded source",
+        );
+    }
+
+    /// The summary is `Unjudged` and carries no epsilon in this plan.
+    #[test]
+    fn evidence_summary_is_unjudged_with_no_epsilon() {
+        let evidence = evidence_for(fx::default_variant(), None);
+        let summary = EvidenceSummary::of(&evidence, 37, 0).expect("summary");
+        assert_eq!(summary.verdict, Verdict::Unjudged);
+        assert_eq!(summary.epsilon_used, None);
+        assert_eq!(summary.contract_version, EVIDENCE_CONTRACT_VERSION);
+        assert_eq!(summary.per_class.len(), 5, "all five classes are populated");
+        assert!(!summary.worst_param_name.is_empty());
+        for (class, stats) in &summary.per_class {
+            assert!(stats.count > 0, "{class}");
+            assert!(stats.min <= stats.median, "{class}");
+            assert!(stats.median <= stats.worst, "{class}");
+        }
+    }
+
+    /// Fixed-order statistics behave on the edge cases the table can present.
+    #[test]
+    fn evidence_statistics_handle_empty_and_even_inputs() {
+        assert_eq!(min_of(&[]), 0.0);
+        assert_eq!(max_of(&[]), 0.0);
+        assert_eq!(median_of(&[]), 0.0);
+        assert_eq!(min_of(&[3.0, 1.0, 2.0]), 1.0);
+        assert_eq!(max_of(&[3.0, 1.0, 2.0]), 3.0);
+        assert_eq!(median_of(&[3.0, 1.0, 2.0]), 2.0);
+        assert_eq!(median_of(&[4.0, 1.0, 3.0, 2.0]), 2.5);
+        assert!(min_of(&[]).is_finite(), "an empty min must serialize as a number");
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The calibration matrix (measurement, not judgment)
+    // -----------------------------------------------------------------------------------
+
+    /// A run's recorded output for one cell.
+    fn tune_output(
+        variant: fx::CalibrationVariant,
+        encoder_lr_override: Option<f64>,
+    ) -> TuneOutput {
+        let (encoder, dataset, selection, config) =
+            fx::prepared_run(variant, encoder_lr_override).into_parts();
+        run_tuning(encoder, &dataset, &selection, &config).expect("the fixture run must tune")
+    }
+
+    /// Its evidence table.
+    fn evidence_for(
+        variant: fx::CalibrationVariant,
+        encoder_lr_override: Option<f64>,
+    ) -> UpdateEvidence {
+        let out = tune_output(variant, encoder_lr_override);
+        UpdateEvidence::from_tune_output(&out, &regime_id()).expect("evidence")
+    }
+
+    /// The regime this matrix was measured under: architecture, seed set, boundary set.
+    fn regime_id() -> String {
+        let mut seeds: Vec<String> =
+            fx::calibration_variants().iter().map(|v| v.root_seed.to_string()).collect();
+        seeds.sort_unstable();
+        seeds.dedup();
+        let mut cells: Vec<String> =
+            fx::calibration_variants().iter().map(|v| v.label.to_string()).collect();
+        cells.sort_unstable();
+        cells.dedup();
+        format!(
+            "minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds={}|cells={}",
+            seeds.join(","),
+            cells.join(","),
+        )
+    }
+
+    /// The learning rate of the null control. Chosen by the plan; measured below to be far
+    /// under the `f32` resolution of every parameter, which is what makes it a null.
+    const CONTROL_LR: f64 = 1e-30;
+
+    /// THE calibration matrix — `#[ignore]`d, and deliberately so.
+    ///
+    /// Twelve complete `run_tuning` passes over a real-weight MiniLM slice do not belong on
+    /// the `evidence_` filter a developer types dozens of times a day. `#[ignore]` keeps it
+    /// off every default run including `cargo test --workspace --lib`, while `pub(crate)`
+    /// `run_tuning` and `#[cfg(test)]` `calibration_variants` both stay exactly as narrow as
+    /// they are — the out-of-crate integration target an earlier draft specified could not
+    /// have compiled against either.
+    ///
+    /// Invoke with:
+    /// `cargo test -p aprender-train --lib --features setfit calibration_matrix -- --ignored --nocapture`
+    #[test]
+    #[ignore = "12 full tuning passes; run explicitly with --ignored (plan 03-05 epsilon basis)"]
+    fn calibration_matrix_epsilon_basis() {
+        let variants = fx::calibration_variants();
+        assert!(variants.len() >= 6, "at least six cells");
+
+        let mut report = String::new();
+        report.push_str(&format!("\nCALIBRATION REGIME: {}\n", regime_id()));
+        report.push_str(
+            "\ncell             class                real_min      real_median   real_max      \
+             ctrl_max      support_frac  all_moved\n",
+        );
+
+        // Cross-cell aggregates, per class, that plan 03-06 freezes epsilon from.
+        let mut real_min_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        let mut ctrl_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        let mut median_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        // WHICH parameter sets each class's lower bound. Without the name, 03-06 knows the
+        // number but not what to widen if the margin turns out to be too narrow.
+        let mut binding_param: BTreeMap<&'static str, String> = BTreeMap::new();
+        let mut endpoint_rows: Vec<String> = Vec::new();
+        let mut endpoint_deltas: Vec<f64> = Vec::new();
+        let mut cells_run = 0_usize;
+
+        for variant in &variants {
+            let real = evidence_for(*variant, None);
+            let control = evidence_for(*variant, Some(CONTROL_LR));
+            cells_run += 2;
+
+            let endpoint_delta = real.last_k_mean - real.first_k_mean;
+            endpoint_deltas.push(endpoint_delta);
+            endpoint_rows.push(format!(
+                "  seed {:>3} cell {:<9} k={} first_k={:.9} last_k={:.9} delta={endpoint_delta:+.9}\n",
+                variant.root_seed,
+                variant.label,
+                real.k,
+                real.first_k_mean,
+                real.last_k_mean,
+            ));
+
+            for class in ParameterClass::ALL {
+                let real_rows = real.rows_of_class(class);
+                let control_rows = control.rows_of_class(class);
+                assert!(!real_rows.is_empty(), "{class} has no rows");
+                assert_eq!(real_rows.len(), control_rows.len());
+
+                let real_values: Vec<f64> = real_rows.iter().map(|r| r.relative_delta).collect();
+                let control_values: Vec<f64> =
+                    control_rows.iter().map(|r| r.relative_delta).collect();
+                let support: Vec<f64> =
+                    real_rows.iter().map(|r| r.delta_support_fraction).collect();
+
+                let real_min = min_of(&real_values);
+                let control_max = max_of(&control_values);
+
+                report.push_str(&format!(
+                    "seed{:<3} {:<9} {:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.4} {}\n",
+                    variant.root_seed,
+                    variant.label,
+                    class.tag(),
+                    real_min,
+                    median_of(&real_values),
+                    max_of(&real_values),
+                    control_max,
+                    median_of(&support),
+                    real_rows.iter().all(|r| r.moved),
+                ));
+
+                // (c) SEPARATION, per class and per cell.
+                assert!(
+                    control_max < real_min,
+                    "seed {} cell {} class {}: the 1e-30 control's max relative delta \
+                     ({control_max:e}) is not below the real run's min ({real_min:e})",
+                    variant.root_seed,
+                    variant.label,
+                    class.tag(),
+                );
+
+                let slot = real_min_across.entry(class.tag()).or_insert(f64::INFINITY);
+                if real_min < *slot {
+                    *slot = real_min;
+                    let binding = real_rows
+                        .iter()
+                        .min_by(|a, b| {
+                            a.relative_delta
+                                .partial_cmp(&b.relative_delta)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map_or_else(String::new, |r| {
+                            format!(
+                                "{} (seed {} cell {})",
+                                r.name, variant.root_seed, variant.label
+                            )
+                        });
+                    binding_param.insert(class.tag(), binding);
+                }
+                let slot = ctrl_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
+                *slot = slot.max(control_max);
+                let slot = median_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
+                *slot = slot.max(median_of(&real_values));
+            }
+        }
+
+        report.push_str("\nENDPOINT MEANS (computed, NOT judged)\n");
+        for row in &endpoint_rows {
+            report.push_str(row);
+        }
+        report.push_str(&format!(
+            "  CROSS-SEED SPREAD of (last_k - first_k): min={:+.9} max={:+.9} range={:.9}\n",
+            min_of(&endpoint_deltas),
+            max_of(&endpoint_deltas),
+            max_of(&endpoint_deltas) - min_of(&endpoint_deltas),
+        ));
+
+        report.push_str("\nCROSS-CELL EPSILON BASIS (03-06 freezes from these)\n");
+        report.push_str(
+            "class                worst_ctrl    best_real     10x_lower     10x_upper     \
+             supports_margin  median/min\n",
+        );
+        for class in ParameterClass::ALL {
+            let worst_ctrl = ctrl_max_across.get(class.tag()).copied().unwrap_or(0.0);
+            let best_real = real_min_across.get(class.tag()).copied().unwrap_or(0.0);
+            let worst_median = median_max_across.get(class.tag()).copied().unwrap_or(0.0);
+            let lower = worst_ctrl * 10.0;
+            let upper = best_real / 10.0;
+            let spread = if best_real > 0.0 { worst_median / best_real } else { f64::INFINITY };
+            report.push_str(&format!(
+                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<16} {:.1e}\n",
+                class.tag(),
+                worst_ctrl,
+                best_real,
+                lower,
+                upper,
+                lower < upper,
+                spread,
+            ));
+        }
+
+        report.push_str("\nWHAT BINDS EACH CLASS'S LOWER EDGE\n");
+        for class in ParameterClass::ALL {
+            report.push_str(&format!(
+                "  {:<20} {}\n",
+                class.tag(),
+                binding_param.get(class.tag()).map_or("-", String::as_str),
+            ));
+        }
+
+        // FLAG, not a silent narrowing: a class whose slowest member is orders of magnitude
+        // below its own median cannot be gated by one epsilon without either failing that
+        // member or admitting a nearly-frozen encoder. Reported here and carried into the
+        // SUMMARY with its numbers; widening the fixture or the matrix is 03-06's call.
+        report.push_str("\nFLAGS\n");
+        let mut flagged = 0_usize;
+        for class in ParameterClass::ALL {
+            let best_real = real_min_across.get(class.tag()).copied().unwrap_or(0.0);
+            let worst_median = median_max_across.get(class.tag()).copied().unwrap_or(0.0);
+            if best_real > 0.0 && worst_median / best_real > 100.0 {
+                flagged += 1;
+                report.push_str(&format!(
+                    "  WIDE-SPREAD {}: median {:.3e} is {:.1e}x its own class minimum {:.3e}; \
+                     a single per-class epsilon at min/10 = {:.3e} sits close to f32 \
+                     resolution\n",
+                    class.tag(),
+                    worst_median,
+                    worst_median / best_real,
+                    best_real,
+                    best_real / 10.0,
+                ));
+            }
+        }
+        if flagged == 0 {
+            report.push_str("  none\n");
+        }
+
+        assert!(cells_run >= 12, "the matrix must run >= 12 passes, ran {cells_run}");
+
+        // The report goes to stdout AND to a file. The file is not belt-and-braces: a
+        // summarizing wrapper around `cargo test` (this repo ships one) drops `--nocapture`
+        // output entirely, and a calibration whose numbers cannot be read is a calibration
+        // that did not happen. `target/` is NOT a safe destination — `.cargo/config.toml`
+        // redirects the target directory and it may not exist relative to the test's cwd,
+        // which is how the first run of this test failed.
+        println!("{report}");
+        let destination = std::env::var("SETFIT_CALIBRATION_REPORT").map_or_else(
+            |_| std::env::temp_dir().join("setfit-calibration-matrix.txt"),
+            std::path::PathBuf::from,
+        );
+        std::fs::write(&destination, &report).unwrap_or_else(|e| {
+            panic!("the calibration report must be writable at {destination:?}: {e}")
+        });
+        println!("calibration report written to {}", destination.display());
+    }
+}

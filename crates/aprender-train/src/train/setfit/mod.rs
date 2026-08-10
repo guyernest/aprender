@@ -34,7 +34,16 @@
 
 pub mod config;
 pub mod epoch;
+pub mod evidence;
 pub mod reduce;
+pub mod tune;
+
+/// The deterministic, network-free, synthetic-text fixture every Phase 3 trainer test uses.
+///
+/// `#[cfg(test)]` and nothing weaker: 03-10's acceptance criteria reject a `#[doc(hidden)]`
+/// test-support door on the shipped surface.
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -222,6 +231,19 @@ impl SetFitRun<Prepared> {
 
         Ok(Self { encoder, dataset, selection, config, evidence: (), _state: PhantomData })
     }
+
+    /// Consume the run and hand back the four inputs stage one operates on.
+    ///
+    /// `pub(crate)`: the lifecycle's public transitions consume `self` and return the next
+    /// state, and this is how they get at the parts. It is deliberately NOT public — a public
+    /// destructor would let a caller take the encoder out of a `Prepared` run, tune it by
+    /// hand, and put nothing back, which is the ungated tuning path the typestate exists to
+    /// forbid.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (SetFitMiniLm, PreparedDataset<Canonical>, Selection, ResolvedSetFitConfig) {
+        (self.encoder, self.dataset, self.selection, self.config)
+    }
 }
 
 /// Build the dense, label-indexed class-size vector Phase 2's capacity functions take.
@@ -280,6 +302,33 @@ pub enum SetFitTrainError {
         /// The offending row identifier.
         id: String,
     },
+    /// The `max_length` knob does not equal the encoder's pinned sequence length.
+    ///
+    /// Distinct from [`config::SetFitConfigError::MaxLengthNotSupported`], which rejects the
+    /// same disagreement at CONSTRUCTION. This variant is what the tuning loop raises when it
+    /// CONSUMES the knob: the knob was validated in 03-03 and never read, which is how a
+    /// validated-but-ignored setting silently becomes decoration.
+    MaxLengthNotConsumable {
+        /// The requested length.
+        requested: u32,
+        /// The encoder's pinned length.
+        pinned: u32,
+    },
+    /// The encoder rejected a tokenize, encode, freeze or forward-ordinal call.
+    ///
+    /// Carries a RENDERED string rather than the typed `SetFitError`, following 03-02's
+    /// precedent: this enum derives `PartialEq` and the encoder's error type is free to grow
+    /// float payloads, which would make that derive a liability at a distance.
+    Encoder {
+        /// The encoder's rendered diagnostic.
+        reason: String,
+    },
+    /// The trainable parameter registry changed order or membership mid-run.
+    ///
+    /// `AdamW` indexes its first and second moment buffers POSITIONALLY, so a reordered
+    /// registry pairs each moment with a different parameter — an update that is silently
+    /// wrong rather than loudly broken (T-3-54).
+    ParameterRegistryMoved,
 }
 
 impl fmt::Display for SetFitTrainError {
@@ -309,6 +358,25 @@ impl fmt::Display for SetFitTrainError {
                 "selected id `{id}` resolves to a row whose exact content hash disagrees \
                  with the selection's — the same name, different bytes \
                  (contract setfit-train-lifecycle-v1, requirement TRN-01)",
+            ),
+            Self::MaxLengthNotConsumable { requested, pinned } => write!(
+                f,
+                "the tuning loop consumes max_length {pinned}, but this run requested \
+                 {requested}; the encoder's sequence length is an equality constraint, not a \
+                 runtime setting \
+                 (contract setfit-train-lifecycle-v1, requirement TRN-02)",
+            ),
+            Self::Encoder { reason } => write!(
+                f,
+                "the encoder rejected a tuning-loop call: {reason} \
+                 (contract setfit-train-lifecycle-v1, requirement TRN-03)",
+            ),
+            Self::ParameterRegistryMoved => write!(
+                f,
+                "the trainable parameter registry changed between the pre-loop snapshot and \
+                 an optimizer step; AdamW's moment state is positional, so the update would \
+                 have paired moments with the wrong parameters \
+                 (contract setfit-train-lifecycle-v1, requirement TRN-03)",
             ),
         }
     }

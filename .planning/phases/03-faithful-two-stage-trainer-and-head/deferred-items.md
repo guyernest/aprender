@@ -75,3 +75,46 @@ Diagnostics citing `crates/aprender-train/` : **0**. Diagnostics citing `train/s
 `scheduler/warmup_linear_decay.rs` : **0**. The error stream is identical with and without
 `--features setfit`. `aprender-compute` is owned by plan 03-02 in this wave, so 03-03 did
 not touch it. Unchanged from Phase 2's entry apart from the crate counts.
+
+---
+
+## D-ITEM-06 (Phase 3, plan 03-05) — the MiniLM slice loader leaves 24 operations on the tape
+
+`SetFitMiniLm::from_slice_fixture` (and, by construction, the shared
+`BertSentenceEncoder::from_import` path behind it) appends **24 entries** to the thread-local
+autograd tape while merely LOADING a model. Measured with the accessor 03-05 added:
+
+```
+clear_graph(); slice_encoder(SEED); graph_tape_len()  ->  24
+```
+
+The count is independent of any subsequent encode, and `no_grad` itself is honoured — the
+same probe reports `graph_tape_len() == 0` after `no_grad(|| encode_texts(n))` for n = 1, 2
+and 4, against a control of `98` for the same encode outside `no_grad`. So this is a LOADER
+property, not a `no_grad` defect.
+
+### Why it is not a correctness bug today
+
+The trainer's step (b) clears the tape before every forward, so those 24 entries are gone by
+the time the first backward runs. They are, however:
+
+* a small permanent allocation for any consumer that loads an encoder and never trains
+  (inference callers included), and
+* a live trap for any future code that assumes a freshly loaded model implies an empty tape.
+  Plan 03-05 wrote exactly that assumption first, and its test went red on it.
+
+### Scope
+
+Out of scope for 03-05: the recording happens in `crates/aprender-core/src/setfit/encoder.rs`
+/ `import.rs`, which 03-05 does not own, and the fix is a Phase 1 change. 03-05's
+`tune_baseline_encode_records_no_operations` asserts the **delta** across the baseline encode
+rather than an absolute zero, and says in its doc comment why.
+
+### Fix direction
+
+Find the operation(s) `from_import` performs on tensors that already require grad — most
+likely a reshape/transpose during projection installation — and either perform them on
+detached data or wrap the constructor body in `autograd::no_grad`. Then tighten
+`tune_baseline_encode_records_no_operations` to the absolute `== 0` form, whose current
+non-vacuity assertion (`baseline_encode_tape.0 > 0`) will turn red and point here. Its own
+PMAT ticket.
