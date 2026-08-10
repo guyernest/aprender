@@ -1169,7 +1169,8 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/setfit-encoder-conformance-v1.yaml \
              contracts/tweet-eval-stance-benchmark-v1.yaml \
              contracts/contrastive-pair-protocol-v1.yaml \
-             contracts/multinomial-head-v1.yaml
+             contracts/multinomial-head-v1.yaml \
+             contracts/setfit-train-lifecycle-v1.yaml
 
 # The two Phase 2 contracts, audited as a BLOCKING tier3 gate by
 # `contract-audit-phase2` below. Deliberately a separate, narrower list than
@@ -1192,7 +1193,14 @@ PHASE2_CONTRACTS := contracts/contrastive-pair-protocol-v1.yaml \
 # was deliberately never authored (`ls` rc=1), and there is nothing for this
 # phase to wire on its behalf. Recorded explicitly because "I did not see a
 # heading" and "I did not look" are indistinguishable afterwards.
-PHASE3_CONTRACTS := contracts/multinomial-head-v1.yaml
+# linear-probe-classifier-v1.yaml is here because plan 03-06 task 3 binds
+# FrozenProbeRun to it. A contract that is bound but absent from this list is
+# audited by NOTHING: `contract-audit` repo-wide is vacuous (see that target),
+# so the bindings would sit unchecked while looking checked. Its presence was
+# verified by inducing a bogus binding status and observing this target go red.
+PHASE3_CONTRACTS := contracts/multinomial-head-v1.yaml \
+                    contracts/setfit-train-lifecycle-v1.yaml \
+                    contracts/linear-probe-classifier-v1.yaml
 
 # NOTE (plan 02-01, D-24): $(CONTRACTS) is an EXPLICIT HARDCODED LIST, not a glob
 # over contracts/*.yaml. A contract file that merely EXISTS in contracts/ is
