@@ -757,6 +757,10 @@ mod svc_rbf_sklearn_fixture;
 #[path = "tests_logreg_contract.rs"]
 mod tests_logreg_contract;
 
+#[cfg(test)]
+#[path = "tests_multinomial_contract.rs"]
+mod tests_multinomial_contract;
+
 // Estimator impl so LogisticRegression works with generic cross_validate /
 // grid_search (Pillar 1). Labels round-trip through f32; inherent API unchanged.
 impl crate::traits::Estimator for LogisticRegression {
