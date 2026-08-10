@@ -1153,7 +1153,7 @@ bindings:
   module_path: entrenar::train::setfit::tune
   function: validate_evidence
   signature: 'fn validate_evidence(evidence: &UpdateEvidence, thresholds: &Thresholds) -> Result<PassedEvidence, SetFitTrainError>'
-  status: not_implemented
+  status: implemented
   notes: 'THE single validating function; every future door calls it. Flipped to implemented by
     plan 03-06 task 2, which arms it. Recorded as not_implemented here deliberately: task 1
     freezes the thresholds and task 2 arms the comparison, and the contract must be committed
@@ -1165,7 +1165,7 @@ bindings:
   module_path: entrenar::train::setfit::tune
   function: validate_evidence
   signature: 'fn validate_evidence(evidence: &UpdateEvidence, thresholds: &Thresholds) -> Result<PassedEvidence, SetFitTrainError>'
-  status: not_implemented
+  status: implemented
   notes: 'The regime membership check is the FIRST statement of validate_evidence, so an
     out-of-regime run is refused before any threshold measured elsewhere is applied to it. Same
     task-2 flip as evidence_gate.'
@@ -1174,7 +1174,7 @@ bindings:
   module_path: entrenar::train::setfit::tune
   function: validate_evidence
   signature: 'fn validate_evidence(evidence: &UpdateEvidence, thresholds: &Thresholds) -> Result<PassedEvidence, SetFitTrainError>'
-  status: not_implemented
+  status: implemented
   notes: 'Run-level aggregate, evaluated after every per-parameter predicate so a failure names
     the offending parameter first. Same task-2 flip.'
 - contract: setfit-train-lifecycle-v1.yaml

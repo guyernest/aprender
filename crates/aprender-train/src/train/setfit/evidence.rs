@@ -471,7 +471,14 @@ fn row_for(name: &str, record: &ParamRecord) -> Result<EvidenceRow, EvidenceErro
 #[non_exhaustive]
 pub(crate) enum Verdict {
     /// No threshold has been frozen, so no verdict is available.
+    ///
+    /// Still reachable: `EvidenceSummary::of` builds an UNJUDGED summary, and only the gate
+    /// promotes it. A summary that never reached the gate must not claim a verdict.
     Unjudged,
+    /// Every gated parameter cleared its contracted epsilon.
+    Pass,
+    /// At least one gated parameter missed it, or the run-level floor was not met.
+    Fail,
 }
 
 /// Min / median / worst relative delta for one class.
@@ -625,8 +632,12 @@ fn median_of(values: &[f64]) -> f64 {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    use aprender::setfit::FreezeGroup;
+
     use crate::train::setfit::test_fixtures as fx;
-    use crate::train::setfit::tune::run_tuning;
+    use crate::train::setfit::thresholds::Thresholds;
+    use crate::train::setfit::tune::{run_tuning, validate_evidence};
+    use crate::train::setfit::{EncoderTuned, SetFitRun, SetFitTrainError};
 
     /// Every name the fixture encoder emits, with its expected class. A CASE TABLE, not a
     /// spot check: a mapping tested on three names is a mapping that has not been tested.
@@ -1000,6 +1011,325 @@ mod tests {
         assert_eq!(median_of(&[3.0, 1.0, 2.0]), 2.0);
         assert_eq!(median_of(&[4.0, 1.0, 3.0, 2.0]), 2.5);
         assert!(min_of(&[]).is_finite(), "an empty min must serialize as a number");
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The armed gate (plan 03-06) — negative / control / mirror
+    //
+    // Ph1 D-24 / Ph2 D-25 discipline: each negative is REJECTED and its message NAMES the
+    // offender, a CONTROL with the same setup minus the poison PASSES, and a MIRROR shows the
+    // untouched path is unchanged by the gate's presence. All of them run in every `cargo
+    // test` — a gate that is only ever exercised on the honest path is not evidence.
+    // -----------------------------------------------------------------------------------
+
+    /// The reference-defaults control run, built once and reused.
+    ///
+    /// A full `tune_encoder` pass per test would repeat the fixture load and the tuning loop
+    /// several times over for no additional evidence.
+    fn control_run() -> Result<SetFitRun<EncoderTuned>, SetFitTrainError> {
+        fx::prepared_run(fx::default_variant(), None).tune_encoder()
+    }
+
+    /// CONTROL: a reference-defaults fixture run passes the gate and mints `EncoderTuned`.
+    ///
+    /// Without this the three negatives below would be satisfied by a gate that rejects
+    /// everything, which is the failure mode that makes a rejection-only test suite worthless.
+    #[test]
+    fn negative_control_reference_run_passes_the_gate() {
+        let run = control_run().expect("the reference-defaults fixture run must pass the gate");
+        let passed = run.evidence();
+        let summary = passed.summary();
+
+        assert_eq!(summary.verdict, Verdict::Pass, "the control's verdict must be Pass");
+        assert_eq!(summary.contract_version, EVIDENCE_CONTRACT_VERSION);
+        assert!(
+            Thresholds::frozen().is_calibrated(&summary.calibration_regime_id),
+            "the control must run inside the calibrated regime, got `{}`",
+            summary.calibration_regime_id,
+        );
+
+        // The per-class epsilon actually applied is the CONTRACT's, not a local literal.
+        let frozen = Thresholds::frozen();
+        for class in ParameterClass::ALL {
+            let entry = frozen.of(class);
+            let Some(eps) = entry.eps else { continue };
+            for row in passed.table().rows_of_class(class) {
+                assert!(
+                    row.relative_delta > eps,
+                    "{}: {} passed the gate at relative delta {:e} which does not exceed the \
+                     contracted epsilon {eps:e}",
+                    class.tag(),
+                    row.name,
+                    row.relative_delta,
+                );
+            }
+        }
+
+        // The summary is BOUND to the table it summarizes.
+        assert_eq!(
+            summary.table_hash,
+            hex::encode(passed.table().table_hash().expect("table hash")),
+            "the summary must bind to its own table",
+        );
+        assert_eq!(summary.trainable_count, passed.table().rows.len());
+    }
+
+    /// NEGATIVE 1 — an all-frozen run cannot pass by being un-checkable (SAFE-03, D-09).
+    #[test]
+    fn negative_all_frozen_run_has_no_trainable_parameters() {
+        let variant = fx::default_variant();
+        // Every group of every layer, plus the embeddings: the complete freeze.
+        let mut policy = vec![FreezeGroup::Embeddings];
+        for layer in 0..fx::slice_encoder(variant.root_seed).num_layers() {
+            policy.push(FreezeGroup::LayerAttention(layer));
+            policy.push(FreezeGroup::LayerFfn(layer));
+            policy.push(FreezeGroup::LayerNorm(layer));
+        }
+        let run = fx::prepared_run_with_freeze(variant, policy);
+        match run.tune_encoder() {
+            Err(SetFitTrainError::NoTrainableParameters { trainable_count }) => {
+                assert_eq!(trainable_count, 0, "the message must report the observed count");
+                let rendered =
+                    SetFitTrainError::NoTrainableParameters { trainable_count }.to_string();
+                assert!(rendered.contains("trainable_count 0"), "rendered: {rendered}");
+                assert!(rendered.contains("SAFE-03"), "the diagnosis must name what it enforces");
+            }
+            other => panic!("an all-frozen run must be rejected as unpassable, got {other:?}"),
+        }
+    }
+
+    /// NEGATIVE 2 — a 1e-30-learning-rate run is rejected and the message NAMES the offender.
+    #[test]
+    fn negative_null_learning_rate_run_is_rejected_naming_the_offender() {
+        let run = fx::prepared_run(fx::default_variant(), Some(1e-30));
+        match run.tune_encoder() {
+            Err(SetFitTrainError::EvidenceRejected { worst, summary, table }) => {
+                // The offender is named by its DOTTED HF name, not an index.
+                assert!(
+                    worst.name.contains('.'),
+                    "the offender must be named by its dotted HF name, got `{}`",
+                    worst.name,
+                );
+                // Its class is one the contract actually gates.
+                let frozen = Thresholds::frozen();
+                let class = ParameterClass::ALL
+                    .into_iter()
+                    .find(|c| c.tag() == worst.class)
+                    .unwrap_or_else(|| panic!("unknown class `{}`", worst.class));
+                assert!(frozen.of(class).gated, "an ungated class must never be blamed");
+
+                // The measured delta and the CONTRACTED epsilon are both present and consistent.
+                assert_eq!(
+                    Some(worst.eps),
+                    frozen.of(class).eps,
+                    "the blamed epsilon must be the contract's value for that class",
+                );
+                assert!(
+                    worst.relative_delta <= worst.eps,
+                    "the offender must actually have missed its threshold: {:e} vs {:e}",
+                    worst.relative_delta,
+                    worst.eps,
+                );
+                // At 1e-30 every update underflows the parameter ULP, so the delta is exactly 0.
+                assert_eq!(worst.relative_delta, 0.0, "a 1e-30 run moves nothing at f32 scale");
+
+                // AUDITABLE FAILURE: the COMPLETE record travels inside the error.
+                assert_eq!(
+                    table.rows.len(),
+                    summary.trainable_count,
+                    "the failed table must carry ONE ROW PER TRAINABLE PARAMETER so a rejection \
+                     can be investigated rather than merely reported",
+                );
+                assert!(table.rows.len() > 1, "non-vacuity: the fixture has many parameters");
+                assert!(table.rows.contains_key(&worst.name), "the offender must be IN the table");
+                assert_eq!(summary.verdict, Verdict::Fail);
+                // Run-level facts survive the rejection too.
+                assert!(!table.loss_trace_hash.is_empty());
+                assert!(!table.consumed_pair_digest.is_empty());
+                assert!(!table.batch_boundary_list.is_empty());
+
+                let rendered =
+                    SetFitTrainError::EvidenceRejected { worst, summary, table }.to_string();
+                assert!(rendered.contains("REJECTED"), "rendered: {rendered}");
+                assert!(rendered.contains("TRN-03"), "the diagnosis must name its requirement");
+            }
+            other => panic!("a 1e-30 run must be rejected by the gate, got {other:?}"),
+        }
+    }
+
+    /// NEGATIVE 2b — a run in which EVERY gated parameter MOVED is still rejected, by the
+    /// epsilon and by nothing else.
+    ///
+    /// This test exists because mutating the gate exposed a hole in the set above. Deleting
+    /// the `relative_delta > eps` comparison outright left every other negative GREEN: the
+    /// 1e-30 run has bit-for-bit zero deltas so the strict movement predicate catches it
+    /// before the threshold is ever consulted, and even a real 1e-8 run contains some
+    /// parameters that did not move at all, so it too is rejected without the epsilon.
+    ///
+    /// The only witness that isolates the threshold is a table in which EVERYTHING moved and
+    /// everything fell short. It is built from the CONTROL's real table, with every relative
+    /// delta scaled below its class epsilon and `moved` left true, so the sole reason to
+    /// reject it is the comparison this test exists to protect.
+    #[test]
+    fn negative_a_run_that_moved_everywhere_but_fell_short_is_rejected_by_the_epsilon() {
+        let out = tune_output(fx::default_variant(), None);
+        let frozen = Thresholds::frozen();
+
+        // CONTROL: unmodified, this table passes.
+        let good = UpdateEvidence::from_tune_output(&out, &regime_id()).expect("evidence");
+        validate_evidence(&good, &frozen, out.trainable_count, out.frozen_count)
+            .expect("CONTROL: the reference table passes before it is scaled down");
+
+        // The poison: everything still MOVED, everything now falls short.
+        let mut short = good.clone();
+        for row in short.rows.values_mut() {
+            row.relative_delta *= 1e-3;
+            assert!(row.moved, "the scaling must not disturb the movement predicate");
+            assert!(row.delta_norm > 0.0);
+        }
+        short.embedding_delta_median *= 1e-3;
+
+        // Non-vacuity: EVERY gated row moved, so nothing here is rejectable by `moved`.
+        let gated_rows: Vec<&EvidenceRow> =
+            short.rows.values().filter(|r| frozen.of(r.class).gated).collect();
+        assert!(!gated_rows.is_empty());
+        assert!(
+            gated_rows.iter().all(|r| r.moved && r.delta_norm > 0.0),
+            "if any gated parameter failed to move, the strict predicate could reject this \
+             table and the epsilon would again go untested",
+        );
+        assert!(
+            gated_rows.iter().all(|r| r.grad_norm_max.is_finite()),
+            "and every gradient is finite, so the finiteness predicate cannot reject it either",
+        );
+
+        match validate_evidence(&short, &frozen, out.trainable_count, out.frozen_count) {
+            Err(SetFitTrainError::EvidenceRejected { worst, .. }) => {
+                let class = ParameterClass::ALL
+                    .into_iter()
+                    .find(|c| c.tag() == worst.class)
+                    .unwrap_or_else(|| panic!("unknown class `{}`", worst.class));
+                assert_eq!(Some(worst.eps), frozen.of(class).eps);
+                assert!(
+                    worst.relative_delta > 0.0,
+                    "the blamed parameter MOVED ({:e}); only the threshold rejected it",
+                    worst.relative_delta,
+                );
+                assert!(worst.relative_delta <= worst.eps);
+            }
+            other => panic!(
+                "a table in which everything moved but fell short of its epsilon MUST be \
+                 rejected; got {other:?}. If this returned Ok, the epsilon comparison is not \
+                 doing anything and every frozen threshold in the contract is decoration.",
+            ),
+        }
+    }
+
+    /// NEGATIVE 3 — an out-of-regime run is refused BEFORE any threshold is compared.
+    ///
+    /// Driven through `validate_evidence` directly with a doctored regime id, because the point
+    /// is the ORDER of the checks: the table handed in is the CONTROL's, which passes every
+    /// threshold. If the regime check ran second, this table would pass and the test would be
+    /// green for the wrong reason.
+    #[test]
+    fn negative_uncalibrated_regime_is_refused_before_any_comparison() {
+        let out = tune_output(fx::default_variant(), None);
+        let frozen = Thresholds::frozen();
+
+        let good = UpdateEvidence::from_tune_output(&out, &regime_id()).expect("evidence");
+        validate_evidence(&good, &frozen, out.trainable_count, out.frozen_count)
+            .expect("CONTROL: this very table passes when its regime is calibrated");
+
+        let foreign =
+            "minilm-full-h384-l6-a12-i1536-v30522@production|seeds=1,42,7|cells=s16e2b8,s8e1b4";
+        let bad = UpdateEvidence::from_tune_output(&out, foreign).expect("evidence");
+        match validate_evidence(&bad, &frozen, out.trainable_count, out.frozen_count) {
+            Err(SetFitTrainError::UncalibratedRegime { observed, calibrated }) => {
+                assert_eq!(observed, foreign);
+                assert_eq!(calibrated.len(), 1, "exactly one calibrated fingerprint");
+                assert!(!calibrated.contains(&foreign.to_string()));
+                let rendered =
+                    SetFitTrainError::UncalibratedRegime { observed, calibrated }.to_string();
+                assert!(rendered.contains("D-10(c)"), "rendered: {rendered}");
+            }
+            other => panic!("an out-of-regime run must fail closed, got {other:?}"),
+        }
+    }
+
+    /// NEGATIVE 3b — a trainable set of ONLY gradient-free parameters is unpassable.
+    ///
+    /// The hole the `attention_key_bias` exclusion would otherwise open: freeze everything the
+    /// gate checks, leave only what it cannot check, and a naive `for p in gated { .. }` loop
+    /// passes vacuously because it iterates over nothing.
+    #[test]
+    fn negative_only_gradient_free_parameters_cannot_testify() {
+        let out = tune_output(fx::default_variant(), None);
+        let full = UpdateEvidence::from_tune_output(&out, &regime_id()).expect("evidence");
+
+        let mut ungated_only = full.clone();
+        ungated_only.rows.retain(|_, r| r.class == ParameterClass::AttentionKeyBias);
+        let kept = ungated_only.rows.len();
+        assert!(kept > 0, "non-vacuity: the fixture must emit key biases");
+
+        match validate_evidence(&ungated_only, &Thresholds::frozen(), kept, out.frozen_count) {
+            Err(SetFitTrainError::NoTestifyingParameters { trainable_count, ungated_count }) => {
+                assert_eq!(trainable_count, kept);
+                assert_eq!(ungated_count, kept);
+            }
+            other => panic!("an all-ungated trainable set must be unpassable, got {other:?}"),
+        }
+    }
+
+    /// MIRROR — arming the gate changed nothing about what the loop records.
+    ///
+    /// Two independent passing runs agree bit-for-bit on every recorded digest. The gate READS
+    /// the evidence; if it had started to influence what the loop consumed, these would diverge.
+    #[test]
+    fn negative_mirror_two_passing_runs_agree_on_every_digest() {
+        let first = control_run().expect("first control run");
+        let second = control_run().expect("second control run");
+        let (a, b) = (first.evidence().table(), second.evidence().table());
+
+        assert_eq!(a.loss_trace_hash, b.loss_trace_hash, "loss trace");
+        assert_eq!(a.consumed_pair_digest, b.consumed_pair_digest, "consumed pairs");
+        assert_eq!(a.batch_boundary_digest, b.batch_boundary_digest, "batch boundaries");
+        assert_eq!(a.batch_boundary_list, b.batch_boundary_list, "readable boundary list");
+        assert_eq!(a.parameter_registry_hash, b.parameter_registry_hash, "registry");
+        assert_eq!(a.step_count, b.step_count, "step count");
+
+        // Non-vacuity: the digests are real, not two empty strings compared to each other.
+        assert_eq!(a.loss_trace_hash.len(), 64, "a SHA-256 renders as 64 hex characters");
+        assert!(a.step_count > 0, "the mirror must compare runs that actually ran");
+
+        // And the whole table hash agrees, which covers every per-parameter measurement at once.
+        assert_eq!(
+            a.table_hash().expect("hash"),
+            b.table_hash().expect("hash"),
+            "two identical runs must produce identical evidence bytes",
+        );
+    }
+
+    /// `PassedEvidence` retains the run-level fields every downstream accessor resolves to.
+    ///
+    /// W-06: anything dropped here becomes something a later plan RECOMPUTES, which is exactly
+    /// the false-green the in-band digests exist to remove.
+    #[test]
+    fn evidence_gate_passed_evidence_carries_the_complete_record() {
+        let run = control_run().expect("control");
+        let table = run.evidence().table();
+
+        assert!(!table.loss_trace_hash.is_empty());
+        assert!(!table.consumed_pair_digest.is_empty());
+        assert!(!table.batch_boundary_digest.is_empty());
+        assert!(!table.batch_boundary_list.is_empty(), "03-08's recorded boundary source");
+        assert!(!table.parameter_registry_hash.is_empty());
+        assert!(table.step_count > 0);
+        assert!(table.k > 0);
+        assert!(table.first_k_mean.is_finite() && table.last_k_mean.is_finite());
+        assert!(table.embedding_delta_min.is_finite());
+        assert!(table.embedding_delta_median > 0.0);
+        assert!(table.pre_clip_norm_max.is_finite());
+        assert!(!table.calibration_regime_id.is_empty());
     }
 
     // -----------------------------------------------------------------------------------

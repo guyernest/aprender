@@ -188,6 +188,31 @@ pub struct BertSentenceEncoder {
     forward_ordinal: u64,
 }
 
+impl BertSentenceEncoder {
+    /// The architecture fingerprint: the dimensions that decide whether a calibration
+    /// measured elsewhere applies to this encoder.
+    ///
+    /// Read-only and derived entirely from `dims`, which the constructor already validated.
+    /// It exists because a gate that fails closed OUTSIDE its calibration regime has to be
+    /// able to observe the architecture it is judging; without this it would be comparing a
+    /// caller-supplied label, which is a claim rather than a measurement.
+    ///
+    /// Deliberately NOT behind `conformance-fixtures`: this is production behaviour, not test
+    /// support. It exposes no tensor, no weight and no tokenizer material — only the shape
+    /// numbers that are already implied by every parameter the model publishes.
+    #[must_use]
+    pub fn architecture_fingerprint(&self) -> String {
+        format!(
+            "minilm-slice-h{}-l{}-a{}-i{}-v{}",
+            self.dims.hidden,
+            self.dims.layers,
+            self.dims.heads,
+            self.dims.intermediate,
+            self.dims.vocab,
+        )
+    }
+}
+
 impl std::fmt::Debug for BertSentenceEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BertSentenceEncoder")

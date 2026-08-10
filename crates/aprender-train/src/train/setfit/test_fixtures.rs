@@ -40,6 +40,7 @@
 
 use std::path::PathBuf;
 
+use aprender::setfit::FreezeGroup;
 use aprender::setfit::SetFitMiniLm;
 use aprender_contrastive_data::ledger::AccessLedger;
 use aprender_contrastive_data::pairs::PairConfig;
@@ -302,6 +303,44 @@ pub(crate) fn prepared_run(
     let encoder = slice_encoder(variant.root_seed);
     SetFitRun::prepare(encoder, dataset, selection, config_for(variant, encoder_lr_override))
         .expect("the fixture run must prepare")
+}
+
+/// A prepared run with an explicit freeze policy.
+///
+/// The all-frozen negative needs a run whose trainable set is EMPTY, and `config_for` hard-codes
+/// an empty policy because every other cell wants the D-20 all-trainable default.
+pub(crate) fn prepared_run_with_freeze(
+    variant: CalibrationVariant,
+    freeze_policy: Vec<FreezeGroup>,
+) -> SetFitRun<Prepared> {
+    let mut ledger = AccessLedger::new();
+    let dataset = synthetic_dataset(&mut ledger);
+    let selection = FewShotSelector::select(
+        &dataset,
+        &SelectionConfig { root_seed: variant.root_seed, shots_per_class: variant.shots_per_class },
+        &mut ledger,
+    )
+    .expect("the synthetic corpus must support this selection");
+    let encoder = slice_encoder(variant.root_seed);
+    let reference = SetFitTrainConfig::reference_defaults(variant.root_seed);
+    let mut pair_config = PairConfig::new(variant.root_seed);
+    pair_config.budget = Some(variant.budget);
+    let config = SetFitTrainConfig::new(SetFitTrainRequest {
+        encoder_lr: reference.encoder_lr(),
+        epochs: variant.epochs,
+        batch_size: variant.batch_size,
+        warmup_ratio: reference.warmup_ratio(),
+        grad_clip_max_norm: reference.grad_clip_max_norm(),
+        max_length: reference.max_length(),
+        pair_config,
+        freeze_policy,
+        head_regularization: reference.head_regularization(),
+        root_seed: variant.root_seed,
+        device: "cpu".to_string(),
+        lr_schedule: reference.lr_schedule(),
+    })
+    .expect("the fixture configuration satisfies the twelve-knob table");
+    SetFitRun::prepare(encoder, dataset, selection, config).expect("the fixture run must prepare")
 }
 
 /// The selection alone, for tests that do not need an encoder.

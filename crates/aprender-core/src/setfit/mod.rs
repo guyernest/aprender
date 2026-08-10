@@ -268,6 +268,16 @@ impl SetFitMiniLm {
         self.tokenizer.tokenizer_sha256()
     }
 
+    /// This model's architecture fingerprint — see
+    /// [`BertSentenceEncoder::architecture_fingerprint`].
+    ///
+    /// Forwarded rather than reached through `encoder()`, which is gated on
+    /// `conformance-fixtures` and therefore absent from production builds.
+    #[must_use]
+    pub fn architecture_fingerprint(&self) -> String {
+        self.encoder.architecture_fingerprint()
+    }
+
     /// Encoder layers, for freeze-group validation and introspection.
     #[must_use]
     pub fn num_layers(&self) -> usize {

@@ -78,6 +78,42 @@ equations:
     formula: 'relative_delta(p) = ||theta_final(p) - theta_init(p)||_2 / max(denom(p), s_class(p)) ; denom(p) = ||theta_init(p)||_2 restricted to the delta support if class(p) is sparse, else ||theta_init(p)||_2 over the whole tensor ; PASS(p) <=> is_finite(grad_norm_max(p)) AND ||dTheta(p)||_2 > 0 AND relative_delta(p) > eps_class(p) ; PASS(run) <=> gated_set != {} AND for all p in gated_set: PASS(p)'
     domain: 'p in the trainable parameter set (all encoder parameters minus FreezeGroup exemptions), class(p) in {embedding, layer_norm_weight, layer_norm_bias, projection_weight, projection_bias, attention_key_bias}'
     codomain: 'PassedEvidence on pass; SetFitTrainError::EvidenceRejected carrying the COMPLETE UpdateEvidence table, its EvidenceSummary and the worst-offending parameter on fail'
+    # THE MACHINE-READABLE FORM of the table restated in the first invariant below.
+    # Both exist on purpose: the markdown table is what a reader checks, this is what the
+    # Rust constants are PARSED from by thresholds_match_the_contract. Keeping them adjacent
+    # means a one-sided edit is visible here as well as red in the test.
+    frozen_thresholds:
+      embedding:
+        eps: 1.1e-5
+        scale_floor: 1.0
+        sparse: true
+        gated: true
+      layer_norm_weight:
+        eps: 2.9e-6
+        scale_floor: 1.0
+        sparse: false
+        gated: true
+      layer_norm_bias:
+        eps: 1.1e-5
+        scale_floor: 1.0
+        sparse: false
+        gated: true
+      projection_weight:
+        eps: 1.8e-5
+        scale_floor: 1.0
+        sparse: false
+        gated: true
+      projection_bias:
+        eps: 8.3e-6
+        scale_floor: 1.0
+        sparse: false
+        gated: true
+      attention_key_bias:
+        eps: null
+        scale_floor: 1.0
+        sparse: false
+        gated: false
+    embedding_delta_floor_value: 2.7e-5
     invariants:
       - 'THE FROZEN PER-CLASS TABLE. Five gated classes, each with an epsilon and a positive
         scale floor. `attention_key_bias` is the sixth class and is NOT gated — it appears in
@@ -224,6 +260,9 @@ equations:
     formula: 'calibration_regime_id = arch_fingerprint || "|seeds=" || sorted(seed_set) || "|cells=" || sorted(cell_labels) ; JUDGE(run) <=> calibration_regime_id(run) in CALIBRATED_REGIMES, else UncalibratedRegime{observed, calibrated}'
     domain: 'a completed run''s recorded calibration_regime_id'
     codomain: 'permission to apply the evidence_gate thresholds, or a typed refusal'
+    # Machine-readable form of the calibrated set; CALIBRATED_REGIMES is parsed from here.
+    calibrated_regimes:
+      - 'minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4'
     invariants:
       - 'THE CALIBRATED SET CONTAINS EXACTLY ONE FINGERPRINT:
         `minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4`'
