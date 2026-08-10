@@ -410,6 +410,16 @@ false claim in the traceability table, which is exactly the failure mode Phase
   SKIPPED-WITH-EVIDENCE and the phase must read that as "not falsified", not as a
   pass.
 
+## Self-Check: PASSED
+
+- `crates/aprender-core/src/setfit/dropout_rng.rs` — FOUND (46.7K)
+- `crates/aprender-core/tests/gemm_thread_determinism.rs` — FOUND (10.9K)
+- `.planning/phases/03-faithful-two-stage-trainer-and-head/03-02-SUMMARY.md` — FOUND (27.1K)
+- Commits `7de50abc9`, `4c41befc1`, `3b790d230`, `942d103fe` — all 4 present in history
+- `git status --short` clean; nothing left uncommitted in the worktree
+- **`STATE.md`, `ROADMAP.md` and `REQUIREMENTS.md` are NOT in this branch's diff**
+  against base `e2dee4be9` — the orchestrator owns those writes
+
 ---
 *Phase: 03-faithful-two-stage-trainer-and-head*
 *Completed: 2026-08-09*
