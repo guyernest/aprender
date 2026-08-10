@@ -438,17 +438,10 @@ impl SetFitRun<EncoderTuned> {
 
     /// The same body at a caller-chosen L-BFGS budget.
     ///
-    /// `#[cfg(test)]`: the non-convergence path has to be reachable to be proven typed, and
-    /// the honest way to reach it is a tiny iteration budget. Shipping this as a public knob
-    /// would put a door on the surface whose only use is to make the head fail.
-    #[cfg(test)]
-    pub(crate) fn fit_head_with_max_iter(
-        self,
-        max_iter: usize,
-    ) -> Result<SetFitRun<HeadFitted>, SetFitTrainError> {
-        self.fit_head_with_iteration_budget(max_iter)
-    }
-
+    /// Module-private, and it stays that way: the non-convergence path has to be reachable
+    /// to be proven typed, and the honest way to reach it is a tiny iteration budget, but
+    /// shipping that as a public knob would put a door on the surface whose only use is to
+    /// make the head fail. `tests` is a descendant module, so it already sees this.
     fn fit_head_with_iteration_budget(
         self,
         max_iter: usize,
@@ -456,14 +449,15 @@ impl SetFitRun<EncoderTuned> {
         let Self { mut encoder, dataset, selection, config, evidence: passed, _state } = self;
         let head_input::FittedHead { head, report, lambda, input } =
             head_input::fit_on_selection(&mut encoder, &dataset, &selection, &config, max_iter)?;
+        let (ordered_labels, encode_ledger, encode_call_count) = input.into_evidence_parts();
         let evidence = HeadFittedEvidence {
             passed,
             head,
             report,
             effective_lambda: lambda,
-            ordered_labels: input.ordered_labels().to_vec(),
-            encode_ledger: input.encode_ledger().to_vec(),
-            encode_call_count: input.encode_call_count(),
+            ordered_labels,
+            encode_ledger,
+            encode_call_count,
         };
         Ok(SetFitRun { encoder, dataset, selection, config, evidence, _state: PhantomData })
     }
@@ -1238,7 +1232,7 @@ mod tests {
         let tuned = fx::prepared_run(fx::calibrated_variant(), None)
             .tune_encoder()
             .expect("the calibrated cell passes the evidence gate");
-        match tuned.fit_head_with_max_iter(1) {
+        match tuned.fit_head_with_iteration_budget(1) {
             Err(SetFitTrainError::HeadFit(HeadFitError::NotConverged {
                 iterations,
                 gradient_norm,

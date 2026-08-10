@@ -56,7 +56,7 @@ use super::SetFitTrainError;
 /// Every field is sampled inside the encode loop. Nothing here is a restatement of what the
 /// code was written to do: a witness that recorded intent would be exactly the false green
 /// this type exists to remove.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct EncodeWitness {
     /// `encoder.training()`, OR-ed over every window. `false` iff eval mode held throughout.
     pub(crate) training_observed: bool,
@@ -96,12 +96,11 @@ impl EncodeWitness {
 }
 
 /// The head's fitting input: one embedding row per unique selected row, in selection order.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct HeadDataset {
     embeddings: Vec<Vec<f32>>,
     class_indices: Vec<usize>,
     ordered_labels: Vec<String>,
-    n: usize,
     encode_ledger: Vec<String>,
     encode_call_count: usize,
     witness: EncodeWitness,
@@ -124,16 +123,27 @@ impl HeadDataset {
     }
 
     /// The UNIQUE row count. The only `n` the head's lambda may be resolved against.
+    ///
+    /// Read off `embeddings` rather than stored beside it. A second copy of this number
+    /// would be state a future edit could desynchronise from the vector it counts, and —
+    /// unlike `encode_ledger` and `encode_call_count`, which are independent observations —
+    /// it proves nothing the vector does not already say.
     pub(crate) fn n(&self) -> usize {
-        self.n
+        self.embeddings.len()
     }
 
     /// The ordered identifiers actually handed to the encoder.
+    ///
+    /// `#[cfg(test)]`: the shipped path MOVES the ledger out through
+    /// [`HeadDataset::into_evidence_parts`] rather than borrowing it, so this borrow exists
+    /// only for the assertions that read the ledger off an intermediate `HeadDataset`.
+    #[cfg(test)]
     pub(crate) fn encode_ledger(&self) -> &[String] {
         &self.encode_ledger
     }
 
-    /// How many times the encoder was invoked.
+    /// How many times the encoder was invoked. `#[cfg(test)]` for the same reason as above.
+    #[cfg(test)]
     pub(crate) fn encode_call_count(&self) -> usize {
         self.encode_call_count
     }
@@ -141,6 +151,14 @@ impl HeadDataset {
     /// What was observed while the encode ran.
     pub(crate) fn witness(&self) -> &EncodeWitness {
         &self.witness
+    }
+
+    /// Hand the evidence-bound parts to the caller by MOVE.
+    ///
+    /// `fit_head` drops this dataset on the next line, so cloning the labels and the ledger
+    /// out of it allocates one `String` per selected row only to free the original.
+    pub(crate) fn into_evidence_parts(self) -> (Vec<String>, Vec<String>, usize) {
+        (self.ordered_labels, self.encode_ledger, self.encode_call_count)
     }
 }
 
@@ -183,7 +201,6 @@ pub(crate) fn head_dataset(
     let encoded = encode_once(encoder, &rows, batch)?;
 
     let built = HeadDataset {
-        n: encoded.embeddings.len(),
         embeddings: encoded.embeddings,
         class_indices,
         ordered_labels,
@@ -217,6 +234,10 @@ fn encode_once(
     let mut training_observed = false;
     let mut requires_grad_observed = false;
 
+    // One buffer for every window, refilled in place. The encoder wants a contiguous
+    // `&[&str]`, but it does not want a fresh allocation per batch.
+    let mut window_texts: Vec<&str> = Vec::with_capacity(batch.min(rows.len().max(1)));
+
     let tape_before = autograd::graph_tape_len();
     let result = autograd::no_grad(|| -> Result<(), SetFitTrainError> {
         for window in rows.chunks(batch) {
@@ -226,7 +247,10 @@ fn encode_once(
             }
             training_observed |= encoder.training();
             encode_call_count += 1;
-            let window_texts: Vec<&str> = window.iter().map(|&(_, text)| text).collect();
+            // Same slice the ledger was just written from — the property the module doc
+            // rests on is that these two never come from different sources.
+            window_texts.clear();
+            window_texts.extend(window.iter().map(|&(_, text)| text));
             let embedded = encoder
                 .encode_texts(&window_texts)
                 .map_err(|e| SetFitTrainError::Encoder { reason: e.to_string() })?;
@@ -620,7 +644,9 @@ mod tests {
         );
         assert!(!training_encoder.training(), "the encoder is left in eval mode");
 
-        let (mut eval_encoder, _, _) = parts();
+        // A FRESH encoder, which is the property this comparison rests on — `parts()`
+        // would also rebuild a dataset and a selection only to discard both.
+        let mut eval_encoder = fx::slice_encoder(fx::FIXTURE_SEED);
         let from_eval = head_dataset(&mut eval_encoder, &dataset, &selection, 4)
             .expect("an eval-mode encoder must produce the head's input");
         assert_eq!(
@@ -639,7 +665,7 @@ mod tests {
     #[test]
     fn head_input_two_builds_are_bitwise_identical() {
         let (mut first, dataset, selection) = parts();
-        let (mut second, _, _) = parts();
+        let mut second = fx::slice_encoder(fx::FIXTURE_SEED);
         let a = head_dataset(&mut first, &dataset, &selection, 4).expect("first build");
         let b = head_dataset(&mut second, &dataset, &selection, 4).expect("second build");
         assert_eq!(a.embeddings(), b.embeddings(), "pinned windows must be bitwise reproducible");
@@ -730,13 +756,17 @@ mod tests {
     /// finds every needle IN ITSELF: `text.contains("no_grad")` is satisfied by the assertion
     /// that spells it, and would stay green if the mechanism were deleted from the code. The
     /// header is assembled at runtime for the same reason.
-    fn shipped_source() -> String {
+    fn module_source() -> String {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/train/setfit/head_input.rs");
-        let text = std::fs::read_to_string(&path).expect("this module is readable");
+        std::fs::read_to_string(&path).expect("this module is readable")
+    }
+
+    /// The shipped half of `whole`, cut at the test module's header.
+    fn shipped_source(whole: &str) -> &str {
         let header = format!("\nmod {} {{", "tests");
-        let cut = text.find(&header).expect("this module ends with its test module");
-        text[..cut].to_string()
+        let cut = whole.find(&header).expect("this module ends with its test module");
+        &whole[..cut]
     }
 
     /// The module names no multiplicity-shaped input anywhere, and the mechanism is present.
@@ -744,9 +774,7 @@ mod tests {
     fn head_input_names_no_multiplicity_shaped_parameter() {
         // The pair-type scan covers the WHOLE file, tests included: there is no reason for
         // this module to mention the type at all. Assembled so it cannot match itself.
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/train/setfit/head_input.rs");
-        let whole = std::fs::read_to_string(&path).expect("this module is readable");
+        let whole = module_source();
         let needle = format!("{}{}", "P", "air");
         assert!(
             !whole.contains(&needle),
@@ -754,7 +782,7 @@ mod tests {
              expressible only from the selection",
         );
 
-        let shipped = shipped_source();
+        let shipped = shipped_source(&whole);
         for mechanism in ["no_grad", "detach", "label_names", "set_training(false)"] {
             assert!(
                 shipped.contains(mechanism),

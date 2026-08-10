@@ -132,8 +132,9 @@ fn endpoint_multiplicities(t: &Trusted) -> Vec<usize> {
 /// The head's rows, each repeated according to `multiplicity`.
 fn replicated(t: &Trusted, multiplicity: &[usize]) -> (Vec<Vec<f32>>, Vec<usize>) {
     let input = &t.fitted.input;
-    let mut features = Vec::new();
-    let mut classes = Vec::new();
+    let total: usize = multiplicity.iter().sum();
+    let mut features = Vec::with_capacity(total);
+    let mut classes = Vec::with_capacity(total);
     for (row, &times) in multiplicity.iter().enumerate() {
         for _ in 0..times {
             features.push(input.embeddings()[row].clone());
@@ -148,17 +149,12 @@ fn max_coefficient_distance(
     a: &MultinomialLogisticRegression,
     b: &MultinomialLogisticRegression,
 ) -> f64 {
-    let weights = a
-        .weights()
-        .iter()
-        .zip(b.weights())
-        .map(|(x, y)| f64::from((x - y).abs()))
-        .fold(0.0_f64, f64::max);
-    a.intercepts()
-        .iter()
-        .zip(b.intercepts())
-        .map(|(x, y)| f64::from((x - y).abs()))
-        .fold(weights, f64::max)
+    fn abs_diffs<'a>(x: &'a [f32], y: &'a [f32]) -> impl Iterator<Item = f64> + 'a {
+        x.iter().zip(y).map(|(p, q)| f64::from((p - q).abs()))
+    }
+    abs_diffs(a.weights(), b.weights())
+        .chain(abs_diffs(a.intercepts(), b.intercepts()))
+        .fold(0.0_f64, f64::max)
 }
 
 /// Total endpoint multiplicity per class, and the (class, ratio) the skew is worst at.
@@ -168,14 +164,11 @@ fn class_totals(t: &Trusted, multiplicity: &[usize]) -> (Vec<usize>, usize, f64)
     for (row, &times) in multiplicity.iter().enumerate() {
         totals[t.fitted.input.class_indices()[row]] += times;
     }
-    let (mut worst, mut hi, mut lo) = (0, totals[0], totals[0]);
-    for (class, &total) in totals.iter().enumerate() {
-        if total > hi {
-            hi = total;
-            worst = class;
-        }
-        lo = lo.min(total);
-    }
+    let hi = totals.iter().copied().max().unwrap_or(0);
+    let lo = totals.iter().copied().min().unwrap_or(0);
+    // `position`, not `max_by_key`: the first class at the maximum, matching the tie-break
+    // the assertion message reports.
+    let worst = totals.iter().position(|&t| t == hi).unwrap_or(0);
     #[allow(clippy::cast_precision_loss)]
     let ratio = hi as f64 / lo.max(1) as f64;
     (totals, worst, ratio)
