@@ -86,18 +86,35 @@ pub(crate) enum ParameterClass {
     LayerNormBias,
     /// `*.attention.self.*.weight`, `*.dense.weight`.
     ProjectionWeight,
-    /// `*.attention.self.*.bias`, `*.dense.bias`.
+    /// `*.attention.self.query.bias`, `*.attention.self.value.bias`, `*.dense.bias`.
     ProjectionBias,
+    /// `*.attention.self.key.bias` — the ANALYTICALLY GRADIENT-FREE class.
+    ///
+    /// Split out of [`Self::ProjectionBias`] on a mechanism, not on a failing margin. Softmax
+    /// is invariant to a constant shift of its inputs, and adding the key bias `b_k` to every
+    /// key contributes `q_i . b_k` to the pre-softmax logit of EVERY key `j` for a given query
+    /// `i` — the same amount for all `j`. The shift cancels, so `dL/db_k = 0` in exact
+    /// arithmetic. The query bias does not have this property (`(q + b_q) . k_j` varies with
+    /// `j`), and neither does the value bias (it adds a constant to the attention output,
+    /// which the downstream layers see), which is why this class is the key bias ALONE and not
+    /// "attention biases".
+    ///
+    /// Measured on the fixture slice: `grad_norm_max` 2.290e-10 for
+    /// `encoder.layer.1.attention.self.key.bias` against 8.007e-3 for
+    /// `encoder.layer.0.attention.self.query.weight` in the same block — 3.5e7x smaller, which
+    /// is f32 cancellation residue rather than a small gradient.
+    AttentionKeyBias,
 }
 
 impl ParameterClass {
     /// Every class, in `Ord` order — the iteration order every report uses.
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Embedding,
         Self::LayerNormWeight,
         Self::LayerNormBias,
         Self::ProjectionWeight,
         Self::ProjectionBias,
+        Self::AttentionKeyBias,
     ];
 
     /// Whether the denominator is restricted to the delta's support.
@@ -124,7 +141,8 @@ impl ParameterClass {
             | Self::LayerNormWeight
             | Self::LayerNormBias
             | Self::ProjectionWeight
-            | Self::ProjectionBias => 1.0,
+            | Self::ProjectionBias
+            | Self::AttentionKeyBias => 1.0,
         }
     }
 
@@ -136,6 +154,7 @@ impl ParameterClass {
             Self::LayerNormBias => "layer_norm_bias",
             Self::ProjectionWeight => "projection_weight",
             Self::ProjectionBias => "projection_bias",
+            Self::AttentionKeyBias => "attention_key_bias",
         }
     }
 }
@@ -207,6 +226,15 @@ pub(crate) fn classify_parameter(name: &str) -> Result<ParameterClass, EvidenceE
         return match leaf {
             "weight" => Ok(ParameterClass::LayerNormWeight),
             "bias" => Ok(ParameterClass::LayerNormBias),
+            _ => Err(unclassified()),
+        };
+    }
+    // BEFORE the general projection branch: the key BIAS is gradient-free, the key WEIGHT is
+    // not (only a constant shift of the logits cancels, and `W_k x` is not constant in x).
+    if name.contains(".attention.self.key.") {
+        return match leaf {
+            "weight" => Ok(ParameterClass::ProjectionWeight),
+            "bias" => Ok(ParameterClass::AttentionKeyBias),
             _ => Err(unclassified()),
         };
     }
@@ -602,14 +630,21 @@ mod tests {
 
     /// Every name the fixture encoder emits, with its expected class. A CASE TABLE, not a
     /// spot check: a mapping tested on three names is a mapping that has not been tested.
-    const CASE_TABLE: [(&str, ParameterClass); 14] = [
+    const CASE_TABLE: [(&str, ParameterClass); 18] = [
         ("embeddings.word_embeddings.weight", ParameterClass::Embedding),
         ("embeddings.position_embeddings.weight", ParameterClass::Embedding),
         ("embeddings.token_type_embeddings.weight", ParameterClass::Embedding),
         ("embeddings.LayerNorm.weight", ParameterClass::LayerNormWeight),
         ("embeddings.LayerNorm.bias", ParameterClass::LayerNormBias),
         ("encoder.layer.0.attention.self.query.weight", ParameterClass::ProjectionWeight),
-        ("encoder.layer.0.attention.self.key.bias", ParameterClass::ProjectionBias),
+        ("encoder.layer.0.attention.self.key.bias", ParameterClass::AttentionKeyBias),
+        ("encoder.layer.1.attention.self.key.bias", ParameterClass::AttentionKeyBias),
+        // The BOUNDARY of the split, tested from both sides: the key WEIGHT is an ordinary
+        // projection weight, and the query/value biases are ordinary projection biases. Only
+        // the key BIAS is gradient-free.
+        ("encoder.layer.0.attention.self.key.weight", ParameterClass::ProjectionWeight),
+        ("encoder.layer.0.attention.self.query.bias", ParameterClass::ProjectionBias),
+        ("encoder.layer.0.attention.self.value.bias", ParameterClass::ProjectionBias),
         ("encoder.layer.0.attention.self.value.weight", ParameterClass::ProjectionWeight),
         ("encoder.layer.0.attention.output.dense.weight", ParameterClass::ProjectionWeight),
         ("encoder.layer.0.attention.output.LayerNorm.bias", ParameterClass::LayerNormBias),
@@ -879,6 +914,58 @@ mod tests {
         );
     }
 
+    /// The split is a MECHANISM, and this is the measurement that pins it.
+    ///
+    /// `AttentionKeyBias` exists because softmax is invariant to a constant shift of its
+    /// inputs, so the key bias contributes the same amount to every key's pre-softmax logit
+    /// for a given query and `dL/db_k = 0` in exact arithmetic. If that reasoning is right,
+    /// the key bias's gradient must be orders of magnitude below its OWN BLOCK's query bias,
+    /// which has no such invariance since `(q + b_q) . k_j` varies with `j`.
+    ///
+    /// This runs in every `cargo test`, not behind `--ignored`, because it is the load-bearing
+    /// justification for a class boundary that removes parameters from the gate. If a future
+    /// encoder, kernel or reduction order makes the key bias gradient real, the split loses
+    /// its basis and this test says so instead of the boundary quietly becoming folklore.
+    #[test]
+    fn evidence_attention_key_bias_is_gradient_free_relative_to_its_own_block() {
+        let evidence = evidence_for(fx::default_variant(), None);
+
+        let key_rows = evidence.rows_of_class(ParameterClass::AttentionKeyBias);
+        let bias_rows = evidence.rows_of_class(ParameterClass::ProjectionBias);
+        assert!(!key_rows.is_empty(), "the fixture must emit key biases");
+        assert!(!bias_rows.is_empty(), "and ordinary projection biases to compare against");
+
+        let key_worst = max_of(&key_rows.iter().map(|r| r.grad_norm_max).collect::<Vec<f64>>());
+        let bias_best = min_of(&bias_rows.iter().map(|r| r.grad_norm_max).collect::<Vec<f64>>());
+
+        // Non-vacuity FIRST: an all-zero comparison would satisfy any ratio.
+        assert!(bias_best > 0.0, "the comparison class must have real gradients");
+        assert!(key_worst > 0.0, "and the key bias must have a measurable residue, not a hole");
+
+        assert!(
+            key_worst * 1e4 < bias_best,
+            "the key bias gradient ({key_worst:e}) is not >=1e4x below the smallest ordinary \
+             projection-bias gradient ({bias_best:e}); the shift-invariance argument the \
+             AttentionKeyBias split rests on no longer holds and the class must be re-derived",
+        );
+
+        // The OTHER half of the boundary: only the key BIAS is split out. The key WEIGHT and
+        // the query/value biases stay ordinary, so the split cannot silently widen into
+        // "attention parameters are exempt".
+        assert_eq!(
+            classify_parameter("encoder.layer.0.attention.self.key.weight"),
+            Ok(ParameterClass::ProjectionWeight),
+        );
+        assert_eq!(
+            classify_parameter("encoder.layer.0.attention.self.query.bias"),
+            Ok(ParameterClass::ProjectionBias),
+        );
+        assert_eq!(
+            classify_parameter("encoder.layer.0.attention.self.value.bias"),
+            Ok(ParameterClass::ProjectionBias),
+        );
+    }
+
     /// The summary is `Unjudged` and carries no epsilon in this plan.
     #[test]
     fn evidence_summary_is_unjudged_with_no_epsilon() {
@@ -887,7 +974,13 @@ mod tests {
         assert_eq!(summary.verdict, Verdict::Unjudged);
         assert_eq!(summary.epsilon_used, None);
         assert_eq!(summary.contract_version, EVIDENCE_CONTRACT_VERSION);
-        assert_eq!(summary.per_class.len(), 5, "all five classes are populated");
+        assert_eq!(
+            summary.per_class.len(),
+            ParameterClass::ALL.len(),
+            "every class the mapping can emit must be populated by the fixture; a class with \
+             no rows would have its epsilon frozen against nothing",
+        );
+        assert_eq!(ParameterClass::ALL.len(), 6, "five classes plus the gradient-free split");
         assert!(!summary.worst_param_name.is_empty());
         for (class, stats) in &summary.per_class {
             assert!(stats.count > 0, "{class}");
@@ -971,6 +1064,21 @@ mod tests {
     /// under the `f32` resolution of every parameter, which is what makes it a null.
     const CONTROL_LR: f64 = 1e-30;
 
+    /// A SECOND control, at a small but fully REPRESENTABLE learning rate.
+    ///
+    /// `CONTROL_LR` is a numerical null: at 1e-30 every per-element update underflows the
+    /// parameter's ULP, so the measured delta is bit-for-bit zero and the matrix bounds
+    /// epsilon from ABOVE only (03-05's concern 3). 1e-8 is 2000x below the reference 2e-5 —
+    /// a run that is not meaningfully training — but it is large enough that AdamW writes a
+    /// different `f32` back. It therefore gives a REAL lower bound: whatever a
+    /// nearly-not-training run can produce, a frozen epsilon must sit above.
+    ///
+    /// It is also the measurement that decides what the gradient-free class may assert. If a
+    /// parameter's `||dTheta|| > 0` is true at 1e-8 just as it is at 2e-5, that predicate does
+    /// not distinguish training from not-training FOR THAT PARAMETER, and arming it would be
+    /// the same vacuity that disqualified the pair-loss endpoint statistic.
+    const NEAR_NULL_LR: f64 = 1e-8;
+
     /// THE calibration matrix — `#[ignore]`d, and deliberately so.
     ///
     /// Twelve complete `run_tuning` passes over a real-weight MiniLM slice do not belong on
@@ -992,7 +1100,8 @@ mod tests {
         report.push_str(&format!("\nCALIBRATION REGIME: {}\n", regime_id()));
         report.push_str(
             "\ncell             class                real_min      real_median   real_max      \
-             ctrl_max      noise_floor   support_frac  all_moved\n",
+             ctrl_max      nnull_max     nnull_moved   noise_floor   support_frac  \
+             all_moved\n",
         );
 
         // Cross-cell aggregates, per class, that plan 03-06 freezes epsilon from.
@@ -1001,6 +1110,10 @@ mod tests {
         let mut median_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
         // The rounding-noise floor the frozen epsilon has to clear, per class, worst cell.
         let mut noise_floor_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        // The near-null (1e-8) control's worst case per class — the REAL lower bound.
+        let mut near_null_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        // Whether EVERY near-null run still satisfies the strict `||dTheta|| > 0` predicate.
+        let mut near_null_moved_all: BTreeMap<&'static str, bool> = BTreeMap::new();
         // WHICH parameter sets each class's lower bound. Without the name, 03-06 knows the
         // number but not what to widen if the margin turns out to be too narrow.
         let mut binding_param: BTreeMap<&'static str, String> = BTreeMap::new();
@@ -1011,7 +1124,8 @@ mod tests {
         for variant in &variants {
             let real = evidence_for(*variant, None);
             let control = evidence_for(*variant, Some(CONTROL_LR));
-            cells_run += 2;
+            let near_null = evidence_for(*variant, Some(NEAR_NULL_LR));
+            cells_run += 3;
 
             let endpoint_delta = real.last_k_mean - real.first_k_mean;
             endpoint_deltas.push(endpoint_delta);
@@ -1027,8 +1141,10 @@ mod tests {
             for class in ParameterClass::ALL {
                 let real_rows = real.rows_of_class(class);
                 let control_rows = control.rows_of_class(class);
+                let near_null_rows = near_null.rows_of_class(class);
                 assert!(!real_rows.is_empty(), "{class} has no rows");
                 assert_eq!(real_rows.len(), control_rows.len());
+                assert_eq!(real_rows.len(), near_null_rows.len());
 
                 let real_values: Vec<f64> = real_rows.iter().map(|r| r.relative_delta).collect();
                 let control_values: Vec<f64> =
@@ -1036,8 +1152,12 @@ mod tests {
                 let support: Vec<f64> =
                     real_rows.iter().map(|r| r.delta_support_fraction).collect();
 
+                let near_null_values: Vec<f64> =
+                    near_null_rows.iter().map(|r| r.relative_delta).collect();
                 let real_min = min_of(&real_values);
                 let control_max = max_of(&control_values);
+                let near_null_max = max_of(&near_null_values);
+                let near_null_moved = near_null_rows.iter().all(|r| r.moved);
 
                 let cell_noise_floor = max_of(
                     &real_rows.iter().map(|r| rounding_noise_floor(r)).collect::<Vec<f64>>(),
@@ -1045,7 +1165,7 @@ mod tests {
 
                 report.push_str(&format!(
                     "seed{:<3} {:<9} {:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} \
-                     {:<13.4} {}\n",
+                     {:<13} {:<13.3e} {:<13.4} {}\n",
                     variant.root_seed,
                     variant.label,
                     class.tag(),
@@ -1053,6 +1173,8 @@ mod tests {
                     median_of(&real_values),
                     max_of(&real_values),
                     control_max,
+                    near_null_max,
+                    near_null_moved,
                     cell_noise_floor,
                     median_of(&support),
                     real_rows.iter().all(|r| r.moved),
@@ -1061,6 +1183,8 @@ mod tests {
                 // (c) SEPARATION, per class and per cell.
                 assert!(
                     control_max < real_min,
+                    // near_null is reported, not asserted: whether it separates is the
+                    // question this matrix exists to answer, not a property to presume.
                     "seed {} cell {} class {}: the 1e-30 control's max relative delta \
                      ({control_max:e}) is not below the real run's min ({real_min:e})",
                     variant.root_seed,
@@ -1098,6 +1222,10 @@ mod tests {
                 }
                 let slot = noise_floor_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
                 *slot = slot.max(cell_noise_floor);
+                let slot = near_null_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
+                *slot = slot.max(near_null_max);
+                let slot = near_null_moved_all.entry(class.tag()).or_insert(true);
+                *slot = *slot && near_null_moved;
                 let slot = ctrl_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
                 *slot = slot.max(control_max);
                 let slot = median_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
@@ -1118,29 +1246,36 @@ mod tests {
 
         report.push_str("\nCROSS-CELL EPSILON BASIS (03-06 freezes from these)\n");
         report.push_str(
-            "class                worst_ctrl    best_real     10x_lower     10x_upper     \
-             noise_floor   eps/noise     supports_margin  median/min\n",
+            "class                worst_ctrl    worst_nnull   best_real     10x_lower     \
+             10x_upper     noise_floor   eps/noise     nnull_moved   supports_margin  \
+             median/min\n",
         );
         for class in ParameterClass::ALL {
             let worst_ctrl = ctrl_max_across.get(class.tag()).copied().unwrap_or(0.0);
             let best_real = real_min_across.get(class.tag()).copied().unwrap_or(0.0);
             let worst_median = median_max_across.get(class.tag()).copied().unwrap_or(0.0);
-            let lower = worst_ctrl * 10.0;
+            let worst_nnull = near_null_max_across.get(class.tag()).copied().unwrap_or(0.0);
+            // The lower edge is the WORSE of the two controls: a frozen epsilon has to sit
+            // above anything a not-really-training run produced, and the 1e-8 control is the
+            // one that produces anything at all.
+            let lower = worst_ctrl.max(worst_nnull) * 10.0;
             let upper = best_real / 10.0;
             let spread = if best_real > 0.0 { worst_median / best_real } else { f64::INFINITY };
             let noise_floor = noise_floor_across.get(class.tag()).copied().unwrap_or(0.0);
             let eps_over_noise =
                 if noise_floor > 0.0 { upper / noise_floor } else { f64::INFINITY };
             report.push_str(&format!(
-                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.2e} {:<16} \
-                 {:.1e}\n",
+                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.2e} \
+                 {:<13} {:<16} {:.1e}\n",
                 class.tag(),
                 worst_ctrl,
+                worst_nnull,
                 best_real,
                 lower,
                 upper,
                 noise_floor,
                 eps_over_noise,
+                near_null_moved_all.get(class.tag()).copied().unwrap_or(false),
                 lower < upper,
                 spread,
             ));
@@ -1198,6 +1333,24 @@ mod tests {
                     eps,
                     noise_floor,
                     eps / noise_floor,
+                ));
+            }
+        }
+        // Does the strict `||dTheta|| > 0` predicate DISCRIMINATE for this class? If a
+        // 1e-8 run — 2000x below the reference rate, not meaningfully training — still moves
+        // every member of the class, then `moved()` is true for reasons that have nothing to
+        // do with tuning and arming it for that class asserts something that cannot fail.
+        for class in ParameterClass::ALL {
+            if near_null_moved_all.get(class.tag()).copied().unwrap_or(false) {
+                flagged += 1;
+                report.push_str(&format!(
+                    "  MOVED-ALONE-INSUFFICIENT {}: every member still satisfies \
+                     ||dTheta|| > 0 under the 1e-8 near-null control (worst relative delta \
+                     {:.3e}), so the strict predicate ALONE does not separate training from \
+                     not-training for this class -- the class's epsilon is what does, and \
+                     this is the measurement that shows the epsilon is not decoration\n",
+                    class.tag(),
+                    near_null_max_across.get(class.tag()).copied().unwrap_or(0.0),
                 ));
             }
         }
