@@ -266,7 +266,15 @@ impl MultiHeadAttention {
     /// implementation and it lives behind the `setfit` feature, so a public
     /// builder here would advertise an extension point an out-of-crate caller
     /// has no way to satisfy.
+    ///
+    /// The `dead_code` allow is SCOPED to the configuration where the lint is
+    /// right rather than blanket: with `setfit` off there is genuinely no
+    /// production caller in a library build — the encoder that installs a source
+    /// is behind that feature, and this module's own tests are `cfg(test)`. A bare
+    /// `#[allow(dead_code)]` would additionally suppress the lint in the build
+    /// where a real caller is supposed to exist, which is when it would matter.
     #[must_use]
+    #[cfg_attr(not(feature = "setfit"), allow(dead_code))]
     pub(crate) fn with_attention_dropout_masks(
         mut self,
         masks: Arc<dyn AttentionDropoutMasks>,
@@ -357,7 +365,7 @@ impl MultiHeadAttention {
         // forward ordinal stay in lockstep regardless of how many inference
         // passes ran between training steps.
         let dropout_masks: Option<&dyn AttentionDropoutMasks> =
-            self.attention_dropout_masks.as_ref().map(|m| &**m);
+            self.attention_dropout_masks.as_deref();
         let (attn_output, attn_weights) = scaled_dot_product_attention_seeded(
             &q,
             &k,
