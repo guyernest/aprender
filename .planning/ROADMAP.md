@@ -144,8 +144,8 @@ plan's `<wave_1_concurrency>` block.)*
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 03-04-PLAN.md — MultinomialLogisticRegression head + central-difference gradient suite + sklearn factor-of-2 falsification + multinomial-head-v1 contract (wave 2)
-- [ ] 03-05-PLAN.md — tune_encoder loop with a pinned step order and in-band execution digests + evidence capture + the epsilon calibration matrix (wave 2)
+- [x] 03-04-PLAN.md — MultinomialLogisticRegression head + central-difference gradient suite + sklearn factor-of-2 falsification + multinomial-head-v1 contract (wave 2)
+- [x] 03-05-PLAN.md — tune_encoder loop with a pinned step order and in-band execution digests + evidence capture + the epsilon calibration matrix (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -216,6 +216,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
-| 3. Faithful Two-Stage Trainer and Head | 3/10 | In Progress|  |
+| 3. Faithful Two-Stage Trainer and Head | 5/10 | In Progress|  |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
