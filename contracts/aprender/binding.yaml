@@ -1071,6 +1071,29 @@ bindings:
     was added — aprender-train is outside plan 02-08''s files_modified and a source edit there is not sanctioned by this plan.
     NOTE: plan 02-08 named the method holder `ClassificationMetrics`; the type is actually `MultiClassMetrics`, read from
     crates/aprender-train/src/eval/classification/metrics.rs.'
+- contract: lbfgs-kernel-v1.yaml
+  equation: two_loop_recursion
+  module_path: aprender::optim::lbfgs
+  function: compute_direction
+  signature: 'fn compute_direction(&self, grad: &Vector<T>) -> Vector<T>'
+  status: implemented
+  notes: 'Plan 03-01 moved the #[contract] annotation off `LBFGS::step` (which only panics —
+    L-BFGS has no stochastic update) and onto the generic core''s `compute_direction`, which IS
+    the two-loop recursion the equation describes. One annotation now covers both widths,
+    because both `LBFGS` (f32) and `LbfgsF64` delegate to `LbfgsImpl<T>`. The item is private to
+    the `lbfgs` module by design: the public surface is the two non-generic wrappers.'
+- contract: lbfgs-kernel-v1.yaml
+  equation: nonfinite_input_status
+  module_path: aprender::optim::lbfgs
+  function: minimize
+  signature: 'fn minimize<F, G>(&mut self, objective: F, gradient: G, x0: Vector<T>) -> LbfgsOutcome<T>'
+  status: implemented
+  notes: 'Added at contract 1.1.0. Annotated on the generic core''s `minimize`, which owns all
+    four entry guards (x0, f(x0), grad(x0), and the non-finite alpha signalled by the Wolfe
+    loop''s own guard) for BOTH widths. Discharged by the ten runnable cases of FALSIFY-LB-009,
+    no Kani harness. Measured against the pre-1.1.0 implementation, three of five f32 channels
+    were RED: a NaN objective at x0 reported Converged, and a non-finite gradient (at x0 and at
+    a line-search trial point) reported Stalled.'
 critical_path:
 - softmax
 - rmsnorm
