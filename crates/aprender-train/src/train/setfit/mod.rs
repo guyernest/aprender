@@ -46,6 +46,8 @@ pub(crate) mod head_input;
 pub mod reduce;
 pub mod thresholds;
 pub mod tune;
+/// The sealed codec seam and the trusted verify-by-reload policy (03-08).
+pub mod verify;
 
 /// The deterministic, network-free, synthetic-text fixture every Phase 3 trainer test uses.
 ///
@@ -70,9 +72,12 @@ use aprender_contrastive_data::pairs::resolve_budget;
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
 use aprender_contrastive_data::select::Selection;
 use aprender_contrastive_data::ContrastiveDataError;
+use sha2::{Digest, Sha256};
 
 use crate::train::device::{Device, DeviceError};
+use bundle::BundleError;
 use config::{ResolvedSetFitConfig, SetFitConfigError, SetFitTrainConfig};
+use verify::CodecError;
 
 /// The seal. Private module, public-in-private trait — the standard Rust sealing idiom.
 mod sealed {
@@ -208,6 +213,239 @@ impl HeadFittedEvidence {
     pub fn encode_call_count(&self) -> usize {
         self.encode_call_count
     }
+
+    /// Split the evidence into the RECORDED facts and the LIVE head.
+    ///
+    /// `pub(crate)`, and the reason it exists is the verify transition: that
+    /// transition must drop the live head before it reloads anything, while still
+    /// moving every recorded measurement into the final state. Keeping the struct
+    /// whole would have kept the head alive across the persistence boundary, which
+    /// is precisely the thing the boundary is supposed to have.
+    ///
+    /// The distinction is not cosmetic. The head is MODEL STATE — the object whose
+    /// replacement by a reloaded one is the whole claim. Everything in
+    /// [`HeadFittedParts`] is a MEASUREMENT of a run that already happened, and a
+    /// measurement is not made truer or falser by being carried forward.
+    pub(crate) fn into_parts(self) -> (HeadFittedParts, MultinomialLogisticRegression) {
+        (
+            HeadFittedParts {
+                passed: self.passed,
+                report: self.report,
+                effective_lambda: self.effective_lambda,
+                ordered_labels: self.ordered_labels,
+                encode_ledger: self.encode_ledger,
+                encode_call_count: self.encode_call_count,
+            },
+            self.head,
+        )
+    }
+}
+
+/// Everything [`HeadFittedEvidence`] recorded, minus the live head.
+pub(crate) struct HeadFittedParts {
+    pub(crate) passed: tune::PassedEvidence,
+    pub(crate) report: HeadFitReport,
+    pub(crate) effective_lambda: f64,
+    pub(crate) ordered_labels: Vec<String>,
+    pub(crate) encode_ledger: Vec<String>,
+    pub(crate) encode_call_count: usize,
+}
+
+// ===========================================================================================
+// The final state's evidence (plan 03-08)
+// ===========================================================================================
+
+/// What one model answered on the probe rows.
+///
+/// Held for BOTH sides of the verification and compared element by element. The
+/// ids come from the encode ledger the encode-once path wrote as it went, so a
+/// windowing defect that reordered rows shows up here rather than being papered
+/// over by a re-derived id list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifyProbe {
+    pub(crate) ids: Vec<String>,
+    pub(crate) embeddings: Vec<Vec<f32>>,
+    pub(crate) probabilities: Vec<Vec<f64>>,
+    pub(crate) labels: Vec<String>,
+}
+
+impl VerifyProbe {
+    /// The probed row identifiers, in encode order.
+    #[must_use]
+    pub fn ids(&self) -> &[String] {
+        &self.ids
+    }
+
+    /// One unit-norm embedding row per probed row.
+    #[must_use]
+    pub fn embeddings(&self) -> &[Vec<f32>] {
+        &self.embeddings
+    }
+
+    /// One probability vector per probed row, in declared-label order.
+    #[must_use]
+    pub fn probabilities(&self) -> &[Vec<f64>] {
+        &self.probabilities
+    }
+
+    /// One predicted label per probed row.
+    #[must_use]
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+}
+
+/// The measured outcome of a verify-by-reload.
+///
+/// The measured maxima are recorded even on success. A verification that reports
+/// only "passed" cannot tell a run that matched exactly from one that matched
+/// within a tolerance it happened to be given.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifyReport {
+    pub(crate) artifact_bytes: usize,
+    pub(crate) probe_rows: usize,
+    pub(crate) embedding_dim: usize,
+    pub(crate) class_count: usize,
+    pub(crate) max_embedding_abs_diff: f32,
+    pub(crate) max_probability_abs_diff: f64,
+    pub(crate) tolerance_embedding_abs: f32,
+    pub(crate) tolerance_probability_abs: f64,
+    pub(crate) round_trip_closed: bool,
+}
+
+impl VerifyReport {
+    /// Length of the serialized artifact.
+    #[must_use]
+    pub fn artifact_bytes(&self) -> usize {
+        self.artifact_bytes
+    }
+
+    /// Rows the verification compared.
+    #[must_use]
+    pub fn probe_rows(&self) -> usize {
+        self.probe_rows
+    }
+
+    /// Width of an embedding row.
+    #[must_use]
+    pub fn embedding_dim(&self) -> usize {
+        self.embedding_dim
+    }
+
+    /// Declared classes.
+    #[must_use]
+    pub fn class_count(&self) -> usize {
+        self.class_count
+    }
+
+    /// Largest absolute embedding difference observed.
+    #[must_use]
+    pub fn max_embedding_abs_diff(&self) -> f32 {
+        self.max_embedding_abs_diff
+    }
+
+    /// Largest absolute probability difference observed.
+    #[must_use]
+    pub fn max_probability_abs_diff(&self) -> f64 {
+        self.max_probability_abs_diff
+    }
+
+    /// The embedding tolerance the comparison ran at.
+    #[must_use]
+    pub fn tolerance_embedding_abs(&self) -> f32 {
+        self.tolerance_embedding_abs
+    }
+
+    /// The probability tolerance the comparison ran at.
+    #[must_use]
+    pub fn tolerance_probability_abs(&self) -> f64 {
+        self.tolerance_probability_abs
+    }
+
+    /// Whether re-serializing the reloaded bundle reproduced the hashed bytes.
+    #[must_use]
+    pub fn round_trip_closed(&self) -> bool {
+        self.round_trip_closed
+    }
+}
+
+/// The final state's evidence: the whole recorded chain, plus the artifact's identity.
+///
+/// The `head` here is the REBUILT one. The head that was fitted is dropped before
+/// the reload, so a value of this type cannot hand out the pre-close model.
+#[derive(Debug)]
+pub struct ArtifactVerifiedEvidence {
+    pub(crate) passed: tune::PassedEvidence,
+    pub(crate) head: MultinomialLogisticRegression,
+    pub(crate) report: HeadFitReport,
+    pub(crate) effective_lambda: f64,
+    pub(crate) ordered_labels: Vec<String>,
+    pub(crate) encode_ledger: Vec<String>,
+    pub(crate) encode_call_count: usize,
+    pub(crate) artifact_hash: [u8; 32],
+    pub(crate) format_id: String,
+    pub(crate) verify: VerifyReport,
+    pub(crate) probe: VerifyProbe,
+}
+
+impl ArtifactVerifiedEvidence {
+    /// The complete stage-one chain.
+    #[must_use]
+    pub fn passed(&self) -> &tune::PassedEvidence {
+        &self.passed
+    }
+
+    /// The head REBUILT from the artifact's bytes. A shared borrow.
+    #[must_use]
+    pub fn head(&self) -> &MultinomialLogisticRegression {
+        &self.head
+    }
+
+    /// The optimizer's deterministic record of the original fit.
+    #[must_use]
+    pub fn report(&self) -> &HeadFitReport {
+        &self.report
+    }
+
+    /// The L2 coefficient the original fit minimized under.
+    #[must_use]
+    pub fn effective_lambda(&self) -> f64 {
+        self.effective_lambda
+    }
+
+    /// The declared label map the head's weight rows are indexed by.
+    #[must_use]
+    pub fn ordered_labels(&self) -> &[String] {
+        &self.ordered_labels
+    }
+
+    /// The ordered identifiers handed to the encoder while the head's input was built.
+    #[must_use]
+    pub fn encode_ledger(&self) -> &[String] {
+        &self.encode_ledger
+    }
+
+    /// How many times the encoder was invoked while building the head's input.
+    #[must_use]
+    pub fn encode_call_count(&self) -> usize {
+        self.encode_call_count
+    }
+
+    /// The measured outcome of the verification.
+    #[must_use]
+    pub fn verify_report(&self) -> &VerifyReport {
+        &self.verify
+    }
+}
+
+impl LifecycleState for ArtifactReloadedAndVerified {
+    /// PROOF that a real close-reload-rebuild-verify round trip happened.
+    ///
+    /// The absent-field pattern again: the artifact hash, the format id and the
+    /// verify report exist only in this state, so "verified implies an artifact
+    /// hash exists" is a fact about the type rather than about a caller's habits.
+    type Evidence = ArtifactVerifiedEvidence;
+    const STATE: &'static str = "artifact_reloaded_and_verified";
 }
 
 impl LifecycleState for EncoderTuned {
@@ -381,9 +619,30 @@ impl SetFitRun<Prepared> {
     /// [`SetFitTrainError::EvidenceRejected`] — carrying the complete table — when the
     /// measured movement misses the contracted thresholds.
     pub fn tune_encoder(self) -> Result<SetFitRun<EncoderTuned>, SetFitTrainError> {
+        self.tune_encoder_with_probes(tune::TuningProbes::NONE)
+    }
+
+    /// The same transition at a probe set only tests can build.
+    ///
+    /// Module-private, and `TuningProbes`'s non-default constructors are
+    /// `#[cfg(test)]`, so a shipped build can reach this only with
+    /// [`tune::TuningProbes::NONE`] and it is therefore exactly `tune_encoder`.
+    /// It exists because 03-08's reproducibility accessors claim to report what a
+    /// run EXECUTED, and the only honest falsification of that claim is a run
+    /// whose execution differs while its configuration does not.
+    fn tune_encoder_with_probes(
+        self,
+        probes: tune::TuningProbes,
+    ) -> Result<SetFitRun<EncoderTuned>, SetFitTrainError> {
         let (encoder, dataset, selection, config) = self.into_parts();
         let regime = calibration_regime_id(&encoder, &selection, &config);
-        let out = tune::run_tuning(encoder, &dataset, &selection, &config)?;
+        #[cfg(test)]
+        let out = tune::run_tuning_with_probes(encoder, &dataset, &selection, &config, probes)?;
+        #[cfg(not(test))]
+        let out = {
+            debug_assert_eq!(probes, tune::TuningProbes::NONE);
+            tune::run_tuning(encoder, &dataset, &selection, &config)?
+        };
 
         let table = evidence::UpdateEvidence::from_tune_output(&out, &regime)
             .map_err(|e| SetFitTrainError::Evidence { reason: e.to_string() })?;
@@ -462,6 +721,185 @@ impl SetFitRun<EncoderTuned> {
             encode_call_count,
         };
         Ok(SetFitRun { encoder, dataset, selection, config, evidence, _state: PhantomData })
+    }
+}
+
+impl SetFitRun<HeadFitted> {
+    /// Close the artifact, reload it FROM BYTES, rebuild, re-predict and compare (D-07).
+    ///
+    /// # What the codec can and cannot do
+    ///
+    /// `codec` is a [`verify::SetFitCodec`]: a format id and a bytes <-> bundle
+    /// pair. It cannot hash, cannot compare, cannot set a tolerance and cannot
+    /// construct a lifecycle state. The hash, the drop, the rebuild, the
+    /// comparison and the minting below are trusted crate-internal code an
+    /// implementor has no way to reach.
+    ///
+    /// # The sequence, and why each step is where it is
+    ///
+    /// 1. Probe the LIVE model on the selected rows, through the same encode-once
+    ///    path stage two used.
+    /// 2. Assemble the bundle, serialize it, and hash exactly those bytes.
+    /// 3. DROP the live encoder and head. This is structural: steps 1-3 happen
+    ///    inside `verify::run_verify_policy`, which takes both by value, so after
+    ///    it returns there is no binding to the pre-close model to compare
+    ///    against even by accident.
+    /// 4. Deserialize, then RE-SERIALIZE the reloaded bundle and require the
+    ///    result to be byte-equal to what was hashed. This is what makes the
+    ///    reloaded value provably a function of the bytes rather than of anything
+    ///    the codec had lying around, and it costs one extra serialize on a path
+    ///    that already serializes once.
+    /// 5. Rebuild the model from the reloaded bundle alone, re-encode, re-predict,
+    ///    and compare embeddings, probabilities and labels at the trusted
+    ///    tolerance — exact for this codec.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitTrainError::Codec`] or [`SetFitTrainError::Bundle`] for a payload
+    /// the codec or the bundle layer refuses — corrupt, truncated, oversized or
+    /// from another schema, each typed and named;
+    /// [`SetFitTrainError::ReloadNotFromBytes`] when the round trip is not closed;
+    /// [`SetFitTrainError::ReloadDiverged`] naming the field, row, index, expected
+    /// and observed value of the first difference.
+    pub fn verify_artifact<C: verify::SetFitCodec>(
+        self,
+        codec: &C,
+    ) -> Result<SetFitRun<ArtifactReloadedAndVerified>, SetFitTrainError> {
+        let Self { encoder, dataset, selection, config, evidence, _state } = self;
+        let (parts, head) = evidence.into_parts();
+
+        let outcome = verify::run_verify_policy(
+            codec,
+            encoder,
+            head,
+            &parts.ordered_labels,
+            &dataset,
+            &selection,
+            &config,
+            parts.passed.summary(),
+            verify::Tolerance::EXACT,
+        )?;
+
+        let evidence = verify::verified_evidence(
+            parts,
+            outcome.artifact_hash,
+            codec.format_id(),
+            outcome.report,
+            outcome.probe,
+            outcome.head,
+        );
+        Ok(SetFitRun {
+            encoder: outcome.encoder,
+            dataset,
+            selection,
+            config,
+            evidence,
+            _state: PhantomData,
+        })
+    }
+}
+
+// ===========================================================================================
+// The reproducibility surface (plan 03-08, TRN-06)
+// ===========================================================================================
+
+/// SHA-256 over an ordered list of strings, NUL-terminated so no concatenation of
+/// two entries can collide with a third.
+fn digest_of_ordered(entries: &[String]) -> String {
+    let mut hasher = Sha256::new();
+    for entry in entries {
+        hasher.update(entry.as_bytes());
+        hasher.update([0_u8]);
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// The out-of-crate reproducibility surface.
+///
+/// # Every one of these is READ-ONLY and RECORDED
+///
+/// None returns `&mut`, none consumes `self` into another state, and none
+/// recomputes a value from configuration. That last one is the substantive
+/// property: an accessor that rebuilt a digest from the config it was given would
+/// describe what the run was CONFIGURED to do, and two runs that share the same
+/// wrong order would then reproduce perfectly.
+impl SetFitRun<ArtifactReloadedAndVerified> {
+    /// The selection's semantic hash — the ordered ids, label map and content hashes.
+    #[must_use]
+    pub fn selection_semantic_hash(&self) -> String {
+        hex::encode(self.selection.semantic_hash())
+    }
+
+    /// The digest the tuning loop ABSORBED as it consumed pairs.
+    ///
+    /// Returns the digest the tuning loop absorbed at the draw; recomputing it
+    /// from configuration would make two runs that share the same wrong order
+    /// reproduce perfectly.
+    #[must_use]
+    pub fn pair_order_digest(&self) -> &str {
+        &self.evidence.passed.table().consumed_pair_digest
+    }
+
+    /// The batch boundaries the loop actually opened, in the order it opened them.
+    ///
+    /// Returns the `(epoch, start_ordinal, len)` triples the loop recorded at
+    /// batch open; recomputing them from configuration would make two runs that
+    /// share the same wrong order reproduce perfectly.
+    #[must_use]
+    pub fn batch_boundaries(&self) -> &[(u32, u64, u32)] {
+        &self.evidence.passed.table().batch_boundary_list
+    }
+
+    /// Optimizer steps the tuning loop took.
+    #[must_use]
+    pub fn step_count(&self) -> u64 {
+        self.evidence.passed.table().step_count
+    }
+
+    /// SHA-256 of the loss trace's little-endian `f32` bits, in step order.
+    #[must_use]
+    pub fn loss_trace_hash(&self) -> &str {
+        &self.evidence.passed.table().loss_trace_hash
+    }
+
+    /// SHA-256 of the canonical evidence table, binding the summary to it.
+    #[must_use]
+    pub fn evidence_table_hash(&self) -> &str {
+        &self.evidence.passed.summary().table_hash
+    }
+
+    /// SHA-256 of the ordered trainable parameter names.
+    #[must_use]
+    pub fn parameter_registry_hash(&self) -> &str {
+        &self.evidence.passed.table().parameter_registry_hash
+    }
+
+    /// SHA-256 over the RECORDED encode ledger, entries NUL-terminated in order.
+    ///
+    /// The ledger itself is the list of ids the encode-once path wrote as each
+    /// window was handed to the encoder; this hashes that recording, and does not
+    /// re-derive the list from the selection.
+    #[must_use]
+    pub fn encode_ledger_hash(&self) -> String {
+        digest_of_ordered(&self.evidence.encode_ledger)
+    }
+
+    /// SHA-256 of the artifact's canonical bytes.
+    #[must_use]
+    pub fn artifact_hash(&self) -> String {
+        hex::encode(self.evidence.artifact_hash)
+    }
+
+    /// What the RELOADED model answered on the probe rows.
+    #[must_use]
+    pub fn probe_predictions(&self) -> &VerifyProbe {
+        &self.evidence.probe
+    }
+
+    /// The identifier of the codec that wrote the artifact.
+    #[must_use]
+    pub fn artifact_format_id(&self) -> &str {
+        &self.evidence.format_id
     }
 }
 
@@ -693,6 +1131,46 @@ pub enum SetFitTrainError {
         /// How many of them are ungated.
         ungated_count: usize,
     },
+    /// The codec refused to encode or decode the artifact.
+    Codec(CodecError),
+    /// The bundle layer refused the payload — a contracted limit, a parse failure,
+    /// an unknown schema version, or a shape the declared tensor does not have.
+    Bundle(BundleError),
+    /// Re-serializing the reloaded bundle did NOT reproduce the bytes that were hashed.
+    ///
+    /// This is the check that makes the reloaded value provably a FUNCTION OF THE
+    /// BYTES. A codec that ignored its input and returned an object it had lying
+    /// around would otherwise satisfy every comparison downstream, because the
+    /// object it returned was never required to have come from anywhere.
+    ///
+    /// A faithful codec satisfies it by construction — it is the
+    /// serialize/deserialize round-trip identity the bundle's own tests prove. An
+    /// implementor that fails it is either not round-tripping or not canonical;
+    /// both are contract-visible incompatibilities rather than bugs to work around.
+    ReloadNotFromBytes {
+        /// Length of the bytes that were hashed.
+        hashed_len: usize,
+        /// Length of the bytes the reloaded bundle re-serialized to.
+        reserialized_len: usize,
+        /// Offset of the first differing byte, when both are non-empty and differ.
+        first_diff_offset: Option<usize>,
+    },
+    /// The reloaded model did not reproduce the pre-close answer.
+    ReloadDiverged {
+        /// What diverged: `embedding`, `probability`, `label`, `probe_id`,
+        /// `probe_row_count`, `embedding_width` or `class_count`.
+        field: &'static str,
+        /// The probe row it diverged on.
+        row: usize,
+        /// The element index within that row.
+        index: usize,
+        /// What the model answered before the artifact was closed.
+        expected: String,
+        /// What the model rebuilt from the artifact answered.
+        observed: String,
+        /// The tolerance the comparison ran at.
+        tolerance: f64,
+    },
     /// The evidence failed the gate. Carries the COMPLETE auditable record.
     ///
     /// `Box`ed because this variant is far larger than every other, and an enum is as big as
@@ -816,6 +1294,34 @@ impl fmt::Display for SetFitTrainError {
                  an optimizer step; AdamW's moment state is positional, so the update would \
                  have paired moments with the wrong parameters \
                  (contract setfit-train-lifecycle-v1, requirement TRN-03)",
+            ),
+            Self::Codec(inner) => write!(
+                f,
+                "the artifact codec refused the payload: {inner} \
+                 (contract setfit-train-lifecycle-v1, requirement TRN-01)",
+            ),
+            Self::Bundle(inner) => write!(
+                f,
+                "the artifact bundle refused the payload: {inner} \
+                 (contract setfit-train-lifecycle-v1, requirement TRN-01)",
+            ),
+            Self::ReloadNotFromBytes { hashed_len, reserialized_len, first_diff_offset } => write!(
+                f,
+                "the reloaded bundle did not re-serialize to the bytes that were hashed \
+                 ({hashed_len} bytes hashed, {reserialized_len} re-serialized, first \
+                 difference at {}); the value the codec returned is therefore not a function \
+                 of its input, so no persistence boundary was crossed and the verification \
+                 cannot mean what it claims \
+                 (contract setfit-train-lifecycle-v1, equation reload_verify_roundtrip)",
+                first_diff_offset
+                    .map_or_else(|| "a length difference".to_string(), |at| at.to_string()),
+            ),
+            Self::ReloadDiverged { field, row, index, expected, observed, tolerance } => write!(
+                f,
+                "the model rebuilt from the artifact disagreed with the model that wrote it: \
+                 {field} at row {row} index {index} was `{expected}` before the close and \
+                 `{observed}` after, which exceeds the tolerance {tolerance:e} \
+                 (contract setfit-train-lifecycle-v1, equation reload_verify_roundtrip)",
             ),
         }
     }

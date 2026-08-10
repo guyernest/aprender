@@ -731,6 +731,24 @@ pub(crate) fn run_tuning(
     tune_with_probes(encoder, dataset, selection, config, TuningProbes::NONE)
 }
 
+/// [`run_tuning`] with a probe set only tests can build.
+///
+/// `#[cfg(test)]` and `pub(crate)`: the reproducibility accessors of 03-08 claim
+/// to report EXECUTION rather than intent, and the only way to falsify that claim
+/// is to run a pipeline whose execution differs while its configuration does not.
+/// That needs the probe to reach `SetFitRun`, and a production door with the same
+/// shape would be a door whose only use is to make a run lie about itself.
+#[cfg(test)]
+pub(crate) fn run_tuning_with_probes(
+    encoder: SetFitMiniLm,
+    dataset: &PreparedDataset<Canonical>,
+    selection: &Selection,
+    config: &ResolvedSetFitConfig,
+    probes: TuningProbes,
+) -> Result<TuneOutput, SetFitTrainError> {
+    tune_with_probes(encoder, dataset, selection, config, probes)
+}
+
 /// The loop body, with a probe knob only tests can set to anything but [`TuningProbes::NONE`].
 #[allow(clippy::too_many_lines)]
 fn tune_with_probes(
