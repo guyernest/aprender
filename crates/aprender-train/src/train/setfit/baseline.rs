@@ -23,9 +23,7 @@
 //! Phase 5 runs its baselines through this door.
 
 use aprender::autograd;
-use aprender::classification::multinomial::{
-    HeadFitError, MultinomialLogisticRegression, Regularization,
-};
+use aprender::classification::multinomial::{MultinomialLogisticRegression, Regularization};
 use aprender::setfit::SetFitMiniLm;
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
 use aprender_contrastive_data::select::Selection;
@@ -34,6 +32,19 @@ use super::SetFitTrainError;
 
 /// The literal this baseline reports itself as. NEVER "setfit".
 pub const FROZEN_PROBE_KIND: &str = "frozen_linear_probe";
+
+/// The encode window this probe uses.
+///
+/// # KNOWN LIMIT, recorded rather than left as a bare `8`
+///
+/// The SetFit path encodes its head input in `config.batch_size()`-wide windows (the reference
+/// default is 16), and this type carries no configuration to read that from. The two paths
+/// therefore pad to different per-window sequence lengths, so the embeddings a benchmark puts
+/// side by side are not guaranteed to agree bitwise even for identical text in identical
+/// order — which is weaker than the comparability this module's header claims. Closing it
+/// needs the window size threaded in from the run's configuration; until then the number is
+/// named, so a reader can see it is a decision rather than an accident.
+const PROBE_ENCODE_WINDOW: usize = 8;
 
 /// What a frozen-probe run reports.
 ///
@@ -124,7 +135,11 @@ impl FrozenProbeRun {
     /// # Errors
     ///
     /// [`SetFitTrainError::Encoder`] if the encoder rejects a row, and
-    /// [`SetFitTrainError::Evidence`] carrying the head's diagnostic if the fit is rejected.
+    /// [`SetFitTrainError::HeadFit`] carrying the head's OWN typed failure if the fit is
+    /// rejected. Not `Evidence { reason: String }`: TRN-04's whole point is that a caller can
+    /// tell "your data was bad" from "the optimizer ran out of budget" without matching on
+    /// message text, and a baseline that renders the head's error to a string is a baseline
+    /// whose failures cannot be compared with the SetFit path's.
     #[cfg_attr(
         feature = "setfit",
         provable_contracts_macros::contract(
@@ -146,15 +161,15 @@ impl FrozenProbeRun {
         let before = autograd::graph_tape_len();
         let mut features: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         let encoded = autograd::no_grad(|| -> Result<(), SetFitTrainError> {
-            for window in texts.chunks(8) {
+            for window in texts.chunks(PROBE_ENCODE_WINDOW) {
                 let embedded = self
                     .encoder
                     .encode_texts(window)
                     .map_err(|e| SetFitTrainError::Encoder { reason: e.to_string() })?;
-                let hidden = embedded.shape()[1];
-                for row in embedded.data().chunks(hidden) {
-                    features.push(row.to_vec());
-                }
+                // The SAME checked split the head's encode-once input uses: a non-2-D return
+                // or a `B` that disagrees with the window is a typed refusal, not a panic and
+                // not a silently short row.
+                super::head_input::push_rows(&mut features, &embedded, window.len())?;
             }
             Ok(())
         });
@@ -165,7 +180,7 @@ impl FrozenProbeRun {
         let hidden = features.first().map_or(0, Vec::len);
         let mut head = MultinomialLogisticRegression::new(ordered_labels.len());
         head.fit(&features, &class_indices, &ordered_labels, self.regularization)
-            .map_err(|e: HeadFitError| SetFitTrainError::Evidence { reason: e.to_string() })?;
+            .map_err(SetFitTrainError::HeadFit)?;
 
         let report = FrozenProbeReport {
             kind: FROZEN_PROBE_KIND,

@@ -88,7 +88,12 @@ impl EncodeWitness {
             return Err(SetFitTrainError::HeadEncodeNotIsolated {
                 training_observed: self.training_observed,
                 requires_grad_observed: self.requires_grad_observed,
-                tape_growth: self.tape_after.saturating_sub(self.tape_before),
+                // MAGNITUDE, not `saturating_sub`. A tape that SHRANK across the encode is
+                // just as much a lost-isolation signal as one that grew, and a saturating
+                // subtraction reported it as `0` — producing a refusal whose three payload
+                // fields all read clean (`false`, `false`, `0`) while the run was rejected,
+                // which is a diagnosis nobody can act on.
+                tape_growth: self.tape_after.abs_diff(self.tape_before),
             });
         }
         Ok(())
@@ -283,7 +288,13 @@ fn encode_once(
 /// The shape is CHECKED rather than indexed. A `[B, H]` that arrived with the wrong `B` would
 /// otherwise silently push a different number of rows than the ledger recorded, which is the
 /// one way the two could disagree without any windowing defect.
-fn push_rows(
+///
+/// `pub(crate)` so the two OTHER eval-mode encode windows in this module tree — the tuning
+/// loop's baseline encode and the frozen probe — split their `[B, H]` through the same checked
+/// function. They previously indexed `shape()[1]` directly, which PANICS on a non-2-D return
+/// and silently accepts a `B` that disagrees with the window; one guard reached from three
+/// call sites is the only way the check cannot be present at one and absent at the others.
+pub(crate) fn push_rows(
     out: &mut Vec<Vec<f32>>,
     embedded: &autograd::Tensor,
     expected: usize,

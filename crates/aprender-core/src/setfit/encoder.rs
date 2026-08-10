@@ -423,7 +423,14 @@ impl BertSentenceEncoder {
     /// this comment either — the gate counts occurrences in the SOURCE TEXT, and
     /// a doc comment is source text. That is not pedantry: it is how this very
     /// paragraph first turned the gate red.)
-    fn dropout_modules(&self) -> Vec<&Arc<SiteDropout>> {
+    ///
+    /// Returns a lazy ITERATOR, not a `Vec`. Both channels run on the hot path —
+    /// `set_forward_ordinal` fires twice per training step and `set_training`
+    /// once per batch — and a walk that only reads each site's atomic has no
+    /// reason to heap-allocate `1 + 3L` pointers first. The elements are
+    /// `&SiteDropout` rather than `&Arc<SiteDropout>` for the same reason: no
+    /// caller needs the handle, only the site.
+    fn dropout_modules(&self) -> impl Iterator<Item = &SiteDropout> {
         std::iter::once(&self.embeddings_dropout)
             .chain(self.layers.iter().flat_map(|l| {
                 [
@@ -432,7 +439,7 @@ impl BertSentenceEncoder {
                     &l.output_dropout,
                 ]
             }))
-            .collect()
+            .map(Arc::as_ref)
     }
 
     /// Number of encoder layers this model was built with.

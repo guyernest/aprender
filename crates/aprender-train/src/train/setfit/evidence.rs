@@ -510,8 +510,19 @@ pub struct EvidenceSummary {
     pub(crate) frozen_count: usize,
     /// Per-class statistics, in class order.
     pub(crate) per_class: BTreeMap<String, ClassStats>,
-    /// The name of the row with the SMALLEST relative delta — the one a gate would reject
-    /// first.
+    /// The name of the row with the SMALLEST relative delta, over EVERY row in the table.
+    ///
+    /// # It is NOT "the parameter the gate would reject first"
+    ///
+    /// The table records ungated classes too — `attention_key_bias` above all, whose gradient
+    /// is analytically zero, so its movement is f32 cancellation residue and is very nearly
+    /// always the smallest number here. The gate never judges it. The parameter a rejection
+    /// actually blames is `SetFitTrainError::EvidenceRejected::worst`, which is chosen among
+    /// the GATED rows and by margin against that class's own epsilon.
+    ///
+    /// This field stays table-wide on purpose: `EvidenceSummary::of` is built without a
+    /// `Thresholds`, and giving `ParameterClass` its own `gated` predicate would put the
+    /// gated/ungated decision in two places — the failure the frozen table exists to prevent.
     pub(crate) worst_param_name: String,
     /// The frozen epsilon, when one exists. `None` while unjudged.
     pub(crate) epsilon_used: Option<f64>,

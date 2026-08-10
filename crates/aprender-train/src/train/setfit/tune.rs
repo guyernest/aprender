@@ -51,7 +51,7 @@
 use std::collections::BTreeMap;
 
 use aprender::autograd::{self, Tensor as CoreTensor};
-use aprender::setfit::{pair_cosine_mse, FreezeGroup, SetFitMiniLm};
+use aprender::setfit::{dropout_rng, pair_cosine_mse, FreezeGroup, SetFitMiniLm};
 use aprender_contrastive_data::pairs::PairSampler;
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
 use aprender_contrastive_data::select::Selection;
@@ -456,10 +456,11 @@ fn baseline_encode(
             let embedded = encoder
                 .encode_texts(window)
                 .map_err(|e| SetFitTrainError::Encoder { reason: e.to_string() })?;
-            let hidden = embedded.shape()[1];
-            for row in embedded.data().chunks(hidden) {
-                out.push(row.to_vec());
-            }
+            // The SAME checked split `head_input` uses. Indexing `shape()[1]` here would
+            // panic on a non-2-D return and would accept a `B` that disagrees with the
+            // window, which is the one way `embeddings_before` and the selection could
+            // silently stop being row-aligned.
+            super::head_input::push_rows(&mut out, &embedded, window.len())?;
         }
         Ok(())
     });
@@ -577,8 +578,14 @@ fn run_batch(
 
     // (c) branch A, (d) branch B — distinct forward ordinals, so the two siamese branches
     // draw INDEPENDENT dropout masks (D-15 as amended).
-    let ordinal_a = 2 * ctx.global_step;
-    let ordinal_b = 2 * ctx.global_step + 1;
+    //
+    // `dropout_rng::forward_ordinal(step, branch)` rather than an open-coded `2*s` / `2*s+1`:
+    // `BertSentenceEncoder::set_forward_ordinal`'s own documentation asks callers to use it,
+    // and it is the half that carries the CHECKED arithmetic — the open-coded form wraps a
+    // large step into a SMALL ordinal and silently replays an early step's masks, which is
+    // the one failure of this scheme that looks perfectly reproducible.
+    let ordinal_a = u64::from(branch_ordinal(ctx.global_step, 0)?);
+    let ordinal_b = u64::from(branch_ordinal(ctx.global_step, 1)?);
     ctx.encoder.set_training(true);
     let za = forward_branch(ctx.encoder, ctx.texts, &inputs.texts_a, ordinal_a)?;
     let zb = forward_branch(ctx.encoder, ctx.texts, &inputs.texts_b, ordinal_b)?;
@@ -631,6 +638,16 @@ fn observe_step_top(ctx: &mut TuneCtx<'_>, applied_lr: f32) -> StepObservation {
         forward_ordinals: (0, 0),
         pre_clip_norm: 0.0,
     }
+}
+
+/// D-15's `block` for one branch of `global_step`, through the ONE definition of `2*s + b`.
+///
+/// The arithmetic lives in `aprender::setfit::dropout_rng`, beside the counter lane it has to
+/// fit; a second spelling here is how the trainer and the encoder end up disagreeing about
+/// which stream a branch draws from.
+fn branch_ordinal(global_step: u64, branch: u32) -> Result<u32, SetFitTrainError> {
+    dropout_rng::forward_ordinal(global_step, branch)
+        .map_err(|e| SetFitTrainError::Encoder { reason: e.to_string() })
 }
 
 /// One siamese branch: point every dropout site at `forward_ordinal`, then encode.
@@ -1065,9 +1082,14 @@ pub(crate) fn validate_evidence(
             // Unreachable while `gated` and `eps.is_some()` agree, which thresholds.rs
             // asserts. Fail closed rather than skip: a gated class without a threshold must
             // never be silently waved through.
+            //
+            // `ungated_count` is the rows that are NOT gated, not the row total: `gated` is
+            // non-empty on this path, so reporting `rows.len()` would render the message
+            // "all N of the N trainable parameters are ungated", which is false and points a
+            // diagnosis at the wrong mechanism.
             return Err(SetFitTrainError::NoTestifyingParameters {
                 trainable_count,
-                ungated_count: evidence.rows.len(),
+                ungated_count: evidence.rows.len().saturating_sub(gated.len()),
             });
         };
 

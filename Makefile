@@ -399,11 +399,26 @@ setfit-feature-matrix: ## D-06/D-05: setfit feature isolation for aprender-core 
 # draft of this leg used `if ! cargo check; then rc=$$?; fi`, where `$$?` is the
 # status of the NEGATION and is therefore always 0. The vacuity check below is
 # what caught it, which is the whole reason it is here.
+#
+# THE `set +e` AROUND THE TWO CARGO CHECKS IS LOAD-BEARING, for exactly the
+# reason recorded on `contract-audit-phase3` below. This Makefile sets
+# `.SHELLFLAGS := -e -c` (line 40) and `.ONESHELL:`, so a FAILING
+# `cargo check` aborts the whole recipe before `ctl_rc=$$?` on the same line can
+# run — and the control build is measured RED at HEAD, which is the ONLY case
+# every guard below was written for. Reproduced directly:
+# `bash -e -c 'false > /tmp/x 2>&1; rc=$$?; echo rc=$$rc; echo REACHED'` prints
+# NOTHING and exits 1. Without `set +e` this leg could never emit its verdict and
+# `make tier3` failed with a bare cargo error instead. `mkdir -p target` for the
+# same class of reason: the shell opens the redirect before cargo runs, so a
+# clean checkout without `target/` would abort on the redirect itself.
 	@echo "  leg (a): minimal-build setfit-diff"
-	@cargo check -p aprender-train --no-default-features \
+	@mkdir -p target; \
+	set +e; \
+	cargo check -p aprender-train --no-default-features \
 	      > target/sfm-train-min-control.log 2>&1; ctl_rc=$$?; \
 	cargo check -p aprender-train --no-default-features --features setfit \
 	      > target/sfm-train-min-setfit.log 2>&1; sf_rc=$$?; \
+	set -e; \
 	grep -A1 -E '^error' target/sfm-train-min-control.log \
 	      > target/sfm-train-min-control.errs || true; \
 	grep -A1 -E '^error' target/sfm-train-min-setfit.log \
