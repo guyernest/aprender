@@ -36,6 +36,11 @@ pub mod baseline;
 pub mod config;
 pub mod epoch;
 pub mod evidence;
+/// Stage two's encode-once input (D-08).
+///
+/// `pub(crate)`: `HeadDataset` is an intermediate, and a public one would be a second way to
+/// reach the head's fitting input — one that does not travel through the typestate.
+pub(crate) mod head_input;
 pub mod reduce;
 pub mod thresholds;
 pub mod tune;
@@ -443,6 +448,12 @@ pub enum SetFitTrainError {
         /// The offending row identifier.
         id: String,
     },
+    /// The head's encode window size was zero.
+    ///
+    /// `ResolvedSetFitConfig` cannot carry a zero batch size, so this is unreachable from the
+    /// shipped transition. It exists because `chunks(0)` PANICS: a typed refusal is what keeps
+    /// the one internal caller that could ever get it wrong from taking the process down.
+    HeadEncodeBatchSizeZero,
     /// The `max_length` knob does not equal the encoder's pinned sequence length.
     ///
     /// Distinct from [`config::SetFitConfigError::MaxLengthNotSupported`], which rejects the
@@ -583,6 +594,12 @@ impl fmt::Display for SetFitTrainError {
                 "selected id `{id}` resolves to a row whose exact content hash disagrees \
                  with the selection's — the same name, different bytes \
                  (contract setfit-train-lifecycle-v1, requirement TRN-01)",
+            ),
+            Self::HeadEncodeBatchSizeZero => write!(
+                f,
+                "the head's encode window size is zero, so the selection would be chunked \
+                 into nothing; a validated configuration cannot produce this \
+                 (contract setfit-train-lifecycle-v1, requirement TRN-05)",
             ),
             Self::MaxLengthNotConsumable { requested, pinned } => write!(
                 f,
