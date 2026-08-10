@@ -1248,6 +1248,45 @@ bindings:
     Confirmation was attempted and could not be completed offline, since `import setfit` fails
     in this environment and the pinned reference fixtures record sampler.py measurements only.
     The contract carries the cheap confirmation recipe.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: reload_verify_roundtrip
+  module_path: entrenar::train::setfit::verify
+  function: run_verify_policy
+  signature: 'fn run_verify_policy<C: SetFitCodec>(codec: &C, encoder: SetFitMiniLm, head: MultinomialLogisticRegression, ...) -> Result<VerifiedOutcome, SetFitTrainError>'
+  status: implemented
+  notes: 'THE trusted policy. It is bound here rather than to `verify_artifact` because this is
+    where the decisions live: hashing (`artifact_hash`, a free function), the close, the
+    round-trip closure check, the rebuild and the comparison. `SetFitCodec` is a sealed pure
+    codec with exactly three methods and no power to hash, compare, set a tolerance or mint a
+    state. The close is STRUCTURAL: the policy takes the live encoder and head by value into
+    its close step and never returns them, so the borrow checker enforces what a drop() call
+    would only document. Falsified in band by EchoCodec, which was MEASURED green before the
+    closure check existed.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: bundle_completeness
+  module_path: entrenar::train::setfit::bundle
+  function: from_run_parts
+  signature: 'fn from_run_parts(format_id: &str, encoder: &SetFitMiniLm, head: &MultinomialLogisticRegression, ordered_labels: &[String], config: &ResolvedSetFitConfig, evidence: &EvidenceSummary) -> Result<SetFitBundle, BundleError>'
+  status: implemented
+  notes: 'Every architectural and policy value is READ OFF the encoder that is about to be
+    serialized, never restated from the configuration that asked for it. The obligation is
+    SUFFICIENCY rather than presence, and the proof is
+    bundle_rebuilds_a_bit_identical_encoder_from_bytes_alone, which rebuilds through the wire
+    form and compares raw f32 bit patterns. The vocabulary remap is part of the architecture
+    record: without it a rebuilt slice gathers the wrong embedding row for every token and
+    still looks structurally valid.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: bundle_limits
+  module_path: entrenar::train::setfit::bundle
+  function: from_canonical_bytes
+  signature: 'fn from_canonical_bytes(bytes: &[u8]) -> Result<SetFitBundle, BundleError>'
+  status: implemented
+  notes: 'Four bounds enforced BEFORE the allocation each bounds. Tensor data travels as hex of
+    the little-endian f32 bit patterns, so an element count is len(hex)/8 and is known from a
+    string length rather than from a decoded vector — which is what makes the per-tensor and
+    cumulative checks pre-allocation rather than post-hoc reports. The VALUES are parsed from
+    the contract by bundle_limits_match_the_contract; the MECHANISM is falsified separately
+    against deliberately tiny bounds, each with a control at exactly the bound.'
 # --- linear-probe-classifier-v1: the SAFE-03 frozen baseline (plan 03-06 task 3) ---
 - contract: linear-probe-classifier-v1.yaml
   equation: linear_probe

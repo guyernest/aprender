@@ -118,3 +118,49 @@ detached data or wrap the constructor body in `autograd::no_grad`. Then tighten
 `tune_baseline_encode_records_no_operations` to the absolute `== 0` form, whose current
 non-vacuity assertion (`baseline_encode_tape.0 > 0`) will turn red and point here. Its own
 PMAT ticket.
+
+---
+
+## D-ITEM-07 — `aprender-core` has ONE pre-existing arm64 clippy error, in a file Phase 3 does not own
+
+Surfaced by plan 03-08, whose acceptance criteria run
+`cargo clippy -p aprender-core --lib --features setfit -- -D warnings`.
+
+**Measured**, scoped with `--no-deps` so the finding is attributable:
+
+```
+crates/aprender-core/src/demo/reliable/performance.rs:126:5
+error: unreachable expression   (`-D unreachable-code` implied by `-D warnings`)
+```
+
+`cpu_backend_name()` returns unconditionally inside `#[cfg(target_arch = "aarch64")]`, so
+the trailing `"Scalar".to_string()` is unreachable on this host. CI runs X64-Linux only,
+where the arm arm is not compiled, so the line is live there and the error does not appear.
+
+### Control
+
+`git diff f56c34481 HEAD -- crates/aprender-core/src/demo/` is EMPTY: the file is
+byte-identical to the wave-5 base commit, and no plan-03-08 change is in it. This matches
+STATE.md's re-measurement at 02-08, which counted the arm64 clippy baseline as
+"aprender-compute 38, zram-core 3, present-terminal 1, **core 1**, serve 1" — this is that
+one.
+
+### Scope
+
+Out of scope for 03-08 under the executor's scope boundary: a pre-existing finding in an
+unrelated file. Recorded here so that a reader of 03-08's clippy leg does not mistake it for
+something the plan introduced, and so the honest scoped form is on record:
+
+| Command | Result |
+|---------|--------|
+| `cargo clippy -p aprender-train --lib --features setfit --no-deps -- -D warnings` | rc=0 |
+| `cargo clippy -p aprender-train --lib --features setfit --no-deps --tests -- -D warnings` | rc=0 |
+| `cargo clippy -p aprender-core --lib --features setfit --no-deps -- -D warnings` | rc=101, ONE finding, the one above |
+| either command WITHOUT `--no-deps` | rc=101, plus 10 `aprender-compute` arm64 findings |
+
+### Fix direction
+
+Add the `#[cfg(not(target_arch = "aarch64"))]` guard the x86 branch already has, or restructure
+`cpu_backend_name` so every branch is an expression rather than an early return. One line, but
+it belongs to whoever owns `demo/reliable/`, and it wants its own two-sided measurement on both
+architectures rather than a blind edit from an arm64 host.

@@ -559,6 +559,190 @@ equations:
     postconditions:
       - 'a configuration that fails any knob rule is a typed error, never a clamped value'
 
+  # ==========================================================================
+  # 11. Verify by reload — the persistence boundary and who owns which half
+  # ==========================================================================
+
+  reload_verify_roundtrip:
+    formula: 'bytes = codec.serialize(bundle(run)) ; h = SHA256(bytes) ; DROP(live encoder, live head) ; reloaded = codec.deserialize(bytes) ; REQUIRE codec.serialize(reloaded) == bytes ; (encoder'', head'') = rebuild(reloaded) ; VERIFIED <=> for all probe rows r: |embed''(r) - embed(r)| <= eps_emb AND |proba''(r) - proba(r)| <= eps_prob AND label''(r) == label(r)'
+    domain: 'a SetFitRun<HeadFitted> and any SetFitCodec implementation'
+    codomain: 'SetFitRun<ArtifactReloadedAndVerified> carrying h, the format id and the verify report; otherwise a typed SetFitTrainError naming what failed'
+    invariants:
+      - 'THE CODEC IS A PURE CODEC AND THE POLICY IS TRUSTED. `SetFitCodec` has exactly three
+        methods -- `format_id`, `serialize`, `deserialize` -- and no other. It has NO hashing
+        method, NO tolerance parameter, NO comparison method and NO way to construct a
+        lifecycle state. Hashing (`artifact_hash`, a FREE FUNCTION), the drop, the rebuild,
+        the comparison and the minting of `ArtifactReloadedAndVerified` are TRUSTED
+        crate-internal obligations that an implementor cannot override. A future refactor
+        that pushed any of them into the trait would violate this equation, which is the
+        reason it is written as an equation rather than left as a code shape.'
+      - 'THE TRAIT IS SEALED. `SetFitCodec: sealed::Sealed` with `Sealed` in a private module,
+        so no out-of-crate type can implement it. Phase 4''s APR codec therefore lands as a
+        thin ADAPTER module inside aprender-train (`impl Sealed for AprCodec` plus the codec
+        impl) that calls aprender-core''s APR format code; the FORMAT stays in aprender-core.
+        Sealing later would be a breaking change and un-sealing later is not, which is why
+        phase 3 seals. D-07 records the amendment.'
+      - 'CANONICAL-SERIALIZATION CLAUSE. Every implementor MUST satisfy
+        `serialize(deserialize(b)) == b` byte for byte. This is not a free property: it holds
+        for SerdeJsonCodec because the bundle uses BTreeMap ordering, declaration-order fields
+        and bit-pattern floats, and even then it required serde_json''s `float_roundtrip`
+        feature -- without it the fast float parser lands one ULP from the value ryu wrote and
+        the check fails on every honest bundle (measured: 0.00009142675446597625 -> ...624, a
+        difference at byte offset 936,551 of the fixture artifact). A phase-4 writer with
+        padding, unordered metadata or a trailing checksum is therefore a CONTRACT-VISIBLE
+        INCOMPATIBILITY that must be amended here deliberately, rather than discovered as a
+        mysterious `ReloadNotFromBytes` failure.'
+      - 'THE ROUND-TRIP CLOSURE CHECK RUNS BEFORE THE REBUILD. The policy re-serializes the
+        reloaded bundle and requires the bytes to equal the ones it hashed. Placing it after
+        the probe comparison would not work: a codec whose cache described a behaviourally
+        identical model passes that comparison, so the substitution would never be seen. What
+        the check establishes is that the reloaded value is a FUNCTION OF THE HASHED BYTES.
+        What it does NOT establish is durability -- an in-process codec round-tripping through
+        a buffer it never writes anywhere satisfies it and is indistinguishable from one that
+        wrote a file, because nothing in this crate observes the filesystem.'
+      - 'THE CLOSE IS STRUCTURAL. The policy takes the live encoder and head BY VALUE into its
+        close step and never returns them, so after that call there is no binding to the
+        pre-close model at all and the comparison object cannot accidentally be built from it.
+        The borrow checker enforces what a `drop(...)` call would only document.'
+      - 'THE SERDE CODEC VERIFIES AT EXACT-ZERO TOLERANCE. eps_emb = 0.0 and eps_prob = 0.0.
+        The `Tolerance` type is crate-internal and exists because phase 4''s format may need
+        contracted non-zero values; a tolerance that arrived then with nowhere to live would
+        arrive as a parameter on the trait, which is exactly the power this split removed. A
+        NaN difference counts as OUTSIDE any tolerance, checked through `partial_cmp` rather
+        than a negated comparison, because every comparison with NaN is false.'
+      - 'THE NEGATIVE IS IN BAND AND WAS MEASURED RED. A test-only `EchoCodec` whose
+        `deserialize` ignores its input and returns a bundle cached at CONSTRUCTION (and whose
+        `serialize` must not refresh that cache) returns
+        `SetFitTrainError::ReloadNotFromBytes`. Before the closure check existed it returned
+        `Ok` and minted the final state -- observed, not assumed. The cache differs in
+        `source_revision` only, which is pure provenance: no rebuild step reads it and no
+        comparison touches it, so the closure check is the only thing that can catch it. Two
+        earlier cheats were rejected as unattributable -- an extra label is caught by the
+        head''s coefficient-arity check and a perturbed tensor by the probe comparison, and
+        either would have left the negative green after the closure check was removed.'
+      - 'EVERY FAILURE IS TYPED AND NAMES WHAT DIVERGED. `ReloadDiverged` carries the field
+        (`embedding`, `probability`, `label`, `probe_id`, `probe_row_count`,
+        `embedding_width`, `class_count`), the row, the element index, the expected and
+        observed values and the tolerance in force. `ReloadNotFromBytes` carries both byte
+        lengths and the offset of the first difference.'
+    preconditions:
+      - 'the run has reached HeadFitted, so a fitted head and a passed evidence chain exist'
+      - 'the probe is taken through the SAME encode-once path stage two used (eval mode, inside no_grad, every result detached), not through a second encode written for verification'
+    postconditions:
+      - 'SetFitRun<ArtifactReloadedAndVerified> exists only after the live model was dropped and the comparison object was built from reload() output'
+      - 'a corrupted, truncated, oversized or version-bumped byte stream fails typed BEFORE any comparison runs'
+
+  # ==========================================================================
+  # 12. Bundle completeness — the normative field list
+  # ==========================================================================
+
+  bundle_completeness:
+    formula: 'SetFitBundle = (schema_version, format_id, architecture, tokenizer_bytes, pooling, normalization, l2_epsilon, truncation_max_sequence_length, padding_mode, max_length, root_seed, tensors, head_weights, head_intercepts, head_n_features, ordered_labels, requested_config, resolved_config, evidence)'
+    domain: 'a finished SetFitRun<HeadFitted>'
+    codomain: 'a bundle sufficient to rebuild an encoder producing BIT-IDENTICAL embeddings'
+    invariants:
+      - 'THE OBLIGATION IS SUFFICIENCY, NOT PRESENCE. The bundle must be enough to rebuild a
+        working model from bytes alone, and the proof is
+        `bundle_rebuilds_a_bit_identical_encoder_from_bytes_alone`, which rebuilds through the
+        wire form and compares raw f32 BIT PATTERNS on the fixture probe rows. A bundle that
+        merely lists the right field names is not a reload.'
+      - 'THE NORMATIVE FIELD LIST, in wire (declaration) order. A field missing from an
+        implementation is a finding, not a simplification:
+        (1) schema_version:u32 ;
+        (2) format_id:string, the codec''s own -- never the project''s shipped container name ;
+        (3) architecture: hidden, heads, head_dim, num_layers, intermediate, vocab, positions,
+            type_vocab_size, layer_norm_eps, pad_token_id, hidden_act, source_revision,
+            tokenizer_sha256, vocab_remap ;
+        (4) tokenizer_bytes: the EXACT tokenizer.json bytes, lowercase hex ;
+        (5) pooling:string ; (6) normalization:string ; (7) l2_epsilon:f32 ;
+        (8) truncation_max_sequence_length:u32 ; (9) padding_mode:string ;
+        (10) max_length:u32, the run''s requested value ;
+        (11) root_seed:u64, read off the ENCODER not the configuration ;
+        (12) tensors: name -> (shape, f32 data) for EVERY named encoder parameter, BTreeMap
+             name order, data as lowercase hex of the little-endian bit patterns ;
+        (13) head_weights ; (14) head_intercepts ; (15) head_n_features ;
+        (16) ordered_labels ; (17) requested_config: the full SetFitTrainConfig ;
+        (18) resolved_config: a bundle-local RECORD ; (19) evidence: the EvidenceSummary
+             including its table_hash.'
+      - 'sha256(tokenizer_bytes) == architecture.tokenizer_sha256, and the reload path checks
+        it BEFORE a tensor is installed. The tokenizer RETAINS its source bytes for this
+        reason: an artifact carrying only the digest can DETECT a substituted tokenizer and
+        cannot REBUILD the right one, so a reload from it could not re-encode a single string.
+        The retained bytes are 466,247 for the pinned tokenizer.json.'
+      - 'THE VOCABULARY REMAP IS PART OF THE ARCHITECTURE RECORD. `SliceConfig`''s field set
+        alone is NOT sufficient: a slice encoder gathers through `slice_to_orig`, so a record
+        without it rebuilds an encoder that reads the wrong embedding row for every token and
+        still looks structurally valid. Only `slice_to_orig` travels; the reverse direction is
+        DERIVED at rebuild, so the two cannot be transported inconsistently.'
+      - 'THE RESOLVED CONFIG IS A PROVENANCE RECORD, NOT A RUNTIME TYPE. `ResolvedSetFitConfig`
+        is Serialize-but-NOT-Deserialize by decision (T-3-50: a probed device must never
+        arrive from a file). The bundle therefore carries a separate bundle-local record with
+        a one-way conversion INTO it, and there is no conversion back and no other path from
+        bytes to a runtime resolved configuration. `from_bundle_parts` takes the architecture,
+        the tokenizer bytes and the tensors and never a reconstructed resolved config; a
+        reload path that needs a device re-resolves it from the live environment.'
+      - 'POLICY IDENTIFIERS COME FROM THE CODE THAT APPLIES THEM. `pooling`, `normalization`,
+        `l2_epsilon`, `padding_mode` and `truncation_max_sequence_length` are constants
+        exported by aprender-core beside the call sites that apply them, not literals the
+        persistence layer believes to be true. An artifact writer with its own copies records
+        what it believes rather than what ran.'
+      - 'THE FORMAT NEVER CLAIMS TO BE THE SHIPPED CONTAINER. `format_id` is
+        "setfit-serde-json-v1". The phase-3 serde form is an interim implementation of the
+        seam; phase 4 replaces the FORMAT behind the same trait. Measured amplification on the
+        fixture: 908,359 raw bytes (110,528 f32 plus the 466,247-byte tokenizer) serialize to
+        1,823,868 bytes, 2.01x -- and the full pin projects to roughly 182 MB. That is the
+        reason phase 4 replaces it, stated as a number rather than an opinion.'
+    preconditions:
+      - 'the head has fitted, so head_n_features is Some and the coefficients exist'
+    postconditions:
+      - 'a model rebuilt from the bundle produces bit-identical embeddings and identical probabilities on the probe rows'
+
+  # ==========================================================================
+  # 13. Bounded deserialization — the four numeric limits
+  # ==========================================================================
+
+  bundle_limits:
+    formula: 'REJECT unless len(bytes) <= max_bundle_bytes AND tensor_count <= max_tensor_count AND for all t: elements(t) <= max_elements_per_tensor AND sum_t elements(t) <= max_total_elements'
+    domain: 'a byte stream presented to SetFitBundle::from_canonical_bytes'
+    codomain: 'a parsed bundle, or BundleLimitExceeded{what, limit, observed}'
+    limits:
+      max_bundle_bytes: 536870912
+      max_tensor_count: 4096
+      max_elements_per_tensor: 134217728
+      max_total_elements: 268435456
+    full_minilm_figures:
+      serialized_bytes: 182455502
+      tensor_count: 101
+      largest_tensor_elements: 11720448
+      total_elements: 22565376
+    invariants:
+      - 'THE FOUR LIMITS ARE ENFORCED BEFORE THE ALLOCATION THEY BOUND. The input length is
+        checked on the raw slice before serde is handed anything. Tensor data travels as hex,
+        so a tensor''s element count is `len(hex)/8` and is known from a STRING LENGTH -- the
+        per-tensor and cumulative checks therefore run before any Vec<f32> is allocated. A
+        limit checked after the allocation is a report, not a bound.'
+      - 'THE NUMBERS, and the full-pin figures they clear. 536,870,912 bytes (512 MiB) against
+        a projected 182,455,502 for the full pin, 2.94x. 4,096 tensors against 101, 40.6x.
+        134,217,728 elements per tensor against the 30522x384 word-embedding table''s
+        11,720,448, 11.45x. 268,435,456 total elements against 22,565,376, 11.90x. The
+        projection is `total_elements * 8` (eight hex characters per f32) plus twice the
+        466,247-byte tokenizer plus 1 MB of JSON structure, and every full-pin figure is
+        COMPUTED from the pinned architecture by `bundle_limits_clear_the_full_minilm_figures`
+        rather than quoted, so a change to the pin moves the comparison with it.'
+      - 'THE TOTAL IS A SEPARATE LIMIT, not an implication of the other two: the product of the
+        tensor-count and per-tensor limits is about 5.5e11 elements, which is not a bound.'
+      - 'EACH LIMIT IS SHOWN BITING, and the VALUES and the MECHANISM are falsified separately.
+        Proving the input-length bound by materializing 512 MiB in a unit test would make the
+        suite pay half a gigabyte to learn that a comparison compares, so the four tests run
+        against deliberately tiny bounds on a real bundle -- each with a CONTROL at exactly
+        the bound that must be accepted -- while the values are pinned against this file by
+        `bundle_limits_match_the_contract`. The shrinking constructor is `#[cfg(test)]` and
+        the only value a shipped build can name is the contracted one.'
+    preconditions:
+      - 'the input-length check precedes the parse'
+    postconditions:
+      - 'a payload exceeding any limit is refused with the limit named, before the allocation it would have requested'
+
 proof_obligations:
 
 - type: soundness
@@ -621,6 +805,64 @@ proof_obligations:
     OBLIG-STL-DIGESTS-IN-BAND: consumed_pair_digest and batch_boundary_digest are absorbed at
     consumption and never recomputed from configuration.
   formal: 'absorb_batch_digests occurs within the pair-pull loop and not in run_tuning''s body'
+  applies_to: all
+
+- type: soundness
+  property: >
+    OBLIG-STL-CODEC-IS-POWERLESS: SetFitCodec has exactly three methods and none of them
+    hashes, compares, carries a tolerance or constructs a lifecycle state. artifact_hash is a
+    free function, not a trait method, and the trait is sealed by a private-module supertrait.
+    An implementor can therefore change the FORMAT and cannot change the VERDICT.
+  formal: 'methods(SetFitCodec) == {format_id, serialize, deserialize} && artifact_hash not in methods(SetFitCodec) && SetFitCodec: sealed::Sealed'
+  applies_to: all
+
+- type: soundness
+  property: >
+    OBLIG-STL-RELOAD-FROM-BYTES: SetFitRun<ArtifactReloadedAndVerified> is constructible only
+    through verify_artifact, which drops the live encoder and head by value, reloads from
+    bytes, requires serialize(deserialize(b)) == b, and rebuilds the comparison object from the
+    reloaded bundle alone. A codec that returns an object it was not handed is refused by the
+    closure check before the rebuild runs.
+  formal: 'SetFitRun<ArtifactReloadedAndVerified> constructible => codec.serialize(codec.deserialize(b)) == b && comparison_object == rebuild(codec.deserialize(b))'
+  applies_to: all
+
+- type: invariant
+  property: >
+    OBLIG-STL-BUNDLE-COMPLETE: the bundle carries every field of the normative list, and the
+    obligation is SUFFICIENCY: a model rebuilt from its bytes alone produces bit-identical
+    embeddings and identical probabilities on the probe rows. In particular it carries the
+    exact tokenizer bytes with sha256(bytes) == architecture.tokenizer_sha256, and the
+    vocabulary remap without which a slice encoder gathers the wrong embedding row for every
+    token.
+  formal: 'for all r in probe_rows: bits(embed(rebuild(bytes), r)) == bits(embed(original, r))'
+  applies_to: all
+
+- type: safety
+  property: >
+    OBLIG-STL-BUNDLE-BOUNDED: four numeric deserialization limits -- input length, tensor
+    count, per-tensor elements and total elements -- are enforced BEFORE the allocation each
+    bounds, each with a typed BundleLimitExceeded naming the limit and the observation. Tensor
+    data travels as hex, so an element count is known from a string length rather than from a
+    decoded vector.
+  formal: 'len(bytes) > max_bundle_bytes => Err before parse; elements(t) > max_elements_per_tensor => Err before any Vec<f32> allocation'
+  applies_to: all
+
+- type: invariant
+  property: >
+    OBLIG-STL-ACCESSORS-RECORDED: the ten reproducibility accessors on
+    SetFitRun<ArtifactReloadedAndVerified> return values RECORDED during execution.
+    pair_order_digest and batch_boundaries move 03-05's in-band recordings through the states
+    and are never recomputed from configuration; none of the ten returns &mut, and none
+    consumes the run into another state.
+  formal: 'pair_order_digest() == evidence.table.consumed_pair_digest && batch_boundaries() == evidence.table.batch_boundary_list'
+  applies_to: all
+
+- type: invariant
+  property: >
+    OBLIG-STL-RESOLVED-CONFIG-ONE-WAY: ResolvedSetFitConfig stays Serialize-but-not-Deserialize
+    (T-3-50), the bundle carries a separate provenance record, and there is no conversion from
+    that record back into a runtime resolved configuration.
+  formal: 'not exists TryFrom<ResolvedConfigRecord> for ResolvedSetFitConfig && Deserialize not in derives(ResolvedSetFitConfig)'
   applies_to: all
 
 falsification_tests:
@@ -718,6 +960,106 @@ falsification_tests:
   if_fails: >
     Pair consumption order is not reproducible from (root_seed, epoch), so the in-band
     consumed-pair digest cannot be replayed.
+
+- id: FALSIFY-STL-008
+  rule: 'reload_verify_roundtrip — an arbitrary codec cannot decide that verification passed'
+  prediction: >
+    An in-band EchoCodec whose deserialize IGNORES its input bytes and returns a bundle cached
+    at construction is refused with SetFitTrainError::ReloadNotFromBytes, while the faithful
+    SerdeJsonCodec on the same run reaches ArtifactReloadedAndVerified with round_trip_closed
+    true and both measured maxima exactly 0.0. Removing the round-trip closure check makes the
+    negative GREEN — measured, not assumed: before the check existed EchoCodec returned Ok and
+    minted the final state. The cache differs only in source_revision, which is pure
+    provenance, so nothing else in the pipeline can catch it; an extra label is caught by the
+    head's coefficient-arity check and a perturbed tensor by the probe comparison, and either
+    would have made this test green for the wrong reason. A deliberately corrupted byte stream
+    fails typed at the codec with the parse position named, and no lifecycle state is minted.
+  test: cargo test -p aprender-train --lib --features setfit verify_
+  test_harness: cargo test -p aprender-train --lib --features setfit verify_
+  expected_output: 'test result: ok.'
+  if_fails: >
+    Either the codec seam has regained a power the policy split removed, or the closure check
+    no longer precedes the rebuild and a behaviourally identical substitute passes unseen.
+
+- id: FALSIFY-STL-009
+  rule: 'bundle_completeness — the bundle is sufficient to rebuild a working model, not merely to describe one'
+  prediction: >
+    A model rebuilt from the bundle's WIRE FORM alone produces BIT-IDENTICAL embeddings to the
+    original on the fixture probe rows, and a head rebuilt from its stored coefficients produces
+    identical probabilities. Dropping the tokenizer bytes makes the rebuild impossible; dropping
+    the vocabulary remap makes it gather the wrong embedding row for every token while still
+    returning plausible floats; a tokenizer-hash mismatch and a missing tensor are each typed
+    rejections naming the digest or the tensor.
+  test: cargo test -p aprender-train --lib --features setfit bundle_
+  test_harness: cargo test -p aprender-train --lib --features setfit bundle_
+  expected_output: 'test result: ok.'
+  if_fails: >
+    A field of the normative list is absent or is not populated from the encoder that would be
+    rebuilt, and "reload" no longer means the artifact is the model.
+
+- id: FALSIFY-STL-010
+  rule: 'bundle_limits — the four bounds bite before the allocation each bounds'
+  prediction: >
+    Each of the four limits refuses a real fixture bundle when set one below the observed
+    figure, naming the limit in BundleLimitExceeded{what, limit, observed}, and ACCEPTS the same
+    payload when set exactly at it — so none of the four is a refusal of everything. The
+    contracted values are parsed from this file and compared against the Rust constants, so a
+    one-sided edit is red, and the full-pin figures they clear are computed from the pinned
+    architecture rather than quoted.
+  test: cargo test -p aprender-train --lib --features setfit bundle_limit
+  test_harness: cargo test -p aprender-train --lib --features setfit bundle_limit
+  expected_output: 'test result: ok.'
+  if_fails: >
+    A bound is checked after the allocation it is supposed to prevent, or a contracted number
+    was changed on one side only.
+
+- id: FALSIFY-STL-011
+  rule: 'reload_verify_roundtrip — the reproducibility accessors report EXECUTION, not intent'
+  prediction: >
+    pair_order_digest() equals the consumed_pair_digest the tuning loop absorbed at the draw,
+    and a run whose intra-batch pull order was reversed reports a DIFFERENT one through the same
+    accessor — while agreeing on the batch boundaries, the step count and the selection hash,
+    which the perturbation does not touch. An accessor that recomputed the digest from
+    configuration would report the SAME value for both runs and this test is what would notice.
+  test: cargo test -p aprender-train --lib --features setfit verify_pair_order_digest
+  test_harness: cargo test -p aprender-train --lib --features setfit verify_pair_order_digest
+  expected_output: 'test result: ok.'
+  if_fails: >
+    A reproducibility accessor is restating configuration, so two runs that consumed different
+    orders would reproduce each other perfectly.
+
+- id: FALSIFY-STL-012
+  rule: 'bundle_completeness — the tokenizer''s retained bytes and its recorded digest cannot drift'
+  prediction: >
+    The sha256 re-derived from MiniLmTokenizer::source_bytes() equals the recorded
+    tokenizer_sha256, and a tokenizer rebuilt from those bytes reproduces input ids, token type
+    ids, attention masks and truncation facts on EVERY frozen case. A from_bytes that hashed one
+    buffer and retained another would pass an identity check against a hash it does not have.
+  test: cargo test -p aprender-core --lib --features setfit tokenizer_bytes
+  test_harness: cargo test -p aprender-core --lib --features setfit tokenizer_bytes
+  expected_output: 'test result: ok.'
+  if_fails: >
+    The retained bytes and the recorded digest describe different tokenizers, so an artifact
+    carrying both is internally inconsistent.
+
+- id: FALSIFY-STL-013
+  rule: 'bundle_completeness — the resolved configuration travels one way only (T-3-50)'
+  prediction: >
+    ResolvedSetFitConfig's derive attributes contain Serialize and NOT Deserialize, the bundle
+    carries the provenance RECORD rather than the runtime type, and no conversion exists from
+    that record back into a runtime resolved configuration. The scan reads the ATTRIBUTE lines
+    above the declaration rather than the surrounding text, because the doc comment there says
+    the words "NOT Deserialize, deliberately" and a naive substring search matches the sentence
+    that documents the invariant and reports it as the violation. The forbidden conversion is
+    assembled at runtime in the test rather than written out, so the same scan can be run as a
+    grep over the whole directory without the test being a file in that directory containing
+    the forbidden token.
+  test: cargo test -p aprender-train --lib --features setfit bundle_resolved_config
+  test_harness: cargo test -p aprender-train --lib --features setfit bundle_resolved_config
+  expected_output: 'test result: ok.'
+  if_fails: >
+    A probed device can arrive from a file, which retires an acceptance criterion plan 03-03
+    already passed and makes a resolved runtime fact restorable from an artifact.
 
 kani_harnesses:
 

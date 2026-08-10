@@ -699,6 +699,104 @@ fn bundle_limits_clear_the_full_minilm_figures() {
         "MAX_BUNDLE_BYTES {MAX_BUNDLE_BYTES} must clear the projected {projected_bytes} by at \
          least 2x",
     );
+
+    // And the contract states the same figures, so the headroom claim it makes is
+    // about the numbers this computation produced rather than about numbers a prose
+    // paragraph remembers.
+    let contracted = contract_bundle_limits();
+    assert_eq!(contracted.full_minilm_figures.total_elements, total_elements);
+    assert_eq!(contracted.full_minilm_figures.largest_tensor_elements, largest_tensor);
+    assert_eq!(contracted.full_minilm_figures.tensor_count, tensor_count);
+    assert_eq!(contracted.full_minilm_figures.serialized_bytes, projected_bytes);
+}
+
+// ---------------------------------------------------------------------------
+// The contracted numbers, PARSED rather than restated
+// ---------------------------------------------------------------------------
+
+/// The committed contract, embedded rather than read at runtime.
+///
+/// `include_str!` for the reason `thresholds.rs` uses it: a test that silently
+/// skips when a file is missing is a test that proves nothing on the machine where
+/// the file went missing.
+const CONTRACT_YAML: &str = include_str!("../../../../../contracts/setfit-train-lifecycle-v1.yaml");
+
+#[derive(Debug, serde::Deserialize)]
+struct ContractFile {
+    equations: ContractEquations,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContractEquations {
+    bundle_limits: ContractBundleLimits,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContractBundleLimits {
+    limits: ContractLimitValues,
+    full_minilm_figures: ContractFullPinFigures,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContractLimitValues {
+    max_bundle_bytes: u64,
+    max_tensor_count: u64,
+    max_elements_per_tensor: u64,
+    max_total_elements: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContractFullPinFigures {
+    serialized_bytes: u64,
+    tensor_count: u64,
+    largest_tensor_elements: u64,
+    total_elements: u64,
+}
+
+fn contract_bundle_limits() -> ContractBundleLimits {
+    let parsed: ContractFile =
+        serde_yaml::from_str(CONTRACT_YAML).expect("the committed contract must deserialize");
+    parsed.equations.bundle_limits
+}
+
+/// Every limit constant is PARSED from the contract and compared.
+///
+/// Not a substring search. The contract is deserialized into typed structs and
+/// compared field by field, so a number that is right but in the wrong slot is red,
+/// and so is a number that appears only in a prose paragraph. Editing either side
+/// alone turns this red, which is what makes loosening a bound require a contract
+/// edit that `pv diff` flags.
+#[test]
+fn bundle_limits_match_the_contract() {
+    let contracted = contract_bundle_limits().limits;
+    assert_eq!(
+        contracted.max_bundle_bytes, MAX_BUNDLE_BYTES,
+        "max_bundle_bytes disagrees with the contract",
+    );
+    assert_eq!(
+        contracted.max_tensor_count, MAX_TENSOR_COUNT,
+        "max_tensor_count disagrees with the contract",
+    );
+    assert_eq!(
+        contracted.max_elements_per_tensor, MAX_ELEMENTS_PER_TENSOR,
+        "max_elements_per_tensor disagrees with the contract",
+    );
+    assert_eq!(
+        contracted.max_total_elements, MAX_TOTAL_ELEMENTS,
+        "max_total_elements disagrees with the contract",
+    );
+
+    // And the shipped bounds object is exactly those four values, so a limit could
+    // not be contracted at one number and enforced at another.
+    assert_eq!(
+        BundleLimits::CONTRACTED,
+        BundleLimits::tiny(
+            contracted.max_bundle_bytes,
+            contracted.max_tensor_count,
+            contracted.max_elements_per_tensor,
+            contracted.max_total_elements,
+        ),
+    );
 }
 
 /// Record the measured sizes, so the amplification is visible rather than asserted.
