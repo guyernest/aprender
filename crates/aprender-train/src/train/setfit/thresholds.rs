@@ -21,8 +21,18 @@
 //! that tuning occurred — in either direction. See the `gradient_free_parameters` equation of
 //! the contract for the mechanism and the measurements. It is RECORDED in the evidence table
 //! and excluded from the verdict.
+//!
+//! # Membership is COMPONENT-WISE, and it has to be
+//!
+//! A calibrated entry enumerates every seed and every cell the epsilons were measured over; a
+//! run executes at ONE seed in ONE cell. Their ids can therefore never be string-equal, so
+//! `contains(&regime_id)` had exactly two possible behaviours: refuse every honest run, or —
+//! as it did — be satisfied by stamping the enumerated string onto runs that never executed
+//! those coordinates. [`RegimeCoordinates`] parses both sides into
+//! `(architecture, seed set, cell set)` and asks whether the calibrated entry COVERS the run.
 
-use std::collections::BTreeMap;
+use core::fmt;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
 use serde::Deserialize;
@@ -50,6 +60,185 @@ pub(crate) const CONTRACT_YAML: &str =
 /// unblock a benchmark.
 pub(crate) const CALIBRATED_REGIMES: &[&str] =
     &["minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4"];
+
+/// The `seeds=` field marker of the regime grammar.
+const SEEDS_PREFIX: &str = "seeds=";
+
+/// The `cells=` field marker of the regime grammar.
+const CELLS_PREFIX: &str = "cells=";
+
+/// A regime id parsed into the three things a calibration is indexed by.
+///
+/// # One grammar, two cardinalities
+///
+/// `<architecture>@<revision>|seeds=<u64,...>|cells=<label,...>`. A RUN renders its own
+/// coordinates through [`Self::render_run`], so both of its sets are singletons; a CALIBRATED
+/// entry enumerates every seed and cell the epsilons were measured over. The two are compared
+/// by [`Self::covers`], never by string equality — see this module's header for why equality
+/// could not work in either direction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegimeCoordinates {
+    /// `<architecture fingerprint>@<source revision>`, compared for exact equality: an epsilon
+    /// measured on one architecture is not evidence about another, so there is no notion of a
+    /// "close enough" architecture here.
+    architecture: String,
+    /// Every root seed the id names.
+    seeds: BTreeSet<u64>,
+    /// Every cell label the id names.
+    cells: BTreeSet<String>,
+}
+
+impl RegimeCoordinates {
+    /// The canonical rendering of ONE run's coordinates.
+    ///
+    /// The writer and the reader share this function's grammar constants, so a run cannot be
+    /// stamped in a shape the membership check cannot parse.
+    pub(crate) fn render_run(architecture: &str, seed: u64, cell: &str) -> String {
+        format!("{architecture}|{SEEDS_PREFIX}{seed}|{CELLS_PREFIX}{cell}")
+    }
+
+    /// Parse an id in the grammar above.
+    ///
+    /// # Errors
+    ///
+    /// [`RegimeParseError`] — every malformed shape is a distinct, named variant. Nothing is
+    /// tolerated silently: an id this function cannot read is an id whose coordinates are
+    /// unknown, and unknown coordinates must never be treated as calibrated ones.
+    pub(crate) fn parse(id: &str) -> Result<Self, RegimeParseError> {
+        let mut fields = id.split('|');
+        let (Some(architecture), Some(seed_field), Some(cell_field), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(RegimeParseError::FieldCount { id: id.to_string() });
+        };
+        if architecture.is_empty() {
+            return Err(RegimeParseError::EmptyArchitecture { id: id.to_string() });
+        }
+
+        let seed_list = seed_field.strip_prefix(SEEDS_PREFIX).ok_or_else(|| {
+            RegimeParseError::MissingPrefix { expected: SEEDS_PREFIX, id: id.to_string() }
+        })?;
+        let cell_list = cell_field.strip_prefix(CELLS_PREFIX).ok_or_else(|| {
+            RegimeParseError::MissingPrefix { expected: CELLS_PREFIX, id: id.to_string() }
+        })?;
+
+        let mut seeds = BTreeSet::new();
+        for item in seed_list.split(',') {
+            let seed = item.parse::<u64>().map_err(|_| RegimeParseError::NotASeed {
+                value: item.to_string(),
+                id: id.to_string(),
+            })?;
+            seeds.insert(seed);
+        }
+        let mut cells = BTreeSet::new();
+        for item in cell_list.split(',') {
+            if item.is_empty() {
+                return Err(RegimeParseError::EmptyCellLabel { id: id.to_string() });
+            }
+            cells.insert(item.to_string());
+        }
+        // `str::split` always yields at least one item, and both loops above reject the empty
+        // one, so neither set can be empty here. Asserted rather than assumed, because an
+        // empty run-side set would make the subset test below vacuously true.
+        debug_assert!(!seeds.is_empty(), "an empty seed set would pass every subset test");
+        debug_assert!(!cells.is_empty(), "an empty cell set would pass every subset test");
+
+        Ok(Self { architecture: architecture.to_string(), seeds, cells })
+    }
+
+    /// Whether THIS (calibrated) entry covers `run`'s coordinates.
+    ///
+    /// Same architecture, and every seed and every cell the run names was measured. For the
+    /// singleton sets a run always carries this reads as "the run's seed and cell are both in
+    /// the measured sets"; the subset form is what lets the calibrated entry itself — which
+    /// names all three seeds and both cells — be checked by the same function.
+    pub(crate) fn covers(&self, run: &Self) -> bool {
+        self.architecture == run.architecture
+            && run.seeds.is_subset(&self.seeds)
+            && run.cells.is_subset(&self.cells)
+    }
+}
+
+/// Why a regime id could not be read.
+///
+/// One variant per malformed shape, each carrying the offending id, so a diagnosis never has
+/// to guess which of the three fields was wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RegimeParseError {
+    /// Not exactly three `|`-separated fields.
+    FieldCount {
+        /// The offending id.
+        id: String,
+    },
+    /// The architecture field is empty.
+    EmptyArchitecture {
+        /// The offending id.
+        id: String,
+    },
+    /// A field did not open with its marker.
+    MissingPrefix {
+        /// The marker that was expected.
+        expected: &'static str,
+        /// The offending id.
+        id: String,
+    },
+    /// A seed item is not a `u64`.
+    NotASeed {
+        /// The item that failed to parse.
+        value: String,
+        /// The offending id.
+        id: String,
+    },
+    /// A cell item is the empty string.
+    EmptyCellLabel {
+        /// The offending id.
+        id: String,
+    },
+}
+
+impl fmt::Display for RegimeParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FieldCount { id } => write!(
+                f,
+                "`{id}` is not a regime id: expected exactly three `|`-separated fields, \
+                 `<architecture>@<revision>|{SEEDS_PREFIX}<u64,...>|{CELLS_PREFIX}<label,...>`",
+            ),
+            Self::EmptyArchitecture { id } => {
+                write!(f, "`{id}` has an empty architecture field")
+            }
+            Self::MissingPrefix { expected, id } => {
+                write!(f, "`{id}` is missing the `{expected}` marker")
+            }
+            Self::NotASeed { value, id } => {
+                write!(f, "`{id}` names seed `{value}`, which is not a u64")
+            }
+            Self::EmptyCellLabel { id } => write!(f, "`{id}` names an empty cell label"),
+        }
+    }
+}
+
+/// Parse a CALIBRATED entry, aborting if it is malformed.
+///
+/// Deliberately not a `Result`. A calibrated entry is a compile-time constant this crate
+/// commits to and `thresholds_match_the_contract` compares against the contract; if one cannot
+/// be read, the honest outcome is to stop. Treating it as "matches nothing" would turn a typo
+/// into a gate that refuses every run while still reporting the entry as calibrated —
+/// fail-closed in appearance and broken in fact, and green in every test that only ever checks
+/// that bad runs are refused.
+///
+/// # Panics
+///
+/// If `entry` is not in the regime grammar.
+fn parse_calibrated(entry: &str) -> RegimeCoordinates {
+    RegimeCoordinates::parse(entry).unwrap_or_else(|err| {
+        panic!(
+            "malformed calibrated regime entry: {err}. A calibrated entry that cannot be \
+             parsed ABORTS rather than being skipped, because a skipped entry leaves a gate \
+             that refuses every run while still reporting the entry as calibrated",
+        )
+    })
+}
 
 /// One class's frozen entry.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -127,10 +316,22 @@ impl Thresholds {
         self.embedding_delta_floor
     }
 
-    /// Whether a recorded regime id is one these numbers were measured in.
+    /// Whether a recorded regime id names an architecture, seed and cell these numbers were
+    /// measured in.
+    ///
+    /// COMPONENT-WISE, not string equality: the run's architecture must equal a calibrated
+    /// entry's, and the run's seed and cell must both be members of that entry's measured sets.
+    ///
+    /// An id this crate cannot PARSE is not calibrated. That is the fail-closed direction: an
+    /// unreadable id is one whose coordinates are unknown, and unknown coordinates are exactly
+    /// what the gate exists to refuse. The opposite treatment is reserved for a malformed
+    /// CALIBRATED entry, which aborts (see [`parse_calibrated`]).
     #[must_use]
     pub(crate) fn is_calibrated(&self, regime_id: &str) -> bool {
-        self.calibrated_regimes.contains(&regime_id)
+        let Ok(observed) = RegimeCoordinates::parse(regime_id) else {
+            return false;
+        };
+        self.calibrated_regimes.iter().any(|entry| parse_calibrated(entry).covers(&observed))
     }
 
     /// The calibrated set, for a diagnostic that does not require reading the contract.
@@ -292,6 +493,168 @@ mod tests {
                 "{}: `gated` and the presence of an epsilon must agree, otherwise a class is \
                  either compared against nothing or carries a threshold nobody applies",
                 class.tag(),
+            );
+        }
+    }
+
+    /// The architecture component of the single calibrated entry, for the tests below.
+    fn calibrated_architecture() -> String {
+        let entry = CALIBRATED_REGIMES.first().expect("exactly one calibrated entry");
+        RegimeCoordinates::parse(entry).expect("the calibrated entry must parse").architecture
+    }
+
+    /// A run id rendered by the writer is readable by the reader, field for field.
+    ///
+    /// Writer and reader sharing one grammar is what makes the membership check below a check
+    /// on the run rather than on a string convention two places happen to agree about.
+    #[test]
+    fn regime_render_and_parse_round_trip() {
+        let rendered = RegimeCoordinates::render_run("arch@rev", 42, "s8e1b4");
+        assert_eq!(rendered, "arch@rev|seeds=42|cells=s8e1b4");
+
+        let parsed = RegimeCoordinates::parse(&rendered).expect("a rendered id must parse");
+        assert_eq!(parsed.architecture, "arch@rev");
+        assert_eq!(parsed.seeds, BTreeSet::from([42]));
+        assert_eq!(parsed.cells, BTreeSet::from(["s8e1b4".to_string()]));
+    }
+
+    /// The seed and cell SETS are order-insensitive, so the frozen entry's `1,42,7` ordering
+    /// is a rendering detail and not a third thing to keep in sync.
+    #[test]
+    fn regime_parse_reads_sets_not_ordered_lists() {
+        let a = RegimeCoordinates::parse("x@y|seeds=1,42,7|cells=b,a").expect("parses");
+        let b = RegimeCoordinates::parse("x@y|seeds=7,1,42|cells=a,b").expect("parses");
+        assert_eq!(a, b, "a regime id names two SETS; their written order carries no meaning");
+    }
+
+    /// Every malformed shape is REJECTED, and each by its own named variant.
+    ///
+    /// A case table rather than a spot check: the parser is the thing standing between a
+    /// typo and a gate that silently stops discriminating, and four of these five shapes are
+    /// one keystroke away from a well-formed id.
+    #[test]
+    fn regime_parse_rejects_every_malformed_shape() {
+        let cases: [(&str, RegimeParseError); 7] = [
+            (
+                "arch@rev|seeds=1",
+                RegimeParseError::FieldCount { id: "arch@rev|seeds=1".to_string() },
+            ),
+            (
+                "arch@rev|seeds=1|cells=a|extra",
+                RegimeParseError::FieldCount { id: "arch@rev|seeds=1|cells=a|extra".to_string() },
+            ),
+            (
+                "|seeds=1|cells=a",
+                RegimeParseError::EmptyArchitecture { id: "|seeds=1|cells=a".to_string() },
+            ),
+            (
+                "arch@rev|seed=1|cells=a",
+                RegimeParseError::MissingPrefix {
+                    expected: SEEDS_PREFIX,
+                    id: "arch@rev|seed=1|cells=a".to_string(),
+                },
+            ),
+            (
+                "arch@rev|seeds=1|cell=a",
+                RegimeParseError::MissingPrefix {
+                    expected: CELLS_PREFIX,
+                    id: "arch@rev|seeds=1|cell=a".to_string(),
+                },
+            ),
+            (
+                "arch@rev|seeds=|cells=a",
+                RegimeParseError::NotASeed {
+                    value: String::new(),
+                    id: "arch@rev|seeds=|cells=a".to_string(),
+                },
+            ),
+            (
+                "arch@rev|seeds=1|cells=",
+                RegimeParseError::EmptyCellLabel { id: "arch@rev|seeds=1|cells=".to_string() },
+            ),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(
+                RegimeCoordinates::parse(id),
+                Err(expected),
+                "`{id}` must be rejected, and by the variant that names what is wrong",
+            );
+            assert!(
+                !Thresholds::frozen().is_calibrated(id),
+                "an id the parser cannot read must never be treated as calibrated: `{id}`",
+            );
+        }
+    }
+
+    /// Membership is COMPONENT-WISE. This is the check the gate rests on.
+    ///
+    /// A single run carries one seed and one cell, so its id can never string-equal an entry
+    /// enumerating three seeds; the negatives below are what distinguish this from a check
+    /// that accepts anything on the right architecture.
+    #[test]
+    fn regime_membership_is_component_wise() {
+        let frozen = Thresholds::frozen();
+        let arch = calibrated_architecture();
+
+        // POSITIVE: each measured (seed, cell) pair, one run at a time.
+        for seed in [1_u64, 7, 42] {
+            for cell in ["s8e1b4", "s16e2b8"] {
+                assert!(
+                    frozen.is_calibrated(&RegimeCoordinates::render_run(&arch, seed, cell)),
+                    "seed {seed} cell {cell} was measured and must be accepted",
+                );
+            }
+        }
+
+        // NEGATIVE: the seed alone is wrong.
+        assert!(
+            !frozen.is_calibrated(&RegimeCoordinates::render_run(&arch, 2, "s8e1b4")),
+            "seed 2 was never swept; a calibrated cell does not make it calibrated",
+        );
+        // NEGATIVE: the cell alone is wrong.
+        assert!(
+            !frozen.is_calibrated(&RegimeCoordinates::render_run(&arch, 1, "s8e1b3")),
+            "cell s8e1b3 was never measured; a calibrated seed does not make it calibrated",
+        );
+        // NEGATIVE: the architecture alone is wrong.
+        assert!(
+            !frozen.is_calibrated(&RegimeCoordinates::render_run(
+                "minilm-full-h384-l6-a12-i1536-v30522@production",
+                1,
+                "s8e1b4",
+            )),
+            "the production encoder is not calibrated at any seed or cell (Phase 5 is blocked \
+             by this, deliberately)",
+        );
+        // NEGATIVE: a superset of the measured seeds is not covered either.
+        assert!(
+            !frozen.is_calibrated(&format!("{arch}|seeds=1,7,42,99|cells=s8e1b4")),
+            "one unmeasured seed in the set is enough to refuse",
+        );
+    }
+
+    /// A malformed CALIBRATED entry ABORTS rather than quietly matching nothing.
+    ///
+    /// The opposite of the run side: a typo in the frozen constant must not be able to
+    /// masquerade as a gate that is merely very strict.
+    #[test]
+    #[should_panic(expected = "malformed calibrated regime entry")]
+    fn regime_a_malformed_calibrated_entry_aborts() {
+        let _ = parse_calibrated("minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7");
+    }
+
+    /// Every committed calibrated entry is in the grammar the gate parses.
+    #[test]
+    fn regime_every_calibrated_entry_parses() {
+        assert!(!CALIBRATED_REGIMES.is_empty(), "non-vacuity: the set must not be empty");
+        for entry in CALIBRATED_REGIMES {
+            let parsed = RegimeCoordinates::parse(entry)
+                .unwrap_or_else(|err| panic!("calibrated entry `{entry}` must parse: {err}"));
+            assert!(!parsed.seeds.is_empty(), "`{entry}` names no seed");
+            assert!(!parsed.cells.is_empty(), "`{entry}` names no cell");
+            assert!(
+                parsed.architecture.contains('@'),
+                "`{entry}` must name an architecture AND a source revision",
             );
         }
     }

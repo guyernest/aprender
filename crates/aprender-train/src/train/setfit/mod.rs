@@ -267,9 +267,10 @@ impl SetFitRun<Prepared> {
     ///
     /// # The regime is recorded by the RUN, not chosen at judgement time
     ///
-    /// `calibration_regime_id` is stamped when the evidence table is built, from the encoder
-    /// and configuration the run actually used. A run cannot present a regime it did not
-    /// execute in, and the gate refuses any regime the thresholds were not measured in.
+    /// `calibration_regime_id` is stamped when the evidence table is built, from the encoder,
+    /// selection and configuration the run actually used — its own architecture, its own seed,
+    /// its own cell. A run cannot present a regime it did not execute in, and the gate refuses
+    /// any (architecture, seed, cell) the thresholds were not measured at.
     ///
     /// # Errors
     ///
@@ -280,7 +281,7 @@ impl SetFitRun<Prepared> {
     /// measured movement misses the contracted thresholds.
     pub fn tune_encoder(self) -> Result<SetFitRun<EncoderTuned>, SetFitTrainError> {
         let (encoder, dataset, selection, config) = self.into_parts();
-        let regime = calibration_regime_id(&encoder, &config);
+        let regime = calibration_regime_id(&encoder, &selection, &config);
         let out = tune::run_tuning(encoder, &dataset, &selection, &config)?;
 
         let table = evidence::UpdateEvidence::from_tune_output(&out, &regime)
@@ -303,23 +304,86 @@ impl SetFitRun<Prepared> {
     }
 }
 
-/// The regime a run executes in, derived from the encoder and configuration it actually used.
+/// The short source-revision tag of the pinned MiniLM slice the epsilons were measured on.
+///
+/// The first eight hex digits of `1110a243fdf4706b3f48f1d95db1a4f5529b4d41`, the upstream
+/// all-MiniLM-L6-v2 revision the fixture slice was carved from.
+///
+/// # It is a REVISION TAG, not a weights hash, and it is ASSERTED rather than observed
+///
+/// `SetFitMiniLm` publishes its dimensions ([`SetFitMiniLm::architecture_fingerprint`]) and
+/// nothing about where its weights came from, so this constant is appended by this crate
+/// rather than read off the model. Two encoders with identical dimensions and different weight
+/// values are therefore indistinguishable to the gate. Closing that needs the encoder to carry
+/// a content hash of its weights, which is a larger change than this constant; it is recorded
+/// here as a KNOWN LIMIT so a later reader does not mistake the tag for a proof of identity.
+const SLICE_SOURCE_REVISION: &str = "1110a243";
+
+/// The regime a run executes in, derived from the encoder, selection and configuration it
+/// actually used.
 ///
 /// Derived rather than supplied: a caller-provided regime string would let a run claim to be
 /// something it is not, and the gate's fail-closed check would then be checking a label
 /// instead of the run.
 ///
-/// The fixture slice's fingerprint is the only calibrated one, so this returns the calibrated
-/// id when the encoder's dimensions match the slice this phase measured, and a DISTINCT,
-/// descriptive id otherwise — which the gate then refuses. It never returns a calibrated id
-/// for an encoder that was not calibrated.
-fn calibration_regime_id(encoder: &SetFitMiniLm, config: &ResolvedSetFitConfig) -> String {
-    let _ = config;
-    let cfg = format!("{}@1110a243", encoder.architecture_fingerprint());
-    if cfg == "minilm-slice-h64-l2-a2-i256-v97@1110a243" {
-        thresholds::CALIBRATED_REGIMES.first().map_or_else(|| cfg.clone(), |s| (*s).to_string())
+/// # The id states the run's OWN coordinates
+///
+/// Architecture from the encoder, seed from the configuration, cell from the selection AND the
+/// configuration — every component measured from the thing that produced it. It is never the
+/// enumerated calibrated string: that string names the seeds and cells the CALIBRATION swept,
+/// and a run that stamped it would be claiming to have executed six cells it never ran. The
+/// gate then decides membership component-wise ([`thresholds::Thresholds::is_calibrated`]),
+/// which is what makes the recorded id and the calibrated set two halves of one check.
+fn calibration_regime_id(
+    encoder: &SetFitMiniLm,
+    selection: &Selection,
+    config: &ResolvedSetFitConfig,
+) -> String {
+    let architecture = format!("{}@{SLICE_SOURCE_REVISION}", encoder.architecture_fingerprint());
+    thresholds::RegimeCoordinates::render_run(
+        &architecture,
+        config.requested().root_seed(),
+        &cell_label(selection, config),
+    )
+}
+
+/// The cell label `s{shots}e{epochs}b{batch}` this run executed in.
+///
+/// The shot count comes from the SELECTION, not from a configuration knob: the selection is
+/// the object that drew the rows, and a label derived from an intent could disagree with the
+/// run it labels.
+fn cell_label(selection: &Selection, config: &ResolvedSetFitConfig) -> String {
+    format!(
+        "{}e{}b{}",
+        shots_component(selection.class_sizes()),
+        config.requested().epochs(),
+        config.requested().batch_size(),
+    )
+}
+
+/// The `s{n}` component of a cell label, from the SELECTED rows per class.
+///
+/// # A non-uniform selection is labelled as such, never as one of its classes
+///
+/// `FewShotSelector` draws the same number of rows for every class, so every calibrated cell
+/// takes the uniform branch. A selection whose classes disagree is not an n-shot cell in any
+/// honest sense, and naming one class's count would mint the label of a cell the run did not
+/// execute — the very substitution this function exists to remove. Such a run is labelled
+/// `smixed{min}-{max}`, and a selection that drew nothing is `sempty`; neither is a member of
+/// any calibrated cell set, so both fail closed rather than borrowing another cell's epsilons.
+///
+/// Takes the sparse `(label, size)` list rather than the `Selection` so the two branches
+/// `FewShotSelector` cannot currently produce are still directly testable.
+fn shots_component(class_sizes: &[(usize, u64)]) -> String {
+    let mut sizes = class_sizes.iter().map(|&(_, size)| size);
+    let Some(first) = sizes.next() else {
+        return "sempty".to_string();
+    };
+    let (min, max) = sizes.fold((first, first), |(lo, hi), size| (lo.min(size), hi.max(size)));
+    if min == max {
+        format!("s{min}")
     } else {
-        format!("{cfg}|seeds=?|cells=?")
+        format!("smixed{min}-{max}")
     }
 }
 
@@ -560,5 +624,207 @@ impl From<DeviceError> for SetFitTrainError {
 impl From<ContrastiveDataError> for SetFitTrainError {
     fn from(inner: ContrastiveDataError) -> Self {
         Self::Capacity(inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures as fx;
+    use super::thresholds::Thresholds;
+    use super::*;
+
+    /// The regime id a fixture cell's run would record, built through the shipped derivation.
+    fn regime_of(variant: fx::CalibrationVariant) -> String {
+        let run = fx::prepared_run(variant, None);
+        calibration_regime_id(run.encoder(), run.selection(), run.config())
+    }
+
+    /// The recorded id states the RUN's coordinates — its seed, its cell, no placeholders.
+    ///
+    /// The exact strings, not a `contains`: the whole defect this test exists for was an id
+    /// that looked plausible (it named the right architecture) while its seed and cell
+    /// components described something other than the run carrying it.
+    #[test]
+    fn regime_id_states_the_runs_own_seed_and_cell() {
+        assert_eq!(
+            regime_of(fx::calibrated_variant()),
+            "minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1|cells=s8e1b4",
+        );
+        assert_eq!(
+            regime_of(fx::default_variant()),
+            format!(
+                "minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds={}|cells=s8e1b4",
+                fx::FIXTURE_SEED,
+            ),
+        );
+        assert_eq!(
+            regime_of(fx::uncalibrated_cell_variant()),
+            "minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1|cells=s8e1b3",
+        );
+
+        // No run may record the enumerated CALIBRATED string, and none may record a
+        // placeholder. Both were observed: the first was returned for every run on the
+        // fixture architecture, the second for every run off it.
+        for variant in
+            [fx::calibrated_variant(), fx::default_variant(), fx::uncalibrated_cell_variant()]
+        {
+            let id = regime_of(variant);
+            assert!(!id.contains('?'), "a recorded id must never be a placeholder: `{id}`");
+            assert!(
+                !id.contains("seeds=1,42,7"),
+                "a single run must never claim the calibration's whole seed sweep: `{id}`",
+            );
+        }
+    }
+
+    /// And the gate agrees with those coordinates, one cell at a time.
+    #[test]
+    fn regime_id_is_calibrated_only_at_a_measured_seed_and_cell() {
+        let frozen = Thresholds::frozen();
+        assert!(
+            frozen.is_calibrated(&regime_of(fx::calibrated_variant())),
+            "seed 1 in cell s8e1b4 was measured",
+        );
+        assert!(
+            !frozen.is_calibrated(&regime_of(fx::default_variant())),
+            "FIXTURE_SEED was never swept",
+        );
+        assert!(
+            !frozen.is_calibrated(&regime_of(fx::uncalibrated_cell_variant())),
+            "cell s8e1b3 was never measured",
+        );
+    }
+
+    /// A compact description of a `tune_encoder` outcome, for the negatives' failure messages.
+    ///
+    /// `{other:?}` on the `Ok` arm renders the entire `SetFitRun` — encoder dims, every
+    /// synthetic row, the whole evidence table — which is ~100 KB of scrollback in place of
+    /// the one fact that matters: which regime the gate accepted.
+    fn outcome(result: &Result<SetFitRun<EncoderTuned>, SetFitTrainError>) -> String {
+        match result {
+            Ok(run) => format!(
+                "Ok — the gate ACCEPTED the run and recorded regime `{}`",
+                run.evidence().summary().calibration_regime_id,
+            ),
+            Err(err) => format!("Err({err})"),
+        }
+    }
+
+    /// CONTROL — a run at a calibrated (architecture, seed, cell) still passes the WHOLE gate.
+    ///
+    /// Without this the two negatives below would be satisfied by a regime check that refuses
+    /// everything, which is the failure mode a fail-closed gate is one keystroke away from.
+    ///
+    /// It asserts the PLUMBING, not the id's spelling: that the id `tune_encoder` stamps into
+    /// the evidence summary is the one the derivation produced for this run, and that the gate
+    /// accepts it. The spelling is pinned by `regime_id_states_the_runs_own_seed_and_cell`
+    /// above, which is where a wrong id belongs — keeping it out of here is what lets this
+    /// test be green both before and after the derivation was fixed, and therefore evidence
+    /// that the new check is not simply refusing everything.
+    #[test]
+    fn regime_gate_a_calibrated_run_passes() {
+        let result = fx::prepared_run(fx::calibrated_variant(), None).tune_encoder();
+        let run = result.expect("a run at a measured seed and cell must pass the regime check");
+        let recorded = &run.evidence().summary().calibration_regime_id;
+        assert!(
+            Thresholds::frozen().is_calibrated(recorded),
+            "the passing run's OWN recorded id must be a calibrated one, got `{recorded}`",
+        );
+        assert_eq!(
+            recorded,
+            &regime_of(fx::calibrated_variant()),
+            "the id the run RECORDS must be the id the derivation produces for it; a divergence \
+             here would mean the gate judged something other than what it stamped",
+        );
+    }
+
+    /// NEGATIVE (seed) — a run at an unswept seed is refused, on a calibrated cell.
+    ///
+    /// The epsilons were measured over seeds {1, 7, 42}. `FIXTURE_SEED` is not one of them, so
+    /// applying those numbers to this run would be applying a measurement to a run it was
+    /// never taken on.
+    #[test]
+    fn regime_gate_an_unswept_seed_is_refused() {
+        let result = fx::prepared_run(fx::default_variant(), None).tune_encoder();
+        match &result {
+            Err(SetFitTrainError::UncalibratedRegime { observed, calibrated }) => {
+                assert_eq!(
+                    observed,
+                    &format!(
+                        "minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds={}|cells=s8e1b4",
+                        fx::FIXTURE_SEED,
+                    ),
+                    "the refusal must name the run's REAL coordinates",
+                );
+                assert_eq!(calibrated.len(), 1, "exactly one calibrated entry");
+                assert!(
+                    calibrated[0].contains("seeds=1,42,7"),
+                    "the diagnosis must show the seeds that WERE measured: {calibrated:?}",
+                );
+            }
+            _ => panic!(
+                "a run at seed {} — which the calibration never swept — must fail closed, got \
+                 {}. If the gate accepted it, every epsilon in the contract is being applied to \
+                 a run it was not measured on.",
+                fx::FIXTURE_SEED,
+                outcome(&result),
+            ),
+        }
+    }
+
+    /// NEGATIVE (cell) — a run in an unmeasured cell is refused, at a calibrated seed.
+    ///
+    /// Same architecture, same seed as the control, one knob apart: batch 3 instead of 4. The
+    /// cell is the only thing that changed, so it is the only thing the refusal can be about.
+    #[test]
+    fn regime_gate_an_unmeasured_cell_is_refused() {
+        let result = fx::prepared_run(fx::uncalibrated_cell_variant(), None).tune_encoder();
+        match &result {
+            Err(SetFitTrainError::UncalibratedRegime { observed, calibrated }) => {
+                assert_eq!(
+                    observed, "minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1|cells=s8e1b3",
+                    "the refusal must name the run's REAL cell",
+                );
+                assert!(
+                    calibrated[0].contains("cells=s16e2b8,s8e1b4"),
+                    "the diagnosis must show the cells that WERE measured: {calibrated:?}",
+                );
+            }
+            _ => panic!(
+                "a run in cell s8e1b3 — which the calibration never measured — must fail \
+                 closed, got {}",
+                outcome(&result),
+            ),
+        }
+    }
+
+    /// A non-uniform selection is labelled as one, not as an n-shot cell it is not.
+    ///
+    /// `FewShotSelector` cannot currently emit a non-uniform draw, which is exactly why the
+    /// branch needs a test: an unexercised default is how a future selector would silently
+    /// inherit a calibrated cell's epsilons.
+    #[test]
+    fn regime_shots_component_never_names_one_class_of_a_non_uniform_selection() {
+        // The uniform case, cross-checked against a real selection.
+        let uniform = fx::fixture_selection(fx::FIXTURE_SEED, 8);
+        assert_eq!(shots_component(uniform.class_sizes()), "s8");
+        assert_eq!(shots_component(&[(0, 8), (1, 8), (2, 8)]), "s8");
+
+        // Non-uniform: the label names the SPREAD, never `s8` (the majority) or `s5`.
+        assert_eq!(shots_component(&[(0, 8), (1, 5), (2, 8)]), "smixed5-8");
+        assert_eq!(shots_component(&[]), "sempty");
+
+        // And neither label is a member of any calibrated cell set.
+        let frozen = Thresholds::frozen();
+        for cell in ["smixed5-8e1b4", "semptye1b4"] {
+            assert!(
+                !frozen.is_calibrated(&thresholds::RegimeCoordinates::render_run(
+                    "minilm-slice-h64-l2-a2-i256-v97@1110a243",
+                    1,
+                    cell,
+                )),
+                "`{cell}` must not borrow a measured cell's epsilons",
+            );
+        }
     }
 }

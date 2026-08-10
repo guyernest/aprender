@@ -243,6 +243,11 @@ pub(crate) fn calibration_variants() -> Vec<CalibrationVariant> {
 }
 
 /// The default cell: 8 shots, 1 epoch, batch 4, budget 12 — a three-step run.
+///
+/// Its SEED is [`FIXTURE_SEED`], which the calibration matrix never swept, so a run built from
+/// it is OUTSIDE the calibrated regime and the evidence gate refuses it. That is deliberate and
+/// load-bearing: it is the fixture the seed-negative below is written against. Tests that need
+/// to reach a threshold comparison use [`calibrated_variant`] instead.
 pub(crate) fn default_variant() -> CalibrationVariant {
     CalibrationVariant {
         label: "s8e1b4",
@@ -252,6 +257,25 @@ pub(crate) fn default_variant() -> CalibrationVariant {
         batch_size: 4,
         budget: 12,
     }
+}
+
+/// The same cell at a seed the calibration matrix DID sweep — the gate-crossing fixture.
+///
+/// Every test that needs `tune_encoder` to get past the regime check and actually compare
+/// evidence against the frozen epsilons builds from this. The seed is taken from
+/// [`CALIBRATION_SEEDS`] rather than written out, so a change to the swept set moves this
+/// fixture with it instead of leaving a stale literal that silently stops being calibrated.
+pub(crate) fn calibrated_variant() -> CalibrationVariant {
+    CalibrationVariant { root_seed: CALIBRATION_SEEDS[0], ..default_variant() }
+}
+
+/// A CALIBRATED seed in an UNMEASURED cell: batch 3 where the matrix measured batch 4.
+///
+/// The cell-negative's fixture. It differs from [`calibrated_variant`] in the batch size and
+/// in nothing else, so a refusal is attributable to the cell alone — the seed, the encoder and
+/// every other knob are the calibrated ones.
+pub(crate) fn uncalibrated_cell_variant() -> CalibrationVariant {
+    CalibrationVariant { label: "s8e1b3", batch_size: 3, ..calibrated_variant() }
 }
 
 /// The validated configuration for a cell, derived from the reference recipe and shrunk.
@@ -475,6 +499,70 @@ mod tests {
         for v in &variants {
             assert!(v.total_steps() >= 2, "{} must take at least two steps", v.label);
         }
+    }
+
+    /// The three gate-facing variants really are what their names claim.
+    ///
+    /// Asserted here rather than trusted, because the regime negatives elsewhere are only
+    /// evidence if their fixtures differ from the calibrated one in EXACTLY the component the
+    /// test blames. A `default_variant` that happened to sit on a swept seed would make the
+    /// seed-negative green for the wrong reason.
+    #[test]
+    fn fixture_gate_facing_variants_isolate_one_component_each() {
+        let calibrated = calibrated_variant();
+        assert!(
+            CALIBRATION_SEEDS.contains(&calibrated.root_seed),
+            "the calibrated fixture must sit on a swept seed",
+        );
+        assert!(
+            CALIBRATION_BOUNDARIES.iter().any(|&(label, shots, epochs, batch, _)| {
+                label == calibrated.label
+                    && (shots, epochs, batch)
+                        == (calibrated.shots_per_class, calibrated.epochs, calibrated.batch_size)
+            }),
+            "the calibrated fixture must sit in a measured cell",
+        );
+
+        // The seed-negative: an unswept seed, everything else the calibrated cell.
+        let seed_negative = default_variant();
+        assert!(
+            !CALIBRATION_SEEDS.contains(&seed_negative.root_seed),
+            "FIXTURE_SEED must NOT be a swept seed, or the seed-negative proves nothing",
+        );
+        assert_eq!(
+            (
+                seed_negative.label,
+                seed_negative.shots_per_class,
+                seed_negative.epochs,
+                seed_negative.batch_size
+            ),
+            (
+                calibrated.label,
+                calibrated.shots_per_class,
+                calibrated.epochs,
+                calibrated.batch_size
+            ),
+            "the seed-negative must differ from the calibrated fixture in the SEED alone",
+        );
+
+        // The cell-negative: a swept seed, a cell the matrix never measured.
+        let cell_negative = uncalibrated_cell_variant();
+        assert_eq!(
+            cell_negative.root_seed, calibrated.root_seed,
+            "the cell-negative must keep the calibrated seed",
+        );
+        assert_ne!(cell_negative.batch_size, calibrated.batch_size);
+        assert!(
+            !CALIBRATION_BOUNDARIES.iter().any(|&(_, shots, epochs, batch, _)| {
+                (shots, epochs, batch)
+                    == (
+                        cell_negative.shots_per_class,
+                        cell_negative.epochs,
+                        cell_negative.batch_size,
+                    )
+            }),
+            "the cell-negative's shot/epoch/batch triple must be one the matrix never measured",
+        );
     }
 
     /// The control differs from its cell in the learning rate and in nothing else.

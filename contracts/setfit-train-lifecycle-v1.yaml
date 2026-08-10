@@ -189,7 +189,7 @@ equations:
         check and a vacuous pass — SAFE-03 is structural only if both holes are closed.'
     preconditions:
       - 'every parameter name classifies; an unmatched name is EvidenceError::UnclassifiedParameter, never a default bucket'
-      - 'the run''s calibration_regime_id is a member of the calibrated set'
+      - 'the run''s calibration_regime_id names an architecture, seed and cell that a calibrated entry COVERS (component-wise membership, not string equality — see calibration_regime)'
     postconditions:
       - 'a rejection carries the COMPLETE UpdateEvidence table and its EvidenceSummary, with one row per trainable parameter'
       - 'SetFitRun<EncoderTuned> is constructible ONLY from a PassedEvidence value'
@@ -257,7 +257,7 @@ equations:
   # ==========================================================================
 
   calibration_regime:
-    formula: 'calibration_regime_id = arch_fingerprint || "|seeds=" || sorted(seed_set) || "|cells=" || sorted(cell_labels) ; JUDGE(run) <=> calibration_regime_id(run) in CALIBRATED_REGIMES, else UncalibratedRegime{observed, calibrated}'
+    formula: 'regime_id(x) = arch_fingerprint(x) || "@" || slice_revision || "|seeds=" || sorted(seed_set(x)) || "|cells=" || sorted(cell_labels(x)) ; for a RUN both sets are SINGLETONS -- seed_set(run) = {config.root_seed}, cell_labels(run) = {cell_label(run)} -- and cell_label(run) = "s" || shots_per_class(selection) || "e" || config.epochs || "b" || config.batch_size ; JUDGE(run) <=> EXISTS c in CALIBRATED_REGIMES : arch(c) = arch(run) AND seed_set(run) SUBSETEQ seed_set(c) AND cell_labels(run) SUBSETEQ cell_labels(c), else UncalibratedRegime{observed, calibrated}'
     domain: 'a completed run''s recorded calibration_regime_id'
     codomain: 'permission to apply the evidence_gate thresholds, or a typed refusal'
     # Machine-readable form of the calibrated set; CALIBRATED_REGIMES is parsed from here.
@@ -266,6 +266,35 @@ equations:
     invariants:
       - 'THE CALIBRATED SET CONTAINS EXACTLY ONE FINGERPRINT:
         `minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4`'
+      - 'THE RECORDED ID STATES THE RUN''S OWN COORDINATES, and only those. The architecture
+        comes from the encoder, the seed from the resolved configuration, and the cell label
+        from the SELECTION (shots per class) crossed with the configuration (epochs, batch
+        size). A run therefore records `...@1110a243|seeds=1|cells=s8e1b4` — one seed, one
+        cell — never the enumerated calibrated string, which names coordinates the CALIBRATION
+        swept rather than any coordinates a single run executed. A run that stamped the
+        enumerated string would be claiming to have executed six cells it never ran, and the
+        membership test below would then be comparing the gate against itself.'
+      - 'MEMBERSHIP IS COMPONENT-WISE, NOT STRING EQUALITY, AND IT HAS TO BE. A run''s id
+        carries one seed and one cell; a calibrated entry enumerates three seeds and two cells.
+        They can never be string-equal, so `id(run) in CALIBRATED_REGIMES` read as string
+        containment has exactly two possible behaviours: refuse every honest run, or be
+        satisfied by stamping the enumerated string onto runs that never executed those
+        coordinates. Both sides are therefore PARSED into (architecture, seed set, cell set)
+        and the calibrated entry must COVER the run: same architecture, and the run''s seed and
+        cell each a member of the measured sets. The seed and cell fields are SETS — the
+        `1,42,7` ordering in the entry above is a rendering detail and carries no meaning.'
+      - 'THE TWO SIDES FAIL IN OPPOSITE DIRECTIONS, DELIBERATELY. An id the parser cannot read
+        is NOT calibrated: unknown coordinates are exactly what this gate exists to refuse. A
+        malformed CALIBRATED ENTRY instead ABORTS. Treating a malformed entry as "matches
+        nothing" would turn a typo into a gate that refuses every run while still reporting the
+        entry as calibrated — fail-closed in appearance, broken in fact, and green in every
+        test that only checks that bad runs are refused.'
+      - 'A NON-UNIFORM SELECTION IS LABELLED AS SUCH, NEVER AS ONE OF ITS CLASSES. FewShotSelector
+        draws the same count for every class, so every calibrated cell takes the uniform branch
+        `s{n}`. A selection whose classes disagree is labelled `smixed{min}-{max}` and one that
+        drew nothing `sempty`; neither is a member of any calibrated cell set, so both fail
+        closed. Naming one class''s count would mint the label of a cell the run did not
+        execute, which is the substitution this equation exists to prevent.'
       - 'The architecture component denotes the pinned MiniLM slice: hidden 64, 2 layers, 2
         heads, intermediate 256, vocabulary 97, source revision
         1110a243fdf4706b3f48f1d95db1a4f5529b4d41. Its WEIGHT VALUES are the real pretrained
@@ -299,6 +328,7 @@ equations:
       - 'the run recorded a calibration_regime_id at evidence-construction time, not at judgement time'
     postconditions:
       - 'UncalibratedRegime names BOTH the observed id and the calibrated set, so the diagnosis does not require reading this file'
+      - 'the observed id in that refusal is the run''s REAL architecture, seed and cell — never a placeholder and never the enumerated calibrated string'
     lean_theorem: Theorems.SetFit_Regime_Fail_Closed
 
   # ==========================================================================

@@ -1035,8 +1035,13 @@ mod tests {
     ///
     /// A full `tune_encoder` pass per test would repeat the fixture load and the tuning loop
     /// several times over for no additional evidence.
+    ///
+    /// `calibrated_variant` rather than `default_variant`: everything below reaches a
+    /// THRESHOLD comparison, and the regime check runs first, so these tests need a run at a
+    /// seed and cell the epsilons were actually measured at. `default_variant` sits on
+    /// `FIXTURE_SEED`, which the calibration never swept — see the seed-negative in `mod.rs`.
     fn control_run() -> Result<SetFitRun<EncoderTuned>, SetFitTrainError> {
-        fx::prepared_run(fx::default_variant(), None).tune_encoder()
+        fx::prepared_run(fx::calibrated_variant(), None).tune_encoder()
     }
 
     /// CONTROL: a reference-defaults fixture run passes the gate and mints `EncoderTuned`.
@@ -1086,7 +1091,10 @@ mod tests {
     /// NEGATIVE 1 — an all-frozen run cannot pass by being un-checkable (SAFE-03, D-09).
     #[test]
     fn negative_all_frozen_run_has_no_trainable_parameters() {
-        let variant = fx::default_variant();
+        // Calibrated coordinates on purpose: the regime check runs BEFORE the empty-trainable-set
+        // check, so an uncalibrated fixture here would be refused for the wrong reason and this
+        // test would stop being about SAFE-03 at all.
+        let variant = fx::calibrated_variant();
         // Every group of every layer, plus the embeddings: the complete freeze.
         let mut policy = vec![FreezeGroup::Embeddings];
         for layer in 0..fx::slice_encoder(variant.root_seed).num_layers() {
@@ -1110,7 +1118,9 @@ mod tests {
     /// NEGATIVE 2 — a 1e-30-learning-rate run is rejected and the message NAMES the offender.
     #[test]
     fn negative_null_learning_rate_run_is_rejected_naming_the_offender() {
-        let run = fx::prepared_run(fx::default_variant(), Some(1e-30));
+        // Calibrated coordinates: this test is about the EPSILON comparison, which only runs
+        // once the regime check has passed.
+        let run = fx::prepared_run(fx::calibrated_variant(), Some(1e-30));
         match run.tune_encoder() {
             Err(SetFitTrainError::EvidenceRejected { worst, summary, table }) => {
                 // The offender is named by its DOTTED HF name, not an index.
