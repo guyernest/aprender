@@ -138,9 +138,9 @@ the phase SUMMARY set — no plan creates it, all three CHECK and stop. Sequenti
 recommended default; per-executor `git worktree` if true parallelism is wanted. See each wave-1
 plan's `<wave_1_concurrency>` block.)*
 
-- [ ] 03-01-PLAN.md — f64 L-BFGS widening with a frozen f32 golden trajectory and the four-channel non-finite matrix (wave 1)
-- [ ] 03-02-PLAN.md — Keyed Philox dropout with the forward-ordinal (branch) coordinate + fixed-pool GEMM thread-count falsification gate (wave 1)
-- [ ] 03-03-PLAN.md — aprender-train setfit feature + typestate skeleton + 12-knob config with validated deserialization + scheduler/reduce/epoch primitives (wave 1)
+- [x] 03-01-PLAN.md — f64 L-BFGS widening with a frozen f32 golden trajectory and the four-channel non-finite matrix (wave 1)
+- [x] 03-02-PLAN.md — Keyed Philox dropout with the forward-ordinal (branch) coordinate + fixed-pool GEMM thread-count falsification gate (wave 1)
+- [x] 03-03-PLAN.md — aprender-train setfit feature + typestate skeleton + 12-knob config with validated deserialization + scheduler/reduce/epoch primitives (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -166,7 +166,6 @@ plan's `<wave_1_concurrency>` block.)*
 **Wave 7** *(blocked on Wave 6 completion)*
 
 - [ ] 03-10-PLAN.md — trybuild non-constructibility proofs (7 cases) + cross-process two-clean-runs gate + adjusted-score mutation + full-suite closing audit (wave 7)
-
 
 ### Phase 4: APR Artifact and Production Parity
 
@@ -217,6 +216,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
-| 3. Faithful Two-Stage Trainer and Head | 0/10 | Planned | - |
+| 3. Faithful Two-Stage Trainer and Head | 3/10 | In Progress|  |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
