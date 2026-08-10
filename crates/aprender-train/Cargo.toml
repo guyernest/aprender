@@ -106,7 +106,17 @@ getrandom = { version = "0.3", features = ["wasm_js"], optional = true }  # WASM
 js-sys = { version = "0.3", optional = true }  # JavaScript types for WASM
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
-serde_json = "1.0"
+# `float_roundtrip` is REQUIRED, not an optimization. Without it serde_json's fast
+# float parser can land one ULP away from the value ryu wrote, so
+# `serialize(parse(bytes)) != bytes` for ordinary f64 statistics. Plan 03-08's
+# verify policy hashes a bundle's bytes and then asserts that re-serializing the
+# reloaded bundle reproduces them, so a one-ULP parse would make every honest
+# codec fail its own round-trip closure check. Measured on the fixture's evidence
+# summary: `0.00009142675446597625` round-tripped to `...624`. The feature adds no
+# dependency (`float_roundtrip = []` in serde_json's manifest); it only selects the
+# correctly-rounding parse path. `bundle_serde_json_parses_floats_round_trip_exactly`
+# is the runnable proof that it is engaged.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 toml = "0.8"
 thiserror = "2.0"
 rand = "0.9"

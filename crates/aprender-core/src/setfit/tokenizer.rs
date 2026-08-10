@@ -162,6 +162,16 @@ impl SentenceBatch {
     }
 }
 
+/// The padding mode the tokenizer is configured with.
+///
+/// A NAMED constant rather than a string a downstream artifact writer invents,
+/// for the same reason [`MAX_SEQUENCE_LENGTH`] is one: a persistence layer that
+/// records "batch_longest" from its own literal is recording what it believes,
+/// and the belief and the configuration can drift apart without either side
+/// becoming red. This is the single definition, and `with_padding` below is the
+/// single place it is applied.
+pub const PADDING_MODE: &str = "batch_longest";
+
 /// The pinned MiniLM WordPiece tokenizer.
 pub struct MiniLmTokenizer {
     /// Configured with truncation at [`MAX_SEQUENCE_LENGTH`] and
@@ -170,6 +180,14 @@ pub struct MiniLmTokenizer {
     /// Same vocabulary, no truncation and no padding. Used only to recover the
     /// true length of rows that the truncating pass actually cut.
     untruncated: tokenizers::Tokenizer,
+    /// The exact `tokenizer.json` bytes this tokenizer was built from.
+    ///
+    /// RETAINED, not merely hashed (plan 03-08). A persistence artifact that
+    /// carries only [`Self::tokenizer_sha256`] can *detect* a substituted
+    /// tokenizer and cannot *rebuild* the right one, so a "reload" from such an
+    /// artifact could never re-encode a single string. The hash stays as the
+    /// identity check; these bytes are what makes the reload real.
+    source_bytes: Vec<u8>,
     /// Lowercase-hex sha256 of the bytes this tokenizer was built from.
     tokenizer_sha256: String,
 }
@@ -178,6 +196,7 @@ impl std::fmt::Debug for MiniLmTokenizer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MiniLmTokenizer")
             .field("tokenizer_sha256", &self.tokenizer_sha256)
+            .field("source_bytes_len", &self.source_bytes.len())
             .field("max_sequence_length", &MAX_SEQUENCE_LENGTH)
             .finish()
     }
@@ -222,6 +241,9 @@ impl MiniLmTokenizer {
             .map_err(|e| SetFitError::TokenizerLoad {
                 reason: format!("cannot configure truncation: {e}"),
             })?;
+        // `PADDING_MODE` names exactly this strategy; the two are adjacent so a
+        // change to one is a change a reader of the other cannot miss.
+        debug_assert_eq!(PADDING_MODE, "batch_longest");
         inner.with_padding(Some(tokenizers::PaddingParams {
             strategy: tokenizers::PaddingStrategy::BatchLongest,
             direction: tokenizers::PaddingDirection::Right,
@@ -248,6 +270,7 @@ impl MiniLmTokenizer {
         Ok(Self {
             inner,
             untruncated,
+            source_bytes: bytes.to_vec(),
             tokenizer_sha256: sha256_hex(bytes),
         })
     }
@@ -256,6 +279,17 @@ impl MiniLmTokenizer {
     #[must_use]
     pub fn tokenizer_sha256(&self) -> &str {
         &self.tokenizer_sha256
+    }
+
+    /// The exact `tokenizer.json` bytes this tokenizer was built from.
+    ///
+    /// The hash and these bytes are set from the same argument in the same
+    /// expression, so they cannot describe different tokenizers; the test
+    /// `tokenizer_bytes_hash_agrees_with_the_recorded_sha256` re-derives the
+    /// digest from what this returns so the two can never drift apart silently.
+    #[must_use]
+    pub fn source_bytes(&self) -> &[u8] {
+        &self.source_bytes
     }
 
     /// Tokenize a batch of texts.

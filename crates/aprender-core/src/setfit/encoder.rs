@@ -48,28 +48,41 @@
 // the removal was MEASURED rather than assumed: `cargo check -p aprender-core
 // --features setfit` reports zero dead-code findings in this file afterwards.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::autograd::{
     additive_attention_mask, embedding_gather, l2_normalize_rows, masked_mean_pool, OpError, Tensor,
 };
-use crate::models::bert::load::read_tensor;
+use crate::models::bert::load::{read_tensor, BertLoadError};
 use crate::nn::transformer::AttentionDropoutMasks;
 use crate::nn::{LayerNorm, Linear, Module, MultiHeadAttention};
 
 use super::dropout_rng::{self, SiteDropout};
 use super::error::SetFitError;
-use super::import::{MiniLmImport, ModelDims, VocabRemap};
+use super::import::{MiniLmImport, ModelDims, VocabRemap, PINNED_ACTIVATION};
 use super::tokenizer::{SentenceBatch, MAX_SEQUENCE_LENGTH};
+use super::EncoderArchitecture;
 
 /// Epsilon of the trailing L2 normalization, matching the pinned
 /// sentence-transformers `Normalize` module.
 ///
-/// `pub(crate)` so the pair objective (01-07 `setfit/loss.rs`) clamps its cosine
-/// norms with the SAME constant this encoder normalized with, rather than a
-/// second literal that can drift. Same single-source-of-truth reasoning 01-06
-/// applied to the two pinned dropout probabilities.
-pub(crate) const L2_EPS: f32 = 1e-12;
+/// `pub` so the pair objective (01-07 `setfit/loss.rs`) clamps its cosine norms
+/// with the SAME constant this encoder normalized with, and so a persistence
+/// artifact (plan 03-08) records the constant that was actually applied rather
+/// than a literal of its own. Same single-source-of-truth reasoning 01-06 applied
+/// to the two pinned dropout probabilities.
+pub const L2_EPS: f32 = 1e-12;
+
+/// The pooling policy this encoder implements: masked mean over the attention mask.
+///
+/// Named here, beside [`BertSentenceEncoder::encode`] which applies it, so that a
+/// downstream artifact records the policy from its definition rather than from a
+/// string it believes to be true.
+pub const POOLING_POLICY: &str = "masked_mean";
+
+/// The normalization policy this encoder implements: row-wise L2 at [`L2_EPS`].
+pub const NORMALIZATION_POLICY: &str = "l2";
 
 /// Dropout probability at every HF-verified site.
 ///
@@ -176,6 +189,17 @@ pub struct BertSentenceEncoder {
     dims: ModelDims,
     /// `Some` for a slice fixture; `None` for the full pin.
     remap: Option<VocabRemap>,
+    /// The LayerNorm epsilon every `LayerNorm` above was constructed with.
+    ///
+    /// RETAINED (plan 03-08) rather than only consumed: it is a behaviour
+    /// constant of this encoder, and a rebuild that had to guess it would
+    /// produce a structurally identical model with different arithmetic.
+    layer_norm_eps: f32,
+    /// The upstream revision this encoder's weights came from.
+    ///
+    /// Retained for the same reason: it is provenance an artifact must record,
+    /// and it exists only on the import that is dropped after construction.
+    source_revision: String,
     /// Sha256 of the tokenizer this encoder is paired with (D-08 defense in
     /// depth — the structural guarantee is the `pub(crate)` constructor).
     tokenizer_sha256: String,
@@ -242,18 +266,137 @@ impl BertSentenceEncoder {
     /// every tensor read here, so this is defense in depth rather than the
     /// primary gate.
     pub(crate) fn from_import(import: &MiniLmImport, root_seed: u64) -> Result<Self, SetFitError> {
-        let dims = import.dims().clone();
         let reader = import.reader();
         let prefix = import.tensor_prefix();
-        let eps = import.layer_norm_eps();
-        let h = dims.hidden;
+        Self::assemble(
+            import.dims().clone(),
+            import.layer_norm_eps(),
+            import.vocab_remap().cloned(),
+            import.revision().to_string(),
+            import.tokenizer_sha256().to_string(),
+            root_seed,
+            &|name: &str, shape: &[usize]| -> Result<Tensor, SetFitError> {
+                // A-01 reuse: the checked-read semantics (presence, dtype path,
+                // element count) come from the loader they were written for, they
+                // are not reimplemented here.
+                Ok(read_tensor(reader, &format!("{prefix}{name}"), shape)?.requires_grad())
+            },
+        )
+    }
 
-        let read = |name: &str, shape: &[usize]| -> Result<Tensor, SetFitError> {
-            // A-01 reuse: the checked-read semantics (presence, dtype path,
-            // element count) come from the loader they were written for, they
-            // are not reimplemented here.
-            Ok(read_tensor(reader, &format!("{prefix}{name}"), shape)?.requires_grad())
+    /// Rebuild an encoder from a name -> (shape, data) map (plan 03-08, D-07).
+    ///
+    /// The reload counterpart of [`Self::from_import`]. It does not mirror that
+    /// function's construction order — it IS that construction order:
+    /// [`Self::assemble`] is the single body, and both constructors differ only
+    /// in the `read` they supply. A copied second construction sequence is how a
+    /// rebuilt encoder ends up structurally identical and behaviourally
+    /// different, so there is no second sequence to diverge.
+    ///
+    /// SEALED (D-08): `pub(crate)`. The public door is
+    /// `SetFitMiniLm::from_bundle_parts`, which pairs this with a tokenizer
+    /// rebuilt from the same artifact.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitError::UnsupportedActivation`] if the record does not name the
+    /// pinned activation; [`SetFitError::RemapInvalid`] if the remap does not
+    /// describe this vocabulary; [`SetFitError::ImportTensor`] naming the tensor
+    /// if one is missing, has the wrong shape, or the wrong element count.
+    pub(crate) fn from_named_tensors(
+        arch: &EncoderArchitecture,
+        tensors: &BTreeMap<String, (Vec<usize>, Vec<f32>)>,
+        root_seed: u64,
+    ) -> Result<Self, SetFitError> {
+        if arch.hidden_act != PINNED_ACTIVATION {
+            return Err(SetFitError::UnsupportedActivation {
+                got: arch.hidden_act.clone(),
+            });
+        }
+        if arch.heads == 0 || arch.head_dim * arch.heads != arch.hidden {
+            return Err(SetFitError::ImportConfigMismatch {
+                field: "head_dim".to_string(),
+                expected: format!("hidden / heads = {} / {}", arch.hidden, arch.heads),
+                got: arch.head_dim.to_string(),
+            });
+        }
+        let dims = ModelDims {
+            hidden: arch.hidden,
+            layers: arch.num_layers,
+            heads: arch.heads,
+            intermediate: arch.intermediate,
+            vocab: arch.vocab,
+            max_positions: arch.positions,
+            type_vocab: arch.type_vocab_size,
+            pad_token_id: arch.pad_token_id,
         };
+        let remap = match &arch.vocab_remap {
+            Some(slice_to_orig) => {
+                let remap = VocabRemap::from_slice_to_orig(slice_to_orig.clone())?;
+                if remap.slice_vocab() != dims.vocab {
+                    return Err(SetFitError::RemapInvalid {
+                        reason: format!(
+                            "the remap has {} rows but the embedding table has {}",
+                            remap.slice_vocab(),
+                            dims.vocab
+                        ),
+                    });
+                }
+                Some(remap)
+            }
+            None => None,
+        };
+
+        Self::assemble(
+            dims,
+            arch.layer_norm_eps as f32,
+            remap,
+            arch.source_revision.clone(),
+            arch.tokenizer_sha256.clone(),
+            root_seed,
+            &|name: &str, shape: &[usize]| -> Result<Tensor, SetFitError> {
+                let (got_shape, data) = tensors.get(name).ok_or_else(|| {
+                    SetFitError::ImportTensor(BertLoadError {
+                        tensor: name.to_string(),
+                        reason: "tensor not present in the bundle".to_string(),
+                    })
+                })?;
+                if got_shape.as_slice() != shape {
+                    return Err(SetFitError::ImportTensor(BertLoadError {
+                        tensor: name.to_string(),
+                        reason: format!("shape mismatch: got {got_shape:?}, expected {shape:?}"),
+                    }));
+                }
+                let expected: usize = shape.iter().product();
+                if data.len() != expected {
+                    return Err(SetFitError::ImportTensor(BertLoadError {
+                        tensor: name.to_string(),
+                        reason: format!(
+                            "element count mismatch: got {}, expected {expected} (shape {shape:?})",
+                            data.len()
+                        ),
+                    }));
+                }
+                Ok(Tensor::from_vec(data.clone(), shape).requires_grad())
+            },
+        )
+    }
+
+    /// THE construction sequence, shared by every constructor above.
+    ///
+    /// Takes the `read` as a parameter precisely so that "from an APR reader" and
+    /// "from a bundle map" cannot be two different orders, two different shape
+    /// expectations or two different seeding schedules.
+    fn assemble(
+        dims: ModelDims,
+        eps: f32,
+        remap: Option<VocabRemap>,
+        source_revision: String,
+        tokenizer_sha256: String,
+        root_seed: u64,
+        read: &dyn Fn(&str, &[usize]) -> Result<Tensor, SetFitError>,
+    ) -> Result<Self, SetFitError> {
+        let h = dims.hidden;
 
         let mut embeddings_layer_norm = LayerNorm::with_eps(&[h], eps);
         embeddings_layer_norm.set_weight(read("embeddings.LayerNorm.weight", &[h])?);
@@ -342,8 +485,10 @@ impl BertSentenceEncoder {
             embeddings_dropout: site_dropout(root_seed, EMBEDDINGS_DROPOUT_SITE, DROPOUT_P)?,
             layers,
             dims,
-            remap: import.vocab_remap().cloned(),
-            tokenizer_sha256: import.tokenizer_sha256().to_string(),
+            remap,
+            layer_norm_eps: eps,
+            source_revision,
+            tokenizer_sha256,
             root_seed,
             training: true,
             forward_ordinal: 0,
@@ -461,6 +606,30 @@ impl BertSentenceEncoder {
     #[must_use]
     pub fn tokenizer_sha256(&self) -> &str {
         &self.tokenizer_sha256
+    }
+
+    /// The dimensions this encoder was built at.
+    #[must_use]
+    pub fn dims(&self) -> &ModelDims {
+        &self.dims
+    }
+
+    /// The epsilon every `LayerNorm` in this encoder was constructed with.
+    #[must_use]
+    pub fn layer_norm_eps(&self) -> f32 {
+        self.layer_norm_eps
+    }
+
+    /// The upstream revision this encoder's weights came from.
+    #[must_use]
+    pub fn source_revision(&self) -> &str {
+        &self.source_revision
+    }
+
+    /// The vocabulary remap a slice encoder gathers through; `None` for the pin.
+    #[must_use]
+    pub fn vocab_remap(&self) -> Option<&VocabRemap> {
+        self.remap.as_ref()
     }
 
     /// Ordered dotted names of every ACTIVE dropout site.

@@ -205,6 +205,66 @@ impl VocabRemap {
             })
     }
 
+    /// Rebuild a remap from its `slice_to_orig` table alone (plan 03-08).
+    ///
+    /// The reverse direction is DERIVED here rather than transported, which is
+    /// what makes the two directions mutually inverse by construction instead of
+    /// by a check on two independently supplied tables. The injectivity check
+    /// stays, because a `slice_to_orig` carrying the same canonical id twice
+    /// would silently collapse two rows into one and there is nothing about a
+    /// derived inverse that prevents that.
+    ///
+    /// `pub(crate)`: the public door is `SetFitMiniLm::from_bundle_parts`.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitError::RemapInvalid`] if the table is empty, does not fit `u32`,
+    /// or maps two rows to one canonical id.
+    pub(crate) fn from_slice_to_orig(slice_to_orig: Vec<u32>) -> Result<Self, SetFitError> {
+        if slice_to_orig.is_empty() {
+            return Err(SetFitError::RemapInvalid {
+                reason: "slice_to_orig is empty; a slice with no vocabulary cannot gather"
+                    .to_string(),
+            });
+        }
+        u32::try_from(slice_to_orig.len()).map_err(|_| SetFitError::RemapInvalid {
+            reason: format!(
+                "slice vocabulary {} does not fit in u32",
+                slice_to_orig.len()
+            ),
+        })?;
+
+        let mut orig_to_slice: HashMap<u32, u32> = HashMap::with_capacity(slice_to_orig.len());
+        for (row, canonical) in slice_to_orig.iter().enumerate() {
+            // `row` is bounded by the length check above, so the cast is exact.
+            let row_u32 = u32::try_from(row).map_err(|_| SetFitError::RemapInvalid {
+                reason: format!("slice row {row} does not fit in u32"),
+            })?;
+            if let Some(first) = orig_to_slice.insert(*canonical, row_u32) {
+                return Err(SetFitError::RemapInvalid {
+                    reason: format!(
+                        "canonical id {canonical} appears at slice rows {first} and {row}; \
+                         the map is not injective and two tokens would share one embedding row"
+                    ),
+                });
+            }
+        }
+        Ok(Self {
+            orig_to_slice,
+            slice_to_orig,
+        })
+    }
+
+    /// The `slice_to_orig` table, in row order.
+    ///
+    /// The whole remap as one serializable value: the reverse direction is
+    /// derivable from it (see [`Self::from_slice_to_orig`]), so transporting
+    /// both would be transporting one fact twice.
+    #[must_use]
+    pub fn slice_to_orig(&self) -> &[u32] {
+        &self.slice_to_orig
+    }
+
     /// Number of rows in the slice embedding table.
     #[must_use]
     pub fn slice_vocab(&self) -> usize {

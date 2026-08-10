@@ -231,6 +231,31 @@ pub enum HeadInputError {
         /// The dimension supplied.
         found: usize,
     },
+    /// Stored coefficients do not describe a `K x d` weight matrix plus `K` intercepts.
+    ///
+    /// Reached only from [`MultinomialLogisticRegression::from_stored_coefficients`],
+    /// the reload door: a fit produces its own coefficients and cannot get this wrong.
+    CoefficientCountMismatch {
+        /// Which array was the wrong size (`"weights"` or `"intercepts"`).
+        array: &'static str,
+        /// The count implied by the label map and the feature dimension.
+        expected: usize,
+        /// The count supplied.
+        found: usize,
+    },
+    /// A stored coefficient is NaN or an infinity.
+    ///
+    /// Reached only from the reload door. A non-finite coefficient makes every
+    /// logit non-finite, so it is refused at the boundary rather than surfacing
+    /// later as a per-row prediction failure.
+    NonFiniteCoefficient {
+        /// Which array carried it (`"weights"` or `"intercepts"`).
+        array: &'static str,
+        /// Flat index of the offending value.
+        index: usize,
+        /// The offending value.
+        value: f32,
+    },
 }
 
 impl fmt::Display for HeadInputError {
@@ -296,6 +321,20 @@ impl fmt::Display for HeadInputError {
                 f,
                 "prediction row {row} has dimension {found}, but the head was fitted on {expected}"
             ),
+            Self::CoefficientCountMismatch {
+                array,
+                expected,
+                found,
+            } => write!(
+                f,
+                "stored {array} has {found} values but the label map and feature dimension \
+                 imply {expected}"
+            ),
+            Self::NonFiniteCoefficient {
+                array,
+                index,
+                value,
+            } => write!(f, "stored {array}[{index}] is {value} (not finite)"),
         }
     }
 }
@@ -623,18 +662,15 @@ struct ValidatedFit {
     lambda: f64,
 }
 
-/// Validates every `fit` input **before** any solve is attempted.
+/// THE label-set rule: at least two classes, arity agreement, no empty label, no
+/// duplicate.
 ///
-/// This is the single gate: no partially validated state can reach the optimizer,
-/// because the optimizer is not called until this returns `Ok`.
-fn validate_fit_inputs(
-    n_classes: usize,
-    features: &[Vec<f32>],
-    class_indices: &[usize],
-    ordered_labels: &[String],
-    regularization: Regularization,
-) -> Result<ValidatedFit, HeadInputError> {
-    // --- label set ------------------------------------------------------
+/// Extracted so the fit path and the reload path
+/// ([`MultinomialLogisticRegression::from_stored_coefficients`]) apply the SAME
+/// rule. A second copy is how a head reloaded from an artifact ends up accepting
+/// a label map the fit would have refused, which would make the index -> label
+/// map non-injective for exactly the models nobody re-fits.
+fn validate_label_set(n_classes: usize, ordered_labels: &[String]) -> Result<(), HeadInputError> {
     if n_classes < 2 {
         return Err(HeadInputError::TooFewClasses { k: n_classes });
     }
@@ -660,6 +696,22 @@ fn validate_fit_inputs(
             }
         }
     }
+    Ok(())
+}
+
+/// Validates every `fit` input **before** any solve is attempted.
+///
+/// This is the single gate: no partially validated state can reach the optimizer,
+/// because the optimizer is not called until this returns `Ok`.
+fn validate_fit_inputs(
+    n_classes: usize,
+    features: &[Vec<f32>],
+    class_indices: &[usize],
+    ordered_labels: &[String],
+    regularization: Regularization,
+) -> Result<ValidatedFit, HeadInputError> {
+    // --- label set ------------------------------------------------------
+    validate_label_set(n_classes, ordered_labels)?;
 
     // --- shape ----------------------------------------------------------
     if features.is_empty() {
@@ -788,6 +840,93 @@ impl MultinomialLogisticRegression {
             labels: Vec::new(),
             report: None,
         }
+    }
+
+    /// Rebuild a head from stored coefficients — the RELOAD door (plan 03-08).
+    ///
+    /// # This is not a fit, and it does not claim to be one
+    ///
+    /// [`Self::report`] stays `None`: no optimizer ran in this process, and a
+    /// synthesized report would assert a convergence status nobody observed. The
+    /// provenance of the coefficients belongs to whatever artifact carried them,
+    /// and it is that artifact's job to record the fit that produced them.
+    ///
+    /// Every input is validated before the head exists, through the SAME
+    /// label-set rule the fit path uses ([`validate_label_set`]) plus the
+    /// coefficient-arity and finiteness checks a fit cannot get wrong. A head
+    /// returned from here therefore satisfies `predict_proba`'s preconditions by
+    /// construction, exactly as a fitted one does.
+    ///
+    /// # Errors
+    ///
+    /// [`HeadFitError::InvalidInput`] carrying the offending
+    /// [`HeadInputError`]: too few classes, a mis-sized label map, an empty or
+    /// duplicated label, a zero feature dimension, a weight or intercept array of
+    /// the wrong length, or a non-finite coefficient.
+    pub fn from_stored_coefficients(
+        ordered_labels: Vec<String>,
+        n_features: usize,
+        weights: Vec<f32>,
+        intercepts: Vec<f32>,
+    ) -> Result<Self, HeadFitError> {
+        let n_classes = ordered_labels.len();
+        validate_label_set(n_classes, &ordered_labels)?;
+        if n_features == 0 {
+            return Err(HeadInputError::ZeroFeatureDimension.into());
+        }
+        let expected_weights =
+            n_classes
+                .checked_mul(n_features)
+                .ok_or(HeadInputError::CoefficientCountMismatch {
+                    array: "weights",
+                    expected: usize::MAX,
+                    found: weights.len(),
+                })?;
+        if weights.len() != expected_weights {
+            return Err(HeadInputError::CoefficientCountMismatch {
+                array: "weights",
+                expected: expected_weights,
+                found: weights.len(),
+            }
+            .into());
+        }
+        if intercepts.len() != n_classes {
+            return Err(HeadInputError::CoefficientCountMismatch {
+                array: "intercepts",
+                expected: n_classes,
+                found: intercepts.len(),
+            }
+            .into());
+        }
+        for (array, values) in [("weights", &weights), ("intercepts", &intercepts)] {
+            for (index, value) in values.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(HeadInputError::NonFiniteCoefficient {
+                        array,
+                        index,
+                        value: *value,
+                    }
+                    .into());
+                }
+            }
+        }
+
+        Ok(Self {
+            n_classes,
+            max_iter: DEFAULT_MAX_ITER,
+            tol: DEFAULT_TOL,
+            history_size: DEFAULT_HISTORY_SIZE,
+            n_features: Some(n_features),
+            // `intercepts_f64` is the gauge/gradient path's copy and exists to keep
+            // the f32 downcast out of the optimizer's arithmetic. Widening the
+            // stored f32 is exact, and it is the only value available here — the
+            // f64 the fit held did not survive the artifact.
+            intercepts_f64: intercepts.iter().map(|&b| f64::from(b)).collect(),
+            weights,
+            intercepts,
+            labels: ordered_labels,
+            report: None,
+        })
     }
 
     /// Sets the maximum L-BFGS iteration budget (default [`DEFAULT_MAX_ITER`]).
@@ -1446,23 +1585,38 @@ mod tests {
             ja.contains("final_grad_norm") && ja.contains("objective"),
             "report JSON missing expected fields: {ja}"
         );
-        // The discrete fields survive a round trip exactly. The f64 fields do NOT
-        // always — see `json_roundtrip_of_an_f64_is_not_bit_exact` for the measured
-        // reason, and hash the SERIALIZED BYTES rather than a reloaded report.
+        // EVERY field survives the round trip exactly, f64 fields included. This used to
+        // be a one-ULP tolerance; `float_roundtrip` (see
+        // `json_roundtrip_of_an_f64_is_bit_exact`) removed the reason for it, and the
+        // tolerance is removed with it — a tolerance kept after its cause is gone is a
+        // hole that admits a real drift later.
         let round: HeadFitReport = serde_json::from_str(&ja).expect("deserialize");
         assert_eq!(round.status, ra.status);
         assert_eq!(round.iterations, ra.iterations);
-        assert!(
-            (round.objective - ra.objective).abs() <= f64::EPSILON * ra.objective.abs().max(1.0),
-            "objective drifted more than one ULP on round trip"
+        assert_eq!(
+            round.objective.to_bits(),
+            ra.objective.to_bits(),
+            "objective must survive the round trip bit for bit"
+        );
+        assert_eq!(
+            round.final_grad_norm.to_bits(),
+            ra.final_grad_norm.to_bits(),
+            "final_grad_norm must survive the round trip bit for bit"
+        );
+        assert_eq!(
+            serde_json::to_string(&round).expect("re-serialize"),
+            ja,
+            "re-serializing a parsed report must reproduce its own bytes"
         );
     }
 
-    /// MEASURED, not assumed: `serde_json`'s float parser is not correctly rounded, so
-    /// `from_str(to_string(x))` can differ from `x` by one ULP.
+    /// `from_str(to_string(x))` returns `x` bit for bit — the `float_roundtrip` proof.
     ///
-    /// This head's own converged gradient norm is such a value. Concretely, on
-    /// serde_json 1.0:
+    /// # This test used to assert the opposite, and the difference is a Cargo feature
+    ///
+    /// `serde_json`'s DEFAULT float parser is fast and not correctly rounded, so it can
+    /// land one ULP from the value ryu wrote. This head's own converged gradient norm was
+    /// such a value, measured on serde_json 1.0 without the feature:
     ///
     /// ```text
     /// v            = 2.1531120041346774e-5   bits 0x3ef693b74d831429
@@ -1470,16 +1624,19 @@ mod tests {
     /// from_str(..) = 2.1531120041346778e-5   bits 0x3ef693b74d83142a   (+1 ULP)
     /// ```
     ///
-    /// The **serialization** is exact and deterministic — which is what
-    /// [`HeadFitReport`]'s stability claim rests on — but the **parse** is not. Any
-    /// reproducibility record must therefore hash the emitted bytes, never a report
-    /// that has been through a reload. Phase 3's reload-and-compare boundary is
-    /// exactly where this trap bites: a reloaded artifact compared bitwise against an
-    /// in-memory one would report a spurious mismatch.
+    /// This crate now declares `serde_json`'s `float_roundtrip` feature, which selects the
+    /// correctly-rounding parse path, and the drift is gone. Plan 03-08 is what forced the
+    /// question: its persistence boundary hashes a serialized bundle and then re-serializes
+    /// the reloaded one and compares the bytes, and a one-ULP parse made every honest codec
+    /// fail that check — a spurious mismatch reported as a tampered artifact.
+    ///
+    /// The test asserts the BEHAVIOUR, not the presence of the flag. A feature can be
+    /// declared and inert — unification, a vendored copy, a future default change — and
+    /// what the reload boundary depends on is the behaviour.
     #[test]
-    fn json_roundtrip_of_an_f64_is_not_bit_exact() {
-        // A value that round-trips cleanly, so the test is not merely asserting that
-        // everything is broken.
+    fn json_roundtrip_of_an_f64_is_bit_exact() {
+        // A value that round-tripped cleanly even before the feature, so this test is not
+        // merely asserting that everything works.
         let clean = 0.11346603265462092_f64;
         let s_clean = serde_json::to_string(&clean).expect("serialize");
         let back_clean: f64 = serde_json::from_str(&s_clean).expect("deserialize");
@@ -1489,28 +1646,25 @@ mod tests {
             "{s_clean} should round-trip"
         );
 
-        // The value that does not.
-        let lossy = 2.1531120041346774e-5_f64;
-        assert_eq!(lossy.to_bits(), 0x3ef6_93b7_4d83_1429);
-        let s_lossy = serde_json::to_string(&lossy).expect("serialize");
+        // The value that did NOT, before `float_roundtrip`.
+        let measured = 2.1531120041346774e-5_f64;
+        assert_eq!(measured.to_bits(), 0x3ef6_93b7_4d83_1429);
+        let serialized = serde_json::to_string(&measured).expect("serialize");
         assert_eq!(
-            s_lossy, "0.000021531120041346774",
-            "the SERIALIZED form is the stable, exact one; if this changed, re-measure \
-             the whole observation below rather than patching the constant"
+            serialized, "0.000021531120041346774",
+            "the SERIALIZED form is the stable, exact one; if this changed, re-measure the \
+             whole observation below rather than patching the constant"
         );
-        let back_lossy: f64 = serde_json::from_str(&s_lossy).expect("deserialize");
+        let back: f64 = serde_json::from_str(&serialized).expect("deserialize");
         assert_eq!(
-            back_lossy.to_bits(),
-            0x3ef6_93b7_4d83_142a,
-            "serde_json's float parse is no longer one ULP high for {s_lossy}. If it is \
-             now exact, the dependency was fixed: delete this test and tighten the \
-             report round-trip assertion back to a full equality."
-        );
-        assert_ne!(back_lossy.to_bits(), lossy.to_bits());
-        assert_eq!(
-            back_lossy.to_bits() - lossy.to_bits(),
-            1,
-            "the drift must be exactly one ULP"
+            back.to_bits(),
+            measured.to_bits(),
+            "`{serialized}` parsed back to bits {:#018x} instead of {:#018x}. serde_json's \
+             `float_roundtrip` feature is not engaged for this build, and every artifact \
+             whose reload is verified by comparing re-serialized bytes will report a \
+             spurious mismatch.",
+            back.to_bits(),
+            measured.to_bits(),
         );
     }
 
