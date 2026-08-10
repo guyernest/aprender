@@ -46,7 +46,7 @@ pub mod loss;
 pub mod tokenizer;
 
 pub use dropout_rng::{DropoutRngError, SiteDropout};
-pub use encoder::BertSentenceEncoder;
+pub use encoder::{BertSentenceEncoder, L2_EPS, NORMALIZATION_POLICY, POOLING_POLICY};
 pub use error::SetFitError;
 pub use import::{
     MiniLmImport, ModelDims, SliceConfig, VocabRemap, PINNED_ACTIVATION, PINNED_MAX_SEQ_LENGTH,
@@ -55,9 +55,77 @@ pub use import::{
 pub use loss::pair_cosine_mse;
 pub use tokenizer::{
     InputProvenance, MiniLmTokenizer, SentenceBatch, TruncationFact, MAX_SEQUENCE_LENGTH,
+    PADDING_MODE,
 };
 
+use std::collections::BTreeMap;
 use std::path::Path;
+
+// ---------------------------------------------------------------------------
+// The reload surface's architecture record (plan 03-08, D-07)
+// ---------------------------------------------------------------------------
+
+/// Everything a rebuild needs that is NOT a tensor and NOT the tokenizer bytes.
+///
+/// The field set is [`SliceConfig`]'s, plus the vocabulary remap. The remap is the
+/// addition that makes the record COMPLETE rather than merely plausible: a slice
+/// encoder gathers through `slice_to_orig`, so a record without it rebuilds an
+/// encoder that reads the wrong embedding row for every token and still looks
+/// structurally valid.
+///
+/// `SliceConfig` is deliberately NOT reused as the transport type, and there is no
+/// `From<&SliceConfig>` for this: that file is parsed only on the
+/// `conformance-fixtures` path, it does not exist on the full-pin path, and it
+/// carries no remap — so such a conversion would be a door that mints incomplete
+/// records for exactly the models that need the missing field.
+///
+/// # It lives HERE and not in `import.rs`
+///
+/// `import.rs` is the pinned-config path, and `import_pin_constructors_are_sealed`
+/// asserts that NO wire form in that file denies unknown fields — because the real
+/// `config.json` carries metadata this crate does not model, so denying unknown
+/// fields there would reject the pinned model itself. This record has the opposite
+/// obligation: it is a closed artifact schema and an unknown field in it is a
+/// rejection. Putting it in `import.rs` would have forced that guard to be
+/// weakened to accommodate a type it was never about.
+///
+/// Produced by exactly one function, [`SetFitMiniLm::architecture`], which reads
+/// every field off the encoder that is going to be rebuilt.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncoderArchitecture {
+    /// Hidden width.
+    pub hidden: usize,
+    /// Attention heads.
+    pub heads: usize,
+    /// Per-head dimension (`hidden / heads`).
+    pub head_dim: usize,
+    /// Encoder layers.
+    pub num_layers: usize,
+    /// FFN intermediate width.
+    pub intermediate: usize,
+    /// Embedding table rows.
+    pub vocab: usize,
+    /// Position table rows.
+    pub positions: usize,
+    /// Token-type table rows.
+    pub type_vocab_size: usize,
+    /// LayerNorm epsilon, widened from the `f32` the encoder holds.
+    ///
+    /// `f32 -> f64 -> f32` is lossless, so the rebuild recovers the exact constant
+    /// the original normalized with.
+    pub layer_norm_eps: f64,
+    /// Padding token id.
+    pub pad_token_id: u32,
+    /// Activation; must still be the pinned exact-erf [`PINNED_ACTIVATION`].
+    pub hidden_act: String,
+    /// Upstream revision this encoder was loaded from.
+    pub source_revision: String,
+    /// Sha256 of the tokenizer this encoder is paired with.
+    pub tokenizer_sha256: String,
+    /// `slice_to_orig` for a slice encoder; `None` for the full pin.
+    pub vocab_remap: Option<Vec<u32>>,
+}
 
 use crate::autograd::Tensor;
 use crate::nn::Module;
@@ -262,10 +330,111 @@ impl SetFitMiniLm {
         })
     }
 
+    /// Rebuild a model from an artifact's bytes alone (plan 03-08, D-07).
+    ///
+    /// THE reload surface. It takes the exact tokenizer bytes, the architecture
+    /// record and every named encoder tensor, and it takes nothing else — in
+    /// particular it takes no resolved runtime configuration, because a resolved
+    /// device is a fact about the host that is running now, not about the host
+    /// that wrote the file.
+    ///
+    /// The tokenizer hash is checked FIRST, before a tensor is touched: the
+    /// architecture record's `tokenizer_sha256` is what pairs the two halves, and
+    /// a rebuild that installed the tensors before noticing the tokenizer was a
+    /// different one would have done all its work on a mismatched pair.
+    ///
+    /// The returned model is in eval mode, like every other constructor here.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitError::TokenizerHashMismatch`] if the bytes do not hash to the
+    /// record's digest, [`SetFitError::TokenizerLoad`] if they do not parse, and
+    /// anything [`BertSentenceEncoder::from_named_tensors`] rejects — each naming
+    /// the tensor, field or remap row that failed.
+    pub fn from_bundle_parts(
+        tokenizer_bytes: &[u8],
+        arch: &EncoderArchitecture,
+        tensors: &BTreeMap<String, (Vec<usize>, Vec<f32>)>,
+        root_seed: u64,
+    ) -> Result<Self, SetFitError> {
+        let observed = tokenizer::sha256_hex(tokenizer_bytes);
+        if observed != arch.tokenizer_sha256 {
+            return Err(SetFitError::TokenizerHashMismatch {
+                expected: arch.tokenizer_sha256.clone(),
+                got: observed,
+            });
+        }
+        let tokenizer = MiniLmTokenizer::from_bytes(tokenizer_bytes)?;
+        let encoder = BertSentenceEncoder::from_named_tensors(arch, tensors, root_seed)?;
+        Ok(Self {
+            tokenizer,
+            encoder,
+            freeze: Vec::new(),
+        })
+    }
+
     /// Sha256 of the tokenizer half of this pair.
     #[must_use]
     pub fn tokenizer_sha256(&self) -> &str {
         self.tokenizer.tokenizer_sha256()
+    }
+
+    /// The exact `tokenizer.json` bytes this model's tokenizer was built from.
+    ///
+    /// The other half of [`Self::tokenizer_sha256`], and the reason a persistence
+    /// artifact can rebuild a working tokenizer rather than only detect a wrong
+    /// one. `sha256(tokenizer_bytes()) == tokenizer_sha256()` is asserted by a
+    /// test so the two cannot drift.
+    #[must_use]
+    pub fn tokenizer_bytes(&self) -> &[u8] {
+        self.tokenizer.source_bytes()
+    }
+
+    /// This model's architecture record — the non-tensor half of a reload.
+    ///
+    /// Every field is READ OFF the encoder that would be rebuilt, never restated
+    /// from a configuration file: a record assembled from the config a caller
+    /// intended describes the model that was meant to be built, which is exactly
+    /// the claim a reload is supposed to check.
+    #[must_use]
+    pub fn architecture(&self) -> EncoderArchitecture {
+        let dims = self.encoder.dims();
+        EncoderArchitecture {
+            hidden: dims.hidden,
+            heads: dims.heads,
+            // Derived, not stored: `ModelDims` has no head_dim, and the encoder's
+            // attention is built as `hidden / heads` in exactly one place.
+            head_dim: dims.hidden / dims.heads.max(1),
+            num_layers: dims.layers,
+            intermediate: dims.intermediate,
+            vocab: dims.vocab,
+            positions: dims.max_positions,
+            type_vocab_size: dims.type_vocab,
+            layer_norm_eps: f64::from(self.encoder.layer_norm_eps()),
+            pad_token_id: dims.pad_token_id,
+            // The import rejects every other activation, so this is the only
+            // value an existing encoder can have been built with.
+            hidden_act: PINNED_ACTIVATION.to_string(),
+            source_revision: self.encoder.source_revision().to_string(),
+            tokenizer_sha256: self.tokenizer.tokenizer_sha256().to_string(),
+            vocab_remap: self
+                .encoder
+                .vocab_remap()
+                .map(|remap| remap.slice_to_orig().to_vec()),
+        }
+    }
+
+    /// Every named encoder parameter, in `Module::named_parameters` order.
+    ///
+    /// A READ accessor: shared borrows out, no construction and no mutation. It
+    /// exists because a persistence artifact must write EVERY tensor, and the two
+    /// existing enumerations ([`Self::trainable_parameters_mut`] and
+    /// [`Self::frozen_parameters`]) partition that set by freeze policy — an
+    /// artifact assembled from their union would silently depend on the policy in
+    /// force when it was written.
+    #[must_use]
+    pub fn named_parameters(&self) -> Vec<(String, &Tensor)> {
+        self.encoder.named_parameters()
     }
 
     /// This model's architecture fingerprint — see
@@ -282,6 +451,17 @@ impl SetFitMiniLm {
     #[must_use]
     pub fn num_layers(&self) -> usize {
         self.encoder.num_layers()
+    }
+
+    /// The root seed every dropout site's stream is derived from.
+    ///
+    /// Read off the encoder, not off a configuration: a persistence artifact must
+    /// record the seed the model was BUILT with, and a run whose configuration
+    /// seed differed from its encoder's would otherwise write a seed that rebuilds
+    /// a different dropout schedule.
+    #[must_use]
+    pub fn root_seed(&self) -> u64 {
+        self.encoder.root_seed()
     }
 
     /// Whether the encoder is in training mode.

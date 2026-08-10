@@ -232,8 +232,30 @@ fn mod_source() -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+/// The enumerated public constructors of `SetFitMiniLm`.
+///
+/// # The invariant is the pairing, and the list is how it is enforced
+///
+/// D-08 says a mismatched tokenizer/encoder pair must not be CONSTRUCTIBLE from
+/// outside the crate. Every entry below satisfies that by building both halves
+/// from ONE source: a pinned checkout, a fixture directory, or — since plan 03-08
+/// — one persistence bundle whose architecture record carries the tokenizer's
+/// sha256 and whose reload path checks it against the supplied bytes BEFORE a
+/// tensor is installed.
+///
+/// `from_bundle_parts` was added deliberately and this list was widened with it,
+/// which is the sanctioned way past this gate. Widening it without an argument of
+/// that shape is the thing the gate exists to stop: a constructor that takes a
+/// tokenizer and an encoder from two places reopens the seal no matter how it is
+/// named.
+const PUBLIC_CONSTRUCTORS: [&str; 3] = [
+    "from_bundle_parts",
+    "from_pretrained_dir",
+    "from_slice_fixture",
+];
+
 #[test]
-fn setfit_model_exposes_exactly_two_public_constructors() {
+fn setfit_model_exposes_exactly_the_enumerated_public_constructors() {
     let src = mod_source();
     let mut found: Vec<String> = src
         .lines()
@@ -247,13 +269,45 @@ fn setfit_model_exposes_exactly_two_public_constructors() {
         .collect();
     found.sort();
     found.dedup();
+    let mut expected: Vec<String> = PUBLIC_CONSTRUCTORS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    expected.sort();
     assert_eq!(
-        found,
-        vec![
-            "from_pretrained_dir".to_string(),
-            "from_slice_fixture".to_string()
-        ],
-        "adding a public constructor to work around the D-08 seal is forbidden"
+        found, expected,
+        "adding a public constructor to work around the D-08 seal is forbidden; a new one is \
+         legitimate only if it builds the tokenizer and the encoder from ONE source, and it \
+         must be added to PUBLIC_CONSTRUCTORS with that argument written down"
+    );
+}
+
+/// The bundle door pairs its two halves from one source, and proves it does.
+///
+/// The enumeration above is a list of names; this is the property the list stands
+/// for, asserted against the one entry the list gained. `from_bundle_parts` must
+/// check the tokenizer digest before it builds anything, or "one source" would be
+/// a claim about how callers are expected to use it rather than a fact about it.
+#[test]
+fn setfit_model_bundle_constructor_checks_tokenizer_identity_before_building() {
+    let src = mod_source();
+    let at = src
+        .find("pub fn from_bundle_parts")
+        .expect("the bundle constructor must exist");
+    let body = &src[at..];
+    let hash_check = body
+        .find("TokenizerHashMismatch")
+        .expect("the bundle constructor must compare the supplied bytes against the record");
+    let tokenizer_build = body
+        .find("MiniLmTokenizer::from_bytes")
+        .expect("the bundle constructor must build the tokenizer from the supplied bytes");
+    let encoder_build = body
+        .find("from_named_tensors")
+        .expect("the bundle constructor must build the encoder from the supplied tensors");
+    assert!(
+        hash_check < tokenizer_build && hash_check < encoder_build,
+        "the identity check must precede both halves being built; checking afterwards would \
+         mean the work was done on a pair that had not been shown to belong together"
     );
 }
 

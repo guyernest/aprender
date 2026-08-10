@@ -33,6 +33,8 @@
 //! marker with an impl and a placeholder evidence type would be a lie that compiles.
 
 pub mod baseline;
+/// The complete deterministic state of a finished run, and its canonical wire form (03-08).
+pub mod bundle;
 pub mod config;
 pub mod epoch;
 pub mod evidence;

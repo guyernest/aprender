@@ -355,3 +355,103 @@ fn sentence_batch_has_no_public_fields_and_no_mutable_accessors() {
         "D-08 seal broken: a bare `pub fn from_bytes` exists"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Retained source bytes (plan 03-08) — the reload half of tokenizer identity
+// ---------------------------------------------------------------------------
+
+/// The retained bytes and the recorded digest describe the SAME tokenizer.
+///
+/// Two facts are now stored where one used to be, so the failure mode this test
+/// exists for is that they drift: a `from_bytes` that hashed one buffer and
+/// retained another would rebuild a tokenizer whose identity check passes against
+/// a hash it does not have. Re-deriving the digest from what `source_bytes()`
+/// returns is the only comparison that can see that; comparing the field against
+/// itself cannot.
+#[test]
+fn tokenizer_bytes_hash_agrees_with_the_recorded_sha256() {
+    let bytes = tokenizer_bytes();
+    assert!(
+        !bytes.is_empty(),
+        "the frozen tokenizer fixture must be non-empty"
+    );
+    let tokenizer = MiniLmTokenizer::from_bytes(&bytes).expect("the frozen tokenizer must load");
+
+    assert_eq!(
+        tokenizer.source_bytes(),
+        bytes.as_slice(),
+        "the retained bytes must be the bytes the tokenizer was built from, byte for byte",
+    );
+    assert_eq!(
+        sha256_hex(tokenizer.source_bytes()),
+        tokenizer.tokenizer_sha256(),
+        "the digest re-derived from the RETAINED bytes must equal the RECORDED digest; a \
+         disagreement means an artifact carrying both would describe two different tokenizers",
+    );
+}
+
+/// The retained bytes rebuild a tokenizer that tokenizes identically.
+///
+/// Byte equality above says the buffer survived; this says the buffer is
+/// SUFFICIENT. A reload path that carried the right bytes into a tokenizer
+/// configured differently — a lost truncation bound, a lost padding mode — would
+/// pass the hash check and still produce different ids, which is the failure a
+/// hash-only artifact can never detect.
+#[test]
+fn tokenizer_bytes_rebuild_a_tokenizer_that_agrees_on_every_frozen_case() {
+    let cases = load_cases();
+    let original = MiniLmTokenizer::from_bytes(&tokenizer_bytes()).expect("original loads");
+    let rebuilt = MiniLmTokenizer::from_bytes(original.source_bytes()).expect("rebuild loads");
+
+    assert!(
+        !cases.cases.is_empty(),
+        "the corpus of record must have cases"
+    );
+    for case in &cases.cases {
+        let texts: Vec<&str> = case.texts.iter().map(String::as_str).collect();
+        let a = original.encode_batch(&texts).expect("original encodes");
+        let b = rebuilt.encode_batch(&texts).expect("rebuild encodes");
+        assert_eq!(a.input_ids(), b.input_ids(), "case {}: input ids", case.id);
+        assert_eq!(
+            a.token_type_ids(),
+            b.token_type_ids(),
+            "case {}: token type ids",
+            case.id
+        );
+        assert_eq!(
+            a.attention_mask(),
+            b.attention_mask(),
+            "case {}: attention mask",
+            case.id
+        );
+        assert_eq!(
+            a.truncation(),
+            b.truncation(),
+            "case {}: truncation facts",
+            case.id
+        );
+        assert_eq!(
+            a.tokenizer_sha256(),
+            b.tokenizer_sha256(),
+            "case {}: tokenizer identity",
+            case.id
+        );
+    }
+}
+
+/// `PADDING_MODE` names the strategy the constructor actually configures.
+///
+/// The constant travels into a persistence artifact, so it is a CLAIM about the
+/// tokenizer rather than decoration. The source assertion is what keeps the claim
+/// tied to the call: a `with_padding` switched to a fixed width while the constant
+/// kept saying `batch_longest` is exactly the drift an artifact reader could not
+/// see.
+#[test]
+fn tokenizer_bytes_padding_mode_constant_matches_the_configured_strategy() {
+    assert_eq!(PADDING_MODE, "batch_longest");
+    let src = include_str!("tokenizer.rs");
+    assert!(
+        src.contains("strategy: tokenizers::PaddingStrategy::BatchLongest"),
+        "PADDING_MODE claims batch-longest padding; the constructor must configure it",
+    );
+}
