@@ -39,6 +39,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
 use aprender_contrastive_data::split::{Split, Test};
 
 use super::evaluate::{ValidationEvaluation, ValidationEvaluationWire, ValidationMetricKind};
@@ -202,6 +203,18 @@ impl SelectionLock {
         let reference_kind = reference.metric_kind();
         let reference_split_fingerprint = reference.validation_split_fingerprint().to_string();
         let reference_dataset_fingerprint = reference.dataset_fingerprint().to_string();
+
+        // (0) Every candidate's value must be FINITE, checked before anything else because a
+        //     non-finite value is a defect in the evaluation rather than a disagreement between
+        //     evaluations. `f64::total_cmp` is a total order that ranks +NaN above +infinity, so
+        //     an admitted NaN would be SELECTED rather than ignored; the rule cannot refuse it
+        //     without ceasing to be a total order, so admission is the only place this can live.
+        for (index, candidate) in candidates.iter().enumerate() {
+            let value = candidate.evaluation().value();
+            if !value.is_finite() {
+                return Err(LockError::NonFiniteMetric { index, value_bits: value.to_bits() });
+            }
+        }
 
         // (1) Every candidate must be COMPARABLE with the first. Each check names the offending
         //     index, because "some candidate disagreed" is not investigable.
@@ -539,7 +552,7 @@ impl CanonicalTestToken {
 pub struct CanonicalTestAccess;
 
 impl CanonicalTestAccess {
-    /// Exchange a token, a model and the canonical test split for a typed access witness.
+    /// Exchange a token, a model and the canonical dataset for a typed access witness.
     ///
     /// # The identity re-check is not redundant
     ///
@@ -548,16 +561,32 @@ impl CanonicalTestAccess {
     /// functions later. Re-checking at access time is what makes the token's meaning "THIS
     /// artifact may see the test split" rather than "some artifact once matched a lock".
     ///
-    /// `Split<CompatibilityTest>` is a DIFFERENT type (Ph2 D-16/D-19) and is unexpressible
-    /// here, so a compatibility profile cannot reach this door at all.
+    /// # Why the parameter is the DATASET and not a `&Split<Test>`
+    ///
+    /// The phase-3 cleanup review found this door checking the artifact and nothing else while
+    /// accepting a bare `&Split<Test>`. A valid token therefore admitted test rows from ANY
+    /// corpus, and the grant it produced went on reporting the `lock_hash` of the corpus the lock
+    /// was actually taken over — the model half of the substitution TRN-07 blocks was pinned and
+    /// the data half was wide open.
+    ///
+    /// The repair had to be the ARGUMENT rather than an added assertion: a bare split carries no
+    /// provenance, so there was nothing sound to compare it against. Taking the dataset gives
+    /// this door the fingerprint the token has been carrying all along, and RETURNING
+    /// `dataset.test()` is the load-bearing half — a version that checked the dataset and then
+    /// admitted a separately-supplied split would verify one thing and hand out another.
+    ///
+    /// `Split<CompatibilityTest>` is a DIFFERENT type (Ph2 D-16/D-19) and the compatibility
+    /// profile is a different `PreparedDataset` parameterisation with no `test()` at all, so a
+    /// compatibility profile is now refused one step earlier — at the parameter, not inside.
     ///
     /// # Errors
     ///
-    /// [`LockError::TokenModelMismatch`] naming both hashes.
+    /// [`LockError::TokenModelMismatch`] naming both hashes, or
+    /// [`LockError::TokenDatasetMismatch`] naming both dataset fingerprints.
     pub fn grant<'a>(
         token: CanonicalTestToken,
         model: &SetFitRun<ArtifactReloadedAndVerified>,
-        test: &'a Split<Test>,
+        dataset: &'a PreparedDataset<Canonical>,
     ) -> Result<CanonicalTestGrant<'a>, LockError> {
         let model_artifact_hash = model.artifact_hash();
         if token.artifact_hash() != model_artifact_hash {
@@ -566,7 +595,14 @@ impl CanonicalTestAccess {
                 model_artifact_hash,
             });
         }
-        Ok(CanonicalTestGrant { token, test })
+        let observed_dataset_fingerprint = dataset.validation_witness().dataset_fingerprint_hex();
+        if token.dataset_fingerprint() != observed_dataset_fingerprint {
+            return Err(LockError::TokenDatasetMismatch {
+                token_dataset_fingerprint: token.dataset_fingerprint().to_string(),
+                observed_dataset_fingerprint,
+            });
+        }
+        Ok(CanonicalTestGrant { token, test: dataset.test() })
     }
 }
 
@@ -670,6 +706,23 @@ pub enum LockError {
         /// This candidate's dataset fingerprint.
         observed: String,
     },
+    /// A candidate's metric value is NaN or an infinity.
+    ///
+    /// Refused at admission rather than handled in the rule: `f64::total_cmp` is a TOTAL order
+    /// and orders `+NaN` above `+infinity`, so a NaN candidate is not skipped by the comparison
+    /// — it wins it. A total order cannot both stay total and reject a value, so the rejection
+    /// belongs here (contract `selection_lock_commitment`).
+    NonFiniteMetric {
+        /// The offending candidate's index.
+        index: usize,
+        /// The non-finite value's IEEE-754 BITS.
+        ///
+        /// Bits rather than an `f64` for the same reason the wire form carries bits: this enum is
+        /// `PartialEq + Eq`, `f64` is neither, and an `assert_eq!` against a variant holding a
+        /// NaN could never match itself since `NaN != NaN`. The bits make the payload both
+        /// comparable and exactly assertable, and `Display` renders them back.
+        value_bits: u64,
+    },
     /// Two candidates name the same artifact.
     DuplicateArtifactHash {
         /// The repeating candidate's index.
@@ -699,6 +752,17 @@ pub enum LockError {
         token_artifact_hash: String,
         /// The artifact the supplied model actually is.
         model_artifact_hash: String,
+    },
+    /// A token was presented alongside a canonical dataset it was not minted over.
+    ///
+    /// The model half of the identity can be right while the CORPUS half is wrong: pinning the
+    /// artifact and leaving the data free admits test rows from another dataset under a grant
+    /// that still names the locked one.
+    TokenDatasetMismatch {
+        /// The dataset fingerprint the token (and therefore the lock) committed to.
+        token_dataset_fingerprint: String,
+        /// The dataset fingerprint of the dataset actually supplied.
+        observed_dataset_fingerprint: String,
     },
     /// The lock record no longer produces its recorded hash.
     LockHashMismatch {
@@ -737,6 +801,14 @@ impl core::fmt::Display for LockError {
                  candidate used `{expected}` \
                  (contract setfit-train-lifecycle-v1, equation selection_lock_commitment)",
             ),
+            Self::NonFiniteMetric { index, value_bits } => write!(
+                f,
+                "candidate {index} carries a non-finite metric value ({}); `f64::total_cmp` \
+                 orders +NaN ABOVE +infinity, so admitting one would not make the ordering \
+                 meaningless -- it would make that candidate WIN \
+                 (contract setfit-train-lifecycle-v1, equation selection_lock_commitment)",
+                f64::from_bits(*value_bits),
+            ),
             Self::DuplicateArtifactHash { index, first_index, artifact_hash } => write!(
                 f,
                 "candidate {index} names artifact `{artifact_hash}`, which candidate \
@@ -763,6 +835,16 @@ impl core::fmt::Display for LockError {
                 "this token admits artifact `{token_artifact_hash}` but was presented with \
                  model `{model_artifact_hash}`; a token that travelled cannot be paired with a \
                  different model \
+                 (contract setfit-train-lifecycle-v1, equation canonical_test_token_minting)",
+            ),
+            Self::TokenDatasetMismatch {
+                token_dataset_fingerprint,
+                observed_dataset_fingerprint,
+            } => write!(
+                f,
+                "this token was minted over dataset `{token_dataset_fingerprint}` but was \
+                 presented with dataset `{observed_dataset_fingerprint}`; the model may be the \
+                 one the lock chose, but the corpus is not the one it was chosen on \
                  (contract setfit-train-lifecycle-v1, equation canonical_test_token_minting)",
             ),
             Self::LockHashMismatch { recorded, recomputed } => write!(

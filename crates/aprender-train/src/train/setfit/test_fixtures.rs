@@ -380,6 +380,46 @@ pub(crate) fn fixture_dataset() -> PreparedDataset<Canonical> {
     synthetic_dataset(&mut ledger)
 }
 
+/// The fixture corpus with ONE TEST row's bytes changed — a DIFFERENT canonical dataset.
+///
+/// Same ids, same label map, same declarations, same train and validation splits, so the only
+/// thing that separates it from [`fixture_dataset`] is the corpus digest. That is what makes it
+/// the right probe for "the model is the locked one but the DATA is not": every other reason a
+/// door might refuse is held constant, so a refusal can only be about the dataset identity.
+///
+/// # Panics
+///
+/// If the rebuilt corpus is not a valid canonical dataset, which is a fixture defect.
+pub(crate) fn dataset_with_altered_test_row() -> PreparedDataset<Canonical> {
+    let base = fixture_dataset();
+    let label_names = base.label_names().to_vec();
+    let classes = label_names.len();
+    let train = base.train().rows().to_vec();
+    let validation = base.validation().rows().to_vec();
+    let mut test = base.test().rows().to_vec();
+    test[0].input = format!("{} and again .", test[0].input);
+
+    let train_per_class = train.len() / classes;
+    let decl = |per_class: usize| SplitDeclaration {
+        expected_class_counts: vec![per_class; classes],
+        label_names: label_names.clone(),
+    };
+    let mut ledger = AccessLedger::new();
+    PreparedDataset::<Canonical>::from_labeled_rows(
+        train,
+        validation,
+        test,
+        &CanonicalDeclarations {
+            train: decl(train_per_class),
+            validation: decl(1),
+            test: decl(1),
+            label_names: label_names.clone(),
+        },
+        &mut ledger,
+    )
+    .expect("altering one test row must still yield a valid canonical dataset")
+}
+
 /// A prepared run with an explicit freeze policy.
 ///
 /// The all-frozen negative needs a run whose trainable set is EMPTY, and `config_for` hard-codes

@@ -1,8 +1,25 @@
 contract: setfit-train-lifecycle
 metadata:
-  version: 1.0.0
+  version: 2.0.0
   created: '2026-08-09'
+  updated: '2026-08-11'
   author: PAIML Engineering
+  version_note: >
+    2.0.0 — `pv diff` suggested MAJOR and this takes it. Two amendments from the phase-3 cleanup
+    review, both narrowing what the lifecycle admits, so existing callers can break:
+    `CanonicalTestAccess::grant` now takes `&PreparedDataset<Canonical>` instead of a bare
+    `&Split<Test>` and returns the grant over that dataset's own test split (a bare split carries
+    no provenance, so the corpus half of the substitution TRN-07 blocks was open); and
+    `from_candidates` refuses a non-finite metric value, because `f64::total_cmp` orders +NaN
+    ABOVE +infinity and an unfiltered NaN candidate would therefore be SELECTED rather than
+    ignored.
+    The FILENAME stays `-v1.yaml`: in this repo the `-vN` suffix is a stable identifier and
+    `metadata.version` carries semver independently — see `tweet-eval-stance-benchmark-v1.yaml`,
+    which is at 2.0.0 under a `-v1` name. Renaming would churn every `include_str!` path, every
+    binding entry and every plan reference to rename nothing that is actually a different
+    contract. Nothing user-reachable consumes this mechanism yet (TRN-07 is deliberately
+    UNCHECKED in REQUIREMENTS.md precisely because no CLI surface reaches it), so the major bump
+    records the break for the next reader rather than paying off an external consumer.
   description: >
     The SetFit stage-one training lifecycle: the evidence gate that a run must pass before
     it may identify as SetFit, the calibration regime those thresholds were measured in, the
@@ -810,8 +827,8 @@ equations:
   # ==========================================================================
 
   selection_lock_commitment:
-    formula: 'lock = (schema_version, rule, [(config_hash_i, artifact_hash_i, evaluation_i)]_{i<N}, chosen_index, dataset_fingerprint, validation_split_fingerprint, selection_semantic_hash, ledger_hash) ; chosen_index = rule(candidates) ; MaxMetricLowestIndexTieBreak: argmax_i value_i with total_cmp, ties to the LOWEST i ; lock_hash = SHA-256(canonical_bytes(lock))'
-    domain: 'a non-empty, mutually comparable candidate set and a verified run that is one of them'
+    formula: 'lock = (schema_version, rule, [(config_hash_i, artifact_hash_i, evaluation_i)]_{i<N}, chosen_index, dataset_fingerprint, validation_split_fingerprint, selection_semantic_hash, ledger_hash) ; forall i < N: is_finite(value_i) ; chosen_index = rule(candidates) ; MaxMetricLowestIndexTieBreak: argmax_i value_i with total_cmp, ties to the LOWEST i ; lock_hash = SHA-256(canonical_bytes(lock))'
+    domain: 'a non-empty, mutually comparable candidate set with finite metric values, and a verified run that is one of them'
     codomain: 'a SelectionLock bound to a hash, or a typed LockError naming the offending candidate index'
     invariants:
       - 'THE WHOLE CANDIDATE HISTORY IS COMMITTED, AND THERE IS NO `chosen` PARAMETER. The phase-3
@@ -821,9 +838,26 @@ equations:
         candidate SET plus a `SelectionRule` and DERIVES the index; `from_candidates` has no
         parameter a caller could use to name a winner, and a source assertion pins that.'
       - 'THE RULE IS CLOSED AND DETERMINISTIC IN BOTH HALVES. `MaxMetricLowestIndexTieBreak` is
-        the only member. The comparison is `f64::total_cmp`, a total order over every bit pattern
-        including NaN, so the outcome cannot depend on the order candidates happened to arrive in
-        even for values `partial_cmp` refuses to order; an exact tie keeps the LOWEST index.'
+        the only member. The comparison is `f64::total_cmp`, a total order over every bit pattern,
+        so the outcome cannot depend on the order candidates happened to arrive in even for values
+        `partial_cmp` refuses to order; an exact tie keeps the LOWEST index.'
+      - 'A NON-FINITE METRIC IS REFUSED AT ADMISSION, BECAUSE UNDER `total_cmp` IT WOULD WIN.
+        This corrects a rationale the phase-3 cleanup review found stated backwards. The earlier
+        text argued the empty-class convention could not be NaN because "every comparison against
+        a NaN is false, so the ordering would be meaningless" -- that is `partial_cmp` semantics,
+        and this rule does not use `partial_cmp`. `f64::total_cmp` orders +NaN ABOVE +infinity, so
+        a NaN candidate is not ignored by the ordering: it is DETERMINISTICALLY SELECTED, and the
+        lock then commits it as the winner. The failure is worse than the one the doc described
+        and in the opposite direction. The rule is therefore not the place to fix it -- a total
+        order cannot both be total and reject a value -- so `from_candidates` refuses any
+        candidate whose value is not finite (`NonFiniteMetric { index, value }`), before the
+        comparability checks, and the rule only ever sees finite values.
+        THIS IS DEFENCE IN DEPTH, NOT A LIVE HOLE: the trusted evaluator cannot currently emit a
+        non-finite value (macro-F1''s empty-class branch returns 0.0 by this contract, and
+        accuracy is a ratio of finite counts over a non-empty split), so the only reachable
+        producer today is the `#[cfg(test)]` door. The guard exists because the rule must stay
+        correct under a future metric, and because a defence whose only argument is "no caller
+        currently does this" is the kind that stops being true silently.'
       - 'FOUR CANDIDATE-CONSISTENCY REJECTIONS, EACH NAMING THE OFFENDING INDEX: an empty list
         (`NoCandidates`); a candidate whose `metric_kind` differs from the first; a candidate
         whose `validation_split_fingerprint` differs; a candidate whose `dataset_fingerprint`
@@ -863,9 +897,9 @@ equations:
   # ==========================================================================
 
   canonical_test_token_minting:
-    formula: 'mint_test_token(lock, model: &SetFitRun<ArtifactReloadedAndVerified>) -> CanonicalTestToken <=> verify_integrity(lock) AND lock.chosen_artifact_hash == model.artifact_hash() ; grant(token, model, test: &Split<Test>) -> CanonicalTestGrant <=> token.artifact_hash == model.artifact_hash()'
-    domain: 'a lock whose record still hashes to its digest, and a verified run'
-    codomain: 'a token and then a typed test-access witness, or LockError::StaleLock / TokenModelMismatch naming BOTH hashes'
+    formula: 'mint_test_token(lock, model: &SetFitRun<ArtifactReloadedAndVerified>) -> CanonicalTestToken <=> verify_integrity(lock) AND lock.chosen_artifact_hash == model.artifact_hash() ; grant(token, model, dataset: &PreparedDataset<Canonical>) -> CanonicalTestGrant<''a> admitting dataset.test() <=> token.artifact_hash == model.artifact_hash() AND token.dataset_fingerprint == dataset.validation_witness().dataset_fingerprint_hex()'
+    domain: 'a lock whose record still hashes to its digest, a verified run, and the canonical dataset the lock was taken over'
+    codomain: 'a token and then a typed test-access witness, or LockError::StaleLock / TokenModelMismatch / TokenDatasetMismatch naming BOTH values'
     invariants:
       - 'MINTING TAKES THE RUN OBJECT, NOT HASH BYTES. The phase-3 review found
         `mint_test_token(&self, candidate: [u8; 32])`, which trusts a caller-supplied hash: a
@@ -881,8 +915,25 @@ equations:
         artifact differs.'
       - 'THE GRANT RE-CHECKS AT ACCESS TIME. Minting checks identity at one instant; a token is a
         value that can be moved, cloned into a struct and used against whatever model is in scope
-        later. `CanonicalTestAccess::grant` takes the token, the model AND the `&Split<Test>`, and
-        refuses a token paired with a different model (`TokenModelMismatch`, both hashes named).'
+        later. `CanonicalTestAccess::grant` takes the token, the model AND the canonical dataset,
+        and refuses a token paired with a different model (`TokenModelMismatch`, both hashes
+        named).'
+      - 'THE GRANT BINDS THE CORPUS, NOT ONLY THE MODEL. The phase-3 cleanup review found the
+        grant took a bare `&Split<Test>` and checked only the ARTIFACT: a valid token therefore
+        admitted test rows from ANY dataset, while the resulting grant''s `lock_hash()` went on
+        claiming the corpus the lock was taken over. Both halves of the substitution TRN-07 exists
+        to block were available -- the model was pinned and the data was not. The token already
+        carried `dataset_fingerprint` for exactly this comparison and the grant read neither
+        fingerprint.
+        The repair is at the ARGUMENT, not in an added assertion: a bare split carries no
+        provenance, so no check written against it could have been sound. `grant` now takes
+        `&PreparedDataset<Canonical>`, compares `dataset.validation_witness().dataset_fingerprint_hex()`
+        against the token''s (`TokenDatasetMismatch`, both digests named), and RETURNS the grant
+        over `dataset.test()` -- so the rows admitted are the ones whose provenance was just
+        checked, rather than rows supplied alongside a dataset that was merely shown.
+        This strengthens rather than weakens the compatibility-profile property below: the
+        parameter is now the Canonical-profile type itself, so a compatibility dataset is refused
+        by the type system one step earlier than before.'
       - 'THE TOKEN IS PROOF OF PROVENANCE, NOT A RECORD OF IT. Every field is private and there is
         no public constructor; reading a token cannot mint one. This is the `SelectedId` pattern
         from Phase 2''s `select.rs` applied to test access.'
@@ -1032,17 +1083,22 @@ proof_obligations:
     OBLIG-STL-LOCK-COMMITS-HISTORY: the lock commits every candidate in order together with the
     rule, and derives chosen_index by applying the rule. from_candidates has no `chosen`
     parameter, so a lock recording only a winner is not expressible. Changing any committed field
-    changes lock_hash, and mint_test_token verifies integrity before it compares anything.
-  formal: 'chosen_index == rule(candidates) && lock_hash == sha256(canonical_bytes(lock)) && not exists parameter `chosen` in from_candidates'
+    changes lock_hash, and mint_test_token verifies integrity before it compares anything. Every
+    admitted candidate carries a FINITE value: total_cmp orders +NaN above +infinity, so an
+    unfiltered non-finite candidate would be selected rather than ignored, and the rule can only
+    stay a total order if the refusal happens at admission instead.
+  formal: 'chosen_index == rule(candidates) && (forall i: is_finite(value_i)) && lock_hash == sha256(canonical_bytes(lock)) && not exists parameter `chosen` in from_candidates'
   applies_to: all
 
 - type: safety
   property: >
     OBLIG-STL-TOKEN-FROM-OBJECT: mint_test_token reads the artifact hash off the supplied verified
     run; no [u8; 32] parameter exists on the minting path. The grant re-checks the token's artifact
-    identity against the model at access time, and Split<CompatibilityTest> is a different type
-    that cannot reach the grant.
-  formal: 'mint(lock, model) = Ok => lock.chosen_artifact_hash == model.artifact_hash() && grant(t, m, _) = Ok => t.artifact_hash == m.artifact_hash()'
+    identity against the model at access time AND binds the corpus by comparing the token's
+    dataset fingerprint against the supplied canonical dataset's, returning the test split out of
+    that same dataset so the rows admitted are the rows whose provenance was checked.
+    Split<CompatibilityTest> is a different type that cannot reach the grant.
+  formal: 'mint(lock, model) = Ok => lock.chosen_artifact_hash == model.artifact_hash() && grant(t, m, d) = Ok => t.artifact_hash == m.artifact_hash() && t.dataset_fingerprint == d.dataset_fingerprint() && result.test == d.test()'
   applies_to: all
 
 falsification_tests:
@@ -1274,6 +1330,12 @@ falsification_tests:
     verify_integrity red with both digests printed, and mint_test_token then refuses with the same
     error, so the check is where it matters rather than merely present. from_candidates has no
     `chosen` parameter, and the lock exposes no removal or edit API.
+    A candidate carrying NaN, +infinity or -infinity is refused with NonFiniteMetric naming the
+    index, and the refusal is shown to BITE rather than merely exist: the same candidate list
+    with the NaN admitted selects the NaN — asserted directly against the rule — because
+    total_cmp orders +NaN above every finite value. That two-sided pair is the whole point of
+    the check; a test that only asserted the rejection would be equally green if the rule had
+    ignored NaN, which is what the superseded rationale claimed it did.
   test: cargo test -p aprender-train --lib --features setfit lock_
   test_harness: cargo test -p aprender-train --lib --features setfit lock_
   expected_output: 'test result: ok.'
@@ -1291,7 +1353,13 @@ falsification_tests:
     grant against B with TokenModelMismatch naming both. The test asserts the two artifact hashes
     differ FIRST, so none of it can hold vacuously. mint_test_token's signature contains
     &SetFitRun<ArtifactReloadedAndVerified> and contains no [u8; 32]; CanonicalTestToken has no
-    public constructor and no public field; grant takes the token, the model and &Split<Test>.
+    public constructor and no public field; grant takes the token, the model and
+    &PreparedDataset<Canonical>, and its signature contains no &Split<Test> parameter.
+    A token valid for its own model but presented with a DIFFERENT canonical corpus is refused
+    with TokenDatasetMismatch naming both digests — the corpus substitution that the earlier
+    bare-&Split<Test> signature admitted silently. The test asserts the two dataset fingerprints
+    differ FIRST, and separately asserts that the grant's rows come out of the dataset that was
+    checked rather than out of a split handed in beside it.
     The command below is the WHOLE `lock_` filter rather than a narrower one, because the three
     source assertions live in their own named tests and a filter that did not reach them would
     leave two thirds of this prediction unbacked by the command that claims it. The sequence
@@ -1301,7 +1369,8 @@ falsification_tests:
   expected_output: 'test result: ok.'
   if_fails: >
     A caller-supplied hash has returned to the minting path, or the grant no longer re-checks
-    identity and a token that travelled can be paired with a different model.
+    identity and a token that travelled can be paired with a different model — or with a
+    different corpus, which is the half the bare-&Split<Test> signature left open.
 
 kani_harnesses:
 

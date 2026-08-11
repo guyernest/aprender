@@ -237,6 +237,60 @@ fn lock_rejects_duplicate_artifact_hashes() {
     assert!(rendered.contains("candidate 0"), "{rendered}");
 }
 
+/// A non-finite metric is refused at admission, naming the index.
+///
+/// All three non-finite bit patterns are checked, not just NaN: `total_cmp` places `+infinity`
+/// above every finite value too, so a candidate carrying one wins for the same reason.
+#[test]
+fn lock_rejects_a_candidate_whose_metric_value_is_not_finite() {
+    for (position, value) in [(1_usize, f64::NAN), (2, f64::INFINITY), (0, f64::NEG_INFINITY)] {
+        let mut candidates =
+            vec![candidate("a", "aa", 0.5), candidate("b", "bb", 0.6), candidate("c", "cc", 0.7)];
+        candidates[position] = candidate("x", "xx", value);
+
+        let error = lock_of(candidates)
+            .expect_err("a non-finite metric is not a measurement the rule can order");
+        assert_eq!(
+            error,
+            LockError::NonFiniteMetric { index: position, value_bits: value.to_bits() },
+            "the rejection must name the offending index and carry the exact bits",
+        );
+        let rendered = error.to_string();
+        assert!(rendered.contains(&format!("candidate {position}")), "{rendered}");
+    }
+}
+
+/// The non-finite refusal BITES: admitted, a NaN would be SELECTED, not ignored.
+///
+/// This is the two-sided half of the guard and the reason the check exists at all. A test that
+/// only asserted the rejection would be exactly as green if `total_cmp` had ignored NaN — which
+/// is what the superseded rationale in `evaluate.rs` claimed, reasoning from `partial_cmp`
+/// semantics that this rule does not use. So the rule is applied DIRECTLY to a candidate set
+/// containing a NaN, bypassing the admission check, and the NaN is shown to win.
+#[test]
+fn lock_a_nan_would_win_the_rule_which_is_why_admission_refuses_it() {
+    let with_nan = vec![
+        candidate("a", "aa", 0.5),
+        candidate("nan", "nn", f64::NAN),
+        candidate("c", "cc", 0.9),
+    ];
+
+    // The rule itself, not the guarded door: `apply` is what would see the NaN if admission
+    // let it through.
+    let chosen = SelectionRule::MaxMetricLowestIndexTieBreak.apply(&with_nan);
+    assert_eq!(
+        chosen, 1,
+        "f64::total_cmp orders +NaN above +infinity, so the NaN candidate WINS -- the failure \
+         mode is deterministic selection of a degenerate candidate, not an unusable ordering",
+    );
+
+    // And with the same list handed to the real door, it never reaches the rule.
+    assert_eq!(
+        lock_of(with_nan).expect_err("admission must refuse before the rule ever runs"),
+        LockError::NonFiniteMetric { index: 1, value_bits: f64::NAN.to_bits() },
+    );
+}
+
 // ===========================================================================================
 // The rule is APPLIED, not asserted
 // ===========================================================================================
@@ -378,13 +432,72 @@ fn lock_mints_a_token_for_the_locked_model_and_grants_canonical_test_access() {
     assert_eq!(token.dataset_fingerprint(), lock.dataset_fingerprint());
     assert_eq!(token.validation_split_fingerprint(), lock.validation_split_fingerprint());
 
-    let test = run.dataset().test();
-    let grant = CanonicalTestAccess::grant(token, &run, test)
-        .expect("the token was minted for this very model");
+    let expected_rows = run.dataset().test().rows().len();
+    let grant = CanonicalTestAccess::grant(token, &run, run.dataset())
+        .expect("the token was minted for this very model over this very dataset");
     assert_eq!(grant.artifact_hash(), run.artifact_hash());
     assert_eq!(grant.lock_hash(), lock.lock_hash());
-    assert_eq!(grant.test().rows().len(), test.rows().len());
+    assert_eq!(grant.test().rows().len(), expected_rows);
     assert!(!grant.test().rows().is_empty(), "the grant must admit real rows");
+}
+
+/// A token valid for its own model is still refused against a DIFFERENT canonical corpus.
+///
+/// This is the half the earlier `&Split<Test>` signature left open: the artifact check passed,
+/// nothing looked at the data, and the grant went on reporting the locked corpus's `lock_hash`
+/// while handing out another corpus's rows. The model is deliberately the RIGHT one here, so the
+/// only thing that can produce a refusal is the dataset identity.
+#[test]
+fn lock_grant_refuses_a_token_presented_with_a_different_canonical_dataset() {
+    let run = verified_run();
+    let lock = lock_over(&run);
+    let token = lock.mint_test_token(&run).expect("the locked model must mint");
+
+    let other = fx::dataset_with_altered_test_row();
+    let locked_fingerprint = token.dataset_fingerprint().to_string();
+    let other_fingerprint = other.validation_witness().dataset_fingerprint_hex();
+    assert_ne!(
+        locked_fingerprint, other_fingerprint,
+        "the two corpora must actually differ, or the refusal below would hold vacuously",
+    );
+
+    let error = CanonicalTestAccess::grant(token, &run, &other)
+        .expect_err("the right model over the wrong corpus is still the wrong access");
+    assert_eq!(
+        error,
+        LockError::TokenDatasetMismatch {
+            token_dataset_fingerprint: locked_fingerprint.clone(),
+            observed_dataset_fingerprint: other_fingerprint.clone(),
+        },
+    );
+    let rendered = error.to_string();
+    assert!(rendered.contains(&locked_fingerprint), "both digests must be named: {rendered}");
+    assert!(rendered.contains(&other_fingerprint), "both digests must be named: {rendered}");
+}
+
+/// The granted rows come OUT of the dataset that was checked, not from one supplied beside it.
+///
+/// The load-bearing half of the repair. A `grant` that verified the dataset's fingerprint and
+/// then admitted a separately-passed `&Split<Test>` would satisfy every assertion in the refusal
+/// test above while still handing out rows nobody checked, so the identity of the returned split
+/// is asserted against the checked dataset directly.
+#[test]
+fn lock_grant_admits_the_checked_datasets_own_test_rows() {
+    let run = verified_run();
+    let lock = lock_over(&run);
+    let token = lock.mint_test_token(&run).expect("the locked model must mint");
+
+    let dataset = fx::fixture_dataset();
+    let expected: Vec<&str> = dataset.test().rows().iter().map(|row| row.id.as_str()).collect();
+    assert!(!expected.is_empty(), "the fixture must have test rows, or this proves nothing");
+
+    let grant = CanonicalTestAccess::grant(token, &run, &dataset)
+        .expect("an independently rebuilt copy of the SAME corpus must be accepted");
+    let admitted: Vec<&str> = grant.test().rows().iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(
+        admitted, expected,
+        "the grant must hand out the test split of the dataset whose fingerprint it checked",
+    );
 }
 
 /// The whole attack, in order: lock, keep tuning, then try to reach the test split.
@@ -413,7 +526,7 @@ fn lock_then_tune_then_test_invalidates_and_a_travelled_token_cannot_be_repaired
 
     // (2) The token minted for run A cannot be carried to run B either. Minting checked the
     //     identity at one instant; the grant re-checks it at the point of access.
-    let carried = CanonicalTestAccess::grant(token, &run_b, run_b.dataset().test())
+    let carried = CanonicalTestAccess::grant(token, &run_b, run_b.dataset())
         .expect_err("a token that travelled must not be re-paired");
     assert_eq!(
         carried,
@@ -532,13 +645,22 @@ fn lock_token_has_no_public_constructor_and_no_public_field() {
     }
 }
 
-/// The grant takes the token, the model and the canonical test split.
+/// The grant takes the token, the model and the canonical DATASET — never a bare split.
+///
+/// The negative half is the one the cleanup review added. A bare `&Split<Test>` carries no
+/// provenance, so a grant accepting one cannot bind the corpus no matter what it asserts
+/// internally; pinning its absence is what stops the parameter regressing to the shape that
+/// admitted another corpus's rows under the locked corpus's `lock_hash`.
 #[test]
-fn lock_grant_signature_takes_the_token_the_model_and_the_test_split() {
+fn lock_grant_signature_takes_the_token_the_model_and_the_canonical_dataset() {
     let signature = signature_after(LOCK_SOURCE, "pub fn grant<'a>(");
     assert!(signature.contains("token: CanonicalTestToken"), "`{signature}`");
     assert!(signature.contains("&SetFitRun<ArtifactReloadedAndVerified>"), "`{signature}`");
-    assert!(signature.contains("&'a Split<Test>"), "`{signature}`");
+    assert!(signature.contains("&'a PreparedDataset<Canonical>"), "`{signature}`");
+    assert!(
+        !signature.contains("Split<Test>"),
+        "a bare split carries no provenance, so the corpus check could not be sound: `{signature}`",
+    );
     assert!(
         !signature.contains("CompatibilityTest"),
         "`Split<CompatibilityTest>` is a different type and is unexpressible here",
