@@ -860,6 +860,21 @@ impl SetFitRun<ArtifactReloadedAndVerified> {
         &self.evidence.passed.table().batch_boundary_list
     }
 
+    /// The digest the loop ABSORBED as it opened each batch.
+    ///
+    /// [`Self::batch_boundaries`] hands back the readable triples; this is the digest the
+    /// loop accumulated at batch open, and it commits one field the list does not carry —
+    /// the `global_step` in force when the batch opened. Two runs with identical boundary
+    /// LISTS and a different step alignment therefore differ here and agree there.
+    ///
+    /// Added by plan 03-10 T2 rather than digesting the list in the caller: the
+    /// cross-process gate's whole claim is that it compares RECORDED execution, and a
+    /// digest computed from the accessor's output would be a digest of a description.
+    #[must_use]
+    pub fn batch_boundary_digest(&self) -> &str {
+        &self.evidence.passed.table().batch_boundary_digest
+    }
+
     /// Optimizer steps the tuning loop took.
     #[must_use]
     pub fn step_count(&self) -> u64 {

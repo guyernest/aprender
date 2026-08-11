@@ -261,6 +261,15 @@ tier2:
 # one positional anyway.
 	@echo "Phase 2 contrastive-data: protocol unit gates..."
 	@cargo test -p aprender-contrastive-data
+# Phase 3 D-16, tier2 half. The decision splits ONE gate across two tiers: the fast
+# in-process comparison here, the authoritative cross-process one in tier3. Wiring only
+# the tier3 half would leave D-16's fast signal in a test file no tier invokes.
+#
+# Measured standalone before wiring (warm tree): rc=0, 6 s wall, 1 test. It is one
+# libtest filter on an already-built target, which is tier2-shaped. Its failure mode was
+# induced, observed and reverted — see 03-10-SUMMARY.md.
+	@echo "Phase 3 SetFit: in-process two-clean-runs equality (D-16)..."
+	@$(MAKE) setfit-repro-inproc
 	@if [ -d tests/golden ]; then \
 		if . scripts/apr_bin.sh 2>/dev/null; then \
 			echo "Running probar golden regression... ($$APR)"; \
@@ -318,6 +327,14 @@ tier3:
 # captured directly, and its failure mode induced, observed and reverted rather
 # than assumed. See the target's own comment block.
 	@$(MAKE) contract-audit-phase3
+# TRN-06's AUTHORITATIVE reproducibility claim (D-16) and D-13's GEMM control, wired
+# here for the reason the three lines above exist: a target outside the tiers is a
+# target that stops being run. Both were run STANDALONE first with the status captured
+# directly, and both had a failure INDUCED, observed and reverted before being wired —
+# see 03-10-SUMMARY.md for the rc values and the perturbations used. The recipes read
+# `$$?` on the line after the redirect and contain no `tee`.
+	@$(MAKE) setfit-repro-crossproc
+	@$(MAKE) gemm-thread-determinism
 	@$(MAKE) setfit-feature-matrix
 # D-04 (Phase 2), wired here for the same reason the line above exists: a target
 # outside the tiers is a target that stops being run. Same evidence discipline as
@@ -1364,6 +1381,87 @@ contract-audit-phase3: ## Audit Phase 3 binding coverage (BLOCKING, wired into t
 		exit 1; \
 	fi; \
 	echo "Phase 3 binding audit: every equation is bound"
+
+# ============================================================================
+# PHASE 3 REPRODUCIBILITY GATES (TRN-06 / D-16 / D-13)
+# ============================================================================
+#
+# D-16 SPLITS one gate across two tiers, and the split is not decoration:
+#
+#   tier2  setfit-repro-inproc      two runs in ONE process agree
+#   tier3  setfit-repro-crossproc   two SEPARATE processes at pool sizes 1 and 3 agree
+#
+# The in-process form is structurally blind — both runs share the rayon pool, the
+# allocator's free lists and every lazily-initialized static, which is exactly the
+# class of nondeterminism a "clean run" exists to expose — so it is the fast signal
+# and NOT the claim. The cross-process form is the authoritative one. Wiring only the
+# tier3 half would implement half of D-16 and leave the fast signal in a test file no
+# tier invokes.
+#
+# EVERY RECIPE BELOW READS `$$?` ON THE LINE AFTER THE REDIRECT, NEVER THROUGH A PIPE.
+# CLAUDE.md Verification Discipline rule 1: piping into `tee` and then reading `$$?`
+# reports the PIPE's last status, and this repo has shipped that defect twice (#2336
+# qwen-story-daily, #2360 make publish's POST-PUBLISH VERIFICATION — three green runs
+# that proved nothing). A pipe before the capture here is a defect, not a style choice.
+#
+# The obvious check for that property — a bare substring search for `tee` across each
+# recipe — is UNFIT, and it was measured rather than reasoned about: it matched the word
+# "guaran-tee" in two failure messages and reported a violation in recipes that contain
+# no pipe at all (CLAUDE.md rule 7 — a guard pattern is re-checked by re-running its case
+# table, not by re-reading it). The messages avoid that substring so the naive form also
+# reads clean, but the pattern to reuse is a PIPE-aware one, e.g. `\| *tee`.
+#
+# `CARGO_INCREMENTAL=0` per STATE.md's ENOSPC mitigation: this workspace has stopped
+# twice on a full disk in `target/debug/incremental` at ~25 GB.
+#
+# `mkdir -p target` because the log destination must exist before the redirect; a
+# redirect into a missing directory fails the shell line, which would be reported as a
+# gate failure rather than as the setup error it is.
+
+setfit-repro-inproc: ## TRN-06/D-16 (tier2 half): in-process two-clean-runs equality
+	@echo "TRN-06: in-process two-run equality (D-16's fast, non-authoritative half)"
+	@mkdir -p target
+	@CARGO_INCREMENTAL=0 cargo test -p aprender-train --test setfit_repro \
+		--features setfit in_process > target/setfit-repro-inproc.log 2>&1; rc=$$?; \
+	tail -3 target/setfit-repro-inproc.log; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: the in-process two-run comparison is red (rc=$$rc)"; \
+		echo "See target/setfit-repro-inproc.log. NOTE: tier2 as a WHOLE is red on"; \
+		echo "arm64 from 24 pre-existing clippy errors (D-ITEM-02) and its headline"; \
+		echo "test step runs zero tests (D-ITEM-03) — neither is this gate's status."; \
+		exit $$rc; \
+	fi
+	@echo "  in-process: every composite component agreed"
+
+setfit-repro-crossproc: ## TRN-06/D-16 (tier3, AUTHORITATIVE): cross-process hash equality
+	@echo "TRN-06: cross-process two-clean-runs equality at fixed pool sizes 1 and 3"
+	@mkdir -p target
+	@CARGO_INCREMENTAL=0 cargo test -p aprender-train --test setfit_repro \
+		--features setfit setfit_repro_cross_process \
+		> target/setfit-repro-crossproc.log 2>&1; rc=$$?; \
+	tail -3 target/setfit-repro-crossproc.log; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: two separate processes did not agree, or did not run at two"; \
+		echo "DISTINCT pool sizes (the mechanism-engaged half). Either way TRN-06's"; \
+		echo "two-clean-runs claim does not hold as measured on this host."; \
+		echo "See target/setfit-repro-crossproc.log"; \
+		exit $$rc; \
+	fi
+	@echo "  cross-process: THREADS differed and all ten components agreed"
+
+gemm-thread-determinism: ## D-13/TRN-06: Tensor::matmul does not depend on the rayon pool size
+	@echo "D-13: GEMM determinism across fixed rayon pool sizes 1/2/3 (03-02 T3)"
+	@mkdir -p target
+	@CARGO_INCREMENTAL=0 cargo test -p aprender-core --test gemm_thread_determinism \
+		> target/gemm-thread-determinism.log 2>&1; rc=$$?; \
+	tail -3 target/gemm-thread-determinism.log; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: Tensor::matmul's output moved with the rayon pool size, so"; \
+		echo "assumption A3 is falsified and TRN-06's bitwise claim does not"; \
+		echo "hold on this host. See target/gemm-thread-determinism.log"; \
+		exit $$rc; \
+	fi
+	@echo "  GEMM: identical hashes at pool sizes 1, 2 and 3"
 
 contract-regen: ## Regenerate wired test files from contracts
 	@echo "Regenerating contract test files..."
