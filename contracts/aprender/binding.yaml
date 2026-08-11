@@ -1287,6 +1287,49 @@ bindings:
     cumulative checks pre-allocation rather than post-hoc reports. The VALUES are parsed from
     the contract by bundle_limits_match_the_contract; the MECHANISM is falsified separately
     against deliberately tiny bounds, each with a control at exactly the bound.'
+# --- setfit-train-lifecycle-v1: canonical-validation selection and its lock (plan 03-09) ---
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: validation_evaluation_provenance
+  module_path: entrenar::train::setfit::evaluate
+  function: evaluate_validation
+  signature: 'fn evaluate_validation(run: &SetFitRun<ArtifactReloadedAndVerified>, dataset: &PreparedDataset<Canonical>, metric: ValidationMetricKind) -> Result<ValidationEvaluation, SetFitTrainError>'
+  status: implemented
+  notes: 'THE only production path to a ValidationEvaluation. Bound to the evaluator rather than to
+    the type, because this is where the decisions are: the fingerprint agreement check, the encode
+    through the ONE encode-once path, the prediction with the run''s own head, and the metric
+    arithmetic. The phase-3 review marked TRN-07 unsatisfied because the previous shape,
+    ValidationMetric::new(&Split<Validation>, name, value), accepted an arbitrary f64 — possessing
+    a split does not prove a number came out of it. There is now no public function in evaluate.rs
+    taking a float parameter at all; the guard reads each pub fn''s PARAMETER LIST, because a
+    line-wise scan was measured red for the wrong reason (it matched the type''s own private
+    `value: f64` field) and a scan for `pub fn ` alone saw 5 of the 9 public functions.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: selection_lock_commitment
+  module_path: entrenar::train::setfit::lock
+  function: from_candidates
+  signature: 'fn from_candidates(candidates: Vec<SelectionCandidate>, rule: SelectionRule, selection_semantic_hash: &str, ledger_hash: &str) -> Result<SelectionLock, LockError>'
+  status: implemented
+  notes: 'The rule is APPLIED here; there is no `chosen` parameter, which is review fix 3 — a lock
+    recording only the winner is as consistent with a test peek followed by back-filling as it is
+    with honest selection. pub(super) on purpose: the semantic and ledger hashes are provenance and
+    the only honest source is a run that executed, so the public door is
+    SetFitRun::create_selection_lock, which reads both off the run and additionally requires the
+    creating run to be among the candidates. The four consistency rejections each name the
+    offending index, and lock_hash covers every committed field — falsified by six one-field
+    variations plus a #[cfg(test)] forgery of chosen_index that mint_test_token then refuses.'
+- contract: setfit-train-lifecycle-v1.yaml
+  equation: canonical_test_token_minting
+  module_path: entrenar::train::setfit::lock
+  function: mint_test_token
+  signature: 'fn mint_test_token(&self, model: &SetFitRun<ArtifactReloadedAndVerified>) -> Result<CanonicalTestToken, LockError>'
+  status: implemented
+  notes: 'Review fix 2: the parameter is the verified run OBJECT and the function reads
+    artifact_hash() off it. The previous form took a caller-supplied [u8; 32], which lets a caller
+    submit the locked hash and then evaluate a different artifact — the exact sequence TRN-07
+    exists to block. Falsified by the full lock-then-tune-then-test walk, where run B is the SAME
+    configuration and seed under a reversed intra-batch pull order so only the artifact differs;
+    StaleLock names both hashes, and CanonicalTestAccess::grant re-checks identity at access time
+    so a token that travelled cannot be re-paired.'
 # --- linear-probe-classifier-v1: the SAFE-03 frozen baseline (plan 03-06 task 3) ---
 - contract: linear-probe-classifier-v1.yaml
   equation: linear_probe
