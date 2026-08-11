@@ -509,43 +509,24 @@ struct BatchInputs {
 /// than by reading the source: `tune_step_order_is_pinned` observes cleared gradients, a
 /// zero tape and the scheduled learning rate at step 0, all recorded in band by this
 /// function.
-fn run_batch(
+/// THE PAIR-PULL LOOP (N-03), lifted out of [`run_batch`] as one whole stage.
+///
+/// `absorb_batch_digests` is called from HERE, once per pair, in the same iteration that DRAWS
+/// it — never from `run_tuning`'s iteration and never from a record returned after this loop
+/// finished. Absorbing from a returned record would absorb a DESCRIPTION of the consumption
+/// instead of the consumption, and 03-05's reversed-consumption negative is what notices.
+///
+/// Extracted in plan 03-10 T3 to bring `run_batch` under the cyclomatic ceiling of 10
+/// (measured 13). It is lifted as ONE stage rather than sliced: `run_batch`'s stages (a)-(m)
+/// are a PINNED ORDER that `tune_`'s order-pin test asserts on, and fragmenting a pinned
+/// sequence makes the property harder to audit rather than easier — which is the opposite of
+/// what the ceiling exists for.
+fn pull_batch_pairs(
     ctx: &mut TuneCtx<'_>,
     epoch: u32,
     batch_index: u32,
     ordinals: &[u64],
-) -> Result<(), SetFitTrainError> {
-    // (a) set the SCHEDULED learning rate for the step about to be taken.
-    let applied_lr = ctx.scheduler.get_lr();
-    ctx.scheduler.apply(&mut ctx.adamw);
-
-    // (b) clear gradients, then the tape.
-    if !ctx.probes.skip_step_top_clear {
-        for (_, param) in ctx.encoder.trainable_parameters_mut() {
-            param.zero_grad_();
-        }
-        autograd::clear_graph();
-    }
-
-    let observation = observe_step_top(ctx, applied_lr);
-
-    // batch open — the boundary digest is absorbed HERE, once per batch.
-    let batch_start_ordinal = ordinals.first().copied().unwrap_or(0);
-    let batch_len = u32::try_from(ordinals.len()).unwrap_or(u32::MAX);
-    absorb_boundary_digest(
-        &mut ctx.boundary_hasher,
-        epoch,
-        batch_index,
-        ctx.global_step,
-        batch_start_ordinal,
-        batch_len,
-    );
-    ctx.boundaries.push((epoch, batch_start_ordinal, batch_len));
-
-    // THE PAIR-PULL LOOP (N-03). `absorb_batch_digests` is called from HERE, once per pair,
-    // in the same iteration that draws it — never from `run_tuning`'s iteration and never
-    // from a record returned after this loop finished. Absorbing from a returned record
-    // would absorb a DESCRIPTION of the consumption instead of the consumption.
+) -> Result<BatchInputs, SetFitTrainError> {
     let mut pull_order: Vec<u64> = ordinals.to_vec();
     if ctx.probes.reverse_intra_batch_pull {
         pull_order.reverse();
@@ -575,6 +556,63 @@ fn run_batch(
         inputs.texts_b.push(b as usize);
         inputs.targets.push(labeled.target);
     }
+    Ok(inputs)
+}
+
+/// Stage (b) of the pinned step order: zero every trainable gradient, THEN clear the tape.
+///
+/// The order is the pin — clearing the tape first would leave `Tensor::grad` populated from the
+/// previous step with no graph entry to match, which is the state 03-05's skip-zero_grad
+/// negative exists to make visible. `probes.skip_step_top_clear` is that negative's door.
+fn clear_grads_then_tape(ctx: &mut TuneCtx<'_>) {
+    if ctx.probes.skip_step_top_clear {
+        return;
+    }
+    for (_, param) in ctx.encoder.trainable_parameters_mut() {
+        param.zero_grad_();
+    }
+    autograd::clear_graph();
+}
+
+/// Batch open: absorb the boundary digest and record the readable triple, once per batch.
+///
+/// Both happen HERE, at the open, and the digest commits the `global_step` in force — which the
+/// triple does not carry. Two runs with identical boundary LISTS and a different step alignment
+/// therefore differ in the digest and agree in the list, which is why 03-10's composite hash
+/// reports both.
+fn open_batch(ctx: &mut TuneCtx<'_>, epoch: u32, batch_index: u32, ordinals: &[u64]) {
+    let batch_start_ordinal = ordinals.first().copied().unwrap_or(0);
+    let batch_len = u32::try_from(ordinals.len()).unwrap_or(u32::MAX);
+    absorb_boundary_digest(
+        &mut ctx.boundary_hasher,
+        epoch,
+        batch_index,
+        ctx.global_step,
+        batch_start_ordinal,
+        batch_len,
+    );
+    ctx.boundaries.push((epoch, batch_start_ordinal, batch_len));
+}
+
+fn run_batch(
+    ctx: &mut TuneCtx<'_>,
+    epoch: u32,
+    batch_index: u32,
+    ordinals: &[u64],
+) -> Result<(), SetFitTrainError> {
+    // (a) set the SCHEDULED learning rate for the step about to be taken.
+    let applied_lr = ctx.scheduler.get_lr();
+    ctx.scheduler.apply(&mut ctx.adamw);
+
+    // (b) clear gradients, then the tape.
+    clear_grads_then_tape(ctx);
+
+    let observation = observe_step_top(ctx, applied_lr);
+
+    // batch open — the boundary digest is absorbed HERE, once per batch.
+    open_batch(ctx, epoch, batch_index, ordinals);
+
+    let inputs = pull_batch_pairs(ctx, epoch, batch_index, ordinals)?;
 
     // (c) branch A, (d) branch B — distinct forward ordinals, so the two siamese branches
     // draw INDEPENDENT dropout masks (D-15 as amended).
@@ -1090,56 +1128,10 @@ pub(crate) fn validate_evidence(
         });
     }
 
-    // (4) Per-parameter predicates. The worst offender is reported by the SMALLEST margin
-    // relative to its own class epsilon, so the blame lands on the parameter that is furthest
-    // from passing rather than on whichever name sorts first.
-    let mut worst: Option<(f64, FailedParameter)> = None;
-    for row in &gated {
-        let entry = thresholds.of(row.class);
-        let Some(eps) = entry.eps else {
-            // Unreachable while `gated` and `eps.is_some()` agree, which thresholds.rs
-            // asserts. Fail closed rather than skip: a gated class without a threshold must
-            // never be silently waved through.
-            //
-            // `ungated_count` is the rows that are NOT gated, not the row total: `gated` is
-            // non-empty on this path, so reporting `rows.len()` would render the message
-            // "all N of the N trainable parameters are ungated", which is false and points a
-            // diagnosis at the wrong mechanism.
-            return Err(SetFitTrainError::NoTestifyingParameters {
-                trainable_count,
-                ungated_count: evidence.rows.len().saturating_sub(gated.len()),
-            });
-        };
+    // (4) Per-parameter predicates.
+    let worst = worst_failing_gated_parameter(&gated, thresholds, trainable_count, &evidence.rows)?;
 
-        // Every measured number the verdict rests on has to be finite, not only the gradient
-        // norms. `relative_delta` is the value COMPARED against the epsilon, and `+inf > eps`
-        // is TRUE — so a parameter that diverged to infinity while its recorded gradient
-        // norms stayed finite would have passed the SetFit-identity gate outright. (The NaN
-        // side already fails closed, because `moved` is `delta_norm > 0.0` and every NaN
-        // comparison is false; the infinity side did not.)
-        let finite = row.grad_norm_max.is_finite()
-            && row.grad_norm_mean.is_finite()
-            && row.init_norm.is_finite()
-            && row.delta_norm.is_finite()
-            && row.relative_delta.is_finite();
-        let passes = finite && row.moved && row.relative_delta > eps;
-        if passes {
-            continue;
-        }
-        let margin = if eps > 0.0 { row.relative_delta / eps } else { f64::INFINITY };
-        let candidate = FailedParameter {
-            name: row.name.clone(),
-            class: row.class.tag().to_string(),
-            relative_delta: row.relative_delta,
-            eps,
-        };
-        match &worst {
-            Some((best_margin, _)) if *best_margin <= margin => {}
-            _ => worst = Some((margin, candidate)),
-        }
-    }
-
-    if let Some((_, offender)) = worst {
+    if let Some(offender) = worst {
         return Err(SetFitTrainError::EvidenceRejected {
             summary: Box::new(summary),
             table: Box::new(evidence.clone()),
@@ -1166,6 +1158,91 @@ pub(crate) fn validate_evidence(
 
     summary.verdict = Verdict::Pass;
     Ok(PassedEvidence { table: evidence.clone(), summary })
+}
+
+/// Rung (4) of the evidence gate: the per-parameter predicates over the GATED rows.
+///
+/// Returns `Ok(None)` when every gated parameter passes, `Ok(Some(worst))` when at least one
+/// fails, and `Err` only for the structural refusal a gated class with no epsilon represents.
+///
+/// # The worst offender is the SMALLEST margin, not the first name
+///
+/// Blame is assigned by `relative_delta / eps`, so it lands on the parameter that is furthest
+/// from passing rather than on whichever name happens to sort first. `<=` in the comparison
+/// keeps the FIRST parameter at a tied margin, which makes the choice deterministic over a
+/// `HashMap`'s iteration order.
+///
+/// Extracted in plan 03-10 T3 to clear the cyclomatic ceiling of 10 (`validate_evidence`
+/// measured 20). Behaviour-preserving: the loop, the finiteness conjunction and the tie rule
+/// are moved verbatim.
+fn worst_failing_gated_parameter(
+    gated: &[&EvidenceRow],
+    thresholds: &Thresholds,
+    trainable_count: usize,
+    all_rows: &BTreeMap<String, EvidenceRow>,
+) -> Result<Option<FailedParameter>, SetFitTrainError> {
+    let mut worst: Option<(f64, FailedParameter)> = None;
+    for row in gated {
+        let entry = thresholds.of(row.class);
+        let Some(eps) = entry.eps else {
+            // Unreachable while `gated` and `eps.is_some()` agree, which thresholds.rs
+            // asserts. Fail closed rather than skip: a gated class without a threshold must
+            // never be silently waved through.
+            //
+            // `ungated_count` is the rows that are NOT gated, not the row total: `gated` is
+            // non-empty on this path, so reporting `rows.len()` would render the message
+            // "all N of the N trainable parameters are ungated", which is false and points a
+            // diagnosis at the wrong mechanism.
+            return Err(SetFitTrainError::NoTestifyingParameters {
+                trainable_count,
+                ungated_count: all_rows.len().saturating_sub(gated.len()),
+            });
+        };
+
+        let Some(failure) = gated_row_failure(row, eps) else { continue };
+        match &worst {
+            Some((best_margin, _)) if *best_margin <= failure.0 => {}
+            _ => worst = Some(failure),
+        }
+    }
+    Ok(worst.map(|(_, offender)| offender))
+}
+
+/// One gated row's verdict: `None` when it passes, `Some((margin, failure))` when it does not.
+///
+/// # Every measured number the verdict rests on must be FINITE, not only the gradient norms
+///
+/// `relative_delta` is the value COMPARED against the epsilon, and `+inf > eps` is TRUE — so a
+/// parameter that diverged to infinity while its recorded gradient norms stayed finite would
+/// have passed the SetFit-identity gate outright. (The NaN side already failed closed, because
+/// `moved` is `delta_norm > 0.0` and every NaN comparison is false; the infinity side did not.)
+///
+/// The margin is `relative_delta / eps`, or `+inf` at `eps == 0.0` so a zero-epsilon class
+/// never wins the "worst offender" comparison by dividing by zero.
+///
+/// Extracted from the loop in plan 03-10 T3. The first split moved `validate_evidence` from
+/// cyclomatic 20 to 10 but left the extracted helper at 12 — the complexity had MOVED rather
+/// than dissolved, which is the failure mode of decomposing by cut-and-paste. This second cut
+/// takes the per-row predicate out of the accumulation, which is what actually reduces both.
+fn gated_row_failure(row: &EvidenceRow, eps: f64) -> Option<(f64, FailedParameter)> {
+    let finite = row.grad_norm_max.is_finite()
+        && row.grad_norm_mean.is_finite()
+        && row.init_norm.is_finite()
+        && row.delta_norm.is_finite()
+        && row.relative_delta.is_finite();
+    if finite && row.moved && row.relative_delta > eps {
+        return None;
+    }
+    let margin = if eps > 0.0 { row.relative_delta / eps } else { f64::INFINITY };
+    Some((
+        margin,
+        FailedParameter {
+            name: row.name.clone(),
+            class: row.class.tag().to_string(),
+            relative_delta: row.relative_delta,
+            eps,
+        },
+    ))
 }
 
 #[cfg(test)]

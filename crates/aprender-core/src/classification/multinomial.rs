@@ -724,21 +724,14 @@ fn validate_label_set(n_classes: usize, ordered_labels: &[String]) -> Result<(),
     Ok(())
 }
 
-/// Validates every `fit` input **before** any solve is attempted.
+/// The SHAPE rung: non-empty, row counts agreeing, non-zero and uniform width.
 ///
-/// This is the single gate: no partially validated state can reach the optimizer,
-/// because the optimizer is not called until this returns `Ok`.
-fn validate_fit_inputs(
-    n_classes: usize,
+/// Returns the feature dimension every row was required to have, so the caller cannot
+/// re-derive it from `features[0]` and disagree with what was checked.
+fn validate_fit_shape(
     features: &[Vec<f32>],
     class_indices: &[usize],
-    ordered_labels: &[String],
-    regularization: Regularization,
-) -> Result<ValidatedFit, HeadInputError> {
-    // --- label set ------------------------------------------------------
-    validate_label_set(n_classes, ordered_labels)?;
-
-    // --- shape ----------------------------------------------------------
+) -> Result<usize, HeadInputError> {
     if features.is_empty() {
         return Err(HeadInputError::EmptyDataset);
     }
@@ -761,8 +754,11 @@ fn validate_fit_inputs(
             });
         }
     }
+    Ok(n_features)
+}
 
-    // --- feature values -------------------------------------------------
+/// The VALUE rung: every feature finite, NaN reported as NaN rather than as an infinity.
+fn validate_fit_feature_values(features: &[Vec<f32>]) -> Result<(), HeadInputError> {
     for (row, values) in features.iter().enumerate() {
         for (col, &v) in values.iter().enumerate() {
             if v.is_nan() {
@@ -773,8 +769,14 @@ fn validate_fit_inputs(
             }
         }
     }
+    Ok(())
+}
 
-    // --- class indices --------------------------------------------------
+/// The LABEL-INDEX rung: in range, and every declared class actually represented.
+fn validate_fit_class_indices(
+    n_classes: usize,
+    class_indices: &[usize],
+) -> Result<(), HeadInputError> {
     let mut represented = vec![false; n_classes];
     for (row, &index) in class_indices.iter().enumerate() {
         if index >= n_classes {
@@ -791,10 +793,14 @@ fn validate_fit_inputs(
             return Err(HeadInputError::UnrepresentedClass { class });
         }
     }
+    Ok(())
+}
 
-    // --- regularization -------------------------------------------------
-    // Finiteness is checked FIRST in both arms: `NaN < 0.0` and `NaN <= 0.0` are both
-    // false, so a NaN would otherwise slip past the sign checks.
+/// The REGULARIZATION rung.
+///
+/// Finiteness is checked FIRST in both arms: `NaN < 0.0` and `NaN <= 0.0` are both false,
+/// so a NaN would otherwise slip past the sign checks and be reported as a valid penalty.
+fn validate_fit_regularization(regularization: Regularization) -> Result<(), HeadInputError> {
     match regularization {
         Regularization::Lambda(lambda) => {
             if !lambda.is_finite() {
@@ -813,6 +819,35 @@ fn validate_fit_inputs(
             }
         }
     }
+    Ok(())
+}
+
+/// Validates every `fit` input **before** any solve is attempted.
+///
+/// This is the single gate: no partially validated state can reach the optimizer,
+/// because the optimizer is not called until this returns `Ok`.
+///
+/// # The rungs are separate functions, and the ORDER here is the contract
+///
+/// Split in plan 03-10 T3 to clear the project's cyclomatic ceiling of 10 (measured 20
+/// before, by `pmat analyze complexity`). The extraction is deliberately order-preserving
+/// and nothing else: the FALSIFY case table pins WHICH error each of the sixteen invalid
+/// inputs produces, and several inputs are invalid on more than one rung — a ragged row of
+/// NaNs is both `RaggedRow` and `NanFeature` — so reordering these calls would change the
+/// reported error for an input that is still, correctly, rejected. That is the failure a
+/// refactor of a validation ladder makes, so the sequence is stated once, here.
+fn validate_fit_inputs(
+    n_classes: usize,
+    features: &[Vec<f32>],
+    class_indices: &[usize],
+    ordered_labels: &[String],
+    regularization: Regularization,
+) -> Result<ValidatedFit, HeadInputError> {
+    validate_label_set(n_classes, ordered_labels)?;
+    let n_features = validate_fit_shape(features, class_indices)?;
+    validate_fit_feature_values(features)?;
+    validate_fit_class_indices(n_classes, class_indices)?;
+    validate_fit_regularization(regularization)?;
 
     Ok(ValidatedFit {
         n_features,
