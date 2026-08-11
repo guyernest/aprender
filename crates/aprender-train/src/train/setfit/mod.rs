@@ -45,6 +45,8 @@ pub mod evidence;
 /// `pub(crate)`: `HeadDataset` is an intermediate, and a public one would be a second way to
 /// reach the head's fitting input — one that does not travel through the typestate.
 pub(crate) mod head_input;
+/// The selection lock and the canonical-test token it mints (D-14, 03-09).
+pub mod lock;
 pub mod reduce;
 pub mod thresholds;
 pub mod tune;

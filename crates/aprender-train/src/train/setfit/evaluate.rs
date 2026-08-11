@@ -198,6 +198,37 @@ impl From<ValidationEvaluation> for ValidationEvaluationWire {
     }
 }
 
+/// Build an evaluation directly, from parts — TEST ONLY.
+///
+/// `#[cfg(test)]` and `pub(super)`, and nothing weaker. The selection lock's rule,
+/// candidate-consistency and hash-binding tests need evaluations at CONTROLLED values,
+/// fingerprints and metric kinds, and producing those from real runs is impossible by
+/// construction — the evaluator computes the value, which is the entire point of this module.
+/// A shipped constructor of this shape would be the caller-asserted number the plan removed, so
+/// it is compiled only for test targets, exactly as `test_fixtures` is.
+///
+/// `evaluate_source_exposes_no_public_api_taking_a_float_parameter` asserts this door exists,
+/// is the only float-taking one, and is gated — so the guard NAMES the exception rather than
+/// silently failing to match it.
+#[cfg(test)]
+pub(super) fn evaluation_for_tests(
+    metric_kind: ValidationMetricKind,
+    value: f64,
+    artifact_hash: &str,
+    validation_split_fingerprint: &str,
+    dataset_fingerprint: &str,
+    n_rows: usize,
+) -> ValidationEvaluation {
+    ValidationEvaluation {
+        metric_kind,
+        value,
+        artifact_hash: artifact_hash.to_string(),
+        validation_split_fingerprint: validation_split_fingerprint.to_string(),
+        dataset_fingerprint: dataset_fingerprint.to_string(),
+        n_rows,
+    }
+}
+
 /// Compute `metric` on the canonical validation split, with the VERIFIED model.
 ///
 /// # The two arguments are both load-bearing

@@ -295,6 +295,21 @@ fn evaluate_source_exposes_no_public_api_taking_a_float_parameter() {
     }
     assert!(checked >= 9, "the scan must have found the public surface, saw {checked}");
     assert!(!EVALUATE_SOURCE.contains("metric_value:"));
+
+    // The ONE float-taking door in this module is the lock tests' fixture constructor. The guard
+    // NAMES it and asserts it is `#[cfg(test)]`-gated and not `pub`, rather than passing because
+    // `pub(super) fn` happens not to match the patterns above — an exception a guard does not
+    // mention is an exception nobody re-checks.
+    assert_eq!(
+        EVALUATE_SOURCE.matches("fn evaluation_for_tests(").count(),
+        1,
+        "exactly one test-only evaluation constructor",
+    );
+    assert!(
+        EVALUATE_SOURCE.contains("#[cfg(test)]\npub(super) fn evaluation_for_tests("),
+        "the test-only constructor must carry `#[cfg(test)]` immediately above it, so a shipped \
+         build cannot contain a door that mints an evaluation from a caller's number",
+    );
 }
 
 /// `ValidationEvaluation` has no public constructor.
