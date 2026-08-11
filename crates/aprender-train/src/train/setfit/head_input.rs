@@ -197,10 +197,7 @@ pub(crate) fn head_dataset(
     selection: &Selection,
     batch_size: u32,
 ) -> Result<HeadDataset, SetFitTrainError> {
-    let batch = batch_size as usize;
-    if batch == 0 {
-        return Err(SetFitTrainError::HeadEncodeBatchSizeZero);
-    }
+    let batch = window_size(batch_size)?;
 
     let ordered_labels = dataset.label_names().to_vec();
     let class_indices = class_indices_of(&ordered_labels, selection)?;
@@ -233,6 +230,21 @@ pub(crate) fn head_dataset(
     // looking at the same value rather than at two copies of it.
     built.witness().require_isolated()?;
     Ok(built)
+}
+
+/// The window size a `u32` knob names, refusing zero BEFORE any `chunks` call.
+///
+/// One function rather than a copy in each caller: `chunks(0)` panics, so this refusal is the
+/// only thing standing between a zero knob and an abort, and a guard that has to be re-typed at
+/// every new encode door is a guard that will eventually be missing from one of them. It stays
+/// at the CALLER rather than inside [`encode_once`] so the refusal keeps its precedence — a
+/// zero window is reported before the selection and label-map work each caller does first.
+fn window_size(batch_size: u32) -> Result<usize, SetFitTrainError> {
+    let batch = batch_size as usize;
+    if batch == 0 {
+        return Err(SetFitTrainError::HeadEncodeBatchSizeZero);
+    }
+    Ok(batch)
 }
 
 /// The encode's outputs and the observations taken while it ran.
@@ -330,11 +342,7 @@ pub(crate) fn encode_eval_rows(
     rows: &[(&str, &str)],
     batch_size: u32,
 ) -> Result<Vec<Vec<f32>>, SetFitTrainError> {
-    let batch = batch_size as usize;
-    if batch == 0 {
-        return Err(SetFitTrainError::HeadEncodeBatchSizeZero);
-    }
-    let encoded = encode_once(encoder, rows, batch)?;
+    let encoded = encode_once(encoder, rows, window_size(batch_size)?)?;
     encoded.witness.require_isolated()?;
     Ok(encoded.embeddings)
 }
@@ -497,8 +505,7 @@ mod tests {
     /// transition whose only inputs are the dataset and the selection — so these tests use a
     /// fresh encoder and skip the tuning loop entirely.
     fn parts() -> (SetFitMiniLm, PreparedDataset<Canonical>, Selection) {
-        let mut ledger = AccessLedger::new();
-        let dataset = fx::synthetic_dataset(&mut ledger);
+        let dataset = fx::fixture_dataset();
         let selection = fx::fixture_selection(fx::FIXTURE_SEED, SHOTS);
         (fx::slice_encoder(fx::FIXTURE_SEED), dataset, selection)
     }

@@ -52,9 +52,11 @@ const LOCK_SCHEMA_VERSION: u32 = 1;
 /// # The artifact hash is READ OUT of the evaluation, never supplied beside it
 ///
 /// A candidate whose `artifact_hash` field could disagree with the artifact its metric was
-/// computed on would be a lie with two halves that individually look fine. The evaluation
-/// already commits the hash it read off the verified run, so this type takes the evaluation and
-/// copies the hash out of it: the two cannot disagree because there is only one of them.
+/// computed on would be a lie with two halves that individually look fine. So there is no such
+/// field: the evaluation already commits the hash it read off the verified run, and
+/// [`Self::artifact_hash`] READS THAT ONE. The two cannot disagree because there is literally
+/// only one of them — a copy taken at construction would have been a second value that a later
+/// edit could move independently, which is the shape this doc claims not to have.
 ///
 /// `config_hash` IS caller-supplied, and deliberately so — it is a LABEL identifying which
 /// configuration produced the candidate, not the identity that gates access. A sweep does not
@@ -63,7 +65,6 @@ const LOCK_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectionCandidate {
     config_hash: String,
-    artifact_hash: String,
     evaluation: ValidationEvaluation,
 }
 
@@ -71,11 +72,7 @@ impl SelectionCandidate {
     /// Build a candidate from its validation evaluation.
     #[must_use]
     pub fn from_evaluation(config_hash: &str, evaluation: ValidationEvaluation) -> Self {
-        Self {
-            config_hash: config_hash.to_string(),
-            artifact_hash: evaluation.artifact_hash().to_string(),
-            evaluation,
-        }
+        Self { config_hash: config_hash.to_string(), evaluation }
     }
 
     /// The label identifying the configuration that produced this candidate.
@@ -85,9 +82,12 @@ impl SelectionCandidate {
     }
 
     /// The artifact this candidate's metric was computed with.
+    ///
+    /// Delegates to the evaluation rather than to a copy of it, so this accessor cannot drift
+    /// from the hash the evaluator committed.
     #[must_use]
     pub fn artifact_hash(&self) -> &str {
-        &self.artifact_hash
+        self.evaluation.artifact_hash()
     }
 
     /// The candidate's canonical-validation evaluation.
@@ -126,14 +126,21 @@ impl SelectionRule {
     fn apply(self, candidates: &[SelectionCandidate]) -> usize {
         match self {
             Self::MaxMetricLowestIndexTieBreak => {
+                // The incumbent's VALUE is carried rather than re-read by index each iteration.
+                // The re-read's `NEG_INFINITY` fallback fired once PER ITERATION and its failure
+                // mode was inverted: had it ever been taken, every challenger would have won.
+                // Seeding once moves the same unreachable arm to a place where taking it is
+                // inert — an empty list skips the loop entirely and index 0 is returned, which
+                // is the index `from_candidates` has already refused to produce.
                 let mut best = 0_usize;
+                let mut best_value =
+                    candidates.first().map_or(f64::NEG_INFINITY, |c| c.evaluation().value());
                 for (index, candidate) in candidates.iter().enumerate().skip(1) {
                     let challenger = candidate.evaluation().value();
-                    let incumbent =
-                        candidates.get(best).map_or(f64::NEG_INFINITY, |c| c.evaluation().value());
                     // STRICTLY greater, so an exact tie leaves the earlier index in place.
-                    if challenger.total_cmp(&incumbent) == core::cmp::Ordering::Greater {
+                    if challenger.total_cmp(&best_value) == core::cmp::Ordering::Greater {
                         best = index;
+                        best_value = challenger;
                     }
                 }
                 best
@@ -187,31 +194,37 @@ impl SelectionLock {
         selection_semantic_hash: &str,
         ledger_hash: &str,
     ) -> Result<Self, LockError> {
-        let reference = candidates.first().ok_or(LockError::NoCandidates)?.evaluation().clone();
+        // Only the three facts the comparison and the record actually need are taken, rather
+        // than cloning the whole reference evaluation: the clone existed to release the borrow
+        // before `candidates` moves into `Self`, and then had two of its own fields re-allocated
+        // at the struct literal below. These two Strings are moved into the record instead.
+        let reference = candidates.first().ok_or(LockError::NoCandidates)?.evaluation();
+        let reference_kind = reference.metric_kind();
+        let reference_split_fingerprint = reference.validation_split_fingerprint().to_string();
+        let reference_dataset_fingerprint = reference.dataset_fingerprint().to_string();
 
         // (1) Every candidate must be COMPARABLE with the first. Each check names the offending
         //     index, because "some candidate disagreed" is not investigable.
         for (index, candidate) in candidates.iter().enumerate().skip(1) {
             let evaluation = candidate.evaluation();
-            if evaluation.metric_kind() != reference.metric_kind() {
+            if evaluation.metric_kind() != reference_kind {
                 return Err(LockError::MetricKindMismatch {
                     index,
-                    expected: reference.metric_kind(),
+                    expected: reference_kind,
                     observed: evaluation.metric_kind(),
                 });
             }
-            if evaluation.validation_split_fingerprint() != reference.validation_split_fingerprint()
-            {
+            if evaluation.validation_split_fingerprint() != reference_split_fingerprint {
                 return Err(LockError::ValidationSplitFingerprintMismatch {
                     index,
-                    expected: reference.validation_split_fingerprint().to_string(),
+                    expected: reference_split_fingerprint,
                     observed: evaluation.validation_split_fingerprint().to_string(),
                 });
             }
-            if evaluation.dataset_fingerprint() != reference.dataset_fingerprint() {
+            if evaluation.dataset_fingerprint() != reference_dataset_fingerprint {
                 return Err(LockError::DatasetFingerprintMismatch {
                     index,
-                    expected: reference.dataset_fingerprint().to_string(),
+                    expected: reference_dataset_fingerprint,
                     observed: evaluation.dataset_fingerprint().to_string(),
                 });
             }
@@ -240,8 +253,8 @@ impl SelectionLock {
             rule,
             candidates,
             chosen_index,
-            dataset_fingerprint: reference.dataset_fingerprint().to_string(),
-            validation_split_fingerprint: reference.validation_split_fingerprint().to_string(),
+            dataset_fingerprint: reference_dataset_fingerprint,
+            validation_split_fingerprint: reference_split_fingerprint,
             selection_semantic_hash: selection_semantic_hash.to_string(),
             ledger_hash: ledger_hash.to_string(),
             // Filled immediately below, from the record that now exists. Hashing a partially
@@ -343,7 +356,7 @@ impl SelectionLock {
                 .iter()
                 .map(|candidate| SelectionCandidateWire {
                     config_hash: candidate.config_hash.clone(),
-                    artifact_hash: candidate.artifact_hash.clone(),
+                    artifact_hash: candidate.artifact_hash().to_string(),
                     evaluation: ValidationEvaluationWire::from(candidate.evaluation.clone()),
                 })
                 .collect(),

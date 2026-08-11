@@ -13,7 +13,11 @@
 
 use super::super::test_fixtures as fx;
 use super::*;
-use crate::train::setfit::verify::SerdeJsonCodec;
+
+// The two source scanners the non-existence assertions read with. Shared with `lock_tests.rs`
+// through the fixture module rather than restated here — see `fx::source_block_after` for why
+// one copy is the point.
+use fx::{source_block_after as block_after, source_signature_after as signature_after};
 
 use aprender_contrastive_data::ledger::AccessLedger;
 use aprender_contrastive_data::prepared::CanonicalDeclarations;
@@ -28,9 +32,7 @@ const EVALUATE_SOURCE: &str = include_str!("evaluate.rs");
 
 /// A complete calibrated pipeline through the shipped codec.
 fn verified_run() -> SetFitRun<ArtifactReloadedAndVerified> {
-    fx::head_fitted_run(fx::calibrated_variant())
-        .verify_artifact(&SerdeJsonCodec::new())
-        .expect("a faithful codec must complete the round trip")
+    fx::verified_run(fx::calibrated_variant())
 }
 
 /// The fixture dataset, rebuilt INDEPENDENTLY of the run's copy.
@@ -39,8 +41,7 @@ fn verified_run() -> SetFitRun<ArtifactReloadedAndVerified> {
 /// evaluator's agreement check pass by identity, and the property being relied on is that it
 /// passes by FINGERPRINT.
 fn fixture_dataset() -> PreparedDataset<Canonical> {
-    let mut ledger = AccessLedger::new();
-    fx::synthetic_dataset(&mut ledger)
+    fx::fixture_dataset()
 }
 
 /// The same corpus with ONE validation row's bytes changed.
@@ -75,24 +76,6 @@ fn dataset_with_altered_validation() -> PreparedDataset<Canonical> {
         &mut ledger,
     )
     .expect("altering one validation row must still yield a valid canonical dataset")
-}
-
-/// The text from `header` up to the first line that begins a new top-level item.
-fn block_after(src: &str, header: &str) -> String {
-    let start = src.find(header).unwrap_or_else(|| panic!("`{header}` must appear in evaluate.rs"));
-    let rest = &src[start..];
-    let end = rest
-        .find("\n}")
-        .unwrap_or_else(|| panic!("`{header}` must open a block that closes at column zero"));
-    rest[..end].to_string()
-}
-
-/// The signature text of `header`, up to the opening brace of its body.
-fn signature_after(src: &str, header: &str) -> String {
-    let start = src.find(header).unwrap_or_else(|| panic!("`{header}` must appear in evaluate.rs"));
-    let rest = &src[start..];
-    let end = rest.find(" {").unwrap_or_else(|| panic!("`{header}` must be followed by a body"));
-    rest[..end].to_string()
 }
 
 // ===========================================================================================

@@ -50,7 +50,8 @@ use aprender_contrastive_data::select::{FewShotSelector, Selection, SelectionCon
 use aprender_contrastive_data::split::SplitDeclaration;
 
 use super::config::{SetFitTrainConfig, SetFitTrainRequest};
-use super::{HeadFitted, Prepared, SetFitRun};
+use super::verify::SerdeJsonCodec;
+use super::{ArtifactReloadedAndVerified, HeadFitted, Prepared, SetFitRun};
 
 /// The seed `aprender-core`'s own slice tests build with. Reused so a divergence between
 /// this crate's fixture and that one is a divergence in the trainer, not in the seed.
@@ -350,6 +351,35 @@ pub(crate) fn head_fitted_run(variant: CalibrationVariant) -> SetFitRun<HeadFitt
         .expect("the head must fit on the fixture's 24 encode-once rows")
 }
 
+/// A complete calibrated pipeline carried one step further, through the shipped codec.
+///
+/// Here for the same reason as [`head_fitted_run`] directly above, and recorded because the
+/// three-copy state that doc describes had reappeared one stage later: `verify_tests.rs`,
+/// `evaluate_tests.rs` and `lock_tests.rs` each spelled this out identically, down to the
+/// `expect` string. The codec choice is the part that must not drift — a test that reloads
+/// through a DIFFERENT codec than its neighbours is comparing two things nobody declared were
+/// the same.
+///
+/// # Panics
+///
+/// If the round trip fails, which is a fixture defect rather than a test failure: the shipped
+/// codec is faithful by construction, and `EchoCodec` is the door for the negative case.
+pub(crate) fn verified_run(variant: CalibrationVariant) -> SetFitRun<ArtifactReloadedAndVerified> {
+    head_fitted_run(variant)
+        .verify_artifact(&SerdeJsonCodec::new())
+        .expect("a faithful codec must complete the round trip")
+}
+
+/// The fixture dataset, rebuilt INDEPENDENTLY of any run's copy.
+///
+/// Deliberately not `run.dataset()`: passing a run's own dataset back into an evaluator would
+/// make its agreement check pass by IDENTITY, and the property being relied on is that it
+/// passes by FINGERPRINT.
+pub(crate) fn fixture_dataset() -> PreparedDataset<Canonical> {
+    let mut ledger = AccessLedger::new();
+    synthetic_dataset(&mut ledger)
+}
+
 /// A prepared run with an explicit freeze policy.
 ///
 /// The all-frozen negative needs a run whose trainable set is EMPTY, and `config_for` hard-codes
@@ -386,6 +416,48 @@ pub(crate) fn prepared_run_with_freeze(
     })
     .expect("the fixture configuration satisfies the twelve-knob table");
     SetFitRun::prepare(encoder, dataset, selection, config).expect("the fixture run must prepare")
+}
+
+/// The text from `header` up to the first line that closes a block at column zero.
+///
+/// # Why a source scan lives in the fixture module
+///
+/// Several phase-3 modules assert what does NOT exist — no public constructor, no float
+/// parameter, no removal API — and a property of that shape cannot be witnessed by calling
+/// something. `evaluate_tests.rs` and `lock_tests.rs` each spelled this scanner out, character
+/// for character, including the sibling below. Two copies of a scanner is two places for "what
+/// counts as the end of a block" to drift apart, in guards whose entire value is that they mean
+/// the same thing in every module that runs them.
+///
+/// # Panics
+///
+/// If `header` does not appear, or opens no block closing at column zero. Both are guard
+/// defects rather than test failures: a scan that silently matched nothing would be green for
+/// a module that had deleted the very shape the guard describes.
+pub(crate) fn source_block_after(src: &str, header: &str) -> String {
+    let start =
+        src.find(header).unwrap_or_else(|| panic!("`{header}` must appear in the scanned source"));
+    let rest = &src[start..];
+    let end = rest
+        .find("\n}")
+        .unwrap_or_else(|| panic!("`{header}` must open a block that closes at column zero"));
+    rest[..end].to_string()
+}
+
+/// The signature text of `header`, up to the opening brace of its body.
+///
+/// Reads the WHOLE signature rather than the header's line, so an assertion about a parameter
+/// survives a signature rustfmt has wrapped across several lines.
+///
+/// # Panics
+///
+/// If `header` does not appear, or is not followed by a body — see [`source_block_after`].
+pub(crate) fn source_signature_after(src: &str, header: &str) -> String {
+    let start =
+        src.find(header).unwrap_or_else(|| panic!("`{header}` must appear in the scanned source"));
+    let rest = &src[start..];
+    let end = rest.find(" {").unwrap_or_else(|| panic!("`{header}` must be followed by a body"));
+    rest[..end].to_string()
 }
 
 /// The selection alone, for tests that do not need an encoder.
@@ -427,8 +499,7 @@ mod tests {
 
     #[test]
     fn fixture_corpus_declares_three_classes_and_sixteen_rows_each() {
-        let mut ledger = AccessLedger::new();
-        let dataset = synthetic_dataset(&mut ledger);
+        let dataset = fixture_dataset();
         assert_eq!(dataset.label_names().len(), CLASSES);
         assert_eq!(dataset.train().rows().len(), CLASSES * TRAIN_PER_CLASS);
         assert_eq!(dataset.train().class_counts(), &[TRAIN_PER_CLASS as u64; CLASSES]);
@@ -438,8 +509,7 @@ mod tests {
     /// silently shrink a class pool.
     #[test]
     fn fixture_every_row_text_is_distinct() {
-        let mut ledger = AccessLedger::new();
-        let dataset = synthetic_dataset(&mut ledger);
+        let dataset = fixture_dataset();
         let mut seen: Vec<&str> = Vec::new();
         for row in dataset.train().rows() {
             assert!(!seen.contains(&row.input.as_str()), "duplicate synthetic text: {}", row.input);
@@ -455,8 +525,7 @@ mod tests {
     /// the corpus stayed inside the slice.
     #[test]
     fn fixture_every_row_encodes_within_the_slice_vocabulary() {
-        let mut ledger = AccessLedger::new();
-        let dataset = synthetic_dataset(&mut ledger);
+        let dataset = fixture_dataset();
         let encoder = slice_encoder(FIXTURE_SEED);
         let texts: Vec<&str> = dataset.train().rows().iter().map(|r| r.input.as_str()).collect();
         let embeddings = encoder

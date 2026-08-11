@@ -66,9 +66,7 @@ fn perturbed_run() -> Result<SetFitRun<HeadFitted>, SetFitTrainError> {
 
 /// A verified run through the shipped codec.
 fn verified_run() -> SetFitRun<ArtifactReloadedAndVerified> {
-    head_fitted_run()
-        .verify_artifact(&SerdeJsonCodec::new())
-        .expect("a faithful codec must complete the round trip")
+    fx::verified_run(fx::calibrated_variant())
 }
 
 // ===========================================================================================

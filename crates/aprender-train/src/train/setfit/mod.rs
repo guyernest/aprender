@@ -1609,7 +1609,6 @@ mod tests {
     // =======================================================================================
 
     use aprender::optim::ConvergenceStatus;
-    use aprender_contrastive_data::ledger::AccessLedger;
 
     use config::HeadRegularization;
 
@@ -1722,8 +1721,7 @@ mod tests {
     /// is budget-independent even when the encoder is not — is asserted below it.
     #[test]
     fn fit_head_pair_budget_does_not_reach_the_head_objective() {
-        let mut ledger = AccessLedger::new();
-        let dataset = fx::synthetic_dataset(&mut ledger);
+        let dataset = fx::fixture_dataset();
         let selection = fx::fixture_selection(fx::FIXTURE_SEED, 8);
         let mut encoder = fx::slice_encoder(fx::FIXTURE_SEED);
 

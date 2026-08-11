@@ -46,7 +46,6 @@
 //! should be reachable from one.
 
 use aprender::classification::{MultinomialLogisticRegression, Regularization};
-use aprender_contrastive_data::ledger::AccessLedger;
 use aprender_contrastive_data::pairs::PairSampler;
 use aprender_contrastive_data::select::Selection;
 
@@ -73,8 +72,7 @@ struct Trusted {
 /// `fit_on_selection` is the body `fit_head` runs. Measuring against it rather than against a
 /// second fit written here is what makes "the trusted path" mean the trusted path.
 fn trusted() -> Trusted {
-    let mut ledger = AccessLedger::new();
-    let dataset = fx::synthetic_dataset(&mut ledger);
+    let dataset = fx::fixture_dataset();
     let selection = fx::fixture_selection(fx::FIXTURE_SEED, 8);
     let mut encoder = fx::slice_encoder(fx::FIXTURE_SEED);
     let variant = fx::CalibrationVariant { budget: SKEW_BUDGET, ..fx::calibrated_variant() };

@@ -12,12 +12,17 @@
 
 use super::super::test_fixtures as fx;
 use super::*;
+
+// The two source scanners the non-existence assertions read with. Shared with
+// `evaluate_tests.rs` through the fixture module rather than restated here — see
+// `fx::source_block_after` for why one copy is the point.
+use fx::{source_block_after as block_after, source_signature_after as signature_after};
+
 use crate::train::setfit::evaluate::{evaluate_validation, evaluation_for_tests};
 use crate::train::setfit::tune::TuningProbes;
 use crate::train::setfit::verify::SerdeJsonCodec;
 use crate::train::setfit::Prepared;
 
-use aprender_contrastive_data::ledger::AccessLedger;
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
 
 /// This module's implementation source, for the non-existence assertions.
@@ -74,9 +79,7 @@ fn lock_of(candidates: Vec<SelectionCandidate>) -> Result<SelectionLock, LockErr
 
 /// A complete calibrated pipeline through the shipped codec.
 fn verified_run() -> SetFitRun<ArtifactReloadedAndVerified> {
-    fx::head_fitted_run(fx::calibrated_variant())
-        .verify_artifact(&SerdeJsonCodec::new())
-        .expect("a faithful codec must complete the round trip")
+    fx::verified_run(fx::calibrated_variant())
 }
 
 /// The SAME configuration, tuned with the intra-batch pull order reversed.
@@ -98,8 +101,7 @@ fn retuned_run() -> SetFitRun<ArtifactReloadedAndVerified> {
 
 /// The fixture dataset, rebuilt independently of any run's copy.
 fn fixture_dataset() -> PreparedDataset<Canonical> {
-    let mut ledger = AccessLedger::new();
-    fx::synthetic_dataset(&mut ledger)
+    fx::fixture_dataset()
 }
 
 /// A lock over the supplied run plus two synthetic competitors that TIE with it.
@@ -136,24 +138,6 @@ fn lock_over(run: &SetFitRun<ArtifactReloadedAndVerified>) -> SelectionLock {
     ];
     run.create_selection_lock(candidates, SelectionRule::MaxMetricLowestIndexTieBreak)
         .expect("the creating run is candidate 0 and every candidate agrees")
-}
-
-/// The text from `header` up to the first line that closes a block at column zero.
-fn block_after(src: &str, header: &str) -> String {
-    let start = src.find(header).unwrap_or_else(|| panic!("`{header}` must appear in lock.rs"));
-    let rest = &src[start..];
-    let end = rest
-        .find("\n}")
-        .unwrap_or_else(|| panic!("`{header}` must open a block that closes at column zero"));
-    rest[..end].to_string()
-}
-
-/// The signature text of `header`, up to the opening brace of its body.
-fn signature_after(src: &str, header: &str) -> String {
-    let start = src.find(header).unwrap_or_else(|| panic!("`{header}` must appear in lock.rs"));
-    let rest = &src[start..];
-    let end = rest.find(" {").unwrap_or_else(|| panic!("`{header}` must be followed by a body"));
-    rest[..end].to_string()
 }
 
 // ===========================================================================================

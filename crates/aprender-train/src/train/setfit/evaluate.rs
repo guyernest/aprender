@@ -257,13 +257,17 @@ pub fn evaluate_validation(
     let observed = dataset.validation_witness();
     let validation_split_fingerprint = observed.fingerprint_hex();
     let dataset_fingerprint = observed.dataset_fingerprint_hex();
-    if expected.fingerprint_hex() != validation_split_fingerprint
-        || expected.dataset_fingerprint_hex() != dataset_fingerprint
+    // Each `*_hex()` allocates, so bind both sides once and compare the bindings — mirroring
+    // what is already done for `observed`.
+    let expected_validation_split_fingerprint = expected.fingerprint_hex();
+    let expected_dataset_fingerprint = expected.dataset_fingerprint_hex();
+    if expected_validation_split_fingerprint != validation_split_fingerprint
+        || expected_dataset_fingerprint != dataset_fingerprint
     {
         return Err(SetFitTrainError::ValidationDatasetMismatch {
-            expected_validation_split_fingerprint: expected.fingerprint_hex(),
+            expected_validation_split_fingerprint,
             observed_validation_split_fingerprint: validation_split_fingerprint,
-            expected_dataset_fingerprint: expected.dataset_fingerprint_hex(),
+            expected_dataset_fingerprint,
             observed_dataset_fingerprint: dataset_fingerprint,
         });
     }
@@ -313,12 +317,9 @@ pub fn evaluate_validation(
 
 /// Fraction of rows whose prediction equals the recorded class.
 ///
-/// The indicator vector is summed through [`reduce::sum_in_index_order`] rather than counted in
-/// a `usize`, so the ONE reduction door D-13 names is the door this metric uses too.
-///
-/// # Panics
-///
-/// Never: the caller has already refused an empty row set, so the divisor is positive.
+/// The indicator vector is averaged through [`reduce::mean_in_index_order`] rather than counted
+/// in a `usize`, so the ONE reduction door D-13 names is the door this metric uses too — and the
+/// empty-slice convention lives in that door alone rather than being restated here.
 fn accuracy(truth: &[usize], predicted: &[usize]) -> f64 {
     debug_assert_eq!(truth.len(), predicted.len(), "one prediction per row");
     let indicators: Vec<f32> = truth
@@ -326,12 +327,7 @@ fn accuracy(truth: &[usize], predicted: &[usize]) -> f64 {
         .zip(predicted.iter())
         .map(|(actual, guess)| if actual == guess { 1.0 } else { 0.0 })
         .collect();
-    if indicators.is_empty() {
-        return 0.0;
-    }
-    #[allow(clippy::cast_precision_loss)]
-    let count = indicators.len() as f64;
-    reduce::sum_in_index_order(&indicators) / count
+    reduce::mean_in_index_order(&indicators)
 }
 
 /// Unweighted mean of the per-class F1 over the DECLARED label map.
@@ -352,41 +348,48 @@ fn accuracy(truth: &[usize], predicted: &[usize]) -> f64 {
 /// `validation_evaluation_provenance` precisely so a later change is visible in a `pv diff`.
 fn macro_f1(truth: &[usize], predicted: &[usize], classes: usize) -> f64 {
     debug_assert_eq!(truth.len(), predicted.len(), "one prediction per row");
-    let mut true_positive = vec![0_u64; classes];
-    let mut false_positive = vec![0_u64; classes];
-    let mut false_negative = vec![0_u64; classes];
+    // One vector of one struct rather than three parallel vectors: "the three counts have the
+    // same length" becomes structural instead of a maintained invariant, and the averaging pass
+    // below reads each class's counts together rather than re-indexing three times.
+    let mut counts = vec![ClassCounts::default(); classes];
     for (&actual, &guess) in truth.iter().zip(predicted.iter()) {
         // Bounds were checked by the caller; a `get_mut` here would need a failure arm that
         // the type of this function cannot express.
         if actual == guess {
-            if let Some(slot) = true_positive.get_mut(actual) {
-                *slot += 1;
+            if let Some(slot) = counts.get_mut(actual) {
+                slot.true_positive += 1;
             }
         } else {
-            if let Some(slot) = false_positive.get_mut(guess) {
-                *slot += 1;
+            if let Some(slot) = counts.get_mut(guess) {
+                slot.false_positive += 1;
             }
-            if let Some(slot) = false_negative.get_mut(actual) {
-                *slot += 1;
+            if let Some(slot) = counts.get_mut(actual) {
+                slot.false_negative += 1;
             }
         }
     }
 
-    let per_class: Vec<f64> = (0..classes)
-        .map(|class| {
-            let hits = true_positive.get(class).copied().unwrap_or(0);
-            let over = false_positive.get(class).copied().unwrap_or(0);
-            let under = false_negative.get(class).copied().unwrap_or(0);
-            let denominator = 2 * hits + over + under;
+    let per_class: Vec<f64> = counts
+        .iter()
+        .map(|count| {
+            let denominator = 2 * count.true_positive + count.false_positive + count.false_negative;
             if denominator == 0 {
                 return 0.0;
             }
             #[allow(clippy::cast_precision_loss)]
-            let ratio = (2 * hits) as f64 / denominator as f64;
+            let ratio = (2 * count.true_positive) as f64 / denominator as f64;
             ratio
         })
         .collect();
     reduce::mean_f64_in_index_order(&per_class)
+}
+
+/// The three per-class tallies macro-F1 needs, kept together so they cannot fall out of step.
+#[derive(Clone, Copy, Default)]
+struct ClassCounts {
+    true_positive: u64,
+    false_positive: u64,
+    false_negative: u64,
 }
 
 #[cfg(test)]
