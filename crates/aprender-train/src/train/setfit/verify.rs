@@ -355,15 +355,25 @@ fn compare_probes(
         SetFitTrainError::ReloadDiverged { field, row, index, expected, observed, tolerance: bound }
     };
 
-    if before.ids.len() != after.ids.len() {
-        return Err(diverged(
-            "probe_row_count",
-            0,
-            0,
-            before.ids.len().to_string(),
-            after.ids.len().to_string(),
-            0.0,
-        ));
+    // Every one of the four lists, not just the ids. The three comparisons below walk
+    // their pairs with `zip`, which STOPS at the shorter side — so a probe whose
+    // embeddings, probabilities or labels ever desynchronised from its ids would have
+    // the surplus rows silently skipped and the verification would pass on a partial
+    // comparison. They agree by construction today (`into_probe_parts` moves both halves
+    // out of one object, and the head answers once per row); this is what keeps "today"
+    // from being the whole argument.
+    for (what, expected, observed) in [
+        ("probe_row_count", before.ids.len(), after.ids.len()),
+        ("probe_row_count", before.ids.len(), before.embeddings.len()),
+        ("probe_row_count", before.ids.len(), after.embeddings.len()),
+        ("probe_row_count", before.ids.len(), before.probabilities.len()),
+        ("probe_row_count", before.ids.len(), after.probabilities.len()),
+        ("probe_row_count", before.ids.len(), before.labels.len()),
+        ("probe_row_count", before.ids.len(), after.labels.len()),
+    ] {
+        if expected != observed {
+            return Err(diverged(what, 0, 0, expected.to_string(), observed.to_string(), 0.0));
+        }
     }
     for (row, (a, b)) in before.ids.iter().zip(after.ids.iter()).enumerate() {
         if a != b {
@@ -479,6 +489,11 @@ fn close_round_trip<C: SetFitCodec>(
 fn rebuild_from(
     bundle: &SetFitBundle,
 ) -> Result<(SetFitMiniLm, MultinomialLogisticRegression), SetFitTrainError> {
+    // FIRST, and before a byte of tensor data is decoded: the rebuild applies the policy
+    // this build compiles in, so a payload recording a different one would be rebuilt
+    // under ours without a word. Reading the recorded fields here is what keeps them
+    // normative rather than decorative.
+    bundle.check_policy_matches_this_build().map_err(SetFitTrainError::Bundle)?;
     let tokenizer_bytes = bundle.tokenizer_bytes().map_err(SetFitTrainError::Bundle)?;
     let tensors: BTreeMap<String, (Vec<usize>, Vec<f32>)> =
         bundle.named_tensors().map_err(SetFitTrainError::Bundle)?;
@@ -550,8 +565,20 @@ pub(crate) fn run_verify_policy<C: SetFitCodec>(
     // entirely minted the final state.
     close_round_trip(codec, &reloaded, &bytes)?;
 
+    // The artifact has done its whole job by here: it has been hashed, reloaded and
+    // shown to be what the reloaded value re-serializes to, and only its LENGTH is
+    // still wanted. Dropping it before the rebuild is not tidiness — on a full pin it
+    // is ~180 MB that would otherwise stay live underneath the reloaded bundle's hex
+    // strings, the decoded tensors and a second complete model.
+    let artifact_bytes = bytes.len();
+    drop(bytes);
+
     // (4) Rebuild from the reloaded bundle and from nothing else.
     let (mut rebuilt_encoder, rebuilt_head) = rebuild_from(&reloaded)?;
+    // Same reasoning, and a larger figure: the bundle carries its tensors as hex, so it
+    // is about twice the artifact's size and every tensor it holds has already been
+    // decoded into the rebuilt encoder.
+    drop(reloaded);
 
     // (5) Re-encode and re-predict FROM THE REBUILT MODEL.
     let after = probe_model(&mut rebuilt_encoder, &rebuilt_head, dataset, selection, config)?;
@@ -561,7 +588,7 @@ pub(crate) fn run_verify_policy<C: SetFitCodec>(
         compare_probes(&probe, &after, tolerance)?;
 
     let report = VerifyReport {
-        artifact_bytes: bytes.len(),
+        artifact_bytes,
         probe_rows: probe.ids.len(),
         embedding_dim: probe.embeddings.first().map_or(0, Vec::len),
         class_count: probe.probabilities.first().map_or(0, Vec::len),

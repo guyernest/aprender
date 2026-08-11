@@ -313,12 +313,70 @@ impl BertSentenceEncoder {
                 got: arch.hidden_act.clone(),
             });
         }
-        if arch.heads == 0 || arch.head_dim * arch.heads != arch.hidden {
+        if arch.heads == 0 || arch.head_dim.checked_mul(arch.heads) != Some(arch.hidden) {
             return Err(SetFitError::ImportConfigMismatch {
                 field: "head_dim".to_string(),
                 expected: format!("hidden / heads = {} / {}", arch.hidden, arch.heads),
                 got: arch.head_dim.to_string(),
             });
+        }
+        // EVERY DIMENSION IS BOUNDED BY THE TENSORS ACTUALLY SUPPLIED, BEFORE `assemble`
+        // ALLOCATES FROM IT.
+        //
+        // `assemble` builds a `LayerNorm` of width `hidden` and a `Vec` of capacity
+        // `num_layers` before it reads a single tensor, so an architecture record is an
+        // allocation request that arrives ahead of every validation the reader has. The
+        // record travels inside a bundle whose four contracted bounds cover the input
+        // length, the tensor count and the element counts -- and none of them covers this
+        // struct, so `num_layers: 2^60` aborted the process on a payload of a few hundred
+        // bytes, which is precisely the class of attack those bounds exist to refuse.
+        //
+        // The bound is not an arbitrary ceiling: every dimension indexes a tensor that must
+        // be present, so a dimension larger than the total number of `f32`s supplied cannot
+        // possibly be satisfied and the read that would discover it is already too late.
+        // `num_layers` is bounded by the tensor COUNT for the same reason -- each layer
+        // consumes named tensors of its own.
+        let supplied_elements: usize = tensors.values().map(|(_, data)| data.len()).sum();
+        for (field, value, ceiling, ceiling_of) in [
+            (
+                "num_layers",
+                arch.num_layers,
+                tensors.len(),
+                "supplied tensors",
+            ),
+            (
+                "hidden",
+                arch.hidden,
+                supplied_elements,
+                "supplied elements",
+            ),
+            (
+                "intermediate",
+                arch.intermediate,
+                supplied_elements,
+                "supplied elements",
+            ),
+            ("vocab", arch.vocab, supplied_elements, "supplied elements"),
+            (
+                "positions",
+                arch.positions,
+                supplied_elements,
+                "supplied elements",
+            ),
+            (
+                "type_vocab_size",
+                arch.type_vocab_size,
+                supplied_elements,
+                "supplied elements",
+            ),
+        ] {
+            if value > ceiling {
+                return Err(SetFitError::ImportConfigMismatch {
+                    field: field.to_string(),
+                    expected: format!("at most {ceiling} ({ceiling_of})"),
+                    got: value.to_string(),
+                });
+            }
         }
         let dims = ModelDims {
             hidden: arch.hidden,
@@ -360,7 +418,7 @@ impl BertSentenceEncoder {
         // to serve this one caller would be the tail wagging the dog.
         let remaining = core::cell::RefCell::new(tensors);
 
-        Self::assemble(
+        let encoder = Self::assemble(
             dims,
             arch.layer_norm_eps as f32,
             remap,
@@ -395,7 +453,24 @@ impl BertSentenceEncoder {
                 }
                 Ok(Tensor::from_vec(data, shape).requires_grad())
             },
-        )
+        )?;
+
+        // NOTHING MAY BE LEFT OVER. `assemble` drains exactly the names
+        // `Module::named_parameters` emits, so a residue is a tensor this architecture does
+        // not name — and every other check is blind to it: the shape and element checks only
+        // fire on names that ARE read, the bundle's `deny_unknown_fields` rejects unknown
+        // KEYS of the struct and says nothing about entries of the tensor MAP, and the
+        // verify policy's round-trip closure check re-serializes the residue happily because
+        // it is genuinely part of the bytes that were hashed. Without this, an artifact could
+        // carry arbitrary unreferenced payload and still be declared a faithful reload.
+        let leftover = remaining.into_inner();
+        if let Some((name, _)) = leftover.into_iter().next() {
+            return Err(SetFitError::ImportTensor(BertLoadError {
+                tensor: name,
+                reason: "the bundle carries a tensor this architecture does not name".to_string(),
+            }));
+        }
+        Ok(encoder)
     }
 
     /// THE construction sequence, shared by every constructor above.

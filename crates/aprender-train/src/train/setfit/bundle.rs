@@ -197,6 +197,17 @@ pub enum BundleError {
         /// Elements the data actually carries.
         observed: u64,
     },
+    /// The payload records a pooling/normalization/tokenization policy this build does
+    /// not implement, so rebuilding from it would apply a different one silently.
+    PolicyMismatch {
+        /// Which policy field: `pooling`, `normalization`, `l2_epsilon`,
+        /// `padding_mode` or `truncation_max_sequence_length`.
+        field: &'static str,
+        /// What this build applies.
+        expected: String,
+        /// What the payload records.
+        got: String,
+    },
 }
 
 impl core::fmt::Display for BundleError {
@@ -229,6 +240,13 @@ impl core::fmt::Display for BundleError {
                 f,
                 "setfit bundle tensor `{tensor}` declares a shape implying {expected} elements \
                  but carries {observed}",
+            ),
+            Self::PolicyMismatch { field, expected, got } => write!(
+                f,
+                "setfit bundle records {field} `{got}` but this build applies `{expected}`; a \
+                 rebuild would silently use the build's policy and the artifact's recorded one \
+                 would be decoration (contract setfit-train-lifecycle-v1, equation \
+                 bundle_completeness)",
             ),
         }
     }
@@ -545,6 +563,70 @@ impl SetFitBundle {
         &self.evidence
     }
 
+    /// Refuse a payload whose recorded policy is not the one this build applies.
+    ///
+    /// # Why a recorded field needs a reader
+    ///
+    /// `pooling`, `normalization`, `l2_epsilon`, `padding_mode` and
+    /// `truncation_max_sequence_length` are on the normative completeness list because
+    /// an encoder that pooled or normalized differently produces different embeddings
+    /// from the same weights. But the rebuild path takes only the tokenizer bytes, the
+    /// architecture record, the tensors and the seed — it applies whatever policy is
+    /// COMPILED IN. So without this, the five fields are written and never read: a
+    /// bundle from a build with a different `L2_EPS` rebuilds silently under the
+    /// current one, and the verification passes because both sides of the comparison
+    /// are the same build. That is the same defect shape 03-05 named
+    /// `MaxLengthNotConsumable` — a value validated at one end and never consumed at
+    /// the other becomes decoration.
+    ///
+    /// `l2_epsilon` is compared by BIT PATTERN: it is an epsilon, so two values that
+    /// differ in the last bit differ in the arithmetic, and `==` on floats is exactly
+    /// the comparison that would not notice a NaN written into the field.
+    ///
+    /// # Errors
+    ///
+    /// [`BundleError::PolicyMismatch`] naming the first field that disagrees.
+    pub fn check_policy_matches_this_build(&self) -> Result<(), BundleError> {
+        let mismatch = |field, expected: String, got: String| BundleError::PolicyMismatch {
+            field,
+            expected,
+            got,
+        };
+        if self.pooling != POOLING_POLICY {
+            return Err(mismatch("pooling", POOLING_POLICY.to_string(), self.pooling.clone()));
+        }
+        if self.normalization != NORMALIZATION_POLICY {
+            return Err(mismatch(
+                "normalization",
+                NORMALIZATION_POLICY.to_string(),
+                self.normalization.clone(),
+            ));
+        }
+        if self.l2_epsilon.to_bits() != L2_EPS.to_bits() {
+            return Err(mismatch(
+                "l2_epsilon",
+                format!("{L2_EPS:e}"),
+                format!("{:e}", self.l2_epsilon),
+            ));
+        }
+        if self.padding_mode != PADDING_MODE {
+            return Err(mismatch(
+                "padding_mode",
+                PADDING_MODE.to_string(),
+                self.padding_mode.clone(),
+            ));
+        }
+        let pinned = MAX_SEQUENCE_LENGTH as u32;
+        if self.truncation_max_sequence_length != pinned {
+            return Err(mismatch(
+                "truncation_max_sequence_length",
+                pinned.to_string(),
+                self.truncation_max_sequence_length.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// The exact tokenizer bytes.
     ///
     /// # Errors
@@ -569,11 +651,19 @@ impl SetFitBundle {
         let mut out = BTreeMap::new();
         for (name, tensor) in &self.tensors {
             let data = hex_to_f32(name, &tensor.data_hex)?;
-            let expected: usize = tensor.shape.iter().product();
-            if data.len() != expected {
+            // SATURATING `u64`, not `usize::product()`. The shape comes from the payload, and
+            // `[usize::MAX, 2].iter().product()` PANICS in a debug build and wraps in a
+            // release one — where the wrapped value can land on `data.len()` and wave a
+            // nonsense shape through into `Tensor::from_vec`. Saturating removes both: the
+            // bound is already the width of the error's `expected` field, and a shape that
+            // saturates it is necessarily larger than any decoded length, so the mismatch
+            // below always fires.
+            let expected =
+                tensor.shape.iter().fold(1_u64, |acc, &dim| acc.saturating_mul(dim as u64));
+            if data.len() as u64 != expected {
                 return Err(BundleError::TensorShapeMismatch {
                     tensor: name.clone(),
-                    expected: expected as u64,
+                    expected,
                     observed: data.len() as u64,
                 });
             }

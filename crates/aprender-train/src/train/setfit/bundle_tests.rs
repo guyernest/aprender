@@ -506,6 +506,111 @@ fn bundle_tokenizer_hash_mismatch_is_a_typed_rejection() {
     }
 }
 
+// ===========================================================================================
+// The reload-door guards, each shown BITING
+//
+// These three refusals were added by a review pass that shipped no tests with them. Each one
+// is a NEW way for a legitimate bundle to be rejected as well as a new way to catch a bad
+// one, so a guard that had only ever been observed on the happy path -- where by
+// construction it does nothing -- was evidence of neither direction. Every test below pairs
+// the refusal with the control that the untampered fixture still passes.
+// ===========================================================================================
+
+/// An extra tensor the architecture never names is refused, naming it.
+///
+/// Nothing else catches this: the shape and element checks only fire on names that ARE read,
+/// `deny_unknown_fields` rejects unknown struct KEYS and says nothing about entries of the
+/// tensor MAP, and the verify policy's round-trip closure check re-serializes the residue
+/// happily because it is genuinely part of the hashed bytes.
+#[test]
+fn bundle_an_unreferenced_tensor_is_refused_naming_it() {
+    let run = head_fitted_run();
+    let bundle = fixture_bundle(&run);
+
+    // Control: untouched, the same bundle rebuilds.
+    let _ = rebuild(&bundle);
+
+    let mut tensors = bundle.named_tensors().expect("tensors decode");
+    assert!(
+        tensors.insert("attacker.payload".to_string(), (vec![2], vec![1.0, 2.0])).is_none(),
+        "the injected name must not already exist",
+    );
+
+    let err = SetFitMiniLm::from_bundle_parts(
+        &bundle.tokenizer_bytes().expect("tokenizer bytes decode"),
+        bundle.architecture(),
+        tensors,
+        bundle.root_seed(),
+    )
+    .expect_err("a bundle carrying a tensor the architecture does not name must be refused");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("attacker.payload"),
+        "the refusal must NAME the unreferenced tensor, got `{rendered}`",
+    );
+}
+
+/// An architecture declaring more layers than the supplied tensors could satisfy is refused
+/// TYPED, rather than aborting the process on the allocation.
+///
+/// `assemble` builds a `Vec` of capacity `num_layers` before it reads a single tensor, and
+/// the bundle's four contracted bounds cover input length, tensor count and element counts —
+/// none of them covers this struct. So the record is an allocation request arriving ahead of
+/// every validation the reader has.
+#[test]
+fn bundle_an_absurd_layer_count_is_refused_before_it_allocates() {
+    let run = head_fitted_run();
+    let bundle = fixture_bundle(&run);
+    let tensors = bundle.named_tensors().expect("tensors decode");
+
+    let mut arch = bundle.architecture().clone();
+    arch.num_layers = 1 << 60;
+
+    let err = SetFitMiniLm::from_bundle_parts(
+        &bundle.tokenizer_bytes().expect("tokenizer bytes decode"),
+        &arch,
+        tensors,
+        bundle.root_seed(),
+    )
+    .expect_err("a layer count no supplied tensor set could satisfy must be refused");
+    match err {
+        aprender::setfit::SetFitError::ImportConfigMismatch { field, .. } => {
+            assert_eq!(field, "num_layers", "the refusal must blame the dimension that is absurd");
+        }
+        other => panic!("expected a typed ImportConfigMismatch, got {other:?}"),
+    }
+}
+
+/// A bundle recording a pooling/normalization policy this build does not implement is refused.
+///
+/// The rebuild applies whatever policy is COMPILED IN, so without this a payload written
+/// under `pooling = "cls"` would be rebuilt under ours and produce different embeddings from
+/// the same weights — and `run_verify_policy` could not notice, because both sides of its
+/// comparison are the same build.
+#[test]
+fn bundle_a_foreign_pooling_policy_is_refused_naming_the_field() {
+    let run = head_fitted_run();
+    let mut bundle = fixture_bundle(&run);
+
+    // Control first: as written, the fixture agrees with this build.
+    bundle
+        .check_policy_matches_this_build()
+        .expect("the fixture must match the build that wrote it");
+
+    let genuine = bundle.pooling.clone();
+    assert_ne!(genuine, "cls", "the perturbation must actually change the policy");
+    bundle.pooling = "cls".to_string();
+
+    match bundle.check_policy_matches_this_build() {
+        Err(BundleError::PolicyMismatch { field, expected, got }) => {
+            assert_eq!(field, "pooling");
+            assert_eq!(expected, genuine, "the error must name what this build implements");
+            assert_eq!(got, "cls", "and what the payload recorded");
+        }
+        other => panic!("expected a typed PolicyMismatch, got {other:?}"),
+    }
+}
+
 /// A missing tensor is a typed error naming the tensor.
 #[test]
 fn bundle_missing_tensor_is_a_typed_rejection_naming_it() {

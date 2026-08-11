@@ -62,6 +62,8 @@
 use crate::optim::{ConvergenceStatus, LbfgsF64};
 use crate::primitives::Vector;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::fmt;
 
 /// Default maximum L-BFGS iterations.
@@ -685,16 +687,39 @@ fn validate_label_set(n_classes: usize, ordered_labels: &[String]) -> Result<(),
             return Err(HeadInputError::EmptyLabel { index });
         }
     }
-    for first in 0..ordered_labels.len() {
-        for second in (first + 1)..ordered_labels.len() {
-            if ordered_labels[first] == ordered_labels[second] {
-                return Err(HeadInputError::DuplicateLabel {
-                    first,
-                    second,
-                    label: ordered_labels[first].clone(),
-                });
+    // ONE pass, not the `K^2` pairwise scan this used to be. The rule is applied to
+    // `ordered_labels` taken straight off a parsed artifact
+    // ([`MultinomialLogisticRegression::from_stored_coefficients`]), and it runs BEFORE
+    // the coefficient-arity check that would otherwise bound `K` — so a payload
+    // declaring millions of one-character labels turned the reload door into a hang
+    // that the bundle's four size bounds cannot see, because none of them bounds the
+    // label map. A `K`-time scan removes the amplification instead of bounding it.
+    //
+    // It reports the SAME pair the pairwise scan did. `first_seen` records each label's
+    // first index; a repeat at `index` yields the candidate `(first_seen, index)`, and
+    // the smallest `first` wins — which is the pair the outer-then-inner loop found,
+    // because a strict `<` keeps the earliest repeat of the winning label.
+    let mut first_seen: HashMap<&str, usize> = HashMap::with_capacity(ordered_labels.len());
+    let mut duplicate: Option<(usize, usize)> = None;
+    for (index, label) in ordered_labels.iter().enumerate() {
+        match first_seen.entry(label.as_str()) {
+            Entry::Vacant(slot) => {
+                slot.insert(index);
+            }
+            Entry::Occupied(slot) => {
+                let first = *slot.get();
+                if duplicate.is_none_or(|(best, _)| first < best) {
+                    duplicate = Some((first, index));
+                }
             }
         }
+    }
+    if let Some((first, second)) = duplicate {
+        return Err(HeadInputError::DuplicateLabel {
+            first,
+            second,
+            label: ordered_labels[first].clone(),
+        });
     }
     Ok(())
 }
@@ -874,14 +899,13 @@ impl MultinomialLogisticRegression {
         if n_features == 0 {
             return Err(HeadInputError::ZeroFeatureDimension.into());
         }
-        let expected_weights =
-            n_classes
-                .checked_mul(n_features)
-                .ok_or(HeadInputError::CoefficientCountMismatch {
-                    array: "weights",
-                    expected: usize::MAX,
-                    found: weights.len(),
-                })?;
+        // SATURATING, not checked-with-a-second-error-arm. The overflow arm had to invent
+        // an `expected` it could not compute and reported `usize::MAX`, which rendered as a
+        // claim that the label map implies 18446744073709551615 weights. Saturating makes
+        // that value TRUE at the bound instead of a placeholder, and collapses two arms
+        // constructing the same error into one: a product that saturates is necessarily
+        // larger than any `Vec` length, so the mismatch below always fires.
+        let expected_weights = n_classes.saturating_mul(n_features);
         if weights.len() != expected_weights {
             return Err(HeadInputError::CoefficientCountMismatch {
                 array: "weights",

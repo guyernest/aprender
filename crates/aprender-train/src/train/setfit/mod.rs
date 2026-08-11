@@ -803,13 +803,19 @@ impl SetFitRun<HeadFitted> {
 // The reproducibility surface (plan 03-08, TRN-06)
 // ===========================================================================================
 
-/// SHA-256 over an ordered list of strings, NUL-terminated so no concatenation of
-/// two entries can collide with a third.
+/// SHA-256 over an ordered list of strings, LENGTH-PREFIXED so no regrouping of the
+/// entries can collide with a different list.
+///
+/// The prefix replaces a NUL TERMINATOR, which did not give the separation it claimed:
+/// a Rust `String` may contain a NUL byte, so `["a\0b"]` and `["a", "b"]` both hashed
+/// the byte stream `a 00 b 00` and were indistinguishable. An eight-byte little-endian
+/// length in front of each entry is unambiguous for every input, including entries that
+/// contain the separator, and it costs one `update` either way.
 fn digest_of_ordered(entries: &[String]) -> String {
     let mut hasher = Sha256::new();
     for entry in entries {
+        hasher.update((entry.len() as u64).to_le_bytes());
         hasher.update(entry.as_bytes());
-        hasher.update([0_u8]);
     }
     hex::encode(hasher.finalize())
 }
@@ -1152,7 +1158,8 @@ pub enum SetFitTrainError {
         hashed_len: usize,
         /// Length of the bytes the reloaded bundle re-serialized to.
         reserialized_len: usize,
-        /// Offset of the first differing byte, when both are non-empty and differ.
+        /// Offset of the first differing byte, or `None` when one stream is a
+        /// PREFIX of the other — in which case the two lengths are the difference.
         first_diff_offset: Option<usize>,
     },
     /// The reloaded model did not reproduce the pre-close answer.
