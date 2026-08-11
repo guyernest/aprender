@@ -743,6 +743,158 @@ equations:
     postconditions:
       - 'a payload exceeding any limit is refused with the limit named, before the allocation it would have requested'
 
+  # ==========================================================================
+  # 14. The validation evaluation — a metric is COMPUTED, never asserted
+  # ==========================================================================
+
+  validation_evaluation_provenance:
+    formula: 'evaluate_validation(run: &SetFitRun<ArtifactReloadedAndVerified>, dataset: &PreparedDataset<Canonical>, kind: ValidationMetricKind) -> ValidationEvaluation{metric_kind, value, artifact_hash, validation_split_fingerprint, dataset_fingerprint, n_rows} ; accuracy = (sum_i [truth_i == pred_i]) / n ; macro_f1 = (1/K) * sum_{c<K} f1_c ; f1_c = 2*TP_c / (2*TP_c + FP_c + FN_c), and f1_c = 0.0 when 2*TP_c + FP_c + FN_c == 0'
+    domain: 'a verified run, the canonical dataset it was prepared from, and one member of the closed metric enum'
+    codomain: 'a ValidationEvaluation bound to the artifact and the split, or a typed SetFitTrainError'
+    invariants:
+      - 'NO API ACCEPTS A METRIC VALUE. There is no public constructor on `ValidationEvaluation`
+        and no public function in `evaluate.rs` takes a float PARAMETER at all. The shape this
+        replaces was `ValidationMetric::new(&Split<Validation>, name, value)`, which the phase-3
+        review marked as leaving TRN-07 unsatisfied: possessing a validation split does not prove
+        a number came out of it, and does not prove it was computed with the artifact whose test
+        access it unlocks. The scan that enforces this reads each `pub fn`''s PARAMETER LIST, not
+        whole lines -- a line-wise search reports the type''s own private `value: f64` FIELD as
+        the violation, and misses a parameter on a wrapped signature. The ONE float-taking door
+        is `evaluation_for_tests`, which is `#[cfg(test)] pub(super)` and is NAMED by the guard
+        rather than silently unmatched.'
+      - 'THE ARTIFACT HASH IS READ OFF THE RUN. `artifact_hash` is `run.artifact_hash()`,
+        taken inside the evaluator. Nothing in the signature could carry one.'
+      - 'THE SPLIT IS `&Split<Validation>` BY TYPE. The rows come from
+        `PreparedDataset<Canonical>::validation()`, and `PreparedDataset<Compatibility>` has no
+        such method (Ph2 D-19) -- so a compatibility-selected evaluation is not rejected at
+        runtime, it is non-constructible at the call site. The evaluation additionally commits
+        `validation_witness().fingerprint_hex()`, which digests the VALIDATION SPLIT ALONE and is
+        deliberately distinct from `dataset_fingerprint_hex()`. Both travel, because which of the
+        two disagrees is the difference between "a different corpus" and "the same corpus whose
+        validation rows changed"; a test asserts they differ, so committing one twice cannot pass
+        unnoticed.'
+      - 'A DATASET THE RUN WAS NOT PREPARED FROM IS REFUSED, before a row is encoded, with BOTH
+        fingerprint pairs named (`ValidationDatasetMismatch`).'
+      - 'THE METRIC KIND IS A CLOSED ENUM: `Accuracy | MacroF1`, no `String` variant and no
+        `#[non_exhaustive]`. A free-form name lets two evaluations that measured different
+        quantities present the same label, and the selection lock''s metric-kind check would then
+        be comparing spellings instead of quantities.'
+      - 'THE EMPTY-CLASS F1 CONVENTION IS 0.0, AND IT IS A CONTRACTED CHOICE. For a class with no
+        actual and no predicted positives both precision and recall are 0/0; this contract defines
+        `f1_c = 0.0` there, matching `sklearn`''s `zero_division` default. The two alternatives are
+        rejected for stated reasons: NaN would make the selection rule''s ordering meaningless
+        while every candidate still appeared to have a score, and EXCLUDING the class from the
+        mean would reward a candidate for declaring a class it never predicts. Changing this
+        convention is an edit to THIS FILE, which `pv diff` flags.'
+      - 'DETERMINISM IS STRUCTURAL. Every reduction runs through `reduce::*_in_index_order`
+        (sequential, f64 accumulation, D-13); the encode goes through the ONE encode-once path
+        the trainer itself uses, at a shared borrow that OBSERVES the isolation witness rather
+        than setting eval mode; and no wall-clock type appears in the module. Two evaluations of
+        the same run are equal down to the value''s bit pattern.'
+      - 'THE WIRE FORM CARRIES BITS, NOT A RENDERING. `ValidationEvaluation` is Serialize and
+        deliberately NOT Deserialize (the 03-03 one-way discipline), and its private wire type
+        carries `value_bits: u64`. A JSON float binds the digest to a formatting library''s
+        shortest-representation choice, and `serde_json` writes every non-finite f64 as `null` --
+        which would make a NaN and an infinity indistinguishable inside a hash whose job is to
+        distinguish things.'
+    preconditions:
+      - 'the run reached ArtifactReloadedAndVerified, so an artifact hash exists'
+      - 'the supplied dataset agrees with the run on BOTH fingerprints'
+      - 'the validation split is non-empty'
+    postconditions:
+      - 'the evaluation commits the artifact hash, the validation-split fingerprint, the dataset fingerprint and the row count'
+      - 'no code path produced the value except the evaluator'
+
+  # ==========================================================================
+  # 15. The selection lock — the whole candidate history, and the rule APPLIED
+  # ==========================================================================
+
+  selection_lock_commitment:
+    formula: 'lock = (schema_version, rule, [(config_hash_i, artifact_hash_i, evaluation_i)]_{i<N}, chosen_index, dataset_fingerprint, validation_split_fingerprint, selection_semantic_hash, ledger_hash) ; chosen_index = rule(candidates) ; MaxMetricLowestIndexTieBreak: argmax_i value_i with total_cmp, ties to the LOWEST i ; lock_hash = SHA-256(canonical_bytes(lock))'
+    domain: 'a non-empty, mutually comparable candidate set and a verified run that is one of them'
+    codomain: 'a SelectionLock bound to a hash, or a typed LockError naming the offending candidate index'
+    invariants:
+      - 'THE WHOLE CANDIDATE HISTORY IS COMMITTED, AND THERE IS NO `chosen` PARAMETER. The phase-3
+        review found the earlier lock recorded only the winner. A single chosen metric cannot
+        prove validation-only selection: it is exactly as consistent with having tried ten
+        configurations, peeked at test, and reported the one that won THERE. So the lock takes the
+        candidate SET plus a `SelectionRule` and DERIVES the index; `from_candidates` has no
+        parameter a caller could use to name a winner, and a source assertion pins that.'
+      - 'THE RULE IS CLOSED AND DETERMINISTIC IN BOTH HALVES. `MaxMetricLowestIndexTieBreak` is
+        the only member. The comparison is `f64::total_cmp`, a total order over every bit pattern
+        including NaN, so the outcome cannot depend on the order candidates happened to arrive in
+        even for values `partial_cmp` refuses to order; an exact tie keeps the LOWEST index.'
+      - 'FOUR CANDIDATE-CONSISTENCY REJECTIONS, EACH NAMING THE OFFENDING INDEX: an empty list
+        (`NoCandidates`); a candidate whose `metric_kind` differs from the first; a candidate
+        whose `validation_split_fingerprint` differs; a candidate whose `dataset_fingerprint`
+        differs; and a repeated `artifact_hash`, which also names where it first appeared. The
+        fingerprint checks are what stop a ranking of SPLITS from being presented as a ranking of
+        MODELS; the duplicate check is what stops one model occupying two places in a tie-break.'
+      - 'A CANDIDATE''S ARTIFACT HASH IS READ OUT OF ITS EVALUATION. `SelectionCandidate` is built
+        from `(config_hash, evaluation)` and copies the hash out, so the field cannot disagree
+        with the artifact the metric was computed on. `config_hash` IS caller-supplied and the
+        contract says so: it is a LABEL naming the configuration, not the identity that gates
+        access -- a sweep does not keep N verified runs alive, and the evaluation is the portable
+        evidence.'
+      - 'THE PROVENANCE IS READ OFF THE RUN. `SetFitRun<ArtifactReloadedAndVerified>::create_selection_lock`
+        is the only PUBLIC door; `from_candidates` is `pub(super)`. The selection semantic hash
+        and the access ledger hash come from the run, because a public constructor taking
+        provenance strings would let a caller mint a lock describing a run that never executed.
+        The creating run must also be AMONG the candidates (`ChosenModelNotACandidate`): a lock
+        that omits the model that created it is not the record of that model''s selection.'
+      - 'THE LOCK IS THE COMPLEMENT OF THE ACCESS LEDGER, NOT A RESTATEMENT OF IT (D-14). Phase 2''s
+        ledger records WHICH splits were touched; a ledger showing only train and validation
+        accesses is equally consistent with an honest run and with a run that peeked at test in an
+        earlier process. Conflating the two would leave the requirement unevidenced.'
+      - 'CANONICAL BYTES, THEN SHA-256 -- one convention, repo-wide. Compact JSON over structs with
+        a fixed field order, no map to iterate, no wall-clock value, and the metric as BITS.
+        `lock_hash` is deliberately absent from the bytes it digests. `verify_integrity`
+        recomputes and compares, and `mint_test_token` runs it FIRST, so a rewritten record cannot
+        open the door. APPEND-ONLY, like the ledger: no removal API, no edit API, and the single
+        `&mut self` method in the type is the `#[cfg(test)]` forgery that proves the check bites.'
+    preconditions:
+      - 'every candidate carries an evaluation produced by the trusted evaluator'
+    postconditions:
+      - 'chosen_index is a function of the candidate set and the rule alone'
+      - 'changing any committed field changes lock_hash'
+
+  # ==========================================================================
+  # 16. Canonical test access — minted from an OBJECT, re-checked at the door
+  # ==========================================================================
+
+  canonical_test_token_minting:
+    formula: 'mint_test_token(lock, model: &SetFitRun<ArtifactReloadedAndVerified>) -> CanonicalTestToken <=> verify_integrity(lock) AND lock.chosen_artifact_hash == model.artifact_hash() ; grant(token, model, test: &Split<Test>) -> CanonicalTestGrant <=> token.artifact_hash == model.artifact_hash()'
+    domain: 'a lock whose record still hashes to its digest, and a verified run'
+    codomain: 'a token and then a typed test-access witness, or LockError::StaleLock / TokenModelMismatch naming BOTH hashes'
+    invariants:
+      - 'MINTING TAKES THE RUN OBJECT, NOT HASH BYTES. The phase-3 review found
+        `mint_test_token(&self, candidate: [u8; 32])`, which trusts a caller-supplied hash: a
+        caller can submit the LOCKED hash and then evaluate an entirely different artifact, and
+        nothing downstream ever sees the substitution. The parameter is now the verified run and
+        the function reads `artifact_hash()` off it. A source assertion pins BOTH halves -- that
+        the signature contains `&SetFitRun<ArtifactReloadedAndVerified>` and that it contains no
+        `[u8; 32]`.'
+      - 'LOCK, KEEP TUNING, THEN TEST INVALIDATES. A token minted against a re-tuned run returns
+        `StaleLock { locked, observed }` naming both hashes. The falsification walks exactly that
+        sequence with run B produced from the SAME configuration and seed under a reversed
+        intra-batch pull order, so a lock keyed on configuration would still match and ONLY the
+        artifact differs.'
+      - 'THE GRANT RE-CHECKS AT ACCESS TIME. Minting checks identity at one instant; a token is a
+        value that can be moved, cloned into a struct and used against whatever model is in scope
+        later. `CanonicalTestAccess::grant` takes the token, the model AND the `&Split<Test>`, and
+        refuses a token paired with a different model (`TokenModelMismatch`, both hashes named).'
+      - 'THE TOKEN IS PROOF OF PROVENANCE, NOT A RECORD OF IT. Every field is private and there is
+        no public constructor; reading a token cannot mint one. This is the `SelectedId` pattern
+        from Phase 2''s `select.rs` applied to test access.'
+      - '`Split<CompatibilityTest>` IS UNEXPRESSIBLE ON THIS PATH. It is a different type
+        (Ph2 D-16/D-19), so a compatibility profile cannot reach the grant at all -- the refusal
+        is a type error rather than a runtime check.'
+    preconditions:
+      - 'the lock was created before any canonical test access'
+    postconditions:
+      - 'a CanonicalTestGrant exists only for the model the lock chose'
+      - 'a stale lock or a travelled token refuses, naming both hashes'
+
 proof_obligations:
 
 - type: soundness
@@ -863,6 +1015,34 @@ proof_obligations:
     (T-3-50), the bundle carries a separate provenance record, and there is no conversion from
     that record back into a runtime resolved configuration.
   formal: 'not exists TryFrom<ResolvedConfigRecord> for ResolvedSetFitConfig && Deserialize not in derives(ResolvedSetFitConfig)'
+  applies_to: all
+
+- type: soundness
+  property: >
+    OBLIG-STL-METRIC-COMPUTED-NOT-ASSERTED: a ValidationEvaluation is produced only by
+    evaluate_validation, which takes the verified run and the canonical dataset and computes the
+    value itself. No public constructor exists, no public function in evaluate.rs takes a float
+    parameter, and the artifact hash is read off the run rather than accepted. The single
+    float-taking door is #[cfg(test)] pub(super) and is named by the guard.
+  formal: 'ValidationEvaluation constructible => produced by evaluate_validation && not exists pub fn in evaluate.rs with a float parameter'
+  applies_to: all
+
+- type: invariant
+  property: >
+    OBLIG-STL-LOCK-COMMITS-HISTORY: the lock commits every candidate in order together with the
+    rule, and derives chosen_index by applying the rule. from_candidates has no `chosen`
+    parameter, so a lock recording only a winner is not expressible. Changing any committed field
+    changes lock_hash, and mint_test_token verifies integrity before it compares anything.
+  formal: 'chosen_index == rule(candidates) && lock_hash == sha256(canonical_bytes(lock)) && not exists parameter `chosen` in from_candidates'
+  applies_to: all
+
+- type: safety
+  property: >
+    OBLIG-STL-TOKEN-FROM-OBJECT: mint_test_token reads the artifact hash off the supplied verified
+    run; no [u8; 32] parameter exists on the minting path. The grant re-checks the token's artifact
+    identity against the model at access time, and Split<CompatibilityTest> is a different type
+    that cannot reach the grant.
+  formal: 'mint(lock, model) = Ok => lock.chosen_artifact_hash == model.artifact_hash() && grant(t, m, _) = Ok => t.artifact_hash == m.artifact_hash()'
   applies_to: all
 
 falsification_tests:
@@ -1060,6 +1240,68 @@ falsification_tests:
   if_fails: >
     A probed device can arrive from a file, which retires an acceptance criterion plan 03-03
     already passed and makes a resolved runtime fact restorable from an artifact.
+
+- id: FALSIFY-STL-014
+  rule: 'validation_evaluation_provenance — a metric is COMPUTED by trusted code, never asserted'
+  prediction: >
+    No public function in evaluate.rs takes a float PARAMETER, ValidationEvaluation has no public
+    constructor and no public field, and ValidationMetricKind carries no String variant. The
+    evaluator commits the artifact hash read off the run and the validation-split fingerprint read
+    off the witness, and the two fingerprints it records are DIFFERENT values. A dataset whose
+    fingerprints disagree with the run is refused before a row is encoded, naming all four
+    hex digests. Two evaluations of the same run are equal down to the value's bit pattern.
+    Macro-F1 scores a class with no actual and no predicted positives as 0.0 and the alternative
+    is visibly different: the same rows under a 3-class map score 2/3 where a 2-class map scores
+    1.0. The parameter-list scan is the load-bearing detail — a line-wise search was MEASURED red
+    here for the wrong reason, matching the type's own private `value: f64` field, and a scan for
+    `pub fn ` alone saw 5 of the 9 public functions because `pub const fn` does not contain it.
+  test: cargo test -p aprender-train --lib --features setfit evaluate_
+  test_harness: cargo test -p aprender-train --lib --features setfit evaluate_
+  expected_output: 'test result: ok.'
+  if_fails: >
+    A door exists that turns a caller's number into an evaluation, or the evaluation no longer
+    binds itself to the artifact and split it was computed on.
+
+- id: FALSIFY-STL-015
+  rule: 'selection_lock_commitment — the lock applies the rule and binds the whole record'
+  prediction: >
+    All four candidate-consistency rejections fire and each names the offending index: an empty
+    list, a differing metric kind at index 2, a differing validation-split fingerprint at index 1,
+    a differing dataset fingerprint at index 3, and a duplicate artifact hash at index 2 naming
+    index 0. The rule selects the highest value and an exact tie keeps the LOWEST index. Six
+    one-field variations — config hash, artifact hash, metric value, candidate ORDER, selection
+    semantic hash, ledger hash — each move lock_hash. A #[cfg(test)] forgery of chosen_index makes
+    verify_integrity red with both digests printed, and mint_test_token then refuses with the same
+    error, so the check is where it matters rather than merely present. from_candidates has no
+    `chosen` parameter, and the lock exposes no removal or edit API.
+  test: cargo test -p aprender-train --lib --features setfit lock_
+  test_harness: cargo test -p aprender-train --lib --features setfit lock_
+  expected_output: 'test result: ok.'
+  if_fails: >
+    The lock records a caller's winner rather than deriving one, or a committed field is outside
+    the digest and can be edited without detection.
+
+- id: FALSIFY-STL-016
+  rule: 'canonical_test_token_minting — lock, keep tuning, then test INVALIDATES'
+  prediction: >
+    A lock taken on run A mints a token for run A and grants access to its &Split<Test>. Run B is
+    the SAME configuration and seed with the intra-batch pull order reversed, so a lock keyed on
+    configuration would still match and only the artifact differs; minting against run B returns
+    StaleLock with BOTH hashes in the rendered message, and the token minted for A is refused at
+    grant against B with TokenModelMismatch naming both. The test asserts the two artifact hashes
+    differ FIRST, so none of it can hold vacuously. mint_test_token's signature contains
+    &SetFitRun<ArtifactReloadedAndVerified> and contains no [u8; 32]; CanonicalTestToken has no
+    public constructor and no public field; grant takes the token, the model and &Split<Test>.
+    The command below is the WHOLE `lock_` filter rather than a narrower one, because the three
+    source assertions live in their own named tests and a filter that did not reach them would
+    leave two thirds of this prediction unbacked by the command that claims it. The sequence
+    itself is `lock_then_tune_then_test_invalidates_and_a_travelled_token_cannot_be_repaired`.
+  test: cargo test -p aprender-train --lib --features setfit lock_
+  test_harness: cargo test -p aprender-train --lib --features setfit lock_
+  expected_output: 'test result: ok.'
+  if_fails: >
+    A caller-supplied hash has returned to the minting path, or the grant no longer re-checks
+    identity and a token that travelled can be paired with a different model.
 
 kani_harnesses:
 

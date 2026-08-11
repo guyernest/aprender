@@ -37,12 +37,16 @@ pub mod baseline;
 pub mod bundle;
 pub mod config;
 pub mod epoch;
+/// Canonical-validation evaluation: the trusted evaluator and its bound metric (03-09).
+pub mod evaluate;
 pub mod evidence;
 /// Stage two's encode-once input (D-08).
 ///
 /// `pub(crate)`: `HeadDataset` is an intermediate, and a public one would be a second way to
 /// reach the head's fitting input — one that does not travel through the typestate.
 pub(crate) mod head_input;
+/// The selection lock and the canonical-test token it mints (D-14, 03-09).
+pub mod lock;
 pub mod reduce;
 pub mod thresholds;
 pub mod tune;
@@ -1178,6 +1182,30 @@ pub enum SetFitTrainError {
         /// The tolerance the comparison ran at.
         tolerance: f64,
     },
+    /// The dataset handed to the validation evaluator is not the one the run was prepared from.
+    ///
+    /// BOTH fingerprint pairs are named. Phase 2 made the validation-split fingerprint and the
+    /// dataset fingerprint deliberately distinct values, and which of the two disagrees is the
+    /// difference between "a different corpus" and "the same corpus whose validation rows
+    /// changed" — a reader who is told only that something disagreed cannot tell those apart.
+    ValidationDatasetMismatch {
+        /// The run's own validation-split fingerprint.
+        expected_validation_split_fingerprint: String,
+        /// The supplied dataset's validation-split fingerprint.
+        observed_validation_split_fingerprint: String,
+        /// The run's own dataset fingerprint.
+        expected_dataset_fingerprint: String,
+        /// The supplied dataset's dataset fingerprint.
+        observed_dataset_fingerprint: String,
+    },
+    /// The canonical validation split has no rows.
+    ///
+    /// Unreachable through the canonical ingest ladder, which refuses a split whose observed
+    /// class counts do not match a declaration — and a declaration of all zeroes is refused in
+    /// its own right. It is a CHECK rather than a comment because the alternative is a division
+    /// by zero: an accuracy over no rows is `0/0`, and a NaN metric would propagate silently
+    /// through the selection rule instead of failing here.
+    ValidationSplitEmpty,
     /// The evidence failed the gate. Carries the COMPLETE auditable record.
     ///
     /// `Box`ed because this variant is far larger than every other, and an enum is as big as
@@ -1322,6 +1350,27 @@ impl fmt::Display for SetFitTrainError {
                  (contract setfit-train-lifecycle-v1, equation reload_verify_roundtrip)",
                 first_diff_offset
                     .map_or_else(|| "a length difference".to_string(), |at| at.to_string()),
+            ),
+            Self::ValidationDatasetMismatch {
+                expected_validation_split_fingerprint,
+                observed_validation_split_fingerprint,
+                expected_dataset_fingerprint,
+                observed_dataset_fingerprint,
+            } => write!(
+                f,
+                "the dataset handed to the validation evaluator is not the one this run was \
+                 prepared from: validation-split fingerprint `{expected_validation_split_fingerprint}` \
+                 was expected and `{observed_validation_split_fingerprint}` was supplied; dataset \
+                 fingerprint `{expected_dataset_fingerprint}` was expected and \
+                 `{observed_dataset_fingerprint}` was supplied. A metric computed against a \
+                 different dataset is not evidence about this run \
+                 (contract setfit-train-lifecycle-v1, equation validation_evaluation_provenance)",
+            ),
+            Self::ValidationSplitEmpty => write!(
+                f,
+                "the canonical validation split has no rows, so no metric computed on it could \
+                 be evidence; a validated canonical dataset cannot produce this \
+                 (contract setfit-train-lifecycle-v1, equation validation_evaluation_provenance)",
             ),
             Self::ReloadDiverged { field, row, index, expected, observed, tolerance } => write!(
                 f,

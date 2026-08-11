@@ -299,6 +299,46 @@ fn encode_once(
     })
 }
 
+/// Encode arbitrary `(id, text)` rows through the SAME encode-once path, at a SHARED borrow.
+///
+/// # Why this door exists rather than a direct `encode_texts` call at the use site
+///
+/// Plan 03-09's validation evaluator needs embeddings for the canonical validation split, and
+/// verify.rs already records the reason a second encode path is unacceptable: it would measure
+/// a model the trainer never ran. Everything that makes the trainer's encode reproducible —
+/// windowing, `no_grad`, the `detach` before anything is stored, the shape check in
+/// [`push_rows`], and the isolation witness — lives inside [`encode_once`], and this is how a
+/// caller outside `head_dataset` reaches it.
+///
+/// # A SHARED borrow, and what that costs
+///
+/// [`head_dataset`] takes `&mut SetFitMiniLm` because the TRANSITION owns the encoder's mode
+/// and sets eval before encoding. The evaluator holds a finished run and only has `&`, so this
+/// function cannot set the mode — it OBSERVES it instead. The witness is checked exactly as
+/// `head_dataset` checks it, so an encoder that arrived in training mode is a typed
+/// [`SetFitTrainError::HeadEncodeNotIsolated`] rather than a quietly irreproducible metric.
+/// That is fail-closed in the direction that matters: the verify transition leaves the encoder
+/// in eval, so the shipped path passes and a future change that stops doing so is red.
+///
+/// # Errors
+///
+/// [`SetFitTrainError::HeadEncodeBatchSizeZero`] for a zero window size,
+/// [`SetFitTrainError::HeadEncodeNotIsolated`] when the encode was not isolated, and
+/// [`SetFitTrainError::Encoder`] for anything the encoder rejects.
+pub(crate) fn encode_eval_rows(
+    encoder: &SetFitMiniLm,
+    rows: &[(&str, &str)],
+    batch_size: u32,
+) -> Result<Vec<Vec<f32>>, SetFitTrainError> {
+    let batch = batch_size as usize;
+    if batch == 0 {
+        return Err(SetFitTrainError::HeadEncodeBatchSizeZero);
+    }
+    let encoded = encode_once(encoder, rows, batch)?;
+    encoded.witness.require_isolated()?;
+    Ok(encoded.embeddings)
+}
+
 /// Split a `[B, H]` embedding tensor into `expected` owned rows.
 ///
 /// The shape is CHECKED rather than indexed. A `[B, H]` that arrived with the wrong `B` would

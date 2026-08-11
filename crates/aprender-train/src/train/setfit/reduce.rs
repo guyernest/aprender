@@ -57,6 +57,40 @@ pub fn mean_in_index_order(values: &[f32]) -> f64 {
     sum_in_index_order(values) / count
 }
 
+/// Sum already-f64 `values` in index order.
+///
+/// # Why a second `sum` rather than narrowing to the f32 door
+///
+/// The door D-13 names is about ORDER, not about the input width, and the guarantee here is
+/// exactly the one above: sequential, index-order, f64 accumulation. Plan 03-09's macro-F1
+/// averages per-class RATIOS that were computed in f64 from integer counts; pushing them
+/// through [`sum_in_index_order`] would mean narrowing each ratio to f32 first, which discards
+/// precision the ratio already has for no reason other than to reuse a signature. Two
+/// functions with one reduction rule beats one function that silently rounds its input.
+#[must_use]
+pub fn sum_f64_in_index_order(values: &[f64]) -> f64 {
+    let mut total = 0.0_f64;
+    for &value in values {
+        total += value;
+    }
+    total
+}
+
+/// Arithmetic mean of already-f64 `values`, accumulated in index order.
+///
+/// An EMPTY slice returns `0.0`, for the same stated reason as [`mean_in_index_order`]: a NaN
+/// would poison every later comparison rather than staying local, and the callers here average
+/// over a DECLARED label map, which a validated dataset cannot make empty.
+#[must_use]
+pub fn mean_f64_in_index_order(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let count = values.len() as f64;
+    sum_f64_in_index_order(values) / count
+}
+
 /// Euclidean (L2) norm of `values`, accumulated in index order in f64.
 ///
 /// The squares are accumulated in f64 BEFORE the square root, so a parameter whose elements
@@ -89,6 +123,30 @@ mod tests {
         assert_eq!(mean_in_index_order(&[]), 0.0);
         assert_eq!(mean_in_index_order(&[2.0, 4.0]), 3.0);
         assert_eq!(mean_in_index_order(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+    }
+
+    #[test]
+    fn reduce_f64_sum_and_mean_match_their_golden_values() {
+        assert_eq!(sum_f64_in_index_order(&[]), 0.0);
+        assert_eq!(sum_f64_in_index_order(&[1.0, 2.0, 3.0, 4.0]), 10.0);
+        assert_eq!(mean_f64_in_index_order(&[]), 0.0);
+        assert_eq!(mean_f64_in_index_order(&[2.0, 4.0]), 3.0);
+        assert_eq!(mean_f64_in_index_order(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+    }
+
+    /// The f64 door PRESERVES what narrowing to the f32 door would discard.
+    ///
+    /// `1/3` is not representable in either width, but the f32 rounding of it differs from the
+    /// f64 one in the 8th decimal place — so a macro-F1 routed through the f32 signature would
+    /// report a different number for the same counts. Both values are asserted exactly, so this
+    /// distinguishes the two accumulators rather than observing that they are close.
+    #[test]
+    fn reduce_f64_door_preserves_what_narrowing_to_f32_would_discard() {
+        let ratio = 1.0_f64 / 3.0;
+        let narrowed = f64::from(ratio as f32);
+        assert_ne!(ratio, narrowed, "the fixture must actually round");
+        assert_eq!(sum_f64_in_index_order(&[ratio]), ratio);
+        assert_eq!(sum_in_index_order(&[ratio as f32]), narrowed);
     }
 
     #[test]
