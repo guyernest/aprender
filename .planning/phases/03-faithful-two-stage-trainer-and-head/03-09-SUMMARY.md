@@ -252,3 +252,11 @@ None. Every file created or modified is in-process library code with no network 
 - `CanonicalTestGrant<'a>` is the type Phase 4/5 must hold before reading the canonical test split. It is not yet consumed by anything.
 - `SelectionLock` has no persistence path. Its wire types derive `Deserialize` and `deny_unknown_fields` so a persisted lock can be READ, but there is deliberately no `From<Wire>` back into a usable evaluation, so a deserialized lock cannot be handed into minting. A plan that adds persistence must decide what a re-loaded lock is allowed to do.
 - `SelectionRule` has one member. A second is a contract edit by construction.
+
+## Self-Check: PASSED
+
+All five claimed files exist on disk (`evaluate.rs` 16.8K, `evaluate_tests.rs` 17.0K,
+`lock.rs` 32.0K, `lock_tests.rs` 26.2K, `03-09-SUMMARY.md` 24.9K) and all four claimed
+commits resolve in `git log --all`: `117b0378b`, `f65c0a6c4`, `c8267f4f0`, `4959437cc`.
+No commit in this plan deleted a tracked file (`git diff --diff-filter=D HEAD~1 HEAD`
+was empty after each).
