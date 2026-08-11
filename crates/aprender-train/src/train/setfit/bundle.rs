@@ -599,12 +599,29 @@ impl SetFitBundle {
 // ===========================================================================================
 
 /// Lowercase hex of the little-endian bit patterns, in slice order.
+///
+/// Encodes STRAIGHT INTO the output string rather than materializing a `4N`-byte scratch
+/// buffer to hand `hex::encode` a contiguous slice. The scratch was pure waste and it was
+/// not small: this runs once per tensor, and the word-embedding table alone is 11.7M
+/// elements, so the intermediate was a 47 MB allocation on its own (~90 MB across a full
+/// pin) — paid twice per verify, since the policy serializes both the live bundle and the
+/// reloaded one.
 fn f32_to_hex(values: &[f32]) -> String {
-    let mut bytes = Vec::with_capacity(values.len() * 4);
+    let mut out = String::with_capacity(values.len() * 8);
+    let mut word = [0u8; 8];
     for value in values {
-        bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+        // Both `expect`s are structural, not hopeful: `encode_to_slice` fails only when the
+        // destination is not exactly twice the source length (4 into `[u8; 8]` is, by
+        // construction), and it writes only lowercase ASCII. They are `expect` rather than a
+        // silent fallback ON PURPOSE — a skipped value would shorten the payload, and a
+        // codec whose contract is byte-exactness must not have a path that quietly truncates.
+        hex::encode_to_slice(value.to_bits().to_le_bytes(), &mut word)
+            .expect("4 source bytes into an 8-byte destination is exactly 2x");
+        out.push_str(
+            std::str::from_utf8(&word).expect("hex::encode_to_slice writes ASCII hex only"),
+        );
     }
-    hex::encode(bytes)
+    out
 }
 
 /// The inverse of [`f32_to_hex`], naming the field on failure.
@@ -618,11 +635,21 @@ fn hex_to_f32(field: &str, encoded: &str) -> Result<Vec<f32>, BundleError> {
             ),
         });
     }
-    let bytes = hex::decode(encoded).map_err(|e| BundleError::MalformedHexPayload {
-        field: field.to_string(),
-        reason: e.to_string(),
-    })?;
-    Ok(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    // Decoded PER VALUE rather than through one `hex::decode` of the whole payload. The
+    // whole-payload form allocated a `4N`-byte scratch `Vec<u8>` that existed only to be
+    // walked once into the `Vec<f32>` — ~90 MB of it on a full pin, on the reload path,
+    // where it stacked with the hex `String` itself and the decoded tensors.
+    // The length check above makes `len / 8` the exact element count, so this reserves once.
+    let mut out = Vec::with_capacity(encoded.len() / 8);
+    let mut word = [0u8; 4];
+    for chunk in encoded.as_bytes().chunks_exact(8) {
+        hex::decode_to_slice(chunk, &mut word).map_err(|e| BundleError::MalformedHexPayload {
+            field: field.to_string(),
+            reason: e.to_string(),
+        })?;
+        out.push(f32::from_le_bytes(word));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

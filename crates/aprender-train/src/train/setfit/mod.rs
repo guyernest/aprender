@@ -1564,11 +1564,7 @@ mod tests {
 
     /// A complete calibrated pipeline: prepare -> tune_encoder -> fit_head.
     fn head_fitted_run(variant: fx::CalibrationVariant) -> SetFitRun<HeadFitted> {
-        fx::prepared_run(variant, None)
-            .tune_encoder()
-            .expect("a run at a measured seed and cell must pass the evidence gate")
-            .fit_head()
-            .expect("the head must fit on the fixture's 24 encode-once rows")
+        fx::head_fitted_run(variant)
     }
 
     /// Embedding rows for arbitrary probe texts, through the run's OWN encoder.

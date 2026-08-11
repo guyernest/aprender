@@ -50,7 +50,7 @@ use aprender_contrastive_data::select::{FewShotSelector, Selection, SelectionCon
 use aprender_contrastive_data::split::SplitDeclaration;
 
 use super::config::{SetFitTrainConfig, SetFitTrainRequest};
-use super::{Prepared, SetFitRun};
+use super::{HeadFitted, Prepared, SetFitRun};
 
 /// The seed `aprender-core`'s own slice tests build with. Reused so a divergence between
 /// this crate's fixture and that one is a divergence in the trainer, not in the seed.
@@ -327,6 +327,27 @@ pub(crate) fn prepared_run(
     let encoder = slice_encoder(variant.root_seed);
     SetFitRun::prepare(encoder, dataset, selection, config_for(variant, encoder_lr_override))
         .expect("the fixture run must prepare")
+}
+
+/// A complete calibrated pipeline: `prepare` -> `tune_encoder` -> `fit_head`.
+///
+/// Lives here rather than in each test module because it was written out THREE times —
+/// `bundle_tests.rs`, `verify_tests.rs` and `mod.rs`'s own test module — identical down to
+/// both `expect` strings, the `mod.rs` copy differing only by taking the variant instead of
+/// hardcoding [`calibrated_variant`]. Three copies of a pipeline is three places for the
+/// pipeline's shape to drift apart, in fixtures whose whole job is that every test starts
+/// from the same run.
+///
+/// # Panics
+///
+/// If the run misses the evidence gate or the head fails to fit — both are fixture defects,
+/// not test failures, and both are the reason the messages name the measured cell.
+pub(crate) fn head_fitted_run(variant: CalibrationVariant) -> SetFitRun<HeadFitted> {
+    prepared_run(variant, None)
+        .tune_encoder()
+        .expect("a run at a measured seed and cell must pass the evidence gate")
+        .fit_head()
+        .expect("the head must fit on the fixture's 24 encode-once rows")
 }
 
 /// A prepared run with an explicit freeze policy.

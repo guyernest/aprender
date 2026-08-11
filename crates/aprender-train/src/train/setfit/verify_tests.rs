@@ -48,11 +48,7 @@ use crate::train::setfit::{
 
 /// A complete calibrated pipeline up to `HeadFitted`.
 fn head_fitted_run() -> SetFitRun<HeadFitted> {
-    fx::prepared_run(fx::calibrated_variant(), None)
-        .tune_encoder()
-        .expect("a run at a measured seed and cell must pass the evidence gate")
-        .fit_head()
-        .expect("the head must fit on the fixture's 24 encode-once rows")
+    fx::head_fitted_run(fx::calibrated_variant())
 }
 
 /// The same pipeline, with the intra-batch pull order reversed.
@@ -294,6 +290,76 @@ impl SetFitCodec for CorruptingCodec {
     }
 }
 
+/// A codec that is honest about its bytes but decodes a payload belonging to ANOTHER format.
+///
+/// It declares a format id of its own while handing back a bundle stamped
+/// `SERDE_JSON_FORMAT_ID`. Nothing in its own `deserialize` checks that — which is the whole
+/// point: it stands in for a future implementor (phase 4's `AprCodec`) that simply forgot to
+/// write the guard. The check must come from the module, not from the implementor's care.
+struct ForeignFormatCodec {
+    inner: SerdeJsonCodec,
+}
+
+impl super::sealed::Sealed for ForeignFormatCodec {}
+
+impl SetFitCodec for ForeignFormatCodec {
+    fn format_id(&self) -> &'static str {
+        "setfit-bundle-someone-elses-format-v1"
+    }
+
+    fn serialize(&self, bundle: &SetFitBundle) -> Result<Vec<u8>, CodecError> {
+        self.inner.serialize(bundle)
+    }
+
+    /// Faithful to its bytes, and silent about whose format they are.
+    fn deserialize(&self, bytes: &[u8]) -> Result<SetFitBundle, CodecError> {
+        self.inner.deserialize(bytes)
+    }
+}
+
+/// A codec that omits the format-id guard is still refused, because `decode` makes it.
+///
+/// # Why this exercises `decode` and not `verify_artifact`
+///
+/// It CANNOT be reached through `verify_artifact`: `close` stamps the payload with
+/// `codec.format_id()`, so within one policy run the written id and the reading codec always
+/// agree by construction. (That was measured — an earlier draft of this test drove it through
+/// `verify_artifact` and the run returned `Ok`, which is the correct answer for that path.)
+/// The mismatch only arises where bytes cross BETWEEN codecs, which is the codec surface
+/// plan 03-10 exposes and phase 4 adds a second implementor to.
+///
+/// So the falsification is aimed at `decode` directly: `ForeignFormatCodec` checks nothing of
+/// its own, is handed bytes written by `SerdeJsonCodec`, and the refusal must still arrive
+/// naming both ids.
+#[test]
+fn verify_a_codec_that_omits_the_format_check_is_still_refused() {
+    let run = head_fitted_run();
+    let honest = SerdeJsonCodec::new();
+    let bundle = SetFitBundle::from_run_parts(
+        honest.format_id(),
+        run.encoder(),
+        run.evidence().head(),
+        run.evidence().ordered_labels(),
+        run.config(),
+        run.evidence().passed().summary(),
+    )
+    .expect("a well-formed bundle in the honest codec's format");
+    let bytes = honest.serialize(&bundle).expect("the honest codec serializes");
+
+    let forgetful = ForeignFormatCodec { inner: SerdeJsonCodec::new() };
+    // Its own `deserialize` is happy — it never looks at the id.
+    forgetful.deserialize(&bytes).expect("the forgetful codec itself raises nothing");
+
+    // Trusted `decode` refuses on its behalf.
+    match super::decode(&forgetful, &bytes) {
+        Err(CodecError::ForeignFormat { expected, got }) => {
+            assert_eq!(expected, "setfit-bundle-someone-elses-format-v1");
+            assert_eq!(got, SERDE_JSON_FORMAT_ID, "the id the payload actually declares");
+        }
+        other => panic!("expected a typed ForeignFormat refusal, got {other:?}"),
+    }
+}
+
 #[test]
 fn verify_corrupted_bytes_fail_typed_and_mint_nothing() {
     let run = head_fitted_run();
@@ -398,8 +464,7 @@ fn verify_policy_closes_the_live_model_before_it_reloads() {
     let at = src.find("pub(crate) fn run_verify_policy").expect("the policy must exist");
     let body = &src[at..];
     let close_at = body.find("close(").expect("the policy must close the artifact");
-    let deserialize_at =
-        body.find("codec.deserialize(").expect("the policy must reload from bytes");
+    let deserialize_at = body.find("decode(codec,").expect("the policy must reload from bytes");
     let closure_at = body
         .find("close_round_trip(codec, &reloaded, &bytes)")
         .expect("the policy must re-serialize the reloaded bundle and compare the bytes");
@@ -467,43 +532,59 @@ fn verify_final_state_has_a_non_option_evidence_type() {
 // The reproducibility surface
 // ===========================================================================================
 
-/// All ten accessors exist as `pub fn`, none returns `&mut`, none consumes self.
+/// Every reproducibility accessor exists, is `pub`, and is read-only — proved by COMPILING.
+///
+/// # Why this is not a source-text scan any more
+///
+/// It used to `include_str!("mod.rs")` and assert that ten `pub fn` signatures appeared and
+/// that the block contained no `&mut self` / `(self)`. That was the wrong altitude twice
+/// over. It asserted `expected.len() == 10` against a ten-element literal — a tautology the
+/// compiler already knows — and, being a substring search, it was blind to the very drift it
+/// existed to catch: an ELEVENTH accessor, `artifact_format_id`, was added and the test
+/// stayed green because nothing counted what was actually there. It also went red on a
+/// rustfmt reflow that changed no behaviour.
+///
+/// Binding a SHARED reference and calling through it moves all of that to compile time: a
+/// `&mut self` or by-value receiver is not callable through `&T`, an absent or non-`pub`
+/// accessor is a name error, and a changed return type is a type error. None of it can pass
+/// by accident.
 #[test]
-fn verify_ten_reproducibility_accessors_are_read_only() {
+fn verify_reproducibility_accessors_are_read_only_and_complete() {
+    let run = verified_run();
+
+    // The whole proof: `r` is a SHARED reference, so every call below is a compile-time
+    // assertion that the accessor takes `&self` and hands back a read-only view.
+    let r: &SetFitRun<ArtifactReloadedAndVerified> = &run;
+
+    let _: String = r.selection_semantic_hash();
+    let _: &str = r.pair_order_digest();
+    let _: &[(u32, u64, u32)] = r.batch_boundaries();
+    let _: u64 = r.step_count();
+    let _: &str = r.loss_trace_hash();
+    let _: &str = r.evidence_table_hash();
+    let _: &str = r.parameter_registry_hash();
+    let _: String = r.encode_ledger_hash();
+    let _: String = r.artifact_hash();
+    let _: &VerifyProbe = r.probe_predictions();
+    let _: &str = r.artifact_format_id();
+
+    // EXHAUSTIVENESS is the one property the calls above cannot carry: they prove each
+    // listed accessor exists, not that the list is the WHOLE surface. So count the block's
+    // declarations and require the number to match. This is the assertion the old form was
+    // trying and failing to make — keep it in step when the surface changes on purpose.
+    const ACCESSORS_CALLED_ABOVE: usize = 11;
     let src = include_str!("mod.rs");
     let at = src
         .find("impl SetFitRun<ArtifactReloadedAndVerified> {")
         .expect("the accessor block must exist");
     let block = &src[at..];
-
-    let expected = [
-        "pub fn selection_semantic_hash(&self)",
-        "pub fn pair_order_digest(&self)",
-        "pub fn batch_boundaries(&self)",
-        "pub fn step_count(&self)",
-        "pub fn loss_trace_hash(&self)",
-        "pub fn evidence_table_hash(&self)",
-        "pub fn parameter_registry_hash(&self)",
-        "pub fn encode_ledger_hash(&self)",
-        "pub fn artifact_hash(&self)",
-        "pub fn probe_predictions(&self)",
-    ];
-    assert_eq!(expected.len(), 10, "the surface is ten accessors");
-    for signature in expected {
-        assert!(block.contains(signature), "the reproducibility surface is missing `{signature}`",);
-    }
-
-    // Read-only, structurally: the block declares no `&mut self` receiver and no
-    // `self`-by-value receiver that could transition into another state.
     let end = block.find("\n}\n").expect("the block must close");
-    let body = &block[..end];
-    assert!(
-        !body.contains("&mut self"),
-        "no reproducibility accessor may hand out a mutable borrow",
-    );
-    assert!(
-        !body.contains("(self)") && !body.contains("(mut self"),
-        "no reproducibility accessor may consume the run",
+    let declared = block[..end].matches("\n    pub fn ").count();
+    assert_eq!(
+        declared, ACCESSORS_CALLED_ABOVE,
+        "the accessor block declares {declared} `pub fn`s but this test exercises \
+         {ACCESSORS_CALLED_ABOVE}; add the new accessor to the calls above (which is what \
+         proves it read-only) and bump the count",
     );
 }
 

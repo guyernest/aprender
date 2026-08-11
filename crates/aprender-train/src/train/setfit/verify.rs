@@ -175,6 +175,12 @@ impl SetFitCodec for SerdeJsonCodec {
         let bundle = SetFitBundle::from_canonical_bytes(bytes).map_err(|source| {
             CodecError::Bundle { format_id: SERDE_JSON_FORMAT_ID.to_string(), source }
         })?;
+        // This check is ALSO made by the trusted `decode`, and the redundancy is deliberate:
+        // the two cover different surfaces. `decode` covers the policy path for every
+        // implementor including ones that forget to check. This one covers THIS codec's own
+        // `pub` surface, which plan 03-10 calls directly without going through the policy —
+        // dropping it here would mean `SerdeJsonCodec.deserialize(foreign_bytes)` returns a
+        // foreign bundle happily. Neither subsumes the other.
         if bundle.format_id() != SERDE_JSON_FORMAT_ID {
             return Err(CodecError::ForeignFormat {
                 expected: SERDE_JSON_FORMAT_ID.to_string(),
@@ -196,6 +202,35 @@ impl SetFitCodec for SerdeJsonCodec {
 /// the only thing tying a verified run to a specific artifact.
 pub(crate) fn artifact_hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+/// Decode through `codec`, then enforce that the payload is the codec's OWN format.
+///
+/// # Why the check lives here and not in the implementor
+///
+/// `close` stamps the format id via [`SetFitBundle::from_run_parts`]`(codec.format_id(), ..)`
+/// — trusted, and unforgeable by an implementor. The matching check on the way back in used
+/// to be hand-written inside `SerdeJsonCodec::deserialize`, which made the *encode* half of
+/// the invariant a property of the module and the *decode* half a guard each implementor had
+/// to remember. That is the wrong altitude for a module whose entire thesis is that an
+/// implementor is powerless: `SetFitBundle::from_canonical_bytes` does not check the id
+/// either, so a phase-4 `AprCodec` that simply forgot would have a public `deserialize` that
+/// silently accepts a foreign payload, with nothing in-crate noticing.
+///
+/// Inside [`run_verify_policy`] the round-trip closure check happens to mask this; on the
+/// codec's own public surface — which plan 03-10 deliberately exposes — nothing does. All
+/// three inputs to the existing [`CodecError::ForeignFormat`] are reachable from the trait,
+/// so one function covers every present and future implementor. This is the same lift the
+/// phase already made for `head_input::push_rows`: one guard, reached from every caller.
+fn decode<C: SetFitCodec>(codec: &C, bytes: &[u8]) -> Result<SetFitBundle, CodecError> {
+    let bundle = codec.deserialize(bytes)?;
+    if bundle.format_id() != codec.format_id() {
+        return Err(CodecError::ForeignFormat {
+            expected: codec.format_id().to_string(),
+            got: bundle.format_id().to_string(),
+        });
+    }
+    Ok(bundle)
 }
 
 /// The comparison tolerance. Crate-internal; no codec can set one.
@@ -450,7 +485,7 @@ fn rebuild_from(
     let encoder = SetFitMiniLm::from_bundle_parts(
         &tokenizer_bytes,
         bundle.architecture(),
-        &tensors,
+        tensors,
         bundle.root_seed(),
     )
     .map_err(|e| SetFitTrainError::Encoder { reason: e.to_string() })?;
@@ -496,8 +531,9 @@ pub(crate) fn run_verify_policy<C: SetFitCodec>(
     let ClosedArtifact { bytes, hash, probe } =
         close(codec, encoder, head, ordered_labels, dataset, selection, config, summary)?;
 
-    // (2) Reload FROM BYTES.
-    let reloaded = codec.deserialize(&bytes).map_err(SetFitTrainError::Codec)?;
+    // (2) Reload FROM BYTES, through the trusted `decode` so the format-id check is the
+    // module's and not the implementor's.
+    let reloaded = decode(codec, &bytes).map_err(SetFitTrainError::Codec)?;
 
     // (3) ROUND-TRIP CLOSURE CHECK, before anything downstream trusts the value.
     //

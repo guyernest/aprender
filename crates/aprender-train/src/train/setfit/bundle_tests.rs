@@ -24,11 +24,7 @@ const FIXTURE_FORMAT_ID: &str = "setfit-serde-json-v1";
 
 /// A complete calibrated pipeline: prepare -> tune_encoder -> fit_head.
 fn head_fitted_run() -> SetFitRun<HeadFitted> {
-    fx::prepared_run(fx::calibrated_variant(), None)
-        .tune_encoder()
-        .expect("a run at a measured seed and cell must pass the evidence gate")
-        .fit_head()
-        .expect("the head must fit on the fixture's 24 encode-once rows")
+    fx::head_fitted_run(fx::calibrated_variant())
 }
 
 /// The bundle a finished fixture run produces, through the shipped assembly path.
@@ -93,7 +89,7 @@ fn rebuild(bundle: &SetFitBundle) -> SetFitMiniLm {
     SetFitMiniLm::from_bundle_parts(
         &bundle.tokenizer_bytes().expect("tokenizer bytes decode"),
         bundle.architecture(),
-        &bundle.named_tensors().expect("tensors decode"),
+        bundle.named_tensors().expect("tensors decode"),
         bundle.root_seed(),
     )
     .expect("a complete bundle must rebuild a model")
@@ -287,7 +283,7 @@ fn bundle_records_the_architecture_and_policy_the_encoder_actually_uses() {
     let bundle = fixture_bundle(&run);
     let arch = bundle.architecture();
 
-    assert_eq!(arch.hidden * 1, 64, "the fixture slice is 64-wide");
+    assert_eq!(arch.hidden, 64, "the fixture slice is 64-wide");
     assert_eq!(arch.num_layers, 2);
     assert_eq!(arch.heads, 2);
     assert_eq!(arch.head_dim, arch.hidden / arch.heads);
@@ -497,7 +493,7 @@ fn bundle_tokenizer_hash_mismatch_is_a_typed_rejection() {
     let err = SetFitMiniLm::from_bundle_parts(
         &bundle.tokenizer_bytes().expect("tokenizer bytes decode"),
         bundle.architecture(),
-        &bundle.named_tensors().expect("tensors decode"),
+        bundle.named_tensors().expect("tensors decode"),
         bundle.root_seed(),
     )
     .expect_err("a tokenizer whose bytes do not match the record must be refused");
@@ -522,7 +518,7 @@ fn bundle_missing_tensor_is_a_typed_rejection_naming_it() {
     let err = SetFitMiniLm::from_bundle_parts(
         &bundle.tokenizer_bytes().expect("tokenizer bytes decode"),
         bundle.architecture(),
-        &tensors,
+        tensors,
         bundle.root_seed(),
     )
     .expect_err("a bundle missing a tensor must be refused");

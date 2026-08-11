@@ -354,7 +354,7 @@ impl SetFitMiniLm {
     pub fn from_bundle_parts(
         tokenizer_bytes: &[u8],
         arch: &EncoderArchitecture,
-        tensors: &BTreeMap<String, (Vec<usize>, Vec<f32>)>,
+        tensors: BTreeMap<String, (Vec<usize>, Vec<f32>)>,
         root_seed: u64,
     ) -> Result<Self, SetFitError> {
         let observed = tokenizer::sha256_hex(tokenizer_bytes);

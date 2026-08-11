@@ -305,7 +305,7 @@ impl BertSentenceEncoder {
     /// if one is missing, has the wrong shape, or the wrong element count.
     pub(crate) fn from_named_tensors(
         arch: &EncoderArchitecture,
-        tensors: &BTreeMap<String, (Vec<usize>, Vec<f32>)>,
+        tensors: BTreeMap<String, (Vec<usize>, Vec<f32>)>,
         root_seed: u64,
     ) -> Result<Self, SetFitError> {
         if arch.hidden_act != PINNED_ACTIVATION {
@@ -347,6 +347,19 @@ impl BertSentenceEncoder {
             None => None,
         };
 
+        // TAKEN BY VALUE and drained, so each tensor's `Vec<f32>` MOVES into its `Tensor`.
+        // Reading through a `&BTreeMap` forced a `data.clone()` per tensor: the caller
+        // (`verify::rebuild_from`) owns the map and drops it immediately afterwards, so every
+        // one of those copies was pure waste. It is not a small waste — a full model pin is
+        // 22,565,376 elements, so the clone duplicated ~90 MB and held ~180 MB of tensor data
+        // live at once on the reload path. `Tensor::from_vec` already takes its `Vec` by
+        // value, so nothing but this signature stood in the way.
+        //
+        // The `RefCell` is what lets a `&dyn Fn` mutate: `assemble` deliberately takes the
+        // reader as `Fn` so every constructor shares ONE ordering, and widening it to `FnMut`
+        // to serve this one caller would be the tail wagging the dog.
+        let remaining = core::cell::RefCell::new(tensors);
+
         Self::assemble(
             dims,
             arch.layer_norm_eps as f32,
@@ -355,7 +368,10 @@ impl BertSentenceEncoder {
             arch.tokenizer_sha256.clone(),
             root_seed,
             &|name: &str, shape: &[usize]| -> Result<Tensor, SetFitError> {
-                let (got_shape, data) = tensors.get(name).ok_or_else(|| {
+                // `remove`, not `get`. Besides enabling the move, it makes a SECOND read of
+                // the same name report "not present" — `assemble` reads each name exactly
+                // once, so a repeat read is a defect in the ordering, not a legitimate call.
+                let (got_shape, data) = remaining.borrow_mut().remove(name).ok_or_else(|| {
                     SetFitError::ImportTensor(BertLoadError {
                         tensor: name.to_string(),
                         reason: "tensor not present in the bundle".to_string(),
@@ -377,7 +393,7 @@ impl BertSentenceEncoder {
                         ),
                     }));
                 }
-                Ok(Tensor::from_vec(data.clone(), shape).requires_grad())
+                Ok(Tensor::from_vec(data, shape).requires_grad())
             },
         )
     }
