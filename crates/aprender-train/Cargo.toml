@@ -162,6 +162,9 @@ serde_yaml_ng = "0.10"
 [dev-dependencies]
 proptest = "1.4"
 approx = "0.5"
+# Phase 3 (03-10 T1): the seven compile-fail proofs in `tests/ui/`. Same form as
+# `aprender-contrastive-data`'s, which is where the harness pattern comes from.
+trybuild = { workspace = true }
 tempfile = "3.8"
 criterion = { workspace = true }
 arrow = { version = "57", default-features = false }  # For MNIST example array access
