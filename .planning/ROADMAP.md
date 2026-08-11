@@ -161,7 +161,7 @@ plan's `<wave_1_concurrency>` block.)*
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 03-09-PLAN.md — Trusted validation evaluator + candidate-committing SelectionLock + object-bound CanonicalTestToken (TRN-07) (wave 6)
+- [x] 03-09-PLAN.md — Trusted validation evaluator + candidate-committing SelectionLock + object-bound CanonicalTestToken (TRN-07) (wave 6)
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
@@ -216,6 +216,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
-| 3. Faithful Two-Stage Trainer and Head | 8/10 | In Progress|  |
+| 3. Faithful Two-Stage Trainer and Head | 9/10 | In Progress|  |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
