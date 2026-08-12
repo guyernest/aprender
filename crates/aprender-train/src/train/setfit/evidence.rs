@@ -204,9 +204,9 @@ pub(crate) enum EvidenceError {
 fn first_null_path(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Null => Some(String::new()),
-        serde_json::Value::Object(map) => map.iter().find_map(|(key, child)| {
-            first_null_path(child).map(|rest| join_path(key, &rest))
-        }),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .find_map(|(key, child)| first_null_path(child).map(|rest| join_path(key, &rest))),
         serde_json::Value::Array(items) => items.iter().enumerate().find_map(|(index, child)| {
             first_null_path(child).map(|rest| join_path(&index.to_string(), &rest))
         }),
@@ -216,7 +216,11 @@ fn first_null_path(value: &serde_json::Value) -> Option<String> {
 
 /// Join one path segment onto a (possibly empty) remainder.
 fn join_path(head: &str, rest: &str) -> String {
-    if rest.is_empty() { head.to_string() } else { format!("{head}.{rest}") }
+    if rest.is_empty() {
+        head.to_string()
+    } else {
+        format!("{head}.{rest}")
+    }
 }
 
 impl fmt::Display for EvidenceError {
@@ -468,9 +472,10 @@ impl UpdateEvidence {
         // non-finite float — which makes this exact today and still exact after someone adds an
         // `f64`. An enumerated field list is the guard that silently stops covering the newest
         // field, which is how these checks rot.
-        if let Some(path) = first_null_path(&serde_json::from_slice::<serde_json::Value>(&bytes)
-            .map_err(|e| EvidenceError::Serialization { reason: e.to_string() })?)
-        {
+        if let Some(path) = first_null_path(
+            &serde_json::from_slice::<serde_json::Value>(&bytes)
+                .map_err(|e| EvidenceError::Serialization { reason: e.to_string() })?,
+        ) {
             return Err(EvidenceError::NonFiniteMeasurement { field: path });
         }
 
@@ -1018,12 +1023,7 @@ mod tests {
         for poison in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
             // (a) a row-level field, nested under the rows map.
             let mut evidence = evidence_for(fx::default_variant(), None);
-            let row_name = evidence
-                .rows
-                .keys()
-                .next()
-                .expect("the fixture table has rows")
-                .clone();
+            let row_name = evidence.rows.keys().next().expect("the fixture table has rows").clone();
             evidence.rows.get_mut(&row_name).expect("row present").relative_delta = poison;
             match evidence.to_canonical_bytes() {
                 Err(EvidenceError::NonFiniteMeasurement { field }) => {
