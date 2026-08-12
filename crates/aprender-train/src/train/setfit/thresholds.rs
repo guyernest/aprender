@@ -460,6 +460,28 @@ mod tests {
             contracted_regimes.len(),
             "the Rust calibrated set and the contract's must have the same size",
         );
+        // EQUALITY, not `is_calibrated`. `is_calibrated` routes through `Regime::covers`, which
+        // is a SUBSET test (`thresholds.rs::covers`) — deliberately so, because it must also
+        // answer "does the calibrated entry cover this RUN's single seed and cell". That makes it
+        // the wrong direction for a provenance gate: widening the Rust constant to
+        // `seeds=1,42,7,99|cells=...,s32e4b16` leaves the length at 1 AND leaves the contract's
+        // narrower regime a subset of it, so both assertions above stayed green while the Rust
+        // side admitted a seed and a cell nothing was ever measured on. Induced and observed
+        // (rc=0) before this assertion existed; it is RED under the same mutation now.
+        //
+        // Comparing the id STRINGS is what closes it: the id is the whole provenance claim, so
+        // any one-sided edit to either side — widening or narrowing — is a mismatch.
+        let rust_regimes: Vec<&str> = frozen.calibrated_regimes().to_vec();
+        let contract_regimes: Vec<&str> = contracted_regimes.iter().map(String::as_str).collect();
+        assert_eq!(
+            rust_regimes, contract_regimes,
+            "the Rust calibrated regime set and the contract's must be EQUAL, not merely \
+             overlapping. A Rust-side widening admits runs on coordinates nothing was measured \
+             on, which is the T-3-21 loosening this gate exists to refuse (REVIEW CR-04).",
+        );
+
+        // Belt and braces: the subset direction must ALSO hold, so a future refactor that keeps
+        // the strings equal but breaks `covers` cannot pass on the equality alone.
         for regime in contracted_regimes {
             assert!(
                 frozen.is_calibrated(regime),
