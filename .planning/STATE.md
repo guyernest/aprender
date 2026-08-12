@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 03 all 10 plans complete, awaiting verification
+stopped_at: Phase 03 verification human_needed — 5 items in 03-HUMAN-UAT.md
 last_updated: "2026-08-11T22:13:56.639Z"
 last_activity: 2026-08-11 -- Phase 03 wave 7 merged (03-10); awaiting verifier
 progress:
@@ -25,10 +25,30 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 03 (faithful-two-stage-trainer-and-head) — CODE-COMPLETE, AWAITING VERIFICATION
+Phase: 03 (faithful-two-stage-trainer-and-head) — CODE-COMPLETE, VERIFICATION RETURNED human_needed
 Plan: 10 of 10 complete (03-10 merged at b002df419)
-Status: Phase 03 all plans executed; 2 must_haves UNMET and reported as shortfalls, not waived
+Status: Phase 03 all plans executed; verifier says human_needed (5/5 roadmap criteria verified, 47/50 must-have truths); code review found 4 BLOCKERS, all in the verification layer
 Last activity: 2026-08-11 -- Phase 03 wave 7 merged (03-10); awaiting verifier
+
+**Phase 03 verification returned `human_needed` (03-VERIFICATION.md) and code review found 4
+blockers (03-REVIEW.md). 5 decisions await the human in `03-HUMAN-UAT.md`.** The verifier tried to
+falsify all five ROADMAP success criteria and could not: 837 scoped aprender-train tests rc=0, 775
+scoped aprender-core rc=0, aprender-core full suite 14285/0, aprender-train full suite 7839 passed /
+24 failed where the 24 names are byte-for-byte `known-red-baseline.md` (zero regressions), all 5 Make
+gates rc=0, `pv validate` clean on 4 contracts. The blockers are NOT implementation defects — they
+are places where a CHECK is weaker than it looks:
+  - CR-01: Phase 3's ~2900 lines of unit tests and all seven trybuild cases run in NO tier and NO CI
+    job. `setfit` is declared (aprender-train/Cargo.toml:79) but not default; no workspace member
+    enables it; tier3's `cargo test --all` and CI's nextest both compile the module out. tier3 only
+    `cargo check`s the feature (setfit-feature-matrix, Makefile:338) and runs 2 repro tests.
+  - CR-02: `setfit_repro_recorded_matches_expected_replay` matches neither Makefile filter, so the
+    one test separating "reproducible" from "correct" never runs — and libtest exits 0 on a
+    zero-match filter, so both repro gates go vacuous on a rename while printing success.
+  - CR-03: serde_json renders non-finite f64 as `null`, so UpdateEvidence::table_hash is not
+    injective over inf/NaN; the contract precondition demanding a typed failure before hashing has
+    no implementation.
+  - CR-04: thresholds_match_the_contract checks entry COUNT then a SUBSET test, so widening
+    CALIBRATED_REGIMES keeps it green while admitting uncalibrated runs.
 
 **Phase 03 is NOT complete.** Two of 03-10's must_haves are unmet, both blocked on a
 compute-budget decision that CLAUDE.md reserves for the human:

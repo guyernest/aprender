@@ -19,7 +19,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Differentiable MiniLM Conformance** - Prove the pinned encoder's shared batched Rust path matches fixtures and updates named parameters through the graph. (completed 2026-08-08)
 - [ ] **Phase 2: Deterministic Pair and Data Protocol** - Make few-shot selection and bounded pair generation reproducible, provenance-complete, leakage-safe, and non-quadratic. (code-complete 2026-08-09; verification returned `human_needed` — 4 items pending in `02-HUMAN-UAT.md`)
-- [ ] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit. (all 10 plans code-complete 2026-08-11; NOT verified — 2 must_haves unmet: scoped mutation score and `make coverage`, both blocked on a compute budget decision)
+- [ ] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit. (all 10 plans code-complete 2026-08-11; verification returned `human_needed` — 5/5 roadmap criteria verified, 47/50 must-have truths; 5 items pending in `03-HUMAN-UAT.md`, and code review found 4 blockers in the VERIFICATION layer — see `03-REVIEW.md`)
 - [ ] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs.
 - [ ] **Phase 5: Benchmark and Claims Gate** - Produce the complete reproducible 40-cell SetFit-versus-9B-LoRA evidence set and reject incomplete or unequal claims.
 
@@ -216,6 +216,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
-| 3. Faithful Two-Stage Trainer and Head | 10/10 | Awaiting verification |  |
+| 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
