@@ -340,28 +340,30 @@ fn within(delta: f64, bound: f64) -> bool {
     )
 }
 
-/// Compare two probes at `tolerance`, naming the first divergence.
-fn compare_probes(
+/// The one shape a probe divergence takes, so the five rungs below cannot disagree on it.
+fn diverged(
+    field: &'static str,
+    row: usize,
+    index: usize,
+    expected: String,
+    observed: String,
+    bound: f64,
+) -> SetFitTrainError {
+    SetFitTrainError::ReloadDiverged { field, row, index, expected, observed, tolerance: bound }
+}
+
+/// Rung 1: EVERY one of the four lists on both sides has the same length.
+///
+/// Not just the ids. The rungs below walk their pairs with `zip`, which STOPS at the shorter
+/// side — so a probe whose embeddings, probabilities or labels ever desynchronised from its
+/// ids would have the surplus rows silently skipped and the verification would pass on a
+/// PARTIAL comparison. They agree by construction today (`into_probe_parts` moves both halves
+/// out of one object, and the head answers once per row); this is what keeps "today" from
+/// being the whole argument.
+fn compare_probe_row_counts(
     before: &VerifyProbe,
     after: &VerifyProbe,
-    tolerance: Tolerance,
-) -> Result<(f32, f64), SetFitTrainError> {
-    let diverged = |field: &'static str,
-                    row: usize,
-                    index: usize,
-                    expected: String,
-                    observed: String,
-                    bound: f64| {
-        SetFitTrainError::ReloadDiverged { field, row, index, expected, observed, tolerance: bound }
-    };
-
-    // Every one of the four lists, not just the ids. The three comparisons below walk
-    // their pairs with `zip`, which STOPS at the shorter side — so a probe whose
-    // embeddings, probabilities or labels ever desynchronised from its ids would have
-    // the surplus rows silently skipped and the verification would pass on a partial
-    // comparison. They agree by construction today (`into_probe_parts` moves both halves
-    // out of one object, and the head answers once per row); this is what keeps "today"
-    // from being the whole argument.
+) -> Result<(), SetFitTrainError> {
     for (what, expected, observed) in [
         ("probe_row_count", before.ids.len(), after.ids.len()),
         ("probe_row_count", before.ids.len(), before.embeddings.len()),
@@ -375,12 +377,30 @@ fn compare_probes(
             return Err(diverged(what, 0, 0, expected.to_string(), observed.to_string(), 0.0));
         }
     }
-    for (row, (a, b)) in before.ids.iter().zip(after.ids.iter()).enumerate() {
+    Ok(())
+}
+
+/// Rung 2 and rung 5: an exact string comparison over one list, named by `field`.
+fn compare_probe_strings(
+    field: &'static str,
+    before: &[String],
+    after: &[String],
+) -> Result<(), SetFitTrainError> {
+    for (row, (a, b)) in before.iter().zip(after.iter()).enumerate() {
         if a != b {
-            return Err(diverged("probe_id", row, 0, a.clone(), b.clone(), 0.0));
+            return Err(diverged(field, row, 0, a.clone(), b.clone(), 0.0));
         }
     }
+    Ok(())
+}
 
+/// Rung 3: the embeddings, at `tolerance.embedding_abs`, returning the largest delta seen.
+fn compare_probe_embeddings(
+    before: &VerifyProbe,
+    after: &VerifyProbe,
+    tolerance: Tolerance,
+) -> Result<f32, SetFitTrainError> {
+    let bound = f64::from(tolerance.embedding_abs);
     let mut max_embedding: f32 = 0.0;
     for (row, (a, b)) in before.embeddings.iter().zip(after.embeddings.iter()).enumerate() {
         if a.len() != b.len() {
@@ -398,19 +418,28 @@ fn compare_probes(
             if delta > max_embedding {
                 max_embedding = delta;
             }
-            if !within(f64::from(delta), f64::from(tolerance.embedding_abs)) {
+            if !within(f64::from(delta), bound) {
                 return Err(diverged(
                     "embedding",
                     row,
                     index,
                     format!("{x:e}"),
                     format!("{y:e}"),
-                    f64::from(tolerance.embedding_abs),
+                    bound,
                 ));
             }
         }
     }
+    Ok(max_embedding)
+}
 
+/// Rung 4: the class probabilities, at `tolerance.probability_abs`.
+fn compare_probe_probabilities(
+    before: &VerifyProbe,
+    after: &VerifyProbe,
+    tolerance: Tolerance,
+) -> Result<f64, SetFitTrainError> {
+    let bound = tolerance.probability_abs;
     let mut max_probability: f64 = 0.0;
     for (row, (a, b)) in before.probabilities.iter().zip(after.probabilities.iter()).enumerate() {
         if a.len() != b.len() {
@@ -428,25 +457,39 @@ fn compare_probes(
             if delta > max_probability {
                 max_probability = delta;
             }
-            if !within(delta, tolerance.probability_abs) {
+            if !within(delta, bound) {
                 return Err(diverged(
                     "probability",
                     row,
                     index,
                     format!("{x:e}"),
                     format!("{y:e}"),
-                    tolerance.probability_abs,
+                    bound,
                 ));
             }
         }
     }
+    Ok(max_probability)
+}
 
-    for (row, (a, b)) in before.labels.iter().zip(after.labels.iter()).enumerate() {
-        if a != b {
-            return Err(diverged("label", row, 0, a.clone(), b.clone(), 0.0));
-        }
-    }
-
+/// Compare two probes at `tolerance`, naming the first divergence.
+///
+/// # Five rungs, in this order, and the order is observable
+///
+/// Split into per-rung functions in plan 03-10 T3 to clear the project's cyclomatic ceiling of
+/// 10 (measured 17 before). The row-count rung must stay FIRST — every rung below it walks
+/// with `zip` and would silently skip surplus rows — and the field names in the errors are
+/// what `verify_tests` asserts on, so the sequence is behaviour, not layout.
+fn compare_probes(
+    before: &VerifyProbe,
+    after: &VerifyProbe,
+    tolerance: Tolerance,
+) -> Result<(f32, f64), SetFitTrainError> {
+    compare_probe_row_counts(before, after)?;
+    compare_probe_strings("probe_id", &before.ids, &after.ids)?;
+    let max_embedding = compare_probe_embeddings(before, after, tolerance)?;
+    let max_probability = compare_probe_probabilities(before, after, tolerance)?;
+    compare_probe_strings("label", &before.labels, &after.labels)?;
     Ok((max_embedding, max_probability))
 }
 

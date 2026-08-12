@@ -1695,6 +1695,7 @@ dependencies = [
  "toml 0.8.23",
  "tower 0.5.3",
  "tower-http",
+ "trybuild",
  "unicode-normalization",
  "uuid",
  "validator",

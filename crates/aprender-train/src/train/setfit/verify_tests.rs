@@ -557,6 +557,7 @@ fn verify_reproducibility_accessors_are_read_only_and_complete() {
     let _: String = r.selection_semantic_hash();
     let _: &str = r.pair_order_digest();
     let _: &[(u32, u64, u32)] = r.batch_boundaries();
+    let _: &str = r.batch_boundary_digest();
     let _: u64 = r.step_count();
     let _: &str = r.loss_trace_hash();
     let _: &str = r.evidence_table_hash();
@@ -570,7 +571,7 @@ fn verify_reproducibility_accessors_are_read_only_and_complete() {
     // listed accessor exists, not that the list is the WHOLE surface. So count the block's
     // declarations and require the number to match. This is the assertion the old form was
     // trying and failing to make — keep it in step when the surface changes on purpose.
-    const ACCESSORS_CALLED_ABOVE: usize = 11;
+    const ACCESSORS_CALLED_ABOVE: usize = 12;
     let src = include_str!("mod.rs");
     let at = src
         .find("impl SetFitRun<ArtifactReloadedAndVerified> {")
@@ -602,6 +603,11 @@ fn verify_pair_order_digest_is_the_recorded_one() {
     assert_eq!(
         run.batch_boundaries(),
         run.evidence().passed().table().batch_boundary_list.as_slice(),
+    );
+    assert_eq!(
+        run.batch_boundary_digest(),
+        run.evidence().passed().table().batch_boundary_digest,
+        "the boundary digest accessor must MOVE the recorded digest through",
     );
     assert_eq!(run.step_count(), run.evidence().passed().table().step_count);
     assert_eq!(run.loss_trace_hash(), run.evidence().passed().table().loss_trace_hash,);

@@ -55,17 +55,24 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
 
 ### Training and Classifier
 
-- [ ] **TRN-01**: A developer can run a typed SetFit lifecycle whose legal stages are
+- [x] **TRN-01**: A developer can run a typed SetFit lifecycle whose legal stages are
   `Prepared -> EncoderTuned -> HeadFitted -> ArtifactReloadedAndVerified`
 
-- [ ] **TRN-02**: A user can configure and validate encoder learning rate, epochs, batch size,
+- [x] **TRN-02**: A user can configure and validate encoder learning rate, epochs, batch size,
   warmup, gradient clipping, maximum length, pair policy/budget, freeze policy, head regularization,
   root seed, and device before training begins
+  — **QUALIFIER (03-10):** eleven of the twelve knobs are genuinely configurable; **`max_length`
+  is VALIDATED, not configurable — the only accepted value is the tokenizer's pinned 256.**
+  `MiniLmTokenizer` hard-truncates at `MAX_SEQUENCE_LENGTH = 256` (tokenizer.rs:52) and
+  `encode_texts` takes no length parameter, so knob 6 accepts 256 and rejects everything else
+  with `MaxLengthNotSupported`. ROADMAP criterion 1 ("invalid ... length ... configuration fails
+  before training begins") IS satisfied; this line read as "choose a value" is not. Making it
+  configurable would re-litigate Phase 1's pinned tokenizer and is out of scope.
 
-- [ ] **TRN-03**: A user receives proof that named encoder gradients, parameter deltas, embedding
+- [x] **TRN-03**: A user receives proof that named encoder gradients, parameter deltas, embedding
   deltas, and pair-loss behavior passed before a run may identify itself as SetFit or export a model
 
-- [ ] **TRN-04**: A user can fit one deterministic L2-regularized multinomial softmax classifier for
+- [x] **TRN-04**: A user can fit one deterministic L2-regularized multinomial softmax classifier for
   any ordered label set with `K >= 2`, with finite logits/probabilities and explicit convergence or
   failure
 
@@ -73,12 +80,24 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
   the tuned encoder in evaluation/no-gradient mode, so pair multiplicity cannot reweight the head
   dataset
 
-- [ ] **TRN-06**: Two clean CPU runs with identical inputs reproduce selected IDs, pair ordering,
+- [x] **TRN-06**: Two clean CPU runs with identical inputs reproduce selected IDs, pair ordering,
   batch ordering, training step count, semantic hashes, predictions, and the declared deterministic
   portions of the loss trace
+  — measured CROSS-PROCESS at fixed rayon pool sizes 1 and 3 with the observed pool sizes asserted
+  to differ (`setfit_repro_cross_process`, `make setfit-repro-crossproc`), over the RECORDED
+  execution digests; and separately proven to have consumed the intended order
+  (`setfit_repro_recorded_matches_expected_replay`)
 
 - [ ] **TRN-07**: A user can select configurations and checkpoints using canonical validation only,
   and a selection-lock record is created before canonical test access is permitted
+  — **LEFT UNCHECKED at 03-10, deliberately.** The NEGATIVE half is proven from outside the crate
+  at compile time (`tests/ui/setfit_token_without_lock.rs` E0451,
+  `tests/ui/setfit_metric_value_asserted.rs` E0451) and the mechanics are fully tested in-crate
+  (73 `lock_` + 45 `evaluate_` tests). What is missing is the POSITIVE "a user can" tier: no
+  out-of-crate caller and no `apr` surface exercises
+  `create_selection_lock -> mint_test_token -> CanonicalTestAccess::grant`, so nothing yet
+  demonstrates a user REACHING the lock. Checking this box would put a claim in the table that
+  the shipped surface does not support — the policy Phase 2 applied to DATA-01..06.
 
 ### APR Artifact Lifecycle
 
@@ -154,8 +173,11 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
   Python or network access, while reference-fixture generation remains a separate pinned developer
   workflow
 
-- [ ] **SAFE-03**: A user cannot label a frozen linear probe, centroid classifier, or other
+- [x] **SAFE-03**: A user cannot label a frozen linear probe, centroid classifier, or other
   non-updating encoder baseline as SetFit in artifacts, reports, or benchmark output
+  — proven from OUTSIDE the crate at COMPILE time: `tests/ui/setfit_probe_claims_setfit.rs` pins
+  E0277 for `FrozenProbeRun -> SetFitRun<_>`, and `SetFitRun`'s constructors are private so no
+  out-of-crate conversion can be written either
 
 ## v2 Requirements
 
@@ -220,12 +242,12 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
 | DATA-04 | Phase 2 | Complete |
 | DATA-05 | Phase 2 | Complete |
 | DATA-06 | Phase 2 | Complete |
-| TRN-01 | Phase 3 | Pending |
-| TRN-02 | Phase 3 | Pending |
-| TRN-03 | Phase 3 | Pending |
-| TRN-04 | Phase 3 | Pending |
+| TRN-01 | Phase 3 | Complete |
+| TRN-02 | Phase 3 | Complete (qualified: `max_length` validated, not configurable) |
+| TRN-03 | Phase 3 | Complete |
+| TRN-04 | Phase 3 | Complete |
 | TRN-05 | Phase 3 | Complete |
-| TRN-06 | Phase 3 | Pending |
+| TRN-06 | Phase 3 | Complete |
 | TRN-07 | Phase 3 | Pending |
 | APR-01 | Phase 4 | Pending |
 | APR-02 | Phase 4 | Pending |
@@ -245,7 +267,7 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
 | EVAL-05 | Phase 5 | Pending |
 | SAFE-01 | Phase 4 | Pending |
 | SAFE-02 | Phase 4 | Pending |
-| SAFE-03 | Phase 3 | Pending |
+| SAFE-03 | Phase 3 | Complete |
 
 **Coverage:**
 
