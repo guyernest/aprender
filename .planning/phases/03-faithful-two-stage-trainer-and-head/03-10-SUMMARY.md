@@ -551,3 +551,21 @@ path derived from caller input, and no schema change at a trust boundary. The on
 - **`tests/ui/` is now a live snapshot suite.** A toolchain bump can reword a diagnostic and turn it
   red with no behaviour change; the re-baseline command and the named-types review rule are in
   `tests/ui.rs`'s module docs.
+
+## Self-Check: PASSED
+
+Every claimed file exists on disk (`tests/ui.rs` 3.2K, `tests/setfit_repro.rs` 27.1K,
+`03-10-SUMMARY.md` 36.5K) and `crates/aprender-train/tests/ui/` holds exactly **14 files, all 14
+tracked by git**. All four claimed commits resolve in `git log --all`: `b7503075a`, `09af9ecaa`,
+`c04674039`, `fcea3276d`.
+
+All three Make targets are defined AND wired inside the tier they are claimed to be in, verified by
+line number rather than by reading: `tier2:` at 205, `tier3:` at 285, `setfit-repro-inproc` invoked
+at **272** (inside tier2), `setfit-repro-crossproc` and `gemm-thread-determinism` at **336-337**
+(inside tier3).
+
+REQUIREMENTS.md reads back as claimed: TRN-01/02/03/04/05/06 and SAFE-03 `[x]`, **TRN-07 `[ ]`**,
+and the traceability table agrees row for row including TRN-02's qualifier text.
+
+No commit in this plan deleted a tracked file — `git diff --diff-filter=D HEAD~1 HEAD` was empty
+after each of the four. The working tree is clean.
