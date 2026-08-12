@@ -270,6 +270,43 @@ jobs:
             -e CARGO_PROFILE_DEV_DEBUG=line-tables-only \
             "$IMAGE" \
             cargo nextest run --profile ci --workspace --lib --exclude aprender-gpu --exclude aprender-cuda-edge --exclude aprender-compute
+      - name: Phase 3 SetFit tests (feature-gated — NOT reached by --workspace --lib above)
+        # REVIEW CR-01. `setfit` is declared but not default (aprender-train/Cargo.toml:79,
+        # `default = ["tui"]`); the module is `#[cfg(feature = "setfit")]` (train/mod.rs:51) and
+        # aprender-core's is gated the same way (lib.rs:165). No workspace member enables either,
+        # and resolver 2 does not unify it in, so the nextest run above COMPILES IT OUT. ~337 lib
+        # tests plus seven trybuild compile-fail cases ran in no CI job at all before this step.
+        #
+        # Three invocations because each is necessary: the two crates are gated independently, and
+        # the trybuild cases live in their own test target that no `--lib` run reaches.
+        #
+        # `cargo test` with a libtest filter rather than nextest: this is the exact command
+        # `make setfit-tests` runs, verified locally at 102 / 234 / 7. Keeping them identical stops
+        # the tier and the CI job from drifting apart. Fixtures are committed (17 files, 4.6 MB at
+        # crates/aprender-core/tests/fixtures/setfit) and resolved from an in-repo path, so this
+        # needs no network.
+        #
+        # `set -e` and no pipes: a non-zero cargo exit fails the step directly. Deliberately NOT
+        # the `| tee ... ; grep -q` shape used below — that reads grep's status, not cargo's
+        # (CLAUDE.md verification rule 1).
+        run: |
+          docker run --rm \
+          -e CI -e GITHUB_ACTIONS -e GITHUB_REF -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_EVENT_NAME -e GITHUB_WORKFLOW \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -v "/mnt/nvme-raid0/cargo-ci/registry/${PR_OR_REF}:/usr/local/cargo/registry" \
+            -v "/mnt/nvme-raid0/targets/aprender-ci/${PR_OR_REF}/run-${GITHUB_RUN_ID}:/workspace/target" \
+            -v "/home/noah/data/sccache:/sccache" \
+            -w /workspace \
+            -e CARGO_TARGET_DIR=/workspace/target \
+            -e RUSTC_WRAPPER=rustc-sccache \
+            -e SCCACHE_DIR=/sccache \
+            -e CARGO_INCREMENTAL=0 \
+            -e CARGO_BUILD_JOBS=8 \
+            "$IMAGE" \
+            bash -c 'set -e; \
+              cargo test -p aprender-core  --features setfit --lib setfit::; \
+              cargo test -p aprender-train --features setfit --lib setfit::; \
+              cargo test -p aprender-train --features setfit --test ui'
       - name: Compute tests (tolerate SIGSEGV at exit — all tests pass but harness crashes on cleanup)
         run: |
           docker run --rm \
