@@ -43,7 +43,39 @@ why_human: `cargo llvm-cov` across the workspace with the mold linker disabled i
   second-heaviest command and needs the same cargo lock the mutation attempts held. Same >1hr
   compute authorization gate. Schedule it in the same window as item 1 — both need an
   uncontended target dir.
-result: [pending]
+result: AUTHORIZED and ATTEMPTED 2026-08-12 — **coverage is NOT MEASURABLE against the floor on
+  this host.** Four attempts, ~90 min, three distinct blocking modes:
+    1. `make coverage` as written -> rc=2. Two aprender-cgp tests fail on Darwin:
+       `test_read_system_memory_total_mb` reads `/proc/meminfo` (absent on macOS) and
+       `test_empirical_flops_positive` asserts a FLOPS floor this host misses. CONTROL RUN:
+       both also fail UNINSTRUMENTED (0.7 GFLOP/s bare vs 0.1 instrumented), so instrumentation
+       is NOT the cause — an earlier hypothesis of mine that the control refuted.
+    2. skipping those two -> rc=1 on aprender-compute's `test_gemm_parallel_shared_b_256`, the
+       timing flake 03-VERIFICATION.md already characterised (pass/FAIL/pass/pass).
+    3. `--no-fail-fast` + two-phase -> HUNG on `h0_mon_90/91_*` (GPU device enumeration,
+       `aprender-compute/src/monitor/tests/integration.rs`; the recipe's `--skip gpu_` does not
+       match the `h0_mon_` naming).
+    4. `--skip h0_mon_` + 30-min wall -> wall tripped at 57 of 58 binaries. The remaining time
+       goes to DOZENS of genuine multi-minute training tests (bug_hunter::hunt_*,
+       finetune::classify_pipeline convergence, instruct_pipeline LoRA overfit, code_gan,
+       transformer_trainer seed reproducibility). Not hangs — real workloads. The recipe's
+       "warm: ~3min" comment is off by more than an order of magnitude here.
+
+  BEST DATA (57/58 binaries, disclosed as incomplete): LH=779558 LF=1063825 -> 73%.
+  **NOT COMPARABLE to CLAUDE.md's 88.78% (786448/885829) and NOT checked against COV_FLOOR.**
+  Covered lines are FLAT (779558 vs 786448, within 0.9%); the whole gap is the DENOMINATOR,
+  +177996 coverable lines, 1.20x. Two explanations cannot be separated without a completed run:
+  ~178k lines of largely untested new code since July, or scope/exclusion differences plus the
+  one unfinished binary. No coverage regression is claimed, and no floor breach is claimed.
+
+  GATE DEFECT FOUND (worth its own ticket, independent of Phase 3): COV_FLOOR compares a
+  percentage whose DENOMINATOR IS NOT PINNED. Identical covered-line counts read 73% or 88.78%
+  depending on what is in scope, so the floor cannot detect a regression — the same code crosses
+  it in either direction purely from the workspace growing. Separately, `make coverage` omits
+  `--no-fail-fast`, so cargo stops at the first failing binary and every later crate contributes
+  lines-found with zero lines-hit; only the recipe's `|| exit 1` stops it from parsing that
+  partial lcov and printing a confident wrong number (measured: 4%, LH=53125/LF=1063825).
+  COV_FLOOR was NOT lowered — a floor that moves to meet the measurement is not a floor.
 
 ### 3. Decide the feature-closure substitution (plan 03-03 must-have 1)
 expected: Either (a) accept `make setfit-feature-matrix` leg (a)'s two-sided diagnostic diff as
