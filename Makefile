@@ -39,7 +39,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism
 
 # Default target
 all: tier2
@@ -334,6 +334,11 @@ tier3:
 # see 03-10-SUMMARY.md for the rc values and the perturbations used. The recipes read
 # `$$?` on the line after the redirect and contain no `tee`.
 	@$(MAKE) setfit-repro-crossproc
+# REVIEW CR-02: the replay check was written, committed, and wired into NOTHING. Two clean
+# runs agreeing proves reproducibility; only this proves the reproduced order is the
+# INTENDED one. Without it the pair of gates above can both pass on a wrong-but-consistent
+# order — the one failure mode the recorded-vs-recomputed split exists to catch.
+	@$(MAKE) setfit-repro-replay
 	@$(MAKE) gemm-thread-determinism
 	@$(MAKE) setfit-feature-matrix
 # D-04 (Phase 2), wired here for the same reason the line above exists: a target
@@ -1386,10 +1391,37 @@ contract-audit-phase3: ## Audit Phase 3 binding coverage (BLOCKING, wired into t
 # PHASE 3 REPRODUCIBILITY GATES (TRN-06 / D-16 / D-13)
 # ============================================================================
 #
+# A NAME-FILTERED `cargo test` THAT MATCHES NOTHING EXITS 0 (REVIEW CR-02).
+#
+# libtest prints `test result: ok. 0 passed; ... N filtered out` and returns success.
+# Every target below selects its test by NAME, so renaming a test — or mistyping a
+# filter — would turn the gate green while running nothing, and it would keep printing
+# its own success banner while doing it. That is a worse failure than red: red gets
+# investigated.
+#
+# `assert_tests_ran` reads the count libtest actually reported and fails if it is below
+# the number the target expects. `awk` parses it, not the rtk hook's summarised form.
+# Measured both ways before being trusted: with the real filter it reads 1 (or 2 for the
+# GEMM target) and passes; with a deliberately misspelled filter it reads 0 and the gate
+# exits non-zero instead of printing success.
+#
+define assert_tests_ran
+ran=$$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($$(i+1) ~ /^passed/) s += $$i } END { print s + 0 }' $(1)); \
+if [ "$$ran" -lt "$(2)" ]; then \
+	echo "FAIL: $(3) reported $$ran test(s) passed, expected at least $(2)."; \
+	echo "A name filter that matches nothing exits 0 (REVIEW CR-02) — this gate was"; \
+	echo "about to report success having run nothing. Check the test name in the"; \
+	echo "filter against the test binary: $(1)"; \
+	exit 1; \
+fi
+endef
+
+#
 # D-16 SPLITS one gate across two tiers, and the split is not decoration:
 #
 #   tier2  setfit-repro-inproc      two runs in ONE process agree
 #   tier3  setfit-repro-crossproc   two SEPARATE processes at pool sizes 1 and 3 agree
+#   tier3  setfit-repro-replay      recorded digests == an independent recomputation
 #
 # The in-process form is structurally blind — both runs share the rayon pool, the
 # allocator's free lists and every lazily-initialized static, which is exactly the
@@ -1421,8 +1453,9 @@ contract-audit-phase3: ## Audit Phase 3 binding coverage (BLOCKING, wired into t
 setfit-repro-inproc: ## TRN-06/D-16 (tier2 half): in-process two-clean-runs equality
 	@echo "TRN-06: in-process two-run equality (D-16's fast, non-authoritative half)"
 	@mkdir -p target
-	@CARGO_INCREMENTAL=0 cargo test -p aprender-train --test setfit_repro \
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --test setfit_repro \
 		--features setfit in_process > target/setfit-repro-inproc.log 2>&1; rc=$$?; \
+	set -e; \
 	tail -3 target/setfit-repro-inproc.log; \
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: the in-process two-run comparison is red (rc=$$rc)"; \
@@ -1431,14 +1464,16 @@ setfit-repro-inproc: ## TRN-06/D-16 (tier2 half): in-process two-clean-runs equa
 		echo "test step runs zero tests (D-ITEM-03) — neither is this gate's status."; \
 		exit $$rc; \
 	fi
+	@$(call assert_tests_ran,target/setfit-repro-inproc.log,1,setfit-repro-inproc)
 	@echo "  in-process: every composite component agreed"
 
 setfit-repro-crossproc: ## TRN-06/D-16 (tier3, AUTHORITATIVE): cross-process hash equality
 	@echo "TRN-06: cross-process two-clean-runs equality at fixed pool sizes 1 and 3"
 	@mkdir -p target
-	@CARGO_INCREMENTAL=0 cargo test -p aprender-train --test setfit_repro \
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --test setfit_repro \
 		--features setfit setfit_repro_cross_process \
 		> target/setfit-repro-crossproc.log 2>&1; rc=$$?; \
+	set -e; \
 	tail -3 target/setfit-repro-crossproc.log; \
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: two separate processes did not agree, or did not run at two"; \
@@ -1447,13 +1482,34 @@ setfit-repro-crossproc: ## TRN-06/D-16 (tier3, AUTHORITATIVE): cross-process has
 		echo "See target/setfit-repro-crossproc.log"; \
 		exit $$rc; \
 	fi
+	@$(call assert_tests_ran,target/setfit-repro-crossproc.log,1,setfit-repro-crossproc)
 	@echo "  cross-process: THREADS differed and all ten components agreed"
+
+setfit-repro-replay: ## TRN-06 (tier3): recorded digests match an INDEPENDENT recomputation
+	@echo "TRN-06: recorded-vs-expected replay (reproducible is not the same as correct)"
+	@mkdir -p target
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --test setfit_repro \
+		--features setfit setfit_repro_recorded_matches_expected_replay \
+		> target/setfit-repro-replay.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/setfit-repro-replay.log; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: the RECORDED pair order / batch boundaries do not match an"; \
+		echo "independent recomputation from the public epoch_pair_order + a fresh"; \
+		echo "PairSampler. Two clean runs could still AGREE while both being wrong;"; \
+		echo "this is the check that separates reproducible from correct."; \
+		echo "See target/setfit-repro-replay.log"; \
+		exit $$rc; \
+	fi
+	@$(call assert_tests_ran,target/setfit-repro-replay.log,1,setfit-repro-replay)
+	@echo "  replay: recorded digests equal the independently recomputed ones"
 
 gemm-thread-determinism: ## D-13/TRN-06: Tensor::matmul does not depend on the rayon pool size
 	@echo "D-13: GEMM determinism across fixed rayon pool sizes 1/2/3 (03-02 T3)"
 	@mkdir -p target
-	@CARGO_INCREMENTAL=0 cargo test -p aprender-core --test gemm_thread_determinism \
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-core --test gemm_thread_determinism \
 		> target/gemm-thread-determinism.log 2>&1; rc=$$?; \
+	set -e; \
 	tail -3 target/gemm-thread-determinism.log; \
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: Tensor::matmul's output moved with the rayon pool size, so"; \
@@ -1461,6 +1517,7 @@ gemm-thread-determinism: ## D-13/TRN-06: Tensor::matmul does not depend on the r
 		echo "hold on this host. See target/gemm-thread-determinism.log"; \
 		exit $$rc; \
 	fi
+	@$(call assert_tests_ran,target/gemm-thread-determinism.log,2,gemm-thread-determinism)
 	@echo "  GEMM: identical hashes at pool sizes 1, 2 and 3"
 
 contract-regen: ## Regenerate wired test files from contracts
