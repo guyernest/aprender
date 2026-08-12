@@ -96,14 +96,29 @@ expected: A decision on scope. These three are self-contained (no CI edit, no cr
   CLOSED (make gets a non-zero status) — the loss is diagnostics, not correctness.
 why_human: Scope call only. Fixing inside Phase 3 keeps the phase's evidence honest before it is
   marked complete; deferring to a 3.1 gap-closure phase lets Phase 4 start sooner.
-result: [pending]
+result: RESOLVED 2026-08-12 — human chose "fix all three now". All three landed on
+  `gsd/phase-2-contract-gate`, each RED-proven before being trusted:
+    - CR-04 `51db85ace` — regime ids compared for EQUALITY. The widening mutation left the OLD
+      test at rc=0 and is rc=101 against the new assertion.
+    - CR-03 `0158a758d` — `NonFiniteLoss` in `run_batch` before `backward()`, plus a null-scan in
+      `to_canonical_bytes`. Defeating either check turns the tests red (rc=101), and the returned
+      bytes contain `"relative_delta":null` verbatim.
+    - CR-02 + WR-01 `1038f6414` — `setfit-repro-replay` wired into tier3, and `assert_tests_ran`
+      refuses a gate that ran nothing (zero-match filter: libtest `ok. 0 passed` → gate rc=2).
+      `set +e` makes the FAIL diagnostics reachable.
+    - `c992831b2` style commit for rustfmt on the CR-03 helpers.
+  Verified after: 234 setfit lib tests pass, all four gates green with asserted counts
+  (1/1/1/2), clippy `--no-deps` rc=0, `cargo fmt --check` rc=0.
+  Caveats recorded in 03-REVIEW.md: workspace-wide clippy cannot reach this crate (D-ITEM-02
+  fails first in aprender-compute), and `bashrs` is absent on this host so the mandated
+  Makefile lint did not run.
 
 ## Summary
 
 total: 5
-passed: 0
+passed: 1
 issues: 0
-pending: 5
+pending: 4
 skipped: 0
 blocked: 0
 

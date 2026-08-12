@@ -875,3 +875,46 @@ Recorded so a later reviewer does not re-derive it:
 _Reviewed: 2026-08-12T01:05:12Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+
+---
+
+## Resolution — applied by the orchestrator 2026-08-12
+
+The reviewer's findings above are preserved verbatim. This section records what happened
+to them; it does not edit the findings.
+
+| Finding | Status | Commit | Evidence |
+|---------|--------|--------|----------|
+| CR-01 | **OPEN — escalated to the human** | — | Fix requires editing `.github/workflows/*.yml`, which project CLAUDE.md reserves for explicit human approval. Item 4 of `03-HUMAN-UAT.md`. Confirmed independently: `setfit` declared at `aprender-train/Cargo.toml:79`, `default = ["tui"]` (:54), module gated at `train/mod.rs:51`, no workspace member enables it. tier3 only `cargo check`s the feature (`setfit-feature-matrix`, Makefile:338). |
+| CR-02 | **FIXED** | `1038f6414` | Both halves. (a) `setfit-repro-replay` target added and wired into tier3. (b) `assert_tests_ran` refuses a gate that ran nothing — proven two-sided: real filter → rc=0/1 test; filter + `XX` → libtest prints `ok. 0 passed; 4 filtered out` and WOULD have exited 0, gate now exits 2. |
+| CR-03 | **FIXED** | `0158a758d` | Two enforcement points. `SetFitTrainError::NonFiniteLoss` in `run_batch` before `backward()`; `EvidenceError::NonFiniteMeasurement` from a null-scan in `to_canonical_bytes`. Premise measured: `+inf`/`-inf`/`NaN` all render `null`, and `from_str::<f64>("null")` errors. Both RED-proven (check defeated → rc=101, returned bytes contain `"relative_delta":null`), then reverted. |
+| CR-04 | **FIXED** | `51db85ace` | Regime ids compared for EQUALITY, not `is_calibrated`'s subset. RED-proven: widening the Rust set to `seeds=1,42,7,99\|cells=...,s32e4b16` left the OLD test at rc=0; the new assertion is rc=101 on the same mutation. Mutation reverted. |
+| WR-01 | **FIXED** | `1038f6414` | `set +e` added to all four recipes under `.SHELLFLAGS := -e -c`. Proven reachable: pointing the GEMM recipe at a non-existent test target now prints its `FAIL:` diagnostic (rc=2) where it previously printed nothing. Gates already failed CLOSED, so this was lost diagnostics, not a false green. |
+| WR-02..WR-11, INFO-01..04 | **OPEN — not triaged** | — | Not addressed in this pass. The scope decision covered the blockers plus WR-01 only. |
+
+### Verification of the fixes
+
+- `cargo test -p aprender-train --features setfit --lib setfit::` → **234 passed, 0 failed, 1 ignored**
+- All four Phase 3 gates green with their real, asserted test counts: `setfit-repro-inproc` 1, `setfit-repro-crossproc` 1, `setfit-repro-replay` 1, `gemm-thread-determinism` 2
+- `cargo clippy -p aprender-train --features setfit --lib --no-deps -- -D warnings` → **rc=0, 0 errors**
+- `cargo fmt --check -p aprender-train` → **rc=0**
+
+### Two caveats on the verification itself
+
+1. **`cargo clippy` without `--no-deps` cannot reach this crate.** It fails first in
+   `aprender-compute` with 19 lint errors under `-D warnings` — D-ITEM-02, which the
+   Makefile already documents as the pre-existing arm64 tier2 red. So the `--no-deps`
+   result above is the honest scope of what was linted: my changes, not the workspace.
+2. **`bashrs` is not installed on this host**, so the project's mandated Makefile lint
+   (`bashrs make lint Makefile`) did NOT run against the CR-02/WR-01 edits. `make -n`
+   parses clean and no recipe pipes into `tee`, but that is not the same check.
+
+### A defect found while reconciling the mutation inventory
+
+`cargo mutants --list -f <form>` **exits 0 with empty output** when the form matches
+nothing, rather than erroring. `-f 'src/train/setfit/**'` and `-f '*/setfit/*'` both
+report zero mutants silently; the working forms are `-f '**/setfit/**'` and the full
+repo-relative `-f 'crates/aprender-train/src/train/setfit/*.rs'`. This is CR-02's
+zero-match vacuity in a second tool: a scoped mutation run could report a perfect score
+having tested nothing. Any future run must assert a non-zero inventory first. Recorded in
+`03-HUMAN-UAT.md` item 1.
