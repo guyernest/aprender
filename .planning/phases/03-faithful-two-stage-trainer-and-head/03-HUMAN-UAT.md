@@ -34,7 +34,36 @@ evidence_measured:
     and `-f '*/setfit/*'` both yield 0 mutants silently; the forms that work are
     `-f '**/setfit/**'` and the full repo-relative path `-f 'crates/aprender-train/src/train/setfit/*.rs'`.
     Any future mutation run MUST assert a non-zero inventory before trusting a score."
-result: [pending]
+result: PARTIALLY EXECUTED 2026-08-12 — authorized; ONE of three scopes measured to completion.
+  **dropout_rng.rs (79 mutants), COMPLETE and config-robust: RAW 82.9%, adjusted 84.0% — BELOW
+  the 85% bar, with the shortfall fully itemized.**
+    - 63 caught / 13 missed / 3 unviable, 79/79 accounted (run `mutants-L`, `-- --lib`, 3h02m).
+    - Config-robust: a second complete run under the narrow `setfit::` filter produced an
+      IDENTICAL survivor set and identical caught count (63) — so the score is a property of
+      the test suite, not of the filter.
+    - Survivor adjudication (read, not assumed):
+        1 PROVEN EQUIVALENT: assemble64 `|`->`^` — operands bit-disjoint (lanes[1]<<32 | lanes[0]),
+          `a|b == a^b` when `a&b == 0`; 02-08's first equivalence class. Excluded -> 63/75 = 84.0%.
+        8 UNTESTED ACCESSORS (killable, not equivalent): probability -> -1.0/0.0/1.0, site -> ""/
+          "xyzzy", threshold -> 0, scale -> 1.0, current_forward_ordinal -> 0. `.probability()` and
+          `.site()` are read by ZERO tests; `.scale()`/`.threshold()` only at their definitions.
+        4 UNREACHED TRAIT FORWARDER (killable): attention_dropout_mask -> vec![]/vec![0.0]/
+          vec![1.0]/vec![-1.0]. Confirmed unreached by the FULL 14285-test lib suite, not just the
+          setfit:: slice — the one-line forwarder to self.mask(len) is never called through the trait
+          by any lib test.
+    - ~12 targeted assertions would take the file to 75/75 = 100% adjusted.
+  REMAINING SCOPES NOT RUN: setfit dir (948 mutants) + multinomial.rs (186) — measured rate
+  ~140s/mutant at -j 2 with the full lib suite -> ~44h, consistent with the executor's original
+  projection. Awaiting a decision on that spend.
+  TOOLING PREREQUISITES discovered (apply to ANY future cargo-mutants run over aprender-core):
+    - `cargo mutants -- <args>` forwards to CARGO TEST, not libtest; libtest flags need a second
+      separator (`-- -- --skip X`). A malformed form fails the baseline in ~0.1s test time.
+    - The baseline MUST be `-- --lib`: `cargo test -p aprender-core` also builds the integration
+      test binaries, and three of them are repo-infrastructure meta-tests that CANNOT pass in a
+      relocated tree (m001/m008 shell out to `cargo run` with no --bin and the root sets no
+      default-run; falsify_cmp_003 reads the repo-root .clippy.toml). Cargo stops at the first
+      failing BINARY, so these present one-at-a-time as baseline failures that read like timeouts.
+      Fix candidates: `default-run = "apr"` in the root manifest, or path-independent test guards.
 
 ### 2. Authorize (or decline) the `make coverage` run on an uncontended target dir
 expected: Line coverage >= COV_FLOOR (88%) with the Phase 3 surface included; plan 03-10
