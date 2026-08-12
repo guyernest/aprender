@@ -39,7 +39,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests
 
 # Default target
 all: tier2
@@ -334,6 +334,16 @@ tier3:
 # see 03-10-SUMMARY.md for the rc values and the perturbations used. The recipes read
 # `$$?` on the line after the redirect and contain no `tee`.
 	@$(MAKE) setfit-repro-crossproc
+# REVIEW CR-01 (tier3 half): the ENTIRE Phase 3 test surface ran in no tier and no CI job.
+# `setfit` is declared but not default (aprender-train/Cargo.toml:79, default = ["tui"]), the
+# module is `#[cfg(feature = "setfit")]` (train/mod.rs:51), aprender-core's is gated the same way
+# (lib.rs:165), and no workspace member enables either — so tier3's `cargo test --all` and CI's
+# `cargo nextest run --workspace --lib` both COMPILE IT OUT. `setfit-feature-matrix` only
+# `cargo check`s the feature; checking is not testing. Never executed anywhere before this line:
+# bundle_tests.rs (1045 lines), lock_tests.rs (753), verify_tests.rs (694), evaluate_tests.rs
+# (378), and all seven trybuild compile-fail cases. The CI half needs a workflow edit and is
+# item 4 of 03-HUMAN-UAT.md; this closes the tier3 half, which needs no approval.
+	@$(MAKE) setfit-tests
 # REVIEW CR-02: the replay check was written, committed, and wired into NOTHING. Two clean
 # runs agreeing proves reproducibility; only this proves the reproduced order is the
 # INTENDED one. Without it the pair of gates above can both pass on a wrong-but-consistent
@@ -1449,6 +1459,41 @@ endef
 # `mkdir -p target` because the log destination must exist before the redirect; a
 # redirect into a missing directory fails the shell line, which would be reported as a
 # gate failure rather than as the setup error it is.
+
+setfit-tests: ## REVIEW CR-01 (tier3 half): RUN the feature-gated Phase 3 test surface
+	@echo "Phase 3 SetFit surface: ~337 lib tests + 7 trybuild cases that no other tier runs"
+	@mkdir -p target
+# Three invocations, not one, and each is necessary:
+#   (a) aprender-core --features setfit  -- 102 setfit:: tests, gated at lib.rs:165
+#   (b) aprender-train --features setfit -- 235 setfit:: tests, gated at train/mod.rs:51
+#   (c) --test ui                        -- the trybuild cases are a SEPARATE test target and
+#                                           are not reached by any --lib invocation
+# rc captured directly off each cargo command, never through a pipe, and `set +e` so the
+# diagnostic below is reachable under this Makefile's `.SHELLFLAGS := -e -c` (REVIEW WR-01).
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-core --features setfit --lib setfit:: \
+		> target/setfit-tests-core.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/setfit-tests-core.log; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: aprender-core setfit tests are red (rc=$$rc)"; exit $$rc; fi
+	@$(call assert_tests_ran,target/setfit-tests-core.log,100,setfit-tests/aprender-core)
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --features setfit --lib setfit:: \
+		> target/setfit-tests-train.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/setfit-tests-train.log; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: aprender-train setfit tests are red (rc=$$rc)"; exit $$rc; fi
+	@$(call assert_tests_ran,target/setfit-tests-train.log,230,setfit-tests/aprender-train)
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --features setfit --test ui \
+		> target/setfit-tests-ui.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/setfit-tests-ui.log; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: a trybuild compile-fail case no longer produces its pinned .stderr (rc=$$rc)"; \
+		echo "An illegal lifecycle expression became EXPRESSIBLE, or a diagnostic changed."; \
+		echo "See target/setfit-tests-ui.log"; \
+		exit $$rc; \
+	fi
+	@$(call assert_tests_ran,target/setfit-tests-ui.log,1,setfit-tests/trybuild)
+	@echo "  setfit surface: core + train lib tests and all seven compile-fail proofs ran"
 
 setfit-repro-inproc: ## TRN-06/D-16 (tier2 half): in-process two-clean-runs equality
 	@echo "TRN-06: in-process two-run equality (D-16's fast, non-authoritative half)"
