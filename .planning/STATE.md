@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-08-11T18:00:30.791Z"
-last_activity: 2026-08-11 -- Phase 03 execution started
+stopped_at: Phase 03 all 10 plans complete, awaiting verification
+last_updated: "2026-08-11T22:13:56.639Z"
+last_activity: 2026-08-11 -- Phase 03 wave 7 merged (03-10); awaiting verifier
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 28
-  completed_plans: 26
-  percent: 40
+  completed_plans: 28
+  percent: 100
 ---
 
 # Project State
@@ -25,16 +25,41 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 03 (faithful-two-stage-trainer-and-head) — EXECUTING
-Plan: 1 of 10
-Status: Executing Phase 03
-returned `human_needed`. Code review found 3 blockers + 14 warnings. 4 items await a human
-decision in `02-HUMAN-UAT.md`; the phase stays pending until verification reruns as `passed`.
-Last activity: 2026-08-11 -- Phase 03 execution started
+Phase: 03 (faithful-two-stage-trainer-and-head) — CODE-COMPLETE, AWAITING VERIFICATION
+Plan: 10 of 10 complete (03-10 merged at b002df419)
+Status: Phase 03 all plans executed; 2 must_haves UNMET and reported as shortfalls, not waived
+Last activity: 2026-08-11 -- Phase 03 wave 7 merged (03-10); awaiting verifier
 
-Working branch: `gsd/phase-2-contract-gate` @ 2ba6781f6 (last code/docs commit; the plan-completion commit follows). All nine plans rode this one branch — see 02-01-SUMMARY.md for the branch/PR policy. **The Phase 2 PR has NOT been opened; per 02-01 that is the human's call after the verifier runs.**
+**Phase 03 is NOT complete.** Two of 03-10's must_haves are unmet, both blocked on a
+compute-budget decision that CLAUDE.md reserves for the human:
+  1. Scoped cargo-mutants adjusted score >= 85% — NOT RUN. 1181 mutants inventoried;
+     ~44.6 h projected single-job. Two measured tooling blockers: `--in-place` conflicts
+     with `--jobs` in cargo-mutants 25.3.1, and the plan's mandated `--timeout 20` kills
+     the BASELINE (aprender-core's 14285-test binary has not finished LINKING in 20 s;
+     `elapsed=20.050001083s -> Timeout`). No score is claimed.
+  2. `make coverage` — deferred; needs the same uncontended target dir.
+TRN-07 is deliberately left unchecked: its compile-time negatives landed, but no
+out-of-crate or `apr` path exercises create_selection_lock -> mint_test_token -> grant,
+so nothing demonstrates a user REACHING the lock.
 
-Progress: [██████████] 100% (18 of 18 PLANNED plans; phases 3-5 are not yet planned, so this is not milestone completion)
+REPAIRED BY HAND after the GSD state/roadmap handlers (recurring defect, 5th occurrence —
+and the first where the damage was a FALSE COMPLETION CLAIM):
+  - `state.begin-phase` wrote `Plan: 1 of 10` on a resume at plan 10, left `stopped_at` on
+    the Phase 2 value, wrote the phase percentage (40) into a field the body renders as a
+    plan percentage, and left Phase 2's `human_needed` sentence reading as if it described
+    Phase 3.
+  - `roadmap.update-plan-progress 03 03-10 complete` then marked the WHOLE PHASE complete
+    (`[x] Phase 3 ... (completed 2026-08-12)`, Progress table -> Complete) purely because
+    summary_count reached plan_count — before the verifier ran and with two must_haves
+    unmet. Reverted to `[ ]` / "Awaiting verification".
+Phase 2's outstanding items live in `02-HUMAN-UAT.md` (status: partial, 4 human decisions
+incl. the publish cascade) and are unchanged by these repairs.
+
+Working branch: `gsd/phase-2-contract-gate` @ b002df419 (wave 7 merge). Phases 2 and 3 both ride this one
+branch — see 02-01-SUMMARY.md for the branch/PR policy. **No PR has been opened yet; per
+02-01 that is the human's call after the verifier runs.**
+
+Progress: [████████████████████] 100% (28 of 28 PLANNED plans executed; phases 4-5 are not yet planned, so this is not milestone completion — and Phase 03 itself is not verified)
 
 ## Performance Metrics
 
@@ -117,6 +142,7 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-09: the plan's Task 3 replay rejections are unreachable from the CLI because SelectionManifest::from_bytes verifies the digest BEFORE returning — the tests reseal forged payloads with the crate's public hash::exact_hash, which reaches the membership, row-hash and recomputation rungs without naming Sha256 in apr-cli
 - [Phase 02]: 02-09: Task 3 had NO executable RED (its tests could not compile until the interface existed, the same produced-before-consumed constraint the checker found in Task 1); its gates are falsified by three induced mutations instead, and the SUMMARY says so rather than manufacturing a RED after the fact
 - [Phase 02]: 02-09: scripts/check_apr_bin_pinned.sh does NOT scan docs — measured with a two-sided control (a bare apr added to the doc is silent; a bare @apr Makefile recipe fires BARE-APR Makefile:1282), both reverted; nobody should later assume documentation is covered
+- [Phase 03]: 03-10: the GSD tracking handlers damaged STATE.md/ROADMAP.md a FIFTH time, and this time the damage was a FALSE COMPLETION CLAIM, not a cosmetic field: `roadmap.update-plan-progress <phase> <plan> complete` marks the WHOLE PHASE `[x] (completed <date>)` and flips the Progress table to Complete as soon as summary_count == plan_count — before the verifier runs and regardless of unmet must_haves. `state.begin-phase` separately wrote `Plan: 1 of 10` on a resume at plan 10 and put the phase percentage in a field the body renders as a plan percentage. The orchestrator MUST diff both files after every handler call and revert any completion claim the verifier has not earned; reading the handler's own JSON (`"complete": true`) is not evidence of anything
 - [Phase 02]: 02-09: the GSD state handlers corrupted STATE.md a THIRD time and in a NEW way — update-progress reported percent 100 while writing 40 into the frontmatter (and 94/20 on the earlier call: it writes the PHASE percentage into a field the body renders as a PLAN percentage), record-session silently ignored its positional stopped-at argument, record-metric REJECTS the documented positional form and needs --phase/--plan/--duration flags, and advance-plan clobbered last_activity to a bare date. Every field repaired by hand and read back
 
 ### Pending Todos

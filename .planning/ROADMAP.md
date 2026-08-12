@@ -19,7 +19,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Differentiable MiniLM Conformance** - Prove the pinned encoder's shared batched Rust path matches fixtures and updates named parameters through the graph. (completed 2026-08-08)
 - [ ] **Phase 2: Deterministic Pair and Data Protocol** - Make few-shot selection and bounded pair generation reproducible, provenance-complete, leakage-safe, and non-quadratic. (code-complete 2026-08-09; verification returned `human_needed` — 4 items pending in `02-HUMAN-UAT.md`)
-- [ ] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit.
+- [ ] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit. (all 10 plans code-complete 2026-08-11; NOT verified — 2 must_haves unmet: scoped mutation score and `make coverage`, both blocked on a compute budget decision)
 - [ ] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs.
 - [ ] **Phase 5: Benchmark and Claims Gate** - Produce the complete reproducible 40-cell SetFit-versus-9B-LoRA evidence set and reject incomplete or unequal claims.
 
@@ -165,7 +165,7 @@ plan's `<wave_1_concurrency>` block.)*
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 03-10-PLAN.md — trybuild non-constructibility proofs (7 cases) + cross-process two-clean-runs gate + adjusted-score mutation + full-suite closing audit (wave 7)
+- [x] 03-10-PLAN.md — trybuild non-constructibility proofs (7 cases) + cross-process two-clean-runs gate + adjusted-score mutation + full-suite closing audit (wave 7)
 
 ### Phase 4: APR Artifact and Production Parity
 
@@ -216,6 +216,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
-| 3. Faithful Two-Stage Trainer and Head | 9/10 | In Progress|  |
+| 3. Faithful Two-Stage Trainer and Head | 10/10 | Awaiting verification |  |
 | 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
