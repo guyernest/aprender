@@ -217,6 +217,7 @@ pub(crate) struct TuningProbes {
     skip_step_top_clear: bool,
     skip_post_step_clear: bool,
     reverse_intra_batch_pull: bool,
+    poison_first_loss: bool,
 }
 
 impl TuningProbes {
@@ -225,6 +226,7 @@ impl TuningProbes {
         skip_step_top_clear: false,
         skip_post_step_clear: false,
         reverse_intra_batch_pull: false,
+        poison_first_loss: false,
     };
 
     /// Skip step (b) only: neither `zero_grad_` nor the pre-forward `clear_graph` runs.
@@ -233,6 +235,7 @@ impl TuningProbes {
         skip_step_top_clear: true,
         skip_post_step_clear: false,
         reverse_intra_batch_pull: false,
+        poison_first_loss: false,
     };
 
     /// Skip the clearing entirely — both step (b) and step (l).
@@ -241,6 +244,7 @@ impl TuningProbes {
         skip_step_top_clear: true,
         skip_post_step_clear: true,
         reverse_intra_batch_pull: false,
+        poison_first_loss: false,
     };
 
     /// Reverse the pair-pull order INSIDE `run_batch`, leaving batch structure identical.
@@ -249,6 +253,22 @@ impl TuningProbes {
         skip_step_top_clear: false,
         skip_post_step_clear: false,
         reverse_intra_batch_pull: true,
+        poison_first_loss: false,
+    };
+
+    /// Force step 0's loss to `NaN`, leaving every other step untouched.
+    ///
+    /// The in-band negative for the `loss_trace_hash` finiteness precondition (REVIEW CR-03).
+    /// A real divergence cannot be summoned from the pinned fixture on demand, and the
+    /// alternative — unit-testing `f64::is_finite` — would prove the standard library works
+    /// rather than that the LOOP refuses a diverged step. This injects at the one point the
+    /// check guards, so removing the check turns the test red.
+    #[cfg(test)]
+    pub(crate) const POISON_FIRST_LOSS: Self = Self {
+        skip_step_top_clear: false,
+        skip_post_step_clear: false,
+        reverse_intra_batch_pull: false,
+        poison_first_loss: true,
     };
 }
 
@@ -632,6 +652,29 @@ fn run_batch(
     let loss = pair_cosine_mse(&za, &zb, &inputs.targets)
         .map_err(|e| SetFitTrainError::Encoder { reason: e.to_string() })?;
     let loss_value = loss.data()[0];
+
+    // The in-band negative for the check immediately below. Production cannot reach this arm:
+    // `TuningProbes::NONE` is the only value it can construct, and `POISON_FIRST_LOSS` is
+    // `#[cfg(test)]`.
+    #[cfg(test)]
+    let loss_value =
+        if ctx.probes.poison_first_loss && ctx.global_step == 0 { f32::NAN } else { loss_value };
+
+    // The loss_trace_hash precondition, enforced where the value ENTERS rather than where it is
+    // hashed (REVIEW CR-03 — it had no implementation at all before). Checked BEFORE `backward()`
+    // so a diverged step does not also propagate NaN through every gradient and every optimizer
+    // moment on its way out: by the time a hash noticed, the encoder would already be poisoned.
+    //
+    // Why this cannot be left to the digest: serde_json renders +inf, -inf and every NaN payload
+    // as `null`, so all three produce IDENTICAL canonical bytes. A digest is not a finiteness
+    // check, and the bundle it seals fails its own reload (`null` is not an f64).
+    if !loss_value.is_finite() {
+        return Err(SetFitTrainError::NonFiniteLoss {
+            step: ctx.global_step,
+            value_bits: f64::from(loss_value).to_bits(),
+        });
+    }
+
     loss.backward();
 
     // (g) per-name PRE-clip gradient norms, (h) registry-hash assertion, (i) clip, (j) step.
@@ -1255,6 +1298,57 @@ mod tests {
         let (encoder, dataset, selection, config) = fx::prepared_run(variant, None).into_parts();
         tune_with_probes(encoder, &dataset, &selection, &config, probes)
             .expect("the fixture run must tune")
+    }
+
+    /// A diverged step is a TYPED FAILURE, not a hashed `null` (REVIEW CR-03).
+    ///
+    /// The contract's `loss_trace_hash` equation has carried the precondition "every loss value
+    /// is finite; a NaN or infinite step is a typed failure before hashing" since 03-06, with no
+    /// implementation: `run_batch` pushed the value unchecked. Because `serde_json` renders every
+    /// non-finite `f64` as `null`, the consequence was not a loud failure but a QUIET one — the
+    /// evidence digest could not tell `+inf` from `-inf` from `NaN`, and the bundle it sealed
+    /// could not be reloaded at all.
+    ///
+    /// Measured, not assumed: `serde_json::to_string` on each of the three yields `null`, and
+    /// `from_str::<f64>("null")` is `Err("invalid type: null, expected f64")`.
+    #[test]
+    fn tune_refuses_a_non_finite_loss_before_hashing() {
+        let (encoder, dataset, selection, config) =
+            fx::prepared_run(fx::default_variant(), None).into_parts();
+        let err = tune_with_probes(
+            encoder,
+            &dataset,
+            &selection,
+            &config,
+            TuningProbes::POISON_FIRST_LOSS,
+        )
+        .expect_err("a NaN loss at step 0 must fail the run, not be recorded");
+
+        match err {
+            SetFitTrainError::NonFiniteLoss { step, value_bits } => {
+                assert_eq!(step, 0, "the poisoned step is step 0");
+                // Compared through the BITS. `f64::NAN != f64::NAN`, so an assertion on the
+                // value itself would pass for the wrong reason — or never pass at all.
+                assert!(
+                    f64::from_bits(value_bits).is_nan(),
+                    "value_bits must carry the offending NaN, got {:?}",
+                    f64::from_bits(value_bits),
+                );
+            }
+            other => panic!("expected NonFiniteLoss, got {other:?}"),
+        }
+    }
+
+    /// The same run WITHOUT the probe completes — so the test above fails for the injected
+    /// reason, not because the fixture cell was broken.
+    #[test]
+    fn tune_control_for_the_non_finite_loss_probe_is_green() {
+        let out = tune(fx::default_variant(), TuningProbes::NONE);
+        assert_eq!(out.step_count, 3, "the control must still be the three-step run");
+        assert!(
+            out.loss_trace.iter().all(|v| v.is_finite()),
+            "every recorded loss in the control run is finite",
+        );
     }
 
     /// THE order pin — behavioural, not a source assertion.

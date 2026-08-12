@@ -1221,6 +1221,25 @@ pub enum SetFitTrainError {
     /// by zero: an accuracy over no rows is `0/0`, and a NaN metric would propagate silently
     /// through the selection rule instead of failing here.
     ValidationSplitEmpty,
+    /// A training step produced a non-finite loss.
+    ///
+    /// The `loss_trace_hash` equation of `contracts/setfit-train-lifecycle-v1.yaml` carries the
+    /// precondition "every loss value is finite; a NaN or infinite step is a typed failure
+    /// BEFORE hashing". This is that failure. It had no implementation until REVIEW CR-03:
+    /// `run_batch` pushed the value unchecked, and `serde_json` renders every non-finite `f64`
+    /// as `null`, so `+inf`, `-inf` and `NaN` all collapsed to the SAME canonical bytes — a
+    /// digest that cannot distinguish three different divergences, over a bundle that then
+    /// fails its own reload because `null` is not an `f64`.
+    ///
+    /// Carries `value_bits` rather than the `f64`, following [`lock::LockError::NonFiniteMetric`]:
+    /// a `NaN` does not equal itself, so an error carrying one could not be compared in a test.
+    NonFiniteLoss {
+        /// The global step that produced it.
+        step: u64,
+        /// `f64::to_bits` of the offending value — distinguishes `+inf` from `-inf` from each
+        /// `NaN` payload, which the decimal rendering does not.
+        value_bits: u64,
+    },
     /// The evidence failed the gate. Carries the COMPLETE auditable record.
     ///
     /// `Box`ed because this variant is far larger than every other, and an enum is as big as
@@ -1262,6 +1281,15 @@ impl fmt::Display for SetFitTrainError {
                  a class that cannot serve as encoder-update evidence (their gradients are \
                  analytically zero), so the gate has nothing to check and refuses to pass the \
                  run (contract setfit-train-lifecycle-v1, requirement SAFE-03)",
+            ),
+            Self::NonFiniteLoss { step, value_bits } => write!(
+                f,
+                "step {step} produced a non-finite loss ({}; bits {value_bits:#018x}). The \
+                 loss_trace_hash precondition requires a typed failure BEFORE hashing: \
+                 serde_json renders every non-finite f64 as `null`, so continuing would fold \
+                 +inf, -inf and NaN into one indistinguishable digest and write a bundle that \
+                 cannot be reloaded (contract setfit-train-lifecycle-v1, requirement TRN-06)",
+                f64::from_bits(*value_bits),
             ),
             Self::EvidenceRejected { worst, summary, .. } => write!(
                 f,

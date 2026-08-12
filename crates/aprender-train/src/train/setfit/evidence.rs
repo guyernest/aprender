@@ -183,6 +183,40 @@ pub(crate) enum EvidenceError {
         /// The renderer's diagnostic.
         reason: String,
     },
+    /// A measurement in the table is not finite, so the canonical bytes would carry a `null`.
+    ///
+    /// FAIL CLOSED, for two independent reasons (REVIEW CR-03): the digest over those bytes is
+    /// not injective — `+inf`, `-inf` and every `NaN` all render as the same `null` — and a
+    /// bundle sealed with it cannot be reloaded, because `null` does not deserialize to `f64`.
+    /// Neither failure is visible in the digest's shape, which is why this is refused at
+    /// production rather than diagnosed later.
+    NonFiniteMeasurement {
+        /// Dotted path to the offending field, e.g. `rows.encoder.layer.0.attn.q.init_norm`.
+        field: String,
+    },
+}
+
+/// The dotted path of the first `null` in a JSON tree, in document order.
+///
+/// `None` means every leaf is a real value. Used only as a finiteness check — see
+/// [`UpdateEvidence::to_canonical_bytes`] for why the check is a null-scan and not a list of
+/// float field names.
+fn first_null_path(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => Some(String::new()),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, child)| {
+            first_null_path(child).map(|rest| join_path(key, &rest))
+        }),
+        serde_json::Value::Array(items) => items.iter().enumerate().find_map(|(index, child)| {
+            first_null_path(child).map(|rest| join_path(&index.to_string(), &rest))
+        }),
+        _ => None,
+    }
+}
+
+/// Join one path segment onto a (possibly empty) remainder.
+fn join_path(head: &str, rest: &str) -> String {
+    if rest.is_empty() { head.to_string() } else { format!("{head}.{rest}") }
 }
 
 impl fmt::Display for EvidenceError {
@@ -198,6 +232,14 @@ impl fmt::Display for EvidenceError {
                 f,
                 "the evidence table could not be rendered canonically: {reason} \
                  (contract setfit-train-lifecycle-v1, requirement TRN-03)",
+            ),
+            Self::NonFiniteMeasurement { field } => write!(
+                f,
+                "the evidence field `{field}` is not finite, so the canonical bytes would carry \
+                 a `null` there. Refused at production: serde_json renders +inf, -inf and every \
+                 NaN identically, so the table hash could not tell three different divergences \
+                 apart, and the bundle sealed with it would fail its own reload (contract \
+                 setfit-train-lifecycle-v1, requirement TRN-03)",
             ),
         }
     }
@@ -408,7 +450,31 @@ impl UpdateEvidence {
     ///
     /// [`EvidenceError::Serialization`].
     pub(crate) fn to_canonical_bytes(&self) -> Result<Vec<u8>, EvidenceError> {
-        serde_json::to_vec(self).map_err(|e| EvidenceError::Serialization { reason: e.to_string() })
+        let bytes = serde_json::to_vec(self)
+            .map_err(|e| EvidenceError::Serialization { reason: e.to_string() })?;
+
+        // REVIEW CR-03. `serde_json` renders EVERY non-finite `f64` as `null`, silently: `+inf`,
+        // `-inf` and every `NaN` payload produce byte-identical output. So `table_hash` was not
+        // injective over exactly the values a diverged run produces, and the bundle sealed with
+        // that digest could not be reloaded — `null` is not an `f64`. A digest is not a
+        // finiteness check; this is the check.
+        //
+        // The scan runs on the bytes PARSED BACK, never on a `Value` used to produce them:
+        // routing emission through `serde_json::Value` could reorder keys relative to struct
+        // field order and would invalidate every digest already recorded. Parsing cannot.
+        //
+        // Scanning for `null` rather than enumerating the float fields is deliberate. Neither
+        // `EvidenceRow` nor `UpdateEvidence` has an `Option` field, so a `null` can ONLY be a
+        // non-finite float — which makes this exact today and still exact after someone adds an
+        // `f64`. An enumerated field list is the guard that silently stops covering the newest
+        // field, which is how these checks rot.
+        if let Some(path) = first_null_path(&serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|e| EvidenceError::Serialization { reason: e.to_string() })?)
+        {
+            return Err(EvidenceError::NonFiniteMeasurement { field: path });
+        }
+
+        Ok(bytes)
     }
 
     /// SHA-256 of the canonical bytes.
@@ -926,6 +992,78 @@ mod tests {
         for banned in ["elapsed", "seconds", "nanos", "millis", "timestamp"] {
             assert!(!summary_json.contains(banned), "summary contains `{banned}`");
         }
+    }
+
+    /// A non-finite measurement is REFUSED at canonical-bytes time (REVIEW CR-03).
+    ///
+    /// The premise, measured directly rather than assumed: `serde_json` renders `+inf`, `-inf`
+    /// and every `NaN` as `null` — three different divergences, one byte string — and
+    /// `from_str::<f64>("null")` is `Err("invalid type: null, expected f64")`. So before this
+    /// guard existed, `table_hash` was NOT injective over exactly the values a diverged run
+    /// produces, and the bundle sealed with that digest could not be reloaded.
+    ///
+    /// A case table over all three values and over both structs, because a guard tested on one
+    /// non-finite value in one field is a guard that has not been tested.
+    #[test]
+    fn evidence_refuses_a_non_finite_measurement_in_either_struct() {
+        // The premise itself, so this test does not rest on a claim made in prose.
+        for probe in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(
+                serde_json::to_string(&probe).expect("serde renders any f64"),
+                "null",
+                "the whole defect rests on this rendering; if it ever changes, revisit the guard",
+            );
+        }
+
+        for poison in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            // (a) a row-level field, nested under the rows map.
+            let mut evidence = evidence_for(fx::default_variant(), None);
+            let row_name = evidence
+                .rows
+                .keys()
+                .next()
+                .expect("the fixture table has rows")
+                .clone();
+            evidence.rows.get_mut(&row_name).expect("row present").relative_delta = poison;
+            match evidence.to_canonical_bytes() {
+                Err(EvidenceError::NonFiniteMeasurement { field }) => {
+                    assert!(
+                        field.contains(&row_name) && field.ends_with("relative_delta"),
+                        "the path must name the offending field, got `{field}`",
+                    );
+                }
+                other => panic!("expected NonFiniteMeasurement for {poison:?}, got {other:?}"),
+            }
+
+            // (b) a top-level field of UpdateEvidence itself.
+            let mut evidence = evidence_for(fx::default_variant(), None);
+            evidence.pre_clip_norm_max = poison;
+            match evidence.to_canonical_bytes() {
+                Err(EvidenceError::NonFiniteMeasurement { field }) => {
+                    assert_eq!(field, "pre_clip_norm_max");
+                }
+                other => panic!("expected NonFiniteMeasurement for {poison:?}, got {other:?}"),
+            }
+
+            // (c) and table_hash, the actual consumer, must fail too rather than hash a null.
+            let mut evidence = evidence_for(fx::default_variant(), None);
+            evidence.pre_clip_norm_max = poison;
+            assert!(
+                evidence.table_hash().is_err(),
+                "table_hash must not produce a digest over a null",
+            );
+        }
+    }
+
+    /// The control: an untouched fixture table serializes and hashes.
+    ///
+    /// Without this, the test above could pass because `to_canonical_bytes` rejects everything.
+    #[test]
+    fn evidence_control_finite_table_still_serializes_and_hashes() {
+        let evidence = evidence_for(fx::default_variant(), None);
+        let bytes = evidence.to_canonical_bytes().expect("a finite table must serialize");
+        assert!(!bytes.is_empty(), "the canonical bytes are non-empty");
+        evidence.table_hash().expect("a finite table must hash");
     }
 
     /// The digests are MOVED from the recorded output, not recomputed.
