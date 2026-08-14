@@ -1,7 +1,23 @@
 ---
 phase: 03-faithful-two-stage-trainer-and-head
 verified: 2026-08-12T01:28:03Z
-status: human_needed
+status: passed
+human_verification_resolved: 2026-08-14T22:35:57Z
+human_verification_outcomes: |
+  All five human_needed items adjudicated; full evidence in 03-HUMAN-UAT.md (status: complete).
+  1. Mutation budget: authorized. dropout_rng.rs closed at 75/79 caught, 100% adjusted
+     (test commit 075a318b7, kill confirmed by scoped re-run 16/16). Remaining scopes
+     (setfit dir 948 + multinomial.rs 186, ~44h) deferred to GitHub CI post-PR by human
+     decision 2026-08-14.
+  2. Coverage: authorized and attempted; NOT MEASURABLE against the floor on this host
+     (best data 57/58 binaries, 73%, denominator not comparable). COV_FLOOR
+     unpinned-denominator gate defect recorded for its own ticket. No floor claim either way.
+  3. Feature-closure: human chose (b) — D-ITEM-05 fixed in d7b65a116; the literal must-have
+     `cargo check -p aprender-train --no-default-features --features setfit` now exits 0 and
+     the feature-matrix leg (a) enforces the plain green check.
+  4. CR-01 test-surface guarding: option (a) landed in both halves — a844f6a98 (tier3),
+     52357404b (CI). Human confirmed 2026-08-14.
+  5. CR-02/03/04 scope: fixed inside Phase 3 (51db85ace, 0158a758d, 1038f6414), RED-proven.
 score: 5/5 roadmap success criteria verified; 47/50 plan must-have truths verified (52/55 total)
 overrides_applied: 0
 re_verification:
@@ -31,7 +47,7 @@ each unique tuned embedding exactly once, with SetFit identity and test access e
 evidence.
 
 **Verified:** 2026-08-12T01:28:03Z
-**Status:** human_needed
+**Status:** passed (human_needed items resolved 2026-08-14 — see frontmatter `human_verification_outcomes` and 03-HUMAN-UAT.md)
 **Re-verification:** No — initial verification
 **Tree verified:** `bd54801e0` / root tree `a2f7f91b0`, working tree clean (`rtk proxy git status --porcelain` -> only `?? .serena/`)
 

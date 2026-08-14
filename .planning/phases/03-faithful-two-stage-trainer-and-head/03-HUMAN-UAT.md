@@ -1,20 +1,14 @@
 ---
-status: partial
+status: complete
 phase: 03-faithful-two-stage-trainer-and-head
 source: [03-VERIFICATION.md, 03-REVIEW.md]
 started: 2026-08-12T01:34:04Z
-updated: 2026-08-14T21:35:08Z
+updated: 2026-08-14T22:35:57Z
 ---
 
 ## Current Test
 
-number: 4
-name: Decide how Phase 3's test surface gets guarded in tier3 and CI (REVIEW CR-01)
-expected: |
-  The ~2900 lines of Phase 3 unit tests and all seven trybuild compile-fail cases run in
-  at least one tier target AND one CI job. Git history shows both halves already landed:
-  a844f6a98 (tier3 half, Makefile) and 52357404b (CI half, ci.yml). Confirm resolution.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
@@ -171,7 +165,12 @@ evidence_measured:
     `test` — and the two repro targets (Makefile:336-337) run 2 tests. Never executed anywhere:
     bundle_tests.rs (1045 lines), lock_tests.rs (753), verify_tests.rs (694),
     evaluate_tests.rs (378), and the seven trybuild cases."
-result: [pending]
+result: pass — CONFIRMED RESOLVED by human 2026-08-14. Option (a) was implemented in two
+  halves, both landed on this branch before this session: `a844f6a98` (tier3 half,
+  `setfit-tests` target wired into tier3 via the Makefile, +46 lines) and `52357404b` (CI
+  half, ci.yml runs the Phase 3 SetFit surface — the workflow edit CLAUDE.md reserves for
+  human approval, granted when it landed). The Phase 3 test surface now runs in one tier
+  target AND one CI job, which is exactly what this item required.
 
 ### 5. Decide whether REVIEW CR-02/CR-03/CR-04 are fixed inside Phase 3 or become a Phase 3.1
 expected: A decision on scope. These three are self-contained (no CI edit, no cross-phase
@@ -210,9 +209,9 @@ result: RESOLVED 2026-08-12 — human chose "fix all three now". All three lande
 ## Summary
 
 total: 5
-passed: 4
+passed: 5
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 
