@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 03 verification human_needed — 5 items in 03-HUMAN-UAT.md
-last_updated: "2026-08-11T22:13:56.639Z"
+stopped_at: Phase 4 context gathered
+last_updated: "2026-08-14T23:30:45.331Z"
 last_activity: 2026-08-11 -- Phase 03 wave 7 merged (03-10); awaiting verifier
 progress:
   total_phases: 5
@@ -37,37 +37,46 @@ scoped aprender-core rc=0, aprender-core full suite 14285/0, aprender-train full
 24 failed where the 24 names are byte-for-byte `known-red-baseline.md` (zero regressions), all 5 Make
 gates rc=0, `pv validate` clean on 4 contracts. The blockers are NOT implementation defects — they
 are places where a CHECK is weaker than it looks:
+
   - CR-01: Phase 3's ~2900 lines of unit tests and all seven trybuild cases run in NO tier and NO CI
     job. `setfit` is declared (aprender-train/Cargo.toml:79) but not default; no workspace member
     enables it; tier3's `cargo test --all` and CI's nextest both compile the module out. tier3 only
     `cargo check`s the feature (setfit-feature-matrix, Makefile:338) and runs 2 repro tests.
+
   - CR-02: `setfit_repro_recorded_matches_expected_replay` matches neither Makefile filter, so the
     one test separating "reproducible" from "correct" never runs — and libtest exits 0 on a
     zero-match filter, so both repro gates go vacuous on a rename while printing success.
+
   - CR-03: serde_json renders non-finite f64 as `null`, so UpdateEvidence::table_hash is not
     injective over inf/NaN; the contract precondition demanding a typed failure before hashing has
     no implementation.
+
   - CR-04: thresholds_match_the_contract checks entry COUNT then a SUBSET test, so widening
     CALIBRATED_REGIMES keeps it green while admitting uncalibrated runs.
 
 **Phase 03 is NOT complete.** Two of 03-10's must_haves are unmet, both blocked on a
 compute-budget decision that CLAUDE.md reserves for the human:
+
   1. Scoped cargo-mutants adjusted score >= 85% — NOT RUN. 1181 mutants inventoried;
      ~44.6 h projected single-job. Two measured tooling blockers: `--in-place` conflicts
      with `--jobs` in cargo-mutants 25.3.1, and the plan's mandated `--timeout 20` kills
      the BASELINE (aprender-core's 14285-test binary has not finished LINKING in 20 s;
      `elapsed=20.050001083s -> Timeout`). No score is claimed.
+
   2. `make coverage` — deferred; needs the same uncontended target dir.
+
 TRN-07 is deliberately left unchecked: its compile-time negatives landed, but no
 out-of-crate or `apr` path exercises create_selection_lock -> mint_test_token -> grant,
 so nothing demonstrates a user REACHING the lock.
 
 REPAIRED BY HAND after the GSD state/roadmap handlers (recurring defect, 5th occurrence —
 and the first where the damage was a FALSE COMPLETION CLAIM):
+
   - `state.begin-phase` wrote `Plan: 1 of 10` on a resume at plan 10, left `stopped_at` on
     the Phase 2 value, wrote the phase percentage (40) into a field the body renders as a
     plan percentage, and left Phase 2's `human_needed` sentence reading as if it described
     Phase 3.
+
   - `roadmap.update-plan-progress 03 03-10 complete` then marked the WHOLE PHASE complete
     (`[x] Phase 3 ... (completed 2026-08-12)`, Progress table -> Complete) purely because
     summary_count reached plan_count — before the verifier ran and with two must_haves
@@ -243,6 +252,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-08-09T18:22:45.598Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-faithful-two-stage-trainer-and-head/03-CONTEXT.md
+Last session: 2026-08-14T23:30:45.327Z
+Stopped at: Phase 4 context gathered
+Resume file: .planning/phases/04-apr-artifact-and-production-parity/04-CONTEXT.md
