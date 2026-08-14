@@ -52,9 +52,19 @@ result: PARTIALLY EXECUTED 2026-08-12 — authorized; ONE of three scopes measur
           setfit:: slice — the one-line forwarder to self.mask(len) is never called through the trait
           by any lib test.
     - ~12 targeted assertions would take the file to 75/75 = 100% adjusted.
-  REMAINING SCOPES NOT RUN: setfit dir (948 mutants) + multinomial.rs (186) — measured rate
-  ~140s/mutant at -j 2 with the full lib suite -> ~44h, consistent with the executor's original
-  projection. Awaiting a decision on that spend.
+  CLOSED 2026-08-14 (human decision "close the issues while we are here"): two tests added in
+  `075a318b7` kill all 12 killable survivors — accessors against INDEPENDENT expectations
+  (validate_rate's own output, the frozen Python-derived threshold golden, a non-default
+  ordinal) and the forwarder called THROUGH `&dyn AttentionDropoutMasks` with a non-vacuous
+  structure assertion. Kill CONFIRMED by a scoped cargo-mutants re-run of the 16 mutants of
+  those functions (12 ex-survivors + 4 previously-caught variants as regression check):
+  16/16 caught, rc=0, baseline ok. **dropout_rng.rs FINAL: 75 caught / 1 proven-equivalent /
+  3 unviable of 79 = 98.7% raw, 100% adjusted.**
+  REMAINING SCOPES DEFERRED TO GITHUB CI AFTER THE PR (human decision 2026-08-14): setfit dir
+  (948 mutants) + multinomial.rs (186), ~44h at the measured ~140s/mutant. ci.yml already has a
+  `mutants` job; wiring these scopes into it is a post-PR workflow edit (needs approval) and MUST
+  carry the tooling prerequisites below, especially the `-- --lib` baseline and a non-zero
+  inventory assertion.
   TOOLING PREREQUISITES discovered (apply to ANY future cargo-mutants run over aprender-core):
     - `cargo mutants -- <args>` forwards to CARGO TEST, not libtest; libtest flags need a second
       separator (`-- -- --skip X`). A malformed form fails the baseline in ~0.1s test time.
