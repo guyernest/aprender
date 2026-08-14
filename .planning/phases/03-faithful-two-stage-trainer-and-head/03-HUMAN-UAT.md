@@ -3,12 +3,18 @@ status: partial
 phase: 03-faithful-two-stage-trainer-and-head
 source: [03-VERIFICATION.md, 03-REVIEW.md]
 started: 2026-08-12T01:34:04Z
-updated: 2026-08-12T01:34:04Z
+updated: 2026-08-14T21:35:08Z
 ---
 
 ## Current Test
 
-[awaiting human decision]
+number: 4
+name: Decide how Phase 3's test surface gets guarded in tier3 and CI (REVIEW CR-01)
+expected: |
+  The ~2900 lines of Phase 3 unit tests and all seven trybuild compile-fail cases run in
+  at least one tier target AND one CI job. Git history shows both halves already landed:
+  a844f6a98 (tier3 half, Makefile) and 52357404b (CI half, ci.yml). Confirm resolution.
+awaiting: user response
 
 ## Tests
 
@@ -127,7 +133,24 @@ why_human: The literal must-have is measured RED (rc=101, 8 errors) and the caus
   pre-existing defect in a module outside Phase 3's declared file set. The property Phase 3 owns
   (setfit does not leak into the minimal build) IS verified. Whether to accept the substitution
   or pull in the out-of-scope fix is a scope decision, not a measurement.
-result: [pending]
+result: RESOLVED 2026-08-14 — human chose (b), require the D-ITEM-05 fix. Landed as
+  `d7b65a116`, RED-proven first (rc=101, 8 errors, all `presentar_terminal` under
+  src/monitor/tui/). The fix is NARROWER than the item's literal wording, same pattern as
+  Phase 02 item 4: gating all of `pub mod tui;` would break four UNCONDITIONAL users of the
+  IPC writer and state types (classify_trainer, training_plan, training_plan_execute, config
+  loader) — the `default = ["tui"]` comment in aprender-train/Cargo.toml documents that
+  design. What is gated on `feature = "tui"`: `tui::dashboard` (whole module),
+  `TuiMonitor`/`TuiMonitorConfig`/`run()`, their re-exports in tui/mod.rs and monitor/mod.rs,
+  and the five config tests. `TrainingStateWriter` and `tui::state` stay unconditional.
+  Makefile leg (a) of setfit-feature-matrix upgraded from the two-sided diff (which tolerated
+  the red control) to the plain green checks the plan asked for — two greens subsume the diff
+  and, unlike it, fail on any regression to red.
+  Verified: plain `cargo check -p aprender-train --no-default-features --features setfit`
+  rc=0; `--no-default-features` alone rc=0; default rc=0; zero aprender-train warnings in all
+  three; clippy --no-deps rc=0 both legs; monitor::tui tests 282 pass (tui on) / 221 pass
+  (tui off); `make setfit-feature-matrix` PASSED end-to-end; `cargo fmt -p aprender-train
+  --check` rc=0. Every configuration that compiled before still compiles — the gate only
+  removes items from builds that previously failed outright.
 
 ### 4. Decide how Phase 3's test surface gets guarded in tier3 and CI (REVIEW CR-01)
 expected: The ~2900 lines of Phase 3 unit tests and all seven trybuild compile-fail cases run in
@@ -187,9 +210,9 @@ result: RESOLVED 2026-08-12 — human chose "fix all three now". All three lande
 ## Summary
 
 total: 5
-passed: 1
+passed: 4
 issues: 0
-pending: 4
+pending: 1
 skipped: 0
 blocked: 0
 
