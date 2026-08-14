@@ -415,65 +415,28 @@ setfit-feature-matrix: ## D-06/D-05: setfit feature isolation for aprender-core 
 	@echo "Feature matrix: aprender-train setfit closure (Phase 3 D-05)"
 	@cargo check -p aprender-train --features setfit
 	@cargo check -p aprender-train --features setfit,cpu-fallback,gguf,monitor,tui,citl,server,tracing,ruchy-sessions,parquet,hub,viz
-# Leg (a) is a two-sided DIFF, not a plain green check, and that is deliberate.
+# Leg (a) is now the PLAIN green check the plan literally asked for.
 #
-# Measured 2026-08-09: `cargo check -p aprender-train --no-default-features` is
-# RED at HEAD with 8 errors, ALL of them `presentar_terminal` unlinked under
-# `src/monitor/tui/` — because `src/monitor/mod.rs:45` declares `pub mod tui;`
-# UNCONDITIONALLY while its only dependency is gated behind the `tui` feature.
-# That is a pre-existing defect in a module Phase 3 does not own (deferred-items
-# D-ITEM-05), so wiring the plain leg would import someone else's red into this
-# phase's gate. Dropping the leg would hide it. What IS this phase's business is
-# that enabling `setfit` adds NOTHING to that build — so the leg asserts the two
-# diagnostic streams are byte-identical, and goes RED the moment setfit leaks
-# into the minimal build. Statuses are read from `$$?` on the line AFTER the
-# redirect and never through a pipe or an `if !` (CLAUDE.md rule 1) — the first
-# draft of this leg used `if ! cargo check; then rc=$$?; fi`, where `$$?` is the
-# status of the NEGATION and is therefore always 0. The vacuity check below is
-# what caught it, which is the whole reason it is here.
-#
-# THE `set +e` AROUND THE TWO CARGO CHECKS IS LOAD-BEARING, for exactly the
-# reason recorded on `contract-audit-phase3` below. This Makefile sets
-# `.SHELLFLAGS := -e -c` (line 40) and `.ONESHELL:`, so a FAILING
-# `cargo check` aborts the whole recipe before `ctl_rc=$$?` on the same line can
-# run — and the control build is measured RED at HEAD, which is the ONLY case
-# every guard below was written for. Reproduced directly:
-# `bash -e -c 'false > /tmp/x 2>&1; rc=$$?; echo rc=$$rc; echo REACHED'` prints
-# NOTHING and exits 1. Without `set +e` this leg could never emit its verdict and
-# `make tier3` failed with a bare cargo error instead. `mkdir -p target` for the
-# same class of reason: the shell opens the redirect before cargo runs, so a
-# clean checkout without `target/` would abort on the redirect itself.
-	@echo "  leg (a): minimal-build setfit-diff"
-	@mkdir -p target; \
-	set +e; \
-	cargo check -p aprender-train --no-default-features \
-	      > target/sfm-train-min-control.log 2>&1; ctl_rc=$$?; \
-	cargo check -p aprender-train --no-default-features --features setfit \
-	      > target/sfm-train-min-setfit.log 2>&1; sf_rc=$$?; \
-	set -e; \
-	grep -A1 -E '^error' target/sfm-train-min-control.log \
-	      > target/sfm-train-min-control.errs || true; \
-	grep -A1 -E '^error' target/sfm-train-min-setfit.log \
-	      > target/sfm-train-min-setfit.errs || true; \
-	if [ "$$ctl_rc" != "0" ] && [ ! -s target/sfm-train-min-control.errs ]; then \
-	  echo "FAIL: the minimal build failed (rc=$$ctl_rc) but produced no diagnostics to compare;"; \
-	  echo "      this guard would pass vacuously. Inspect target/sfm-train-min-control.log."; \
-	  exit 1; \
-	fi; \
-	if [ "$$ctl_rc" = "0" ] && [ -s target/sfm-train-min-control.errs ]; then \
-	  echo "FAIL: the minimal build exited 0 yet emitted diagnostics; the comparison is not"; \
-	  echo "      measuring what it claims. Inspect target/sfm-train-min-control.log."; \
-	  exit 1; \
-	fi; \
-	if [ "$$ctl_rc" != "$$sf_rc" ]; then \
-	  echo "FAIL: enabling setfit changed the minimal build's exit status ($$ctl_rc -> $$sf_rc) (D-05 leakage)"; \
-	  exit 1; \
-	fi; \
-	if ! diff -u target/sfm-train-min-control.errs target/sfm-train-min-setfit.errs; then \
-	  echo "FAIL: enabling setfit changed the minimal build's diagnostics (D-05 leakage)"; \
-	  exit 1; \
-	fi; \
-	echo "    identical with and without setfit (control rc=$$ctl_rc, setfit rc=$$sf_rc)"
+# History, because this leg used to be a two-sided diff: measured 2026-08-09,
+# `cargo check -p aprender-train --no-default-features` was RED at HEAD with 8
+# errors, all `presentar_terminal` unlinked under `src/monitor/tui/`, because
+# `src/monitor/mod.rs` declared `pub mod tui;` UNCONDITIONALLY while its only
+# dependency is gated behind the `tui` feature (deferred-items D-ITEM-05). The
+# diff leg asserted only that setfit added nothing to that red build. On
+# 2026-08-14 the human rejected that substitution (03-HUMAN-UAT.md item 3,
+# decision (b)) and required the D-ITEM-05 fix: the presentar-dependent surface
+# (`tui::dashboard`, `TuiMonitor`, `TuiMonitorConfig`) is now `#[cfg(feature =
+# "tui")]` while the unconditional IPC writer and state types stay available,
+# exactly as the `default = ["tui"]` comment in aprender-train/Cargo.toml always
+# said. Both minimal builds are green, so the diff apparatus is retired: two
+# plain checks subsume it (green + green means setfit added nothing), and unlike
+# the diff they FAIL if either build regresses to red. Under `.SHELLFLAGS := -e
+# -c` a failing cargo check aborts the recipe with cargo's own diagnostics,
+# which is now the desired behavior — fail loud, no status comparison to guard.
+	@echo "  leg (a): minimal-build closure (plain; D-ITEM-05 fixed 2026-08-14)"
+	@cargo check -p aprender-train --no-default-features
+	@cargo check -p aprender-train --no-default-features --features setfit
+	@echo "    minimal build green with and without setfit"
 # The dependency-closure negative, two-sided. The positive half is what stops
 # the negative half passing for the wrong reason: a `cargo tree` invocation that
 # silently stopped resolving these packages would satisfy an absence-only check
