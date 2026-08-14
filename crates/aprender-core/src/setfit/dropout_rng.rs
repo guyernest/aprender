@@ -688,6 +688,79 @@ mod dropout_rng_tests {
     }
 
     // -----------------------------------------------------------------------
+    // Accessors and the trait forwarder
+    //
+    // Every assertion here exists because a specific mutant SURVIVED the
+    // complete 03-10 mutation run of this file (79 mutants, run twice under
+    // different test configs with byte-identical survivor sets): `site ->
+    // ""/"xyzzy"`, `probability -> -1.0/0.0/1.0`, `scale -> 1.0`, `threshold
+    // -> 0`, `current_forward_ordinal -> 0`, and all four
+    // `attention_dropout_mask -> vec![...]` variants. The accessors were read
+    // by ZERO tests, and the forwarder was never called THROUGH the trait by
+    // any lib test. A behavioral test cannot kill an accessor mutant — the
+    // mutation changes the accessor, not the field — so these read each
+    // accessor against an INDEPENDENTLY derived expectation.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dropout_rng_accessors_report_the_constructed_values() {
+        let s = site(0.1);
+
+        // Round-trip of the identity fields (kills `site -> "" / "xyzzy"`,
+        // `probability -> -1.0 / 0.0 / 1.0`).
+        assert_eq!(s.site(), GOLDEN_SITE);
+        assert_eq!(s.probability(), 0.1);
+
+        // The derived fields compare against derivations, not against a second
+        // read of the same struct: scale is validate_rate's own output for this
+        // p (kills `scale -> 1.0`; 1/(1-0.1) != 1.0), and threshold is the
+        // FROZEN golden produced by the independent Python in this module's
+        // header (kills `threshold -> 0`).
+        assert_eq!(s.scale(), validate_rate(0.1).expect("0.1 is a valid rate"));
+        assert_eq!(s.threshold(), THRESHOLD_DROPOUT_P);
+        assert_eq!(s.threshold(), keep_threshold(f64::from(0.1_f32)));
+
+        // The ordinal is asserted at a NON-default value: at construction it is
+        // genuinely 0 — the mutant's constant — so an assertion there would
+        // pass with or without the mutation and prove nothing.
+        s.set_forward_ordinal(7).expect("7 fits u32");
+        assert_eq!(s.current_forward_ordinal(), 7);
+    }
+
+    #[test]
+    fn dropout_rng_attention_mask_trait_forwarder_reaches_the_real_mask() {
+        use crate::nn::transformer::AttentionDropoutMasks;
+
+        // p = 0.5 so a correct mask carries BOTH outcomes and the kept value is
+        // exactly 2.0 — no constant vec can collide with it.
+        let s = site(0.5);
+        s.set_forward_ordinal(3).expect("3 fits u32");
+
+        // THROUGH the trait object, the way the in-attention site is reached in
+        // production. The direct-method tests in this module cannot see a
+        // mutation of the forwarder (kills all four `attention_dropout_mask ->
+        // vec![...]` variants).
+        let via_trait: &dyn AttentionDropoutMasks = &s;
+        let len = 64_usize;
+        let mask = via_trait.attention_dropout_mask(len);
+
+        assert_eq!(mask.len(), len, "a fixed 0- or 1-element vec is not a mask");
+        assert_eq!(
+            mask,
+            s.mask(len),
+            "the forwarder must return THE mask, not a lookalike"
+        );
+        // Non-vacuity for the equality above: the mask must have structure no
+        // constant vec has — both outcomes present at p = 0.5. Deterministic:
+        // fixed key and ordinal, so this either always holds or never does.
+        assert!(
+            mask.contains(&0.0),
+            "no element dropped at p=0.5 across 64 draws"
+        );
+        assert!(mask.contains(&2.0), "no element kept-and-scaled at p=0.5");
+    }
+
+    // -----------------------------------------------------------------------
     // Byte encoding
     // -----------------------------------------------------------------------
 
