@@ -201,18 +201,18 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 04-03-PLAN.md — Production loader: bounded reader + fail-closed ladder + probe replay + VerifiedSetFitModel typestate + induced-corruption suite + trybuild non-constructibility (wave 3)
+- [x] 04-03-PLAN.md — Production loader: bounded reader + fail-closed ladder + probe replay + VerifiedSetFitModel typestate + induced-corruption suite + trybuild non-constructibility (wave 3)
 
 **Wave 4** *(blocked on Wave 3; two parallel plans, zero file overlap)*
 
-- [ ] 04-04-PLAN.md — ClassifyRequestDocument + ClassifyResponse with enforced validation (D-08) + classify + execution-derived backend identity (D-12) (wave 4)
-- [ ] 04-05-PLAN.md — AprCodec sealed adapter with a proven 20-field bijection + typed CodecError::Artifact + APR-03 round trip at Tolerance::EXACT (wave 4)
+- [x] 04-04-PLAN.md — ClassifyRequestDocument + ClassifyResponse with enforced validation (D-08) + classify + execution-derived backend identity (D-12) (wave 4)
+- [x] 04-05-PLAN.md — AprCodec sealed adapter with a proven 20-field bijection + typed CodecError::Artifact + APR-03 round trip at Tolerance::EXACT (wave 4)
 
 **Wave 5** *(blocked on Wave 4; three parallel plans, zero file overlap)*
 
-- [ ] 04-06-PLAN.md — `apr setfit train`: setfit feature, namespace, config-file-first with validated override merge, bounded artifact reader, atomic write, fail-closed device gate (wave 5)
-- [ ] 04-12-PLAN.md — OPS-01 public-API lifecycle proof (train -> save -> load -> embed -> classify -> inspect) + cargo-tree boundary evidence (wave 5)
-- [ ] 04-16-PLAN.md — reload_verified_run_from_apr: the fresh-process door to a verified run, minting only by re-entering the existing trusted policy (wave 5)
+- [x] 04-06-PLAN.md — `apr setfit train`: setfit feature, namespace, config-file-first with validated override merge, bounded artifact reader, atomic write, fail-closed device gate (wave 5)
+- [x] 04-12-PLAN.md — OPS-01 public-API lifecycle proof (train -> save -> load -> embed -> classify -> inspect) + cargo-tree boundary evidence (wave 5)
+- [x] 04-16-PLAN.md — reload_verified_run_from_apr: the fresh-process door to a verified run, minting only by re-entering the existing trusted policy (wave 5)
 
 **Wave 6** *(blocked on Wave 5; two parallel plans, zero file overlap)*
 
@@ -265,5 +265,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
-| 4. APR Artifact and Production Parity | 4/16 | In Progress|  |
+| 4. APR Artifact and Production Parity | 10/16 | In Progress|  |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
