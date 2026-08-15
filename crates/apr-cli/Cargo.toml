@@ -93,6 +93,20 @@ wgpu = ["inference"]
 visualization = ["renacer", "trueno-viz"]
 zram = ["trueno-zram-core"]
 training = ["dep:entrenar", "dep:entrenar-lora", "dep:aprender-train-distill", "dep:aprender-train-common", "aprender-train-distill?/shard-batch-source"]
+# Native SetFit classifier training — `apr setfit train` (Phase 4, D-05/D-07).
+#
+# `training` is what pulls `dep:entrenar`; the WEAK `entrenar?/setfit` then turns on
+# that crate's own setfit feature without naming the dependency a second time. Both
+# halves are required: `aprender/setfit` supplies the encoder/tokenizer/artifact
+# surface and `entrenar/setfit` supplies the lifecycle, and the feature is
+# dependency-CLOSED (enabling `setfit` alone must build).
+#
+# 04-08 appends "realizar?/setfit" to this list when `apr serve` learns the artifact.
+#
+# Deliberately NOT in `default`: CR-01's discipline (Phase 3 code that runs in no tier
+# and no CI job) is satisfied by the named tier/CI legs 04-10 and 04-11 wire, not by
+# defaulting a training path into every `cargo install aprender`.
+setfit = ["training", "aprender/setfit", "entrenar?/setfit"]
 training-gpu = ["training"]
 whisper = ["whisper-apr"]
 dhat-heap = ["dep:dhat"]
@@ -235,6 +249,11 @@ aprender-contrastive-data = { workspace = true }
 half = "2.4.1"
 # YAML config parsing (distillation configs, ALB-011)
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
+
+# TOML config parsing — `apr setfit train --config <FILE>.toml` (D-07).
+# Already a workspace dependency (root Cargo.toml), so this resolves no new package:
+# T-04-SC's "no new registry package" disposition is satisfied by construction.
+toml = { workspace = true }
 
 # Unicode normalization (NFC) for BPE corpus preprocessing (MODEL-2).
 unicode-normalization = "0.1"

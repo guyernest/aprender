@@ -732,6 +732,16 @@ pub enum ExtendedCommands {
         #[command(subcommand)]
         command: DataCommands,
     },
+    /// Native SetFit classifier training — consumes `apr data` artifacts, emits APR
+    ///
+    /// Feature-gated (`--features setfit`) and training-only by decision (D-06):
+    /// prediction, evaluation and inspection of a `setfit-apr-v1` artifact are the
+    /// generic `apr` commands, because the artifact is an APR like any other.
+    #[cfg(feature = "setfit")]
+    Setfit {
+        #[command(subcommand)]
+        command: SetfitCommands,
+    },
     /// Pipeline orchestration (plan/apply/status) — wraps forjar DAG engine
     Pipeline {
         #[command(subcommand)]

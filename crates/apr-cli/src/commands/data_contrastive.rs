@@ -272,7 +272,16 @@ fn role_file(role: &str) -> Result<String> {
 ///
 /// [`CliError::ValidationFailed`] for a missing/unreadable file, a manifest this build
 /// cannot read, or any attested-boundary rejection.
-fn read_attested_canonical(
+///
+/// # `pub(crate)` so `apr setfit train` reads through THIS door (04-06)
+///
+/// The alternative was a second ingest sequence in `commands/setfit_train.rs`, which
+/// would have made two readers of `benchmark-manifest.json` — the exact defect the
+/// comment inside this function exists to prevent, and the one that would let a
+/// training run accept a directory `apr data select` refuses. Widening the visibility
+/// keeps the attested boundary a single implementation with a single set of
+/// rejections.
+pub(crate) fn read_attested_canonical(
     data_dir: &Path,
     ledger: &mut AccessLedger,
 ) -> Result<PreparedDataset<Canonical>> {
@@ -598,7 +607,11 @@ fn pair_config_error(error: &ContrastiveDataError) -> CliError {
 ///
 /// [`CliError::ValidationFailed`] when the file is absent or its digest disagrees with its
 /// payload; [`CliError::Io`] for any other read failure.
-fn read_selection_manifest(path: &Path) -> Result<SelectionManifest> {
+///
+/// `pub(crate)` for the same reason as [`read_attested_canonical`]: `apr setfit train`
+/// consumes the manifest `apr data select` wrote, and a second reader of that file is
+/// a second place for the envelope digest check to be omitted.
+pub(crate) fn read_selection_manifest(path: &Path) -> Result<SelectionManifest> {
     let bytes = fs::read(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             CliError::ValidationFailed(format!(
