@@ -273,3 +273,55 @@ and 8 cases reported ok — not a vacuous harness pass.
 --test ui` with a case-count assertion (`>= 8`), not just a `rc=0` check. A trybuild harness
 reports `1 passed` for the whole suite, so `test result: ok` alone cannot distinguish 8 cases
 from 0.
+
+---
+
+## F-14 — code-review: five findings deferred to a phase-owner decision (BLOCKING for 04-10/04-11)
+
+Ten `/code-review` findings were fixed in `bbc631ef7`. These five were correctly NOT fixed because
+each needs a decision, not a patch. **04-10 and 04-11 own them.**
+
+**1. The loader's rung numbering is off by one from the contract.** `contracts/setfit-apr-v1.yaml`
+(`load_validation_ladder`, ~:983-991) defines EIGHT rungs — 1 bounded read, 2 raw length, 3
+container/CRC, 4 typed tag+doc, 5 structural, 6 non-finite scan, 7 rebuild, 8 probe replay — and
+its postcondition says *a refusal names the RUNG*. The code is `rung1_raw_length` ..
+`rung7_replay_probes`, and the typed refusals say `InconsistentTensor(rung 4…)` for a corrupt
+tensor index, which the contract calls typed-tag/document-parse. An operator reading a refusal and
+looking it up gets the wrong subsystem. The contract also asserts `VerifiedSetFitModel exists only
+after all EIGHT rungs passed` — unsatisfiable with seven. **Decide: amend the contract to seven, or
+renumber the code to eight.** No CI gate compares them, which is why it survived. NOTE: my
+`/simplify` pass relabelled the WRITER's helpers from "Rung N" to "Step N" for a different reason
+(the writer and loader gave the same numbers to different checks); that change is unrelated to and
+does not fix this one.
+
+**2. All 15 `setfit-apr-v1` binding rows are still `status: pending`** — see F-01, now confirmed by
+review. `binding.yaml:1352-1356` states the rule in its own words: *"A plan that lands a module and
+leaves its binding `pending` has recorded a claim nothing checks."* `contract-audit-phase4`
+tolerates BIND-004 (pending) and fails only on BIND-001 (missing), so it passes green over a
+registry tracking nothing. **Two rows name symbols that do not exist**: `probe_policy -> function:
+replay_probes` (the function is `rung7_replay_probes`, and it is private) and `backend_identity ->
+aprender::setfit::classify::backend_identity` (no such item — identity comes from
+`ExecutionBackend::identity` in `encoder.rs`). Flipping either today would FAIL the audit.
+
+**3. `ClassifyResponse` derives `PartialEq`, which compares `latency_ms`.** The contract (yaml:805,
+:822) makes it normative that latency *"participates in no equality comparison"*. 04-09's parity
+harness is this envelope's intended consumer, and the obvious `assert_eq!(cli, http)` is a
+guaranteed red; the workaround (field-by-field) puts the exclusion rule back in the harness where
+the contract says it must not live. **Decide: a manual `PartialEq`, or a dedicated `agrees_with`
+comparator.** Not auto-fixed because removing latency from `PartialEq` also weakens the existing
+serde round-trip assertion at `classify.rs:1898`.
+
+**4. `ClassifyRequestDocument` deserializes an unbounded `texts` vector.** `MAX_BATCH_TEXTS` is
+checked only AFTER the whole document is parsed and allocated — the module's own T-04-11 rationale
+("a batch bound checked after tokenization is not a bound on the work an attacker can request")
+applies one layer up and is not honoured. A body with 10,000,000 strings is fully materialised
+first. **04-08's HTTP surface will hand this type an attacker-controlled body.** The review added
+and re-exported `MAX_REQUEST_BODY_BYTES` (the contract bound at yaml:807-809 that had NO code
+binding at all), but **enforcement is still owed by 04-07 (`--input` reader) and 04-08 (body
+extractor)** — before deserializing, not after.
+
+**5. `read_setfit_apr_bytes_bounded` pre-reserves the caller-declared length clamped to 256 MiB.**
+A source that lies upward (a one-byte FIFO, a sparse file, metadata reporting 268,435,456) makes
+the process commit a quarter gigabyte before reading a byte — the exhaustion the cap exists to
+prevent, arriving via the reservation instead of the payload. Fixing it means inventing a
+reservation ceiling the contract does not fix. **Decide with the bound's owner.**
