@@ -317,8 +317,30 @@ its "Python is PROHIBITED" and contract-first spirit are consistent with phase d
 | Train→save→reload→verify policy, lifecycle states, lock/token/eval | `aprender-train` (existing, unchanged) | — | Ph3 D-07: Phase 4 swaps the format behind the seam, not the check |
 | `apr setfit train`, generic `apr predict` (new), inspect/eval auto-detect routing | `apr-cli` | calls core + train | Ph2 D-04: CLI owns filesystem adapters only; `apr data` namespace is the wiring template |
 | Classify HTTP route, `AppState` slot, readiness reporting | `aprender-serve` (new `setfit` feature) | calls core loader/model | D-09; router/AppState/health handlers already exist; tower `oneshot` in-process test pattern already in-tree |
-| Device gate + backend identity | `aprender-train::train::device` (gate) + trueno runtime detection (identity) | surfaced through core classify path | `resolve_device` fail-closed verified; trueno `detect_*_backend()` is the execution-derived identity source |
+| Device gate + backend identity | `aprender-train::train::device` (gate) + the `ExecutionBackend` value RETURNED by the encode invocation that ran, defined in `aprender-core/src/setfit/encoder.rs` (identity) | surfaced through core classify path | `resolve_device` fail-closed verified. Identity column **SUPERSEDED** — see the note under this table. |
 | Parity harness (3-surface + goldens + in-band negative) | new integration test crate location — planner sites it (apr-cli `tests/` is natural: it can dep on core, train, serve) | — | Needs all three surfaces reachable; apr-cli already deps on core and (optionally) train, and can add serve as dev-dep — verify direction at plan time |
+
+> **SUPERSEDED (amended 2026-08-14) — the "Device gate + backend identity" identity source.**
+>
+> This row originally named "trueno runtime detection (identity)" and called `detect_*_backend()`
+> "the execution-derived identity source". That is wrong, and the Phase 4 plan set now FORBIDS it.
+> `detect_*_backend()` is CAPABILITY detection: it reports what the host CAN do, never what ran.
+> `trueno::Matrix::matmul` dispatches on SIZE (`matmul_naive` below the 64 threshold,
+> `gemm_blis_parallel` above it, a GPU path when compiled in), so an AVX2 detection result is
+> consistent with a scalar execution — the defect cross-AI review finding B6 raised.
+>
+> A capability-detection value in the backend field is now a CONTRACT VIOLATION. See **04-01 item
+> 12** (backend-identity grammar: the value MUST be produced by the encode invocation that ran and
+> returned to the caller; a config/env/CLI value must not reach the field) and **04-04 Task 2**,
+> whose acceptance criterion asserts that
+> `grep -rn "select_backend\|Backend::AVX\|detect_x86_backend\|detect_arm_backend" crates/aprender-core/src/setfit/`
+> returns ZERO matches. The identity channel is `ExecutionBackend`, produced by
+> `encode_with_backend` / `encode_texts_traced`, with v1 value `cpu:setfit-core:autograd-trueno-matmul`.
+>
+> The recorded v1 limitation stands and is not a licence to fall back on detection: trueno exposes
+> no per-dispatch execution report, so the identity names the kernel ENTRY POINT the encoder
+> invoked, not the innermost dispatch chosen. Upgrading to per-dispatch reporting needs a trueno API
+> and is a recorded deferred item. Do not reintroduce detection here.
 
 ## Standard Stack
 

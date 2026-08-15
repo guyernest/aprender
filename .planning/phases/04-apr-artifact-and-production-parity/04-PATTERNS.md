@@ -37,6 +37,26 @@ pre-monorepo docs — root `CLAUDE.md` governs (per 04-RESEARCH.md "Project Cons
 | `CLAUDE.md` (MOD — realizar-first table SetFit row, D-09) | docs | — | the realizar-first table itself | exact in-place |
 | `crates/aprender-core/src/setfit/mod.rs` (MOD, exports) | module wiring | — | itself | exact in-place |
 
+### Appended 2026-08-14 — files added by the revision that created plans 04-12..04-16 and the wave-2 library-API work
+
+The rows above were written before plans 04-12..04-16 existed and before wave 2 was split into
+04-02 / 04-13 / 04-14, so roughly a third of the files the plan set now touches had no row. The
+discipline was never violated — each of those plans cites a concrete in-tree analog in its own
+`<read_first>` — but the table was stale, so the analogs were only visible inside the plans. They
+are recorded here as well:
+
+| New/Modified File | Role | Data Flow | Closest Analog | Match Quality |
+|-------------------|------|-----------|----------------|---------------|
+| `crates/aprender-train/src/train/setfit/apr_reload.rs` (NEW, 04-16) | trusted reload door | file-I/O (fail-closed read) | `verify.rs:577-660` (`run_verify_policy` — the identity-gate policy shape this door mirrors) | role-match — cited in 04-16 `read_first` |
+| `crates/aprender-train/src/train/setfit/bundle.rs` (MOD, 04-13: `ProvenanceRecord` + field 20 + schema bump) | trusted value type | transform (run→bundle) | itself, lines 285-420 (`ResolvedConfigRecord`, `from_run_parts`, the `f32_to_hex` bit-pattern precedent) | exact in-place |
+| `crates/aprender-train/src/train/setfit/bundle_tests.rs` (MOD, 04-13: allowlist completeness gate) | test | — | `evidence.rs:200-222` (`first_null_path`/`join_path` — the null-walk shape, widened from first-only to all) | exact — cited in 04-13 `read_first` |
+| `crates/aprender-train/src/train/setfit/verify_tests.rs` (MOD, 04-13: two `from_run_parts` call sites) | test | — | itself, lines 205-225 and 330-350 (the two call sites; `#[path = "verify_tests.rs"] mod verify_tests;` at verify.rs:678-680 makes it part of the `setfit::verify` target) | exact in-place |
+| `crates/aprender-train/src/train/setfit/{config.rs, lock.rs, lock_tests.rs, evaluate.rs}` (MOD, 04-14: library-API additions incl. `SelectionLock::from_canonical_bytes`) | trusted library API | transform + file-I/O | `bundle.rs:437-470` (the bounded/fail-closed `from_canonical_bytes` door discipline these follow) | exact — cited in 04-14 `read_first` |
+| `crates/apr-cli/src/setfit_io.rs` (NEW, 04-06) | CLI bounded reader | file-I/O (fail-closed read) | `bundle.rs:437-470` (raw-length cap before parse) + apr-cli's existing file adapters | role-match |
+| `crates/aprender-core/src/setfit/encoder.rs` (MOD, 04-04: `ExecutionBackend` channel) | execution identity channel | transform (encode→identity) | itself (the encode entry point) + `verify.rs:62-65` private-module sealing idiom for the no-public-constructor rule | role-match — cited in 04-04 `read_first` |
+| `crates/aprender-train/tests/setfit_apr_lifecycle.rs` (NEW, 04-12) | integration test (in-process OPS-01 lifecycle) | request-response | `verify.rs` policy tests + the crate's existing `tests/ui.rs` harness siting | role-match — cited in 04-12 `read_first` |
+| `crates/apr-cli/tests/setfit_cli_lifecycle.rs` (NEW, 04-15) | integration test (spawned-binary OPS-02 lifecycle + generic-tooling A3) | request-response ×5 processes | `env!(CARGO_BIN_EXE_apr)` spawn pattern in apr-cli's existing integration tests | role-match — cited in 04-15 `read_first` |
+
 ## Pattern Assignments
 
 ### `crates/aprender-train/src/train/setfit/apr_codec.rs` (codec adapter)
@@ -681,3 +701,14 @@ via the existing free-function pattern; never hash inside the codec.
 `Makefile`, `.github/workflows/ci.yml`, `crates/aprender-train/tests/ui/`
 **Files scanned:** 20 read directly (targeted, non-overlapping ranges), plus grep pinning across 8 more
 **Pattern extraction date:** 2026-08-14
+
+**Amended 2026-08-14 (checker warning W-D).** The original File Classification table was mapped
+before plans 04-12..04-16 existed and before wave 2 was split into 04-02 / 04-13 / 04-14, so it
+omitted `apr_reload.rs`, `bundle.rs`/`bundle_tests.rs`/`verify_tests.rs`,
+`config.rs`/`lock.rs`/`lock_tests.rs`/`evaluate.rs`, `setfit_io.rs`, `encoder.rs`,
+`tests/setfit_apr_lifecycle.rs` and `tests/setfit_cli_lifecycle.rs`. Rows for all of them are
+appended under "Appended 2026-08-14" above. Note for later readers: plans 04-12..04-16 already carry
+their analogs INLINE in each task's `<read_first>` (04-13 cites `evidence.rs:200-222`'s
+`first_null_path` shape; 04-14 cites `bundle.rs:437-470`'s fail-closed door discipline; 04-16 cites
+verify.rs's policy shape), so the omission was artifact staleness, not a pattern violation — the
+plans were never analog-less.

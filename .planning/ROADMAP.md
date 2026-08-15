@@ -182,7 +182,7 @@ surfaces on the mandatory CPU profile.
   4. Rust, CLI, and native HTTP callers can classify ordered single or mixed-length batches and receive matching labels, full probabilities, optional logits, margins, token/truncation facts, latency, backend identity, and the same artifact hash in predictions and readiness.
   5. A developer can run offline executable contracts and the supported CPU build/test feature matrix to detect detached gradients, invalid data/math, leakage, label drift, artifact mismatches, and core/CLI/HTTP parity failures; an explicitly requested unavailable device fails instead of silently falling back or misreporting its backend.
 
-**Plans**: 12 plans in 9 waves
+**Plans**: 16 plans in 9 waves (revised 2026-08-15 after cross-AI review — 04-REVIEWS.md)
 
 **Branch base**: `gsd/phase-2-contract-gate` @ d66678e7a (Phase 3 complete + UAT + CR-01..04 fixes).
 The orchestrator creates `gsd/phase-4-apr-parity` from that HEAD before dispatching wave 1; wave
@@ -191,42 +191,46 @@ merges land back on `gsd/phase-2-contract-gate` (Phase 3 precedent). No PR to `m
 Plans:
 **Wave 1**
 
-- [ ] 04-01-PLAN.md — setfit-apr-v1 contract (cap/probes/tolerances/name table) + $(CONTRACTS)/audit wiring + CLAUDE.md realizar-first SetFit row (wave 1)
+- [ ] 04-01-PLAN.md — setfit-apr-v1 contract: normative storage map (incl. head tensors), SetFitArtifactDoc field list, doc<->bundle bijection table, cap/probes/tolerances, backend-identity grammar, lock lifecycle + $(CONTRACTS)/audit wiring + CLAUDE.md realizar-first SetFit row (wave 1)
 
-**Wave 2** *(blocked on Wave 1)*
+**Wave 2** *(blocked on Wave 1; three parallel plans, zero file overlap)*
 
-- [ ] 04-02-PLAN.md — Core artifact writer: canonical tensors, U8 tokenizer blob, one-key deterministic metadata, embedded synthetic probes + cross-process determinism proofs (wave 2)
+- [ ] 04-02-PLAN.md — Core artifact writer: canonical tensors + setfit.head.weight/bias + U8 tokenizer blob, one-key deterministic metadata, embedded synthetic probes + cross-process determinism proofs (wave 2)
+- [ ] 04-13-PLAN.md — SetFitBundle provenance (field 20) read off the run + schema-version bump — makes byte-canonical closure achievable (wave 2)
+- [ ] 04-14-PLAN.md — aprender-train public API for the CLI: SetFitTrainConfig::to_request (validated override merge) + SelectionLock::from_canonical_bytes (durable lock reconstruction) (wave 2)
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 04-03-PLAN.md — Production loader: 7-rung fail-closed ladder + probe replay + VerifiedSetFitModel typestate + induced-corruption suite + trybuild non-constructibility (wave 3)
+- [ ] 04-03-PLAN.md — Production loader: bounded reader + fail-closed ladder + probe replay + VerifiedSetFitModel typestate + induced-corruption suite + trybuild non-constructibility (wave 3)
 
 **Wave 4** *(blocked on Wave 3; two parallel plans, zero file overlap)*
 
-- [ ] 04-04-PLAN.md — ClassifyResponse envelope (D-08) + VerifiedSetFitModel::classify + execution-derived backend identity (D-12) (wave 4)
-- [ ] 04-05-PLAN.md — AprCodec sealed adapter + APR-03 round trip at Tolerance::EXACT (wave 4; OPS-01 lifecycle proof moved to 04-12)
+- [ ] 04-04-PLAN.md — ClassifyRequestDocument + ClassifyResponse with enforced validation (D-08) + classify + execution-derived backend identity (D-12) (wave 4)
+- [ ] 04-05-PLAN.md — AprCodec sealed adapter with a proven 20-field bijection + typed CodecError::Artifact + APR-03 round trip at Tolerance::EXACT (wave 4)
 
-**Wave 5** *(blocked on Wave 4; two parallel plans, zero file overlap)*
+**Wave 5** *(blocked on Wave 4; three parallel plans, zero file overlap)*
 
-- [ ] 04-06-PLAN.md — `apr setfit train`: setfit feature, namespace, config-file-first adapter, atomic write, fail-closed device gate (wave 5)
-- [ ] 04-12-PLAN.md — OPS-01 public-API lifecycle proof (train -> save -> load -> embed -> classify -> inspect) + cargo-tree boundary evidence (wave 5; needs 04-04's classify + 04-05's AprCodec)
+- [ ] 04-06-PLAN.md — `apr setfit train`: setfit feature, namespace, config-file-first with validated override merge, bounded artifact reader, atomic write, fail-closed device gate (wave 5)
+- [ ] 04-12-PLAN.md — OPS-01 public-API lifecycle proof (train -> save -> load -> embed -> classify -> inspect) + cargo-tree boundary evidence (wave 5)
+- [ ] 04-16-PLAN.md — reload_verified_run_from_apr: the fresh-process door to a verified run, minting only by re-entering the existing trusted policy (wave 5)
 
 **Wave 6** *(blocked on Wave 5; two parallel plans, zero file overlap)*
 
-- [ ] 04-07-PLAN.md — Generic `apr predict` (new) + inspect APR-05 recovery + eval lock->token->grant (TRN-07 positive, D-16) (wave 6)
-- [ ] 04-08-PLAN.md — Serve surface: setfit feature, AppState slot, /v1/classify, readiness hash, startup auto-detect, oneshot tests (wave 6)
+- [ ] 04-07-PLAN.md — Generic `apr predict` (JSON request document) + inspect APR-05 recovery + eval validation-lock artifact and gated canonical test access (TRN-07 positive, D-16) (wave 6)
+- [ ] 04-08-PLAN.md — Serve surface: setfit feature, AppState slot, always-installed /v1/classify with 503 handler, readiness hash, bounded startup read, oneshot tests (wave 6)
 
-**Wave 7** *(blocked on Wave 6)*
+**Wave 7** *(blocked on Wave 6; two parallel plans, zero file overlap)*
 
-- [ ] 04-09-PLAN.md — Three-surface parity harness + frozen goldens + in-band skewed negative + ONE tier3 spawned-serve smoke (wave 7)
+- [ ] 04-09-PLAN.md — Three-surface parity harness on one shared request document + frozen goldens + in-band skewed negative + ONE tier3 spawned-serve smoke with a specified port protocol (wave 7)
+- [ ] 04-15-PLAN.md — Spawned-binary OPS-02 lifecycle chain (train -> inspect -> validation lock -> test eval -> predict) + generic APR tooling compatibility (D-01 / A3) (wave 7)
 
 **Wave 8** *(blocked on Wave 7)*
 
-- [ ] 04-10-PLAN.md — Make gates with ran-something guards + four-crate SAFE-02 feature matrix + tier wiring + OPS-01 boundary gate (wave 8)
+- [ ] 04-10-PLAN.md — Make gates with one filter per invocation and ran-something guards + four-crate x three-profile SAFE-02 matrix + tier wiring + OPS-01 boundary gate (wave 8)
 
 **Wave 9** *(blocked on Wave 8; NOT autonomous — human checkpoint)*
 
-- [ ] 04-11-PLAN.md — ci.yml extension (human-approved), scoped mutation gate, closing requirements audit incl. TRN-07 (wave 9)
+- [ ] 04-11-PLAN.md — ci.yml extension proposed as a patch file then human-approved, per-crate mutation gate, closing requirements audit incl. TRN-07 (wave 9)
 
 ### Phase 5: Benchmark and Claims Gate
 
