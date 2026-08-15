@@ -101,12 +101,18 @@ training = ["dep:entrenar", "dep:entrenar-lora", "dep:aprender-train-distill", "
 # surface and `entrenar/setfit` supplies the lifecycle, and the feature is
 # dependency-CLOSED (enabling `setfit` alone must build).
 #
-# 04-08 appends "realizar?/setfit" to this list when `apr serve` learns the artifact.
+# 04-08 appended `realizar?/setfit`: `realizar` (aprender-serve) is the OPTIONAL dep
+# behind `inference`, so the weak form turns on its classify surface without naming
+# the dependency a second time and without dragging axum into a `--features setfit`
+# build that did not also ask for `inference`. Serving a SetFit artifact therefore
+# needs BOTH: `--features setfit,inference` — and `inference` is default-on, so in
+# practice `--features setfit` is enough unless the caller passed
+# `--no-default-features`.
 #
 # Deliberately NOT in `default`: CR-01's discipline (Phase 3 code that runs in no tier
 # and no CI job) is satisfied by the named tier/CI legs 04-10 and 04-11 wire, not by
 # defaulting a training path into every `cargo install aprender`.
-setfit = ["training", "aprender/setfit", "entrenar?/setfit"]
+setfit = ["training", "aprender/setfit", "entrenar?/setfit", "realizar?/setfit"]
 training-gpu = ["training"]
 whisper = ["whisper-apr"]
 dhat-heap = ["dep:dhat"]

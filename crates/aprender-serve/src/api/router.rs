@@ -109,6 +109,37 @@ pub fn create_router_with_config(state: AppState, config: RouterConfig) -> Route
             .route("/api/generate", post(ollama_generate_handler));
     }
 
+    // Phase 4 D-09 / OPS-05: the SetFit classification surface.
+    //
+    // INSTALLED WHENEVER THE FEATURE IS COMPILED IN, and deliberately NOT
+    // conditional on `state.has_setfit_model()` (review finding M4). A
+    // slot-conditional installation makes a running server with no model loaded
+    // answer 404 — which is indistinguishable, to any client, from "this build
+    // has no classify surface at all". 503 from the handler is the honest answer
+    // to "the route exists, the model does not", and it is the answer the
+    // readiness contract already gives on the same state.
+    //
+    // Nor is it placed inside the `config.openai_api` group above: `/v1/classify`
+    // is an aprender-native endpoint that merely shares the `/v1` prefix, and
+    // hanging it off the OpenAI toggle would reintroduce exactly the 404
+    // ambiguity M4 is about through a second door.
+    //
+    // The 1 MiB body limit is the contract's `max_request_body_bytes`
+    // (`setfit-apr-v1` item 11), taken from core's constant rather than spelled
+    // as a literal, and attached to THIS route only so the generate/chat paths
+    // keep axum's default. It bounds the PARSE; `MAX_BATCH_TEXTS` bounds the work
+    // after the document exists. Neither subsumes the other (T-04-23).
+    #[cfg(feature = "setfit")]
+    {
+        router = router.route(
+            "/v1/classify",
+            post(setfit_classify_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    classify_body_limit_bytes(),
+                )),
+        );
+    }
+
     // realizr#191: Logprobs + perplexity endpoints (CUDA only, F-QUALITY-01)
     #[cfg(feature = "cuda")]
     {
@@ -211,12 +242,26 @@ fn build_health_response(state: &AppState) -> HealthResponse {
         "ok"
     };
 
+    // Phase 4 OPS-05: the classifier's identity, read off the LOADED MODEL. Both
+    // fields move together — a hash with no verified flag, or the reverse, would
+    // describe a state this server cannot be in.
+    #[cfg(feature = "setfit")]
+    let (classifier_artifact_sha256, classifier_verified) = state.setfit_model().map_or(
+        (None, None),
+        |model| (Some(model.artifact_sha256().to_string()), Some(true)),
+    );
+    #[cfg(not(feature = "setfit"))]
+    let (classifier_artifact_sha256, classifier_verified): (Option<String>, Option<bool>) =
+        (None, None);
+
     HealthResponse {
         status: status.to_string(),
         version: crate::VERSION.to_string(),
         compute_mode: compute_mode.to_string(),
         model_loaded,
         uptime_sec: server_uptime_sec(),
+        classifier_artifact_sha256,
+        classifier_verified,
     }
 }
 
