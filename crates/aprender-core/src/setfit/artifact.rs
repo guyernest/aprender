@@ -947,12 +947,24 @@ pub fn build_hf_name_map(num_layers: usize) -> BTreeMap<String, String> {
 /// Every tensor name the container is expected to carry, including the three
 /// schema-owned entries. `|expected| = 5 + 16 * num_layers + 3`.
 #[must_use]
-pub fn expected_container_tensor_names(num_layers: usize) -> BTreeSet<String> {
+pub fn expected_tensor_names(num_layers: usize) -> BTreeSet<String> {
     let mut names: BTreeSet<String> = build_hf_name_map(num_layers).into_values().collect();
     names.insert(HEAD_WEIGHT_TENSOR.to_string());
     names.insert(HEAD_BIAS_TENSOR.to_string());
     names.insert(TOKENIZER_BLOB_TENSOR.to_string());
     names
+}
+
+/// The canonical form of ONE HF dotted name under an architecture of
+/// `num_layers` layers, or `None` if the name has no canonical entry.
+///
+/// A convenience over [`build_hf_name_map`], deliberately implemented BY calling
+/// it rather than by re-parsing `encoder.layer.{n}.` prefixes: a second
+/// implementation of the mapping would be a second table to keep in step, and
+/// the whole point of `canonical_tensor_names` is that there is one.
+#[must_use]
+pub fn canonical_name_for_hf(hf_name: &str, num_layers: usize) -> Option<String> {
+    build_hf_name_map(num_layers).remove(hf_name)
 }
 
 // ===========================================================================
@@ -1059,21 +1071,29 @@ fn disallowed_null_paths(doc: &JsonMap<String, Value>) -> Vec<String> {
         .collect()
 }
 
-/// Refuse a document carrying a `null` outside the allowlist.
+/// The FIRST `null` path outside [`NULLABLE_PATH_ALLOWLIST`], in document order.
 ///
-/// The refusal names the FIRST offending path in document order, which is what
-/// the contract's postcondition requires. The walk collects all of them so the
-/// full set is available to a caller and to the tests; only the error's single
-/// `path` field is contract-shaped.
+/// The contract's `nullable_path_allowlist` equation names this concept and the
+/// binding registry names this function; it is the whole decision the guard
+/// makes. The walk collects EVERY offender first — so the full set is available
+/// to a caller and the accept tests can assert the exact observed set — and only
+/// the error's single `path` field is narrowed to the first, which is what the
+/// contract's postcondition requires ("names the exact dotted path of the first
+/// offending null").
+fn first_unallowed_null_path(doc: &JsonMap<String, Value>) -> Option<String> {
+    disallowed_null_paths(doc).into_iter().next()
+}
+
+/// Refuse a document carrying a `null` outside the allowlist.
 fn guard_subdocument_nulls(doc: &JsonMap<String, Value>) -> Result<(), SetFitArtifactError> {
-    if let Some(path) = disallowed_null_paths(doc).into_iter().next() {
+    if let Some(path) = first_unallowed_null_path(doc) {
         return Err(SetFitArtifactError::NonFiniteValue { path });
     }
     Ok(())
 }
 
 // ===========================================================================
-// Document construction (stub — filled in the GREEN step)
+// Document construction
 // ===========================================================================
 
 /// Build the normative `SetFitArtifactDoc` as ONE `serde_json::Map`.
@@ -1637,7 +1657,7 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect();
-        let expected = expected_container_tensor_names(view.architecture.num_layers);
+        let expected = expected_tensor_names(view.architecture.num_layers);
         assert_eq!(observed, expected);
         // The count is DERIVED (5 global + 16 per layer + 3 schema-owned), never
         // quoted: the same arithmetic gives 104 for the pinned six-layer model.
@@ -1942,7 +1962,7 @@ mod tests {
             .collect();
         assert_eq!(
             observed,
-            expected_container_tensor_names(view.architecture.num_layers),
+            expected_tensor_names(view.architecture.num_layers),
             "the same rule judges the fixture and the pin; there is no test-only branch"
         );
     }
@@ -1985,6 +2005,31 @@ mod tests {
         assert_ne!(
             artifact_sha256_hex(&bytes),
             artifact_sha256_hex(&bytes[1..])
+        );
+    }
+
+    #[test]
+    fn canonical_name_for_hf_agrees_with_the_one_name_table() {
+        let map = build_hf_name_map(FIXTURE_LAYERS);
+        for (hf, canonical) in &map {
+            assert_eq!(
+                canonical_name_for_hf(hf, FIXTURE_LAYERS).as_ref(),
+                Some(canonical),
+                "{hf}"
+            );
+        }
+        // A layer this architecture does not have has no canonical name, because
+        // the expansion is a FUNCTION of num_layers rather than a fixed list.
+        assert_eq!(
+            canonical_name_for_hf(
+                "encoder.layer.9.attention.self.query.weight",
+                FIXTURE_LAYERS
+            ),
+            None
+        );
+        assert_eq!(
+            canonical_name_for_hf("pooler.dense.weight", FIXTURE_LAYERS),
+            None
         );
     }
 
@@ -2138,6 +2183,39 @@ mod nullable {
         assert!(
             matches!(&err, SetFitArtifactError::NonFiniteValue { path }
                 if path == "architecture.hidden_act"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_walk_collects_every_offender_and_the_refusal_names_the_first() {
+        // Two offenders, in two different sub-documents. The walk must SEE both
+        // — a first-only walk could not report the set — while the refusal names
+        // the first in document order, which is the order of WALKED_SUBDOCUMENTS.
+        let mut view = fixture_view_full_pin_shape();
+        view.evidence["table_hash"] = Value::Null;
+        view.provenance["shots_per_class"] = Value::Null;
+        let doc = {
+            let mut doc = doc_of(&fixture_view_full_pin_shape());
+            doc["evidence"]["table_hash"] = Value::Null;
+            doc["provenance"]["shots_per_class"] = Value::Null;
+            doc
+        };
+        assert_eq!(
+            disallowed_null_paths(&doc),
+            vec![
+                "evidence.table_hash".to_string(),
+                "provenance.shots_per_class".to_string(),
+            ]
+        );
+        assert_eq!(
+            first_unallowed_null_path(&doc),
+            Some("evidence.table_hash".to_string())
+        );
+        let err = write_setfit_apr(&view).expect_err("two offenders is still a refusal");
+        assert!(
+            matches!(&err, SetFitArtifactError::NonFiniteValue { path }
+                if path == "evidence.table_hash"),
             "got {err:?}"
         );
     }
