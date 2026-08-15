@@ -34,6 +34,12 @@
 
 /// The `setfit-apr-v1` adapter behind the sealed codec seam (04-05, APR-03).
 pub mod apr_codec;
+/// The fresh-process validation evaluator: a reloaded artifact -> a candidate (04-07, TRN-07).
+///
+/// Closes the edge 04-16 recorded open: `SelectionCandidate::from_evaluation` needs a
+/// `ValidationEvaluation`, whose only producer took a train-time run, so a process holding
+/// only `.apr` files could consume a lock but never write one.
+pub mod apr_evaluate;
 /// The fresh-process door: artifact bytes -> a sealed credential (04-16, D-11, D-16).
 pub mod apr_reload;
 pub mod baseline;
@@ -1244,6 +1250,12 @@ pub enum SetFitTrainError {
     /// failure vocabulary, and the trainer error wraps it whole so a caller can still tell
     /// a provenance disagreement from a container CRC failure without matching on text.
     AprReload(apr_reload::AprReloadError),
+    /// The fresh-process validation evaluator refused the artifact/dataset pair.
+    ///
+    /// Same reasoning as [`Self::AprReload`]: the module that owns the operation owns its
+    /// failure vocabulary, so a label-map disagreement stays distinguishable from a corpus
+    /// disagreement without matching on rendered text.
+    AprEvaluate(apr_evaluate::AprEvaluateError),
     /// The bundle layer refused the payload — a contracted limit, a parse failure,
     /// an unknown schema version, or a shape the declared tensor does not have.
     Bundle(BundleError),
@@ -1472,6 +1484,10 @@ impl fmt::Display for SetFitTrainError {
             Self::AprReload(inner) => write!(
                 f,
                 "the artifact could not be reloaded against the supplied inputs: {inner}",
+            ),
+            Self::AprEvaluate(inner) => write!(
+                f,
+                "the reloaded artifact could not be evaluated on the supplied dataset: {inner}",
             ),
             Self::ReloadNotFromBytes { hashed_len, reserialized_len, first_diff_offset } => write!(
                 f,

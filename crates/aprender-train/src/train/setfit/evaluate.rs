@@ -327,9 +327,63 @@ pub fn evaluate_validation(
     let predicted =
         run.evidence().head().predict_indices(&embeddings).map_err(SetFitTrainError::HeadFit)?;
 
-    // (4) Both index vectors are checked against the DECLARED label map before the metric runs,
-    //     so the metric functions below are total and directly unit-testable.
+    // (4) Both index vectors are checked against the DECLARED label map, and the metric is
+    //     computed, by the ONE shared tail below.
     let truth: Vec<usize> = rows.iter().map(|row| row.label).collect();
+    evaluation_from_predictions(
+        metric,
+        &truth,
+        &predicted,
+        classes,
+        // READ OFF the run. There is no parameter here a caller could have supplied.
+        run.artifact_hash(),
+        validation_split_fingerprint,
+        dataset_fingerprint,
+    )
+}
+
+/// The shared tail: bounds-check two index vectors, compute the metric, commit the facts.
+///
+/// # Why this is a function and not two copies of eight lines
+///
+/// [`evaluate_validation`] and
+/// [`super::apr_evaluate::evaluate_validation_from_artifact`] differ ONLY in how they obtain
+/// `predicted` — the trainer has a live run's encoder and head, a fresh process has a reloaded
+/// artifact and core's one classify path. Everything downstream of the predictions is the same
+/// decision, so it is the same code: the bounds check, the metric dispatch, the empty-class
+/// convention that lives inside [`macro_f1`], and the construction of the evidence record.
+///
+/// # It takes NO float, deliberately
+///
+/// The module's one sentence is that an evaluation is a computation performed by trusted code,
+/// never a number a caller says it obtained. A `value: f64` parameter here would be that number
+/// with one more step, and it would be reachable from a sibling module rather than only from
+/// `#[cfg(test)]`. The caller hands over the PREDICTIONS; the value is computed here.
+/// `evaluate_source_exposes_no_public_api_taking_a_float_parameter` names this door and asserts
+/// its parameter list is float-free.
+///
+/// # Errors
+///
+/// [`SetFitTrainError::SelectionLabelOutOfRange`] for a truth or predicted index outside the
+/// declared label map.
+pub(super) fn evaluation_from_predictions(
+    metric: ValidationMetricKind,
+    truth: &[usize],
+    predicted: &[usize],
+    classes: usize,
+    artifact_hash: String,
+    validation_split_fingerprint: String,
+    dataset_fingerprint: String,
+) -> Result<ValidationEvaluation, SetFitTrainError> {
+    if truth.len() != predicted.len() {
+        // Not reachable from either caller — both derive one prediction per row and check the
+        // arity — and refused rather than `debug_assert`ed because a silent mis-pairing here
+        // turns every number below into a confidently wrong measurement rather than an error.
+        return Err(SetFitTrainError::SelectionLabelOutOfRange {
+            label: predicted.len(),
+            classes: truth.len(),
+        });
+    }
     for &label in truth.iter().chain(predicted.iter()) {
         if label >= classes {
             return Err(SetFitTrainError::SelectionLabelOutOfRange { label, classes });
@@ -337,18 +391,17 @@ pub fn evaluate_validation(
     }
 
     let value = match metric {
-        ValidationMetricKind::Accuracy => accuracy(&truth, &predicted),
-        ValidationMetricKind::MacroF1 => macro_f1(&truth, &predicted, classes),
+        ValidationMetricKind::Accuracy => accuracy(truth, predicted),
+        ValidationMetricKind::MacroF1 => macro_f1(truth, predicted, classes),
     };
 
     Ok(ValidationEvaluation {
         metric_kind: metric,
         value,
-        // READ OFF the run. There is no parameter here a caller could have supplied.
-        artifact_hash: run.artifact_hash(),
+        artifact_hash,
         validation_split_fingerprint,
         dataset_fingerprint,
-        n_rows: rows.len(),
+        n_rows: truth.len(),
     })
 }
 
