@@ -322,12 +322,24 @@ bytemuck = { version = "1.24", features = ["derive"] }
 # — makes `realizar::api` reachable from an integration test WITH its setfit
 # surface, with no dev-dep and therefore no unification.
 #
-# The note survives anyway because 04-10's feature matrix and 04-11's audit must
-# not overclaim either way: SAFE-02's gating evidence is read off the BUILD leg,
-# `cargo check -p apr-cli --no-default-features`, which does not build
-# dev-dependencies at all. Adding any unconditional dev-dep on a crate that also
-# appears as a normal dep would weaken the corresponding `cargo test
-# --no-default-features` RUN leg; do not add one here without re-reading that.
+# The RULE survives anyway, because 04-10's feature matrix and 04-11's audit must
+# not overclaim in either direction: adding ANY unconditional dev-dep on a crate
+# that also appears as a normal dep weakens the corresponding `cargo test`
+# gating-by-absence leg, because dev-dep features unify. Do not add one here
+# without re-reading this.
+#
+# MEASURED, and NOT what plan 04-09 assumed: SAFE-02's gating evidence cannot be
+# read off `cargo check -p apr-cli --no-default-features`. That leg does not
+# compile, and did not compile at this plan's base commit f2824611a either
+# (measured with the base manifest restored) — 4 pre-existing errors, none in a
+# file this plan touches:
+#   src/commands/explain.rs:231,344          `realizar::safetensors::...`
+#   src/commands/diff_05_aprt_stage.rs:100   `realizar::inference_trace::...`
+#   src/lib.rs:63  re-exports `serve::auth::apply`, itself `cfg(feature="inference")`
+# i.e. `inference`-gated code that is not `cfg`-gated. The leg that IS green, and
+# the one 04-06/04-07 actually used, is `cargo check -p apr-cli --all-targets`
+# with DEFAULT features (setfit OFF, inference ON): the ungated build is what
+# proves the setfit gating. Recorded in deferred-items.md as D-04-09-A.
 
 # The three-surface parity gate (04-09, D-13/D-14). Declared so the target is
 # skipped rather than broken when the features are off. ONLY this target is
