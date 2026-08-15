@@ -1733,6 +1733,27 @@ impl VerifiedSetFitModel {
         &self.doc
     }
 
+    /// The rebuilt encoder + tokenizer pair.
+    ///
+    /// `pub(crate)`, for `setfit::classify` (plan 04-04). It is a READ borrow:
+    /// it constructs nothing and mutates nothing, so the D-08 seal and this
+    /// typestate's private constructor are both untouched. It exists because
+    /// [`Self::embed`] deliberately calls the UNTRACED
+    /// `SetFitMiniLm::encode_texts`, and `classify` must instead reach
+    /// `encode_batch_traced` so the backend it reports is the one the encode
+    /// that produced ITS embeddings returned (D-12).
+    #[must_use]
+    pub(crate) fn model(&self) -> &SetFitMiniLm {
+        &self.model
+    }
+
+    /// The rebuilt classifier head. `pub(crate)`, on the same terms as
+    /// [`Self::model`].
+    #[must_use]
+    pub(crate) fn head(&self) -> &MultinomialLogisticRegression {
+        &self.head
+    }
+
     /// The encoder's L2-normalized sentence embeddings — OPS-01's "embed" step.
     ///
     /// This is the SAME encode path rung 7's probe replay verified, so a caller

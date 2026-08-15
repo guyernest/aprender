@@ -534,6 +534,218 @@ fn within(delta: f64, bound: f64) -> bool {
     )
 }
 
+// ---------------------------------------------------------------------------
+// The one classification path (OPS-04)
+// ---------------------------------------------------------------------------
+
+impl crate::setfit::artifact::VerifiedSetFitModel {
+    /// Classify an ordered batch of texts.
+    ///
+    /// A method on the VERIFIED typestate only, so the door stays single: every
+    /// response this repository can produce came from a model that passed all
+    /// seven rungs of the load ladder, including probe replay.
+    ///
+    /// # The backend field cannot be misreported
+    ///
+    /// `backend` is [`crate::setfit::encoder::ExecutionBackend::identity`]
+    /// called on the value the encode invocation RETURNED. This method never
+    /// names the kernel constant,
+    /// takes no backend or device parameter, and reads no configuration: a
+    /// reader who wants to change the reported value must change the encode
+    /// path, which is exactly the point (D-12, review B6).
+    ///
+    /// # Errors
+    ///
+    /// [`ClassifyError::EmptyInput`] for a request with no texts;
+    /// [`ClassifyError::BatchTooLarge`] above [`MAX_BATCH_TEXTS`] — both checked
+    /// BEFORE tokenization, because a bound applied after the work is not a
+    /// bound on the work; [`ClassifyError::EncodeFailed`] and
+    /// [`ClassifyError::HeadFailed`] for the two fallible compute steps; and
+    /// anything the envelope's validating constructors refuse.
+    pub fn classify(
+        &self,
+        request: &ClassifyRequestDocument,
+    ) -> Result<ClassifyResponse, ClassifyError> {
+        // (1) Bounds FIRST, before a single token is produced (T-04-11).
+        if request.texts.is_empty() {
+            return Err(ClassifyError::EmptyInput);
+        }
+        if request.texts.len() > MAX_BATCH_TEXTS {
+            return Err(ClassifyError::BatchTooLarge {
+                max: MAX_BATCH_TEXTS,
+                got: request.texts.len(),
+            });
+        }
+
+        let started = std::time::Instant::now();
+        let borrowed: Vec<&str> = request.texts.iter().map(String::as_str).collect();
+
+        // (2) Tokenize ONCE. The token facts below are read off THIS batch — the
+        //     very one the encoder consumes in step 3 — rather than recomputed
+        //     from the input strings, which would describe a different call.
+        let batch =
+            self.model()
+                .tokenize_batch(&borrowed)
+                .map_err(|e| ClassifyError::EncodeFailed {
+                    reason: e.to_string(),
+                })?;
+
+        // (3) Encode, keeping the identity the invocation hands back.
+        let (pooled, backend) =
+            self.model()
+                .encode_batch_traced(&batch)
+                .map_err(|e| ClassifyError::EncodeFailed {
+                    reason: e.to_string(),
+                })?;
+        let features = embedding_rows(&pooled, request.texts.len())?;
+
+        // (4) The head, through its SINGLE logit implementation. Probabilities
+        //     are that same computation plus the head's own softmax, so the two
+        //     reported vectors cannot disagree with each other.
+        let logit_rows =
+            self.head()
+                .predict_logits(&features)
+                .map_err(|e| ClassifyError::HeadFailed {
+                    reason: e.to_string(),
+                })?;
+
+        let labels = self.ordered_labels();
+        let mut results = Vec::with_capacity(logit_rows.len());
+        for (row, logits) in logit_rows.iter().enumerate() {
+            let mut probabilities = vec![0.0_f64; logits.len()];
+            crate::classification::multinomial::softmax_into(logits, &mut probabilities);
+
+            // Ties break to the LOWEST index, the same rule the head's own
+            // `predict` uses — so the API and the head can never name different
+            // winners for the same row.
+            let winner = crate::classification::multinomial::argmax_lowest_index(&probabilities);
+            let label = labels
+                .get(winner)
+                .ok_or(ClassifyError::LabelCountMismatch {
+                    expected: labels.len(),
+                    got: probabilities.len(),
+                })?
+                .clone();
+
+            // Top-1 minus top-2, in one pass. With fewer than two labels `top2`
+            // stays -inf and the margin is non-finite, which the envelope's
+            // constructor refuses — fail-closed rather than a fabricated 0.0.
+            let mut top1 = f64::NEG_INFINITY;
+            let mut top2 = f64::NEG_INFINITY;
+            for &p in &probabilities {
+                if p > top1 {
+                    top2 = top1;
+                    top1 = p;
+                } else if p > top2 {
+                    top2 = p;
+                }
+            }
+
+            results.push(ClassifyResult::new(
+                label,
+                probabilities,
+                if request.include_logits {
+                    Some(logits.clone())
+                } else {
+                    None
+                },
+                top1 - top2,
+                consumed_positions(&batch, row)?,
+                batch
+                    .truncation()
+                    .get(row)
+                    .is_some_and(|fact| fact.truncated),
+            )?);
+        }
+
+        // (5) A MEASUREMENT, taken around the compute. Excluded from every
+        //     cross-surface comparison; no gate may assert it is > 0.
+        let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        ClassifyResponse::new(
+            self.artifact_sha256().to_string(),
+            // The identity travels back from step 3. There is no other
+            // expression in this function that could produce this string.
+            backend.identity(),
+            latency_ms,
+            results,
+        )
+    }
+}
+
+/// The number of positions the model actually CONSUMED for row `row`.
+///
+/// The count of kept entries in that row's attention mask — the contract's
+/// definition of `token_count`. Read off the encoded batch, never recomputed
+/// from the input text: a tokenizer-internal count varies with whether special
+/// tokens are counted, and two surfaces disagreeing about that would make the
+/// field mean different things in the same schema.
+fn consumed_positions(
+    batch: &crate::setfit::tokenizer::SentenceBatch,
+    row: usize,
+) -> Result<u32, ClassifyError> {
+    let seq = batch.seq();
+    let start = row.saturating_mul(seq);
+    let end = start.saturating_add(seq);
+    // `get`, not a slice index: this path's contract is that it does not panic.
+    let mask =
+        batch
+            .attention_mask()
+            .get(start..end)
+            .ok_or_else(|| ClassifyError::EncodeFailed {
+                reason: format!(
+                    "row {row} spans {start}..{end} of a {}-element attention mask",
+                    batch.attention_mask().len()
+                ),
+            })?;
+    let kept = mask.iter().filter(|&&m| m != 0).count();
+    u32::try_from(kept).map_err(|_| ClassifyError::EncodeFailed {
+        reason: format!("row {row} consumed {kept} positions, which does not fit a u32"),
+    })
+}
+
+/// `[B, H]` -> one owned `f32` row per text, with the row count checked.
+///
+/// Separate from [`crate::setfit::artifact::VerifiedSetFitModel::embed`]'s
+/// equivalent because that method deliberately re-encodes through the UNTRACED
+/// path; this one works on the tensor the traced encode already returned, which
+/// is what ties the reported backend to these exact embeddings.
+fn embedding_rows(
+    pooled: &crate::autograd::Tensor,
+    expected_rows: usize,
+) -> Result<Vec<Vec<f32>>, ClassifyError> {
+    let shape = pooled.shape().to_vec();
+    let (rows, width) = match shape.as_slice() {
+        [rows, width] => (*rows, *width),
+        other => {
+            return Err(ClassifyError::EncodeFailed {
+                reason: format!("the encoder produced shape {other:?}, expected [B, H]"),
+            })
+        }
+    };
+    if rows != expected_rows {
+        return Err(ClassifyError::EncodeFailed {
+            reason: format!("{expected_rows} texts produced {rows} embedding rows"),
+        });
+    }
+    let data = pooled.data();
+    let mut out = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let start = row.saturating_mul(width);
+        let end = start.saturating_add(width);
+        let slice = data
+            .get(start..end)
+            .ok_or_else(|| ClassifyError::EncodeFailed {
+                reason: format!(
+                    "row {row} spans {start}..{end} of a {}-element result",
+                    data.len()
+                ),
+            })?;
+        out.push(slice.to_vec());
+    }
+    Ok(out)
+}
+
 // ===========================================================================
 // Test modules
 //
@@ -1348,5 +1560,362 @@ mod backend {
             traced.data(),
             "the traced path must return the SAME embeddings, bit for bit"
         );
+    }
+}
+
+/// Task 3: `VerifiedSetFitModel::classify` — the one classification path.
+#[cfg(test)]
+mod classify_path {
+    use super::*;
+    use crate::setfit::tokenizer::MAX_SEQUENCE_LENGTH;
+
+    /// The contract's `probe_truncation_boundary`, built by its OWN rule:
+    /// `repeat_unit` repeated exactly `repeat_count` times, no separator.
+    const TRUNCATION_PROBE_UNIT: &str = "few shot classification with contrastive pairs ";
+    const TRUNCATION_PROBE_REPEATS: usize = 64;
+
+    fn truncation_probe() -> String {
+        TRUNCATION_PROBE_UNIT.repeat(TRUNCATION_PROBE_REPEATS)
+    }
+
+    #[test]
+    fn the_truncation_probe_matches_the_contract_construction_rule() {
+        // The probe is only evidence about truncation if it is the contract's
+        // probe. Pinned against the contract text rather than against a comment.
+        let contract = include_str!("../../../../contracts/setfit-apr-v1.yaml");
+        assert!(
+            contract.contains(&format!("repeat_unit: '{TRUNCATION_PROBE_UNIT}'")),
+            "the repeat unit drifted from contract item probe_truncation_boundary"
+        );
+        assert!(
+            contract.contains(&format!("repeat_count: {TRUNCATION_PROBE_REPEATS}")),
+            "the repeat count drifted from contract item probe_truncation_boundary"
+        );
+    }
+
+    #[test]
+    fn classify_returns_one_result_per_text_in_input_order() {
+        let model = fixture_verified_model();
+        let labels = model.ordered_labels().to_vec();
+        let request = ClassifyRequestDocument::new(["ok", "a longer sentence here", "x"]);
+        let response = model.classify(&request).expect("the fixture classifies");
+
+        assert_eq!(response.results().len(), 3, "one result per input text");
+        for result in response.results() {
+            assert_eq!(
+                result.probabilities().len(),
+                labels.len(),
+                "every result carries the FULL ordered probability vector"
+            );
+            assert!(
+                labels.iter().any(|l| l == result.label()),
+                "the winning label {:?} is one of the head's ordered labels",
+                result.label()
+            );
+        }
+        assert_eq!(response.schema_version(), CLASSIFY_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn classify_refuses_an_empty_request() {
+        let model = fixture_verified_model();
+        let err = model
+            .classify(&ClassifyRequestDocument::new(Vec::<String>::new()))
+            .expect_err("an empty batch is refused");
+        assert!(
+            matches!(err, ClassifyError::EmptyInput),
+            "expected EmptyInput, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_refuses_a_batch_over_the_contract_bound() {
+        let model = fixture_verified_model();
+        let texts: Vec<String> = (0..=MAX_BATCH_TEXTS).map(|i| format!("text {i}")).collect();
+        assert_eq!(texts.len(), 257, "the bound is 256, so this is one over");
+        let err = model
+            .classify(&ClassifyRequestDocument::new(texts))
+            .expect_err("257 texts exceed the contract bound");
+        assert!(
+            matches!(
+                err,
+                ClassifyError::BatchTooLarge {
+                    max: MAX_BATCH_TEXTS,
+                    got: 257
+                }
+            ),
+            "expected BatchTooLarge{{256,257}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_accepts_exactly_the_contract_bound() {
+        // The boundary itself, so the refusal above is shown to be OFF-BY-NONE:
+        // a bound that also rejected 256 would pass the test above for the
+        // wrong reason.
+        let model = fixture_verified_model();
+        let texts: Vec<String> = (0..MAX_BATCH_TEXTS).map(|i| format!("t{i}")).collect();
+        let response = model
+            .classify(&ClassifyRequestDocument::new(texts))
+            .expect("exactly 256 texts are legal");
+        assert_eq!(response.results().len(), MAX_BATCH_TEXTS);
+    }
+
+    #[test]
+    fn a_truncated_text_reports_truncated_and_the_pinned_token_count() {
+        let model = fixture_verified_model();
+        let response = model
+            .classify(&ClassifyRequestDocument::new([truncation_probe()]))
+            .expect("the truncation probe classifies");
+        let result = response.results().first().expect("one result");
+        assert!(
+            result.truncated(),
+            "the contract's truncation probe exceeds the pinned bound"
+        );
+        assert_eq!(
+            usize::try_from(result.token_count()).expect("fits"),
+            MAX_SEQUENCE_LENGTH,
+            "a truncated text consumed exactly the pinned bound's worth of positions — \
+             compared against the EXPORTED constant, never a literal 256"
+        );
+    }
+
+    #[test]
+    fn a_short_text_reports_not_truncated_and_a_token_count_below_the_bound() {
+        let model = fixture_verified_model();
+        let response = model
+            .classify(&ClassifyRequestDocument::new(["ok"]))
+            .expect("a short text classifies");
+        let result = response.results().first().expect("one result");
+        assert!(
+            !result.truncated(),
+            "a two-character input is not truncated"
+        );
+        assert!(
+            usize::try_from(result.token_count()).expect("fits") < MAX_SEQUENCE_LENGTH,
+            "token_count {} should be below the pinned bound",
+            result.token_count()
+        );
+        assert!(
+            result.token_count() > 0,
+            "a non-empty text consumes at least one position"
+        );
+    }
+
+    #[test]
+    fn the_response_backend_equals_the_identity_encode_texts_traced_returns() {
+        // D-12: the two values must be the SAME because they have the same
+        // source — the encode invocation — not because two literals were kept
+        // in sync.
+        let model = fixture_verified_model();
+        let encoder = fixture_encoder_model();
+        let (_, backend) = encoder
+            .encode_texts_traced(&["ok"])
+            .expect("the traced encode runs");
+        let response = model
+            .classify(&ClassifyRequestDocument::new(["ok"]))
+            .expect("classifies");
+        assert_eq!(
+            response.backend(),
+            backend.identity(),
+            "the response's backend is the identity the encode path returns"
+        );
+    }
+
+    #[test]
+    fn classify_exposes_no_parameter_that_can_set_the_backend() {
+        let src = production_source();
+        let marker = "pub fn classify(";
+        let start = src.find(marker).expect("classify is defined here");
+        let body = &src[start..];
+        let end = body.find(") -> Result<").expect("its signature is closed");
+        let signature = &body[..end];
+        assert!(
+            signature.contains("request: &ClassifyRequestDocument"),
+            "classify takes the shared request document: {signature}"
+        );
+        for forbidden in ["backend", "device", "kernel"] {
+            assert!(
+                !signature.contains(forbidden),
+                "classify's signature must expose no {forbidden:?} parameter — the identity \
+                 is REPORTED FROM EXECUTION, never echoed from a caller (D-12): {signature}"
+            );
+        }
+        // And the request document itself carries no such knob either, so the
+        // absence above cannot be routed around through the one parameter it
+        // does take.
+        let doc_marker = "pub struct ClassifyRequestDocument {";
+        let dstart = src.find(doc_marker).expect("the request document is here");
+        let dbody = &src[dstart + doc_marker.len()..];
+        let dend = dbody.find("\n}").expect("its body is closed");
+        for forbidden in ["backend", "device", "kernel"] {
+            assert!(
+                !dbody[..dend].contains(forbidden),
+                "ClassifyRequestDocument must carry no {forbidden:?} field"
+            );
+        }
+    }
+
+    #[test]
+    fn latency_ms_is_finite_and_non_negative() {
+        // Never asserted strictly positive: a fast operation under a coarse
+        // timer legitimately reports 0.0, so `> 0` would be a flake with a
+        // schedule (contract item 11).
+        let model = fixture_verified_model();
+        let response = model
+            .classify(&ClassifyRequestDocument::new(["ok"]))
+            .expect("classifies");
+        assert!(
+            response.latency_ms().is_finite() && response.latency_ms() >= 0.0,
+            "latency_ms was {}",
+            response.latency_ms()
+        );
+    }
+
+    #[test]
+    fn single_and_batched_classification_agree_within_tolerance() {
+        // Padding invariance at the RESPONSE level: a mixed-length batch pads
+        // its short rows, and the masked mean pool must make that invisible.
+        let model = fixture_verified_model();
+        let texts = ["ok", "a considerably longer sentence than the first one"];
+        let batched = model
+            .classify(&ClassifyRequestDocument::new(texts))
+            .expect("the batch classifies");
+        for (i, text) in texts.iter().enumerate() {
+            let single = model
+                .classify(&ClassifyRequestDocument::new([*text]))
+                .expect("the singleton classifies");
+            let a = single.results()[0].probabilities();
+            let b = batched.results()[i].probabilities();
+            assert_eq!(a.len(), b.len(), "same arity");
+            for (j, (p, q)) in a.iter().zip(b.iter()).enumerate() {
+                assert!(
+                    within((p - q).abs(), 1e-6),
+                    "text {i} class {j}: singleton {p} vs batched {q} differ by more than 1e-6"
+                );
+            }
+            assert_eq!(
+                single.results()[0].label(),
+                batched.results()[i].label(),
+                "labels are compared EXACTLY; a 'close enough' label is a wrong answer"
+            );
+        }
+    }
+
+    #[test]
+    fn include_logits_controls_the_logits_field() {
+        let model = fixture_verified_model();
+        let without = model
+            .classify(&ClassifyRequestDocument::new(["ok"]))
+            .expect("classifies");
+        assert!(
+            without.results()[0].logits().is_none(),
+            "logits are absent unless requested"
+        );
+
+        let with = model
+            .classify(&ClassifyRequestDocument::new(["ok"]).with_logits())
+            .expect("classifies");
+        let logits = with.results()[0]
+            .logits()
+            .expect("logits are present when requested");
+        assert_eq!(
+            logits.len(),
+            model.ordered_labels().len(),
+            "one logit per ordered label"
+        );
+        assert!(
+            logits.iter().all(|l| l.is_finite()),
+            "every logit is finite"
+        );
+        // The two vectors come from ONE computation, so they cannot disagree.
+        assert_eq!(
+            with.results()[0].probabilities(),
+            without.results()[0].probabilities(),
+            "requesting logits must not change the probabilities"
+        );
+    }
+
+    #[test]
+    fn probabilities_match_the_heads_predict_proba_exactly() {
+        // classify derives probabilities from `predict_logits` + the head's own
+        // `softmax_into`. `predict_proba` is defined as exactly that pair, so
+        // this asserts the equivalence rather than arguing for it.
+        let model = fixture_verified_model();
+        let texts = vec!["ok".to_string(), "another input".to_string()];
+        let response = model
+            .classify(&ClassifyRequestDocument::new(texts.clone()))
+            .expect("classifies");
+        let embeddings = model.embed(&texts).expect("the embed surface runs");
+        let expected = model
+            .head()
+            .predict_proba(&embeddings)
+            .expect("the head runs");
+        for (row, result) in response.results().iter().enumerate() {
+            assert_eq!(
+                result.probabilities(),
+                expected[row].as_slice(),
+                "row {row} must match the head's own predict_proba bit for bit"
+            );
+        }
+    }
+
+    #[test]
+    fn margin_is_top1_minus_top2_and_the_label_is_the_argmax() {
+        let model = fixture_verified_model();
+        let response = model
+            .classify(&ClassifyRequestDocument::new(["ok", "another one"]))
+            .expect("classifies");
+        let labels = model.ordered_labels();
+        for result in response.results() {
+            let mut sorted = result.probabilities().to_vec();
+            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(core::cmp::Ordering::Equal));
+            assert!(
+                within((result.margin() - (sorted[0] - sorted[1])).abs(), 1e-12),
+                "margin {} should be top1 {} minus top2 {}",
+                result.margin(),
+                sorted[0],
+                sorted[1]
+            );
+            assert!(result.margin() >= 0.0, "top1 is never below top2");
+            let winner =
+                crate::classification::multinomial::argmax_lowest_index(result.probabilities());
+            assert_eq!(
+                result.label(),
+                labels[winner],
+                "the label is the argmax, ties breaking to the lowest index"
+            );
+        }
+    }
+
+    #[test]
+    fn the_response_carries_the_models_artifact_sha256() {
+        let model = fixture_verified_model();
+        let response = model
+            .classify(&ClassifyRequestDocument::new(["ok"]))
+            .expect("classifies");
+        assert_eq!(
+            response.artifact_sha256(),
+            model.artifact_sha256(),
+            "every response is attributable to its artifact without trusting the caller"
+        );
+        assert_eq!(
+            response.artifact_sha256().len(),
+            64,
+            "a lowercase-hex sha256"
+        );
+    }
+
+    #[test]
+    fn a_classify_response_serializes_and_reparses_unchanged() {
+        // The end-to-end D-08 claim: what classify produces is what the CLI and
+        // the HTTP surface will emit, and it survives its own schema.
+        let model = fixture_verified_model();
+        let response = model
+            .classify(&ClassifyRequestDocument::new(["ok", "two"]).with_logits())
+            .expect("classifies");
+        let json = serde_json::to_string(&response).expect("serializes");
+        let back: ClassifyResponse = serde_json::from_str(&json).expect("reparses");
+        assert_eq!(back, response, "the real response round-trips unchanged");
     }
 }

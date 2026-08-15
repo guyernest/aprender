@@ -1153,14 +1153,23 @@ impl MultinomialLogisticRegression {
         Ok(report)
     }
 
-    /// Per-row class probabilities, computed with `f64` logit accumulation.
+    /// Per-row class logits, accumulated in `f64` from the `f32` store.
     ///
-    /// Each returned row is finite and sums to 1 within `1e-6`.
-    pub fn predict_proba(&self, features: &[Vec<f32>]) -> Result<Vec<Vec<f64>>, HeadFitError> {
+    /// THE single logit implementation: [`Self::predict_proba`] is this plus a
+    /// softmax, so a caller that needs both — `VerifiedSetFitModel::classify`,
+    /// which reports `logits` alongside `probabilities` — cannot obtain a pair
+    /// that disagrees with itself. Extracting it also removed the standing
+    /// temptation to write a second copy of the accumulation loop next to the
+    /// caller that wanted logits.
+    ///
+    /// The accumulation ORDER is unchanged from the original `predict_proba`:
+    /// intercept first, then `j` ascending. That order is what the artifact
+    /// writer recorded its probe logits in, so it is load-bearing rather than
+    /// incidental.
+    pub fn predict_logits(&self, features: &[Vec<f32>]) -> Result<Vec<Vec<f64>>, HeadFitError> {
         let d = self.n_features.ok_or(HeadFitError::NotFitted)?;
         let k = self.n_classes;
         let mut out = Vec::with_capacity(features.len());
-        let mut logits = vec![0.0_f64; k];
         for (row, values) in features.iter().enumerate() {
             if values.len() != d {
                 return Err(HeadFitError::InvalidInput(
@@ -1171,6 +1180,7 @@ impl MultinomialLogisticRegression {
                     },
                 ));
             }
+            let mut logits = vec![0.0_f64; k];
             for c in 0..k {
                 // Accumulate in f64 from the f32 store: a finite f32 row whose f32
                 // dot product would overflow still yields a finite logit here.
@@ -1183,8 +1193,20 @@ impl MultinomialLogisticRegression {
                 }
                 logits[c] = z;
             }
-            let mut probs = vec![0.0_f64; k];
-            softmax_into(&logits, &mut probs);
+            out.push(logits);
+        }
+        Ok(out)
+    }
+
+    /// Per-row class probabilities, computed with `f64` logit accumulation.
+    ///
+    /// Each returned row is finite and sums to 1 within `1e-6`.
+    pub fn predict_proba(&self, features: &[Vec<f32>]) -> Result<Vec<Vec<f64>>, HeadFitError> {
+        let rows = self.predict_logits(features)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for logits in &rows {
+            let mut probs = vec![0.0_f64; logits.len()];
+            softmax_into(logits, &mut probs);
             out.push(probs);
         }
         Ok(out)

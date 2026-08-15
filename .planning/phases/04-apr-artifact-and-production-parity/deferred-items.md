@@ -1,74 +1,82 @@
 # Phase 4 — deferred items
 
-Out-of-scope discoveries logged rather than fixed. Each was observed while executing a plan,
-is NOT caused by that plan's changes, and touches files the plan does not own.
+Out-of-scope discoveries logged during execution. Not fixed; recorded so they are
+not rediscovered as if new.
 
 ---
 
-## D-04-03-A — `aprender-core` cannot pass `clippy -D warnings` on arm64 (pre-existing)
+## D-04-04-A — `cargo clippy -p aprender-core ... -D warnings` cannot pass, even with `--no-deps`
 
-Found during: plan 04-03, Task 1 verification.
+Discovered by plan 04-04, wave 4.
+
+Orchestrator note F-03 established that `--no-deps` rescues the clippy gate for
+`aprender-train` by excluding `aprender-compute`'s pre-existing debt. **That does not
+extend to `aprender-core`**, which carries one of its own:
 
 ```
-cargo clippy -p aprender-core --features setfit --lib --tests --no-deps -- -D warnings
-rc=101, 1 error:
-  error: unreachable expression
-     --> crates/aprender-core/src/demo/reliable/performance.rs:126:5
-  124 |         return "NEON".to_string();
-  126 |     "Scalar".to_string()
+error: unreachable expression
+   --> crates/aprender-core/src/demo/reliable/performance.rs:126:5
+124 |         return "NEON".to_string();
+126 |     "Scalar".to_string()
 ```
 
-`#[cfg(target_arch = "aarch64")] { return "NEON".to_string(); }` makes the trailing
-`"Scalar".to_string()` unreachable on arm64 only. Zero findings in `setfit/artifact.rs`
-(`grep -c "setfit/artifact.rs" <clippy log>` = 0), and `git diff --name-only 17938b1a7..HEAD`
-does not list `demo/`, so this is the known-red arm64 baseline (D-ITEM-02), not a regression.
+Measured, not assumed: `rtk proxy cargo clippy -p aprender-core --features setfit --lib
+--no-deps -- -D warnings` exits **101** with exactly **one** error, the one above. The
+20 `aprender-compute` entries in the same output are `warning`, not `error` — `--no-deps`
+is working; the crate under test simply has debt of its own.
 
-Fix belongs to whoever owns `demo/reliable/` — either an `#[allow(unreachable_code)]` with a
-comment or a `#[cfg(not(target_arch = "aarch64"))]` on the trailing expression. **Do not fix by
-dropping `-D warnings`.**
+Consequence for any plan that states `cargo clippy -p aprender-core ... --no-deps --
+-D warnings` as a gate: it fails today and would fail identically on an empty diff, so it
+cannot distinguish "my code is clean" from "never linted" — the exact F-03 defect, one
+crate over.
+
+**What 04-04 did instead** (and what a Make target should do): run the same command and
+assert **zero diagnostics whose path is under the plan's own files**. Verified at 04-04's
+final state: zero lines matching `setfit/` in the clippy output.
+
+**Action for 04-10:** either fix `demo/reliable/performance.rs:126` (a `cfg`-shaped
+`return` followed by a fallback — the same pattern `aprender-compute` has four of), or
+scope the core clippy leg by path. Do not "fix" it by dropping `-D warnings`.
 
 ---
 
-## D-04-03-B — three `aprender-train` insta snapshots are stale (pre-existing)
+## D-04-04-B — 24 `aprender-train --lib` tests fail in this worktree, in modules that link nothing this phase touches
 
-Found during: plan 04-03, Task 3 commit (the active pre-commit hook ran the crate's lib tests).
+Discovered by plan 04-04, wave 4. **Cause not diagnosed. Not claimed pre-existing** —
+that was not measured.
 
-```
-cargo test -p aprender-train --lib prune::snapshot
-rc=101 — 14 passed, 3 failed:
-  prune::snapshot_tests::tests::snapshot_all_prune_methods
-  prune::snapshot_tests::tests::snapshot_pipeline_stages
-  prune::snapshot_tests::tests::snapshot_schedule_validation_errors
-```
+`cargo test -p aprender-train --features setfit --lib` → `7865 passed; 24 failed`. The
+failures are entirely:
 
-Each run writes a `.snap.new` beside the committed `.snap`. `crates/aprender-train/src/prune/`
-is not in 04-03's `files_modified` and `--lib` does not compile `tests/`, so the two ui files
-this plan added cannot be the cause. Whoever owns `prune/` should review the three `.snap.new`
-diffs and either bless them or fix the drift — a blind `INSTA_UPDATE=always` would bless
-whatever regressed.
+- `gpu::guard::tests::*` (8)
+- `gpu::ledger::tests::*` (12)
+- `gpu::wait::tests::test_timeout_when_full` (1)
+- `prune::snapshot_tests::tests::*` (3)
 
----
+Sample: `gpu::ledger::tests::test_reserve_and_release` asserts `total_reserved() == 8000`
+immediately after a successful `try_reserve(8000, …)` and observes `0`. Re-running with
+`--test-threads=1` still fails 21 of them, so intra-binary parallelism is not the cause.
+The ledger path is per-process (`temp_dir()/entrenar-ledger-test/test-ledger-{n}-{pid}.json`),
+so cross-process contention with the parallel wave-4 agent is not the cause either.
 
-## D-04-03-C — the active pre-commit hook fails without blocking, and has a broken line
+**Proven NOT caused by this plan**, by import graph rather than by argument:
 
-Found during: plan 04-03, Task 3 commit. Observed in the hook's own output:
+- `grep -rn "predict_proba\|predict_logits\|MultinomialLogisticRegression\|softmax"
+  crates/aprender-train/src/gpu/ crates/aprender-train/src/prune/` → **zero matches**.
+- `gpu/ledger.rs` imports `std`, `chrono`, `fs4`, `serde`, `super::{error, profiler}` and
+  `crate::trace` — **nothing from `aprender-core`**.
+- `prune/snapshot_tests.rs` imports only `crate::prune::…`.
 
-```
-error: test failed, to rerun pass `-p aprender-train --lib`
-(eval):2: command not found: --features
-ok worktre
-[exited with code 0]
-```
+The one control that would have been decisive — reverting `classification/multinomial.rs`
+to the base blob and re-running — does not compile, because 04-04's `classify` calls the
+`predict_logits` that refactor introduces. Reverting the whole task to run it was judged a
+worse trade than recording the import-level proof.
 
-Two separate problems, both in the class this phase exists to catch:
+Positive evidence that the refactor is behaviour-preserving where it matters:
+`cargo test -p aprender-train --features setfit --lib setfit::` → **256 passed**, and
+`cargo test -p aprender-core --features setfit --lib` → **14419 passed**. Those suites
+include the probe-replay comparisons that check head logits and probabilities against
+recorded artifact values.
 
-1. The hook ran a test suite, that suite FAILED (D-04-03-B), and the commit still succeeded.
-   A gate that cannot block is theater.
-2. `(eval):2: command not found: --features` — a command was split across lines so its flags
-   became a command. That leg has never run.
-
-The repo-tracked `.githooks/pre-commit` is NOT the hook that ran: `git config --get
-core.hooksPath` exits 1 (unset), and `.githooks/pre-commit` contains no `cargo test` and no
-`--features`. So the active hook is installed outside the repo and is not visible from a
-worktree — CLAUDE.md rule 8's shadowed-artifact class. Locating and repairing it is out of
-scope for a plan that owns two source files.
+**Action:** someone should run these four modules on a clean checkout of `main` to
+establish whether they are pre-existing or environmental to this machine.
