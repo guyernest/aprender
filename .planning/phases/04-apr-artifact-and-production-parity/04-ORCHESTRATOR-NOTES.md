@@ -360,3 +360,36 @@ The other remains: `backend_identity` names
 **STILL OPEN (5) bounded-read pre-reservation** — `read_setfit_apr_bytes_bounded` still reserves the
 caller-declared length clamped to 256 MiB, so a source that lies upward commits a quarter gigabyte
 before reading a byte. Fixing it means inventing a reservation ceiling the contract does not fix.
+
+## Wave 6 close — three open items (orchestrator-recorded, 2026-08-15)
+
+**OPS-01 is NOT met, and 04-12 must not be read as meeting it.** 04-12 landed its file and 5
+passing tests, and PROVED the wave-5 blocker (OPS-01-F1) is gone: `into_artifact_bytes` returns
+1,824,298 bytes cross-crate whose SHA-256 equals the digest the trusted policy recorded. But the
+full train->save->load->embed->classify->inspect chain still cannot close, blocked by **F-10**:
+`CALIBRATED_REGIMES` has exactly one entry, architecture compared for exact equality, so the
+phase-3 MiniLM slice is the only trainable encoder and its 97-row vocabulary closure cannot compute
+`probe_unicode` (canonical id 5915). Measured on three independent routes. The plan's
+`requirements-completed` is deliberately `[]`. Closing F-10 needs a calibration run plus a
+deliberate edit to `contracts/setfit-train-lifecycle-v1.yaml` (D-10(c)) — a **Phase 5** item.
+
+CORRECTION to this file's own earlier F-10 action item: it tells 04-12 to "reuse 04-05's
+substitution shape". That shape is `E0451` out-of-crate — both `SetFitRun` and `HeadFittedEvidence`
+refuse it by name. 04-05's remedy exists only at the `--lib` tier, which is exactly why OPS-01 is
+the requirement F-10 blocks hardest.
+
+**D-04-08-A — `aprender-serve` standing red, pre-existing, NOT caused by phase 4.**
+Orchestrator-verified after the wave-6 merge: `cargo test -p aprender-serve --lib` =
+15389 passed / 51 failed, and all 51 share ONE root cause: `attempt to multiply with overflow` at
+`crates/aprender-serve/src/contract_gate.rs:428:21`. No phase-4 plan has touched `contract_gate.rs`.
+Consequence for 04-10: do NOT add a whole-crate `aprender-serve` test leg to the Make gates; scope
+any serve leg to the setfit surface, or the gate is red on arrival.
+
+**Codec-reachability note (surfaced by 04-12, assessed by the orchestrator).** With G1 supplying
+artifact bytes out-of-crate, a caller can reach `AprCodec::deserialize` and obtain a `SetFitBundle`
+without going through the verify policy's probe replay and round-trip closure. Bounded, and NOT a
+credential-forgery path: `pub trait SetFitCodec: sealed::Sealed` is sealed so no codec can be
+forged; `AprCodec` is not re-exported from the crate root; and the lock/token/grant doors still
+require `reload_verified_run_from_apr`, i.e. the full `load_setfit_apr` ladder plus the provenance
+identity gate. The observed route died at probe validation. Recorded so 04-07/04-09/04-15 treat
+"has a bundle" as strictly weaker than "has a verified model" — not as a phase-4 blocker.
