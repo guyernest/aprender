@@ -2858,7 +2858,7 @@ fn hex_nibble_value(byte: u8) -> Option<u8> {
 // ===========================================================================
 
 #[cfg(all(test, feature = "setfit"))]
-mod fixture {
+pub(crate) mod fixture {
     //! The tiny fixture, in the PRODUCTION nullability shape.
     //!
     //! Two rules govern everything here, and both come from the contract rather
@@ -3240,7 +3240,12 @@ mod fixture {
     /// Every suite that touches the writer must exercise this shape by default,
     /// and every downstream plan that "builds the fixture artifact the same way"
     /// inherits it from here.
-    pub(super) fn fixture_view_full_pin_shape() -> SetFitArtifactView {
+    /// `pub(crate)`, not `pub(super)`: `setfit::classify`'s suites (plan 04-04)
+    /// build their model from THIS fixture. A second fixture assembled next door
+    /// would be a second definition of "the artifact shape under test", free to
+    /// drift from this one — the classify suites would then earn their green on
+    /// a shape the writer never produces.
+    pub(crate) fn fixture_view_full_pin_shape() -> SetFitArtifactView {
         fixture_view(None)
     }
 

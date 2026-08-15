@@ -175,6 +175,81 @@ struct EncoderLayer {
 }
 
 // ---------------------------------------------------------------------------
+// Execution-derived backend identity (D-12, review B6)
+// ---------------------------------------------------------------------------
+
+/// The identity of the compute path that ACTUALLY RAN an encode (D-12).
+///
+/// A value of this type is obtained in exactly one way: by calling
+/// [`BertSentenceEncoder::encode_with_backend`] and receiving it back. There is
+/// no public constructor, no setter, no `From` and no field a caller can write,
+/// so the `backend` a response reports cannot be minted — only returned.
+///
+/// # What the identity means, and what it does not
+///
+/// (a) It names the kernel ENTRY POINT the encode path invoked. The SetFit
+/// encoder's matmuls reach `trueno::Matrix::matmul` through `crate::autograd`
+/// (`autograd/gradient.rs`, `matmul_2d`), and `autograd-trueno-matmul` is the
+/// name of that entry point.
+///
+/// (b) trueno exposes NO per-dispatch execution report, and
+/// `trueno::Matrix::matmul` selects among `matmul_naive`,
+/// `blis::parallel::gemm_blis_parallel` and a GPU path BY SIZE
+/// (`aprender-compute/src/matrix/ops/arithmetic.rs`, `SIMD_THRESHOLD == 64`).
+/// So a CPU-feature detection value would describe the HOST rather than the run:
+/// an AVX2 detection result is fully consistent with a scalar execution of this
+/// very batch, because a small input takes the naive path regardless of what the
+/// silicon can do.
+///
+/// (c) Reporting a capability value from trueno's `Backend` enum (its AVX2 /
+/// NEON variants) or from its backend-selection family is therefore FORBIDDEN
+/// here, and the conservative kernel-entry identity is deliberate rather than an
+/// oversight. CLAUDE.md Verification Discipline rule 2: *never label a run by
+/// intent — prove the mechanism engaged.* Reviewer B6's finding was exactly
+/// this: detecting that AVX2 is AVAILABLE does not prove the encoder USED it.
+///
+/// Those symbol names are spelled here in PROSE, never as the literal tokens.
+/// The D-12 gate greps this whole directory for them and requires zero matches,
+/// so a doc comment quoting them verbatim would turn its own guard red — the
+/// same defect orchestrator note F-05 records for `skip_serializing_if`, and it
+/// is exactly what happened on this file's first green run.
+///
+/// (d) The v1 limitation is recorded rather than papered over.
+/// `autograd-trueno-matmul` is a TRUE statement about what the encoder called
+/// and an INCOMPLETE one about what silicon executed. Upgrading to per-dispatch
+/// reporting requires a trueno API that does not exist; it is a recorded
+/// DEFERRED ITEM, not a Phase 4 deliverable.
+///
+/// The grammar is three colon-separated segments and stays three, so a future
+/// GPU identity is comparable to this one rather than a differently-shaped
+/// string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionBackend {
+    device: &'static str,
+    kernel: &'static str,
+}
+
+impl ExecutionBackend {
+    /// The three-segment identity string, `<device>:setfit-core:<kernel>`.
+    #[must_use]
+    pub fn identity(&self) -> String {
+        format!("{}:setfit-core:{}", self.device, self.kernel)
+    }
+
+    /// The device segment.
+    #[must_use]
+    pub fn device(&self) -> &'static str {
+        self.device
+    }
+
+    /// The kernel segment.
+    #[must_use]
+    pub fn kernel(&self) -> &'static str {
+        self.kernel
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Encoder
 // ---------------------------------------------------------------------------
 
@@ -813,6 +888,41 @@ impl BertSentenceEncoder {
         let tokens = self.forward_tokens(batch)?;
         let pooled = masked_mean_pool(&tokens, batch.attention_mask())?;
         Ok(l2_normalize_rows(&pooled, L2_EPS)?)
+    }
+
+    /// The identity of the path [`Self::encode`] above runs, and the ONLY place
+    /// this repository spells it.
+    ///
+    /// Deliberately adjacent to `encode` — the code it names is the three lines
+    /// above — so the name and the implementation move together. Module-private,
+    /// and it stays that way: [`Self::encode_with_backend`] is the only door,
+    /// which is what makes "the identity is RETURNED by the encode call" true
+    /// rather than merely conventional. No other module may name this constant;
+    /// a reader who wants to change the reported value must change the encode
+    /// path, which is the point.
+    ///
+    /// See [`ExecutionBackend`] for why this is a kernel entry point and not a
+    /// CPU-feature detection result (review B6, D-12).
+    const ENCODE_BACKEND: ExecutionBackend = ExecutionBackend {
+        device: "cpu",
+        kernel: "autograd-trueno-matmul",
+    };
+
+    /// [`Self::encode`], plus the identity of the path that ran it (D-12).
+    ///
+    /// Added BESIDE [`Self::encode`], which is unchanged: the training path and
+    /// every Phase 1 conformance fixture call it, and their bytes must stay
+    /// byte-identical.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::encode`]'s.
+    pub fn encode_with_backend(
+        &self,
+        batch: &SentenceBatch,
+    ) -> Result<(Tensor, ExecutionBackend), SetFitError> {
+        let pooled = self.encode(batch)?;
+        Ok((pooled, Self::ENCODE_BACKEND))
     }
 
     // -----------------------------------------------------------------------

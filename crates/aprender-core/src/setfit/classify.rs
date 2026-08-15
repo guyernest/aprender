@@ -545,6 +545,54 @@ fn within(delta: f64, bound: f64) -> bool {
 // 0 — the CR-02 vacuous pass that bit plan 04-13's `bundle_nullable` filter.
 // ===========================================================================
 
+/// This file's PRODUCTION source, with the test modules cut off.
+///
+/// A source assertion must not scan its own needle. A guard greping for
+/// `pub struct ...Wire` whose own text contains that literal can NEVER turn
+/// green, and one greping for an attribute it also quotes passes vacuously on
+/// its own text. Cutting at the first test module removes both failure modes at
+/// once, and it is the same class of defect as orchestrator note F-05 (a
+/// `skip_serializing_if` gate turning red on its own documentation) — which this
+/// module's first run reproduced exactly.
+#[cfg(test)]
+fn production_source() -> &'static str {
+    const SRC: &str = include_str!("classify.rs");
+    // The cut is the banner ABOVE this function, so this function and all three
+    // test modules fall outside it. `find` returns the FIRST occurrence, which
+    // is the banner — not this literal, which lives below it.
+    // `production_source_excludes_the_test_modules` pins that down rather than
+    // assuming it.
+    let cut = SRC.find("// Test modules").unwrap_or(SRC.len());
+    &SRC[..cut]
+}
+
+/// The ONE model every classify suite runs against.
+///
+/// Built from `artifact::fixture`'s view through the REAL writer and the REAL
+/// fail-closed loader, so these suites exercise a `VerifiedSetFitModel` that
+/// passed all seven rungs — not a hand-assembled stand-in that skipped them.
+#[cfg(test)]
+fn fixture_verified_model() -> crate::setfit::artifact::VerifiedSetFitModel {
+    let view = crate::setfit::artifact::fixture::fixture_view_full_pin_shape();
+    let bytes =
+        crate::setfit::artifact::write_setfit_apr(&view).expect("the fixture view is writable");
+    crate::setfit::artifact::load_setfit_apr(&bytes).expect("the fixture artifact verifies")
+}
+
+/// The same fixture's encoder half, for the suites that need `SetFitMiniLm`
+/// directly rather than through the verified typestate.
+#[cfg(test)]
+fn fixture_encoder_model() -> crate::setfit::SetFitMiniLm {
+    let view = crate::setfit::artifact::fixture::fixture_view_full_pin_shape();
+    crate::setfit::SetFitMiniLm::from_bundle_parts(
+        &view.tokenizer_bytes,
+        &view.architecture,
+        view.tensors.clone(),
+        view.root_seed,
+    )
+    .expect("the fixture parts rebuild a model")
+}
+
 /// Task 1: the envelope's invariants, on every path in and out.
 #[cfg(test)]
 mod envelope {
@@ -559,7 +607,7 @@ mod envelope {
     const GOLDEN_RESPONSE_JSON: &str = concat!(
         r#"{"schema_version":1,"#,
         r#""artifact_sha256":"9f2c7a1d4e8b60315a7c9e0d2f4b6813a5c7e9f1b3d50729468a0c2e4f6a8b1d","#,
-        r#""backend":"cpu:setfit-core:autograd-trueno-matmul","#,
+        r#""backend":"cpu:setfit-core:fixture-kernel","#,
         r#""latency_ms":0.0,"#,
         r#""results":["#,
         r#"{"label":"positive","probabilities":[0.25,0.75],"logits":null,"#,
@@ -570,23 +618,16 @@ mod envelope {
     );
 
     const GOLDEN_SHA: &str = "9f2c7a1d4e8b60315a7c9e0d2f4b6813a5c7e9f1b3d50729468a0c2e4f6a8b1d";
-    const GOLDEN_BACKEND: &str = "cpu:setfit-core:autograd-trueno-matmul";
 
-    /// This file's PRODUCTION source, with the test modules cut off.
+    /// A FIXTURE backend value, deliberately NOT the real v1 identity.
     ///
-    /// A source assertion must not scan its own needle. A guard greping for
-    /// `pub struct ...Wire` whose own text contains that literal can NEVER turn
-    /// green, and one greping for an attribute it also quotes passes vacuously
-    /// on its own text. Cutting at the first test module removes both failure
-    /// modes at once, and it is the same class of defect as orchestrator note
-    /// F-05 (a `skip_serializing_if` gate turning red on its own documentation).
-    fn production_source() -> &'static str {
-        const SRC: &str = include_str!("classify.rs");
-        // `find` returns the FIRST occurrence, which is the `mod envelope {`
-        // declaration above — not this literal, which lives inside it.
-        let cut = SRC.find("mod envelope {").unwrap_or(SRC.len());
-        &SRC[..cut]
-    }
+    /// This golden pins the SCHEMA — field names, declaration order, exact bytes
+    /// — not the identity. Writing the real `<device>:setfit-core:<kernel>`
+    /// value here would put the kernel literal in this file, and the D-12 gate
+    /// requires that literal to live in `encoder.rs` and nowhere else: the
+    /// identity must arrive as a VALUE returned by the encode call, never as a
+    /// string this module knows how to spell.
+    const GOLDEN_BACKEND: &str = "cpu:setfit-core:fixture-kernel";
 
     fn golden_response() -> ClassifyResponse {
         let a = ClassifyResult::new("positive".into(), vec![0.25, 0.75], None, 0.5, 7, false)
@@ -1094,6 +1135,218 @@ mod envelope {
         assert!(
             body[..end].contains("partial_cmp"),
             "within must be written through partial_cmp so the NaN case is visible"
+        );
+    }
+}
+
+/// Task 2: the execution-derived backend identity channel (D-12, review B6).
+///
+/// These suites live here rather than in `encoder.rs` because they exercise only
+/// the re-exported surface — `SetFitMiniLm::encode_texts_traced` and
+/// `ExecutionBackend::identity` — and because the plan fixes
+/// `setfit::classify::backend` as this task's filter. No case here needs
+/// encoder-private state.
+#[cfg(test)]
+mod backend {
+    use super::*;
+
+    /// Item 12 of the contract, read from the contract rather than from a copy
+    /// of it. `include_str!` and not a runtime read: a missing contract is a
+    /// COMPILE error here, where a runtime read would be a silent skip.
+    const CONTRACT: &str = include_str!("../../../../contracts/setfit-apr-v1.yaml");
+
+    /// Every `.rs` file in this directory, read at test time.
+    ///
+    /// `read_dir` and not a hardcoded list: a hardcoded list goes stale the
+    /// moment a file is added, and a file added later is exactly where a
+    /// capability-detection symbol would arrive unnoticed.
+    fn setfit_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/setfit");
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("the setfit source directory is readable") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().and_then(std::ffi::OsStr::to_str) == Some("rs") {
+                let name = path
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .expect("a UTF-8 file name")
+                    .to_string();
+                let body = std::fs::read_to_string(&path).expect("a readable source file");
+                out.push((name, body));
+            }
+        }
+        // A non-zero MINIMUM, because a scan of zero files exits green and
+        // proves nothing (orchestrator note F-04).
+        assert!(
+            out.len() >= 10,
+            "expected at least 10 setfit source files, found {}: a path that resolved to \
+             nothing would make every scan below vacuous",
+            out.len()
+        );
+        out
+    }
+
+    #[test]
+    fn encode_texts_traced_returns_the_identity_the_contract_pins() {
+        let model = fixture_encoder_model();
+        let (_, backend) = model
+            .encode_texts_traced(&["hello world"])
+            .expect("the fixture encodes");
+        let identity = backend.identity();
+        // Pinned against the CONTRACT's own text, not against a literal copied
+        // into this file: a copy can drift from the contract silently, and the
+        // D-12 gate additionally requires the kernel literal to appear nowhere
+        // in this module.
+        let pin = format!("v1 = \"{identity}\"");
+        assert!(
+            CONTRACT.contains(&pin),
+            "the observed identity {identity:?} is not the value item 12 pins ({pin:?})"
+        );
+    }
+
+    #[test]
+    fn the_identity_carries_no_simd_capability_token() {
+        let model = fixture_encoder_model();
+        let (_, backend) = model
+            .encode_texts_traced(&["hello world"])
+            .expect("the fixture encodes");
+        let identity = backend.identity().to_lowercase();
+        for token in ["avx", "neon", "sse", "512"] {
+            assert!(
+                !identity.contains(token),
+                "the identity {identity:?} names the capability token {token:?}. Detecting \
+                 that a SIMD ISA is AVAILABLE is consistent with a SCALAR execution — \
+                 trueno's Matrix::matmul dispatches on SIZE — so such a value describes the \
+                 HOST, not the run (CLAUDE.md Verification Discipline rule 2)"
+            );
+        }
+    }
+
+    #[test]
+    fn the_identity_has_exactly_three_colon_separated_segments() {
+        let model = fixture_encoder_model();
+        let (_, backend) = model
+            .encode_texts_traced(&["hello world"])
+            .expect("the fixture encodes");
+        let identity = backend.identity();
+        let segments: Vec<&str> = identity.split(':').collect();
+        assert_eq!(
+            segments.len(),
+            3,
+            "the grammar is <device>:<implementation>:<kernel> and stays three segments, so a \
+             future GPU identity is COMPARABLE to this one: {identity:?}"
+        );
+        assert!(
+            segments.iter().all(|s| !s.is_empty()),
+            "no segment may be empty: {identity:?}"
+        );
+        assert_eq!(segments[0], backend.device());
+        assert_eq!(segments[2], backend.kernel());
+    }
+
+    #[test]
+    fn execution_backend_has_no_public_constructor_or_setter() {
+        let src = include_str!("encoder.rs");
+        let marker = "pub struct ExecutionBackend {";
+        let start = src.find(marker).expect("ExecutionBackend is declared here");
+        let body = &src[start + marker.len()..];
+        let end = body.find("\n}").expect("its body is closed");
+        assert!(
+            !body[..end].contains("pub "),
+            "ExecutionBackend must have no public field, or a caller could forge an identity"
+        );
+
+        let impl_marker = "impl ExecutionBackend {";
+        let istart = src
+            .find(impl_marker)
+            .expect("ExecutionBackend has an inherent impl");
+        let ibody = &src[istart + impl_marker.len()..];
+        let iend = ibody.find("\n}").expect("the impl block is closed");
+        let block = &ibody[..iend];
+        for forbidden in ["pub fn new", "pub const fn new", "&mut self", "-> Self"] {
+            assert!(
+                !block.contains(forbidden),
+                "ExecutionBackend's public impl must contain no {forbidden:?}: a constructor \
+                 or a setter would let a value be MINTED rather than RETURNED by the encode \
+                 invocation that ran (D-12)"
+            );
+        }
+        assert!(
+            !src.contains("pub const ENCODE_BACKEND")
+                && !src.contains("pub(crate) const ENCODE_BACKEND"),
+            "the constant instance stays module-private; only encode_with_backend hands it out"
+        );
+    }
+
+    #[test]
+    fn the_setfit_surface_names_no_capability_detection_symbol() {
+        // The needles are assembled from fragments so this test's OWN text does
+        // not contain them — otherwise scanning `classify.rs` would make the
+        // guard permanently red, the F-05 failure mode. `concat!` is expanded at
+        // compile time, so the comparison is against the whole symbol.
+        let needles = [
+            concat!("select_", "backend"),
+            concat!("Backend::", "AVX"),
+            concat!("detect_x86_", "backend"),
+            concat!("detect_arm_", "backend"),
+        ];
+        let sources = setfit_sources();
+        for (name, body) in &sources {
+            for needle in needles {
+                assert!(
+                    !body.contains(needle),
+                    "{name} names {needle:?}. A capability probe reports what the HOST CAN DO; \
+                     the backend field must report what RAN (review B6, D-12)"
+                );
+            }
+        }
+        // The scan is proven able to fire, on a string it WOULD reject.
+        let planted = format!("let b = {};", needles[1]);
+        assert!(
+            needles.iter().any(|n| planted.contains(n)),
+            "the needle set must match a planted violation, or this gate is theater"
+        );
+    }
+
+    #[test]
+    fn the_kernel_literal_lives_only_in_encoder_rs() {
+        // Assembled from fragments for the same reason as above: written whole,
+        // this test would itself be a second home for the literal.
+        let kernel = concat!("autograd-", "trueno-matmul");
+        let sources = setfit_sources();
+        let mut carriers: Vec<&str> = Vec::new();
+        for (name, body) in &sources {
+            if body.contains(kernel) {
+                carriers.push(name.as_str());
+            }
+        }
+        assert_eq!(
+            carriers,
+            vec!["encoder.rs"],
+            "the kernel identity must be spelled in encoder.rs and nowhere else in this \
+             directory — classify.rs included. It arrives everywhere else as a VALUE returned \
+             by the encode call (review B6)"
+        );
+    }
+
+    #[test]
+    fn the_traced_and_untraced_encode_paths_agree_elementwise() {
+        // `encode`/`encode_texts` were extended BESIDE, not modified: the
+        // training path and every Phase 1 conformance fixture call them, and
+        // their output must not have moved because a reporting channel was
+        // added. Comparing the two paths' data is the behavioural half of that
+        // claim; `git diff` on encoder.rs is the textual half.
+        let model = fixture_encoder_model();
+        let texts = ["hello world", "a much longer sentence for the batch"];
+        let plain = model.encode_texts(&texts).expect("the untraced path runs");
+        let (traced, _) = model
+            .encode_texts_traced(&texts)
+            .expect("the traced path runs");
+        assert_eq!(plain.shape(), traced.shape(), "same shape");
+        assert_eq!(
+            plain.data(),
+            traced.data(),
+            "the traced path must return the SAME embeddings, bit for bit"
         );
     }
 }
