@@ -587,6 +587,131 @@ fn verify_reproducibility_accessors_are_read_only_and_complete() {
          {ACCESSORS_CALLED_ABOVE}; add the new accessor to the calls above (which is what \
          proves it read-only) and bump the count",
     );
+
+    // ---------------------------------------------------------------------------------
+    // The BYTES DOOR is a SECOND block, and it is counted here rather than left uncounted.
+    //
+    // 04-17 added `into_artifact_bytes`, which CONSUMES the run and therefore cannot join
+    // the calls above — `r` is a shared reference, which is the entire proof this test
+    // makes. Adding it to that block would have meant deleting the proof to keep the
+    // count. So it lives in its own `impl` block below the accessors (the shape `lock.rs`
+    // established for `create_selection_lock`), and the surface is guarded by requiring
+    // that block to hold EXACTLY ONE method with EXACTLY that signature.
+    //
+    // Without this half, the accessor block's count would have been satisfied by a run
+    // whose public surface had silently grown by a second `impl` block — which is the
+    // "silent surface growth" the original guard exists to prevent, one level up.
+    // ---------------------------------------------------------------------------------
+    let door_at = src[at + 1..]
+        .find("impl SetFitRun<ArtifactReloadedAndVerified> {")
+        .map(|offset| at + 1 + offset)
+        .expect("the bytes-door block must exist below the accessor block");
+    let door = &src[door_at..];
+    let door_end = door.find("\n}\n").expect("the bytes-door block must close");
+    let door_block = &door[..door_end];
+    assert_eq!(
+        door_block.matches("\n    pub fn ").count(),
+        1,
+        "the bytes-door block must stay a SINGLE method; a second one is new public \
+         surface on the verified run and must be a deliberate, asserted addition",
+    );
+    assert!(
+        door_block.contains("pub fn into_artifact_bytes(self) -> Vec<u8>"),
+        "and that method must be the CONSUMING door, by exact signature. `&self` here \
+         would let a caller hold the artifact's bytes and go on using the run, which is \
+         the borrowing variant the phase explicitly did not take: {door_block}",
+    );
+
+    // There must be no THIRD block. `find` returns the first match, so without this the
+    // two assertions above would keep passing while a third block grew unobserved.
+    assert!(
+        src[door_at + 1..].find("impl SetFitRun<ArtifactReloadedAndVerified> {").is_none(),
+        "exactly two `impl SetFitRun<ArtifactReloadedAndVerified>` blocks live in mod.rs \
+         — the reproducibility accessors and the bytes door. A third is unguarded surface",
+    );
+}
+
+/// `into_artifact_bytes` hands back the bytes that were HASHED — proven by re-hashing.
+///
+/// # A non-emptiness check would not have been evidence
+///
+/// The failure this guards against is not "the door returns nothing". It is "the door
+/// returns *a* valid artifact that is not *the* verified one" — a re-serialization from
+/// the rebuilt model, which parses, loads, classifies, and has a different SHA-256 from
+/// the one the run reports. `apr setfit train` writes these bytes and prints
+/// `artifact_hash()` beside them as their digest, so if those two can ever disagree the
+/// command is emitting a false attestation. Re-hashing is what rules it out.
+///
+/// Run with `--nocapture` to see the retained buffer's size, which is the figure the
+/// drop-justification comment in `verify.rs` cites.
+#[test]
+fn verify_into_artifact_bytes_are_the_hashed_bytes() {
+    let run = verified_run();
+
+    // Both recorded facts must be read BEFORE the door consumes the run.
+    let recorded_hash = run.artifact_hash();
+    let recorded_len = run.evidence().verify_report().artifact_bytes();
+
+    let bytes = run.into_artifact_bytes();
+    eprintln!("04-17 G1: retained artifact buffer = {} bytes", bytes.len());
+
+    assert!(!bytes.is_empty(), "the door must hand back a real artifact");
+    assert_eq!(
+        bytes.len(),
+        recorded_len,
+        "`VerifyReport::artifact_bytes()` is the LENGTH of exactly these bytes; if the \
+         two disagree the report is describing a buffer nobody can obtain",
+    );
+
+    // THE assertion.
+    let rehashed = hex::encode(Sha256::digest(&bytes));
+    assert_eq!(
+        rehashed, recorded_hash,
+        "the door must hand out the bytes the policy hashed, not bytes that merely \
+         deserialize to an equivalent bundle",
+    );
+
+    // And they are an artifact rather than a buffer that merely has the right digest:
+    // the shipped codec reads them back, and what it reads back re-serializes to them.
+    // This is `close_round_trip`'s property re-observed from OUTSIDE the policy, on the
+    // value a caller actually receives.
+    let codec = SerdeJsonCodec::new();
+    let reloaded = codec.deserialize(&bytes).expect("the handed-out bytes must be a bundle");
+    assert_eq!(reloaded.format_id(), SERDE_JSON_FORMAT_ID);
+    let reserialized = codec.serialize(&reloaded).expect("and must re-serialize");
+    assert_eq!(
+        reserialized, bytes,
+        "the bytes a caller receives must be the canonical ones, or the file written \
+         from them would not be the file that was verified",
+    );
+}
+
+/// Retaining the bytes must not make `{:?}` on a run print a megabyte.
+///
+/// `LifecycleState::Evidence: Debug` forces this value to be reachable from every
+/// `SetFitRun`'s `Debug`, so the newtype's short rendering is load-bearing rather than
+/// cosmetic: a bare `Vec<u8>` under `derive(Debug)` renders each byte as a decimal
+/// number, which on the fixture is ~4 MB of text per log line and on a full pin is far
+/// worse. This is the assertion that keeps the derive from creeping back.
+#[test]
+fn verify_retained_artifact_bytes_debug_prints_a_length_not_a_payload() {
+    let run = verified_run();
+    let artifact_len = run.evidence().verify_report().artifact_bytes();
+    assert!(artifact_len > 0, "non-vacuity: there must be a payload to leak");
+
+    // EXACT equality, on the newtype itself. A `contains` check would pass for a derive
+    // that printed the length first and then every byte.
+    let rendered = format!("{:?}", run.evidence().artifact_bytes);
+    assert_eq!(
+        rendered,
+        format!("RetainedArtifactBytes {{ len: {artifact_len} }}"),
+        "the retained bytes must render as their LENGTH and nothing else",
+    );
+
+    // And the derive on the whole evidence delegates to it, so a `{:?}` of the run does
+    // not carry the artifact either.
+    let evidence_rendering = format!("{:?}", run.evidence());
+    assert!(evidence_rendering.contains(&rendered), "{evidence_rendering}");
 }
 
 /// `pair_order_digest()` returns the digest 03-05's loop RECORDED.
