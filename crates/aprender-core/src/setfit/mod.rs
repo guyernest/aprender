@@ -48,10 +48,11 @@ pub mod tokenizer;
 
 pub use artifact::{
     artifact_sha256_hex, load_setfit_apr, read_setfit_apr_bytes_bounded, read_setfit_apr_parts,
-    write_setfit_apr, SetFitAprParts, SetFitArtifactDoc, SetFitArtifactError, SetFitArtifactView,
-    SetFitHeadDoc, SetFitPreprocessingDoc, SetFitProbeRecord, VerifiedSetFitModel,
-    MAX_ARTIFACT_BYTES, NULLABLE_PATH_ALLOWLIST, PROBE_EMBEDDING_ABS_TOLERANCE,
-    PROBE_LOGITS_ABS_TOLERANCE, PROBE_PROBABILITIES_ABS_TOLERANCE, WALKED_SUBDOCUMENTS,
+    write_setfit_apr, ProbeReplayDivergence, SetFitAprParts, SetFitArtifactDoc,
+    SetFitArtifactError, SetFitArtifactView, SetFitHeadDoc, SetFitPreprocessingDoc,
+    SetFitProbeRecord, VerifiedSetFitModel, MAX_ARTIFACT_BYTES, MAX_ENCODER_LAYERS,
+    NULLABLE_PATH_ALLOWLIST, PROBE_EMBEDDING_ABS_TOLERANCE, PROBE_LOGITS_ABS_TOLERANCE,
+    PROBE_PROBABILITIES_ABS_TOLERANCE, WALKED_SUBDOCUMENTS,
 };
 pub use dropout_rng::{DropoutRngError, SiteDropout};
 pub use encoder::{BertSentenceEncoder, L2_EPS, NORMALIZATION_POLICY, POOLING_POLICY};

@@ -54,7 +54,9 @@ use serde_json::{Map as JsonMap, Value};
 use super::tokenizer::sha256_hex;
 use super::{EncoderArchitecture, SetFitMiniLm};
 use crate::classification::MultinomialLogisticRegression;
-use crate::format::v2::{AprV2Metadata, AprV2Writer, TensorDType};
+use crate::format::v2::{
+    AprV2Metadata, AprV2Reader, AprV2Writer, TensorDType, V2FormatError, VERSION_V2,
+};
 
 // ===========================================================================
 // Contract-resident constants
@@ -602,23 +604,14 @@ pub enum SetFitArtifactError {
     ///
     /// This is the rung a checksum cannot reach: corrupted-but-checksummed
     /// states, wrong-loader states and platform math divergence all arrive here.
-    ProbeReplayFailed {
-        /// The probe's index in the artifact's probe array.
-        probe: usize,
-        /// The contract's identifier for that probe.
-        probe_id: String,
-        /// `probe_count`, `input`, `embedding_width`, `embedding`, `logit_count`,
-        /// `logit`, `probability_count`, `probability` or `label`.
-        component: &'static str,
-        /// The component's index inside the probe, or 0 where there is none.
-        index: usize,
-        /// The artifact's recorded expectation.
-        expected: String,
-        /// What this process actually produced.
-        observed: String,
-        /// The bound the comparison used, formatted; `exact` where none exists.
-        tolerance: String,
-    },
+    ///
+    /// The payload is BOXED. Inlined, its seven fields (four of them `String`)
+    /// would make `SetFitArtifactError` 136 bytes, and every
+    /// `Result<_, SetFitArtifactError>` in this module — including
+    /// `write_setfit_apr`'s, which returns a `Vec<u8>` on success — would pay
+    /// that width on its SUCCESS path (`clippy::result_large_err`, 32 sites). One
+    /// heap allocation on the failure path is the right trade.
+    ProbeReplayFailed(Box<ProbeReplayDivergence>),
 
     /// [`VerifiedSetFitModel::embed`] was handed an empty batch.
     ///
@@ -631,6 +624,31 @@ pub enum SetFitArtifactError {
         /// The underlying diagnostic, forwarded rather than flattened.
         reason: String,
     },
+}
+
+/// Everything a rung-7 probe divergence reports.
+///
+/// A named struct behind [`SetFitArtifactError::ProbeReplayFailed`]'s `Box`, so
+/// the diagnosis stays STRUCTURED — an operator gets the probe, the component and
+/// both values rather than one flattened sentence — without widening every
+/// `Result` in the module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeReplayDivergence {
+    /// The probe's index in the artifact's probe array.
+    pub probe: usize,
+    /// The contract's identifier for that probe.
+    pub probe_id: String,
+    /// `probe_count`, `input`, `embedding_width`, `embedding`, `logit_count`,
+    /// `logit`, `probability_count`, `probability` or `label`.
+    pub component: &'static str,
+    /// The component's index inside the probe, or 0 where there is none.
+    pub index: usize,
+    /// The artifact's recorded expectation.
+    pub expected: String,
+    /// What this process actually produced.
+    pub observed: String,
+    /// The bound the comparison used, formatted; `exact` where none exists.
+    pub tolerance: String,
 }
 
 impl std::fmt::Display for SetFitArtifactError {
@@ -668,7 +686,11 @@ impl std::fmt::Display for SetFitArtifactError {
                     "SetFitArtifactError::ProbeComputation({probe}: {reason})"
                 )
             }
-            Self::ArtifactTooLarge { what, observed, cap } => write!(
+            Self::ArtifactTooLarge {
+                what,
+                observed,
+                cap,
+            } => write!(
                 f,
                 "SetFitArtifactError::ArtifactTooLarge(check {what} observed {observed} bytes \
                  against the {cap}-byte cap; the payload is refused before the allocation it \
@@ -718,19 +740,17 @@ impl std::fmt::Display for SetFitArtifactError {
                 f,
                 "SetFitArtifactError::ArtifactRebuildFailed(rung 6, {what}: {reason})"
             ),
-            Self::ProbeReplayFailed {
-                probe,
-                probe_id,
-                component,
-                index,
-                expected,
-                observed,
-                tolerance,
-            } => write!(
+            Self::ProbeReplayFailed(divergence) => write!(
                 f,
-                "SetFitArtifactError::ProbeReplayFailed(rung 7, probe {probe} ({probe_id}), \
-                 {component}[{index}]: expected {expected}, observed {observed}, tolerance \
-                 {tolerance})"
+                "SetFitArtifactError::ProbeReplayFailed(rung 7, probe {} ({}), {}[{}]: expected \
+                 {}, observed {}, tolerance {})",
+                divergence.probe,
+                divergence.probe_id,
+                divergence.component,
+                divergence.index,
+                divergence.expected,
+                divergence.observed,
+                divergence.tolerance
             ),
             Self::EmptyEmbedBatch => write!(
                 f,
@@ -1456,6 +1476,20 @@ fn build_artifact_doc(
 /// those can run — see [`read_setfit_apr_bytes_bounded`].
 pub const MAX_ARTIFACT_BYTES: u64 = 268_435_456;
 
+/// The largest encoder depth this loader will expand the per-layer templates over.
+///
+/// `expected(arch)` is `5 + 16 * num_layers + 3` names and `num_layers` arrives
+/// from the DOCUMENT, which is attacker-controlled. Without this bound a document
+/// claiming 2^60 layers would make the EXPANSION itself the allocation attack —
+/// the exact failure the architecture-derived tensor set exists to prevent. The
+/// contract records the requirement as `architecture_derived_tensor_set`
+/// precondition 2 ("num_layers is bounded by the tensor-count limit, so the
+/// expansion cannot itself become the allocation attack") without freezing a
+/// number, so the number is derived here and stated: 256 is ~42x the pinned
+/// model's 6, and 5 + 16*256 + 3 = 4104 names sits in the same order as the
+/// bundle's `MAX_TENSOR_COUNT` of 4096.
+pub const MAX_ENCODER_LAYERS: usize = 256;
+
 /// Absolute tolerance for a probe embedding component.
 ///
 /// CITED from `setfit-encoder-conformance-v1`'s frozen pooled-output family, not
@@ -1711,8 +1745,48 @@ impl VerifiedSetFitModel {
     /// [`SetFitArtifactError::EncodeFailed`] for anything the tokenizer or the
     /// encoder rejects. There is no panic path.
     pub fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, SetFitArtifactError> {
-        let _ = texts;
-        Err(stub_error())
+        if texts.is_empty() {
+            return Err(SetFitArtifactError::EmptyEmbedBatch);
+        }
+        let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let pooled =
+            self.model
+                .encode_texts(&borrowed)
+                .map_err(|e| SetFitArtifactError::EncodeFailed {
+                    reason: e.to_string(),
+                })?;
+        let shape = pooled.shape().to_vec();
+        let (rows, width) = match shape.as_slice() {
+            [rows, width] => (*rows, *width),
+            other => {
+                return Err(SetFitArtifactError::EncodeFailed {
+                    reason: format!("the encoder produced shape {other:?}, expected [B, H]"),
+                })
+            }
+        };
+        if rows != texts.len() {
+            return Err(SetFitArtifactError::EncodeFailed {
+                reason: format!("{} texts produced {rows} embedding rows", texts.len()),
+            });
+        }
+        let data = pooled.data();
+        let mut out = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let start = row.saturating_mul(width);
+            let end = start.saturating_add(width);
+            // `get` and not `[start..end]`: this is a codec whose contract is that
+            // it does not panic, and a slice index is a panic path.
+            let slice = data
+                .get(start..end)
+                .ok_or_else(|| SetFitArtifactError::EncodeFailed {
+                    reason: format!(
+                        "row {row} spans {start}..{end} of a {}-element result",
+                        data.len()
+                    ),
+                })?;
+            out.push(slice.to_vec());
+        }
+        Ok(out)
     }
 }
 
@@ -1766,8 +1840,50 @@ fn read_setfit_apr_bytes_bounded_within<R: std::io::Read>(
     declared_len: Option<u64>,
     limits: &ArtifactLimits,
 ) -> Result<Vec<u8>, SetFitArtifactError> {
-    let _ = (reader, declared_len, limits);
-    Err(stub_error())
+    use std::io::Read as _;
+
+    let cap = limits.max_artifact_bytes;
+
+    // (a) THE DECLARED LENGTH, BEFORE THE READER IS TOUCHED. A caller passing
+    //     `fs::metadata(path)?.len()` is refused here, so `fs::read` never runs
+    //     on a hostile multi-gigabyte file. Review B5: the cap belongs at the
+    //     read, not only after it.
+    if let Some(declared) = declared_len {
+        if declared > cap {
+            return Err(SetFitArtifactError::ArtifactTooLarge {
+                what: "declared_length",
+                observed: declared,
+                cap,
+            });
+        }
+    }
+
+    // (b) THE READ ITSELF, BOUNDED AT cap + 1 ANYWAY, because check (a) trusts
+    //     metadata an attacker controls. The reservation is the declared length
+    //     CLAMPED to the cap, so a length that lies cannot pre-allocate past it,
+    //     and an absent length reserves nothing at all.
+    let ceiling = cap.saturating_add(1);
+    let reserve = usize::try_from(declared_len.unwrap_or(0).min(cap)).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(reserve);
+    let mut bounded = reader.take(ceiling);
+    bounded
+        .read_to_end(&mut bytes)
+        .map_err(|e| SetFitArtifactError::ArtifactRead {
+            reason: e.to_string(),
+        })?;
+
+    // (c) THE `+ 1` PAYS OFF HERE. Exactly `cap` bytes is a legal artifact of
+    //     exactly the cap size; `cap + 1` is a larger stream truncated at the
+    //     cap, and only reading one byte more makes the two distinguishable.
+    let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if observed > cap {
+        return Err(SetFitArtifactError::ArtifactTooLarge {
+            what: "stream",
+            observed,
+            cap,
+        });
+    }
+    Ok(bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -1793,8 +1909,20 @@ fn read_setfit_apr_parts_within(
     bytes: &[u8],
     limits: &ArtifactLimits,
 ) -> Result<SetFitAprParts, SetFitArtifactError> {
-    let _ = (bytes, limits);
-    Err(stub_error())
+    rung1_raw_length(bytes, limits)?;
+    let reader = rung2_container(bytes)?;
+    let doc = rung3_document(&reader)?;
+    rung4_structure(&reader, &doc)?;
+    let (tensors, head_weights, head_intercepts, tokenizer_bytes) =
+        rung5_finite_payloads(&reader, &doc)?;
+    Ok(SetFitAprParts {
+        doc,
+        tensors,
+        head_weights,
+        head_intercepts,
+        tokenizer_bytes,
+        artifact_sha256: artifact_sha256_hex(bytes),
+    })
 }
 
 /// The ONE production door: bytes in, a verified model or a typed refusal out.
@@ -1818,16 +1946,856 @@ fn load_setfit_apr_within(
     bytes: &[u8],
     limits: &ArtifactLimits,
 ) -> Result<VerifiedSetFitModel, SetFitArtifactError> {
-    let _ = (bytes, limits);
-    Err(stub_error())
+    // RUNGS 1-5, through the very code the parse-only door runs. The call is the
+    // point: two copies of this ladder would be two verification policies, and
+    // the looser of the two would silently become the real one.
+    let parts = read_setfit_apr_parts_within(bytes, limits)?;
+    // RUNG 6.
+    let (model, head) = rung6_rebuild(&parts)?;
+    // RUNG 7 — the last word. Nothing classify-capable exists until it returns.
+    rung7_replay_probes(&model, &head, &parts)?;
+    Ok(VerifiedSetFitModel {
+        model,
+        head,
+        artifact_sha256: parts.artifact_sha256,
+        doc: parts.doc,
+    })
 }
 
-/// The RED-phase placeholder, distinct from every variant a test asserts on.
-fn stub_error() -> SetFitArtifactError {
-    SetFitArtifactError::ContainerIntegrity {
-        what: "unimplemented",
-        reason: "plan 04-03 RED: the ladder is not implemented yet".to_string(),
+// ---------------------------------------------------------------------------
+// Rung 1: the raw length, before any parse
+// ---------------------------------------------------------------------------
+
+/// The in-memory door's own length check — DEFENSE IN DEPTH, not redundancy.
+///
+/// [`read_setfit_apr_bytes_bounded`] protects a caller who is about to read a
+/// file. This protects a caller who already holds bytes from somewhere else, and
+/// neither one subsumes the other.
+fn rung1_raw_length(bytes: &[u8], limits: &ArtifactLimits) -> Result<(), SetFitArtifactError> {
+    let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if observed > limits.max_artifact_bytes {
+        return Err(SetFitArtifactError::ArtifactTooLarge {
+            what: "input_bytes",
+            observed,
+            cap: limits.max_artifact_bytes,
+        });
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Rung 2: the container
+// ---------------------------------------------------------------------------
+
+/// Magic, header CRC, container version, row-major flag and footer CRC.
+///
+/// The footer CRC runs FIRST because it is a pure byte comparison over the whole
+/// content: nothing in the file is interpreted until the file has been shown to
+/// be the file that was written. CRC32 is NOT cryptographic, so this rung cannot
+/// see semantic corruption — that is rung 7's job.
+fn rung2_container(bytes: &[u8]) -> Result<AprV2Reader, SetFitArtifactError> {
+    verify_footer_checksum(bytes)?;
+
+    let reader = AprV2Reader::from_bytes(bytes).map_err(|e| {
+        let what = match &e {
+            V2FormatError::ChecksumMismatch => "header_checksum",
+            V2FormatError::InvalidMagic(_) => "magic",
+            _ => "container_parse",
+        };
+        SetFitArtifactError::ContainerIntegrity {
+            what,
+            reason: e.to_string(),
+        }
+    })?;
+
+    let header = reader.header();
+    if header.version != VERSION_V2 {
+        return Err(SetFitArtifactError::ContainerIntegrity {
+            what: "container_version",
+            reason: format!(
+                "the container declares version {:?}, this build reads {VERSION_V2:?}",
+                header.version
+            ),
+        });
+    }
+    // LAYOUT-002. `AprV2Reader` only refuses an EXPLICIT column-major flag; this
+    // artifact schema additionally REQUIRES the row-major flag to be present, so
+    // an artifact that asserts nothing about its layout is refused rather than
+    // assumed.
+    if !header.flags.is_row_major() {
+        return Err(SetFitArtifactError::ContainerIntegrity {
+            what: "row_major_flag",
+            reason: "LAYOUT_ROW_MAJOR is not set; setfit-apr-v1 is exclusively row-major and \
+                     does not assume a layout an artifact declined to declare"
+                .to_string(),
+        });
+    }
+    Ok(reader)
+}
+
+/// The container's trailing CRC32 over everything that precedes it.
+fn verify_footer_checksum(bytes: &[u8]) -> Result<(), SetFitArtifactError> {
+    let split =
+        bytes
+            .len()
+            .checked_sub(4)
+            .ok_or_else(|| SetFitArtifactError::ContainerIntegrity {
+                what: "footer_length",
+                reason: format!(
+                    "{} bytes cannot carry the container's 4-byte trailing checksum",
+                    bytes.len()
+                ),
+            })?;
+    let (content, footer) = bytes.split_at(split);
+    let declared = u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]);
+    let observed = crate::format::crc32(content);
+    if declared != observed {
+        return Err(SetFitArtifactError::ContainerIntegrity {
+            what: "footer_checksum",
+            reason: format!(
+                "the footer declares {declared:#010x} over {} content bytes; a recompute gives \
+                 {observed:#010x}",
+                content.len()
+            ),
+        });
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Rung 3: the typed tag and the ONE document
+// ---------------------------------------------------------------------------
+
+/// D-04 explicit-tag detection, the one custom key, then `schema` /
+/// `schema_version` BEFORE any other field is read.
+fn rung3_document(reader: &AprV2Reader) -> Result<SetFitArtifactDoc, SetFitArtifactError> {
+    let metadata = reader.metadata();
+    // D-04: the whole detection rule. No tensor-name sniffing, no shape
+    // inference — a SetFit-shaped tensor set without the tag is a plain APR.
+    if metadata.model_type != MODEL_TYPE_TAG {
+        return Err(SetFitArtifactError::NotASetFitArtifact {
+            model_type: metadata.model_type.clone(),
+        });
+    }
+    if metadata.custom.len() != 1 {
+        return Err(SetFitArtifactError::ArtifactDocumentMissing {
+            reason: format!(
+                "the container carries {} custom metadata keys; exactly one ({CUSTOM_METADATA_KEY:?}) \
+                 is reproducible, because AprV2Metadata.custom is a flattened HashMap whose \
+                 iteration order is unspecified",
+                metadata.custom.len()
+            ),
+        });
+    }
+    let value = metadata.custom.get(CUSTOM_METADATA_KEY).ok_or_else(|| {
+        SetFitArtifactError::ArtifactDocumentMissing {
+            reason: format!("the one custom metadata key is not {CUSTOM_METADATA_KEY:?}"),
+        }
+    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| SetFitArtifactError::ArtifactDocumentMissing {
+            reason: format!("the {CUSTOM_METADATA_KEY:?} key does not hold a JSON object"),
+        })?;
+
+    // SCHEMA AND SCHEMA VERSION FIRST. Reading them off the raw `Value` before
+    // the typed parse is what makes the contract's postcondition literally true:
+    // a future schema is refused rather than partially interpreted by this build.
+    let schema = object
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| SetFitArtifactError::ArtifactDocumentMissing {
+            reason: "the document has no first-level `schema` field".to_string(),
+        })?;
+    if schema != ARTIFACT_SCHEMA {
+        return Err(SetFitArtifactError::UnsupportedSchema {
+            got: schema.to_string(),
+            supported: ARTIFACT_SCHEMA,
+        });
+    }
+    let version = object
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| SetFitArtifactError::ArtifactDocumentMissing {
+            reason: "the document has no first-level `schema_version` field".to_string(),
+        })?;
+    if version != u64::from(ARTIFACT_SCHEMA_VERSION) {
+        return Err(SetFitArtifactError::UnsupportedSchemaVersion {
+            got: version,
+            supported: ARTIFACT_SCHEMA_VERSION,
+        });
+    }
+
+    // Only now the typed, `deny_unknown_fields` parse.
+    serde_json::from_value::<SetFitArtifactDoc>(value.clone()).map_err(|e| {
+        SetFitArtifactError::ArtifactDocumentParse {
+            detail: e.to_string(),
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Rung 4: structure, derived from the artifact's OWN declared architecture
+// ---------------------------------------------------------------------------
+
+/// The architecture-derived tensor set, the per-entry size rule, the head
+/// shapes, the carried name map and the tokenizer identity.
+fn rung4_structure(
+    reader: &AprV2Reader,
+    doc: &SetFitArtifactDoc,
+) -> Result<(), SetFitArtifactError> {
+    check_declared_depth(doc)?;
+    check_tensor_name_set(reader, doc)?;
+    check_tensor_entries(reader)?;
+    check_head_shapes(reader, doc)?;
+    check_carried_name_map(doc)?;
+    check_tokenizer_identity(reader, doc)
+}
+
+/// The expansion bound, BEFORE the expansion.
+///
+/// `expected(arch)` is `5 + 16 * num_layers + 3` names and `num_layers` arrives
+/// from the DOCUMENT — attacker-controlled. Without this check a document
+/// claiming 2^60 layers would make the EXPANSION the allocation attack, which is
+/// precisely what the tensor-set rule exists to prevent (contract
+/// `architecture_derived_tensor_set`, precondition 2).
+fn check_declared_depth(doc: &SetFitArtifactDoc) -> Result<(), SetFitArtifactError> {
+    let declared = u64::try_from(doc.architecture.num_layers).unwrap_or(u64::MAX);
+    let cap = u64::try_from(MAX_ENCODER_LAYERS).unwrap_or(u64::MAX);
+    if declared > cap {
+        return Err(SetFitArtifactError::ArtifactTooLarge {
+            what: "declared_layers",
+            observed: declared,
+            cap,
+        });
+    }
+    Ok(())
+}
+
+/// `tensor_index_names == expected(doc.architecture)`, compared EXACTLY.
+///
+/// A mismatch names the MISSING and the UNEXPECTED tensors, not merely the two
+/// counts: "104 != 103" is not a diagnosis. The head tensors are members of the
+/// expected set (review B1), so a HEADLESS artifact cannot reach a prediction.
+fn check_tensor_name_set(
+    reader: &AprV2Reader,
+    doc: &SetFitArtifactDoc,
+) -> Result<(), SetFitArtifactError> {
+    let expected = expected_tensor_names(doc.architecture.num_layers);
+    let observed: BTreeSet<String> = reader
+        .tensor_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+    let missing: Vec<String> = expected.difference(&observed).cloned().collect();
+    if !missing.is_empty() {
+        return Err(SetFitArtifactError::IncompleteTensorSet { missing });
+    }
+    let unexpected: Vec<String> = observed.difference(&expected).cloned().collect();
+    if !unexpected.is_empty() {
+        return Err(SetFitArtifactError::InconsistentTensorSet {
+            reason: format!(
+                "{} tensor(s) outside the architecture-derived set: {}",
+                unexpected.len(),
+                unexpected.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// `size == product(shape) * dtype_width`, on the DECLARED shape and dtype,
+/// before any payload is decoded into a tensor.
+fn check_tensor_entries(reader: &AprV2Reader) -> Result<(), SetFitArtifactError> {
+    for entry in reader.tensor_index() {
+        // dtype U8 makes the tokenizer's byte-exactness STRUCTURAL: there is no
+        // float path it could be rounded through.
+        let required = if entry.name == TOKENIZER_BLOB_TENSOR {
+            TensorDType::U8
+        } else {
+            TensorDType::F32
+        };
+        if entry.dtype != required {
+            return Err(SetFitArtifactError::InconsistentTensor {
+                tensor: entry.name.clone(),
+                reason: format!(
+                    "declares dtype {} but {required} is the only dtype this name may carry",
+                    entry.dtype
+                ),
+            });
+        }
+        if entry.shape.is_empty() {
+            return Err(SetFitArtifactError::InconsistentTensor {
+                tensor: entry.name.clone(),
+                reason: "declares no shape at all".to_string(),
+            });
+        }
+        let mut elements: u64 = 1;
+        for dim in &entry.shape {
+            let dim = u64::try_from(*dim).unwrap_or(u64::MAX);
+            elements = elements.checked_mul(dim).ok_or_else(|| {
+                SetFitArtifactError::InconsistentTensor {
+                    tensor: entry.name.clone(),
+                    reason: format!("shape {:?} overflows an element count", entry.shape),
+                }
+            })?;
+        }
+        let width = u64::try_from(required.bytes_per_element()).unwrap_or(0);
+        let declared =
+            elements
+                .checked_mul(width)
+                .ok_or_else(|| SetFitArtifactError::InconsistentTensor {
+                    tensor: entry.name.clone(),
+                    reason: format!("shape {:?} overflows a byte count", entry.shape),
+                })?;
+        if entry.size != declared {
+            return Err(SetFitArtifactError::InconsistentTensor {
+                tensor: entry.name.clone(),
+                reason: format!(
+                    "declares shape {:?} ({elements} elements x {width} bytes = {declared}) but \
+                     the index records size {}",
+                    entry.shape, entry.size
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The head must be the head of THIS label set and THIS encoder (review B1/T-04-44).
+fn check_head_shapes(
+    reader: &AprV2Reader,
+    doc: &SetFitArtifactDoc,
+) -> Result<(), SetFitArtifactError> {
+    let num_labels = doc.ordered_labels.len();
+    if num_labels < 2 {
+        return Err(SetFitArtifactError::InconsistentTensorSet {
+            reason: format!(
+                "a classifier head needs at least two labels, the document declares {num_labels}"
+            ),
+        });
+    }
+    if doc.head.num_labels != num_labels {
+        return Err(SetFitArtifactError::InconsistentTensorSet {
+            reason: format!(
+                "head.num_labels is {} but ordered_labels carries {num_labels}",
+                doc.head.num_labels
+            ),
+        });
+    }
+    // A head fitted at a different width would refuse every probe at replay time
+    // in a fresh process, long after the artifact shipped.
+    if doc.head.n_features != doc.architecture.hidden {
+        return Err(SetFitArtifactError::InconsistentTensorSet {
+            reason: format!(
+                "head.n_features {} does not match the encoder's hidden width {}",
+                doc.head.n_features, doc.architecture.hidden
+            ),
+        });
+    }
+
+    for (name, expected) in [
+        (HEAD_WEIGHT_TENSOR, vec![num_labels, doc.head.n_features]),
+        (HEAD_BIAS_TENSOR, vec![num_labels]),
+    ] {
+        let entry =
+            reader
+                .get_tensor(name)
+                .ok_or_else(|| SetFitArtifactError::IncompleteTensorSet {
+                    missing: vec![name.to_string()],
+                })?;
+        if entry.shape != expected {
+            return Err(SetFitArtifactError::InconsistentTensor {
+                tensor: name.to_string(),
+                reason: format!(
+                    "declares shape {:?}; the document's label set and head configuration require \
+                     {expected:?}, because row i belongs to ordered_labels[i]",
+                    entry.shape
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The carried `hf_name_map` must be usable as an INVERSION.
+///
+/// The map is written into the artifact precisely so `deserialize` inverts a map
+/// the artifact carries rather than re-deriving names from a table that may have
+/// moved since the write. For that to be safe it must be INJECTIVE (a collision
+/// would OVERWRITE a tensor rather than fail) and TOTAL over the encoder half of
+/// the artifact's own tensor set.
+fn check_carried_name_map(doc: &SetFitArtifactDoc) -> Result<(), SetFitArtifactError> {
+    let distinct: BTreeSet<&String> = doc.hf_name_map.values().collect();
+    if distinct.len() != doc.hf_name_map.len() {
+        return Err(SetFitArtifactError::InconsistentNameMap {
+            reason: format!(
+                "{} HF names resolve to {} canonical names; a collision would overwrite a tensor \
+                 rather than fail",
+                doc.hf_name_map.len(),
+                distinct.len()
+            ),
+        });
+    }
+    let mut encoder_names = expected_tensor_names(doc.architecture.num_layers);
+    for schema_owned in [HEAD_WEIGHT_TENSOR, HEAD_BIAS_TENSOR, TOKENIZER_BLOB_TENSOR] {
+        encoder_names.remove(schema_owned);
+    }
+    let carried: BTreeSet<String> = doc.hf_name_map.values().cloned().collect();
+    if carried != encoder_names {
+        let missing: Vec<&String> = encoder_names.difference(&carried).collect();
+        let unexpected: Vec<&String> = carried.difference(&encoder_names).collect();
+        return Err(SetFitArtifactError::InconsistentNameMap {
+            reason: format!(
+                "the carried map is not total over the encoder half of the tensor set: missing \
+                 {missing:?}, unexpected {unexpected:?}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The tokenizer is paired BEFORE a tensor is installed.
+///
+/// An encoder rebuilt with a substituted tokenizer produces confidently wrong
+/// embeddings for every input and looks structurally valid the whole time.
+fn check_tokenizer_identity(
+    reader: &AprV2Reader,
+    doc: &SetFitArtifactDoc,
+) -> Result<(), SetFitArtifactError> {
+    let blob = reader
+        .get_tensor_data(TOKENIZER_BLOB_TENSOR)
+        .ok_or_else(|| SetFitArtifactError::InconsistentTensor {
+            tensor: TOKENIZER_BLOB_TENSOR.to_string(),
+            reason: "the index entry does not resolve to a payload inside the file".to_string(),
+        })?;
+    let observed = sha256_hex(blob);
+    if observed != doc.tokenizer_sha256 {
+        return Err(SetFitArtifactError::TokenizerHashMismatch {
+            expected: doc.tokenizer_sha256.clone(),
+            got: observed,
+        });
+    }
+    // The doc's first-level digest and the architecture record's are two copies
+    // of one fact, and two copies of one fact are two values that can disagree.
+    if doc.architecture.tokenizer_sha256 != doc.tokenizer_sha256 {
+        return Err(SetFitArtifactError::TokenizerHashMismatch {
+            expected: doc.tokenizer_sha256.clone(),
+            got: doc.architecture.tokenizer_sha256.clone(),
+        });
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Rung 5: the non-finite scan, and the payloads it produces
+// ---------------------------------------------------------------------------
+
+/// The four payload groups rungs 6-7 consume: HF-keyed tensors, head weights,
+/// head intercepts, tokenizer bytes.
+type LoadedPayloads = (
+    BTreeMap<String, (Vec<usize>, Vec<f32>)>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<u8>,
+);
+
+/// Decode every `f32` the artifact carries and refuse the first non-finite one.
+///
+/// A `NaN` weight poisons every prediction and looks structurally valid the whole
+/// time, so it dies here rather than at a tolerance comparison two rungs later.
+fn rung5_finite_payloads(
+    reader: &AprV2Reader,
+    doc: &SetFitArtifactDoc,
+) -> Result<LoadedPayloads, SetFitArtifactError> {
+    let mut tensors: BTreeMap<String, (Vec<usize>, Vec<f32>)> = BTreeMap::new();
+    for (hf, canonical) in &doc.hf_name_map {
+        let entry = reader.get_tensor(canonical).ok_or_else(|| {
+            SetFitArtifactError::InconsistentNameMap {
+                reason: format!(
+                    "the map sends {hf} to {canonical}, which the index does not carry"
+                ),
+            }
+        })?;
+        let shape = entry.shape.clone();
+        let data = decode_finite_f32(reader, canonical)?;
+        tensors.insert(hf.clone(), (shape, data));
+    }
+    let head_weights = decode_finite_f32(reader, HEAD_WEIGHT_TENSOR)?;
+    let head_intercepts = decode_finite_f32(reader, HEAD_BIAS_TENSOR)?;
+    scan_probe_expectations(doc)?;
+    let tokenizer_bytes = reader
+        .get_tensor_data(TOKENIZER_BLOB_TENSOR)
+        .ok_or_else(|| SetFitArtifactError::InconsistentTensor {
+            tensor: TOKENIZER_BLOB_TENSOR.to_string(),
+            reason: "the index entry does not resolve to a payload inside the file".to_string(),
+        })?
+        .to_vec();
+    Ok((tensors, head_weights, head_intercepts, tokenizer_bytes))
+}
+
+/// One F32 payload, decoded and scanned, with the offending index named.
+fn decode_finite_f32(reader: &AprV2Reader, name: &str) -> Result<Vec<f32>, SetFitArtifactError> {
+    let data =
+        reader
+            .get_f32_tensor(name)
+            .ok_or_else(|| SetFitArtifactError::InconsistentTensor {
+                tensor: name.to_string(),
+                reason: "the F32 payload does not resolve inside the file".to_string(),
+            })?;
+    for (index, value) in data.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(SetFitArtifactError::NonFiniteValue {
+                path: format!("{name}[{index}]"),
+            });
+        }
+    }
+    Ok(data)
+}
+
+/// Every probe EXPECTATION is decodable and finite.
+///
+/// A non-finite expectation would make its replay unfalsifiable: the comparator
+/// is NaN-visible, so such a probe could never agree with anything — the artifact
+/// is refused here instead, where the diagnosis names the field.
+fn scan_probe_expectations(doc: &SetFitArtifactDoc) -> Result<(), SetFitArtifactError> {
+    for (index, probe) in doc.probes.iter().enumerate() {
+        for (field, values) in [
+            ("embedding_hex", &probe.embedding_hex),
+            ("logits_hex", &probe.logits_hex),
+            ("probabilities_hex", &probe.probabilities_hex),
+        ] {
+            for (position, hex) in values.iter().enumerate() {
+                let path = format!("probes.{index}.{field}[{position}]");
+                let value = hex_to_f32(hex).ok_or_else(|| {
+                    SetFitArtifactError::ArtifactDocumentParse {
+                        detail: format!(
+                            "{path} is {hex:?}, not eight lowercase hex digits of an f32 bit pattern"
+                        ),
+                    }
+                })?;
+                if !value.is_finite() {
+                    return Err(SetFitArtifactError::NonFiniteValue { path });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Rung 6: the rebuild
+// ---------------------------------------------------------------------------
+
+/// Rebuild the encoder + tokenizer pair and the classifier head from bytes alone.
+///
+/// `from_bundle_parts` re-checks the tokenizer digest itself (mod.rs:365-371).
+/// That is deliberate duplication of rung 4's check, not an oversight: this
+/// function is reachable from one place today and the pairing is too important to
+/// depend on the caller having done it.
+fn rung6_rebuild(
+    parts: &SetFitAprParts,
+) -> Result<(SetFitMiniLm, MultinomialLogisticRegression), SetFitArtifactError> {
+    let model = SetFitMiniLm::from_bundle_parts(
+        &parts.tokenizer_bytes,
+        &parts.doc.architecture,
+        parts.tensors.clone(),
+        parts.doc.root_seed,
+    )
+    .map_err(|e| SetFitArtifactError::ArtifactRebuildFailed {
+        what: "encoder",
+        reason: e.to_string(),
+    })?;
+    let head = MultinomialLogisticRegression::from_stored_coefficients(
+        parts.doc.ordered_labels.clone(),
+        parts.doc.head.n_features,
+        parts.head_weights.clone(),
+        parts.head_intercepts.clone(),
+    )
+    .map_err(|e| SetFitArtifactError::ArtifactRebuildFailed {
+        what: "head",
+        reason: e.to_string(),
+    })?;
+    Ok((model, head))
+}
+
+// ---------------------------------------------------------------------------
+// Rung 7: probe replay (D-11)
+// ---------------------------------------------------------------------------
+
+/// The ONE shape a probe divergence takes, so the rungs below cannot disagree on it.
+fn probe_diverged(
+    probe: usize,
+    probe_id: &str,
+    component: &'static str,
+    index: usize,
+    expected: String,
+    observed: String,
+    tolerance: &str,
+) -> SetFitArtifactError {
+    SetFitArtifactError::ProbeReplayFailed(Box::new(ProbeReplayDivergence {
+        probe,
+        probe_id: probe_id.to_string(),
+        component,
+        index,
+        expected,
+        observed,
+        tolerance: tolerance.to_string(),
+    }))
+}
+
+/// Decode one probe field's hex array. Rung 5 already proved it decodes.
+fn decode_probe_field(values: &[String]) -> Vec<f32> {
+    values.iter().filter_map(|hex| hex_to_f32(hex)).collect()
+}
+
+/// Replay all SIX probes through the rebuilt model, in the contract's order.
+///
+/// This is the production-side mirror of the train-time round trip: it catches
+/// corrupted-but-checksummed states, wrong-loader states and platform math
+/// divergence, none of which a checksum can see. "The served model is the
+/// evaluated model" becomes a property this process RE-PROVES offline rather than
+/// a training-time memory.
+///
+/// Order — counts, inputs, embeddings, logits, probabilities, labels — mirrors
+/// `compare_probes` (verify.rs:476+). Counts come FIRST because every rung below
+/// walks its pairs with `zip`, which STOPS at the shorter side: a partial
+/// comparison that passed would be the worst possible outcome.
+fn rung7_replay_probes(
+    model: &SetFitMiniLm,
+    head: &MultinomialLogisticRegression,
+    parts: &SetFitAprParts,
+) -> Result<(), SetFitArtifactError> {
+    let doc = &parts.doc;
+    let inputs = probe_inputs();
+    if doc.probes.len() != PROBE_COUNT {
+        return Err(probe_diverged(
+            0,
+            "<all>",
+            "probe_count",
+            0,
+            PROBE_COUNT.to_string(),
+            doc.probes.len().to_string(),
+            "exact",
+        ));
+    }
+
+    let width = doc.head.n_features;
+    let classes = doc.ordered_labels.len();
+
+    for (index, record) in doc.probes.iter().enumerate() {
+        let id = PROBE_IDS[index];
+
+        // Probe inputs are FIXED, SYNTHETIC and CONTRACT-RESIDENT (Pitfall 8):
+        // an artifact carrying a dataset sentence here is refused, not replayed.
+        if record.input != inputs[index] {
+            return Err(probe_diverged(
+                index,
+                id,
+                "input",
+                0,
+                format!("{:?}", inputs[index]),
+                format!("{:?}", record.input),
+                "exact",
+            ));
+        }
+
+        let pooled = model.encode_texts(&[record.input.as_str()]).map_err(|e| {
+            SetFitArtifactError::EncodeFailed {
+                reason: format!("probe {index} ({id}): {e}"),
+            }
+        })?;
+        if pooled.shape() != [1, width] {
+            return Err(probe_diverged(
+                index,
+                id,
+                "embedding_width",
+                0,
+                format!("{:?}", [1, width]),
+                format!("{:?}", pooled.shape()),
+                "exact",
+            ));
+        }
+        let observed_embedding: Vec<f32> = pooled.data().to_vec();
+
+        let expected_embedding = decode_probe_field(&record.embedding_hex);
+        if expected_embedding.len() != observed_embedding.len() {
+            return Err(probe_diverged(
+                index,
+                id,
+                "embedding_width",
+                0,
+                expected_embedding.len().to_string(),
+                observed_embedding.len().to_string(),
+                "exact",
+            ));
+        }
+        compare_probe_component(
+            index,
+            id,
+            "embedding",
+            &expected_embedding,
+            &observed_embedding,
+            PROBE_EMBEDDING_ABS_TOLERANCE,
+        )?;
+
+        // The logits are accumulated in `f64` in the SAME order the writer used
+        // and then narrowed, so the recorded and the replayed logits cannot
+        // describe two different computations.
+        let observed_logits = replay_logits(parts, &observed_embedding, classes, width, index, id)?;
+        let expected_logits = decode_probe_field(&record.logits_hex);
+        if expected_logits.len() != observed_logits.len() {
+            return Err(probe_diverged(
+                index,
+                id,
+                "logit_count",
+                0,
+                expected_logits.len().to_string(),
+                observed_logits.len().to_string(),
+                "exact",
+            ));
+        }
+        compare_probe_component(
+            index,
+            id,
+            "logit",
+            &expected_logits,
+            &observed_logits,
+            PROBE_LOGITS_ABS_TOLERANCE,
+        )?;
+
+        let observed_probabilities: Vec<f32> = head
+            .predict_proba(&[observed_embedding.clone()])
+            .map_err(|e| SetFitArtifactError::EncodeFailed {
+                reason: format!("probe {index} ({id}): {e}"),
+            })?
+            .into_iter()
+            .next()
+            .ok_or_else(|| SetFitArtifactError::EncodeFailed {
+                reason: format!("probe {index} ({id}): predict_proba returned no rows"),
+            })?
+            .into_iter()
+            .map(|p| p as f32)
+            .collect();
+        let expected_probabilities = decode_probe_field(&record.probabilities_hex);
+        if expected_probabilities.len() != observed_probabilities.len() {
+            return Err(probe_diverged(
+                index,
+                id,
+                "probability_count",
+                0,
+                expected_probabilities.len().to_string(),
+                observed_probabilities.len().to_string(),
+                "exact",
+            ));
+        }
+        compare_probe_component(
+            index,
+            id,
+            "probability",
+            &expected_probabilities,
+            &observed_probabilities,
+            PROBE_PROBABILITIES_ABS_TOLERANCE,
+        )?;
+
+        // Labels are compared EXACTLY. A tolerance on a label is a category
+        // error, and a "close enough" label is a wrong answer.
+        let observed_label = head
+            .predict(&[observed_embedding])
+            .map_err(|e| SetFitArtifactError::EncodeFailed {
+                reason: format!("probe {index} ({id}): {e}"),
+            })?
+            .into_iter()
+            .next()
+            .ok_or_else(|| SetFitArtifactError::EncodeFailed {
+                reason: format!("probe {index} ({id}): predict returned no rows"),
+            })?;
+        if observed_label != record.label {
+            return Err(probe_diverged(
+                index,
+                id,
+                "label",
+                0,
+                record.label.clone(),
+                observed_label,
+                "exact",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Recompute one probe's logits the way the writer recorded them.
+fn replay_logits(
+    parts: &SetFitAprParts,
+    embedding: &[f32],
+    classes: usize,
+    width: usize,
+    probe: usize,
+    probe_id: &str,
+) -> Result<Vec<f32>, SetFitArtifactError> {
+    let mut logits = Vec::with_capacity(classes);
+    for class in 0..classes {
+        let intercept = parts.head_intercepts.get(class).copied().ok_or_else(|| {
+            probe_diverged(
+                probe,
+                probe_id,
+                "logit_count",
+                class,
+                classes.to_string(),
+                parts.head_intercepts.len().to_string(),
+                "exact",
+            )
+        })?;
+        let start = class.saturating_mul(width);
+        let row = parts
+            .head_weights
+            .get(start..start.saturating_add(width))
+            .ok_or_else(|| {
+                probe_diverged(
+                    probe,
+                    probe_id,
+                    "logit_count",
+                    class,
+                    format!("{}", classes.saturating_mul(width)),
+                    parts.head_weights.len().to_string(),
+                    "exact",
+                )
+            })?;
+        let mut z = f64::from(intercept);
+        for (weight, value) in row.iter().zip(embedding.iter()) {
+            z += f64::from(*weight) * f64::from(*value);
+        }
+        logits.push(z as f32);
+    }
+    Ok(logits)
+}
+
+/// One tolerance-bounded component comparison, NaN-visible throughout.
+fn compare_probe_component(
+    probe: usize,
+    probe_id: &str,
+    component: &'static str,
+    expected: &[f32],
+    observed: &[f32],
+    bound: f64,
+) -> Result<(), SetFitArtifactError> {
+    for (index, (want, got)) in expected.iter().zip(observed.iter()).enumerate() {
+        let delta = f64::from((got - want).abs());
+        if !within(delta, bound) {
+            return Err(probe_diverged(
+                probe,
+                probe_id,
+                component,
+                index,
+                format!("{want:e}"),
+                format!("{got:e}"),
+                &format!("{bound:e}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3175,7 +4143,12 @@ mod tamper {
                         .get_tensor_data(&entry.name)
                         .expect("every index entry has a payload")
                         .to_vec();
-                    (entry.name.clone(), entry.dtype, entry.shape.clone(), payload)
+                    (
+                        entry.name.clone(),
+                        entry.dtype,
+                        entry.shape.clone(),
+                        payload,
+                    )
                 })
                 .collect();
             Self {
@@ -3284,7 +4257,9 @@ mod ladder {
 
     impl Read for Flood<'_> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let take = buf.len().min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+            let take = buf
+                .len()
+                .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
             for byte in buf.iter_mut().take(take) {
                 *byte = 0xAB;
             }
@@ -3333,7 +4308,10 @@ mod ladder {
             MAX_ARTIFACT_BYTES, 268_435_456,
             "contracts/setfit-apr-v1.yaml artifact_size_bounds.max_artifact_bytes"
         );
-        assert_eq!(ArtifactLimits::CONTRACTED.max_artifact_bytes, MAX_ARTIFACT_BYTES);
+        assert_eq!(
+            ArtifactLimits::CONTRACTED.max_artifact_bytes,
+            MAX_ARTIFACT_BYTES
+        );
     }
 
     #[test]
@@ -3367,7 +4345,11 @@ mod ladder {
         assert!(
             matches!(
                 &err,
-                SetFitArtifactError::ArtifactTooLarge { what: "stream", cap: 64, .. }
+                SetFitArtifactError::ArtifactTooLarge {
+                    what: "stream",
+                    cap: 64,
+                    ..
+                }
             ),
             "got {err:?}"
         );
@@ -3451,7 +4433,10 @@ mod ladder {
         assert!(
             matches!(
                 &err,
-                SetFitArtifactError::ContainerIntegrity { what: "header_checksum", .. }
+                SetFitArtifactError::ContainerIntegrity {
+                    what: "header_checksum",
+                    ..
+                }
             ),
             "got {err:?}"
         );
@@ -3466,7 +4451,10 @@ mod ladder {
         assert!(
             matches!(
                 &err,
-                SetFitArtifactError::ContainerIntegrity { what: "footer_checksum", .. }
+                SetFitArtifactError::ContainerIntegrity {
+                    what: "footer_checksum",
+                    ..
+                }
             ),
             "got {err:?}"
         );
@@ -3522,15 +4510,16 @@ mod ladder {
     #[test]
     fn schema_version_two_is_a_typed_unsupported_schema_version() {
         let mut tampered = Tampered::of(&honest_bytes());
-        tampered
-            .doc
-            .insert("schema_version".to_string(), json!(2));
+        tampered.doc.insert("schema_version".to_string(), json!(2));
         let err = load_setfit_apr(&tampered.emit())
             .expect_err("a future schema must be refused, never partially interpreted");
         assert!(
             matches!(
                 &err,
-                SetFitArtifactError::UnsupportedSchemaVersion { got: 2, supported: 1 }
+                SetFitArtifactError::UnsupportedSchemaVersion {
+                    got: 2,
+                    supported: 1
+                }
             ),
             "got {err:?}"
         );
@@ -3635,6 +4624,33 @@ mod ladder {
     }
 
     #[test]
+    fn a_document_claiming_an_absurd_encoder_depth_is_refused_before_the_expansion() {
+        // The expected-set builder is a FUNCTION of num_layers, so a document
+        // claiming 2^40 layers would make the EXPANSION the allocation attack.
+        // The bound must therefore run BEFORE the expansion, not after it.
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered
+            .doc
+            .get_mut("architecture")
+            .and_then(Value::as_object_mut)
+            .expect("the architecture sub-document")
+            .insert("num_layers".to_string(), json!(1_099_511_627_776_u64));
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("an absurd declared depth is refused, not expanded");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ArtifactTooLarge {
+                    what: "declared_layers",
+                    observed: 1_099_511_627_776,
+                    cap
+                } if *cap == MAX_ENCODER_LAYERS as u64
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
     fn a_declared_size_that_disagrees_with_the_declared_shape_is_a_typed_inconsistent_tensor() {
         let mut tampered = Tampered::of(&honest_bytes());
         {
@@ -3695,8 +4711,8 @@ mod ladder {
             // 0x7FC00000, little-endian: the quiet-NaN bit pattern.
             payload[0..4].copy_from_slice(&[0x00, 0x00, 0xC0, 0x7F]);
         }
-        let err = load_setfit_apr(&tampered.emit())
-            .expect_err("a NaN weight must never reach a rebuild");
+        let err =
+            load_setfit_apr(&tampered.emit()).expect_err("a NaN weight must never reach a rebuild");
         assert!(
             matches!(&err, SetFitArtifactError::NonFiniteValue { path }
                 if path == "blk.0.attn_q.weight[0]"),
@@ -3885,7 +4901,10 @@ mod probe {
     fn ordered_labels_are_read_off_the_rebuilt_head() {
         let model = load_setfit_apr(&honest_bytes()).expect("loads");
         assert_eq!(model.ordered_labels(), model.doc_view().ordered_labels);
-        assert_eq!(model.ordered_labels().len(), model.doc_view().head.num_labels);
+        assert_eq!(
+            model.ordered_labels().len(),
+            model.doc_view().head.num_labels
+        );
     }
 
     #[test]
@@ -3904,12 +4923,11 @@ mod probe {
         assert!(
             matches!(
                 &err,
-                SetFitArtifactError::ProbeReplayFailed {
-                    probe: 2,
-                    component: "embedding",
-                    index: 3,
-                    ..
-                }
+                SetFitArtifactError::ProbeReplayFailed(divergence)
+                    if divergence.probe == 2
+                        && divergence.probe_id == PROBE_IDS[2]
+                        && divergence.component == "embedding"
+                        && divergence.index == 3
             ),
             "got {err:?}"
         );
@@ -3934,11 +4952,10 @@ mod probe {
         assert!(
             matches!(
                 &err,
-                SetFitArtifactError::ProbeReplayFailed {
-                    probe: 0,
-                    component: "label",
-                    ..
-                }
+                SetFitArtifactError::ProbeReplayFailed(divergence)
+                    if divergence.probe == 0
+                        && divergence.component == "label"
+                        && divergence.tolerance == "exact"
             ),
             "got {err:?}"
         );
@@ -3955,11 +4972,8 @@ mod probe {
         assert!(
             matches!(
                 &err,
-                SetFitArtifactError::ProbeReplayFailed {
-                    probe: 4,
-                    component: "input",
-                    ..
-                }
+                SetFitArtifactError::ProbeReplayFailed(divergence)
+                    if divergence.probe == 4 && divergence.component == "input"
             ),
             "got {err:?}"
         );
@@ -3978,10 +4992,10 @@ mod probe {
         assert!(
             matches!(
                 &err,
-                SetFitArtifactError::ProbeReplayFailed {
-                    component: "probe_count",
-                    ..
-                }
+                SetFitArtifactError::ProbeReplayFailed(divergence)
+                    if divergence.component == "probe_count"
+                        && divergence.expected == PROBE_COUNT.to_string()
+                        && divergence.observed == "5"
             ),
             "got {err:?}"
         );
@@ -4013,13 +5027,22 @@ mod probe {
         assert_eq!(doc.bundle_schema_version, view.bundle_schema_version);
         assert_eq!(doc.format_id, view.format_id);
         // Revisions and hashes
-        assert_eq!(doc.architecture.source_revision, view.architecture.source_revision);
-        assert_eq!(doc.architecture.tokenizer_sha256, view.architecture.tokenizer_sha256);
+        assert_eq!(
+            doc.architecture.source_revision,
+            view.architecture.source_revision
+        );
+        assert_eq!(
+            doc.architecture.tokenizer_sha256,
+            view.architecture.tokenizer_sha256
+        );
         assert_eq!(doc.tokenizer_sha256, view.architecture.tokenizer_sha256);
         // Pooling / truncation policy
         assert_eq!(doc.preprocessing.pooling, view.pooling);
         assert_eq!(doc.preprocessing.normalization, view.normalization);
-        assert_eq!(doc.preprocessing.l2_epsilon_hex, f32_bits_hex(view.l2_epsilon));
+        assert_eq!(
+            doc.preprocessing.l2_epsilon_hex,
+            f32_bits_hex(view.l2_epsilon)
+        );
         assert_eq!(
             doc.preprocessing.truncation_max_sequence_length,
             view.truncation_max_sequence_length
@@ -4053,7 +5076,9 @@ mod probe {
         let model = load_setfit_apr(&honest_bytes()).expect("loads");
         let width = model.doc_view().architecture.hidden;
         let texts = vec!["the quick brown fox".to_string(), "ok".to_string()];
-        let rows = model.embed(&texts).expect("embed is reachable through the public API");
+        let rows = model
+            .embed(&texts)
+            .expect("embed is reachable through the public API");
 
         assert_eq!(rows.len(), texts.len());
         for row in &rows {
