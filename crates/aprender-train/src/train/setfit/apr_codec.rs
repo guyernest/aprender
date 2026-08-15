@@ -1026,3 +1026,337 @@ mod bijection {
         );
     }
 }
+
+#[cfg(test)]
+mod round_trip {
+    //! APR-03, end to end through the REAL trusted policy.
+    //!
+    //! > "training closes the in-memory model, reloads the written APR through the
+    //! > production core loader, and verifies exact tokenizer/configuration/tensor
+    //! > state plus tolerance-bounded outputs."
+    //!
+    //! Every test below drives `SetFitRun::<HeadFitted>::verify_artifact` — the
+    //! shipped public door — which delegates to `verify::run_verify_policy` at
+    //! `Tolerance::EXACT`. Nothing in the policy changed for phase 4: the format
+    //! swapped behind the seam and the check did not (Ph3 D-07 as amended).
+    //!
+    //! # What the run is, exactly
+    //!
+    //! The dataset, the selection, the resolved configuration and the stage-one
+    //! evidence come from a genuine calibrated run built through the shipped doors
+    //! (`fx::head_fitted_run`). The ENCODER and HEAD are substituted for an
+    //! APR-capable pair, because the phase-3 slice fixture provably cannot compute
+    //! the contract's six probes — see `fixture`'s module docs for the measurement,
+    //! and `round_trip_the_phase_three_slice_fixture_cannot_carry_an_apr_artifact`
+    //! below for the executable record of it.
+
+    use aprender::setfit::{artifact_sha256_hex, load_setfit_apr, SetFitArtifactError};
+
+    use super::*;
+    use crate::train::setfit::bundle::ProvenanceRecord;
+    use crate::train::setfit::test_fixtures as fx;
+    use crate::train::setfit::{HeadFitted, HeadFittedEvidence, SetFitRun, SetFitTrainError};
+
+    /// A calibrated run whose encoder and head CAN carry a `setfit-apr-v1` artifact.
+    ///
+    /// The struct literal is deliberate and it is in-crate: the lifecycle seal is
+    /// against OUT-OF-CRATE minting (`mod.rs`'s `sealed::Sealed`), and phase 3's own
+    /// test modules already assemble bundles directly through `from_run_parts`. What
+    /// is substituted is named here so no reader has to infer it: the encoder, the
+    /// head, and nothing else.
+    fn apr_capable_run() -> SetFitRun<HeadFitted> {
+        let real = fx::head_fitted_run(fx::calibrated_variant());
+        let SetFitRun { encoder: _slice_encoder, dataset, selection, config, evidence, _state } =
+            real;
+        let labels = evidence.ordered_labels().to_vec();
+        assert_eq!(
+            labels.len(),
+            3,
+            "the fixture corpus declares three classes; the substituted head must match",
+        );
+        let evidence = HeadFittedEvidence { head: fixture::head(&labels), ..evidence };
+        SetFitRun { encoder: fixture::encoder(), dataset, selection, config, evidence, _state }
+    }
+
+    /// The exact bytes `close` will produce for this run, computed without consuming it.
+    ///
+    /// Assembled through the SAME `from_run_parts` the trusted `close` calls, with the
+    /// same seven arguments in the same order, so this is the artifact under test and
+    /// not a look-alike.
+    fn artifact_bytes_of(run: &SetFitRun<HeadFitted>) -> Vec<u8> {
+        let bundle = SetFitBundle::from_run_parts(
+            APR_FORMAT_ID,
+            run.encoder(),
+            run.evidence().head(),
+            run.evidence().ordered_labels(),
+            run.selection(),
+            run.config(),
+            run.evidence().passed().summary(),
+        )
+        .expect("the run's parts must assemble into a bundle");
+        AprCodec::new().serialize(&bundle).expect("the bundle must write as setfit-apr-v1")
+    }
+
+    /// The final state is MINTED, and the hash it records is the artifact's own.
+    ///
+    /// One hash, two witnesses: the policy's `verify::artifact_hash` (a trusted free
+    /// function, never the codec's) and core's `artifact_sha256_hex` over the same
+    /// bytes. They come from two modules and must agree, which is what makes the
+    /// recorded identity checkable by a consumer that only has the file.
+    #[test]
+    fn round_trip_verify_artifact_mints_the_verified_state_and_records_the_artifact_hash() {
+        let run = apr_capable_run();
+        let bytes = artifact_bytes_of(&run);
+
+        let verified = run
+            .verify_artifact(&AprCodec::new())
+            .expect("the shipped APR codec must complete the trusted round trip");
+
+        assert_eq!(verified.state_name(), "artifact_reloaded_and_verified");
+        assert_eq!(verified.artifact_format_id(), APR_FORMAT_ID);
+        assert_eq!(
+            verified.artifact_hash(),
+            artifact_sha256_hex(&bytes),
+            "the state's recorded hash must be the sha256 of the artifact it was minted from",
+        );
+
+        let report = verified.evidence().verify_report();
+        assert!(report.round_trip_closed(), "the byte-canonical closure check must have passed");
+        assert_eq!(report.artifact_bytes(), bytes.len());
+        assert!(report.probe_rows() > 0, "the verification must have compared rows");
+        assert_eq!(report.embedding_dim(), fixture::HIDDEN);
+        assert_eq!(report.class_count(), 3);
+    }
+
+    /// The SAME bytes load through the PRODUCTION core loader — probe replay included.
+    ///
+    /// This is the half of APR-03 the codec alone cannot claim: `deserialize` runs
+    /// rungs 1-5, and `load_setfit_apr` runs 1-7. A train-time artifact that parsed
+    /// but could not be rebuilt or could not reproduce its own probe expectations
+    /// would satisfy the codec and fail in production.
+    #[test]
+    fn round_trip_the_same_bytes_load_through_the_production_core_loader() {
+        let run = apr_capable_run();
+        let bytes = artifact_bytes_of(&run);
+
+        let model = load_setfit_apr(&bytes)
+            .expect("a train-time setfit-apr-v1 artifact IS a production artifact");
+        assert_eq!(model.artifact_sha256(), artifact_sha256_hex(&bytes));
+        assert_eq!(model.ordered_labels(), run.evidence().ordered_labels());
+        assert_eq!(model.doc_view().head.n_features, fixture::HIDDEN);
+        assert_eq!(model.doc_view().schema, APR_FORMAT_ID);
+
+        // The verification the codec's own door does NOT perform, performed.
+        let embedded = model
+            .embed(&["the quick brown fox".to_string()])
+            .expect("the verified model embeds through the same path rung 7 replayed");
+        assert_eq!(embedded.len(), 1);
+        assert_eq!(embedded[0].len(), fixture::HIDDEN);
+    }
+
+    /// The recovered provenance equals the RUN'S OWN selection fingerprints.
+    ///
+    /// The end-to-end witness that plan 04-13's bundle field 20 is real and not
+    /// merely compiled: the values are read off the `Selection` at assembly, written
+    /// into the artifact, and recovered from the artifact alone by the production
+    /// loader — six facts no function of the other nineteen bundle fields produces.
+    #[test]
+    fn round_trip_the_recovered_provenance_equals_the_runs_selection_fingerprints() {
+        let run = apr_capable_run();
+        let bytes = artifact_bytes_of(&run);
+        let selection = run.selection();
+
+        let model = load_setfit_apr(&bytes).expect("load");
+        let provenance = &model.doc_view().provenance;
+
+        for (field, expected) in [
+            ("dataset_fingerprint", selection.dataset_fingerprint_hex().to_string()),
+            ("validation_split_fingerprint", selection.validation_fingerprint_hex().to_string()),
+            ("selection_semantic_hash", hex::encode(selection.semantic_hash())),
+            ("selection_ledger_hash", hex::encode(selection.ledger_hash())),
+        ] {
+            let observed = provenance
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("the artifact must carry provenance.{field}"));
+            assert_eq!(observed, expected, "provenance.{field}");
+            assert_eq!(observed.len(), 64, "provenance.{field} must be a 64-character digest");
+        }
+        assert_eq!(
+            provenance.get("selection_root_seed").and_then(serde_json::Value::as_u64),
+            Some(selection.root_seed()),
+        );
+        assert_eq!(
+            provenance.get("shots_per_class").and_then(serde_json::Value::as_u64),
+            Some(u64::from(selection.shots_per_class())),
+        );
+    }
+
+    /// `Tolerance::EXACT` HOLDS: both bounds and both observed maxima are zero.
+    ///
+    /// A2's falsification point. If this ever fails, the fix is a contracted
+    /// tolerance in TRUSTED code keyed on the codec — never a parameter on the
+    /// trait, which is the power the codec/policy split removed.
+    #[test]
+    fn round_trip_tolerance_exact_holds_with_zero_recorded_maxima() {
+        let verified =
+            apr_capable_run().verify_artifact(&AprCodec::new()).expect("the round trip closes");
+        let report = verified.evidence().verify_report();
+
+        assert_eq!(report.tolerance_embedding_abs(), 0.0, "the APR codec verifies at EXACT");
+        assert_eq!(report.tolerance_probability_abs(), 0.0);
+        assert_eq!(
+            report.max_embedding_abs_diff(),
+            0.0,
+            "an embedding element differed across the APR persistence boundary",
+        );
+        assert_eq!(
+            report.max_probability_abs_diff(),
+            0.0,
+            "a class probability differed across the APR persistence boundary",
+        );
+    }
+
+    /// A codec that SILENTLY DEFAULTS one bundle field cannot close. The bijection,
+    /// shown able to fail.
+    ///
+    /// This is the in-band negative for THIS plan's claim. `AprCodec` recovers all
+    /// twenty fields; the wrapper below recovers nineteen and invents the twentieth,
+    /// which is precisely the defect review B3 said was asserted and shown nowhere.
+    /// The trusted policy's round-trip closure check catches it, because
+    /// re-serializing a bundle with a different `provenance` cannot reproduce the
+    /// bytes that were hashed.
+    ///
+    /// It is `provenance` and not another field on purpose: field 20 is the one that
+    /// is NOT derivable from the artifact's other contents, so a codec could not
+    /// recover it by accident.
+    #[test]
+    fn round_trip_a_codec_that_defaults_one_bundle_field_cannot_close() {
+        /// `AprCodec`, minus field 20.
+        struct ProvenanceDefaultingCodec(AprCodec);
+
+        impl sealed::Sealed for ProvenanceDefaultingCodec {}
+
+        impl SetFitCodec for ProvenanceDefaultingCodec {
+            fn format_id(&self) -> &'static str {
+                APR_FORMAT_ID
+            }
+
+            fn serialize(&self, bundle: &SetFitBundle) -> Result<Vec<u8>, CodecError> {
+                // HONEST, exactly like `EchoCodec`'s: the defect is entirely in the
+                // reverse direction, so the closure check has a fair chance to pass.
+                self.0.serialize(bundle)
+            }
+
+            fn deserialize(&self, bytes: &[u8]) -> Result<SetFitBundle, CodecError> {
+                let mut bundle = self.0.deserialize(bytes)?;
+                bundle.provenance = ProvenanceRecord {
+                    dataset_fingerprint: "0".repeat(64),
+                    validation_split_fingerprint: "0".repeat(64),
+                    selection_semantic_hash: "0".repeat(64),
+                    selection_ledger_hash: "0".repeat(64),
+                    selection_root_seed: 0,
+                    shots_per_class: 0,
+                };
+                Ok(bundle)
+            }
+        }
+
+        // The control: the SAME run closes under the honest codec, so the refusal
+        // below is attributable to the defaulted field and to nothing else.
+        apr_capable_run()
+            .verify_artifact(&AprCodec::new())
+            .expect("control: the honest codec must close");
+
+        // `let ... else` and not `expect_err`: the Ok arm is a `SetFitRun`, which is
+        // deliberately not `Debug`, and `.err().expect(..)` is a clippy error here.
+        let Err(err) =
+            apr_capable_run().verify_artifact(&ProvenanceDefaultingCodec(AprCodec::new()))
+        else {
+            panic!("a codec that defaults a bundle field must not mint the verified state");
+        };
+        assert!(
+            matches!(err, SetFitTrainError::ReloadNotFromBytes { .. }),
+            "expected the closure check to refuse, got {err:?}",
+        );
+    }
+
+    /// One flipped artifact byte is refused, typed, by BOTH doors.
+    ///
+    /// The container's trailing CRC covers the whole content and is checked before
+    /// anything in the file is interpreted, so a flip anywhere in the payload is a
+    /// `footer_checksum` refusal rather than a mis-decoded tensor. The DEEPER
+    /// corruption class — a flip that is re-signed, so the CRCs agree and only the
+    /// probe replay notices — is 04-03's tamper-harness territory and is already
+    /// covered there; it needs a re-emitting writer that lives in core's test module.
+    #[test]
+    fn round_trip_a_flipped_artifact_byte_is_refused_by_both_doors() {
+        let bytes = artifact_bytes_of(&apr_capable_run());
+        let mut flipped = bytes.clone();
+        let middle = flipped.len() / 2;
+        flipped[middle] ^= 0x01;
+        assert_ne!(flipped, bytes, "the flip must actually change a byte");
+
+        let codec_err = AprCodec::new()
+            .deserialize(&flipped)
+            .expect_err("the codec must refuse a corrupted artifact");
+        assert!(
+            matches!(
+                &codec_err,
+                CodecError::Artifact {
+                    source: SetFitArtifactError::ContainerIntegrity { what, .. },
+                    ..
+                } if *what == "footer_checksum"
+            ),
+            "expected a typed footer-checksum refusal, got {codec_err:?}",
+        );
+
+        assert!(
+            load_setfit_apr(&flipped).is_err(),
+            "the production loader must refuse the same bytes",
+        );
+    }
+
+    /// THE FINDING, kept executable: the phase-3 slice fixture cannot carry an artifact.
+    ///
+    /// Plan 04-05 was written assuming `fx::head_fitted_run(..)` could be pushed
+    /// straight through `verify_artifact(&AprCodec)`. It cannot, and this test is the
+    /// measurement rather than a paragraph — if the slice fixture ever gains
+    /// vocabulary coverage, this turns red and points at `fixture`'s module docs.
+    ///
+    /// Both structural gaps are asserted, not only the one that happens to fire
+    /// first, so the record does not silently narrow to whichever probe the encoder
+    /// reaches soonest.
+    #[test]
+    fn round_trip_the_phase_three_slice_fixture_cannot_carry_an_apr_artifact() {
+        let slice = fx::slice_encoder(fx::FIXTURE_SEED);
+        let arch = slice.architecture();
+        assert!(
+            arch.vocab_remap.is_some(),
+            "gap 1: the slice is a VOCABULARY CLOSURE, so a probe outside it has no id",
+        );
+        assert!(
+            arch.positions < aprender::setfit::MAX_SEQUENCE_LENGTH,
+            "gap 2: the slice declares {} position rows, below the {}-token truncation \
+             boundary probe_truncation_boundary produces",
+            arch.positions,
+            aprender::setfit::MAX_SEQUENCE_LENGTH,
+        );
+
+        let Err(err) =
+            fx::head_fitted_run(fx::calibrated_variant()).verify_artifact(&AprCodec::new())
+        else {
+            panic!("the slice fixture cannot compute the contract's six probes");
+        };
+        assert!(
+            matches!(
+                &err,
+                SetFitTrainError::Codec(CodecError::Artifact {
+                    source: SetFitArtifactError::ProbeComputation { probe, .. },
+                    ..
+                }) if probe == "probe_unicode"
+            ),
+            "expected a typed probe-computation refusal naming probe_unicode, got {err:?}",
+        );
+    }
+}
