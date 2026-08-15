@@ -169,3 +169,73 @@ theater" class from CLAUDE.md, in the workflow's own scaffolding.
 workspace-wide, which exits 101 on pre-existing `aprender-compute` debt — activating it today would
 block every commit immediately. Activation requires fixing that debt or scoping the hook first.
 This is a repo-level decision for the human, not a phase-4 change.
+
+---
+
+## F-10 — the phase-3 slice fixture CANNOT carry a setfit-apr-v1 artifact (BLOCKING for 04-12)
+
+Measured by 04-05, not predicted:
+
+```
+ProbeComputation { probe: "probe_unicode",
+    reason: "SetFitError::VocabOutOfSlice(canonical id 5915 is outside the slice closure)" }
+```
+
+The slice fixture's `vocab_remap` is a **97-row closure** and it declares **64 position rows** against
+a **256-token** truncation probe. Neither is a production defect — the real pin has the full
+vocabulary and 512 positions — but the probes in the contract exercise ranges the slice does not have.
+
+Worse for anyone trying to route around it: **`tune_encoder` gates on
+`encoder.architecture_fingerprint()`, so no synthetic encoder can reach `HeadFitted` through the
+shipped transitions either.** Both obvious paths are closed.
+
+04-05's Task 2 solved it by substituting **the encoder and head only**, keeping the dataset,
+selection, config, evidence and the entire trusted verify policy real, and kept the finding
+executable as a test rather than a comment.
+
+**Action for 04-12 (OPS-01, wave 5):** a plain `fx::head_fitted_run(..)` **will not close to APR**.
+Reuse 04-05's substitution shape. Read `04-05-SUMMARY.md` before writing the lifecycle test.
+
+---
+
+## F-11 — do NOT use `head`/`tail` to produce file content in this environment
+
+04-05 hit this live: `head -N file > file2` produced a **682-line** file when **1021** lines were
+requested. `head` output is filtered by the RTK proxy, so a redirect captures the *rendered view*,
+not the bytes. Caught and reverted within one command; nothing committed was affected.
+
+This generalizes the user's global CLAUDE.md guidance ("avoid using this tool to run cat/head/tail")
+into a correctness hazard, not just a token-efficiency preference: **any `head`/`tail`/`cat` redirect
+can silently truncate.** Use `Read`, or `sed -n '1,Np'`, or Python for byte-exact extraction.
+
+---
+
+## D-04-04-B — RESOLVED: the 24 `aprender-train` failures are pre-existing and unrelated
+
+04-04 observed 24 failures and correctly declined to call them pre-existing without measuring.
+Measured on the merged wave-4 tree (`e21f108dd` + recovery merge):
+
+```
+test result: FAILED. 7882 passed; 24 failed; 15 ignored
+failure set = 21 x gpu::*  +  3 x prune::*   ->  ZERO setfit failures
+```
+
+04-05 independently `diff`ed the failure set against the phase-3 known-red baseline: `DIFF_RC=0`,
+zero new. Confirmed pre-existing, in subsystems this phase does not touch.
+
+---
+
+## F-12 — ORCHESTRATOR SELF-CORRECTION: `--ff-only` after the base moves, plus unconditional cleanup
+
+I captured `EXPECTED_BASE` for wave 4, then committed the F-03 refinement on top of it before the
+agents returned. `git merge --ff-only <04-04 branch>` therefore exited **128** ("Not possible to
+fast-forward") — correctly, since the branch had diverged — and my cleanup loop then deleted the
+branch **without checking the merge status**, so 04-04's four commits were briefly unreferenced.
+
+Recovered in full by merging the dangling commit `b943116e0` directly (7 files, 0 conflicts,
+`classify.rs` and `04-04-SUMMARY.md` restored, verified reachable).
+
+**Rules for the remaining waves:** capture `EXPECTED_BASE` and then do not commit to the branch
+until the wave's agents have returned and merged; use `git merge --no-edit` (not `--ff-only`) for
+wave merges; and never delete a worktree branch without first asserting `git merge-base --is-ancestor
+<branch> HEAD`.
