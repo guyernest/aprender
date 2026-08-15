@@ -2224,7 +2224,7 @@ mod determinism {
     /// carries, so a platform that produces different bytes for this view has a
     /// parity defect, not a flaky test.
     const GOLDEN_SHA256_FIXTURE_VIEW_FULL_PIN_SHAPE: &str =
-        "0000000000000000000000000000000000000000000000000000000000000000";
+        "13e5c2965e95fc970c19a93f298a33b123f5c524a03c1e33e4a0e36967000bf4";
 
     #[test]
     fn two_writes_of_one_view_are_byte_identical_in_one_process() {
