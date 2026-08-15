@@ -574,10 +574,350 @@ pub fn artifact_sha256_hex(bytes: &[u8]) -> String {
 /// [`SetFitArtifactError`], each variant naming the specific tensor, path, probe
 /// or digest that failed.
 pub fn write_setfit_apr(view: &SetFitArtifactView) -> Result<Vec<u8>, SetFitArtifactError> {
-    let _ = view;
-    Err(SetFitArtifactError::ContainerWrite {
-        reason: "write_setfit_apr is not implemented yet (RED)".to_string(),
-    })
+    // (1) NAMES. The expected set is a FUNCTION of the view's own declared
+    //     architecture, so the identical rule judges the pinned model and a
+    //     reduced fixture.
+    let hf_name_map = build_hf_name_map(view.architecture.num_layers);
+    validate_view_structure(view, &hf_name_map)?;
+
+    // (2) EVERY f32 THE VIEW CARRIES, before any of it can reach a payload.
+    scan_view_floats(view)?;
+
+    // (3) TOKENIZER IDENTITY, BEFORE THE REBUILD. An encoder rebuilt with a
+    //     substituted tokenizer produces confidently wrong embeddings for every
+    //     input and looks structurally valid the whole time — so a probe
+    //     mismatch must never be able to arrive wearing a math-divergence
+    //     diagnosis when it is really a mis-paired tokenizer.
+    let observed = sha256_hex(&view.tokenizer_bytes);
+    if observed != view.architecture.tokenizer_sha256 {
+        return Err(SetFitArtifactError::TokenizerHashMismatch {
+            expected: view.architecture.tokenizer_sha256.clone(),
+            got: observed,
+        });
+    }
+
+    // (4) PROBES, computed from the view's OWN parts — never carried, which is
+    //     what makes them closure-safe (a carried probe set would be a 21st
+    //     bundle field with no source).
+    let probes = compute_probes(view)?;
+
+    // (5) THE ONE DOCUMENT.
+    let doc = build_artifact_doc(view, &hf_name_map, &probes)?;
+
+    // (6) THE FIVE-SUBDOCUMENT NULL WALK. Runs at WRITE time and not only as a
+    //     byte comparison: an allowlisted `null` round-trips to `None` and back
+    //     to `null`, so closure HOLDS while the value is GONE.
+    guard_subdocument_nulls(&doc)?;
+
+    // (7) THE CONTAINER. Nothing has been written until here, so a refusal at
+    //     any rung above leaves no partial artifact.
+    write_container(view, &hf_name_map, doc)
+}
+
+/// Rung 1: the view's tensor names map 1:1 onto the architecture-derived set,
+/// and its parts do not contradict one another.
+fn validate_view_structure(
+    view: &SetFitArtifactView,
+    hf_name_map: &BTreeMap<String, String>,
+) -> Result<(), SetFitArtifactError> {
+    // An HF name with no canonical entry is a typed error, NEVER a silently
+    // dropped tensor.
+    for hf in view.tensors.keys() {
+        if !hf_name_map.contains_key(hf) {
+            return Err(SetFitArtifactError::UnmappedTensorName {
+                hf_name: hf.clone(),
+            });
+        }
+    }
+    let missing: Vec<String> = hf_name_map
+        .keys()
+        .filter(|expected| !view.tensors.contains_key(*expected))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        return Err(SetFitArtifactError::IncompleteTensorSet { missing });
+    }
+    // Injectivity: two HF names resolving to one canonical name would OVERWRITE
+    // a tensor in the container's index rather than fail.
+    let canonical: BTreeSet<&String> = hf_name_map.values().collect();
+    if canonical.len() != hf_name_map.len() {
+        return Err(SetFitArtifactError::InconsistentTensorSet {
+            reason: format!(
+                "the canonical name map is not injective: {} HF names resolve to {} canonical names",
+                hf_name_map.len(),
+                canonical.len()
+            ),
+        });
+    }
+    // The structural per-entry rule, applied to the DECLARED shape before any
+    // payload is written.
+    for (hf, (shape, data)) in &view.tensors {
+        if shape.is_empty() {
+            return Err(SetFitArtifactError::InconsistentTensorSet {
+                reason: format!("{hf}: a tensor with no declared shape is not writable"),
+            });
+        }
+        let elements: usize = shape.iter().product();
+        if elements != data.len() {
+            return Err(SetFitArtifactError::InconsistentTensorSet {
+                reason: format!(
+                    "{hf}: shape {shape:?} implies {elements} elements but {} were supplied",
+                    data.len()
+                ),
+            });
+        }
+    }
+
+    let num_labels = view.ordered_labels.len();
+    if num_labels < 2 {
+        return Err(SetFitArtifactError::InconsistentTensorSet {
+            reason: format!("a classifier head needs at least two labels, got {num_labels}"),
+        });
+    }
+    // The head must be able to CONSUME this encoder's embedding. A head fitted
+    // at a different width would refuse every probe at replay time, in a fresh
+    // process, long after the artifact shipped.
+    if view.head_n_features != view.architecture.hidden {
+        return Err(SetFitArtifactError::InconsistentTensorSet {
+            reason: format!(
+                "head_n_features {} does not match the encoder's hidden width {}",
+                view.head_n_features, view.architecture.hidden
+            ),
+        });
+    }
+    let expected_weights = num_labels.saturating_mul(view.head_n_features);
+    if view.head_weights.len() != expected_weights {
+        return Err(SetFitArtifactError::InconsistentTensorSet {
+            reason: format!(
+                "setfit.head.weight declares [{num_labels}, {}] = {expected_weights} values but {} were supplied",
+                view.head_n_features,
+                view.head_weights.len()
+            ),
+        });
+    }
+    if view.head_intercepts.len() != num_labels {
+        return Err(SetFitArtifactError::InconsistentTensorSet {
+            reason: format!(
+                "setfit.head.bias declares [{num_labels}] values but {} were supplied",
+                view.head_intercepts.len()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Rung 2: every `f32` the view carries is finite, named by its exact path.
+fn scan_view_floats(view: &SetFitArtifactView) -> Result<(), SetFitArtifactError> {
+    for (hf, (_, data)) in &view.tensors {
+        for (index, value) in data.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(SetFitArtifactError::NonFiniteValue {
+                    path: format!("tensors.{hf}[{index}]"),
+                });
+            }
+        }
+    }
+    for (array, values) in [
+        ("head_weights", &view.head_weights),
+        ("head_intercepts", &view.head_intercepts),
+    ] {
+        for (index, value) in values.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(SetFitArtifactError::NonFiniteValue {
+                    path: format!("{array}[{index}]"),
+                });
+            }
+        }
+    }
+    if !view.l2_epsilon.is_finite() {
+        return Err(SetFitArtifactError::NonFiniteValue {
+            path: "preprocessing.l2_epsilon".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Rung 4: the six contract-resident probes, replayed through a model rebuilt
+/// from the view's own parts.
+///
+/// The tensor map is CLONED because `from_bundle_parts` takes ownership and
+/// drains it (encoder.rs:408-419, where taking by value is what avoids a
+/// per-tensor copy on the reload path), while this writer only borrows the view.
+/// That is a real cost on a full pin and it is the right trade: computing the
+/// probes from anything other than the view's OWN tensors would record
+/// expectations for a model the artifact does not contain.
+fn compute_probes(view: &SetFitArtifactView) -> Result<Vec<Value>, SetFitArtifactError> {
+    let model = SetFitMiniLm::from_bundle_parts(
+        &view.tokenizer_bytes,
+        &view.architecture,
+        view.tensors.clone(),
+        view.root_seed,
+    )
+    .map_err(|e| SetFitArtifactError::ProbeComputation {
+        probe: "<rebuild>".to_string(),
+        reason: e.to_string(),
+    })?;
+    let head = MultinomialLogisticRegression::from_stored_coefficients(
+        view.ordered_labels.clone(),
+        view.head_n_features,
+        view.head_weights.clone(),
+        view.head_intercepts.clone(),
+    )
+    .map_err(|e| SetFitArtifactError::ProbeComputation {
+        probe: "<head>".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    let d = view.head_n_features;
+    let k = view.ordered_labels.len();
+    let mut records = Vec::with_capacity(PROBE_COUNT);
+
+    for (index, input) in probe_inputs().into_iter().enumerate() {
+        let id = PROBE_IDS[index];
+        let fail = |reason: String| SetFitArtifactError::ProbeComputation {
+            probe: id.to_string(),
+            reason,
+        };
+
+        let pooled = model
+            .encode_texts(&[input.as_str()])
+            .map_err(|e| fail(e.to_string()))?;
+        if pooled.shape().to_vec() != vec![1, d] {
+            return Err(fail(format!(
+                "the encode produced shape {:?}, expected [1, {d}]",
+                pooled.shape()
+            )));
+        }
+        let embedding: Vec<f32> = pooled.data().to_vec();
+        for (position, value) in embedding.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(SetFitArtifactError::NonFiniteValue {
+                    path: format!("probes.{index}.embedding_hex.{position}"),
+                });
+            }
+        }
+
+        // The logits are accumulated in `f64` in the SAME order
+        // `predict_proba` uses (multinomial.rs:1174-1185) and then narrowed to
+        // `f32` for storage, so the recorded logits and the recorded
+        // probabilities cannot describe two different computations. The
+        // narrowing is deterministic and the contract's replay tolerance
+        // (1.0e-5 absolute) is orders above `f32` epsilon at these magnitudes.
+        let mut logits = Vec::with_capacity(k);
+        for c in 0..k {
+            let mut z = f64::from(view.head_intercepts[c]);
+            for j in 0..d {
+                z += f64::from(view.head_weights[c * d + j]) * f64::from(embedding[j]);
+            }
+            logits.push(z as f32);
+        }
+
+        let probabilities: Vec<f32> = head
+            .predict_proba(&[embedding.clone()])
+            .map_err(|e| fail(e.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| fail("predict_proba returned no rows".to_string()))?
+            .into_iter()
+            .map(|p| p as f32)
+            .collect();
+
+        for (field, values) in [
+            ("logits_hex", &logits),
+            ("probabilities_hex", &probabilities),
+        ] {
+            for (position, value) in values.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(SetFitArtifactError::NonFiniteValue {
+                        path: format!("probes.{index}.{field}.{position}"),
+                    });
+                }
+            }
+        }
+
+        // The label goes through the head's own `predict`, so the tie-break
+        // (lowest index on an exact tie) is the house rule and not a second one
+        // written here.
+        let label = head
+            .predict(&[embedding.clone()])
+            .map_err(|e| fail(e.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| fail("predict returned no rows".to_string()))?;
+
+        let mut record = JsonMap::new();
+        record.insert("input".to_string(), Value::String(input));
+        record.insert(
+            "embedding_hex".to_string(),
+            Value::Array(f32_slice_hex(&embedding)),
+        );
+        record.insert(
+            "logits_hex".to_string(),
+            Value::Array(f32_slice_hex(&logits)),
+        );
+        record.insert(
+            "probabilities_hex".to_string(),
+            Value::Array(f32_slice_hex(&probabilities)),
+        );
+        record.insert("label".to_string(), Value::String(label));
+        records.push(Value::Object(record));
+    }
+    Ok(records)
+}
+
+/// Rung 7: hand the tensors and the ONE document to the APR v2 container.
+fn write_container(
+    view: &SetFitArtifactView,
+    hf_name_map: &BTreeMap<String, String>,
+    doc: JsonMap<String, Value>,
+) -> Result<Vec<u8>, SetFitArtifactError> {
+    let mut custom: HashMap<String, Value> = HashMap::with_capacity(1);
+    custom.insert(CUSTOM_METADATA_KEY.to_string(), Value::Object(doc));
+
+    let metadata = AprV2Metadata {
+        model_type: MODEL_TYPE_TAG.to_string(),
+        // NO TIMESTAMP IS WRITTEN — see the module docs. Written explicitly
+        // rather than left to `Default` so the choice is visible at the site
+        // that makes it.
+        created_at: None,
+        custom,
+        ..Default::default()
+    };
+
+    // `AprV2Writer::new` already sets LAYOUT_ROW_MAJOR (writer.rs:30-39); there
+    // is no GGUF import path into this writer, so there is no transpose at this
+    // boundary and no column-major kernel may ever be pointed at these tensors.
+    let mut writer = AprV2Writer::new(metadata);
+    for (hf, (shape, data)) in &view.tensors {
+        let canonical =
+            hf_name_map
+                .get(hf)
+                .ok_or_else(|| SetFitArtifactError::UnmappedTensorName {
+                    hf_name: hf.clone(),
+                })?;
+        writer.add_f32_tensor(canonical.clone(), shape.clone(), data);
+    }
+    let num_labels = view.ordered_labels.len();
+    writer.add_f32_tensor(
+        HEAD_WEIGHT_TENSOR,
+        vec![num_labels, view.head_n_features],
+        &view.head_weights,
+    );
+    writer.add_f32_tensor(HEAD_BIAS_TENSOR, vec![num_labels], &view.head_intercepts);
+    // dtype U8 makes the tokenizer's byte-exactness STRUCTURAL: there is no
+    // float path it could be rounded through.
+    writer.add_tensor(
+        TOKENIZER_BLOB_TENSOR,
+        TensorDType::U8,
+        vec![view.tokenizer_bytes.len()],
+        view.tokenizer_bytes.clone(),
+    );
+
+    writer
+        .write()
+        .map_err(|e| SetFitArtifactError::ContainerWrite {
+            reason: e.to_string(),
+        })
 }
 
 // ===========================================================================
@@ -737,13 +1077,113 @@ fn guard_subdocument_nulls(doc: &JsonMap<String, Value>) -> Result<(), SetFitArt
 // ===========================================================================
 
 /// Build the normative `SetFitArtifactDoc` as ONE `serde_json::Map`.
+///
+/// The insertion order below is the contract's declaration order, for a reader's
+/// benefit only: `serde_json::Map` is BTreeMap-backed (no workspace crate enables
+/// `preserve_order`), so the SERIALIZED key order is sorted and does not depend
+/// on the order of these calls. That is precisely what makes the bytes
+/// reproducible.
 fn build_artifact_doc(
     view: &SetFitArtifactView,
     hf_name_map: &BTreeMap<String, String>,
     probes: &[Value],
 ) -> Result<JsonMap<String, Value>, SetFitArtifactError> {
-    let _ = (view, hf_name_map, probes);
-    Ok(JsonMap::new())
+    // The architecture sub-document is DERIVED from the typed record — see
+    // `SetFitArtifactView`. One fact, one copy.
+    let architecture = serde_json::to_value(&view.architecture).map_err(|e| {
+        SetFitArtifactError::InconsistentTensorSet {
+            reason: format!("the architecture record does not serialize: {e}"),
+        }
+    })?;
+
+    let mut preprocessing = JsonMap::new();
+    preprocessing.insert("pooling".to_string(), Value::String(view.pooling.clone()));
+    preprocessing.insert(
+        "normalization".to_string(),
+        Value::String(view.normalization.clone()),
+    );
+    // A bit-pattern hex string, never a JSON number: decimal text is not the
+    // identity on f32, and a non-finite value would render as an indistinguishable
+    // `null`. Hex keeps every doc-OWNED float exact and off the null path.
+    preprocessing.insert(
+        "l2_epsilon_hex".to_string(),
+        Value::String(f32_bits_hex(view.l2_epsilon)),
+    );
+    preprocessing.insert(
+        "truncation_max_sequence_length".to_string(),
+        Value::from(view.truncation_max_sequence_length),
+    );
+    preprocessing.insert(
+        "padding_mode".to_string(),
+        Value::String(view.padding_mode.clone()),
+    );
+    preprocessing.insert("max_length".to_string(), Value::from(view.max_length));
+
+    let mut head = JsonMap::new();
+    head.insert("n_features".to_string(), Value::from(view.head_n_features));
+    head.insert(
+        "num_labels".to_string(),
+        Value::from(view.ordered_labels.len()),
+    );
+
+    // The map is WRITTEN INTO the artifact so `deserialize` inverts a map the
+    // artifact carries rather than re-deriving names from a table that may have
+    // moved between the write and the read.
+    let mut names = JsonMap::new();
+    for (hf, canonical) in hf_name_map {
+        names.insert(hf.clone(), Value::String(canonical.clone()));
+    }
+
+    let mut doc = JsonMap::new();
+    doc.insert(
+        "schema".to_string(),
+        Value::String(ARTIFACT_SCHEMA.to_string()),
+    );
+    doc.insert(
+        "schema_version".to_string(),
+        Value::from(ARTIFACT_SCHEMA_VERSION),
+    );
+    doc.insert(
+        "bundle_schema_version".to_string(),
+        Value::from(view.bundle_schema_version),
+    );
+    doc.insert(
+        "format_id".to_string(),
+        Value::String(view.format_id.clone()),
+    );
+    doc.insert("architecture".to_string(), architecture);
+    doc.insert(
+        "tokenizer_sha256".to_string(),
+        Value::String(view.architecture.tokenizer_sha256.clone()),
+    );
+    doc.insert("preprocessing".to_string(), Value::Object(preprocessing));
+    doc.insert("root_seed".to_string(), Value::from(view.root_seed));
+    doc.insert("head".to_string(), Value::Object(head));
+    doc.insert(
+        "ordered_labels".to_string(),
+        Value::Array(
+            view.ordered_labels
+                .iter()
+                .map(|label| Value::String(label.clone()))
+                .collect(),
+        ),
+    );
+    doc.insert(
+        "requested_config".to_string(),
+        view.requested_config.clone(),
+    );
+    doc.insert("resolved_config".to_string(), view.resolved_config.clone());
+    doc.insert("evidence".to_string(), view.evidence.clone());
+    doc.insert("provenance".to_string(), view.provenance.clone());
+    doc.insert("hf_name_map".to_string(), Value::Object(names));
+    doc.insert("probes".to_string(), Value::Array(probes.to_vec()));
+
+    debug_assert_eq!(
+        doc.len(),
+        SETFIT_ARTIFACT_DOC_FIELDS.len(),
+        "the doc must carry exactly the contract's field list"
+    );
+    Ok(doc)
 }
 
 // ===========================================================================
@@ -1906,11 +2346,20 @@ mod determinism {
         );
 
         let stdout = String::from_utf8_lossy(&output.stdout);
+        // libtest with `--nocapture` prints the test's stdout on the SAME line as
+        // its `test <name> ... ` prefix, so the marker is searched for ANYWHERE
+        // in the line rather than at its start. A `strip_prefix` here found
+        // nothing and the test failed loudly — which is the correct behaviour for
+        // a missing marker and is why the `expect` is not an `unwrap_or_default`.
         let child = stdout
             .lines()
-            .find_map(|line| line.trim().strip_prefix(CHILD_MARKER))
+            .find_map(|line| {
+                line.find(CHILD_MARKER)
+                    .map(|at| &line[at + CHILD_MARKER.len()..])
+            })
             .map(str::trim)
             .expect("the child must print its marker line; a missing marker FAILS, never passes");
+        assert_eq!(child.len(), 64, "the child printed {child:?}, not a sha256");
         assert_eq!(
             child, parent,
             "same view, two processes, two different HashMap RandomStates"
