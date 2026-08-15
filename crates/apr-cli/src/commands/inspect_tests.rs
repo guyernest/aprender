@@ -69,6 +69,7 @@ mod inspect_tests {
                 architecture: Some("llama".to_string()),
                 ..MetadataInfo::default()
             },
+            setfit: None,
         };
         let json = serde_json::to_string(&result).expect("serialize");
         assert!(json.contains("model.apr"));
@@ -103,6 +104,7 @@ mod inspect_tests {
                 has_vocab: false,
             },
             metadata: MetadataInfo::default(),
+            setfit: None,
         };
         let json = serde_json::to_string(&result).expect("serialize");
         // Top-level architecture (on InspectResult) has skip_serializing_if

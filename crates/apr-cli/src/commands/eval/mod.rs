@@ -21,6 +21,11 @@
 pub(crate) mod code_eval;
 pub(crate) mod inference;
 mod perplexity;
+/// The `setfit-apr-v1` branch: validation + the durable selection lock, and gated test
+/// access (D-16, TRN-07). Reached only when `--task classify` names an artifact carrying
+/// the typed SetFit tag; the LoRA `--task classify` path is untouched.
+#[cfg(feature = "setfit")]
+pub(crate) mod setfit;
 
 use crate::error::{CliError, Result};
 use crate::output;

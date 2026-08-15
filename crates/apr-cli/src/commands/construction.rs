@@ -345,6 +345,7 @@
                 has_vocab: false,
             },
             metadata: MetadataInfo::default(),
+            setfit: None,
         };
 
         let json = serde_json::to_string_pretty(&result).expect("serialize");
@@ -430,6 +431,7 @@
             source_metadata: Some(
                 serde_json::json!({"run_id": "test_123", "framework": "pytorch"}),
             ),
+            setfit_doc: None,
         };
         output_metadata_text(&metadata);
     }

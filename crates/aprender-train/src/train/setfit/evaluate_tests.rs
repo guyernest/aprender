@@ -293,6 +293,41 @@ fn evaluate_source_exposes_no_public_api_taking_a_float_parameter() {
         "the test-only constructor must carry `#[cfg(test)]` immediately above it, so a shipped \
          build cannot contain a door that mints an evaluation from a caller's number",
     );
+
+    // The SECOND `pub(super)` door, added by 04-07 so a fresh process can build a candidate.
+    // It is named here rather than left to escape the `pub fn` / `pub const fn` patterns
+    // above, on this guard's own stated principle: an exception a guard does not mention is an
+    // exception nobody re-checks. `pub(super)` matches neither pattern, so a float-taking
+    // sibling door would have slipped past in silence.
+    let shared_tail = EVALUATE_SOURCE
+        .find("pub(super) fn evaluation_from_predictions(")
+        .expect("the shared prediction tail must exist; if it moved, fix this scan");
+    let rest = &EVALUATE_SOURCE[shared_tail..];
+    let open = rest.find('(').expect("a function signature has a parameter list");
+    let close = rest[open..].find(')').expect("a parameter list closes") + open;
+    let parameters = &rest[open..=close];
+    assert!(
+        !parameters.contains("f64") && !parameters.contains("f32"),
+        "`evaluation_from_predictions` must take PREDICTIONS, never a value: `{parameters}`. \
+         A metric a sibling module can hand over is the asserted number this module removed, \
+         one call frame further out.",
+    );
+    // The complete `pub(super)` surface, enumerated: `from_wire` (the lock's reconstruction
+    // path, which takes the wire struct and therefore BITS), `evaluation_for_tests` (gated),
+    // and `evaluation_from_predictions` (the shared tail). A fourth must be examined against
+    // the same float rule rather than added silently.
+    for door in [
+        "pub(super) fn from_wire(",
+        "pub(super) fn evaluation_for_tests(",
+        "pub(super) fn evaluation_from_predictions(",
+    ] {
+        assert_eq!(EVALUATE_SOURCE.matches(door).count(), 1, "`{door}` must exist exactly once",);
+    }
+    assert_eq!(
+        EVALUATE_SOURCE.matches("pub(super) fn ").count(),
+        3,
+        "exactly three `pub(super)` doors in this module, all enumerated above",
+    );
 }
 
 /// `ValidationEvaluation` has no public constructor.
