@@ -872,7 +872,14 @@ impl SetFitBundle {
 /// elements, so the intermediate was a 47 MB allocation on its own (~90 MB across a full
 /// pin) — paid twice per verify, since the policy serializes both the live bundle and the
 /// reloaded one.
-fn f32_to_hex(values: &[f32]) -> String {
+///
+/// `pub(super)` so `super::apr_codec` can REUSE it rather than write a second encoder.
+/// A second implementation would be two copies of one fact: the codec's whole obligation
+/// is `serialize(deserialize(bytes)) == bytes`, and a copy that differed in case, byte
+/// order or the handling of a subnormal would break that closure with nothing here
+/// turning red. It would also reintroduce the `4N`-byte scratch buffer the paragraph
+/// above exists to explain away.
+pub(super) fn f32_to_hex(values: &[f32]) -> String {
     let mut out = String::with_capacity(values.len() * 8);
     let mut word = [0u8; 8];
     for value in values {
@@ -891,7 +898,11 @@ fn f32_to_hex(values: &[f32]) -> String {
 }
 
 /// The inverse of [`f32_to_hex`], naming the field on failure.
-fn hex_to_f32(field: &str, encoded: &str) -> Result<Vec<f32>, BundleError> {
+///
+/// `pub(super)` for the same reason as [`f32_to_hex`]: `super::apr_codec` recovers the
+/// bundle's `l2_epsilon` from the artifact's `l2_epsilon_hex` and must decode it through
+/// the same function that encoded it, not through a second decoder that agrees today.
+pub(super) fn hex_to_f32(field: &str, encoded: &str) -> Result<Vec<f32>, BundleError> {
     if encoded.len() % 8 != 0 {
         return Err(BundleError::MalformedHexPayload {
             field: field.to_string(),
