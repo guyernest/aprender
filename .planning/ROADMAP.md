@@ -191,13 +191,13 @@ merges land back on `gsd/phase-2-contract-gate` (Phase 3 precedent). No PR to `m
 Plans:
 **Wave 1**
 
-- [ ] 04-01-PLAN.md — setfit-apr-v1 contract: normative storage map (incl. head tensors), SetFitArtifactDoc field list, doc<->bundle bijection table, cap/probes/tolerances, backend-identity grammar, lock lifecycle + $(CONTRACTS)/audit wiring + CLAUDE.md realizar-first SetFit row (wave 1)
+- [x] 04-01-PLAN.md — setfit-apr-v1 contract: normative storage map (incl. head tensors), SetFitArtifactDoc field list, doc<->bundle bijection table, cap/probes/tolerances, backend-identity grammar, lock lifecycle + $(CONTRACTS)/audit wiring + CLAUDE.md realizar-first SetFit row (wave 1)
 
 **Wave 2** *(blocked on Wave 1; three parallel plans, zero file overlap)*
 
-- [ ] 04-02-PLAN.md — Core artifact writer: canonical tensors + setfit.head.weight/bias + U8 tokenizer blob, one-key deterministic metadata, embedded synthetic probes + cross-process determinism proofs (wave 2)
-- [ ] 04-13-PLAN.md — SetFitBundle provenance (field 20) read off the run + schema-version bump — makes byte-canonical closure achievable (wave 2)
-- [ ] 04-14-PLAN.md — aprender-train public API for the CLI: SetFitTrainConfig::to_request (validated override merge) + SelectionLock::from_canonical_bytes (durable lock reconstruction) (wave 2)
+- [x] 04-02-PLAN.md — Core artifact writer: canonical tensors + setfit.head.weight/bias + U8 tokenizer blob, one-key deterministic metadata, embedded synthetic probes + cross-process determinism proofs (wave 2)
+- [x] 04-13-PLAN.md — SetFitBundle provenance (field 20) read off the run + schema-version bump — makes byte-canonical closure achievable (wave 2)
+- [x] 04-14-PLAN.md — aprender-train public API for the CLI: SetFitTrainConfig::to_request (validated override merge) + SelectionLock::from_canonical_bytes (durable lock reconstruction) (wave 2)
 
 **Wave 3** *(blocked on Wave 2)*
 
@@ -265,5 +265,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
-| 4. APR Artifact and Production Parity | 0/12 | Planned | - |
+| 4. APR Artifact and Production Parity | 4/16 | In Progress|  |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
