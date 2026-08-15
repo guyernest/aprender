@@ -1415,9 +1415,9 @@ bindings:
 - contract: setfit-apr-v1.yaml
   equation: probe_policy
   module_path: aprender::setfit::artifact
-  function: replay_probes
+  function: rung8_replay_probes
   status: pending
-  notes: 'Probe RECORDING lands with 04-02, probe REPLAY with 04-03 as rung 8. The six inputs are contract-resident and synthetic — never dataset text (Pitfall 8).'
+  notes: 'Probe RECORDING lands with 04-02, probe REPLAY with 04-03 as rung 8. The six inputs are contract-resident and synthetic — never dataset text (Pitfall 8). The function column named `replay_probes`, which never existed at any point on this branch; the shipped function is `rung8_replay_probes`, numbered to the contract ladder rather than to a private count.'
 - contract: setfit-apr-v1.yaml
   equation: probe_and_parity_tolerances
   module_path: aprender::setfit::artifact

@@ -62,6 +62,17 @@ pub const MAX_BATCH_TEXTS: usize = 256;
 /// reads the payload is the one that must apply it, BEFORE deserializing —
 /// [`MAX_BATCH_TEXTS`] is checked after the document exists, so it bounds the
 /// tokenization but not the parse.
+///
+/// # Enforcement is DEFERRED to the reading surface, and that is recorded, not implied
+///
+/// `setfit-apr-v1` is the only contract in `contracts/` that names a request-body
+/// bound, and no crate in this workspace enforces one today — there is no
+/// `DefaultBodyLimit`, no body-limit layer, and no sibling obligation to match.
+/// So this constant does not inherit an established pattern; it ESTABLISHES the
+/// number, so that when `apr classify --input` (04-07) and `POST /v1/classify`
+/// (04-08) land they apply the same one instead of each picking their own. The
+/// bound biting on a real oversized payload is those plans' obligation and is
+/// deliberately not claimed here.
 pub const MAX_REQUEST_BODY_BYTES: u64 = 1_048_576;
 
 /// Absolute tolerance on one result row's probability mass.
@@ -388,7 +399,7 @@ impl TryFrom<ClassifyResultWire> for ClassifyResult {
 /// Every field is private; [`Self::new`] is the only constructor and it
 /// validates. `Deserialize` routes through the same validation via the private
 /// [`ClassifyResponseWire`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(into = "ClassifyResponseWire", try_from = "ClassifyResponseWire")]
 pub struct ClassifyResponse {
     schema_version: u32,
@@ -396,6 +407,35 @@ pub struct ClassifyResponse {
     backend: String,
     latency_ms: f64,
     results: Vec<ClassifyResult>,
+}
+
+/// EQUALITY EXCLUDES `latency_ms`, because the contract says it must.
+///
+/// `classify_response_schema`'s postcondition is that `latency_ms` "participates
+/// in no equality comparison", and its invariant repeats that it "is EXCLUDED
+/// from every equality comparison across surfaces". A derived `PartialEq`
+/// silently made both false: `==` compared two wall-clock measurements, so the
+/// obvious `assert_eq!(from_cli, from_http)` in a parity gate was a guaranteed
+/// red for a reason that has nothing to do with the model, and the non-obvious
+/// workaround puts the exclusion rule back in every harness that compares — which
+/// is exactly where a rule goes to be applied inconsistently.
+///
+/// The rule now lives in ONE place, on the type that owns it. Everything a
+/// response asserts about the model — schema version, artifact identity, backend
+/// and every result row — is compared; the one field that is a MEASUREMENT is not.
+/// A caller that genuinely wants to inspect the timing reads
+/// [`ClassifyResponse::latency_ms`], which is the honest way to ask about it.
+///
+/// `Eq` is deliberately NOT implemented: [`ClassifyResult`] carries `f64`
+/// probabilities, so the relation is not reflexive in general even though the
+/// validating constructor excludes `NaN` today.
+impl PartialEq for ClassifyResponse {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.artifact_sha256 == other.artifact_sha256
+            && self.backend == other.backend
+            && self.results == other.results
+    }
 }
 
 impl ClassifyResponse {
@@ -1191,6 +1231,18 @@ mod envelope {
         let json = serde_json::to_string(&original).expect("serializes");
         let back: ClassifyResponse = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back, original, "the envelope round-trips unchanged");
+        // `==` deliberately says nothing about `latency_ms` (see the type's
+        // `PartialEq`), so the round trip asserts that field SEPARATELY and by
+        // BITS. Bits and not `==` on the float: the wire carries a decimal
+        // rendering, and a round trip that only compared `0.0 == 0.0` would also
+        // have passed for `-0.0`, or for any value serde had renormalized. This
+        // is the assertion that would otherwise have been quietly lost by
+        // narrowing equality.
+        assert_eq!(
+            back.latency_ms().to_bits(),
+            original.latency_ms().to_bits(),
+            "latency_ms is excluded from `==` but must still survive the wire exactly"
+        );
     }
 
     #[test]
@@ -1937,5 +1989,85 @@ mod classify_path {
         let json = serde_json::to_string(&response).expect("serializes");
         let back: ClassifyResponse = serde_json::from_str(&json).expect("reparses");
         assert_eq!(back, response, "the real response round-trips unchanged");
+        // Same split as the golden round trip: `==` covers everything the response
+        // CLAIMS about the model, and the one MEASUREMENT is asserted by bits
+        // beside it rather than smuggled into equality.
+        assert_eq!(
+            back.latency_ms().to_bits(),
+            response.latency_ms().to_bits(),
+            "a measured latency must survive the wire exactly, even though `==` ignores it"
+        );
+    }
+
+    /// The exclusion is a PROPERTY OF THE TYPE, not a convention harnesses follow.
+    ///
+    /// Two responses that agree about the model and disagree only about how long
+    /// it took are EQUAL. Without this, the 04-09 parity gate comparing a CLI
+    /// response against an HTTP one would be red on every run for a reason that
+    /// has nothing to do with either surface — a flake with a schedule, which the
+    /// contract names by that phrase.
+    #[test]
+    fn responses_differing_only_in_latency_are_equal_and_differing_in_substance_are_not() {
+        let model = fixture_verified_model();
+        let request = ClassifyRequestDocument::new(["ok", "two"]).with_logits();
+        let fast = model.classify(&request).expect("classifies");
+
+        // A response identical in every claim, rebuilt with a wildly different
+        // measurement. Constructed through the shipped validating constructor, so
+        // this is a value either surface could legitimately have produced.
+        let slow = ClassifyResponse::new(
+            fast.artifact_sha256().to_string(),
+            fast.backend().to_string(),
+            fast.latency_ms() + 4_096.0,
+            fast.results().to_vec(),
+        )
+        .expect("a larger finite latency is a legal response");
+        assert_ne!(
+            slow.latency_ms().to_bits(),
+            fast.latency_ms().to_bits(),
+            "the fixture must actually differ in the excluded field, or this proves nothing"
+        );
+        assert_eq!(
+            slow, fast,
+            "latency_ms participates in no equality comparison (contract setfit-apr-v1, \
+             classify_response_schema)"
+        );
+
+        // And the exclusion is NARROW: every other field still decides equality.
+        let other_artifact = ClassifyResponse::new(
+            "0".repeat(64),
+            fast.backend().to_string(),
+            fast.latency_ms(),
+            fast.results().to_vec(),
+        )
+        .expect("a different artifact hash is still a legal response");
+        assert_ne!(
+            other_artifact, fast,
+            "excluding the measurement must not excuse excluding the identity"
+        );
+
+        let other_backend = ClassifyResponse::new(
+            fast.artifact_sha256().to_string(),
+            format!("{}-elsewhere", fast.backend()),
+            fast.latency_ms(),
+            fast.results().to_vec(),
+        )
+        .expect("a different backend string is still a legal response");
+        assert_ne!(
+            other_backend, fast,
+            "two surfaces reporting different backends are not the same response"
+        );
+
+        let fewer_rows = ClassifyResponse::new(
+            fast.artifact_sha256().to_string(),
+            fast.backend().to_string(),
+            fast.latency_ms(),
+            fast.results()[..1].to_vec(),
+        )
+        .expect("a one-row response is legal");
+        assert_ne!(
+            fewer_rows, fast,
+            "the results are the answer; equality must still see them"
+        );
     }
 }

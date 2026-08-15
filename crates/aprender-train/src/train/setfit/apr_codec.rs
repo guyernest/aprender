@@ -396,7 +396,7 @@ mod fixture {
     //! evidence summary — and, in `round_trip`, the entire trusted verify policy
     //! including `Tolerance::EXACT`. The encoder itself is built through the SHIPPED
     //! reload door `SetFitMiniLm::from_bundle_parts`, which is the same door the
-    //! artifact's own rung-6 rebuild uses.
+    //! artifact's own rung-7 rebuild uses.
 
     use std::collections::BTreeMap;
 
@@ -1131,7 +1131,7 @@ mod round_trip {
     /// The SAME bytes load through the PRODUCTION core loader — probe replay included.
     ///
     /// This is the half of APR-03 the codec alone cannot claim: `deserialize` runs
-    /// rungs 1-5, and `load_setfit_apr` runs 1-7. A train-time artifact that parsed
+    /// rungs 2-6, and `load_setfit_apr` runs 2-8. A train-time artifact that parsed
     /// but could not be rebuilt or could not reproduce its own probe expectations
     /// would satisfy the codec and fail in production.
     #[test]
@@ -1149,7 +1149,7 @@ mod round_trip {
         // The verification the codec's own door does NOT perform, performed.
         let embedded = model
             .embed(&["the quick brown fox".to_string()])
-            .expect("the verified model embeds through the same path rung 7 replayed");
+            .expect("the verified model embeds through the same path rung 8 replayed");
         assert_eq!(embedded.len(), 1);
         assert_eq!(embedded[0].len(), fixture::HIDDEN);
     }

@@ -502,9 +502,9 @@ pub enum SetFitArtifactError {
     // refusal names the RUNG and what it observed — "invalid artifact" is not a
     // diagnosis (contract `load_validation_ladder`).
     // -----------------------------------------------------------------------
-    /// Rung 1 / the bounded read: an over-cap length.
+    /// Rungs 1-2, the two length bounds: an over-cap length.
     ///
-    /// `what` distinguishes the two checks the contract requires — a
+    /// `what` distinguishes the three checks the contract requires — a
     /// `declared_length` refusal happened BEFORE a byte was read, a `stream`
     /// refusal means the declared length lied, and an `input_bytes` refusal is
     /// the in-memory door's own defense-in-depth check.
@@ -523,10 +523,10 @@ pub enum SetFitArtifactError {
         reason: String,
     },
 
-    /// Rung 2: magic, version, header CRC, row-major flag or footer CRC.
+    /// Rung 3: magic, version, header CRC, row-major flag or footer CRC.
     ///
     /// CRC32 is not cryptographic, so this rung cannot see semantic corruption —
-    /// that is what rung 7's probe replay is for.
+    /// that is what rung 8's probe replay is for.
     ContainerIntegrity {
         /// `magic`, `container_version`, `header_checksum`, `row_major_flag`,
         /// `footer_length`, `footer_checksum` or `container_parse`.
@@ -535,7 +535,7 @@ pub enum SetFitArtifactError {
         reason: String,
     },
 
-    /// Rung 3: the container is not tagged as a SetFit artifact (D-04).
+    /// Rung 4: the container is not tagged as a SetFit artifact (D-04).
     ///
     /// Detection is EXPLICIT-TAG-ONLY: a SetFit-shaped tensor set without the
     /// typed `model_type` key is a plain APR and is refused here.
@@ -544,13 +544,13 @@ pub enum SetFitArtifactError {
         model_type: String,
     },
 
-    /// Rung 3: the ONE custom metadata document is absent or unusable.
+    /// Rung 4: the ONE custom metadata document is absent or unusable.
     ArtifactDocumentMissing {
         /// What was expected and what was found.
         reason: String,
     },
 
-    /// Rung 3: the document declares a schema identifier this build does not own.
+    /// Rung 4: the document declares a schema identifier this build does not own.
     UnsupportedSchema {
         /// The identifier found.
         got: String,
@@ -558,7 +558,7 @@ pub enum SetFitArtifactError {
         supported: &'static str,
     },
 
-    /// Rung 3: the document declares a schema version this build does not implement.
+    /// Rung 4: the document declares a schema version this build does not implement.
     ///
     /// Checked BEFORE any other field is read, so a future schema is refused
     /// rather than partially interpreted by this build.
@@ -569,13 +569,13 @@ pub enum SetFitArtifactError {
         supported: u32,
     },
 
-    /// Rung 3: the document did not parse under `deny_unknown_fields`.
+    /// Rung 4: the document did not parse under `deny_unknown_fields`.
     ArtifactDocumentParse {
         /// serde's diagnostic, including the position when it has one.
         detail: String,
     },
 
-    /// Rung 4: ONE index entry contradicts its own declared shape, dtype or size.
+    /// Rung 5: ONE index entry contradicts its own declared shape, dtype or size.
     ///
     /// Distinct from [`Self::InconsistentTensorSet`], which is a SET-level
     /// disagreement: "this tensor lies about itself" and "the collection is the
@@ -587,13 +587,13 @@ pub enum SetFitArtifactError {
         reason: String,
     },
 
-    /// Rung 4: the document's carried `hf_name_map` is not usable as an inversion.
+    /// Rung 5: the document's carried `hf_name_map` is not usable as an inversion.
     InconsistentNameMap {
         /// What was wrong: not injective, not total, or naming an absent tensor.
         reason: String,
     },
 
-    /// Rung 6: the encoder, tokenizer or head could not be rebuilt.
+    /// Rung 7: the encoder, tokenizer or head could not be rebuilt.
     ArtifactRebuildFailed {
         /// `encoder` or `head`.
         what: &'static str,
@@ -601,7 +601,7 @@ pub enum SetFitArtifactError {
         reason: String,
     },
 
-    /// Rung 7: a probe did not replay within tolerance.
+    /// Rung 8: a probe did not replay within tolerance.
     ///
     /// This is the rung a checksum cannot reach: corrupted-but-checksummed
     /// states, wrong-loader states and platform math divergence all arrive here.
@@ -627,7 +627,7 @@ pub enum SetFitArtifactError {
     },
 }
 
-/// Everything a rung-7 probe divergence reports.
+/// Everything a rung-8 probe divergence reports.
 ///
 /// A named struct behind [`SetFitArtifactError::ProbeReplayFailed`]'s `Box`, so
 /// the diagnosis stays STRUCTURED — an operator gets the probe, the component and
@@ -702,48 +702,48 @@ impl std::fmt::Display for SetFitArtifactError {
             }
             Self::ContainerIntegrity { what, reason } => write!(
                 f,
-                "SetFitArtifactError::ContainerIntegrity(rung 2, {what}: {reason})"
+                "SetFitArtifactError::ContainerIntegrity(rung 3, {what}: {reason})"
             ),
             Self::NotASetFitArtifact { model_type } => write!(
                 f,
-                "SetFitArtifactError::NotASetFitArtifact(rung 3: model_type is {model_type:?}, \
+                "SetFitArtifactError::NotASetFitArtifact(rung 4: model_type is {model_type:?}, \
                  not \"setfit\"; detection is explicit-tag-only, so a SetFit-shaped tensor set \
                  without the tag is a plain APR)"
             ),
             Self::ArtifactDocumentMissing { reason } => write!(
                 f,
-                "SetFitArtifactError::ArtifactDocumentMissing(rung 3: {reason})"
+                "SetFitArtifactError::ArtifactDocumentMissing(rung 4: {reason})"
             ),
             Self::UnsupportedSchema { got, supported } => write!(
                 f,
-                "SetFitArtifactError::UnsupportedSchema(rung 3: document declares schema {got:?}, \
+                "SetFitArtifactError::UnsupportedSchema(rung 4: document declares schema {got:?}, \
                  this build owns {supported:?})"
             ),
             Self::UnsupportedSchemaVersion { got, supported } => write!(
                 f,
-                "SetFitArtifactError::UnsupportedSchemaVersion(rung 3: document declares version \
+                "SetFitArtifactError::UnsupportedSchemaVersion(rung 4: document declares version \
                  {got}, this build implements {supported}; a document from a different schema is \
                  refused rather than partially interpreted)"
             ),
             Self::ArtifactDocumentParse { detail } => write!(
                 f,
-                "SetFitArtifactError::ArtifactDocumentParse(rung 3, deny_unknown_fields: {detail})"
+                "SetFitArtifactError::ArtifactDocumentParse(rung 4, deny_unknown_fields: {detail})"
             ),
             Self::InconsistentTensor { tensor, reason } => write!(
                 f,
-                "SetFitArtifactError::InconsistentTensor(rung 4, {tensor}: {reason})"
+                "SetFitArtifactError::InconsistentTensor(rung 5, {tensor}: {reason})"
             ),
             Self::InconsistentNameMap { reason } => write!(
                 f,
-                "SetFitArtifactError::InconsistentNameMap(rung 4: {reason})"
+                "SetFitArtifactError::InconsistentNameMap(rung 5: {reason})"
             ),
             Self::ArtifactRebuildFailed { what, reason } => write!(
                 f,
-                "SetFitArtifactError::ArtifactRebuildFailed(rung 6, {what}: {reason})"
+                "SetFitArtifactError::ArtifactRebuildFailed(rung 7, {what}: {reason})"
             ),
             Self::ProbeReplayFailed(divergence) => write!(
                 f,
-                "SetFitArtifactError::ProbeReplayFailed(rung 7, probe {} ({}), {}[{}]: expected \
+                "SetFitArtifactError::ProbeReplayFailed(rung 8, probe {} ({}), {}[{}]: expected \
                  {}, observed {}, tolerance {})",
                 divergence.probe,
                 divergence.probe_id,
@@ -798,8 +798,8 @@ pub fn artifact_sha256_hex(bytes: &[u8]) -> String {
 /// 7. hand the tensors and the document to the container.
 ///
 /// These are STEPS, deliberately not "rungs". The rung vocabulary is
-/// contract-normative for the LOADER ladder, where rung 4 is structure and rung 7
-/// is probe replay. Reusing those numbers here for different checks made "rung 4"
+/// contract-normative for the LOADER ladder, where rung 5 is structure and rung 8
+/// is probe replay. Reusing those numbers here for different checks made "rung 5"
 /// mean two things in one file.
 ///
 /// Nothing is written until every rung has passed: there is no partial artifact.
@@ -1196,7 +1196,7 @@ pub fn expected_tensor_names(num_layers: usize) -> BTreeSet<String> {
 ///
 /// The composition rule — encoder names plus the three schema-owned ones — lives
 /// here once; the public door above is that rule applied to a fresh expansion,
-/// and rung 4 is that same rule applied to the one expansion it already made.
+/// and rung 5 is that same rule applied to the one expansion it already made.
 fn expected_tensor_names_from(derived: &BTreeMap<String, String>) -> BTreeSet<String> {
     let mut names: BTreeSet<String> = derived.values().cloned().collect();
     names.insert(HEAD_WEIGHT_TENSOR.to_string());
@@ -1466,17 +1466,33 @@ fn build_artifact_doc(
 //
 // # The rungs, and why the ORDER is part of the contract
 //
-// | rung | what it bounds | why it cannot move |
-// |------|----------------|--------------------|
-// | 1 | raw length vs the cap | a parse of an unbounded buffer is the attack |
-// | 2 | magic, version, header CRC, row-major flag, footer CRC | nothing may be believed before integrity |
-// | 3 | typed tag, ONE custom key, `schema`/`schema_version`, `deny_unknown_fields` | a future schema must not be partially interpreted |
-// | 4 | architecture-derived tensor set, per-entry size, head shapes, tokenizer digest | the tokenizer must be paired BEFORE a tensor is installed |
-// | 5 | non-finite scan over every decoded `f32` | a NaN weight must not reach a rebuild |
-// | 6 | rebuild encoder + tokenizer + head | only from bytes that passed 1-5 |
-// | 7 | replay all six probes within tolerance | the last word, before a classify-capable value exists |
+// THE NUMBERS ARE THE CONTRACT'S, NOT THIS FILE'S. `load_validation_ladder`
+// (contracts/setfit-apr-v1.yaml, `rungs:`) enumerates EIGHT, and a refusal here
+// names the rung an operator will look up there. An earlier draft numbered its
+// own seven functions 1-7 by folding the bounded read out of the count, so every
+// `rung N` this module printed pointed at a different rung of the normative
+// ladder — `rung 4` on a corrupt tensor index resolved to "typed tag / document
+// parse" in the contract, the wrong subsystem entirely. One numbering, and it is
+// the published one.
 //
-// Rungs 1-5 live ONCE, in [`read_setfit_apr_parts_within`], and
+// | rung | what it bounds | where it lives | why it cannot move |
+// |------|----------------|----------------|--------------------|
+// | 1 | declared length, before the reader is touched | [`read_setfit_apr_bytes_bounded`] | the allocation must be refused before it is requested |
+// | 2 | raw length vs the cap | [`rung2_raw_length`] | a parse of an unbounded buffer is the attack |
+// | 3 | magic, version, header CRC, row-major flag, footer CRC | [`rung3_container`] | nothing may be believed before integrity |
+// | 4 | typed tag, ONE custom key, `schema`/`schema_version`, `deny_unknown_fields` | [`rung4_document`] | a future schema must not be partially interpreted |
+// | 5 | architecture-derived tensor set, per-entry size, head shapes, tokenizer digest | [`rung5_structure`] | the tokenizer must be paired BEFORE a tensor is installed |
+// | 6 | non-finite scan over every decoded `f32` | [`rung6_finite_payloads`] | a NaN weight must not reach a rebuild |
+// | 7 | rebuild encoder + tokenizer + head | [`rung7_rebuild`] | only from bytes that passed 1-6 |
+// | 8 | replay all six probes within tolerance | [`rung8_replay_probes`] | the last word, before a classify-capable value exists |
+//
+// RUNG 1 IS A DIFFERENT KIND OF RUNG, and saying so is the honest form. It bounds
+// a SOURCE, so it belongs at the boundary where bytes are acquired and cannot be
+// applied to a `&[u8]` a caller already holds. Rung 2 is what the in-memory doors
+// run for that caller, which is why the contract lists both rather than merging
+// them.
+//
+// Rungs 2-6 live ONCE, in [`read_setfit_apr_parts_within`], and
 // [`load_setfit_apr_within`] CALLS it. One ladder, never two policies: a second
 // parse-only path would be a second verification policy with its own tolerances.
 // ===========================================================================
@@ -1661,7 +1677,7 @@ pub struct SetFitArtifactDoc {
     pub probes: Vec<SetFitProbeRecord>,
 }
 
-/// Everything rungs 1-5 recover, before any rebuild has happened.
+/// Everything rungs 2-6 recover, before any rebuild has happened.
 ///
 /// A STRUCT and not a five-element tuple, deliberately: plan 04-05 maps this
 /// field-by-field onto a `SetFitBundle`, and a tuple of five same-shaped
@@ -1777,7 +1793,7 @@ impl VerifiedSetFitModel {
 
     /// The encoder's L2-normalized sentence embeddings — OPS-01's "embed" step.
     ///
-    /// This is the SAME encode path rung 7's probe replay verified, so a caller
+    /// This is the SAME encode path rung 8's probe replay verified, so a caller
     /// reaching embeddings through the public API gets the vectors the artifact's
     /// own probe expectations were checked against.
     ///
@@ -1949,16 +1965,18 @@ fn read_setfit_apr_bytes_bounded_within<R: std::io::Read>(
 // The two doors
 // ---------------------------------------------------------------------------
 
-/// Rungs 1-5 as a PARSE-ONLY door: no rebuild, no probe replay.
+/// Rungs 2-6 as a PARSE-ONLY door: no rebuild, no probe replay.
 ///
-/// [`load_setfit_apr`] is implemented as this function followed by rungs 6-7, so
-/// rungs 1-5 exist ONCE. Plan 04-05's codec consumes this door; landing it here
+/// [`load_setfit_apr`] is implemented as this function followed by rungs 7-8, so
+/// rungs 2-6 exist ONCE. Rung 1 bounds a SOURCE and therefore lives at the
+/// boundary that acquires the bytes ([`read_setfit_apr_bytes_bounded`]); rung 2
+/// is what this door runs for a caller who already holds a slice. Plan 04-05's codec consumes this door; landing it here
 /// is what keeps the two from becoming two verification policies.
 ///
 /// # Errors
 ///
 /// The same typed [`SetFitArtifactError`] variants [`load_setfit_apr`] reports
-/// for any rung 1-5 failure — by construction, because it is the same code.
+/// for any rung 2-6 failure — by construction, because it is the same code.
 pub fn read_setfit_apr_parts(bytes: &[u8]) -> Result<SetFitAprParts, SetFitArtifactError> {
     read_setfit_apr_parts_within(bytes, &ArtifactLimits::CONTRACTED)
 }
@@ -1968,12 +1986,12 @@ fn read_setfit_apr_parts_within(
     bytes: &[u8],
     limits: &ArtifactLimits,
 ) -> Result<SetFitAprParts, SetFitArtifactError> {
-    rung1_raw_length(bytes, limits)?;
-    let reader = rung2_container(bytes)?;
-    let doc = rung3_document(&reader)?;
-    rung4_structure(&reader, &doc)?;
+    rung2_raw_length(bytes, limits)?;
+    let reader = rung3_container(bytes)?;
+    let doc = rung4_document(&reader)?;
+    rung5_structure(&reader, &doc)?;
     let (tensors, head_weights, head_intercepts, tokenizer_bytes) =
-        rung5_finite_payloads(&reader, &doc)?;
+        rung6_finite_payloads(&reader, &doc)?;
     Ok(SetFitAprParts {
         doc,
         tensors,
@@ -1986,7 +2004,8 @@ fn read_setfit_apr_parts_within(
 
 /// The ONE production door: bytes in, a verified model or a typed refusal out.
 ///
-/// Runs rungs 1-7 in the contract's order, offline. Nothing short of the whole
+/// Runs rungs 2-8 in the contract's order, offline, after the caller has taken
+/// rung 1 through [`read_setfit_apr_bytes_bounded`]. Nothing short of the whole
 /// ladder produces a [`VerifiedSetFitModel`], and no consumer may add a second
 /// minting path — a consumer with its own load path would be a second
 /// verification policy with its own tolerances.
@@ -2005,18 +2024,18 @@ fn load_setfit_apr_within(
     bytes: &[u8],
     limits: &ArtifactLimits,
 ) -> Result<VerifiedSetFitModel, SetFitArtifactError> {
-    // RUNGS 1-5, through the very code the parse-only door runs. The call is the
+    // RUNGS 2-6, through the very code the parse-only door runs. The call is the
     // point: two copies of this ladder would be two verification policies, and
     // the looser of the two would silently become the real one.
     let mut parts = read_setfit_apr_parts_within(bytes, limits)?;
-    // RUNG 6. The tensor map moves in: `from_bundle_parts` drains it, and nothing
+    // RUNG 7. The tensor map moves in: `from_bundle_parts` drains it, and nothing
     // after this rung reads `parts.tensors`. Cloning here would duplicate ~90 MB on
     // a full pin — the same waste `from_named_tensors` was changed to take by value
     // to eliminate (encoder.rs).
     let tensors = std::mem::take(&mut parts.tensors);
-    let (model, head) = rung6_rebuild(tensors, &parts)?;
-    // RUNG 7 — the last word. Nothing classify-capable exists until it returns.
-    rung7_replay_probes(&model, &head, &parts)?;
+    let (model, head) = rung7_rebuild(tensors, &parts)?;
+    // RUNG 8 — the last word. Nothing classify-capable exists until it returns.
+    rung8_replay_probes(&model, &head, &parts)?;
     Ok(VerifiedSetFitModel {
         model,
         head,
@@ -2026,7 +2045,7 @@ fn load_setfit_apr_within(
 }
 
 // ---------------------------------------------------------------------------
-// Rung 1: the raw length, before any parse
+// Rung 2: the raw length, before any parse
 // ---------------------------------------------------------------------------
 
 /// The in-memory door's own length check — DEFENSE IN DEPTH, not redundancy.
@@ -2034,7 +2053,7 @@ fn load_setfit_apr_within(
 /// [`read_setfit_apr_bytes_bounded`] protects a caller who is about to read a
 /// file. This protects a caller who already holds bytes from somewhere else, and
 /// neither one subsumes the other.
-fn rung1_raw_length(bytes: &[u8], limits: &ArtifactLimits) -> Result<(), SetFitArtifactError> {
+fn rung2_raw_length(bytes: &[u8], limits: &ArtifactLimits) -> Result<(), SetFitArtifactError> {
     let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     if observed > limits.max_artifact_bytes {
         return Err(SetFitArtifactError::ArtifactTooLarge {
@@ -2047,7 +2066,7 @@ fn rung1_raw_length(bytes: &[u8], limits: &ArtifactLimits) -> Result<(), SetFitA
 }
 
 // ---------------------------------------------------------------------------
-// Rung 2: the container
+// Rung 3: the container
 // ---------------------------------------------------------------------------
 
 /// Magic, header CRC, container version, row-major flag and footer CRC.
@@ -2055,8 +2074,8 @@ fn rung1_raw_length(bytes: &[u8], limits: &ArtifactLimits) -> Result<(), SetFitA
 /// The footer CRC runs FIRST because it is a pure byte comparison over the whole
 /// content: nothing in the file is interpreted until the file has been shown to
 /// be the file that was written. CRC32 is NOT cryptographic, so this rung cannot
-/// see semantic corruption — that is rung 7's job.
-fn rung2_container(bytes: &[u8]) -> Result<AprV2Reader, SetFitArtifactError> {
+/// see semantic corruption — that is rung 8's job.
+fn rung3_container(bytes: &[u8]) -> Result<AprV2Reader, SetFitArtifactError> {
     verify_footer_checksum(bytes)?;
 
     let reader = AprV2Reader::from_bytes(bytes).map_err(|e| {
@@ -2126,12 +2145,12 @@ fn verify_footer_checksum(bytes: &[u8]) -> Result<(), SetFitArtifactError> {
 }
 
 // ---------------------------------------------------------------------------
-// Rung 3: the typed tag and the ONE document
+// Rung 4: the typed tag and the ONE document
 // ---------------------------------------------------------------------------
 
 /// D-04 explicit-tag detection, the one custom key, then `schema` /
 /// `schema_version` BEFORE any other field is read.
-fn rung3_document(reader: &AprV2Reader) -> Result<SetFitArtifactDoc, SetFitArtifactError> {
+fn rung4_document(reader: &AprV2Reader) -> Result<SetFitArtifactDoc, SetFitArtifactError> {
     let metadata = reader.metadata();
     // D-04: the whole detection rule. No tensor-name sniffing, no shape
     // inference — a SetFit-shaped tensor set without the tag is a plain APR.
@@ -2200,12 +2219,12 @@ fn rung3_document(reader: &AprV2Reader) -> Result<SetFitArtifactDoc, SetFitArtif
 }
 
 // ---------------------------------------------------------------------------
-// Rung 4: structure, derived from the artifact's OWN declared architecture
+// Rung 5: structure, derived from the artifact's OWN declared architecture
 // ---------------------------------------------------------------------------
 
 /// The architecture-derived tensor set, the per-entry size rule, the head
 /// shapes, the carried name map and the tokenizer identity.
-fn rung4_structure(
+fn rung5_structure(
     reader: &AprV2Reader,
     doc: &SetFitArtifactDoc,
 ) -> Result<(), SetFitArtifactError> {
@@ -2429,17 +2448,17 @@ fn check_head_shapes(
 ///
 /// An earlier form compared only `values()` against the derived value set. That
 /// admits two shapes it should not. Junk keys (`{"a": "token_embd.weight", ...}`)
-/// pass the value-set test and make rung 5 key the recovered tensor map by names
+/// pass the value-set test and make rung 6 key the recovered tensor map by names
 /// no rebuild can look up. Worse, a PERMUTED map — the right HF keys pointed at
-/// each other's canonical names — also passes: rung 5 then loads the query
-/// projection out of the key projection's payload, rung 6 rebuilds happily
-/// because the two have identical shapes, and only rung 7's probe replay
+/// each other's canonical names — also passes: rung 6 then loads the query
+/// projection out of the key projection's payload, rung 7 rebuilds happily
+/// because the two have identical shapes, and only rung 8's probe replay
 /// disagrees, which reports a math divergence for what is a name-map defect. The
 /// parse-only door (`read_setfit_apr_parts`, and therefore
-/// `AprCodec::deserialize`) does not run rung 7 at all, so on that path the
+/// `AprCodec::deserialize`) does not run rung 8 at all, so on that path the
 /// swapped tensors travel out with no refusal whatsoever.
 ///
-/// Comparing the whole map costs nothing extra: rung 4 already expanded the
+/// Comparing the whole map costs nothing extra: rung 5 already expanded the
 /// derived map in order to check the value side.
 fn check_carried_name_map(
     doc: &SetFitArtifactDoc,
@@ -2524,10 +2543,10 @@ fn check_tokenizer_identity(
 }
 
 // ---------------------------------------------------------------------------
-// Rung 5: the non-finite scan, and the payloads it produces
+// Rung 6: the non-finite scan, and the payloads it produces
 // ---------------------------------------------------------------------------
 
-/// The four payload groups rungs 6-7 consume: HF-keyed tensors, head weights,
+/// The four payload groups rungs 7-8 consume: HF-keyed tensors, head weights,
 /// head intercepts, tokenizer bytes.
 type LoadedPayloads = (
     BTreeMap<String, (Vec<usize>, Vec<f32>)>,
@@ -2540,7 +2559,7 @@ type LoadedPayloads = (
 ///
 /// A `NaN` weight poisons every prediction and looks structurally valid the whole
 /// time, so it dies here rather than at a tolerance comparison two rungs later.
-fn rung5_finite_payloads(
+fn rung6_finite_payloads(
     reader: &AprV2Reader,
     doc: &SetFitArtifactDoc,
 ) -> Result<LoadedPayloads, SetFitArtifactError> {
@@ -2620,16 +2639,16 @@ fn scan_probe_expectations(doc: &SetFitArtifactDoc) -> Result<(), SetFitArtifact
 }
 
 // ---------------------------------------------------------------------------
-// Rung 6: the rebuild
+// Rung 7: the rebuild
 // ---------------------------------------------------------------------------
 
 /// Rebuild the encoder + tokenizer pair and the classifier head from bytes alone.
 ///
 /// `from_bundle_parts` re-checks the tokenizer digest itself (mod.rs:365-371).
-/// That is deliberate duplication of rung 4's check, not an oversight: this
+/// That is deliberate duplication of rung 5's check, not an oversight: this
 /// function is reachable from one place today and the pairing is too important to
 /// depend on the caller having done it.
-fn rung6_rebuild(
+fn rung7_rebuild(
     tensors: BTreeMap<String, (Vec<usize>, Vec<f32>)>,
     parts: &SetFitAprParts,
 ) -> Result<(SetFitMiniLm, MultinomialLogisticRegression), SetFitArtifactError> {
@@ -2657,7 +2676,7 @@ fn rung6_rebuild(
 }
 
 // ---------------------------------------------------------------------------
-// Rung 7: probe replay (D-11)
+// Rung 8: probe replay (D-11)
 // ---------------------------------------------------------------------------
 
 /// The ONE shape a probe divergence takes, so the rungs below cannot disagree on it.
@@ -2698,7 +2717,7 @@ fn decode_probe_field(values: &[String]) -> Vec<f32> {
 /// `compare_probes` (verify.rs:476+). Counts come FIRST because every rung below
 /// walks its pairs with `zip`, which STOPS at the shorter side: a partial
 /// comparison that passed would be the worst possible outcome.
-fn rung7_replay_probes(
+fn rung8_replay_probes(
     model: &SetFitMiniLm,
     head: &MultinomialLogisticRegression,
     parts: &SetFitAprParts,
@@ -2866,7 +2885,7 @@ fn rung7_replay_probes(
 /// Through the rebuilt head's `predict_logits` — THE single logit implementation,
 /// and the very function `compute_probes` records with. A hand-written
 /// accumulation here was two copies of one loop: the writer's and this one, whose
-/// agreement was the whole property rung 7 exists to check. It also read the row
+/// agreement was the whole property rung 8 exists to check. It also read the row
 /// with `zip`, which STOPS at the shorter side, so an embedding narrower than the
 /// head silently produced a truncated dot product instead of a refusal;
 /// `predict_logits` reports a typed `FeatureDimMismatch` for exactly that input.
@@ -4343,7 +4362,7 @@ mod tamper {
 
 #[cfg(all(test, feature = "setfit"))]
 mod ladder {
-    //! Rungs 1-5: the bounded read, the cap, the container, the document, the
+    //! Rungs 1-6: the bounded read, the cap, the container, the document, the
     //! structure and the non-finite scan — each shown ABLE TO FAIL by induced
     //! corruption of real writer-produced bytes.
 
@@ -4352,6 +4371,123 @@ mod ladder {
 
     use serde_json::json;
     use std::io::Read;
+
+    /// THE RUNG NUMBERING IS THE CONTRACT'S, AND THIS IS WHAT KEEPS IT THAT WAY.
+    ///
+    /// `load_validation_ladder`'s postcondition is that a refusal "names the RUNG"
+    /// — a promise about a number an operator will look up in the contract, which
+    /// is only worth anything if the two agree. They did not: this module numbered
+    /// its own seven functions 1-7 by folding the bounded read out of the count,
+    /// so every `rung N` it printed pointed one step up the contract's eight-rung
+    /// ladder. `rung 4` on a corrupt tensor index resolved to "typed tag /
+    /// document parse". Nothing was red, because nothing compared them.
+    ///
+    /// So this compares them. `include_str!` and not a runtime read, for the
+    /// reason `thresholds.rs` gives: a test that silently skips when a file is
+    /// absent is a test that reports success for having done nothing.
+    ///
+    /// # It scans the PRODUCTION half, and it learned that the hard way
+    ///
+    /// The first version scanned the whole file and failed on its own text: the
+    /// `absent` list below spells `fn rung1_` as a literal, so `SRC.contains` saw
+    /// the needle in the haystack of the guard itself. That is orchestrator note
+    /// F-05's defect — a source assertion scanning its own needle — and cutting at
+    /// the first test banner removes it structurally rather than by being careful
+    /// about wording. Every symbol asserted below lives above that cut.
+    #[test]
+    fn the_rung_numbering_matches_the_contracts_eight_rung_ladder() {
+        const CONTRACT: &str = include_str!("../../../../contracts/setfit-apr-v1.yaml");
+        const WHOLE_FILE: &str = include_str!("artifact.rs");
+
+        // The banner above `mod fixture`, which is the first test item in the
+        // file. `find` returns THAT occurrence and not this one, because it comes
+        // first — `production_source_is_cut_above_the_test_modules` pins it.
+        let cut = WHOLE_FILE
+            .find("// Test fixtures")
+            .expect("the production half ends at the test banner");
+        let src = &WHOLE_FILE[..cut];
+
+        // The contract's `rungs:` block, read as the list of numbers it declares.
+        let block = CONTRACT
+            .split_once("\n    rungs:\n")
+            .expect("load_validation_ladder declares a rungs block")
+            .1;
+        let declared: Vec<u32> = block
+            .lines()
+            .map_while(|line| line.strip_prefix("      "))
+            .filter_map(|entry| entry.split_once(':'))
+            .filter_map(|(key, _)| key.trim().parse::<u32>().ok())
+            .collect();
+        assert_eq!(
+            declared,
+            (1..=8).collect::<Vec<u32>>(),
+            "the contract's ladder is eight consecutively numbered rungs; if that changed, this \
+             module's function names and its error strings both have to move with it"
+        );
+
+        // Rung 1 bounds a SOURCE, so it has no `rungN_` function: it is the door
+        // that acquires the bytes. Asserted by name so "there is no rung 1 here"
+        // stays a deliberate statement rather than an omission.
+        assert!(
+            src.contains("pub fn read_setfit_apr_bytes_bounded<R: std::io::Read>("),
+            "rung 1 is the bounded read at the acquisition boundary"
+        );
+
+        // Rungs 2-8 are functions, each named for the rung it IS.
+        for (rung, suffix) in [
+            (2, "raw_length"),
+            (3, "container"),
+            (4, "document"),
+            (5, "structure"),
+            (6, "finite_payloads"),
+            (7, "rebuild"),
+            (8, "replay_probes"),
+        ] {
+            let expected = format!("fn rung{rung}_{suffix}");
+            assert!(
+                src.contains(&expected),
+                "rung {rung} of the contract's ladder must be implemented by `{expected}`; a \
+                 function numbered differently from the rung it implements is how the printed \
+                 diagnosis and the published ladder drifted apart in the first place"
+            );
+        }
+
+        // And no function may carry a number the ladder does not have. `rung1_` is
+        // the specific mistake this guard was written after: folding the bounded
+        // read into the count is what shifted everything below it by one.
+        for absent in ["fn rung0_", "fn rung1_", "fn rung9_"] {
+            assert!(
+                !src.contains(absent),
+                "`{absent}` names a rung the contract's ladder does not declare"
+            );
+        }
+    }
+
+    /// The cut above is REAL: the production slice excludes this module.
+    ///
+    /// Without this, the three absence assertions above could pass for the worst
+    /// possible reason — a cut that landed at the top of the file would make
+    /// `src` empty and every `!contains` trivially true, while the `contains`
+    /// assertions above would fail loudly enough that nobody would ever look. It
+    /// pins BOTH directions: a production symbol is inside the slice and a test
+    /// symbol is outside it.
+    #[test]
+    fn production_source_is_cut_above_the_test_modules() {
+        const WHOLE_FILE: &str = include_str!("artifact.rs");
+        let cut = WHOLE_FILE
+            .find("// Test fixtures")
+            .expect("the production half ends at the test banner");
+        let src = &WHOLE_FILE[..cut];
+
+        assert!(
+            src.contains("pub fn write_setfit_apr("),
+            "the production half must still contain the code being scanned"
+        );
+        assert!(
+            !src.contains("fn the_rung_numbering_matches"),
+            "the cut must remove this module, or every assertion above scans its own text"
+        );
+    }
 
     /// The largest byte count any test in this module is allowed to materialize.
     ///
@@ -4522,7 +4658,7 @@ mod ladder {
     }
 
     // -----------------------------------------------------------------------
-    // Rung 1: the raw length, before any parse
+    // Rung 2: the raw length, before any parse
     // -----------------------------------------------------------------------
 
     #[test]
@@ -4530,7 +4666,7 @@ mod ladder {
         let bytes = honest_bytes();
         let exact = u64::try_from(bytes.len()).expect("a fixture artifact fits in u64");
         load_setfit_apr_within(&bytes, &ArtifactLimits::tiny(exact))
-            .expect("an artifact of exactly the limit passes rung 1");
+            .expect("an artifact of exactly the limit passes rung 2");
 
         let err = load_setfit_apr_within(&bytes, &ArtifactLimits::tiny(exact - 1))
             .expect_err("one byte over the limit is refused");
@@ -4908,7 +5044,7 @@ mod ladder {
     }
 
     #[test]
-    fn both_doors_report_the_same_typed_variant_for_every_rung_one_to_five_corruption() {
+    fn both_doors_report_the_same_typed_variant_for_every_rung_two_to_six_corruption() {
         let honest = honest_bytes();
         let mut untagged = Tampered::of(&honest);
         untagged.metadata.model_type = "bert".to_string();
@@ -5002,7 +5138,7 @@ mod ladder {
     /// Recompute the container's trailing CRC32 over the (possibly tampered) content.
     ///
     /// A LEGITIMATE re-signing, exactly like the writer's own footer step: it is
-    /// what lets a rung-2 header test and a rung-4/5 content test be about
+    /// what lets a rung-3 header test and a rung-5/6 content test be about
     /// different rungs instead of both landing on the footer.
     fn reseal_footer(bytes: &mut [u8]) {
         let split = bytes.len() - 4;
@@ -5013,7 +5149,7 @@ mod ladder {
 
 #[cfg(all(test, feature = "setfit"))]
 mod probe {
-    //! Rungs 6-7 and the typestate: the rebuild, the six-probe replay, and the
+    //! Rungs 7-8 and the typestate: the rebuild, the six-probe replay, and the
     //! only value a consumer may classify with.
 
     use super::tamper::{honest_bytes, Tampered};
@@ -5043,8 +5179,8 @@ mod probe {
     fn a_transposed_encoder_tensor_is_a_typed_rebuild_failure() {
         // [vocab, hidden] -> [hidden, vocab]. The PRODUCT is unchanged, so the
         // per-entry size rule still holds, the name set is untouched and every
-        // value is still finite — rungs 1-5 have nothing to say. Only the rebuild
-        // knows what shape this name must have, which is what makes rung 6 a rung
+        // value is still finite — rungs 2-6 have nothing to say. Only the rebuild
+        // knows what shape this name must have, which is what makes rung 7 a rung
         // rather than a formality.
         let mut tampered = Tampered::of(&honest_bytes());
         {
@@ -5054,7 +5190,7 @@ mod probe {
         let bytes = tampered.emit();
         // The parse-only door gets all the way through: this is genuinely a rung
         // BELOW it, not a rung it skipped.
-        read_setfit_apr_parts(&bytes).expect("rungs 1-5 have no complaint about a transpose");
+        read_setfit_apr_parts(&bytes).expect("rungs 2-6 have no complaint about a transpose");
         let err = load_setfit_apr(&bytes).expect_err("the rebuild knows the required shape");
         assert!(
             matches!(
@@ -5072,7 +5208,7 @@ mod probe {
     fn a_perturbed_probe_embedding_is_a_typed_replay_failure_naming_the_probe() {
         let mut tampered = Tampered::of(&honest_bytes());
         // Move ONE component far outside the contract's 7.63e-06 bound, and
-        // re-sign the whole artifact, so this exercises rung 7 and not rung 2.
+        // re-sign the whole artifact, so this exercises rung 8 and not rung 3.
         let perturbed = f32_bits_hex(1.5);
         tampered
             .probe_mut(2)
@@ -5299,7 +5435,7 @@ mod probe {
             assert!(
                 !block.contains(forbidden),
                 "an inherent method of VerifiedSetFitModel returns `{forbidden}`; the ONLY value \
-                 of this type must come from load_setfit_apr, which ran all seven rungs including \
+                 of this type must come from load_setfit_apr, which ran rungs 2-8 including \
                  the six-probe replay. A second minting path is a second verification policy."
             );
         }
