@@ -38,6 +38,7 @@
 //! a free function — that would reopen the seal through a path the source
 //! assertions do not scan.
 
+pub mod artifact;
 pub mod dropout_rng;
 pub mod encoder;
 pub mod error;
@@ -45,6 +46,10 @@ pub mod import;
 pub mod loss;
 pub mod tokenizer;
 
+pub use artifact::{
+    artifact_sha256_hex, write_setfit_apr, SetFitArtifactError, SetFitArtifactView,
+    NULLABLE_PATH_ALLOWLIST, WALKED_SUBDOCUMENTS,
+};
 pub use dropout_rng::{DropoutRngError, SiteDropout};
 pub use encoder::{BertSentenceEncoder, L2_EPS, NORMALIZATION_POLICY, POOLING_POLICY};
 pub use error::SetFitError;
