@@ -39,6 +39,7 @@
 //! assertions do not scan.
 
 pub mod artifact;
+pub mod classify;
 pub mod dropout_rng;
 pub mod encoder;
 pub mod error;
