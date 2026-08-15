@@ -519,20 +519,15 @@ impl TryFrom<ClassifyResponseWire> for ClassifyResponse {
 // The one comparison helper
 // ---------------------------------------------------------------------------
 
-/// Whether `delta` is inside `bound`, with an INCOMPARABLE delta counting as
-/// outside.
+/// The NaN-visible tolerance comparator, defined ONCE for the crate in
+/// [`crate::setfit::artifact::within`].
 ///
-/// Written through `partial_cmp` rather than as `delta <= bound` so the NaN case
-/// is VISIBLE rather than implied. `delta <= bound` happens to reject NaN, but
-/// it refactors into `!(delta > bound)` — which ACCEPTS NaN silently, because
-/// every comparison with NaN is false. The `partial_cmp` form cannot be
-/// refactored into acceptance by accident.
-fn within(delta: f64, bound: f64) -> bool {
-    matches!(
-        delta.partial_cmp(&bound),
-        Some(core::cmp::Ordering::Less | core::cmp::Ordering::Equal)
-    )
-}
+/// A second copy here would be a second comparator: same five lines today, and
+/// nothing forcing them to stay the same tomorrow. Since divergence between a
+/// load-time and a classify-time tolerance check would be silent, the definition
+/// lives in one place and `within_is_nan_visible_in_both_argument_positions`
+/// scans that one place for the `partial_cmp` form.
+use crate::setfit::artifact::within;
 
 // ---------------------------------------------------------------------------
 // The one classification path (OPS-04)
@@ -611,9 +606,12 @@ impl crate::setfit::artifact::VerifiedSetFitModel {
 
         let labels = self.ordered_labels();
         let mut results = Vec::with_capacity(logit_rows.len());
-        for (row, logits) in logit_rows.iter().enumerate() {
+        // `logit_rows` is owned and dead after this loop, so each row MOVES into the
+        // result rather than being cloned into it — one fewer allocation per text on
+        // the per-request path.
+        for (row, logits) in logit_rows.into_iter().enumerate() {
             let mut probabilities = vec![0.0_f64; logits.len()];
-            crate::classification::multinomial::softmax_into(logits, &mut probabilities);
+            crate::classification::multinomial::softmax_into(&logits, &mut probabilities);
 
             // Ties break to the LOWEST index, the same rule the head's own
             // `predict` uses — so the API and the head can never name different
@@ -645,7 +643,7 @@ impl crate::setfit::artifact::VerifiedSetFitModel {
                 label,
                 probabilities,
                 if request.include_logits {
-                    Some(logits.clone())
+                    Some(logits)
                 } else {
                     None
                 },
@@ -714,36 +712,11 @@ fn embedding_rows(
     pooled: &crate::autograd::Tensor,
     expected_rows: usize,
 ) -> Result<Vec<Vec<f32>>, ClassifyError> {
-    let shape = pooled.shape().to_vec();
-    let (rows, width) = match shape.as_slice() {
-        [rows, width] => (*rows, *width),
-        other => {
-            return Err(ClassifyError::EncodeFailed {
-                reason: format!("the encoder produced shape {other:?}, expected [B, H]"),
-            })
-        }
-    };
-    if rows != expected_rows {
-        return Err(ClassifyError::EncodeFailed {
-            reason: format!("{expected_rows} texts produced {rows} embedding rows"),
-        });
-    }
-    let data = pooled.data();
-    let mut out = Vec::with_capacity(rows);
-    for row in 0..rows {
-        let start = row.saturating_mul(width);
-        let end = start.saturating_add(width);
-        let slice = data
-            .get(start..end)
-            .ok_or_else(|| ClassifyError::EncodeFailed {
-                reason: format!(
-                    "row {row} spans {start}..{end} of a {}-element result",
-                    data.len()
-                ),
-            })?;
-        out.push(slice.to_vec());
-    }
-    Ok(out)
+    // The shape rule lives once, in artifact.rs. What differs between `embed` and
+    // `classify` is which encode produced the tensor, not how a `[B, H]` tensor is
+    // split — so only the refusal TYPE is chosen here.
+    crate::setfit::artifact::split_embedding_rows(pooled, expected_rows)
+        .map_err(|reason| ClassifyError::EncodeFailed { reason })
 }
 
 // ===========================================================================
@@ -1340,8 +1313,14 @@ mod envelope {
         // The idiom itself, not only its current behaviour: `delta <= bound`
         // happens to reject NaN, but refactors into `!(delta > bound)`, which
         // ACCEPTS it. `partial_cmp` cannot be refactored into acceptance.
-        let src = production_source();
-        let start = src.find("fn within(").expect("within is defined here");
+        //
+        // The scan follows the function: `within` is defined once for the crate,
+        // in artifact.rs, and this is the guard that pins its shape. Scanning
+        // classify.rs would now find only the `use` and prove nothing.
+        let src = include_str!("artifact.rs");
+        let start = src
+            .find("pub(crate) fn within(")
+            .expect("within is defined in artifact.rs");
         let body = &src[start..];
         let end = body.find("\n}").expect("within's body is closed");
         assert!(

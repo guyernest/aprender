@@ -440,10 +440,18 @@ impl SelectionLock {
     /// 1. The input-length bound, on the raw slice, before serde is handed anything.
     /// 2. The parse, where `deny_unknown_fields` refuses a key this reader does not know.
     /// 3. The schema version, before any content is believed.
-    /// 4. The rebuild, through [`Self::from_candidates`] — every consistency invariant and the
-    ///    rule itself, from the single implementation.
-    /// 5. The recorded winner: in range, then equal to the rule's.
-    /// 6. The canonical-form check, which is what makes the list above total.
+    /// 4. The candidate rebuild, where each artifact hash is taken from the EVALUATION rather
+    ///    than from the wire's second copy of it.
+    /// 5. The rebuild THROUGH [`Self::from_candidates`] — every consistency invariant and the
+    ///    selection rule itself, from the single implementation.
+    /// 6. The recorded winner: in range, then equal to the rule's.
+    /// 7. The canonical-form check, which is what makes the list above total.
+    /// 8. [`Self::verify_integrity`], and honest about being structural: the hash was derived
+    ///    from this very record, so it proves self-consistency, not provenance.
+    ///
+    /// This list is the eight steps the body performs, numbered as the body numbers them. A
+    /// doc that collapsed them would be a second, shorter description of an ordered ladder —
+    /// exactly the drift the rest of this file works to prevent.
     ///
     /// # Errors
     ///

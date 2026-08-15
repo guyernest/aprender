@@ -49,6 +49,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use serde::Deserialize as _;
 use serde_json::{Map as JsonMap, Value};
 
 use super::tokenizer::sha256_hex;
@@ -796,6 +797,11 @@ pub fn artifact_sha256_hex(bytes: &[u8]) -> String {
 /// 6. walk all FIVE embedded sub-documents for `null`s outside the allowlist;
 /// 7. hand the tensors and the document to the container.
 ///
+/// These are STEPS, deliberately not "rungs". The rung vocabulary is
+/// contract-normative for the LOADER ladder, where rung 4 is structure and rung 7
+/// is probe replay. Reusing those numbers here for different checks made "rung 4"
+/// mean two things in one file.
+///
 /// Nothing is written until every rung has passed: there is no partial artifact.
 ///
 /// # Errors
@@ -843,7 +849,8 @@ pub fn write_setfit_apr(view: &SetFitArtifactView) -> Result<Vec<u8>, SetFitArti
     write_container(view, &hf_name_map, doc)
 }
 
-/// Rung 1: the view's tensor names map 1:1 onto the architecture-derived set,
+/// Step 1 of [`write_setfit_apr`]: the view's tensor names map 1:1 onto the
+/// architecture-derived set,
 /// and its parts do not contradict one another.
 fn validate_view_structure(
     view: &SetFitArtifactView,
@@ -935,7 +942,8 @@ fn validate_view_structure(
     Ok(())
 }
 
-/// Rung 2: every `f32` the view carries is finite, named by its exact path.
+/// Step 2 of [`write_setfit_apr`]: every `f32` the view carries is finite, named
+/// by its exact path.
 fn scan_view_floats(view: &SetFitArtifactView) -> Result<(), SetFitArtifactError> {
     for (hf, (_, data)) in &view.tensors {
         for (index, value) in data.iter().enumerate() {
@@ -966,7 +974,8 @@ fn scan_view_floats(view: &SetFitArtifactView) -> Result<(), SetFitArtifactError
     Ok(())
 }
 
-/// Rung 4: the six contract-resident probes, replayed through a model rebuilt
+/// Step 4 of [`write_setfit_apr`]: the six contract-resident probes, replayed
+/// through a model rebuilt
 /// from the view's own parts.
 ///
 /// The tensor map is CLONED because `from_bundle_parts` takes ownership and
@@ -998,7 +1007,6 @@ fn compute_probes(view: &SetFitArtifactView) -> Result<Vec<Value>, SetFitArtifac
     })?;
 
     let d = view.head_n_features;
-    let k = view.ordered_labels.len();
     let mut records = Vec::with_capacity(PROBE_COUNT);
 
     for (index, input) in probe_inputs().into_iter().enumerate() {
@@ -1026,20 +1034,23 @@ fn compute_probes(view: &SetFitArtifactView) -> Result<Vec<Value>, SetFitArtifac
             }
         }
 
-        // The logits are accumulated in `f64` in the SAME order
-        // `predict_proba` uses (multinomial.rs:1174-1185) and then narrowed to
-        // `f32` for storage, so the recorded logits and the recorded
-        // probabilities cannot describe two different computations. The
-        // narrowing is deterministic and the contract's replay tolerance
-        // (1.0e-5 absolute) is orders above `f32` epsilon at these magnitudes.
-        let mut logits = Vec::with_capacity(k);
-        for c in 0..k {
-            let mut z = f64::from(view.head_intercepts[c]);
-            for j in 0..d {
-                z += f64::from(view.head_weights[c * d + j]) * f64::from(embedding[j]);
-            }
-            logits.push(z as f32);
-        }
+        // The recorded logits come from `predict_logits` — THE single logit
+        // implementation — rather than a second accumulation written here, so the
+        // recorded logits and the recorded probabilities below cannot describe two
+        // different computations. `predict_proba` is literally `predict_logits` +
+        // softmax, so they now share the accumulation rather than agreeing by hand.
+        // Only the narrowing to `f32` for storage happens here; it is deterministic,
+        // and the contract's replay tolerance (1.0e-5 absolute) is orders above
+        // `f32` epsilon at these magnitudes.
+        let logits: Vec<f32> = head
+            .predict_logits(&[embedding.clone()])
+            .map_err(|e| fail(e.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| fail("predict_logits returned no rows".to_string()))?
+            .into_iter()
+            .map(|z| z as f32)
+            .collect();
 
         let probabilities: Vec<f32> = head
             .predict_proba(&[embedding.clone()])
@@ -1094,7 +1105,8 @@ fn compute_probes(view: &SetFitArtifactView) -> Result<Vec<Value>, SetFitArtifac
     Ok(records)
 }
 
-/// Rung 7: hand the tensors and the ONE document to the APR v2 container.
+/// Step 7 of [`write_setfit_apr`]: hand the tensors and the ONE document to the
+/// APR v2 container.
 fn write_container(
     view: &SetFitArtifactView,
     hf_name_map: &BTreeMap<String, String>,
@@ -1776,39 +1788,56 @@ impl VerifiedSetFitModel {
                 .map_err(|e| SetFitArtifactError::EncodeFailed {
                     reason: e.to_string(),
                 })?;
-        let shape = pooled.shape().to_vec();
-        let (rows, width) = match shape.as_slice() {
-            [rows, width] => (*rows, *width),
-            other => {
-                return Err(SetFitArtifactError::EncodeFailed {
-                    reason: format!("the encoder produced shape {other:?}, expected [B, H]"),
-                })
-            }
-        };
-        if rows != texts.len() {
-            return Err(SetFitArtifactError::EncodeFailed {
-                reason: format!("{} texts produced {rows} embedding rows", texts.len()),
-            });
-        }
-        let data = pooled.data();
-        let mut out = Vec::with_capacity(rows);
-        for row in 0..rows {
-            let start = row.saturating_mul(width);
-            let end = start.saturating_add(width);
-            // `get` and not `[start..end]`: this is a codec whose contract is that
-            // it does not panic, and a slice index is a panic path.
-            let slice = data
-                .get(start..end)
-                .ok_or_else(|| SetFitArtifactError::EncodeFailed {
-                    reason: format!(
-                        "row {row} spans {start}..{end} of a {}-element result",
-                        data.len()
-                    ),
-                })?;
-            out.push(slice.to_vec());
-        }
-        Ok(out)
+        split_embedding_rows(&pooled, texts.len())
+            .map_err(|reason| SetFitArtifactError::EncodeFailed { reason })
     }
+}
+
+/// Split a `[B, H]` pooled tensor into `B` owned rows, or say why it could not be.
+///
+/// ONE implementation of the shape rule for the whole crate. `embed` and
+/// `classify` differ in WHICH encode produced the tensor — traced vs untraced —
+/// but not in how a `[B, H]` tensor becomes rows, and two copies of that split
+/// were two places for the bounds rule to drift apart.
+///
+/// Returns the reason as a `String` rather than a typed error precisely so each
+/// caller keeps its OWN error enum: `embed` maps it to
+/// `SetFitArtifactError::EncodeFailed`, `classify` to `ClassifyError::EncodeFailed`.
+/// Sharing the rule does not mean sharing the refusal type.
+pub(crate) fn split_embedding_rows(
+    pooled: &crate::autograd::Tensor,
+    expected_rows: usize,
+) -> Result<Vec<Vec<f32>>, String> {
+    let shape = pooled.shape().to_vec();
+    let (rows, width) = match shape.as_slice() {
+        [rows, width] => (*rows, *width),
+        other => {
+            return Err(format!(
+                "the encoder produced shape {other:?}, expected [B, H]"
+            ))
+        }
+    };
+    if rows != expected_rows {
+        return Err(format!(
+            "{expected_rows} texts produced {rows} embedding rows"
+        ));
+    }
+    let data = pooled.data();
+    let mut out = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let start = row.saturating_mul(width);
+        let end = start.saturating_add(width);
+        // `get` and not `[start..end]`: this is a codec whose contract is that
+        // it does not panic, and a slice index is a panic path.
+        let slice = data.get(start..end).ok_or_else(|| {
+            format!(
+                "row {row} spans {start}..{end} of a {}-element result",
+                data.len()
+            )
+        })?;
+        out.push(slice.to_vec());
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1970,9 +1999,13 @@ fn load_setfit_apr_within(
     // RUNGS 1-5, through the very code the parse-only door runs. The call is the
     // point: two copies of this ladder would be two verification policies, and
     // the looser of the two would silently become the real one.
-    let parts = read_setfit_apr_parts_within(bytes, limits)?;
-    // RUNG 6.
-    let (model, head) = rung6_rebuild(&parts)?;
+    let mut parts = read_setfit_apr_parts_within(bytes, limits)?;
+    // RUNG 6. The tensor map moves in: `from_bundle_parts` drains it, and nothing
+    // after this rung reads `parts.tensors`. Cloning here would duplicate ~90 MB on
+    // a full pin — the same waste `from_named_tensors` was changed to take by value
+    // to eliminate (encoder.rs).
+    let tensors = std::mem::take(&mut parts.tensors);
+    let (model, head) = rung6_rebuild(tensors, &parts)?;
     // RUNG 7 — the last word. Nothing classify-capable exists until it returns.
     rung7_replay_probes(&model, &head, &parts)?;
     Ok(VerifiedSetFitModel {
@@ -2147,11 +2180,13 @@ fn rung3_document(reader: &AprV2Reader) -> Result<SetFitArtifactDoc, SetFitArtif
         });
     }
 
-    // Only now the typed, `deny_unknown_fields` parse.
-    serde_json::from_value::<SetFitArtifactDoc>(value.clone()).map_err(|e| {
-        SetFitArtifactError::ArtifactDocumentParse {
-            detail: e.to_string(),
-        }
+    // Only now the typed, `deny_unknown_fields` parse. Deserializing from `&Value`
+    // rather than `from_value(value.clone())` avoids deep-cloning the whole tree —
+    // dominated by the probes' ~2,600 hex strings — purely to hand it to serde.
+    // Same `deny_unknown_fields` behaviour, same error, same ordering: the schema
+    // and schema_version pre-checks above still run first on the raw `Value`.
+    SetFitArtifactDoc::deserialize(value).map_err(|e| SetFitArtifactError::ArtifactDocumentParse {
+        detail: e.to_string(),
     })
 }
 
@@ -2359,12 +2394,19 @@ fn check_carried_name_map(doc: &SetFitArtifactDoc) -> Result<(), SetFitArtifactE
             ),
         });
     }
-    let mut encoder_names = expected_tensor_names(doc.architecture.num_layers);
-    for schema_owned in [HEAD_WEIGHT_TENSOR, HEAD_BIAS_TENSOR, TOKENIZER_BLOB_TENSOR] {
-        encoder_names.remove(schema_owned);
-    }
-    let carried: BTreeSet<String> = doc.hf_name_map.values().cloned().collect();
-    if carried != encoder_names {
+    // The encoder half IS `build_hf_name_map`'s value set. Deriving it that way
+    // rather than calling `expected_tensor_names` and removing the three
+    // schema-owned names back off restates no composition rule: a fourth
+    // schema-owned tensor cannot silently require an edit here, and a collision
+    // between a schema name and a canonical encoder name cannot drop a legitimate
+    // entry instead of failing.
+    let encoder_names: BTreeSet<String> = build_hf_name_map(doc.architecture.num_layers)
+        .into_values()
+        .collect();
+    // `distinct` above already borrows exactly these values, and both sides are
+    // sorted `BTreeSet`s, so equality is an allocation-free ordered comparison.
+    if !distinct.iter().copied().eq(encoder_names.iter()) {
+        let carried: BTreeSet<String> = doc.hf_name_map.values().cloned().collect();
         let missing: Vec<&String> = encoder_names.difference(&carried).collect();
         let unexpected: Vec<&String> = carried.difference(&encoder_names).collect();
         return Err(SetFitArtifactError::InconsistentNameMap {
@@ -2516,12 +2558,13 @@ fn scan_probe_expectations(doc: &SetFitArtifactDoc) -> Result<(), SetFitArtifact
 /// function is reachable from one place today and the pairing is too important to
 /// depend on the caller having done it.
 fn rung6_rebuild(
+    tensors: BTreeMap<String, (Vec<usize>, Vec<f32>)>,
     parts: &SetFitAprParts,
 ) -> Result<(SetFitMiniLm, MultinomialLogisticRegression), SetFitArtifactError> {
     let model = SetFitMiniLm::from_bundle_parts(
         &parts.tokenizer_bytes,
         &parts.doc.architecture,
-        parts.tensors.clone(),
+        tensors,
         parts.doc.root_seed,
     )
     .map_err(|e| SetFitArtifactError::ArtifactRebuildFailed {
@@ -2831,7 +2874,13 @@ fn compare_probe_component(
 /// `partial_cmp` form cannot be refactored into acceptance by accident. This is
 /// verify.rs:337-342's `within`, kept identical so the train-time and load-time
 /// comparators cannot disagree.
-fn within(delta: f64, bound: f64) -> bool {
+///
+/// This is the ONE definition in `aprender-core`: `classify` calls it rather than
+/// carrying a second copy, so the crate cannot end up with two comparators whose
+/// divergence would be silent. `classify`'s
+/// `within_is_nan_visible_in_both_argument_positions` scans THIS function's source
+/// for the `partial_cmp` form, so the surviving copy is the guarded one.
+pub(crate) fn within(delta: f64, bound: f64) -> bool {
     matches!(
         delta.partial_cmp(&bound),
         Some(core::cmp::Ordering::Less | core::cmp::Ordering::Equal)
