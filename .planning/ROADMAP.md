@@ -221,8 +221,8 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6; two parallel plans, zero file overlap)*
 
-- [ ] 04-09-PLAN.md — Three-surface parity harness on one shared request document + frozen goldens + in-band skewed negative + ONE tier3 spawned-serve smoke with a specified port protocol (wave 7)
-- [ ] 04-15-PLAN.md — Spawned-binary OPS-02 lifecycle chain (train -> inspect -> validation lock -> test eval -> predict) + generic APR tooling compatibility (D-01 / A3) (wave 7)
+- [x] 04-09-PLAN.md — Three-surface parity harness on one shared request document + frozen goldens + in-band skewed negative + ONE tier3 spawned-serve smoke with a specified port protocol (wave 7)
+- [x] 04-15-PLAN.md — Spawned-binary OPS-02 lifecycle chain (train -> inspect -> validation lock -> test eval -> predict) + generic APR tooling compatibility (D-01 / A3) (wave 7)
 
 **Wave 8** *(blocked on Wave 7)*
 
@@ -265,5 +265,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
-| 4. APR Artifact and Production Parity | 13/17 | In Progress|  |
+| 4. APR Artifact and Production Parity | 15/17 | In Progress|  |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
