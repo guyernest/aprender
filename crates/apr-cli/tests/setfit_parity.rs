@@ -1366,6 +1366,99 @@ fn bless_requested() -> bool {
     std::env::var("APR_BLESS_SETFIT_PARITY_GOLDENS").is_ok_and(|v| v == "1")
 }
 
+/// Compare a document's frozen rows against live ones.
+///
+/// The ONE row comparison, used by the library golden test AND by the spawned
+/// smoke test — so "the served answers are the frozen answers" is the same claim
+/// in both places rather than two claims that can drift apart.
+///
+/// Exact: label, probability arity, logits presence and arity, `token_count`,
+/// `truncated`. Tolerance: probabilities, logits, margins.
+fn assert_golden_rows(id: &str, frozen: &[GoldenResult], live: &[GoldenResult]) {
+    assert_eq!(frozen.len(), live.len(), "{id}: result count changed");
+
+    // NON-VACUITY. The fixture's head is random, and it happens to produce a
+    // CONSTANT argmax across every probe — so a labels-only comparison here
+    // would be nearly information-free (a reversed row order still passes it;
+    // measured). The rows differ in probability and token facts by orders of
+    // magnitude more than the tolerance, and that is what this comparison is
+    // actually resting on. Asserted, so the day a fixture change flattens the
+    // rows this test says so instead of quietly proving nothing.
+    if frozen.len() > 1 {
+        assert!(
+            frozen.iter().any(|r| !within(
+                (r.probabilities[0] - frozen[0].probabilities[0]).abs(),
+                PROBE_PROBABILITIES_ABS_TOLERANCE
+            )),
+            "{id}: every frozen row carries the same leading probability — this comparison \
+             cannot distinguish a row permutation and is therefore vacuous"
+        );
+        assert!(
+            frozen
+                .iter()
+                .any(|r| r.token_count != frozen[0].token_count),
+            "{id}: every frozen row carries the same token_count — vacuous"
+        );
+    }
+
+    for (index, (a, b)) in frozen.iter().zip(live.iter()).enumerate() {
+        assert_eq!(
+            a.label, b.label,
+            "{id} result {index}: label moved (labels are compared EXACTLY)"
+        );
+        assert_eq!(
+            a.probabilities.len(),
+            b.probabilities.len(),
+            "{id} result {index}: probability arity moved"
+        );
+        for (class, (p, q)) in a
+            .probabilities
+            .iter()
+            .zip(b.probabilities.iter())
+            .enumerate()
+        {
+            assert!(
+                within((p - q).abs(), PROBE_PROBABILITIES_ABS_TOLERANCE),
+                "{id} result {index} class {class}: probability moved {p} -> {q}"
+            );
+        }
+        match (a.logits.as_ref(), b.logits.as_ref()) {
+            (Some(x), Some(y)) => {
+                assert_eq!(x.len(), y.len(), "{id} result {index}: logit arity moved");
+                for (class, (p, q)) in x.iter().zip(y.iter()).enumerate() {
+                    assert!(
+                        within((p - q).abs(), PROBE_LOGITS_ABS_TOLERANCE),
+                        "{id} result {index} class {class}: logit moved {p} -> {q}"
+                    );
+                }
+            }
+            (None, None) => {}
+            (x, y) => panic!(
+                "{id} result {index}: logits presence moved ({} -> {})",
+                x.is_some(),
+                y.is_some()
+            ),
+        }
+        assert!(
+            within(
+                (a.margin - b.margin).abs(),
+                PROBE_PROBABILITIES_ABS_TOLERANCE
+            ),
+            "{id} result {index}: margin moved {} -> {}",
+            a.margin,
+            b.margin
+        );
+        assert_eq!(
+            a.token_count, b.token_count,
+            "{id} result {index}: token_count moved"
+        );
+        assert_eq!(
+            a.truncated, b.truncated,
+            "{id} result {index}: truncated moved"
+        );
+    }
+}
+
 #[test]
 fn golden_library_answers_are_unchanged() {
     let harness = Harness::new();
@@ -1433,80 +1526,7 @@ fn golden_library_answers_are_unchanged() {
             "{}: result count changed",
             frozen_doc.id
         );
-        for (index, (a, b)) in frozen_doc
-            .results
-            .iter()
-            .zip(live_doc.results.iter())
-            .enumerate()
-        {
-            assert_eq!(
-                a.label, b.label,
-                "{} result {index}: label moved (labels are compared EXACTLY)",
-                frozen_doc.id
-            );
-            assert_eq!(
-                a.probabilities.len(),
-                b.probabilities.len(),
-                "{} result {index}: probability arity moved",
-                frozen_doc.id
-            );
-            for (class, (p, q)) in a
-                .probabilities
-                .iter()
-                .zip(b.probabilities.iter())
-                .enumerate()
-            {
-                assert!(
-                    within((p - q).abs(), PROBE_PROBABILITIES_ABS_TOLERANCE),
-                    "{} result {index} class {class}: probability moved {p} -> {q}",
-                    frozen_doc.id
-                );
-            }
-            match (a.logits.as_ref(), b.logits.as_ref()) {
-                (Some(x), Some(y)) => {
-                    assert_eq!(
-                        x.len(),
-                        y.len(),
-                        "{} result {index}: logit arity moved",
-                        frozen_doc.id
-                    );
-                    for (class, (p, q)) in x.iter().zip(y.iter()).enumerate() {
-                        assert!(
-                            within((p - q).abs(), PROBE_LOGITS_ABS_TOLERANCE),
-                            "{} result {index} class {class}: logit moved {p} -> {q}",
-                            frozen_doc.id
-                        );
-                    }
-                }
-                (None, None) => {}
-                (x, y) => panic!(
-                    "{} result {index}: logits presence moved ({} -> {})",
-                    frozen_doc.id,
-                    x.is_some(),
-                    y.is_some()
-                ),
-            }
-            assert!(
-                within(
-                    (a.margin - b.margin).abs(),
-                    PROBE_PROBABILITIES_ABS_TOLERANCE
-                ),
-                "{} result {index}: margin moved {} -> {}",
-                frozen_doc.id,
-                a.margin,
-                b.margin
-            );
-            assert_eq!(
-                a.token_count, b.token_count,
-                "{} result {index}: token_count moved",
-                frozen_doc.id
-            );
-            assert_eq!(
-                a.truncated, b.truncated,
-                "{} result {index}: truncated moved",
-                frozen_doc.id
-            );
-        }
+        assert_golden_rows(&frozen_doc.id, &frozen_doc.results, &live_doc.results);
     }
 }
 
@@ -1780,4 +1800,491 @@ fn golden_negative_uses_the_public_validating_constructors() {
             "no validation backdoor may appear in this harness ({backdoor})"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The ONE tier3 spawned-serve smoke test (D-14)
+// ---------------------------------------------------------------------------
+//
+// D-14's shape, and why it is exactly one: an all-spawned suite is the flaky-gate
+// failure mode (every test racing a socket, a process and a scheduler), while an
+// in-process-only suite never proves the INSTALLED binary serves anything. So the
+// deterministic HTTP leg above runs in every `cargo test` and this one — the only
+// test in the repository that starts a real `apr serve` — is `#[ignore]`d and run
+// by the tier3 target plan 04-10 wires.
+//
+// No HTTP client dependency is added: the round trip is written directly on
+// `std::net::TcpStream` with `Connection: close`. T-04-SC — zero new packages
+// this phase — is a constraint on this file too.
+
+/// A bounded, drained pipe reader.
+///
+/// A chatty child that fills a 64 KiB pipe buffer BLOCKS on write, and a parent
+/// that only reads after `wait()` deadlocks forever. Both streams are therefore
+/// drained on their own threads from the moment the child exists, into a buffer
+/// capped so a runaway child cannot exhaust the test runner's memory either.
+struct DrainedOutput {
+    text: std::sync::Arc<std::sync::Mutex<String>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+const MAX_CAPTURED_CHILD_BYTES: usize = 64 * 1024;
+
+impl DrainedOutput {
+    fn spawn<R: std::io::Read + Send + 'static>(mut stream: R) -> Self {
+        let text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = std::sync::Arc::clone(&text);
+        let handle = std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut guard) = sink.lock() {
+                            if guard.len() < MAX_CAPTURED_CHILD_BYTES {
+                                guard.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            text,
+            handle: Some(handle),
+        }
+    }
+
+    fn snapshot(&self) -> String {
+        self.text
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| "<capture thread poisoned>".to_string())
+    }
+
+    fn join(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Kills and REAPS the child on every exit path, including a panic.
+///
+/// The exit status is read from the reaped `ExitStatus` — never inferred from a
+/// pipe (CLAUDE.md Verification rule 1).
+struct ServeChild {
+    child: Option<std::process::Child>,
+    stdout: DrainedOutput,
+    stderr: DrainedOutput,
+    port: u16,
+}
+
+impl ServeChild {
+    fn tail(&self) -> String {
+        format!(
+            "--- child stdout ---\n{}\n--- child stderr ---\n{}",
+            self.stdout.snapshot(),
+            self.stderr.snapshot()
+        )
+    }
+
+    /// Has the child already exited? Read WITHOUT blocking, so a child that
+    /// died on a bind error is detected instead of waited out.
+    fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        self.child
+            .as_mut()
+            .and_then(|c| c.try_wait().ok().flatten())
+    }
+}
+
+impl Drop for ServeChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.stdout.join();
+        self.stderr.join();
+    }
+}
+
+#[derive(Debug)]
+struct SmokeFailure {
+    message: String,
+    /// A port that was reserved and then taken by someone else in the release
+    /// window is not a defect in anything this plan owns — retry it.
+    address_in_use: bool,
+}
+
+/// One raw HTTP/1.1 round trip on loopback.
+///
+/// Returns `(status, body)`. `Connection: close` makes read-to-EOF the framing,
+/// and the chunked case is de-framed explicitly rather than assumed away.
+fn http_round_trip(port: u16, request: &str) -> Result<(u16, String), String> {
+    use std::io::{Read as _, Write as _};
+
+    let mut stream =
+        std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .map_err(|e| format!("set_read_timeout: {e}"))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+    stream.flush().map_err(|e| format!("flush: {e}"))?;
+
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("read: {e}"))?;
+    let text = String::from_utf8_lossy(&raw).into_owned();
+
+    let split = text
+        .find("\r\n\r\n")
+        .ok_or_else(|| format!("no header terminator in response: {text:?}"))?;
+    let (head, rest) = text.split_at(split);
+    let body_raw = &rest[4..];
+
+    let status_line = head
+        .split("\r\n")
+        .next()
+        .ok_or_else(|| "empty response".to_string())?;
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| format!("malformed status line: {status_line:?}"))?
+        .parse()
+        .map_err(|e| format!("unparseable status in {status_line:?}: {e}"))?;
+
+    let body = if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        dechunk(body_raw)?
+    } else {
+        body_raw.to_string()
+    };
+    Ok((status, body))
+}
+
+fn dechunk(body: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = body;
+    loop {
+        let end = rest
+            .find("\r\n")
+            .ok_or_else(|| "truncated chunk header".to_string())?;
+        let size = usize::from_str_radix(rest[..end].trim(), 16)
+            .map_err(|e| format!("bad chunk size {:?}: {e}", &rest[..end]))?;
+        rest = &rest[end + 2..];
+        if size == 0 {
+            return Ok(out);
+        }
+        if rest.len() < size {
+            return Err("truncated chunk body".to_string());
+        }
+        out.push_str(&rest[..size]);
+        rest = &rest[size + 2..];
+    }
+}
+
+fn get_request(port: u16, path: &str) -> String {
+    format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+}
+
+fn post_json_request(port: u16, path: &str, body: &str) -> String {
+    format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// Reserve a concrete port by binding an ephemeral one and releasing it.
+///
+/// Review finding: `127.0.0.1:0` cannot be used by the PARENT unless the chosen
+/// port is communicated back, and a fixed high port is collision-prone. So the
+/// parent picks, releases, and hands the number to the child — and the
+/// reserve-then-release race window is handled by RETRYING the whole sequence
+/// rather than pretended away.
+fn reserve_port() -> Result<u16, String> {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("reserve bind: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("local_addr: {e}"))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+struct SmokeReport {
+    port: u16,
+    readiness_ms: u128,
+    polls: u32,
+    rows: Vec<GoldenResult>,
+}
+
+/// Startup -> readiness -> one classify round trip, against the INSTALLED binary.
+fn spawned_serve_round_trip(harness: &Harness) -> Result<SmokeReport, SmokeFailure> {
+    let fail = |message: String| SmokeFailure {
+        message,
+        address_in_use: false,
+    };
+
+    let port = reserve_port().map_err(fail)?;
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_apr"))
+        .arg("serve")
+        .arg("run")
+        .arg(&harness.apr_path)
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| fail(format!("spawning apr serve: {e}")))?;
+
+    let stdout = DrainedOutput::spawn(
+        child
+            .stdout
+            .take()
+            .ok_or_else(|| fail("no stdout pipe".to_string()))?,
+    );
+    let stderr = DrainedOutput::spawn(
+        child
+            .stderr
+            .take()
+            .ok_or_else(|| fail("no stderr pipe".to_string()))?,
+    );
+    let mut guard = ServeChild {
+        child: Some(child),
+        stdout,
+        stderr,
+        port,
+    };
+
+    // (1) READINESS, bounded: 50 polls x 100 ms.
+    let started = std::time::Instant::now();
+    let mut ready_body = String::new();
+    let mut polls = 0u32;
+    for attempt in 1..=50u32 {
+        polls = attempt;
+        if let Some(status) = guard.exited() {
+            let tail = guard.tail();
+            let address_in_use = tail.to_ascii_lowercase().contains("address already in use")
+                || tail.contains("Bind:");
+            return Err(SmokeFailure {
+                message: format!(
+                    "apr serve exited before becoming ready (status {status:?}, port {port})\n{tail}"
+                ),
+                address_in_use,
+            });
+        }
+        if let Ok((200, body)) =
+            http_round_trip(guard.port, &get_request(guard.port, "/health/ready"))
+        {
+            ready_body = body;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let readiness_ms = started.elapsed().as_millis();
+    if ready_body.is_empty() {
+        return Err(fail(format!(
+            "apr serve never answered 200 on /health/ready within 5s (port {port})\n{}",
+            guard.tail()
+        )));
+    }
+
+    // (2) READINESS REPORTS THE ARTIFACT (OPS-05).
+    let ready: serde_json::Value = serde_json::from_str(&ready_body)
+        .map_err(|e| fail(format!("readiness body is not JSON ({e}): {ready_body:?}")))?;
+    let reported = ready
+        .get("classifier_artifact_sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            fail(format!(
+                "readiness carries no classifier hash: {ready_body}"
+            ))
+        })?;
+    if reported != harness.artifact_sha256() {
+        return Err(fail(format!(
+            "readiness reports {reported}, the fixture file hashes to {}",
+            harness.artifact_sha256()
+        )));
+    }
+    if ready
+        .get("classifier_verified")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Err(fail(format!(
+            "readiness does not report a verified classifier: {ready_body}"
+        )));
+    }
+
+    // (3) ONE CLASSIFY ROUND TRIP, on the SAME committed document.
+    let document = batch_document();
+    let body = Harness::serialize(&document);
+    let (status, response_body) = http_round_trip(
+        guard.port,
+        &post_json_request(guard.port, "/v1/classify", &body),
+    )
+    .map_err(|e| fail(format!("classify round trip: {e}\n{}", guard.tail())))?;
+    if status != 200 {
+        return Err(fail(format!(
+            "POST /v1/classify answered {status}: {response_body}\n{}",
+            guard.tail()
+        )));
+    }
+    let response: ClassifyResponse = serde_json::from_str(&response_body).map_err(|e| {
+        fail(format!(
+            "the spawned server's body is not the envelope ({e}): {response_body}"
+        ))
+    })?;
+    if response.artifact_sha256() != harness.artifact_sha256() {
+        return Err(fail(format!(
+            "the served response names artifact {}, the fixture is {}",
+            response.artifact_sha256(),
+            harness.artifact_sha256()
+        )));
+    }
+
+    let rows: Vec<GoldenResult> = response
+        .results()
+        .iter()
+        .map(|r| GoldenResult {
+            label: r.label().to_string(),
+            probabilities: r.probabilities().to_vec(),
+            logits: r.logits().map(<[f64]>::to_vec),
+            margin: r.margin(),
+            token_count: r.token_count(),
+            truncated: r.truncated(),
+        })
+        .collect();
+
+    // (4) The child is killed and REAPED by `guard`'s Drop on the way out.
+    Ok(SmokeReport {
+        port,
+        readiness_ms,
+        polls,
+        rows,
+    })
+}
+
+/// The rows the goldens froze for the batch document.
+fn golden_batch_rows() -> Vec<GoldenResult> {
+    let bytes = std::fs::read(goldens_path()).expect("goldens.json is committed");
+    let goldens: Goldens = serde_json::from_slice(&bytes).expect("the goldens deserialize");
+    goldens
+        .documents
+        .into_iter()
+        .find(|d| d.id == "batch")
+        .expect("the goldens record the batch document")
+        .results
+}
+
+/// The ONE spawned-serve test. Run by the tier3 target (plan 04-10) as
+/// `cargo test -p apr-cli --features setfit,inference --test setfit_parity -- \
+///  --ignored spawned_serve_smoke`.
+#[test]
+#[ignore = "tier3: spawns a real `apr serve` and binds a loopback port"]
+fn spawned_serve_smoke() {
+    let harness = Harness::new();
+    let expected = golden_batch_rows();
+
+    let mut attempts = Vec::new();
+    for attempt in 1..=3u32 {
+        match spawned_serve_round_trip(&harness) {
+            Ok(report) => {
+                // The FULL frozen rows, not just the labels: the fixture's random
+                // head produces a constant argmax, so a labels-only comparison
+                // here would pass a reversed row order (measured, then fixed).
+                assert_golden_rows("spawned batch", &expected, &report.rows);
+                println!(
+                    "spawned_serve_smoke: attempt {attempt}, port {}, ready after {} ms \
+                     ({} poll(s)), {} rows matched the frozen goldens",
+                    report.port,
+                    report.readiness_ms,
+                    report.polls,
+                    report.rows.len()
+                );
+                return;
+            }
+            Err(failure) if failure.address_in_use && attempt < 3 => {
+                attempts.push(format!("attempt {attempt}: {}", failure.message));
+            }
+            Err(failure) => {
+                attempts.push(format!("attempt {attempt}: {}", failure.message));
+                panic!("spawned serve smoke failed:\n{}", attempts.join("\n"));
+            }
+        }
+    }
+    panic!(
+        "spawned serve smoke lost the reserved port three times:\n{}",
+        attempts.join("\n")
+    );
+}
+
+#[test]
+fn parity_harness_spawns_exactly_one_serve_process() {
+    let source = harness_source();
+    let code = code_lines(&source);
+
+    // D-14: exactly one spawned-serve site. More would be the flaky-gate shape
+    // this decision exists to prevent.
+    let serve_arg = needle(&["arg(\"se", "rve\")"]);
+    assert_eq!(
+        count_occurrences(&code, &serve_arg),
+        1,
+        "exactly one code site starts a server process"
+    );
+
+    // The port must be REAL and handed over, never a literal and never 0.
+    let ephemeral = needle(&["TcpListener::bind(\"127.0.0.1", ":0\")"]);
+    assert_eq!(
+        count_occurrences(&code, &ephemeral),
+        1,
+        "the parent reserves the port by binding an ephemeral one"
+    );
+    let port_flag = needle(&["\"--po", "rt\""]);
+    assert_eq!(
+        count_occurrences(&code, &port_flag),
+        1,
+        "the reserved port is handed to the child explicitly"
+    );
+    for literal in [
+        needle(&["arg(\"80", "80\")"]),
+        needle(&["arg(\"1", "1434\")"]),
+        needle(&["port(\"", "0\")"]),
+    ] {
+        assert_eq!(
+            count_occurrences(&code, &literal),
+            0,
+            "no fixed port literal may be passed to the child ({literal})"
+        );
+    }
+
+    // Both pipes drained on threads, and the cleanup guard implements Drop.
+    assert_eq!(
+        count_occurrences(&code, &needle(&["DrainedOutput::sp", "awn("])),
+        2,
+        "exactly two call sites — child stdout and child stderr are BOTH drained on \
+         their own threads, so a chatty child cannot fill a pipe and deadlock"
+    );
+    assert_eq!(
+        count_occurrences(&code, &needle(&["std::thread::sp", "awn("])),
+        1,
+        "the drain thread is the one place a thread is spawned"
+    );
+    assert_eq!(
+        count_occurrences(&code, &needle(&["impl Drop for Serve", "Child"])),
+        1,
+        "the child is reaped by a Drop guard, so no orphan survives a panic"
+    );
 }
