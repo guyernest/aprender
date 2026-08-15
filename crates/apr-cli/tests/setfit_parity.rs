@@ -1216,3 +1216,568 @@ fn parity_harness_builds_its_fixture_from_the_full_pin_shape_recipe() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Frozen goldens + the SHA-256 manifest (Ph1 D-13)
+// ---------------------------------------------------------------------------
+//
+// The live pairwise comparison proves the three surfaces AGREE. It cannot prove
+// they still agree on the SAME ANSWER they agreed on yesterday: three surfaces
+// that all changed together are still in perfect agreement. The goldens are the
+// "nobody moved" pin, and the manifest is what makes editing them a visible act
+// rather than a silent one.
+
+/// One frozen result row. NO latency: a measurement cannot be frozen.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct GoldenResult {
+    label: String,
+    probabilities: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    logits: Option<Vec<f64>>,
+    margin: f64,
+    token_count: u32,
+    truncated: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct GoldenDocument {
+    id: String,
+    text_count: usize,
+    include_logits: bool,
+    results: Vec<GoldenResult>,
+}
+
+/// The frozen library-leg answers on the committed request documents.
+///
+/// `backend` is recorded as an EXACT string because it is an identity (D-12).
+/// `artifact_sha256` is recorded because a moved fixture is exactly what this
+/// pin exists to make loud.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Goldens {
+    note: String,
+    schema_version: u32,
+    artifact_sha256: String,
+    backend: String,
+    documents: Vec<GoldenDocument>,
+}
+
+fn goldens_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/setfit_parity"
+    ))
+}
+
+fn goldens_path() -> std::path::PathBuf {
+    goldens_dir().join("goldens.json")
+}
+
+fn manifest_path() -> std::path::PathBuf {
+    goldens_dir().join("goldens.sha256")
+}
+
+/// The three committed documents, in the order the goldens record them.
+fn golden_documents() -> Vec<(&'static str, ClassifyRequestDocument)> {
+    vec![
+        ("batch", batch_document()),
+        ("single", single_document()),
+        ("batch_with_logits", logits_document()),
+    ]
+}
+
+fn goldens_from_library(harness: &Harness) -> Goldens {
+    let mut documents = Vec::new();
+    let mut backend = String::new();
+    let mut schema_version = 0;
+    for (id, document) in golden_documents() {
+        let response = harness.library(&document);
+        backend = response.backend().to_string();
+        schema_version = response.schema_version();
+        documents.push(GoldenDocument {
+            id: id.to_string(),
+            text_count: document.texts.len(),
+            include_logits: document.include_logits,
+            results: response
+                .results()
+                .iter()
+                .map(|r| GoldenResult {
+                    label: r.label().to_string(),
+                    probabilities: r.probabilities().to_vec(),
+                    logits: r.logits().map(<[f64]>::to_vec),
+                    margin: r.margin(),
+                    token_count: r.token_count(),
+                    truncated: r.truncated(),
+                })
+                .collect(),
+        });
+    }
+    Goldens {
+        note: "Frozen library-leg answers for the 04-09 three-surface parity gate. \
+               Blessing is deliberate: set APR_BLESS_SETFIT_PARITY_GOLDENS=1 and the \
+               goldens.json + goldens.sha256 pair is rewritten together. Reviewing the \
+               resulting git diff is the control; the manifest is what makes an edit to \
+               goldens.json ALONE fail loudly."
+            .to_string(),
+        schema_version,
+        artifact_sha256: harness.artifact_sha256(),
+        backend,
+        documents,
+    }
+}
+
+/// A manifest line is `<64 hex>  <filename>` — the `sha256sum` shape.
+fn manifest_expectation(manifest: &str) -> Result<(String, String), String> {
+    let line = manifest
+        .split('\n')
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .ok_or_else(|| "the manifest carries no entry".to_string())?;
+    let mut parts = line.split_whitespace();
+    let hash = parts
+        .next()
+        .ok_or_else(|| format!("malformed manifest line: {line:?}"))?;
+    let name = parts
+        .next()
+        .ok_or_else(|| format!("manifest line names no file: {line:?}"))?;
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("manifest hash is not 64 hex chars: {hash:?}"));
+    }
+    Ok((hash.to_string(), name.to_string()))
+}
+
+/// The manifest check, as a FUNCTION so the flipped-byte negative can call it on
+/// mutated bytes without touching the file on disk.
+fn check_manifest(goldens_bytes: &[u8], manifest: &str) -> Result<(), String> {
+    let (expected, name) = manifest_expectation(manifest)?;
+    if name != "goldens.json" {
+        return Err(format!("the manifest names {name:?}, not goldens.json"));
+    }
+    let observed = artifact_sha256_hex(goldens_bytes);
+    if observed == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "goldens.json does not match its manifest: expected {expected}, observed {observed}"
+        ))
+    }
+}
+
+fn bless_requested() -> bool {
+    std::env::var("APR_BLESS_SETFIT_PARITY_GOLDENS").is_ok_and(|v| v == "1")
+}
+
+#[test]
+fn golden_library_answers_are_unchanged() {
+    let harness = Harness::new();
+    let live = goldens_from_library(&harness);
+
+    if bless_requested() {
+        let rendered = serde_json::to_string_pretty(&live).expect("the goldens serialize") + "\n";
+        std::fs::create_dir_all(goldens_dir()).expect("the goldens directory is creatable");
+        std::fs::write(goldens_path(), rendered.as_bytes()).expect("goldens.json is writable");
+        let manifest = format!(
+            "# SHA-256 manifest for the 04-09 parity goldens (Ph1 D-13).\n\
+             # Regenerate together with goldens.json:\n\
+             #   APR_BLESS_SETFIT_PARITY_GOLDENS=1 cargo test -p apr-cli \\\n\
+             #     --features setfit,inference --test setfit_parity golden\n\
+             {}  goldens.json\n",
+            artifact_sha256_hex(rendered.as_bytes())
+        );
+        std::fs::write(manifest_path(), manifest).expect("goldens.sha256 is writable");
+        return;
+    }
+
+    let frozen_bytes = std::fs::read(goldens_path()).expect(
+        "tests/fixtures/setfit_parity/goldens.json is committed; bless it with \
+         APR_BLESS_SETFIT_PARITY_GOLDENS=1 if it is genuinely absent",
+    );
+    let frozen: Goldens =
+        serde_json::from_slice(&frozen_bytes).expect("the committed goldens deserialize");
+
+    assert_eq!(
+        frozen.schema_version, live.schema_version,
+        "the envelope's schema version moved"
+    );
+    assert_eq!(
+        frozen.backend, live.backend,
+        "the backend IDENTITY moved — this is an exact comparison because a backend is an \
+         identity, not a measurement (D-12)"
+    );
+    assert_eq!(
+        frozen.artifact_sha256, live.artifact_sha256,
+        "the FIXTURE ARTIFACT's bytes moved. If every value below still matches at tolerance, \
+         the model did not change and only the container did — re-bless deliberately and put \
+         the reason in the commit message"
+    );
+    assert_eq!(
+        frozen.documents.len(),
+        live.documents.len(),
+        "the committed document set changed"
+    );
+
+    for (frozen_doc, live_doc) in frozen.documents.iter().zip(live.documents.iter()) {
+        assert_eq!(frozen_doc.id, live_doc.id, "document order changed");
+        assert_eq!(
+            frozen_doc.text_count, live_doc.text_count,
+            "{}: the committed input set changed length",
+            frozen_doc.id
+        );
+        assert_eq!(
+            frozen_doc.include_logits, live_doc.include_logits,
+            "{}: include_logits changed",
+            frozen_doc.id
+        );
+        assert_eq!(
+            frozen_doc.results.len(),
+            live_doc.results.len(),
+            "{}: result count changed",
+            frozen_doc.id
+        );
+        for (index, (a, b)) in frozen_doc
+            .results
+            .iter()
+            .zip(live_doc.results.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                a.label, b.label,
+                "{} result {index}: label moved (labels are compared EXACTLY)",
+                frozen_doc.id
+            );
+            assert_eq!(
+                a.probabilities.len(),
+                b.probabilities.len(),
+                "{} result {index}: probability arity moved",
+                frozen_doc.id
+            );
+            for (class, (p, q)) in a
+                .probabilities
+                .iter()
+                .zip(b.probabilities.iter())
+                .enumerate()
+            {
+                assert!(
+                    within((p - q).abs(), PROBE_PROBABILITIES_ABS_TOLERANCE),
+                    "{} result {index} class {class}: probability moved {p} -> {q}",
+                    frozen_doc.id
+                );
+            }
+            match (a.logits.as_ref(), b.logits.as_ref()) {
+                (Some(x), Some(y)) => {
+                    assert_eq!(
+                        x.len(),
+                        y.len(),
+                        "{} result {index}: logit arity moved",
+                        frozen_doc.id
+                    );
+                    for (class, (p, q)) in x.iter().zip(y.iter()).enumerate() {
+                        assert!(
+                            within((p - q).abs(), PROBE_LOGITS_ABS_TOLERANCE),
+                            "{} result {index} class {class}: logit moved {p} -> {q}",
+                            frozen_doc.id
+                        );
+                    }
+                }
+                (None, None) => {}
+                (x, y) => panic!(
+                    "{} result {index}: logits presence moved ({} -> {})",
+                    frozen_doc.id,
+                    x.is_some(),
+                    y.is_some()
+                ),
+            }
+            assert!(
+                within(
+                    (a.margin - b.margin).abs(),
+                    PROBE_PROBABILITIES_ABS_TOLERANCE
+                ),
+                "{} result {index}: margin moved {} -> {}",
+                frozen_doc.id,
+                a.margin,
+                b.margin
+            );
+            assert_eq!(
+                a.token_count, b.token_count,
+                "{} result {index}: token_count moved",
+                frozen_doc.id
+            );
+            assert_eq!(
+                a.truncated, b.truncated,
+                "{} result {index}: truncated moved",
+                frozen_doc.id
+            );
+        }
+    }
+}
+
+#[test]
+fn golden_file_matches_its_committed_manifest() {
+    let bytes = std::fs::read(goldens_path()).expect("goldens.json is committed");
+    let manifest = std::fs::read_to_string(manifest_path()).expect("goldens.sha256 is committed");
+    check_manifest(&bytes, &manifest).expect("the committed goldens match their manifest");
+}
+
+/// NEGATIVE 2: a flipped byte in a golden must fail the manifest check.
+///
+/// A manifest that has only ever been observed passing is theatre (CLAUDE.md
+/// Verification Discipline 5). This runs the mutation in memory in EVERY cargo
+/// test invocation, so the check is proven able to fire without anyone having to
+/// remember to edit a file.
+#[test]
+fn golden_a_single_flipped_byte_fails_the_manifest() {
+    let bytes = std::fs::read(goldens_path()).expect("goldens.json is committed");
+    let manifest = std::fs::read_to_string(manifest_path()).expect("goldens.sha256 is committed");
+    check_manifest(&bytes, &manifest).expect("the un-mutated bytes pass — non-vacuity");
+
+    let mut tampered = bytes.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+    let verdict = check_manifest(&tampered, &manifest);
+    assert!(
+        verdict.is_err(),
+        "one flipped byte must fail the manifest; got {verdict:?}"
+    );
+    let message = verdict.unwrap_err();
+    assert!(
+        message.contains("does not match its manifest"),
+        "the failure must name the mismatch: {message}"
+    );
+
+    // And a manifest whose hash line is edited must fail too — otherwise the
+    // check could be satisfied by rewriting the cheaper of the two files.
+    let forged = manifest.replace(
+        &manifest_expectation(&manifest)
+            .expect("the committed manifest parses")
+            .0,
+        &"0".repeat(64),
+    );
+    assert!(
+        check_manifest(&bytes, &forged).is_err(),
+        "an edited manifest hash must fail against untouched goldens"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The in-band negative — the gate proven able to fail, in every cargo test run
+// ---------------------------------------------------------------------------
+//
+// House discipline chain: Ph1 D-24 / Ph2 D-25 / Ph3 D-08 / this plan. "A gate
+// that can go vacuous is not a gate": a comparator that has only ever been
+// handed equal values is not evidence that it can tell unequal ones apart.
+
+/// Rebuild `response` with ONE probability perturbed by 10x the parity
+/// tolerance, through the envelope's PUBLIC validating constructors.
+///
+/// **No backdoor is needed and none is shipped.** The perturbed value is finite
+/// and the perturbation is MASS-PRESERVING (+delta on class 0, -delta on class
+/// 1), so `ClassifyResult::new`'s finiteness and probability-mass checks both
+/// accept it. That is the point: the gate under test here is the COMPARATOR, not
+/// the constructor, so the negative must be a value the type system and the
+/// constructor consider entirely legitimate.
+fn skewed_response(response: &ClassifyResponse) -> ClassifyResponse {
+    let skew = 10.0 * PROBE_PROBABILITIES_ABS_TOLERANCE;
+    let mut results = Vec::new();
+    for (index, result) in response.results().iter().enumerate() {
+        let mut probabilities = result.probabilities().to_vec();
+        assert!(
+            probabilities.len() >= 2,
+            "a mass-preserving skew needs at least two classes"
+        );
+        if index == 0 {
+            probabilities[0] += skew;
+            probabilities[1] -= skew;
+        }
+        results.push(
+            aprender::setfit::ClassifyResult::new(
+                result.label().to_string(),
+                probabilities,
+                result.logits().map(<[f64]>::to_vec),
+                result.margin(),
+                result.token_count(),
+                result.truncated(),
+            )
+            .expect("a finite, mass-preserving perturbation is a legal ClassifyResult"),
+        );
+    }
+    ClassifyResponse::new(
+        response.artifact_sha256().to_string(),
+        response.backend().to_string(),
+        response.latency_ms(),
+        results,
+    )
+    .expect("a legal envelope")
+}
+
+/// NEGATIVE 1: the comparator REJECTS a skewed response, and says which value.
+#[test]
+fn golden_negative_the_comparator_rejects_a_skewed_probability() {
+    let harness = Harness::new();
+    let document = batch_document();
+    let good = harness.library(&document);
+
+    // Non-vacuity: the comparator accepts the unskewed value first, so a
+    // comparator that rejected everything could not pass this test.
+    compare_parity(&good, &good).expect("a response agrees with itself");
+
+    let skewed = skewed_response(&good);
+    let verdict = compare_parity(&good, &skewed);
+    assert!(
+        matches!(
+            verdict,
+            Err(ParityMismatch::Probability {
+                index: 0,
+                class: 0,
+                ..
+            })
+        ),
+        "a 10x-tolerance probability skew must be REJECTED and named; got {verdict:?}"
+    );
+
+    // The same rejection through the assertion wrapper the pairwise tests use —
+    // captured as a panic, never by log inspection. The hook is silenced only
+    // for the expected panic, then restored.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let caught = std::panic::catch_unwind(|| assert_parity("negative", &good, &skewed));
+    std::panic::set_hook(previous);
+    assert!(
+        caught.is_err(),
+        "assert_parity must panic on a skewed response"
+    );
+}
+
+/// NEGATIVE 1b: a skew SMALLER than the tolerance is accepted.
+///
+/// Without this the rejection above would be consistent with a comparator that
+/// rejects any two distinct floats, which is a different (and useless) gate.
+#[test]
+fn golden_negative_a_sub_tolerance_perturbation_is_still_parity() {
+    let harness = Harness::new();
+    let good = harness.library(&batch_document());
+    let tiny = PROBE_PROBABILITIES_ABS_TOLERANCE / 10.0;
+    let mut results = Vec::new();
+    for (index, result) in good.results().iter().enumerate() {
+        let mut probabilities = result.probabilities().to_vec();
+        if index == 0 {
+            probabilities[0] += tiny;
+            probabilities[1] -= tiny;
+        }
+        results.push(
+            aprender::setfit::ClassifyResult::new(
+                result.label().to_string(),
+                probabilities,
+                result.logits().map(<[f64]>::to_vec),
+                result.margin(),
+                result.token_count(),
+                result.truncated(),
+            )
+            .expect("a legal result"),
+        );
+    }
+    let nudged = ClassifyResponse::new(
+        good.artifact_sha256().to_string(),
+        good.backend().to_string(),
+        good.latency_ms(),
+        results,
+    )
+    .expect("a legal envelope");
+    compare_parity(&good, &nudged)
+        .expect("a perturbation an order of magnitude BELOW the bound is still parity");
+}
+
+/// NEGATIVE 3: the envelope's validated `Deserialize` is live at the surface
+/// boundary (review M1).
+///
+/// Both legs that cross a process or socket boundary parse INTO
+/// `ClassifyResponse`, so this is what makes "the CLI/HTTP body deserialized"
+/// mean more than "it was syntactically JSON".
+#[test]
+fn golden_negative_a_malformed_envelope_does_not_deserialize() {
+    // (a) a `null` probability — serde's own type check.
+    let with_null = r#"{
+        "schema_version": 1,
+        "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "backend": "cpu:setfit-core:autograd-trueno-matmul",
+        "latency_ms": 1.0,
+        "results": [{
+            "label": "favor",
+            "probabilities": [null, 0.5, 0.5],
+            "margin": 0.0,
+            "token_count": 4,
+            "truncated": false
+        }]
+    }"#;
+    let verdict = serde_json::from_str::<ClassifyResponse>(with_null);
+    assert!(
+        verdict.is_err(),
+        "a null probability must not deserialize into the envelope; got {verdict:?}"
+    );
+
+    // (b) a probability row that does not sum to 1 — the VALIDATING TryFrom,
+    //     which a plain serde type check would have waved through.
+    let bad_mass = r#"{
+        "schema_version": 1,
+        "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "backend": "cpu:setfit-core:autograd-trueno-matmul",
+        "latency_ms": 1.0,
+        "results": [{
+            "label": "favor",
+            "probabilities": [0.5, 0.5, 0.5],
+            "margin": 0.0,
+            "token_count": 4,
+            "truncated": false
+        }]
+    }"#;
+    let verdict = serde_json::from_str::<ClassifyResponse>(bad_mass);
+    assert!(
+        verdict.is_err(),
+        "a probability row summing to 1.5 must not deserialize; got {verdict:?}"
+    );
+
+    // Non-vacuity: the same shape with a legal row DOES deserialize, so the two
+    // rejections above are about the values and not about the schema.
+    let legal = r#"{
+        "schema_version": 1,
+        "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "backend": "cpu:setfit-core:autograd-trueno-matmul",
+        "latency_ms": 1.0,
+        "results": [{
+            "label": "favor",
+            "probabilities": [0.25, 0.5, 0.25],
+            "margin": 0.25,
+            "token_count": 4,
+            "truncated": false
+        }]
+    }"#;
+    serde_json::from_str::<ClassifyResponse>(legal)
+        .expect("a well-formed envelope deserializes — non-vacuity for the two rejections above");
+}
+
+/// The skewed helper must use the PUBLIC constructors — no test-only door, no
+/// `pub(crate)` backdoor, no field mutation.
+#[test]
+fn golden_negative_uses_the_public_validating_constructors() {
+    let source = harness_source();
+    let code = code_lines(&source);
+    for constructor in [
+        needle(&["ClassifyResponse::", "new("]),
+        needle(&["ClassifyResult::", "new("]),
+    ] {
+        assert!(
+            count_occurrences(&code, &constructor) >= 1,
+            "the negative must be built through {constructor}"
+        );
+    }
+    // There is no such door in core, and this asserts none was invented here.
+    for backdoor in [
+        needle(&["for_", "tests("]),
+        needle(&["_unchec", "ked("]),
+        needle(&["skip_valid", "ation"]),
+    ] {
+        assert_eq!(
+            count_occurrences(&code, &backdoor),
+            0,
+            "no validation backdoor may appear in this harness ({backdoor})"
+        );
+    }
+}
