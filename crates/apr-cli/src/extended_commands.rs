@@ -121,6 +121,38 @@ pub enum ExtendedCommands {
         /// Sampling temperature (0.0 = greedy, 0.8 = standard for pass@k>1)
         #[arg(long, default_value = "0.0")]
         temperature: f32,
+        /// SetFit only: the selection-manifest.json `apr data select` wrote
+        ///
+        /// The artifact records the selection's hashes; this is what they are compared
+        /// against. Reached only when --task classify names a setfit-apr-v1 artifact.
+        #[arg(long, value_name = "FILE")]
+        selection: Option<PathBuf>,
+        /// SetFit only: which canonical split to measure (`validation` or `test`)
+        ///
+        /// `validation` may COMMIT a selection by writing --lock-out. `test` REQUIRES a lock
+        /// a prior validation run committed, because canonical test rows are reachable only
+        /// through a selection decision that was recorded before the test command ran.
+        #[arg(long, default_value = "validation")]
+        split: String,
+        /// SetFit only, `--split validation`: where to write the durable selection lock
+        ///
+        /// Omitting it measures and reports but COMMITS NOTHING, and the report says so: a
+        /// validation run that did not commit a selection cannot later unlock test access.
+        #[arg(long = "lock-out", value_name = "FILE")]
+        lock_out: Option<PathBuf>,
+        /// SetFit only, `--split test`: the lock a prior validation run committed
+        #[arg(long = "selection-lock", value_name = "FILE")]
+        selection_lock: Option<PathBuf>,
+        /// SetFit only, `--split validation`: another artifact to consider (repeatable)
+        ///
+        /// Each is reloaded and evaluated through the SAME door as the primary artifact, so a
+        /// candidate trained on a different corpus or selection is refused rather than
+        /// silently compared against ones that were not.
+        #[arg(long, value_name = "APR")]
+        candidate: Vec<PathBuf>,
+        /// SetFit only: replace an existing --lock-out
+        #[arg(long)]
+        force: bool,
     },
     /// Deep profiling with Roofline analysis
     Profile {

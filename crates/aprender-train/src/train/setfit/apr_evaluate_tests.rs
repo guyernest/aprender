@@ -15,7 +15,10 @@ use aprender_contrastive_data::select::{FewShotSelector, Selection, SelectionCon
 use super::super::apr_codec::fixture::{apr_capable_run, artifact_bytes_of};
 use super::super::apr_reload::reload_verified_run_from_apr;
 use super::super::evaluate::evaluate_validation;
-use super::super::lock::{create_selection_lock, SelectionCandidate, SelectionRule};
+use super::super::lock::{
+    create_selection_lock, CanonicalTestAccess, LockError, SelectionCandidate, SelectionLock,
+    SelectionRule,
+};
 use super::super::test_fixtures as fx;
 use super::*;
 
@@ -324,4 +327,150 @@ fn apr_evaluate_mints_no_state_and_fabricates_no_evidence() {
     ] {
         assert!(!code.contains(banned), "this module must not construct or fabricate `{banned}`",);
     }
+}
+
+// ===========================================================================================
+// TRN-07: the durable selection lock, across two invocations, mediated by a FILE
+// ===========================================================================================
+
+/// Build the lock a `--split validation --lock-out` invocation would commit.
+fn committed_lock(
+    credential: &ReloadedSetFitCredential,
+    dataset: &PreparedDataset<Canonical>,
+) -> SelectionLock {
+    let evaluation =
+        evaluate_validation_from_artifact(credential, dataset, ValidationMetricKind::Accuracy)
+            .expect("the reloaded artifact is measurable on its own corpus");
+    let candidate = SelectionCandidate::from_evaluation("cfg-hash", evaluation);
+    create_selection_lock(credential, vec![candidate], SelectionRule::MaxMetricLowestIndexTieBreak)
+        .expect("the creating model is in its own candidate set")
+}
+
+/// TRN-07's POSITIVE tier: a user reaches lock -> token -> grant across two invocations.
+///
+/// # This is the IN-PROCESS, FILE-MEDIATED proof
+///
+/// The two halves below share no `SelectionLock` value: the first serializes to disk and drops
+/// everything, the second reads the FILE and reconstructs through
+/// `SelectionLock::from_canonical_bytes`. That is the property review finding B4 is about — the
+/// selection must be COMMITTED before test access is taken, and a lock that only ever existed
+/// in one call stack proves nothing about that ordering.
+///
+/// It is deliberately NOT labelled a cross-process proof. Two `std::process::Command`
+/// invocations of the real `apr` binary are 04-15's deliverable
+/// (`crates/apr-cli/tests/setfit_cli_lifecycle.rs`); this test runs in one process and its
+/// claim is exactly the FILE boundary, not the process boundary.
+///
+/// It lives in `aprender-train` rather than beside `apr eval` because this is the only crate in
+/// which a `setfit-apr-v1` artifact can be produced at all — measured, not assumed: F-10 leaves
+/// the phase-3 slice as the sole trainable encoder and it cannot compute two of the six probes,
+/// and core's APR-capable view fixture is `#[cfg(test)] pub(crate)`.
+#[test]
+fn apr_evaluate_the_lock_travels_between_two_invocations_as_a_file() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let lock_path = temp.path().join("selection-lock.json");
+
+    // ---- INVOCATION ONE: measure, commit, write. ------------------------------------
+    let recorded_lock_hash = {
+        let (credential, dataset) = fresh_credential();
+        let lock = committed_lock(&credential, &dataset);
+        std::fs::write(&lock_path, lock.to_canonical_bytes()).expect("the lock file is writable");
+        lock.lock_hash().to_string()
+        // `credential`, `dataset` and `lock` all drop here. Nothing but the FILE survives.
+    };
+
+    // ---- INVOCATION TWO: read the file, mint, grant, read the test rows. ------------
+    let (credential, dataset) = fresh_credential();
+    let bytes = std::fs::read(&lock_path).expect("the lock file is readable");
+    let lock = SelectionLock::from_canonical_bytes(&bytes)
+        .expect("a lock written by the previous invocation must reconstruct");
+    assert_eq!(
+        lock.lock_hash(),
+        recorded_lock_hash,
+        "the reconstructed lock must be the record the first invocation committed, not a fresh \
+         opinion about a payload silently repaired on the way in",
+    );
+
+    let token = lock.mint_test_token(&credential).expect("the lock names this artifact as chosen");
+    let grant = CanonicalTestAccess::grant(token, &credential, &dataset)
+        .expect("the corpus is the one the lock was taken over");
+
+    assert!(
+        !grant.test().rows().is_empty(),
+        "the grant must admit the canonical test rows; an empty split would make every claim \
+         above vacuous",
+    );
+    assert_eq!(
+        grant.artifact_hash(),
+        credential.artifact_hash(),
+        "the grant belongs to THIS artifact",
+    );
+    assert_eq!(
+        grant.lock_hash(),
+        recorded_lock_hash,
+        "and it traces back to the lock the FIRST invocation wrote",
+    );
+}
+
+/// A lock naming a DIFFERENT artifact is refused as stale, naming both hashes.
+#[test]
+fn apr_evaluate_a_lock_naming_a_different_artifact_is_refused_as_stale() {
+    // A genuinely different artifact: the same fixture run closed with phase 3's debug codec,
+    // whose bytes — and therefore whose digest — are not the APR artifact's.
+    let other_run = fx::verified_run(fx::calibrated_variant());
+    let other_dataset = fx::fixture_dataset();
+    let other_evaluation =
+        evaluate_validation(&other_run, &other_dataset, ValidationMetricKind::Accuracy)
+            .expect("the fixture run is measurable on its own dataset");
+    let other_lock = create_selection_lock(
+        &other_run,
+        vec![SelectionCandidate::from_evaluation("cfg-hash", other_evaluation)],
+        SelectionRule::MaxMetricLowestIndexTieBreak,
+    )
+    .expect("the creating model is in its own candidate set");
+
+    let (credential, _dataset) = fresh_credential();
+    assert_ne!(
+        other_lock.chosen_artifact_hash(),
+        credential.artifact_hash(),
+        "non-vacuity: the two artifacts must actually differ, or this test proves nothing",
+    );
+
+    let error = other_lock
+        .mint_test_token(&credential)
+        .expect_err("a lock that names another artifact must not admit this one");
+    assert!(
+        matches!(error, LockError::StaleLock { .. }),
+        "the refusal must be typed StaleLock; got: {error:?}",
+    );
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(other_lock.chosen_artifact_hash())
+            && rendered.contains(credential.artifact_hash()),
+        "the refusal must name BOTH the locked hash and the observed one; got: {rendered}",
+    );
+}
+
+/// A grant taken over a DIFFERENT corpus is refused, naming both fingerprints.
+#[test]
+fn apr_evaluate_a_grant_over_a_different_corpus_is_refused() {
+    let (credential, dataset) = fresh_credential();
+    let lock = committed_lock(&credential, &dataset);
+    let token = lock.mint_test_token(&credential).expect("the lock names this artifact");
+
+    // ONE TEST ROW ALTERED. The MODEL half of the substitution is held constant — the token is
+    // valid and the artifact is the locked one — so only the DATA half can fire.
+    let other = fx::dataset_with_altered_test_row();
+    assert_ne!(
+        other.validation_witness().dataset_fingerprint_hex(),
+        dataset.validation_witness().dataset_fingerprint_hex(),
+        "non-vacuity: the probe corpus must actually differ",
+    );
+
+    let error = CanonicalTestAccess::grant(token, &credential, &other)
+        .expect_err("a valid token must not admit test rows from another corpus");
+    assert!(
+        matches!(error, LockError::TokenDatasetMismatch { .. }),
+        "the refusal must be typed TokenDatasetMismatch; got: {error:?}",
+    );
 }

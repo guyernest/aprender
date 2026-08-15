@@ -730,6 +730,95 @@ fn dispatch_experiment_command(
     }
 }
 
+/// Route `apr eval --task classify` by the artifact's OWN typed tag (D-04, OPS-03).
+///
+/// A `setfit-apr-v1` artifact goes to the SetFit branch; everything else goes to the LoRA
+/// classification path exactly as before. Detection reads the metadata record, never a tensor
+/// name, so a checkpoint that merely looks like a classifier keeps its existing behaviour.
+///
+/// The SetFit-only flags are REFUSED on the non-SetFit path rather than ignored. An operator
+/// who passes `--selection-lock` and gets a green report has every reason to believe the lock
+/// gated something; it would have gated nothing.
+#[cfg(feature = "training")]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn dispatch_classify_eval(
+    resolved: &std::path::Path,
+    dataset: &str,
+    data: Option<&std::path::Path>,
+    model_size: Option<&str>,
+    num_classes: usize,
+    generate_card: bool,
+    json: bool,
+    selection: Option<&std::path::Path>,
+    split: &str,
+    lock_out: Option<&std::path::Path>,
+    selection_lock: Option<&std::path::Path>,
+    candidate: &[std::path::PathBuf],
+    force: bool,
+) -> std::result::Result<(), CliError> {
+    let tagged = crate::setfit_tag::read_setfit_tag(resolved)?.is_some();
+
+    if tagged {
+        #[cfg(feature = "setfit")]
+        {
+            let split = split.parse::<commands::eval::setfit::Split>()?;
+            return commands::eval::setfit::run(&commands::eval::setfit::SetFitEvalArgs {
+                artifact: resolved,
+                data,
+                selection,
+                split,
+                lock_out,
+                selection_lock,
+                candidates: candidate,
+                force,
+                json,
+            });
+        }
+        #[cfg(not(feature = "setfit"))]
+        {
+            let _ = (selection, split, lock_out, selection_lock, candidate, force);
+            return Err(CliError::FeatureDisabled(format!(
+                "{} is a setfit-apr-v1 classifier, but this binary was built without the \
+                 `setfit` feature. Rebuild with `--features setfit` to evaluate it.",
+                resolved.display()
+            )));
+        }
+    }
+
+    for (flag, given) in [
+        ("--selection", selection.is_some()),
+        ("--lock-out", lock_out.is_some()),
+        ("--selection-lock", selection_lock.is_some()),
+        ("--candidate", !candidate.is_empty()),
+    ] {
+        if given {
+            return Err(CliError::ValidationFailed(format!(
+                "{flag} applies only to a setfit-apr-v1 artifact, and {} does not carry the \
+                 SetFit tag. Accepting it here would let a flag that gates canonical test \
+                 access appear to have done so on a path where it gates nothing.",
+                resolved.display()
+            )));
+        }
+    }
+    if split != "validation" {
+        return Err(CliError::ValidationFailed(format!(
+            "--split applies only to a setfit-apr-v1 artifact, and {} does not carry the \
+             SetFit tag.",
+            resolved.display()
+        )));
+    }
+
+    eval::run_classify_eval(
+        resolved,
+        dataset,
+        data,
+        model_size,
+        num_classes,
+        generate_card,
+        json,
+    )
+}
+
 /// Dispatch `apr setfit` subcommands to the training adapter.
 ///
 /// `cli.offline` is deliberately NOT threaded through, for the same reason
@@ -1314,9 +1403,15 @@ fn dispatch_profiling_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             device,
             samples,
             temperature,
+            selection,
+            split,
+            lock_out,
+            selection_lock,
+            candidate,
+            force,
         } => crate::error::resolve_model_path(file).and_then(|r| match task.as_deref() {
             #[cfg(feature = "training")]
-            Some("classify") => eval::run_classify_eval(
+            Some("classify") => dispatch_classify_eval(
                 &r,
                 dataset,
                 data.as_deref(),
@@ -1324,6 +1419,12 @@ fn dispatch_profiling_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 *num_classes,
                 *generate_card,
                 cli.json,
+                selection.as_deref(),
+                split,
+                lock_out.as_deref(),
+                selection_lock.as_deref(),
+                candidate,
+                *force,
             ),
             Some("code") => {
                 eval::run_code_eval(&r, data.as_deref(), *max_tokens, *threshold, cli.json)
