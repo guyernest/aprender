@@ -65,8 +65,26 @@ It fails on a dependency's pre-existing debt, so it cannot distinguish "my code 
 04-13 proved `--no-deps` is still a working gate by planting a deliberate `useless_format` probe
 and observing RED. Both 04-13 and 04-14 hit this independently.
 
-**Action for 04-10:** every clippy leg in the Make targets must carry `--no-deps`, or the gate is
-theater. Do not "fix" it by removing `-D warnings`.
+**REFINEMENT (verified after wave 4, from 04-04's D-04-04-A):** `--no-deps` rescues
+`aprender-train` but **NOT `aprender-core`**, which has a pre-existing error of its own:
+
+```
+cargo clippy -p aprender-core --features setfit --no-deps -- -D warnings   -> rc=101
+error: unreachable expression
+  --> crates/aprender-core/src/demo/reliable/performance.rs:126:5
+```
+
+It is **arm64-only and pre-existing**: on aarch64 the `#[cfg(target_arch = "aarch64")] { return
+"NEON" }` makes the trailing `"Scalar".to_string()` unreachable. Last touched by `bb519c6eb`
+(APR-MONO), **zero** phase-4 commits touch that file. So on this host `aprender-core` exits 101 on an
+empty diff — the gate cannot distinguish clean from dirty there either.
+
+04-04's workaround is the right shape: a **path-scoped** assertion over the setfit surface only,
+proven non-vacuous by planting a `useless_format` (0 → 1). Do not scope by crate.
+
+**Action for 04-10:** every clippy leg must carry `--no-deps`, AND `aprender-core` legs must
+additionally be path-scoped to the setfit surface or they fail on unrelated pre-existing arm64 debt.
+Do not "fix" either by removing `-D warnings`.
 
 ---
 
