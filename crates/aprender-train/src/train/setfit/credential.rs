@@ -56,6 +56,7 @@
 //! beside it. A sealed trait has no constructor at all: the only way to hold a credential
 //! is to hold something this crate minted.
 
+use super::apr_reload::ReloadedSetFitCredential;
 use super::{ArtifactReloadedAndVerified, SetFitRun};
 
 /// The seal. Private module, public-in-private trait — the idiom `LifecycleState` and
@@ -122,6 +123,42 @@ impl SetFitCredential for SetFitRun<ArtifactReloadedAndVerified> {
 
     fn selection_ledger_hash(&self) -> [u8; 32] {
         self.selection().ledger_hash()
+    }
+}
+
+impl sealed::Sealed for ReloadedSetFitCredential {}
+
+/// The FRESH-PROCESS credential (04-16), and the reason this trait exists.
+///
+/// # Why the seal impl is HERE and the type is in `apr_reload`
+///
+/// `mod sealed` is private to this module, so `Sealed` is not nameable from a sibling —
+/// which is the seal working as intended. A type elsewhere in the crate becomes a
+/// credential by an impl written in THIS file, so the complete answer to "what satisfies
+/// the seal" is one grep in one place, and `credential_seal_is_a_private_supertrait` counts
+/// it. `ReloadedSetFitCredential` itself lives beside the door that mints it, because the
+/// provenance gate and the type are one argument.
+///
+/// # This is what 04-16's refusal bought
+///
+/// `reload_verified_run_from_apr` runs `aprender-core`'s eight-rung production loader,
+/// including the six-probe replay, and then requires the artifact's recorded selection
+/// semantic hash, selection ledger hash and dataset fingerprint to equal the values
+/// computed from the caller's own `Selection` and `PreparedDataset`. Those three facts are
+/// exactly what the doors read. Nothing about the optimizer run is claimed, recomputed or
+/// defaulted — which is the difference between this credential and the state 04-16 measured
+/// to be unreconstructible.
+impl SetFitCredential for ReloadedSetFitCredential {
+    fn artifact_hash(&self) -> String {
+        ReloadedSetFitCredential::artifact_hash(self).to_string()
+    }
+
+    fn selection_semantic_hash(&self) -> String {
+        ReloadedSetFitCredential::selection_semantic_hash(self).to_string()
+    }
+
+    fn selection_ledger_hash(&self) -> [u8; 32] {
+        ReloadedSetFitCredential::selection_ledger_hash(self)
     }
 }
 

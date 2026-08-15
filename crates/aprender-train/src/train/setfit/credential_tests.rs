@@ -245,15 +245,23 @@ fn credential_seal_is_a_private_supertrait() {
         "the sealing module must stay private, or the supertrait is nameable and the seal \
          is decoration",
     );
+    // TWO types satisfy the seal, and the count is what makes a third deliberate. 04-17
+    // shipped the first and left this number at one; 04-16 added the second, which is the
+    // fresh-process credential the whole trait was introduced for. Both are named below, so
+    // a change that swaps one for another fails here rather than passing on the count.
     assert_eq!(
         CREDENTIAL_SOURCE.matches("impl sealed::Sealed for ").count(),
-        1,
-        "exactly one type may satisfy the seal today; a second is a deliberate addition",
+        2,
+        "exactly two types may satisfy the seal today; a third is a deliberate addition",
     );
     assert!(
         CREDENTIAL_SOURCE
             .contains("impl sealed::Sealed for SetFitRun<ArtifactReloadedAndVerified> {}"),
-        "and it is the train-time run",
+        "the train-time run must still be a credential",
+    );
+    assert!(
+        CREDENTIAL_SOURCE.contains("impl sealed::Sealed for ReloadedSetFitCredential {}"),
+        "and so must the fresh-process credential 04-16 mints from artifact bytes",
     );
 }
 

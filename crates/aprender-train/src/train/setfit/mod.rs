@@ -34,6 +34,8 @@
 
 /// The `setfit-apr-v1` adapter behind the sealed codec seam (04-05, APR-03).
 pub mod apr_codec;
+/// The fresh-process door: artifact bytes -> a sealed credential (04-16, D-11, D-16).
+pub mod apr_reload;
 pub mod baseline;
 /// The complete deterministic state of a finished run, and its canonical wire form (03-08).
 pub mod bundle;
@@ -1235,6 +1237,13 @@ pub enum SetFitTrainError {
     },
     /// The codec refused to encode or decode the artifact.
     Codec(CodecError),
+    /// The fresh-process reload door refused the artifact/inputs pair.
+    ///
+    /// A SEPARATE variant rather than a set of arms on this enum, on the precedent
+    /// [`Self::Codec`] and [`Self::Bundle`] set: the module that owns an operation owns its
+    /// failure vocabulary, and the trainer error wraps it whole so a caller can still tell
+    /// a provenance disagreement from a container CRC failure without matching on text.
+    AprReload(apr_reload::AprReloadError),
     /// The bundle layer refused the payload — a contracted limit, a parse failure,
     /// an unknown schema version, or a shape the declared tensor does not have.
     Bundle(BundleError),
@@ -1460,6 +1469,10 @@ impl fmt::Display for SetFitTrainError {
                 "the artifact bundle refused the payload: {inner} \
                  (contract setfit-train-lifecycle-v1, requirement TRN-01)",
             ),
+            Self::AprReload(inner) => write!(
+                f,
+                "the artifact could not be reloaded against the supplied inputs: {inner}",
+            ),
             Self::ReloadNotFromBytes { hashed_len, reserialized_len, first_diff_offset } => write!(
                 f,
                 "the reloaded bundle did not re-serialize to the bytes that were hashed \
@@ -1520,6 +1533,12 @@ impl From<DeviceError> for SetFitTrainError {
 impl From<ContrastiveDataError> for SetFitTrainError {
     fn from(inner: ContrastiveDataError) -> Self {
         Self::Capacity(inner)
+    }
+}
+
+impl From<apr_reload::AprReloadError> for SetFitTrainError {
+    fn from(inner: apr_reload::AprReloadError) -> Self {
+        Self::AprReload(inner)
     }
 }
 
