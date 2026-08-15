@@ -325,3 +325,38 @@ A source that lies upward (a one-byte FIFO, a sparse file, metadata reporting 26
 the process commit a quarter gigabyte before reading a byte — the exhaustion the cap exists to
 prevent, arriving via the reservation instead of the payload. Fixing it means inventing a
 reservation ceiling the contract does not fix. **Decide with the bound's owner.**
+
+
+---
+
+## F-14 UPDATE — three of the five closed in `fb7904bad`
+
+**CLOSED (1) rung renumbering.** Code now follows the contract's eight rungs
+(`rung2_raw_length` .. `rung8_replay_probes`), with contract rung 1 — the declared-length source
+bound — documented as living in `read_setfit_apr_bytes_bounded` rather than left as a silent gap.
+Pinned by `the_rung_numbering_matches_the_contracts_eight_rung_ladder`, which parses the contract's
+own `rungs:` block via `include_str!` (not a hand-copied list) and was shown RED on a real rename
+before being believed. It scans only the production half — its first version failed on its own
+`fn rung1_` literal, the F-05 self-scan defect, caught and fixed.
+
+**CLOSED (3) `latency_ms` out of equality.** Manual `PartialEq` over schema version, artifact hash,
+backend and results. `Eq` deliberately not implemented (`f64` probabilities). The two round-trip
+tests that had been leaning on equality to cover latency now assert it separately and BY BITS, so a
+renormalized `-0.0` cannot pass. **04-09's parity harness can now use `assert_eq!` as intended.**
+
+**PARTIALLY CLOSED (4).** Research first: `max_request_body_bytes` appears in NO other contract, and
+no crate enforces a body limit anywhere (no `DefaultBodyLimit`, no body-limit layer). So this
+constant ESTABLISHES the number rather than inheriting a pattern. `MAX_REQUEST_BODY_BYTES` is the
+shared value; **enforcement before deserializing is still owed by 04-07 (`--input` reader) and
+04-08 (HTTP body extractor)** — the type still parses an unbounded `texts` vector.
+
+**STILL OPEN (2) binding statuses** — all 15 rows remain `pending`; `contract-audit-phase4` is
+green over a registry tracking nothing. One of the two bad rows is now fixed: `probe_policy` named
+`replay_probes`, a function that never existed on this branch, corrected to `rung8_replay_probes`.
+The other remains: `backend_identity` names
+`aprender::setfit::classify::backend_identity`, which does not exist — the identity comes from
+`ExecutionBackend::identity` in `encoder.rs`.
+
+**STILL OPEN (5) bounded-read pre-reservation** — `read_setfit_apr_bytes_bounded` still reserves the
+caller-declared length clamped to 256 MiB, so a source that lies upward commits a quarter gigabyte
+before reading a byte. Fixing it means inventing a reservation ceiling the contract does not fix.
