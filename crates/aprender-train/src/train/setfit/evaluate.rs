@@ -198,6 +198,43 @@ impl From<ValidationEvaluation> for ValidationEvaluationWire {
     }
 }
 
+impl ValidationEvaluation {
+    /// Rebuild an evaluation from the canonical wire form a lock committed.
+    ///
+    /// # This is not a second construction path for a caller's number
+    ///
+    /// The module doc says this type must not `Deserialize`, and it still does not: there is no
+    /// `impl Deserialize`, and the only way to reach this function is to hold a
+    /// [`ValidationEvaluationWire`], which is `pub(super)` and therefore unnameable outside this
+    /// module tree. What it exists for is the ONE place a persisted evaluation legitimately
+    /// comes back: `SelectionLock::from_canonical_bytes`, reading a lock a PRIOR process wrote.
+    /// A lock file whose evaluations could not be reconstructed is a file nothing can use, which
+    /// is what review finding B4 was about.
+    ///
+    /// # It takes BITS, not a float
+    ///
+    /// `evaluate_source_exposes_no_public_api_taking_a_float_parameter` requires that
+    /// `evaluation_for_tests` is the only float-taking door in this module, and this one takes
+    /// the wire struct — so the guard is unaffected rather than excused. The bits form is also
+    /// what makes the reconstruction EXACT: a decimal round trip would bind the recovered value
+    /// to a formatting library's shortest-representation choice, and the lock hashes the bits.
+    ///
+    /// The wire's `schema_version` is deliberately not re-checked here. The caller checks the
+    /// LOCK's version, and a drifted evaluation version changes the bytes the reconstructed lock
+    /// re-serializes to — which its canonical-form check refuses. Checking it twice, in two
+    /// places, is how the two answers eventually disagree.
+    pub(super) fn from_wire(wire: ValidationEvaluationWire) -> Self {
+        Self {
+            metric_kind: wire.metric_kind,
+            value: f64::from_bits(wire.value_bits),
+            artifact_hash: wire.artifact_hash,
+            validation_split_fingerprint: wire.validation_split_fingerprint,
+            dataset_fingerprint: wire.dataset_fingerprint,
+            n_rows: wire.n_rows as usize,
+        }
+    }
+}
+
 /// Build an evaluation directly, from parts — TEST ONLY.
 ///
 /// `#[cfg(test)]` and `pub(super)`, and nothing weaker. The selection lock's rule,

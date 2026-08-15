@@ -818,8 +818,8 @@ fn lock_survives_a_round_trip_through_canonical_bytes() {
     .expect("the lock must build");
     let bytes = original.to_canonical_bytes();
 
-    let reconstructed =
-        SelectionLock::from_canonical_bytes(&bytes).expect("bytes this module wrote must read back");
+    let reconstructed = SelectionLock::from_canonical_bytes(&bytes)
+        .expect("bytes this module wrote must read back");
 
     assert_eq!(reconstructed, original);
     assert_eq!(reconstructed.lock_hash(), original.lock_hash());
@@ -860,12 +860,9 @@ fn lock_from_canonical_bytes_refuses_an_oversized_payload_before_parsing() {
     // Deliberately NOT valid JSON. If the bound were enforced AFTER the parse, this would come
     // back as a malformed payload; the variant that actually arrives is the ordering proof.
     let over = vec![b'x'; cap + 1];
-    let error =
-        SelectionLock::from_canonical_bytes(&over).expect_err("an over-cap payload must be refused");
-    assert_eq!(
-        error,
-        LockError::LockPayloadTooLarge { limit: MAX_SELECTION_LOCK_BYTES, observed },
-    );
+    let error = SelectionLock::from_canonical_bytes(&over)
+        .expect_err("an over-cap payload must be refused");
+    assert_eq!(error, LockError::LockPayloadTooLarge { limit: MAX_SELECTION_LOCK_BYTES, observed },);
     let rendered = error.to_string();
     assert!(rendered.contains(&MAX_SELECTION_LOCK_BYTES.to_string()), "{rendered}");
     assert!(rendered.contains(&observed.to_string()), "{rendered}");
@@ -922,7 +919,8 @@ fn lock_from_canonical_bytes_refuses_a_chosen_index_out_of_range() {
     .expect("the lock must build");
     assert_eq!(lock.chosen_index(), 1);
 
-    let payload = substitute_first(&canonical_json(&lock), "\"chosen_index\":1", "\"chosen_index\":9");
+    let payload =
+        substitute_first(&canonical_json(&lock), "\"chosen_index\":1", "\"chosen_index\":9");
     let error = SelectionLock::from_canonical_bytes(payload.as_bytes())
         .expect_err("an index past the end of the list names no candidate");
     assert_eq!(error, LockError::ChosenIndexOutOfRange { chosen_index: 9, candidates: 2 });
@@ -945,14 +943,12 @@ fn lock_from_canonical_bytes_refuses_a_recorded_winner_the_rule_did_not_pick() {
     .expect("the lock must build");
     assert_eq!(lock.chosen_index(), 1, "0.90 wins, so index 0 is the loser this test names");
 
-    let payload = substitute_first(&canonical_json(&lock), "\"chosen_index\":1", "\"chosen_index\":0");
+    let payload =
+        substitute_first(&canonical_json(&lock), "\"chosen_index\":1", "\"chosen_index\":0");
     let error = SelectionLock::from_canonical_bytes(payload.as_bytes())
         .expect_err("the rule derives the winner; the file does not get to disagree");
     assert!(matches!(error, LockError::NonCanonicalLockPayload { .. }), "got {error:?}");
-    assert!(
-        error.to_string().contains("canonical"),
-        "the refusal must say what it means: {error}",
-    );
+    assert!(error.to_string().contains("canonical"), "the refusal must say what it means: {error}",);
 }
 
 /// An edit that IS well-formed still moves the hash, and still fails at the next door.
@@ -1008,11 +1004,11 @@ fn lock_reconstructed_from_bytes_mints_for_its_own_run_and_refuses_a_retuned_one
     let bytes = lock_over(&run_a).to_canonical_bytes();
 
     // Process two: it has the FILE and nothing else — no in-memory lock to mint from.
-    let lock = SelectionLock::from_canonical_bytes(&bytes).expect("the written lock must read back");
+    let lock =
+        SelectionLock::from_canonical_bytes(&bytes).expect("the written lock must read back");
 
-    let token = lock
-        .mint_test_token(&run_a)
-        .expect("a reconstructed lock still admits the model it chose");
+    let token =
+        lock.mint_test_token(&run_a).expect("a reconstructed lock still admits the model it chose");
     let grant = CanonicalTestAccess::grant(token, &run_a, run_a.dataset())
         .expect("the token was minted for this model over this dataset");
     assert_eq!(grant.artifact_hash(), run_a.artifact_hash());
@@ -1059,13 +1055,16 @@ fn lock_max_selection_lock_bytes_clears_a_realistic_sweep() {
 #[test]
 fn lock_from_canonical_bytes_bounds_the_raw_input_before_serde() {
     let signature = signature_after(LOCK_SOURCE, "pub fn from_canonical_bytes(");
+    // A BORROWED slice, so the bound at step (1) is a comparison on bytes the caller already
+    // holds rather than on a copy this door was handed.
     assert!(signature.contains("bytes: &[u8]"), "`{signature}`");
-    assert!(signature.contains("Result<SelectionLock, LockError>"), "`{signature}`");
+    // `Self`, not `SelectionLock` — `clippy::use_self` is on, so the spelled-out type would not
+    // survive the lint gate. The assertion is written the way the source must be written.
+    assert!(signature.contains("Result<Self, LockError>"), "`{signature}`");
 
     let body = method_body(LOCK_SOURCE, "pub fn from_canonical_bytes(");
-    let bound_at = body
-        .find("MAX_SELECTION_LOCK_BYTES")
-        .expect("the door must name the bound it enforces");
+    let bound_at =
+        body.find("MAX_SELECTION_LOCK_BYTES").expect("the door must name the bound it enforces");
     let serde_at = body.find("serde_json::").expect("the door must parse the payload");
     assert!(
         bound_at < serde_at,

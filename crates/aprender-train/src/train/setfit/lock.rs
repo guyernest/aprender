@@ -48,6 +48,26 @@ use super::{ArtifactReloadedAndVerified, SetFitRun};
 /// The canonical selection-lock schema version.
 const LOCK_SCHEMA_VERSION: u32 = 1;
 
+/// Maximum accepted length of a serialized selection lock, in bytes (1 MiB).
+///
+/// # The derivation, and where it is checked
+///
+/// A candidate is a FIXED-SHAPE record: a config label and an artifact hash, plus a nested
+/// evaluation carrying that artifact hash again, two more fingerprints, a metric tag, a `u64` of
+/// value bits and a row count. At the 64-character hex hashes this format actually uses, that is
+/// on the order of 600 bytes once JSON keys and punctuation are counted, so 1 MiB admits roughly
+/// 1,600 candidates. `lock_max_selection_lock_bytes_clears_a_realistic_sweep` MEASURES that
+/// figure as the difference between two real locks rather than trusting this paragraph, because
+/// a derivation nobody re-runs is a comment about a version of the wire form that used to exist.
+///
+/// A sweep in this phase commits tens of candidates, so the bound clears the realistic worst
+/// case by about two orders of magnitude while still refusing a payload that claims millions of
+/// candidates in order to make the allocation itself the attack.
+///
+/// The bound is INCLUSIVE — a payload of exactly this length is admitted — and it is enforced on
+/// the RAW slice before serde is handed anything, following `bundle.rs`'s door discipline.
+pub const MAX_SELECTION_LOCK_BYTES: u64 = 1_048_576;
+
 /// One configuration that was tried, and what it measured on canonical validation.
 ///
 /// # The artifact hash is READ OUT of the evaluation, never supplied beside it
@@ -381,6 +401,146 @@ impl SelectionLock {
         };
         serde_json::to_vec(&wire)
             .expect("the lock's canonical form is integers, strings and unit variants")
+    }
+
+    /// Reconstruct a lock from canonical bytes a PRIOR process wrote (review B4, TRN-07).
+    ///
+    /// # Why this exists
+    ///
+    /// [`Self::to_canonical_bytes`] was public and nothing could read those bytes back, so a
+    /// second process — `apr eval --split test` — had no lock to consume. The only shape that
+    /// compiled was minting the lock INSIDE the test command, which satisfies "a lock existed
+    /// before test access" with an object created one line earlier and therefore satisfies
+    /// nothing. Validation evaluation writes the lock; test evaluation reads it here.
+    ///
+    /// # The trust model, stated exactly and no stronger
+    ///
+    /// This file is an INTEGRITY-CHECKED RECORD, not an unforgeable credential. `lock_hash` is
+    /// the digest OF THESE VERY BYTES, so a hand-written file that is internally consistent is
+    /// possible and its own integrity check will pass. What the mechanism guarantees is narrower
+    /// and still worth having: canonical-test access cannot be reached without a recorded,
+    /// hash-committing selection decision that names the candidates and the chosen artifact, and
+    /// every downstream door re-checks identity against the REAL run and the REAL dataset —
+    /// [`Self::mint_test_token`] reads the artifact hash off the run it is handed, and
+    /// [`CanonicalTestAccess::grant`] compares the dataset fingerprint against the dataset it is
+    /// handed. An edited lock still cannot make a mismatched artifact or corpus pass; it just
+    /// fails one door later, typed. This is the wording of `setfit-apr-v1`'s
+    /// `selection_lock_lifecycle` invariants, and it is deliberately not upgraded here.
+    ///
+    /// # This does not widen the CREATION door
+    ///
+    /// [`Self::from_candidates`] stays `pub(super)`: creating a lock still requires a run, whose
+    /// selection semantic hash and ledger hash are read off it rather than accepted as
+    /// arguments. This door only READS a record such a run already created — and it rebuilds it
+    /// THROUGH that same constructor, so a file cannot carry a candidate set the constructor
+    /// would have refused, nor a winner the rule would not have picked.
+    ///
+    /// # Order is load-bearing
+    ///
+    /// 1. The input-length bound, on the raw slice, before serde is handed anything.
+    /// 2. The parse, where `deny_unknown_fields` refuses a key this reader does not know.
+    /// 3. The schema version, before any content is believed.
+    /// 4. The rebuild, through [`Self::from_candidates`] — every consistency invariant and the
+    ///    rule itself, from the single implementation.
+    /// 5. The recorded winner: in range, then equal to the rule's.
+    /// 6. The canonical-form check, which is what makes the list above total.
+    ///
+    /// # Errors
+    ///
+    /// [`LockError::LockPayloadTooLarge`] naming the limit and the observed length,
+    /// [`LockError::MalformedLockPayload`], [`LockError::UnsupportedLockSchemaVersion`] naming
+    /// both versions, [`LockError::ChosenIndexOutOfRange`],
+    /// [`LockError::NonCanonicalLockPayload`], plus every candidate-consistency failure
+    /// [`Self::from_candidates`] reports.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, LockError> {
+        // (1) The bound, on the RAW slice. Before serde, so a payload that would be expensive to
+        //     parse is refused by a comparison rather than by an allocator.
+        let observed = bytes.len() as u64;
+        if observed > MAX_SELECTION_LOCK_BYTES {
+            return Err(LockError::LockPayloadTooLarge {
+                limit: MAX_SELECTION_LOCK_BYTES,
+                observed,
+            });
+        }
+
+        // (2) The parse.
+        let wire: SelectionLockWire = serde_json::from_slice(bytes)
+            .map_err(|error| LockError::MalformedLockPayload { detail: error.to_string() })?;
+
+        // (3) The version, before any of the record's contents are believed.
+        if wire.schema_version != LOCK_SCHEMA_VERSION {
+            return Err(LockError::UnsupportedLockSchemaVersion {
+                got: wire.schema_version,
+                supported: LOCK_SCHEMA_VERSION,
+            });
+        }
+
+        // (4) Rebuild the candidates. The artifact hash comes from the EVALUATION, exactly as
+        //     `SelectionCandidate::artifact_hash` reads it, so the wire's readable top-level copy
+        //     cannot become a second answer. A file whose two copies disagree is caught at step
+        //     (6) rather than silently normalized to whichever one this loop happened to prefer.
+        let recorded_index = wire.chosen_index;
+        let candidates: Vec<SelectionCandidate> = wire
+            .candidates
+            .into_iter()
+            .map(|candidate| {
+                SelectionCandidate::from_evaluation(
+                    &candidate.config_hash,
+                    ValidationEvaluation::from_wire(candidate.evaluation),
+                )
+            })
+            .collect();
+
+        // (5) Rebuild THROUGH the constructor, so the finiteness, comparability, duplicate and
+        //     non-empty invariants — and the RULE — are the same single implementation a freshly
+        //     created lock went through. A reader that re-implemented them would be a second
+        //     answer that could drift; one that skipped them would admit a file the constructor
+        //     would have refused.
+        let lock = Self::from_candidates(
+            candidates,
+            wire.rule,
+            &wire.selection_semantic_hash,
+            &wire.ledger_hash,
+        )?;
+
+        // (6) The recorded winner must name a candidate. Checked AFTER the rebuild so an empty
+        //     candidate list is reported as `NoCandidates` — the truer statement — rather than as
+        //     an out-of-range index into a list that does not exist.
+        let count = lock.candidates.len() as u64;
+        if recorded_index >= count {
+            return Err(LockError::ChosenIndexOutOfRange {
+                chosen_index: recorded_index,
+                candidates: lock.candidates.len(),
+            });
+        }
+
+        // (7) The canonical-form check, and it is what makes the steps above TOTAL. Everything
+        //     the file said that this reconstruction did not preserve shows up here as a byte
+        //     difference: a winner the rule did not pick, top-level fingerprints that disagree
+        //     with candidate zero's, a candidate whose two artifact-hash copies differ, a drifted
+        //     evaluation schema version, a duplicated JSON key, a pretty-printed rendering.
+        //     Enumerating those as separate checks would be a list that drifts from the wire
+        //     form; comparing against the canonical serialization cannot.
+        //
+        //     It is also what makes the recomputed `lock_hash` the SAME hash the writing process
+        //     recorded, rather than a fresh opinion about a payload silently repaired on the way
+        //     in — which would be a lock whose digest matched nothing anybody wrote down.
+        let canonical = lock.to_canonical_bytes();
+        if canonical != bytes {
+            return Err(LockError::NonCanonicalLockPayload {
+                observed_len: bytes.len(),
+                canonical_len: canonical.len(),
+                first_difference_at: first_difference(bytes, &canonical),
+            });
+        }
+
+        // (8) Structural, and honest about being so: the hash was derived from this very record
+        //     three lines ago, so this cannot fail today. It is here so this door cannot become
+        //     the one path that returns a lock whose recorded hash was never derived from its
+        //     contents. The TAMPER check is not this line — it is that an edited file's hash
+        //     CHANGES, and that every downstream door re-checks identity against the real run.
+        lock.verify_integrity()?;
+        Ok(lock)
     }
 
     /// Recompute the lock hash from the record as it stands now.
@@ -771,6 +931,50 @@ pub enum LockError {
         /// The digest its current contents produce.
         recomputed: String,
     },
+    /// The serialized lock was longer than [`MAX_SELECTION_LOCK_BYTES`].
+    ///
+    /// Reported from the RAW slice, before serde is handed anything.
+    LockPayloadTooLarge {
+        /// The bound, in bytes.
+        limit: u64,
+        /// The input's length, in bytes.
+        observed: u64,
+    },
+    /// The payload did not parse as a canonical selection lock.
+    MalformedLockPayload {
+        /// What the parser reported, including the offending key or byte position.
+        detail: String,
+    },
+    /// The payload declares a schema version this reader does not implement.
+    UnsupportedLockSchemaVersion {
+        /// The version the payload declared.
+        got: u32,
+        /// The only version this reader implements.
+        supported: u32,
+    },
+    /// The recorded winner names no candidate in the list the payload carried.
+    ChosenIndexOutOfRange {
+        /// The index the payload recorded.
+        chosen_index: u64,
+        /// How many candidates the payload carried.
+        candidates: usize,
+    },
+    /// The payload is not the canonical serialization of the record it parses to.
+    ///
+    /// One refusal rather than a list, deliberately. Everything a file can say that a faithful
+    /// reconstruction does not preserve — a winner the rule did not pick, top-level fingerprints
+    /// disagreeing with candidate zero's, a candidate whose two artifact-hash copies differ, a
+    /// drifted nested schema version, a duplicated JSON key, a pretty-printed rendering — is the
+    /// same defect seen from a different angle: the bytes are not the canonical form of the
+    /// record. Enumerating the angles would be a list that drifts from the wire form.
+    NonCanonicalLockPayload {
+        /// The payload's length, in bytes.
+        observed_len: usize,
+        /// The length of the canonical serialization of the record it parsed to.
+        canonical_len: usize,
+        /// The byte offset of the first difference, for locating the edit.
+        first_difference_at: usize,
+    },
 }
 
 impl core::fmt::Display for LockError {
@@ -854,11 +1058,60 @@ impl core::fmt::Display for LockError {
                  append-only log that can be rewritten is not evidence \
                  (contract setfit-train-lifecycle-v1, equation selection_lock_commitment)",
             ),
+            Self::LockPayloadTooLarge { limit, observed } => write!(
+                f,
+                "the selection lock payload is {observed} bytes, over the {limit}-byte limit; \
+                 refused on the raw input before it was parsed, so a payload claiming millions \
+                 of candidates cannot make the allocation itself the attack \
+                 (contract setfit-apr-v1, equation selection_lock_lifecycle)",
+            ),
+            Self::MalformedLockPayload { detail } => write!(
+                f,
+                "the selection lock payload did not parse: {detail}; a reader that guessed at a \
+                 record it could not read would be believing a lock nobody wrote \
+                 (contract setfit-apr-v1, equation selection_lock_lifecycle)",
+            ),
+            Self::UnsupportedLockSchemaVersion { got, supported } => write!(
+                f,
+                "the selection lock declares schema version {got}, but this reader implements \
+                 version {supported}; a reader that met a version it did not know and continued \
+                 would be interpreting fields that may have been re-meant \
+                 (contract setfit-apr-v1, equation selection_lock_lifecycle)",
+            ),
+            Self::ChosenIndexOutOfRange { chosen_index, candidates } => write!(
+                f,
+                "the selection lock records chosen index {chosen_index}, but it carries only \
+                 {candidates} candidates; the recorded winner names no candidate at all \
+                 (contract setfit-apr-v1, equation selection_lock_lifecycle)",
+            ),
+            Self::NonCanonicalLockPayload { observed_len, canonical_len, first_difference_at } => {
+                write!(
+                f,
+                "the payload is {observed_len} bytes but the record it parses to serializes to \
+                 {canonical_len} canonical bytes, first differing at offset \
+                 {first_difference_at}; the file therefore claims something the reconstruction \
+                 does not reproduce -- a winner the rule did not pick, a fingerprint disagreeing \
+                 with the candidates it summarizes, or a rendering that is not the canonical one \
+                 -- and a lock whose bytes are not its canonical form has a hash nobody wrote \
+                 down (contract setfit-apr-v1, equation selection_lock_lifecycle)",
+            )
+            }
         }
     }
 }
 
 impl std::error::Error for LockError {}
+
+/// The byte offset of the first difference between two slices.
+///
+/// Falls back to the shorter length when one is a prefix of the other, which is the offset a
+/// reader would look at first anyway. Only ever called on a pair already known to differ.
+fn first_difference(left: &[u8], right: &[u8]) -> usize {
+    left.iter()
+        .zip(right.iter())
+        .position(|(l, r)| l != r)
+        .unwrap_or_else(|| left.len().min(right.len()))
+}
 
 /// A `BTreeMap` rather than a `HashMap` for the duplicate scan: the iteration order never
 /// affects the reported index, because the scan reports the FIRST occurrence it recorded.
