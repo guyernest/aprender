@@ -182,7 +182,50 @@ surfaces on the mandatory CPU profile.
   4. Rust, CLI, and native HTTP callers can classify ordered single or mixed-length batches and receive matching labels, full probabilities, optional logits, margins, token/truncation facts, latency, backend identity, and the same artifact hash in predictions and readiness.
   5. A developer can run offline executable contracts and the supported CPU build/test feature matrix to detect detached gradients, invalid data/math, leakage, label drift, artifact mismatches, and core/CLI/HTTP parity failures; an explicitly requested unavailable device fails instead of silently falling back or misreporting its backend.
 
-**Plans**: TBD
+**Plans**: 11 plans in 9 waves
+
+**Branch base**: `gsd/phase-2-contract-gate` @ d66678e7a (Phase 3 complete + UAT + CR-01..04 fixes).
+The orchestrator creates `gsd/phase-4-apr-parity` from that HEAD before dispatching wave 1; wave
+merges land back on `gsd/phase-2-contract-gate` (Phase 3 precedent). No PR to `main` — human's call.
+
+Plans:
+**Wave 1**
+
+- [ ] 04-01-PLAN.md — setfit-apr-v1 contract (cap/probes/tolerances/name table) + $(CONTRACTS)/audit wiring + CLAUDE.md realizar-first SetFit row (wave 1)
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 04-02-PLAN.md — Core artifact writer: canonical tensors, U8 tokenizer blob, one-key deterministic metadata, embedded synthetic probes + cross-process determinism proofs (wave 2)
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 04-03-PLAN.md — Production loader: 7-rung fail-closed ladder + probe replay + VerifiedSetFitModel typestate + induced-corruption suite + trybuild non-constructibility (wave 3)
+
+**Wave 4** *(blocked on Wave 3; two parallel plans, zero file overlap)*
+
+- [ ] 04-04-PLAN.md — ClassifyResponse envelope (D-08) + VerifiedSetFitModel::classify + execution-derived backend identity (D-12) (wave 4)
+- [ ] 04-05-PLAN.md — AprCodec sealed adapter + APR-03 round trip at Tolerance::EXACT + OPS-01 public-API lifecycle proof (wave 4)
+
+**Wave 5** *(blocked on Wave 4)*
+
+- [ ] 04-06-PLAN.md — `apr setfit train`: setfit feature, namespace, config-file-first adapter, atomic write, fail-closed device gate (wave 5)
+
+**Wave 6** *(blocked on Wave 5; two parallel plans, zero file overlap)*
+
+- [ ] 04-07-PLAN.md — Generic `apr predict` (new) + inspect APR-05 recovery + eval lock->token->grant (TRN-07 positive, D-16) (wave 6)
+- [ ] 04-08-PLAN.md — Serve surface: setfit feature, AppState slot, /v1/classify, readiness hash, startup auto-detect, oneshot tests (wave 6)
+
+**Wave 7** *(blocked on Wave 6)*
+
+- [ ] 04-09-PLAN.md — Three-surface parity harness + frozen goldens + in-band skewed negative + ONE tier3 spawned-serve smoke (wave 7)
+
+**Wave 8** *(blocked on Wave 7)*
+
+- [ ] 04-10-PLAN.md — Make gates with ran-something guards + four-crate SAFE-02 feature matrix + tier wiring + OPS-01 boundary gate (wave 8)
+
+**Wave 9** *(blocked on Wave 8; NOT autonomous — human checkpoint)*
+
+- [ ] 04-11-PLAN.md — ci.yml extension (human-approved), scoped mutation gate, closing requirements audit incl. TRN-07 (wave 9)
 
 ### Phase 5: Benchmark and Claims Gate
 
@@ -217,5 +260,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
-| 4. APR Artifact and Production Parity | 0/TBD | Not started | - |
+| 4. APR Artifact and Production Parity | 0/11 | Planned | - |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
