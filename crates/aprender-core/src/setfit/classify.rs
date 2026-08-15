@@ -48,6 +48,22 @@ pub const CLASSIFY_SCHEMA_VERSION: u32 = 1;
 /// tokenization is not a bound on the work an attacker can request (T-04-11).
 pub const MAX_BATCH_TEXTS: usize = 256;
 
+/// Contract bound `max_request_body_bytes` (`setfit-apr-v1` item 11), in bytes.
+///
+/// The sibling of [`MAX_BATCH_TEXTS`] in the same `bounds:` block, and it lives
+/// here for the same reason: the request document is core-owned, so the number
+/// every surface bounds a body against is core-owned too. Left in the contract
+/// alone, the CLI's `--input` reader and the HTTP body extractor would each pick
+/// their own, and "the two surfaces received the SAME ordered text set" would
+/// stop being true at exactly the size where it matters.
+///
+/// It is a TRANSPORT bound and cannot be enforced here: this module never sees
+/// bytes, only an already-parsed [`ClassifyRequestDocument`]. The surface that
+/// reads the payload is the one that must apply it, BEFORE deserializing —
+/// [`MAX_BATCH_TEXTS`] is checked after the document exists, so it bounds the
+/// tokenization but not the parse.
+pub const MAX_REQUEST_BODY_BYTES: u64 = 1_048_576;
+
 /// Absolute tolerance on one result row's probability mass.
 ///
 /// Absolute and not relative: probabilities live in `[0, 1]`, and a relative
@@ -649,10 +665,13 @@ impl crate::setfit::artifact::VerifiedSetFitModel {
                 },
                 top1 - top2,
                 consumed_positions(&batch, row)?,
-                batch
-                    .truncation()
-                    .get(row)
-                    .is_some_and(|fact| fact.truncated),
+                // A MISSING fact is a refusal, not a `false`. `is_some_and` here
+                // reported "not truncated" for a batch whose per-input facts were
+                // short — the one shape in which the answer is unknown — while the
+                // adjacent `consumed_positions` refused the same batch. Two
+                // neighbouring reads of the same batch must not disagree about
+                // whether an absent row is an error.
+                truncation_fact(&batch, row)?,
             )?);
         }
 
@@ -669,6 +688,28 @@ impl crate::setfit::artifact::VerifiedSetFitModel {
             results,
         )
     }
+}
+
+/// Whether row `row` hit the pinned truncation bound.
+///
+/// Reported from the batch's per-input facts, and a row the batch does not carry
+/// is a typed refusal rather than a `false`: `truncated` is contract-normative
+/// (gates assert it TOGETHER with `token_count == MAX_SEQUENCE_LENGTH`), and a
+/// fabricated `false` would make a truncated text look untruncated.
+fn truncation_fact(
+    batch: &crate::setfit::tokenizer::SentenceBatch,
+    row: usize,
+) -> Result<bool, ClassifyError> {
+    batch
+        .truncation()
+        .get(row)
+        .map(|fact| fact.truncated)
+        .ok_or_else(|| ClassifyError::EncodeFailed {
+            reason: format!(
+                "row {row} has no truncation fact in a batch carrying {}",
+                batch.truncation().len()
+            ),
+        })
 }
 
 /// The number of positions the model actually CONSUMED for row `row`.

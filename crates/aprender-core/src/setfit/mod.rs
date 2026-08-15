@@ -57,7 +57,8 @@ pub use artifact::{
 };
 pub use classify::{
     ClassifyError, ClassifyRequestDocument, ClassifyResponse, ClassifyResult,
-    CLASSIFY_SCHEMA_VERSION, MAX_BATCH_TEXTS, PROBABILITY_MASS_ABS_TOLERANCE,
+    CLASSIFY_SCHEMA_VERSION, MAX_BATCH_TEXTS, MAX_REQUEST_BODY_BYTES,
+    PROBABILITY_MASS_ABS_TOLERANCE,
 };
 pub use dropout_rng::{DropoutRngError, SiteDropout};
 pub use encoder::{

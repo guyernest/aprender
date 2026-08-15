@@ -1189,7 +1189,16 @@ pub fn build_hf_name_map(num_layers: usize) -> BTreeMap<String, String> {
 /// schema-owned entries. `|expected| = 5 + 16 * num_layers + 3`.
 #[must_use]
 pub fn expected_tensor_names(num_layers: usize) -> BTreeSet<String> {
-    let mut names: BTreeSet<String> = build_hf_name_map(num_layers).into_values().collect();
+    expected_tensor_names_from(&build_hf_name_map(num_layers))
+}
+
+/// [`expected_tensor_names`] over a map the caller has ALREADY expanded.
+///
+/// The composition rule — encoder names plus the three schema-owned ones — lives
+/// here once; the public door above is that rule applied to a fresh expansion,
+/// and rung 4 is that same rule applied to the one expansion it already made.
+fn expected_tensor_names_from(derived: &BTreeMap<String, String>) -> BTreeSet<String> {
+    let mut names: BTreeSet<String> = derived.values().cloned().collect();
     names.insert(HEAD_WEIGHT_TENSOR.to_string());
     names.insert(HEAD_BIAS_TENSOR.to_string());
     names.insert(TOKENIZER_BLOB_TENSOR.to_string());
@@ -2201,10 +2210,16 @@ fn rung4_structure(
     doc: &SetFitArtifactDoc,
 ) -> Result<(), SetFitArtifactError> {
     check_declared_depth(doc)?;
-    check_tensor_name_set(reader, doc)?;
+    // ONE expansion of the sixteen per-layer templates for the whole rung. It was
+    // computed three times — once inside `expected_tensor_names` and twice inside
+    // `check_carried_name_map` — and each expansion allocates `5 + 16 * num_layers`
+    // Strings for a map that cannot change between the calls. The bound checked
+    // immediately above is what makes doing it once, here, safe to do eagerly.
+    let derived = build_hf_name_map(doc.architecture.num_layers);
+    check_tensor_name_set(reader, &derived)?;
     check_tensor_entries(reader)?;
     check_head_shapes(reader, doc)?;
-    check_carried_name_map(doc)?;
+    check_carried_name_map(doc, &derived)?;
     check_tokenizer_identity(reader, doc)
 }
 
@@ -2235,14 +2250,37 @@ fn check_declared_depth(doc: &SetFitArtifactDoc) -> Result<(), SetFitArtifactErr
 /// expected set (review B1), so a HEADLESS artifact cannot reach a prediction.
 fn check_tensor_name_set(
     reader: &AprV2Reader,
-    doc: &SetFitArtifactDoc,
+    derived: &BTreeMap<String, String>,
 ) -> Result<(), SetFitArtifactError> {
-    let expected = expected_tensor_names(doc.architecture.num_layers);
-    let observed: BTreeSet<String> = reader
-        .tensor_names()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+    let expected = expected_tensor_names_from(derived);
+    let names = reader.tensor_names();
+    let observed: BTreeSet<String> = names.iter().map(|name| (*name).to_string()).collect();
+
+    // A DUPLICATE NAME IS NOT A SET-EQUALITY QUESTION, so it has to be asked
+    // separately: collapsing the index into a `BTreeSet` makes two entries called
+    // `setfit.head.weight` indistinguishable from one, and `get_tensor` then
+    // resolves to whichever the index happens to list first. The whole rung
+    // reasons about names, so a name that does not identify one payload has to
+    // die here rather than silently pick a winner.
+    if observed.len() != names.len() {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut duplicated: Vec<String> = names
+            .iter()
+            .filter(|name| !seen.insert(name))
+            .map(|name| (*name).to_string())
+            .collect();
+        duplicated.sort();
+        duplicated.dedup();
+        return Err(SetFitArtifactError::InconsistentTensorSet {
+            reason: format!(
+                "the index carries {} entries under {} distinct names; a duplicate name does not \
+                 identify one payload: {}",
+                names.len(),
+                observed.len(),
+                duplicated.join(", ")
+            ),
+        });
+    }
 
     let missing: Vec<String> = expected.difference(&observed).cloned().collect();
     if !missing.is_empty() {
@@ -2297,7 +2335,11 @@ fn check_tensor_entries(reader: &AprV2Reader) -> Result<(), SetFitArtifactError>
                 }
             })?;
         }
-        let width = u64::try_from(required.bytes_per_element()).unwrap_or(0);
+        // `u64::MAX` and not `0` on the (unreachable) conversion failure: a width
+        // of zero makes `declared` zero, which turns this check into "the entry
+        // must declare size 0" — a guard that fails OPEN for exactly the entry a
+        // hostile artifact would want it to. Saturating upward refuses instead.
+        let width = u64::try_from(required.bytes_per_element()).unwrap_or(u64::MAX);
         let declared =
             elements
                 .checked_mul(width)
@@ -2380,9 +2422,29 @@ fn check_head_shapes(
 /// The map is written into the artifact precisely so `deserialize` inverts a map
 /// the artifact carries rather than re-deriving names from a table that may have
 /// moved since the write. For that to be safe it must be INJECTIVE (a collision
-/// would OVERWRITE a tensor rather than fail) and TOTAL over the encoder half of
-/// the artifact's own tensor set.
-fn check_carried_name_map(doc: &SetFitArtifactDoc) -> Result<(), SetFitArtifactError> {
+/// would OVERWRITE a tensor rather than fail) and it must be THE SAME MAP the
+/// architecture derives — every PAIR, not merely the same set of canonical names.
+///
+/// # Why the DOMAIN is checked too, and not only the value set
+///
+/// An earlier form compared only `values()` against the derived value set. That
+/// admits two shapes it should not. Junk keys (`{"a": "token_embd.weight", ...}`)
+/// pass the value-set test and make rung 5 key the recovered tensor map by names
+/// no rebuild can look up. Worse, a PERMUTED map — the right HF keys pointed at
+/// each other's canonical names — also passes: rung 5 then loads the query
+/// projection out of the key projection's payload, rung 6 rebuilds happily
+/// because the two have identical shapes, and only rung 7's probe replay
+/// disagrees, which reports a math divergence for what is a name-map defect. The
+/// parse-only door (`read_setfit_apr_parts`, and therefore
+/// `AprCodec::deserialize`) does not run rung 7 at all, so on that path the
+/// swapped tensors travel out with no refusal whatsoever.
+///
+/// Comparing the whole map costs nothing extra: rung 4 already expanded the
+/// derived map in order to check the value side.
+fn check_carried_name_map(
+    doc: &SetFitArtifactDoc,
+    derived: &BTreeMap<String, String>,
+) -> Result<(), SetFitArtifactError> {
     let distinct: BTreeSet<&String> = doc.hf_name_map.values().collect();
     if distinct.len() != doc.hf_name_map.len() {
         return Err(SetFitArtifactError::InconsistentNameMap {
@@ -2394,25 +2456,35 @@ fn check_carried_name_map(doc: &SetFitArtifactDoc) -> Result<(), SetFitArtifactE
             ),
         });
     }
-    // The encoder half IS `build_hf_name_map`'s value set. Deriving it that way
-    // rather than calling `expected_tensor_names` and removing the three
-    // schema-owned names back off restates no composition rule: a fourth
-    // schema-owned tensor cannot silently require an edit here, and a collision
-    // between a schema name and a canonical encoder name cannot drop a legitimate
-    // entry instead of failing.
-    let encoder_names: BTreeSet<String> = build_hf_name_map(doc.architecture.num_layers)
-        .into_values()
-        .collect();
-    // `distinct` above already borrows exactly these values, and both sides are
-    // sorted `BTreeSet`s, so equality is an allocation-free ordered comparison.
-    if !distinct.iter().copied().eq(encoder_names.iter()) {
-        let carried: BTreeSet<String> = doc.hf_name_map.values().cloned().collect();
-        let missing: Vec<&String> = encoder_names.difference(&carried).collect();
-        let unexpected: Vec<&String> = carried.difference(&encoder_names).collect();
+    // The encoder half IS `build_hf_name_map`'s map. Comparing against it rather
+    // than against `expected_tensor_names` with the three schema-owned names
+    // removed back off restates no composition rule: a fourth schema-owned tensor
+    // cannot silently require an edit here, and a collision between a schema name
+    // and a canonical encoder name cannot drop a legitimate entry instead of
+    // failing.
+    if &doc.hf_name_map != derived {
+        let missing: Vec<&String> = derived
+            .keys()
+            .filter(|hf| !doc.hf_name_map.contains_key(*hf))
+            .collect();
+        let unexpected: Vec<&String> = doc
+            .hf_name_map
+            .keys()
+            .filter(|hf| !derived.contains_key(*hf))
+            .collect();
+        let misdirected: Vec<String> = derived
+            .iter()
+            .filter_map(|(hf, canonical)| {
+                doc.hf_name_map
+                    .get(hf)
+                    .filter(|carried| *carried != canonical)
+                    .map(|carried| format!("{hf} -> {carried} (derived {canonical})"))
+            })
+            .collect();
         return Err(SetFitArtifactError::InconsistentNameMap {
             reason: format!(
-                "the carried map is not total over the encoder half of the tensor set: missing \
-                 {missing:?}, unexpected {unexpected:?}"
+                "the carried map is not the architecture-derived map: missing {missing:?}, \
+                 unexpected {unexpected:?}, misdirected {misdirected:?}"
             ),
         });
     }
@@ -2646,7 +2718,6 @@ fn rung7_replay_probes(
     }
 
     let width = doc.head.n_features;
-    let classes = doc.ordered_labels.len();
 
     for (index, record) in doc.probes.iter().enumerate() {
         let id = PROBE_IDS[index];
@@ -2707,7 +2778,7 @@ fn rung7_replay_probes(
         // The logits are accumulated in `f64` in the SAME order the writer used
         // and then narrowed, so the recorded and the replayed logits cannot
         // describe two different computations.
-        let observed_logits = replay_logits(parts, &observed_embedding, classes, width, index, id)?;
+        let observed_logits = replay_logits(head, &observed_embedding, index, id)?;
         let expected_logits = decode_probe_field(&record.logits_hex);
         if expected_logits.len() != observed_logits.len() {
             return Err(probe_diverged(
@@ -2791,49 +2862,33 @@ fn rung7_replay_probes(
 }
 
 /// Recompute one probe's logits the way the writer recorded them.
+///
+/// Through the rebuilt head's `predict_logits` — THE single logit implementation,
+/// and the very function `compute_probes` records with. A hand-written
+/// accumulation here was two copies of one loop: the writer's and this one, whose
+/// agreement was the whole property rung 7 exists to check. It also read the row
+/// with `zip`, which STOPS at the shorter side, so an embedding narrower than the
+/// head silently produced a truncated dot product instead of a refusal;
+/// `predict_logits` reports a typed `FeatureDimMismatch` for exactly that input.
 fn replay_logits(
-    parts: &SetFitAprParts,
+    head: &MultinomialLogisticRegression,
     embedding: &[f32],
-    classes: usize,
-    width: usize,
     probe: usize,
     probe_id: &str,
 ) -> Result<Vec<f32>, SetFitArtifactError> {
-    let mut logits = Vec::with_capacity(classes);
-    for class in 0..classes {
-        let intercept = parts.head_intercepts.get(class).copied().ok_or_else(|| {
-            probe_diverged(
-                probe,
-                probe_id,
-                "logit_count",
-                class,
-                classes.to_string(),
-                parts.head_intercepts.len().to_string(),
-                "exact",
-            )
+    let batch = [embedding.to_vec()];
+    let rows = head
+        .predict_logits(&batch)
+        .map_err(|e| SetFitArtifactError::EncodeFailed {
+            reason: format!("probe {probe} ({probe_id}): {e}"),
         })?;
-        let start = class.saturating_mul(width);
-        let row = parts
-            .head_weights
-            .get(start..start.saturating_add(width))
-            .ok_or_else(|| {
-                probe_diverged(
-                    probe,
-                    probe_id,
-                    "logit_count",
-                    class,
-                    format!("{}", classes.saturating_mul(width)),
-                    parts.head_weights.len().to_string(),
-                    "exact",
-                )
-            })?;
-        let mut z = f64::from(intercept);
-        for (weight, value) in row.iter().zip(embedding.iter()) {
-            z += f64::from(*weight) * f64::from(*value);
-        }
-        logits.push(z as f32);
-    }
-    Ok(logits)
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| SetFitArtifactError::EncodeFailed {
+            reason: format!("probe {probe} ({probe_id}): predict_logits returned no rows"),
+        })?;
+    Ok(row.into_iter().map(|z| z as f32).collect())
 }
 
 /// One tolerance-bounded component comparison, NaN-visible throughout.
@@ -3117,10 +3172,12 @@ pub(crate) mod fixture {
         let im = arch.intermediate;
         let mut f = Filler::new(0x0402_0001);
         let mut t: BTreeMap<String, (Vec<usize>, Vec<f32>)> = BTreeMap::new();
-        let mut put = |t: &mut BTreeMap<String, (Vec<usize>, Vec<f32>)>,
-                       f: &mut Filler,
-                       name: String,
-                       shape: Vec<usize>| {
+        // Not `mut`: the closure captures nothing, so every mutation it performs
+        // arrives through its two `&mut` parameters. `rustc` warns on the binding.
+        let put = |t: &mut BTreeMap<String, (Vec<usize>, Vec<f32>)>,
+                   f: &mut Filler,
+                   name: String,
+                   shape: Vec<usize>| {
             let n = shape.iter().product();
             t.insert(name, (shape, f.vec(n)));
         };
@@ -5206,5 +5263,65 @@ mod probe {
             matches!(&err, SetFitArtifactError::EmptyEmbedBatch),
             "got {err:?}"
         );
+    }
+
+    /// APR-04's OTHER half: the typestate has no public constructor at all.
+    ///
+    /// `tests/ui/setfit_verified_model_constructed.rs` proves the struct literal
+    /// is a compile error, and its own header says the ABSENT CONSTRUCTOR "is
+    /// covered by a source assertion instead". Until this test existed it was not:
+    /// the trybuild case deliberately carries ONE claim (two claims failing in
+    /// different compiler passes cannot share a snapshot, since rustc aborts after
+    /// the first), and the second claim was documented as mechanised without being
+    /// mechanised anywhere. A compensating control named in a comment and present
+    /// nowhere is the failure class this phase exists to catch, so here it is.
+    ///
+    /// It scans the `impl` block by slicing to the first column-0 `}` — the same
+    /// shape `classify`'s guards use — so the assertions below cannot match their
+    /// own text, which sits far below that block.
+    #[test]
+    fn verified_model_declares_no_public_constructor_and_no_minting_derive() {
+        const SRC: &str = include_str!("artifact.rs");
+
+        let marker = "impl VerifiedSetFitModel {";
+        let start = SRC
+            .find(marker)
+            .expect("the typestate's inherent impl block");
+        let body = &SRC[start + marker.len()..];
+        let end = body
+            .find("\n}")
+            .expect("the impl block is closed at column 0");
+        let block = &body[..end];
+
+        // A `pub fn` that HANDS BACK the type is a minting path whatever it is
+        // called, so the scan is on the return type and not on the name `new`.
+        for forbidden in ["-> Self", "-> VerifiedSetFitModel"] {
+            assert!(
+                !block.contains(forbidden),
+                "an inherent method of VerifiedSetFitModel returns `{forbidden}`; the ONLY value \
+                 of this type must come from load_setfit_apr, which ran all seven rungs including \
+                 the six-probe replay. A second minting path is a second verification policy."
+            );
+        }
+
+        // The derive list, read off the declaration rather than trusted: `Default`
+        // or `Deserialize` would each mint the type without a single rung running,
+        // and neither needs a `pub fn` to do it.
+        let decl = SRC
+            .find("pub struct VerifiedSetFitModel {")
+            .expect("the typestate declaration");
+        let derive_line = SRC[..decl]
+            .lines()
+            .next_back()
+            .filter(|line| line.contains("#[derive("))
+            .expect("the declaration is preceded by its derive attribute");
+        for forbidden in ["Default", "Deserialize", "Clone"] {
+            assert!(
+                !derive_line.contains(forbidden),
+                "VerifiedSetFitModel derives `{forbidden}`; the derive list is `Debug` alone \
+                 because Default and Deserialize each mint the witness with no rung run, and \
+                 Clone would let one verified value become an unbounded supply of them."
+            );
+        }
     }
 }

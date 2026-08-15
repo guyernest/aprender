@@ -1504,14 +1504,25 @@ endef
 # redirect into a missing directory fails the shell line, which would be reported as a
 # gate failure rather than as the setup error it is.
 
-setfit-tests: ## REVIEW CR-01 (tier3 half): RUN the feature-gated Phase 3 test surface
-	@echo "Phase 3 SetFit surface: ~337 lib tests + 7 trybuild cases that no other tier runs"
+setfit-tests: ## REVIEW CR-01 (tier3 half): RUN the feature-gated Phase 3+4 test surface
+	@echo "Phase 3+4 SetFit surface: lib tests + 8 trybuild cases that no other tier runs"
 	@mkdir -p target
 # Three invocations, not one, and each is necessary:
-#   (a) aprender-core --features setfit  -- 102 setfit:: tests, gated at lib.rs:165
-#   (b) aprender-train --features setfit -- 235 setfit:: tests, gated at train/mod.rs:51
+#   (a) aprender-core --features setfit  -- setfit:: tests, gated at lib.rs:165
+#   (b) aprender-train --features setfit -- setfit:: tests, gated at train/mod.rs:51
 #   (c) --test ui                        -- the trybuild cases are a SEPARATE test target and
 #                                           are not reached by any --lib invocation
+# THE FLOORS BELOW ARE MEASURED, AND THEY MOVE WHEN THE SURFACE MOVES. Phase 4 roughly
+# doubled the core suite while the floor stayed at its Phase 3 value of 100, so an entire
+# Phase 4 module could have been compiled out and this gate would still have gone green —
+# the vacuous-pass class (CR-02) the floors exist to prevent, reintroduced by not raising
+# them. Re-measure and raise them whenever a phase adds tests here.
+#
+# MEASURED at the head of phase 4, status captured directly off each cargo command and
+# never through a pipe (CLAUDE.md rule 1):
+#   cargo test -p aprender-core  --features setfit --lib setfit:: -> rc=0, 236 passed
+#   cargo test -p aprender-train --features setfit --lib setfit:: -> rc=0, 273 passed, 1 ignored
+# The floors sit just under those, as the Phase 3 pair did (100 under 102, 230 under 235).
 # rc captured directly off each cargo command, never through a pipe, and `set +e` so the
 # diagnostic below is reachable under this Makefile's `.SHELLFLAGS := -e -c` (REVIEW WR-01).
 	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-core --features setfit --lib setfit:: \
@@ -1519,13 +1530,13 @@ setfit-tests: ## REVIEW CR-01 (tier3 half): RUN the feature-gated Phase 3 test s
 	set -e; \
 	tail -3 target/setfit-tests-core.log; \
 	if [ $$rc -ne 0 ]; then echo "FAIL: aprender-core setfit tests are red (rc=$$rc)"; exit $$rc; fi
-	@$(call assert_tests_ran,target/setfit-tests-core.log,100,setfit-tests/aprender-core)
+	@$(call assert_tests_ran,target/setfit-tests-core.log,230,setfit-tests/aprender-core)
 	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --features setfit --lib setfit:: \
 		> target/setfit-tests-train.log 2>&1; rc=$$?; \
 	set -e; \
 	tail -3 target/setfit-tests-train.log; \
 	if [ $$rc -ne 0 ]; then echo "FAIL: aprender-train setfit tests are red (rc=$$rc)"; exit $$rc; fi
-	@$(call assert_tests_ran,target/setfit-tests-train.log,230,setfit-tests/aprender-train)
+	@$(call assert_tests_ran,target/setfit-tests-train.log,265,setfit-tests/aprender-train)
 	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --features setfit --test ui \
 		> target/setfit-tests-ui.log 2>&1; rc=$$?; \
 	set -e; \
@@ -1537,7 +1548,7 @@ setfit-tests: ## REVIEW CR-01 (tier3 half): RUN the feature-gated Phase 3 test s
 		exit $$rc; \
 	fi
 	@$(call assert_tests_ran,target/setfit-tests-ui.log,1,setfit-tests/trybuild)
-	@echo "  setfit surface: core + train lib tests and all seven compile-fail proofs ran"
+	@echo "  setfit surface: core + train lib tests and all eight compile-fail proofs ran"
 
 setfit-repro-inproc: ## TRN-06/D-16 (tier2 half): in-process two-clean-runs equality
 	@echo "TRN-06: in-process two-run equality (D-16's fast, non-authoritative half)"

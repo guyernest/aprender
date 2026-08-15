@@ -1401,6 +1401,22 @@ fn bundle_nullable_path_allowlist_is_complete_over_the_five_subdocuments() {
         "requested_config.pair_config.hard_cap",
     ];
 
+    // THE SHIPPED CONSTANT, NOT ONLY THE CONTRACT'S TEXT. The gate's whole claim is
+    // that the contract, the writer's guard and the types stay in step; comparing the
+    // types against a hand-copied literal proved two of those three and left
+    // `aprender-core`'s `NULLABLE_PATH_ALLOWLIST` — the list the writer actually
+    // enforces — compared against nothing. A drift there would refuse every
+    // production artifact with this gate still green.
+    let mut shipped: Vec<&str> = aprender::setfit::NULLABLE_PATH_ALLOWLIST.to_vec();
+    shipped.sort_unstable();
+    assert_eq!(
+        shipped,
+        ALLOWLIST.to_vec(),
+        "aprender-core's NULLABLE_PATH_ALLOWLIST — the list the writer's null walk enforces — \
+         has drifted from contracts/setfit-apr-v1.yaml's allowlist. The two must be edited \
+         together, with the written analysis the contract requires.",
+    );
+
     let run = head_fitted_run();
     let bundle = fixture_bundle(&run);
 
