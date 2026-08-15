@@ -287,6 +287,8 @@ $ cargo test -p apr-cli --features setfit --lib eval::setfit
 rc=0    15 passed, 6751 filtered out        (plan criterion: >= 6)
 $ cargo test -p aprender-train --features setfit --lib setfit::apr_evaluate::
 rc=0    12 passed, 7947 filtered out
+$ cargo test -p aprender-train --features setfit --lib setfit::
+rc=0   311 passed, 1 ignored                (the whole setfit surface — 0 failures)
 
 $ cargo test -p apr-cli --features setfit --lib
 rc=0  6751 passed, 15 ignored, 0 FAILED
@@ -314,16 +316,27 @@ between those two measurements; the four named filters above are the measured ad
 
 ### aprender-train's known-red baseline, DIFFED not counted
 
+Measured on the FINAL tree (`ad59e6963`):
+
 ```
+$ cargo test -p aprender-train --features setfit --lib setfit::
+rc=0     311 passed, 1 ignored, 7647 filtered out
+         (the entire setfit surface, including this plan's new module — zero failures)
+
 $ cargo test -p aprender-train --features setfit --lib
-rc=101   7917 passed; 24 failed; 15 ignored
+rc=101   7920 passed; 24 failed; 15 ignored
 
 $ set-difference(observed failure names, known-red-baseline.md names)
-NEW FAILURES (regressions): NONE
+observed failures: 24
+NEW (regressions): NONE
+all in baseline:   True
 ```
 
-24 names, all in the baseline (21 × `gpu::*`, 3 × `prune::snapshot_tests`). **Zero
-regressions.**
+24 names, every one in the baseline (21 × `gpu::*`, 3 × `prune::snapshot_tests`) — all in
+subsystems this plan does not touch, and `setfit::` is entirely green. **Zero regressions.**
+
+Test-count arithmetic closes exactly: 7908 before this plan → +9 (`apr_evaluate` Task 3a)
+= 7917 → +3 (the TRN-07 trio in Task 3b) = **7920**.
 
 ## Guards shown able to FAIL
 
