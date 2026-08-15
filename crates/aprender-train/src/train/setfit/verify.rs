@@ -58,8 +58,15 @@ use super::config::ResolvedSetFitConfig;
 use super::evidence::EvidenceSummary;
 use super::{head_input, ArtifactVerifiedEvidence, SetFitTrainError, VerifyProbe, VerifyReport};
 
-/// The seal. Private module, public-in-private trait — the standard Rust idiom.
-mod sealed {
+/// The seal. Crate-visible module, public-in-private trait — the standard Rust idiom.
+///
+/// `pub(crate)` and not `pub`: the module docs above promise that no OUT-OF-CRATE
+/// type can implement [`SetFitCodec`], and `pub(crate)` keeps that promise exactly
+/// while letting phase 4's adapter — `super::apr_codec::AprCodec`, a sibling module
+/// in this crate — write the `impl Sealed` the docs say it will. A module-private
+/// seal would have forced the adapter to live inside this file, which is the one
+/// thing the "thin ADAPTER module inside this crate" sentence rules out.
+pub(crate) mod sealed {
     /// Implemented only by codecs declared inside this crate.
     pub trait Sealed {}
 }
@@ -121,6 +128,34 @@ pub enum CodecError {
         /// The identifier the payload declares.
         got: String,
     },
+    /// The `aprender-core` artifact layer refused the payload, typed.
+    ///
+    /// # Why this is a SECOND variant and not a conversion into [`Self::Bundle`]
+    ///
+    /// [`Self::Bundle`] carries a [`BundleError`]; the core artifact layer reports
+    /// a [`aprender::setfit::SetFitArtifactError`], and the two enumerate different
+    /// worlds — a contracted allocation limit, a container CRC failure, a
+    /// non-finite payload, an incomplete tensor set and a probe-replay divergence
+    /// have no `BundleError` counterparts at all. This module's rule is that the
+    /// inner error is PRESERVED rather than rendered to a string, "so a caller can
+    /// tell a contracted limit from a parse failure without matching on message
+    /// text" (see [`Self::Bundle`]'s own doc). Honouring that rule with only one
+    /// variant leaves two options and both are defects: stringify the core error
+    /// into `BundleError::Serialization` — which erases exactly the distinction the
+    /// rule exists to keep — or map it onto some `BundleError` variant that never
+    /// happened, which is worse, because the caller then matches successfully on a
+    /// diagnosis nothing produced.
+    ///
+    /// Adding a variant is cheap here precisely because `CodecError` is
+    /// `#[non_exhaustive]`, and it is constructible because
+    /// `SetFitArtifactError` derives `Debug + Clone + PartialEq` — the three this
+    /// enum derives (a 04-02 acceptance criterion, taken for this reason).
+    Artifact {
+        /// The codec that was reading or writing.
+        format_id: String,
+        /// What the core artifact layer said, typed and whole.
+        source: aprender::setfit::SetFitArtifactError,
+    },
 }
 
 impl core::fmt::Display for CodecError {
@@ -134,6 +169,9 @@ impl core::fmt::Display for CodecError {
                 "codec `{expected}` was handed a payload written by `{got}`; a codec reads \
                  only its own format",
             ),
+            Self::Artifact { format_id, source } => {
+                write!(f, "codec `{format_id}`: {source}")
+            }
         }
     }
 }
