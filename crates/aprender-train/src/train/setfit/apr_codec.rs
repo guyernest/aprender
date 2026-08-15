@@ -133,7 +133,11 @@ impl SetFitCodec for AprCodec {
 /// probe-replay divergence without matching on message text. `CodecError::Bundle`
 /// carries a `BundleError` and cannot carry this type, which is why
 /// `CodecError::Artifact` exists.
-fn artifact_error(source: SetFitArtifactError) -> CodecError {
+///
+/// `pub(super)` for `apr_reload`: the fresh-process door maps the SAME core failure
+/// for the same format when it runs the production loader (04-16), and a second
+/// spelling there would be a second place for the format id to drift from this one.
+pub(super) fn artifact_error(source: SetFitArtifactError) -> CodecError {
     CodecError::Artifact { format_id: APR_FORMAT_ID.to_string(), source }
 }
 
@@ -353,7 +357,7 @@ fn bundle_of(parts: SetFitAprParts) -> Result<SetFitBundle, CodecError> {
 // ===========================================================================================
 
 #[cfg(test)]
-mod fixture {
+pub(in crate::train::setfit) mod fixture {
     //! An APR-CAPABLE tiny model, and why the phase-3 slice fixture is not one.
     //!
     //! # The measurement that forced this module to exist
@@ -413,6 +417,9 @@ mod fixture {
     };
     use crate::train::setfit::config::SetFitTrainConfig;
     use crate::train::setfit::evidence::{ClassStats, EvidenceSummary, Verdict};
+    use crate::train::setfit::test_fixtures as fx;
+    use crate::train::setfit::verify::SetFitCodec;
+    use crate::train::setfit::{HeadFitted, HeadFittedEvidence, SetFitRun};
 
     /// Reduced dimensions. `positions` is NOT reduced, for the reason in the module
     /// docs: `probe_truncation_boundary` produces a `MAX_SEQUENCE_LENGTH`-position row.
@@ -746,6 +753,56 @@ mod fixture {
             provenance: provenance(),
         }
     }
+
+    /// A calibrated run whose encoder and head CAN carry a `setfit-apr-v1` artifact.
+    ///
+    /// The struct literal is deliberate and it is in-crate: the lifecycle seal is
+    /// against OUT-OF-CRATE minting (`mod.rs`'s `sealed::Sealed`), and phase 3's own
+    /// test modules already assemble bundles directly through `from_run_parts`. What
+    /// is substituted is named here so no reader has to infer it: the encoder, the
+    /// head, and nothing else.
+    ///
+    /// # Why this lives in `fixture` and is visible to the whole `setfit` module
+    ///
+    /// It was `round_trip`'s private helper until plan 04-16 needed the same run:
+    /// `apr_reload`'s door takes real `.apr` bytes, and this is the ONLY model in
+    /// this crate that can produce them — the phase-3 slice fixture provably cannot
+    /// compute two of the contract's six probes (see this module's header for the
+    /// measurement). A second copy there would have been a second APR-capable
+    /// fixture, free to drift from this one in exactly the dimensions the probes
+    /// are sensitive to, so the definition moved here instead of being duplicated.
+    pub(in crate::train::setfit) fn apr_capable_run() -> SetFitRun<HeadFitted> {
+        let real = fx::head_fitted_run(fx::calibrated_variant());
+        let SetFitRun { encoder: _slice_encoder, dataset, selection, config, evidence, _state } =
+            real;
+        let labels = evidence.ordered_labels().to_vec();
+        assert_eq!(
+            labels.len(),
+            3,
+            "the fixture corpus declares three classes; the substituted head must match",
+        );
+        let evidence = HeadFittedEvidence { head: head(&labels), ..evidence };
+        SetFitRun { encoder: encoder(), dataset, selection, config, evidence, _state }
+    }
+
+    /// The exact bytes `close` will produce for this run, computed without consuming it.
+    ///
+    /// Assembled through the SAME `from_run_parts` the trusted `close` calls, with the
+    /// same seven arguments in the same order, so this is the artifact under test and
+    /// not a look-alike.
+    pub(in crate::train::setfit) fn artifact_bytes_of(run: &SetFitRun<HeadFitted>) -> Vec<u8> {
+        let bundle = SetFitBundle::from_run_parts(
+            super::APR_FORMAT_ID,
+            run.encoder(),
+            run.evidence().head(),
+            run.evidence().ordered_labels(),
+            run.selection(),
+            run.config(),
+            run.evidence().passed().summary(),
+        )
+        .expect("the run's parts must assemble into a bundle");
+        super::AprCodec::new().serialize(&bundle).expect("the bundle must write as setfit-apr-v1")
+    }
 }
 
 #[cfg(test)]
@@ -1052,50 +1109,11 @@ mod round_trip {
 
     use aprender::setfit::{artifact_sha256_hex, load_setfit_apr, SetFitArtifactError};
 
+    use super::fixture::{apr_capable_run, artifact_bytes_of};
     use super::*;
     use crate::train::setfit::bundle::ProvenanceRecord;
     use crate::train::setfit::test_fixtures as fx;
-    use crate::train::setfit::{HeadFitted, HeadFittedEvidence, SetFitRun, SetFitTrainError};
-
-    /// A calibrated run whose encoder and head CAN carry a `setfit-apr-v1` artifact.
-    ///
-    /// The struct literal is deliberate and it is in-crate: the lifecycle seal is
-    /// against OUT-OF-CRATE minting (`mod.rs`'s `sealed::Sealed`), and phase 3's own
-    /// test modules already assemble bundles directly through `from_run_parts`. What
-    /// is substituted is named here so no reader has to infer it: the encoder, the
-    /// head, and nothing else.
-    fn apr_capable_run() -> SetFitRun<HeadFitted> {
-        let real = fx::head_fitted_run(fx::calibrated_variant());
-        let SetFitRun { encoder: _slice_encoder, dataset, selection, config, evidence, _state } =
-            real;
-        let labels = evidence.ordered_labels().to_vec();
-        assert_eq!(
-            labels.len(),
-            3,
-            "the fixture corpus declares three classes; the substituted head must match",
-        );
-        let evidence = HeadFittedEvidence { head: fixture::head(&labels), ..evidence };
-        SetFitRun { encoder: fixture::encoder(), dataset, selection, config, evidence, _state }
-    }
-
-    /// The exact bytes `close` will produce for this run, computed without consuming it.
-    ///
-    /// Assembled through the SAME `from_run_parts` the trusted `close` calls, with the
-    /// same seven arguments in the same order, so this is the artifact under test and
-    /// not a look-alike.
-    fn artifact_bytes_of(run: &SetFitRun<HeadFitted>) -> Vec<u8> {
-        let bundle = SetFitBundle::from_run_parts(
-            APR_FORMAT_ID,
-            run.encoder(),
-            run.evidence().head(),
-            run.evidence().ordered_labels(),
-            run.selection(),
-            run.config(),
-            run.evidence().passed().summary(),
-        )
-        .expect("the run's parts must assemble into a bundle");
-        AprCodec::new().serialize(&bundle).expect("the bundle must write as setfit-apr-v1")
-    }
+    use crate::train::setfit::SetFitTrainError;
 
     /// The final state is MINTED, and the hash it records is the artifact's own.
     ///
