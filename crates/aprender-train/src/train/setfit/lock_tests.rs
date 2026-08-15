@@ -751,3 +751,331 @@ fn lock_canonical_bytes_commit_the_whole_record() {
     );
     assert_eq!(lock.recompute_lock_hash(), lock.lock_hash());
 }
+
+// ===========================================================================================
+// Durable reconstruction — the lock crosses a PROCESS boundary as a file (04-14, review B4)
+// ===========================================================================================
+//
+// `to_canonical_bytes` was public and nothing could read those bytes back, so `apr eval --split
+// test` had no way to consume a lock a PRIOR `apr eval --split validation` had written. The only
+// shape that compiled was minting the lock inside the test command — which satisfies "a lock
+// existed before test access" with an object created one line earlier, and therefore satisfies
+// nothing. These tests are about the file being a real gate.
+
+/// A 64-hex string, as every real artifact hash and fingerprint in this format is.
+///
+/// The synthetic `"aa"` hashes elsewhere in this file are fine for comparisons but understate
+/// the wire form's size by 60-odd bytes per occurrence, which would make the bound projection
+/// below flattering rather than honest.
+fn hex64(fill: char) -> String {
+    core::iter::repeat_n(fill, 64).collect()
+}
+
+/// The canonical bytes as a string, for the surgery below.
+fn canonical_json(lock: &SelectionLock) -> String {
+    String::from_utf8(lock.to_canonical_bytes()).expect("the canonical form is UTF-8 JSON")
+}
+
+/// Replace the FIRST occurrence, and PROVE the replacement applied.
+///
+/// First rather than all, because `schema_version` appears once at the top level and once inside
+/// every candidate's evaluation: a global replace would edit facts the test did not name, and the
+/// assertion would then describe a different payload than the one it claims to. The applied-check
+/// is the lesson `config.rs`'s `substitute` records — a substitution keyed on a literal that
+/// `serde_json` renders differently matches nothing, and the test silently becomes an assertion
+/// about a perfectly valid payload.
+fn substitute_first(payload: &str, from: &str, to: &str) -> String {
+    let out = payload.replacen(from, to, 1);
+    assert_ne!(
+        out, payload,
+        "the substitution `{from}` -> `{to}` did not apply; the test would be vacuous. \
+         Payload was: {payload}",
+    );
+    out
+}
+
+/// The body of a method, from its header to the first brace closing at method indentation.
+///
+/// `fx::source_block_after` stops at the first `\n}`, which inside an `impl` is the END OF THE
+/// WHOLE BLOCK — so an ordering assertion written with it would range over every later method
+/// too, and could be satisfied by a `serde_json::` call in a different function entirely.
+fn method_body(src: &str, header: &str) -> String {
+    let start = src.find(header).unwrap_or_else(|| panic!("`{header}` must appear in lock.rs"));
+    let rest = &src[start..];
+    let end = rest
+        .find("\n    }")
+        .unwrap_or_else(|| panic!("`{header}` must close at method indentation"));
+    rest[..end].to_string()
+}
+
+#[test]
+fn lock_survives_a_round_trip_through_canonical_bytes() {
+    let original = lock_of(vec![
+        candidate("config-a", &hex64('a'), 0.10),
+        candidate("config-b", &hex64('b'), 0.90),
+        candidate("config-c", &hex64('c'), 0.50),
+    ])
+    .expect("the lock must build");
+    let bytes = original.to_canonical_bytes();
+
+    let reconstructed =
+        SelectionLock::from_canonical_bytes(&bytes).expect("bytes this module wrote must read back");
+
+    assert_eq!(reconstructed, original);
+    assert_eq!(reconstructed.lock_hash(), original.lock_hash());
+    assert_eq!(reconstructed.schema_version(), original.schema_version());
+    assert_eq!(reconstructed.rule(), original.rule());
+    assert_eq!(reconstructed.chosen_index(), 1, "the rule's winner survives the file");
+    assert_eq!(reconstructed.chosen_artifact_hash(), original.chosen_artifact_hash());
+    assert_eq!(reconstructed.dataset_fingerprint(), original.dataset_fingerprint());
+    assert_eq!(
+        reconstructed.validation_split_fingerprint(),
+        original.validation_split_fingerprint(),
+    );
+    assert_eq!(reconstructed.selection_semantic_hash(), original.selection_semantic_hash());
+    assert_eq!(reconstructed.ledger_hash(), original.ledger_hash());
+    assert_eq!(reconstructed.candidates().len(), 3);
+
+    // The metric comes back as BITS, so the reconstruction is exact rather than close. A decimal
+    // round trip would bind the value to a formatting library's shortest-representation choice.
+    for (rebuilt, source) in reconstructed.candidates().iter().zip(original.candidates()) {
+        assert_eq!(rebuilt.config_hash(), source.config_hash());
+        assert_eq!(rebuilt.artifact_hash(), source.artifact_hash());
+        assert_eq!(rebuilt.evaluation().value_bits(), source.evaluation().value_bits());
+        assert_eq!(rebuilt.evaluation().metric_kind(), source.evaluation().metric_kind());
+        assert_eq!(rebuilt.evaluation().n_rows(), source.evaluation().n_rows());
+    }
+
+    // And re-serializing reproduces the input byte for byte, which is what makes the recomputed
+    // hash the SAME hash rather than a second opinion.
+    assert_eq!(reconstructed.to_canonical_bytes(), bytes);
+}
+
+#[test]
+fn lock_from_canonical_bytes_refuses_an_oversized_payload_before_parsing() {
+    let cap = usize::try_from(MAX_SELECTION_LOCK_BYTES)
+        .expect("the cap fits a usize on any host this crate builds for");
+    let observed = MAX_SELECTION_LOCK_BYTES + 1;
+
+    // Deliberately NOT valid JSON. If the bound were enforced AFTER the parse, this would come
+    // back as a malformed payload; the variant that actually arrives is the ordering proof.
+    let over = vec![b'x'; cap + 1];
+    let error =
+        SelectionLock::from_canonical_bytes(&over).expect_err("an over-cap payload must be refused");
+    assert_eq!(
+        error,
+        LockError::LockPayloadTooLarge { limit: MAX_SELECTION_LOCK_BYTES, observed },
+    );
+    let rendered = error.to_string();
+    assert!(rendered.contains(&MAX_SELECTION_LOCK_BYTES.to_string()), "{rendered}");
+    assert!(rendered.contains(&observed.to_string()), "{rendered}");
+
+    // The bound is INCLUSIVE: exactly the limit is not over it. Same garbage, so the refusal must
+    // now come from the parse — the other half of the ordering proof, and the half that stops the
+    // comparison from being `>=` by accident.
+    let at_limit = vec![b'x'; cap];
+    let error = SelectionLock::from_canonical_bytes(&at_limit)
+        .expect_err("garbage at exactly the limit is still garbage");
+    assert!(
+        matches!(error, LockError::MalformedLockPayload { .. }),
+        "at the limit the length check must have passed and the PARSE must be what refuses, \
+         got {error:?}",
+    );
+}
+
+#[test]
+fn lock_from_canonical_bytes_refuses_an_unknown_field() {
+    let lock = lock_of(vec![candidate("config-a", &hex64('a'), 0.5)]).expect("the lock must build");
+    let payload = substitute_first(
+        &canonical_json(&lock),
+        "{\"schema_version\"",
+        "{\"back_door\":1,\"schema_version\"",
+    );
+
+    let error = SelectionLock::from_canonical_bytes(payload.as_bytes())
+        .expect_err("deny_unknown_fields must reject a key this reader does not know");
+    let LockError::MalformedLockPayload { detail } = error.clone() else {
+        panic!("expected a malformed payload, got {error:?}");
+    };
+    assert!(detail.contains("back_door"), "the refusal must name the offending key: {detail}");
+}
+
+#[test]
+fn lock_from_canonical_bytes_refuses_an_unsupported_schema_version() {
+    let lock = lock_of(vec![candidate("config-a", &hex64('a'), 0.5)]).expect("the lock must build");
+    let payload =
+        substitute_first(&canonical_json(&lock), "{\"schema_version\":1", "{\"schema_version\":2");
+
+    let error = SelectionLock::from_canonical_bytes(payload.as_bytes())
+        .expect_err("a version this reader does not know must be refused rather than guessed at");
+    assert_eq!(error, LockError::UnsupportedLockSchemaVersion { got: 2, supported: 1 });
+    let rendered = error.to_string();
+    assert!(rendered.contains('2') && rendered.contains('1'), "both versions: {rendered}");
+}
+
+#[test]
+fn lock_from_canonical_bytes_refuses_a_chosen_index_out_of_range() {
+    let lock = lock_of(vec![
+        candidate("config-a", &hex64('a'), 0.10),
+        candidate("config-b", &hex64('b'), 0.90),
+    ])
+    .expect("the lock must build");
+    assert_eq!(lock.chosen_index(), 1);
+
+    let payload = substitute_first(&canonical_json(&lock), "\"chosen_index\":1", "\"chosen_index\":9");
+    let error = SelectionLock::from_canonical_bytes(payload.as_bytes())
+        .expect_err("an index past the end of the list names no candidate");
+    assert_eq!(error, LockError::ChosenIndexOutOfRange { chosen_index: 9, candidates: 2 });
+    let rendered = error.to_string();
+    assert!(rendered.contains('9'), "{rendered}");
+}
+
+/// A file cannot name a winner the RULE did not pick.
+///
+/// This is `from_candidates`' missing-`chosen`-parameter rule, arriving as bytes instead of as an
+/// argument. Reading the recorded index back and trusting it would re-open the exact door the
+/// constructor closes: a lock recording only a winner is as consistent with "we looked at test
+/// and wrote down what won there" as it is with honest selection.
+#[test]
+fn lock_from_canonical_bytes_refuses_a_recorded_winner_the_rule_did_not_pick() {
+    let lock = lock_of(vec![
+        candidate("config-a", &hex64('a'), 0.10),
+        candidate("config-b", &hex64('b'), 0.90),
+    ])
+    .expect("the lock must build");
+    assert_eq!(lock.chosen_index(), 1, "0.90 wins, so index 0 is the loser this test names");
+
+    let payload = substitute_first(&canonical_json(&lock), "\"chosen_index\":1", "\"chosen_index\":0");
+    let error = SelectionLock::from_canonical_bytes(payload.as_bytes())
+        .expect_err("the rule derives the winner; the file does not get to disagree");
+    assert!(matches!(error, LockError::NonCanonicalLockPayload { .. }), "got {error:?}");
+    assert!(
+        error.to_string().contains("canonical"),
+        "the refusal must say what it means: {error}",
+    );
+}
+
+/// An edit that IS well-formed still moves the hash, and still fails at the next door.
+///
+/// This is the honest trust model in one test. The edited file's own integrity check PASSES —
+/// `lock_hash` is the digest of these very bytes, so a hand-written record can always be made
+/// self-consistent. What it cannot do is survive `mint_test_token`, which compares against the
+/// REAL run.
+#[test]
+fn lock_edited_candidate_reconstructs_to_a_different_hash_and_cannot_mint() {
+    let run = verified_run();
+    let original = lock_over(&run);
+    let real = run.artifact_hash();
+    let forged = hex64('3');
+
+    let json = canonical_json(&original);
+    assert!(json.contains(&real), "the chosen artifact must appear in the bytes it commits");
+    // BOTH copies: the candidate's own `artifact_hash` and the one inside its evaluation. They
+    // are the same string by construction, and an edit to only one of them is refused as
+    // non-canonical — a different, also correct outcome. This test is about the edit that is
+    // well-formed and STILL fails.
+    let payload = json.replace(&real, &forged);
+    assert_ne!(payload, json, "the substitution must apply, or this test proves nothing");
+
+    let edited = SelectionLock::from_canonical_bytes(payload.as_bytes())
+        .expect("a well-formed edit is still a well-formed record");
+    assert_eq!(edited.verify_integrity(), Ok(()), "a forged record can be self-consistent");
+    assert_ne!(
+        edited.lock_hash(),
+        original.lock_hash(),
+        "editing a committed field must move the hash, or the hash commits nothing",
+    );
+    assert_eq!(edited.chosen_artifact_hash(), forged);
+
+    let error = edited
+        .mint_test_token(&run)
+        .expect_err("the edited lock names an artifact this run is not");
+    assert_eq!(error, LockError::StaleLock { locked: forged, observed: real });
+}
+
+/// The whole point: a lock written by one process gates the test split in another.
+#[test]
+fn lock_reconstructed_from_bytes_mints_for_its_own_run_and_refuses_a_retuned_one() {
+    let run_a = verified_run();
+    let run_b = retuned_run();
+    assert_ne!(
+        run_a.artifact_hash(),
+        run_b.artifact_hash(),
+        "the fixture must actually re-tune, or every assertion below would hold vacuously",
+    );
+
+    // Process one: evaluate on validation, commit the decision, write the bytes.
+    let bytes = lock_over(&run_a).to_canonical_bytes();
+
+    // Process two: it has the FILE and nothing else — no in-memory lock to mint from.
+    let lock = SelectionLock::from_canonical_bytes(&bytes).expect("the written lock must read back");
+
+    let token = lock
+        .mint_test_token(&run_a)
+        .expect("a reconstructed lock still admits the model it chose");
+    let grant = CanonicalTestAccess::grant(token, &run_a, run_a.dataset())
+        .expect("the token was minted for this model over this dataset");
+    assert_eq!(grant.artifact_hash(), run_a.artifact_hash());
+    assert_eq!(grant.lock_hash(), lock.lock_hash());
+    assert!(!grant.test().rows().is_empty(), "the grant must admit real rows");
+
+    let stale = lock
+        .mint_test_token(&run_b)
+        .expect_err("crossing a process boundary must not launder a re-tuned model");
+    assert_eq!(
+        stale,
+        LockError::StaleLock { locked: run_a.artifact_hash(), observed: run_b.artifact_hash() },
+    );
+}
+
+/// The bound is MEASURED against the wire form, not quoted at it.
+#[test]
+fn lock_max_selection_lock_bytes_clears_a_realistic_sweep() {
+    // Pinned as a VALUE so a change to the bound is visible in a diff rather than only in a
+    // refusal somebody meets at 3am.
+    assert_eq!(MAX_SELECTION_LOCK_BYTES, 1_048_576, "1 MiB");
+
+    // The marginal cost of one candidate, taken as a DIFFERENCE between two real locks, so this
+    // figure tracks the wire form instead of describing a remembered version of it. Both use
+    // 64-character hashes, which is what a real candidate carries.
+    let one = lock_of(vec![candidate(&hex64('0'), &hex64('a'), 0.10)]).expect("builds");
+    let two = lock_of(vec![
+        candidate(&hex64('0'), &hex64('a'), 0.10),
+        candidate(&hex64('1'), &hex64('b'), 0.90),
+    ])
+    .expect("builds");
+    let marginal = two.to_canonical_bytes().len() - one.to_canonical_bytes().len();
+    assert!(marginal > 0, "a candidate must cost bytes, or the projection means nothing");
+
+    let admitted = MAX_SELECTION_LOCK_BYTES / marginal as u64;
+    assert!(
+        admitted >= 1_000,
+        "the bound must clear a realistic sweep by orders of magnitude: {marginal} bytes per \
+         candidate admits only {admitted}",
+    );
+}
+
+/// The raw length is bounded BEFORE serde is handed anything, and the creation door did not widen.
+#[test]
+fn lock_from_canonical_bytes_bounds_the_raw_input_before_serde() {
+    let signature = signature_after(LOCK_SOURCE, "pub fn from_canonical_bytes(");
+    assert!(signature.contains("bytes: &[u8]"), "`{signature}`");
+    assert!(signature.contains("Result<SelectionLock, LockError>"), "`{signature}`");
+
+    let body = method_body(LOCK_SOURCE, "pub fn from_canonical_bytes(");
+    let bound_at = body
+        .find("MAX_SELECTION_LOCK_BYTES")
+        .expect("the door must name the bound it enforces");
+    let serde_at = body.find("serde_json::").expect("the door must parse the payload");
+    assert!(
+        bound_at < serde_at,
+        "the input-length bound must be enforced before serde is handed anything: bound at \
+         {bound_at}, parse at {serde_at}",
+    );
+
+    // Reading a record a run already created must not become a way to CREATE one.
+    assert!(
+        LOCK_SOURCE.contains("pub(super) fn from_candidates("),
+        "the reconstruction door must not have widened the creation door",
+    );
+}
