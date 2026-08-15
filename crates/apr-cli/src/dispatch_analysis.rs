@@ -566,6 +566,12 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             val_shard.as_deref(),
             cli.json,
         ),
+        ExtendedCommands::Predict {
+            file,
+            text,
+            input,
+            logits,
+        } => commands::predict::run(file, text, input.as_deref(), *logits, cli.json),
         ExtendedCommands::Tokenize { command } => dispatch_tokenize_command(command, cli),
         ExtendedCommands::Data { command } => dispatch_data_command(command, cli),
         #[cfg(feature = "setfit")]

@@ -722,6 +722,32 @@ pub enum ExtendedCommands {
         #[arg(long, value_name = "DIR")]
         val_shard: Option<PathBuf>,
     },
+    /// Classify text with a model — auto-detects the family from the artifact's tag
+    ///
+    /// GENERIC by decision (D-06): a `setfit-apr-v1` classifier is an APR, so it is
+    /// predicted with the same command as any other model. Routing reads the typed
+    /// `model_type` tag and NEVER tensor names, so a file that merely looks like a
+    /// classifier stays a plain APR.
+    Predict {
+        /// Path to the model file
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// A text to classify; repeat for a batch, order is response order
+        #[arg(long, value_name = "STR")]
+        text: Vec<String>,
+        /// A classify request document: `{"texts": [...], "include_logits": false}`
+        ///
+        /// This is the SAME document `POST /v1/classify` accepts, and deliberately
+        /// NOT one text per line: a line-delimited file cannot carry a text that
+        /// contains a newline, so the CLI and the HTTP surface would receive
+        /// different ordered inputs while appearing to agree. Unknown keys are
+        /// refused, and the file is bounded before it is parsed.
+        #[arg(long, value_name = "FILE", conflicts_with = "text")]
+        input: Option<PathBuf>,
+        /// Include per-class logits in the response
+        #[arg(long)]
+        logits: bool,
+    },
     /// Tokenizer training pipeline (plan/apply) — BPE vocabulary learning
     Tokenize {
         #[command(subcommand)]

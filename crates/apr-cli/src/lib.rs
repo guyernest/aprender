@@ -35,6 +35,13 @@ pub mod pipe;
 #[cfg(feature = "setfit")]
 mod setfit_io;
 
+// The ONE place a command decides "is this APR a SetFit classifier?" (D-04).
+// Deliberately NOT feature-gated: `apr predict` must be able to tell a tagged
+// artifact from a plain APR in a binary built WITHOUT the classifier, so that it
+// can answer `FeatureDisabled` (exit 9) instead of "unsupported format", and
+// `apr inspect` must be able to show identity fields without the feature at all.
+mod setfit_tag;
+
 pub use error::CliError;
 
 // Public re-exports for integration tests
