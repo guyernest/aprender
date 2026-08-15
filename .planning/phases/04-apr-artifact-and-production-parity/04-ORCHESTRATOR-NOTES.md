@@ -239,3 +239,37 @@ Recovered in full by merging the dangling commit `b943116e0` directly (7 files, 
 until the wave's agents have returned and merged; use `git merge --no-edit` (not `--ff-only`) for
 wave merges; and never delete a worktree branch without first asserting `git merge-base --is-ancestor
 <branch> HEAD`.
+
+---
+
+## F-13 — wave-4 regression: 04-05 broke the trybuild ui suite and did not run it
+
+Found while verifying an unrelated `/simplify` pass, and proven pre-existing by
+stashing those changes and re-running on the clean tree (`rc=101`, identical single
+mismatch). **Not caused by the simplify work.**
+
+**Cause.** 04-03 added `tests/ui/setfit_external_codec_impl.rs` and blessed its `.stderr`
+when `SerdeJsonCodec` was the ONLY `sealed::Sealed` implementor. 04-05 then added
+`impl sealed::Sealed for AprCodec` (`apr_codec.rs:86`), so rustc's help text changed from
+
+```
+help: the trait `verify::sealed::Sealed` is implemented for `SerdeJsonCodec`
+```
+
+to `help: the following other types implement trait …` listing both. The snapshot went stale.
+
+**Why it escaped.** 04-05's SUMMARY lists every command it ran — `--lib`, `setfit::`,
+`setfit::apr_codec::`, `::bijection`, `::round_trip`, clippy, fmt. **`--test ui` is not among
+them.** 04-03 ran it (`8 of 8 cases`); 04-05 changed a type that the ui suite observes and
+never re-ran it. A plan that adds an implementor of a sealed trait must re-run the suite that
+snapshots that trait's diagnostics.
+
+**Fix applied:** regenerated via `TRYBUILD=overwrite`. The diff is purely the implementor list;
+the `error[E0277]: the trait bound 'MyCodec: verify::sealed::Sealed' is not satisfied` refusal is
+unchanged, so the sealing property is still proven, not weakened. Verified 8 case files on disk
+and 8 cases reported ok — not a vacuous harness pass.
+
+**Action for 04-10 (wave 8):** the Make gates must include `-p aprender-train --features setfit
+--test ui` with a case-count assertion (`>= 8`), not just a `rc=0` check. A trybuild harness
+reports `1 passed` for the whole suite, so `test result: ok` alone cannot distinguish 8 cases
+from 0.
