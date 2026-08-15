@@ -215,6 +215,7 @@ fn echo_cache(run: &SetFitRun<HeadFitted>) -> SetFitBundle {
         run.encoder(),
         run.evidence().head(),
         run.evidence().ordered_labels(),
+        run.selection(),
         run.config(),
         run.evidence().passed().summary(),
     )
@@ -338,6 +339,7 @@ fn verify_a_codec_that_omits_the_format_check_is_still_refused() {
         run.encoder(),
         run.evidence().head(),
         run.evidence().ordered_labels(),
+        run.selection(),
         run.config(),
         run.evidence().passed().summary(),
     )

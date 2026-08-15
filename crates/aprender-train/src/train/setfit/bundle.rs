@@ -41,6 +41,23 @@
 //! The format identifier written here is the serde one. Naming it after the
 //! project's model container would make a phase-4 reader believe an interim
 //! debug format is the real thing.
+//!
+//! # Field 20 is an ADDITION to the phase-3 completeness list, recorded here
+//!
+//! `contracts/setfit-train-lifecycle-v1.yaml`'s `bundle_completeness` enumerates
+//! NINETEEN fields, and its invariant reads "A field MISSING from an
+//! implementation is a finding". That makes the list a normative MINIMUM rather
+//! than a maximum, so an ADDED field is not a violation of it — but an addition
+//! nobody wrote down is indistinguishable from drift, which is why it is written
+//! down here.
+//!
+//! `provenance` (field 20) is required by phase 4's APR-01 obligation that the
+//! artifact publish data/model provenance and APR-05's that inspection recover a
+//! data fingerprint. It is recorded normatively in `contracts/setfit-apr-v1.yaml`,
+//! whose bijection table enumerates all TWENTY fields and reconstructs every one
+//! of them from artifact bytes. The phase-3 contract is deliberately NOT edited
+//! (Ph1 D-23: reference, never edit), so this note is where the nineteen-field
+//! list and the twenty-field one are reconciled.
 
 use std::collections::BTreeMap;
 
@@ -49,6 +66,7 @@ use aprender::setfit::{
     EncoderArchitecture, SetFitMiniLm, L2_EPS, MAX_SEQUENCE_LENGTH, NORMALIZATION_POLICY,
     PADDING_MODE, POOLING_POLICY,
 };
+use aprender_contrastive_data::select::Selection;
 use serde::{Deserialize, Serialize};
 
 use super::config::{ResolvedSetFitConfig, SetFitTrainConfig};
@@ -63,7 +81,29 @@ use super::evidence::EvidenceSummary;
 /// Bumped whenever a field is added, removed or re-meant. A reader that meets a
 /// version it does not know refuses rather than guessing, following the ledger
 /// precedent in `aprender-contrastive-data`.
-pub const BUNDLE_SCHEMA_VERSION: u32 = 1;
+///
+/// # History
+///
+/// * `1` — the nineteen-field phase-3 bundle (plan 03-08).
+/// * `2` — adds [`ProvenanceRecord`] as field 20 (plan 04-13, APR-01/APR-05).
+///
+/// # Two refusals, and which one a given payload actually gets
+///
+/// [`SetFitBundle::from_canonical_bytes`] parses BEFORE it checks the version
+/// (the order is documented there and is load-bearing for the allocation
+/// bounds), so the two failure modes are distinct and both are tested:
+///
+/// * A payload that DECLARES version 1 but is otherwise shaped like a v2 bundle
+///   parses, then meets [`BundleError::UnsupportedSchemaVersion`] naming both
+///   versions. This is the refusal the bump exists to produce, and it is what a
+///   forward reader — one that gained a field this build does not know — hits.
+/// * A genuine v1 payload has no `provenance` key at all, and `provenance` is
+///   not an `Option`, so it fails one step EARLIER at the parse with a typed
+///   [`BundleError::Serialization`] whose detail names the missing field. That
+///   is a refusal, not a silent partial interpretation, which is the property
+///   that matters; the version check never gets to speak because there is no
+///   parsed value to read a version off.
+pub const BUNDLE_SCHEMA_VERSION: u32 = 2;
 
 /// Maximum accepted length of a serialized bundle, in bytes (512 MiB).
 ///
@@ -300,6 +340,112 @@ impl From<&ResolvedSetFitConfig> for ResolvedConfigRecord {
     }
 }
 
+/// What data this model was trained on, read off the run that trained it.
+///
+/// Serves APR-01 ("the artifact publishes data/model provenance") and APR-05
+/// ("inspection recovers a data fingerprint"). The field NAMES are normative:
+/// `contracts/setfit-apr-v1.yaml`'s bijection table maps `doc.provenance` 1:1 onto
+/// this record, so renaming a field here silently renames an artifact key.
+///
+/// # Every value is READ OFF the [`Selection`], never accepted from a caller
+///
+/// [`SetFitBundle::from_run_parts`] takes the `Selection` OBJECT and derives all
+/// six fields from it. There is deliberately no constructor taking these as
+/// strings, for the same reason `SelectionLock::from_candidates` is `pub(super)`:
+/// caller-supplied provenance can describe a run that never happened, and a
+/// fingerprint that can be typed in is a claim wearing a measurement's clothes.
+///
+/// # NO FIELD IS AN `Option`, AND THAT IS AN INVARIANT WITH TEETH
+///
+/// The record is either fully read off the run or it is not built, so it
+/// contributes ZERO paths to `setfit-apr-v1`'s nullable-path allowlist while
+/// still being WALKED by the writer's null scan (04-02). Adding an `Option` field
+/// here would make every honest production artifact emit a `null` at an
+/// un-allowlisted path, which the writer answers with `NonFiniteValue` — i.e. the
+/// whole pipeline would refuse its own output.
+///
+/// That claim is not left to this doc comment. `bundle_tests.rs` carries the
+/// allowlist COMPLETENESS GATE, which serializes an all-`None` instance of each of
+/// the five embedded sub-documents and asserts this one contributes an EMPTY path
+/// set by name. A new `Option` here fails that gate, in this crate, naming the new
+/// path — instead of failing on the first pinned MiniLM artifact in production.
+/// If such a field is ever genuinely needed, the fix is a new allowlist entry in
+/// `contracts/setfit-apr-v1.yaml` AND in `NULLABLE_PATH_ALLOWLIST`
+/// (`crates/aprender-core/src/setfit/artifact.rs`), together. It is NEVER
+/// `skip_serializing_if`: that would change [`SetFitBundle::to_canonical_bytes`]'s
+/// output, break phase 3's committed closure tests, and silently empty the
+/// allowlist with nothing turning red.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProvenanceRecord {
+    /// Lowercase-hex fingerprint of the WHOLE dataset the selection was drawn from.
+    pub(crate) dataset_fingerprint: String,
+    /// Lowercase-hex fingerprint of the validation split alone.
+    pub(crate) validation_split_fingerprint: String,
+    /// Lowercase hex of the selection's semantic hash — WHICH rows were selected.
+    pub(crate) selection_semantic_hash: String,
+    /// Lowercase hex of the access-ledger hash as of the moment of selection.
+    pub(crate) selection_ledger_hash: String,
+    /// The root seed the selection was drawn from.
+    pub(crate) selection_root_seed: u64,
+    /// Shots per class the selection drew.
+    pub(crate) shots_per_class: u32,
+}
+
+impl ProvenanceRecord {
+    /// Read the record off the selection the run actually consumed.
+    ///
+    /// Private on purpose: [`SetFitBundle::from_run_parts`] is the only assembly
+    /// site, and a public constructor here would be the caller-supplied-provenance
+    /// door the type doc forbids.
+    fn of(selection: &Selection) -> Self {
+        Self {
+            dataset_fingerprint: selection.dataset_fingerprint_hex().to_string(),
+            validation_split_fingerprint: selection.validation_fingerprint_hex().to_string(),
+            selection_semantic_hash: hex::encode(selection.semantic_hash()),
+            selection_ledger_hash: hex::encode(selection.ledger_hash()),
+            selection_root_seed: selection.root_seed(),
+            shots_per_class: selection.shots_per_class(),
+        }
+    }
+
+    /// Fingerprint of the whole dataset the run's selection was drawn from.
+    #[must_use]
+    pub fn dataset_fingerprint(&self) -> &str {
+        &self.dataset_fingerprint
+    }
+
+    /// Fingerprint of the validation split alone.
+    #[must_use]
+    pub fn validation_split_fingerprint(&self) -> &str {
+        &self.validation_split_fingerprint
+    }
+
+    /// The selection's semantic hash: which rows were selected.
+    #[must_use]
+    pub fn selection_semantic_hash(&self) -> &str {
+        &self.selection_semantic_hash
+    }
+
+    /// The access-ledger hash as of the moment of selection.
+    #[must_use]
+    pub fn selection_ledger_hash(&self) -> &str {
+        &self.selection_ledger_hash
+    }
+
+    /// The root seed the selection was drawn from.
+    #[must_use]
+    pub fn selection_root_seed(&self) -> u64 {
+        self.selection_root_seed
+    }
+
+    /// Shots per class the selection drew.
+    #[must_use]
+    pub fn shots_per_class(&self) -> u32 {
+        self.shots_per_class
+    }
+}
+
 // ===========================================================================================
 // The bundle
 // ===========================================================================================
@@ -353,6 +499,18 @@ pub struct SetFitBundle {
     pub(crate) resolved_config: ResolvedConfigRecord,
     /// The bound evidence summary, carrying its own table hash.
     pub(crate) evidence: EvidenceSummary,
+    /// WHAT DATA this run was trained on, READ OFF the selection it consumed.
+    ///
+    /// Field 20, added by plan 04-13. It serves APR-01 (the artifact publishes
+    /// data/model provenance) and APR-05 (inspection recovers a data fingerprint).
+    ///
+    /// It is a BUNDLE field rather than something the writer computes because the
+    /// artifact codec's closure equation is `serialize(deserialize(bytes)) ==
+    /// bytes`: anything in the artifact that is neither a bundle field nor a
+    /// deterministic function of bundle fields is unrecoverable on the way back,
+    /// so writing provenance without carrying it here would make closure
+    /// unachievable rather than merely untested (review finding B3).
+    pub(crate) provenance: ProvenanceRecord,
 }
 
 impl SetFitBundle {
@@ -364,6 +522,16 @@ impl SetFitBundle {
     /// Every architectural and policy value is READ OFF the encoder that is about
     /// to be serialized, never restated from the configuration that asked for it.
     ///
+    /// # Why this takes the `Selection` and not six provenance strings
+    ///
+    /// The same rule, applied to the data side: [`ProvenanceRecord`] is derived
+    /// HERE from the selection object the run actually consumed, so there is no
+    /// parameter through which a caller could describe a run that never happened.
+    /// Six `&str` parameters would type-check identically and would make the
+    /// artifact's data fingerprint an assertion rather than a measurement — the
+    /// same reason `SelectionLock::from_candidates` is `pub(super)` rather than a
+    /// public constructor over hashes.
+    ///
     /// # Errors
     ///
     /// [`BundleError::Serialization`] if the head reports no fitted feature
@@ -373,6 +541,7 @@ impl SetFitBundle {
         encoder: &SetFitMiniLm,
         head: &MultinomialLogisticRegression,
         ordered_labels: &[String],
+        selection: &Selection,
         config: &ResolvedSetFitConfig,
         evidence: &EvidenceSummary,
     ) -> Result<Self, BundleError> {
@@ -412,6 +581,7 @@ impl SetFitBundle {
             requested_config: config.requested().clone(),
             resolved_config: ResolvedConfigRecord::from(config),
             evidence: evidence.clone(),
+            provenance: ProvenanceRecord::of(selection),
         })
     }
 
@@ -561,6 +731,12 @@ impl SetFitBundle {
     #[must_use]
     pub fn evidence(&self) -> &EvidenceSummary {
         &self.evidence
+    }
+
+    /// What data this run was trained on (APR-01, APR-05).
+    #[must_use]
+    pub fn provenance(&self) -> &ProvenanceRecord {
+        &self.provenance
     }
 
     /// Refuse a payload whose recorded policy is not the one this build applies.

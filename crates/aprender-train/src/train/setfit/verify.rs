@@ -292,6 +292,7 @@ fn close<C: SetFitCodec>(
         &encoder,
         &head,
         ordered_labels,
+        selection,
         config,
         summary,
     )

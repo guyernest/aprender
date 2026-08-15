@@ -14,6 +14,8 @@
 use std::collections::BTreeMap;
 
 use aprender::setfit::SetFitMiniLm;
+use aprender_contrastive_data::ledger::AccessLedger;
+use aprender_contrastive_data::select::{FewShotSelector, Selection, SelectionConfig};
 
 use super::super::test_fixtures as fx;
 use super::*;
@@ -29,15 +31,40 @@ fn head_fitted_run() -> SetFitRun<HeadFitted> {
 
 /// The bundle a finished fixture run produces, through the shipped assembly path.
 fn fixture_bundle(run: &SetFitRun<HeadFitted>) -> SetFitBundle {
+    bundle_of(run, run.selection())
+}
+
+/// The same assembly, at a caller-chosen selection.
+///
+/// Exists so the provenance tests can vary the ONE input provenance is read off
+/// without paying for a second `tune_encoder` + `fit_head` pipeline. Every other
+/// argument is the run's own, so a difference in the record is attributable to the
+/// selection alone.
+fn bundle_of(run: &SetFitRun<HeadFitted>, selection: &Selection) -> SetFitBundle {
     SetFitBundle::from_run_parts(
         FIXTURE_FORMAT_ID,
         run.encoder(),
         run.evidence().head(),
         run.evidence().ordered_labels(),
+        selection,
         run.config(),
         run.evidence().passed().summary(),
     )
     .expect("a finished run must assemble into a bundle")
+}
+
+/// A selection over the fixture corpus, drawn independently of any run.
+///
+/// Built through the shipped door (`FewShotSelector::select` over
+/// `fx::synthetic_dataset`), so a selection produced here is the same KIND of
+/// object a run carries — the point of the determinism test below is that the same
+/// arguments reproduce the same hashes, which is only meaningful if this path is
+/// the production one.
+fn selection_at(root_seed: u64, shots_per_class: u32) -> Selection {
+    let mut ledger = AccessLedger::new();
+    let dataset = fx::synthetic_dataset(&mut ledger);
+    FewShotSelector::select(&dataset, &SelectionConfig { root_seed, shots_per_class }, &mut ledger)
+        .expect("the synthetic corpus must support this selection")
 }
 
 /// The probe texts: the fixture's test split, which the run never trained on.
@@ -260,6 +287,11 @@ fn bundle_declares_every_field_of_the_normative_completeness_list() {
         "pub(crate) requested_config: SetFitTrainConfig,",
         "pub(crate) resolved_config: ResolvedConfigRecord,",
         "pub(crate) evidence: EvidenceSummary,",
+        // Field 20 (plan 04-13). The phase-3 contract's `bundle_completeness`
+        // enumerates the nineteen above as a normative MINIMUM ("a field MISSING
+        // is a finding"); `setfit-apr-v1`'s bijection table enumerates all twenty
+        // and recovers every one of them from artifact bytes.
+        "pub(crate) provenance: ProvenanceRecord,",
     ] {
         assert!(
             src.contains(field),
@@ -466,8 +498,14 @@ fn bundle_version_bump_is_a_typed_version_error() {
     let bundle = fixture_bundle(&head_fitted_run());
     let text = String::from_utf8(bundle.to_canonical_bytes().expect("canonical bytes"))
         .expect("canonical bytes are UTF-8 JSON");
+    // Both sides read the CONSTANT. A literal `"schema_version":1` on the left
+    // silently stopped matching the moment 04-13 bumped the constant to 2, and a
+    // `replacen` that matches nothing leaves the payload valid — the test would
+    // then have asserted that a CURRENT-version bundle is refused, which is the
+    // opposite of what it claims, and it would have failed for the right-looking
+    // reason. The `assert_ne!` below is what catches that class.
     let bumped = text.replacen(
-        "\"schema_version\":1",
+        &format!("\"schema_version\":{BUNDLE_SCHEMA_VERSION}"),
         &format!("\"schema_version\":{}", BUNDLE_SCHEMA_VERSION + 1),
         1,
     );
@@ -1042,4 +1080,410 @@ fn bundle_ragged_hex_payload_is_refused() {
         }
         other => panic!("a partial f32 must be refused, got {other:?}"),
     }
+}
+
+// ===========================================================================================
+// Field 20: provenance (plan 04-13, APR-01 + APR-05)
+// ===========================================================================================
+
+/// Every provenance value is READ OFF the selection, never restated from config.
+///
+/// The distinction is the whole point of the field. `selection_root_seed` and
+/// `shots_per_class` both also exist in the run's CONFIGURATION, so a record built
+/// from `config` would look identical on the fixture and would be a description of
+/// what was ASKED FOR rather than of what was DRAWN. The two hashes and the two
+/// fingerprints have no configuration counterpart at all: they exist only on the
+/// selection object, which is why they are the ones that make this a measurement.
+#[test]
+fn bundle_provenance_is_read_off_the_runs_own_selection() {
+    let run = head_fitted_run();
+    let bundle = fixture_bundle(&run);
+    let selection = run.selection();
+    let provenance = bundle.provenance();
+
+    assert_eq!(provenance.dataset_fingerprint(), selection.dataset_fingerprint_hex());
+    assert_eq!(provenance.validation_split_fingerprint(), selection.validation_fingerprint_hex(),);
+    assert_eq!(provenance.selection_semantic_hash(), hex::encode(selection.semantic_hash()));
+    assert_eq!(provenance.selection_ledger_hash(), hex::encode(selection.ledger_hash()));
+    assert_eq!(provenance.selection_root_seed(), selection.root_seed());
+    assert_eq!(provenance.shots_per_class(), selection.shots_per_class());
+
+    // Not a vacuous comparison of two empty strings: a 32-byte hash is 64 hex
+    // characters, and every character is lowercase hex.
+    for (what, hash) in [
+        ("selection_semantic_hash", provenance.selection_semantic_hash()),
+        ("selection_ledger_hash", provenance.selection_ledger_hash()),
+    ] {
+        assert_eq!(hash.len(), 64, "{what} must be 32 bytes of lowercase hex");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "{what} must be LOWERCASE hex, got `{hash}`",
+        );
+    }
+    assert!(
+        !provenance.dataset_fingerprint().is_empty(),
+        "APR-05 is the obligation that inspection recovers a data fingerprint; an empty one \
+         recovers nothing",
+    );
+    assert_ne!(
+        provenance.dataset_fingerprint(),
+        provenance.validation_split_fingerprint(),
+        "the whole dataset and the validation split alone must not fingerprint identically, or \
+         one of the two is being read off the wrong thing",
+    );
+}
+
+/// The same selection reproduces the record; a different one moves the hash.
+///
+/// Two assertions that fail for opposite reasons, deliberately paired. A record
+/// hardcoded to constants passes the first and fails the second; a record built
+/// from something nondeterministic (a timestamp, an address, an iteration order)
+/// fails the first. Only a deterministic function OF THE SELECTION passes both.
+#[test]
+fn bundle_provenance_is_deterministic_and_moves_with_the_selection() {
+    let run = head_fitted_run();
+    let mine = fixture_bundle(&run);
+
+    // Same arguments, drawn again through the shipped selector: identical record.
+    let redrawn = selection_at(run.selection().root_seed(), run.selection().shots_per_class());
+    let same = bundle_of(&run, &redrawn);
+    assert_eq!(
+        same.provenance(),
+        mine.provenance(),
+        "the same dataset and the same selection arguments must reproduce the record exactly",
+    );
+
+    // A DIFFERENT selection over the same corpus: the semantic hash must move.
+    let other_seed = run.selection().root_seed().wrapping_add(1);
+    let other = bundle_of(&run, &selection_at(other_seed, run.selection().shots_per_class()));
+    assert_ne!(
+        other.provenance().selection_semantic_hash(),
+        mine.provenance().selection_semantic_hash(),
+        "a different draw selected different rows; a semantic hash that did not move is not \
+         identifying the selection",
+    );
+    assert_eq!(
+        other.provenance().dataset_fingerprint(),
+        mine.provenance().dataset_fingerprint(),
+        "the CORPUS did not change, so its fingerprint must not; only the draw did",
+    );
+    assert_eq!(other.provenance().selection_root_seed(), other_seed);
+}
+
+/// The round trip stays byte-closed with field 20 present.
+///
+/// `bundle_round_trip_is_byte_stable_and_closed` above already asserts closure for
+/// the bundle as a whole; this asserts it for the NEW field specifically, and
+/// checks the field actually survives the wire rather than being reconstructed by
+/// a default. Closure is the property `setfit-apr-v1`'s codec equation rests on
+/// (`serialize(deserialize(bytes)) == bytes`), and adding a field is exactly the
+/// change that breaks it.
+#[test]
+fn bundle_provenance_survives_the_round_trip_byte_closed() {
+    let run = head_fitted_run();
+    let bundle = fixture_bundle(&run);
+
+    let first = bundle.to_canonical_bytes().expect("first serialize");
+    let parsed = SetFitBundle::from_canonical_bytes(&first).expect("parse");
+    let reserialized = parsed.to_canonical_bytes().expect("re-serialize");
+    assert_bytes_eq(&first, &reserialized, "closure must hold with field 20 present");
+    assert_eq!(parsed.provenance(), bundle.provenance());
+
+    // The field is IN the bytes, not merely in the parsed value.
+    let text = String::from_utf8(first).expect("canonical bytes are UTF-8 JSON");
+    assert!(text.contains("\"provenance\":"), "provenance must be on the wire");
+    assert!(
+        text.contains(bundle.provenance().selection_semantic_hash()),
+        "the selection hash must appear verbatim in the payload",
+    );
+}
+
+/// A payload declaring the PREVIOUS schema version is refused, naming both.
+///
+/// The companion to `bundle_version_bump_is_a_typed_version_error`, which covers
+/// the forward direction. This is the backward one: v1 is a real version that real
+/// bytes on a real disk declare, and it must be a typed refusal rather than a
+/// partial interpretation of a nineteen-field payload as a twenty-field one.
+#[test]
+fn bundle_the_previous_schema_version_is_a_typed_version_error() {
+    assert!(
+        BUNDLE_SCHEMA_VERSION > 1,
+        "this test is about a version that PRECEDES the current one; at version 1 there is none \
+         and the test would be vacuous",
+    );
+    let previous = BUNDLE_SCHEMA_VERSION - 1;
+
+    let bundle = fixture_bundle(&head_fitted_run());
+    let text = String::from_utf8(bundle.to_canonical_bytes().expect("canonical bytes"))
+        .expect("canonical bytes are UTF-8 JSON");
+    let downgraded = text.replacen(
+        &format!("\"schema_version\":{BUNDLE_SCHEMA_VERSION}"),
+        &format!("\"schema_version\":{previous}"),
+        1,
+    );
+    assert_ne!(downgraded, text, "the replacement must have applied");
+
+    match SetFitBundle::from_canonical_bytes(downgraded.as_bytes()) {
+        Err(BundleError::UnsupportedSchemaVersion { got, supported }) => {
+            assert_eq!(got, previous, "the refusal must name the version the payload declared");
+            assert_eq!(supported, BUNDLE_SCHEMA_VERSION, "and the one this build supports");
+        }
+        other => panic!("a superseded schema must be refused, got {other:?}"),
+    }
+}
+
+/// A payload with NO provenance key at all is refused at the parse.
+///
+/// This is what a genuine v1 artifact looks like, and it is a different failure
+/// from the version check above: `provenance` is not an `Option`, so serde never
+/// reaches the version comparison. Asserted because "refused" and "refused with
+/// the error I expected" are different claims, and because a future
+/// `#[serde(default)]` on the field would turn this into a SILENT acceptance that
+/// fabricates an empty fingerprint — the precise failure APR-05 exists to prevent.
+#[test]
+fn bundle_a_payload_without_provenance_is_refused_naming_the_field() {
+    let bundle = fixture_bundle(&head_fitted_run());
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bundle.to_canonical_bytes().expect("canonical bytes"))
+            .expect("canonical bytes parse as JSON");
+    let removed =
+        value.as_object_mut().expect("the bundle serializes as a JSON object").remove("provenance");
+    assert!(removed.is_some(), "the key must have been there to remove");
+
+    let without = serde_json::to_vec(&value).expect("the trimmed document re-serializes");
+    match SetFitBundle::from_canonical_bytes(&without) {
+        Err(BundleError::Serialization { context, detail }) => {
+            assert_eq!(context, "parse");
+            assert!(
+                detail.contains("provenance"),
+                "the parse failure must name the missing field, got `{detail}`",
+            );
+        }
+        other => panic!("a payload with no provenance must be refused, got {other:?}"),
+    }
+}
+
+/// `ProvenanceRecord` declares no `Option` field, asserted against the SOURCE.
+///
+/// A behavioural test cannot see this: an `Option` field left `None` on the
+/// fixture would serialize as a `null` the completeness gate below catches, but an
+/// `Option` field that happens to be `Some` on every fixture would pass every
+/// runtime assertion here and still put an un-allowlisted nullable path into
+/// production. The declaration is the thing under test, so the declaration is what
+/// is read.
+#[test]
+fn bundle_provenance_record_declares_no_option_field() {
+    let src = include_str!("bundle.rs");
+    let marker = "pub struct ProvenanceRecord {";
+    let start = src.find(marker).expect("the record must be declared") + marker.len();
+    let len = src[start..].find("\n}").expect("the declaration must close");
+    let block = &src[start..start + len];
+
+    assert!(
+        block.contains("dataset_fingerprint: String,"),
+        "the scan must be looking at the right block, got:\n{block}",
+    );
+    assert_eq!(
+        block.matches("Option<").count(),
+        0,
+        "ProvenanceRecord must have NO `Option` field: it contributes zero paths to \
+         setfit-apr-v1's nullable-path allowlist while still being walked by the writer's null \
+         scan, so an Option here makes every honest artifact a NonFiniteValue refusal. The \
+         block was:\n{block}",
+    );
+    assert!(
+        !block.contains("skip_serializing_if"),
+        "skip_serializing_if is forbidden on all five sub-document types: it changes \
+         to_canonical_bytes output, breaks phase 3's closure tests, and silently empties the \
+         allowlist with nothing turning red",
+    );
+}
+
+// ===========================================================================================
+// The nullable-path allowlist completeness gate (04-01 item 3, obligation (b))
+// ===========================================================================================
+
+/// EVERY dotted path at which the tree holds a `Value::Null`, in document order.
+///
+/// The shape is `evidence.rs`'s `first_null_path` (lines 199-224) widened from
+/// first-only to all. First-only is the right primitive for a REFUSAL — it reports
+/// the offending path and stops. It is the wrong one for a completeness gate,
+/// which has to compare a SET against the allowlist: a first-only walk would
+/// report `architecture.vocab_remap` and never mention the new field added beside
+/// it.
+fn null_paths(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::Null => vec![String::new()],
+        serde_json::Value::Object(map) => map
+            .iter()
+            .flat_map(|(key, child)| {
+                null_paths(child).into_iter().map(move |rest| join_null_path(key, &rest))
+            })
+            .collect(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .flat_map(|(index, child)| {
+                null_paths(child)
+                    .into_iter()
+                    .map(move |rest| join_null_path(&index.to_string(), &rest))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Join one path segment onto a (possibly empty) remainder.
+fn join_null_path(head: &str, rest: &str) -> String {
+    if rest.is_empty() {
+        head.to_string()
+    } else {
+        format!("{head}.{rest}")
+    }
+}
+
+/// The null paths one sub-document contributes, prefixed by its doc field name.
+///
+/// Asserts the value is a JSON OBJECT before walking it. Without that, a
+/// sub-document that serialized to `null` outright would contribute the single
+/// path `<name>` and a sub-document that serialized to a scalar would contribute
+/// NOTHING — and "contributed nothing" is exactly what this gate reads as "has no
+/// nullable fields". A gate whose pass condition is reachable by not looking is
+/// the CR-02 vacuity class.
+fn subdocument_null_paths<T: serde::Serialize>(name: &str, value: &T) -> Vec<String> {
+    let json = serde_json::to_value(value).expect("a sub-document must serialize to a Value");
+    let object = json
+        .as_object()
+        .unwrap_or_else(|| panic!("`{name}` must serialize to a JSON object, got {json}"));
+    assert!(!object.is_empty(), "`{name}` serialized to an EMPTY object; nothing was walked");
+    null_paths(&json).into_iter().map(|path| join_null_path(name, &path)).collect()
+}
+
+/// The allowlist in `setfit-apr-v1` is COMPLETE against the five shipped types.
+///
+/// # What this gate is for
+///
+/// 04-02's writer refuses an artifact carrying a `null` at any path outside a
+/// four-entry allowlist. That guard is an ALLOWLISTED null scan rather than a
+/// blanket one because a blanket scan is exact only over types with no `Option`
+/// field — the precondition `evidence.rs:455-478` records for the shipped
+/// `first_null_path` guard, and which THREE of these five types do not meet.
+///
+/// An allowlist that drifts behind the types refuses the first PRODUCTION
+/// artifact, and no fixture-shaped test catches that: the slice fixture sets
+/// `vocab_remap: Some(..)` (`import.rs:620`) while the full pin sets `None`
+/// (`import.rs:501`), so the fixture is the one input shape at which the guard
+/// cannot fire. This gate makes the allowlist mechanically derived from the types
+/// instead of hand-listed beside them.
+///
+/// # It lives here because it can only live here
+///
+/// `aprender-train` is the only crate that can name all five types. `aprender-core`
+/// owns the writer and the doc, and train depends on core rather than the reverse,
+/// so four of the five arrive there already reduced to an opaque
+/// `serde_json::Value`.
+///
+/// # If this fails
+///
+/// The fix is a new entry in `contracts/setfit-apr-v1.yaml`'s allowlist AND in
+/// `NULLABLE_PATH_ALLOWLIST` (`crates/aprender-core/src/setfit/artifact.rs`),
+/// together, with the written analysis the contract requires. It is NEVER
+/// `skip_serializing_if` — that would change `to_canonical_bytes`'s output and
+/// break the closure tests in this very file, while silently emptying the
+/// allowlist with nothing turning red.
+#[test]
+fn bundle_nullable_path_allowlist_is_complete_over_the_five_subdocuments() {
+    /// The allowlist, verbatim from `contracts/setfit-apr-v1.yaml`, sorted.
+    const ALLOWLIST: [&str; 4] = [
+        "architecture.vocab_remap",
+        "evidence.epsilon_used",
+        "requested_config.pair_config.budget",
+        "requested_config.pair_config.hard_cap",
+    ];
+
+    let run = head_fitted_run();
+    let bundle = fixture_bundle(&run);
+
+    // (1) architecture — the fixture is a SLICE, so `vocab_remap` is `Some`. The
+    //     production shape is the full pin's `None`, which is the one this gate
+    //     must see. Overriding it is not weakening the fixture; it is aiming the
+    //     gate at the shape the fixture structurally cannot produce.
+    let mut architecture = bundle.architecture().clone();
+    assert!(
+        architecture.vocab_remap.is_some(),
+        "the slice fixture is expected to carry a remap; if it does not, this override is no \
+         longer doing the work its comment claims",
+    );
+    architecture.vocab_remap = None;
+
+    // (2) requested_config — through the PUBLIC constructor path, never the
+    //     private wire type. `reference_defaults` builds `PairConfig::new`, whose
+    //     `budget` and `hard_cap` are both `None`. The fixture run's own config
+    //     sets `budget: Some(..)` (test_fixtures.rs:293), so reusing it here would
+    //     hide one of the two paths and the gate would pass while under-counting.
+    let requested_config = SetFitTrainConfig::reference_defaults(fx::FIXTURE_SEED);
+    assert!(
+        requested_config.pair_config().budget.is_none()
+            && requested_config.pair_config().hard_cap.is_none(),
+        "this instance must be the all-`None` one, or the two pair_config paths never appear",
+    );
+
+    // (3) resolved_config — one `String`; nothing to set to `None`.
+    let resolved_config = bundle.resolved_config.clone();
+
+    // (4) evidence — `epsilon_used` is `None` while unjudged, which is the shipped
+    //     state (evidence.rs:655). Set explicitly so the gate does not depend on
+    //     that remaining true by accident.
+    let mut evidence = bundle.evidence().clone();
+    evidence.epsilon_used = None;
+
+    // (5) provenance — no `Option` field to set. That is the claim under test.
+    let provenance = bundle.provenance().clone();
+
+    let architecture_paths = subdocument_null_paths("architecture", &architecture);
+    let requested_paths = subdocument_null_paths("requested_config", &requested_config);
+    let resolved_paths = subdocument_null_paths("resolved_config", &resolved_config);
+    let evidence_paths = subdocument_null_paths("evidence", &evidence);
+    let provenance_paths = subdocument_null_paths("provenance", &provenance);
+
+    // The two zero-contribution subtrees, asserted BY NAME. Folding them into the
+    // set comparison below would report a new `Option` on either as an opaque set
+    // mismatch; named, it reports which type grew one.
+    assert_eq!(
+        resolved_paths,
+        Vec::<String>::new(),
+        "`resolved_config` (ResolvedConfigRecord) must contribute NO nullable path. It is walked \
+         by the writer precisely because it contributes none today — an unwalked subtree cannot \
+         reject anything, so a new `Option` here would fail on the first production artifact \
+         instead of here.",
+    );
+    assert_eq!(
+        provenance_paths,
+        Vec::<String>::new(),
+        "`provenance` (ProvenanceRecord) must contribute NO nullable path. Field 20 is `four \
+         String + u64 + u32` by construction and the type doc forbids an `Option`; if this fires, \
+         one was added and the contract's allowlist is now incomplete.",
+    );
+
+    let mut observed: Vec<String> = architecture_paths
+        .into_iter()
+        .chain(requested_paths)
+        .chain(resolved_paths)
+        .chain(evidence_paths)
+        .chain(provenance_paths)
+        .collect();
+    observed.sort();
+
+    let expected: Vec<String> = ALLOWLIST.iter().map(|p| (*p).to_string()).collect();
+    let unexpected: Vec<&String> = observed.iter().filter(|p| !expected.contains(p)).collect();
+    let missing: Vec<&String> = expected.iter().filter(|p| !observed.contains(p)).collect();
+    assert!(
+        unexpected.is_empty() && missing.is_empty(),
+        "the nullable-path allowlist in contracts/setfit-apr-v1.yaml is no longer complete \
+         against the shipped types.\n  NOT ALLOWLISTED (a new `Option` field): {unexpected:?}\n  \
+         ALLOWLISTED BUT NOT OBSERVED (a removed field, or a fixture that no longer sets it to \
+         `None`): {missing:?}\n  observed: {observed:?}\n  allowlist: {expected:?}",
+    );
+    assert_eq!(observed, expected, "the sets agree but the walk must also be exhaustive");
+    assert_eq!(observed.len(), 4, "the contract commits to FOUR paths over FIVE walked types");
 }
