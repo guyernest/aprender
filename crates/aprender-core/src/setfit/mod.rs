@@ -39,6 +39,7 @@
 //! assertions do not scan.
 
 pub mod artifact;
+pub mod classify;
 pub mod dropout_rng;
 pub mod encoder;
 pub mod error;
@@ -54,8 +55,14 @@ pub use artifact::{
     NULLABLE_PATH_ALLOWLIST, PROBE_EMBEDDING_ABS_TOLERANCE, PROBE_LOGITS_ABS_TOLERANCE,
     PROBE_PROBABILITIES_ABS_TOLERANCE, WALKED_SUBDOCUMENTS,
 };
+pub use classify::{
+    ClassifyError, ClassifyRequestDocument, ClassifyResponse, ClassifyResult,
+    CLASSIFY_SCHEMA_VERSION, MAX_BATCH_TEXTS, PROBABILITY_MASS_ABS_TOLERANCE,
+};
 pub use dropout_rng::{DropoutRngError, SiteDropout};
-pub use encoder::{BertSentenceEncoder, L2_EPS, NORMALIZATION_POLICY, POOLING_POLICY};
+pub use encoder::{
+    BertSentenceEncoder, ExecutionBackend, L2_EPS, NORMALIZATION_POLICY, POOLING_POLICY,
+};
 pub use error::SetFitError;
 pub use import::{
     MiniLmImport, ModelDims, SliceConfig, VocabRemap, PINNED_ACTIVATION, PINNED_MAX_SEQ_LENGTH,
@@ -488,6 +495,55 @@ impl SetFitMiniLm {
     pub fn encode_texts(&self, texts: &[&str]) -> Result<Tensor, SetFitError> {
         let batch = self.tokenizer.encode_batch(texts)?;
         self.encoder.encode(&batch)
+    }
+
+    /// [`Self::encode_texts`], plus the identity of the path that ran it (D-12).
+    ///
+    /// [`Self::encode_texts`] is left EXACTLY as it was: the training path and
+    /// every Phase 1 conformance fixture call it, and their bytes must not move
+    /// because a reporting channel was added beside them.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::encode_texts`]'s.
+    pub fn encode_texts_traced(
+        &self,
+        texts: &[&str],
+    ) -> Result<(Tensor, ExecutionBackend), SetFitError> {
+        let batch = self.tokenize_batch(texts)?;
+        self.encode_batch_traced(&batch)
+    }
+
+    /// Tokenize with THIS model's tokenizer — the in-crate half of
+    /// [`Self::encode_texts_traced`].
+    ///
+    /// `pub(crate)`: [`Self::tokenize`] is gated on `conformance-fixtures` and
+    /// therefore absent from production builds, but
+    /// [`crate::setfit::artifact::VerifiedSetFitModel::classify`] needs the
+    /// batch's ordered truncation and attention-mask facts in every build. It
+    /// stays crate-private so the D-08 seal is untouched.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::tokenize`].
+    pub(crate) fn tokenize_batch(&self, texts: &[&str]) -> Result<SentenceBatch, SetFitError> {
+        self.tokenizer.encode_batch(texts)
+    }
+
+    /// Encode an already-tokenized batch, returning the executing backend.
+    ///
+    /// Split from [`Self::encode_texts_traced`] so `classify` tokenizes ONCE and
+    /// reads its token facts off the very batch that was encoded — rather than
+    /// tokenizing a second time and reporting facts about a different call.
+    ///
+    /// # Errors
+    ///
+    /// As [`BertSentenceEncoder::encode`].
+    pub(crate) fn encode_batch_traced(
+        &self,
+        batch: &SentenceBatch,
+    ) -> Result<(Tensor, ExecutionBackend), SetFitError> {
+        self.encoder.encode_with_backend(batch)
     }
 
     /// ENC-05 mode propagation, forwarded to the encoder.

@@ -1733,6 +1733,27 @@ impl VerifiedSetFitModel {
         &self.doc
     }
 
+    /// The rebuilt encoder + tokenizer pair.
+    ///
+    /// `pub(crate)`, for `setfit::classify` (plan 04-04). It is a READ borrow:
+    /// it constructs nothing and mutates nothing, so the D-08 seal and this
+    /// typestate's private constructor are both untouched. It exists because
+    /// [`Self::embed`] deliberately calls the UNTRACED
+    /// `SetFitMiniLm::encode_texts`, and `classify` must instead reach
+    /// `encode_batch_traced` so the backend it reports is the one the encode
+    /// that produced ITS embeddings returned (D-12).
+    #[must_use]
+    pub(crate) fn model(&self) -> &SetFitMiniLm {
+        &self.model
+    }
+
+    /// The rebuilt classifier head. `pub(crate)`, on the same terms as
+    /// [`Self::model`].
+    #[must_use]
+    pub(crate) fn head(&self) -> &MultinomialLogisticRegression {
+        &self.head
+    }
+
     /// The encoder's L2-normalized sentence embeddings — OPS-01's "embed" step.
     ///
     /// This is the SAME encode path rung 7's probe replay verified, so a caller
@@ -2858,7 +2879,7 @@ fn hex_nibble_value(byte: u8) -> Option<u8> {
 // ===========================================================================
 
 #[cfg(all(test, feature = "setfit"))]
-mod fixture {
+pub(crate) mod fixture {
     //! The tiny fixture, in the PRODUCTION nullability shape.
     //!
     //! Two rules govern everything here, and both come from the contract rather
@@ -3240,7 +3261,12 @@ mod fixture {
     /// Every suite that touches the writer must exercise this shape by default,
     /// and every downstream plan that "builds the fixture artifact the same way"
     /// inherits it from here.
-    pub(super) fn fixture_view_full_pin_shape() -> SetFitArtifactView {
+    /// `pub(crate)`, not `pub(super)`: `setfit::classify`'s suites (plan 04-04)
+    /// build their model from THIS fixture. A second fixture assembled next door
+    /// would be a second definition of "the artifact shape under test", free to
+    /// drift from this one — the classify suites would then earn their green on
+    /// a shape the writer never produces.
+    pub(crate) fn fixture_view_full_pin_shape() -> SetFitArtifactView {
         fixture_view(None)
     }
 
