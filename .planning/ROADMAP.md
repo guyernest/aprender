@@ -216,7 +216,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5; two parallel plans, zero file overlap)*
 
-- [ ] 04-07-PLAN.md — Generic `apr predict` (JSON request document) + inspect APR-05 recovery + eval validation-lock artifact and gated canonical test access (TRN-07 positive, D-16) (wave 6)
+- [x] 04-07-PLAN.md — Generic `apr predict` (JSON request document) + inspect APR-05 recovery + eval validation-lock artifact and gated canonical test access (TRN-07 positive, D-16) (wave 6)
 - [x] 04-08-PLAN.md — Serve surface: setfit feature, AppState slot, always-installed /v1/classify with 503 handler, readiness hash, bounded startup read, oneshot tests (wave 6)
 
 **Wave 7** *(blocked on Wave 6; two parallel plans, zero file overlap)*
@@ -265,5 +265,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
-| 4. APR Artifact and Production Parity | 12/17 | In Progress|  |
+| 4. APR Artifact and Production Parity | 13/17 | In Progress|  |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
