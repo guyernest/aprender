@@ -327,6 +327,14 @@ tier3:
 # captured directly, and its failure mode induced, observed and reverted rather
 # than assumed. See the target's own comment block.
 	@$(MAKE) contract-audit-phase3
+# Phase 4's equivalent, wired here for the same reason the two lines above exist: a
+# target outside the tiers is a target that stops being run. Scoped to
+# $(PHASE4_CONTRACTS). Unlike its predecessors this one tolerates `status: pending`
+# (BIND-004) and still refuses a missing entry (BIND-001), because 04-01 commits the
+# Phase 4 schema BEFORE the code that implements it. Its RED and GREEN states were
+# both measured with the status captured directly, never through a pipe. See the
+# target's own comment block.
+	@$(MAKE) contract-audit-phase4
 # TRN-06's AUTHORITATIVE reproducibility claim (D-16) and D-13's GEMM control, wired
 # here for the reason the three lines above exist: a target outside the tiers is a
 # target that stops being run. Both were run STANDALONE first with the status captured
@@ -1181,7 +1189,8 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/contrastive-pair-protocol-v1.yaml \
              contracts/multinomial-head-v1.yaml \
              contracts/setfit-train-lifecycle-v1.yaml \
-             contracts/linear-probe-classifier-v1.yaml
+             contracts/linear-probe-classifier-v1.yaml \
+             contracts/setfit-apr-v1.yaml
 
 # The two Phase 2 contracts, audited as a BLOCKING tier3 gate by
 # `contract-audit-phase2` below. Deliberately a separate, narrower list than
@@ -1212,6 +1221,16 @@ PHASE2_CONTRACTS := contracts/contrastive-pair-protocol-v1.yaml \
 PHASE3_CONTRACTS := contracts/multinomial-head-v1.yaml \
                     contracts/setfit-train-lifecycle-v1.yaml \
                     contracts/linear-probe-classifier-v1.yaml
+
+# The Phase 4 contract, audited as a BLOCKING tier3 gate by
+# `contract-audit-phase4` below. Same narrowing rationale as PHASE2_CONTRACTS and
+# PHASE3_CONTRACTS: scoped to what this phase OWNS, because the repo-wide
+# `contract-audit` is vacuous (see that target's comment block).
+#
+# ONE ENTRY, AND THAT IS THE WHOLE PHASE. Ph1 D-23 is one new contract per phase
+# referencing the existing ones rather than editing them, and `git diff --stat`
+# on plan 04-01's contract commit showed NO other contract file modified.
+PHASE4_CONTRACTS := contracts/setfit-apr-v1.yaml
 
 # NOTE (plan 02-01, D-24): $(CONTRACTS) is an EXPLICIT HARDCODED LIST, not a glob
 # over contracts/*.yaml. A contract file that merely EXISTS in contracts/ is
@@ -1359,6 +1378,68 @@ contract-audit-phase3: ## Audit Phase 3 binding coverage (BLOCKING, wired into t
 		exit 1; \
 	fi; \
 	echo "Phase 3 binding audit: every equation is bound"
+
+# Phase 4's twin of contract-audit-phase2/phase3, for the same reason both exist:
+# `contract-validate` checks contract SHAPE and says nothing about whether an
+# equation is bound to any implementation, so setfit-apr-v1.yaml could be "valid"
+# with all fifteen equations bound to nothing at all. BLOCKING, wired into tier3
+# immediately after the Phase 3 audit.
+#
+# THE `set +e` AND THE `status=$$?` ON ITS OWN LINE ARE BOTH LOAD-BEARING, and both
+# are copied from contract-audit-phase3 rather than from contract-audit-phase2. This
+# Makefile sets `.SHELLFLAGS := -e -c` (line 40), so a failing `$(PV_BIN) audit`
+# inside the loop body would ABORT the whole recipe before `status=$$?` could run:
+# `unbound` would never accumulate and the summarising FAIL line would be
+# unreachable. And the status is read from `$$?` directly, NEVER through a pipe —
+# CLAUDE.md Verification rule 1, the defect that made the repo-wide
+# `contract-audit` print 132 BIND-001 errors and exit 0 anyway.
+#
+# WHY `pending` MUST PASS HERE AND `BIND-001` MUST NOT. Plan 04-01 commits the
+# Phase 4 schema BEFORE the writer, loader and codec exist — that ordering is the
+# point of the phase (Ph1 D-14; the cross-AI review found three plans describing
+# the artifact differently because no plan wrote it down). So all fifteen equations
+# are registered `status: pending` in $(BINDING), which `pv audit` reports as
+# BIND-004, a WARNING (audit/mod.rs:182-194). A MISSING entry stays BIND-001, an
+# ERROR. The gate therefore tolerates "not written yet" and refuses "not tracked at
+# all", and it tightens by itself as each later plan flips its binding to
+# `implemented`.
+#
+# EVIDENCE DISCIPLINE, matching the two blocks above. Both states were MEASURED with
+# the status captured directly, never through a pipe:
+#   - BEFORE the bindings were added: `pv audit contracts/setfit-apr-v1.yaml
+#     --binding $(BINDING) > /tmp/pv-audit-04-01-pre.log 2>&1; rc=$$?` -> rc=1, with
+#     fifteen "[ERROR] BIND-001 ... has no binding entry" lines, one per equation.
+#   - AFTER: rc=0, "Total equations: 15 / Bound equations: 15", fifteen
+#     "[WARN] BIND-004 ... is pending implementation" lines.
+# That pair IS this gate's induced failure mode: it was observed RED and then GREEN
+# on a real difference, not merely observed passing. A gate that has only ever been
+# seen passing is not evidence.
+contract-audit-phase4: ## Audit Phase 4 binding coverage (BLOCKING, wired into tier3)
+	@echo "Auditing binding coverage for the Phase 4 contracts..."
+	@unbound=""; \
+	audited=0; \
+	for contract in $(PHASE4_CONTRACTS); do \
+		echo "  $$contract"; \
+		audited=$$((audited + 1)); \
+		set +e; \
+		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+		status=$$?; \
+		set -e; \
+		if [ "$$status" -ne 0 ]; then \
+			unbound="$$unbound $$contract"; \
+		fi; \
+	done; \
+	if [ "$$audited" -eq 0 ]; then \
+		echo "FAIL: PHASE4_CONTRACTS is empty — this gate audited nothing and would have reported success."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$unbound" ]; then \
+		echo "FAIL: unbound equations remain in:$$unbound"; \
+		echo "Every equation of a Phase 4 contract needs an entry in $(BINDING)."; \
+		echo "An equation still being written belongs there as 'status: pending', not absent."; \
+		exit 1; \
+	fi; \
+	echo "Phase 4 binding audit: $$audited contract(s) audited, every equation is bound"
 
 # ============================================================================
 # PHASE 3 REPRODUCIBILITY GATES (TRN-06 / D-16 / D-13)
