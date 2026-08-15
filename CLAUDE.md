@@ -167,6 +167,16 @@ TraceSteps: `Tokenize`, `Embed`, `LayerNorm`, `Attention`, `FFN`, `TransformerBl
 | Model Serving / HTTP / KV Cache | **FORBIDDEN** | Primary | Compute/Storage |
 | GGUF/SafeTensors Loading | Never | Primary | - |
 | CUDA/GPU Inference | Never | Primary | Kernels |
+| SetFit Classification Inference | **Primary** (aprender-core: loader + `VerifiedSetFitModel::classify`) | HTTP transport ONLY (route/`AppState`/readiness — calls core) | Compute |
+
+**The SetFit row is a deliberate, documented EXCEPTION (Phase 4 D-09), not drift.**
+Realizar-first exists because core's LLM inference was ~750x slower than realizar's
+kernels — a performance argument. It does not apply here: SetFit is a 22M-param encoder
+whose ONLY conformance-proven implementation is core's fixture-verified graph path, so the
+evidence lives in core. `aprender-serve` owns the route, `AppState` and readiness and calls
+core's verified model; it does not reimplement the tokenizer, pooling or head. Serving a
+second, unproven port would violate OPS-03 (one implementation per operation) and re-open
+every Phase 1 conformance fixture. Schema and load rules: `contracts/setfit-apr-v1.yaml`.
 
 ```rust
 // WRONG - bypasses realizar, 0.3 tok/s
