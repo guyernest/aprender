@@ -1061,6 +1061,190 @@ mod tests {
     }
 
     // --------------------------------------------------------------------------------
+    // End to end over REAL Phase 2 artifacts (OPS-02's train leg, tier3 weight)
+    //
+    // These are `#[ignore]`d because they build a whole benchmark directory and a whole
+    // selection before they start. 04-10 runs them as their OWN invocation —
+    //
+    //     cargo test -p apr-cli --features setfit --lib setfit_train -- --ignored
+    //
+    // — because libtest takes ONE positional filter, so this cannot be combined with
+    // another filter in a single command.
+    //
+    // # What they can and cannot assert today
+    //
+    // They drive `run` through every stage the shipped libraries can serve and stop at
+    // the first one they cannot. Two independent, MEASURED, phase-level blockers stand
+    // between this command and a written artifact, and neither is this plan's to fix:
+    //
+    // 1. **No encoder can both pass the calibration gate AND carry an artifact**
+    //    (orchestrator note F-10, measured by 04-05). `tune_encoder` judges
+    //    `encoder.architecture_fingerprint()` against a calibrated set whose only entry
+    //    is the phase-3 slice, and the slice cannot compute two of the artifact's
+    //    contract-resident probes (a 97-row vocab closure; 64 position rows against a
+    //    256-token probe). The production pin is the other side of the same coin: it
+    //    computes every probe and returns `UncalibratedRegime`, which 04-CONTEXT records
+    //    as a deliberate Phase 5 item — "Phase 4 does not silently widen the regime".
+    // 2. **The verified artifact's bytes are not reachable out-of-crate** — see
+    //    [`ARTIFACT_BYTES_GAP`].
+    //
+    // So these tests assert the stages that DO run, the typed refusal at the first that
+    // does not, and each blocker BY NAME — so that fixing either one turns a test red
+    // and points its author at the next thing to do, rather than leaving a comment
+    // nobody re-reads.
+    // --------------------------------------------------------------------------------
+
+    /// The in-repo conformance slice, which is a real directory and is NOT a pinned
+    /// checkout. Resolved from this crate's manifest rather than from the process's
+    /// working directory, which `cargo test` does not guarantee.
+    fn slice_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../aprender-core/tests/fixtures/setfit")
+    }
+
+    #[test]
+    #[ignore = "integration weight: builds a real benchmark directory and selection. Run as \
+                its own invocation — `cargo test -p apr-cli --features setfit --lib \
+                setfit_train -- --ignored` (04-10's setfit-cli-tests leg)"]
+    fn setfit_train_e2e_clears_every_stage_up_to_the_encoder_over_real_phase_two_artifacts() {
+        let temp = TempDir::new().expect("tempdir");
+        let (data, selection) = phase2_artifacts(temp.path());
+        let config = config_file(temp.path(), "train.toml");
+        let output = temp.path().join("model.apr");
+        let model_dir = slice_fixture_dir();
+        assert!(
+            model_dir.is_dir(),
+            "the conformance slice fixture must exist at {} — if the fixture estate moved, \
+             this test should be updated rather than deleted",
+            model_dir.display()
+        );
+        let before = listing(temp.path());
+
+        let error = run(
+            &config,
+            &data,
+            &selection,
+            &model_dir,
+            &output,
+            Some(29),
+            Some("cpu"),
+            false,
+            false,
+            true,
+        )
+        .expect_err(
+            "a training run cannot complete today — see the two blockers in this section's \
+             header. If this line starts returning Ok, one of them has been fixed and the \
+             assertions below are what should be rewritten",
+        );
+
+        // The refusal is at the ENCODER door, which is the evidence that everything before
+        // it ran: the config parsed and merged, `--device cpu` resolved, `--output` was
+        // clear, the benchmark directory passed the attested boundary, and the selection
+        // manifest replayed strictly against it. Any of those failing would have produced
+        // a DIFFERENT error, which is what makes this a stage assertion and not a smoke
+        // test.
+        let rendered = error.to_string();
+        assert!(
+            matches!(error, CliError::ModelLoadFailed(_)),
+            "the first unservable stage is the encoder load; got: {error}"
+        );
+        assert!(
+            rendered.contains("--model-dir"),
+            "the refusal must name the flag the operator has to change; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("NEVER downloads"),
+            "and it must state the offline prerequisite (A5), because the obvious next \
+             assumption is that the command will fetch the pin itself; got: {rendered}"
+        );
+        // The library refused on `config.json`, which is AFTER the tokenizer load — so the
+        // slice's tokenizer.json satisfied the pinned-digest check and the gap really is
+        // the encoder weights, not a near-miss tokenizer. Pinning the observed file name
+        // is what turns "it failed somewhere in the loader" into a stage measurement.
+        assert!(
+            rendered.contains("config.json"),
+            "the refusal must name the first missing pin file — observed at authoring time: \
+             SetFitError::ImportIo(config.json: No such file or directory); got: {rendered}"
+        );
+        assert_eq!(
+            listing(temp.path()),
+            before,
+            "a run that failed after ingest must leave the working tree exactly as it \
+             found it — no artifact, no temp file"
+        );
+    }
+
+    #[test]
+    #[ignore = "integration weight: same invocation as the e2e above"]
+    fn setfit_train_e2e_records_the_blocker_that_stops_short_of_an_artifact() {
+        // BLOCKER 1, asserted structurally rather than described. The slice fixture is a
+        // real MiniLM slice — the pinned tokenizer plus a carved-down encoder — and the
+        // two files below are what make it a SLICE and not a pin. `from_pretrained_dir`
+        // needs the pin; `from_slice_fixture` reads these, and is `conformance-fixtures`
+        // gated and unavailable to a shipped CLI.
+        let dir = slice_fixture_dir();
+        assert!(
+            dir.join("tokenizer.json").is_file(),
+            "the slice carries the PINNED tokenizer, which is why the failure above is \
+             about the encoder and not about the tokenizer"
+        );
+        assert!(
+            dir.join("slice_config.json").is_file() && dir.join("vocab_remap.json").is_file(),
+            "and these two are what make it a slice: a 97-row vocabulary closure and the \
+             reduced dimensions F-10 names. If they ever disappear the fixture has become \
+             something else and this whole section needs re-measuring"
+        );
+        assert!(
+            !dir.join("model.safetensors").is_file(),
+            "there is deliberately no pinned encoder weight file in the repository — the \
+             90 MB pin is an offline prerequisite, not a committed artifact"
+        );
+
+        // BLOCKER 2, kept honest by naming the constant. `verified_artifact_bytes` is the
+        // ONE site the door lands at; when it does, this assertion is what makes its
+        // author come back and finish the write path and its e2e assertions.
+        assert!(
+            ARTIFACT_BYTES_GAP.contains("into_artifact_bytes"),
+            "the gap must keep naming the exact door that closes it — a blocker recorded \
+             without its remedy is a complaint"
+        );
+        let write_site = needle(&["verified_artifact_", "bytes(&verified)?"]);
+        assert_eq!(
+            SETFIT_TRAIN_SOURCE.matches(&write_site).count(),
+            1,
+            "and there must be exactly one call site for it, so closing the gap is a \
+             one-function change rather than a search"
+        );
+    }
+
+    #[test]
+    fn setfit_train_the_writer_and_the_bounded_reader_compose_and_a_forced_rewrite_is_identical() {
+        // The write half of OPS-02's train leg, exercised on the only bytes available
+        // today. It is NOT the artifact-level determinism witness the plan asked for —
+        // that needs a real artifact, which blocker 2 above withholds — but it does prove
+        // the two halves of this CLI's artifact file I/O compose: what `atomic_write`
+        // lands is byte-for-byte what `setfit_io`'s bounded door reads back, and a
+        // second `--force` run over the same input produces the same file rather than a
+        // file that merely parses the same.
+        let temp = TempDir::new().expect("tempdir");
+        let target = temp.path().join("model.apr");
+        let payload: Vec<u8> = (0..=255_u8).cycle().take(9001).collect();
+
+        atomic_write(&target, &payload, false).expect("the first write lands");
+        let first = crate::setfit_io::read_setfit_apr_file_bounded(&target)
+            .expect("the bounded door reads what the writer wrote");
+        assert_eq!(first, payload, "write then read is the identity");
+
+        atomic_write(&target, &payload, true).expect("a --force rewrite lands");
+        let second =
+            crate::setfit_io::read_setfit_apr_file_bounded(&target).expect("and reads back");
+        assert_eq!(
+            first, second,
+            "a second identical run with --force produces a byte-identical file"
+        );
+    }
+
+    // --------------------------------------------------------------------------------
     // Source assertions: the shape the review findings require
     // --------------------------------------------------------------------------------
 
