@@ -493,6 +493,144 @@ pub enum SetFitArtifactError {
         /// The underlying diagnostic, forwarded rather than flattened.
         reason: String,
     },
+
+    // -----------------------------------------------------------------------
+    // The loader's rungs (plan 04-03). One variant per corruption class, so a
+    // refusal names the RUNG and what it observed — "invalid artifact" is not a
+    // diagnosis (contract `load_validation_ladder`).
+    // -----------------------------------------------------------------------
+    /// Rung 1 / the bounded read: an over-cap length.
+    ///
+    /// `what` distinguishes the two checks the contract requires — a
+    /// `declared_length` refusal happened BEFORE a byte was read, a `stream`
+    /// refusal means the declared length lied, and an `input_bytes` refusal is
+    /// the in-memory door's own defense-in-depth check.
+    ArtifactTooLarge {
+        /// `declared_length`, `stream` or `input_bytes`.
+        what: &'static str,
+        /// The length observed at that check.
+        observed: u64,
+        /// The cap it was judged against.
+        cap: u64,
+    },
+
+    /// The bounded read's underlying source failed.
+    ArtifactRead {
+        /// The I/O diagnostic, forwarded rather than flattened.
+        reason: String,
+    },
+
+    /// Rung 2: magic, version, header CRC, row-major flag or footer CRC.
+    ///
+    /// CRC32 is not cryptographic, so this rung cannot see semantic corruption —
+    /// that is what rung 7's probe replay is for.
+    ContainerIntegrity {
+        /// `magic`, `container_version`, `header_checksum`, `row_major_flag`,
+        /// `footer_length`, `footer_checksum` or `container_parse`.
+        what: &'static str,
+        /// What was observed, in full.
+        reason: String,
+    },
+
+    /// Rung 3: the container is not tagged as a SetFit artifact (D-04).
+    ///
+    /// Detection is EXPLICIT-TAG-ONLY: a SetFit-shaped tensor set without the
+    /// typed `model_type` key is a plain APR and is refused here.
+    NotASetFitArtifact {
+        /// The `model_type` the container declares.
+        model_type: String,
+    },
+
+    /// Rung 3: the ONE custom metadata document is absent or unusable.
+    ArtifactDocumentMissing {
+        /// What was expected and what was found.
+        reason: String,
+    },
+
+    /// Rung 3: the document declares a schema identifier this build does not own.
+    UnsupportedSchema {
+        /// The identifier found.
+        got: String,
+        /// The identifier this build reads and writes.
+        supported: &'static str,
+    },
+
+    /// Rung 3: the document declares a schema version this build does not implement.
+    ///
+    /// Checked BEFORE any other field is read, so a future schema is refused
+    /// rather than partially interpreted by this build.
+    UnsupportedSchemaVersion {
+        /// The version found.
+        got: u64,
+        /// The version this build implements.
+        supported: u32,
+    },
+
+    /// Rung 3: the document did not parse under `deny_unknown_fields`.
+    ArtifactDocumentParse {
+        /// serde's diagnostic, including the position when it has one.
+        detail: String,
+    },
+
+    /// Rung 4: ONE index entry contradicts its own declared shape, dtype or size.
+    ///
+    /// Distinct from [`Self::InconsistentTensorSet`], which is a SET-level
+    /// disagreement: "this tensor lies about itself" and "the collection is the
+    /// wrong collection" are two different operator errors.
+    InconsistentTensor {
+        /// The tensor that contradicts itself.
+        tensor: String,
+        /// What disagreed with what.
+        reason: String,
+    },
+
+    /// Rung 4: the document's carried `hf_name_map` is not usable as an inversion.
+    InconsistentNameMap {
+        /// What was wrong: not injective, not total, or naming an absent tensor.
+        reason: String,
+    },
+
+    /// Rung 6: the encoder, tokenizer or head could not be rebuilt.
+    ArtifactRebuildFailed {
+        /// `encoder` or `head`.
+        what: &'static str,
+        /// The underlying diagnostic, forwarded rather than flattened.
+        reason: String,
+    },
+
+    /// Rung 7: a probe did not replay within tolerance.
+    ///
+    /// This is the rung a checksum cannot reach: corrupted-but-checksummed
+    /// states, wrong-loader states and platform math divergence all arrive here.
+    ProbeReplayFailed {
+        /// The probe's index in the artifact's probe array.
+        probe: usize,
+        /// The contract's identifier for that probe.
+        probe_id: String,
+        /// `probe_count`, `input`, `embedding_width`, `embedding`, `logit_count`,
+        /// `logit`, `probability_count`, `probability` or `label`.
+        component: &'static str,
+        /// The component's index inside the probe, or 0 where there is none.
+        index: usize,
+        /// The artifact's recorded expectation.
+        expected: String,
+        /// What this process actually produced.
+        observed: String,
+        /// The bound the comparison used, formatted; `exact` where none exists.
+        tolerance: String,
+    },
+
+    /// [`VerifiedSetFitModel::embed`] was handed an empty batch.
+    ///
+    /// A typed refusal rather than an empty result: "embed nothing" is a caller
+    /// mistake, and returning `Ok(vec![])` would let it travel silently.
+    EmptyEmbedBatch,
+
+    /// [`VerifiedSetFitModel::embed`]'s tokenize-or-encode step failed.
+    EncodeFailed {
+        /// The underlying diagnostic, forwarded rather than flattened.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for SetFitArtifactError {
@@ -529,6 +667,77 @@ impl std::fmt::Display for SetFitArtifactError {
                     f,
                     "SetFitArtifactError::ProbeComputation({probe}: {reason})"
                 )
+            }
+            Self::ArtifactTooLarge { what, observed, cap } => write!(
+                f,
+                "SetFitArtifactError::ArtifactTooLarge(check {what} observed {observed} bytes \
+                 against the {cap}-byte cap; the payload is refused before the allocation it \
+                 would have requested)"
+            ),
+            Self::ArtifactRead { reason } => {
+                write!(f, "SetFitArtifactError::ArtifactRead({reason})")
+            }
+            Self::ContainerIntegrity { what, reason } => write!(
+                f,
+                "SetFitArtifactError::ContainerIntegrity(rung 2, {what}: {reason})"
+            ),
+            Self::NotASetFitArtifact { model_type } => write!(
+                f,
+                "SetFitArtifactError::NotASetFitArtifact(rung 3: model_type is {model_type:?}, \
+                 not \"setfit\"; detection is explicit-tag-only, so a SetFit-shaped tensor set \
+                 without the tag is a plain APR)"
+            ),
+            Self::ArtifactDocumentMissing { reason } => write!(
+                f,
+                "SetFitArtifactError::ArtifactDocumentMissing(rung 3: {reason})"
+            ),
+            Self::UnsupportedSchema { got, supported } => write!(
+                f,
+                "SetFitArtifactError::UnsupportedSchema(rung 3: document declares schema {got:?}, \
+                 this build owns {supported:?})"
+            ),
+            Self::UnsupportedSchemaVersion { got, supported } => write!(
+                f,
+                "SetFitArtifactError::UnsupportedSchemaVersion(rung 3: document declares version \
+                 {got}, this build implements {supported}; a document from a different schema is \
+                 refused rather than partially interpreted)"
+            ),
+            Self::ArtifactDocumentParse { detail } => write!(
+                f,
+                "SetFitArtifactError::ArtifactDocumentParse(rung 3, deny_unknown_fields: {detail})"
+            ),
+            Self::InconsistentTensor { tensor, reason } => write!(
+                f,
+                "SetFitArtifactError::InconsistentTensor(rung 4, {tensor}: {reason})"
+            ),
+            Self::InconsistentNameMap { reason } => write!(
+                f,
+                "SetFitArtifactError::InconsistentNameMap(rung 4: {reason})"
+            ),
+            Self::ArtifactRebuildFailed { what, reason } => write!(
+                f,
+                "SetFitArtifactError::ArtifactRebuildFailed(rung 6, {what}: {reason})"
+            ),
+            Self::ProbeReplayFailed {
+                probe,
+                probe_id,
+                component,
+                index,
+                expected,
+                observed,
+                tolerance,
+            } => write!(
+                f,
+                "SetFitArtifactError::ProbeReplayFailed(rung 7, probe {probe} ({probe_id}), \
+                 {component}[{index}]: expected {expected}, observed {observed}, tolerance \
+                 {tolerance})"
+            ),
+            Self::EmptyEmbedBatch => write!(
+                f,
+                "SetFitArtifactError::EmptyEmbedBatch(embed was handed no texts)"
+            ),
+            Self::EncodeFailed { reason } => {
+                write!(f, "SetFitArtifactError::EncodeFailed({reason})")
             }
         }
     }
@@ -1204,6 +1413,467 @@ fn build_artifact_doc(
         "the doc must carry exactly the contract's field list"
     );
     Ok(doc)
+}
+
+// ===========================================================================
+// The loader (plan 04-03): the bounded read, the fail-closed ladder, and the
+// `VerifiedSetFitModel` typestate
+//
+// Contract: `contracts/setfit-apr-v1.yaml`, equations `artifact_size_bounds`,
+// `bounded_read`, `artifact_doc_schema`, `architecture_derived_tensor_set`,
+// `probe_policy`, `probe_and_parity_tolerances` and `load_validation_ladder`.
+//
+// # The rungs, and why the ORDER is part of the contract
+//
+// | rung | what it bounds | why it cannot move |
+// |------|----------------|--------------------|
+// | 1 | raw length vs the cap | a parse of an unbounded buffer is the attack |
+// | 2 | magic, version, header CRC, row-major flag, footer CRC | nothing may be believed before integrity |
+// | 3 | typed tag, ONE custom key, `schema`/`schema_version`, `deny_unknown_fields` | a future schema must not be partially interpreted |
+// | 4 | architecture-derived tensor set, per-entry size, head shapes, tokenizer digest | the tokenizer must be paired BEFORE a tensor is installed |
+// | 5 | non-finite scan over every decoded `f32` | a NaN weight must not reach a rebuild |
+// | 6 | rebuild encoder + tokenizer + head | only from bytes that passed 1-5 |
+// | 7 | replay all six probes within tolerance | the last word, before a classify-capable value exists |
+//
+// Rungs 1-5 live ONCE, in [`read_setfit_apr_parts_within`], and
+// [`load_setfit_apr_within`] CALLS it. One ladder, never two policies: a second
+// parse-only path would be a second verification policy with its own tolerances.
+// ===========================================================================
+
+/// The contract's outer artifact size bound, in bytes (256 MiB).
+///
+/// `contracts/setfit-apr-v1.yaml`, equation `artifact_size_bounds`, constant
+/// `max_artifact_bytes: 268435456`. It is DERIVED there, not chosen for
+/// roundness: the pinned encoder payload is 22565376 f32 (90261504 bytes), the
+/// pinned tokenizer is 466247 bytes and a three-label head is 4620 bytes, so a
+/// legitimate artifact is about 90.8 MB and this clears it by ~2.9x — the same
+/// headroom factor `MAX_BUNDLE_BYTES` uses.
+///
+/// # This is an outer RESOURCE bound, not a correctness check
+///
+/// Correctness is the per-entry size rule and the architecture-derived tensor
+/// set. The cap exists so a hostile input cannot exhaust memory before either of
+/// those can run — see [`read_setfit_apr_bytes_bounded`].
+pub const MAX_ARTIFACT_BYTES: u64 = 268_435_456;
+
+/// Absolute tolerance for a probe embedding component.
+///
+/// CITED from `setfit-encoder-conformance-v1`'s frozen pooled-output family, not
+/// re-derived here. A Phase 4 number would be a SECOND tolerance for the same
+/// quantity, and the looser of two silently becomes the real one.
+pub const PROBE_EMBEDDING_ABS_TOLERANCE: f64 = 7.629_394_53e-06;
+
+/// Absolute tolerance for a probe logit.
+pub const PROBE_LOGITS_ABS_TOLERANCE: f64 = 1.0e-5;
+
+/// Absolute tolerance for a probe class probability.
+pub const PROBE_PROBABILITIES_ABS_TOLERANCE: f64 = 1.0e-5;
+
+/// The ladder's outer resource bounds, as one value.
+///
+/// # Why the bound is a parameter at all
+///
+/// The cap has to be shown BITING, and it bites only on inputs far larger than
+/// any fixture. Materializing 256 MiB in a unit test would make the suite pay a
+/// quarter of a gigabyte to learn that a comparison compares. So the bound VALUE
+/// and the bound MECHANISM are falsified separately: the mechanism against a
+/// deliberately tiny bound on a real artifact, the value against the contract it
+/// is frozen in. This is `BundleLimits`'s shape (bundle.rs:138-181) and it is
+/// kept for the same reason.
+///
+/// The field is private and the only value production can name is
+/// [`Self::CONTRACTED`]; the shrinking constructor is `#[cfg(test)]`. A knob that
+/// could weaken a bound in a shipped build would be worse than the attack it
+/// tests for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArtifactLimits {
+    max_artifact_bytes: u64,
+}
+
+impl ArtifactLimits {
+    /// The contracted bound — the only value a shipped build can construct.
+    const CONTRACTED: Self = Self {
+        max_artifact_bytes: MAX_ARTIFACT_BYTES,
+    };
+
+    /// A deliberately tiny bound, so the cap can be shown biting on a real artifact.
+    #[cfg(test)]
+    const fn tiny(max_artifact_bytes: u64) -> Self {
+        Self { max_artifact_bytes }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The parsed document (contract equation `artifact_doc_schema`)
+// ---------------------------------------------------------------------------
+
+/// The `preprocessing` group of [`SetFitArtifactDoc`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetFitPreprocessingDoc {
+    /// The pooling policy identifier the encoder applied.
+    pub pooling: String,
+    /// The normalization policy identifier the encoder applied.
+    pub normalization: String,
+    /// The L2 epsilon as an f32 BIT PATTERN in hex, never a JSON number.
+    pub l2_epsilon_hex: String,
+    /// The tokenizer's truncation bound.
+    pub truncation_max_sequence_length: u32,
+    /// The tokenizer's padding mode.
+    pub padding_mode: String,
+    /// The run's requested max sequence length.
+    pub max_length: u32,
+}
+
+/// The `head` group of [`SetFitArtifactDoc`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetFitHeadDoc {
+    /// The head's fitted feature dimension.
+    pub n_features: usize,
+    /// The number of labels the head discriminates.
+    pub num_labels: usize,
+}
+
+/// One embedded probe record (contract equation `probe_policy`).
+///
+/// EVERY float is a bit-pattern hex string. Decimal text is not the identity on
+/// `f32`, and a `null` from a non-finite value would be indistinguishable from a
+/// missing one — hex keeps probe expectations exact and off the null path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetFitProbeRecord {
+    /// The probe string, verbatim.
+    pub input: String,
+    /// The pooled, normalized embedding, one bit-pattern hex string per component.
+    pub embedding_hex: Vec<String>,
+    /// One logit per label, in `ordered_labels` order.
+    pub logits_hex: Vec<String>,
+    /// One probability per label, in `ordered_labels` order.
+    pub probabilities_hex: Vec<String>,
+    /// The argmax label, compared EXACTLY.
+    pub label: String,
+}
+
+/// The single value held at custom metadata key `"setfit"`.
+///
+/// The field list is EXACTLY [`SETFIT_ARTIFACT_DOC_FIELDS`] — the contract's
+/// normative list (review B2) — and `deny_unknown_fields` makes an unknown key a
+/// typed parse refusal rather than a silently ignored field. That the two agree
+/// is asserted by a test, so an added or renamed field is a LOUD failure.
+///
+/// # The four opaque sub-documents
+///
+/// `requested_config`, `resolved_config`, `evidence` and `provenance` stay
+/// `serde_json::Value` because `aprender-core` CANNOT NAME the `aprender-train`
+/// types behind them: train depends on core, never the reverse. `architecture`
+/// is the one core DOES own, so it is parsed into the typed
+/// [`EncoderArchitecture`] the rebuild needs.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetFitArtifactDoc {
+    /// Const `"setfit-apr-v1"`.
+    pub schema: String,
+    /// Const `1`.
+    pub schema_version: u32,
+    /// The `SetFitBundle` wire version this artifact was written from.
+    pub bundle_schema_version: u32,
+    /// The codec identifier that wrote the payload.
+    pub format_id: String,
+    /// The encoder architecture record — typed, because the rebuild needs it.
+    pub architecture: EncoderArchitecture,
+    /// Lowercase-hex SHA-256 of the tokenizer bytes, at the doc's first level.
+    pub tokenizer_sha256: String,
+    /// The pooling/normalization/truncation policy the encoder applied.
+    pub preprocessing: SetFitPreprocessingDoc,
+    /// The root seed every dropout stream derives from.
+    pub root_seed: u64,
+    /// The head's configuration.
+    pub head: SetFitHeadDoc,
+    /// Index `i` is the label of head weight row `i`.
+    pub ordered_labels: Vec<String>,
+    /// `to_value(SetFitTrainConfig)` — opaque here.
+    pub requested_config: Value,
+    /// `to_value(ResolvedConfigRecord)` — opaque here.
+    pub resolved_config: Value,
+    /// `to_value(EvidenceSummary)` — opaque here.
+    pub evidence: Value,
+    /// `to_value(ProvenanceRecord)` — opaque here (bundle field 20).
+    pub provenance: Value,
+    /// HF dotted name -> canonical tensor name, carried BY the artifact.
+    pub hf_name_map: BTreeMap<String, String>,
+    /// The six contract-resident probe records, in probe order.
+    pub probes: Vec<SetFitProbeRecord>,
+}
+
+/// Everything rungs 1-5 recover, before any rebuild has happened.
+///
+/// A STRUCT and not a five-element tuple, deliberately: plan 04-05 maps this
+/// field-by-field onto a `SetFitBundle`, and a tuple of five same-shaped
+/// components is exactly where such a mapping goes wrong silently.
+#[derive(Debug, Clone)]
+pub struct SetFitAprParts {
+    /// The parsed, `deny_unknown_fields` document.
+    pub doc: SetFitArtifactDoc,
+    /// Every encoder tensor keyed by its HF dotted name, `(shape, data)`.
+    ///
+    /// Keyed by HF name because that is what `SetFitMiniLm::from_bundle_parts`
+    /// takes; the canonical names are inverted through the doc's OWN
+    /// `hf_name_map`, never re-derived from a table that may have moved since
+    /// the write.
+    pub tensors: BTreeMap<String, (Vec<usize>, Vec<f32>)>,
+    /// The head's `K * d` weights, row-major; row `i` belongs to `ordered_labels[i]`.
+    pub head_weights: Vec<f32>,
+    /// The head's `K` intercepts.
+    pub head_intercepts: Vec<f32>,
+    /// The exact `tokenizer.json` bytes the artifact carries.
+    pub tokenizer_bytes: Vec<u8>,
+    /// Lowercase-hex SHA-256 of the artifact bytes these parts came from.
+    pub artifact_sha256: String,
+}
+
+// ---------------------------------------------------------------------------
+// The verified typestate (APR-04's consumer side)
+// ---------------------------------------------------------------------------
+
+/// A model that reached the END of the ladder, and the ONLY value a consumer may
+/// classify with.
+///
+/// # Non-constructibility is the mechanism, not the documentation
+///
+/// Every field is private and there is NO public constructor, no `Default`, no
+/// `Deserialize` and no builder. The only way to obtain one is
+/// [`load_setfit_apr`], which means every rung — including the six-probe replay —
+/// ran in THIS process on THESE bytes. `crates/aprender-train/tests/ui/
+/// setfit_verified_model_constructed.rs` pins that as a COMPILE error from
+/// outside the crate: a runtime rejection can be caught and ignored by a caller,
+/// a non-compiling program cannot.
+///
+/// APR-04's obligation in one sentence: evaluation, registration, benchmarking,
+/// prediction and serving accept only `ArtifactReloadedAndVerified`, and
+/// out-of-crate code cannot mint the consumer-side witness type.
+///
+/// # What is deliberately absent
+///
+/// `classify` arrives in plan 04-04 and reads [`Self::head`]'s coefficients.
+/// Nothing speculative is added here.
+#[derive(Debug)]
+pub struct VerifiedSetFitModel {
+    /// The rebuilt encoder + tokenizer pair.
+    model: SetFitMiniLm,
+    /// The rebuilt classifier head. [`Self::ordered_labels`] reads its label
+    /// vector — the one a classification will actually index by, rather than the
+    /// doc's copy of it — and plan 04-04's `classify` reads its coefficients.
+    head: MultinomialLogisticRegression,
+    /// Everything APR-05's inspection recovers from the artifact alone.
+    doc: SetFitArtifactDoc,
+    /// The identity every Phase 4 response carries.
+    artifact_sha256: String,
+}
+
+impl VerifiedSetFitModel {
+    /// Lowercase-hex SHA-256 of the artifact these bytes were verified from.
+    #[must_use]
+    pub fn artifact_sha256(&self) -> &str {
+        &self.artifact_sha256
+    }
+
+    /// The labels the head's weight rows are indexed by.
+    ///
+    /// Read off the REBUILT HEAD, not off the document: this is the list a
+    /// classification will actually index into, and a doc copy that had drifted
+    /// from it would be a label map that describes a different model.
+    #[must_use]
+    pub fn ordered_labels(&self) -> &[String] {
+        self.head.labels()
+    }
+
+    /// The whole recovered document — APR-05's inspection surface.
+    ///
+    /// Revisions, hashes, pooling/truncation policy, label order, head
+    /// configuration, provenance (including the dataset fingerprint), seeds,
+    /// update evidence and the schema version, all recovered from the artifact
+    /// alone with no network and no sidecar file.
+    #[must_use]
+    pub fn doc_view(&self) -> &SetFitArtifactDoc {
+        &self.doc
+    }
+
+    /// The encoder's L2-normalized sentence embeddings — OPS-01's "embed" step.
+    ///
+    /// This is the SAME encode path rung 7's probe replay verified, so a caller
+    /// reaching embeddings through the public API gets the vectors the artifact's
+    /// own probe expectations were checked against.
+    ///
+    /// # Errors
+    ///
+    /// [`SetFitArtifactError::EmptyEmbedBatch`] for an empty input list, and
+    /// [`SetFitArtifactError::EncodeFailed`] for anything the tokenizer or the
+    /// encoder rejects. There is no panic path.
+    pub fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, SetFitArtifactError> {
+        let _ = texts;
+        Err(stub_error())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The bounded read (contract equation `bounded_read`, review B5)
+// ---------------------------------------------------------------------------
+
+/// Read artifact bytes with the cap applied BEFORE the allocation it bounds.
+///
+/// THIS is the API every filesystem and stream adapter is required to call —
+/// `apr-cli`, `aprender-serve` and the codec alike. Two adapters with two
+/// bounded-read implementations are two places for the bound to be forgotten.
+///
+/// # Two checks, because one is not enough
+///
+/// (a) If `declared_len` is over cap the call returns WITHOUT TOUCHING the
+/// reader, so a caller passing `fs::metadata(path)?.len()` is refused before
+/// `fs::read` ever runs. (b) The read then goes through
+/// `reader.take(MAX_ARTIFACT_BYTES + 1)` anyway, so a length that LIES — a FIFO,
+/// a growing file, a filesystem reporting zero — still cannot exhaust memory.
+/// Check (a) alone trusts metadata an attacker controls; check (b) alone reads
+/// 256 MiB of garbage before refusing.
+///
+/// The `+ 1` is load-bearing: reading exactly the cap cannot distinguish "a legal
+/// artifact of exactly the cap size" from "a larger stream truncated at the cap".
+///
+/// # Why [`load_setfit_apr`] keeps its own length check
+///
+/// Defense in depth, and not redundancy: the in-memory check CANNOT protect a
+/// caller who already read the file from some other source. Review B5's finding
+/// was precisely that the cap ran only after `fs::read` had already succeeded.
+///
+/// # Errors
+///
+/// [`SetFitArtifactError::ArtifactTooLarge`] naming which of the two checks
+/// fired and what it observed, or [`SetFitArtifactError::ArtifactRead`] for an
+/// I/O failure.
+pub fn read_setfit_apr_bytes_bounded<R: std::io::Read>(
+    reader: R,
+    declared_len: Option<u64>,
+) -> Result<Vec<u8>, SetFitArtifactError> {
+    read_setfit_apr_bytes_bounded_within(reader, declared_len, &ArtifactLimits::CONTRACTED)
+}
+
+/// [`read_setfit_apr_bytes_bounded`] at a caller-chosen bound.
+///
+/// Module-private, and it stays that way: the shipped door above is the only one
+/// that names a bound, and the only bound it names is the contracted one.
+fn read_setfit_apr_bytes_bounded_within<R: std::io::Read>(
+    reader: R,
+    declared_len: Option<u64>,
+    limits: &ArtifactLimits,
+) -> Result<Vec<u8>, SetFitArtifactError> {
+    let _ = (reader, declared_len, limits);
+    Err(stub_error())
+}
+
+// ---------------------------------------------------------------------------
+// The two doors
+// ---------------------------------------------------------------------------
+
+/// Rungs 1-5 as a PARSE-ONLY door: no rebuild, no probe replay.
+///
+/// [`load_setfit_apr`] is implemented as this function followed by rungs 6-7, so
+/// rungs 1-5 exist ONCE. Plan 04-05's codec consumes this door; landing it here
+/// is what keeps the two from becoming two verification policies.
+///
+/// # Errors
+///
+/// The same typed [`SetFitArtifactError`] variants [`load_setfit_apr`] reports
+/// for any rung 1-5 failure — by construction, because it is the same code.
+pub fn read_setfit_apr_parts(bytes: &[u8]) -> Result<SetFitAprParts, SetFitArtifactError> {
+    read_setfit_apr_parts_within(bytes, &ArtifactLimits::CONTRACTED)
+}
+
+/// [`read_setfit_apr_parts`] at a caller-chosen bound. Module-private.
+fn read_setfit_apr_parts_within(
+    bytes: &[u8],
+    limits: &ArtifactLimits,
+) -> Result<SetFitAprParts, SetFitArtifactError> {
+    let _ = (bytes, limits);
+    Err(stub_error())
+}
+
+/// The ONE production door: bytes in, a verified model or a typed refusal out.
+///
+/// Runs rungs 1-7 in the contract's order, offline. Nothing short of the whole
+/// ladder produces a [`VerifiedSetFitModel`], and no consumer may add a second
+/// minting path — a consumer with its own load path would be a second
+/// verification policy with its own tolerances.
+///
+/// # Errors
+///
+/// One distinct [`SetFitArtifactError`] variant per corruption class, each naming
+/// the rung and what it observed. "Invalid artifact" is not an admissible
+/// diagnosis and this function never produces one.
+pub fn load_setfit_apr(bytes: &[u8]) -> Result<VerifiedSetFitModel, SetFitArtifactError> {
+    load_setfit_apr_within(bytes, &ArtifactLimits::CONTRACTED)
+}
+
+/// [`load_setfit_apr`] at a caller-chosen bound. Module-private.
+fn load_setfit_apr_within(
+    bytes: &[u8],
+    limits: &ArtifactLimits,
+) -> Result<VerifiedSetFitModel, SetFitArtifactError> {
+    let _ = (bytes, limits);
+    Err(stub_error())
+}
+
+/// The RED-phase placeholder, distinct from every variant a test asserts on.
+fn stub_error() -> SetFitArtifactError {
+    SetFitArtifactError::ContainerIntegrity {
+        what: "unimplemented",
+        reason: "plan 04-03 RED: the ladder is not implemented yet".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NaN-visible comparison (contract equation `probe_and_parity_tolerances`)
+// ---------------------------------------------------------------------------
+
+/// Whether `delta` is inside `bound`, with an INCOMPARABLE delta counting as OUTSIDE.
+///
+/// The contract MANDATES this exact form. A bare `delta <= bound` happens to
+/// reject `NaN` in this direction, but the idiom is fragile under the obvious
+/// refactor to `!(delta > bound)`, which ACCEPTS `NaN` silently. The explicit
+/// `partial_cmp` form cannot be refactored into acceptance by accident. This is
+/// verify.rs:337-342's `within`, kept identical so the train-time and load-time
+/// comparators cannot disagree.
+fn within(delta: f64, bound: f64) -> bool {
+    matches!(
+        delta.partial_cmp(&bound),
+        Some(core::cmp::Ordering::Less | core::cmp::Ordering::Equal)
+    )
+}
+
+/// One `f32` recovered from the lowercase hex of its LITTLE-ENDIAN bit pattern.
+///
+/// The exact inverse of [`f32_bits_hex`]. Lowercase-only and length-exact on
+/// purpose: this reads attacker-supplied text, and a lenient parser here would
+/// accept documents the writer can never produce.
+fn hex_to_f32(hex: &str) -> Option<f32> {
+    if hex.len() != 8 {
+        return None;
+    }
+    let mut bytes = [0u8; 4];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let hi = hex_nibble_value(pair[0])?;
+        let lo = hex_nibble_value(pair[1])?;
+        bytes[index] = (hi << 4) | lo;
+    }
+    Some(f32::from_bits(u32::from_le_bytes(bytes)))
+}
+
+/// One lowercase hex digit as its value, or `None`.
+fn hex_nibble_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 // ===========================================================================
@@ -2453,5 +3123,959 @@ mod determinism {
         }
         let bytes = write_setfit_apr(&fixture_view_full_pin_shape()).expect("child write");
         println!("{CHILD_MARKER}{}", artifact_sha256_hex(&bytes));
+    }
+}
+
+#[cfg(all(test, feature = "setfit"))]
+mod tamper {
+    //! Take REAL writer-produced bytes apart and re-emit them through the SAME
+    //! container writer with exactly ONE thing changed.
+    //!
+    //! Every negative in `mod ladder` and `mod probe` is an INDUCED CORRUPTION of
+    //! a real artifact, never a hand-built fake: a fake can be wrong in ways the
+    //! writer would never produce, so a loader that refused it would have proven
+    //! nothing about the artifacts it will actually meet.
+    //!
+    //! The harness is only evidence if a round trip through it is the IDENTITY —
+    //! otherwise a "tampered" artifact differs from the honest one in ways nobody
+    //! chose, and every refusal below could be about the harness. That is asserted
+    //! by `the_tamper_harness_re_emits_untouched_bytes_byte_identically`, which is
+    //! the first test in `mod ladder` for exactly that reason.
+
+    use super::*;
+
+    use crate::format::v2::AprV2Reader;
+
+    pub(super) struct Tampered {
+        /// The container's typed metadata, with the custom document REMOVED (it
+        /// lives in `doc` so a test can mutate it as a `serde_json::Map`).
+        pub(super) metadata: AprV2Metadata,
+        /// The one custom document.
+        pub(super) doc: JsonMap<String, Value>,
+        /// Every index entry as `(name, dtype, shape, payload)`.
+        pub(super) tensors: Vec<(String, TensorDType, Vec<usize>, Vec<u8>)>,
+    }
+
+    impl Tampered {
+        pub(super) fn of(bytes: &[u8]) -> Self {
+            let reader = AprV2Reader::from_bytes(bytes).expect("real writer bytes parse");
+            let mut metadata = reader.metadata().clone();
+            let doc = metadata
+                .custom
+                .remove(CUSTOM_METADATA_KEY)
+                .expect("the one custom key is present")
+                .as_object()
+                .expect("the custom key holds a JSON object")
+                .clone();
+            let tensors = reader
+                .tensor_index()
+                .iter()
+                .map(|entry| {
+                    let payload = reader
+                        .get_tensor_data(&entry.name)
+                        .expect("every index entry has a payload")
+                        .to_vec();
+                    (entry.name.clone(), entry.dtype, entry.shape.clone(), payload)
+                })
+                .collect();
+            Self {
+                metadata,
+                doc,
+                tensors,
+            }
+        }
+
+        pub(super) fn emit(&self) -> Vec<u8> {
+            let mut metadata = self.metadata.clone();
+            metadata.custom.insert(
+                CUSTOM_METADATA_KEY.to_string(),
+                Value::Object(self.doc.clone()),
+            );
+            let mut writer = AprV2Writer::new(metadata);
+            for (name, dtype, shape, payload) in &self.tensors {
+                writer.add_tensor(name.clone(), *dtype, shape.clone(), payload.clone());
+            }
+            writer.write().expect("the harness re-emits a container")
+        }
+
+        /// Borrow one entry's `(shape, payload)` by name.
+        pub(super) fn entry_mut(&mut self, name: &str) -> (&mut Vec<usize>, &mut Vec<u8>) {
+            let found = self
+                .tensors
+                .iter_mut()
+                .find(|(entry, ..)| entry == name)
+                .unwrap_or_else(|| panic!("the fixture artifact carries {name}"));
+            (&mut found.2, &mut found.3)
+        }
+
+        pub(super) fn drop_tensor(&mut self, name: &str) {
+            let before = self.tensors.len();
+            self.tensors.retain(|(entry, ..)| entry != name);
+            assert_eq!(
+                self.tensors.len() + 1,
+                before,
+                "the fixture artifact must carry {name} for dropping it to mean anything"
+            );
+        }
+
+        /// Mutate one probe record in place.
+        pub(super) fn probe_mut(&mut self, index: usize) -> &mut JsonMap<String, Value> {
+            self.doc
+                .get_mut("probes")
+                .and_then(Value::as_array_mut)
+                .and_then(|probes| probes.get_mut(index))
+                .and_then(Value::as_object_mut)
+                .expect("the document carries the six probe records")
+        }
+    }
+
+    /// The honest artifact, produced by the real writer from the DEFAULT fixture.
+    pub(super) fn honest_bytes() -> Vec<u8> {
+        write_setfit_apr(&super::fixture::fixture_view_full_pin_shape())
+            .expect("the fixture view is writable")
+    }
+}
+
+#[cfg(all(test, feature = "setfit"))]
+mod ladder {
+    //! Rungs 1-5: the bounded read, the cap, the container, the document, the
+    //! structure and the non-finite scan — each shown ABLE TO FAIL by induced
+    //! corruption of real writer-produced bytes.
+
+    use super::tamper::{honest_bytes, Tampered};
+    use super::*;
+
+    use serde_json::json;
+    use std::io::Read;
+
+    /// The largest byte count any test in this module is allowed to materialize.
+    ///
+    /// The cap boundary is exercised through the injected limit instead, so the
+    /// suite never pays 256 MiB to learn that a comparison compares.
+    const TEST_ALLOCATION_CEILING: usize = 1_048_576;
+
+    /// A reader that PANICS the moment it is read from.
+    ///
+    /// It is the whole proof of the declared-length ordering: if
+    /// `read_setfit_apr_bytes_bounded` consulted the stream before the declared
+    /// length, this test would abort instead of returning a typed refusal.
+    struct PanicOnRead;
+
+    impl Read for PanicOnRead {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            panic!(
+                "read_setfit_apr_bytes_bounded touched the reader; the declared-length refusal \
+                 must run BEFORE the first read (review B5)"
+            )
+        }
+    }
+
+    /// A reader with far more bytes than the cap, which COUNTS what it handed over.
+    ///
+    /// Bounded rather than endless on purpose: an endless reader would HANG when
+    /// the `take` is missing, and a hanging test is a worse signal than a failing
+    /// one. The discriminating assertion is on `handed`, not on the refusal —
+    /// without the `take` the refusal still fires, but only after the whole flood
+    /// is resident.
+    struct Flood<'a> {
+        remaining: u64,
+        handed: &'a mut u64,
+    }
+
+    impl Read for Flood<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let take = buf.len().min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+            for byte in buf.iter_mut().take(take) {
+                *byte = 0xAB;
+            }
+            self.remaining -= take as u64;
+            *self.handed += take as u64;
+            Ok(take)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The harness itself
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_tamper_harness_re_emits_untouched_bytes_byte_identically() {
+        let bytes = honest_bytes();
+        assert!(
+            bytes.len() < TEST_ALLOCATION_CEILING,
+            "the fixture artifact is {} bytes; this suite must never materialize more than {}",
+            bytes.len(),
+            TEST_ALLOCATION_CEILING
+        );
+        assert_eq!(
+            Tampered::of(&bytes).emit(),
+            bytes,
+            "a round trip through the tamper harness must be the IDENTITY, or every negative \
+             below could be about the harness rather than about the corruption"
+        );
+    }
+
+    #[test]
+    fn the_honest_artifact_passes_every_rung_through_both_doors() {
+        let bytes = honest_bytes();
+        let parts = read_setfit_apr_parts(&bytes).expect("the honest artifact parses");
+        assert_eq!(parts.doc.schema, ARTIFACT_SCHEMA);
+        load_setfit_apr(&bytes).expect("the honest artifact loads");
+    }
+
+    // -----------------------------------------------------------------------
+    // The bounded read (contract `bounded_read`, review B5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_public_cap_constant_is_the_contracts_268435456() {
+        assert_eq!(
+            MAX_ARTIFACT_BYTES, 268_435_456,
+            "contracts/setfit-apr-v1.yaml artifact_size_bounds.max_artifact_bytes"
+        );
+        assert_eq!(ArtifactLimits::CONTRACTED.max_artifact_bytes, MAX_ARTIFACT_BYTES);
+    }
+
+    #[test]
+    fn a_declared_length_over_the_cap_is_refused_before_the_reader_is_touched() {
+        let err = read_setfit_apr_bytes_bounded(PanicOnRead, Some(MAX_ARTIFACT_BYTES + 1))
+            .expect_err("an over-cap declared length must be refused");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ArtifactTooLarge {
+                    what: "declared_length",
+                    observed,
+                    cap
+                } if *observed == MAX_ARTIFACT_BYTES + 1 && *cap == MAX_ARTIFACT_BYTES
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_lying_declared_length_cannot_make_the_reader_hand_over_more_than_cap_plus_one() {
+        let limits = ArtifactLimits::tiny(64);
+        let mut handed = 0_u64;
+        let flood = Flood {
+            remaining: 4096,
+            handed: &mut handed,
+        };
+        // The declared length claims the stream is tiny. It is not.
+        let err = read_setfit_apr_bytes_bounded_within(flood, Some(8), &limits)
+            .expect_err("a stream over the cap must be refused however it was described");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ArtifactTooLarge { what: "stream", cap: 64, .. }
+            ),
+            "got {err:?}"
+        );
+        assert!(
+            handed <= 65,
+            "the reader handed over {handed} bytes; the bound is cap + 1 = 65 and the `+ 1` is \
+             what makes 'exactly the cap' distinguishable from 'truncated at the cap'"
+        );
+    }
+
+    #[test]
+    fn an_absent_declared_length_is_not_permission_to_read_unboundedly() {
+        let limits = ArtifactLimits::tiny(64);
+        let mut handed = 0_u64;
+        let flood = Flood {
+            remaining: 4096,
+            handed: &mut handed,
+        };
+        let err = read_setfit_apr_bytes_bounded_within(flood, None, &limits)
+            .expect_err("no declared length is treated as an over-cap CLAIM, not as permission");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ArtifactTooLarge { what: "stream", .. }
+            ),
+            "got {err:?}"
+        );
+        assert!(handed <= 65, "handed {handed}");
+    }
+
+    #[test]
+    fn a_stream_of_exactly_the_cap_is_accepted_and_returned_whole() {
+        let limits = ArtifactLimits::tiny(64);
+        let source = vec![0x5A_u8; 64];
+        let read = read_setfit_apr_bytes_bounded_within(source.as_slice(), Some(64), &limits)
+            .expect("a stream of exactly the cap is legal");
+        assert_eq!(read, source);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 1: the raw length, before any parse
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_artifact_at_the_limit_loads_and_one_byte_of_limit_less_is_refused_before_any_parse() {
+        let bytes = honest_bytes();
+        let exact = u64::try_from(bytes.len()).expect("a fixture artifact fits in u64");
+        load_setfit_apr_within(&bytes, &ArtifactLimits::tiny(exact))
+            .expect("an artifact of exactly the limit passes rung 1");
+
+        let err = load_setfit_apr_within(&bytes, &ArtifactLimits::tiny(exact - 1))
+            .expect_err("one byte over the limit is refused");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ArtifactTooLarge {
+                    what: "input_bytes",
+                    observed,
+                    cap
+                } if *observed == exact && *cap == exact - 1
+            ),
+            "got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 2: the container
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_flipped_header_byte_is_a_typed_header_checksum_refusal() {
+        let mut bytes = honest_bytes();
+        // Byte 44 is inside the header's `reserved` region: covered by the header
+        // CRC (which spans 0..40 and 44..64) and interpreted by nothing else, so
+        // this isolates the checksum from every other header rule.
+        bytes[44] ^= 0xFF;
+        // The footer is recomputed, so the ONLY thing wrong with these bytes is
+        // the header checksum.
+        reseal_footer(&mut bytes);
+        let err = load_setfit_apr(&bytes).expect_err("a corrupt header must not be believed");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ContainerIntegrity { what: "header_checksum", .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_flipped_payload_byte_without_a_reseal_is_a_typed_footer_checksum_refusal() {
+        let mut bytes = honest_bytes();
+        let last_payload = bytes.len() - 8;
+        bytes[last_payload] ^= 0xFF;
+        let err = load_setfit_apr(&bytes).expect_err("the footer CRC covers the whole content");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ContainerIntegrity { what: "footer_checksum", .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_truncated_artifact_is_a_typed_container_integrity_refusal() {
+        let bytes = honest_bytes();
+        for keep in [0_usize, 3, 63, bytes.len() - 1] {
+            let err = load_setfit_apr(&bytes[..keep])
+                .expect_err("a truncated artifact must not be partially interpreted");
+            assert!(
+                matches!(&err, SetFitArtifactError::ContainerIntegrity { .. }),
+                "keeping {keep} bytes gave {err:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 3: the typed tag and the one document
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_setfit_shaped_tensor_set_without_the_typed_tag_is_refused() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered.metadata.model_type = "bert".to_string();
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("D-04 detection is explicit-tag-only, never tensor-name sniffing");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::NotASetFitArtifact { model_type } if model_type == "bert"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_document_field_is_a_typed_parse_refusal() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered
+            .doc
+            .insert("shadow_field".to_string(), json!("smuggled"));
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("deny_unknown_fields: an unknown key is a refusal, not a skipped field");
+        assert!(
+            matches!(&err, SetFitArtifactError::ArtifactDocumentParse { detail }
+                if detail.contains("shadow_field")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn schema_version_two_is_a_typed_unsupported_schema_version() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered
+            .doc
+            .insert("schema_version".to_string(), json!(2));
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("a future schema must be refused, never partially interpreted");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::UnsupportedSchemaVersion { got: 2, supported: 1 }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_foreign_schema_identifier_is_a_typed_unsupported_schema() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered
+            .doc
+            .insert("schema".to_string(), json!("setfit-apr-v9"));
+        let err = load_setfit_apr(&tampered.emit()).expect_err("this build owns one schema id");
+        assert!(
+            matches!(&err, SetFitArtifactError::UnsupportedSchema { got, .. }
+                if got == "setfit-apr-v9"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_schema_check_runs_before_the_documents_other_fields_are_read() {
+        // BOTH a foreign schema AND an unknown field. The schema refusal must
+        // win, because the contract requires `schema`/`schema_version` to be
+        // checked before any other field is read.
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered
+            .doc
+            .insert("schema".to_string(), json!("setfit-apr-v9"));
+        tampered.doc.insert("shadow_field".to_string(), json!(1));
+        let err = load_setfit_apr(&tampered.emit()).expect_err("refused");
+        assert!(
+            matches!(&err, SetFitArtifactError::UnsupportedSchema { .. }),
+            "the schema rung must speak first; got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 4: the architecture-derived tensor set and the per-entry rules
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_missing_encoder_tensor_is_a_typed_incomplete_tensor_set() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered.drop_tensor("blk.1.ffn_norm.bias");
+        let err = load_setfit_apr(&tampered.emit()).expect_err("an incomplete encoder is refused");
+        assert!(
+            matches!(&err, SetFitArtifactError::IncompleteTensorSet { missing }
+                if missing == &vec!["blk.1.ffn_norm.bias".to_string()]),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_headless_artifact_is_a_typed_incomplete_tensor_set_naming_the_head_tensor() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered.drop_tensor(HEAD_WEIGHT_TENSOR);
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("review B1: a headless artifact cannot load");
+        assert!(
+            matches!(&err, SetFitArtifactError::IncompleteTensorSet { missing }
+                if missing == &vec![HEAD_WEIGHT_TENSOR.to_string()]),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_extra_tensor_is_a_typed_inconsistent_tensor_set() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered.tensors.push((
+            "setfit.head.shadow".to_string(),
+            TensorDType::F32,
+            vec![2],
+            vec![0_u8; 8],
+        ));
+        let err =
+            load_setfit_apr(&tampered.emit()).expect_err("the expected set is compared EXACTLY");
+        assert!(
+            matches!(&err, SetFitArtifactError::InconsistentTensorSet { reason }
+                if reason.contains("setfit.head.shadow")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_expected_set_is_derived_from_the_documents_own_num_layers() {
+        // The fixture is two layers. Claim three, and the SAME rule must now
+        // demand sixteen layer-2 tensors the artifact does not carry — which is
+        // only possible if the expected set is a FUNCTION of the parsed doc.
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered
+            .doc
+            .get_mut("architecture")
+            .and_then(Value::as_object_mut)
+            .expect("the architecture sub-document")
+            .insert("num_layers".to_string(), json!(3));
+        let err = load_setfit_apr(&tampered.emit()).expect_err("refused");
+        let SetFitArtifactError::IncompleteTensorSet { missing } = &err else {
+            panic!("got {err:?}")
+        };
+        assert_eq!(missing.len(), 16, "one per layer template: {missing:?}");
+        assert!(missing.iter().all(|name| name.starts_with("blk.2.")));
+    }
+
+    #[test]
+    fn a_declared_size_that_disagrees_with_the_declared_shape_is_a_typed_inconsistent_tensor() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        {
+            let (shape, _) = tampered.entry_mut("token_embd_norm.bias");
+            shape[0] += 1;
+        }
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("size == product(shape) * dtype_width is structural");
+        assert!(
+            matches!(&err, SetFitArtifactError::InconsistentTensor { tensor, .. }
+                if tensor == "token_embd_norm.bias"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_head_weight_shape_that_disagrees_with_the_label_set_is_a_typed_inconsistent_tensor() {
+        // [3, 8] -> [8, 3]: the PRODUCT is unchanged, so the per-entry size rule
+        // still holds and only the head-shape rule can catch this.
+        let mut tampered = Tampered::of(&honest_bytes());
+        {
+            let (shape, _) = tampered.entry_mut(HEAD_WEIGHT_TENSOR);
+            shape.reverse();
+        }
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("row i of the head must belong to ordered_labels[i]");
+        assert!(
+            matches!(&err, SetFitArtifactError::InconsistentTensor { tensor, .. }
+                if tensor == HEAD_WEIGHT_TENSOR),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn one_flipped_tokenizer_blob_byte_is_a_typed_tokenizer_hash_mismatch() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        {
+            let (_, payload) = tampered.entry_mut(TOKENIZER_BLOB_TENSOR);
+            payload[7] ^= 0x01;
+        }
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("the tokenizer is paired BEFORE a tensor is installed");
+        assert!(
+            matches!(&err, SetFitArtifactError::TokenizerHashMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 5: the non-finite scan
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_nan_bit_pattern_in_an_f32_payload_is_a_typed_non_finite_value() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        {
+            let (_, payload) = tampered.entry_mut("blk.0.attn_q.weight");
+            // 0x7FC00000, little-endian: the quiet-NaN bit pattern.
+            payload[0..4].copy_from_slice(&[0x00, 0x00, 0xC0, 0x7F]);
+        }
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("a NaN weight must never reach a rebuild");
+        assert!(
+            matches!(&err, SetFitArtifactError::NonFiniteValue { path }
+                if path == "blk.0.attn_q.weight[0]"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_head_coefficient_is_a_typed_non_finite_value() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        {
+            let (_, payload) = tampered.entry_mut(HEAD_BIAS_TENSOR);
+            // 0x7F800000, little-endian: +Inf.
+            payload[4..8].copy_from_slice(&[0x00, 0x00, 0x80, 0x7F]);
+        }
+        let err = load_setfit_apr(&tampered.emit()).expect_err("+Inf in the head is refused");
+        assert!(
+            matches!(&err, SetFitArtifactError::NonFiniteValue { path }
+                if path == "setfit.head.bias[1]"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_probe_expectation_is_a_typed_non_finite_value() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered
+            .probe_mut(0)
+            .get_mut("embedding_hex")
+            .and_then(Value::as_array_mut)
+            .expect("the probe records an embedding")[0] = json!("0000c07f");
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("a non-finite EXPECTATION would make every replay unfalsifiable");
+        assert!(
+            matches!(&err, SetFitArtifactError::NonFiniteValue { path }
+                if path == "probes.0.embedding_hex[0]"),
+            "got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The parse-only door
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_setfit_apr_parts_recovers_the_doc_the_tensors_the_head_and_the_tokenizer() {
+        let view = super::fixture::fixture_view_full_pin_shape();
+        let bytes = honest_bytes();
+        let parts = read_setfit_apr_parts(&bytes).expect("the honest artifact parses");
+
+        assert_eq!(parts.doc.schema, ARTIFACT_SCHEMA);
+        assert_eq!(parts.doc.schema_version, ARTIFACT_SCHEMA_VERSION);
+        assert_eq!(parts.doc.architecture, view.architecture);
+        // HF-keyed, bit-exact, and the WHOLE set: the map came back through the
+        // artifact's OWN hf_name_map inversion, not through a re-derivation.
+        assert_eq!(parts.tensors, view.tensors);
+        assert_eq!(parts.head_weights, view.head_weights);
+        assert_eq!(parts.head_intercepts, view.head_intercepts);
+        assert_eq!(parts.tokenizer_bytes, view.tokenizer_bytes);
+        assert_eq!(parts.artifact_sha256, artifact_sha256_hex(&bytes));
+    }
+
+    #[test]
+    fn both_doors_report_the_same_typed_variant_for_every_rung_one_to_five_corruption() {
+        let honest = honest_bytes();
+        let mut untagged = Tampered::of(&honest);
+        untagged.metadata.model_type = "bert".to_string();
+        let mut unknown_field = Tampered::of(&honest);
+        unknown_field.doc.insert("shadow".to_string(), json!(1));
+        let mut headless = Tampered::of(&honest);
+        headless.drop_tensor(HEAD_BIAS_TENSOR);
+        let mut nan = Tampered::of(&honest);
+        {
+            let (_, payload) = nan.entry_mut("blk.0.ffn_up.bias");
+            payload[0..4].copy_from_slice(&[0x00, 0x00, 0xC0, 0x7F]);
+        }
+
+        let mut truncated = honest.clone();
+        truncated.truncate(honest.len() - 1);
+
+        for (what, bytes) in [
+            ("truncated", truncated),
+            ("untagged", untagged.emit()),
+            ("unknown_field", unknown_field.emit()),
+            ("headless", headless.emit()),
+            ("nan_payload", nan.emit()),
+        ] {
+            let from_parts = read_setfit_apr_parts(&bytes)
+                .err()
+                .unwrap_or_else(|| panic!("{what} must be refused by the parse-only door"));
+            let from_load = load_setfit_apr(&bytes)
+                .err()
+                .unwrap_or_else(|| panic!("{what} must be refused by the production door"));
+            assert_eq!(
+                from_parts, from_load,
+                "{what}: ONE ladder, two doors — a divergence here is a second policy"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers and unit-level rules
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_document_type_carries_exactly_the_contracts_sixteen_fields() {
+        let bytes = honest_bytes();
+        let parts = read_setfit_apr_parts(&bytes).expect("parses");
+        let value = serde_json::to_value(&parts.doc).expect("the doc re-serializes");
+        let observed: BTreeSet<&str> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected: BTreeSet<&str> = SETFIT_ARTIFACT_DOC_FIELDS.iter().copied().collect();
+        assert_eq!(
+            observed, expected,
+            "the parse struct and the contract's normative field list must not drift"
+        );
+    }
+
+    #[test]
+    fn the_hex_helpers_round_trip_every_stored_float_exactly() {
+        for value in [
+            0.0_f32,
+            -0.0,
+            1.0,
+            -1.0,
+            f32::MIN_POSITIVE,
+            f32::MAX,
+            L2_EPS_PROBE,
+            0.333_333_34,
+        ] {
+            let hex = f32_bits_hex(value);
+            assert_eq!(hex.len(), 8, "{value} rendered as {hex}");
+            assert_eq!(
+                hex_to_f32(&hex).map(f32::to_bits),
+                Some(value.to_bits()),
+                "hex is the identity on f32 and decimal text is not"
+            );
+        }
+        // Strictness: the reader accepts nothing the writer cannot produce.
+        assert_eq!(hex_to_f32(""), None);
+        assert_eq!(hex_to_f32("0000803"), None);
+        assert_eq!(hex_to_f32("0000803FF"), None);
+        assert_eq!(hex_to_f32("0000803F".to_uppercase().as_str()), None);
+        assert_eq!(hex_to_f32("zzzzzzzz"), None);
+    }
+
+    /// A stand-in for a small positive constant, kept local so this test does not
+    /// depend on a `setfit` re-export that a later plan might move.
+    const L2_EPS_PROBE: f32 = 1e-12;
+
+    /// Recompute the container's trailing CRC32 over the (possibly tampered) content.
+    ///
+    /// A LEGITIMATE re-signing, exactly like the writer's own footer step: it is
+    /// what lets a rung-2 header test and a rung-4/5 content test be about
+    /// different rungs instead of both landing on the footer.
+    fn reseal_footer(bytes: &mut [u8]) {
+        let split = bytes.len() - 4;
+        let checksum = crate::format::crc32(&bytes[..split]);
+        bytes[split..].copy_from_slice(&checksum.to_le_bytes());
+    }
+}
+
+#[cfg(all(test, feature = "setfit"))]
+mod probe {
+    //! Rungs 6-7 and the typestate: the rebuild, the six-probe replay, and the
+    //! only value a consumer may classify with.
+
+    use super::tamper::{honest_bytes, Tampered};
+    use super::*;
+
+    use serde_json::json;
+
+    #[test]
+    fn a_valid_artifact_yields_a_verified_model_carrying_the_artifacts_own_hash() {
+        let bytes = honest_bytes();
+        let model = load_setfit_apr(&bytes).expect("the honest artifact replays all six probes");
+        assert_eq!(model.artifact_sha256(), artifact_sha256_hex(&bytes));
+        assert_eq!(model.artifact_sha256().len(), 64);
+    }
+
+    #[test]
+    fn ordered_labels_are_read_off_the_rebuilt_head() {
+        let model = load_setfit_apr(&honest_bytes()).expect("loads");
+        assert_eq!(model.ordered_labels(), model.doc_view().ordered_labels);
+        assert_eq!(model.ordered_labels().len(), model.doc_view().head.num_labels);
+    }
+
+    #[test]
+    fn a_perturbed_probe_embedding_is_a_typed_replay_failure_naming_the_probe() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        // Move ONE component far outside the contract's 7.63e-06 bound, and
+        // re-sign the whole artifact, so this exercises rung 7 and not rung 2.
+        let perturbed = f32_bits_hex(1.5);
+        tampered
+            .probe_mut(2)
+            .get_mut("embedding_hex")
+            .and_then(Value::as_array_mut)
+            .expect("embedding_hex")[3] = json!(perturbed);
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("probe replay is the last word before a classify-capable value exists");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ProbeReplayFailed {
+                    probe: 2,
+                    component: "embedding",
+                    index: 3,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_perturbed_probe_label_is_a_typed_replay_failure_compared_exactly() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        let recorded = tampered.probe_mut(0)["label"]
+            .as_str()
+            .expect("the probe records a label")
+            .to_string();
+        let other = super::fixture::FIXTURE_LABELS
+            .iter()
+            .find(|label| **label != recorded)
+            .expect("the fixture has three labels");
+        tampered
+            .probe_mut(0)
+            .insert("label".to_string(), json!(other));
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("a label has no tolerance; a close-enough label is a wrong answer");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ProbeReplayFailed {
+                    probe: 0,
+                    component: "label",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_probe_input_that_is_not_the_contracts_own_string_is_a_typed_replay_failure() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered
+            .probe_mut(4)
+            .insert("input".to_string(), json!("a dataset sentence"));
+        let err = load_setfit_apr(&tampered.emit())
+            .expect_err("probe inputs are fixed, synthetic and contract-resident");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ProbeReplayFailed {
+                    probe: 4,
+                    component: "input",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_probe_array_is_a_typed_replay_failure_and_a_partial_replay_is_not_a_pass() {
+        let mut tampered = Tampered::of(&honest_bytes());
+        tampered
+            .doc
+            .get_mut("probes")
+            .and_then(Value::as_array_mut)
+            .expect("probes")
+            .truncate(5);
+        let err = load_setfit_apr(&tampered.emit()).expect_err("all six replay, or none passes");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ProbeReplayFailed {
+                    component: "probe_count",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_probe_comparator_is_nan_visible_in_both_argument_positions() {
+        assert!(within(0.0, 1.0));
+        assert!(within(1.0, 1.0), "the bound itself is INSIDE");
+        assert!(!within(1.000_001, 1.0));
+        assert!(
+            !within(f64::NAN, 1.0),
+            "a NaN delta means at least one side was non-finite — a divergence in every sense"
+        );
+        assert!(!within(1.0, f64::NAN), "and in the other argument position");
+        assert!(!within(f64::NAN, f64::NAN));
+        assert!(!within(f64::INFINITY, 1.0));
+    }
+
+    #[test]
+    fn doc_view_recovers_every_apr_05_identity_field_from_the_artifact_alone() {
+        let view = super::fixture::fixture_view_full_pin_shape();
+        let model = load_setfit_apr(&honest_bytes()).expect("loads");
+        let doc = model.doc_view();
+
+        // Schema identity
+        assert_eq!(doc.schema, ARTIFACT_SCHEMA);
+        assert_eq!(doc.schema_version, ARTIFACT_SCHEMA_VERSION);
+        assert_eq!(doc.bundle_schema_version, view.bundle_schema_version);
+        assert_eq!(doc.format_id, view.format_id);
+        // Revisions and hashes
+        assert_eq!(doc.architecture.source_revision, view.architecture.source_revision);
+        assert_eq!(doc.architecture.tokenizer_sha256, view.architecture.tokenizer_sha256);
+        assert_eq!(doc.tokenizer_sha256, view.architecture.tokenizer_sha256);
+        // Pooling / truncation policy
+        assert_eq!(doc.preprocessing.pooling, view.pooling);
+        assert_eq!(doc.preprocessing.normalization, view.normalization);
+        assert_eq!(doc.preprocessing.l2_epsilon_hex, f32_bits_hex(view.l2_epsilon));
+        assert_eq!(
+            doc.preprocessing.truncation_max_sequence_length,
+            view.truncation_max_sequence_length
+        );
+        assert_eq!(doc.preprocessing.padding_mode, view.padding_mode);
+        assert_eq!(doc.preprocessing.max_length, view.max_length);
+        // Label order and head configuration
+        assert_eq!(doc.ordered_labels, view.ordered_labels);
+        assert_eq!(doc.head.n_features, view.head_n_features);
+        assert_eq!(doc.head.num_labels, view.ordered_labels.len());
+        // Seeds
+        assert_eq!(doc.root_seed, view.root_seed);
+        // Configuration and update evidence
+        assert_eq!(doc.requested_config, view.requested_config);
+        assert_eq!(doc.resolved_config, view.resolved_config);
+        assert_eq!(doc.evidence, view.evidence);
+        // Provenance, INCLUDING the data fingerprint APR-05 asks for by name
+        assert_eq!(doc.provenance, view.provenance);
+        assert_eq!(
+            doc.provenance.get("dataset_fingerprint"),
+            view.provenance.get("dataset_fingerprint")
+        );
+        assert!(doc.provenance.get("dataset_fingerprint").is_some());
+        // The naming table and the probes travelled too
+        assert_eq!(doc.hf_name_map.len(), view.tensors.len());
+        assert_eq!(doc.probes.len(), PROBE_COUNT);
+    }
+
+    #[test]
+    fn embed_returns_l2_normalized_rows_of_the_encoders_hidden_width() {
+        let model = load_setfit_apr(&honest_bytes()).expect("loads");
+        let width = model.doc_view().architecture.hidden;
+        let texts = vec!["the quick brown fox".to_string(), "ok".to_string()];
+        let rows = model.embed(&texts).expect("embed is reachable through the public API");
+
+        assert_eq!(rows.len(), texts.len());
+        for row in &rows {
+            assert_eq!(row.len(), width);
+            assert!(row.iter().all(|value| value.is_finite()));
+            let norm = f64::from(row.iter().map(|v| v * v).sum::<f32>()).sqrt();
+            assert!(
+                (norm - 1.0).abs() <= 1e-5,
+                "pooled embeddings are L2-normalized; observed norm {norm}"
+            );
+        }
+    }
+
+    #[test]
+    fn embed_on_an_empty_batch_is_a_typed_refusal_and_never_panics() {
+        let model = load_setfit_apr(&honest_bytes()).expect("loads");
+        let err = model
+            .embed(&[])
+            .expect_err("embedding nothing is a caller mistake, not an empty result");
+        assert!(
+            matches!(&err, SetFitArtifactError::EmptyEmbedBatch),
+            "got {err:?}"
+        );
     }
 }
