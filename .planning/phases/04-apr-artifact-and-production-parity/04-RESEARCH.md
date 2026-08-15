@@ -826,7 +826,10 @@ All other factual claims in this document are [VERIFIED: codebase] (read on bran
 `gsd/phase-2-contract-gate` @ d66678e7a during this session) or [VERIFIED: empirical test]
 (HashMap ordering).
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All five questions were resolved during planning; each recommendation was adopted verbatim by the
+plan set. Inline markers cite the adopting plan tasks.
 
 1. **Exact canonical tensor names for the BERT family under `tensor-names-v1.yaml`**
    - What we know: the contract maps semantic keys (e.g. `token_embedding_weight`) to per-arch
@@ -838,15 +841,23 @@ All other factual claims in this document are [VERIFIED: codebase] (read on bran
    - Recommendation: the plan's first artifact task derives the complete canonical↔HF table from
      the contract (via `pv status`/reading, not re-invention), commits it as the embedded
      `hf_name_map`, and validates completeness in the writer (missing mapping = typed error).
+   - **RESOLVED:** adopted by **04-01 Task 1** — the canonical↔HF name table is derived from
+     `tensor-names-v1.yaml` and committed into `contracts/setfit-apr-v1.yaml`; the writer
+     validates completeness with a typed error (04-02 Task 1 consumes the table as `hf_name_map`).
 2. **The D-03 hard-cap constant**
    - What we know: legitimate artifact ~90 MB; the bundle precedent chose ~2.9x headroom
      (512 MiB over ~182 MB).
    - Recommendation: 256 MiB (~2.8x over 90 MB), contract-resident in `setfit-apr-v1.yaml` with
      the derivation recorded; plus the existing 16 MB `MAX_METADATA_SIZE` as the metadata bound.
+   - **RESOLVED:** adopted — 256 MiB (268435456) is contract-resident in `setfit-apr-v1.yaml`
+     (**04-01 Task 1**) and enforced as rung 1 of `load_setfit_apr`/`read_setfit_apr_parts`
+     before any parse (**04-03 Task 1**).
 3. **HTTP route naming**
    - What we know: `/v1/predict` is taken (features-based); D-10 fixed mechanism not URL.
    - Recommendation: `POST /v1/classify` with the D-08 envelope; readiness additions on
      `/health/ready`.
+   - **RESOLVED:** adopted — `POST /v1/classify` serializing the core D-08 envelope, plus
+     `/health/ready` classifier additions (**04-08 Task 1**; parity-exercised in 04-09).
 4. **Where `apr serve` startup detection meets aprender-serve's AppState**
    - What we know: `start_realizar_server` (apr-cli) detects format by magic; aprender-serve owns
      `AppState`/router; the SetFit slot must be populated before router creation.
@@ -854,12 +865,18 @@ All other factual claims in this document are [VERIFIED: codebase] (read on bran
      startup or a parallel branch in the same function.
    - Recommendation: branch inside the existing APR-format arm after reading the typed tag —
      one detection point, no new serve command (D-10).
+   - **RESOLVED:** adopted — the branch lives inside the existing APR-format arm after the typed
+     `model_type == "setfit"` tag read; one detection point, no new serve command
+     (**04-08 Task 2**).
 5. **Contract shape** — default per Ph1 D-23: one new `contracts/setfit-apr-v1.yaml` owning
    artifact schema, load-validation ladder, cap, probe policy, parity tolerances; referencing
    `setfit-train-lifecycle-v1`, `setfit-encoder-conformance-v1`, `tensor-names-v1`,
    `tensor-layout-v1`, `apr-model-lifecycle-v1`. Must be appended to `$(CONTRACTS)` and validated
    via `pv` (schema kinds: if `pv validate` rejects, restructure to `KernelContract` shape per
    CLAUDE.md's three sanctioned options).
+   - **RESOLVED:** adopted — one new `contracts/setfit-apr-v1.yaml` authored and pv-validated in
+     **04-01 Tasks 1–2**, appended to `$(CONTRACTS)` with the blocking `contract-audit-phase4`
+     gate; the KernelContract-restructure fallback is written into 04-01 Task 1's action.
 
 ## Environment Availability
 
