@@ -393,3 +393,38 @@ forged; `AprCodec` is not re-exported from the crate root; and the lock/token/gr
 require `reload_verified_run_from_apr`, i.e. the full `load_setfit_apr` ladder plus the provenance
 identity gate. The observed route died at probe validation. Recorded so 04-07/04-09/04-15 treat
 "has a bundle" as strictly weaker than "has a verified model" — not as a phase-4 blocker.
+
+## Wave 8 close — constraints 04-10 MUST respect (orchestrator-verified, 2026-08-15)
+
+04-10 wires the Make gates. There are now **two legs it must NOT wire**, both pre-existing and
+both re-measured by the orchestrator on the post-wave-8 tree:
+
+**D-04-08-A — no whole-crate `aprender-serve` test leg.** `cargo test -p aprender-serve --lib` =
+15389 passed / 51 failed; all 51 share ONE root cause, `attempt to multiply with overflow` at
+`crates/aprender-serve/src/contract_gate.rs:428:21`. No phase-4 plan touched that file. Scope any
+serve leg to the setfit surface, or the gate is red on arrival.
+
+**D-04-09-A — no `cargo check -p apr-cli --no-default-features` leg.** Orchestrator-measured
+rc=101 (4 errors + 1 summary line). 04-09 re-measured it with the BASE manifest restored and got
+the same failure, so it predates phase 4. Cause: `inference`-gated code that is not `cfg`-gated at
+`src/commands/explain.rs:231,344`, `src/commands/diff_05_aprt_stage.rs:100`, `src/lib.rs:63`.
+04-09's plan named this leg as SAFE-02's gating evidence; that is wrong. **The green equivalent is
+`cargo check -p apr-cli --all-targets` with default features.**
+
+Known-green legs on this tree, all orchestrator-measured post-merge:
+- `cargo test -p apr-cli --lib --features setfit` -> 6751 passed / 0 failed / 15 ignored
+- `cargo test -p apr-cli --test setfit_parity --features setfit,inference` -> 20 passed / 1 ignored
+- `cargo test -p apr-cli --test setfit_cli_lifecycle --features setfit` -> 1 passed / 3 ignored
+- `cargo test -p aprender-train --lib --features setfit` -> 7920 passed / **24 failed = the
+  known-red baseline exactly**. Any train leg MUST diff failing NAMES against
+  `.planning/phases/03-faithful-two-stage-trainer-and-head/known-red-baseline.md`, never assert 0.
+
+**T-04-61 does not arise.** 04-09 measured that the `realizar` dev-dependency its plan required is
+unnecessary — `--features setfit,inference` already makes `realizar::api` reachable from an
+integration test. There is no feature unification to mitigate.
+
+**OPS-01 and OPS-02 remain UNMET** behind F-10 (a Phase 5 item). 04-12, 04-15 and 04-09 each
+declined to route around it by synthesising an APR-capable encoder, which would have compiled and
+satisfied their acceptance criteria while testing a model training never produced. 04-09's parity
+fixture IS synthetic and says so in both its module header and SUMMARY — legitimate, because its
+claim is about three *readers* of one artifact, not about the training chain.
