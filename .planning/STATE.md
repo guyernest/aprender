@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 4 context gathered
-last_updated: "2026-08-15T07:11:16.720Z"
-last_activity: 2026-08-15 -- Phase 04 planning complete
+last_updated: "2026-08-15T07:12:44.049Z"
+last_activity: 2026-08-15 -- Phase 04 execution started
 progress:
   total_phases: 5
   completed_phases: 3
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-07)
 
 **Core value:** A small labeled dataset can produce an accurate, fast, reproducible classifier that trains and runs entirely through Aprender's native Rust and APR lifecycle.
-**Current focus:** Phase 03 — faithful-two-stage-trainer-and-head
+**Current focus:** Phase 04 — apr-artifact-and-production-parity
 
 ## Current Position
 
-Phase: 03 (faithful-two-stage-trainer-and-head) — CODE-COMPLETE, VERIFICATION RETURNED human_needed
-Plan: 10 of 10 complete (03-10 merged at b002df419)
-Status: Ready to execute
-Last activity: 2026-08-15 -- Phase 04 planning complete
+Phase: 04 (apr-artifact-and-production-parity) — EXECUTING
+Plan: 1 of 16
+Status: Executing Phase 04
+Last activity: 2026-08-15 -- Phase 04 execution started
 
 **Phase 03 verification returned `human_needed` (03-VERIFICATION.md) and code review found 4
 blockers (03-REVIEW.md). 5 decisions await the human in `03-HUMAN-UAT.md`.** The verifier tried to
