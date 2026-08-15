@@ -10,7 +10,7 @@ created: 2026-08-14
 # Phase 4 — Validation Strategy
 
 > Per-phase validation contract for feedback sampling during execution.
-> Populated from 04-RESEARCH.md § Validation Architecture + the 04-01..04-11 plan set.
+> Populated from 04-RESEARCH.md § Validation Architecture + the 04-01..04-12 plan set.
 
 ---
 
@@ -51,10 +51,10 @@ created: 2026-08-14
 | 4-04-02 | 04 | 4 | OPS-04, OPS-06 | T-04-11/12 | batch cap typed (256); backend identity from execution only, no setter | unit | `cargo test -p aprender-core --features setfit --lib setfit::classify::` | ❌ W0 | ⬜ pending |
 | 4-05-01 | 05 | 4 | APR-03 | T-04-14 | foreign format refused twice (trusted + codec self-check); closure holds twice | unit | `cargo test -p aprender-train --features setfit --lib setfit::apr_codec::` | ❌ W0 | ⬜ pending |
 | 4-05-02 | 05 | 4 | APR-03 | T-04-15/16 | trusted policy closure + EXACT + production-loader cross-check; mutated byte fails typed | integration (in-lib) | `cargo test -p aprender-train --features setfit --lib setfit::apr_codec::round_trip` | ❌ W0 | ⬜ pending |
-| 4-05-03 | 05 | 4 | OPS-01 | — | zero apr-cli deps; train→save→load→embed→classify→inspect via public API only | integration | `cargo test -p aprender-train --features setfit --test setfit_apr_lifecycle` | ❌ W0 | ⬜ pending |
 | 4-06-01 | 06 | 5 | OPS-02 | T-04-17 | feature-gated namespace compiles with AND without setfit | build | `cargo check -p apr-cli --features setfit && cargo check -p apr-cli` | ✅ (checks existing crates) | ⬜ pending |
 | 4-06-02 | 06 | 5 | OPS-02, OPS-06 | T-04-17/18/19 | deny_unknown_fields config; typed CudaNotAvailable before data load; atomic temp+rename write | unit | `cargo test -p apr-cli --features setfit --lib setfit_train` | ❌ W0 | ⬜ pending |
-| 4-06-03 | 06 | 5 | OPS-02 | T-04-19 | end-to-end tiny-fixture train leg (tier3-weight) | integration (ignored) | `cargo test -p apr-cli --features setfit --lib setfit_train -- --ignored --include-ignored` | ❌ W0 | ⬜ pending |
+| 4-06-03 | 06 | 5 | OPS-02 | T-04-19 | end-to-end tiny-fixture train leg (tier3-weight) | integration (ignored) | `cargo test -p apr-cli --features setfit --lib setfit_train -- --include-ignored` | ❌ W0 | ⬜ pending |
+| 4-12-01 | 12 | 5 | OPS-01 | T-04-36 | zero apr-cli deps; train→save→load→embed→classify→inspect via public API only | integration | `cargo test -p aprender-train --features setfit --test setfit_apr_lifecycle` | ❌ W0 | ⬜ pending |
 | 4-07-01 | 07 | 6 | OPS-03 | T-04-20/22 | explicit-tag-only auto-detect; untagged APR stays plain (negative test) | unit | `cargo test -p apr-cli --features setfit --lib predict` | ❌ W0 | ⬜ pending |
 | 4-07-02 | 07 | 6 | APR-05 | T-04-22 | inspect recovers every identity field via the full ladder | unit | `cargo test -p apr-cli --features setfit --lib inspect` | ❌ W0 | ⬜ pending |
 | 4-07-03 | 07 | 6 | OPS-02 | T-04-21 | test split reachable only via lock→token→grant; typed refusal without lock | unit | `cargo test -p apr-cli --features setfit --lib eval::setfit` | ❌ W0 | ⬜ pending |
@@ -72,6 +72,11 @@ created: 2026-08-14
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
+*Note (revision 2): the OPS-01 lifecycle task moved from 04-05 Task 3 (wave 4) to 04-12 Task 1
+(wave 5, depends_on 04-04 + 04-05) — its classify step consumes 04-04's
+`VerifiedSetFitModel::classify`, which lands in the PARALLEL wave-4 plan and is not visible in a
+wave-4 worktree. The 4-12-01 row sits in wave-5 position above, between the 04-06 and wave-6 rows.*
+
 ---
 
 ## Wave 0 Requirements
@@ -84,7 +89,7 @@ RED step before implementation. The new test surfaces (mapping RESEARCH § Wave 
 - [ ] `crates/aprender-core/src/setfit/classify.rs` tests + envelope goldens — 04-04
 - [ ] `crates/aprender-train/src/train/setfit/apr_codec.rs` closure/determinism tests — 04-05
 - [ ] `crates/aprender-train/tests/ui/setfit_verified_model_constructed.{rs,stderr}` trybuild case — 04-03
-- [ ] `crates/aprender-train/tests/setfit_apr_lifecycle.rs` (OPS-01) — 04-05
+- [ ] `crates/aprender-train/tests/setfit_apr_lifecycle.rs` (OPS-01) — 04-12
 - [ ] apr-cli setfit_train / predict / inspect / eval / serve test modules — 04-06, 04-07, 04-08
 - [ ] aprender-serve oneshot suite — 04-08
 - [ ] `contracts/setfit-apr-v1.yaml` + `$(CONTRACTS)` append + pv validation — 04-01
@@ -105,11 +110,11 @@ All other phase behaviors have automated verification.
 
 ## Validation Sign-Off
 
-- [x] All tasks have `<automated>` verify or Wave 0 dependencies (verified against 04-01..04-11 task blocks — 30/30 tasks carry `<automated>`)
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies (verified against 04-01..04-12 task blocks — 30/30 tasks carry `<automated>`)
 - [x] Sampling continuity: no 3 consecutive tasks without automated verify (every task has one; 04-11 Task 2's checkpoint is bracketed by automated evidence commands)
 - [x] Wave 0 covers all MISSING references (tdd tasks create their own test files RED-first; no orphan MISSING markers exist in any plan)
 - [x] No watch-mode flags (audited: no `--watch`/watch-mode invocation in any `<automated>` command)
 - [x] Feedback latency < 120s (scoped per-crate filters; tier3 reserved for wave/phase gates)
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** approved 2026-08-14
+**Approval:** approved 2026-08-14 (revision 2: 4-05-03 relocated to 4-12-01; 4-06-03 libtest flags fixed)

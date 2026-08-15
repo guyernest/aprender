@@ -182,7 +182,7 @@ surfaces on the mandatory CPU profile.
   4. Rust, CLI, and native HTTP callers can classify ordered single or mixed-length batches and receive matching labels, full probabilities, optional logits, margins, token/truncation facts, latency, backend identity, and the same artifact hash in predictions and readiness.
   5. A developer can run offline executable contracts and the supported CPU build/test feature matrix to detect detached gradients, invalid data/math, leakage, label drift, artifact mismatches, and core/CLI/HTTP parity failures; an explicitly requested unavailable device fails instead of silently falling back or misreporting its backend.
 
-**Plans**: 11 plans in 9 waves
+**Plans**: 12 plans in 9 waves
 
 **Branch base**: `gsd/phase-2-contract-gate` @ d66678e7a (Phase 3 complete + UAT + CR-01..04 fixes).
 The orchestrator creates `gsd/phase-4-apr-parity` from that HEAD before dispatching wave 1; wave
@@ -204,11 +204,12 @@ Plans:
 **Wave 4** *(blocked on Wave 3; two parallel plans, zero file overlap)*
 
 - [ ] 04-04-PLAN.md — ClassifyResponse envelope (D-08) + VerifiedSetFitModel::classify + execution-derived backend identity (D-12) (wave 4)
-- [ ] 04-05-PLAN.md — AprCodec sealed adapter + APR-03 round trip at Tolerance::EXACT + OPS-01 public-API lifecycle proof (wave 4)
+- [ ] 04-05-PLAN.md — AprCodec sealed adapter + APR-03 round trip at Tolerance::EXACT (wave 4; OPS-01 lifecycle proof moved to 04-12)
 
-**Wave 5** *(blocked on Wave 4)*
+**Wave 5** *(blocked on Wave 4; two parallel plans, zero file overlap)*
 
 - [ ] 04-06-PLAN.md — `apr setfit train`: setfit feature, namespace, config-file-first adapter, atomic write, fail-closed device gate (wave 5)
+- [ ] 04-12-PLAN.md — OPS-01 public-API lifecycle proof (train -> save -> load -> embed -> classify -> inspect) + cargo-tree boundary evidence (wave 5; needs 04-04's classify + 04-05's AprCodec)
 
 **Wave 6** *(blocked on Wave 5; two parallel plans, zero file overlap)*
 
