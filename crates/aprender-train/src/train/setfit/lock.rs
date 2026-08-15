@@ -42,6 +42,7 @@ use sha2::{Digest, Sha256};
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
 use aprender_contrastive_data::split::{Split, Test};
 
+use super::credential::SetFitCredential;
 use super::evaluate::{ValidationEvaluation, ValidationEvaluationWire, ValidationMetricKind};
 use super::{ArtifactReloadedAndVerified, SetFitRun};
 
@@ -572,21 +573,27 @@ impl SelectionLock {
 
     /// Mint a canonical-test token for the model this lock CHOSE.
     ///
-    /// # It takes the run, not bytes
+    /// # It takes a CREDENTIAL OBJECT, not bytes
     ///
     /// A `[u8; 32]` parameter here would let a caller pass the locked hash and then evaluate a
     /// different artifact: the check would pass, the token would be valid, and nothing
     /// downstream would ever see the substitution. Reading `artifact_hash()` off the supplied
-    /// run makes the identity a property of the object being granted access.
+    /// credential makes the identity a property of the object being granted access.
+    ///
+    /// [`SetFitCredential`] is SEALED, so widening this parameter from the concrete
+    /// `&SetFitRun<ArtifactReloadedAndVerified>` (04-17 G2) did not widen who can satisfy it:
+    /// an out-of-crate type that returned three strings of its choosing would be exactly the
+    /// byte-array parameter above wearing a struct, and it does not compile —
+    /// `tests/ui/setfit_external_credential_impl.rs`.
     ///
     /// # Errors
     ///
     /// [`LockError::LockHashMismatch`] for a record that no longer hashes to its digest, and
-    /// [`LockError::StaleLock`] naming BOTH hashes when the supplied run is not the locked one —
-    /// which is what a lock-then-keep-tuning-then-test sequence produces.
-    pub fn mint_test_token(
+    /// [`LockError::StaleLock`] naming BOTH hashes when the supplied model is not the locked
+    /// one — which is what a lock-then-keep-tuning-then-test sequence produces.
+    pub fn mint_test_token<C: SetFitCredential>(
         &self,
-        model: &SetFitRun<ArtifactReloadedAndVerified>,
+        model: &C,
     ) -> Result<CanonicalTestToken, LockError> {
         // FIRST, before the identity comparison: a record that no longer hashes to its digest is
         // not a lock, and comparing against a field somebody may have edited would make the
@@ -661,20 +668,46 @@ impl SetFitRun<ArtifactReloadedAndVerified> {
         candidates: Vec<SelectionCandidate>,
         rule: SelectionRule,
     ) -> Result<SelectionLock, LockError> {
-        let mine = self.artifact_hash();
-        if !candidates.iter().any(|candidate| candidate.artifact_hash() == mine) {
-            return Err(LockError::ChosenModelNotACandidate {
-                artifact_hash: mine,
-                candidates: candidates.len(),
-            });
-        }
-        SelectionLock::from_candidates(
-            candidates,
-            rule,
-            &self.selection_semantic_hash(),
-            &hex::encode(self.selection().ledger_hash()),
-        )
+        self::create_selection_lock(self, candidates, rule)
     }
+}
+
+/// Commit a selection decision from any [`SetFitCredential`] — the ONE implementation.
+///
+/// # Why this is a free function and the method above delegates to it
+///
+/// The other two doors ([`SelectionLock::mint_test_token`], [`CanonicalTestAccess::grant`])
+/// are already free-standing enough to take a generic parameter. `create_selection_lock` was
+/// an inherent method on the train-time run, and 04-17 needed it reachable from a fresh
+/// process too. Copying the body into a generic function would have produced TWO
+/// candidate-membership checks — and the day one of them gained a condition the other did
+/// not, a lock created one way would accept a candidate set the other way refused. OPS-03
+/// says one implementation per operation; this is it, and the method above is a one-line
+/// forward so every existing call site keeps its spelling and its behaviour.
+///
+/// # Errors
+///
+/// [`LockError::ChosenModelNotACandidate`] when the credential's artifact is absent from the
+/// candidate set, plus every candidate-consistency failure
+/// [`SelectionLock::from_candidates`] reports.
+pub fn create_selection_lock<C: SetFitCredential>(
+    model: &C,
+    candidates: Vec<SelectionCandidate>,
+    rule: SelectionRule,
+) -> Result<SelectionLock, LockError> {
+    let mine = model.artifact_hash();
+    if !candidates.iter().any(|candidate| candidate.artifact_hash() == mine) {
+        return Err(LockError::ChosenModelNotACandidate {
+            artifact_hash: mine,
+            candidates: candidates.len(),
+        });
+    }
+    SelectionLock::from_candidates(
+        candidates,
+        rule,
+        &model.selection_semantic_hash(),
+        &hex::encode(model.selection_ledger_hash()),
+    )
 }
 
 /// Proof that a lock was created and that its chosen artifact is a particular model.
@@ -747,13 +780,22 @@ impl CanonicalTestAccess {
     /// profile is a different `PreparedDataset` parameterisation with no `test()` at all, so a
     /// compatibility profile is now refused one step earlier — at the parameter, not inside.
     ///
+    /// # The model parameter is a SEALED credential (04-17 G2)
+    ///
+    /// `model` widened from `&SetFitRun<ArtifactReloadedAndVerified>` to any
+    /// [`SetFitCredential`] so that `apr eval --split test`, running in a process that never
+    /// trained anything, can reach this door at all. The widening is safe for exactly one
+    /// reason: the trait is sealed, so the set of types that satisfy it is this crate's to
+    /// choose. An openly implementable trait here would be a caller-supplied artifact hash
+    /// with extra steps.
+    ///
     /// # Errors
     ///
     /// [`LockError::TokenModelMismatch`] naming both hashes, or
     /// [`LockError::TokenDatasetMismatch`] naming both dataset fingerprints.
-    pub fn grant<'a>(
+    pub fn grant<'a, C: SetFitCredential>(
         token: CanonicalTestToken,
-        model: &SetFitRun<ArtifactReloadedAndVerified>,
+        model: &C,
         dataset: &'a PreparedDataset<Canonical>,
     ) -> Result<CanonicalTestGrant<'a>, LockError> {
         let model_artifact_hash = model.artifact_hash();

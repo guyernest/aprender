@@ -38,6 +38,8 @@ pub mod baseline;
 /// The complete deterministic state of a finished run, and its canonical wire form (03-08).
 pub mod bundle;
 pub mod config;
+/// The sealed credential the lock doors are typed against (04-17 G2, D-11).
+pub mod credential;
 pub mod epoch;
 /// Canonical-validation evaluation: the trusted evaluator and its bound metric (03-09).
 pub mod evaluate;
