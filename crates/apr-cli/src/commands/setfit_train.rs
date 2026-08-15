@@ -76,63 +76,27 @@ const MODEL_DIR_REMEDY: &str = "Point --model-dir at a pinned all-MiniLM-L6-v2 c
      the directory.";
 
 // ==========================================================================================
-// KNOWN GAP: the verified artifact's bytes are not reachable from outside aprender-train
+// CLOSED GAP (04-17 G1): the verified artifact's bytes ARE now reachable
 // ==========================================================================================
-
-/// Why this command cannot yet write its output, stated once, in full.
-///
-/// This is the only step of the plan's seven that the shipped library cannot serve, and
-/// it is surfaced as a typed refusal rather than worked around. The two ways around it
-/// are both worse than the gap:
-///
-/// * **Re-serialize here.** `SetFitBundle::from_run_parts` is `pub(crate)`, so an
-///   adapter cannot obtain a bundle to hand to `AprCodec::serialize`. Assembling a
-///   `SetFitArtifactView` from the run's rebuilt encoder and head instead would be a
-///   SECOND implementation of the bundle -> artifact mapping that 04-05 proved field by
-///   field — and the bytes it produced would not be the bytes that were verified, which
-///   is precisely the "the served model is the evaluated model" claim this phase exists
-///   to make true.
-/// * **Widen the library here.** The door belongs in
-///   `crates/aprender-train/src/train/setfit/`, which this plan does not own: the wave-5
-///   ownership contract splits `apr-cli` (this plan) from `aprender-train` (04-12 and
-///   04-16, both running concurrently).
-///
-/// 04-12's plan states the phase's rule for exactly this situation — "if a public-API gap
-/// blocks the test, STOP and surface; that gap is itself an OPS-01 finding, not something
-/// to patch around by editing core or train sources here."
-const ARTIFACT_BYTES_GAP: &str = "the verified artifact's BYTES are not reachable through \
-     aprender-train's public API. `SetFitRun::<HeadFitted>::verify_artifact` returns a \
-     verified RUN, and the trusted policy behind it drops the artifact bytes internally \
-     (keeping only their length, deliberately, so ~180 MB is not held alongside the rebuilt \
-     model). Writing the file needs one new public door in \
-     crates/aprender-train/src/train/setfit/ — for example \
-     `SetFitRun::<ArtifactReloadedAndVerified>::into_artifact_bytes(self) -> Vec<u8>`. \
-     Re-serializing in the CLI is NOT an acceptable substitute: it would be a second \
-     implementation of the bundle-to-artifact mapping, and the bytes written would not be \
-     the bytes that were verified.";
-
-/// Take the verified artifact's bytes.
-///
-/// Every value this function needs already exists inside the verified run; the library
-/// simply has no accessor that hands the bytes back. The signature is written the way it
-/// will be written once the door lands, so closing the gap is a one-line change here.
-///
-/// # Errors
-///
-/// Always, today: [`CliError::Aprender`] carrying [`ARTIFACT_BYTES_GAP`].
-fn verified_artifact_bytes(run: &SetFitRun<VerifiedState>) -> Result<Vec<u8>> {
-    // The hash IS reachable, which is what makes the gap precise rather than vague: the
-    // run can tell a caller what the artifact's digest is and cannot hand over the bytes
-    // that digest was taken over.
-    let _recorded_hash = run.artifact_hash();
-    Err(CliError::Aprender(format!(
-        "trained and verified successfully, but the artifact could not be written: \
-         {ARTIFACT_BYTES_GAP}"
-    )))
-}
-
-/// The lifecycle state `verify_artifact` mints, named once so the signature above reads.
-type VerifiedState = entrenar::train::setfit::ArtifactReloadedAndVerified;
+//
+// This block used to hold `ARTIFACT_BYTES_GAP` and a `verified_artifact_bytes` that always
+// returned a typed refusal. `verify::run_verify_policy` dropped the artifact buffer and kept
+// only `bytes.len()`, so this command could report an artifact's SHA-256 and could not write
+// the file that digest was of. Both of the ways around it were worse than the gap and neither
+// was taken: re-serializing here would be a SECOND implementation of the bundle -> artifact
+// mapping whose output is not what was verified, and widening the library was outside 04-06's
+// wave-5 file ownership.
+//
+// Plan 04-17 landed the door in the crate that owns it:
+// `SetFitRun::<ArtifactReloadedAndVerified>::into_artifact_bytes(self) -> Vec<u8>`, handing
+// back the exact `Vec` the policy hashed and closed — `verify_into_artifact_bytes_are_the_
+// hashed_bytes` re-hashes it and requires the digest to equal `artifact_hash()`. So the bytes
+// written below and the digest printed beside them cannot disagree.
+//
+// The door CONSUMES the run, which is the one thing a caller has to arrange for: every value
+// the completion report needs is read before the write. There is no local wrapper — this
+// module calls the library door exactly once, and
+// `setfit_train_e2e_records_the_blocker_that_stops_short_of_an_artifact` asserts that.
 
 // ==========================================================================================
 // Test-only fault-injection seam (the shape `data_contrastive` established)
@@ -674,17 +638,29 @@ pub(crate) fn run(
         .verify_artifact(&AprCodec::new())
         .map_err(|e| train_error(&e))?;
 
-    // (6) The write. One rename site, no-clobber, temp in the destination directory.
-    let bytes = verified_artifact_bytes(&verified)?;
+    // (6) The report's three recorded values, read BEFORE the write — `into_artifact_bytes`
+    //     consumes the run, deliberately (a borrowing door would let a caller hold ~90 MB of
+    //     artifact and the whole live model at once). Reading them here is not a workaround:
+    //     they are recorded facts about a run that has finished, and the file about to be
+    //     written is the artifact they describe.
+    let artifact_sha256 = verified.artifact_hash();
+    let artifact_format_id = verified.artifact_format_id().to_string();
+    let evidence_table_hash = verified.evidence_table_hash().to_string();
+
+    // (7) The write. One rename site, no-clobber, temp in the destination directory. These
+    //     are the bytes the trusted policy hashed and round-trip-closed, not a
+    //     re-serialization of them, so `artifact_sha256` above is genuinely this file's
+    //     digest.
+    let bytes = verified.into_artifact_bytes();
     atomic_write(output_path, &bytes, force)?;
 
-    // (7) The report, from the run's own recorded values.
+    // (8) The report, from the run's own recorded values.
     let report = TrainReport {
         command: "setfit-train",
         output: output_path.display().to_string(),
-        artifact_sha256: verified.artifact_hash(),
-        artifact_format_id: verified.artifact_format_id(),
-        evidence_table_hash: verified.evidence_table_hash(),
+        artifact_sha256,
+        artifact_format_id: &artifact_format_id,
+        evidence_table_hash: &evidence_table_hash,
         provenance: &inputs.provenance,
         resolved,
     };
@@ -1074,8 +1050,8 @@ mod tests {
     // # What they can and cannot assert today
     //
     // They drive `run` through every stage the shipped libraries can serve and stop at
-    // the first one they cannot. Two independent, MEASURED, phase-level blockers stand
-    // between this command and a written artifact, and neither is this plan's to fix:
+    // the first one they cannot. 04-06 recorded TWO independent, measured, phase-level
+    // blockers between this command and a written artifact. **04-17 closed the second.**
     //
     // 1. **No encoder can both pass the calibration gate AND carry an artifact**
     //    (orchestrator note F-10, measured by 04-05). `tune_encoder` judges
@@ -1085,11 +1061,14 @@ mod tests {
     //    256-token probe). The production pin is the other side of the same coin: it
     //    computes every probe and returns `UncalibratedRegime`, which 04-CONTEXT records
     //    as a deliberate Phase 5 item — "Phase 4 does not silently widen the regime".
-    // 2. **The verified artifact's bytes are not reachable out-of-crate** — see
-    //    [`ARTIFACT_BYTES_GAP`].
+    //    **This is now the SOLE remaining cause**, and it is a Phase 5 item.
+    // 2. ~~The verified artifact's bytes are not reachable out-of-crate.~~ CLOSED by
+    //    04-17 G1: `SetFitRun::<ArtifactReloadedAndVerified>::into_artifact_bytes`. The
+    //    second test below now asserts the door LANDED and is called exactly once, which
+    //    is the successor of the assertion that used to name the gap.
     //
     // So these tests assert the stages that DO run, the typed refusal at the first that
-    // does not, and each blocker BY NAME — so that fixing either one turns a test red
+    // does not, and the remaining blocker BY NAME — so that fixing it turns a test red
     // and points its author at the next thing to do, rather than leaving a comment
     // nobody re-reads.
     // --------------------------------------------------------------------------------
@@ -1104,7 +1083,11 @@ mod tests {
     #[test]
     #[ignore = "integration weight: builds a real benchmark directory and selection. Run as \
                 its own invocation — `cargo test -p apr-cli --features setfit --lib \
-                setfit_train -- --ignored` (04-10's setfit-cli-tests leg)"]
+                setfit_train -- --ignored` (04-10's setfit-cli-tests leg). It also cannot \
+                reach a written artifact, and since 04-17 closed the artifact-bytes door \
+                the SOLE remaining cause is F-10: no encoder both passes CALIBRATED_REGIMES \
+                and computes the artifact's contract-resident probes. That is a deliberate \
+                Phase 5 item, not a defect in this command"]
     fn setfit_train_e2e_clears_every_stage_up_to_the_encoder_over_real_phase_two_artifacts() {
         let temp = TempDir::new().expect("tempdir");
         let (data, selection) = phase2_artifacts(temp.path());
@@ -1174,8 +1157,25 @@ mod tests {
         );
     }
 
+    /// The ONE remaining blocker, plus the proof that the other one is gone.
+    ///
+    /// # Un-ignored by 04-17, and it was never the heavy one
+    ///
+    /// It was `#[ignore]`d only because it was authored beside the e2e above and inherited
+    /// its reason. It builds no benchmark directory and no selection: it stats three files
+    /// and scans this module's own source, so running it in the default invocation costs
+    /// nothing and buys a gate on both halves.
+    ///
+    /// # What changed, and what deliberately did not
+    ///
+    /// The BLOCKER 1 half (F-10) is byte-for-byte what 04-06 wrote — it is still true and
+    /// still the reason this command cannot produce an artifact. The BLOCKER 2 half was
+    /// `ARTIFACT_BYTES_GAP.contains("into_artifact_bytes")` — "the gap must keep naming the
+    /// exact door that closes it". That door landed, so the assertion's successor is that
+    /// the door is CALLED, exactly once, and that no refusal constant survived it. The claim
+    /// was not weakened to make the test green; it advanced to the next thing that can go
+    /// wrong.
     #[test]
-    #[ignore = "integration weight: same invocation as the e2e above"]
     fn setfit_train_e2e_records_the_blocker_that_stops_short_of_an_artifact() {
         // BLOCKER 1, asserted structurally rather than described. The slice fixture is a
         // real MiniLM slice — the pinned tokenizer plus a carved-down encoder — and the
@@ -1200,20 +1200,35 @@ mod tests {
              90 MB pin is an offline prerequisite, not a committed artifact"
         );
 
-        // BLOCKER 2, kept honest by naming the constant. `verified_artifact_bytes` is the
-        // ONE site the door lands at; when it does, this assertion is what makes its
-        // author come back and finish the write path and its e2e assertions.
-        assert!(
-            ARTIFACT_BYTES_GAP.contains("into_artifact_bytes"),
-            "the gap must keep naming the exact door that closes it — a blocker recorded \
-             without its remedy is a complaint"
+        // BLOCKER 2 IS CLOSED (04-17 G1), and this is what keeps it closed.
+        //
+        // The library door is called EXACTLY ONCE. More than one call site would mean more
+        // than one path from a verified run to a file, and the phase's whole claim — the
+        // served model is the evaluated model — rests on there being one.
+        let door = needle(&["verified.into_artifact_", "bytes()"]);
+        assert_eq!(
+            SETFIT_TRAIN_SOURCE.matches(&door).count(),
+            1,
+            "exactly one call to the library's bytes door, so there is exactly one path \
+             from a verified run to a file on disk"
         );
-        let write_site = needle(&["verified_artifact_", "bytes(&verified)?"]);
+
+        // And it is what gets written: the write takes the bytes that call returned, so a
+        // future edit that re-serialized instead would have to change this line too.
+        let write_site = needle(&["atomic_write(output_path, &", "bytes, force)?"]);
         assert_eq!(
             SETFIT_TRAIN_SOURCE.matches(&write_site).count(),
             1,
-            "and there must be exactly one call site for it, so closing the gap is a \
-             one-function change rather than a search"
+            "and those bytes are the ones written"
+        );
+
+        // No refusal constant survived. A stale gap message left in the source would tell
+        // a later reader the door is still missing, which is now false.
+        let stale_gap = needle(&["ARTIFACT_BYTES_", "GAP:"]);
+        assert_eq!(
+            SETFIT_TRAIN_SOURCE.matches(&stale_gap).count(),
+            0,
+            "the gap constant must be gone, not merely unused"
         );
     }
 

@@ -38,6 +38,8 @@ pub mod baseline;
 /// The complete deterministic state of a finished run, and its canonical wire form (03-08).
 pub mod bundle;
 pub mod config;
+/// The sealed credential the lock doors are typed against (04-17 G2, D-11).
+pub mod credential;
 pub mod epoch;
 /// Canonical-validation evaluation: the trusted evaluator and its bound metric (03-09).
 pub mod evaluate;
@@ -375,6 +377,30 @@ impl VerifyReport {
     }
 }
 
+/// The verified artifact's bytes, with a `Debug` that prints their LENGTH and never them.
+///
+/// # Why the bytes are not a bare `Vec<u8>` field
+///
+/// [`ArtifactVerifiedEvidence`] is `Debug`, and it must be — `LifecycleState::Evidence`
+/// requires it, so `{:?}` on any `SetFitRun` reaches this value. A bare `Vec<u8>` under
+/// `#[derive(Debug)]` renders every byte: on the calibrated fixture that is 1,824,298
+/// bytes rendered as `[123, 34, 115, ...]` — several megabytes of text — in whatever log
+/// line formatted the run, and on a full pin it is two orders of magnitude worse than
+/// that. Retaining the bytes (04-17 G1) must not turn a debug
+/// print into a denial of service, so the newtype makes the short rendering the only one
+/// available rather than a discipline every caller has to remember.
+///
+/// It carries no accessor. The bytes leave through exactly one door —
+/// [`SetFitRun::<ArtifactReloadedAndVerified>::into_artifact_bytes`] — which consumes the
+/// run.
+pub(crate) struct RetainedArtifactBytes(pub(crate) Vec<u8>);
+
+impl fmt::Debug for RetainedArtifactBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetainedArtifactBytes").field("len", &self.0.len()).finish()
+    }
+}
+
 /// The final state's evidence: the whole recorded chain, plus the artifact's identity.
 ///
 /// The `head` here is the REBUILT one. The head that was fitted is dropped before
@@ -392,6 +418,9 @@ pub struct ArtifactVerifiedEvidence {
     pub(crate) format_id: String,
     pub(crate) verify: VerifyReport,
     pub(crate) probe: VerifyProbe,
+    /// The bytes `artifact_hash` was taken over. No accessor; see
+    /// [`SetFitRun::<ArtifactReloadedAndVerified>::into_artifact_bytes`].
+    pub(crate) artifact_bytes: RetainedArtifactBytes,
 }
 
 impl ArtifactVerifiedEvidence {
@@ -793,6 +822,7 @@ impl SetFitRun<HeadFitted> {
             outcome.report,
             outcome.probe,
             outcome.head,
+            outcome.bytes,
         );
         Ok(SetFitRun {
             encoder: outcome.encoder,
@@ -927,6 +957,51 @@ impl SetFitRun<ArtifactReloadedAndVerified> {
     #[must_use]
     pub fn artifact_format_id(&self) -> &str {
         &self.evidence.format_id
+    }
+}
+
+/// The bytes door (04-17 G1, APR-04 / OPS-01 / OPS-02).
+///
+/// # Why this is a SEPARATE block from the accessors above
+///
+/// The same reason `create_selection_lock` lives in `lock.rs`: the block above is THE
+/// reproducibility surface, and `verify_reproducibility_accessors_are_read_only_and_complete`
+/// binds a SHARED reference and calls every member through it — which is what proves each one
+/// is read-only. [`Self::into_artifact_bytes`] CONSUMES the run and therefore cannot be called
+/// through `&T` at all. Putting it in that block would have forced the guard to stop making its
+/// claim. It is counted by its own assertion in `verify_tests.rs` instead, so neither surface
+/// can grow unobserved.
+impl SetFitRun<ArtifactReloadedAndVerified> {
+    /// Take the artifact's bytes — the exact ones that were hashed, reloaded and closed.
+    ///
+    /// # This is the ONLY public door to them, and it CONSUMES the run
+    ///
+    /// Before 04-17 there was no door at all. `verify::run_verify_policy` dropped the buffer
+    /// and kept `bytes.len()`, and `VerifyReport::artifact_bytes()` — a `usize` — was the trap:
+    /// it compiles and reads as if the payload were in hand. The measured consequence was that
+    /// `apr setfit train` could report an artifact's SHA-256 and could not write the file that
+    /// digest is of (04-06 THE FINDING, 04-12 OPS-01-F1, both proved with rustc).
+    ///
+    /// It consumes `self` by the phase's explicit decision. A borrowing accessor would let a
+    /// caller hold the bytes AND go on using the run, which means the ~90 MB buffer and the
+    /// whole live model stay resident together for as long as the caller likes. Consuming makes
+    /// the handover a transfer: the run's encoder, dataset and evidence are dropped as this
+    /// returns, so the peak is one buffer, not a buffer plus a model. A caller that needs both
+    /// the file and the lock/token chain must therefore create the lock BEFORE writing the
+    /// file — which is the correct order anyway, since a lock records a selection decision and
+    /// the file is its subject.
+    ///
+    /// # What "the exact ones" means, and how it is checked
+    ///
+    /// The `Vec` returned here is the one [`verify::run_verify_policy`] serialized, hashed with
+    /// SHA-256 and required to be reproduced by re-serializing the reloaded bundle. It is moved,
+    /// never rebuilt. `verify_into_artifact_bytes_are_the_hashed_bytes` re-hashes the return
+    /// value and requires the digest to equal [`Self::artifact_hash`] — a test that only checked
+    /// for a non-empty `Vec` would pass for a re-serialization, which is precisely the substitute
+    /// this door exists to make unnecessary.
+    #[must_use]
+    pub fn into_artifact_bytes(self) -> Vec<u8> {
+        self.evidence.artifact_bytes.0
     }
 }
 

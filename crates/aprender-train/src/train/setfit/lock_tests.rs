@@ -601,13 +601,22 @@ fn lock_candidate_artifact_hash_comes_from_its_evaluation() {
 // The non-existence assertions — this is where the two review fixes are pinned
 // ===========================================================================================
 
-/// `mint_test_token` takes the run OBJECT and no hash bytes. This is review fix 2.
+/// `mint_test_token` takes a CREDENTIAL OBJECT and no hash bytes. This is review fix 2.
+///
+/// # 04-17 widened the parameter, and the claim survived the widening
+///
+/// It used to read `&SetFitRun<ArtifactReloadedAndVerified>`. The claim was never about that
+/// concrete type — it is that the identity is READ OFF AN OBJECT rather than supplied beside
+/// it, so a caller cannot pass the locked hash and then evaluate something else. `&C` where
+/// `C: SetFitCredential` keeps exactly that, because the trait is sealed: the set of types a
+/// caller can supply is this crate's, and `credential_seal_is_a_private_supertrait` plus
+/// `tests/ui/setfit_external_credential_impl.rs` are what hold that half.
 #[test]
 fn lock_mint_test_token_takes_the_run_object_and_no_hash_bytes() {
-    let signature = signature_after(LOCK_SOURCE, "pub fn mint_test_token(");
+    let signature = signature_after(LOCK_SOURCE, "pub fn mint_test_token<");
     assert!(
-        signature.contains("&SetFitRun<ArtifactReloadedAndVerified>"),
-        "minting must read the hash off the run: `{signature}`",
+        signature.contains("C: SetFitCredential") && signature.contains("model: &C"),
+        "minting must read the hash off a sealed credential OBJECT: `{signature}`",
     );
     assert!(
         !signature.contains("[u8; 32]") && !signature.contains("[u8;32]"),
@@ -615,6 +624,14 @@ fn lock_mint_test_token_takes_the_run_object_and_no_hash_bytes() {
          artifact: `{signature}`",
     );
     assert!(!signature.contains("artifact_hash:"), "`{signature}`");
+
+    // And the door is still reachable with the train-time run, unchanged. This is the
+    // compile-time half of "the retype altered no train-time behaviour": if the run stopped
+    // satisfying the credential, every existing call site would break and this line first.
+    let run = verified_run();
+    let lock = lock_of(vec![candidate("config", &run.artifact_hash(), 0.9)])
+        .expect("a lock over this run's artifact must build");
+    let _: Result<CanonicalTestToken, LockError> = lock.mint_test_token(&run);
 }
 
 /// `from_candidates` has no `chosen` parameter. This is review fix 3.
@@ -653,9 +670,13 @@ fn lock_token_has_no_public_constructor_and_no_public_field() {
 /// admitted another corpus's rows under the locked corpus's `lock_hash`.
 #[test]
 fn lock_grant_signature_takes_the_token_the_model_and_the_canonical_dataset() {
-    let signature = signature_after(LOCK_SOURCE, "pub fn grant<'a>(");
+    let signature = signature_after(LOCK_SOURCE, "pub fn grant<'a, ");
     assert!(signature.contains("token: CanonicalTestToken"), "`{signature}`");
-    assert!(signature.contains("&SetFitRun<ArtifactReloadedAndVerified>"), "`{signature}`");
+    assert!(
+        signature.contains("C: SetFitCredential") && signature.contains("model: &C"),
+        "the model is a SEALED credential object read at access time, never a hash: \
+         `{signature}`",
+    );
     assert!(signature.contains("&'a PreparedDataset<Canonical>"), "`{signature}`");
     assert!(
         !signature.contains("Split<Test>"),
@@ -705,6 +726,28 @@ fn lock_run_side_door_is_a_single_read_only_method() {
         "the lock's door on the run must stay a single method, or this guard stops describing it",
     );
     assert!(block.contains("pub fn create_selection_lock("), "{block}");
+
+    // 04-17: the door's BODY moved to a free function over `SetFitCredential` so a fresh
+    // process can reach it. That is only sound if the method became a FORWARD rather than a
+    // copy — two candidate-membership checks can drift, and a lock created one way would
+    // then accept a candidate set the other way refused (OPS-03, one implementation per
+    // operation). Both halves are asserted: the delegation is present, and the refusal that
+    // check produces is constructed in exactly one place in the whole file.
+    assert!(
+        block.contains("self::create_selection_lock(self, candidates, rule)"),
+        "the run-side door must forward to the single implementation: {block}",
+    );
+    assert_eq!(
+        LOCK_SOURCE.matches("Err(LockError::ChosenModelNotACandidate {").count(),
+        1,
+        "the candidate-membership check must exist exactly once",
+    );
+    let free = signature_after(LOCK_SOURCE, "pub fn create_selection_lock<");
+    assert!(
+        free.contains("C: SetFitCredential") && free.contains("model: &C"),
+        "and the single implementation must be the generic one: `{free}`",
+    );
+
     assert!(
         block.contains("&self,") && !block.contains("&mut self"),
         "the door must take a SHARED borrow: creating a lock cannot alter the run it records",

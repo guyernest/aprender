@@ -56,7 +56,10 @@ use sha2::{Digest, Sha256};
 use super::bundle::{BundleError, SetFitBundle};
 use super::config::ResolvedSetFitConfig;
 use super::evidence::EvidenceSummary;
-use super::{head_input, ArtifactVerifiedEvidence, SetFitTrainError, VerifyProbe, VerifyReport};
+use super::{
+    head_input, ArtifactVerifiedEvidence, RetainedArtifactBytes, SetFitTrainError, VerifyProbe,
+    VerifyReport,
+};
 
 /// The seal. Crate-visible module, public-in-private trait — the standard Rust idiom.
 ///
@@ -607,6 +610,13 @@ pub(crate) struct VerifiedOutcome {
     pub(crate) probe: VerifyProbe,
     /// SHA-256 of the artifact's bytes.
     pub(crate) artifact_hash: [u8; 32],
+    /// THE bytes — the ones [`Self::artifact_hash`] was taken over.
+    ///
+    /// Not a re-serialization and not a copy taken somewhere else: this is the same
+    /// `Vec` [`close`] hashed and [`close_round_trip`] closed, moved rather than
+    /// rebuilt, so no route exists by which the value handed out could differ from the
+    /// value that was verified.
+    pub(crate) bytes: Vec<u8>,
 }
 
 /// The whole trusted sequence, driven from [`super::SetFitRun::verify_artifact`].
@@ -647,13 +657,45 @@ pub(crate) fn run_verify_policy<C: SetFitCodec>(
     // entirely minted the final state.
     close_round_trip(codec, &reloaded, &bytes)?;
 
-    // The artifact has done its whole job by here: it has been hashed, reloaded and
-    // shown to be what the reloaded value re-serializes to, and only its LENGTH is
-    // still wanted. Dropping it before the rebuild is not tidiness — on a full pin it
-    // is ~180 MB that would otherwise stay live underneath the reloaded bundle's hex
-    // strings, the decoded tensors and a second complete model.
+    // THE ARTIFACT IS NOW RETAINED, AND THIS COMMENT USED TO SAY THE OPPOSITE.
+    //
+    // It read: "only its LENGTH is still wanted ... on a full pin it is ~180 MB that
+    // would otherwise stay live". The first half was measured false by plan 04-17 —
+    // wanting only the length is exactly what left `apr setfit train` able to report an
+    // artifact's SHA-256 and unable to write the file that digest is of, because
+    // `SetFitBundle::from_run_parts` is `pub(crate)` and there is no other public route
+    // to the bytes. Re-serializing them out-of-crate would produce a SECOND
+    // implementation of the twenty-field mapping whose output is not what was verified,
+    // which is the one claim this whole phase exists to make true.
+    //
+    // So `bytes` now moves into `VerifiedOutcome` and reaches the caller through the
+    // single consuming door `SetFitRun::<ArtifactReloadedAndVerified>::into_artifact_bytes`.
+    // The length is still computed HERE, before the move, so `VerifyReport` is unchanged.
+    //
+    // What that costs, MEASURED and not estimated. `/usr/bin/time -l` around one full
+    // verify of the calibrated fixture (`verify_full_pipeline_reaches_the_final_state`,
+    // aarch64 Darwin, five runs on each side), maximum resident set size in bytes:
+    //
+    //           min          median       max
+    //   before  59,146,240   59,473,920   65,748,992
+    //   after   60,882,944   61,292,544   67,518,464
+    //   delta   +1,736,704   +1,818,624   +1,769,472
+    //
+    // The retained buffer on that fixture is 1,824,298 bytes, so the median delta
+    // accounts for it to within 0.3 percent: the cost is the artifact and nothing else.
+    // (Re-measure the buffer with `cargo test -p aprender-train --lib --features setfit
+    // verify_into_artifact_bytes -- --nocapture`.)
+    //
+    // The ~180 MB the old text cited was a FULL PIN, and it stays an estimate: no test in
+    // this repository can produce one (orchestrator note F-10 — no encoder both passes
+    // `CALIBRATED_REGIMES` and computes the artifact's contract-resident probes). The
+    // scaling is nevertheless the plain one, because the retained buffer IS the artifact:
+    // whatever a pinned artifact weighs, this holds exactly that and not a multiple of it.
+    //
+    // `drop(reloaded)` below is untouched and keeps its position. It is the LARGER
+    // buffer — the bundle carries its tensors as hex, so roughly twice the artifact —
+    // and it has no caller, so nothing was gained by holding it.
     let artifact_bytes = bytes.len();
-    drop(bytes);
 
     // (4) Rebuild from the reloaded bundle and from nothing else.
     let (mut rebuilt_encoder, rebuilt_head) = rebuild_from(&reloaded)?;
@@ -687,10 +729,15 @@ pub(crate) fn run_verify_policy<C: SetFitCodec>(
         report,
         probe: after,
         artifact_hash: hash,
+        bytes,
     })
 }
 
 /// Assemble the final state's evidence.
+///
+/// `artifact_bytes` is the buffer [`run_verify_policy`] hashed and closed, moved through
+/// unchanged. Nothing here re-serializes, re-hashes or re-derives it: the only thing that
+/// happens to it is the newtype wrapper that keeps `Debug` printing a length.
 pub(crate) fn verified_evidence(
     parts: super::HeadFittedParts,
     artifact_hash: [u8; 32],
@@ -698,6 +745,7 @@ pub(crate) fn verified_evidence(
     report: VerifyReport,
     probe: VerifyProbe,
     head: MultinomialLogisticRegression,
+    artifact_bytes: Vec<u8>,
 ) -> ArtifactVerifiedEvidence {
     ArtifactVerifiedEvidence {
         passed: parts.passed,
@@ -711,6 +759,7 @@ pub(crate) fn verified_evidence(
         format_id: format_id.to_string(),
         verify: report,
         probe,
+        artifact_bytes: RetainedArtifactBytes(artifact_bytes),
     }
 }
 
