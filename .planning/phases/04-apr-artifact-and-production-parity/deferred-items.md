@@ -80,3 +80,42 @@ recorded artifact values.
 
 **Action:** someone should run these four modules on a clean checkout of `main` to
 establish whether they are pre-existing or environmental to this machine.
+
+---
+
+## D-04-08-A — 51 `aprender-serve --lib` tests fail on ONE arithmetic overflow in `contract_gate.rs:428`
+
+Discovered by plan 04-08, wave 7. **Not fixed** — `contract_gate.rs` is outside this
+plan's files and the fix needs a decision about the intended width.
+
+`cargo test -p aprender-serve --features setfit --lib` → `15389 passed; 51 failed`. Every
+one of the 51 panics at the SAME line, and the message is the same:
+
+```
+thread '...' panicked at crates/aprender-serve/src/contract_gate.rs:428:21:
+attempt to multiply with overflow
+```
+
+The failing tests are `apr_transformer::tests::{q4k_bytes_q6k, tests_08, tests_10}::*` (49),
+`contract_gate::tests::test_small_model_passes_resource_check` (1) and
+`convert::convert_tests_q4k_converter::test_q4k_convert_roundtrip_loadable` (1). They are
+one defect with 51 witnesses, not 51 defects.
+
+**Not caused by this plan.** This plan's diff touches `api/` (the `AppState` slot, the
+route, `HealthResponse`), `Cargo.toml` and test files. It does not touch `contract_gate.rs`,
+`apr_transformer.rs` or `convert/`, and none of those modules names `AppState`,
+`HealthResponse` or anything under `setfit`. The panic is an integer multiply in a
+resource-estimation path reached from model construction — a code path with no edge to the
+HTTP surface.
+
+**Also pre-existing and unrelated:** `cargo check -p aprender-serve --tests` is red at the
+base commit for two integration targets that have drifted from their types —
+`tests/ffn_coverage.rs` (5 × missing `OwnedQuantizedLayer::{post_attn_norm_weight,
+post_ffw_norm_weight}`) and `tests/gguf_extended_coverage.rs` (14 × missing
+`GGUFConfig::query_pre_attn_scalar`). 04-08 fixed only the `HealthResponse` initializers its
+own change broke (8 sites, 3 files) and left these 19 alone.
+
+**Action for 04-10 (gates):** an `aprender-serve` test leg must either fix
+`contract_gate.rs:428` first or be scoped by filter, because a whole-crate `cargo test
+-p aprender-serve --lib` cannot go green today and so cannot distinguish a regression from
+the standing red. 04-08's own leg is scoped: `--lib setfit` (see its SUMMARY).
