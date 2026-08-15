@@ -119,3 +119,38 @@ own change broke (8 sites, 3 files) and left these 19 alone.
 `contract_gate.rs:428` first or be scoped by filter, because a whole-crate `cargo test
 -p aprender-serve --lib` cannot go green today and so cannot distinguish a regression from
 the standing red. 04-08's own leg is scoped: `--lib setfit` (see its SUMMARY).
+
+---
+
+## D-04-09-A — `cargo check -p apr-cli --no-default-features` does not compile (pre-existing)
+
+**Found by:** plan 04-09, while verifying the Cargo.toml note plan 04-09 Task 1 step 1
+requires, which names that command as the leg SAFE-02's gating evidence is read from.
+
+**Measured twice** — on 04-09's tree, and again with the BASE manifest restored
+(`git checkout f2824611a -- crates/apr-cli/Cargo.toml`), which is a true base measurement for
+a lib-only check because 04-09's diff touches no `src/` file at all. Identical result both
+times, same four errors:
+
+```
+$ cargo check -p apr-cli --no-default-features > log 2>&1; echo "rc=$?"
+rc=101   error: could not compile `apr-cli` (lib) due to 4 previous errors
+```
+
+The four are `inference`-gated code that is not `cfg`-gated:
+
+| file | error |
+| ---- | ----- |
+| `src/commands/explain.rs:231` | `realizar::safetensors::find_sibling_file` — unlinked crate |
+| `src/commands/explain.rs:344` | same |
+| `src/commands/diff_05_aprt_stage.rs:100` | `realizar::inference_trace::save_tensor::read_tensor_file` |
+| `src/lib.rs:63` | re-exports `commands::serve::auth::apply`, which is `#[cfg(feature = "inference")]` |
+
+**Not fixed here.** All four are in files 04-09 does not own, the fix is a `cfg` decision on
+the `explain`/`diff` command surface, and 04-15 is editing `crates/apr-cli/` in the same wave.
+
+**Action for 04-10 (gates) and 04-11 (audit): do NOT wire `--no-default-features` as a leg.**
+It cannot distinguish a regression from this standing red. The leg that is green, and the one
+04-06 and 04-07 actually used, is `cargo check -p apr-cli --all-targets` with DEFAULT features
+(`setfit` OFF, `inference` ON) — the ungated build is what proves the `setfit` gating.
+04-09's Cargo.toml carries the same note beside the dev-dependency block.
