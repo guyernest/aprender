@@ -604,6 +604,64 @@ impl SetFitTrainConfig {
         self.lr_schedule
     }
 
+    /// Read the twelve knobs back out as a REQUEST, so overrides can be merged and revalidated.
+    ///
+    /// # What this is for
+    ///
+    /// D-07's `apr setfit train` is config-file-first: a file supplies the twelve knobs and
+    /// `--seed` / `--device` may override two of them. The override is applied to the REQUEST
+    /// this returns, and the result goes back through [`Self::new`] — so the merged
+    /// configuration is validated AS A WHOLE, by the same single implementation that validated
+    /// the file.
+    ///
+    /// ```ignore
+    /// let mut request = config.to_request();
+    /// request.root_seed = cli_seed;          // the override
+    /// let merged = SetFitTrainConfig::new(request)?;  // revalidated, as a whole
+    /// ```
+    ///
+    /// # The two alternatives, and why both are wrong
+    ///
+    /// Overriding a field on an already-validated [`SetFitTrainConfig`] would let an invalid
+    /// merge through: the value would never meet the knob table, and the type's promise — that
+    /// every value of it has been validated for its whole life — would be false. That is why
+    /// there is no mutable-receiver method here and why the accessors are read-only.
+    ///
+    /// Deserializing into `SetFitTrainConfigWire` and editing THAT is not possible from another
+    /// crate: the wire type is private, deliberately (see the module doc), and `apr-cli`
+    /// physically cannot name it. Plan 04-06 was originally written against that private type;
+    /// this door is what closes that finding without widening the wire form's visibility.
+    ///
+    /// # There is deliberately no `with_seed` / `with_device`
+    ///
+    /// Two doors to the same merge is how the two diverge. `to_request` plus the existing
+    /// [`Self::new`] is the whole surface, and
+    /// `falsify_config_to_request_is_the_whole_merge_surface` is what keeps it that way.
+    ///
+    /// # Round-trip note
+    ///
+    /// Feeding the result straight back to [`Self::new`] reproduces an EQUAL config: `new`'s
+    /// two canonicalizations (the freeze policy is already sorted and deduped, and
+    /// `pair_config.root_seed` already equals `root_seed`) are idempotent on a config that has
+    /// been through them once.
+    #[must_use]
+    pub fn to_request(&self) -> SetFitTrainRequest {
+        SetFitTrainRequest {
+            encoder_lr: self.encoder_lr,
+            epochs: self.epochs,
+            batch_size: self.batch_size,
+            warmup_ratio: self.warmup_ratio,
+            grad_clip_max_norm: self.grad_clip_max_norm,
+            max_length: self.max_length,
+            pair_config: self.pair_config,
+            freeze_policy: self.freeze_policy.clone(),
+            head_regularization: self.head_regularization,
+            root_seed: self.root_seed,
+            device: self.device.as_str().to_string(),
+            lr_schedule: self.lr_schedule,
+        }
+    }
+
     /// Probe the host and pair the requested form with the resolved device.
     ///
     /// # Errors
@@ -840,9 +898,11 @@ mod tests {
     ///
     /// The scans below read the file they live in, so a whole literal would appear IN
     /// `CONFIG_SOURCE`: every count would be one too high and every non-existence assertion
-    /// would fail against its own text. Assembling at runtime keeps the searched-for string
-    /// out of the file. This is not hypothetical — the first draft counted `pub fn to_request`
-    /// whole and saw 2, the definition and the assertion.
+    /// would fail against its own text. Assembling at runtime keeps the searched-for string out
+    /// of the file — INCLUDING out of this doc comment, which is where the first draft still
+    /// spelled the merge door's signature whole and made the count 2 against a source with one
+    /// definition in it. A scan of its own file is only as good as the discipline that no prose
+    /// nearby spells the needle.
     fn needle(parts: &[&str]) -> String {
         parts.concat()
     }
@@ -1398,9 +1458,7 @@ mod tests {
         assert_eq!(merged.epochs(), original.epochs());
         assert_eq!(merged.batch_size(), original.batch_size());
         assert!((merged.warmup_ratio() - original.warmup_ratio()).abs() < f64::EPSILON);
-        assert!(
-            (merged.grad_clip_max_norm() - original.grad_clip_max_norm()).abs() < f32::EPSILON
-        );
+        assert!((merged.grad_clip_max_norm() - original.grad_clip_max_norm()).abs() < f32::EPSILON);
         assert_eq!(merged.max_length(), original.max_length());
         assert_eq!(merged.freeze_policy(), original.freeze_policy());
         assert_eq!(merged.head_regularization(), original.head_regularization());
@@ -1416,10 +1474,7 @@ mod tests {
         assert_eq!(merged.pair_config().budget, original.pair_config().budget);
         assert_eq!(merged.pair_config().hard_cap, original.pair_config().hard_cap);
         assert_eq!(merged.pair_config().strategy, original.pair_config().strategy);
-        assert_eq!(
-            merged.pair_config().singleton_policy,
-            original.pair_config().singleton_policy,
-        );
+        assert_eq!(merged.pair_config().singleton_policy, original.pair_config().singleton_policy,);
     }
 
     #[test]
