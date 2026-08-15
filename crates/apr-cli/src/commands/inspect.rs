@@ -42,6 +42,13 @@ struct InspectResult {
     vocab_size: Option<usize>,
     flags: FlagsInfo,
     metadata: MetadataInfo,
+    /// APR-05: everything a `setfit-apr-v1` artifact records about itself.
+    ///
+    /// `skip_serializing_if` so a plain APR's output is BYTE-UNCHANGED from before
+    /// this branch existed — asserted by a golden comparison, because a new key that
+    /// appeared on every model would break every downstream `jq` in the fleet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setfit: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -115,6 +122,14 @@ struct MetadataInfo {
     special_tokens: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_metadata: Option<serde_json::Value>,
+    /// The raw value at custom key `setfit`, present only on a TAGGED artifact.
+    ///
+    /// `#[serde(skip)]`: this is an INPUT to the APR-05 section built below, not a
+    /// field of the metadata block. Serializing it here would publish the artifact
+    /// document twice under two different keys — two copies of one fact, which is
+    /// two values that can disagree.
+    #[serde(skip)]
+    setfit_doc: Option<serde_json::Value>,
 }
 
 /// Parsed v2 header data
@@ -183,8 +198,23 @@ pub(crate) fn run(
             let header = read_and_parse_header(&mut reader)?;
             let metadata_info = read_metadata(&mut reader, &header);
 
+            // APR-05. Built ONCE, from the document the metadata read already
+            // recovered, and consumed by whichever renderer runs. Inspection is
+            // READ-ONLY metadata work: no tensor is loaded and no probe is replayed,
+            // because `inspect` does not classify and therefore does not need the
+            // verified state APR-04 gates prediction behind. The whole file is read
+            // only for the artifact's SHA-256, and only through the ONE bounded door.
+            let setfit = build_setfit_inspection(path, metadata_info.setfit_doc.as_ref());
+
             if json_output {
-                output_json_with_quality(path, file_size, &header, metadata_info, show_quality);
+                output_json_with_quality(
+                    path,
+                    file_size,
+                    &header,
+                    metadata_info,
+                    show_quality,
+                    setfit,
+                );
             } else {
                 output_text(
                     path,
@@ -195,6 +225,7 @@ pub(crate) fn run(
                     show_filters,
                     show_weights,
                 );
+                output_setfit_text(setfit.as_ref());
                 if show_quality {
                     output_quality_text(&metadata_info, &header);
                 }
@@ -514,6 +545,21 @@ fn read_metadata(reader: &mut BufReader<File>, header: &HeaderData) -> MetadataI
         return MetadataInfo::default();
     }
 
+    // BOUND BEFORE THE ALLOCATION. `metadata_size` is a u32 read out of the file
+    // under inspection, so a hostile container can declare 4 GiB and make this
+    // allocate it before `read_exact` discovers there is nothing to fill it with.
+    // A block cannot be longer than the file that contains it, so the stat'd length
+    // is a sound bound that needs no invented constant. The OUTPUT is unchanged: an
+    // over-long declaration already produced `MetadataInfo::default()`, it just did
+    // so after paying for the allocation.
+    let declared = u64::from(header.metadata_size);
+    let fits = reader
+        .get_ref()
+        .metadata()
+        .is_ok_and(|m| header.metadata_offset.saturating_add(declared) <= m.len());
+    if !fits {
+        return MetadataInfo::default();
+    }
     let mut metadata_bytes = vec![0u8; header.metadata_size as usize];
     if reader.read_exact(&mut metadata_bytes).is_err() {
         return MetadataInfo::default();
@@ -523,8 +569,19 @@ fn read_metadata(reader: &mut BufReader<File>, header: &HeaderData) -> MetadataI
     match AprV2Metadata::from_json(&metadata_bytes) {
         Ok(meta) => {
             let source_metadata = meta.custom.get("source_metadata").cloned();
+            // The TYPED TAG decides, never a tensor name and never the mere presence
+            // of the custom key (D-04): an untagged APR that happens to carry a
+            // `setfit` key is a plain APR here, exactly as it is to `apr predict`.
+            let setfit_doc = if meta.model_type == crate::setfit_tag::SETFIT_MODEL_TYPE {
+                meta.custom
+                    .get(crate::setfit_tag::SETFIT_CUSTOM_KEY)
+                    .cloned()
+            } else {
+                None
+            };
 
             MetadataInfo {
+                setfit_doc,
                 model_type: if meta.model_type.is_empty() {
                     None
                 } else {
@@ -578,5 +635,7 @@ fn read_metadata(reader: &mut BufReader<File>, header: &HeaderData) -> MetadataI
 }
 
 include!("inspect_output_json.rs");
+include!("inspect_setfit.rs");
 include!("inspect_03.rs");
 include!("inspect_tests.rs");
+include!("inspect_setfit_tests.rs");
