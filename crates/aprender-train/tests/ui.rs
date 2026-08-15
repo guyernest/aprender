@@ -1,16 +1,17 @@
-//! TRN-01 / TRN-07 / SAFE-03 — "cannot be expressed" is checked by the COMPILER.
+//! TRN-01 / TRN-07 / SAFE-03 / APR-04 — "cannot be expressed" is checked by the COMPILER.
 //!
 //! Obligations: the lifecycle typestate (`OBLIG-STL-*`, contract
 //! `setfit-train-lifecycle-v1`), TRN-01's legality claim, TRN-07's
-//! no-caller-asserted-metric claim and SAFE-03's probe-is-not-SetFit claim.
+//! no-caller-asserted-metric claim, SAFE-03's probe-is-not-SetFit claim and APR-04's
+//! no-consumer-mints-the-witness-type claim (contract `setfit-apr-v1`).
 //!
-//! Every other Phase 3 gate observes a value and rejects it. These seven observe that
+//! Every other gate observes a value and rejects it. These eight observe that
 //! there is no value to observe: each `tests/ui/*.rs` is a complete program using only
 //! the crate's PUBLIC API which must fail to compile, with the diagnostic pinned by a
 //! committed `.stderr` snapshot. A runtime rejection can be caught and ignored by a
 //! caller; a non-compiling program cannot.
 //!
-//! # The seven cases and what each one would otherwise be
+//! # The eight cases and what each one would otherwise be
 //!
 //! | Case | Without the compile error it would be |
 //! |------|---------------------------------------|
@@ -21,15 +22,23 @@
 //! | `setfit_probe_claims_setfit` | SAFE-03's baseline reported as the method under test |
 //! | `setfit_metric_value_asserted` | the caller supplying the number the selection lock commits |
 //! | `setfit_external_codec_impl` | an out-of-crate codec inside the verification path |
+//! | `setfit_verified_model_constructed` | a classify-capable model that never replayed a probe (plan 04-03) |
 //!
 //! # What a snapshot must contain to be evidence
 //!
 //! Each `.stderr` must name the crate's real types, methods or visibility —
 //! `SetFitRun`, `fit_head`, `CanonicalTestToken`, `FrozenProbeRun`,
-//! `ValidationEvaluation`, `SetFitCodec`, `Sealed`. A snapshot showing a syntax error, an
-//! unresolved import or a misspelled name would be a red case that proves nothing about
-//! legality, and the CASE must be fixed rather than the snapshot blessed. The acceptance
-//! grep for this plan is exactly that rule mechanised across all seven files.
+//! `ValidationEvaluation`, `SetFitCodec`, `Sealed`, `VerifiedSetFitModel`. A snapshot
+//! showing a syntax error, an unresolved import or a misspelled name would be a red case
+//! that proves nothing about legality, and the CASE must be fixed rather than the snapshot
+//! blessed. The acceptance grep is exactly that rule mechanised across all eight files.
+//!
+//! A second rule the suite has now learned TWICE, once per claim it cost: TWO CLAIMS THAT
+//! FAIL IN DIFFERENT COMPILER PASSES CANNOT SHARE A SNAPSHOT. rustc aborts after the first
+//! failing pass, so the later claim is never emitted and is silently absent from its own
+//! evidence — `setfit_direct_state_construction` records it for E0616 (typeck) vs E0451
+//! (privacy), and `setfit_verified_model_constructed` records it for E0599 (resolution) vs
+//! the same E0451. One claim per case file.
 //!
 //! # Snapshots are rustc-version sensitive, and that is understood
 //!
