@@ -4908,6 +4908,35 @@ mod probe {
     }
 
     #[test]
+    fn a_transposed_encoder_tensor_is_a_typed_rebuild_failure() {
+        // [vocab, hidden] -> [hidden, vocab]. The PRODUCT is unchanged, so the
+        // per-entry size rule still holds, the name set is untouched and every
+        // value is still finite — rungs 1-5 have nothing to say. Only the rebuild
+        // knows what shape this name must have, which is what makes rung 6 a rung
+        // rather than a formality.
+        let mut tampered = Tampered::of(&honest_bytes());
+        {
+            let (shape, _) = tampered.entry_mut("token_embd.weight");
+            shape.reverse();
+        }
+        let bytes = tampered.emit();
+        // The parse-only door gets all the way through: this is genuinely a rung
+        // BELOW it, not a rung it skipped.
+        read_setfit_apr_parts(&bytes).expect("rungs 1-5 have no complaint about a transpose");
+        let err = load_setfit_apr(&bytes).expect_err("the rebuild knows the required shape");
+        assert!(
+            matches!(
+                &err,
+                SetFitArtifactError::ArtifactRebuildFailed {
+                    what: "encoder",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
     fn a_perturbed_probe_embedding_is_a_typed_replay_failure_naming_the_probe() {
         let mut tampered = Tampered::of(&honest_bytes());
         // Move ONE component far outside the contract's 7.63e-06 bound, and
