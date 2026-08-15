@@ -120,3 +120,34 @@ Verified against the committed blob, not assumed: `close` passes 6 args to the n
 `from_run_parts` (E0061). A signature change and its call sites cannot be split across commits and
 still compile; `59a4eca93` restores it. The two always land together. Relevant only to `git bisect`
 across that pair.
+
+---
+
+## F-09 — there is NO active pre-commit hook; "hooks run by default" is a false assumption
+
+04-03 reported "the active pre-commit hook ran a failing test suite and did not block, and one of
+its lines is `command not found: --features`." I investigated from the main checkout. The reality
+is stronger than the diagnosis:
+
+```
+git config core.hooksPath        -> unset
+git rev-parse --git-path hooks   -> .git/hooks
+.git/hooks/pre-commit            -> DOES NOT EXIST (only *.sample)
+```
+
+**No pre-commit hook is active in this repository at all.** The repo ships `.githooks/pre-commit`,
+but it requires `git config core.hooksPath .githooks` to take effect, and that is unset. No Claude
+Code hook intercepts commits either (the configured hooks are GSD SessionStart/PostToolUse infra;
+none contain `--features`).
+
+Consequence: the standing executor instruction — *"Run `git commit` normally — hooks run by default.
+Do NOT pass `--no-verify`"* — has been providing **no gate whatsoever** for every commit in this
+phase. Nothing was bypassed and nothing is wrong with the commits; the per-commit verification in
+this phase came entirely from executors running their suites explicitly, which they did. But the
+belief that a hook was also checking was unfounded. This is the "a guard that does not run is
+theater" class from CLAUDE.md, in the workflow's own scaffolding.
+
+**Do not simply activate it.** Per F-03, `.githooks/pre-commit` runs `cargo clippy -- -D warnings`
+workspace-wide, which exits 101 on pre-existing `aprender-compute` debt — activating it today would
+block every commit immediately. Activation requires fixing that debt or scoping the hook first.
+This is a repo-level decision for the human, not a phase-4 change.
