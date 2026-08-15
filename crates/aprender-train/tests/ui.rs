@@ -5,13 +5,13 @@
 //! no-caller-asserted-metric claim, SAFE-03's probe-is-not-SetFit claim and APR-04's
 //! no-consumer-mints-the-witness-type claim (contract `setfit-apr-v1`).
 //!
-//! Every other gate observes a value and rejects it. These eight observe that
+//! Every other gate observes a value and rejects it. These nine observe that
 //! there is no value to observe: each `tests/ui/*.rs` is a complete program using only
 //! the crate's PUBLIC API which must fail to compile, with the diagnostic pinned by a
 //! committed `.stderr` snapshot. A runtime rejection can be caught and ignored by a
 //! caller; a non-compiling program cannot.
 //!
-//! # The eight cases and what each one would otherwise be
+//! # The nine cases and what each one would otherwise be
 //!
 //! | Case | Without the compile error it would be |
 //! |------|---------------------------------------|
@@ -23,15 +23,17 @@
 //! | `setfit_metric_value_asserted` | the caller supplying the number the selection lock commits |
 //! | `setfit_external_codec_impl` | an out-of-crate codec inside the verification path |
 //! | `setfit_verified_model_constructed` | a classify-capable model that never replayed a probe (plan 04-03) |
+//! | `setfit_external_credential_impl` | a forged lock credential — three strings of the caller's choosing wearing a verified model's authority (plan 04-17) |
 //!
 //! # What a snapshot must contain to be evidence
 //!
 //! Each `.stderr` must name the crate's real types, methods or visibility —
 //! `SetFitRun`, `fit_head`, `CanonicalTestToken`, `FrozenProbeRun`,
-//! `ValidationEvaluation`, `SetFitCodec`, `Sealed`, `VerifiedSetFitModel`. A snapshot
+//! `ValidationEvaluation`, `SetFitCodec`, `SetFitCredential`, `Sealed`,
+//! `VerifiedSetFitModel`. A snapshot
 //! showing a syntax error, an unresolved import or a misspelled name would be a red case
 //! that proves nothing about legality, and the CASE must be fixed rather than the snapshot
-//! blessed. The acceptance grep is exactly that rule mechanised across all eight files.
+//! blessed. The acceptance grep is exactly that rule mechanised across all nine files.
 //!
 //! A second rule the suite has now learned TWICE, once per claim it cost: TWO CLAIMS THAT
 //! FAIL IN DIFFERENT COMPILER PASSES CANNOT SHARE A SNAPSHOT. rustc aborts after the first
@@ -56,10 +58,11 @@
 //! # Why the whole file is feature-gated
 //!
 //! `train::setfit` exists only under `--features setfit` (`train/mod.rs:51`). Without the
-//! gate the harness would compile in a default build, find seven cases that fail because
-//! the module is absent, and report SEVEN PASSING compile-fail tests — the vacuous-proof
-//! failure mode this suite exists to rule out. The `#[cfg]` makes the default build run
-//! zero cases instead of seven fake ones.
+//! gate the harness would compile in a default build, find that EVERY case fails because
+//! the module is absent, and report the whole suite PASSING — the vacuous-proof failure
+//! mode this suite exists to rule out, and it gets worse with each case added rather than
+//! better. The `#[cfg]` makes the default build run zero cases instead of a green wall of
+//! fake ones.
 
 #![cfg(feature = "setfit")]
 

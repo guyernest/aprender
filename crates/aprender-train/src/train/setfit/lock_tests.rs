@@ -609,7 +609,7 @@ fn lock_candidate_artifact_hash_comes_from_its_evaluation() {
 /// concrete type — it is that the identity is READ OFF AN OBJECT rather than supplied beside
 /// it, so a caller cannot pass the locked hash and then evaluate something else. `&C` where
 /// `C: SetFitCredential` keeps exactly that, because the trait is sealed: the set of types a
-/// caller can supply is this crate's, and `credential_seal_is_proved_by_the_ui_case` plus
+/// caller can supply is this crate's, and `credential_seal_is_a_private_supertrait` plus
 /// `tests/ui/setfit_external_credential_impl.rs` are what hold that half.
 #[test]
 fn lock_mint_test_token_takes_the_run_object_and_no_hash_bytes() {
