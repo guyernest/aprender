@@ -28,6 +28,13 @@ pub mod error;
 mod output;
 pub mod pipe;
 
+// The ONE bounded door for `setfit-apr-v1` bytes on disk (review B5). A real `mod`
+// rather than an `include!` because it is a module with its own imports, not a
+// fragment of the CLI's derive surface — see `setfit_io.rs`'s header for the rule it
+// exists to enforce on 04-07 and 04-08.
+#[cfg(feature = "setfit")]
+mod setfit_io;
+
 pub use error::CliError;
 
 // Public re-exports for integration tests
@@ -117,6 +124,8 @@ include!("model_ops_commands.rs");
 include!("extended_commands.rs");
 include!("tool_commands.rs");
 include!("data_commands.rs");
+#[cfg(feature = "setfit")]
+include!("setfit_commands.rs");
 #[cfg(feature = "training")]
 include!("train_commands.rs");
 include!("serve_commands.rs");
