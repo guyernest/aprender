@@ -568,6 +568,8 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
         ),
         ExtendedCommands::Tokenize { command } => dispatch_tokenize_command(command, cli),
         ExtendedCommands::Data { command } => dispatch_data_command(command, cli),
+        #[cfg(feature = "setfit")]
+        ExtendedCommands::Setfit { command } => dispatch_setfit_command(command, cli),
         ExtendedCommands::Pipeline { command } => dispatch_pipeline_command(command, cli),
         ExtendedCommands::Ppl { log_probs_file } => commands::ppl::run(log_probs_file, cli.json),
 
@@ -719,6 +721,44 @@ fn dispatch_experiment_command(
         ExperimentCommands::View { db, global, json } => {
             commands::experiment::experiment_view(db, *global, *json || cli.json)
         }
+    }
+}
+
+/// Dispatch `apr setfit` subcommands to the training adapter.
+///
+/// `cli.offline` is deliberately NOT threaded through, for the same reason
+/// `dispatch_data_command` records for `apr data select` / `apr data pairs`: this
+/// command opens no socket. `--model-dir` names a local directory the operator
+/// obtained beforehand, and every other input is a file `apr data` already wrote.
+/// An offline switch here would advertise a network capability that does not exist.
+#[cfg(feature = "setfit")]
+fn dispatch_setfit_command(
+    command: &SetfitCommands,
+    cli: &Cli,
+) -> std::result::Result<(), CliError> {
+    match command {
+        SetfitCommands::Train {
+            config,
+            data,
+            selection,
+            model_dir,
+            output,
+            seed,
+            device,
+            force,
+            dry_run,
+        } => commands::setfit_train::run(
+            config,
+            data,
+            selection,
+            model_dir,
+            output,
+            *seed,
+            device.as_deref(),
+            *force,
+            *dry_run,
+            cli.json,
+        ),
     }
 }
 
