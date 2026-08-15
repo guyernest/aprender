@@ -833,6 +833,20 @@ mod tests {
     use aprender_contrastive_data::pairs::resolve_budget;
     use aprender_contrastive_data::ContrastiveDataError;
 
+    /// This module's own source, for the non-existence assertions on the merge surface.
+    const CONFIG_SOURCE: &str = include_str!("config.rs");
+
+    /// Assemble a search needle from fragments.
+    ///
+    /// The scans below read the file they live in, so a whole literal would appear IN
+    /// `CONFIG_SOURCE`: every count would be one too high and every non-existence assertion
+    /// would fail against its own text. Assembling at runtime keeps the searched-for string
+    /// out of the file. This is not hypothetical — the first draft counted `pub fn to_request`
+    /// whole and saw 2, the definition and the assertion.
+    fn needle(parts: &[&str]) -> String {
+        parts.concat()
+    }
+
     /// A request that passes every rung, so each FALSIFY row varies exactly ONE knob.
     fn valid_request() -> SetFitTrainRequest {
         SetFitTrainRequest {
@@ -1313,5 +1327,157 @@ mod tests {
         let json = serde_json::to_string(&resolved).expect("serializes");
         assert!(json.contains("\"requested\""), "{json}");
         assert!(json.contains("\"resolved_device\":\"cpu\""), "{json}");
+    }
+
+    // ─── the override/merge door (04-14, D-07) ─────────────────────────────
+
+    /// A request whose knobs all DIFFER from the reference defaults.
+    ///
+    /// A round trip over `reference_defaults` would pass even if a field were dropped and
+    /// re-defaulted, because the dropped value and the default are the same number. Every knob
+    /// that CAN vary is varied here; `max_length` and `lr_schedule` each have exactly one legal
+    /// value, so they are pinned rather than varied and the twelve-knob assertion says so.
+    fn distinctive_request() -> SetFitTrainRequest {
+        SetFitTrainRequest {
+            encoder_lr: 3e-5,
+            epochs: 4,
+            batch_size: 8,
+            warmup_ratio: 0.25,
+            grad_clip_max_norm: 0.5,
+            max_length: pinned_max_length(),
+            pair_config: PairConfig { budget: Some(64), ..PairConfig::new(7) },
+            freeze_policy: vec![FreezeGroup::Embeddings, FreezeGroup::LayerFfn(2)],
+            head_regularization: HeadRegularization::Lambda(0.75),
+            root_seed: 7,
+            device: "cpu".to_string(),
+            lr_schedule: LrSchedule::WarmupLinearDecay,
+        }
+    }
+
+    #[test]
+    fn falsify_config_to_request_round_trips_all_twelve_knobs_identically() {
+        let original =
+            SetFitTrainConfig::new(distinctive_request()).expect("the fixture request is valid");
+        let request = original.to_request();
+
+        // All TWELVE, knob by knob. A subset would let a forgotten field drift silently, and
+        // the equality assertion at the bottom alone would not localize which one.
+        assert!((request.encoder_lr - original.encoder_lr()).abs() < f64::EPSILON); // 1
+        assert_eq!(request.epochs, original.epochs()); // 2
+        assert_eq!(request.batch_size, original.batch_size()); // 3
+        assert!((request.warmup_ratio - original.warmup_ratio()).abs() < f64::EPSILON); // 4
+        assert!((request.grad_clip_max_norm - original.grad_clip_max_norm()).abs() < f32::EPSILON); // 5
+        assert_eq!(request.max_length, original.max_length()); // 6
+        assert_eq!(&request.pair_config, original.pair_config()); // 7
+        assert_eq!(request.freeze_policy.as_slice(), original.freeze_policy()); // 8
+        assert_eq!(request.head_regularization, original.head_regularization()); // 9
+        assert_eq!(request.root_seed, original.root_seed()); // 10
+        assert_eq!(request.device, original.device().as_str()); // 11
+        assert_eq!(request.lr_schedule, original.lr_schedule()); // 12
+
+        // And the whole thing revalidates to the config it was read off.
+        let rebuilt = SetFitTrainConfig::new(request)
+            .expect("a request read off a validated config is itself valid");
+        assert_eq!(rebuilt, original);
+    }
+
+    #[test]
+    fn falsify_config_to_request_seed_override_moves_the_seed_and_nothing_else() {
+        let original =
+            SetFitTrainConfig::new(distinctive_request()).expect("the fixture request is valid");
+        let mut request = original.to_request();
+        request.root_seed = 99;
+        let merged =
+            SetFitTrainConfig::new(request).expect("a seed override is still a valid request");
+
+        assert_eq!(merged.root_seed(), 99);
+        assert_ne!(merged.root_seed(), original.root_seed());
+
+        // The other ten knobs, unchanged.
+        assert!((merged.encoder_lr() - original.encoder_lr()).abs() < f64::EPSILON);
+        assert_eq!(merged.epochs(), original.epochs());
+        assert_eq!(merged.batch_size(), original.batch_size());
+        assert!((merged.warmup_ratio() - original.warmup_ratio()).abs() < f64::EPSILON);
+        assert!(
+            (merged.grad_clip_max_norm() - original.grad_clip_max_norm()).abs() < f32::EPSILON
+        );
+        assert_eq!(merged.max_length(), original.max_length());
+        assert_eq!(merged.freeze_policy(), original.freeze_policy());
+        assert_eq!(merged.head_regularization(), original.head_regularization());
+        assert_eq!(merged.device().as_str(), original.device().as_str());
+        assert_eq!(merged.lr_schedule(), original.lr_schedule());
+
+        // Knob 7 is the one that MOVES WITH the seed, and it must: `new` normalizes
+        // `pair_config.root_seed` to the top-level seed (see the knob-7 comment there), which
+        // is what makes a `--seed` override actually reseed the pair stream instead of leaving
+        // a stale second seed behind that the provenance record would still describe. Its
+        // policy half is unchanged, so the override is a reseed and not a reconfiguration.
+        assert_eq!(merged.pair_config().root_seed, 99);
+        assert_eq!(merged.pair_config().budget, original.pair_config().budget);
+        assert_eq!(merged.pair_config().hard_cap, original.pair_config().hard_cap);
+        assert_eq!(merged.pair_config().strategy, original.pair_config().strategy);
+        assert_eq!(
+            merged.pair_config().singleton_policy,
+            original.pair_config().singleton_policy,
+        );
+    }
+
+    #[test]
+    fn falsify_config_to_request_device_override_is_validated_by_new_not_by_assignment() {
+        let original = SetFitTrainConfig::reference_defaults(13);
+        let mut request = original.to_request();
+        request.device = "gpu".to_string();
+
+        let error = SetFitTrainConfig::new(request)
+            .expect_err("`gpu` is not in the device grammar, whichever door it arrives through");
+        assert!(
+            matches!(error, SetFitConfigError::Device(DeviceError::InvalidSpec(_))),
+            "the merge must be validated AS A WHOLE, got {error}",
+        );
+        assert!(error.to_string().contains("device"), "{error}");
+
+        // The config the request was read off is untouched: an override that fails cannot have
+        // half-applied itself, because `to_request` hands back a REQUEST and the only path to a
+        // config is `new`.
+        assert_eq!(original.device().as_str(), "cpu");
+    }
+
+    #[test]
+    fn falsify_config_to_request_max_length_override_is_still_refused_by_the_pinned_bound() {
+        let original = SetFitTrainConfig::reference_defaults(13);
+        let mut request = original.to_request();
+        request.max_length = 512;
+
+        let error = SetFitTrainConfig::new(request)
+            .expect_err("TRN-02's pinned bound survives the override path");
+        assert_eq!(error, SetFitConfigError::MaxLengthNotSupported { requested: 512, pinned: 256 });
+        assert_eq!(original.max_length(), 256, "the original is untouched");
+    }
+
+    #[test]
+    fn falsify_config_to_request_is_the_whole_merge_surface() {
+        assert_eq!(
+            CONFIG_SOURCE.matches(&needle(&["pub fn ", "to_request"])).count(),
+            1,
+            "exactly one merge door",
+        );
+
+        // No method takes a mutable receiver. Two doors to the same merge is how the two
+        // diverge, and a setter on an ALREADY-VALIDATED config would skip `new` entirely --
+        // which is the invalid-merge hole this door exists to close.
+        assert!(
+            !CONFIG_SOURCE.contains(&needle(&["&mut ", "self"])),
+            "no method on a validated config may take a mutable receiver",
+        );
+        for banned in [
+            needle(&["pub fn ", "with_seed"]),
+            needle(&["pub fn ", "with_device"]),
+            needle(&["pub fn ", "set_"]),
+        ] {
+            assert!(
+                !CONFIG_SOURCE.contains(&banned),
+                "`{banned}` would be a second merge path that `new` does not police",
+            );
+        }
     }
 }
