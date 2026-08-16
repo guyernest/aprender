@@ -240,10 +240,10 @@ Plans:
 
 **Wave 11** *(four parallel plans, zero `files_modified` overlap)*
 
-- [ ] 04-18-PLAN.md — WR-09 + WR-08: bound `apr inspect`'s attacker-controlled metadata allocation by the shared 16 MiB cap, and make the over-cap case one typed refusal so predict/eval/inspect/serve stop contradicting each other about one file (wave 11)
-- [ ] 04-19-PLAN.md — `backend_identity` binding: point the registry row at the shipped `ExecutionBackend::identity`, earn the `implemented` flip with a compile-witnessed resolution guard, clear the last BIND-004 (wave 11)
-- [ ] 04-20-PLAN.md — WR-10: run `apr eval --lock-out`'s no-clobber gate before the dataset ingest instead of after the full multi-candidate sweep, restoring the ordering discipline `setfit_train.rs:12-20` states; end-to-end evidence via a spawned decoy case, since the dispatch tag gate makes an untagged live probe unreachable (wave 11)
-- [ ] 04-21-PLAN.md — the two named mutation survivors in `api/setfit_handlers.rs`, re-measured at HEAD and diagnosed from varied inputs; each kill confirmed by a `-F`-scoped cargo-mutants re-run (wave 11)
+- [x] 04-18-PLAN.md — WR-09 + WR-08: bound `apr inspect`'s attacker-controlled metadata allocation by the shared 16 MiB cap, and make the over-cap case one typed refusal so predict/eval/inspect/serve stop contradicting each other about one file (wave 11)
+- [x] 04-19-PLAN.md — `backend_identity` binding: point the registry row at the shipped `ExecutionBackend::identity`, earn the `implemented` flip with a compile-witnessed resolution guard, clear the last BIND-004 (wave 11)
+- [x] 04-20-PLAN.md — WR-10: run `apr eval --lock-out`'s no-clobber gate before the dataset ingest instead of after the full multi-candidate sweep, restoring the ordering discipline `setfit_train.rs:12-20` states; end-to-end evidence via a spawned decoy case, since the dispatch tag gate makes an untagged live probe unreachable (wave 11)
+- [x] 04-21-PLAN.md — the two named mutation survivors in `api/setfit_handlers.rs`, re-measured at HEAD and diagnosed from varied inputs; each kill confirmed by a `-F`-scoped cargo-mutants re-run (wave 11)
 
 **Wave 12** *(blocked on Wave 11 — 04-21 also edits the Makefile, and the Makefile is this plan's subject)*
 
@@ -282,5 +282,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
-| 4. APR Artifact and Production Parity | 17/22 | gaps_found |  |
+| 4. APR Artifact and Production Parity | 21/22 | In Progress|  |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
