@@ -294,3 +294,42 @@ beside the exclusion.
 have both the Make target and a CI step invoke that script, so no quoting rewrite is needed. Note
 `bashrs` (which CLAUDE.md mandates over shellcheck) is NOT installed on this host, so any new
 script would need linting elsewhere.
+
+## D-04-12-A — 04-REVIEW.md's non-Critical findings are open and now TRACKED (W-03)
+
+The phase-04 code review returned **2 Critical, 6 Warning, 5 Info**. Both Criticals were fixed and
+committed at `0fb47958f`:
+- **CR-02 (security)** `POST /v1/classify` was mounted WITHOUT the AuthGate, so with `APR_API_KEY`
+  set the classifier server was unauthenticated behind `CorsLayer::permissive()` — and since
+  `AuthGate::from_env()` was never called, its "routes are unauthenticated" warning never printed
+  either. Fixed with the same `auth::layer` the APR path already used.
+- **CR-01 (correctness)** `apr eval --split test` scored artifact-head indices against dataset
+  indices with no label-map gate, so a mismatched corpus produced a confidently wrong accuracy
+  rather than an error — the exact failure the validation evaluator refuses by name
+  (`apr_evaluate.rs`, `LabelMapMismatch`). Gate added in `run_test`, with a source guard asserting
+  ORDER (not mere presence) plus non-vacuity on both sides, shown red by deleting the gate.
+
+**The remaining 6 Warning + 5 Info are NOT fixed.** They were previously untracked, which is how
+review findings quietly die. The two worth doing first, both write-path defects:
+
+- **WR-02** (verifier re-confirmed present at `eval/setfit.rs:620-636`): `write_lock`'s temp file is
+  predictable, symlink-following, and opened with `.create(true)` rather than `create_new` — while
+  this repo's own precedent (`setfit_train::temp_path` + `create_new`) does the opposite.
+- **WR-01**: `atomic_write` / `write_lock` both clobber through a check -> `fs::rename` window that
+  their own doc comments claim to have closed.
+
+Full findings with file:line and mechanism are in
+`.planning/phases/04-apr-artifact-and-production-parity/04-REVIEW.md`.
+
+## D-04-12-B — 04-11's mutation gate never produced a score (verifier gap, not F-10)
+
+The only phase-04 gap NOT caused by F-10. One crate attempted, interrupted at 68 minutes against a
+measured >=10 h projection for the lightest crate alone; cargo-mutants prints its summary only at
+the end, so **no per-crate or aggregate score exists**. Two real production survivors in
+`setfit_handlers.rs` remain undiagnosed — the notable one is `>` -> `==` at
+`texts.len() > MAX_BATCH_TEXTS` surviving beside a test named
+`..._refuses_a_batch_one_over_the_contract_bound`, i.e. the exact distinguishing input.
+
+Two recipe defects were found and fixed en route, and both invalidate any earlier confidence at
+this tier: `-- --features setfit` never reached cargo (so setfit was compiled OUT — F-04 vacuity),
+and cargo-mutants had no baseline at all for `aprender-serve` (fixed with `--cargo-arg=--lib`).

@@ -298,11 +298,22 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
   before being trusted. Two cells are deliberately NOT wired and both are pre-existing standing
   reds, not gaps: `cargo check -p apr-cli --no-default-features` (D-04-09-A, rc=101 for BOTH minimal
   cells because `setfit` does not imply `inference`) and any whole-crate `aprender-serve` test leg
-  (D-04-08-A). **The CI half exists only as an unapplied proposal**:
-  `.planning/phases/04-apr-artifact-and-production-parity/04-11-ci-setfit.patch`, which `git apply
-  --check` accepts (rc=0) and which modifying `.github/workflows/ci.yml` requires human approval to
-  land (CLAUDE.md). Until it is applied, no CI job runs the apr-cli, aprender-serve, lifecycle or
-  parity legs, so this requirement is not met.
+  (D-04-08-A). **The CI half is now APPLIED** at commit `57f7823ab`, from the reviewed patch
+  `.planning/phases/04-apr-artifact-and-production-parity/04-11-ci-setfit.patch`, after explicit
+  user approval at the 04-11 checkpoint (CLAUDE.md places `.github/workflows/*.yml` edits outside
+  autonomous scope, so the executor authored the patch as a FILE and never touched `ci.yml`;
+  `git apply` ran only after that ruling). 16 scoped legs landed, each grep-verified verbatim
+  against the Makefile so CI and local gates cannot drift, and the YAML re-parsed with both
+  branch-protection required checks (`gate`, `workspace-test`) intact.
+
+  One target remains excluded: `setfit-api-boundary`, on QUOTING grounds, not value grounds
+  (D-04-11-A). It is a `cargo tree` gate written as a Make `for` loop whose `$$`-escaped vars and
+  single-quoted patterns cannot enter the CI step's `bash -c '...'` without the very rewrite the
+  gate exists to detect. Risk accepted by the user: a Linux-only dependency-closure regression
+  introduced via `cfg(target_os)` would not be caught, since the gate now runs only locally.
+
+  SAFE-02 is therefore **substantially met**, and is left UNCHECKED only because
+  `setfit-api-boundary` has no CI coverage. It is not blocked by F-10.
 
 - [x] **SAFE-03**: A user cannot label a frozen linear probe, centroid classifier, or other
   non-updating encoder baseline as SetFit in artifacts, reports, or benchmark output

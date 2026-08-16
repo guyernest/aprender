@@ -182,7 +182,7 @@ surfaces on the mandatory CPU profile.
   4. Rust, CLI, and native HTTP callers can classify ordered single or mixed-length batches and receive matching labels, full probabilities, optional logits, margins, token/truncation facts, latency, backend identity, and the same artifact hash in predictions and readiness.
   5. A developer can run offline executable contracts and the supported CPU build/test feature matrix to detect detached gradients, invalid data/math, leakage, label drift, artifact mismatches, and core/CLI/HTTP parity failures; an explicitly requested unavailable device fails instead of silently falling back or misreporting its backend.
 
-**Plans**: 16 plans in 9 waves (revised 2026-08-15 after cross-AI review — 04-REVIEWS.md)
+**Plans**: 17 plans in 10 waves (revised 2026-08-15 after cross-AI review — 04-REVIEWS.md; then 04-17 added mid-phase at a user checkpoint to land the two public-API doors — `into_artifact_bytes` and the sealed `SetFitCredential` — that waves 5-6 proved missing, which shifted the dependent plans one wave later)
 
 **Branch base**: `gsd/phase-2-contract-gate` @ d66678e7a (Phase 3 complete + UAT + CR-01..04 fixes).
 The orchestrator creates `gsd/phase-4-apr-parity` from that HEAD before dispatching wave 1; wave
