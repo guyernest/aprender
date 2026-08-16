@@ -359,6 +359,33 @@ tier3:
 	@$(MAKE) setfit-repro-replay
 	@$(MAKE) gemm-thread-determinism
 	@$(MAKE) setfit-feature-matrix
+# ─── Phase 4 (plan 04-10). CR-01's lesson made structural ───────────────────
+#
+# CR-01 was not "someone forgot a line". It was that an ENTIRE feature-gated test
+# surface existed with no tier and no CI job running it, for a whole phase, while
+# every plan cited it as evidence. The structural fix is that no feature-gated
+# surface ships without a tier that runs it — so all five Phase 4 gates are wired
+# HERE, together, rather than left as targets a reader could discover.
+#
+#   setfit-all-tests     18 scoped suites, each with its own measured floor
+#   setfit-parity        04-09's three readers of one artifact must agree
+#   setfit-serve-smoke   04-09's #[ignore]d spawned-server leg
+#   setfit-cli-lifecycle 04-15's #[ignore]d spawned-`apr` ladders
+#   setfit-api-boundary  OPS-01: no library crate may depend on apr-cli
+#
+# THE TWO `#[ignore]`d ONES ARE THE POINT OF WIRING THEM HERE. An `#[ignore]`d
+# test runs in NO default invocation — not `cargo test --all`, not tier2, not CI's
+# nextest run. Left unwired they would be the CR-01 shape reintroduced by the very
+# plans that were closing it. tier3 is where an `--ignored` leg belongs: it is the
+# pre-push tier, and both spawn real processes.
+#
+# `setfit-feature-matrix` above is the SAFE-02 half and is already in this list; it
+# grew from two crates to four in the same plan that added these five.
+	@$(MAKE) setfit-all-tests
+	@$(MAKE) setfit-parity
+	@$(MAKE) setfit-serve-smoke
+	@$(MAKE) setfit-cli-lifecycle
+	@$(MAKE) setfit-api-boundary
 # D-04 (Phase 2), wired here for the same reason the line above exists: a target
 # outside the tiers is a target that stops being run. Same evidence discipline as
 # the D-26 block — `make contrastive-data-boundary` was run STANDALONE first with
@@ -387,9 +414,89 @@ tier3:
 # which touches no setfit code at all, fails identically. The union below is the
 # platform-appropriate one D22's fix direction asks for and covers every feature
 # combination this phase introduces.
-setfit-feature-matrix: ## D-06/D-05: setfit feature isolation for aprender-core AND aprender-train
+# ─── SAFE-02: FOUR crates x THREE supported CPU profiles, BUILD and RUN ─────
+#
+# SAFE-02: "a developer can verify the supported CPU build/test feature matrix in
+# CI without Python or network access". Phase 4 spread the `setfit` feature across
+# four crates, so the matrix has to span all four. Profiles:
+#
+#   (a) --no-default-features                     the minimal build
+#   (b) --no-default-features --features setfit   dependency closure of the feature
+#   (c) default features + --features setfit      what a developer actually runs
+#
+# THE FULL CELL TABLE, MEASURED on 5887d301c with the status captured directly off
+# each cargo command, never through a pipe (CLAUDE.md rule 1):
+#
+#   crate            (a) ndf   (b) ndf+setfit   (c) default+setfit
+#   aprender-core    rc=0      rc=0             rc=0
+#   aprender-train   rc=0      rc=0             rc=0
+#   apr-cli          rc=101 !  rc=101 !         rc=0
+#   aprender-serve   rc=0      rc=0             rc=0
+#
+# ! THE TWO apr-cli MINIMAL CELLS ARE RED AT THIS COMMIT AND ARE NOT WIRED.
+# Both fail with the same four errors, and they are the SAME four the (a) cell
+# produces — `inference`-gated code that is not `cfg`-gated at
+# src/commands/explain.rs:231 and :344, src/commands/diff_05_aprt_stage.rs:100 and
+# src/lib.rs:63. 04-09 re-measured (a) with the pre-Phase-4 manifest restored and
+# got the identical failure, so it predates this phase (D-04-09-A). Setting
+# `--features setfit` does not help because `setfit` does not imply `inference`.
+#
+# **04-09's PLAN NAMED `cargo check -p apr-cli --no-default-features` AS SAFE-02's
+# GATING EVIDENCE. THAT IS WRONG AND WIRING IT WOULD MAKE THIS GATE RED ON
+# ARRIVAL.** The green equivalent, and the leg the gating evidence is actually read
+# from, is `cargo check -p apr-cli --all-targets` with DEFAULT features (setfit
+# OFF, inference ON) — measured rc=0, and the leg 04-06 and 04-07 already used.
+#
+# LITERAL `--all-features` WAS MEASURED, NOT ASSUMED, for all four crates:
+#   aprender-core    rc=101  alsa-sys build script (no ALSA headers on macOS)
+#   aprender-train   rc=0    CLEAN — so it IS wired below
+#   apr-cli          rc=101  entrenar::finetune::wgpu_pipeline::WgpuInstructPipeline
+#   aprender-serve   rc=101  trueno_viz::plots::Histogram::dimensions (API drift)
+# Three of the four fail for reasons with nothing to do with setfit — GPU, audio
+# and viz features that are not the supported CPU profile SAFE-02 names — which is
+# why the per-crate CPU unions below are the honest substitute. The aprender-train
+# result contradicts the older comment further down claiming no `--all-features`
+# leg is buildable on a CPU host; it was re-measured and it is. If the train leg
+# ever goes red for a `cuda`/`wasm` reason, that is NOT a SAFE-02 signal — scope it
+# back out rather than silencing the whole matrix.
+#
+# THE RUN LEGS, and what each one actually proves:
+#   aprender-core / aprender-train: the SAME `setfit::` filter is run with the
+#     feature off and on. Off must select ZERO (assert_tests_absent), on must
+#     select many (assert_tests_ran). Neither half is evidence alone — see the
+#     define's comment. Measured 0 / 240 and 0 / 311.
+#   apr-cli: the off leg is NOT zero. Measured `--lib setfit` = 13 with the feature
+#     off and 68 with it on, because apr-cli carries setfit-NAMED tests (argument
+#     parsing, error strings) that are not behind the feature. So the apr-cli run
+#     leg proves the gated surface APPEARS, not that it is ABSENT, and it is
+#     asserted as a delta rather than as a zero. SAFE-02's apr-cli gating evidence
+#     is the CHECK leg plus the `tokenizers` graph negative below.
+#   aprender-serve: has a run leg ONLY at profile (c). Its `--no-default-features`
+#     TEST build is red (D-04-10-A, new here) — `#[cfg(test)]` code imports
+#     crate::gguf::OwnedQuantizedModelCached, crate::gpu and crate::api GPU types
+#     unconditionally, so the test target needs `server`/`gpu` even though the
+#     LIBRARY checks clean without them. Pre-existing and unrelated to setfit: the
+#     feature-off leg fails identically. The (a)/(b) CHECK cells still run.
+#
+# THE dev-dependency RULE, recorded here because a reader of this recipe is who
+# needs it (04-09-SUMMARY deviation 1). Cargo does not permit an OPTIONAL
+# dev-dependency, so a dev-dep on a package that is ALSO a normal dependency is
+# unconditional, and its features UNIFY with the normal dependency for any build
+# that includes test targets. Such an entry silently weakens the corresponding
+# `cargo test --no-default-features` run leg: the crate under test would still be
+# built WITH the feature the leg is trying to prove absent.
+# **IT DOES NOT APPLY ON THIS TREE.** 04-09's plan required a `realizar` dev-dep
+# with `features = ["setfit"]`; 04-09 MEASURED it unnecessary (the test target's
+# own `required-features = ["setfit","inference"]` already makes `realizar::api`
+# reachable with its setfit surface) and did not add one, so threat T-04-61 does
+# not arise. The rule stays written down because the next person reaching for such
+# a dev-dep needs it; the apr-cli run leg's weakness above has a different,
+# measured cause.
+setfit-feature-matrix: ## SAFE-02: setfit feature matrix, 4 crates x 3 CPU profiles, build AND run
+	@mkdir -p target
 	@echo "Feature matrix: aprender-core setfit isolation (D-06)"
 	@cargo check -p aprender-core --no-default-features
+	@cargo check -p aprender-core --no-default-features --features setfit
 	@cargo check -p aprender-core --features setfit
 	@cargo check -p aprender-core --features conformance-fixtures
 	@cargo check -p aprender-core --features setfit,conformance-fixtures,model-tests
@@ -469,6 +576,134 @@ setfit-feature-matrix: ## D-06/D-05: setfit feature isolation for aprender-core 
 			exit 1; \
 		fi; \
 	done
+# The one MEASURED-CLEAN `--all-features` leg (see the table at the head of this
+# target). Wired because it was measured rc=0, not because it was assumed to be.
+	@echo "  leg (d): aprender-train --all-features (measured clean 2026-08-15)"
+	@cargo check -p aprender-train --all-features
+# ─── SAFE-02 cell: apr-cli ──────────────────────────────────────────────────
+#
+# NO `--no-default-features` LEG. Measured rc=101 at this commit AND at the
+# pre-Phase-4 base — D-04-09-A, four `inference`-gated-but-not-cfg-gated errors.
+# The gating evidence is the `--all-targets` check with DEFAULT features below.
+	@echo "Feature matrix: apr-cli (SAFE-02 gating evidence is the CHECK leg)"
+	@echo "  check, setfit OFF (default features) — THIS is SAFE-02's gating leg"
+	@cargo check -p apr-cli --all-targets
+	@echo "  check, setfit ON"
+	@cargo check -p apr-cli --features setfit
+	@cargo check -p apr-cli --features setfit,inference --all-targets
+# The graph negative, two-sided, and it is the apr-cli gating claim that the run
+# leg below cannot make. `aprender-contrastive-data` is NOT usable as the marker
+# here (unlike aprender-train): it is already in the DEFAULT apr-cli tree via
+# `training`, which is a default feature. Measured — `tokenizers` is 0 in the
+# default tree and 1 with setfit, so it is the marker that actually discriminates.
+	@echo "  negative: a DEFAULT apr-cli build must contain NO tokenizers node"
+	@cargo tree -p apr-cli -e normal --prefix none > target/sfm-cli-tree-default.txt 2>&1 || \
+		{ echo "FAIL: cargo tree failed; the apr-cli closure check would pass vacuously"; \
+		  cat target/sfm-cli-tree-default.txt; exit 1; }
+	@cargo tree -p apr-cli --features setfit -e normal --prefix none > target/sfm-cli-tree-setfit.txt 2>&1 || \
+		{ echo "FAIL: cargo tree --features setfit failed; the apr-cli closure check would pass vacuously"; \
+		  cat target/sfm-cli-tree-setfit.txt; exit 1; }
+	@if grep -q tokenizers target/sfm-cli-tree-default.txt; then \
+		echo "FAIL (SAFE-02): tokenizers leaked into a DEFAULT apr-cli build"; \
+		grep -n tokenizers target/sfm-cli-tree-default.txt; exit 1; \
+	fi
+	@if ! grep -q tokenizers target/sfm-cli-tree-setfit.txt; then \
+		echo "FAIL: --features setfit did NOT pull tokenizers into apr-cli; the absence"; \
+		echo "check above is vacuous — the marker no longer discriminates (SAFE-02)"; \
+		exit 1; \
+	fi
+	@echo "    apr-cli: tokenizers absent by default, present with setfit"
+# ─── SAFE-02 cell: aprender-serve ───────────────────────────────────────────
+	@echo "Feature matrix: aprender-serve setfit closure (D-09, HTTP transport only)"
+	@cargo check -p aprender-serve --no-default-features
+	@cargo check -p aprender-serve --no-default-features --features setfit
+	@cargo check -p aprender-serve --features setfit
+	@echo "  negative: a DEFAULT aprender-serve build must contain NO tokenizers node"
+	@cargo tree -p aprender-serve -e normal --prefix none > target/sfm-serve-tree-default.txt 2>&1 || \
+		{ echo "FAIL: cargo tree failed; the aprender-serve closure check would pass vacuously"; \
+		  cat target/sfm-serve-tree-default.txt; exit 1; }
+	@cargo tree -p aprender-serve --features setfit -e normal --prefix none > target/sfm-serve-tree-setfit.txt 2>&1 || \
+		{ echo "FAIL: cargo tree --features setfit failed; the aprender-serve closure check would pass vacuously"; \
+		  cat target/sfm-serve-tree-setfit.txt; exit 1; }
+	@if grep -q tokenizers target/sfm-serve-tree-default.txt; then \
+		echo "FAIL (SAFE-02): tokenizers leaked into a DEFAULT aprender-serve build"; \
+		grep -n tokenizers target/sfm-serve-tree-default.txt; exit 1; \
+	fi
+	@if ! grep -q tokenizers target/sfm-serve-tree-setfit.txt; then \
+		echo "FAIL: --features setfit did NOT pull tokenizers into aprender-serve; the"; \
+		echo "absence check above is vacuous (SAFE-02)"; \
+		exit 1; \
+	fi
+	@echo "    aprender-serve: tokenizers absent by default, present with setfit"
+# ─── SAFE-02 RUN legs ───────────────────────────────────────────────────────
+#
+# `cargo check` is not `cargo test`. A crate can type-check with the feature on
+# and still have every gated test compiled out — which is CR-01 exactly, and is
+# why this target used to be described as "only cargo checks the feature;
+# checking is not testing" in the setfit-tests comment above. These legs close
+# that: each profile that has tests RUNS them, under a guard.
+	@echo "Feature matrix RUN legs (checking is not testing — CR-01)"
+	@echo "  aprender-core: same filter, feature OFF must select ZERO"
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-core --no-default-features --lib setfit:: \
+		> target/sfm-run-core-off.log 2>&1; rc=$$?; \
+	set -e; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: aprender-core minimal test build is red (rc=$$rc)"; tail -20 target/sfm-run-core-off.log; exit $$rc; fi
+	@$(call assert_tests_absent,target/sfm-run-core-off.log,aprender-core --no-default-features --lib setfit::)
+	@echo "  aprender-core: same filter, feature ON must select many"
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-core --no-default-features --features setfit --lib setfit:: \
+		> target/sfm-run-core-on.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/sfm-run-core-on.log; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: aprender-core setfit run leg is red (rc=$$rc)"; exit $$rc; fi
+	@$(call assert_tests_ran,target/sfm-run-core-on.log,230,setfit-feature-matrix/core-run)
+	@echo "  aprender-train: same filter, feature OFF must select ZERO"
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --no-default-features --lib setfit:: \
+		> target/sfm-run-train-off.log 2>&1; rc=$$?; \
+	set -e; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: aprender-train minimal test build is red (rc=$$rc)"; tail -20 target/sfm-run-train-off.log; exit $$rc; fi
+	@$(call assert_tests_absent,target/sfm-run-train-off.log,aprender-train --no-default-features --lib setfit::)
+	@echo "  aprender-train: same filter, feature ON must select many"
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --no-default-features --features setfit --lib setfit:: \
+		> target/sfm-run-train-on.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/sfm-run-train-on.log; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: aprender-train setfit run leg is red (rc=$$rc)"; exit $$rc; fi
+	@$(call assert_tests_ran,target/sfm-run-train-on.log,300,setfit-feature-matrix/train-run)
+# apr-cli is a DELTA, not a zero — see the head of this target. 13 off / 68 on,
+# measured. Asserting zero here would be false, and asserting nothing would let
+# the leg read as gating evidence it cannot supply.
+	@echo "  apr-cli: DELTA leg (feature-off is NOT zero — see this target's header)"
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p apr-cli --lib setfit \
+		> target/sfm-run-cli-off.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/sfm-run-cli-off.log; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: apr-cli default test build is red (rc=$$rc)"; exit $$rc; fi
+	@$(call assert_tests_ran,target/sfm-run-cli-off.log,10,setfit-feature-matrix/cli-run-off)
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p apr-cli --features setfit --lib setfit \
+		> target/sfm-run-cli-on.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/sfm-run-cli-on.log; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: apr-cli setfit run leg is red (rc=$$rc)"; exit $$rc; fi
+	@$(call assert_tests_ran,target/sfm-run-cli-on.log,60,setfit-feature-matrix/cli-run-on)
+	@off=$$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($$(i+1) ~ /^passed/) s += $$i } END { print s + 0 }' target/sfm-run-cli-off.log); \
+	on=$$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($$(i+1) ~ /^passed/) s += $$i } END { print s + 0 }' target/sfm-run-cli-on.log); \
+	if [ $$((on - off)) -lt 40 ]; then \
+		echo "FAIL (SAFE-02): apr-cli's setfit delta is $$((on - off)) ($$off off, $$on on),"; \
+		echo "expected at least 40. Either the gated surface stopped compiling in, or the"; \
+		echo "surface stopped being gated. Both are SAFE-02 failures; neither is visible"; \
+		echo "from a one-sided count."; \
+		exit 1; \
+	fi; \
+	echo "    apr-cli setfit delta: $$off off -> $$on on (+$$((on - off)))"
+# aprender-serve runs at profile (c) ONLY — its minimal TEST build is red for a
+# pre-existing, non-setfit reason (D-04-10-A; the CHECK cells above still run).
+	@echo "  aprender-serve: profile (c) only (D-04-10-A blocks the minimal TEST build)"
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-serve --features setfit --lib setfit \
+		> target/sfm-run-serve-on.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/sfm-run-serve-on.log; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: aprender-serve setfit run leg is red (rc=$$rc)"; exit $$rc; fi
+	@$(call assert_tests_ran,target/sfm-run-serve-on.log,9,setfit-feature-matrix/serve-run)
 	@echo "setfit-feature-matrix: PASSED"
 
 # D-04: the aprender-contrastive-data bytes boundary. Wired into tier3 above.
@@ -1466,6 +1701,27 @@ if [ "$$ran" -lt "$(2)" ]; then \
 	echo "A name filter that matches nothing exits 0 (REVIEW CR-02) — this gate was"; \
 	echo "about to report success having run nothing. Check the test name in the"; \
 	echo "filter against the test binary: $(1)"; \
+	exit 1; \
+fi
+endef
+
+# The INVERSE guard, for SAFE-02's gating-by-absence half. `assert_tests_ran`
+# catches a filter that selected nothing; this catches a filter that selected
+# something it should not have — a surface that stopped being feature-gated.
+#
+# NEITHER IS SOUND ALONE, and the matrix uses them in PAIRS on purpose. An
+# assert-zero leg passes for two different reasons — the surface really is gated,
+# or the filter is dead — and it cannot tell them apart. It is only evidence when
+# the SAME filter, with the feature ON, is asserted non-zero by `assert_tests_ran`.
+# That pairing is what the two-sided `cargo tree` negatives below do for the
+# dependency graph, applied here at the test tier.
+define assert_tests_absent
+ran=$$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($$(i+1) ~ /^passed/) s += $$i } END { print s + 0 }' $(1)); \
+if [ "$$ran" -ne 0 ]; then \
+	echo "FAIL: $(2) ran $$ran test(s) with the setfit feature OFF, expected 0."; \
+	echo "SAFE-02's gating half says this filter must select NOTHING when the"; \
+	echo "feature is off. It selected something, so either the surface is no"; \
+	echo "longer feature-gated or the filter has widened. Log: $(1)"; \
 	exit 1; \
 fi
 endef

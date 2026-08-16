@@ -1346,11 +1346,25 @@ bindings:
     to.'
 # --- setfit-apr-v1: the Phase 4 artifact schema (plan 04-01 task 2) -----------------------
 #
-# ALL FIFTEEN ARE `pending`, AND THAT IS THE POINT OF THE PHASE, NOT AN OMISSION. Plan 04-01
-# commits the artifact schema BEFORE any code that could quietly answer its questions
-# differently (Ph1 D-14, and the cross-AI review's finding that the writer, the loader and the
-# codec each described the artifact and described it differently). None of the modules named
-# below exists on this branch yet.
+# STATUS AS OF PLAN 04-10 (wave 9): FOURTEEN of fifteen are `implemented`; `backend_identity`
+# alone is still `pending`, and its reason is recorded on its own entry below.
+#
+# WHY ALL FIFTEEN STARTED `pending`, AND WHY THAT WAS THE POINT OF THE PHASE RATHER THAN AN
+# OMISSION. Plan 04-01 commits the artifact schema BEFORE any code that could quietly answer
+# its questions differently (Ph1 D-14, and the cross-AI review's finding that the writer, the
+# loader and the codec each described the artifact and described it differently). None of the
+# modules named below existed when this block landed.
+#
+# EACH FLIP WAS VERIFIED, NOT TRANSCRIBED (plan 04-10). A binding moved to `implemented`
+# because someone believed the module had landed is a claim nothing checked — the exact failure
+# class the scoped audits exist to catch. Every `module_path`/`function` pair below was resolved
+# against the shipped source through the dogfooded pmat index before its status moved, and the
+# check found a real discrepancy: `backend_identity` names
+# `aprender::setfit::classify::backend_identity`, which does not exist at any point on this
+# branch. The identity is produced by `ExecutionBackend::identity` in the encoder. Correcting
+# the `function` column is a SEMANTIC edit to the registry, not a binding-status flip, so it is
+# out of 04-10's scope and the entry stays `pending` — which is the honest state: `pv audit`
+# reports it as BIND-004 (a warning) rather than letting an unverifiable claim read as green.
 #
 # WHY ENTRIES AT ALL, RATHER THAN NO ENTRIES. `pv audit` treats a MISSING entry as BIND-001, an
 # ERROR — measured, not assumed: `pv audit contracts/setfit-apr-v1.yaml --binding
@@ -1368,91 +1382,99 @@ bindings:
   equation: artifact_storage_map
   module_path: aprender::setfit::artifact
   function: write_setfit_apr
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-02. The storage map is the writer''s specification: every APR-01 item to a named tensor, the one typed key, or the one custom document.'
 - contract: setfit-apr-v1.yaml
   equation: artifact_doc_schema
   module_path: aprender::setfit::artifact
   function: SetFitArtifactDoc
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-02. The deny_unknown_fields struct; 16 fields in declaration order, no others.'
 - contract: setfit-apr-v1.yaml
   equation: nullable_path_allowlist
   module_path: aprender::setfit::artifact
   function: first_unallowed_null_path
-  status: pending
+  status: implemented
   notes: 'The walk lands with 04-02 (all FIVE sub-documents, ONE named four-path constant); the completeness gate that proves the allowlist total against the shipped types lands with 04-13, in aprender-train — the only crate that can name all five types.'
 - contract: setfit-apr-v1.yaml
   equation: doc_bundle_bijection
   module_path: entrenar::train::setfit::apr_codec
   function: deserialize
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-05. The closure equation serialize(deserialize(bytes)) == bytes at Tolerance::EXACT; depends on bundle field 20 (ProvenanceRecord) from 04-13.'
 - contract: setfit-apr-v1.yaml
   equation: canonical_tensor_names
   module_path: aprender::setfit::artifact
   function: canonical_name_for_hf
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-02. Total and injective over the artifact''s own tensor set; the resulting map is written into the artifact as hf_name_map.'
 - contract: setfit-apr-v1.yaml
   equation: architecture_derived_tensor_set
   module_path: aprender::setfit::artifact
   function: expected_tensor_names
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-03. A FUNCTION of doc.architecture.num_layers — no hardcoded six-layer list and no test-only schema exception.'
 - contract: setfit-apr-v1.yaml
   equation: artifact_size_bounds
   module_path: aprender::setfit::artifact
   function: load_setfit_apr
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-03 as rung 2 of the ladder, plus the per-entry structural size check at rung 5.'
 - contract: setfit-apr-v1.yaml
   equation: bounded_read
   module_path: aprender::setfit::artifact
   function: read_setfit_apr_bytes_bounded
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-03. Review B5: the cap must bite BEFORE the caller allocates, so apr-cli and aprender-serve both call this rather than fs::read.'
 - contract: setfit-apr-v1.yaml
   equation: probe_policy
   module_path: aprender::setfit::artifact
   function: rung8_replay_probes
-  status: pending
+  status: implemented
   notes: 'Probe RECORDING lands with 04-02, probe REPLAY with 04-03 as rung 8. The six inputs are contract-resident and synthetic — never dataset text (Pitfall 8). The function column named `replay_probes`, which never existed at any point on this branch; the shipped function is `rung8_replay_probes`, numbered to the contract ladder rather than to a private count.'
 - contract: setfit-apr-v1.yaml
   equation: probe_and_parity_tolerances
   module_path: aprender::setfit::artifact
   function: within
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-03 and is reused by the 04-09 parity harness. NaN-visible partial_cmp form; the embedding bound is parsed from setfit-encoder-conformance-v1, never re-derived.'
 - contract: setfit-apr-v1.yaml
   equation: classify_response_schema
   module_path: aprender::setfit::classify
   function: ClassifyResponse
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-04. Private fields, one validating constructor, Deserialize routed through it via a private wire struct — what makes the non-finite claim true rather than falsifiable by a public field (review M2).'
 - contract: setfit-apr-v1.yaml
   equation: backend_identity
   module_path: aprender::setfit::classify
   function: backend_identity
   status: pending
-  notes: 'Lands with plan 04-04. Produced BY the encode invocation that ran; review B6 — a trueno capability detection must never reach this field.'
+  notes: 'Lands with plan 04-04. Produced BY the encode invocation that ran; review B6 — a trueno
+    capability detection must never reach this field. STILL `pending` AFTER 04-10, and deliberately
+    so: 04-10 resolved every binding pair in this block against the shipped source before moving its
+    status, and this is the one that did not resolve. There is no
+    `aprender::setfit::classify::backend_identity` at any point on this branch — the identity comes
+    from `ExecutionBackend::identity` in the encoder. Flipping this to `implemented` would record a
+    claim nothing can check. Correcting the `function` column is a SEMANTIC edit to the registry
+    rather than a binding-status flip, so it is out of 04-10''s declared scope; the orchestrator has
+    it recorded as an open wave-6 item.'
 - contract: setfit-apr-v1.yaml
   equation: selection_lock_lifecycle
   module_path: entrenar::train::setfit::lock
   function: mint_test_token
-  status: pending
+  status: implemented
   notes: 'The durable lock artifact and the CLI workflow land with 04-07 / 04-14 (review B4); the underlying lock, token minting and grant already exist from Phase 3 and are consumed as shipped.'
 - contract: setfit-apr-v1.yaml
   equation: d02_typed_key_amendment
   module_path: aprender::setfit::artifact
   function: write_setfit_apr
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-02. model_type = "setfit" is the only typed key set; schema, schema_version, ordered_labels and tokenizer_sha256 are first-level doc fields. An explicit, recorded amendment of D-02(a).'
 - contract: setfit-apr-v1.yaml
   equation: load_validation_ladder
   module_path: aprender::setfit::artifact
   function: load_setfit_apr
-  status: pending
+  status: implemented
   notes: 'Lands with plan 04-03. Eight ordered rungs; VerifiedSetFitModel has a private constructor reachable only from here, proven non-constructible from outside by a trybuild compile-fail test (APR-04).'
 critical_path:
 - softmax
