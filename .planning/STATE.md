@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 4 context gathered
-last_updated: "2026-08-16T18:05:24.798Z"
-last_activity: 2026-08-16 -- Phase 04 planning complete
+stopped_at: Phase 4 UAT complete, awaiting secure-phase
+last_updated: "2026-08-16T23:29:10Z"
+last_activity: 2026-08-16 -- Phase 04 UAT complete (12 passed, 0 issues); verification reconciled
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 50
-  completed_plans: 45
+  completed_plans: 50
   percent: 60
 ---
 
@@ -21,22 +21,61 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-07)
 
 **Core value:** A small labeled dataset can produce an accurate, fast, reproducible classifier that trains and runs entirely through Aprender's native Rust and APR lifecycle.
-**Current focus:** Phase 04 — apr-artifact-and-production-parity
+**Current focus:** Phase 04 executed + UAT-passed; blocked on `/gsd:secure-phase 04` before Phase 5
 
 ## Current Position
 
-Phase: 04 (apr-artifact-and-production-parity) — EXECUTING
-Plan: 1 of 16
-Status: Ready to execute
-Last activity: 2026-08-16 -- Phase 04 planning complete
+Phase: 04 (apr-artifact-and-production-parity) — EXECUTED, UAT COMPLETE, NOT YET CLOSED
+Plan: 22 of 22 executed
+Status: Awaiting `/gsd:secure-phase 04` — security enforcement is ON and no 04-SECURITY.md exists
+Last activity: 2026-08-16 -- Phase 04 UAT complete (12 passed, 0 issues); verification reconciled
 
-**Phase 03 verification returned `human_needed` (03-VERIFICATION.md) and code review found 4
-blockers (03-REVIEW.md). 5 decisions await the human in `03-HUMAN-UAT.md`.** The verifier tried to
-falsify all five ROADMAP success criteria and could not: 837 scoped aprender-train tests rc=0, 775
-scoped aprender-core rc=0, aprender-core full suite 14285/0, aprender-train full suite 7839 passed /
-24 failed where the 24 names are byte-for-byte `known-red-baseline.md` (zero regressions), all 5 Make
-gates rc=0, `pv validate` clean on 4 contracts. The blockers are NOT implementation defects — they
-are places where a CHECK is weaker than it looks:
+**Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
+see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
+reload 17, lifecycle 5, spawned CLI ladder 3+1, parity 20/20, artifact 86, eval 20, serve 11,
+feature matrix (core 246 / train 311 / apr-cli delta 18→79 / serve 11) with RUN legs and
+two-sided negatives, `pv validate` 0 errors 0 warnings, `contract-audit-phase4` 15/15 bound
+with **zero BIND- lines**, `setfit-api-boundary` PASSED with an executed MUST-MATCH control,
+`bashrs-lint-makefile` honest at bashrs rc=2 with 1 control-refuted false positive.
+
+**`04-VERIFICATION.md` was stale and is now reconciled, not rewritten.** It was written at
+`0fb47958f` and never re-run; the five gap-closure plans it triggered (04-18..04-22) landed
+afterwards, and `roadmap.update-plan-progress` had already flipped Phase 4 to Complete on
+summary-count parity alone — the SIXTH occurrence of that false-completion defect. Status is
+now `gaps_acknowledged` with the original verdict and its measurements UNAMENDED, plus an
+`## Acknowledged Gaps` section. Closed since the report: SC4+SC5's shared BIND-004 (04-19),
+WR-08/WR-09 (04-18), WR-10 (04-20), both D-04-11-A production survivors (04-21), F-07 (04-22).
+
+**Four items are OPEN by explicit human ruling, and Phase 4 does NOT close them:**
+
+  1. **F-10** — `CALIBRATED_REGIMES` admits only the phase-3 MiniLM slice, whose 97-row
+     vocabulary cannot compute `probe_unicode`, so no user-reachable path produces a
+     `setfit-apr-v1`. SC1 and SC3 remain UNMET; SC2's policy has only run over a substituted
+     encoder/head; SC4's parity fixture is synthetic. Deferred to **Phase 5**, which must
+     calibrate on production `all-MiniLM-L6-v2` and add its fingerprint to
+     `contracts/setfit-train-lifecycle-v1.yaml` by deliberate `pv diff`-flagged contract edit
+     per Phase 3 D-10(c) — never an inline relaxation.
+
+  2. **04-11 must-have 4** — per-crate cargo-mutants baselines and an aggregate adjusted score.
+     1 of 4 crates attempted, interrupted at ~68 min, no score produced. Human ruled this out
+     of the phase sequence and into a **standalone compute ticket** (≥10 h for 890 mutants is a
+     compute-budget decision CLAUDE.md reserves for the human). **No mutation score exists for
+     Phase 4 and none may be inferred.** Owner unassigned; successor to D-04-11-B.
+
+  3. **WR-01** — the APR write path is not race-free. `fs::rename` in `atomic_write` replaces
+     its destination unconditionally, so a file created between check and rename is destroyed
+     without `--force`. 04-20 narrowed the window; closing it needs `O_CREAT|O_EXCL`.
+
+  4. **SAFE-02 "in CI"** — the 16 setfit legs at `.github/workflows/ci.yml:378-397` (applied
+     `57f7823ab`) have NEVER EXECUTED. All Phase 4 evidence is macOS/arm64 local. The arch
+     asymmetry is two-way and only one direction has been measured: `make tier2` is known RED
+     on arm64 with 24 clippy errors in arch-gated SIMD that X64-Linux CI never lints.
+
+**Phase 03 is COMPLETE.** Its five `human_needed` items were adjudicated 2026-08-14 —
+`03-HUMAN-UAT.md` is `status: complete`, `03-VERIFICATION.md` reads `passed`. The ROADMAP
+progress table still showed `human_needed` for Phase 3 as of `b3f816c25`; that is table lag,
+not an open item. The four Phase 3 code-review blockers below are retained as the historical
+record of what was found and why it was not an implementation defect:
 
   - CR-01: Phase 3's ~2900 lines of unit tests and all seven trybuild cases run in NO tier and NO CI
     job. `setfit` is declared (aprender-train/Cargo.toml:79) but not default; no workspace member
@@ -54,8 +93,10 @@ are places where a CHECK is weaker than it looks:
   - CR-04: thresholds_match_the_contract checks entry COUNT then a SUBSET test, so widening
     CALIBRATED_REGIMES keeps it green while admitting uncalibrated runs.
 
-**Phase 03 is NOT complete.** Two of 03-10's must_haves are unmet, both blocked on a
-compute-budget decision that CLAUDE.md reserves for the human:
+**Two of 03-10's must_haves were unmet at the time of that verification, both blocked on the
+same compute-budget decision CLAUDE.md reserves for the human. They were adjudicated in
+`03-HUMAN-UAT.md` on 2026-08-14 — and Phase 4's mutation deferral (item 2 above) is the same
+shape, now routed to a standalone compute ticket:**
 
   1. Scoped cargo-mutants adjusted score >= 85% — NOT RUN. 1181 mutants inventoried;
      ~44.6 h projected single-job. Two measured tooling blockers: `--in-place` conflicts
@@ -69,8 +110,13 @@ TRN-07 is deliberately left unchecked: its compile-time negatives landed, but no
 out-of-crate or `apr` path exercises create_selection_lock -> mint_test_token -> grant,
 so nothing demonstrates a user REACHING the lock.
 
-REPAIRED BY HAND after the GSD state/roadmap handlers (recurring defect, 5th occurrence —
-and the first where the damage was a FALSE COMPLETION CLAIM):
+REPAIRED BY HAND after the GSD state/roadmap handlers (recurring defect — 5th occurrence at
+Phase 3, and the first where the damage was a FALSE COMPLETION CLAIM. **It recurred a 6th time
+at Phase 4**: `roadmap.update-plan-progress` marked Phase 4 Complete on summary-count parity
+while `04-VERIFICATION.md` still read `gaps_found`, and the two artifacts sat in contradiction
+for 25 commits until the 2026-08-16 UAT reconciled them. The rule stands: diff STATE.md and
+ROADMAP.md after EVERY handler call and revert any completion claim the verifier has not
+earned; the handler's own `"complete": true` is not evidence of anything):
 
   - `state.begin-phase` wrote `Plan: 1 of 10` on a resume at plan 10, left `stopped_at` on
     the Phase 2 value, wrote the phase percentage (40) into a field the body renders as a
@@ -84,11 +130,15 @@ and the first where the damage was a FALSE COMPLETION CLAIM):
 Phase 2's outstanding items live in `02-HUMAN-UAT.md` (status: partial, 4 human decisions
 incl. the publish cascade) and are unchanged by these repairs.
 
-Working branch: `gsd/phase-2-contract-gate` @ b002df419 (wave 7 merge). Phases 2 and 3 both ride this one
+Working branch: `gsd/phase-2-contract-gate` @ b3f816c25. Phases 2, 3 and 4 all ride this one
 branch — see 02-01-SUMMARY.md for the branch/PR policy. **No PR has been opened yet; per
-02-01 that is the human's call after the verifier runs.**
+02-01 that is the human's call after the verifier runs.** This is now also why SAFE-02's
+"in CI" clause is unproven: with no PR, the 16 setfit legs in ci.yml have never executed.
 
-Progress: [████████████████████] 100% (28 of 28 PLANNED plans executed; phases 4-5 are not yet planned, so this is not milestone completion — and Phase 03 itself is not verified)
+Progress: [████████████████████] 100% (50 of 50 PLANNED plans executed across phases 1-4;
+Phase 5 is not yet planned, so this is NOT milestone completion. Phase 4 is executed and
+UAT-passed but NOT CLOSED — `/gsd:secure-phase 04` has not run, and SC1/SC3 remain unmet
+pending F-10 in Phase 5.)
 
 ## Performance Metrics
 
@@ -252,6 +302,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-08-14T23:30:45.327Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-apr-artifact-and-production-parity/04-CONTEXT.md
+Last session: 2026-08-16T23:29:10Z
+Stopped at: Phase 4 UAT complete (12 passed, 0 issues); awaiting /gsd:secure-phase 04
+Resume file: .planning/phases/04-apr-artifact-and-production-parity/04-UAT.md
