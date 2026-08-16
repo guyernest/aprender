@@ -154,3 +154,42 @@ It cannot distinguish a regression from this standing red. The leg that is green
 04-06 and 04-07 actually used, is `cargo check -p apr-cli --all-targets` with DEFAULT features
 (`setfit` OFF, `inference` ON) — the ungated build is what proves the `setfit` gating.
 04-09's Cargo.toml carries the same note beside the dev-dependency block.
+
+---
+
+## D-04-10-A — `aprender-serve`'s minimal TEST build is red; the LIBRARY check is green
+
+**Found by:** plan 04-10, while measuring the SAFE-02 run legs for the feature matrix. The
+CHECK cells for `aprender-serve` at profiles (a) and (b) are both rc=0, so the discrepancy is
+specific to the test target and would not have surfaced from a build-only matrix.
+
+**Measured** (status captured directly off cargo, never through a pipe):
+
+```
+$ cargo check -p aprender-serve --no-default-features                        rc=0
+$ cargo check -p aprender-serve --no-default-features --features setfit      rc=0
+$ cargo test  -p aprender-serve --no-default-features --lib setfit           rc=101
+$ cargo test  -p aprender-serve --no-default-features --features setfit --lib setfit  rc=101
+```
+
+**Cause:** `#[cfg(test)]` code imports feature-gated items unconditionally —
+`crate::gguf::OwnedQuantizedModelCached`, `crate::gguf::OwnedQuantizedModelCachedSync`,
+`crate::gguf::DequantizedFFNWeights`, `crate::gguf::DequantizedWeightCache`, `crate::gpu`, and
+the `crate::api` GPU request/response types (`GpuBatchRequest`, `GpuStatusResponse`, ...). The
+library compiles without `server`/`gpu`; only the test target needs them.
+
+**Pre-existing and unrelated to setfit.** The two runs above produce the SAME first errors with
+the feature OFF and ON, and the first four errors are `gguf`/`gpu` imports that setfit does not
+touch. This is the same class as D-04-09-A one crate over: gated code that is not `cfg`-gated,
+here inside `#[cfg(test)]` rather than in `src/`.
+
+**Action taken by 04-10:** `setfit-feature-matrix` runs `aprender-serve` at profile (c) only,
+and says so in the recipe. The (a)/(b) CHECK cells are still wired — they are green and they
+are what the SAFE-02 build claim needs. `setfit-serve-tests` is likewise scoped to
+`--features setfit --lib setfit` (10 passed / 0 failed).
+
+**Action for whoever fixes it:** the fix is a `cfg` decision on `aprender-serve`'s test module
+imports, not on setfit. Once green, add the two missing RUN cells to `setfit-feature-matrix`
+beside the profile-(c) leg. Do NOT wire the whole-crate `-p aprender-serve --lib` suite in the
+process — that is a separate standing red (D-04-08-A, 51 failures from one overflow at
+`contract_gate.rs:428`).
