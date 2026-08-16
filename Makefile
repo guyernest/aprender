@@ -39,7 +39,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests contract-audit-phase4 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests contract-audit-phase4 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests
 
 # Default target
 all: tier2
@@ -1651,6 +1651,8 @@ gemm-thread-determinism: ## D-13/TRN-06: Tensor::matmul does not depend on the r
 #   setfit-codec-tests         train setfit::apr_codec::     17 / 0        15
 #   setfit-reload-tests        train setfit::apr_reload::    17 / 0        15
 #   setfit-lock-tests          train setfit::lock            36 / 0        32
+#   setfit-verify-tests        train setfit::verify          18 / 0        16
+#   setfit-cli-serve-tests     cli   serve                  358 / 0       330
 #   setfit-lifecycle-tests     train --test setfit_apr_life   5 / 0         5
 #   setfit-ui-tests            train --test ui                1 / 0         1
 #   setfit-cli-train-tests     cli   setfit_train            15 / 0        13
@@ -1784,6 +1786,33 @@ setfit-lock-tests: ## SAFE-01: aprender-train setfit::lock (TRN-07 selection loc
 	tail -3 target/setfit-lock-tests.log; \
 	if [ $$rc -ne 0 ]; then echo "FAIL: setfit-lock-tests is red (rc=$$rc); see target/setfit-lock-tests.log"; exit $$rc; fi
 	@$(call assert_tests_ran,target/setfit-lock-tests.log,32,setfit-lock-tests)
+
+# FOUND BY THE ALL-38-TASKS CROSS-CHECK, not by the plan's target list. 04-13's
+# `<automated>` block names this suite as its own evidence and it had no target —
+# and its acceptance criterion is the strongest of the phase ("a compile failure
+# here is the signature of a missed verify_tests.rs call site"), which is precisely
+# the kind of claim that must not depend on an unguarded broad leg.
+setfit-verify-tests: ## SAFE-01: aprender-train setfit::verify (04-13's cited evidence)
+	@echo "Phase 4: aprender-train setfit::verify suite (04-13 evidence)"
+	@mkdir -p target
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --features setfit --lib setfit::verify \
+		> target/setfit-verify-tests.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/setfit-verify-tests.log; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: setfit-verify-tests is red (rc=$$rc); see target/setfit-verify-tests.log"; exit $$rc; fi
+	@$(call assert_tests_ran,target/setfit-verify-tests.log,16,setfit-verify-tests)
+
+# Also found by the cross-check: 04-08's `<automated>` block names
+# `cargo test -p apr-cli --features setfit --lib serve` and nothing covered it.
+setfit-cli-serve-tests: ## OPS-05: apr-cli serve (04-08's cited evidence)
+	@echo "Phase 4: apr-cli serve suite (04-08 evidence)"
+	@mkdir -p target
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p apr-cli --features setfit --lib serve \
+		> target/setfit-cli-serve-tests.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/setfit-cli-serve-tests.log; \
+	if [ $$rc -ne 0 ]; then echo "FAIL: setfit-cli-serve-tests is red (rc=$$rc); see target/setfit-cli-serve-tests.log"; exit $$rc; fi
+	@$(call assert_tests_ran,target/setfit-cli-serve-tests.log,330,setfit-cli-serve-tests)
 
 setfit-lifecycle-tests: ## OPS-01: aprender-train --test setfit_apr_lifecycle (04-12's cross-crate leg)
 	@echo "Phase 4: aprender-train setfit_apr_lifecycle integration suite"
@@ -2013,9 +2042,10 @@ setfit-api-boundary: ## OPS-01: aprender-core / aprender-train must not depend o
 # (W-6): they are 04-14's cited evidence and had no guarded target before.
 setfit-all-tests: setfit-apr-tests setfit-classify-tests setfit-bundle-tests \
 	setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests \
-	setfit-lock-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests \
-	setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests \
-	setfit-cli-io-tests setfit-serve-tests ## Phase 4: every scoped setfit suite, each guarded
+	setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests \
+	setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests \
+	setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests \
+	setfit-serve-tests ## Phase 4: every scoped setfit suite, each guarded
 	@echo "setfit-all-tests: every Phase 4 suite ran under its own floor"
 
 contract-regen: ## Regenerate wired test files from contracts
