@@ -187,16 +187,43 @@ pub(crate) fn atomic_write(target: &Path, bytes: &[u8], force: bool) -> Result<(
     result
 }
 
-/// The no-clobber gate, callable on its own so it can run BEFORE training.
+/// The no-clobber gate, callable on its own so it can run BEFORE the work.
 ///
-/// [`atomic_write`] calls it too, and that is not redundancy: the pre-flight closes the
-/// window in which a long run ends by refusing to write, while the write-time check is
-/// what makes the guarantee true for a file that appeared while the run was going.
+/// # Three call sites in two commands, and the order is the point
+///
+/// This was `fn`, and the doc above already said it exists to be callable before training —
+/// a stated purpose the visibility prevented any other module from using. `apr eval
+/// --lock-out` therefore ran its ENTIRE multi-candidate sweep before discovering that the
+/// lock file it was asked to write already existed (finding WR-10), which is exactly the
+/// twenty-minute run ending in "I will not overwrite that file" that this module's header
+/// says the ordering discipline exists to prevent. It is `pub(crate)` now, and the three
+/// call sites are ordered:
+///
+/// 1. `apr setfit train`'s pre-flight — before a row of `--data` is read.
+/// 2. `apr eval --lock-out`'s pre-flight — same rule, one command over, reached through
+///    `eval::setfit::refuse_existing_lock`, which re-states this refusal in the wording a
+///    selection lock needs rather than re-implementing the decision.
+/// 3. [`atomic_write`]'s own check — immediately before the rename.
+///
+/// The third is NOT made redundant by the first two, and deleting it as such would be the
+/// regression `write_lock_still_refuses_a_destination_that_appeared_mid_run` exists to
+/// catch: a pre-flight closes the window in which a long run ends by refusing to write,
+/// while the write-time check is what makes the guarantee true for a file that appeared
+/// WHILE the run was going.
+///
+/// # What this still does not close
+///
+/// The check-to-`fs::rename` window inside [`atomic_write`] remains open (WR-01): `rename`
+/// replaces its destination unconditionally, so a file created after this check and before
+/// that rename is still destroyed without `--force`. Refusing earlier narrows the window; it
+/// does not make the write path race-free, and closing it needs the destination taken with
+/// `O_CREAT|O_EXCL`.
 ///
 /// # Errors
 ///
-/// [`CliError::ValidationFailed`] naming the path and `--force`.
-fn refuse_existing_output(target: &Path, force: bool) -> Result<()> {
+/// [`CliError::ValidationFailed`] naming the path and `--force`. That is the ONLY failure
+/// mode, which is what lets a caller replace the message without losing a distinction.
+pub(crate) fn refuse_existing_output(target: &Path, force: bool) -> Result<()> {
     if !force && target.exists() {
         return Err(CliError::ValidationFailed(format!(
             "Refusing to replace existing file {} (pass --force to replace it)",

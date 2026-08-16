@@ -195,9 +195,14 @@ const EVAL_RULE: SelectionRule = SelectionRule::MaxMetricLowestIndexTieBreak;
 /// whose dataset does not match); [`CliError::InvalidFormat`] for an over-cap lock file;
 /// [`CliError::ModelLoadFailed`] for an artifact the load ladder rejects.
 pub(crate) fn run(args: &SetFitEvalArgs<'_>) -> Result<()> {
-    // (1) THE FLAGS FIRST, before a byte of the dataset or the artifact is read. A run that
-    //     spends a minute loading a corpus and then says "--selection-lock is required" has
-    //     told the operator something it knew before it started.
+    // (1) THE FLAGS AND THE OUTPUT PATH FIRST, before a byte of the dataset or the artifact is
+    //     read. A run that spends a minute loading a corpus and then says "--selection-lock is
+    //     required" has told the operator something it knew before it started — and the same is
+    //     true of the destination it was asked to write. That second half was MISSING (WR-10):
+    //     the no-clobber check lived only at the write, so the whole multi-candidate sweep ran
+    //     first. `setfit_train.rs`'s module header states this discipline as four checks and
+    //     says refusing the output path is the one that stops a long run from ending in "I will
+    //     not overwrite that file"; this is that check, in the command that lacked it.
     let data = args.data.ok_or_else(|| {
         CliError::ValidationFailed(
             "--data <DIR> is required to evaluate a setfit-apr-v1 artifact: the canonical \
@@ -215,6 +220,9 @@ pub(crate) fn run(args: &SetFitEvalArgs<'_>) -> Result<()> {
         )
     })?;
     check_split_flags(args)?;
+    if let Some(destination) = args.lock_out {
+        refuse_existing_lock(destination, args.force)?;
+    }
 
     // (2) THE PHASE 2 INPUTS, through the doors `data_contrastive` already owns.
     let mut ledger = AccessLedger::new();
@@ -591,27 +599,62 @@ fn selection_root_seed(credential: &ReloadedSetFitCredential) -> Option<u64> {
         .as_u64()
 }
 
+/// Refuse an occupied `--lock-out` destination — ONE decision, ONE wording, TWO call sites.
+///
+/// # The decision is not re-implemented here
+///
+/// `setfit_train::refuse_existing_output` is the crate's standalone no-clobber gate, and its
+/// own doc says it exists to be callable before the work. This function delegates the DECISION
+/// to it and replaces only the MESSAGE. That gate has exactly one failure mode, documented on
+/// it, so nothing is lost by re-stating it.
+///
+/// # Why a bespoke message at all
+///
+/// The generic refusal is "Refusing to replace existing file {path} (pass --force)". True, and
+/// it does not tell an operator what replacing THIS file costs: the lock is the record that a
+/// selection was committed BEFORE canonical test access was taken, so replacing one silently
+/// invalidates every test measurement taken under the old one while leaving a file that looks
+/// current. That is worth spelling out, and worth spelling out in exactly ONE place — the
+/// pre-flight and the write-time refusal being two wordings for one refusal is precisely how
+/// they would drift.
+fn refuse_existing_lock(destination: &Path, force: bool) -> Result<()> {
+    crate::commands::setfit_train::refuse_existing_output(destination, force).map_err(|_| {
+        CliError::ValidationFailed(format!(
+            "{} already exists. A selection lock is a COMMITMENT, so overwriting one is never \
+             implicit: pass --force if you intend to replace the committed decision, and be \
+             aware that any test measurement taken under the old lock no longer describes the \
+             selection this file records.",
+            destination.display()
+        ))
+    })
+}
+
 /// Write the lock atomically, refusing to clobber without `--force`.
 ///
 /// Temp file in the DESTINATION directory, `sync_all`, one `rename` — the 04-06 precedent, for
 /// the same reason: a lock half-written by an interrupted run would be a file that looks like a
 /// committed selection and is not one.
 fn write_lock(destination: &Path, lock: &SelectionLock, force: bool) -> Result<()> {
-    if destination.exists() && !force {
-        return Err(CliError::ValidationFailed(format!(
-            "{} already exists. A selection lock is a COMMITMENT, so overwriting one is never \
-             implicit: pass --force if you intend to replace the committed decision, and be \
-             aware that any test measurement taken under the old lock no longer describes the \
-             selection this file records.",
-            destination.display()
-        )));
-    }
+    refuse_existing_lock(destination, force)?;
     // THE WRITE goes through the crate's ONE atomic writer, not a fourth hand-roll.
     //
-    // The bespoke refusal above stays: "a lock is a COMMITMENT" says more than the generic
-    // no-clobber message, and it fires before any bytes are produced. `force` is still passed
-    // through so `atomic_write`'s own `refuse_existing_output` runs too — that second check is
-    // not redundant, it is what covers a file that appeared WHILE this run was going.
+    // THREE ORDERED CHECKS STAND HERE, and none is redundant with the others. They differ in
+    // WHEN they run, which is the whole of their value:
+    //
+    //   1. the PRE-FLIGHT in `run`, before any input is read — so an occupied destination
+    //      costs the operator nothing but the message. This was the missing one (WR-10): the
+    //      refusal used to arrive after the corpus read, the load ladder and a classify pass
+    //      over the validation split for every candidate.
+    //   2. THIS call, before any bytes are produced — it covers a destination that appeared
+    //      between the pre-flight and the decision, which on a long sweep is a real interval.
+    //   3. `atomic_write`'s own `refuse_existing_output`, immediately before the rename — the
+    //      narrowest window, and the reason `force` is still passed through.
+    //
+    // Deleting (3) as "now redundant" is the regression this arrangement invites, so it is
+    // pinned: `write_lock_still_refuses_a_destination_that_appeared_mid_run` turns red when
+    // that line is removed. What NONE of the three closes is the check-to-`rename` window
+    // inside `atomic_write` itself (WR-01) — `rename` replaces unconditionally, so this path
+    // is narrower than it was and is not race-free.
     //
     // The hand-rolled copy this replaces had drifted from the shared writer in two ways that
     // mattered: its temp was `.{name}.tmp` with no pid or ordinal, so two concurrent
