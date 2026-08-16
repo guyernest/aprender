@@ -739,9 +739,11 @@ fn dispatch_experiment_command(
 /// The SetFit-only flags are REFUSED on the non-SetFit path rather than ignored. An operator
 /// who passes `--selection-lock` and gets a green report has every reason to believe the lock
 /// gated something; it would have gated nothing.
+// `pub(crate)` solely so the four-consumer agreement table in `setfit_tag_tests.rs` can
+// reach this decision surface; nothing else about this function changes (WR-08).
 #[cfg(feature = "training")]
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-fn dispatch_classify_eval(
+pub(crate) fn dispatch_classify_eval(
     resolved: &std::path::Path,
     dataset: &str,
     data: Option<&std::path::Path>,

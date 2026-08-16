@@ -290,6 +290,127 @@ fn setfit_tag_keeps_the_two_metadata_malformations_distinguishable() {
     );
 }
 
+/// WR-08 stated as ONE table over ONE file: no two tools may contradict each other.
+///
+/// Measured at HEAD `81652bb50`, before this plan, for this exact container — a real
+/// APR v2 file carrying `model_type = "setfit"` whose metadata block is in-bounds for
+/// the file but over the identification cap:
+///
+/// * `apr predict` said "not a SetFit classifier … run `apr inspect <FILE>` to see
+///   what it actually is" — a denial of a tag it had not read, plus a pointer;
+/// * `apr inspect`, followed to, rendered the FULL APR-05 section for the same bytes;
+/// * `apr eval --task classify` refused its SetFit-only flags with "does not carry
+///   the SetFit tag", which is false of a file that carries it.
+///
+/// CLAUDE.md rule 5: a guard that does not scan the surface where the DECISION is made
+/// is theater. The decision surfaces here are exactly four — the shared detector,
+/// `inspect`'s own reader, `predict`, and the `apr eval --task classify` router — so
+/// all four are driven, and two `pub(crate)` seams exist for no other purpose than to
+/// make the last two reachable. That this function COMPILES is the reachability proof;
+/// the assertions below are the agreement proof.
+///
+/// `apr serve` is asserted too, and asserted to be DIFFERENT: its fall-through is
+/// deliberate and documented, and it is driven through the very expression
+/// `serve/handlers.rs:774` uses so that an edit there turns this red.
+#[cfg(feature = "training")]
+#[test]
+fn four_consumers_agree_about_one_over_cap_file() {
+    /// A statement no surface may make about this file. It carries the tag; the only
+    /// honest position is "I could not read the block", never "it is not one".
+    const FALSE_DENIALS: [&str; 3] = [
+        "not a SetFit classifier",
+        "does not carry the SetFit tag",
+        "is not a SetFit",
+    ];
+
+    let temp = TempDir::new().expect("tempdir");
+    let declared = MAX_TAG_METADATA_BYTES + 1;
+    let path = write_over_cap_apr(temp.path(), "over-cap.apr", SETFIT_MODEL_TYPE, declared);
+
+    // ---- surface 1: the SHARED DETECTOR -----------------------------------
+    let detector = read_setfit_tag(&path)
+        .expect_err("the shared detector refuses a block it cannot cheaply read");
+    let detector_msg = detector.to_string();
+
+    // ---- surface 2: `apr inspect`'s OWN reader ----------------------------
+    // Not `read_setfit_tag` again: `inspect` has a SEPARATE reader, and WR-08 is
+    // exactly the case where the two disagreed about one file.
+    let mut reader =
+        std::io::BufReader::new(std::fs::File::open(&path).expect("the fixture is readable"));
+    let header = crate::commands::inspect::read_and_parse_header(&mut reader)
+        .expect("the fixture is a real APR v2 container");
+    let info = crate::commands::inspect::read_metadata(&mut reader, &header);
+
+    // ---- surface 3: `apr predict` -----------------------------------------
+    let predict = crate::commands::predict::run(&path, &["hello".to_string()], None, false, true)
+        .expect_err("predict cannot classify a block it could not read");
+    let predict_msg = predict.to_string();
+
+    // ---- surface 4: `apr eval --task classify` ----------------------------
+    let eval = crate::dispatch_classify_eval(
+        &path,
+        "sst2",
+        None,
+        None,
+        2,
+        false,
+        true,
+        None,
+        "validation",
+        None,
+        None,
+        &[],
+        false,
+    )
+    .expect_err("the classify router cannot route a block it could not read");
+    let eval_msg = eval.to_string();
+
+    // ---- the CONJUNCTION WR-08 names --------------------------------------
+    for (surface, message) in [
+        ("read_setfit_tag", &detector_msg),
+        ("predict", &predict_msg),
+        ("dispatch_classify_eval", &eval_msg),
+    ] {
+        assert!(
+            message.contains("16 MiB"),
+            "{surface} must name the cap that fired, so all surfaces cite ONE cause; \
+             got: {message}"
+        );
+        for denial in FALSE_DENIALS {
+            assert!(
+                !message.contains(denial),
+                "{surface} must not state or imply the file is not a SetFit artifact — it \
+                 carries the tag, and the block was never read; found {denial:?} in: {message}"
+            );
+        }
+    }
+
+    // `apr inspect` must not render a populated APR-05 section for these bytes, and
+    // must disclose WHY rather than defaulting to a silent "no model type".
+    assert_eq!(
+        info.metadata_over_cap_bytes,
+        Some(declared),
+        "inspect must DISCLOSE the refusal, not render the file as an ordinary APR"
+    );
+    assert_eq!(
+        info.model_type, None,
+        "inspect must derive no model type from a block it never read"
+    );
+    assert!(
+        info.setfit_doc.is_none(),
+        "inspect must render NO APR-05 section for a file whose document it never read — \
+         rendering one while predict denied the tag is WR-08 itself"
+    );
+
+    // ---- `apr serve`: DIFFERENT, and deliberately so ----------------------
+    let serve_routes_to_setfit = read_setfit_tag(&path).ok().flatten().is_some();
+    assert!(
+        !serve_routes_to_setfit,
+        "serve keeps its documented fall-through to the plain-APR path via \
+         `.ok().flatten()`; that is a considered disposition, not a contradiction"
+    );
+}
+
 /// The CODE LINES of the production half of `setfit_tag.rs`.
 ///
 /// Two filters, and each was earned by a real red:

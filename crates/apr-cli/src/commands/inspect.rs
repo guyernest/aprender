@@ -62,10 +62,19 @@ struct FlagsInfo {
     has_vocab: bool,
 }
 
+/// What `apr inspect` derived from a file's metadata block.
+///
+/// `pub(crate)`, along with `HeaderData`, `read_and_parse_header` and the three fields
+/// marked below, for ONE reason: the four-consumer agreement table in
+/// `setfit_tag_tests.rs` drives this reader directly. The plan for this change budgeted
+/// a single `pub(crate)` keyword on `read_metadata`; the compiler disagreed, because
+/// that function's signature names two module-private types and the facts the table
+/// must assert live in private fields. Everything not needed by the table stays private.
 #[derive(Serialize, Default)]
-struct MetadataInfo {
+pub(crate) struct MetadataInfo {
+    /// `pub(crate)`: the table asserts nothing is derived from an unread block.
     #[serde(skip_serializing_if = "Option::is_none")]
-    model_type: Option<String>,
+    pub(crate) model_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,20 +144,25 @@ struct MetadataInfo {
     /// indistinguishable from a plain APR that genuinely has neither. That is the
     /// `inspect` half of WR-08 — the fact that the block was REFUSED is the whole
     /// diagnosis, and defaulting throws it away.
+    /// `pub(crate)`: the table asserts the refusal is DISCLOSED, not defaulted.
     #[serde(skip_serializing_if = "Option::is_none")]
-    metadata_over_cap_bytes: Option<u64>,
+    pub(crate) metadata_over_cap_bytes: Option<u64>,
     /// The raw value at custom key `setfit`, present only on a TAGGED artifact.
     ///
     /// `#[serde(skip)]`: this is an INPUT to the APR-05 section built below, not a
     /// field of the metadata block. Serializing it here would publish the artifact
     /// document twice under two different keys — two copies of one fact, which is
     /// two values that can disagree.
+    /// `pub(crate)`: the table asserts NO APR-05 section is rendered for these bytes.
     #[serde(skip)]
-    setfit_doc: Option<serde_json::Value>,
+    pub(crate) setfit_doc: Option<serde_json::Value>,
 }
 
 /// Parsed v2 header data
-struct HeaderData {
+///
+/// `pub(crate)` only because `read_metadata` and `read_and_parse_header` name it and
+/// both are now `pub(crate)`; the fields stay private.
+pub(crate) struct HeaderData {
     version: (u8, u8),
     flags: AprV2Flags,
     tensor_count: u32,
@@ -240,6 +254,7 @@ pub(crate) fn run(
                     show_filters,
                     show_weights,
                 );
+                output_metadata_over_cap_text(&metadata_info);
                 output_setfit_text(setfit.as_ref());
                 if show_quality {
                     output_quality_text(&metadata_info, &header);
@@ -498,7 +513,9 @@ fn validate_path(path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-fn read_and_parse_header(reader: &mut BufReader<File>) -> Result<HeaderData, CliError> {
+/// `pub(crate)`: the agreement table needs a real header to drive `read_metadata`
+/// with, and constructing one by hand would test a header this code never produced.
+pub(crate) fn read_and_parse_header(reader: &mut BufReader<File>) -> Result<HeaderData, CliError> {
     let mut header_bytes = [0u8; HEADER_SIZE_V2];
     reader.read_exact(&mut header_bytes).map_err(|_| {
         CliError::InvalidFormat(
@@ -547,7 +564,44 @@ fn read_and_parse_header(reader: &mut BufReader<File>) -> Result<HeaderData, Cli
     })
 }
 
-fn read_metadata(reader: &mut BufReader<File>, header: &HeaderData) -> MetadataInfo {
+/// Disclose, in the HUMAN output, a metadata block the absolute cap refused.
+///
+/// Printed only when the cap fired, so every legitimate artifact's text output is
+/// unchanged — the `None` arm returns before printing anything.
+///
+/// It lives here rather than inside `output_metadata_text` because that function is
+/// in `inspect_output_json.rs`, and this disclosure must not perturb that file: the
+/// `skip_serializing_if` field it reports was designed to need no call-site change,
+/// and a diff there would undercut the claim.
+///
+/// Without this line `apr inspect` renders a hostile container as a model with no
+/// `model_type` and no APR-05 section — byte-identical to a plain APR that genuinely
+/// has neither. The operator cannot tell "this file says nothing" from "I refused to
+/// read what it says", and only the second is actionable.
+fn output_metadata_over_cap_text(metadata: &MetadataInfo) {
+    let Some(declared) = metadata.metadata_over_cap_bytes else {
+        return;
+    };
+    println!("\n  Metadata: NOT READ");
+    println!(
+        "    The header declares {declared} bytes, over the {} byte (16 MiB) cap.",
+        crate::setfit_tag::MAX_TAG_METADATA_BYTES
+    );
+    println!(
+        "    The block was NOT read, so no model type, no identity fields and no \
+         SetFit section could be derived from it."
+    );
+}
+
+/// Read the metadata block, or report why it was not read.
+///
+/// `pub(crate)` for ONE reason: the four-consumer agreement table in
+/// `setfit_tag_tests.rs` must drive `inspect`'s OWN reader — the surface where
+/// `inspect`'s decision about a file is actually made — rather than a re-implementation
+/// of it. A table that exercised only the two already-reachable consumers would be
+/// precisely the "guard that does not scan the surface where the DECISION is made"
+/// that CLAUDE.md rule 5 calls theater.
+pub(crate) fn read_metadata(reader: &mut BufReader<File>, header: &HeaderData) -> MetadataInfo {
     if header.metadata_size == 0 {
         return MetadataInfo::default();
     }
