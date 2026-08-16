@@ -226,7 +226,7 @@ Plans:
 
 **Wave 8** *(blocked on Wave 7)*
 
-- [ ] 04-10-PLAN.md — Make gates with one filter per invocation and ran-something guards + four-crate x three-profile SAFE-02 matrix + tier wiring + OPS-01 boundary gate (wave 8)
+- [x] 04-10-PLAN.md — Make gates with one filter per invocation and ran-something guards + four-crate x three-profile SAFE-02 matrix + tier wiring + OPS-01 boundary gate (wave 8)
 
 **Wave 9** *(blocked on Wave 8; NOT autonomous — human checkpoint)*
 
@@ -265,5 +265,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
-| 4. APR Artifact and Production Parity | 15/17 | In Progress|  |
+| 4. APR Artifact and Production Parity | 16/17 | In Progress|  |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
