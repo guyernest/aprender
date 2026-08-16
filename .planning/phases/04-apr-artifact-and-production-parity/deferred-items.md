@@ -333,3 +333,78 @@ the end, so **no per-crate or aggregate score exists**. Two real production surv
 Two recipe defects were found and fixed en route, and both invalidate any earlier confidence at
 this tier: `-- --features setfit` never reached cargo (so setfit was compiled OUT — F-04 vacuity),
 and cargo-mutants had no baseline at all for `aprender-serve` (fixed with `--cargo-arg=--lib`).
+
+## D-04-13-A — cleanup-pass findings deliberately NOT applied (2026-08-16)
+
+A four-angle cleanup review (reuse / simplification / efficiency / altitude) over the phase-4
+diff applied ten fixes and deferred the rest. The deferred items are real, were each named by at
+least one angle, and are listed here rather than dropped. They were skipped because each is a
+cross-crate refactor or a multi-site mechanical change beyond a cleanup pass, not because they
+were judged wrong.
+
+**Highest value first:**
+
+1. **Three functions now exceed the ENFORCED `max_complexity = 10`** (`.pmat-gates.toml`),
+   measured with `pmat analyze complexity`. This is a live gate violation, not a preference:
+   - `commands/setfit_train.rs::run` — cyclomatic **15**, cognitive 17, nesting 5
+   - `setfit_tag.rs::read_setfit_tag` — cyclomatic **12**, cognitive **27** (threshold 15)
+   - `train/setfit/apr_evaluate.rs::evaluate_validation_from_artifact` — cyclomatic **12**
+   Item 2 below fixes the third for free.
+
+2. **The classify-and-score half of `apr_evaluate.rs` is re-implemented in the CLI.**
+   `eval/setfit.rs`'s label-map comparison and its chunk-by-`MAX_BATCH_TEXTS` / `position()` /
+   arity-check loop duplicate `apr_evaluate.rs` almost line for line — and the CLI copy silently
+   scores an unrecognised predicted label as WRONG where the library refuses with a typed error.
+   Fix: extract `check_label_map(model, dataset)` and `classify_rows_to_indices(model, rows,
+   labels)` as `pub` in `apr_evaluate.rs`; both callers use them.
+
+3. **`eval/setfit.rs` computes test accuracy outside the ONE reduction door.** It tallies in a
+   `usize` and divides, while the validation side averages an indicator vector through
+   `reduce::mean_in_index_order` — "the trainer's ONLY reduction door (D-13)", whose purpose
+   (TRN-06) is bitwise-stable index-order f64 accumulation. Both numbers land in the same
+   `EvalRow` schema carrying `value_bits`, which exists precisely so a determinism assertion can
+   compare bit patterns — the comparison this divergence makes meaningless ACROSS SPLITS.
+
+4. **~100 lines of atomic-writer stack duplicated VERBATIM** (including doc-comment prose)
+   between `commands/setfit_train.rs:110-207` and `commands/data_contrastive.rs:83-192`. This
+   pass removed the third, degraded copy (`write_lock`) by delegating to `atomic_write`; the
+   remaining two should collapse into one `crate::atomic_io` module. Net ~-140 lines.
+
+5. **A bounded small-file reader written twice**: `predict.rs::read_request_document` and
+   `eval/setfit.rs::read_lock` differ only in the cap constant and the noun. The subtle
+   `take(CAP + 1)` re-check now exists in two places. Fix: `read_bounded(path, cap, what)` in
+   `setfit_io.rs`, whose module header already declares it the crate's bounded-read door.
+
+6. **`dispatch_analysis.rs::dispatch_classify_eval` takes 13 positional params** behind
+   `#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]` — the lints fired
+   and were silenced rather than heeded — plus a hand-maintained flag-refusal table. `--split`'s
+   "was it supplied?" is reconstructed by comparing against clap's own `default_value` instead of
+   being typed as `Option<String>`. Fix: a `#[derive(Args)] struct` with `#[command(flatten)]`.
+
+7. **`AppState` gained the identical `setfit_model: None` line at 17 struct-literal sites**
+   because none of the 16 other constructors delegates. Now that `Default` exists, rewrite them as
+   `Self { .., ..Self::default() }`. Entirely compiler-checked; highest noise-removed-per-risk.
+
+8. **`inspect.rs`: the SetFit section travels as a parallel positional argument** to
+   `output_json`/`output_json_with_quality` even though `MetadataInfo` already carries
+   `setfit_doc`. A second artifact family adds another positional param to both functions and
+   every call site. Fix: build it from `metadata.setfit_doc` where `InspectResult` is assembled.
+
+9. **`predict.rs`: `--text`/`--input` exclusion is expressed at two altitudes** — clap's
+   `conflicts_with` AND `RequestSource::choose`'s arm. clap wins at parse time, so the arm is
+   unreachable through the CLI and its better-worded message never ships; the unit test calls
+   `choose` directly, so the TESTED message is not the SHIPPED message. CLAUDE.md verification
+   item 5 in miniature. Fix: drop `conflicts_with`, keep the good message.
+
+10. **`eval/setfit.rs::run_test` re-derives the lock path with a weaker, unreachable refusal**
+    (`check_split_flags` already guaranteed it), and the lock file is read only AFTER the corpus
+    ingest and the full artifact verification — contradicting the file's own comment that a run
+    "has told the operator something it knew before it started". Fix: read and validate the lock
+    immediately after `check_split_flags`, pass the `SelectionLock` into `run_test`.
+
+**Confirmed clean by the review, recorded so it is not re-litigated:** the retained ~1.8 MB
+artifact buffer is never cloned or copied in non-test source (moved end to end); `drop(reloaded)`
+keeps its measured position; `POST /v1/classify` has no hoistable per-request work and installs as
+a fn pointer, not a capturing closure; the sealed `SetFitCredential` and the consuming
+`into_artifact_bytes` are at the right altitude — and the consuming signature means the
+read-then-take ordering is enforced by BORROWCK, not by call-site discipline.

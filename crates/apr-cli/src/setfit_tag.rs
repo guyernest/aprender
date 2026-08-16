@@ -40,6 +40,13 @@ use crate::error::CliError;
 /// The value `AprV2Metadata::model_type` carries for a `setfit-apr-v1` artifact.
 pub(crate) const SETFIT_MODEL_TYPE: &str = "setfit";
 
+/// The most metadata this module will read to answer "is this a SetFit artifact?".
+///
+/// Absorbed from a duplicate detector that `serve/handlers.rs` carried until this cleanup;
+/// that copy had its own bound and its own opinion, and the two could answer differently for
+/// the same file. One detection point (D-04/D-10) means one bound.
+const MAX_TAG_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+
 /// The single custom metadata key the artifact document lives at.
 pub(crate) const SETFIT_CUSTOM_KEY: &str = "setfit";
 
@@ -123,6 +130,18 @@ pub(crate) fn read_setfit_tag(path: &Path) -> Result<Option<SetFitTag>, CliError
         )));
     }
 
+    // (2b) THE ABSOLUTE CAP, complementary to (2) rather than a replacement for it.
+    //      (2) is tighter for a small file; this is tighter for a large one — a 30 GB APR
+    //      whose metadata block declares 20 MiB passes (2) and would otherwise be read in
+    //      full just to answer one yes/no question. `setfit-apr-v1` cannot need this much:
+    //      the tokenizer bytes and every tensor live in the container's DATA section, never
+    //      in metadata. Over the cap is `None` ("I cannot cheaply identify this as SetFit"),
+    //      NOT an error — the caller falls through to the pre-existing APR path, which has
+    //      its own and better diagnosis for an unusual container.
+    if declared > MAX_TAG_METADATA_BYTES {
+        return Ok(None);
+    }
+
     // (3) THE READ, at the size the bound just approved.
     if file.seek(SeekFrom::Start(header.metadata_offset)).is_err() {
         return Ok(None);
@@ -135,14 +154,18 @@ pub(crate) fn read_setfit_tag(path: &Path) -> Result<Option<SetFitTag>, CliError
     // (4) THE TAG. Parse failures are "not a SetFit artifact", not an error: a plain
     //     APR whose metadata this build cannot parse is exactly as un-SetFit as one
     //     whose `model_type` is `qwen2`.
-    let Ok(meta) = AprV2Metadata::from_json(&metadata_bytes) else {
+    let Ok(mut meta) = AprV2Metadata::from_json(&metadata_bytes) else {
         return Ok(None);
     };
     if meta.model_type != SETFIT_MODEL_TYPE {
         return Ok(None);
     }
+    // `remove`, not `get(..).cloned()`: `meta` is owned and `custom` is never read again, so the
+    // document MOVES out. The cloned form deep-copied the whole SetFit document — every probe
+    // embedding and the entire HF name map, hundreds of KB — on every `apr predict` and every
+    // `apr eval --task classify`, only to drop it: both production callers ask `.is_some()`.
     Ok(Some(SetFitTag {
-        doc: meta.custom.get(SETFIT_CUSTOM_KEY).cloned(),
+        doc: meta.custom.remove(SETFIT_CUSTOM_KEY),
     }))
 }
 

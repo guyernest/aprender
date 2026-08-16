@@ -173,7 +173,7 @@ fn fill_and_sync(temp: &Path, bytes: &[u8]) -> Result<()> {
 ///
 /// [`CliError::ValidationFailed`] when `target` exists and `force` is false;
 /// [`CliError::Io`] for any create, write, sync or rename failure.
-fn atomic_write(target: &Path, bytes: &[u8], force: bool) -> Result<()> {
+pub(crate) fn atomic_write(target: &Path, bytes: &[u8], force: bool) -> Result<()> {
     refuse_existing_output(target, force)?;
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir)?;

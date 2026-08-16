@@ -349,19 +349,38 @@ fn eval_setfit_reads_artifacts_only_through_the_one_bounded_door() {
 #[test]
 fn eval_setfit_writes_the_lock_atomically_through_exactly_one_rename() {
     let code = production_code_lines();
+
+    // The atomicity property is DELEGATED now, not hand-rolled here. This module used to carry
+    // its own rename/sync/no-clobber sequence — a third copy of the crate's atomic writer, and
+    // the only one with a colliding temp name and `create(true)` instead of `create_new(true)`.
+    // So the guard asserts the delegation and the ABSENCE of a re-hand-roll, which is what can
+    // actually regress; `setfit_train`'s own tests prove the write is atomic.
+    assert!(
+        code.contains("setfit_train::atomic_write("),
+        "the lock write must go through the crate's ONE atomic writer, so the sync-then-rename \
+         guarantee is proven in one place instead of three"
+    );
     assert_eq!(
         code.matches("fs::rename(").count(),
-        1,
-        "exactly one rename site: a lock half-written by an interrupted run would look like a \
-         committed selection and not be one"
+        0,
+        "no rename site may reappear here: a fourth hand-rolled writer is exactly the drift \
+         this delegation removed"
     );
     assert!(
-        code.contains("sync_all()"),
-        "the bytes must be on disk before the rename makes them visible"
+        !code.contains("sync_all()"),
+        "no sync site may reappear here either — if one does, the write has been re-inlined"
     );
+
+    // The bespoke no-clobber refusal STAYS local: "a lock is a COMMITMENT" says more than the
+    // generic message, and it must fire before any bytes are produced.
     assert!(
         code.contains("already exists"),
         "an existing lock must not be clobbered without --force"
+    );
+    assert!(
+        code.contains("is a COMMITMENT"),
+        "the domain-specific refusal must survive delegation — the generic no-clobber message \
+         does not tell an operator what replacing a lock costs"
     );
 }
 

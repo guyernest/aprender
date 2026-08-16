@@ -567,15 +567,15 @@ fn read_metadata(reader: &mut BufReader<File>, header: &HeaderData) -> MetadataI
 
     // Parse JSON metadata (v2 uses JSON, not msgpack)
     match AprV2Metadata::from_json(&metadata_bytes) {
-        Ok(meta) => {
-            let source_metadata = meta.custom.get("source_metadata").cloned();
+        Ok(mut meta) => {
+            let source_metadata = meta.custom.remove("source_metadata");
             // The TYPED TAG decides, never a tensor name and never the mere presence
             // of the custom key (D-04): an untagged APR that happens to carry a
             // `setfit` key is a plain APR here, exactly as it is to `apr predict`.
+            // `remove`, not `get(..).cloned()`: `meta.custom` is owned and is not read again,
+            // so the document moves out instead of being deep-copied.
             let setfit_doc = if meta.model_type == crate::setfit_tag::SETFIT_MODEL_TYPE {
-                meta.custom
-                    .get(crate::setfit_tag::SETFIT_CUSTOM_KEY)
-                    .cloned()
+                meta.custom.remove(crate::setfit_tag::SETFIT_CUSTOM_KEY)
             } else {
                 None
             };

@@ -196,3 +196,20 @@ fn setfit_tag_detection_never_consults_a_tensor_name() {
         );
     }
 }
+
+/// The local tag literal and core's `MODEL_TYPE_TAG` must agree.
+///
+/// `setfit_tag` is deliberately UNGATED while `aprender::setfit` is `#[cfg(feature = "setfit")]`,
+/// so this module cannot name core's constant in non-test code and must carry a literal. Nothing
+/// bound the two until now: `serve/handlers.rs` compared against core's constant while this module
+/// compared against the literal, and a divergence would have silently split detection between
+/// `apr serve` and `apr predict`. The gate is one line, so the literal cannot drift unnoticed.
+#[cfg(feature = "setfit")]
+#[test]
+fn the_local_tag_literal_equals_cores_model_type_tag() {
+    assert_eq!(
+        super::SETFIT_MODEL_TYPE,
+        aprender::setfit::artifact::MODEL_TYPE_TAG,
+        "apr-cli's ungated tag literal must track the value core's writer stamps"
+    );
+}

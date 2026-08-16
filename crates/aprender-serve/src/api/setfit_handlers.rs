@@ -64,12 +64,6 @@ impl AppState {
     pub fn setfit_model(&self) -> Option<&Arc<VerifiedSetFitModel>> {
         self.setfit_model.as_ref()
     }
-
-    /// Whether a verified classifier is resident.
-    #[must_use]
-    pub fn has_setfit_model(&self) -> bool {
-        self.setfit_model.is_some()
-    }
 }
 
 // ---------------------------------------------------------------------------

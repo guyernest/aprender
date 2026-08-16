@@ -326,8 +326,16 @@ pub fn reload_verified_run_from_apr(
 
     // Field 20, typed. `aprender-core` keeps it opaque because train depends on core and
     // never the reverse, so this is the first point at which it CAN be a record.
-    let recorded: ProvenanceRecord = serde_json::from_value(model.doc_view().provenance.clone())
-        .map_err(|error| AprReloadError::ProvenanceUnreadable { reason: error.to_string() })?;
+    // Deserialize by REFERENCE. `from_value` takes the `Value` by value, so the previous
+    // spelling deep-cloned the provenance object purely to satisfy the signature; serde_json
+    // implements `Deserializer` for `&Value`, so the error text and field handling are
+    // unchanged and the copy disappears. `apr eval --split validation` reloads once per
+    // `--candidate`, so this recurs per candidate.
+    let recorded: ProvenanceRecord =
+        serde::Deserialize::deserialize(&model.doc_view().provenance)
+            .map_err(|error: serde_json::Error| AprReloadError::ProvenanceUnreadable {
+                reason: error.to_string(),
+            })?;
 
     // ---- The provenance identity gate: three checks, COARSE TO FINE, no rebuild yet. ----
     // The order is load-bearing, not stylistic. See this module's header: the three

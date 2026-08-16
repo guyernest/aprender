@@ -380,8 +380,8 @@ fn run_validation(
         dataset_fingerprint: own.dataset_fingerprint().to_string(),
         validation_split_fingerprint: own.validation_split_fingerprint().to_string(),
         ordered_labels: credential.model().ordered_labels().to_vec(),
-        evidence_table_hash: doc_string(credential, &["evidence", "table_hash"]),
-        selection_root_seed: doc_u64(credential, &["provenance", "selection_root_seed"]),
+        evidence_table_hash: evidence_table_hash(credential),
+        selection_root_seed: selection_root_seed(credential),
         config_hash_derivation: CONFIG_HASH_DERIVATION,
         candidates: candidate_rows,
         lock: lock_row,
@@ -455,8 +455,8 @@ fn run_test(
         dataset_fingerprint: dataset.validation_witness().dataset_fingerprint_hex(),
         validation_split_fingerprint: dataset.validation_witness().fingerprint_hex(),
         ordered_labels: credential.model().ordered_labels().to_vec(),
-        evidence_table_hash: doc_string(credential, &["evidence", "table_hash"]),
-        selection_root_seed: doc_u64(credential, &["provenance", "selection_root_seed"]),
+        evidence_table_hash: evidence_table_hash(credential),
+        selection_root_seed: selection_root_seed(credential),
         config_hash_derivation: CONFIG_HASH_DERIVATION,
         candidates: Vec::new(),
         lock: Some(LockRow {
@@ -563,40 +563,32 @@ fn candidate_row(config_hash: &str, evaluation: &ValidationEvaluation) -> Candid
 fn config_hash_of(credential: &ReloadedSetFitCredential) -> String {
     let requested = &credential.model().doc_view().requested_config;
     let bytes = serde_json::to_vec(requested).unwrap_or_default();
-    hex_of(&Sha256::digest(&bytes))
+    aprender_contrastive_data::hash::hex(&Sha256::digest(&bytes).into())
 }
 
-/// Lowercase hex.
-fn hex_of(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
+/// The evidence table's hash, read straight off the artifact document.
+///
+/// Was a generic path-walker over `&[&str]`; it had exactly two callers with constant paths, a
+/// silently-unreachable arm for any other root, and it cloned the found `Value`. Two direct
+/// readers say the same thing with neither cost.
+fn evidence_table_hash(credential: &ReloadedSetFitCredential) -> Option<String> {
+    credential
+        .model()
+        .doc_view()
+        .evidence
+        .get("table_hash")?
+        .as_str()
+        .map(str::to_string)
 }
 
-/// Read a string out of the artifact document.
-fn doc_string(credential: &ReloadedSetFitCredential, path: &[&str]) -> Option<String> {
-    doc_at(credential, path)?.as_str().map(str::to_string)
-}
-
-/// Read a `u64` out of the artifact document.
-fn doc_u64(credential: &ReloadedSetFitCredential, path: &[&str]) -> Option<u64> {
-    doc_at(credential, path)?.as_u64()
-}
-
-/// Walk the artifact document's opaque sub-documents.
-fn doc_at(credential: &ReloadedSetFitCredential, path: &[&str]) -> Option<serde_json::Value> {
-    let doc = credential.model().doc_view();
-    let mut cursor = match path.first()? {
-        &"evidence" => &doc.evidence,
-        &"provenance" => &doc.provenance,
-        _ => return None,
-    };
-    for segment in &path[1..] {
-        cursor = cursor.get(segment)?;
-    }
-    Some(cursor.clone())
+/// The selection's root seed, read straight off the artifact document.
+fn selection_root_seed(credential: &ReloadedSetFitCredential) -> Option<u64> {
+    credential
+        .model()
+        .doc_view()
+        .provenance
+        .get("selection_root_seed")?
+        .as_u64()
 }
 
 /// Write the lock atomically, refusing to clobber without `--force`.
@@ -614,32 +606,20 @@ fn write_lock(destination: &Path, lock: &SelectionLock, force: bool) -> Result<(
             destination.display()
         )));
     }
-    let bytes = lock.to_canonical_bytes();
-    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(CliError::Io)?;
-    let temp = parent.join(format!(
-        ".{}.tmp",
-        destination.file_name().map_or_else(
-            || "selection-lock".to_string(),
-            |n| n.to_string_lossy().into_owned()
-        )
-    ));
-    let cleanup = |error: CliError| -> CliError {
-        let _ = fs::remove_file(&temp);
-        error
-    };
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temp)
-        .map_err(CliError::Io)?;
-    file.write_all(&bytes)
-        .map_err(|e| cleanup(CliError::Io(e)))?;
-    file.sync_all().map_err(|e| cleanup(CliError::Io(e)))?;
-    drop(file);
-    fs::rename(&temp, destination).map_err(|e| cleanup(CliError::Io(e)))?;
-    Ok(())
+    // THE WRITE goes through the crate's ONE atomic writer, not a fourth hand-roll.
+    //
+    // The bespoke refusal above stays: "a lock is a COMMITMENT" says more than the generic
+    // no-clobber message, and it fires before any bytes are produced. `force` is still passed
+    // through so `atomic_write`'s own `refuse_existing_output` runs too — that second check is
+    // not redundant, it is what covers a file that appeared WHILE this run was going.
+    //
+    // The hand-rolled copy this replaces had drifted from the shared writer in two ways that
+    // mattered: its temp was `.{name}.tmp` with no pid or ordinal, so two concurrent
+    // `--lock-out` runs into one directory clobbered each other's scratch file, and it opened
+    // with `create(true).truncate(true)` rather than `create_new(true)`, silently reusing a
+    // crashed run's leftover instead of reporting it. `temp_path` + `fill_and_sync` get both
+    // right, and they are proven once instead of three times.
+    crate::commands::setfit_train::atomic_write(destination, &lock.to_canonical_bytes(), force)
 }
 
 /// Read a lock file, BOUNDED BEFORE THE READ, and reconstruct it.

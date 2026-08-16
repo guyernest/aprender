@@ -112,7 +112,7 @@ pub fn create_router_with_config(state: AppState, config: RouterConfig) -> Route
     // Phase 4 D-09 / OPS-05: the SetFit classification surface.
     //
     // INSTALLED WHENEVER THE FEATURE IS COMPILED IN, and deliberately NOT
-    // conditional on `state.has_setfit_model()` (review finding M4). A
+    // conditional on `state.setfit_model().is_some()` (review finding M4). A
     // slot-conditional installation makes a running server with no model loaded
     // answer 404 — which is indistinguishable, to any client, from "this build
     // has no classify surface at all". 503 from the handler is the honest answer

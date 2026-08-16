@@ -762,9 +762,19 @@ pub(crate) fn start_realizar_server(model_path: &Path, config: &ServerConfig) ->
             // typed `model_type` tag its writer stamps, so the branch lives INSIDE
             // the arm that already knows the file is an APR. Reading the tag costs
             // a 64-byte header plus one bounded metadata block — never the tensors.
+            // THE ONE detection point (D-04/D-10): `crate::setfit_tag::read_setfit_tag`,
+            // the same door `apr predict`, `apr inspect` and `apr eval --task classify`
+            // route through. This arm used to carry its own header-read/seek/parse copy
+            // with its own 16 MiB bound, so `apr serve` and `apr predict` could answer
+            // differently for one file; the bound has moved into the shared reader and the
+            // copy is gone. `.ok().flatten()` preserves the copy's semantics exactly —
+            // EVERY failure falls through to the pre-existing APR path, which has the
+            // better diagnosis for a broken container.
             #[cfg(all(feature = "setfit", feature = "inference"))]
-            if setfit_apr_model_type_tag(model_path).as_deref()
-                == Some(aprender::setfit::artifact::MODEL_TYPE_TAG)
+            if crate::setfit_tag::read_setfit_tag(model_path)
+                .ok()
+                .flatten()
+                .is_some()
             {
                 return start_setfit_server(model_path, config);
             }
@@ -1392,58 +1402,6 @@ pub fn build_demo_streaming_apr_cpu_router_for_test() -> axum::Router {
 // SetFit classifier serving (Phase 4, D-09 / D-10 / OPS-05)
 // ============================================================================
 
-/// The largest APR metadata block this tag read will allocate for, in bytes.
-///
-/// `AprV2Header::metadata_size` is a `u32`, so a hostile header can declare up to
-/// 4 GiB and `apr inspect` allocates exactly what it is told (inspect.rs:517). This
-/// path refuses to: 16 MiB is two orders of magnitude above any real
-/// `setfit-apr-v1` document (the tokenizer bytes and every tensor live in the
-/// container's DATA section, never in metadata), and an APR whose metadata exceeds
-/// it is simply not answered as "setfit" — the existing APR path then handles it
-/// exactly as it did before this branch existed. That is deliberate: this function
-/// answers ONE question and must not become a second APR validator with its own
-/// opinion about what is loadable.
-#[cfg(all(feature = "setfit", feature = "inference"))]
-const MAX_TAG_READ_METADATA_BYTES: u32 = 16 * 1024 * 1024;
-
-/// The `model_type` tag of an APR v2 container, or `None` if it cannot be read.
-///
-/// Cheap by construction: a 64-byte header, one seek, and one bounded metadata
-/// read. No tensor is touched, so pointing `apr serve` at a 30 GB Q4_K APR costs
-/// the same as pointing it at a 2 MB classifier.
-///
-/// **Every failure is `None`, never an error.** A malformed header, an unreadable
-/// metadata block or unparseable JSON all mean "this is not a file I can identify
-/// as a SetFit artifact", and the caller's answer to that is to fall through to the
-/// pre-existing APR path — which has its own diagnosis for a broken container and
-/// is better at producing it. Returning `Err` here would make this function the
-/// place APR containers are judged, which is precisely what D-10's "one detection
-/// point" is not asking for.
-#[cfg(all(feature = "setfit", feature = "inference"))]
-fn setfit_apr_model_type_tag(model_path: &Path) -> Option<String> {
-    use aprender::format::v2::{AprV2Header, AprV2Metadata, HEADER_SIZE_V2, MAGIC_V2};
-    use std::io::{BufReader, Read, Seek, SeekFrom};
-
-    let mut reader = BufReader::new(std::fs::File::open(model_path).ok()?);
-    let mut header_bytes = [0u8; HEADER_SIZE_V2];
-    reader.read_exact(&mut header_bytes).ok()?;
-    if header_bytes.get(0..4)? != MAGIC_V2 {
-        return None;
-    }
-    let header = AprV2Header::from_bytes(&header_bytes).ok()?;
-    if header.metadata_size == 0 || header.metadata_size > MAX_TAG_READ_METADATA_BYTES {
-        return None;
-    }
-
-    reader.seek(SeekFrom::Start(header.metadata_offset)).ok()?;
-    let mut metadata_bytes = vec![0u8; header.metadata_size as usize];
-    reader.read_exact(&mut metadata_bytes).ok()?;
-    let metadata = AprV2Metadata::from_json(&metadata_bytes).ok()?;
-    if metadata.model_type.is_empty() {
-        return None;
-    }
-    Some(metadata.model_type)
-}
 
 /// Serve a `setfit-apr-v1` artifact over `POST /v1/classify` (D-09, OPS-05).
 ///
@@ -1498,6 +1456,14 @@ fn start_setfit_server(model_path: &Path, config: &ServerConfig) -> Result<()> {
         .green()
         .bold()
     );
+
+    // The rebuilt model is the only thing the server needs; the raw artifact is dead from
+    // here. `bytes` is a function-scope local and this fn does not return until shutdown, so
+    // without an explicit drop the whole artifact stays resident for the process lifetime —
+    // up to MAX_ARTIFACT_BYTES (256 MiB) by contract, ~90 MB for a pinned MiniLM. For scale,
+    // 04-17 measured and justified a 1.8 MB retention in verify.rs; this is the same class of
+    // cost, one to two orders larger, and it buys nothing.
+    drop(bytes);
 
     let state = AppState::default().with_setfit_model(Arc::new(model));
     // CR-01 (04-REVIEW): the classifier surface gets the SAME AuthGate as the APR
@@ -1587,9 +1553,14 @@ mod setfit_serve_tests {
     fn setfit_serve_tag_read_identifies_a_setfit_container() {
         let temp = TempDir::new().expect("tempdir");
         let path = write_file(temp.path(), "tagged.apr", &container_tagged(MODEL_TYPE_TAG));
-        assert_eq!(
-            setfit_apr_model_type_tag(&path).as_deref(),
-            Some(MODEL_TYPE_TAG),
+        // Through THE SHARED DOOR, the same one `apr predict`/`inspect`/`eval` use.
+        // This test used to exercise a serve-local copy, so it could pass while the
+        // two detectors disagreed about this very file.
+        assert!(
+            crate::setfit_tag::read_setfit_tag(&path)
+                .ok()
+                .flatten()
+                .is_some(),
             "a container stamped by the setfit writer must be recognised from its tag"
         );
     }
@@ -1598,9 +1569,11 @@ mod setfit_serve_tests {
     fn setfit_serve_tag_read_does_not_divert_a_plain_apr() {
         let temp = TempDir::new().expect("tempdir");
         let path = write_file(temp.path(), "plain.apr", &container_tagged("qwen2"));
-        assert_ne!(
-            setfit_apr_model_type_tag(&path).as_deref(),
-            Some(MODEL_TYPE_TAG),
+        assert!(
+            crate::setfit_tag::read_setfit_tag(&path)
+                .ok()
+                .flatten()
+                .is_none(),
             "a non-setfit APR must keep going down the pre-existing path byte-unchanged"
         );
     }
@@ -1614,7 +1587,10 @@ mod setfit_serve_tests {
             &[0x7f, b'E', b'L', b'F', 0, 0, 0, 0],
         );
         assert!(
-            setfit_apr_model_type_tag(&path).is_none(),
+            crate::setfit_tag::read_setfit_tag(&path)
+                .ok()
+                .flatten()
+                .is_none(),
             "an unidentifiable file must fall through, not raise a diagnosis this \
              function is not qualified to make"
         );
@@ -1666,9 +1642,11 @@ mod setfit_serve_tests {
             .expect("a sparse over-cap file is creatable");
         drop(file);
 
-        assert_eq!(
-            setfit_apr_model_type_tag(&path).as_deref(),
-            Some(MODEL_TYPE_TAG),
+        assert!(
+            crate::setfit_tag::read_setfit_tag(&path)
+                .ok()
+                .flatten()
+                .is_some(),
             "the tag read must still succeed — otherwise this test would prove \
              nothing about the bounded door"
         );

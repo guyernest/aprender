@@ -344,16 +344,35 @@ mod setfit {
     fn preview(text: &str) -> String {
         const MAX: usize = 40;
         let mut out = String::with_capacity(MAX);
+        // Count as we go. `out.chars().count()` re-walked the whole accumulating string on
+        // every pushed char, making this quadratic in MAX for each of up to 256 rows.
+        //
+        // The counter tracks RENDERED width, not input chars: an escaped control character
+        // occupies two columns, and the bound is on what the table cell displays. Counting
+        // inputs instead would let a newline-heavy text render wider than MAX.
+        let mut shown = 0_usize;
         for ch in text.chars() {
-            if out.chars().count() >= MAX {
+            if shown >= MAX {
                 out.push('…');
                 break;
             }
             match ch {
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                other => out.push(other),
+                '\n' => {
+                    out.push_str("\\n");
+                    shown += 2;
+                }
+                '\r' => {
+                    out.push_str("\\r");
+                    shown += 2;
+                }
+                '\t' => {
+                    out.push_str("\\t");
+                    shown += 2;
+                }
+                other => {
+                    out.push(other);
+                    shown += 1;
+                }
             }
         }
         if out.is_empty() {
