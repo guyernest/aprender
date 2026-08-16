@@ -1346,8 +1346,9 @@ bindings:
     to.'
 # --- setfit-apr-v1: the Phase 4 artifact schema (plan 04-01 task 2) -----------------------
 #
-# STATUS AS OF PLAN 04-10 (wave 9): FOURTEEN of fifteen are `implemented`; `backend_identity`
-# alone is still `pending`, and its reason is recorded on its own entry below.
+# STATUS AS OF PLAN 04-19 (wave 11): FIFTEEN of fifteen are `implemented`. `backend_identity` was
+# the last entry still `pending`; 04-19 performed the semantic correction described below, and the
+# scoped audit now reports zero BIND findings.
 #
 # WHY ALL FIFTEEN STARTED `pending`, AND WHY THAT WAS THE POINT OF THE PHASE RATHER THAN AN
 # OMISSION. Plan 04-01 commits the artifact schema BEFORE any code that could quietly answer
@@ -1359,12 +1360,18 @@ bindings:
 # because someone believed the module had landed is a claim nothing checked — the exact failure
 # class the scoped audits exist to catch. Every `module_path`/`function` pair below was resolved
 # against the shipped source through the dogfooded pmat index before its status moved, and the
-# check found a real discrepancy: `backend_identity` names
-# `aprender::setfit::classify::backend_identity`, which does not exist at any point on this
+# check found a real discrepancy: `backend_identity` named a free function `backend_identity` in
+# the `aprender::setfit::classify` module, and no such function existed at any point on this
 # branch. The identity is produced by `ExecutionBackend::identity` in the encoder. Correcting
-# the `function` column is a SEMANTIC edit to the registry, not a binding-status flip, so it is
-# out of 04-10's scope and the entry stays `pending` — which is the honest state: `pv audit`
-# reports it as BIND-004 (a warning) rather than letting an unverifiable claim read as green.
+# the `function` column is a SEMANTIC edit to the registry, not a binding-status flip, so it was
+# out of 04-10's scope and the entry stayed `pending` — which was the honest state: `pv audit`
+# reported it as BIND-004 (a warning) rather than letting an unverifiable claim read as green.
+#
+# PLAN 04-19 (wave 11) DISCHARGED IT, CHECK FIRST. The row below names the shipped symbol, and the
+# flip is earned rather than asserted: a guard in `aprender::setfit::classify`'s `mod backend` was
+# written and observed RED against THIS FILE before the status moved. That ordering is the whole
+# point — 04-10 declined precisely because flipping a status the tooling cannot resolve records a
+# claim nothing checks, and `pv audit` still cannot resolve symbols; it reads the `status` field.
 #
 # WHY ENTRIES AT ALL, RATHER THAN NO ENTRIES. `pv audit` treats a MISSING entry as BIND-001, an
 # ERROR — measured, not assumed: `pv audit contracts/setfit-apr-v1.yaml --binding
@@ -1446,18 +1453,30 @@ bindings:
   notes: 'Lands with plan 04-04. Private fields, one validating constructor, Deserialize routed through it via a private wire struct — what makes the non-finite claim true rather than falsifiable by a public field (review M2).'
 - contract: setfit-apr-v1.yaml
   equation: backend_identity
-  module_path: aprender::setfit::classify
-  function: backend_identity
-  status: pending
-  notes: 'Lands with plan 04-04. Produced BY the encode invocation that ran; review B6 — a trueno
-    capability detection must never reach this field. STILL `pending` AFTER 04-10, and deliberately
-    so: 04-10 resolved every binding pair in this block against the shipped source before moving its
-    status, and this is the one that did not resolve. There is no
-    `aprender::setfit::classify::backend_identity` at any point on this branch — the identity comes
-    from `ExecutionBackend::identity` in the encoder. Flipping this to `implemented` would record a
-    claim nothing can check. Correcting the `function` column is a SEMANTIC edit to the registry
-    rather than a binding-status flip, so it is out of 04-10''s declared scope; the orchestrator has
-    it recorded as an open wave-6 item.'
+  module_path: aprender::setfit::encoder
+  function: ExecutionBackend::identity
+  signature: 'fn identity(&self) -> String'
+  status: implemented
+  notes: 'Lands with plan 04-04; the row was corrected and flipped by plan 04-19. Produced BY the
+    encode invocation that ran; review B6 / D-12 — a trueno CAPABILITY DETECTION must never reach
+    this field, because `trueno::Matrix::matmul` dispatches on SIZE, so an AVX2 detection result is
+    fully consistent with a scalar execution and would be exactly the fraudulent capability claim
+    D-12 exists to prevent. THE SHIPPED SYMBOL is `ExecutionBackend::identity` in
+    `crates/aprender-core/src/setfit/encoder.rs`. It is TYPE-QUALIFIED here because `identity` is an
+    inherent method, not a free function; a bare `identity` would be as unresolvable as the name
+    this row carried until 04-19, which pointed at a free `backend_identity` in the classify module
+    that existed at no point on this branch. THE FLIP IS EARNED, NOT ASSERTED: `mod backend` in
+    `aprender::setfit::classify` pins this row by reading THIS FILE with `include_str!` — a missing
+    registry is a COMPILE error there, where a runtime read would be a silent skip — and coerces
+    `ExecutionBackend::identity` into a typed `fn(&ExecutionBackend) -> String`, making rustc the
+    witness that the symbol resolves with the signature recorded above. Its must-match,
+    must-not-match and non-vacuity arms were each observed RED before the status moved here.
+    MEASURED LIMITATION OF THE AUDIT TOOLING, recorded on the registry rather than deferred,
+    because it is this file documenting the blind spot in its own auditor: `pv verify-bindings
+    contracts/aprender/binding.yaml --crate-name aprender` reports 0 of 124 binding functions
+    verified in this monorepo''s crates/*/src layout and lists ALL 124 as ghosts — including
+    `softmax`, `gelu` and `within`, which demonstrably exist. Its ghost list is therefore not
+    evidence about any single row, and it is not what earns this one.'
 - contract: setfit-apr-v1.yaml
   equation: selection_lock_lifecycle
   module_path: entrenar::train::setfit::lock
