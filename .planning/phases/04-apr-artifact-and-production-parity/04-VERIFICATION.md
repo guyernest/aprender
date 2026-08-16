@@ -2,10 +2,20 @@
 phase: 04-apr-artifact-and-production-parity
 verified: 2026-08-16T04:36:49Z
 verified_at_commit: 0fb47958f
-status: gaps_found
+status: gaps_acknowledged
+original_status: gaps_found
 score: 94/100 must-haves verified
 roadmap_success_criteria: 0/5 fully met (2 FAILED, 3 PARTIAL)
 overrides_applied: 0
+acknowledged: 2026-08-16T23:29:10Z
+acknowledged_at_commit: b3f816c25
+acknowledged_via: .planning/phases/04-apr-artifact-and-production-parity/04-UAT.md
+acknowledged_note: >-
+  The verdict below is UNAMENDED and its measurements stand as taken at 0fb47958f. Five
+  gap-closure plans (04-18..04-22) landed afterwards; four of the gaps listed here are
+  closed and re-measured, and the remainder were ruled on by a human. See the
+  "## Acknowledged Gaps" section at the end of this file. Phase 4's success criteria are
+  NOT retroactively marked met — SC1 and SC3 remain unmet pending F-10 closure in Phase 5.
 gaps:
   - truth: "SC1 — A user can SAVE one checksummed F32 setfit-apr-v1 containing the complete encoder, tokenizer bytes/hash, policy, head, labels, config, evidence and provenance"
     status: failed
@@ -465,3 +475,70 @@ failure of execution.
 _Verified: 2026-08-16T04:36:49Z at `0fb47958f`_
 _Verifier: Claude (gsd-verifier) — 19 Make gates, 3 whole-crate regression runs, 9 trybuild cases,
 2 contract tools and 5 live binary probes executed; no result in this report is taken from a SUMMARY_
+
+---
+
+## Acknowledged Gaps
+
+_Appended 2026-08-16T23:29:10Z after `/gsd:verify-work 04` at `b3f816c25`, 25 commits after
+this report was written. **The verdict above is NOT amended.** `status: gaps_found` stands,
+and its measurements stand as taken at `0fb47958f`. This section records what changed
+afterwards and which gaps a human explicitly ruled on — see `04-UAT.md` for the session._
+
+**Why this section exists.** Five gap-closure plans (04-18…04-22) landed AFTER this report
+and were written to close findings it raised. `roadmap.update-plan-progress` then flipped
+Phase 4 to Complete on summary-count parity alone — the same false-completion defect
+recorded at 03-10 — so the ROADMAP claimed complete while the verification still read
+`gaps_found`. Neither artifact had been reconciled against the other until this UAT.
+
+### Closed since this report
+
+| Gap as reported | Closed by | Evidence re-measured at b3f816c25 |
+|---|---|---|
+| SC4 / SC5 — `backend_identity` binds to `aprender::setfit::classify::backend_identity`, a symbol that does not exist; equation left `status: pending` (BIND-004) | 04-19 | `make contract-audit-phase4`: 15 equations, 15 bound, 15 implemented, 0 partial, 0 not-implemented, 18 obligations / 270 covered, "No binding gaps found", **zero `BIND-` lines**. Ghost path absent from `contracts/` entirely; row now names `aprender::setfit::encoder` / `ExecutionBackend::identity`. Check was built RED before the flip (six tests in `setfit::classify::backend`). |
+| WR-08 / WR-09 — over-cap metadata block handling | 04-18 | `make setfit-apr-tests` 86 passed / 0 failed. Typed refusal naming the limit; four consumers proven to agree over ONE over-cap file via an agreement table. |
+| WR-10 — `apr eval --lock-out` ran a full multi-candidate sweep before refusing to overwrite the lock file it was asked to write | 04-20 | `make setfit-cli-eval-tests` 20 passed / 0 failed (floor 13). Ordering proven by two in-process tests failing at DIFFERENT later stages; the spawned three-leg witness was **falsified**, not reported green. |
+| D-04-11-A survivors A and B (the two REAL production mutants) | 04-21 | `make setfit-serve-tests` 11 passed / 0 failed. Survivor set re-measured at HEAD (99 mutants: 78 `tests::`/`fixture::`, 21 production). Survivor A corrected — `has_setfit_model` was DELETED at `b47acc4fe`, so that mutant no longer exists; successor surface named. |
+| F-07 — `bashrs-lint-makefile` ended in `\|\| echo`, exiting 0 whatever bashrs reported | 04-22 | `make bashrs-lint-makefile` now reads its own status; proven RED on an induced real defect. At HEAD: bashrs rc=2, SC2168 still present at `Makefile:2695`, gate reports "0 counted error-severity finding(s) (baseline 0), 1 discriminated as control-refuted false positive(s)". 35 warnings printed with stated deferral reasons, not suppressed. |
+
+Also re-measured green this session, unchanged in substance from this report: `make
+setfit-codec-tests` 17, `make setfit-reload-tests` 17, `make setfit-lifecycle-tests` 5,
+`make setfit-parity` 20/20, `pv validate contracts/setfit-apr-v1.yaml` 0 errors / 0
+warnings, `make setfit-api-boundary` PASSED with an executed MUST-MATCH control, `make
+setfit-feature-matrix` PASSED with RUN legs (core 246, train 311, apr-cli delta 18→79,
+serve 11) and two-sided negatives.
+
+One measurement in this report has since moved: the spawned CLI ladder was `2+1` at
+`0fb47958f`; it is `3+1` at `b3f816c25` (04-20 added a lifecycle-named case, selected by
+the existing filter because `assert_tests_ran` is a floor).
+
+### Ruled on by a human, still open
+
+| Gap | Ruling | Where it goes |
+|---|---|---|
+| **F-10** — `CALIBRATED_REGIMES` admits only the phase-3 MiniLM slice, whose 97-row vocabulary cannot compute `probe_unicode`; no user-reachable path produces a `setfit-apr-v1`. Root cause of SC1 failed, SC2 partial, SC3 failed, SC4 synthetic fixture. | Accepted, deferred | **Phase 5**, per the existing blocking ROADMAP note. Unblocking requires calibrating on production `all-MiniLM-L6-v2` and adding its fingerprint to `contracts/setfit-train-lifecycle-v1.yaml` — a deliberate `pv diff`-flagged contract edit per Phase 3 D-10(c), never an inline relaxation by a Phase 5 executor. |
+| **04-11 must-have 4** — per-crate cargo-mutants baselines and an explicitly computed aggregate adjusted score. 1 of 4 crates attempted, interrupted at ~68 min, no score produced. | Accepted, deferred | **A standalone compute ticket**, not a phase plan. ≥10 h wall clock for 890 mutants is a compute-budget decision CLAUDE.md reserves for the human. Owner unassigned; successor to D-04-11-B. **No mutation score exists for Phase 4 — a later reader must not infer one.** |
+| **WR-01** — the APR write path is not race-free. `fs::rename` in `atomic_write` replaces its destination unconditionally, so a file created between check and rename is destroyed without `--force`. 04-20 narrowed the window, did not close it. | Accepted as open | Needs `O_CREAT\|O_EXCL`. Stated in `refuse_existing_output`'s doc and `write_lock`'s comment, so the source does not mislead. |
+| **SAFE-02 "in CI"** — the 16 setfit legs at `.github/workflows/ci.yml:378-397` (applied `57f7823ab`) have never executed. No PR opened for `gsd/phase-2-contract-gate`. | Accepted as open | All Phase 4 evidence, including everything in this section, is **macOS/arm64 local**. The arch asymmetry is two-way and only one direction has been measured: `make tier2` is known RED on arm64 with 24 pre-existing clippy errors in arch-gated SIMD that X64-Linux CI never lints. |
+
+### Not re-measured this session
+
+Distinguishing "verified today" from "verified once, at `0fb47958f`":
+
+- The unavailable-device structured refusal (SC5) — carried from this report's own evidence
+  (green unit test, two structured CLI refusals at the binary tier).
+- The trybuild no-bypass compile proof (SC2) — `make setfit-ui-tests` was not run; the
+  command typed was `setfit-ui-test`, which is not a target.
+
+### Surfaced this session, unrouted
+
+`pv` is not on PATH. CLAUDE.md's contract-validation section instructs the reader to type
+bare `pv validate …`, which returns command-not-found; the repo's own gates go through
+`PV_BIN := cargo run --release -p aprender-contracts-cli --bin pv --` (`Makefile:1737`).
+There is no `pv` analogue of `scripts/apr_bin.sh`, so unlike `apr` there is no staleness
+proof for the contract CLI. Repo-wide, not a Phase 4 defect; same class as CLAUDE.md
+rules 3 and 8.
+
+_Acknowledged: 2026-08-16T23:29:10Z at `b3f816c25` (macOS/arm64) via `/gsd:verify-work 04`.
+12 UAT tests, 0 issues. Every gate cited above was executed by the human in-session; no
+result in this section is taken from a SUMMARY._
