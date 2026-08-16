@@ -1433,11 +1433,31 @@ mod envelope {
 #[cfg(test)]
 mod backend {
     use super::*;
+    use crate::setfit::encoder::ExecutionBackend;
 
     /// Item 12 of the contract, read from the contract rather than from a copy
     /// of it. `include_str!` and not a runtime read: a missing contract is a
     /// COMPILE error here, where a runtime read would be a silent skip.
     const CONTRACT: &str = include_str!("../../../../contracts/setfit-apr-v1.yaml");
+
+    /// Item 12's row in the BINDING REGISTRY — the artifact a human or a gate
+    /// reads to decide whether a contracted equation is implemented.
+    ///
+    /// `include_str!` and not a runtime read, for exactly the reason `CONTRACT`
+    /// above is: a missing registry must be a COMPILE error here, where a
+    /// runtime read would be a silent skip. A guard that silently skips is the
+    /// same unfalsifiable claim this particular row's history is about — the
+    /// row named `aprender::setfit::classify::backend_identity`, a path that
+    /// exists at no point on this branch, and `pv audit` could not tell,
+    /// because it reads the `status` field and does not resolve symbols.
+    const BINDING: &str = include_str!("../../../../contracts/aprender/binding.yaml");
+
+    /// The signature the registry records for the bound symbol.
+    ///
+    /// ONE literal with TWO obligations (test 6): the registry row must record
+    /// it, and `encoder.rs` must declare it. A recorded signature that nothing
+    /// reads back is a claim nothing checks.
+    const ROW_SIGNATURE: &str = "fn identity(&self) -> String";
 
     /// Every `.rs` file in this directory, read at test time.
     ///
@@ -1468,6 +1488,195 @@ mod backend {
             out.len()
         );
         out
+    }
+
+    /// The binding-registry row for `equation`, as raw YAML text: from the
+    /// `- contract:` line that opens it to the next one.
+    ///
+    /// Returns `Option` rather than `expect`ing inside its callers so the
+    /// non-vacuity arm (test 4) can assert the row was FOUND explicitly. A
+    /// parser that silently matched nothing would make every pin below
+    /// vacuously true — the zero-match class, one tier up from the code it
+    /// guards.
+    fn binding_row(equation: &str) -> Option<&'static str> {
+        let key = format!("\n  equation: {equation}\n");
+        let at = BINDING.find(&key)?;
+        // Walk back to the `- contract:` line that opens this row, then forward
+        // to the one that opens the next.
+        let start = BINDING[..at].rfind("\n- contract:")? + 1;
+        let tail = &BINDING[start..];
+        let end = tail[1..]
+            .find("\n- contract:")
+            .map_or(tail.len(), |o| o + 1);
+        Some(&tail[..end])
+    }
+
+    /// TEST 1 — the COMPILE witness.
+    ///
+    /// Coercing the inherent method into a typed function item makes rustc
+    /// itself the witness that `ExecutionBackend::identity` exists at that path
+    /// with that signature. Rename it, move it, or change its signature and
+    /// this is a COMPILE error in the crate that owns it — not a registry row
+    /// that drifted silently, which is the failure this row's history is about.
+    #[test]
+    fn the_registry_named_symbol_resolves_as_a_typed_function_item() {
+        let f: fn(&ExecutionBackend) -> String = ExecutionBackend::identity;
+        let model = fixture_encoder_model();
+        let (_, backend) = model
+            .encode_texts_traced(&["hello world"])
+            .expect("the fixture encodes");
+        assert_eq!(
+            f(&backend),
+            backend.identity(),
+            "the function item bound here must BE the method the registry names, not a \
+             same-named neighbour"
+        );
+    }
+
+    /// TEST 2 — the registry pin, MUST-MATCH arm.
+    #[test]
+    fn the_registry_row_names_the_shipped_symbol_and_is_implemented() {
+        let row = binding_row("backend_identity")
+            .expect("the backend_identity row exists (test 4 is the dedicated non-vacuity arm)");
+        for needle in [
+            "\n  module_path: aprender::setfit::encoder\n",
+            "\n  function: ExecutionBackend::identity\n",
+            "\n  status: implemented\n",
+        ] {
+            assert!(
+                row.contains(needle),
+                "the backend_identity row does not carry {needle:?}. The `function` column is \
+                 TYPE-QUALIFIED because `identity` is an INHERENT METHOD on ExecutionBackend, so \
+                 a bare `identity` would be as unresolvable as the ghost it replaces. Row as \
+                 found:\n{row}"
+            );
+        }
+    }
+
+    /// TEST 3 — the registry pin, MUST-NOT-MATCH arm.
+    ///
+    /// A correction that left the ghost behind in a SECOND row would satisfy
+    /// test 2 and still ship an unresolvable claim.
+    #[test]
+    fn the_ghost_path_appears_nowhere_in_the_registry() {
+        // Assembled from `concat!` fragments so this guard's OWN source text
+        // does not carry the strings it forbids: `classify.rs` is inside the
+        // directory `setfit_sources()` walks, the F-05 self-scan hazard the
+        // sibling guard `the_setfit_surface_names_no_capability_detection_symbol`
+        // documents in its own comment. `concat!` expands at compile time, so
+        // the comparison is against the whole symbol.
+        let ghost_path = concat!("aprender::setfit::classify", "::backend_identity");
+        let bare_column = concat!("\n  function: ", "backend_identity\n");
+
+        assert!(
+            !BINDING.contains(ghost_path),
+            "the registry still names {ghost_path:?}, which exists at no point on this branch"
+        );
+        assert!(
+            !BINDING.contains(bare_column),
+            "the registry still carries a bare {bare_column:?} column; an inherent method needs \
+             its type to resolve"
+        );
+
+        // The case table is EXECUTED, not commented: both needles are shown able
+        // to fire on text they WOULD reject.
+        let planted = format!("  module_path: {ghost_path}{bare_column}  status: implemented\n");
+        assert!(
+            planted.contains(ghost_path) && planted.contains(bare_column),
+            "both needles must match a planted violation, or the two arms above are theater"
+        );
+    }
+
+    /// TEST 4 — NON-VACUITY. The arms in tests 2 and 3 are only evidence if the
+    /// parser they share finds a row at all.
+    #[test]
+    fn the_registry_row_parser_finds_the_row_it_claims_to_pin() {
+        // MUST-MATCH arm of the parser's own case table.
+        let row = binding_row("backend_identity");
+        assert!(
+            row.is_some(),
+            "no `equation: backend_identity` row was found in contracts/aprender/binding.yaml. A \
+             parser that silently matched NOTHING would make every pin in this module vacuously \
+             true"
+        );
+        let row = row.expect("is_some was just asserted");
+        assert!(
+            row.starts_with("- contract: setfit-apr-v1.yaml\n"),
+            "the row must be found under the setfit-apr-v1.yaml list, not a neighbouring \
+             contract's: {row}"
+        );
+        // MUST-NOT-MATCH arm: an equation that does not exist must yield None
+        // rather than drifting onto a neighbouring row.
+        assert!(
+            binding_row("backend_identity_x").is_none(),
+            "the parser returned a row for an equation that does not exist, so a renamed key \
+             would go unnoticed"
+        );
+    }
+
+    /// TEST 5 — CONTRACT AGREEMENT.
+    ///
+    /// Tests 1-4 prove the row names a symbol that EXISTS; this proves that
+    /// symbol's OUTPUT is the thing item 12 describes, so the row binds the
+    /// equation rather than merely something that compiles.
+    #[test]
+    fn the_bound_symbol_produces_the_identity_the_contract_describes() {
+        // Obtained from the live encode path, never constructed: ExecutionBackend
+        // has no public constructor and the sibling guard above exists to keep it
+        // that way, so a value here is one an invocation RETURNED.
+        let model = fixture_encoder_model();
+        let (_, backend) = model
+            .encode_texts_traced(&["hello world"])
+            .expect("the fixture encodes");
+        let identity = ExecutionBackend::identity(&backend);
+        let segments: Vec<&str> = identity.split(':').collect();
+        assert_eq!(
+            segments.len(),
+            3,
+            "item 12's grammar is <device>:<implementation>:<kernel>: {identity:?}"
+        );
+        assert_eq!(
+            segments[1], "setfit-core",
+            "the middle segment names THIS implementation: {identity:?}"
+        );
+        assert!(
+            CONTRACT.contains("backend = \"<device>:<implementation>:<kernel>\""),
+            "item 12's grammar line moved, so the segment assertions above are pinned to a \
+             formula that is no longer the contract's"
+        );
+    }
+
+    /// TEST 6 — closes the `module_path` hole.
+    ///
+    /// Tests 1-3 witness the FUNCTION, but compare `module_path` against a
+    /// hard-coded literal living inside `classify.rs` — a file that is NOT the
+    /// module that literal names. A moved `ExecutionBackend` would leave the
+    /// literal true and the row wrong. So reuse the sibling idiom from
+    /// `execution_backend_has_no_public_constructor_or_setter`: read the file
+    /// the path's last segment names and require the symbol to be declared
+    /// THERE. That is the strongest tie available without a proc-macro.
+    #[test]
+    fn the_module_path_segment_names_the_file_the_symbol_lives_in() {
+        let src = include_str!("encoder.rs");
+        let row = binding_row("backend_identity").expect("the backend_identity row exists");
+        assert!(
+            row.contains("\n  module_path: aprender::setfit::encoder\n"),
+            "the row's module_path must end in the `encoder` segment this test reads"
+        );
+        assert!(
+            src.contains("impl ExecutionBackend {"),
+            "encoder.rs does not declare `impl ExecutionBackend {{`, so the row's `encoder` \
+             segment names a module the symbol does not live in"
+        );
+        assert!(
+            row.contains(&format!("\n  signature: '{ROW_SIGNATURE}'\n")),
+            "the row must record the signature {ROW_SIGNATURE:?}"
+        );
+        assert!(
+            src.contains(&format!("pub {ROW_SIGNATURE}")),
+            "encoder.rs must declare `pub {ROW_SIGNATURE}`; a signature the registry records but \
+             nothing reads back is a claim nothing checks"
+        );
     }
 
     #[test]
