@@ -737,6 +737,73 @@ mod tests {
         );
     }
 
+    /// The bound ITSELF — the only input that can observe the check at `:152`.
+    ///
+    /// [`MAX_BATCH_TEXTS`] is enforced here AND again inside
+    /// `VerifiedSetFitModel::classify` (module header, "Why the bounds are
+    /// checked here AND in core", T-04-23). That redundancy is deliberate, and
+    /// it has a consequence nobody had measured: a REFUSAL at
+    /// `MAX_BATCH_TEXTS + 1` cannot distinguish the two implementations.
+    /// Measured under a hand-applied `>` → `==`, a 257-text batch still answers
+    /// `400` with the byte-identical body
+    /// `{"error":"the request carried 257 texts; the bound is 256"}` — because
+    /// the mutated transport check falls through, core's re-check produces the
+    /// same `BatchTooLarge { max: 256, got: 257 }`, and `classify_error_response`
+    /// maps it to the same status. So the neighbouring
+    /// `setfit_classify_refuses_a_batch_one_over_the_contract_bound`, whose name
+    /// asserts boundary coverage, provably CANNOT kill that mutant — and did
+    /// not, for three commits.
+    ///
+    /// Only an ACCEPTANCE at exactly the bound separates them: `>` admits 256,
+    /// while both `==` and `>=` refuse it. Measured: 255→200, 256→200, 257→400
+    /// under `>`; 255→200, 256→**400**, 257→400 under both mutants.
+    ///
+    /// Kills, by their `cargo mutants --list` names — re-run either with
+    /// `cargo mutants -F 'replace > with (==|>=) in setfit_classify_handler'`:
+    /// * `setfit_handlers.rs:152:28: replace > with == in setfit_classify_handler`
+    /// * `setfit_handlers.rs:152:28: replace > with >= in setfit_classify_handler`
+    #[tokio::test]
+    async fn setfit_classify_admits_a_batch_at_exactly_the_contract_bound() {
+        let (app, _bytes, _hash) = app_with_model();
+        // Read off the exported constant, never a literal 256, so a contract
+        // change moves this test WITH the bound instead of leaving it asserting
+        // a number the contract no longer states.
+        let texts: Vec<String> = (0..MAX_BATCH_TEXTS).map(|_| "ok".to_string()).collect();
+        assert_eq!(
+            texts.len(),
+            MAX_BATCH_TEXTS,
+            "the batch must sit exactly ON the bound"
+        );
+        let body = serde_json::json!({ "texts": texts }).to_string();
+
+        // The OTHER bound must not be what this measures. `MAX_REQUEST_BODY_BYTES`
+        // also applies to this request; short texts keep the body far under it,
+        // and asserting so means a future change to either constant cannot
+        // silently turn this into a body-limit test that passes for the wrong
+        // reason.
+        assert!(
+            body.len() < classify_body_limit_bytes() / 2,
+            "the at-the-bound body must sit far under the body limit, else this \
+             test measures the wrong bound; body={} limit={}",
+            body.len(),
+            classify_body_limit_bytes()
+        );
+
+        let (status, raw) = post_classify(app, body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "exactly MAX_BATCH_TEXTS is LEGAL — the bound is `>`, not `>=`"
+        );
+        let response: ClassifyResponse =
+            serde_json::from_slice(&raw).expect("the body IS a core ClassifyResponse");
+        assert_eq!(
+            response.results().len(),
+            MAX_BATCH_TEXTS,
+            "every text in a batch ON the bound must be classified"
+        );
+    }
+
     #[tokio::test]
     async fn setfit_classify_refuses_a_body_over_the_contract_limit() {
         let (app, _bytes, _hash) = app_with_model();

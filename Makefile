@@ -1917,7 +1917,7 @@ gemm-thread-determinism: ## D-13/TRN-06: Tensor::matmul does not depend on the r
 #   setfit-cli-inspect-tests   cli   inspect                120 / 0       110
 #   setfit-cli-eval-tests      cli   eval::setfit            15 / 0        13
 #   setfit-cli-io-tests        cli   setfit_io                5 / 0         5
-#   setfit-serve-tests         serve setfit                  10 / 0         9
+#   setfit-serve-tests         serve setfit                  11 / 0        10
 #   setfit-parity              cli   --test setfit_parity    20 / 0        18
 #   setfit-serve-smoke         cli   --ignored smoke          1 / 0         1
 #   setfit-cli-lifecycle       cli   --ignored lifecycle      2 / 0         2
@@ -2174,7 +2174,7 @@ setfit-serve-tests: ## OPS-05: aprender-serve setfit (HTTP transport only, D-09)
 		echo "appear here, the filter has widened, not this surface regressed."; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-serve-tests.log,9,setfit-serve-tests)
+	@$(call assert_tests_ran,target/setfit-serve-tests.log,10,setfit-serve-tests)
 
 setfit-parity: ## SAFE-01: 04-09's three-reader parity gate (core / CLI / HTTP agree)
 	@echo "Phase 4: three-surface parity (aprender-core, apr-cli, aprender-serve)"
