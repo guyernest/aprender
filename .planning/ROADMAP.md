@@ -20,7 +20,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Differentiable MiniLM Conformance** - Prove the pinned encoder's shared batched Rust path matches fixtures and updates named parameters through the graph. (completed 2026-08-08)
 - [ ] **Phase 2: Deterministic Pair and Data Protocol** - Make few-shot selection and bounded pair generation reproducible, provenance-complete, leakage-safe, and non-quadratic. (code-complete 2026-08-09; verification returned `human_needed` — 4 items pending in `02-HUMAN-UAT.md`)
 - [ ] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit. (all 10 plans code-complete 2026-08-11; verification returned `human_needed` — 5/5 roadmap criteria verified, 47/50 must-have truths; 5 items pending in `03-HUMAN-UAT.md`, and code review found 4 blockers in the VERIFICATION layer — see `03-REVIEW.md`)
-- [ ] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs. (all 17 plans code-complete 2026-08-16; verification returned `gaps_found` — 0/5 roadmap criteria fully met (2 FAILED, 3 PARTIAL), 94/95 must-have truths, and 04-11's per-crate mutation gate unmet. The blocker is F-10, escalated to Phase 5. Five gap-closure plans 04-18..04-22 added 2026-08-16 for the user-scoped subset that does NOT depend on F-10; OPS-01 and OPS-02 stay NOT MET regardless. **A prior `[x] (completed 2026-08-16)` was reverted by hand — the 6th occurrence of the tracking-handler defect STATE.md records, which marks a phase complete as soon as summary_count reaches plan_count, before the verifier runs and regardless of unmet must-haves.**)
+- [x] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs. (all 17 plans code-complete 2026-08-16; verification returned `gaps_found` — 0/5 roadmap criteria fully met (2 FAILED, 3 PARTIAL), 94/95 must-have truths, and 04-11's per-crate mutation gate unmet. The blocker is F-10, escalated to Phase 5. Five gap-closure plans 04-18..04-22 added 2026-08-16 for the user-scoped subset that does NOT depend on F-10; OPS-01 and OPS-02 stay NOT MET regardless. **A prior `[x] (completed 2026-08-16)` was reverted by hand — the 6th occurrence of the tracking-handler defect STATE.md records, which marks a phase complete as soon as summary_count reaches plan_count, before the verifier runs and regardless of unmet must-haves.**) (completed 2026-08-16)
 - [ ] **Phase 5: Benchmark and Claims Gate** - Produce the complete reproducible 40-cell SetFit-versus-9B-LoRA evidence set and reject incomplete or unequal claims.
 
 ## Phase Details
@@ -247,7 +247,7 @@ Plans:
 
 **Wave 12** *(blocked on Wave 11 — 04-21 also edits the Makefile, and the Makefile is this plan's subject)*
 
-- [ ] 04-22-PLAN.md — F-07: run bashrs for real over the Makefile and `scripts/`, make `bashrs-lint-makefile` capable of failing, wire one scoped baseline-non-increase gate founded on shell semantics (two error findings are measured bashrs false positives), and triage the repo-wide backlog with an owner — no skipped check reported as passing (wave 12)
+- [x] 04-22-PLAN.md — F-07: run bashrs for real over the Makefile and `scripts/`, make `bashrs-lint-makefile` capable of failing, wire one scoped baseline-non-increase gate founded on shell semantics (two error findings are measured bashrs false positives), and triage the repo-wide backlog with an owner — no skipped check reported as passing (wave 12)
 
 ### Phase 5: Benchmark and Claims Gate
 
@@ -282,5 +282,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
-| 4. APR Artifact and Production Parity | 21/22 | In Progress|  |
+| 4. APR Artifact and Production Parity | 22/22 | Complete   | 2026-08-16 |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
