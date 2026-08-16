@@ -420,6 +420,29 @@ fn run_test(
         ))
     })?;
 
+    // THE LABEL MAP — the fourth door, and the one the three above deliberately do not cover.
+    // `mint_test_token` compares the artifact hash; `grant` compares artifact + dataset
+    // fingerprint; the reload gate compares corpus/ledger/draw. NONE of them compares the two
+    // LABEL ORDERINGS. `evaluate_test` scores `position(result.label())` — an index into the
+    // ARTIFACT's head — against `row.label`, an index into the DATASET. If the two orderings
+    // disagree, every comparison is between unrelated indices and the command reports a
+    // confidently wrong accuracy instead of an error.
+    //
+    // The validation evaluator already refuses exactly this by name
+    // (`aprender-train/src/train/setfit/apr_evaluate.rs`, `LabelMapMismatch`); the test path
+    // shipped without it. Read the labels OFF THE REBUILT HEAD, not off the document's copy,
+    // which is what a classification actually indexes into.
+    let artifact_labels: Vec<String> = credential.model().ordered_labels().to_vec();
+    let dataset_labels: Vec<String> = dataset.label_names().to_vec();
+    if artifact_labels != dataset_labels {
+        return Err(CliError::ValidationFailed(format!(
+            "label map mismatch: the artifact's labels are {artifact_labels:?} but the dataset's \
+             are {dataset_labels:?}.\nIndex i of one is not index i of the other, so scoring them \
+             against each other would produce a confidently wrong number rather than an error. \
+             The --data directory must be the corpus this artifact was trained over."
+        )));
+    }
+
     let evaluation = evaluate_test(credential, grant.test())?;
 
     let row = EvalRow {

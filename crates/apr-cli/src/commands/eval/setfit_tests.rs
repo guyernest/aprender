@@ -381,3 +381,46 @@ fn eval_setfit_uses_the_librarys_evaluator_and_computes_no_validation_metric_its
         );
     }
 }
+
+/// CR-01 (04-REVIEW): the label-map gate must stand between the three doors and the scoring.
+///
+/// `evaluate_test` scores `position(result.label())` — an index into the ARTIFACT's head —
+/// against `row.label`, an index into the DATASET. None of the three doors compares those two
+/// orderings: `mint_test_token` compares the artifact hash, `grant` compares artifact + dataset
+/// fingerprint, and the reload gate compares corpus/ledger/draw. Without the fourth gate a
+/// mismatched corpus yields a confidently wrong accuracy instead of an error — which is exactly
+/// what the validation evaluator refuses by name (`apr_evaluate.rs`, `LabelMapMismatch`).
+///
+/// The behaviour is not reachable from this adapter's tests: reaching it needs a real
+/// `ReloadedSetFitCredential`, and no artifact can be built on this host while F-10 stands. So
+/// this is a SOURCE guard, in the same shape this phase uses elsewhere for blocked rungs. It
+/// asserts ORDER, not mere presence — a gate placed after the scoring would be no gate at all.
+#[test]
+fn eval_setfit_test_split_gates_the_label_map_before_it_scores() {
+    let src = include_str!("setfit.rs");
+
+    let gate = src
+        .find("artifact_labels != dataset_labels")
+        .expect("the label-map gate must exist in the test path (CR-01)");
+    let scoring = src
+        .find("let evaluation = evaluate_test(")
+        .expect("the test path must still call evaluate_test — this guard is anchored to it");
+
+    assert!(
+        gate < scoring,
+        "the label-map gate must run BEFORE evaluate_test, not after: a gate downstream of the \
+         scoring cannot stop a confidently wrong number from being computed"
+    );
+
+    // Non-vacuity: both sides must be read from real sources, or the comparison above could be
+    // between two empty vecs and would pass while gating nothing.
+    assert!(
+        src.contains("credential.model().ordered_labels()"),
+        "the artifact side must be read off the REBUILT HEAD, which is what a classification \
+         actually indexes into — not the document's copy, which can drift"
+    );
+    assert!(
+        src.contains("dataset.label_names()"),
+        "the dataset side must be read off the prepared dataset"
+    );
+}

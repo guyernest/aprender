@@ -1500,7 +1500,15 @@ fn start_setfit_server(model_path: &Path, config: &ServerConfig) -> Result<()> {
     );
 
     let state = AppState::default().with_setfit_model(Arc::new(model));
-    let app = create_router_with_config(state, RouterConfig::default());
+    // CR-01 (04-REVIEW): the classifier surface gets the SAME AuthGate as the APR
+    // routes. Mounting the router bare left `POST /v1/classify` unauthenticated even
+    // with APR_API_KEY set, behind `CorsLayer::permissive()` — and because
+    // `AuthGate::from_env()` was never CALLED, its "routes are unauthenticated"
+    // warning never printed either, so the hole was silent from both ends.
+    let app = super::auth::layer(
+        super::auth::AuthGate::from_env(),
+        create_router_with_config(state, RouterConfig::default()),
+    );
 
     let bind_addr = config.bind_addr();
     let runtime = tokio::runtime::Runtime::new()
