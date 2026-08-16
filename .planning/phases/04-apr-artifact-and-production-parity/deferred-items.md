@@ -621,3 +621,235 @@ pre-check.
 mutation gate with four baselines and an explicitly computed aggregate adjusted score. D-04-11-B
 measured ≥ 10 h wall clock for its 890 mutants; this plan ran 25 mutants over 865 s against ONE file
 in ONE crate. That gate remains a `human_verification` item, exactly as D-04-11-B left it.
+
+## D-04-22-A — the bashrs inventory: measured exit-code semantics, two proven TOOL false positives, and the triaged repo-wide backlog
+
+Measured by plan 04-22, wave 12, on `gsd/phase-2-contract-gate` at base `9ae41fcaa` (2026-08-16).
+Every status below was captured with `cmd > log 2>&1; rc=$?` — never through a pipe, never with
+`tee`. CLAUDE.md Verification Discipline rule 1 records two shipped defects of exactly that shape
+(#2336, #2360), and this entry is the inventory for a finding of the same class, so committing it
+here would have been self-refuting.
+
+### 0. The tool, proven before any number it printed was trusted
+
+CLAUDE.md rule 8 records two cases where a shadowed artifact made edits look effective while
+changing nothing. So the binary was proven, not assumed:
+
+| probe | result |
+|-------|--------|
+| `whence -a bashrs` (zsh) | **exactly one path**: `/Users/guy/.cargo/bin/bashrs` |
+| `command -v bashrs` | rc=0, same single path |
+| `bashrs --version` | rc=0, **`bashrs 6.66.3`** |
+
+`type -aP bashrs` — the form CLAUDE.md rule 8 suggests — is **not available here**: the login shell
+is zsh, whose `type` has no `-P` (`(eval):type:1: bad option: -P`, rc=1). `whence -a` is zsh's
+equivalent and was used instead. Recorded rather than silently substituted.
+
+**This contradicts F-07's premise and D-04-11-A's closing note, both of which say bashrs is absent.**
+The version matches what the planner measured, so the planner's counts were re-derived rather than
+inherited — and they reproduced (see §3).
+
+### 1. Exit-code semantics, established by CONTROL — and the help text is misleading
+
+`bashrs --help` documents a global `--strict` as *"Enable strict mode (fail on warnings)"*, which
+implies the default does NOT fail on warnings. **That implication is false.** Throwaway inputs were
+constructed under the scratch directory, one per severity state, for BOTH subcommands. They are
+different code paths and were measured separately rather than assumed to share semantics.
+
+**`bashrs lint` (shell scripts):**
+
+| # | input | findings | default rc | `--strict` rc |
+|---|-------|----------|-----------|--------------|
+| 1 | `probe_a.sh` — info-only | 0E 0W 3I | **0** | **0** |
+| 2 | `probe_w.sh` — warning-present | 0E 1W 2I | **1** | **1** |
+| 3 | `probe_b.sh` — error-present (a REAL unterminated quote) | 1E 0W 0I | **2** | **2** |
+
+**`bashrs make lint` (Makefiles):**
+
+| # | input | findings | default rc | `--strict` rc |
+|---|-------|----------|-----------|--------------|
+| 4 | `Mk_min.mk` — no findings at all | 0E 0W 0I | **0** | **0** |
+| 5 | `Mk_warn.mk` — warning-only | 0E 6W 0I | **1** | **1** |
+| 6 | `Mk_err.mk` — error-present (a REAL `local` in a recipe body) | 1E 0W 0I | **2** | **2** |
+| 7 | `Makefile` (the real one, 2432 lines) | 1E 33W 0I | **2** | **2** |
+
+Twelve measured cells over the two subcommands. Three conclusions, all load-bearing for the gate
+built in Task 2:
+
+1. **The mapping is severity-tiered, identically for both subcommands:** `0` = nothing above info,
+   `1` = warnings present, `2` = at least one error. It is NOT pass/fail.
+2. **`--strict` is a no-op in all seven states measured.** Warnings already fail without it (rc=1),
+   and it does not escalate info to failure. The gate does not use it, and the reason is recorded
+   here so a future editor does not add it expecting an effect.
+3. **The info-only cell is not constructible for `make lint`.** No info-severity Makefile rule was
+   observed to fire — zero infos on the real 2432-line Makefile and on every probe. The row is
+   therefore replaced by the strictly-more-informative *no-findings* and *warning-only* rows rather
+   than fabricated. Stated explicitly so the missing cell is not read as an omission.
+
+**The finding that decided Task 2's design — rc=2 is AMBIGUOUS:**
+
+| control | rc |
+|---------|----|
+| `bashrs make lint Makefile` (1 error-severity finding) | **2** |
+| `bashrs make lint /nonexistent/Makefile` (*"The specified file was not found"*) | **2** |
+| `bashrs make lint Makefile` with bashrs absent from `PATH` | **127** |
+
+**A gate keyed on the exit code alone cannot distinguish "this file has an error" from "the gate was
+pointed at nothing".** That is the vacuous-pass failure mode this plan exists to remove, arriving
+through the back door. Every gate written in Task 2 therefore parses the report and FAILS
+explicitly when no parseable report was produced, rather than trusting `rc`.
+
+A second parsing hazard, measured: a **fully clean** file prints `✓ No issues found in <f>` and
+**no `Summary:` line at all** (`scripts/verify-parity.sh`, rc=0). A parser that greps only for
+`Summary:` reads nothing there and, if it defaults to zero, cannot tell clean from unparsed. Both
+shapes are handled.
+
+### 2. The two MEASURED FALSE POSITIVES — bashrs defects, not code defects
+
+Of the four files Task 2 gates, exactly two carry an error-severity finding, and **both are wrong**.
+Each was checked against an independent shell-semantic control rather than accepting the linter's
+severity verdict as ground truth. This is the most reusable output of the plan: in both cases,
+"fixing" what bashrs flagged would have caused a real regression.
+
+**FP-1 — `scripts/check_apr_bin_pinned.sh:72`, SC1078**
+
+| field | value |
+|-------|-------|
+| rule | `SC1078: Did you forget to close this double-quoted string?` (error), cols **83-84** |
+| flagged text | `ABS_APR='(^\|[[:space:]]"'"'"'=(])(/\|~/\|\$HOME/)[A-Za-z0-9_.$/-]*/apr([[:space:]]"'"'"']\|$)'` — the standard `'"'"'` single-quote-escaping idiom inside the regex |
+| refuting control | **`bash -n scripts/check_apr_bin_pinned.sh` → rc=`0`** (empty output). bash's own parser accepts the file. |
+| control is non-vacuous | The same control on `probe_b.sh`, which has a genuine unterminated quote, → rc=`2` (`unexpected EOF while looking for matching '"'`). So `bash -n` does fire when a quote really is unterminated; it declines to fire here. |
+| avoided consequence | Editing a regex whose own lines 70-71 read *"This regex class has now been gotten wrong four times in this repo; if you change it, re-run the table rather than reading it."* The `apr`-invocation patterns were wrong five times (CLAUDE.md rule 7) and every one was caught by the 12-case must-match/must-not-match table, none by review. Rewriting it to appease a parser bug is the single most dangerous edit available in this plan. |
+
+**FP-2 — `Makefile:2327`, SC2168**
+
+| field | value |
+|-------|-------|
+| rule | `SC2168: 'local' is only valid in functions` (error), cols **22-28** |
+| flagged text | cols 22-28 of `dev-setup: ## Set up local dev environment with sibling repo overrides` are exactly **`local d`** — English prose inside a `##` help comment |
+| refuting control | **`make -n dev-setup` → rc=`0`**, and the fully expanded recipe it prints contains **zero** shell `local` (`grep -cE '(^\|[^A-Za-z_])local[[:space:]]' → 0`, grep rc=1). There is no `local` anywhere in the target's actual shell. |
+| avoided consequence | A blocking tier3 gate that trips on any future help string containing "local", "declare" or "typeset". A gate satisfied by deleting a word from prose is a gate that will be disabled, and it takes the real gates beside it down with it. |
+
+**Neither is suppressed.** Both are carried as *justified baseline entries* in Task 2's gate, where
+each entry must name its refuting control or the gate rejects it. If a later bashrs release fixes
+either rule, the entry is **removed from the baseline**, not left as permanent slack — the gate's
+own recipe says so.
+
+The other two gated files carry **no** error-severity finding at all (`apr_bin.sh` 0E,
+`check_sourced_libs_option_neutral.sh` 0E), so no control was required for them.
+
+### 3. The per-leg inventory — every leg's status, read directly off the command
+
+**Leg A — `bashrs make lint Makefile`: rc=`2`, `1 error(s), 33 warning(s), 0 info(s)`.**
+
+| code | severity | count |
+|------|----------|-------|
+| MAKE012 (recursive make invocation) | warning | 18 |
+| MAKE010 (missing error handling) | warning | 11 |
+| MAKE003 (unquoted variable in command) | warning | 2 |
+| MAKE018 | warning | 1 |
+| MAKE001 (non-deterministic `$(wildcard)`) | warning | 1 |
+| **SC2168** | **error** | **1** (FP-2 above) |
+
+Identical to the planner's pre-04-21 tally. **04-21's two-line Makefile edit produced a delta of
+zero** — recorded because the plan flagged a small delta as expected, and "expected but absent" is
+itself a measurement.
+
+**Leg B — `bashrs lint` over each of `scripts/*.sh`, ONE FILE AT A TIME.** The corpus form
+(`bashrs lint scripts/*.sh`) hides which file failed, so 59 separate invocations were made.
+**59 scripts, 51 non-zero.** With §1's semantics the "51 red" headline decomposes into something
+more useful:
+
+| rc | meaning | files |
+|----|---------|-------|
+| 0 | nothing above info | **8** |
+| 1 | warnings, **no errors** | **29** |
+| 2 | **at least one error-severity finding** | **22** |
+
+So the actionable error-severity surface is **22 files**, not 51.
+
+Corpus-wide severity tally, ANSI stripped before counting (the output is coloured and a naive grep
+over the raw bytes miscounts): **106 error**, **754 warning**, **1412 info**.
+
+- error: SC1078 (34), SC1100 (30), SC2296 (11), SC1007 (11), SC1035 (7), SC2122 (5), SC2188 (4),
+  SC1028 (2), SC2105 (1), SC2104 (1)
+- warning: SC2086 (180), PERF002 (133), SC2047 (65), SC2154 (51), SC2164 (30), SC2161 (29),
+  REL005 (26), **SEC014 (24)**, **SEC013 (24)**, SC2198 (21), SC2036 (20), SC2297 (15), SC2155 (15),
+  SC2031 (12), **SEC020 (4)**, **SEC006 (2)**
+- info: SC1012 (216), SC2081 (133), SC2227 (129), PERF003 (104), SC2016 (94), SC2233 (83)
+
+Per-file exit codes, all 59 (`E`/`W`/`I` = error/warning/info counts):
+
+| script | rc | findings | | script | rc | findings |
+|--------|----|----------|-|--------|----|----------|
+| `apr_bin.sh` | 1 | 0E 14W 33I | | `dispatch-distill-phase-3-gx10.sh` | 2 | 12E 78W 38I |
+| `bench.sh` | 0 | 0E 0W 7I | | `dispatch-distill-phase-5-humaneval.sh` | 1 | 0E 14W 37I |
+| `benchmark-2x-ollama.sh` | 2 | 10E 33W 152I | | `dispatch-distill-stage-d.sh` | 1 | 0E 35W 55I |
+| `benchmark-matrix.sh` | 2 | 2E 52W 141I | | `dispatch-phase5-humaneval-gx10.sh` | 2 | 10E 23W 38I |
+| `book-ci-local.sh` | 2 | 4E 14W 22I | | `dispatch-phase6-publish.sh` | 2 | 5E 9W 26I |
+| `book-gate.sh` | 2 | 1E 5W 38I | | `dogfood-book.sh` | 1 | 0E 38W 21I |
+| `build-wasm-noise.sh` | 1 | 0E 8W 7I | | `dogfood-use.sh` | 2 | 3E 22W 33I |
+| `capture_golden_traces.sh` | 1 | 0E 9W 19I | | `extract-book-examples.sh` | 1 | 0E 2W 1I |
+| `cascade-drain.sh` | 1 | 0E 10W 10I | | `gen-cli-chapter-stubs.sh` | 2 | 6E 24W 12I |
+| `cascade-publish.sh` | 2 | 7E 22W 46I | | `gen-lib-chapter-stubs.sh` | 2 | 3E 13W 5I |
+| `check_apr_bin_pinned.sh` | **2** | 1E 17W 35I | | `gen-summary.sh` | 2 | 1E 0W 6I |
+| `check_beat_baseline_env.sh` | 2 | 1E 28W 27I | | `gpu_2x_benchmark.sh` | 1 | 0E 22W 45I |
+| `check_beat_measurements.sh` | 1 | 0E 11W 11I | | `lint-self-referential-default.sh` | 2 | 12E 0W 2I |
+| `check_beats_gated.sh` | 1 | 0E 17W 13I | | `pcu-batch.sh` | 2 | 10E 18W 19I |
+| `check_book_cli_parity.sh` | 1 | 0E 5W 8I | | `prepare-release.sh` | 0 | 0E 0W 11I |
+| `check_book_example_block.sh` | 1 | 0E 5W 3I | | `qualify-matrix.sh` | 2 | 5E 11W 91I |
+| `check_book_examples_compile.sh` | 1 | 0E 2W 3I | | `qwen-story.sh` | 2 | 2E 23W 96I |
+| `check_book_examples_executable.sh` | 2 | 3E 49W 44I | | `release.sh` | 0 | 0E 0W 4I |
+| `check_book_lib_example_block.sh` | 1 | 0E 5W 3I | | `repro_qwen.sh` | 0 | 0E 0W 3I |
+| `check_book_lib_parity.sh` | 1 | 0E 6W 2I | | `stack_release.sh` | 2 | 2E 5W 12I |
+| `check_book_linkcheck.sh` | 1 | 0E 2W 2I | | `verify_pmat_116.sh` | 1 | 0E 12W 15I |
+| `check_build_rs_paths.sh` | 2 | 2E 9W 4I | | `verify-chat-models.sh` | 1 | 0E 7W 32I |
+| `check_format_sovereignty.sh` | 1 | 0E 1W 10I | | `verify-parity.sh` | 0 | 0E 0W 0I † |
+| `check_include_files.sh` | 1 | 0E 5W 5I | | `watch-distill-phase-3-gx10.sh` | 0 | 0E 0W 3I |
+| `check_msrv.sh` | 1 | 0E 4W 4I | | `cleanup-gx10-runs.sh` | 1 | 0E 8W 11I |
+| `check_package_includes.sh` | 1 | 0E 5W 4I | | `crux_bulk_pmat_work.sh` | 2 | 4E 5W 17I |
+| `check_pass_grep_anchored.sh` | 1 | 0E 16W 30I | | `cublas_fp8_per_layer_diff.sh` | 1 | 0E 8W 25I |
+| `check_publish_safety.sh` | 1 | 0E 7W 28I | | `ci.sh` | 0 | 0E 0W 6I |
+| `check_readme_claims.sh` | 0 | 0E 0W 5I | | `check_runner_labels.sh` | 1 | 0E 2W 1I |
+| `check_sourced_libs_option_neutral.sh` | 1 | 0E 14W 31I | | | | |
+
+† `verify-parity.sh` is genuinely clean: bashrs prints `✓ No issues found` and emits **no `Summary:`
+line**. Recorded because the first pass through the corpus logged it as `NO-SUMMARY`, and a gate
+that greps only for `Summary:` would read nothing there. Investigated rather than tidied away.
+
+**Leg C — `bashrs score` on the three guard scripts** (advisory, RECORDED, not a gate):
+
+| script | rc | grade | score |
+|--------|----|-------|-------|
+| `scripts/apr_bin.sh` | 0 | B- | 7.1 / 10.0 |
+| `scripts/check_apr_bin_pinned.sh` | 0 | C- | 5.6 / 10.0 |
+| `scripts/check_sourced_libs_option_neutral.sh` | 0 | B | 7.9 / 10.0 |
+
+**Leg D — `bashrs gate`: RUN, and it is VACUOUS. It is NOT recorded as a pass.**
+
+The invocation CLAUDE.md documents, `bashrs gate --strict .`, **does not exist in 6.66.3**:
+
+```
+$ bashrs gate --strict .            → rc=2
+error: unexpected argument '--strict' found
+Usage: bashrs gate [OPTIONS]
+```
+
+`gate` takes neither a path nor `--strict` in this version — only `--tier` and `--report`. The valid
+form was then run at every tier, and every tier reports success **having enabled nothing**:
+
+```
+$ bashrs gate --tier 1              → rc=0
+Executing Tier 1 Quality Gates...
+Gates enabled:
+----------------------------------------
+----------------------------------------
+✅ Tier 1 Gates Passed!
+```
+
+`--tier 2` and `--tier 3` are byte-identical in shape: rc=0, `Gates enabled:` **empty**,
+`✅ Tier N Gates Passed!`. **This is a check that reports passing having checked nothing — the exact
+defect class F-07 is about, inside the tool this plan was sent to adopt.** It is recorded in the
+NOT-RUN list below as `NOT RUN (vacuous)`, never as a green leg, and nothing in this phase is
+gated on it. CLAUDE.md's documented `bashrs gate --strict .` invocation is stale for 6.66.3 and
+should be corrected when someone next edits that section.
