@@ -1471,7 +1471,7 @@ fn start_setfit_server(model_path: &Path, config: &ServerConfig) -> Result<()> {
     // with APR_API_KEY set, behind `CorsLayer::permissive()` — and because
     // `AuthGate::from_env()` was never CALLED, its "routes are unauthenticated"
     // warning never printed either, so the hole was silent from both ends.
-    let app = super::auth::layer(
+    let app = super::auth::layer_public_ops(
         super::auth::AuthGate::from_env(),
         create_router_with_config(state, RouterConfig::default()),
     );

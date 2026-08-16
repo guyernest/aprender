@@ -1,7 +1,8 @@
 ---
 phase: 04
 phase_name: apr-artifact-and-production-parity
-reviewed: 2026-08-15T00:00:00Z
+reviewed: 2026-08-16T00:00:00Z
+review_round: 2
 depth: standard
 diff_base: 87b780eefabb4dbb6f5e64efe2f5b6698d058e73
 files_reviewed: 35
@@ -42,194 +43,96 @@ files_reviewed_list:
   - crates/aprender-train/src/train/setfit/mod.rs
   - crates/aprender-train/src/train/setfit/verify.rs
 findings:
-  critical: 2
-  warning: 6
-  info: 5
-  total: 13
+  critical: 0
+  warning: 9
+  info: 6
+  total: 15
+closed_since_round_1:
+  - CR-01
+  - CR-02
+  - WR-02
+  - IN-03
 status: findings
 ---
 
-# Phase 04: Code Review Report
+# Phase 04: Code Review Report (round 2 — re-review)
 
-**Reviewed:** 2026-08-15
-**Depth:** standard (per-file, Rust-specific, with cross-file tracing into `aprender-core`)
+**Reviewed:** 2026-08-16
+**Depth:** standard (per-file, Rust-specific, cross-file into `aprender-core` / `aprender-serve`)
 **Files Reviewed:** 35
-**Status:** findings
+**Status:** findings — **0 Critical**, 9 Warning, 6 Info
 
 ## Summary
 
-The security spine — `verify.rs`, `credential.rs`, `lock.rs`, `apr_reload.rs`, `setfit_io.rs` — holds up
-under adversarial reading. Four of the five specific concerns raised in the brief are **refuted** (see
-"Specific concerns: verdicts" below); the fifth is confirmed as bounded and safe. No `unwrap()`, no SATD,
-no `unsafe`, no tensor indexing in scope.
+Both round-1 Critical findings are **genuinely closed**, and the fixes are correct rather than
+cosmetic — I traced each one to its single call site and to the sibling implementation it was
+supposed to mirror. `WR-02` and `IN-03` are closed too. The cleanup pass (`b47acc4fe`) is, on
+the six items the brief named, **correct in all six**; the verification for each is recorded
+below so the next reader does not have to re-derive it.
 
-The defects are all in the **consumer surfaces**, and they cluster in one shape: the *validation* path
-and the *test* path of `apr eval` were written by different hands and the test path is missing gates the
-validation path has. The two Critical findings are (1) `apr eval --split test` computing its accuracy by
-comparing an artifact-label index against a dataset-label index with no label-map gate — the exact
-"confidently wrong number rather than an error" the sibling path refuses by name — and (2) the new
-`POST /v1/classify` surface being served without the `AuthGate` layer that the CLI's own APR router
-applies, so `APR_API_KEY` silently does not protect it and not even the boot warning fires.
+The re-review found **four new Warnings**, three of which are consequences of the cleanup and
+the CR-02 fix themselves:
 
-Two write paths (`atomic_write`, `write_lock`) share a clobber window that their doc comments claim to
-have closed, and `write_lock` additionally uses a predictable, symlink-following temp file where its
-in-repo precedent (`setfit_train::temp_path` + `create_new`) does not.
+* the `AuthGate` that closed CR-02 is layered **outside** `CorsLayer::permissive()`, so with
+  `APR_API_KEY` set the classify surface now 401s every browser CORS preflight and every
+  unauthenticated health probe (**WR-07**);
+* the new `MAX_TAG_METADATA_BYTES` fail-open makes `apr predict` and `apr eval` state, in
+  writing, that a genuinely tagged artifact is "not a SetFit classifier" — and the message
+  points the operator at `apr inspect`, which will show them the opposite (**WR-08**);
+* `apr inspect`'s own metadata read — bounded by this phase, but only by the file's length —
+  still allocates up to 4 GiB from an attacker-controlled `u32`, which is the exact hazard the
+  new 16 MiB constant was introduced to refuse two files away (**WR-09**);
+* `apr eval --lock-out` runs the entire multi-candidate sweep before discovering the lock file
+  already exists, inverting the ordering discipline `setfit_train.rs`'s own module header
+  states and enforces (**WR-10**).
 
----
+Five round-1 Warnings and four round-1 Infos are re-confirmed present, unchanged.
 
-## Specific concerns: verdicts
-
-| # | Concern | Verdict |
-|---|---------|---------|
-| 1 | Bounded read reports declared vs streamed length; large read before refusal | **REFUTED.** `artifact.rs:1926-1934` refuses on `declared_length` *before the reader is touched*, and `artifact.rs:1941` clamps the pre-allocation to `min(declared, cap)` so a lying length cannot over-reserve. `setfit_io.rs:71-89` stats first and passes `Some(metadata.len())`. Neighbouring readers (`predict.rs:236-271`, `eval/setfit.rs:623-660`, `setfit_tag.rs:111-133`, `inspect.rs:548-563`) all apply the same declared-then-stream shape. See IN-04 for the one that does not. |
-| 2 | `into_artifact_bytes` ordering hazard / unnecessary 1.8 MB clones | **REFUTED.** Exactly one call site (`setfit_train.rs:654`), and it reads all three report values at 646-648 *before* consuming. No clone of the buffer exists anywhere; `verify.rs:698` takes only `bytes.len()` before the move at 732. |
-| 3 | Retained bytes reachable via `Debug`/`Display`/serde | **REFUTED.** `RetainedArtifactBytes` (`mod.rs:404-410`) has a hand-written `Debug`; the field is `pub(crate)` with no accessor; `ArtifactVerifiedEvidence` and `SetFitRun` derive only `Debug` — no `Serialize`/`Display` anywhere in `train/setfit/`. See IN-05 for a scope caveat. |
-| 4 | Credential comparisons constant-shape / total; seal unbreakable | **PARTIALLY CONFIRMED.** The seal is real: `mod sealed` in `credential.rs:64-67` is module-private, so a sibling module cannot even name `Sealed`, and the trybuild `.stderr` pins rustc's refusal. All comparisons are total `String`/`[u8;32]` equality with no short-circuit that admits a partial match. **But only 1 of the credential's 3 values is ever re-checked** — see IN-02. |
-| 5 | HTTP: body-limit vs batch-bound; path leaks; readiness lying about verification | **CONFIRMED SAFE for the three named sub-concerns.** `router.rs:132-141` attaches `DefaultBodyLimit::max(1 MiB)` to `/v1/classify` only; batch bound is checked after parse (`setfit_handlers.rs:158-167`) and again inside core — neither subsumes the other, correctly. Error bodies are core's typed `Display` strings plus a fixed transport sentence; no path, no `Debug` of internal state reaches the wire. Readiness cannot lie: `classifier_verified` is `Some(true)` only when `setfit_model` is populated, and that slot's type `VerifiedSetFitModel` has no constructor outside `load_setfit_apr`. **A separate, larger HTTP problem was found** — see CR-02. |
-| 6 | `AprCodec::deserialize` reachable out-of-crate without probe replay | **CONFIRMED AND BOUNDED.** `AprCodec` *is* reachable (`entrenar::train::setfit::apr_codec::AprCodec`, which `setfit_train.rs:57` imports), and so is `SetFitCodec` (`pub mod verify`). So an out-of-crate caller can obtain a `SetFitBundle` with no probe replay. The bound holds: `SetFitBundle`'s twenty fields are all `pub(crate)` (`bundle.rs:463-502`), `from_run_parts` is `pub(crate)`, `LifecycleState` and `SetFitCredential` are both sealed, and `AppState::with_setfit_model` takes `VerifiedSetFitModel` — so **no route turns a raw bundle into anything trusted**. Worth restating in the contract, not fixing in code. |
-
----
-
-## Critical Issues
-
-### CR-01: `apr eval --split test` compares artifact label indices against dataset label indices with no label-map gate
-
-**File:** `crates/apr-cli/src/commands/eval/setfit.rs:490-505`
-
-**Issue:**
-`evaluate_test` builds `labels` from the **artifact's head** (`credential.model().ordered_labels()`, line
-490) and scores against `row.label`, which is the **dataset's** declared label index:
-
-```rust
-let labels = credential.model().ordered_labels().to_vec();
-...
-let predicted = labels.iter().position(|label| label == result.label());
-if predicted == Some(row.label) { correct += 1; }
-```
-
-Nothing on this path checks that the two label maps are the same list in the same order. The sibling
-validation evaluator refuses exactly this, by name, at
-`crates/aprender-train/src/train/setfit/apr_evaluate.rs:219-229`:
-
-> *"Index i of one is not index i of the other, so every prediction would be compared against a different
-> class's truth and the metric would be a confidently wrong number rather than an error"* —
-> `AprEvaluateError::LabelMapMismatch`
-
-None of the three upstream doors closes the gap. `reload_verified_run_from_apr` gates the *corpus*, the
-*access ledger* and the *selection draw* (`apr_reload.rs:339-372`) — the head's label ordering is not one
-of the three. `mint_test_token` compares only the artifact hash (`lock.rs:604-610`). `grant` compares the
-artifact hash and the dataset fingerprint (`lock.rs:801-814`). A permuted head label row is invisible to
-all of them.
-
-**Reachability, stated honestly.** In the happy path the labels agree because both derive from the same
-prepared dataset, and a run that goes validation-then-test would have hit `LabelMapMismatch` at
-validation time. It bites when the test invocation does *not* follow a validation invocation in the same
-tree — which is the documented workflow (`eval/setfit.rs:11-20`: two invocations with a durable file
-between them), and `lock.rs:419-429` explicitly states a hand-written, internally consistent lock file
-passes its own integrity check. It also bites on a version-skewed artifact whose head rows were written in
-a different order. The output is a plausible accuracy in `[0,1]`, reported as the phase's headline test
-number, with no error.
-
-**Fix:** apply the sibling's gate at the top of `evaluate_test`, before any classify runs:
-
-```rust
-fn evaluate_test(
-    credential: &ReloadedSetFitCredential,
-    dataset: &PreparedDataset<Canonical>,   // add this parameter
-    split: &Split<Test>,
-) -> Result<TestMeasurement> {
-    let labels = credential.model().ordered_labels().to_vec();
-    let dataset_labels = dataset.label_names().to_vec();
-    if labels != dataset_labels {
-        return Err(CliError::ValidationFailed(format!(
-            "the artifact's head indexes by {labels:?} and the dataset declares {dataset_labels:?}; \
-             index i of one is not index i of the other, so every prediction would be scored \
-             against a different class's truth"
-        )));
-    }
-    ...
-```
-
-`run_test` already holds `dataset` (line 398), so the call site at line 423 becomes
-`evaluate_test(credential, dataset, grant.test())?`.
+**Project-rule compliance:** zero `unwrap()` in every Phase 4 source file (verified by count
+across all 13 new/changed non-test modules); zero `unsafe`; zero SATD markers. Note that
+`crates/apr-cli/src/lib.rs:9-16` carries a crate-wide
+`#![allow(clippy::all, clippy::pedantic, clippy::disallowed_methods, unused_imports, dead_code, …)]`,
+so the `unwrap()` ban and the unused-import lint are **not machine-enforced anywhere in
+`apr-cli`** — this phase's compliance is by discipline, not by gate. That is the mechanism
+behind IN-06.
 
 ---
 
-### CR-02: the new `POST /v1/classify` server is mounted without the `AuthGate`, so `APR_API_KEY` does not protect it and no warning is emitted
+## Verification of the round-1 fixes and the cleanup pass
 
-**File:** `crates/apr-cli/src/commands/serve/handlers.rs:1502-1503`
-
-**Issue:**
-`start_setfit_server` builds and serves its router with no auth layer:
-
-```rust
-let state = AppState::default().with_setfit_model(Arc::new(model));
-let app = create_router_with_config(state, RouterConfig::default());   // <- no auth::layer
-...
-axum::serve(listener, app)
-```
-
-`realizar::api::create_router_with_config` (`crates/aprender-serve/src/api/router.rs:57-169`) attaches
-CORS (`CorsLayer::permissive()`, line 167) and the JSON-rejection sanitiser — but no authentication. The
-CLI's own APR-CPU path does the opposite: `handlers.rs:1146` calls
-`build_apr_cpu_router(state, super::auth::AuthGate::from_env())` and `handlers.rs:1332` applies
-`super::auth::layer(auth_gate, router)`.
-
-Consequence: an operator who sets `APR_API_KEY` (or `APR_API_KEY_HASH`) and runs
-`apr serve classifier.apr` gets a **fully unauthenticated** `/v1/classify` plus `/health*`, `/metrics`,
-`/v1/predict`, `/api/chat` and every other route `create_router_with_config` mounts — with
-`CorsLayer::permissive()` in front of it, so any web origin can reach it. Worse than the bypass itself:
-because `AuthGate::from_env()` is never *called* on this path, the "no APR_API_KEY … HTTP routes are
-unauthenticated" warning at `auth.rs:70-72` never prints. The operator has no signal at all.
-
-The `run_cpu_server` path (`serve/server.rs`, `realizar::api::create_router`) shares this gap, so the
-condition is not unique to Phase 4 — but this is a **new** route added by this phase, on the surface a
-classifier deployment is most likely to expose, and the fix is one line using a function that is already
-generic over the router's state type (`auth::layer<S>`, `auth.rs:176-184`, works for `Router<()>`).
-
-**Fix:**
-
-```rust
-let state = AppState::default().with_setfit_model(Arc::new(model));
-let app = super::auth::layer(
-    super::auth::AuthGate::from_env(),
-    create_router_with_config(state, RouterConfig::default()),
-);
-```
-
-The `setfit_serve_startup_reads_bounded_loads_through_the_one_door_and_builds_the_real_router` source
-scan (`handlers.rs:1694-1732`) should gain a fifth needle asserting the `auth::layer` call site exists,
-so the gate cannot be removed silently.
+| Item | Verdict | Evidence |
+|---|---|---|
+| **CR-01** label-map gate | **CLOSED — correct** | `eval/setfit.rs:435-444` compares `credential.model().ordered_labels()` against `dataset.label_names()` and returns `Err` **before** `evaluate_test` at line 446. It mirrors the library gate byte-for-byte in *semantics*: `apr_evaluate.rs:219-229` compares the same two accessors, and both deliberately read the **rebuilt head**, not the document's copy. Not bypassable: `evaluate_test` has exactly one call site (446) and `run_test` exactly one (238). The gate sits after `mint_test_token`/`grant`, which is fine — no scoring happens in between. |
+| **CR-02** AuthGate on `/v1/classify` | **CLOSED for the bypass** | `handlers.rs:1474-1477` wraps the whole `create_router_with_config(...)` router in `super::auth::layer(super::auth::AuthGate::from_env(), …)`. `auth::layer<S>` (`serve/auth.rs:176-184`) applies `from_fn_with_state(Arc<AuthGate>, apply)` to the router, and `apply` (`auth.rs:139-165`) checks every request with no route exemption — so `/v1/classify` is genuinely gated. `AuthGate::from_env()` is now *called* on this path, so the `auth.rs:70-72` "routes are unauthenticated" warning is reachable. **But the layer's position introduces WR-07.** The fifth source-scan needle the round-1 fix suggested (`handlers.rs:1691-1709`) was **not** added, so nothing pins the gate against silent removal. |
+| **WR-02** predictable temp file | **CLOSED — correct** | The hand-rolled writer is deleted. `eval/setfit.rs:622` delegates to `crate::commands::setfit_train::atomic_write`, which uses `temp_path` (`setfit_train.rs:132-141`: `.{stem}.tmp.{pid}.{ordinal}` off a shared `AtomicU64`) and `fill_and_sync` (`148-151`: `create_new(true)`). All three sub-issues — concurrent clobber, silent leftover reuse, symlink-following `create(true)` — are gone. |
+| **IN-03** third hex encoder | **CLOSED** | `hex_of` deleted; `config_hash_of` now calls `aprender_contrastive_data::hash::hex` (`eval/setfit.rs:566`), the same encoder `setfit_train.rs:52` uses. |
+| **write_lock double-refusal / force semantics** | **Correct, no defect** | `force=true` → both checks skip → `rename` replaces. `force=false` + pre-existing → bespoke "a lock is a COMMITMENT" message fires first, before bytes are produced. `force=false` + file appears mid-run → `atomic_write`'s `refuse_existing_output` catches it. No path double-refuses and no path inverts `force`. Temp-file safety strictly improved. |
+| **`setfit_tag.rs` bound ordering** | **Correct** | `end > file_len` (line 124) precedes `declared > MAX_TAG_METADATA_BYTES` (line 141). A container declaring a block past its own EOF still errors (`InvalidFormat`); a merely-large in-bounds block returns `Ok(None)`. `saturating_add` (123) means a near-`u64::MAX` offset saturates and trips the EOF check rather than wrapping. Ordering is right. **The fail-open's downstream effect is WR-08.** |
+| **`handlers.rs` `.ok().flatten().is_some()`** | **Correct — matches the deleted copy exactly** | I recovered the deleted `setfit_apr_model_type_tag` (removed in `b47acc4fe`): it returned `Option<String>` built entirely from `.ok()?` chains, so *every* failure produced `None` and fell through. `.ok().flatten()` reproduces that disposition precisely. The shared reader is strictly **stronger** than the copy — the copy had only the 16 MiB cap and no `end > file_len` check at all. No failure is swallowed that the previous code surfaced. |
+| **`inspect.rs` / `setfit_tag.rs` `.remove()`** | **Correct** | `inspect.rs:571,578`: `meta.custom` is never read after 578 and `MetadataInfo` (66-130) has no `custom` field, so nothing downstream expects either key. `setfit_tag.rs:168`: `meta` is a function-local `let Ok(mut meta) = …` consumed at the `Ok(Some(…))` return. Both moves are safe. |
+| **`predict.rs::preview` running counter** | **Correct — boundary unchanged** | The old guard was `out.chars().count() >= MAX`, and `out` already held `"\\n"` as **two** chars for an escaped control character. The new counter adds `2` for `\n`/`\r`/`\t` and `1` otherwise, which is the same quantity. The check remains at loop head, `'…'` is still pushed on break. Truncation is identical for every input including the escaped-control case. |
+| **`apr_reload.rs` `Deserialize::deserialize(&…)`** | **Correct — identical error behaviour** | `serde_json` implements `Deserializer<'de>` for `&'de Value` with `Error = serde_json::Error`, the same associated error type `from_value` produces, and neither form carries line/column data. Field handling, `deny_unknown_fields` and message text are unchanged; only the deep clone disappears. |
 
 ---
 
 ## Warnings
 
-### WR-01: `atomic_write` and `write_lock` both clobber a file that appears in the check→rename window, and both doc comments deny it
+### WR-01 — STILL OPEN: `atomic_write` and `write_lock` clobber a file that appears in the check→rename window, and both doc comments deny it
 
-**File:** `crates/apr-cli/src/commands/setfit_train.rs:176-207`; `crates/apr-cli/src/commands/eval/setfit.rs:584-618`
+**File:** `crates/apr-cli/src/commands/setfit_train.rs:176-207`
 
-**Issue:**
-`atomic_write` calls `refuse_existing_output(target, force)` (line 177), then writes and `sync_all`s the
-temp file (`fill_and_sync`, lines 144-160), then `fs::rename(&temp, target)` (line 183). `fs::rename` on
-Unix **replaces the destination unconditionally**. Anything that creates `target` during the temp write —
-which for a ~90 MB artifact is a `write_all` plus an `fsync`, i.e. seconds — is silently destroyed even
-though `--force` was not passed.
+`refuse_existing_output` (177) then `fill_and_sync` then `fs::rename(&temp, target)` (183).
+`fs::rename` on Unix replaces the destination unconditionally, so a file created during the
+temp write — seconds, for a ~90 MB artifact plus `fsync` — is destroyed without `--force`.
+`refuse_existing_output`'s doc (191-194) still claims "the write-time check is what makes the
+guarantee true for a file that appeared while the run was going." It narrows the window; it
+does not close it. `write_lock` now inherits the same window via delegation.
 
-`refuse_existing_output`'s doc (lines 191-194) claims the opposite:
-
-> *"the write-time check is what makes the guarantee true for a file that appeared while the run was going"*
-
-It narrows the window; it does not close it. `write_lock` (`eval/setfit.rs:585-618`) has the identical
-shape — `destination.exists() && !force` at 585, unconditional `fs::rename` at 618 — and the same
-data-loss consequence, on a file the module itself calls "a COMMITMENT".
-
-**Fix:** either close the window or stop claiming it is closed. To close it, take the destination as an
-exclusive-create sentinel before the temp write and rename over your own file:
+**Fix:** take the destination itself with `O_CREAT|O_EXCL` before the temp write and rename
+over your own placeholder, so the kernel adjudicates the race:
 
 ```rust
 if !force {
-    // O_CREAT|O_EXCL on the TARGET: the kernel adjudicates the race, not a stat.
     fs::OpenOptions::new().write(true).create_new(true).open(target)
         .map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists {
             CliError::ValidationFailed(format!(
@@ -237,261 +140,305 @@ if !force {
                 target.display()))
         } else { CliError::Io(e) })?;
 }
-// ... temp write, then rename over the placeholder we now own
 ```
 
-If that is judged too invasive, amend both doc comments to state that the guarantee is best-effort and
-that `fs::rename` replaces unconditionally.
+Or amend both doc comments to say the guarantee is best-effort.
 
-### WR-02: `write_lock`'s temp file has a predictable name, follows symlinks, and is not exclusive-create
+### WR-03 — STILL OPEN: `config_hash_of` silently collapses to `sha256("")` on serialization failure
 
-**File:** `crates/apr-cli/src/commands/eval/setfit.rs:597-613`
-
-**Issue:**
-
-```rust
-let temp = parent.join(format!(".{}.tmp", destination.file_name()...));
-...
-let mut file = fs::OpenOptions::new()
-    .write(true)
-    .create(true)
-    .truncate(true)      // <- not create_new
-    .open(&temp)
-```
-
-Three consequences, in increasing severity:
-
-1. **Concurrent runs corrupt each other.** Two `apr eval --lock-out <same path>` processes derive the
-   *same* temp name and both open it with `truncate(true)`. Their writes interleave; whichever renames
-   last installs a lock file assembled from two records. `SelectionLock::from_canonical_bytes` would
-   almost certainly reject it, but the corruption is silent at write time.
-2. **A leftover temp from a crashed run is silently reused** rather than diagnosed.
-3. **`create(true)` follows symlinks.** If `parent` is group- or world-writable (a shared scratch or
-   results directory), an attacker who pre-creates `.selection-lock.json.tmp` as a symlink to any file
-   the operator can write causes that file to be truncated and overwritten with the lock bytes. `O_EXCL`
-   would refuse the existing path — including a dangling symlink — which is exactly why
-   `setfit_train.rs:148-151` uses `create_new(true)`.
-
-The in-repo precedent already solved all three: `setfit_train::temp_path` (lines 132-141) embeds
-`std::process::id()` and a per-call `AtomicU64` ordinal, and `fill_and_sync` opens with `create_new(true)`
-and documents why. This module did not adopt it.
-
-**Fix:** reuse the precedent verbatim.
-
-```rust
-static LOCK_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-let ordinal = LOCK_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-let temp = parent.join(format!(".{stem}.tmp.{}.{ordinal}", std::process::id()));
-let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
-```
-
-Better still: promote `setfit_train::atomic_write` to a shared helper so there is one implementation, per
-the phase's own OPS-03 discipline.
-
-### WR-03: `config_hash_of` silently collapses to `sha256("")` on serialization failure
-
-**File:** `crates/apr-cli/src/commands/eval/setfit.rs:540-544`
-
-**Issue:**
+**File:** `crates/apr-cli/src/commands/eval/setfit.rs:563-567`
 
 ```rust
 let bytes = serde_json::to_vec(requested).unwrap_or_default();
-hex_of(&Sha256::digest(&bytes))
+aprender_contrastive_data::hash::hex(&Sha256::digest(&bytes).into())
 ```
 
-`unwrap_or_default()` on the *bytes* means a failed serialize yields an empty slice, and the config hash
-becomes the constant `e3b0c442…b855` for **every** artifact that hits it. Every candidate in a sweep would
-then be labelled with the same `config_hash` in the committed lock and in the `--json` report, and
-`SelectionLock::from_candidates` does not refuse duplicate `config_hash` (only duplicate
-`artifact_hash`, `lock.rs:269-280`) — so the lock commits and nothing notices.
+A failed serialize yields an empty slice, so every affected candidate is labelled with the
+constant `e3b0c442…b855` in the committed lock and in `--json`.
+`SelectionLock::from_candidates` refuses duplicate `artifact_hash` but **not** duplicate
+`config_hash` (`lock.rs:269-280`), so the lock commits and nothing notices. The value is a
+label, not a gate, so this is not an authorization defect — but it is a silent fail-open on an
+identity value in a module whose thesis is that identity values are never defaulted, and
+`to_vec` over a `serde_json::Value` is effectively infallible, so the `unwrap_or_default` buys
+nothing.
 
-The value is a *label*, not a gate (`lock.rs:83-86`), so this is not an authorization defect. It is a
-silent fail-open on an identity value in a module whose entire thesis is that identity values are never
-defaulted, and `serde_json::to_vec` over a `serde_json::Value` is effectively infallible anyway — so the
-`unwrap_or_default` buys nothing and costs a correctness claim.
+**Fix:** return `Result<String>` and map the error to
+`CliError::Aprender("the artifact's requested_config sub-document did not serialize: {error}")`.
 
-**Fix:**
-
-```rust
-fn config_hash_of(credential: &ReloadedSetFitCredential) -> Result<String> {
-    let requested = &credential.model().doc_view().requested_config;
-    let bytes = serde_json::to_vec(requested).map_err(|error| {
-        CliError::Aprender(format!(
-            "the artifact's requested_config sub-document did not serialize: {error}"
-        ))
-    })?;
-    Ok(hex::encode(Sha256::digest(&bytes)))
-}
-```
-
-### WR-04: an arity mismatch is reported as `SelectionLabelOutOfRange`, which renders a diagnosis of something that did not happen
+### WR-04 — STILL OPEN: an arity mismatch is reported as `SelectionLabelOutOfRange`
 
 **File:** `crates/aprender-train/src/train/setfit/evaluate.rs:378-386`
-
-**Issue:**
 
 ```rust
 if truth.len() != predicted.len() {
     return Err(SetFitTrainError::SelectionLabelOutOfRange {
-        label: predicted.len(),
-        classes: truth.len(),
+        label: predicted.len(), classes: truth.len(),
     });
 }
 ```
 
-That variant's `Display` (`mod.rs:1414-1418`) renders:
+That variant's `Display` (`mod.rs:1414-1418`) renders *"selection names class N but the dataset
+declares M classes"* and sends the operator to check `--selection` against `--data`. Nothing
+about the selection is wrong; the classifier returned a different number of results than there
+were rows. The variant is `PartialEq`-matchable, so a caller can match on a diagnosis nothing
+produced.
 
-> `selection names class 480 but the dataset declares 512 classes (contract setfit-train-lifecycle-v1, requirement TRN-01)`
-
-An operator who hits this is told the *selection's label map* is out of range and is sent to check
-`--selection` against `--data`. Nothing about the selection is wrong; the classifier returned a different
-number of results than there were rows. This is the exact failure mode `AprReloadError`'s own header calls
-out (`apr_reload.rs:94-97`): *"a WRONG one, which is not an opaque diagnosis"*. It is also `PartialEq`-
-matchable, so a caller can successfully match on a diagnosis nothing produced.
-
-The comment concedes the arm is unreachable from both current callers — which is precisely why it is cheap
-to fix and why nobody will notice the wrong message until it fires.
-
-**Fix:** add a variant to the `#[non_exhaustive]` enum. `SetFitTrainError` is already non-exhaustive
-(`mod.rs:1125`), so this is not a breaking change:
+**Fix:** add a variant to the already-`#[non_exhaustive]` enum (`mod.rs:1125`), so this is not
+a breaking change:
 
 ```rust
-/// The prediction vector and the truth vector had different lengths.
 PredictionArityMismatch { truth_rows: usize, predicted_rows: usize },
 ```
 
-### WR-05: `apr inspect` shows no SetFit section for a tagged artifact whose `setfit` document is missing, while `apr predict` and `apr serve` route that same file to the SetFit path
+### WR-05 — STILL OPEN: `apr inspect` shows no SetFit section for a tagged artifact whose `setfit` document is missing
 
-**File:** `crates/apr-cli/src/commands/inspect.rs:575-581`, `crates/apr-cli/src/commands/inspect_setfit.rs:42-43`
+**Files:** `crates/apr-cli/src/commands/inspect.rs:577-581`, `crates/apr-cli/src/commands/inspect_setfit.rs:42-43`
 
-**Issue:**
-`inspect.rs` populates `setfit_doc` only when the tag *and* the custom key are both present:
+`inspect.rs` populates `setfit_doc` only when the tag **and** the custom key are both present,
+and `build_setfit_inspection` early-returns on `let doc = doc?;`, so the whole APR-05 section
+vanishes. `setfit_tag::read_setfit_tag` is deliberately the opposite (`setfit_tag.rs:53-59`):
+an artifact tagged `setfit` with no custom key is still routed to the SetFit path. So
+`apr predict` (`predict.rs:114-120`) and `apr serve` (`handlers.rs:774-778`) both fail on such
+a file while `apr inspect` — CLAUDE.md's mandated first diagnostic — reports a healthy plain
+APR. This is exactly the outcome `inspect_setfit.rs:33-36` says it exists to avoid.
+
+**Fix:** carry the tag decision separately from the document and emit the section with `Null`
+fields plus a `document_present: false` marker when the document is absent.
+
+### WR-06 — STILL OPEN: `evaluate_test` scores an unknown predicted label as merely "wrong", and its `zip` cannot detect an over-long response
+
+**File:** `crates/apr-cli/src/commands/eval/setfit.rs:513-535`
+
+Two gaps against `apr_evaluate.rs:245-275`:
+
+1. `labels.iter().position(|label| label == result.label())` yields `None` for a label outside
+   the artifact's ordered set; `None == Some(row.label)` is `false`, so the row counts as
+   **incorrect**. If it happened for every row the command reports `accuracy = 0.000000` as a
+   measurement. The sibling refuses this by name with `UnknownPredictedLabel`.
+2. `for (row, result) in chunk.iter().zip(response.results())` with `seen += 1` **inside** the
+   loop means `seen` can never exceed `rows.len()`, so the guard at 530-535 is structurally
+   unable to fire when the response is *longer* than the chunk. The sibling counts results
+   independently and then compares totals, catching both directions.
+
+Note this is now the *only* remaining hole in the test path — CR-01's label-map gate closed the
+larger one — but an artifact whose head grows a label the loader admits still produces a number
+rather than a refusal.
+
+**Fix:** mirror the sibling — `ok_or_else` on the `position`, and accumulate
+`returned += response.results().len()` outside the zip, comparing `returned` against
+`rows.len()` at the end.
+
+### WR-07 — NEW: the CR-02 auth gate is layered outside `CorsLayer::permissive()`, so every browser preflight and every unauthenticated health probe now gets 401
+
+**Files:** `crates/apr-cli/src/commands/serve/handlers.rs:1474-1477`, `crates/aprender-serve/src/api/router.rs:166-168`
+
+`create_router_with_config` finishes with `router.layer(cors).with_state(state)` (router.rs:167-168).
+`handlers.rs:1474` then applies `super::auth::layer(...)` to the returned router. In axum the
+**last-added layer is the outermost** (axum 0.7 `docs/middleware.md`, "Ordering": *"First
+`layer_three` receives the request … then passes it onto `layer_two`"*). So the request order is
+**auth → CORS → handler**, and the auth middleware short-circuits before `CorsLayer` ever runs.
+
+Concrete failure, with `APR_API_KEY` set and `apr serve classifier.apr` running:
+
+1. A browser app at `https://app.example.com` calls
+   `fetch(url, {method:'POST', headers:{'Authorization':'Bearer k','Content-Type':'application/json'}})`.
+2. Because of the non-simple headers the browser first sends
+   `OPTIONS /v1/classify` — and per the Fetch spec a preflight carries **no** `Authorization`
+   header.
+3. `auth::apply` (`auth.rs:145-165`) sees `header_value == None`, `check_bearer` returns
+   `false`, and it returns `401` **constructed inside the auth layer**, so the response never
+   passes back through `CorsLayer` and carries no `Access-Control-Allow-Origin`.
+4. The browser aborts. GH-671's CORS support is dead for every authenticated classifier
+   deployment.
+
+Secondary, same root cause: `/health`, `/health/live`, `/health/ready` and `/metrics` are also
+inside the gate. The startup banner at `handlers.rs:1493` advertises
+`GET /health/ready - Readiness (reports the artifact hash)` without saying it needs a bearer
+token, and `AppState::model_loaded()` was just taught (`mod_app_state_gpu.rs:410-419`) to return
+`true` for a classifier specifically so *"a k8s rollout would … admit a classifier deployment"* —
+which it now cannot, because the probe gets 401 instead of 200. `build_apr_cpu_router` does not
+exhibit the CORS half of this (it mounts no `CorsLayer`), so this is specific to the new path.
+
+**Fix:** put the gate **inside** the CORS layer, or exempt preflight and the liveness surface.
+The cheapest correct form is to apply auth to the router *before* CORS wraps it — which requires
+a small `router.rs` change — or to short-circuit in `apply`:
 
 ```rust
-let setfit_doc = if meta.model_type == crate::setfit_tag::SETFIT_MODEL_TYPE {
-    meta.custom.get(crate::setfit_tag::SETFIT_CUSTOM_KEY).cloned()   // -> None if absent
-} else { None };
-```
-
-and `build_setfit_inspection` early-returns on `let doc = doc?;` (line 43), so the entire APR-05 section
-vanishes.
-
-`setfit_tag::read_setfit_tag` is deliberately the opposite (`setfit_tag.rs:47-52, 144-146`):
-
-> *"An artifact tagged `setfit` whose custom key is missing is still routed to the SetFit path — where the
-> loader refuses it by name — rather than silently falling back to 'plain APR', which would report a
-> corrupt classifier as a healthy generic model."*
-
-So `apr predict` (`predict.rs:114-120`) routes it to `load_setfit_apr` and fails, `apr serve`
-(`handlers.rs:766-769`) routes it to `start_setfit_server` and fails — and `apr inspect`, which CLAUDE.md
-mandates as the diagnostic step before reading code, reports a healthy plain APR with no SetFit section
-at all. The operator's mandated first tool contradicts the two commands that just failed.
-
-This is exactly the outcome `inspect_setfit.rs:33-36` says it exists to avoid ("a future schema version
-still shows its identity fields AND reports the parse failure, instead of showing nothing").
-
-**Fix:** make `inspect` share the tag module's predicate. Change `MetadataInfo` to carry the tag decision
-separately from the document, and have `build_setfit_inspection` emit the section with `null` fields plus
-a note when the document is absent:
-
-```rust
-fn build_setfit_inspection(path: &Path, tagged: bool, doc: Option<&serde_json::Value>)
-    -> Option<serde_json::Value>
-{
-    if !tagged { return None; }
-    let doc = doc.cloned().unwrap_or(serde_json::Value::Null);
-    // ... existing body; every copy_paths/pick_object already emits Null for an absent path
-    // plus: section.insert("document_present", Value::Bool(!doc.is_null()));
+// auth.rs::apply, before the bearer check
+if req.method() == axum::http::Method::OPTIONS {
+    return next.run(req).await;   // let CorsLayer answer the preflight
 }
 ```
 
-### WR-06: `evaluate_test` scores an unknown predicted label as merely "wrong", and its `zip` cannot detect an over-long response
+and, if health probes are meant to stay open, add the same early return for
+`/health`, `/health/live`, `/health/ready`. Whichever is chosen, the startup banner should say
+which routes require the token.
 
-**File:** `crates/apr-cli/src/commands/eval/setfit.rs:499-512`
+### WR-08 — NEW: `MAX_TAG_METADATA_BYTES`'s fail-open makes `apr predict` and `apr eval` state that a genuinely tagged artifact is not a SetFit classifier
 
-**Issue:** two gaps against the sibling implementation:
-
-1. `let predicted = labels.iter().position(|label| label == result.label());` — if the classifier returns
-   a label not in the artifact's own ordered set, `position` yields `None`, `None == Some(row.label)` is
-   `false`, and the row is counted **incorrect**. If it happened for every row the command reports
-   `accuracy = 0.000000` as a real measurement. `apr_evaluate.rs:251-259` refuses this with
-   `UnknownPredictedLabel` and documents why: *"the alternative to a typed refusal is an `expect` in the
-   one place a silent mis-mapping would turn every metric below into a confidently wrong number."*
-2. `for (row, result) in chunk.iter().zip(response.results())` — `zip` stops at the shorter side, and
-   `seen` counts only the pairs it produced. So `seen` always equals `rows.len()` when the response is
-   *longer* than the chunk, and the guard at 507-512 cannot fire. `apr_evaluate.rs:245-275` pushes every
-   result and then compares totals, which catches both directions.
-
-**Fix:** mirror the sibling — refuse an unknown label, and count results independently of the zip:
+**File:** `crates/apr-cli/src/setfit_tag.rs:133-143`
 
 ```rust
-let mut returned = 0_usize;
-for chunk in rows.chunks(MAX_BATCH_TEXTS) {
-    let response = credential.model().classify(&request)...;
-    returned += response.results().len();
-    for (row, result) in chunk.iter().zip(response.results()) {
-        let predicted = labels.iter().position(|l| l == result.label()).ok_or_else(|| {
-            CliError::InferenceFailed(format!(
-                "the classifier returned the label `{}`, which is not in the artifact's own \
-                 ordered label set", result.label()))
-        })?;
-        if predicted == row.label { correct += 1; }
-        seen += 1;
+if declared > MAX_TAG_METADATA_BYTES {
+    return Ok(None);
+}
+```
+
+The comment justifying `Ok(None)` says *"the caller falls through to the pre-existing APR path,
+which has its own and better diagnosis for an unusual container."* That is true for exactly one
+of the three consumers.
+
+* `apr serve` (`handlers.rs:774-778`) — falls through to `start_apr_server`. The comment holds.
+* `apr predict` (`predict.rs:114-120`) — has **no** plain-APR path. It returns
+  `InvalidFormat("{path}: not a SetFit classifier. …")`, and `SUPPORTED_FAMILIES`
+  (`predict.rs:44-47`) appends *"run `apr inspect <FILE>` to see what it actually is."*
+* `apr eval --task classify` (`dispatch_analysis.rs:759-809`) — falls past the `tagged` branch
+  and refuses the flags with *"`--selection` applies only to a setfit-apr-v1 artifact, and X
+  **does not carry the SetFit tag**"*, which is a false statement about a file that does.
+
+Concrete failure: an artifact whose `setfit` document exceeds 16 MiB — reachable by a large
+`vocab_remap` / HF name map plus six probe embeddings, and trivially constructible by an
+attacker who wants a classifier to be misidentified. `apr predict` tells the operator it is not
+a classifier and sends them to `apr inspect`, which reads the same block (it has no such cap —
+see WR-09), finds `model_type: "setfit"` and renders the **full APR-05 section**. The two tools
+contradict each other and the error message routes the operator into the contradiction.
+
+This is precisely the failure mode the module's own header refuses in the adjacent case
+(`setfit_tag.rs:56-59`): *"rather than silently falling back to 'plain APR', which would report
+a corrupt classifier as a healthy generic model."*
+
+Related, and worth deciding at the same time: the three consumers disagree on error disposition.
+`dispatch_analysis.rs:759` and `predict.rs:114` propagate `read_setfit_tag`'s `Err` with `?`;
+`handlers.rs:774` swallows it with `.ok()`. Each is individually defensible, but "ONE detection
+point" currently means one reader with three dispositions.
+
+**Fix:** make the over-cap case distinguishable from "not tagged". Return the tag decision even
+when the document is not read, e.g.
+
+```rust
+pub(crate) struct SetFitTag {
+    pub(crate) doc: Option<serde_json::Value>,
+    /// True when the block was in-bounds for the file but over MAX_TAG_METADATA_BYTES,
+    /// so `doc` is absent for a reason that is NOT "this is not a SetFit artifact".
+    pub(crate) metadata_over_cap: bool,
+}
+```
+
+and read `model_type` from a bounded prefix, or — simpler and consistent with the module's own
+stated bias — return `Err(CliError::InvalidFormat(..))` naming the cap, letting `serve` keep its
+`.ok()` fall-through while `predict`/`eval` say something true.
+
+### WR-09 — NEW: `apr inspect` still allocates up to 4 GiB from an attacker-controlled `u32`
+
+**File:** `crates/apr-cli/src/commands/inspect.rs:548-566`
+
+The bound this phase added is:
+
+```rust
+let fits = reader.get_ref().metadata()
+    .is_ok_and(|m| header.metadata_offset.saturating_add(declared) <= m.len());
+if !fits { return MetadataInfo::default(); }
+let mut metadata_bytes = vec![0u8; header.metadata_size as usize];
+```
+
+`metadata_size` is a `u32` read straight out of the file (`apr-format/src/v2/header_impl.rs:80`),
+`from_bytes` performs no range validation and does **not** verify the header checksum
+(`inspect.rs:521` computes `checksum_valid` but nothing branches on it), so an attacker controls
+the value up to `0xFFFF_FFFF` ≈ 4 GiB. The only bound is the file's own length — and a file long
+enough is free:
+
+```bash
+truncate -s 4297M evil.apr          # sparse, zero disk cost
+# write a 64-byte APR\0 header with metadata_offset=64, metadata_size=0xFFFFFFFF
+apr inspect evil.apr                # allocates ~4 GiB, read_exact fills it, then
+                                    # from_json fails and the command reports a plain APR
+```
+
+The command *succeeds* after burning ~4 GiB RSS. On a memory-constrained host or in a container
+with a memory limit this is an OOM-kill of the tool CLAUDE.md mandates as diagnostic step 1.
+
+This is in scope because it is code this phase wrote, and because the phase reached the opposite
+conclusion two files away: `setfit_tag.rs:133-143` argues that a file-length bound is *not*
+sufficient (*"a 30 GB APR whose metadata block declares 20 MiB passes (2) and would otherwise be
+read in full just to answer one yes/no question"*) and adds an absolute 16 MiB cap. The deleted
+`serve` copy named `inspect.rs:517` as the counterexample it refused to be. The gap is now the
+only place in the phase's read surface without an absolute cap.
+
+**Fix:** apply the same absolute cap the tag reader uses — the constant already exists:
+
+```rust
+if declared > crate::setfit_tag::MAX_TAG_METADATA_BYTES {   // make it pub(crate)
+    return MetadataInfo::default();
+}
+```
+
+`MetadataInfo::default()` is already the outcome for an unparseable block, so the observable
+behaviour for a legitimate file is unchanged.
+
+### WR-10 — NEW: `apr eval --lock-out` runs the whole candidate sweep before discovering the lock file already exists
+
+**File:** `crates/apr-cli/src/commands/eval/setfit.rs:318-352`
+
+`run_validation` loads and evaluates the primary artifact (321) and then every `--candidate` in
+a loop (329-341) — each iteration a full bounded read, the eight-rung load ladder, and a
+classify pass over the whole validation split — then calls `create_selection_lock` (347) and only
+then `write_lock` (352), whose first act is `destination.exists() && !force`.
+
+Concrete failure: `apr eval M.apr --candidate A.apr --candidate B.apr --candidate C.apr
+--lock-out selection.json` on a directory where `selection.json` already exists spends four full
+artifact loads and four validation sweeps and then exits with *"selection.json already exists.
+A selection lock is a COMMITMENT…"* — a fact it could have reported before reading a byte.
+
+This directly inverts the discipline the sibling module states and enforces
+(`setfit_train.rs:12-20`): *"parse the config, merge the overrides, resolve the device, refuse an
+existing output — all four BEFORE a single row of `--data` is read… Refusing the output path last
+of the four is what stops a twenty-minute run from ending in 'I will not overwrite that file'."*
+`setfit_train.rs:199-207` exposes `refuse_existing_output` as a standalone function precisely so
+it can be called early; `apr eval` never calls it early.
+
+**Fix:** pre-flight in `check_split_flags` (or immediately after it, before step (2) reads the
+dataset):
+
+```rust
+if let Some(destination) = args.lock_out {
+    if destination.exists() && !args.force {
+        return Err(CliError::ValidationFailed(format!("{} already exists. …", destination.display())));
     }
 }
-if returned != rows.len() { /* refuse, naming both counts */ }
 ```
+
+The existing check in `write_lock` stays — it is what covers a file that appeared during the run.
 
 ---
 
 ## Info
 
-### IN-01: `config_hash_of`'s canonicality argument is measurably wrong for this build
+### IN-01 — STILL OPEN: `config_hash_of`'s canonicality argument is wrong for this build
 
-**File:** `crates/apr-cli/src/commands/eval/setfit.rs:534-539`
+**File:** `crates/apr-cli/src/commands/eval/setfit.rs:557-562`
 
-The doc states the hash is canonical *"because … `serde_json::Map` preserves object order as read."*
-That is only true with the `preserve_order` feature, which is **not** enabled anywhere (`Cargo.toml:138`,
-`crates/apr-cli/Cargo.toml:177` — plain `serde_json = "1.0"`). Without it, `Map` is a `BTreeMap` and sorts
-keys, so it does *not* preserve order as read.
+The doc claims the hash is canonical *"because … `serde_json::Map` preserves object order as
+read."* That is true only with the `preserve_order` feature, which is not enabled
+(`crates/apr-cli/Cargo.toml`, plain `serde_json = "1.0"`). Without it `Map` is a `BTreeMap` and
+sorts keys. The output is still deterministic, so nothing is broken today — but
+`CONFIG_HASH_DERIVATION` is published in `--json` as the recipe Phase 5 reproduces, and the
+stated recipe is not the one the code runs. It is also a feature-unification hazard: any crate
+in the graph enabling `preserve_order` silently changes every `config_hash` in every lock.
 
-The outcome is still deterministic (sorted keys), so nothing is broken today. But `CONFIG_HASH_DERIVATION`
-is published in the `--json` report as the recipe Phase 5 reproduces, and the stated recipe is not the one
-the code runs. It is also a feature-unification hazard: any crate anywhere in the graph enabling
-`preserve_order` would silently change every `config_hash` in every lock. Restate the derivation as
-"sorted-key JSON as produced by `serde_json` without `preserve_order`", or pin it by serializing through
-an explicitly ordered form.
+### IN-02 — STILL OPEN: two of the credential's three values are write-only in the lock chain
 
-### IN-02: two of the credential's three values are write-only in the lock chain
+**Files:** `crates/aprender-train/src/train/setfit/lock.rs:594-617` and `796-816`
 
-**Files:** `crates/aprender-train/src/train/setfit/lock.rs:594-617` and `796-816`;
-`crates/aprender-train/src/train/setfit/credential.rs:84-99`
+`create_selection_lock` records all three credential values; `mint_test_token` re-checks only
+`artifact_hash` (line 606), and `grant` re-checks `artifact_hash` plus the dataset fingerprint
+(802, 809). Neither ever compares the lock's recorded `selection_semantic_hash` / `ledger_hash`
+against the credential presenting itself. Combined with `from_canonical_bytes`'s admission that
+a hand-written, internally consistent lock passes its own integrity check (`lock.rs:419-429`), a
+lock's recorded selection provenance can name a selection the artifact was never trained under.
+Nothing wrong is reported today because `run_test`'s row does not surface those hashes — hence
+Info. `mint_test_token` already holds the credential; adding the two equalities is three lines.
 
-`SetFitCredential` exposes three values. `create_selection_lock` (`lock.rs:698-710`) reads all three and
-*records* the latter two into the lock. `mint_test_token` re-checks only `artifact_hash` (line 605), and
-`grant` re-checks `artifact_hash` plus the dataset fingerprint (lines 802, 809). Neither ever compares the
-lock's recorded `selection_semantic_hash` / `ledger_hash` against the credential presenting itself.
-
-Combined with `from_canonical_bytes`'s honest admission that a hand-written, internally consistent lock
-passes its own integrity check (`lock.rs:419-429`), this means a lock's *recorded selection provenance*
-can claim a selection the named artifact was never trained under, and no later door notices. The artifact
-and corpus identity gates still hold, and `run_test`'s report does not surface the lock's selection
-hashes, so nothing wrong is reported today — hence Info rather than Warning.
-
-Cheap hardening: `mint_test_token` already holds the credential, so adding the two equalities is three
-lines and makes the credential's surface exactly what the doors consume, which is the property
-`credential.rs:74-77` claims for it.
-
-### IN-03: a third hex encoder
-
-**File:** `crates/apr-cli/src/commands/eval/setfit.rs:547-553`
-
-`hex_of` is a hand-rolled lowercase-hex encoder alongside the `hex` crate (used throughout
-`aprender-train`) and `aprender_contrastive_data::hash::hex` (used at `setfit_train.rs:52, 366-367`).
-Three implementations of one operation is what OPS-03 exists to prevent, and this one allocates a
-`String` per byte via `format!`. Replace with `hex::encode`.
-
-### IN-04: `read_selection_manifest` was widened to `pub(crate)` and still reads unbounded
+### IN-04 — STILL OPEN: `read_selection_manifest` was widened to `pub(crate)` and still reads unbounded
 
 **File:** `crates/apr-cli/src/commands/data_contrastive.rs:610-611`
 
@@ -500,29 +447,91 @@ pub(crate) fn read_selection_manifest(path: &Path) -> Result<SelectionManifest> 
     let bytes = fs::read(path).map_err(...)?;
 ```
 
-Every other reader this phase touched applies a stat-then-stream bound: the artifact door
-(`setfit_io.rs:67-91`), the request document (`predict.rs:236-271`), the lock file
-(`eval/setfit.rs:623-660`), the tag metadata (`setfit_tag.rs:111-133`), inspect's metadata block
-(`inspect.rs:548-563`). This one takes an operator-supplied path and reads it whole. The visibility change
-does not add a new external entry point (`apr data select` already reached it), so no new attack surface —
-but it is now the only unbounded read on the `apr setfit train` and `apr eval` ingest paths, and it is the
-one that will look like an oversight to the next reader.
+Every other reader this phase touched applies a stat-then-stream bound — `setfit_io.rs:67-91`,
+`predict.rs:236-271`, `eval/setfit.rs:626-663`, `setfit_tag.rs:118-152`. This one takes an
+operator-supplied path and reads it whole. The visibility change adds no new external entry
+point (`apr data select` already reached it), but it is now the only unbounded read on the
+`apr setfit train` and `apr eval` ingest paths.
 
-### IN-05: `RetainedArtifactBytes`'s `Debug` mitigation is partial at the level it claims
+### IN-05 — STILL OPEN: `RetainedArtifactBytes`'s `Debug` mitigation is partial at the level it claims
 
-**File:** `crates/aprender-train/src/train/setfit/mod.rs:388-410, 526-534`
+**File:** `crates/aprender-train/src/train/setfit/mod.rs:388-410`
 
-The newtype's doc says retaining the bytes *"must not turn a debug print into a denial of service"*, and
-scopes the claim to `{:?}` on any `SetFitRun`. But `SetFitRun` also derives `Debug` and holds
-`encoder: SetFitMiniLm` and `dataset: PreparedDataset<Canonical>` — so `{:?}` on a run already renders
-every encoder tensor and the whole corpus, orders of magnitude past the 1.8 MB the newtype removes. The
-newtype is correct and worth keeping; the doc's claim about `{:?}` on a `SetFitRun` is not achieved by it
-alone. Either narrow the claim to `ArtifactVerifiedEvidence` (where it *is* true) or give `SetFitRun` a
-hand-written `Debug` too.
+The newtype's doc scopes its claim to `{:?}` on any `SetFitRun`, but `SetFitRun` also derives
+`Debug` and holds `encoder: SetFitMiniLm` and `dataset: PreparedDataset<Canonical>`, so `{:?}` on
+a run already renders every encoder tensor and the whole corpus — orders of magnitude past the
+1.8 MB the newtype removes. The newtype is correct and worth keeping; narrow the claim to
+`ArtifactVerifiedEvidence` (where it *is* true) or give `SetFitRun` a hand-written `Debug` too.
+
+### IN-06 — NEW: dead `Write` import left by the cleanup pass, invisible to the compiler
+
+**File:** `crates/apr-cli/src/commands/eval/setfit.rs:40`
+
+```rust
+use std::io::{Read as _, Write as _};
+```
+
+The cleanup deleted the hand-rolled writer (the only `write_all`/`sync_all` in the file), so
+`Write` is now unused — `Read` is still needed by `file.take(..).read_to_end(..)` at 654-656.
+This does not surface as a warning because `crates/apr-cli/src/lib.rs:9-16` carries a crate-wide
+`#![allow(clippy::all, clippy::pedantic, clippy::disallowed_methods, unused_imports, dead_code,
+unused_variables, unreachable_code, unused_assignments)]`. Verified empirically:
+`cargo check -p apr-cli --lib --features setfit` recompiles the crate and emits **zero**
+diagnostics for `apr-cli/src`.
+
+Worth flagging beyond the one import: that blanket allow means the project's `unwrap()` ban
+(`.clippy.toml` `disallowed-methods`) and the pedantic lint set are **not enforced in `apr-cli`
+at all**. This phase's `apr-cli` code happens to be clean (0 `unwrap()` across all seven new
+modules, verified by count), but nothing would have caught it if it were not.
+
+**Fix:** drop `Write as _`. Separately, consider a `#![deny]` island or a
+`#[allow(...)]`-per-module scheme so new Phase 4 modules are actually linted.
+
+### IN-07 — NEW: `--force` is accepted and silently ignored on three `apr eval` paths
+
+**Files:** `crates/apr-cli/src/commands/eval/setfit.rs:246-288`, `crates/apr-cli/src/dispatch_analysis.rs:788-809`
+
+`check_split_flags` refuses `--selection-lock` on validation and `--lock-out` / `--candidate` on
+test, and `dispatch_classify_eval` refuses `--selection`, `--lock-out`, `--selection-lock` and
+`--candidate` on a non-tagged artifact. `--force` is refused on none of them. So
+`apr eval M.apr --task classify --split test --force`, and `--force` on a non-SetFit artifact,
+are both accepted and do nothing. `--force` only has meaning together with `--lock-out`.
+
+`check_split_flags`'s own doc states the rule this misses: *"A flag silently ignored is worse
+than a flag refused."*
+
+**Fix:** add `("--force", args.force)` to the dispatch-level refusal table, and refuse
+`--force` without `--lock-out` in `check_split_flags`.
 
 ---
 
-_Reviewed: 2026-08-15_
+## Round-1 → round-2 delta
+
+| ID | Round 1 | Round 2 |
+|---|---|---|
+| CR-01 label-map gate | Critical | **CLOSED** — fix verified correct and unbypassable |
+| CR-02 unauthenticated `/v1/classify` | Critical | **CLOSED** — gate applies; see WR-07 for the layering consequence |
+| WR-01 rename clobber window | Warning | STILL OPEN |
+| WR-02 predictable temp file | Warning | **CLOSED** — verified |
+| WR-03 `config_hash_of` fail-open | Warning | STILL OPEN |
+| WR-04 wrong error variant for arity | Warning | STILL OPEN |
+| WR-05 `inspect` hides SetFit section | Warning | STILL OPEN |
+| WR-06 unknown label / `zip` arity | Warning | STILL OPEN |
+| WR-07 auth outside CORS | — | **NEW** |
+| WR-08 tag cap fail-open misdiagnoses | — | **NEW** |
+| WR-09 `inspect` 4 GiB allocation | — | **NEW** |
+| WR-10 late `--lock-out` no-clobber check | — | **NEW** |
+| IN-01 canonicality doc wrong | Info | STILL OPEN |
+| IN-02 write-only credential values | Info | STILL OPEN |
+| IN-03 third hex encoder | Info | **CLOSED** — verified |
+| IN-04 unbounded manifest read | Info | STILL OPEN |
+| IN-05 partial `Debug` claim | Info | STILL OPEN |
+| IN-06 dead `Write` import + unenforced lints | — | **NEW** |
+| IN-07 `--force` silently ignored | — | **NEW** |
+
+---
+
+_Reviewed: 2026-08-16_
 _Reviewer: Claude (gsd-code-reviewer)_
-_Depth: standard_
+_Depth: standard — re-review (round 2)_
 _Diff base: 87b780eefabb4dbb6f5e64efe2f5b6698d058e73..HEAD_

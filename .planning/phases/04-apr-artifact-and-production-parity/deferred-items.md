@@ -408,3 +408,56 @@ keeps its measured position; `POST /v1/classify` has no hoistable per-request wo
 a fn pointer, not a capturing closure; the sealed `SetFitCredential` and the consuming
 `into_artifact_bytes` are at the right altitude — and the consuming signature means the
 read-then-take ordering is enforced by BORROWCK, not by call-site discipline.
+
+## D-04-14-A — round-2 review: WR-07 fixed, three warnings open (2026-08-16)
+
+Round 2 returned **0 Critical**. Both round-1 Criticals verified genuinely closed (not cosmetically),
+WR-02 closed by the `atomic_write` delegation, IN-03 closed. All six cleanup-pass code paths were
+verified correct — the reviewer recovered the deleted tag detector from `a523db6b3` to compare
+semantics rather than taking the claim on trust.
+
+**WR-07 — FIXED, and it was a regression introduced BY the CR-02 auth fix.** Gating the shared
+router put auth OUTSIDE `CorsLayer::permissive()`, so a browser's `OPTIONS /v1/classify` preflight
+got 401 with no `Access-Control-Allow-Origin` before CORS saw it, and every `/health/ready` probe
+401'd — the endpoint 04-08 added specifically so an orchestrator could admit a classifier. The
+security fix would have made the server unreachable from a browser and unschedulable under k8s.
+Closed by `auth::layer_public_ops`, which exempts only CORS preflight (defined to travel without
+credentials, so gating it is unsatisfiable by a conforming client) and `/health*` (no model data;
+both were fully public before the classify surface was gated at all). `POST /v1/classify` stays
+gated. The APR path is untouched — a new function rather than a change to shared `apply`. Three
+tests drive the REAL middleware through a real router, and a mutation removing the exemptions fails
+exactly the two operability tests while leaving the security test green.
+
+**STILL OPEN — three warnings, highest value first:**
+
+**WR-09 (do this first).** `commands/inspect.rs:548-566` bounds `metadata_size` — an
+attacker-controlled `u32` with no checksum branch — only by file length. `truncate -s 4297M` costs
+nothing on a sparse filesystem, so `apr inspect` allocates ~4 GiB and then SUCCEEDS. The 16 MiB
+`MAX_TAG_METADATA_BYTES` added to `setfit_tag.rs` in the cleanup pass exists for exactly this class
+and is two files away. Fix: apply the same cap.
+
+**WR-08.** The cap's `Ok(None)` fail-open is justified in its own comment by "the caller falls
+through to the pre-existing APR path" — true for `apr serve` ONLY. `apr predict` has no APR path
+and emits "not a SetFit classifier … run apr inspect"; `apr inspect` has no cap and renders the
+full APR-05 section. So the three tools now disagree about one file, and the message routes the
+operator INTO the contradiction. Fix alongside WR-09.
+
+**WR-10.** `--lock-out`'s no-clobber check runs AFTER the full multi-candidate sweep, inverting the
+ordering discipline `setfit_train.rs:12-20` states and that `refuse_existing_output` was made
+standalone to support.
+
+## D-04-14-B — IN-06: the unwrap() ban is NOT machine-enforced in apr-cli
+
+`crates/apr-cli/src/lib.rs:9-16` carries crate-wide
+`#![allow(clippy::all, clippy::pedantic, clippy::disallowed_methods, unused_imports, dead_code, …)]`.
+
+`clippy::disallowed_methods` is the mechanism `.clippy.toml` uses to ban `unwrap()`, and CLAUDE.md
+states "0 unwrap()" as a project threshold — so the project's headline quality gate is silently
+inert across the entire CLI crate. Verified empirically by the reviewer, not inferred: a fresh
+`cargo check -p apr-cli --lib --features setfit` recompiles and emits ZERO diagnostics for
+`apr-cli/src`, including for a genuinely dead `Write as _` import at `eval/setfit.rs:40`.
+
+Phase 4's own code is clean — 0 `unwrap()` across all 13 new modules, counted — but by discipline
+rather than by gate, which is exactly the distinction CLAUDE.md's verification discipline warns
+about. This is a PROJECT-level finding, far beyond phase 4: removing the blanket allow will surface
+a backlog across the whole crate and needs its own ticket and its own pass.
