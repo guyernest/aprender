@@ -20,7 +20,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Differentiable MiniLM Conformance** - Prove the pinned encoder's shared batched Rust path matches fixtures and updates named parameters through the graph. (completed 2026-08-08)
 - [ ] **Phase 2: Deterministic Pair and Data Protocol** - Make few-shot selection and bounded pair generation reproducible, provenance-complete, leakage-safe, and non-quadratic. (code-complete 2026-08-09; verification returned `human_needed` — 4 items pending in `02-HUMAN-UAT.md`)
 - [ ] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit. (all 10 plans code-complete 2026-08-11; verification returned `human_needed` — 5/5 roadmap criteria verified, 47/50 must-have truths; 5 items pending in `03-HUMAN-UAT.md`, and code review found 4 blockers in the VERIFICATION layer — see `03-REVIEW.md`)
-- [x] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs. (completed 2026-08-16)
+- [ ] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs. (all 17 plans code-complete 2026-08-16; verification returned `gaps_found` — 0/5 roadmap criteria fully met (2 FAILED, 3 PARTIAL), 94/95 must-have truths, and 04-11's per-crate mutation gate unmet. The blocker is F-10, escalated to Phase 5. Five gap-closure plans 04-18..04-22 added 2026-08-16 for the user-scoped subset that does NOT depend on F-10; OPS-01 and OPS-02 stay NOT MET regardless. **A prior `[x] (completed 2026-08-16)` was reverted by hand — the 6th occurrence of the tracking-handler defect STATE.md records, which marks a phase complete as soon as summary_count reaches plan_count, before the verifier runs and regardless of unmet must-haves.**)
 - [ ] **Phase 5: Benchmark and Claims Gate** - Produce the complete reproducible 40-cell SetFit-versus-9B-LoRA evidence set and reject incomplete or unequal claims.
 
 ## Phase Details
@@ -182,7 +182,7 @@ surfaces on the mandatory CPU profile.
   4. Rust, CLI, and native HTTP callers can classify ordered single or mixed-length batches and receive matching labels, full probabilities, optional logits, margins, token/truncation facts, latency, backend identity, and the same artifact hash in predictions and readiness.
   5. A developer can run offline executable contracts and the supported CPU build/test feature matrix to detect detached gradients, invalid data/math, leakage, label drift, artifact mismatches, and core/CLI/HTTP parity failures; an explicitly requested unavailable device fails instead of silently falling back or misreporting its backend.
 
-**Plans**: 17 plans in 10 waves (revised 2026-08-15 after cross-AI review — 04-REVIEWS.md; then 04-17 added mid-phase at a user checkpoint to land the two public-API doors — `into_artifact_bytes` and the sealed `SetFitCredential` — that waves 5-6 proved missing, which shifted the dependent plans one wave later)
+**Plans**: 22 plans in 12 waves — 17 delivered, then 5 gap-closure plans added 2026-08-16 after `04-VERIFICATION.md` returned `gaps_found` (revised 2026-08-15 after cross-AI review — 04-REVIEWS.md; then 04-17 added mid-phase at a user checkpoint to land the two public-API doors — `into_artifact_bytes` and the sealed `SetFitCredential` — that waves 5-6 proved missing, which shifted the dependent plans one wave later)
 
 **Branch base**: `gsd/phase-2-contract-gate` @ d66678e7a (Phase 3 complete + UAT + CR-01..04 fixes).
 The orchestrator creates `gsd/phase-4-apr-parity` from that HEAD before dispatching wave 1; wave
@@ -232,6 +232,23 @@ Plans:
 
 - [x] 04-11-PLAN.md — ci.yml extension proposed as a patch file then human-approved, per-crate mutation gate, closing requirements audit incl. TRN-07 (wave 9)
 
+**Wave 10** *(added mid-phase at a user checkpoint; the two public-API doors waves 5-6 proved missing)*
+
+- [x] 04-17-PLAN.md — `SetFitRun::into_artifact_bytes` (the consuming bytes door, borrowck-enforced read-then-take) + the sealed `SetFitCredential` trait, which unblocked 04-12 and 04-16 (wave 10)
+
+**Gap closure** *(added 2026-08-16 after `04-VERIFICATION.md` returned `gaps_found`; user-scoped to six items. Does NOT close F-10 — OPS-01 and OPS-02 stay NOT MET and are Phase 5 work per the blocking note below)*
+
+**Wave 11** *(four parallel plans, zero `files_modified` overlap)*
+
+- [ ] 04-18-PLAN.md — WR-09 + WR-08: bound `apr inspect`'s attacker-controlled metadata allocation by the shared 16 MiB cap, and make the over-cap case one typed refusal so predict/eval/inspect/serve stop contradicting each other about one file (wave 11)
+- [ ] 04-19-PLAN.md — `backend_identity` binding: point the registry row at the shipped `ExecutionBackend::identity`, earn the `implemented` flip with a compile-witnessed resolution guard, clear the last BIND-004 (wave 11)
+- [ ] 04-20-PLAN.md — WR-10: run `apr eval --lock-out`'s no-clobber gate before the dataset ingest instead of after the full multi-candidate sweep, restoring the ordering discipline `setfit_train.rs:12-20` states; end-to-end evidence via a spawned decoy case, since the dispatch tag gate makes an untagged live probe unreachable (wave 11)
+- [ ] 04-21-PLAN.md — the two named mutation survivors in `api/setfit_handlers.rs`, re-measured at HEAD and diagnosed from varied inputs; each kill confirmed by a `-F`-scoped cargo-mutants re-run (wave 11)
+
+**Wave 12** *(blocked on Wave 11 — 04-21 also edits the Makefile, and the Makefile is this plan's subject)*
+
+- [ ] 04-22-PLAN.md — F-07: run bashrs for real over the Makefile and `scripts/`, make `bashrs-lint-makefile` capable of failing, wire one scoped baseline-non-increase gate founded on shell semantics (two error findings are measured bashrs false positives), and triage the repo-wide backlog with an owner — no skipped check reported as passing (wave 12)
+
 ### Phase 5: Benchmark and Claims Gate
 
 **Goal**: Users can audit and recompute a complete, selection-safe TweetEval comparison between the
@@ -265,5 +282,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
-| 4. APR Artifact and Production Parity | 17/17 | Complete   | 2026-08-16 |
+| 4. APR Artifact and Production Parity | 17/22 | gaps_found |  |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
