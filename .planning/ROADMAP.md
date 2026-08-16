@@ -20,7 +20,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Differentiable MiniLM Conformance** - Prove the pinned encoder's shared batched Rust path matches fixtures and updates named parameters through the graph. (completed 2026-08-08)
 - [ ] **Phase 2: Deterministic Pair and Data Protocol** - Make few-shot selection and bounded pair generation reproducible, provenance-complete, leakage-safe, and non-quadratic. (code-complete 2026-08-09; verification returned `human_needed` — 4 items pending in `02-HUMAN-UAT.md`)
 - [ ] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit. (all 10 plans code-complete 2026-08-11; verification returned `human_needed` — 5/5 roadmap criteria verified, 47/50 must-have truths; 5 items pending in `03-HUMAN-UAT.md`, and code review found 4 blockers in the VERIFICATION layer — see `03-REVIEW.md`)
-- [ ] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs.
+- [x] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs. (completed 2026-08-16)
 - [ ] **Phase 5: Benchmark and Claims Gate** - Produce the complete reproducible 40-cell SetFit-versus-9B-LoRA evidence set and reject incomplete or unequal claims.
 
 ## Phase Details
@@ -230,7 +230,7 @@ Plans:
 
 **Wave 9** *(blocked on Wave 8; NOT autonomous — human checkpoint)*
 
-- [ ] 04-11-PLAN.md — ci.yml extension proposed as a patch file then human-approved, per-crate mutation gate, closing requirements audit incl. TRN-07 (wave 9)
+- [x] 04-11-PLAN.md — ci.yml extension proposed as a patch file then human-approved, per-crate mutation gate, closing requirements audit incl. TRN-07 (wave 9)
 
 ### Phase 5: Benchmark and Claims Gate
 
@@ -265,5 +265,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Differentiable MiniLM Conformance | 9/9 | Complete   | 2026-08-08 |
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | human_needed |  |
-| 4. APR Artifact and Production Parity | 16/17 | In Progress|  |
+| 4. APR Artifact and Production Parity | 17/17 | Complete   | 2026-08-16 |
 | 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
