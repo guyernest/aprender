@@ -65,7 +65,8 @@ patch awaiting a human.
 | ---- | ----------- | ------ |
 | 1 | `04-11-ci-setfit.patch` — the proposed ci.yml extension, `git apply --check` rc=0, ci.yml clean | `eb0f8e1c5` |
 | 3 | the closing requirements audit in `REQUIREMENTS.md` | `608aa954e` |
-| 2 | mutation gate — see the mutation section below | (this file) |
+| — | this SUMMARY, committed before the mutation run returned so a stall could not lose it | `5037e0d90` |
+| 2 | mutation gate — PARTIAL; findings as `D-04-11-A` / `D-04-11-B` in `deferred-items.md` | (final commit) |
 
 Task 2 in the plan is the blocking human checkpoint on the patch. **It was not executed by me and
 must not be**: applying the patch is the orchestrator's step after the human approves. Nothing in
@@ -200,7 +201,67 @@ all; both are recorded under Deviations.
 A near-zero count is itself a red flag (T-04-35); these are the real numbers and the globs
 resolved (paths relative to the workspace root).
 
-### MUTATION-RESULTS-PLACEHOLDER
+### Result: PARTIAL, and stopped on a MEASURED projection rather than a guess
+
+**There is no aggregate adjusted score, and I am not going to compute one from a partial run.**
+Here is exactly what was measured.
+
+| Crate | Mutants | Baseline | Run | Outcome |
+| ----- | ------- | -------- | --- | ------- |
+| aprender-serve | 101 | **ok** | `--shard 1/25` (4 mutants) | **4 / 4 caught**, 453 s |
+| aprender-serve | 101 | **ok** | full | **INTERRUPTED at 4,094 s (68 min)**; 9 survivors reported, completed count unknown |
+| aprender-core | 380 | not reached | — | not run |
+| aprender-train | 358 | not reached | — | not run |
+| apr-cli | 51 | not reached | — | not run |
+
+cargo-mutants prints a line only for non-caught outcomes and a summary at the end. The full run was
+killed before that summary, so **the number of mutants completed is unknown** and no ratio can be
+stated. What IS known is the nine survivors it named, and they are worth more than a score.
+
+### Survivor triage — 7 equivalent by construction, 2 real
+
+**Seven of nine mutate the file's own `#[cfg(test)]` module** — five `tests::<fn> -> ()` and two
+inside `fixture::Filler::next`. A test suite cannot detect the deletion of one of its own tests, so
+these are equivalent by construction, not coverage gaps. This is the **F-05 self-scan class at the
+mutation tier**: a `-f <file>` glob mutates the file's tests along with its production code. Any
+future run must exclude them or ~7 of every 9 survivors will be noise.
+
+**Two are real production survivors:**
+
+| Mutation | Source | Assessment |
+| -------- | ------ | ---------- |
+| `replace AppState::has_setfit_model -> bool with false` | `:70-72`, body `self.setfit_model.is_some()` | **Real gap.** Under the `setfit` filter — the same one `make setfit-serve-tests` uses — nothing pins this returning `true`. A readiness path that always reported "no classifier resident" would pass. |
+| `replace > with == in setfit_classify_handler` | `:158`, `if request.texts.len() > MAX_BATCH_TEXTS` | **Real, and it should not have survived.** A co-located test is *named* `setfit_classify_refuses_a_batch_one_over_the_contract_bound` — `len == MAX+1` is the exact input distinguishing `>` from `==`. Either it does not exercise the branch its name claims, or it is not reached under this filter. |
+
+The second is the finding worth having: a test whose NAME asserts boundary coverage, beside a
+boundary mutant that lives. That is CLAUDE.md rule 2 — labelling by intent — one level down, at the
+test name rather than at the run. **I did not diagnose it**: one failing input is an anecdote (rule
+6), and diagnosing it means re-running that mutant alone.
+
+Neither was fixed. `crates/aprender-serve/src/api/setfit_handlers.rs` is 04-08's file and is not in
+this plan's `files_modified`; fixing it here would be scope creep into a file another plan owns.
+Both are logged as **D-04-11-A** in `deferred-items.md` with the reproduction command.
+
+### The projection, measured — why the run stopped
+
+From the full run: 4,094 s elapsed without finishing 101 mutants gives an average **> 40.5 s per
+mutant** including baseline — a LOWER bound, since it had not completed. `aprender-core` and
+`aprender-train` carry far heavier builds and test suites than `aprender-serve`, so their real cost
+is strictly worse.
+
+```
+890 mutants x >= 40.5 s  =  >= 36,000 s  =  >= 10.0 hours, plus four baselines
+789 not yet attempted    =  >=  8.9 hours
+```
+
+The plan's own instruction covers this exactly: *"If wall-clock projects beyond a reasonable budget,
+report the measured projection and stop for the human (the Phase 3 compute-budget precedent) rather
+than shrinking scope silently."* That is what happened. Recorded as **D-04-11-B** with the four
+corrections a future run needs.
+
+**Disk was watched throughout** (the ENOSPC precedent): 91 GiB free at start, 88 GiB at the
+deepest point of the tree-copy build, 91 GiB after cleanup. It never approached the 15 GiB floor,
+so disk was not the constraint — wall clock was. `CARGO_INCREMENTAL=0` on every invocation.
 
 ---
 
@@ -393,3 +454,48 @@ Threat register as covered:
 | T-04-34 (unearned checkboxes) | zero boxes flipped; two frontmatter overclaims refused by name |
 | T-04-35 (mutation scoped to nothing) | per-crate denominators enumerated (380/358/101/51 = 890) before any run |
 | T-04-63 (a tier-covered surface silently absent from CI) | 24/24 accounted; the third exclusion surfaced rather than absorbed |
+
+## Notes for the orchestrator and Phase 5
+
+- **The patch is NOT applied and must be presented to the human before it is.** Plan Task 2 is the
+  blocking checkpoint. `git apply --check` rc=0; `git apply` has never been run.
+  Present alongside the 24-row accounting table above, not just the diff — the accounting is where
+  the third exclusion is visible.
+- **Three decisions are owed at that checkpoint:** (a) promote `setfit-serve-smoke` to CI?
+  (b) promote `setfit-cli-lifecycle`? (c) **`setfit-api-boundary` — the exclusion I could not make
+  cleanly**; it has real CI-only value and was dropped on quoting grounds, so it deserves a ruling
+  rather than inheritance.
+- **Mutation gate is unfinished by measurement, not by omission** — D-04-11-B carries the numbers
+  and the four corrections a re-run needs. It belongs in a nightly job, not in a plan.
+- **Phase 5 inherits, unchanged:** F-10 (the single blocker for OPS-01/OPS-02 and the artifact
+  half of APR-01..05), `backend_identity` binding a nonexistent symbol (blocks a named clause of
+  OPS-04 and OPS-06), F-14(5) bounded-read pre-reservation, and `apr qa`'s inapplicability to
+  encoder-only APRs.
+
+## Self-Check: PASSED
+
+Files claimed, checked on disk:
+
+```
+FOUND: .planning/phases/04-apr-artifact-and-production-parity/04-11-ci-setfit.patch   8,133 B
+FOUND: .planning/phases/04-apr-artifact-and-production-parity/04-11-SUMMARY.md
+FOUND: .planning/REQUIREMENTS.md                                                     32,794 B
+FOUND: .planning/phases/04-apr-artifact-and-production-parity/deferred-items.md      15,101 B
+```
+
+Commits claimed, checked in `git log`: `eb0f8e1c5`, `608aa954e`, `5037e0d90` — all present.
+
+| Assertion | Criterion | Observed |
+| --- | --- | --- |
+| `.github/workflows/ci.yml` modified | never | **0-byte porcelain** at every step, incl. after `--check` |
+| `git apply --check` on the patch | rc=0 | **rc=0** |
+| `git apply` run without `--check` | never | **never run** |
+| `STATE.md` / `ROADMAP.md` touched | no | **not touched** — the orchestrator owns them |
+| added cargo commands verbatim in the Makefile | all | **17/17** |
+| pipes in added lines | 0 | **0** |
+| forbidden legs as added commands | 0 | **0**, with a 5/5 executed case table proving the scan is live |
+| 04-10 targets accounted for | all | **24/24** (10 already covered, 10 added, 1 aggregate, 3 excluded) |
+| Phase 4 requirement boxes checked | 0 | **0** — `- [x]` count is 13, unchanged |
+| TRN-07 label separation | `CROSS-PROCESS` on 04-15 only | **asserted mechanically** — present on 04-15's citation, absent from 04-07's |
+| mutation score claimed from a partial run | none | **none claimed** |
+| `bashrs` reported as passing | never | **never** — it is not installed on this host |
