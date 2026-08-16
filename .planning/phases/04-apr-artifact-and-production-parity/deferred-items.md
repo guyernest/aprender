@@ -853,3 +853,184 @@ defect class F-07 is about, inside the tool this plan was sent to adopt.** It is
 NOT-RUN list below as `NOT RUN (vacuous)`, never as a green leg, and nothing in this phase is
 gated on it. CLAUDE.md's documented `bashrs gate --strict .` invocation is stale for 6.66.3 and
 should be corrected when someone next edits that section.
+
+### 3b. The control that reframes the whole backlog: NO script fails `bash -n`
+
+Run across the corpus after the two per-file false positives were found, because if bash's own
+parser refuted two of them it was worth asking how far that generalises:
+
+| control | result |
+|---------|--------|
+| `bash -n` over all **59** scripts | **0 failures.** Every script parses. |
+| files carrying at least one SC1078 | **8**, and **all 8** have `bash -n` rc=0 |
+
+**84 of the 106 error-severity findings are parse-class rules** — SC1078 (34), SC1100 (30),
+SC1007 (11), SC1035 (7), SC1028 (2) — **and bash accepts every file they appear in.** For a bash
+script, bash is the authority on whether it parses. That does not make all 84 provably wrong (a
+quote can parse and still nest differently than the author intended, which is why the ABS_APR regex
+is protected by its own 12-case table rather than by `bash -n` alone), but it does mean the
+"106 error-severity findings" headline is not 106 broken scripts, and a fixer who starts there will
+mostly be editing correct code.
+
+The remaining **22 are semantic, not parse-class** — SC2296 (11), SC2122 (5), SC2188 (4),
+SC2104 (1), SC2105 (1) — and `bash -n` says nothing about them either way. **They are where a fixer
+should start.** Measured precedent for why the distinction matters: SC2168 is also semantic, `bash -n`
+does NOT catch it, and the induced probe `@local probe=1` in a Makefile recipe produced a genuine
+runtime failure (`/bin/bash: line 0: local: can only be used in a function`). Semantic findings can
+be real even when the file parses.
+
+### 4. The triage, grouped by what a fixer would actually DO
+
+Grouped by fix-shape rather than by lint code, because the code is not the unit of work.
+
+**Group A — SECURITY (50 findings). Highest value, and the same defect class this phase closed in
+Rust as WR-02.**
+
+| code | n | meaning | representative files |
+|------|---|---------|----------------------|
+| SEC013 | **24** | hardcoded `/tmp` path, vulnerable to symlink attack | `benchmark-2x-ollama.sh`, `benchmark-matrix.sh`, `dogfood-book.sh` |
+| SEC014 | **24** | related insecure-temp handling | `book-gate.sh`, `capture_golden_traces.sh`, `cascade-drain.sh` |
+| SEC020 | **4** | (see per-file logs) | `check_book_examples_executable.sh` |
+| SEC006 | **2** | unsafe temp file — use `mktemp` for random names | `benchmark-2x-ollama.sh`, `benchmark-matrix.sh` |
+
+**WR-02 connection, stated because it is the argument for doing this group first:** WR-02 was the
+Rust-side instance of exactly this — a `.{name}.tmp` file opened with `create(true)`, which follows
+a symlink. Phase 4 closed it in Rust and left the identical exposure standing in 59 shell scripts. A
+predictable path in a world-writable directory is a symlink-attack surface whatever language opens
+it. **Mechanical fix is plausible** for SEC006/SEC013 (`/tmp/fixed-name` → `$(mktemp)`), but each
+site needs a read: several of these scripts pass the path between steps or expect a stable name
+across runs, and a blind rewrite breaks those. Budget per-site judgement, not sed.
+
+**Group B — SEMANTIC CORRECTNESS (22 findings). Small, and the only error-severity group `bash -n`
+does not contradict.**
+
+| code | n | representative files |
+|------|---|----------------------|
+| SC2296 | 11 | `benchmark-2x-ollama.sh`, `benchmark-matrix.sh`, `check_beat_baseline_env.sh` |
+| SC2122 | 5 | (per-file logs) |
+| SC2188 | 4 | (per-file logs) |
+| SC2104 | 1 | (per-file logs) |
+| SC2105 | 1 | (per-file logs) |
+
+**Per-site judgement required, no mechanical fix.** 22 sites is a single focused session.
+
+**Group C — PARSE-CLASS (84 findings). Do NOT start here.**
+
+SC1078 (34), SC1100 (30), SC1007 (11), SC1035 (7), SC1028 (2), across files including
+`cascade-publish.sh`, `check_apr_bin_pinned.sh`, `dispatch-distill-phase-3-gx10.sh`,
+`book-ci-local.sh`, `check_book_examples_executable.sh`, `lint-self-referential-default.sh`.
+**Every file involved passes `bash -n`** (section 3b). At least one — `check_apr_bin_pinned.sh:72` —
+is a PROVEN false positive whose "fix" would have been a real regression. Triage each against
+`bash -n` and the file's own intent BEFORE editing anything. Expect a high false-positive rate;
+report the pattern upstream rather than rewriting the repo around it.
+
+**Group D — QUOTING / WORD-SPLITTING (180 findings, SC2086).** `benchmark-2x-ollama.sh`,
+`benchmark-matrix.sh`, `book-ci-local.sh` are the heaviest. **A mechanical fix is exactly what must
+NOT happen here.** Adding quotes changes word-splitting behaviour and can silently alter what a
+script does — a script relying on splitting an argument list will break silently, and the failure
+surfaces in CI, not at edit time. Whoever takes this MUST ship a must-match / must-not-match case
+table per CLAUDE.md rule 7. That rule exists because the `apr`-invocation patterns in this repo were
+wrong five times and every one was caught by such a table, none by review.
+
+**Group E — PERFORMANCE / STYLE (PERF002 133, PERF003 104, SC1012 216, SC2081 133, SC2227 129,
+SC2016 94, SC2233 83, and others).** Advisory. Lowest priority; do not let it dilute Groups A and B.
+
+### 5. Owner and shape
+
+**Owner: a standalone repo-wide shell hygiene ticket, filed against the tooling queue before Phase 5
+planning starts, and carried by whoever owns `scripts/` maintenance — NOT a Phase 4 plan and NOT a
+Phase 5 plan.** Phase 5 is production encoder calibration; absorbing 59 scripts into it would repeat
+the mistake this entry exists to prevent.
+
+Required shape, so it is actionable rather than a wish:
+
+1. **Order: Group A (security) → Group B (semantic) → Group D (quoting, only with a case table) →
+   Group C (parse-class, triage-only) → Group E (optional).**
+2. **Every group's changes ship a must-match / must-not-match case table (CLAUDE.md rule 7), RUN and
+   recorded, not written.** Group D cannot be merged without one.
+3. **Every claimed false positive names its independent control and that control's exit code as a
+   number.** A false positive asserted without its control is the same defect one level up.
+4. **Do not wire `lint-scripts` into a tier until the corpus is green.** 51 of 59 are non-zero today;
+   a permanently red blocking gate gets disabled, and the real gates beside it go with it (Ph1 D-26).
+   The scoped `bashrs-scoped-lint` added by this plan is the interim: it covers the four files this
+   phase's own verification rests on, and it is green.
+5. **Adjacent finding, cross-referenced so both are found together:** `D-ITEM-01` in `STATE.md`
+   (Phase 2) records vacuous macOS `grep -oP` guards in this same file family. Same directory, same
+   class of portability defect, same owner.
+
+### 6. The two bashrs FALSE POSITIVES, as TOOL defects — and the upstream decision
+
+The full five-field records are in section 2 above (file:line, rule id, flagged text, refuting
+control with its numeric exit code, avoided consequence). Restated here as the reusable output:
+
+| # | site | rule | control | verdict |
+|---|------|------|---------|---------|
+| FP-1 | `scripts/check_apr_bin_pinned.sh:72` | SC1078 | `bash -n` rc=**0** (and rc=**2** on a real unterminated quote) | tool defect |
+| FP-2 | `Makefile:2327` at base `9ae41fcaa` | SC2168 | `make -n dev-setup` rc=**0**, zero shell `local` in the expanded recipe | tool defect |
+
+**FP-2's line number moved** to 2686 once this plan inserted its gate block above it. Recorded
+because the finding is unchanged and only its coordinates moved — which is exactly why nothing in
+the gate is keyed on a line number.
+
+**Neither is suppressed and neither is baselined-and-forgotten.** Each is DISCRIMINATED by a control
+that is re-run on every gate invocation: SC2168 is discounted only when the flagged columns fall
+after a `##` on a non-recipe line, and SC1078 only for a file whose own `bash -n` exits 0. Both
+discriminators were proven to still catch the real thing — an induced `@local probe=1` recipe and an
+induced unterminated quote both turn the gate RED. If a later bashrs release fixes either rule,
+DELETE the discriminator rather than leaving it as permanent slack.
+
+**Upstream reporting: RECOMMENDED, and explicitly NOT DONE by this plan.** Both are cleanly
+reproducible from single lines and would be good bug reports (SC2168 parsing a `##` help comment as
+shell; SC1078 mis-parsing the `'"'"'` escape idiom). Filing them requires opening issues against a
+third-party repository, which is outside this plan's autonomous scope and was not done. Recorded as
+a decision rather than left ambiguous, so nobody assumes it was handled.
+
+### 7. The stale premise in D-04-11-A, corrected ADDITIVELY
+
+**2026-08-16.** `## D-04-11-A` (the `setfit-api-boundary` CI-exclusion entry) closes with: *"Note
+`bashrs` (which CLAUDE.md mandates over shellcheck) is NOT installed on this host, so any new script
+would need linting elsewhere."* **That premise is now FALSE.** bashrs **6.66.3 is installed at
+exactly one path**, `/Users/guy/.cargo/bin/bashrs` (section 0). That section is left byte-unchanged;
+this is the correction.
+
+Consequence: the clean fix D-04-11-A proposed — extracting the `cargo tree` loop into
+`scripts/setfit_api_boundary.sh` so that one script serves both the Make target and a CI step, with
+no quoting rewrite — **is now UNBLOCKED on the tooling side.** A new script can be linted, and this
+plan's `bashrs-scoped-lint` is the pattern for adding it to a scoped gate.
+
+**It is NOT unblocked on the process side, and this changes nothing about that.** The extraction only
+pays off if a CI step invokes the script, which needs a `.github/workflows/ci.yml` edit. CLAUDE.md
+places workflow edits outside autonomous scope, so it stays a human decision. **The user's
+risk-acceptance recorded in D-04-11-A still stands unaltered:** a Linux-only dependency-closure
+regression introduced via `cfg(target_os)` would still not be caught, because the gate still only
+runs on developer machines.
+
+### 8. The NOT-RUN set — nothing here may be read as closed
+
+Stated as its own list so a verifier reading only this section cannot mistake any item for done.
+
+1. **NOT RUN — the 51-of-59 script backlog is MEASURED and TRIAGED, but NOT FIXED.** 106
+   error-severity, 754 warning, 1412 info findings remain in the tree. Only 4 files are gated
+   (section 4, group ordering). No script was modified by this plan: `git diff -- scripts/` is empty.
+2. **NOT RUN (vacuous) — `bashrs gate` at every tier.** rc=0 with `Gates enabled:` EMPTY at tiers 1,
+   2 and 3 (section 3, Leg D). It reports success having checked nothing. It is NOT a passing leg and
+   nothing is gated on it. `bashrs gate --strict .`, the form CLAUDE.md documents, does not exist in
+   6.66.3 at all (rc=2, `unexpected argument '--strict'`).
+3. **NOT RUN — the info-only cell of the `bashrs make lint` control table.** No info-severity Makefile
+   rule was observed to fire, on the real 2432-line Makefile or on any probe, so the cell is not
+   constructible. Substituted with no-findings and warning-only rows and recorded as a substitution,
+   not silently omitted.
+4. **NOT RUN — the per-crate `cargo-mutants` gate (04-11 must-have 4).** D-04-11-B measured **≥ 10 h**
+   wall clock for its 890 mutants. Untouched here; still a `human_verification` item.
+5. **NOT RUN — SAFE-02's "in CI" clause.** The 16 legs applied at `.github/workflows/ci.yml:378-397`
+   have never been executed. Nothing was pushed, no PR was opened, and no file under `.github/` was
+   modified by this plan.
+6. **NOT RUN — the full `make tier3`.** The two new targets were verified standalone (rc=0 each) and
+   their presence in the tier3 recipe confirmed by `make -n tier3`. A full tier3 was not run; it
+   carries known standing reds unrelated to this plan (D-04-04-B's 24 `aprender-train` names,
+   D-04-08-A's 51 `aprender-serve` failures).
+7. **NOT RUN — upstream bug reports for FP-1 and FP-2.** Recommended in section 6, not filed.
+
+**F-10, OPS-01, OPS-02, SC1, SC2, SC3 and the "over a produced artifact" halves of SC4/SC5 remain
+OPEN. SAFE-01 and SAFE-02 remain UNCHECKED.** This plan improves the honesty of the gate surface
+those requirements are measured on; it does not deliver any of them.
