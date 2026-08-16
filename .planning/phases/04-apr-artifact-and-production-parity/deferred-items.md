@@ -272,3 +272,25 @@ the Phase 3 compute-budget precedent. **Recommendations for whoever runs it:**
    run happens with `setfit` compiled out.
 3. Pass `--cargo-arg=--lib` (deviation 5) or the baseline cannot build on `aprender-serve`.
 4. Exclude `#[cfg(test)]` functions, or ~7 of every 9 survivors will be equivalent by construction.
+
+## D-04-11-A — `setfit-api-boundary` excluded from CI (user ruling, 2026-08-15)
+
+**Status:** deferred by explicit user decision at the 04-11 checkpoint. Excluded on QUOTING
+grounds, not value grounds.
+
+`setfit-api-boundary` is a `cargo tree` dependency-direction gate implemented as a Make `for` loop
+with `$$`-escaped variables and single-quoted patterns. It cannot be embedded in the CI step's
+single-quoted `bash -c '...'` without rewriting the quoting — and that rewrite is precisely the
+drift the gate exists to detect. It continues to run locally via `make setfit-api-boundary`
+(orchestrator-measured rc=0).
+
+**Risk explicitly accepted by the user:** a Linux-only dependency-closure regression — one
+introduced via `cfg(target_os)` so that the Linux closure differs from macOS — would NOT be caught,
+because the gate now only ever runs on developer machines. This is the one class of regression a
+local-only run cannot cover, and it is the counter-argument the executor recorded in the patch
+beside the exclusion.
+
+**If revisited:** the clean fix is to extract the loop into `scripts/setfit_api_boundary.sh` and
+have both the Make target and a CI step invoke that script, so no quoting rewrite is needed. Note
+`bashrs` (which CLAUDE.md mandates over shellcheck) is NOT installed on this host, so any new
+script would need linting elsewhere.
