@@ -243,6 +243,254 @@ fn eval_setfit_refuses_a_directory_as_a_lock() {
 }
 
 // ===========================================================================
+// WR-10: the no-clobber gate runs BEFORE the work, not after it
+//
+// # What these four tests are, as a group
+//
+// `setfit_train.rs:12-20` states the ordering discipline this command was supposed to share:
+// the request-level checks run "BEFORE a single row of `--data` is read", and "refusing the
+// output path last of the four is what stops a twenty-minute run from ending in 'I will not
+// overwrite that file'". `refuse_existing_output` was factored out as a standalone function
+// precisely so it could be called early. `apr eval --lock-out` never called it early: it ran
+// the whole multi-candidate sweep — a bounded read of the corpus, the eight-rung load ladder
+// and a classify pass over the whole validation split for EVERY candidate — and only then
+// discovered that the file it was asked to write already existed.
+//
+// # Why there are TWO ordering tests and not one
+//
+// CLAUDE.md rule 6: one failing input is an anecdote. A single test showing the lock refusal
+// winning proves only that it beat ONE particular later error. Tests 1 and 2 hold everything
+// constant except HOW the later input is broken, and produce two DIFFERENT pre-fix
+// diagnoses — a missing corpus directory and a corpus whose manifest is not JSON. The lock
+// refusal has to beat both.
+//
+// # The measured limit of the in-process pair, stated rather than glossed
+//
+// The plan asked the second witness to fail at step (3) — the artifact reload — rather than
+// at a second point inside step (2). That is NOT reachable from this file: getting past step
+// (2) needs a VALID attested prepared dataset, and the only fixture that writes one is
+// `#[cfg(test)]`-private to `data_contrastive`, which is outside this change's file scope.
+// Widening it would put a dataset fixture in a second place. So the second witness varies the
+// later input WITHIN step (2), where the two diagnoses are still demonstrably different, and
+// the process-tier witness in `tests/setfit_cli_lifecycle.rs` covers the same property against
+// the shipped binary.
+// ===========================================================================
+
+/// A `--lock-out` destination that ALREADY holds something.
+///
+/// The contents are deliberately not a valid lock: the gate under test is `exists()`, and a
+/// gate that had to parse the file first would be doing the expensive work this plan moved.
+fn occupied_lock_destination(dir: &Path) -> PathBuf {
+    let path = dir.join("lock.json");
+    std::fs::write(&path, br#"{"committed":"by a prior validation run"}"#)
+        .expect("the pre-existing lock destination is writable");
+    path
+}
+
+/// A `--data` directory that EXISTS and whose manifest is unreadable.
+///
+/// Distinct from an absent directory on purpose: it makes step (2) fail with a PARSE diagnosis
+/// (`benchmark-manifest.json is not valid JSON`) instead of a NOT-FOUND one, which is what
+/// makes the second ordering witness a different measurement rather than a copy of the first.
+fn corpus_with_an_unparseable_manifest(dir: &Path) -> PathBuf {
+    let path = dir.join("broken-corpus");
+    std::fs::create_dir_all(&path).expect("the corpus directory is creatable");
+    std::fs::write(
+        path.join(crate::commands::data_tweeteval::MANIFEST_FILE),
+        b"this is not JSON",
+    )
+    .expect("the broken manifest is writable");
+    path
+}
+
+#[test]
+fn lock_out_refuses_an_existing_destination_before_the_dataset_is_read() {
+    let temp = TempDir::new().expect("tempdir");
+    let artifact = temp.path().join("model.apr");
+    // ABSENT on purpose. The only way to tell "the corpus was never opened" from "the corpus
+    // was opened and was fine" is to make opening it fail loudly, then check whether that
+    // failure is what the operator was told about.
+    let data = temp.path().join("no-such-corpus");
+    let selection = temp.path().join("no-such-selection.json");
+    let lock_out = occupied_lock_destination(temp.path());
+    assert!(
+        !data.exists() && lock_out.exists(),
+        "the fixture must be an absent corpus and an OCCUPIED destination, or this test \
+         measures nothing"
+    );
+
+    let mut a = args(&artifact, &data, &selection);
+    a.lock_out = Some(&lock_out);
+    assert!(
+        !a.force,
+        "the pre-flight is gated on --force; a forced run is Test 3's subject, not this one"
+    );
+
+    let error = run(&a).expect_err("an occupied --lock-out destination must be refused");
+    assert!(
+        matches!(error, CliError::ValidationFailed(_)),
+        "refusing to clobber a commitment is a request error (exit 5); got: {error}"
+    );
+    let rendered = error.to_string();
+    // POSITIVE: the bespoke wording, not the generic no-clobber message. "Refusing to replace
+    // existing file X" does not tell an operator what replacing a selection lock COSTS.
+    assert!(
+        rendered.contains("A selection lock is a COMMITMENT"),
+        "the refusal must carry the domain wording that says what replacing a lock costs; \
+         got: {rendered}"
+    );
+    assert!(
+        rendered.contains(&lock_out.display().to_string()),
+        "and it must name the destination the operator supplied; got: {rendered}"
+    );
+    // NEGATIVE, and this is the ORDER assertion. Pre-fix, step (2) ran first and the operator
+    // was sent to look at the corpus — a true statement about the wrong problem, arrived at
+    // after the whole sweep. A one-sided assertion would pass on a run that failed for a third
+    // reason entirely.
+    assert!(
+        !rendered.contains(&data.display().to_string()),
+        "the lock refusal must come BEFORE the dataset is read, so the corpus must not be \
+         named at all; got: {rendered}"
+    );
+}
+
+#[test]
+fn lock_out_refuses_an_existing_destination_before_a_broken_corpus_is_diagnosed() {
+    // THE SECOND WITNESS. Same occupied destination, a DIFFERENT later-stage failure: the
+    // corpus directory exists and its manifest is unparseable, so step (2) fails with a parse
+    // diagnosis rather than a not-found one. Two different later failures both losing to the
+    // pre-flight is what distinguishes "the check moved earlier" from "the check happened to
+    // beat one particular error".
+    let temp = TempDir::new().expect("tempdir");
+    let artifact = temp.path().join("model.apr");
+    let data = corpus_with_an_unparseable_manifest(temp.path());
+    let selection = temp.path().join("no-such-selection.json");
+    let lock_out = occupied_lock_destination(temp.path());
+
+    let mut a = args(&artifact, &data, &selection);
+    a.lock_out = Some(&lock_out);
+
+    let error = run(&a).expect_err("an occupied --lock-out destination must be refused");
+    assert!(
+        matches!(error, CliError::ValidationFailed(_)),
+        "got: {error}"
+    );
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("A selection lock is a COMMITMENT"),
+        "the same bespoke refusal must win here too; got: {rendered}"
+    );
+    // NEGATIVE: the pre-fix path reached `attestation_bytes_from_manifest` and said so.
+    assert!(
+        !rendered.contains("is not valid JSON"),
+        "the lock refusal must come BEFORE the manifest is parsed — a run that diagnosed the \
+         manifest has already done the read this plan moved the gate above; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains(crate::commands::data_tweeteval::MANIFEST_FILE),
+        "and it must not name the manifest file at all; got: {rendered}"
+    );
+}
+
+#[test]
+fn lock_out_force_proceeds_past_the_preflight() {
+    // The pre-flight must be gated on `force` exactly like the two checks it joins. An
+    // operator who passed --force asked for the replacement; the run must proceed to the work
+    // and fail (or succeed) on the LATER input.
+    let temp = TempDir::new().expect("tempdir");
+    let artifact = temp.path().join("model.apr");
+    let data = temp.path().join("no-such-corpus");
+    let selection = temp.path().join("no-such-selection.json");
+    let lock_out = occupied_lock_destination(temp.path());
+
+    let mut a = args(&artifact, &data, &selection);
+    a.lock_out = Some(&lock_out);
+    a.force = true;
+
+    let rendered = run(&a)
+        .expect_err("the corpus really is absent, so a forced run must still fail — but LATER")
+        .to_string();
+    assert!(
+        rendered.contains(&data.display().to_string()),
+        "--force must carry the run PAST the pre-flight and into the ingest, which is what \
+         names the corpus. If this run is silent about the corpus, --force did not override \
+         the gate and Test 1 proved nothing about --force; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("A selection lock is a COMMITMENT"),
+        "and the no-clobber refusal must NOT have fired: --force is the operator saying they \
+         intend to replace the committed decision; got: {rendered}"
+    );
+}
+
+#[test]
+fn write_lock_still_refuses_a_destination_that_appeared_mid_run() {
+    // THE THIRD CHECK, and why this test drives the writer rather than `write_lock`.
+    //
+    // There are three ordered no-clobber checks once the pre-flight lands: the pre-flight
+    // (before any input is read), `write_lock`'s bespoke check (before bytes are produced),
+    // and `atomic_write`'s `refuse_existing_output` (immediately before the rename). Only the
+    // third covers a file that appeared WHILE the run was going, and the risk this test exists
+    // for is someone deleting it as "now redundant" after the pre-flight moved earlier.
+    //
+    // `write_lock` itself cannot be called from here: it needs a `SelectionLock`, and this
+    // file's header records the measured reason none can be built in this crate —
+    // `SelectionCandidate::from_evaluation` needs a `ValidationEvaluation`, whose only
+    // producers take a verified model, and no `setfit-apr-v1` artifact can be produced on this
+    // host (F-10). `SelectionLock::from_canonical_bytes` exists, but hand-forging canonical
+    // lock bytes here would be a SECOND implementation of the lock's wire form living in a CLI
+    // test — the exact drift this phase removes elsewhere. So the property is pinned where it
+    // actually lives: at the writer `write_lock` delegates to, plus a source anchor tying the
+    // two together so the delegation cannot be quietly replaced.
+    let temp = TempDir::new().expect("tempdir");
+
+    // The source anchor: this is the write path the behaviour below is about.
+    assert!(
+        production_code_lines().contains("setfit_train::atomic_write("),
+        "the lock write must still delegate to the crate's ONE atomic writer, or the check \
+         exercised below is not the check on the lock's write path"
+    );
+
+    // A destination that did NOT exist at pre-flight time and DOES exist by write time.
+    let destination = temp.path().join("appeared-mid-run.json");
+    assert!(
+        !destination.exists(),
+        "the pre-flight would have passed on this path — that is the premise"
+    );
+    std::fs::write(&destination, b"a concurrent run committed here")
+        .expect("the mid-run file is writable");
+
+    let error = crate::commands::setfit_train::atomic_write(&destination, b"{}", false)
+        .expect_err("a file that appeared mid-run must still not be clobbered");
+    assert!(
+        matches!(error, CliError::ValidationFailed(_)),
+        "the write-time refusal is typed, not an IO error; got: {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains(&destination.display().to_string()),
+        "and it names the path it refused to replace; got: {error}"
+    );
+    // Non-vacuity: the bytes on disk are untouched, so the refusal happened BEFORE the rename
+    // rather than after a clobber that then reported an error.
+    assert_eq!(
+        std::fs::read(&destination).expect("the destination is readable"),
+        b"a concurrent run committed here",
+        "a refused write must leave the existing file exactly as it was"
+    );
+    // And the control: --force still replaces it, so the assertion above is about the gate
+    // rather than about the writer being broken.
+    crate::commands::setfit_train::atomic_write(&destination, b"{}", true)
+        .expect("--force replaces the destination");
+    assert_eq!(
+        std::fs::read(&destination).expect("the destination is readable"),
+        b"{}",
+        "the forced write must actually have replaced the file"
+    );
+}
+
+// ===========================================================================
 // Structural: this adapter gates nothing itself, and bypasses nothing
 // ===========================================================================
 
