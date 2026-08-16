@@ -386,6 +386,27 @@ tier3:
 	@$(MAKE) setfit-serve-smoke
 	@$(MAKE) setfit-cli-lifecycle
 	@$(MAKE) setfit-api-boundary
+# ─── F-07 (plan 04-22). CLAUDE.md mandates bashrs over shellcheck, and until this
+# line NO bashrs target was wired into ANY tier — all three of them
+# (`lint-scripts`, `bashrs-score`, `bashrs-lint-makefile`) sat outside, which is
+# the D-26 failure mode again: a target outside the tiers is a target that stops
+# being run. `bashrs-lint-makefile` was worse than unwired — it ended in
+# `|| echo`, so it could not fail even if someone did run it.
+#
+# Both were run STANDALONE first with the status captured directly
+# (`> log 2>&1; rc=$$?`, never through a pipe): rc=0 each, ~5 s combined, which is
+# nothing against tier3's 1-5 minute budget. Both had their failure modes INDUCED,
+# observed and reverted rather than assumed — a real unterminated quote in a guard
+# script, an unjustified baseline entry, and an empty file list each turned the
+# gate RED. See 04-22-SUMMARY.md for the verbatim transcripts.
+#
+# `lint-scripts` is DELIBERATELY NOT WIRED. Measured one file at a time: 51 of 59
+# scripts exit non-zero, 22 with error-severity findings. Wiring it here would put
+# a permanently-red gate in a blocking tier, and a permanently-red gate gets
+# disabled — along with the real gates beside it. The backlog is measured, triaged
+# by fix-shape and given an owner in D-04-22-A instead of being hidden.
+	@$(MAKE) bashrs-lint-makefile
+	@$(MAKE) bashrs-scoped-lint
 # D-04 (Phase 2), wired here for the same reason the line above exists: a target
 # outside the tiers is a target that stops being run. Same evidence discipline as
 # the D-26 block — `make contrastive-data-boundary` was run STANDALONE first with
@@ -1106,9 +1127,346 @@ bashrs-score: ## Score shell script quality with bashrs
 		bashrs score "$$script"; \
 	done
 
-bashrs-lint-makefile: ## Lint Makefile with bashrs
-	@echo "🔍 Linting Makefile with bashrs..."
-	@bashrs make lint Makefile || echo "⚠️  Makefile linting found issues"
+# ─── F-07 (plan 04-22): the two bashrs gates that can actually fail ──────────
+#
+# WHAT `bashrs-lint-makefile` USED TO BE, and why it was a defect:
+#
+#     @bashrs make lint Makefile || echo "  Makefile linting found issues"
+#
+# `|| echo` SWALLOWS THE STATUS. `echo` succeeds, so the recipe exited 0 no matter
+# what bashrs said, and the 34 findings it really produces — including one
+# error-severity SC2168 — were printed to a gate nobody read. That is the same
+# defect class CLAUDE.md Verification Discipline rule 1 records twice by ticket:
+# #2336, where qwen-story-daily captured `tee`'s status so its fail-the-job step
+# was unreachable and three green runs proved nothing; and #2360, where `make
+# publish`'s POST-PUBLISH VERIFICATION did the same and could never report a
+# broken published crate. A check that cannot fail is not a check.
+#
+# THE EXIT CODE IS NOT THE VERDICT. Measured, not read off the help text
+# (D-04-22-A section 1):
+#
+#   bashrs make lint <Makefile with 1 error-severity finding>  -> rc=2
+#   bashrs make lint /nonexistent/Makefile                     -> rc=2   SAME CODE
+#   bashrs make lint <warning-only Makefile>                   -> rc=1
+#   bashrs make lint <clean Makefile>                          -> rc=0
+#   bashrs absent from PATH                                    -> rc=127
+#
+# rc=2 cannot distinguish "this file has an error" from "the gate was pointed at
+# nothing", so both targets below read the VERDICT OUT OF THE REPORT and treat an
+# unparseable report as a FAILURE, never as a zero. Two report shapes exist and
+# both are handled: `Summary: N error(s), ...`, and — on a fully clean file —
+# `No issues found` with no Summary line at all. bashrs also colours its output
+# EVEN WHEN REDIRECTED TO A FILE, so the count arrives wrapped in ANSI and is
+# stripped with a literal ESC before any numeric comparison. A naive
+# `awk`-then-compare reads `\033[1;31m1`, not `1`.
+#
+# The global `--strict` flag is deliberately NOT used. Its help text says "fail on
+# warnings", but warnings already fail without it (rc=1) and it changed nothing in
+# any of the seven states measured. It is a no-op here.
+#
+# BASELINE, NOT ZERO-ERRORS — and every entry must justify itself.
+# A zero-errors gate over these four files is UNSATISFIABLE today without editing
+# correct code, because two of the error-severity findings are MEASURED BASHRS
+# FALSE POSITIVES (D-04-22-A section 2):
+#
+#   The `dev-setup:` help line — 2327 when measured at 9ae41fcaa, and it moves
+#     every time anything is inserted above it, which is exactly why nothing here
+#     is keyed on a line number — SC2168 "'local' is only valid in functions"
+#     lands on its columns 22-28, i.e. the English words "local d" of
+#     `dev-setup: ## Set up local dev environment ...`. CONTROL: `make -n
+#     dev-setup` exits 0 and the expanded recipe contains ZERO shell `local`.
+#   scripts/check_apr_bin_pinned.sh:72 SC1078 "forget to close this double-quoted
+#     string?" lands on the standard single-quote-escaping idiom inside the
+#     ABS_APR regex. CONTROL: `bash -n` on that file exits 0 — and the same
+#     control exits 2 on a genuinely unterminated quote, so it is not a control
+#     that never fires.
+#
+# NEITHER IS FIXED. Rewording a help string to satisfy a parser bug would wire a
+# blocking tier3 gate that trips on any future help text containing "local",
+# "declare" or "typeset"; editing the ABS_APR regex would touch a pattern whose
+# own lines 70-71 say it "has now been gotten wrong four times in this repo; if
+# you change it, re-run the table rather than reading it".
+#
+# HOW THEY ARE HANDLED, and why the design changed once it was TESTED. The first
+# version carried each as a BASELINED count (Makefile 1, check_apr_bin_pinned.sh
+# 1). Running the case table refuted that: one new ordinary help line containing
+# the word "local" took the Makefile count to 2 and turned the gate red on correct
+# prose — the exact liability this plan set out not to build. Both are therefore
+# DISCRIMINATED by the two controls documented above the counter, and every
+# baseline is now 0. The discriminators are not suppressions: each names a control
+# that is re-run on every invocation and that demonstrably FIRES on a real defect
+# in the same file. If a later bashrs release fixes either rule, DELETE the
+# discriminator rather than leaving it as permanent slack.
+#
+# The baseline mechanism itself is kept, and every entry must still name the
+# control that justifies it: the gate REJECTS an entry with an empty
+# justification, so the list cannot decay into a silent suppression list — which
+# would be just a slower version of the `|| echo` defect it replaced.
+#
+# Entry format:  <path>%<subcommand>%<max-error-severity>%<justification>
+#
+# `_` stands for a space, because make's `for` splits on whitespace and an entry
+# therefore cannot contain any. The readable form of each justification is in the
+# block above. The separator is `%` and NOT `|`: the first draft used `|`, and the
+# unquoted expansion made the shell read every entry as a PIPELINE —
+# `syntax error near unexpected token '|'`. Caught by running the target, not by
+# reading it. Entries are restricted to [A-Za-z0-9_./%:=,+-] and the gate REJECTS
+# an entry containing anything else rather than mis-parsing it, so the next editor
+# who reaches for a space or a quote gets a clear failure instead of silence.
+#
+# Each entry is ALSO single-quoted here, and that is load-bearing rather than
+# decorative. Without the quotes the charset guard was unreachable for exactly the
+# characters that matter: make pastes this list into shell source text, so an
+# entry containing `;` aborted the whole recipe with a raw bash syntax error
+# BEFORE the guard could run. Fail-closed either way, but a bash parse dump is not
+# a diagnostic. Measured: with quotes, the same probe now reports
+# `FAIL: baseline entries outside the safe charset: scripts/bad;rm%lint%0%probe`.
+#
+# A THIRD false positive, found by running this gate against its own change and
+# recorded rather than tidied away: bashrs reads the `check_apr_bin_pinned.sh`
+# DATA line below as a command and raises MAKE003 "Unquoted variable in command"
+# on the `$(BASHRS_GUARD_PINNED_BASELINE)` inside it. It is a variable-assignment
+# continuation, not a command, and there is nothing to quote. It is
+# warning-severity, so it does not move any baseline — but it is why the Makefile
+# warning count went 33 -> 34 in this commit, and an unexplained +1 in a lint
+# tally is exactly the kind of thing that gets a gate distrusted.
+# ─── THE PROSE DISCRIMINATOR, and why the baseline alone was not enough ──────
+#
+# The first version of this gate baselined the Makefile at 1 error-severity
+# finding, carrying the SC2168 false positive as a justified entry. Running the
+# must-not-match row from CLAUDE.md rule 7's case table REFUTED that design:
+# appending one new ordinary help line —
+#
+#     04-22-probe-help-string: ## Run the local smoke suite against a local endpoint
+#
+# — raised a SECOND SC2168, took the count 1 -> 2, and turned the gate RED on
+# correct prose. A blocking tier3 gate that goes red when someone writes the word
+# "local" in help text is precisely the liability this plan set out NOT to build;
+# it would be disabled within a week, and the real gates beside it with it.
+#
+# So SC2168 findings that land on HELP TEXT are discriminated out instead of
+# baselined. The rule is positional, not a name-based suppression:
+#
+#   skip iff  rule is SC2168
+#       AND   the source line does NOT begin with a TAB (recipe lines always do,
+#             target/help lines never do)
+#       AND   the line contains `##`
+#       AND   the flagged start column falls AFTER that `##`
+#
+# WHY NOT JUST SUPPRESS SC2168. Because it catches a REAL defect, measured: a
+# recipe body `@local probe=1; echo "$$probe"` produced SC2168 at 2699:3-9 AND
+# `/bin/bash: line 0: local: can only be used in a function` when actually run.
+# Blanket-suppressing the rule would have let that through. The discriminator
+# keeps the true positive and drops the false one — which is the whole difference
+# between a gate and a mute button.
+#
+# ITS CASE TABLE, RUN rather than written (CLAUDE.md rule 7). Full transcripts in
+# 04-22-SUMMARY.md:
+#   COUNTED     `@local probe=1` in a recipe body (TAB-led, no `##`)      -> gate RED
+#   NOT COUNTED SC2168 on `dev-setup: ## Set up local dev environment ...` -> gate green
+#   NOT COUNTED a NEW `... ## Run the local smoke suite ...` help line     -> gate green
+# With the discriminator the Makefile's counted baseline is therefore 0, not 1.
+# SC2168 is still PRESENT and still PRINTED in the log — it is classified, not
+# hidden, and `bashrs-lint-makefile` prints every raw error line before counting.
+#
+# THE SECOND DISCRIMINATOR, for the SC1078 false positive, on the same principle
+# and with the same discipline: an SC1078 ("did you forget to close this
+# double-quoted string?") is DISCOUNTED for a file whose own `bash -n` exits 0.
+# The authority on whether a bash script's quotes are balanced is bash. The
+# control is per-file and re-run every time the gate runs, so it cannot go stale,
+# and it is NOT a blanket rule suppression:
+#
+#   COUNTED     an unterminated quote appended to a guard -> bash -n rc=2 -> RED
+#   NOT COUNTED the ABS_APR idiom at check_apr_bin_pinned.sh:72 -> bash -n rc=0
+#
+# That pairing is the whole justification. A control that never fires would prove
+# nothing, and this one demonstrably fires on a real defect in the same file.
+# It is deliberately narrowed to SC1078 rather than all SC10xx parse-class rules:
+# a wider discount would start excusing findings whose control was never measured.
+#
+# KNOWN LIMITATIONS, stated rather than discovered later. (1) A recipe line that
+# puts a literal `##` inside a string before a genuine `local` would be
+# under-counted; no such line exists here, and recipe lines are excluded by the
+# TAB test anyway. (2) `bash -n` proves syntax, not intent, so an SC1078 marking a
+# quote that parses but nests differently than the author meant would be
+# discounted; the ABS_APR regex is protected instead by the 12-case must-match /
+# must-not-match table its own comment block demands be re-run on every change.
+#
+# Prints "<counted> <discriminated>". $(2) is the source file, or NONE to disable
+# the help-comment discriminator (shell scripts have no `##` help convention).
+# $(3) is the file's `bash -n` exit code, or NONE when it was not applicable.
+# TWO make-level traps here, both found by RUNNING this, not by reading it:
+#   (1) It is ONE physical line on purpose. `$(call)` of a multi-line `define`
+#       injects real newlines, which terminate the `\`-continued shell line these
+#       recipes are built from — `unexpected EOF while looking for matching '`.
+#   (2) It contains NO literal hash character. A `#` inside a make variable
+#       assignment starts a COMMENT, so the obvious `index(l, "##")` silently
+#       truncated this whole program mid-string and produced the identical
+#       unexpected-EOF error. The two hashes are built as `sprintf("%c%c",35,35)`.
+bashrs_count_errors = awk -v src="$(2)" -v bashn="$(3)" 'BEGIN { if (src != "NONE") { n = 0; while ((getline l < src) > 0) { n++; srcline[n] = l } } } /\[error\]/ { lineno = 0; colstart = 0; rule = ""; if (match($$0, /[0-9]+:[0-9]+-[0-9]+/)) { loc = substr($$0, RSTART, RLENGTH); split(loc, p, ":"); lineno = p[1] + 0; split(p[2], c, "-"); colstart = c[1] + 0 } if (match($$0, /\[error\] [A-Z]+[0-9]+/)) { rule = substr($$0, RSTART + 8, RLENGTH - 8) } if (src != "NONE" && rule == "SC2168" && (lineno in srcline)) { l = srcline[lineno]; if (substr(l, 1, 1) != "\t") { h = index(l, sprintf("%c%c", 35, 35)); if (h > 0 && colstart > h) { skipped++; next } } } if (rule == "SC1078" && bashn == "0") { skipped++; next } counted++ } END { printf "%d %d\n", counted + 0, skipped + 0 }' $(1)
+
+BASHRS_MAKEFILE_BASELINE = 0
+BASHRS_GUARD_PINNED_BASELINE = 0
+BASHRS_SCOPED_BASELINE = \
+	'Makefile%make%$(BASHRS_MAKEFILE_BASELINE)%the_only_error-severity_finding_is_SC2168_on_the_dev-setup_help_comment,_which_the_prose_discriminator_above_classifies_out._CONTROL:_make_-n_dev-setup_rc=0_and_the_expanded_recipe_contains_ZERO_shell_local' \
+	'scripts/apr_bin.sh%lint%0%zero_error-severity_findings_at_baseline_time._CONTROL:_bash_-n_rc=0' \
+	'scripts/check_apr_bin_pinned.sh%lint%$(BASHRS_GUARD_PINNED_BASELINE)%its_only_error-severity_finding_is_SC1078_at_line_72_on_the_single-quote_escape_idiom_inside_the_ABS_APR_regex,_which_the_bash_-n_discriminator_above_discounts._CONTROL:_bash_-n_rc=0,_and_the_SAME_control_returns_rc=2_on_a_genuinely_unterminated_quote' \
+	'scripts/check_sourced_libs_option_neutral.sh%lint%0%zero_error-severity_findings_at_baseline_time._CONTROL:_bash_-n_rc=0'
+
+bashrs-lint-makefile: ## F-07: lint the Makefile with bashrs and REPORT THE REAL STATUS (BLOCKING, wired into tier3)
+	@echo "Linting Makefile with bashrs (baseline $(BASHRS_MAKEFILE_BASELINE) error-severity)..."
+	@if ! command -v bashrs >/dev/null 2>&1; then \
+		echo "FAIL: bashrs is not installed, so this check DID NOT RUN."; \
+		echo "A check that did not run is never reported as passing (F-07)."; \
+		echo "Install with: cargo install bashrs"; \
+		exit 1; \
+	fi
+	@mkdir -p target
+	@set +e; bashrs make lint Makefile > target/bashrs-makefile.log 2>&1; rc=$$?; \
+	set -e; \
+	esc=$$(printf '\033'); \
+	sed "s/$$esc\[[0-9;]*m//g" target/bashrs-makefile.log > target/bashrs-makefile.plain.log; \
+	grep -E '\[error\]' target/bashrs-makefile.plain.log || true; \
+	grep -E '^Summary:' target/bashrs-makefile.plain.log || true; \
+	echo "  warning-severity breakdown (deferred with stated reasons in D-04-22-A,"; \
+	echo "  NOT silently tolerated -- MAKE012 is an architectural observation about"; \
+	echo "  the whole file, and MAKE010 largely flags the advisory '|| echo' idiom):"; \
+	grep -oE '\[warning\] [A-Z]+[0-9]+' target/bashrs-makefile.plain.log \
+		| sort | uniq -c | sort -rn | sed 's/^/    /' || true; \
+	echo "  full report: target/bashrs-makefile.log"; \
+	if grep -q '^Summary:' target/bashrs-makefile.plain.log \
+		|| grep -q 'No issues found' target/bashrs-makefile.plain.log; then \
+		pair=$$($(call bashrs_count_errors,target/bashrs-makefile.plain.log,Makefile,NONE)); \
+	else \
+		pair=""; \
+	fi; \
+	if [ -z "$$pair" ]; then \
+		echo "FAIL: bashrs produced no parseable report (rc=$$rc)."; \
+		echo "rc alone cannot be trusted: rc=2 means BOTH 'one error-severity finding'"; \
+		echo "AND 'the specified file was not found'. See target/bashrs-makefile.log."; \
+		exit 1; \
+	fi; \
+	errs=$${pair%% *}; prose=$${pair##* }; \
+	if [ "$$errs" -gt "$(BASHRS_MAKEFILE_BASELINE)" ]; then \
+		echo "FAIL: $$errs counted error-severity finding(s), baseline is $(BASHRS_MAKEFILE_BASELINE) (bashrs rc=$$rc)."; \
+		echo "Fix the NEW finding. Do not raise the baseline to absorb it, and do not"; \
+		echo "reword correct code to satisfy the linter. If the new finding is SC2168 on"; \
+		echo "a ## help comment it would have been discriminated out automatically, so a"; \
+		echo "COUNTED finding here is one the prose discriminator did not excuse."; \
+		exit 1; \
+	fi; \
+	echo "bashrs-lint-makefile: $$errs counted error-severity finding(s) (baseline $(BASHRS_MAKEFILE_BASELINE)), $$prose discriminated as control-refuted false positive(s), bashrs rc=$$rc"
+
+# The SCOPED gate. Its scope is the whole point, and it is not zero-errors.
+#
+# WHY NOT THE WHOLE CORPUS. Measured at 9ae41fcaa, one file at a time so no
+# failure masks another: 59 scripts, 51 exit non-zero, 22 of them carrying at
+# least one error-severity finding (106 across the corpus). Wiring `lint-scripts`
+# into a blocking tier would make tier3 permanently red, and a permanently red
+# gate stops being run — it gets commented out, and the real gates beside it go
+# with it. That is the Ph1 D-26 failure mode this phase has now cited three times.
+# The backlog is not ignored: it is measured, triaged by fix-shape and given an
+# owner in D-04-22-A. `lint-scripts` above stays UNWIRED and honest.
+#
+# WHY THESE FOUR FILES. They are the surface this phase's own verification rests
+# on: the Makefile that defines every Phase 4 gate, and the three scripts CLAUDE.md
+# makes load-bearing for every `apr` invocation — apr_bin.sh (sourced, so it must
+# stay option-neutral), its guard check_apr_bin_pinned.sh, and the guard that
+# enforces the option-neutrality. A guard that does not scan the surface where the
+# DECISION is made is theater (CLAUDE.md rule 5).
+#
+# IT DETECTS REGRESSION; IT DOES NOT ASSERT CLEANLINESS. Read the baseline block
+# above before changing a number in it.
+bashrs-scoped-lint: ## F-07: baseline-non-increase bashrs gate over the Makefile + the three apr-pinning guards (BLOCKING, wired into tier3)
+	@echo "bashrs scoped gate: Makefile + the three apr-pinning guard scripts"
+	@if ! command -v bashrs >/dev/null 2>&1; then \
+		echo "FAIL: bashrs is not installed, so this gate DID NOT RUN."; \
+		echo "A check that did not run is never reported as passing (F-07)."; \
+		echo "Install with: cargo install bashrs"; \
+		exit 1; \
+	fi
+	@mkdir -p target
+	@esc=$$(printf '\033'); \
+	examined=0; over=""; unjustified=""; unparseable=""; \
+	malformed=""; \
+	for entry in $(BASHRS_SCOPED_BASELINE); do \
+		case "$$entry" in \
+			*[!A-Za-z0-9_./%:=,+-]*) malformed="$$malformed $$entry"; continue ;; \
+			*) ;; \
+		esac; \
+		path=$$(printf '%s' "$$entry" | cut -d'%' -f1); \
+		mode=$$(printf '%s' "$$entry" | cut -d'%' -f2); \
+		base=$$(printf '%s' "$$entry" | cut -d'%' -f3); \
+		why=$$(printf '%s' "$$entry" | cut -d'%' -f4); \
+		if [ -z "$$why" ]; then \
+			unjustified="$$unjustified $$path"; \
+			continue; \
+		fi; \
+		log=target/bashrs-scoped-$$(printf '%s' "$$path" | tr '/.' '__').log; \
+		set +e; \
+		if [ "$$mode" = "make" ]; then \
+			bashrs make lint "$$path" > "$$log" 2>&1; rc=$$?; src="$$path"; bashn=NONE; \
+		else \
+			bashrs lint "$$path" > "$$log" 2>&1; rc=$$?; src=NONE; \
+			bash -n "$$path" > "$$log.bashn" 2>&1; bashn=$$?; \
+		fi; \
+		set -e; \
+		sed "s/$$esc\[[0-9;]*m//g" "$$log" > "$$log.plain"; \
+		if grep -q '^Summary:' "$$log.plain" || grep -q 'No issues found' "$$log.plain"; then \
+			pair=$$($(call bashrs_count_errors,"$$log.plain",$$src,$$bashn)); \
+		else \
+			pair=""; \
+		fi; \
+		if [ -z "$$pair" ]; then \
+			unparseable="$$unparseable $$path(rc=$$rc)"; \
+			continue; \
+		fi; \
+		errs=$${pair%% *}; prose=$${pair##* }; \
+		examined=$$((examined + 1)); \
+		echo "  examined $$path: $$errs counted error-severity (baseline $$base), $$prose discriminated as control-refuted false positive(s), bashrs rc=$$rc"; \
+		if [ "$$errs" -gt "$$base" ]; then \
+			over="$$over $$path($$errs>$$base)"; \
+		fi; \
+	done; \
+	if [ -n "$$malformed" ]; then \
+		echo "FAIL: baseline entries outside the safe charset:$$malformed"; \
+		echo "An entry must match [A-Za-z0-9_./%:=,+-] and use _ for spaces. Anything"; \
+		echo "else is REJECTED rather than mis-parsed -- an unquoted | in an earlier"; \
+		echo "draft made the shell read each entry as a pipeline."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$unjustified" ]; then \
+		echo "FAIL: baseline entries carrying no justification:$$unjustified"; \
+		echo "Every entry must name the independent shell-semantic control that refuted"; \
+		echo "the finding it carries -- a bash -n exit code, or the read showing the flag"; \
+		echo "lands on prose. Without that rule this baseline decays into a silent"; \
+		echo "suppression list, which is a slower version of the defect this gate replaced."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$unparseable" ]; then \
+		echo "FAIL: bashrs produced no parseable report for:$$unparseable"; \
+		echo "rc alone cannot be trusted: MEASURED, bashrs make lint returns rc=2 BOTH for"; \
+		echo "one error-severity finding AND for a file that does not exist. A check that"; \
+		echo "did not run is never reported as passing (F-07)."; \
+		exit 1; \
+	fi; \
+	if [ "$$examined" -eq 0 ]; then \
+		echo "FAIL: this gate examined NOTHING and was about to report success."; \
+		echo "BASHRS_SCOPED_BASELINE is empty, or every entry was skipped. A gate whose"; \
+		echo "file list stops matching must go RED, not green (contract-audit-phase4 above"; \
+		echo "carries the same guard for the same reason)."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$over" ]; then \
+		echo "FAIL: error-severity findings ROSE above baseline in:$$over"; \
+		echo "This gate detects REGRESSION; it does not assert cleanliness. Fix the NEW"; \
+		echo "finding. Do not raise the baseline to absorb it, and do not reword correct"; \
+		echo "code to satisfy the linter. The two known bashrs false positives here are"; \
+		echo "already DISCRIMINATED OUT by their own controls, so a COUNTED finding is one"; \
+		echo "neither control excused -- treat it as real until a control says otherwise."; \
+		exit 1; \
+	fi; \
+	echo "bashrs-scoped-lint: $$examined file(s) examined, none above its baseline"
 
 # Run CI pipeline
 run-ci: ## Run full CI pipeline
@@ -1915,7 +2273,7 @@ gemm-thread-determinism: ## D-13/TRN-06: Tensor::matmul does not depend on the r
 #     (second leg)             cli   setfit_train --ignored   1 / 0         1
 #   setfit-cli-predict-tests   cli   predict                 34 / 0        30
 #   setfit-cli-inspect-tests   cli   inspect                120 / 0       110
-#   setfit-cli-eval-tests      cli   eval::setfit            15 / 0        13
+#   setfit-cli-eval-tests      cli   eval::setfit            20 / 0        18
 #   setfit-cli-io-tests        cli   setfit_io                5 / 0         5
 #   setfit-serve-tests         serve setfit                  11 / 0        10
 #   setfit-parity              cli   --test setfit_parity    20 / 0        18
@@ -2137,6 +2495,16 @@ setfit-cli-inspect-tests: ## OPS-02: apr-cli inspect
 	if [ $$rc -ne 0 ]; then echo "FAIL: setfit-cli-inspect-tests is red (rc=$$rc); see target/setfit-cli-inspect-tests.log"; exit $$rc; fi
 	@$(call assert_tests_ran,target/setfit-cli-inspect-tests.log,110,setfit-cli-inspect-tests)
 
+# FLOOR RE-MEASURED IN WAVE 12, which is the first point at which the number was
+# stable. It read 13 against a measured 15 for most of Phase 4; 04-20 then added
+# four tests to `eval::setfit` in wave 11, so the row was stale by SEVEN. 04-21
+# owned the Makefile that wave and deliberately did not touch this line, because
+# 04-20 was its same-wave sibling and any value written would have been wrong on
+# contact. Measured here AFTER 04-20 landed:
+#   rtk proxy cargo test -p apr-cli --features setfit --lib eval::setfit
+#   -> rc=0, "test result: ok. 20 passed; 0 failed; 6764 filtered out"
+# 13 -> 18, matching the ~90% convention every other row in the table above uses
+# (and exactly the 20/18 pair `setfit-parity` already carries).
 setfit-cli-eval-tests: ## OPS-02: apr-cli eval::setfit
 	@echo "Phase 4: apr-cli eval::setfit suite"
 	@mkdir -p target
@@ -2145,7 +2513,7 @@ setfit-cli-eval-tests: ## OPS-02: apr-cli eval::setfit
 	set -e; \
 	tail -3 target/setfit-cli-eval-tests.log; \
 	if [ $$rc -ne 0 ]; then echo "FAIL: setfit-cli-eval-tests is red (rc=$$rc); see target/setfit-cli-eval-tests.log"; exit $$rc; fi
-	@$(call assert_tests_ran,target/setfit-cli-eval-tests.log,13,setfit-cli-eval-tests)
+	@$(call assert_tests_ran,target/setfit-cli-eval-tests.log,18,setfit-cli-eval-tests)
 
 setfit-cli-io-tests: ## OPS-02: apr-cli setfit_io
 	@echo "Phase 4: apr-cli setfit_io suite"
