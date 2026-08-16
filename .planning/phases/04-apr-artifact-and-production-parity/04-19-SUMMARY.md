@@ -238,6 +238,14 @@ Stated plainly, per the plan's success criteria:
 
 Phase 4's binding registry is internally consistent: no row names a symbol that does not exist, no header claim contradicts the rows beneath it, and the one row that was unfalsifiable now has a guard that fails four different ways. `make contract-audit-phase4` is green and blocking in tier3. The produced-artifact parity work (F-10) is the gating item for OPS-04 / OPS-06 / SAFE-01 and carries into Phase 5.
 
+## Self-Check: PASSED
+
+- Files exist: `04-19-SUMMARY.md`, `crates/aprender-core/src/setfit/classify.rs`, `contracts/aprender/binding.yaml`.
+- Commits exist: `daf6ce868` (test), `b94c5a2d4` (fix), `9d8cd054a` (docs).
+- Each commit is single-file, verified by `git show --stat`.
+- `.planning/STATE.md` and `.planning/ROADMAP.md` untouched — zero occurrences in this plan's commit range, clean working tree. The orchestrator owns those writes.
+- No file deletions in any commit.
+
 ---
 *Phase: 04-apr-artifact-and-production-parity*
 *Completed: 2026-08-16*
