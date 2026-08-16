@@ -84,9 +84,17 @@ pub(crate) struct SetFitTag {
 /// # Errors
 ///
 /// [`CliError::FileNotFound`] for an absent path, [`CliError::NotAFile`] for a
-/// directory or other non-regular file, [`CliError::InvalidFormat`] when the
-/// metadata block the header declares does not fit inside the file, and
-/// [`CliError::Io`] for a read failure.
+/// directory or other non-regular file, and [`CliError::Io`] for a read failure.
+///
+/// [`CliError::InvalidFormat`] for EITHER of two distinct metadata malformations,
+/// which carry distinct messages because they are different facts about the
+/// container and a reader must not have to guess which one fired:
+///
+/// 1. the block the header declares does not fit inside the file; or
+/// 2. it fits, but exceeds [`MAX_TAG_METADATA_BYTES`] — the identification cap. This
+///    case is deliberately NOT `Ok(None)`: falling through would report a container
+///    this function could not identify as one it positively identified as "not
+///    SetFit", which is a claim it has no evidence for (WR-08).
 pub(crate) fn read_setfit_tag(path: &Path) -> Result<Option<SetFitTag>, CliError> {
     let metadata = fs::metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -140,11 +148,35 @@ pub(crate) fn read_setfit_tag(path: &Path) -> Result<Option<SetFitTag>, CliError
     //      whose metadata block declares 20 MiB passes (2) and would otherwise be read in
     //      full just to answer one yes/no question. `setfit-apr-v1` cannot need this much:
     //      the tokenizer bytes and every tensor live in the container's DATA section, never
-    //      in metadata. Over the cap is `None` ("I cannot cheaply identify this as SetFit"),
-    //      NOT an error — the caller falls through to the pre-existing APR path, which has
-    //      its own and better diagnosis for an unusual container.
+    //      in metadata.
+    //
+    //      Over the cap is an ERROR, not `Ok(None)`. It used to be `Ok(None)`, justified by
+    //      "the caller falls through to the pre-existing APR path, which has its own and
+    //      better diagnosis". MEASURED, that sentence was true of `apr serve` ONLY:
+    //
+    //        * `apr predict` has no plain-APR path, so it answered "not a SetFit
+    //          classifier … run `apr inspect`" for a file that DOES carry the tag, and
+    //          `apr inspect` then rendered the full APR-05 section for the same bytes —
+    //          the refusal's own text routed the operator into the contradiction;
+    //        * `apr eval --task classify` refused its SetFit-only flags with "does not
+    //          carry the SetFit tag", which is false of such a file.
+    //
+    //      One `Ok(None)` therefore produced three statements about one file, two of them
+    //      untrue (WR-08). `apr serve` KEEPS its fall-through: `serve/handlers.rs:774`
+    //      calls this through `.ok().flatten()`, so an `Err` here still lands on the
+    //      plain-APR path exactly as before, deliberately and documented as such. The
+    //      other two consumers already `?`-propagate, so they now carry a true statement
+    //      with no edit of their own.
+    //
+    //      The message says NOTHING about whether this is a SetFit artifact: the block
+    //      has not been read, so at this point that fact is genuinely unknown.
     if declared > MAX_TAG_METADATA_BYTES {
-        return Ok(None);
+        return Err(CliError::InvalidFormat(format!(
+            "{}: the metadata block declares {declared} bytes, over the \
+             {MAX_TAG_METADATA_BYTES} byte (16 MiB) cap this reader will read to identify a \
+             container. The block was NOT read, so what this file is has not been determined.",
+            path.display()
+        )));
     }
 
     // (3) THE READ, at the size the bound just approved.
@@ -226,6 +258,60 @@ pub(crate) mod test_support {
         let mut file = std::fs::File::create(&path).expect("fixture file is creatable");
         file.write_all(&bytes).expect("fixture file is writable");
         file.sync_all().expect("fixture file syncs");
+        path
+    }
+
+    /// A REAL APR v2 container whose header DECLARES a metadata block over the cap.
+    ///
+    /// Only the 4-byte `metadata_size` field is rewritten. The DECLARED value is the
+    /// whole subject, so the block does not have to actually be that large — and
+    /// making it so would put a 16 MiB write into every `cargo test` for no extra
+    /// evidence, since nothing ever reads past the refusal.
+    ///
+    /// The offsets are `AprV2Header::from_bytes`' own — `metadata_offset` a LE `u64`
+    /// at 12..20 and `metadata_size` a LE `u32` at 20..24 — CONFIRMED by reading
+    /// `apr-format/src/v2/header_impl.rs`, not taken on trust from a plan.
+    ///
+    /// The file is then EXTENDED past `metadata_offset + declared` so the pre-existing
+    /// "runs past the end of its own file" check cannot fire first. That ORDER is what
+    /// keeps the two malformations distinguishable, and a fixture that tripped the
+    /// earlier check would prove nothing about the cap. `set_len` is sparse, so the
+    /// extension is instant and costs no disk.
+    pub(crate) fn write_over_cap_apr(
+        dir: &Path,
+        name: &str,
+        model_type: &str,
+        declared: u64,
+    ) -> PathBuf {
+        let path = write_setfit_shaped_apr(
+            dir,
+            name,
+            model_type,
+            Some(r#"{"schema":"setfit-apr-v1","schema_version":1}"#),
+        );
+        let mut bytes = std::fs::read(&path).expect("the honest fixture is readable");
+        let metadata_offset = u64::from_le_bytes(
+            bytes
+                .get(12..20)
+                .and_then(|slice| <[u8; 8]>::try_from(slice).ok())
+                .expect("an APR v2 header is 64 bytes, so 12..20 is in range"),
+        );
+        let encoded = u32::try_from(declared)
+            .expect("a declared size under test must fit the u32 header field")
+            .to_le_bytes();
+        bytes
+            .get_mut(20..24)
+            .expect("an APR v2 header is 64 bytes, so 20..24 is in range")
+            .copy_from_slice(&encoded);
+        std::fs::write(&path, &bytes).expect("the patched fixture is writable");
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("the patched fixture reopens for extension");
+        file.set_len(metadata_offset.saturating_add(declared).saturating_add(1))
+            .expect("sparse extension needs no zero buffer");
+        file.sync_all().expect("the extended fixture syncs");
         path
     }
 }

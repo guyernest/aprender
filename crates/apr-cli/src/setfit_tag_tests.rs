@@ -1,6 +1,6 @@
 //! Tests for the typed-tag detector (D-04's negative, stated as tests).
 
-use super::test_support::write_setfit_shaped_apr;
+use super::test_support::{write_over_cap_apr, write_setfit_shaped_apr};
 use super::*;
 use tempfile::TempDir;
 
@@ -139,6 +139,154 @@ fn setfit_tag_refuses_a_metadata_block_longer_than_its_own_file() {
     assert!(
         rendered.contains(&truncated_len.to_string()),
         "the refusal must name the file length that bounds it; got: {rendered}"
+    );
+}
+
+// ===========================================================================
+// WR-08: an over-cap block is a TYPED REFUSAL, not a fail-open `Ok(None)`
+// ===========================================================================
+
+/// The over-cap arm is `Err`, and the message names the declared size and the cap.
+///
+/// Measured at HEAD `81652bb50`, this returned `Ok(None)`. That single value made
+/// `apr predict` tell an operator a genuinely tagged classifier "is not a SetFit
+/// classifier … run `apr inspect`", and `apr inspect` then rendered the full APR-05
+/// section for the same bytes. The fail-open was the contradiction's source.
+#[test]
+fn setfit_tag_refuses_an_over_cap_metadata_block_by_name() {
+    let temp = TempDir::new().expect("tempdir");
+    let declared = MAX_TAG_METADATA_BYTES + 1;
+    let path = write_over_cap_apr(
+        temp.path(),
+        "over-cap-tagged.apr",
+        SETFIT_MODEL_TYPE,
+        declared,
+    );
+
+    let error = read_setfit_tag(&path)
+        .expect_err("a block over the identification cap must be a typed refusal");
+    assert!(
+        matches!(error, CliError::InvalidFormat(_)),
+        "an over-cap block is a format refusal (exit 4); got: {error}"
+    );
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(&declared.to_string()),
+        "the refusal must name the DECLARED size so the operator can see what the file \
+         asked for; got: {rendered}"
+    );
+    assert!(
+        rendered.contains("16 MiB"),
+        "the refusal must name the cap in the units an operator reads; got: {rendered}"
+    );
+}
+
+/// The refusal is about the BLOCK, not about the tag.
+///
+/// `read_setfit_tag` cannot know the tag without reading the block, so a container
+/// tagged `qwen2` earns exactly the same refusal. A message that mentioned SetFit
+/// either way would be asserting something this code has no evidence for — which is
+/// the precise defect WR-08 names, re-introduced one layer down.
+#[test]
+fn setfit_tag_refuses_an_over_cap_block_whatever_the_tag_says() {
+    let temp = TempDir::new().expect("tempdir");
+    let declared = MAX_TAG_METADATA_BYTES + 1;
+    let path = write_over_cap_apr(temp.path(), "over-cap-qwen.apr", "qwen2", declared);
+
+    let error = read_setfit_tag(&path).expect_err("the block is over the cap whatever it says");
+    assert!(
+        matches!(error, CliError::InvalidFormat(_)),
+        "an over-cap block is a format refusal (exit 4); got: {error}"
+    );
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("16 MiB"),
+        "the same cap refusal must arrive for an untagged container; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("SetFit") && !rendered.contains("setfit-apr-v1"),
+        "the refusal must say NOTHING about whether this is a SetFit artifact — the \
+         block was never read, so that fact is unknown here; got: {rendered}"
+    );
+}
+
+/// NON-VACUITY. The new `Err` must not swallow the two ordinary dispositions.
+///
+/// An arm that refused everything would satisfy both tests above and break every
+/// real invocation of `apr predict`, `apr serve` and `apr eval --task classify`.
+#[test]
+fn setfit_tag_keeps_both_in_bounds_dispositions_after_the_over_cap_error() {
+    let temp = TempDir::new().expect("tempdir");
+    let tagged = write_setfit_shaped_apr(
+        temp.path(),
+        "in-bounds-tagged.apr",
+        SETFIT_MODEL_TYPE,
+        Some(r#"{"schema":"setfit-apr-v1","schema_version":1}"#),
+    );
+    let plain = write_setfit_shaped_apr(temp.path(), "in-bounds-plain.apr", "qwen2", None);
+
+    assert!(
+        read_setfit_tag(&tagged)
+            .expect("an in-bounds tagged artifact is still readable")
+            .is_some(),
+        "the tagged disposition must be unchanged"
+    );
+    assert!(
+        read_setfit_tag(&plain)
+            .expect("an in-bounds plain APR is still readable")
+            .is_none(),
+        "the plain-APR disposition must be unchanged"
+    );
+}
+
+/// TWO malformations, TWO diagnoses. Collapsing them would lose the ORDER.
+///
+/// "Longer than its own file" and "fits, but too large to identify cheaply" are
+/// different facts about a container, and the checks run in that order. A fixture
+/// that tripped the first could never prove anything about the second, so the
+/// over-cap fixture is deliberately extended past its own declared end.
+#[test]
+fn setfit_tag_keeps_the_two_metadata_malformations_distinguishable() {
+    let temp = TempDir::new().expect("tempdir");
+
+    // (a) the block runs PAST THE END of its own file.
+    let honest = write_setfit_shaped_apr(temp.path(), "honest.apr", SETFIT_MODEL_TYPE, None);
+    let bytes = std::fs::read(&honest).expect("the fixture is readable");
+    let truncated_len = HEADER_SIZE_V2 + 8;
+    assert!(
+        bytes.len() > truncated_len,
+        "the honest fixture must be longer than the truncation point"
+    );
+    let past_eof_path = temp.path().join("past-eof.apr");
+    std::fs::write(&past_eof_path, &bytes[..truncated_len]).expect("fixture is writable");
+    let past_eof = read_setfit_tag(&past_eof_path)
+        .expect_err("a block past its own EOF is malformed")
+        .to_string();
+
+    // (b) the block FITS the file but is over the identification cap.
+    let declared = MAX_TAG_METADATA_BYTES + 1;
+    let over_cap_path =
+        write_over_cap_apr(temp.path(), "over-cap.apr", SETFIT_MODEL_TYPE, declared);
+    let over_cap = read_setfit_tag(&over_cap_path)
+        .expect_err("a block over the cap is refused")
+        .to_string();
+
+    assert_ne!(
+        past_eof, over_cap,
+        "two different malformations must not collapse into one diagnosis"
+    );
+    assert!(
+        past_eof.contains(&truncated_len.to_string()),
+        "the past-EOF refusal names the FILE LENGTH that bounds it; got: {past_eof}"
+    );
+    assert!(
+        !past_eof.contains("16 MiB"),
+        "the past-EOF refusal must NOT name the cap — the cap is not what fired, and \
+         naming it would send the operator after the wrong fact; got: {past_eof}"
+    );
+    assert!(
+        over_cap.contains("16 MiB"),
+        "the over-cap refusal names the CAP; got: {over_cap}"
     );
 }
 

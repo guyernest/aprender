@@ -94,6 +94,44 @@ fn predict_judges_the_request_before_it_opens_the_model_path() {
 // Detection (D-04) at the command boundary
 // ===========================================================================
 
+/// WR-08 at the `apr predict` surface: the operator must not be told something false.
+///
+/// Measured at HEAD `81652bb50`, this exact file — a real APR v2 container carrying
+/// `model_type = "setfit"` — made `apr predict` answer "not a SetFit classifier … run
+/// `apr inspect <FILE>` to see what it actually is". It IS tagged. `predict` simply
+/// could not read the block, and the fail-open turned "I could not tell" into a
+/// confident denial that then routed the operator to a tool which rendered the full
+/// APR-05 section for the same bytes.
+///
+/// BOTH directions are asserted in one test on purpose: an implementation that
+/// merely appended the cap text to the old denial would satisfy the positive half
+/// alone while leaving the false statement in place.
+#[test]
+fn predict_surfaces_the_cap_refusal_instead_of_denying_the_tag() {
+    let temp = TempDir::new().expect("tempdir");
+    let declared = crate::setfit_tag::MAX_TAG_METADATA_BYTES + 1;
+    let path = crate::setfit_tag::test_support::write_over_cap_apr(
+        temp.path(),
+        "over-cap.apr",
+        crate::setfit_tag::SETFIT_MODEL_TYPE,
+        declared,
+    );
+
+    let error = run(&path, &["hello".to_string()], None, false, true)
+        .expect_err("a metadata block that cannot be read cannot be classified");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("16 MiB"),
+        "predict must surface the CAP that fired, so the operator learns what to fix; \
+         got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("not a SetFit classifier"),
+        "predict must NOT deny the tag it never read — that is the false statement \
+         WR-08 names; got: {rendered}"
+    );
+}
+
 #[test]
 fn predict_refuses_a_setfit_shaped_but_untagged_apr() {
     let temp = TempDir::new().expect("tempdir");
