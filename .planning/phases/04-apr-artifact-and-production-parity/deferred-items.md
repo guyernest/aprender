@@ -193,3 +193,82 @@ imports, not on setfit. Once green, add the two missing RUN cells to `setfit-fea
 beside the profile-(c) leg. Do NOT wire the whole-crate `-p aprender-serve --lib` suite in the
 process — that is a separate standing red (D-04-08-A, 51 failures from one overflow at
 `contract_gate.rs:428`).
+
+---
+
+## D-04-11-A — two PRODUCTION mutation survivors in `api/setfit_handlers.rs`, one of them surprising
+
+**Found by:** plan 04-11's mutation gate. `crates/aprender-serve/src/api/setfit_handlers.rs` is
+04-08's file, not 04-11's, so neither survivor was fixed here.
+
+Invocation (note the two corrections — see 04-11-SUMMARY deviations 4 and 5):
+
+```
+cargo mutants --no-times --timeout 180 --package aprender-serve \
+  --features setfit --cargo-arg=--lib \
+  -f crates/aprender-serve/src/api/setfit_handlers.rs -- setfit
+```
+
+Baseline `ok`. The run was INTERRUPTED at ~68 min before finishing all 101 mutants, so there is
+**no score** — but the survivors it did report are real and are recorded here rather than lost.
+
+**Nine survivors reported; SEVEN are proven-equivalent by construction** — they mutate code inside
+the file's own `#[cfg(test)]` module (five `tests::<fn> -> ()` and two in `fixture::Filler::next`).
+A test suite cannot detect the deletion or alteration of one of its own tests, so these are not
+coverage gaps. This is the F-05 self-scan class at the mutation tier: a `-f <file>` glob mutates
+the file's tests along with its production code, and those survivors must be triaged out rather
+than counted against the score.
+
+**The two that matter:**
+
+| # | Mutation | Source | Assessment |
+|---|----------|--------|------------|
+| A | `replace AppState::has_setfit_model -> bool with false` | `:70-72`, body is `self.setfit_model.is_some()` | **Real gap.** Under the `setfit`-filtered suite — the same filter `make setfit-serve-tests` uses — nothing pins this returning `true`. A readiness path that always reported "no classifier resident" would pass. |
+| B | `replace > with == in setfit_classify_handler` | `:158`, `if request.texts.len() > MAX_BATCH_TEXTS` | **Real, and it should not have survived.** A co-located test is *named* `setfit_classify_refuses_a_batch_one_over_the_contract_bound`, i.e. `len == MAX+1` — the exact input that distinguishes `>` from `==`. Either that test does not exercise the branch its name claims, or it is not reached under this filter. **Not diagnosed here; one failing input is an anecdote (CLAUDE.md rule 6).** |
+
+B is the more valuable finding and is precisely what mutation testing is for: a test whose NAME
+asserts boundary coverage, beside a boundary mutant that lives. That is "labelling by intent"
+(CLAUDE.md rule 2) one level down — at the test name rather than at the run.
+
+**Action for the owner of `api/setfit_handlers.rs` (04-08's surface, or Phase 5):**
+1. Re-run B's mutant alone and read why the named test does not kill it.
+2. Add an assertion pinning `has_setfit_model() == true` on a state that has a resident model.
+3. When re-running, exclude `#[cfg(test)]` functions from the mutation set so the score is not
+   diluted by seven survivors that are equivalent by construction.
+
+---
+
+## D-04-11-B — the full mutation gate does not fit a single session: MEASURED projection
+
+**Found by:** plan 04-11, which was asked to run a scoped mutation gate over all four crates.
+
+Denominators, enumerated with `cargo mutants --list` (not estimated):
+
+| Crate | Files | Mutants |
+| ----- | ----- | ------- |
+| aprender-core | `setfit/artifact.rs` (311), `setfit/classify.rs` (69) | 380 |
+| aprender-train | `bundle.rs` (188), `lock.rs` (81), `config.rs` (63), `apr_reload.rs` (14), `apr_codec.rs` (12) | 358 |
+| aprender-serve | `api/setfit_handlers.rs` | 101 |
+| apr-cli | `setfit_train.rs` (25), `predict.rs` (20), `setfit_io.rs` (6) | 51 |
+| **total** | | **890** |
+
+Two timing measurements on the SMALLEST crate:
+
+- `--shard 1/25` (4 mutants + baseline): **453 s**, 4/4 caught.
+- full 101 mutants: **interrupted at 4,094 s (68 min) without finishing**.
+
+From the second: the average cost per mutant, baseline included, is **> 40.5 s** — a lower bound,
+since the run had not completed. `aprender-core` and `aprender-train` carry far heavier builds and
+test suites than `aprender-serve`, so their per-mutant cost is strictly worse.
+
+**Projection: ≥ 10 hours of wall clock for all 890 mutants**, ≥ 8.9 h for the 789 not yet
+attempted, plus four baselines. That is beyond a single execution session, and the run that was
+attempted was killed rather than completing.
+
+**Reported and stopped rather than shrinking scope silently**, per the plan's own instruction and
+the Phase 3 compute-budget precedent. **Recommendations for whoever runs it:**
+1. Run it as a scheduled/nightly job per crate, not inside a plan execution.
+2. Pass `--features` / `--cargo-arg`, never `-- --features` (deviation 4) — otherwise the whole
+   run happens with `setfit` compiled out.
+3. Pass `--cargo-arg=--lib` (deviation 5) or the baseline cannot build on `aprender-serve`.
+4. Exclude `#[cfg(test)]` functions, or ~7 of every 9 survivors will be equivalent by construction.
