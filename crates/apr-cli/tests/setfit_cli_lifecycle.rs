@@ -1013,6 +1013,190 @@ fn setfit_cli_lifecycle_trn_07_the_test_split_gate_holds_across_processes() {
 }
 
 // ==========================================================================================
+// Test 2b — WR-10 across a PROCESS boundary: the no-clobber gate precedes the work
+// ==========================================================================================
+
+#[test]
+#[ignore = "integration weight: spawns the shipped binary three times. It is selected by the \
+            SAME `-- --ignored lifecycle` filter `make setfit-cli-lifecycle` drives (verified \
+            by reading the recipe, not assumed), and that gate's `assert_tests_ran` floor of 2 \
+            is a MINIMUM, so this case is covered without touching the Makefile"]
+fn setfit_cli_lifecycle_wr_10_the_lock_refusal_precedes_the_corpus_read() {
+    // ------------------------------------------------------------------------------
+    // WHY THIS IS A SPAWNED TEST AND NOT A SHELL PROBE
+    //
+    // The obvious way to check this by hand — run the pinned binary against some `*.apr` in
+    // the repo with an occupied `--lock-out` — CANNOT REACH the code under test, and that was
+    // measured rather than guessed. `dispatch_analysis.rs:759` reads the SetFit tag BEFORE
+    // `commands::eval::setfit::run` is called, so an UNTAGGED artifact is refused at the flag
+    // table (`:787`) with "--lock-out applies only to a setfit-apr-v1 artifact, and {path}
+    // does not carry the SetFit tag". No `*.apr` in this repository carries the tag — the
+    // nearest, `tests/fixtures/setfit/slice_model.apr`, has `model_type: "Bert"` — and F-10
+    // guarantees none can be produced. A probe run that way would report a refusal that has
+    // nothing to do with the ordering it claims to measure.
+    //
+    // `write_tagged_decoy` exists for exactly this: a real APR v2 container carrying the tag
+    // and nothing else, which is all the routing gate needs. The second test above establishes
+    // that a `--split validation --lock-out` invocation on the decoy reaches step (2) and
+    // names the corpus (its L6 leg), so the pre-flight this test is about IS on the path.
+    //
+    // WHAT THIS ADDS OVER THE TWO IN-PROCESS ORDERING TESTS. Those call
+    // `commands::eval::setfit::run` with a struct they built themselves. They cannot observe
+    // an argument clap never routed, a `--force` flag that reached the dispatcher but not the
+    // adapter, or an exit code `main` mapped differently from the `CliError` the module
+    // returned. This does, from a reaped `ExitStatus`.
+    // ------------------------------------------------------------------------------
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path();
+    let decoy = write_tagged_decoy(root, "tagged.apr");
+    let decoy_s = decoy.display().to_string();
+
+    // ABSENT on purpose, and asserted absent: "the corpus was never opened" is only
+    // distinguishable from "the corpus was opened and was fine" if opening it fails loudly.
+    let absent_data = root.join("no-such-corpus");
+    let absent_selection = root.join("no-such-selection.json");
+    let absent_data_s = absent_data.display().to_string();
+    let absent_selection_s = absent_selection.display().to_string();
+    assert!(
+        !absent_data.exists() && !absent_selection.exists(),
+        "both Phase 2 inputs must genuinely be absent, or this test measures nothing"
+    );
+
+    // The OCCUPIED destination — a committed lock a prior validation run left behind.
+    const PRIOR_COMMITMENT: &[u8] = br#"{"committed":"by a prior validation run"}"#;
+    let occupied = root.join("committed-lock.json");
+    fs::write(&occupied, PRIOR_COMMITMENT).expect("the pre-existing destination is writable");
+    let occupied_s = occupied.display().to_string();
+
+    // And a VACANT one, for the control below.
+    let vacant = root.join("vacant-lock.json");
+    let vacant_s = vacant.display().to_string();
+    assert!(!vacant.exists(), "the control's destination must be vacant");
+
+    // Every leg holds ALL other arguments constant and varies ONE thing, so each verdict is
+    // attributable to that one thing rather than to the invocation being broken in general
+    // (CLAUDE.md rule 6: one failing input is an anecdote).
+    let invocation = |lock_out: &str, force: bool| {
+        let mut argv = vec![
+            "eval".to_string(),
+            decoy_s.clone(),
+            "--task".to_string(),
+            "classify".to_string(),
+            "--data".to_string(),
+            absent_data_s.clone(),
+            "--selection".to_string(),
+            absent_selection_s.clone(),
+            "--split".to_string(),
+            "validation".to_string(),
+            "--lock-out".to_string(),
+            lock_out.to_string(),
+        ];
+        if force {
+            argv.push("--force".to_string());
+        }
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        run_apr(&refs, FAST_LIMIT)
+    };
+
+    // ------------------------------------------------------------------------------
+    // W1 — THE ORDER ASSERTION. An occupied destination is refused, and the corpus is
+    //      never named, because it was never opened.
+    // ------------------------------------------------------------------------------
+    let occupied_run = invocation(&occupied_s, false);
+    occupied_run
+        .expect_refusal(
+            "a committed selection lock must not be replaced without --force. If this ever \
+             exits 0, a test measurement taken under the old lock silently stops describing \
+             the selection its file records",
+        )
+        .expect_no_panic("an occupied destination is a refusal, not a crash")
+        .expect_mentions(
+            "A selection lock is a COMMITMENT",
+            "and the operator must get the BESPOKE wording, not the generic no-clobber \
+             message — the generic one does not say what replacing a lock costs",
+        )
+        .expect_mentions(&occupied_s, "the refusal names the destination it refused")
+        .expect_silent_about(
+            &absent_data_s,
+            "THE WR-10 ASSERTION: the refusal must NOT name the corpus, because the gate now \
+             runs before the Phase 2 ingest. Pre-fix this invocation reported the missing \
+             corpus — a true statement about the wrong problem, arrived at only after the \
+             whole multi-candidate sweep",
+        );
+    assert_eq!(
+        occupied_run.code(),
+        EXIT_VALIDATION_FAILED,
+        "the refusal is a typed ValidationFailed (exit 5), which a script can tell from a \
+         missing file (3) or a broken artifact (6):\n{}",
+        occupied_run.transcript()
+    );
+    // Printed so a SUMMARY transcribes the refusal from a RUN rather than from the format
+    // string in the source — the convention the tooling test below established. Visible under
+    // `-- --ignored lifecycle --nocapture`.
+    println!(
+        "[04-20] W1 spawned refusal (exit {}): {}",
+        occupied_run.code(),
+        occupied_run.combined().trim()
+    );
+
+    // ------------------------------------------------------------------------------
+    // W2 — THE MECHANISM PROOF. The same invocation with a VACANT destination gets past
+    //      the pre-flight and dies on the corpus instead.
+    //
+    // Without this, W1's silence about the corpus would be indistinguishable from "this
+    // invocation is broken in some way that never reaches anything". Two runs differing in
+    // one path produce two DIFFERENT refusals; that difference is the evidence.
+    // ------------------------------------------------------------------------------
+    let vacant_run = invocation(&vacant_s, false);
+    vacant_run
+        .expect_refusal("the corpus really is absent, so this must fail too — but LATER")
+        .expect_no_panic("and still as a typed error")
+        .expect_mentions(
+            &absent_data_s,
+            "a vacant destination must carry the run PAST the pre-flight and into the ingest, \
+             which is what names the corpus. If this run is silent about the corpus too, the \
+             two refusals are the same refusal and W1 proved nothing about ordering",
+        );
+    assert_ne!(
+        occupied_run.combined().trim(),
+        vacant_run.combined().trim(),
+        "two invocations differing only in the --lock-out path must not produce the same \
+         message"
+    );
+    assert!(
+        !vacant.exists(),
+        "and a run that failed before the decision must leave NO lock file — the file IS the \
+         commitment"
+    );
+
+    // ------------------------------------------------------------------------------
+    // W3 — --force overrides the pre-flight, at the process tier too.
+    //
+    // The pre-flight has to be gated on --force exactly like the two checks it joins, or an
+    // operator who asked for the replacement would be refused by the new gate and the flag
+    // would have stopped working. Same occupied destination, one extra flag.
+    // ------------------------------------------------------------------------------
+    let forced = invocation(&occupied_s, true);
+    forced
+        .expect_refusal("the corpus is still absent, so a forced run must still fail — LATER")
+        .expect_mentions(
+            &absent_data_s,
+            "--force must carry the run past the pre-flight and into the ingest",
+        )
+        .expect_silent_about(
+            "A selection lock is a COMMITMENT",
+            "and the no-clobber refusal must NOT have fired: --force is the operator saying \
+             they intend to replace the committed decision",
+        );
+    assert_eq!(
+        fs::read(&occupied).expect("the occupied destination is readable"),
+        PRIOR_COMMITMENT,
+        "the prior commitment must be BYTE-IDENTICAL after all three runs: none of them \
+         reached the decision, so none of them had anything to write"
+    );
+}
+
+// ==========================================================================================
 // Test 3 — D-01's generic-tooling promise, executed (research assumption A3)
 // ==========================================================================================
 
