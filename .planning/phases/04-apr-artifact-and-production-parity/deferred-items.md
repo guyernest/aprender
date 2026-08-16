@@ -461,3 +461,163 @@ Phase 4's own code is clean — 0 `unwrap()` across all 13 new modules, counted 
 rather than by gate, which is exactly the distinction CLAUDE.md's verification discipline warns
 about. This is a PROJECT-level finding, far beyond phase 4: removing the blanket allow will surface
 a backlog across the whole crate and needs its own ticket and its own pass.
+
+---
+
+## D-04-21-A — the `setfit_handlers.rs` survivor set RE-MEASURED at HEAD; D-04-11-A corrected in three ways (2026-08-16)
+
+**Supersedes the measurement in `## D-04-11-A` (the mutation-survivor one at line 199), which is
+left byte-unchanged above.** It was true when written. Three commits landed after it, one of them
+deleted the function its Survivor A mutates, and its own run was INTERRUPTED at 68 min before
+reaching the whole set — so it is incomplete rather than wrong.
+
+Measured by plan 04-21 at HEAD `91eba6f1c`, `cargo-mutants 25.3.1`.
+
+### The enumeration (`--list`, not estimated)
+
+```
+cargo mutants --list --package aprender-serve --features setfit --cargo-arg=--lib \
+  -f crates/aprender-serve/src/api/setfit_handlers.rs
+```
+
+**99 mutants total; 78 are `tests::` / `fixture::`; 21 are PRODUCTION.** The 78 stay triaged out on
+D-04-11-A's own argument — a suite cannot detect the deletion or alteration of one of its own tests
+— and the two counts are recorded so the exclusion is auditable rather than a hand-wave. D-04-11-B
+recorded 101 for this file; the drop to 99 is the `b47acc4fe` cleanup.
+
+### The run
+
+```
+cargo mutants --no-times --timeout 180 --package aprender-serve \
+  --features setfit --cargo-arg=--lib \
+  -f crates/aprender-serve/src/api/setfit_handlers.rs \
+  -E 'tests::' -E 'fixture::' -- setfit
+```
+
+Baseline `ok`. **COMPLETED in 593 s** (D-04-11-A's was interrupted at 4,094 s, which is why it never
+produced a score). Verbatim summary line:
+
+```
+21 mutants tested: 3 missed, 5 caught, 13 unviable
+```
+
+Viable production mutants = 8. `-- setfit` is load-bearing, not decoration: the unfiltered
+`-p aprender-serve --lib` suite is 51-red (D-04-08-A), so a baseline reported `ok` is itself the
+proof the filter engaged. The `setfit` feature was genuinely ON — the whole file is behind
+`#[cfg(feature = "setfit")]` and produced 21 mutants, which a build with it compiled out cannot do
+(the F-04 vacuity check D-04-11-B's deviation 4 exists for).
+
+### Correction 1 — Survivor A is MOOT BY DELETION, not fixed
+
+`AppState::has_setfit_model` was added at `82416fcc1` and **deleted at `b47acc4fe`** ("Deleted
+`has_setfit_model` (zero callers)"). At HEAD `grep -rn has_setfit_model crates/` returns nothing
+(rc=1) and the `--list` log contains **zero** occurrences. The mutant D-04-11-A named cannot be
+re-run because the code is gone. **No test was written for it** — writing one would have been
+writing a test for deleted code.
+
+Its successor surface is `AppState::setfit_model()` (`setfit_handlers.rs:65`), whose ONLY production
+caller is the readiness assembly at `router.rs:249`
+(`state.setfit_model().map_or((None, None), …)`); the `model_loaded` half is separate and reads the
+FIELD directly (`mod_app_state_gpu.rs:420`). The successor mutant
+`replace AppState::setfit_model -> Option<&Arc<VerifiedSetFitModel>> with None` was **MEASURED
+CAUGHT** — `setfit_readiness_is_200_and_reports_the_exact_artifact_hash` (`:811`) asserts the exact
+hash VALUE, and under `-> None` the key is absent. So the readiness gap D-04-11-A's action item 2
+asked to close **does not exist at HEAD**, and no test was added for it either. Recorded as a
+measurement rather than closed with a test that would kill nothing.
+
+### Correction 2 — Survivor B is TWO mutants, not one, and moved line
+
+D-04-11-A records `:158`; at HEAD the expression is `setfit_handlers.rs:152`. Three comparison
+mutants live at `:152:28`, and they do NOT behave alike:
+
+| Mutant | Verdict at HEAD (before this plan) |
+|--------|------------------------------------|
+| `replace > with ==` | **MISSED** |
+| `replace > with >=` | **MISSED** |
+| `replace > with <`  | CAUGHT |
+
+### Correction 3 — a THIRD survivor D-04-11-A never reported
+
+`:108:9: delete match arm ClassifyError::EmptyInput | BatchTooLarge{..} | UnsupportedSchemaVersion{..}
+in classify_error_response` — MISSED. D-04-11-A did not report it because its run was interrupted
+before reaching it, not because it was absent. See "Still open" below: it is **equivalent by
+construction**, with evidence.
+
+### The varied-input diagnosis for Survivor B (CLAUDE.md rule 6)
+
+D-04-11-A explicitly declined to diagnose from one input. **Three inputs were EXECUTED** — through
+the real router via `oneshot`, under the correct code and under each hand-applied mutant — not
+reasoned about:
+
+| batch size | correct `>` | mutant `==` | mutant `>=` |
+|-----------|-------------|-------------|-------------|
+| `MAX_BATCH_TEXTS - 1` = 255 | **200** | 200 | 200 |
+| `MAX_BATCH_TEXTS` = 256     | **200** | **400** `the request carried 256 texts; the bound is 256` | **400** (identical) |
+| `MAX_BATCH_TEXTS + 1` = 257 | **400** `the request carried 257 texts; the bound is 256` | **400** (byte-identical) | **400** (byte-identical) |
+
+**The cause, named from the measurements.** At 257 all three implementations answer `400` with the
+same body. Under the mutants the transport check falls through, core re-checks the same bound at
+`classify.rs:624`, returns `BatchTooLarge { max: 256, got: 257 }`, and `classify_error_response`
+maps it to `BAD_REQUEST` — the same status and the same `Display` string the transport `refuse`
+produces. So `setfit_classify_refuses_a_batch_one_over_the_contract_bound` (`:725`), which asserts
+400 plus the substrings `257` and `256`, **provably cannot distinguish the implementations**.
+
+The diagnosis is therefore **neither of the two D-04-11-A offered**. The test is not mis-scoped and
+it is not unreached — it reaches the branch and asserts truthfully. A redundant INNER check makes
+the outer branch unobservable through the response *for that input*. This is the cost of defense in
+depth (T-04-23), and it is worth paying; it just means the boundary needs a different witness.
+
+**The distinguishing input is exactly `MAX_BATCH_TEXTS`**, where `>` admits and both `==` and `>=`
+refuse. `aprender-core` already had that acceptance test (`classify.rs:1729`); `aprender-serve` had
+none, which is precisely why two mutants lived there.
+
+### What was done
+
+`setfit_classify_admits_a_batch_at_exactly_the_contract_bound` added to `setfit_handlers.rs`,
+reading the bound from the exported constant and asserting the body sits far under
+`classify_body_limit_bytes()` so it cannot silently become a body-limit test.
+
+Proven RED/GREEN asymmetric by hand-applied probe — the finding itself, so recorded verbatim:
+
+| hand-applied probe at `:152` | `…admits_a_batch_at_exactly_the_contract_bound` | `…refuses_a_batch_one_over_the_contract_bound` |
+|------------------------------|--------------------------------------------------|--------------------------------------------------|
+| `> → ==` | **FAILED** | ok |
+| `> → >=` | **FAILED** | ok |
+
+Then confirmed by cargo-mutants itself, `-F 'replace > with .* in setfit_classify_handler|delete match arm'`,
+baseline `ok`, verbatim: **`4 mutants tested: 1 missed, 3 caught`** — all three `:152` mutants
+CAUGHT, zero missed among the mutants this plan claims to have killed.
+
+### Still open
+
+**`:108` delete-match-arm — MISSED, and triaged EQUIVALENT BY CONSTRUCTION.** No test was added,
+because none can exist at this tier. `classify_error_response` has exactly ONE caller
+(`setfit_handlers.rs:166`, the `map_err` on `model.classify`), so the arm is reachable only if
+`classify()` can return one of its three variants after the transport pre-checks pass:
+
+* `EmptyInput` — pre-empted by `:146`, unreachable;
+* `BatchTooLarge` — pre-empted by `:152`, unreachable;
+* `UnsupportedSchemaVersion` — **not producible on the request path at all.**
+  `ClassifyRequestDocument` is `{ texts, include_logits }` with `#[serde(deny_unknown_fields)]` and
+  carries no `schema_version`; that variant belongs to `ClassifyResponseWire`'s `TryFrom`
+  (`classify.rs:559`), and `classify()` builds its result through `ClassifyResponse::new`
+  (`classify.rs:722`), never that `TryFrom`. Measured, not inferred: posting
+  `{"schema_version":2,"texts":["ok"]}` answers **422** from axum's extractor
+  (`Invalid request body. Check that the JSON structure matches…`), so the variant never reaches
+  the mapper.
+
+Every error `classify()` CAN return under those pre-conditions (`EncodeFailed`, `HeadFailed`,
+`LabelCountMismatch`, `NonFiniteResponse`, `NegativeLatency`, `ProbabilityMassOutOfRange`) already
+lands on the `_ => INTERNAL_SERVER_ERROR` wildcard, so deleting the arm changes no HTTP response.
+Note this is the SAME structural cause as Survivor B — the transport pre-checks shadow core's
+equivalents — but here it makes the mutant genuinely equivalent rather than merely hard to observe.
+The arm is still correct to keep: it is the fail-closed mapping if a future edit ever removes a
+pre-check.
+
+**Adjusted production score after this plan: 7 caught / 7 non-equivalent viable = 100%**
+(21 mutants − 13 unviable = 8 viable, less the 1 equivalent).
+
+**NOT closed by this plan, and not claimed:** 04-11's must-have 4 — the four-crate per-crate
+mutation gate with four baselines and an explicitly computed aggregate adjusted score. D-04-11-B
+measured ≥ 10 h wall clock for its 890 mutants; this plan ran 25 mutants over 865 s against ONE file
+in ONE crate. That gate remains a `human_verification` item, exactly as D-04-11-B left it.
