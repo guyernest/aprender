@@ -45,7 +45,12 @@ pub(crate) const SETFIT_MODEL_TYPE: &str = "setfit";
 /// Absorbed from a duplicate detector that `serve/handlers.rs` carried until this cleanup;
 /// that copy had its own bound and its own opinion, and the two could answer differently for
 /// the same file. One detection point (D-04/D-10) means one bound.
-const MAX_TAG_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+///
+/// `commands::inspect.rs::read_metadata` now REFERENCES this constant rather than bounding its
+/// own read by the stat'd file length alone, so the two readers of one metadata block cannot
+/// answer differently about it — the same argument stated just above for the deleted `serve`
+/// copy, applied to a second READER instead of to a second detector.
+pub(crate) const MAX_TAG_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The single custom metadata key the artifact document lives at.
 pub(crate) const SETFIT_CUSTOM_KEY: &str = "setfit";

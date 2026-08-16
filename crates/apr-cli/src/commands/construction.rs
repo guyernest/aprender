@@ -431,6 +431,11 @@
             source_metadata: Some(
                 serde_json::json!({"run_id": "test_123", "framework": "pytorch"}),
             ),
+            // WR-09: this fixture is a fully-populated metadata block that WAS read,
+            // so there is no over-cap fact. Listed rather than elided behind
+            // `..Default::default()` on purpose — the exhaustive literal is what made
+            // the compiler point at this file when the field was added.
+            metadata_over_cap_bytes: None,
             setfit_doc: None,
         };
         output_metadata_text(&metadata);

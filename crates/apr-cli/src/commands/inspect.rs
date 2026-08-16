@@ -122,6 +122,21 @@ struct MetadataInfo {
     special_tokens: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_metadata: Option<serde_json::Value>,
+    /// The declared metadata length the ABSOLUTE cap refused, when it refused one.
+    ///
+    /// Present ONLY on a container whose header declares more metadata than
+    /// [`crate::setfit_tag::MAX_TAG_METADATA_BYTES`]. `skip_serializing_if` so every
+    /// legitimate artifact's `--json` output is byte-identical to what it was before
+    /// the cap existed, and no `output_json` / `output_json_with_quality` call site
+    /// changes.
+    ///
+    /// It exists because the alternative is silence: without it an over-cap container
+    /// renders as a model with no `model_type` and no APR-05 section, which is
+    /// indistinguishable from a plain APR that genuinely has neither. That is the
+    /// `inspect` half of WR-08 — the fact that the block was REFUSED is the whole
+    /// diagnosis, and defaulting throws it away.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata_over_cap_bytes: Option<u64>,
     /// The raw value at custom key `setfit`, present only on a TAGGED artifact.
     ///
     /// `#[serde(skip)]`: this is an INPUT to the APR-05 section built below, not a
@@ -545,13 +560,32 @@ fn read_metadata(reader: &mut BufReader<File>, header: &HeaderData) -> MetadataI
         return MetadataInfo::default();
     }
 
-    // BOUND BEFORE THE ALLOCATION. `metadata_size` is a u32 read out of the file
-    // under inspection, so a hostile container can declare 4 GiB and make this
-    // allocate it before `read_exact` discovers there is nothing to fill it with.
-    // A block cannot be longer than the file that contains it, so the stat'd length
-    // is a sound bound that needs no invented constant. The OUTPUT is unchanged: an
-    // over-long declaration already produced `MetadataInfo::default()`, it just did
-    // so after paying for the allocation.
+    // TWO BOUNDS BEFORE THE ALLOCATION, and NEITHER SUBSUMES THE OTHER.
+    // `metadata_size` is a u32 read out of the file under inspection, so a hostile
+    // container can declare up to 4 GiB and make this allocate it before `read_exact`
+    // discovers there is nothing to fill it with.
+    //
+    // (a) THE FILE LENGTH is tighter for a SMALL file: a block cannot be longer than
+    //     the file that contains it.
+    // (b) THE ABSOLUTE CAP is tighter for a LARGE one.
+    //
+    // This comment previously claimed the stat'd length was "a sound bound that needs
+    // no invented constant", and that is the claim T-04-70 refutes. `setfit_tag.rs`'s
+    // own module header names the counter-example: a 30 GB APR whose metadata block
+    // declares 20 MiB passes (a) and is then read in full to answer one question. The
+    // hostile version of that is cheaper still — on a sparse filesystem `truncate -s
+    // 4297M` costs nothing, so (a) can be SATISFIED by a 4 GiB declaration for free
+    // and `apr inspect` — the tool CLAUDE.md mandates as diagnostic step 1 — allocates
+    // it and then reports success. Under a memory-limited container it is OOM-killed.
+    //
+    // The cap is `crate::setfit_tag::MAX_TAG_METADATA_BYTES`, REFERENCED and never
+    // re-declared, so this reader and the tag detector cannot answer differently about
+    // one block. The comparison is `>` in both places, so the boundary agrees too.
+    //
+    // Over-cap is DISCLOSED, not silently defaulted. Defaulting would render a hostile
+    // container as a model with no `model_type` and no APR-05 section — the same
+    // output as a plain APR that genuinely has neither — and the fact that the block
+    // was REFUSED is the entire diagnosis (WR-08's `inspect` half).
     let declared = u64::from(header.metadata_size);
     let fits = reader
         .get_ref()
@@ -559,6 +593,12 @@ fn read_metadata(reader: &mut BufReader<File>, header: &HeaderData) -> MetadataI
         .is_ok_and(|m| header.metadata_offset.saturating_add(declared) <= m.len());
     if !fits {
         return MetadataInfo::default();
+    }
+    if declared > crate::setfit_tag::MAX_TAG_METADATA_BYTES {
+        return MetadataInfo {
+            metadata_over_cap_bytes: Some(declared),
+            ..MetadataInfo::default()
+        };
     }
     let mut metadata_bytes = vec![0u8; header.metadata_size as usize];
     if reader.read_exact(&mut metadata_bytes).is_err() {
@@ -582,6 +622,8 @@ fn read_metadata(reader: &mut BufReader<File>, header: &HeaderData) -> MetadataI
 
             MetadataInfo {
                 setfit_doc,
+                // The block was READ, so there is no over-cap fact to disclose.
+                metadata_over_cap_bytes: None,
                 model_type: if meta.model_type.is_empty() {
                     None
                 } else {
