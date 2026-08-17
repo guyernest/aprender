@@ -161,10 +161,6 @@ name = "ring_buffer_overhead"
 harness = false
 
 [[bench]]
-name = "visualization_simd"
-harness = false
-
-[[bench]]
 name = "metrics_throughput"
 harness = false
 
@@ -187,10 +183,6 @@ path = "examples/build_time_assertions.rs"
 [[example]]
 name = "validate_golden_trace"
 path = "examples/validate_golden_trace.rs"
-
-[[example]]
-name = "simd_visualization"
-path = "examples/simd_visualization.rs"
 
 [[example]]
 name = "process_tracer_demo"
