@@ -118,3 +118,54 @@ through `rtk proxy`.
 **Action:** plans 05-03, 05-07, 05-09..05-13 should be read as the `rtk proxy` form
 wherever they grep a libtest line. Worth deciding once, at phase level, rather than
 rediscovering per plan.
+
+## D-ITEM-05-14-C — `make test` cannot compile the workspace on macOS (PRE-EXISTING, blocks the post-merge gate)
+
+Surfaced by the wave-1 post-merge test gate, which is `make test`
+(`cargo nextest run --workspace -j 2`). It exited non-zero having run **zero** tests: the
+`cargo test --no-run --workspace` compile aborted. Two independent, unrelated breaks:
+
+1. `crates/aprender-profile/examples/{validate_golden_trace,process_tracer_demo}.rs` import
+   `renacer::{validate, process_tracer}`, which are `#[cfg(target_os = "linux")]` in
+   `crates/aprender-profile/src/lib.rs:86-87`. On macOS the imports do not resolve
+   (`E0432`), plus an `E0282` behind them.
+2. `crates/aprender-serve/tests/{gguf_config_coverage,gguf_kv_cache_coverage}.rs` build
+   `GGUFConfig { .. }` literals that omit the `query_pre_attn_scalar` field (`E0063`, 9
+   sites). The field exists in the struct; the test initializers were never updated.
+
+**Proven pre-existing, not caused by 05-14** — three independent controls:
+- The identical `aprender-profile` errors reproduce from a detached worktree at the base
+  commit `b3386b063` (`cargo check -p aprender-profile --examples` → exit 101).
+- All four failing files are byte-identical between `b3386b063` and the merge commit
+  (`git rev-parse <rev>:<path>` matches on each).
+- The merge changed exactly 4 files: 3 planning docs and
+  `crates/aprender-train/src/train/setfit/evidence.rs`. Neither `aprender-profile` nor
+  `aprender-serve` declares an `aprender-train` dependency, so no path exists by which the
+  change could reach them.
+
+**Why the wave still closed:** the merged tree is byte-identical to the tree the executor
+tested in its worktree (`git diff c69a5fcba HEAD` is empty — the merge added no content
+beyond the executor's own commits), and wave 1 ran a single plan, so there is no cross-plan
+integration surface for the gate to detect. The gate's purpose was satisfied by that
+equivalence, not by waiving it.
+
+**Action:** these two breaks make the project's standard test gate unrunnable on a macOS dev
+host — every later wave in this phase inherits it, and any plan whose verify block shells
+out to `make test` will read a non-zero exit that has nothing to do with its own work. Fix
+by feature-gating the two `aprender-profile` examples to Linux (`required-features` or a
+`#![cfg]` guard) and adding the missing field to the 9 `GGUFConfig` literals. Until then,
+scope post-merge gates to the crates a plan touches.
+
+## D-ITEM-05-14-D — the dev host is at 95% disk with a 117 GB `target/debug`
+
+Surfaced when a full-workspace control compile exhausted the volume mid-run (`ENOSPC`,
+which also killed the tool harness's own output writes until space was reclaimed).
+
+`df -h /` reports 926Gi total, ~760Mi free. `target/debug` alone is 117 GB (`target/release`
+is 1.6 GB).
+
+**Action:** this phase's remaining waves compile heavily and waves 05-11/05-12 execute 80
+benchmark cells that write per-row artifacts under `benchmarks/tweeteval-stance/`. At
+~760Mi headroom those will fail on write, and an ENOSPC failure mid-benchmark is
+indistinguishable from a measurement failure — exactly the confusion the claims gate exists
+to prevent. Reclaim space before dispatching wave 2.
