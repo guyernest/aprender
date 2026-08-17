@@ -149,6 +149,14 @@ of 18, and is halted for a decision on execution shape.**
 The compute gate was resolved twice: first Option B (lambda-vector), which proved unreachable;
 then **Option A — run the full matrix locally in release, ~8.29 h explicitly authorized**.
 
+**`s64:13:control` banked — 11 of 18 passes.** `evidence_sha256=9c969aa9…c704`, `steps=1536`,
+`wall_clock=3348.9s`, regime byte-identical to the cell's real pass. Two findings: the survivable
+window is **at least 57.5 min** (the earlier 55.8 min was a death observation, i.e. a floor, not a
+ceiling — a 55.82 min pass completed comfortably); and the **control leg does not erode at s64** —
+at 1536 steps the 1e-30 control still writes back bit-identical weights (max `relative_delta` 0.0,
+0 rows moved, 0 support), so `ctrl_max` stays `0.000e0` and only the near-null leg and `best_real`
+can still move `attention_key_bias`'s 15.1 margin.
+
 **D′ is now VALIDATED END-TO-END at s8.** The nine s8 passes were re-banked (28.7 min, all
 `rc=0`) and `APRENDER_CALIBRATION_COMBINE="s8:13,s8:31,s8:53"` ran the separation assertion over
 the persisted tables with no training. **Every measured digit is identical to the in-process s8

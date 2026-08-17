@@ -979,6 +979,52 @@ banner.
 as reviewable artifacts, so the ε basis lives in ONE medium and 05-03 derives it mechanically
 rather than transcribing from prose.
 
+### D′ pass 2 of 9 BANKED — `s64:13:control`
+
+```text
+[progress] pass done: seed=13 cell=s64e1b16 condition=control device=Cpu steps=1536 \
+  wall_clock=3348.9s regime=minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=13|cells=s64e1b16
+[persist] s64e1b16-seed13-control evidence_sha256=9c969aa9f10be6579f607e72744883bb4fa1e7b7de2e59703fdd644a4e59c704
+STATUS: PARTIAL
+```
+
+`shasum -a 256` on the committed file reproduces `9c969aa9…c704` independently. `steps=1536`,
+`device=Cpu`, regime byte-identical to the real pass of the same cell. **11 of 18 passes banked.**
+
+**The survivable window is looser than measured, and the earlier figure should be read as a floor
+rather than a limit.** This pass ran 3 348.9 s = **55.82 min** of tuning inside a task that lived
+09:49:10Z → 10:46:40Z = **57.5 min**, and completed. The earlier 55.8 min figure was a *death*
+observation, not a ceiling — the process that died did so ~100 s into its second pass, so all it
+established was that the window is *at least* that long. It is at least 57.5 min. Still an order
+of magnitude short of a 2.71 h cell, so nothing about D′ changes; but a single s64 pass has more
+headroom than the ~20 s I reported last time, and I should not have implied a hard boundary from
+one death.
+
+**An early finding worth having before the near-null pass: the control leg does NOT erode at
+s64.** Read directly off the persisted table:
+
+| quantity | s64 control, 1536 steps |
+|---|---|
+| rows | 101 |
+| max `relative_delta` | **0.0** |
+| rows with `moved = true` | **0** |
+| max `delta_support_count` | **0** |
+| max `delta_norm` | **0.0** |
+
+At 64× the optimizer steps of the s8 half, the 1e-30 control **still writes back bit-identical
+weights** — every parameter, no exceptions. The worry that 1 536 steps of accumulation might let
+the control drift and narrow the separation window is **refuted for the control leg**: 1e-30
+underflows every parameter's ULP however many times it is applied, so `ctrl_max` will be
+`0.000e0` at s64 exactly as at s8, and `ctrl_max < real_min` will hold with the widest possible
+margin.
+
+**This sharpens where the remaining risk to `attention_key_bias`'s 15.1 margin actually lies.**
+The window is `[10 × max(worst_ctrl, worst_nnull), best_real / 10]`. With `worst_ctrl` pinned at
+zero, the lower bound is set entirely by the **near-null (1e-8)** leg and the upper bound by
+`best_real` — so the two passes that can still move that margin are `s64:13:near-null` and the
+real passes of seeds 31 and 53. The control passes, while still required for the assertion, can
+no longer shrink anything.
+
 ### PRE-REGISTERED CHECK — the architecture component across cell labels (still UNPROVEN)
 
 Recorded before the evidence exists, so it is reported as a result rather than assumed to have
