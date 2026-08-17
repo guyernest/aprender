@@ -18,9 +18,9 @@ provides:
 affects: [05-02, 05-03, 05-07, 05-12]
 
 actuals:
-  tokens: 26000
-  tasks: 1        # Task 1 complete; Task 2 is 9 of 18 passes, halted for a decision
-  commits: 6
+  tokens: 154000
+  tasks: 1        # Task 1 complete; Task 2 partial (12 of 18); Task 3 not completable as specified
+  commits: 15
 
 tech-stack:
   added: []
@@ -138,12 +138,42 @@ of 18, and is halted for a decision on execution shape.**
 
 ## Performance
 
-- **Duration:** ~175 min (two timed probes ~35 min; killed matrix attempt ~40 min; re-measured
-  s8 half ~9 min; the rest harness work and analysis)
-- **Tasks completed:** 1 of 3 (Task 2 is 9 of 18 passes)
-- **Commits:** 6
+- **Duration:** ~10 h wall clock (12 banked tuning passes ≈ 3.6 h of `run_tuning`; one killed
+  chunk ~56 min; harness work, the determinism proof and analysis the remainder)
+- **Tasks completed:** 1 of 3 — Task 2 PARTIAL (12 of 18 passes), Task 3 NOT completable as
+  specified (the ε windows do not exist for 5 of 6 classes)
+- **Commits:** 15
 
-## Status: PARTIAL — s8 half of the boundary matrix measured, s64 half awaiting a decision
+## STATUS: PARTIAL — 12 of 18 passes; stopped by human decision, not by failure
+
+**Measurement was stopped deliberately, and stopping was correct.** The remaining six passes
+cannot change the verdict: `lower = 10 × worst_nnull` can only **rise** as more near-null passes
+land, and `upper = best_real / 10` can only **fall** as more real passes land, so every window can
+only narrow further. Spending another ~5.5 h to confirm a determined outcome was rejected in favour
+of closing out with the result in hand.
+
+**All 12 passes are committed as reviewable artifacts** in
+`.planning/phases/05-benchmark-and-claims-gate/calibration-store/` (evidence + metadata per pass,
+each digest independently reproducible with `shasum -a 256`), so `s64:31` and `s64:53` can be
+measured later without redoing any of this.
+
+**On the plan's own terms this is a success.** 05-01 front-loaded the measurement precisely so F-10
+would fail early if it was going to — and it did, at 12 passes rather than after ε had been frozen
+and built upon. Four real defects surfaced along the way, none of which a plan assuming its rule
+worked would have found: the false-green test child that ran zero tests and exited 0; the
+unconditional ε-basis header inviting a freeze from half the matrix; the fail-closed hole letting
+`rc=0` coexist with an empty ε basis; and the refuted gradient-free premise for
+`attention_key_bias`.
+
+**The six findings 05-03 inherits** are written up in
+`05-01-calibration-measurements.md` → *PLAN CLOSEOUT*: (1) the 10×/10× rule does not survive
+production step counts for 5 of 6 classes; (2) separation is **intact** — this is not "calibration
+is impossible"; (3) `COMBINE` exits `rc=0` with an empty ε basis, a fail-closed hole 05-03 must
+close; (4) `attention_key_bias`'s "receives no gradient" justification is refuted by measurement;
+(5) the superlinear near-null growth **hypothesis**, explicitly untested; (6) the cross-label check
+**passed**, which is what makes (1) a result about step count rather than two different models.
+
+## Earlier status (superseded, kept for the record): s8 half measured, s64 half awaiting a decision
 
 **Current state (supersedes the two earlier halt states below, which are kept for the record).**
 The compute gate was resolved twice: first Option B (lambda-vector), which proved unreachable;
@@ -478,9 +508,13 @@ Every status was read directly (`cmd > log 2>&1; rc=$?`), never through a pipe (
 
 ## Known Stubs
 
-None. The harness is a complete, running measurement; the boundary-matrix and ε-derivation
-sections of the measurements file are *absent* rather than stubbed, and the file states
-explicitly that they were not run and why.
+None. The harness is a complete, running measurement.
+
+**The ε derivation is ABSENT BY RESULT, not stubbed.** Task 3's per-class ε windows are not
+delivered because the measurement showed they do not exist for 5 of 6 classes — see Finding 1. No
+placeholder ε was written, and the report now prints `n/a` and `EMPTY` for those classes rather than
+a number that would look like a margin. The two cells `s64:31` and `s64:53` are *unmeasured* and the
+report names them as missing in its `PROVISIONAL` banner; nothing treats them as passing.
 
 ## Threat Flags
 
@@ -498,33 +532,56 @@ writes only a test harness and a planning document.
 | Diff scope | `git diff --name-only` | `crates/aprender-train/src/train/setfit/evidence.rs` only |
 | Formatting | `cargo fmt -p aprender-train -- --check` | `rc=0` |
 | Lints | `cargo clippy -p aprender-train --lib --features setfit --all-targets` | `rc=0` |
+| D′ cross-process determinism | `cargo test --release ... cross_process_determinism -- --ignored` | `rc=0`, 1 passed, 97 s; two child processes, **bit-identical** evidence `5838b3d2…57dc` |
+| D′ determinism, independent of the test | two invocations + `shasum -a 256`, separate stores | identical digest, `BIT-IDENTICAL: yes`, 48 555 bytes each |
+| D′ combine == in-process (s8) | `COMBINE="s8:13,s8:31,s8:53"` vs the in-process s8 report | `rc=0`; **every measured digit identical** (18 rows × 9 cols, 6 ε rows × 9 cols, all binding rows); only wall clock differs |
+| s64 cell separation | `COMBINE="s64:13"` | `rc=0`; `ctrl_max = 0.000e0 < real_min` for all 6 classes |
+| Cross-label architecture component | `COMBINE="s8:13,s8:31,s8:53,s64:13"` (12 passes, both labels) | `rc=0`; `minilm-slice-h384-l6-a12-i1536-v30522@1110a243` **byte-identical** across `s8e1b16` and `s64e1b16` |
+| Empty-window reporting fix | same combine, after the fix | `eps/noise` = `n/a` and `window` = `EMPTY` for the 5 classes; explicit block names each and the factor by which `lower` exceeds `upper` |
+| Persisted store integrity | `shasum -a 256` on each committed `*.evidence.json` | every digest matches its `meta.json` `evidence_sha256` |
 
-## Next Steps
+## Self-Check: PASSED
 
-1. ~~Human go/no-go on the compute option~~ — **DONE.** Option B (lambda-vector) proved
-   unreachable; **Option A** (run locally in release, ~8.29 h) authorized and in progress.
-2. ~~s8 half of the boundary matrix~~ — **DONE**, 9 passes, `rc=0`, tables in the measurements file.
-3. **Decide the execution shape for the s64 half (~8.12 h, re-measured).** The only open
-   blocker. A′ and B′ are now refuted by measurement (2.71 h per cell against a ~55.8 min
-   window):
-   - **D′ is now BUILT and PROVEN, and 1 of 9 s64 passes is banked.** The remaining **8 passes**
-     are dispatchable one at a time, each ~55 min and retryable:
-     `s64:13:control`, `s64:13:near-null`, then the six for seeds 31 and 53. After a cell's three
-     conditions are banked, `APRENDER_CALIBRATION_COMBINE="s64:13"` runs the separation assertion
-     over them in seconds, with no training.
-   - **Recommended alongside:** re-bank the nine s8 passes into the same store (~8 min total,
-     since an s8 pass is under a minute). Then one `COMBINE` over all six cells derives the
-     cross-cell epsilon basis mechanically, instead of 05-03 assembling it by hand from prose.
-   - **C′** — a human runs the remainder outside this session. Still available, and now cheaper
-     to hand over: the store format is exactly the artifact an off-host run would transport back.
-   - ~~A′ (per-seed cell chunks)~~ / ~~B′ (one relaunch)~~ — refuted; a cell cannot fit the
-     window and cannot be subdivided without moving the assertion off the measurement.
-4. Finish the **`attention_key_bias` verdict** with the s64 evidence.
-5. Task 3 then derives ε, composes the proposed regime entry from a measured rendered id, writes
-   the MEASURED-vs-COVERED table, and runs the two-cell prospective validation.
-6. Plan 05-03 carries the deliberate three-place edit to the D-04 checkpoint — and, if the
-   preliminary `attention_key_bias` finding holds, must revise the *justification* it records
-   for leaving that class ungated.
+| claim | verified |
+|---|---|
+| measurements file, SUMMARY, `evidence.rs` exist | 3 of 3 FOUND |
+| store holds 12 passes | 12 `*.evidence.json` + 12 `*.meta.json` |
+| every persisted digest matches its recorded `evidence_sha256` | **12 of 12 OK, 0 mismatches** |
+| all 7 plan commits exist | 7 of 7 FOUND |
+| the `1.51e1` trap is gone from the regenerated report | absent; 5 classes marked `EMPTY` |
+
+**One methodological note on the self-check itself.** Its first commit-existence check used
+`git log --oneline --all | grep "^<hash>"` and reported **all seven commits MISSING** — a false
+negative, because this shell environment rewrites `git log --oneline` output (the same artifact made
+an earlier `ls` of a populated directory print `(empty)`). Re-verified with `git log --format=%h`,
+which is stable: all seven are present. Recorded because the failure is directional-blind — a check
+that can report MISSING for a commit that exists can equally report FOUND for one that does not, so
+the *method*, not just the result, had to be corrected. This is CLAUDE.md rule 1's family: when a
+result looks wrong, check how it was measured.
+
+## Next Steps — all for 05-03; this plan is closed
+
+1. ~~Human go/no-go on compute~~ — **DONE.** 2. ~~s8 half~~ — **DONE**, 9 passes. 3. ~~Execution
+   shape for s64~~ — **DONE**, D′ built, proven and validated end-to-end. 4. ~~Cross-label
+   architecture check~~ — **DONE, PASSED.**
+5. **05-03 must decide what replaces the 10×/10× rule.** Five of six classes have no legal ε at the
+   measured boundary (Finding 1). Either the safety factors are revisited against this evidence, or
+   the near-null condition's role in setting the lower bound is. **Not by picking a number that
+   makes the table close.**
+6. **05-03 must close the fail-closed hole** (Finding 3): an empty window must become a hard
+   failure in whatever surface freezes ε. Today `rc=0` coexists with five empty windows, so a green
+   run is not evidence that an ε basis exists.
+7. **05-03 must rewrite `attention_key_bias`'s justification** (Finding 4). "Receives no gradient,
+   `dL/db_k = 0`" is refuted by measurement. Note the class now has **no window either**, so
+   "ungated because it cannot move" and "gated at a frozen ε" are *both* unavailable on this
+   evidence — the decision has to be made explicitly and recorded with the measurements that force
+   it.
+8. **Optional, cheap:** measure `s64:31` and `s64:53` (six passes, ~5.5 h) if 05-03 wants the
+   boundary fully covered. It cannot change Finding 1 — every window can only narrow — so it is
+   confirmation, not evidence. The store makes it resumable at any time.
+9. **Optional:** test the Finding 5 hypothesis by measuring near-null at an intermediate step count
+   (e.g. s16 or s32). Worth doing only if the mechanism matters to the replacement rule; the
+   hypothesis is *not* needed to act on Findings 1–4.
 
 **The `attention_key_bias` verdict is the item to watch.** It is the open question from the
 probe and 05-03's contract edit depends on it: the fixture leaves that class **ungated** on the

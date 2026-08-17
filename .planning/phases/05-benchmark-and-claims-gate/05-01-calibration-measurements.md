@@ -1183,6 +1183,125 @@ stated result, quoting the ids. **If it does not hold, that is a phase-level fin
 `id.starts_with(&architecture)` where `architecture` is taken from the FIRST regime seen, so a
 green run proves agreement only among the ids that run actually loaded.
 
+## PLAN CLOSEOUT — what 05-03 inherits
+
+Measurement stopped by human decision at 12 of 18 passes, **not** by failure. The remaining six
+passes cannot change the verdict: `lower = 10 × worst_nnull` can only **rise** as more near-null
+passes land, and `upper = best_real / 10` can only **fall** as more real passes land, so every
+window can only get narrower. Spending a further ~5.5 h to confirm a determined outcome was
+rejected. All 12 passes are committed as reviewable artifacts, so `s64:31` and `s64:53` can be
+measured later without redoing anything.
+
+### FINDING 1 — the 10×/10× window rule does not survive production step counts
+
+**Five of six classes have no legal ε** at the measured boundary. From the shipped `COMBINE` path:
+
+| class | lower `10 × worst_nnull` | upper `best_real / 10` | window | lower exceeds upper by |
+|---|---|---|---|---|
+| `embedding` | 1.553e-3 | 1.813e-4 | **EMPTY** | 8.56× |
+| `layer_norm_weight` | 4.802e-6 | 1.891e-5 | EXISTS | — |
+| `layer_norm_bias` | 9.844e-4 | 7.112e-5 | **EMPTY** | 13.84× |
+| `projection_weight` | 1.051e-3 | 1.231e-4 | **EMPTY** | 8.54× |
+| `projection_bias` | 1.101e-3 | 3.447e-5 | **EMPTY** | 31.94× |
+| `attention_key_bias` | 9.278e-8 | 1.714e-8 | **EMPTY** | 5.41× |
+
+Only `layer_norm_weight` retains a window — also the one class whose near-null does not move every
+row. ε cannot be frozen for the other five by this rule. **05-03 must either revisit the rule's
+safety factors against this evidence or reconsider the near-null condition's role in setting the
+lower bound.** It must not pick a number to make the table close.
+
+### FINDING 2 — what did NOT fail: separation is intact
+
+**`ctrl_max = 0.000e0 < real_min` for all six classes, in every measured cell.** The 1e-30 control
+writes back bit-identical weights even at 1536 steps (101 rows, zero moved, zero support). Real
+training remains cleanly distinguishable from no training, with the widest possible margin.
+
+**05-03 must not over-read Finding 1 as "calibration is impossible."** What failed is *freezing an
+ε by the 10×/10× rule*. What works is the underlying discrimination the gate depends on.
+
+### FINDING 3 — `COMBINE` exits `rc=0` with an empty ε basis (fail-closed hole)
+
+A real defect in the surface F-10 exists to protect, recorded here rather than fixed because making
+it fail-closed changes gate semantics and belongs to 05-03's replan.
+
+- The separation predicate is **asserted** (`assert!(control_max < real_min)`).
+- `supports_margin` / `window` is only **reported**. Nothing fails when a window vanishes.
+- Consequently **`rc=0` is currently reachable with five of six ε windows empty** — verified: the
+  four-cell combine exited `rc=0` while printing `EMPTY` for five classes.
+
+A green run is therefore not evidence that an ε basis exists. **05-03 must make an empty window a
+hard failure** in whatever surface freezes ε, or the gate can be satisfied by a run that proves
+nothing about ε.
+
+### FINDING 4 — `attention_key_bias`'s original justification is REFUTED
+
+The contract's stated reason for leaving this class ungated — *it receives no gradient, since
+`dL/db_k = 0` by softmax shift-invariance* — is refuted by measurement:
+
+- `grad_norm_max = 8.084e-10` (s8), `7.298e-10` (s64) — non-zero, on the binding row
+  `encoder.layer.4.attention.self.key.bias` / `encoder.layer.1...` respectively;
+- the delta **scales with the learning rate** (real 2e-5 → 1.714e-7; near-null 1e-8 → 3.105e-11),
+  which a parameter receiving no gradient cannot do.
+
+`dL/db_k = 0` holds in **exact** arithmetic; the encoder executes `f32`, where shift-invariance is
+only approximate. The physics argument survives as an explanation of why the gradient is *tiny*, not
+as a claim that it is *zero*. **This sentence cannot be carried into 05-03 as written.** Note the
+class now also has **no window**, so "ungated because it cannot move" and "gated at a frozen ε" are
+*both* unavailable on this evidence — which is precisely the decision 05-03 has to make explicitly.
+
+### FINDING 5 — superlinear near-null growth (HYPOTHESIS, not tested)
+
+Near-null `max relative_delta` grew **299×** for `attention_key_bias` across a **64×** increase in
+steps (3.105e-11 → 9.278e-9); other classes grew 56–72×. Superlinear growth is not a longer walk.
+
+**Hypothesis:** at 24 steps most 1e-8 updates fall below the parameters' ULP and vanish, so the s8
+figure is *underflow-dominated*; at 1536 steps, warmup complete and Adam normalising each step to
+roughly the learning rate, far more updates survive rounding. Emerging from an underflow-dominated
+regime produces exactly this jump.
+
+**This was NOT tested.** It would be tested by measuring near-null at an intermediate step count and
+checking whether growth becomes linear once out of the underflow regime. Recorded as a hypothesis so
+05-03 does not inherit it as a mechanism.
+
+### FINDING 6 — the cross-label check PASSED
+
+`COMBINE="s8:13,s8:31,s8:53,s64:13"` — 12 passes across **both** cell labels in one invocation, so
+`architecture` was taken from an s8 id and `starts_with` evaluated against every s64 id.
+`minilm-slice-h384-l6-a12-i1536-v30522@1110a243` is **byte-identical across `cells=s8e1b16` and
+`cells=s64e1b16`**.
+
+Both halves measured the same 22M-parameter production encoder, not the 97-token fixture slice.
+**This is what licenses Finding 1 as a result about step count rather than an artifact of two
+different models.**
+
+### Reporting defects fixed in this plan
+
+1. **`eps/noise` is no longer printed for a class with an empty window** — it reads `n/a`. That
+   column is `10x_upper / noise_floor`, and `10x_upper` is only a legal ε while `lower < upper`. The
+   old behaviour produced a plausible-looking margin for a class with no ε at all; this plan tracked
+   `1.51e1` for `attention_key_bias` across several reports before noticing it was meaningless.
+   Suppressed rather than adjusted, because there is no correct value to print.
+2. **Per-class window status is now explicit** (`EXISTS` / `EMPTY`) plus a block naming every empty
+   window, the factor by which `lower` exceeds `upper`, and the instruction not to read a suppressed
+   margin as small rather than absent.
+3. The **PROVISIONAL** ε-basis banner (coverage + named missing cells) is now permanently accurate
+   for this plan rather than temporarily so.
+
+Both the production and fixture ε tables were fixed, so the trap does not survive in a sibling
+report.
+
+### Task status, honestly
+
+| task | status | why |
+|---|---|---|
+| **Task 1** — frozen hyperparameters, rendered regime id, compute projection | **COMPLETE** | recorded above, verbatim |
+| **Task 2** — measure the 18-pass boundary matrix | **PARTIAL, 12 of 18** | complete s8 half (9) + complete `s64:13` cell (3); stopped by human decision, verdict already determined |
+| **Task 3** — derive per-class ε windows and the proposed regime entry string | **NOT DONE, and not completable as specified** | the windows do not exist for 5 of 6 classes, so there is no ε to freeze. Emitting a regime entry would mean publishing a number nobody should use |
+
+**Task 3's one deliverable that IS met:** the verbatim regime ids for both cell labels, proven
+byte-identical in their architecture component (Finding 6). The frozen ε is not delivered, and
+should not be.
+
 ### What Task 3 still owes once the s64 half lands
 
 Frozen ε per class (window upper edge rounded DOWN to two significant figures) with noise-floor

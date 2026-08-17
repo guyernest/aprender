@@ -1758,7 +1758,7 @@ mod tests {
         report.push_str("\nCROSS-CELL EPSILON BASIS (03-06 freezes from these)\n");
         report.push_str(
             "class                worst_ctrl    worst_nnull   best_real     10x_lower     \
-             10x_upper     noise_floor   eps/noise     nnull_moved   supports_margin  \
+             10x_upper     noise_floor   eps/noise     nnull_moved   window        \
              median/min\n",
         );
         for class in ParameterClass::ALL {
@@ -1773,11 +1773,20 @@ mod tests {
             let upper = best_real / 10.0;
             let spread = if best_real > 0.0 { worst_median / best_real } else { f64::INFINITY };
             let noise_floor = noise_floor_across.get(class.tag()).copied().unwrap_or(0.0);
-            let eps_over_noise =
-                if noise_floor > 0.0 { upper / noise_floor } else { f64::INFINITY };
+            // Suppressed for an EMPTY window for the same reason as the production table: this
+            // column is `upper / noise_floor`, and `upper` is only a legal epsilon while
+            // `lower < upper`. See the production basis for the full note.
+            let window_exists = lower < upper;
+            let eps_over_noise = if !window_exists {
+                "n/a".to_string()
+            } else if noise_floor > 0.0 {
+                format!("{:.2e}", upper / noise_floor)
+            } else {
+                "inf".to_string()
+            };
             report.push_str(&format!(
-                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.2e} \
-                 {:<13} {:<16} {:.1e}\n",
+                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13} \
+                 {:<13} {:<13} {:.1e}\n",
                 class.tag(),
                 worst_ctrl,
                 worst_nnull,
@@ -1787,7 +1796,7 @@ mod tests {
                 noise_floor,
                 eps_over_noise,
                 near_null_moved_all.get(class.tag()).copied().unwrap_or(false),
-                lower < upper,
+                if window_exists { "EXISTS" } else { "EMPTY" },
                 spread,
             ));
         }
@@ -2920,9 +2929,12 @@ mod tests {
             }
             report.push_str(
                 "class                worst_ctrl    worst_nnull   best_real     10x_lower     \
-                 10x_upper     noise_floor   eps/noise     nnull_moved   supports_margin  \
+                 10x_upper     noise_floor   eps/noise     nnull_moved   window        \
                  median/min\n",
             );
+            // Classes whose window is EMPTY, collected so the reason can be spelled out below
+            // the table rather than inferred from two columns the reader has to compare.
+            let mut empty_windows: Vec<(&'static str, f64, f64)> = Vec::new();
             for class in ParameterClass::ALL {
                 let worst_ctrl = ctrl_max_across.get(class.tag()).copied().unwrap_or(0.0);
                 let best_real = real_min_across.get(class.tag()).copied().unwrap_or(0.0);
@@ -2932,11 +2944,26 @@ mod tests {
                 let upper = best_real / 10.0;
                 let spread = if best_real > 0.0 { worst_median / best_real } else { f64::INFINITY };
                 let noise_floor = noise_floor_across.get(class.tag()).copied().unwrap_or(0.0);
-                let eps_over_noise =
-                    if noise_floor > 0.0 { upper / noise_floor } else { f64::INFINITY };
+                let window_exists = lower < upper;
+                if !window_exists {
+                    empty_windows.push((class.tag(), lower, upper));
+                }
+                // `eps/noise` is `upper / noise_floor`, and `upper` is only a legal epsilon when
+                // `lower < upper`. Printing it for an EMPTY window divides an illegal epsilon by
+                // the noise floor and yields a plausible-looking margin for a class that has no
+                // epsilon at all — this plan tracked such a number (`1.51e1` for
+                // attention_key_bias) across several reports before noticing it was meaningless.
+                // Suppressed rather than fixed up, because there is no correct value to print.
+                let eps_over_noise = if !window_exists {
+                    "n/a".to_string()
+                } else if noise_floor > 0.0 {
+                    format!("{:.2e}", upper / noise_floor)
+                } else {
+                    "inf".to_string()
+                };
                 report.push_str(&format!(
                     "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} \
-                     {:<13.2e} {:<13} {:<16} {:.1e}\n",
+                     {:<13} {:<13} {:<13} {:.1e}\n",
                     class.tag(),
                     worst_ctrl,
                     worst_nnull,
@@ -2946,9 +2973,39 @@ mod tests {
                     noise_floor,
                     eps_over_noise,
                     near_null_moved_all.get(class.tag()).copied().unwrap_or(false),
-                    lower < upper,
+                    if window_exists { "EXISTS" } else { "EMPTY" },
                     spread,
                 ));
+            }
+            if empty_windows.is_empty() {
+                report.push_str(
+                    "\nEvery class above has a non-empty window (10x_lower < 10x_upper).\n",
+                );
+            } else {
+                report.push_str(&format!(
+                    "\nWINDOWS THAT DO NOT EXIST — {} of {} classes have NO legal epsilon\n",
+                    empty_windows.len(),
+                    ParameterClass::ALL.len(),
+                ));
+                for (tag, lower, upper) in &empty_windows {
+                    report.push_str(&format!(
+                        "  {:<20} lower {:.3e} EXCEEDS upper {:.3e} by {:.2}x\n",
+                        tag,
+                        lower,
+                        upper,
+                        if *upper > 0.0 { lower / upper } else { f64::INFINITY },
+                    ));
+                }
+                report.push_str(
+                    "  The window rule is [10 x max(worst_ctrl, worst_nnull), best_real / 10]. \
+                     When the\n  lower bound exceeds the upper there is no value epsilon can \
+                     take: it cannot be both\n  10x above the strongest not-training signal and \
+                     10x below the weakest training signal.\n  `eps/noise` reads `n/a` for these \
+                     classes BY DESIGN — that column divides `10x_upper`\n  by the noise floor, \
+                     and `10x_upper` is not a legal epsilon here. Do not freeze an epsilon\n  \
+                     for a class listed above, and do not read its suppressed margin as small \
+                     rather\n  than absent.\n",
+                );
             }
         } else {
             report.push_str(
