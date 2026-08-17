@@ -2162,34 +2162,61 @@ mod tests {
         /// `APRENDER_CALIBRATION_PROSPECTIVE="s16:41,s32:29"` — named contracted-but-unmeasured
         /// cells, REAL condition only, run AFTER epsilon is frozen. Validation, not derivation.
         Prospective(Vec<ProductionCell>),
+        /// `APRENDER_CALIBRATION_CELLS="s8:13,s8:31"` — a named SUBSET of the boundary matrix
+        /// with the FULL three-condition treatment, so the 18 passes can be executed in
+        /// resumable chunks.
+        ///
+        /// This partitions the work; it does not shrink it. Each chunk runs exactly the same
+        /// passes, with the same conditions and the same separation assertion, that the
+        /// unchunked matrix would have run for those cells — so `{s8,s64} x {13,31,53}` split
+        /// across several invocations is the SAME measurement as one invocation, not a trim.
+        /// The cross-cell epsilon basis is then derived in plan 05-03 from the union of the
+        /// per-cell tables, which is how the window rule is defined anyway (worst control and
+        /// best real *across all measured cells*).
+        CellSubset(Vec<ProductionCell>),
         /// The full boundary matrix: `{s8, s64} x {13, 31, 53} x {real, control, near-null}`.
         BoundaryMatrix,
     }
 
-    /// Read the mode off the environment. Probe wins over prospective if both are set.
-    fn production_mode() -> ProductionMode {
-        if std::env::var("APRENDER_CALIBRATION_PROBE").is_ok_and(|v| v == "1") {
-            return ProductionMode::Probe;
-        }
-        if let Ok(spec) = std::env::var("APRENDER_CALIBRATION_PROSPECTIVE") {
-            let cells: Vec<ProductionCell> = spec
-                .split(',')
+    /// Parse a `s<shots>:<seed>,…` cell list from an environment variable.
+    fn parse_cell_spec(var: &str, spec: &str) -> Vec<ProductionCell> {
+        let cells: Vec<ProductionCell> =
+            spec.split(',')
                 .filter(|s| !s.trim().is_empty())
                 .map(|entry| {
                     let (shots, seed) = entry.trim().split_once(':').unwrap_or_else(|| {
-                        panic!("APRENDER_CALIBRATION_PROSPECTIVE entry `{entry}` is not `s<shots>:<seed>`")
+                        panic!("{var} entry `{entry}` is not `s<shots>:<seed>`")
                     });
-                    let shots = shots.trim().strip_prefix('s').unwrap_or_else(|| {
-                        panic!("APRENDER_CALIBRATION_PROSPECTIVE shots `{shots}` must start with `s`")
-                    });
+                    let shots = shots
+                        .trim()
+                        .strip_prefix('s')
+                        .unwrap_or_else(|| panic!("{var} shots `{shots}` must start with `s`"));
                     ProductionCell {
                         shots: shots.parse().expect("shot count"),
                         seed: seed.trim().parse().expect("seed"),
                     }
                 })
                 .collect();
-            assert!(!cells.is_empty(), "APRENDER_CALIBRATION_PROSPECTIVE named no cells");
-            return ProductionMode::Prospective(cells);
+        assert!(!cells.is_empty(), "{var} named no cells");
+        cells
+    }
+
+    /// Read the mode off the environment. Probe wins over the others if several are set.
+    fn production_mode() -> ProductionMode {
+        if std::env::var("APRENDER_CALIBRATION_PROBE").is_ok_and(|v| v == "1") {
+            return ProductionMode::Probe;
+        }
+        if let Ok(spec) = std::env::var("APRENDER_CALIBRATION_CELLS") {
+            return ProductionMode::CellSubset(parse_cell_spec(
+                "APRENDER_CALIBRATION_CELLS",
+                &spec,
+            ));
+        }
+        if let Ok(spec) = std::env::var("APRENDER_CALIBRATION_PROSPECTIVE") {
+            return ProductionMode::Prospective(parse_cell_spec(
+                "APRENDER_CALIBRATION_PROSPECTIVE",
+                &spec,
+            ));
         }
         ProductionMode::BoundaryMatrix
     }
@@ -2241,6 +2268,11 @@ mod tests {
             ProductionMode::Prospective(ref cells) => {
                 (cells.clone(), false, "PROSPECTIVE VALIDATION (named cells, REAL only)")
             }
+            ProductionMode::CellSubset(ref cells) => (
+                cells.clone(),
+                true,
+                "CELL SUBSET (named cells, FULL 3 conditions — a resumable chunk of the matrix)",
+            ),
             ProductionMode::BoundaryMatrix => {
                 let mut out = Vec::with_capacity(PRODUCTION_SHOTS.len() * PRODUCTION_SEEDS.len());
                 for &shots in &PRODUCTION_SHOTS {
@@ -2250,6 +2282,30 @@ mod tests {
                 }
                 (out, true, "BOUNDARY MATRIX (2 cells x 3 seeds x 3 conditions)")
             }
+        };
+
+        // The report file is resolved UP FRONT and rewritten after every cell, not written
+        // once at the end.
+        //
+        // This is not belt-and-braces. The first attempt at the full matrix was killed
+        // externally at pass 9 of 18, and because the report was only emitted after the final
+        // pass, nine completed `run_tuning` passes produced no per-class numbers at all —
+        // roughly 40 minutes of measurement lost to a signal, with nothing wrong in the code.
+        // A long unattended job that keeps its findings only in memory is one interruption
+        // away from having measured nothing.
+        let destination = std::env::var("SETFIT_PRODUCTION_CALIBRATION_REPORT").map_or_else(
+            |_| std::env::temp_dir().join("setfit-production-calibration.txt"),
+            std::path::PathBuf::from,
+        );
+        let flush = |body: &str, complete: bool| {
+            let banner = if complete {
+                "STATUS: COMPLETE\n"
+            } else {
+                "STATUS: PARTIAL — this run had not finished when the file was written; the \
+                 cells below are the ones that COMPLETED. Treat any absent cell as unmeasured, \
+                 never as passing.\n"
+            };
+            let _ = std::fs::write(&destination, format!("{banner}{body}"));
         };
 
         let mut report = String::new();
@@ -2460,6 +2516,24 @@ mod tests {
                 let slot = median_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
                 *slot = slot.max(median_of(&real_values));
             }
+
+            // Persist everything measured so far. A kill after this point costs at most the
+            // cell in flight, never the cells already paid for.
+            let mut partial = report.clone();
+            partial.push_str("\nPASSES COMPLETED SO FAR\n");
+            for row in &timing_rows {
+                partial.push_str(row);
+            }
+            for id in &regimes {
+                partial.push_str(&format!("  regime: {id}\n"));
+            }
+            flush(&partial, false);
+            eprintln!(
+                "[progress] cell {} seed {} complete; partial report written to {}",
+                cell.label(),
+                cell.seed,
+                destination.display()
+            );
         }
 
         // The architecture@revision component every cell rendered, under the SAME header the
@@ -2544,11 +2618,10 @@ mod tests {
         report.push_str(&format!("\nPASSES RUN: {passes_run}\n"));
 
         println!("{report}");
-        let destination = std::env::var("SETFIT_PRODUCTION_CALIBRATION_REPORT").map_or_else(
-            |_| std::env::temp_dir().join("setfit-production-calibration.txt"),
-            std::path::PathBuf::from,
-        );
-        std::fs::write(&destination, &report).unwrap_or_else(|e| {
+        // Final write, with the COMPLETE banner. Unlike the per-cell flushes this one is
+        // allowed to fail loudly: a calibration whose numbers cannot be read is a calibration
+        // that did not happen, and by this point every pass has already been paid for.
+        std::fs::write(&destination, format!("STATUS: COMPLETE\n{report}")).unwrap_or_else(|e| {
             panic!("the production calibration report must be writable at {destination:?}: {e}")
         });
         println!("production calibration report written to {}", destination.display());
