@@ -58,8 +58,36 @@ impl MultiClassMetrics {
     }
 
     /// Compute from predictions and ground truth
+    ///
+    /// The class count is INFERRED from the observed indices (`max + 1`). A class that appears
+    /// in neither vector is therefore absent from the result — see
+    /// [`Self::from_predictions_with_min_classes`] when the declared label map is known and a
+    /// zero-support class must still be represented.
     pub fn from_predictions(y_pred: &[usize], y_true: &[usize]) -> Self {
         let cm = ConfusionMatrix::from_predictions(y_pred, y_true);
+        Self::from_confusion_matrix(&cm)
+    }
+
+    /// Compute from predictions and ground truth over AT LEAST `min_classes` classes.
+    ///
+    /// # Why the declared size has to be passed in
+    ///
+    /// [`Self::from_predictions`] infers the class count from the data, which is right when
+    /// nothing else knows it. A benchmark row does know it: the head's ordered label map is the
+    /// authority, and a split in which the last class happens to have zero support would
+    /// otherwise silently produce a SHORTER metric vector — so `f1[2]` would mean `favor` on one
+    /// row of a results table and be out of range on the next, and an official score selecting
+    /// class 2 would report "not computable" for a class that merely did not occur.
+    ///
+    /// With the declared size supplied, an absent class is present and scores the shipped
+    /// zero-division value (`0.0`), which is the convention [`Self::from_confusion_matrix`]
+    /// already applies to every degenerate precision, recall and F1.
+    pub fn from_predictions_with_min_classes(
+        y_pred: &[usize],
+        y_true: &[usize],
+        min_classes: usize,
+    ) -> Self {
+        let cm = ConfusionMatrix::from_predictions_with_min_classes(y_pred, y_true, min_classes);
         Self::from_confusion_matrix(&cm)
     }
 
