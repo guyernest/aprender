@@ -17,18 +17,19 @@
 //! |------|------------------------------|---------|
 //! | train | **yes** | `lifecycle_train_then_save_hands_the_caller_the_hashed_artifact_bytes` |
 //! | save (bytes) | **yes**, since 04-17's `into_artifact_bytes` | same test — the bytes are RE-HASHED against the recorded digest |
-//! | save (as `setfit-apr-v1`) | **NO — F-10** | `lifecycle_the_apr_save_rung_is_refused_by_the_only_calibrated_encoder` |
-//! | load / embed / classify / inspect | **NO** — they have no input | `lifecycle_the_load_rung_requires_setfit_apr_v1_bytes` |
+//! | save (as `setfit-apr-v1`) | **NO — with the SLICE encoder** | `lifecycle_the_apr_save_rung_is_refused_by_the_conformance_slice_encoder` |
+//! | load / embed / classify / inspect | **NO** — they have no input HERE | `lifecycle_the_load_rung_requires_setfit_apr_v1_bytes` |
 //!
-//! # The blocker, stated precisely (F-10, and it is NOT 04-12's own)
+//! # The blocker, restated after Phase 5 (what changed and what did not)
 //!
-//! Two facts hold at the same time and are jointly fatal:
+//! **Before Phase 5's 05-03 calibration edit (commit `a63bb130b`), no user-reachable path
+//! produced a `setfit-apr-v1`.** Two facts held at the same time and were jointly fatal:
 //!
 //! 1. `tune_encoder` refuses any run whose regime coordinates are outside
-//!    `CALIBRATED_REGIMES`, and that set has exactly ONE entry, whose architecture component
+//!    `CALIBRATED_REGIMES`, and that set had exactly ONE entry, whose architecture component
 //!    is compared for EXACT equality:
 //!    `minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4`. So the
-//!    phase-3 MiniLM slice is the only encoder that can reach `HeadFitted` through the
+//!    phase-3 MiniLM slice was the only encoder that could reach `HeadFitted` through the
 //!    shipped transitions.
 //! 2. That same slice provably cannot compute the `setfit-apr-v1` contract's six embedded
 //!    probes: it is a 97-row VOCABULARY CLOSURE, and `probe_unicode` needs canonical id
@@ -36,9 +37,19 @@
 //!    probes from the view's own tensors, so the refusal is a property of the ENCODER and
 //!    not of any particular door.
 //!
-//! `load_setfit_apr` therefore has no bytes to be given, and `embed`, `classify` and
-//! `doc_view` — all methods on `VerifiedSetFitModel`, which only `load_setfit_apr`
-//! constructs — have no receiver.
+//! **Fact 1 no longer holds.** `a63bb130b` added a SECOND, measured regime entry for the
+//! production `all-MiniLM-L6-v2` checkout — additively, with the fixture entry byte-untouched
+//! — so a run on the production encoder now resolves a threshold table instead of failing
+//! closed with `UncalibratedRegime`. The end-to-end chain that unblocks is proven at the
+//! spawned-binary tier by 05-07
+//! (`setfit_cli_production_chain_completes_after_the_calibration_edit`).
+//!
+//! **Fact 2 is untouched, and it is the fact this file measures.** The conformance slice is
+//! still a 97-row vocabulary closure and still cannot compute `probe_unicode`. Every refusal
+//! below is therefore about the SLICE ENCODER, not about the calibrated set — which is why the
+//! calibration edit did not turn any of them red. What this file can witness out-of-crate is
+//! bounded by that: the production checkout is an 86.7 MB offline prerequisite, not a
+//! committed fixture, so an out-of-crate test that trained on it would be measuring the host.
 //!
 //! # What this file deliberately does NOT do
 //!
@@ -52,12 +63,12 @@
 //! Nor does it reach for a `pub(crate)` door. 04-05 solved the same problem in-crate by
 //! substituting the encoder and head into a run through a struct literal; that shape is
 //! compiler-closed here (`E0451`, both `SetFitRun` and `HeadFittedEvidence`), which is
-//! itself the finding: the remedy the phase has for F-10 is not available at the tier where
-//! OPS-01 is claimed.
+//! itself the finding: the in-crate remedy is not available at the tier where OPS-01 is
+//! claimed.
 //!
-//! Every refusal below is asserted as a TYPED value naming its cause, so the day F-10 is
-//! closed these tests go red and point a reader at this module rather than silently
-//! continuing to pass.
+//! Every refusal below is asserted as a TYPED value naming its cause, so the day the SLICE
+//! stops being refused these tests go red and point a reader at this module rather than
+//! silently continuing to pass.
 
 #![cfg(feature = "setfit")]
 
@@ -148,7 +159,7 @@ fn synthetic_row(role: &str, role_index: usize, label: usize, index: usize) -> L
 ///
 /// It must stay inside the MiniLM slice's 97-row vocabulary — the slice's encoder returns
 /// `VocabOutOfSlice` for anything outside it, digits included — which is why the sentences
-/// read as they do. That same 97-row closure is what F-10 is about.
+/// read as they do. That same 97-row closure is what the refusals in section (2) are about.
 fn synthetic_dataset() -> PreparedDataset<Canonical> {
     let label_names: Vec<String> = LABEL_NAMES.iter().map(|n| (*n).to_string()).collect();
     let rows = |role: &str, role_index: usize, per_class: usize| -> Vec<LabeledExample> {
@@ -344,15 +355,23 @@ fn lifecycle_train_then_save_hands_the_caller_the_hashed_artifact_bytes() {
     assert_eq!(
         format_id, "setfit-serde-json-v1",
         "this run was closed with phase 3's debug codec; if it ever reports the APR format here, \
-         F-10 has been fixed and the rest of this file must be revisited",
+         the SLICE encoder has become able to carry an artifact and the rest of this file must \
+         be revisited",
     );
 }
 
 // ===========================================================================================
-// (2) THE FINDING, kept executable: the save rung cannot produce `setfit-apr-v1`
+// (2) THE FINDING, kept executable: the SLICE encoder cannot produce `setfit-apr-v1`
 // ===========================================================================================
 
-/// F-10 at the OPS-01 tier: the only trainable encoder cannot carry an APR artifact.
+/// The OPS-01 tier: the CONFORMANCE SLICE encoder cannot carry an APR artifact.
+///
+/// Renamed from `..._by_the_only_calibrated_encoder` by 05-07. That name asserted a fact that
+/// stopped holding at `a63bb130b`: `CALIBRATED_REGIMES` now has TWO entries, so the slice is no
+/// longer the only calibrated encoder. **Nothing else about this test changed** — the slice is
+/// still a 97-row vocabulary closure, `probe_unicode` still needs canonical id 5915, and both
+/// routes below still refuse. The old name would have made a true measurement carry a false
+/// claim.
 ///
 /// 04-05 records the same measurement from INSIDE the crate
 /// (`round_trip_the_phase_three_slice_fixture_cannot_carry_an_apr_artifact`). This is the
@@ -363,7 +382,7 @@ fn lifecycle_train_then_save_hands_the_caller_the_hashed_artifact_bytes() {
 /// Both structural gaps are asserted, not only the one that fires first, so the record does
 /// not silently narrow to whichever probe the encoder reaches soonest.
 #[test]
-fn lifecycle_the_apr_save_rung_is_refused_by_the_only_calibrated_encoder() {
+fn lifecycle_the_apr_save_rung_is_refused_by_the_conformance_slice_encoder() {
     let arch = slice_encoder(ROOT_SEED).architecture();
     assert!(
         arch.vocab_remap.is_some(),
@@ -380,8 +399,10 @@ fn lifecycle_the_apr_save_rung_is_refused_by_the_only_calibrated_encoder() {
     // Route 1: the shipped door. `SetFitRun::<HeadFitted>::verify_artifact(&AprCodec)`.
     let Err(via_policy) = head_fitted_run().verify_artifact(&AprCodec::new()) else {
         panic!(
-            "the slice fixture produced a setfit-apr-v1 artifact — F-10 is CLOSED. Restore the \
-             full OPS-01 chain in this file: load_setfit_apr -> embed -> classify -> doc_view.",
+            "the SLICE fixture produced a setfit-apr-v1 artifact. This is NOT the F-10 signal \
+             (F-10 was closed for the production encoder at a63bb130b): it means the 97-row \
+             vocabulary closure has become able to compute probe_unicode. Restore the full \
+             OPS-01 chain in this file: load_setfit_apr -> embed -> classify -> doc_view.",
         );
     };
     assert_probe_unicode_refusal(&via_policy);
@@ -398,7 +419,9 @@ fn lifecycle_the_apr_save_rung_is_refused_by_the_only_calibrated_encoder() {
         .deserialize(&verified_run().into_artifact_bytes())
         .expect("phase 3's codec must read back the bytes it just wrote");
     let Err(via_seam) = AprCodec::new().serialize(&bundle) else {
-        panic!("the codec seam produced a setfit-apr-v1 artifact — F-10 is CLOSED; see above");
+        panic!(
+            "the codec seam produced a setfit-apr-v1 artifact FROM THE SLICE's bundle; see above"
+        );
     };
     assert_matches_probe_unicode(&via_seam, "the codec seam");
 }
@@ -415,7 +438,8 @@ fn assert_probe_unicode_refusal(err: &SetFitTrainError) {
 ///
 /// A `is_err()` check would pass for a refusal with any cause at all, including one that
 /// arrived because the fixture directory was missing. Naming `probe_unicode` is what makes
-/// this a record of F-10 rather than a record of something going wrong.
+/// this a record of the SLICE's vocabulary closure rather than a record of something going
+/// wrong.
 fn assert_matches_probe_unicode(err: &CodecError, route: &str) {
     assert!(
         matches!(
@@ -429,15 +453,22 @@ fn assert_matches_probe_unicode(err: &CodecError, route: &str) {
     );
 }
 
-/// The escape route is closed too: no SECOND encoder can reach the save rung.
+/// The escape route is closed: an OUT-OF-ENVELOPE run cannot reach the save rung.
+///
+/// Renamed from `lifecycle_no_second_encoder_can_reach_the_save_rung` by 05-07. That name
+/// asserted a fact that stopped holding at `a63bb130b`: there IS now a second calibrated
+/// architecture, the production all-MiniLM-L6-v2 checkout. What this test measures was never
+/// "only one architecture exists" — it is that the gate compares the run's coordinates
+/// COMPONENT-WISE and fails closed on any coordinate the calibrated set does not cover, which
+/// is exactly as true with two entries as with one.
 ///
 /// # Why this test is what makes the finding complete
 ///
 /// "The slice cannot carry an artifact" invites the obvious answer: use a different encoder.
 /// `SetFitMiniLm::from_bundle_parts` is `pub`, so one is constructible out here. It cannot be
-/// TRAINED: `tune_encoder` renders the run's own coordinates and requires the frozen
-/// thresholds' calibrated set to COVER them, with the architecture component compared for
-/// exact equality.
+/// TRAINED at coordinates nobody measured: `tune_encoder` renders the run's own coordinates and
+/// requires the frozen thresholds' calibrated set to COVER them, with the architecture
+/// component compared for exact equality.
 ///
 /// The refusal PUBLISHES the calibrated set, so this test reads the constant out of the error
 /// rather than restating it — a copy here could drift from `CALIBRATED_REGIMES` silently, and
@@ -447,7 +478,7 @@ fn assert_matches_probe_unicode(err: &CodecError, route: &str) {
 /// fire for an unrelated reason; both firing, each naming its own varied coordinate in the
 /// observed id, shows the comparison is component-wise and fail-closed.
 #[test]
-fn lifecycle_no_second_encoder_can_reach_the_save_rung() {
+fn lifecycle_an_out_of_envelope_run_cannot_reach_the_save_rung() {
     let cases = [
         ("seed", UNCALIBRATED_SEED, BATCH_SIZE, "seeds=2"),
         ("cell", ROOT_SEED, UNCALIBRATED_BATCH_SIZE, "cells=s8e1b8"),
@@ -476,20 +507,48 @@ fn lifecycle_no_second_encoder_can_reach_the_save_rung() {
             "the {what} variation should have rendered `{expected_component}` into its regime id, \
              got `{observed}` — this run is not varying the coordinate it claims to vary",
         );
+        // THE STATE CHANGE, ASSERTED POSITIVELY (05-07).
+        //
+        // This read `calibrated.len() == 1` with the note "if it has grown, an APR-capable
+        // encoder may now be trainable and this whole file must be revisited". It grew:
+        // Phase 5's 05-03 calibration edit (commit `a63bb130b`) added the production
+        // all-MiniLM-L6-v2 regime, and the file WAS revisited — that is this plan. The old
+        // literal was left behind by 05-03 and made `make setfit-lifecycle-tests` RED; it is
+        // migrated here rather than deleted, so the transition is recorded by an assertion
+        // instead of by an assertion's disappearance (05-03's own deviation-3 pattern).
+        //
+        // Exactly TWO, and both named, because a bare `>= 1` would pass a set that had
+        // silently gained a third architecture — which is precisely the widening the
+        // regime gate exists to make visible.
         assert_eq!(
             calibrated.len(),
-            1,
-            "the calibrated set has exactly one entry today; if it has grown, an APR-capable \
-             encoder may now be trainable and this whole file must be revisited",
+            2,
+            "the calibrated set has exactly two entries since a63bb130b — the phase-3 slice \
+             and the production checkout. If it has grown again, a THIRD architecture became \
+             trainable and this whole file must be revisited: got {calibrated:?}",
         );
-        let entry = calibrated.first().expect("length was just asserted to be 1");
+        let fixture_entry = calibrated
+            .iter()
+            .find(|entry| entry.starts_with("minilm-slice-h64-l2-a2-i256-v97@"))
+            .unwrap_or_else(|| {
+                panic!("the phase-3 slice regime must still be calibrated, got {calibrated:?}")
+            });
         assert!(
-            entry.starts_with("minilm-slice-h64-l2-a2-i256-v97@"),
-            "the one calibrated architecture must still be the phase-3 slice, got `{entry}`",
+            calibrated
+                .iter()
+                .any(|entry| entry.starts_with("minilm-slice-h384-l6-a12-i1536-v30522@")),
+            "and the PRODUCTION regime a63bb130b added must be present — its absence would \
+             mean the F-10 unblock was reverted, got {calibrated:?}",
         );
         assert_ne!(
-            &observed, entry,
-            "non-vacuity: the observed id must actually differ from the calibrated entry",
+            &observed, fixture_entry,
+            "non-vacuity: the observed id must actually differ from the fixture entry",
+        );
+        assert!(
+            !calibrated.contains(&observed),
+            "non-vacuity, restated for two entries: the observed id must differ from EVERY \
+             calibrated entry, or the refusal above proves nothing about the coordinate this \
+             case varied. observed `{observed}` against {calibrated:?}",
         );
     }
 }

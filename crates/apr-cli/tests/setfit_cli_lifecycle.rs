@@ -855,8 +855,10 @@ fn prepare_phase2_inputs(root: &Path) -> (PathBuf, PathBuf) {
 }
 
 #[test]
-#[ignore = "integration weight AND host weight: spawns the shipped binary seven times and \
-            TRAINS a 22M-parameter encoder. Needs the pinned 86.7 MB production checkout \
+#[ignore = "integration weight AND host weight: spawns the shipped binary eight times \
+            (--version, data tweet-eval-stance, data select, setfit train, inspect, eval \
+            x2, predict) and TRAINS a 22M-parameter encoder. Needs the pinned 86.7 MB \
+            production checkout \
             (APRENDER_MINILM_DIR, default ~/.cache/aprender/minilm-l6-v2-1110a243); it SKIPS \
             with a printed message when that is absent, and export \
             APRENDER_PRODUCTION_CHAIN_REQUIRED=1 to make the skip a failure instead. \

@@ -12,12 +12,17 @@
 //! | HTTP | `realizar::api::create_router_with_config` driven by `tower` `oneshot` |
 //!
 //! **It does NOT prove that training produces an artifact all three agree on.**
-//! That chain cannot close on this host: `CALIBRATED_REGIMES` admits exactly one
-//! encoder (the phase-3 MiniLM slice) whose 97-row vocabulary closure cannot
-//! compute the `probe_unicode` probe, so no `setfit-apr-v1` artifact is
-//! producible from `apr setfit train` here (finding F-10, measured on three
-//! independent routes by plan 04-12; it is a Phase 5 item). The artifact this
-//! file compares over is a SYNTHETIC fixture written through core's public
+//! Before Phase 5's 05-03 calibration edit (commit `a63bb130b`), no user-reachable
+//! path produced a `setfit-apr-v1` at all: `CALIBRATED_REGIMES` admitted exactly
+//! one encoder (the phase-3 MiniLM slice) whose 97-row vocabulary closure cannot
+//! compute the `probe_unicode` probe (finding F-10, measured on three independent
+//! routes by plan 04-12). That is closed — 05-07's
+//! `setfit_cli_production_chain_completes_after_the_calibration_edit` trains,
+//! inspects, evaluates and predicts from one real artifact — but closing it did
+//! not change what THIS file claims, and the artifact it compares over is
+//! deliberately still a SYNTHETIC fixture: producing a real one needs the 86.7 MB
+//! production checkout, which is an offline prerequisite rather than something a
+//! parity suite may require. The fixture is written through core's public
 //! `write_setfit_apr` and loaded through core's public `load_setfit_apr` — the
 //! same two doors production uses. That is honest for a PARITY claim, which is
 //! about three READERS agreeing on one artifact, and it would NOT be honest for

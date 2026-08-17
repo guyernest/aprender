@@ -2,16 +2,22 @@
 //!
 //! # The measured boundary of what these can reach
 //!
-//! `apr-cli` cannot construct a `setfit-apr-v1` artifact that passes the load ladder, and
+//! These UNIT tests cannot construct a `setfit-apr-v1` artifact that passes the load ladder, and
 //! therefore cannot construct a `SelectionLock` either: `SelectionCandidate::from_evaluation`
 //! needs a `ValidationEvaluation`, whose only producers take a verified model. The blockers are
-//! structural, not gaps in effort — `CALIBRATED_REGIMES` admits only the phase-3 MiniLM slice,
-//! whose 97-row vocabulary closure cannot compute two of the six contract-resident probes
-//! (F-10), and core's APR-capable view fixture is `#[cfg(test)] pub(crate)`.
+//! structural, not gaps in effort — the conformance slice's 97-row vocabulary closure cannot
+//! compute two of the six contract-resident probes, and core's APR-capable view fixture is
+//! `#[cfg(test)] pub(crate)`. Producing a real artifact needs the 86.7 MB production checkout,
+//! which a default-suite module may not require.
 //!
 //! So the lock->token->grant chain is proven where an artifact exists: in `aprender-train`, by
 //! `apr_evaluate_the_lock_travels_between_two_invocations_as_a_file` (TRN-07, IN-PROCESS,
-//! file-mediated). 04-15 owns the SPAWNED cross-process proof.
+//! file-mediated). The SPAWNED cross-process form is 04-15's ladder, and its POSITIVE half —
+//! `--split validation --lock-out` in one process, `--split test --selection-lock` in the next,
+//! same lock hash — is walked by 05-07's
+//! `setfit_cli_production_chain_completes_after_the_calibration_edit`. **Before Phase 5's 05-03
+//! calibration edit (commit `a63bb130b`) no user-reachable path produced a `setfit-apr-v1`
+//! (finding F-10), so that positive half was unreachable; it is not any more.**
 //!
 //! What IS reachable here — and is what this adapter is — is every refusal, every ordering
 //! claim, and the structural guarantee that no path reaches the test split around `grant`.
@@ -434,10 +440,11 @@ fn write_lock_still_refuses_a_destination_that_appeared_mid_run() {
     // for is someone deleting it as "now redundant" after the pre-flight moved earlier.
     //
     // `write_lock` itself cannot be called from here: it needs a `SelectionLock`, and this
-    // file's header records the measured reason none can be built in this crate —
+    // file's header records the measured reason none can be built in this crate's unit suite —
     // `SelectionCandidate::from_evaluation` needs a `ValidationEvaluation`, whose only
-    // producers take a verified model, and no `setfit-apr-v1` artifact can be produced on this
-    // host (F-10). `SelectionLock::from_canonical_bytes` exists, but hand-forging canonical
+    // producers take a verified model, and no `setfit-apr-v1` artifact is available here
+    // without the 86.7 MB production checkout (before commit a63bb130b none was producible at
+    // all — F-10). `SelectionLock::from_canonical_bytes` exists, but hand-forging canonical
     // lock bytes here would be a SECOND implementation of the lock's wire form living in a CLI
     // test — the exact drift this phase removes elsewhere. So the property is pinned where it
     // actually lives: at the writer `write_lock` delegates to, plus a source anchor tying the
@@ -658,8 +665,9 @@ fn eval_setfit_uses_the_librarys_evaluator_and_computes_no_validation_metric_its
 /// mismatched corpus yields a confidently wrong accuracy instead of an error — which is exactly
 /// what the validation evaluator refuses by name (`apr_evaluate.rs`, `LabelMapMismatch`).
 ///
-/// The behaviour is not reachable from this adapter's tests: reaching it needs a real
-/// `ReloadedSetFitCredential`, and no artifact can be built on this host while F-10 stands. So
+/// The behaviour is not reachable from this adapter's unit tests: reaching it needs a real
+/// `ReloadedSetFitCredential`, and building one needs the production checkout this module may
+/// not require (before commit a63bb130b no artifact was producible at all — F-10). So
 /// this is a SOURCE guard, in the same shape this phase uses elsewhere for blocked rungs. It
 /// asserts ORDER, not mere presence — a gate placed after the scoring would be no gate at all.
 #[test]

@@ -362,9 +362,17 @@ fn committed_lock(
 /// claim is exactly the FILE boundary, not the process boundary.
 ///
 /// It lives in `aprender-train` rather than beside `apr eval` because this is the only crate in
-/// which a `setfit-apr-v1` artifact can be produced at all — measured, not assumed: F-10 leaves
-/// the phase-3 slice as the sole trainable encoder and it cannot compute two of the six probes,
-/// and core's APR-capable view fixture is `#[cfg(test)] pub(crate)`.
+/// which a `setfit-apr-v1` artifact can be produced WITHOUT the 86.7 MB production checkout —
+/// measured, not assumed: the phase-3 slice cannot compute two of the six probes, and core's
+/// APR-capable view fixture is `#[cfg(test)] pub(crate)`, so `apr-cli`'s own suites have no
+/// in-repository artifact to build a lock from.
+///
+/// **Before Phase 5's 05-03 calibration edit (commit `a63bb130b`), no user-reachable path
+/// produced a `setfit-apr-v1` at all.** That is closed for the production encoder, and the
+/// SPAWNED cross-process form of the claim below — a lock written by one `apr eval` process
+/// and consumed by another — is proven end-to-end by 05-07's
+/// `setfit_cli_production_chain_completes_after_the_calibration_edit`. This test's own scope is
+/// unchanged: one process, the FILE boundary, no production checkout required.
 #[test]
 fn apr_evaluate_the_lock_travels_between_two_invocations_as_a_file() {
     let temp = tempfile::TempDir::new().expect("tempdir");

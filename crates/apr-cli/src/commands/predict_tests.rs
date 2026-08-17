@@ -1,15 +1,25 @@
 //! Tests for the generic `apr predict` surface.
 //!
 //! What these can and cannot reach is a MEASURED boundary, recorded here so a
-//! reader does not mistake its shape for a gap in the suite. `apr-cli` cannot
-//! construct a `setfit-apr-v1` artifact that passes the load ladder: the only
-//! encoder the calibrated-regime gate admits is the phase-3 MiniLM slice, whose
-//! 97-row vocabulary closure cannot compute two of the six contract-resident probes
-//! (F-10), and core's APR-capable view fixture is `#[cfg(all(test, feature =
-//! "setfit"))] pub(crate)`, so it is unreachable from this crate. Every rung up to
-//! the artifact door is therefore tested here by behaviour; the rung past it is
-//! tested by the typed refusal that arrives, which is what proves the routing
-//! engaged rather than merely that a message was printed.
+//! reader does not mistake its shape for a gap in the suite. These UNIT tests
+//! cannot construct a `setfit-apr-v1` artifact that passes the load ladder: the
+//! conformance slice's 97-row vocabulary closure cannot compute two of the six
+//! contract-resident probes, and core's APR-capable view fixture is
+//! `#[cfg(all(test, feature = "setfit"))] pub(crate)`, so it is unreachable from
+//! this crate. Every rung up to the artifact door is therefore tested here by
+//! behaviour; the rung past it is tested by the typed refusal that arrives, which
+//! is what proves the routing engaged rather than merely that a message was
+//! printed.
+//!
+//! **The boundary is a fixture boundary, not a capability one.** Before Phase 5's
+//! 05-03 calibration edit (commit `a63bb130b`) no user-reachable path produced a
+//! `setfit-apr-v1` (finding F-10). That is closed: `apr predict` is exercised
+//! against a REAL trained artifact, with its full eight-rung load ladder and probe
+//! replay, by 05-07's spawned production chain
+//! (`crates/apr-cli/tests/setfit_cli_lifecycle.rs`,
+//! `setfit_cli_production_chain_completes_after_the_calibration_edit`). That test
+//! needs the 86.7 MB production checkout and trains an encoder, which is why the
+//! positive rung lives there and not in this default-suite module.
 
 use super::*;
 use crate::setfit_tag::test_support::write_setfit_shaped_apr;
