@@ -276,15 +276,15 @@ contract edit per Phase 3 D-10(c), never an inline relaxation by a Phase 5 execu
 **Plans**: 13 plans in 7 waves
 
 Plans:
-**Wave 1** *(the F-10 unblock work — D-01; nothing downstream runs until the edit lands)*
+**Wave 1** *(the F-10 unblock work — D-01 — plus the independent numerics substrate 05-04, whose t_critical.json fixture is the source of 05-05's frozen contract literal; nothing F-10-downstream runs until the edit lands)*
 
 - [ ] 05-01-PLAN.md — Production calibration measurement: freeze E/B from pinned setfit 1.1.3, timed s8 probe, boundary matrix, ε windows + proposed regime entry (NOT autonomous: conditional >1hr compute check-in)
 - [ ] 05-02-PLAN.md — Per-regime Thresholds restructuring (table_for lookup, fixture semantics byte-identical, len==1 preserved)
+- [ ] 05-04-PLAN.md — Numerics substrate: multiclass top-label ECE + Brier (calibration-v1-bound), f64 paired-t + frozen t_{0.975,9}, scipy/sklearn fixtures in the pinned uv env
 
-**Wave 2** *(blocked on Wave 1 for 05-03; 05-04/05/06 are independent foundations)*
+**Wave 2** *(blocked on Wave 1 for 05-03 and for 05-05 — which copies its frozen t literal from 05-04's t_critical.json; 05-06 is an independent foundation)*
 
 - [ ] 05-03-PLAN.md — The three-place synchronized contract/code/test edit at the D-04 human checkpoint (NOT autonomous), one commit, pv diff evidence, 40-cell envelope coverage test
-- [ ] 05-04-PLAN.md — Numerics substrate: multiclass top-label ECE + Brier (calibration-v1-bound), f64 paired-t + frozen t_{0.975,9}, scipy/sklearn fixtures in the pinned uv env
 - [ ] 05-05-PLAN.md — setfit-benchmark-claims-v1.yaml + BenchRow/RunManifest (method-tagged, deny_unknown_fields, digest-verify-before-return) + $(CONTRACTS)/audit wiring
 - [ ] 05-06-PLAN.md — `apr finetune --task classify --selection-manifest` + explicit seed/val_split/early-stop control + A6 probe + run_classify_core shared entry
 

@@ -865,7 +865,7 @@ pub fn ttest_rel(sample1: &[f32], sample2: &[f32]) -> Result<TTestResult> // dif
 | A6 | `ClassifyTrainer` tolerates `val_split: 0.0` / effectively-disabled early stopping | Pitfall 3 | If it divides by zero or requires val batches, D-10 wiring needs a trainer-side patch; probe with a 5-minute test before the LoRA wave |
 | A7 | The SetFit train completion report carries (or can trivially carry) wall-clock timing | Pattern 6 | Minor: the driver can wall-clock the invocation regardless |
 
-## Open Questions
+## Open Questions (RESOLVED — every question has a plan-adopted resolution or a mandated checkpoint; pointers below)
 
 1. **lambda-vector access + 9B base-model provenance** (A5)
    - What we know: pre-authorized compute; RTX 4090 per dispatch-script comments; dispatch-*.sh
@@ -874,11 +874,15 @@ pub fn ttest_rel(sample1: &[f32], sample2: &[f32]) -> Result<TTestResult> // dif
      base weights live and their pinned hash (rows must record base-model hashes, D-12).
    - Recommendation: resolve at the first human checkpoint; plan the LoRA wave behind an explicit
      environment-verification task.
+   - **RESOLVED →** fronted as the blocking human checkpoint 05-11.T1 (automation-first ssh
+     probes; base-weight SHA-256 recorded before any cell runs — the LoRA wave's hard precondition).
 2. **Production epochs/batch for the cell labels** (feeds D-02's entry and F-R3)
    - What we know: labels are `s{shots}e{E}b{B}`; fixture cells used e1b4/e2b8; SetFit reference
      recipe leans 1 epoch / batch 16 (A2).
    - Recommendation: freeze from the pinned setfit 1.1.3 defaults (A2 verification) in the
      calibration plan, BEFORE the matrix runs — they are baked into the contract entry.
+   - **RESOLVED →** 05-01.T1 freezes E/B from the pinned env before the matrix; the frozen values
+     are baked into 05-03's contract entry.
 3. **LoRA-side lock semantics** (F-R14, the one real design gap)
    - What we know: `create_selection_lock`/`mint_test_token`/`grant` are generic over a SEALED
      `SetFitCredential` (exactly two implementors, counted by
@@ -892,18 +896,26 @@ pub fn ttest_rel(sample1: &[f32], sample2: &[f32]) -> Result<TTestResult> // dif
      more than one trained candidate per (shot, seed)"; (c) reuse the SetFit cell's lock as the
      cell's pairing witness. Recommendation: (b) — it matches "frozen defaults ⇒ no selection"
      and avoids touching the seal; the contract states it in-band with a doctored-row negative.
+   - **RESOLVED →** option (b) adopted: 05-05's claims contract owns the LoRA no-selection
+     attestation rule (seal NOT widened); 05-10's bench gate enforces one-trained-candidate-per-cell.
 4. **Where the row/manifest TYPES live** — `aprender-train` (beside lock/evidence, feature
    `setfit`) vs a small new module in `apr-cli`. House rule ("no semantics in the CLI",
    `SelectionManifest` lives in the data crate) argues for the library. Planner's call; the
    contract owns the schema either way.
+   - **RESOLVED →** the library: `aprender_train::train::setfit::bench_row` (feature `setfit`),
+     built in 05-05.T2; the CLI stays a filesystem shim.
 5. **`bench run` shells out vs library calls** — the spawned-process design gives per-cell
    isolation, true child peak-RSS, and matches the spawned-tier evidence style; library calls
    give richer typed errors. Hybrid recommendation: `bench run` calls libraries for evaluation
    (needs prediction vectors) but the 40-cell DRIVER spawns `bench run` per cell (isolation +
    resume + measurement). OPS-03 is satisfied either way as long as evaluation goes through the
    one library door.
+   - **RESOLVED →** the hybrid, as recommended: 05-09's `bench run` calls library doors for
+     evaluation; the 40-cell driver (run_bench_cells.sh) spawns one `bench run` process per cell.
 6. **SetFit CPU host choice** (macOS dev box vs lambda-vector CPU) — affects peak-memory
    mechanism uniformity (Pattern 6). Recommend deciding in the same checkpoint as Q1.
+   - **RESOLVED →** decided at the same 05-11.T1 checkpoint as Q1 (default recommendation:
+     macOS local, mechanism declared per row); 05-12 consumes the decision.
 
 ## Environment Availability
 

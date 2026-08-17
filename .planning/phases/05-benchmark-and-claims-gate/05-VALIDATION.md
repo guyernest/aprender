@@ -28,10 +28,10 @@ updated: 2026-08-16
 
 ## Sampling Rate
 
-- **After every task commit:** Run the task's `<automated>` verify (each < 60 s except the flagged calibration/cell runs)
+- **After every task commit:** Run the task's `<automated>` verify (each < 60 s except the flagged calibration/ladder/cell runs)
 - **After every plan wave:** Run the full suite command
 - **Before `/gsd:verify-work`:** Full suite must be green
-- **Max feedback latency:** 300 seconds (calibration matrix and 40-cell runs are contracted exceptions with their own compute gates)
+- **Max feedback latency:** 300 seconds (the calibration matrix, the 05-07.T1 spawned production ladder — its automated verify includes a real s8 training rung — and the 40-cell runs are contracted exceptions with their own compute gates)
 
 ---
 
@@ -47,9 +47,9 @@ updated: 2026-08-16
 | 05-03.T1 | 05-03 | 2 | EVAL-02 | T-05-03-01/02/03 | additive edit; envelope covered; NO commit | unit + pv | `cargo test ... thresholds` + `pv validate` + `pv diff` | ◐ edits existing | ⬜ pending |
 | 05-03.T2 | 05-03 | 2 | EVAL-02 | T-05-03-04 | human approval before commit (D-04) | checkpoint (human) | — (human-check) | — | ⬜ pending |
 | 05-03.T3 | 05-03 | 2 | EVAL-02 | T-05-03-01 | one commit; both gate directions | unit + audit | `cargo test ... setfit::` + `make contract-audit-phase4` | ◐ edits existing | ⬜ pending |
-| 05-04.T1 | 05-04 | 2 | EVAL-01/04 | T-05-04-01 | manifested fixtures; A1/A3/A4 resolved | generator self-verify | `uv run python gen_claims_fixtures.py` + `shasum -c` | ❌ Wave 0 | ⬜ pending |
-| 05-04.T2 | 05-04 | 2 | EVAL-01 | T-05-04-01 | fixture-parity ECE/Brier, contract-bound | unit (tdd) | `cargo test -p aprender-core --lib calibration` | ◐ edits existing | ⬜ pending |
-| 05-04.T3 | 05-04 | 2 | EVAL-04 | T-05-04-02/03 | frozen t verified vs scipy; no RNG | unit (tdd) | `cargo test -p aprender-core --lib stats::` | ◐ edits existing | ⬜ pending |
+| 05-04.T1 | 05-04 | 1 | EVAL-01/04 | T-05-04-01 | manifested fixtures; A1/A3/A4 resolved | generator self-verify | `uv run python gen_claims_fixtures.py` + `shasum -c` | ❌ Wave 0 | ⬜ pending |
+| 05-04.T2 | 05-04 | 1 | EVAL-01 | T-05-04-01 | fixture-parity ECE/Brier, contract-bound | unit (tdd) | `cargo test -p aprender-core --lib calibration` | ◐ edits existing | ⬜ pending |
+| 05-04.T3 | 05-04 | 1 | EVAL-04 | T-05-04-02/03 | frozen t verified vs scipy; no RNG | unit (tdd) | `cargo test -p aprender-core --lib stats::` | ◐ edits existing | ⬜ pending |
 | 05-05.T1 | 05-05 | 2 | EVAL-03/04 | T-05-05-02 | contract pv-valid + gate can fail | pv + induced red | `pv validate contracts/setfit-benchmark-claims-v1.yaml` | ❌ Wave 0 | ⬜ pending |
 | 05-05.T2 | 05-05 | 2 | EVAL-03 | T-05-05-01/03/04/05 | 5 distinct refusals; 80-cell parity | unit (tdd) | `cargo test -p aprender-train --lib --features setfit bench_row` | ❌ Wave 0 | ⬜ pending |
 | 05-06.T1 | 05-06 | 2 | EVAL-02 | T-05-06-01 | manifest->Selection door; hardcodes controllable | check + unit | `cargo check -p apr-cli --features setfit` | ◐ edits existing | ⬜ pending |
