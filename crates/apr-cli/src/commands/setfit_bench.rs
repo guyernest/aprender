@@ -1123,20 +1123,428 @@ pub(crate) fn write_probe_text(bench_dir: &Path, cell: CellKey, text: &str) -> R
 // The SetFit cell path
 // ==========================================================================================
 
-/// Wave-4 task 2 fills this module. The surface, the resource protocol and the transport
-/// ingest above are complete and proven; the execution paths land in the next two commits of
-/// THIS plan, which is why the refusal names them rather than pretending to be a feature flag.
+/// The SetFit cell: train, write, RELOAD, measure, lock, evaluate, emit.
+///
+/// # Pure library orchestration
+///
+/// Not one semantic decision is made in this module. `SetFitRun`'s four transitions carry
+/// every training gate; `load_setfit_apr` (reached through `reload_verified_run_from_apr`'s
+/// load ladder) is the production loader, so only a VERIFIED artifact proceeds;
+/// `evaluate_rows_from_artifact` is the ONE prediction door a benchmark cell may call;
+/// `create_selection_lock` -> `mint_test_token` -> `CanonicalTestAccess::grant` is the D-16
+/// workflow `apr eval` uses, consumed rather than reimplemented; `assemble_quality_block`
+/// computes every published number. This module reads files, times things and writes files.
 mod setfit_cell {
-    use super::{CellRequest, CliError, Result};
+    use std::path::{Path, PathBuf};
 
-    pub(super) fn execute(request: &CellRequest<'_>) -> Result<()> {
-        Err(CliError::ValidationFailed(format!(
-            "cell {} cannot be executed by this build yet: `apr setfit bench run`'s SetFit \
-             execution path lands in plan 05-09 task 2. `--record` and `--cold-probe` are \
-             complete.",
-            request.cell
-        )))
+    use aprender::setfit::{ClassifyRequestDocument, PINNED_REVISION};
+    use aprender_contrastive_data::ledger::AccessLedger;
+    use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
+    use aprender_contrastive_data::select::Selection;
+    use entrenar::train::setfit::apr_codec::AprCodec;
+    use entrenar::train::setfit::apr_evaluate::{
+        evaluate_rows_from_artifact, evaluate_validation_from_artifact, EvaluatedSplit,
+        RowPredictions,
+    };
+    use entrenar::train::setfit::apr_reload::{
+        reload_verified_run_from_apr, ReloadedSetFitCredential,
+    };
+    use entrenar::train::setfit::bench_metrics::assemble_quality_block;
+    use entrenar::train::setfit::bench_row::{
+        sha256_hex, BenchLockRef, BenchRowPayload, MethodEvidence, ResourceBlock, SetfitEvidence,
+        BENCH_ROW_SCHEMA_VERSION, CLAIMS_CONTRACT_ID, WARMUP_COUNT,
+    };
+    use entrenar::train::setfit::evaluate::ValidationMetricKind;
+    use entrenar::train::setfit::lock::{
+        create_selection_lock, CanonicalTestAccess, SelectionCandidate, SelectionRule,
+    };
+    use entrenar::train::setfit::SetFitRun;
+
+    use crate::commands::{data_contrastive, data_tweeteval, setfit_train};
+
+    use super::resource::{self, TrainRssSampler, THROUGHPUT_BATCH_SIZE};
+    use super::{
+        emit_row, host_identity, lock_relative_path, read_bounded, write_probe_text, CellRequest,
+        CliError, Result,
+    };
+
+    /// The metric the lock orders candidates by — the SAME fixed choice `apr eval` makes.
+    ///
+    /// Fixed rather than a flag for the reason `eval/setfit.rs` records: a candidate set whose
+    /// metric kinds disagree cannot form a lock, so a per-invocation choice would let an
+    /// operator build a lock that cannot be created and discover it at the end.
+    const EVAL_METRIC: ValidationMetricKind = ValidationMetricKind::Accuracy;
+
+    /// The selection rule this command commits under — again `apr eval`'s.
+    const EVAL_RULE: SelectionRule = SelectionRule::MaxMetricLowestIndexTieBreak;
+
+    /// Everything the Phase 2 ingest produces, replayed against itself.
+    struct Phase2 {
+        dataset: PreparedDataset<Canonical>,
+        selection: Selection,
+        manifest_semantic_hash: String,
+        dataset_revision: String,
     }
+
+    /// Read `--data` and `--selection` through the doors `data_contrastive` owns.
+    ///
+    /// The same three calls `commands/eval/setfit.rs` and `apr finetune --selection-manifest`
+    /// make — `read_attested_canonical`, `read_selection_manifest`, `Selection::replay`. This
+    /// is EVAL-02's identical-sampled-ID guarantee: both methods walk one code path rather
+    /// than trusting an exporter.
+    fn read_phase2(request: &CellRequest<'_>) -> Result<Phase2> {
+        let mut ledger = AccessLedger::new();
+        let dataset = data_contrastive::read_attested_canonical(request.data, &mut ledger)?;
+        let manifest = data_contrastive::read_selection_manifest(request.selection)?;
+        let selection = Selection::replay(&manifest, &dataset, &mut ledger).map_err(|error| {
+            CliError::ValidationFailed(format!(
+                "--selection {} does not replay against --data {}: {error}",
+                request.selection.display(),
+                request.data.display()
+            ))
+        })?;
+
+        // THE CELL KEY AND THE SELECTION MUST DESCRIBE THE SAME DRAW. Nothing else checks
+        // this: `Selection::replay` proves the manifest describes THIS dataset, and the row
+        // records `shots`/`seed` from the FLAGS. A cell run with `--seed 13` against a
+        // manifest drawn at seed 17 would publish a row filed under seed 13 whose rows are
+        // seed 17's, and every paired-delta in the report would be comparing two different
+        // draws while looking correctly paired.
+        if selection.root_seed() != u64::from(request.cell.seed) {
+            return Err(CliError::ValidationFailed(format!(
+                "--seed {} disagrees with the selection manifest, which was drawn at root seed \
+                 {}. The row would be filed under a seed its rows do not come from.",
+                request.cell.seed,
+                selection.root_seed()
+            )));
+        }
+        if selection.shots_per_class() != request.cell.shots {
+            return Err(CliError::ValidationFailed(format!(
+                "--shots {} disagrees with the selection manifest, which carries {} per class.",
+                request.cell.shots,
+                selection.shots_per_class()
+            )));
+        }
+
+        let manifest_bytes = read_bounded(&request.data.join(data_tweeteval::MANIFEST_FILE))
+            .map_err(|error| {
+                CliError::ValidationFailed(format!(
+                    "{}: {error}",
+                    request.data.join(data_tweeteval::MANIFEST_FILE).display()
+                ))
+            })?;
+        let dataset_revision = data_tweeteval::dataset_revision_from_manifest(&manifest_bytes)?;
+
+        Ok(Phase2 {
+            dataset,
+            selection,
+            manifest_semantic_hash: manifest.semantic_hash.clone(),
+            dataset_revision,
+        })
+    }
+
+    /// Execute one SetFit cell.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn execute(request: &CellRequest<'_>) -> Result<()> {
+        let model_dir = request.model_dir.ok_or_else(|| {
+            CliError::ValidationFailed(
+                "--model-dir <DIR> is required for a setfit cell: it names the pinned \
+                 all-MiniLM-L6-v2 checkout. This command NEVER downloads."
+                    .to_string(),
+            )
+        })?;
+
+        // (1) THE REQUEST, in full, before anything expensive. The seed is the CELL's, and it
+        //     goes through the library's validated merge door whether or not a file was given.
+        let config = setfit_train::resolve_config(request.config, u64::from(request.cell.seed))?;
+
+        // (2) Phase 2's artifacts, replayed strictly against each other and against the cell.
+        let training_inputs = read_phase2(request)?;
+        let dataset_revision = training_inputs.dataset_revision.clone();
+        let selection_manifest_hash = training_inputs.manifest_semantic_hash.clone();
+        let dataset_fingerprint = training_inputs
+            .dataset
+            .validation_witness()
+            .dataset_fingerprint_hex();
+
+        // (3) THE ENCODER, then the shipped lifecycle. Every gate — device probe, pair budget,
+        //     selection/dataset agreement, calibration regime, evidence thresholds, head fit,
+        //     artifact round trip — is inside those four transitions.
+        let encoder =
+            aprender::setfit::SetFitMiniLm::from_pretrained_dir(model_dir, config.root_seed())
+                .map_err(|error| {
+                    CliError::ModelLoadFailed(format!(
+                        "--model-dir {}: {error}",
+                        model_dir.display()
+                    ))
+                })?;
+
+        // The TRAIN peak sampler opens here and closes the moment training ends, so what it
+        // observes is the training process's footprint and not the reload's.
+        let sampler = TrainRssSampler::start();
+        let started = std::time::Instant::now();
+        let prepared = SetFitRun::prepare(
+            encoder,
+            training_inputs.dataset,
+            training_inputs.selection,
+            config,
+        )
+        .map_err(train_error)?;
+        let tuned = prepared.tune_encoder().map_err(train_error)?;
+        let fitted = tuned.fit_head().map_err(train_error)?;
+        let verified = fitted
+            .verify_artifact(&AprCodec::new())
+            .map_err(train_error)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let train_wall_ms = started.elapsed().as_millis() as u64;
+        let train_peak = sampler.finish();
+
+        let evidence_table_hash = verified.evidence_table_hash().to_string();
+        let apr_artifact_sha256 = verified.artifact_hash();
+
+        // (4) THE WRITE. These are the bytes the trusted policy hashed and round-trip-closed,
+        //     so `artifact_bytes` below counts the artifact `apr_artifact_sha256` describes.
+        //     SetFit ships ONE file, so `deployable_total_bytes == artifact_bytes` — stated
+        //     rather than assumed, because on the LoRA side they deliberately differ.
+        let bytes = verified.into_artifact_bytes();
+        let artifact_bytes = bytes.len() as u64;
+        let artifact_path = artifact_path(request.bench_dir, request);
+        super::atomic_write(&artifact_path, &bytes, true)?;
+        drop(bytes);
+
+        // (5) THE RELOAD. Through the production door, so only a VERIFIED artifact proceeds —
+        //     and against a FRESH Phase 2 ingest, because the lifecycle consumed the first.
+        //     Reading the directory twice is the same discipline `apr eval` runs under: the
+        //     evaluation's inputs pass the attested boundary in their own right.
+        let eval_inputs = read_phase2(request)?;
+        let artifact_file_bytes = crate::setfit_io::read_setfit_apr_file_bounded(&artifact_path)?;
+        let credential = reload_verified_run_from_apr(
+            &artifact_file_bytes,
+            &eval_inputs.dataset,
+            &eval_inputs.selection,
+        )
+        .map_err(|error| {
+            CliError::ValidationFailed(format!(
+                "{}: {error}\nThe artifact this cell just wrote did not reload against the \
+                 inputs it was trained on, so no number measured from it would describe the \
+                 run that produced it.",
+                artifact_path.display()
+            ))
+        })?;
+        drop(artifact_file_bytes);
+
+        // (6) COLD LATENCY + INFERENCE PEAK, in a dedicated fresh child. NEVER the first
+        //     classify in this process: it has just trained and is operationally warm.
+        let probe_text = eval_inputs
+            .dataset
+            .test()
+            .rows()
+            .first()
+            .map(|row| row.input.clone())
+            .ok_or_else(|| {
+                CliError::ValidationFailed(
+                    "the canonical test split has no rows, so there is nothing to probe with"
+                        .to_string(),
+                )
+            })?;
+        let probe_path = write_probe_text(request.bench_dir, request.cell, &probe_text)?;
+        let cold = resource::measure_cold(&artifact_path, None, &probe_path)?;
+
+        // (7) WARM + THROUGHPUT, against the RELOADED model in this process.
+        let warm_request = ClassifyRequestDocument::new(std::iter::once(probe_text.clone()));
+        let mut backend_identity = String::new();
+        let warm_latency_ms_median = resource::warm_latency_ms_median(WARMUP_COUNT, || {
+            let response = credential
+                .model()
+                .classify(&warm_request)
+                .map_err(|error| CliError::InferenceFailed(error.to_string()))?;
+            // BACKEND IDENTITY, READ FROM EXECUTION (Ph4 D-12). `ClassifyResponse::backend`
+            // is `ExecutionBackend::identity` called on the value the encode invocation
+            // RETURNED — there is no parameter, no setter and no configuration path that
+            // reaches it. Echoing a device string from `--config` here would produce a row
+            // that says GPU because somebody typed GPU.
+            backend_identity = response.backend().to_string();
+            Ok(())
+        })?;
+
+        let test_rows_data = eval_inputs.dataset.test().rows();
+        let throughput_rows_per_sec = resource::throughput_rows_per_sec(
+            test_rows_data.len(),
+            THROUGHPUT_BATCH_SIZE,
+            |from, to| {
+                let batch = ClassifyRequestDocument::new(
+                    test_rows_data[from..to].iter().map(|row| row.input.clone()),
+                );
+                credential
+                    .model()
+                    .classify(&batch)
+                    .map_err(|error| CliError::InferenceFailed(error.to_string()))?;
+                Ok(())
+            },
+        )?;
+
+        // (8) THE EVALUATION, through the Phase 3 lock chain. Validation FIRST (it is what a
+        //     selection may be made on), then the lock is COMMITTED TO DISK, then the token,
+        //     then the grant, then the test rows.
+        let validation_rows = evaluate_rows_from_artifact(
+            &credential,
+            &eval_inputs.dataset,
+            EvaluatedSplit::Validation,
+        )
+        .map_err(|error| CliError::ValidationFailed(error.to_string()))?;
+
+        let scalar =
+            evaluate_validation_from_artifact(&credential, &eval_inputs.dataset, EVAL_METRIC)
+                .map_err(|error| CliError::ValidationFailed(error.to_string()))?;
+        let config_hash = config_hash_of(&credential);
+        let lock = create_selection_lock(
+            &credential,
+            vec![SelectionCandidate::from_evaluation(&config_hash, scalar)],
+            EVAL_RULE,
+        )
+        .map_err(|error| {
+            CliError::ValidationFailed(format!(
+                "the selection lock could not be committed: {error}"
+            ))
+        })?;
+
+        // COMMIT THE LOCK BYTES. The row's `lock_hash` is a CLAIM; this file is the evidence,
+        // and 05-10's gate recomputes the digest from these bytes rather than trusting the
+        // field. `force = true` because the row file is the write-once artifact — a re-run
+        // that got past the row's no-clobber gate is entitled to rewrite its own lock.
+        let lock_bytes = lock.to_canonical_bytes();
+        let lock_rel = lock_relative_path(request.cell);
+        super::atomic_write(&request.bench_dir.join(&lock_rel), &lock_bytes, true)?;
+        let committed_lock_hash = sha256_hex(&lock_bytes);
+
+        let token = lock.mint_test_token(&credential).map_err(|error| {
+            CliError::ValidationFailed(format!(
+                "the selection lock does not admit this artifact: {error}"
+            ))
+        })?;
+        let grant = CanonicalTestAccess::grant(token, &credential, &eval_inputs.dataset).map_err(
+            |error| {
+                CliError::ValidationFailed(format!("canonical test access was refused: {error}"))
+            },
+        )?;
+        let test_rows = evaluate_rows_from_artifact(
+            &credential,
+            &eval_inputs.dataset,
+            EvaluatedSplit::Test(&grant),
+        )
+        .map_err(|error| CliError::ValidationFailed(error.to_string()))?;
+
+        // (9) THE QUALITY BLOCK. Test rows supply the accuracy family, validation rows the
+        //     calibration diagnostics — SEPARATE PARAMETERS, so there is no argument order
+        //     that feeds test probabilities to the calibration functions (D-07).
+        let ordered_labels: Vec<String> = credential.model().ordered_labels().to_vec();
+        let quality = assemble_quality_block(&test_rows, &validation_rows, &ordered_labels)
+            .map_err(|error| CliError::ValidationFailed(error.to_string()))?;
+
+        // (10) THE ROW.
+        let payload = BenchRowPayload {
+            schema_version: BENCH_ROW_SCHEMA_VERSION,
+            contract_id: CLAIMS_CONTRACT_ID.to_string(),
+            method: request.cell.method,
+            shots: request.cell.shots,
+            seed: request.cell.seed,
+            dataset_revision,
+            dataset_fingerprint,
+            model_revision: PINNED_REVISION.to_string(),
+            selection_manifest_hash,
+            backend_identity,
+            host: host_identity(),
+            quality,
+            resource: ResourceBlock {
+                train_wall_ms,
+                cold_latency_ms: cold.cold_latency_ms,
+                // Always true on a row this adapter writes: `measure_cold` has no in-process
+                // path, so there is no branch here that could set it false.
+                cold_measured_in_child_process: true,
+                warm_latency_ms_median,
+                throughput_rows_per_sec,
+                throughput_batch_size: THROUGHPUT_BATCH_SIZE,
+                warmup_count: WARMUP_COUNT,
+                train_peak_rss_bytes: train_peak.bytes,
+                train_peak_rss_mechanism: train_peak.mechanism.clone(),
+                inference_peak_rss_bytes: cold.peak_rss_bytes,
+                inference_peak_rss_mechanism: cold.peak_rss_mechanism.to_string(),
+                peak_rss_sample_interval_hz: train_peak.sample_interval_hz,
+                artifact_bytes,
+                // SetFit ships ONE standalone file: the encoder, the tokenizer identity, the
+                // pooling policy and the head are all inside it. The equality is therefore a
+                // FACT about the format, not a copy-paste.
+                deployable_total_bytes: artifact_bytes,
+            },
+            evidence: MethodEvidence::Setfit(SetfitEvidence {
+                evidence_table_hash,
+                apr_artifact_sha256,
+                lock: BenchLockRef {
+                    lock_hash: committed_lock_hash,
+                    role: "written".to_string(),
+                    rule: lock.rule().to_string(),
+                    lock_record_path: lock_rel,
+                },
+            }),
+        };
+
+        let (row_path, row_hash) = emit_row(request.bench_dir, payload, request.force)?;
+        report(request.json, request.cell, &row_path, &row_hash)
+    }
+
+    /// Where this cell's artifact lands inside the bench directory.
+    fn artifact_path(bench_dir: &Path, request: &CellRequest<'_>) -> PathBuf {
+        bench_dir.join("artifacts").join(format!(
+            "{}-s{}-seed{}.apr",
+            request.cell.method.tag(),
+            request.cell.shots,
+            request.cell.seed
+        ))
+    }
+
+    /// The hex SHA-256 over the artifact document's canonical `requested_config` sub-document.
+    ///
+    /// The SAME derivation `apr eval` records as `CONFIG_HASH_DERIVATION`, so a lock this
+    /// command writes and a lock `apr eval` writes carry comparable candidate identities.
+    fn config_hash_of(credential: &ReloadedSetFitCredential) -> String {
+        use sha2::Digest as _;
+        let requested = &credential.model().doc_view().requested_config;
+        let bytes = serde_json::to_vec(requested).unwrap_or_default();
+        aprender_contrastive_data::hash::hex(&sha2::Sha256::digest(&bytes).into())
+    }
+
+    /// Map a lifecycle failure onto the CLI surface.
+    fn train_error(error: entrenar::train::setfit::SetFitTrainError) -> CliError {
+        CliError::ValidationFailed(format!("setfit bench cell: {error}"))
+    }
+
+    /// What the command says when a cell lands.
+    fn report(
+        json: bool,
+        cell: entrenar::train::setfit::bench_row::CellKey,
+        row_path: &Path,
+        row_hash: &str,
+    ) -> Result<()> {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "command": "setfit-bench-run",
+                    "cell": cell.render(),
+                    "row": row_path.display().to_string(),
+                    "row_sha256": row_hash,
+                    "executed": true,
+                })
+            );
+        } else {
+            println!("{cell} -> {} ({row_hash})", row_path.display());
+        }
+        Ok(())
+    }
+
+    /// Silence the unused-import warning when a helper is only used by one arm.
+    #[allow(dead_code)]
+    fn _row_predictions_type_is_named(_: &RowPredictions) {}
 }
 
 // ==========================================================================================

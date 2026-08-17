@@ -320,6 +320,33 @@ fn merge_overrides(
     })
 }
 
+/// Resolve a training configuration for a caller that may or may not have a file.
+///
+/// # The ONE config door, shared with `apr setfit bench run`
+///
+/// A benchmark cell's `--config` is optional and its seed is the CELL's, not the file's, so
+/// the bench adapter needs "parse if present, else the frozen published defaults, then apply
+/// this seed". Every one of those steps already exists here, and re-deriving them in
+/// `setfit_bench.rs` would put a second definition of "the default configuration" in the
+/// repository — which is precisely the knob a benchmark must not have two of.
+///
+/// `SetFitTrainConfig::reference_defaults` is the library's own frozen recipe. It is not
+/// copied here; it is called.
+///
+/// # Errors
+///
+/// Everything [`parse_config`] and [`merge_overrides`] return.
+pub(crate) fn resolve_config(config_path: Option<&Path>, seed: u64) -> Result<SetFitTrainConfig> {
+    let base = match config_path {
+        Some(path) => parse_config(path)?,
+        None => SetFitTrainConfig::reference_defaults(seed),
+    };
+    // The seed goes through the validated merge even on the defaults path, so the merged
+    // configuration is validated AS A WHOLE by the same single implementation in both cases
+    // and `pair_config.root_seed` is reseeded with it.
+    merge_overrides(&base, Some(seed), None)
+}
+
 /// Name the flags that participated in the merge, so the message points somewhere.
 fn overridden_flags(seed: Option<u64>, device: Option<&str>) -> String {
     let mut flags = Vec::new();

@@ -615,6 +615,382 @@ fn setfit_bench_run_long_help_lists_the_machinery_flags() {
 }
 
 // ==========================================================================================
+// A synthetic row, for the transport-ingest proofs
+// ==========================================================================================
+
+mod synthetic {
+    use entrenar::train::setfit::bench_row::{
+        sha256_hex, BenchLockRef, BenchRow, BenchRowPayload, CellKey, HostIdentity, MethodEvidence,
+        QualityBlock, ResourceBlock, SetfitEvidence, BENCH_ROW_SCHEMA_VERSION, CALIBRATION_SPLIT,
+        CLAIMS_CONTRACT_ID, MECHANISM_CHILD_MAX_RSS_TIME_L, WARMUP_COUNT,
+    };
+
+    /// The canonical three labels, in the pinned dataset's own order.
+    pub(super) fn labels() -> Vec<String> {
+        ["none", "against", "favor"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    }
+
+    /// The bytes a committed lock record would have. Arbitrary, and that is the point: the
+    /// property under test is that the ROW's `lock_hash` is the SHA-256 of whatever is on
+    /// disk, so the content must not be something the row could re-derive.
+    pub(super) const LOCK_BYTES: &[u8] = br#"{"chosen_artifact_hash":"ab","rule":"max_metric"}"#;
+
+    /// A structurally valid row for `cell`, whose lock hash is the digest of [`LOCK_BYTES`].
+    pub(super) fn payload(cell: CellKey, artifact_bytes: u64) -> BenchRowPayload {
+        let f_avg = 0.625_f64;
+        let macro_f1 = 0.5_f64;
+        let mcc = 0.25_f64;
+        let ece = 0.1_f64;
+        let brier = 0.4_f64;
+        BenchRowPayload {
+            schema_version: BENCH_ROW_SCHEMA_VERSION,
+            contract_id: CLAIMS_CONTRACT_ID.to_string(),
+            method: cell.method,
+            shots: cell.shots,
+            seed: cell.seed,
+            dataset_revision: "4fbd22cd78421f05b1ecdb4fc5725bc7a7bd8f66".to_string(),
+            dataset_fingerprint: "aa".repeat(32),
+            model_revision: "bb".repeat(20),
+            selection_manifest_hash: "cc".repeat(32),
+            backend_identity: "cpu:setfit-core:autograd-trueno-matmul".to_string(),
+            host: HostIdentity {
+                hostname: "probe".to_string(),
+                os: "macos".to_string(),
+                arch: "aarch64".to_string(),
+            },
+            quality: QualityBlock {
+                f_avg,
+                f_avg_bits: f_avg.to_bits(),
+                macro_f1,
+                macro_f1_bits: macro_f1.to_bits(),
+                per_class_precision: vec![0.5, 0.5, 0.5],
+                per_class_recall: vec![0.5, 0.5, 0.5],
+                per_class_f1: vec![0.25, 0.5, 0.75],
+                mcc,
+                mcc_bits: mcc.to_bits(),
+                confusion_matrix: vec![vec![1, 0, 0], vec![0, 1, 0], vec![0, 0, 1]],
+                n_test_rows: 3,
+                ordered_labels: labels(),
+                ece_top_label_validation: ece,
+                ece_top_label_validation_bits: ece.to_bits(),
+                brier_multiclass_validation: brier,
+                brier_multiclass_validation_bits: brier.to_bits(),
+                calibration_split: CALIBRATION_SPLIT.to_string(),
+            },
+            resource: ResourceBlock {
+                train_wall_ms: 1234,
+                cold_latency_ms: 42.0,
+                cold_measured_in_child_process: true,
+                warm_latency_ms_median: 4.0,
+                throughput_rows_per_sec: 100.0,
+                throughput_batch_size: 32,
+                warmup_count: WARMUP_COUNT,
+                train_peak_rss_bytes: 1_000_000,
+                train_peak_rss_mechanism: "vm_hwm".to_string(),
+                inference_peak_rss_bytes: 500_000,
+                inference_peak_rss_mechanism: MECHANISM_CHILD_MAX_RSS_TIME_L.to_string(),
+                peak_rss_sample_interval_hz: None,
+                artifact_bytes,
+                // A SetFit row: one standalone file, so the deployable size IS the artifact
+                // size. The LoRA half of this equality is asserted separately, because there
+                // the two must DIFFER.
+                deployable_total_bytes: artifact_bytes,
+            },
+            evidence: MethodEvidence::Setfit(SetfitEvidence {
+                evidence_table_hash: "dd".repeat(32),
+                apr_artifact_sha256: "ee".repeat(32),
+                lock: BenchLockRef {
+                    lock_hash: sha256_hex(LOCK_BYTES),
+                    role: "written".to_string(),
+                    rule: "max_metric_lowest_index_tie_break".to_string(),
+                    lock_record_path: super::lock_relative_path(cell),
+                },
+            }),
+        }
+    }
+
+    /// The row file's bytes for `cell`.
+    pub(super) fn row_bytes(cell: CellKey, artifact_bytes: u64) -> Vec<u8> {
+        BenchRow::new(payload(cell, artifact_bytes))
+            .to_file_bytes()
+            .expect("the synthetic row serializes")
+    }
+}
+
+// ==========================================================================================
+// `--record`: the transport ingest
+// ==========================================================================================
+
+/// Write `bytes` into a temp directory under the name `cell` demands, and return both paths.
+fn staged_row(
+    temp: &tempfile::TempDir,
+    cell: CellKey,
+    bytes: &[u8],
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let incoming = temp.path().join("incoming");
+    std::fs::create_dir_all(&incoming).expect("the incoming directory is creatable");
+    let row_file = incoming.join(row_file_name(cell));
+    std::fs::write(&row_file, bytes).expect("the staged row is writable");
+    (temp.path().join("bench"), row_file)
+}
+
+#[test]
+fn setfit_bench_record_ingests_a_valid_transported_row() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let cell = CellKey::new(Method::Setfit, 16, 29);
+    let bytes = synthetic::row_bytes(cell, 793_416);
+    let (bench_dir, row_file) = staged_row(&temp, cell, &bytes);
+
+    super::record_mode(&bench_dir, &row_file, false, true).expect("a valid row records");
+
+    let landed = bench_dir.join(ROWS_DIR).join(row_file_name(cell));
+    assert_eq!(
+        std::fs::read(&landed).expect("the row landed"),
+        bytes,
+        "the recorded row must be the transported BYTES, not a re-serialization of them — a \
+         re-encode would produce a file whose digest the sender never computed"
+    );
+
+    // And the manifest now carries it. Completeness is defined by THAT file, so a row on disk
+    // that the manifest never saw would be invisible to the 05-10 gate.
+    let manifest = load_or_declare_manifest(&bench_dir).expect("the manifest reloads");
+    assert_eq!(manifest.completed(), 1);
+    assert!(manifest.row_sha256(cell).is_some());
+}
+
+#[test]
+fn setfit_bench_record_is_idempotent_on_an_identical_digest() {
+    // The resume-after-a-dropped-ssh case. Refusing this would get manifests deleted and
+    // re-created, which erases the pre-declared expectation set that makes omission visible.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let cell = CellKey::new(Method::Setfit, 8, 13);
+    let bytes = synthetic::row_bytes(cell, 1_024);
+    let (bench_dir, row_file) = staged_row(&temp, cell, &bytes);
+
+    super::record_mode(&bench_dir, &row_file, false, true).expect("the first record lands");
+    super::record_mode(&bench_dir, &row_file, false, true)
+        .expect("re-recording the IDENTICAL digest is idempotent, and needs no --force");
+
+    let manifest = load_or_declare_manifest(&bench_dir).expect("the manifest reloads");
+    assert_eq!(
+        manifest.completed(),
+        1,
+        "an idempotent re-record must not duplicate the cell"
+    );
+}
+
+#[test]
+fn setfit_bench_record_refuses_a_differing_digest_for_a_recorded_cell() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let cell = CellKey::new(Method::Setfit, 8, 13);
+    let (bench_dir, row_file) = staged_row(&temp, cell, &synthetic::row_bytes(cell, 1_024));
+    super::record_mode(&bench_dir, &row_file, false, true).expect("the first record lands");
+
+    // A row for the SAME cell with a DIFFERENT measurement — the collision.
+    let differing = synthetic::row_bytes(cell, 2_048);
+    std::fs::write(&row_file, &differing).expect("the second staged row is writable");
+    let error = super::record_mode(&bench_dir, &row_file, false, true)
+        .expect_err("a differing re-record must be refused, not silently overwritten");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("already recorded"),
+        "the refusal must say the cell is already recorded; got: {rendered}"
+    );
+
+    // And the refusal did not partially apply: the ORIGINAL row is still on disk.
+    let landed = bench_dir.join(ROWS_DIR).join(row_file_name(cell));
+    assert_eq!(
+        std::fs::read(&landed).expect("the original row survives"),
+        synthetic::row_bytes(cell, 1_024),
+        "the run that produced the published number must stay the run on disk"
+    );
+}
+
+#[test]
+fn setfit_bench_record_refuses_a_doctored_digest() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let cell = CellKey::new(Method::Setfit, 32, 41);
+    let mut bytes = synthetic::row_bytes(cell, 4_096);
+    // Flip one byte INSIDE the payload, leaving the envelope's digest untouched. This is the
+    // shape a transport tamper actually has: the file still parses.
+    let text = String::from_utf8(bytes.clone()).expect("the row is UTF-8");
+    let doctored = text.replace("\"train_wall_ms\": 1234", "\"train_wall_ms\": 9999");
+    assert_ne!(
+        doctored, text,
+        "the fixture must actually have been altered"
+    );
+    bytes = doctored.into_bytes();
+    let (bench_dir, row_file) = staged_row(&temp, cell, &bytes);
+
+    let error = super::record_mode(&bench_dir, &row_file, false, true)
+        .expect_err("a payload whose digest no longer matches must be refused");
+    assert!(
+        error.to_string().contains("digest mismatch"),
+        "got: {error}"
+    );
+    assert!(
+        !bench_dir.join(ROWS_DIR).join(row_file_name(cell)).exists(),
+        "and nothing was written"
+    );
+}
+
+#[test]
+fn setfit_bench_record_refuses_a_filename_that_disagrees_with_the_payload() {
+    // The one check the library CANNOT make: it verifies the payload, not the name the
+    // operator filed it under. A row named for another cell would be counted as that cell by
+    // every later reader.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let cell = CellKey::new(Method::Setfit, 8, 13);
+    let bytes = synthetic::row_bytes(cell, 4_096);
+
+    let incoming = temp.path().join("incoming");
+    std::fs::create_dir_all(&incoming).expect("creatable");
+    let wrong_name = incoming.join(row_file_name(CellKey::new(Method::Setfit, 8, 17)));
+    std::fs::write(&wrong_name, &bytes).expect("writable");
+
+    let error = super::record_mode(&temp.path().join("bench"), &wrong_name, false, true)
+        .expect_err("a name/content disagreement must be refused");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("setfit-s8-seed13.json"),
+        "got: {rendered}"
+    );
+    assert!(
+        rendered.contains("setfit-s8-seed17.json"),
+        "got: {rendered}"
+    );
+}
+
+#[test]
+fn setfit_bench_record_refusals_are_distinct_typed_errors() {
+    // Three refusals that must not collapse into one. A caller who cannot tell a tampered row
+    // from a misfiled one cannot act on either.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let cell = CellKey::new(Method::Setfit, 8, 13);
+
+    // (a) An UNCONTRACTED cell — refused by the library before the filename is even consulted.
+    let uncontracted = CellKey::new(Method::Setfit, 8, 42);
+    let mut payload = synthetic::payload(cell, 1);
+    payload.seed = 42;
+    let row = entrenar::train::setfit::bench_row::BenchRow::new(payload);
+    let bytes = row.to_file_bytes().expect("serializes");
+    let (bench_dir, _) = staged_row(&temp, cell, b"placeholder");
+    let incoming = temp.path().join("incoming");
+    let path = incoming.join(row_file_name(uncontracted));
+    std::fs::write(&path, &bytes).expect("writable");
+    let uncontracted_error = super::record_mode(&bench_dir, &path, false, true)
+        .expect_err("seed 42 is outside the contracted matrix")
+        .to_string();
+    assert!(
+        uncontracted_error.contains("outside the contracted matrix"),
+        "got: {uncontracted_error}"
+    );
+
+    // (b) A DOCTORED digest and (c) a MISFILED name are covered by their own tests above; what
+    //     this asserts is that (a) reads differently from both.
+    assert!(!uncontracted_error.contains("digest mismatch"));
+    assert!(!uncontracted_error.contains("the file handed over is named"));
+}
+
+// ==========================================================================================
+// The lock-hash relationship the 05-10 gate recomputes
+// ==========================================================================================
+
+#[test]
+fn setfit_bench_row_lock_hash_is_the_digest_of_the_committed_lock_file() {
+    use entrenar::train::setfit::bench_row::MethodEvidence;
+
+    // A SetFit row claims `lock.lock_hash`; the FILE at `lock.lock_record_path` is the
+    // evidence. 05-10 recomputes the digest from those bytes rather than trusting the field,
+    // so this pins the relationship the gate will check.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let bench_dir = temp.path().join("bench");
+    let cell = CellKey::new(Method::Setfit, 16, 23);
+    let payload = synthetic::payload(cell, 90_777_156);
+
+    let lock_path = bench_dir.join(lock_relative_path(cell));
+    std::fs::create_dir_all(lock_path.parent().expect("has a parent")).expect("creatable");
+    std::fs::write(&lock_path, synthetic::LOCK_BYTES).expect("the committed lock is writable");
+
+    let MethodEvidence::Setfit(evidence) = &payload.evidence else {
+        panic!("the synthetic row is a setfit row");
+    };
+    let recomputed = sha256_hex(&std::fs::read(&lock_path).expect("the lock file reads"));
+    assert_eq!(
+        evidence.lock.lock_hash, recomputed,
+        "the row's lock_hash must be recomputable from the committed file's bytes — a field \
+         that only agreed with itself would attest nothing"
+    );
+    assert_eq!(
+        bench_dir.join(&evidence.lock.lock_record_path),
+        lock_path,
+        "and the recorded path must be RELATIVE to the bench directory, so a transported row \
+         resolves against the receiving host's tree"
+    );
+}
+
+#[test]
+fn setfit_bench_setfit_rows_have_equal_artifact_and_deployable_bytes() {
+    // SetFit ships ONE standalone file, so its deployable size IS its artifact size. Asserted
+    // rather than assumed because the LoRA side deliberately differs: an adapter-only figure
+    // standing in for a deployable size is the size claim PF-008 exists to forbid.
+    let payload = synthetic::payload(CellKey::new(Method::Setfit, 64, 53), 90_777_156);
+    assert_eq!(payload.resource.artifact_bytes, 90_777_156);
+    assert_eq!(
+        payload.resource.deployable_total_bytes, payload.resource.artifact_bytes,
+        "SetFit: one file, one size"
+    );
+}
+
+// ==========================================================================================
+// The row file is write-once
+// ==========================================================================================
+
+#[test]
+fn setfit_bench_emit_row_refuses_an_existing_row_without_force() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let bench_dir = temp.path().join("bench");
+    let cell = CellKey::new(Method::Setfit, 8, 13);
+
+    emit_row(&bench_dir, synthetic::payload(cell, 1_000), false).expect("the first emit lands");
+    let first = std::fs::read(bench_dir.join(ROWS_DIR).join(row_file_name(cell)))
+        .expect("the row is readable");
+
+    let error = emit_row(&bench_dir, synthetic::payload(cell, 2_000), false)
+        .expect_err("re-running a completed cell must be refused, never silently duplicated");
+    assert!(
+        error.to_string().contains("--force"),
+        "the refusal must name the flag; got: {error}"
+    );
+    assert_eq!(
+        std::fs::read(bench_dir.join(ROWS_DIR).join(row_file_name(cell))).expect("still readable"),
+        first,
+        "and a refused re-run must not have touched the row it refused to replace"
+    );
+}
+
+#[test]
+fn setfit_bench_emit_row_records_the_digest_the_row_file_carries() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let bench_dir = temp.path().join("bench");
+    let cell = CellKey::new(Method::Setfit, 8, 13);
+
+    let (path, hash) =
+        emit_row(&bench_dir, synthetic::payload(cell, 1_000), false).expect("the emit lands");
+
+    // The manifest's recorded digest and the file's own envelope must be ONE value. If they
+    // could differ, the resume path would compare a digest against a file that never had it.
+    let on_disk = BenchRow::from_bytes(&std::fs::read(&path).expect("readable"))
+        .expect("the emitted row verifies through the library's own door");
+    assert_eq!(on_disk.semantic_hash, hash);
+    let manifest = load_or_declare_manifest(&bench_dir).expect("the manifest reloads");
+    assert_eq!(manifest.row_sha256(cell), Some(hash.as_str()));
+}
+
+// ==========================================================================================
 // Source assertions: the shape the resource protocol requires
 // ==========================================================================================
 
@@ -625,6 +1001,34 @@ fn setfit_bench_resolves_the_cold_probe_child_through_current_exe() {
         SETFIT_BENCH_SOURCE.contains(&door),
         "the cold-probe child must be THIS binary resolved through current_exe — never a bare \
          `apr`, which once resolved to a 26-day-old build on this very dev box"
+    );
+}
+
+#[test]
+fn setfit_bench_creates_files_only_through_the_shared_atomic_writer() {
+    // The proof that an interrupted cell leaves either NO row or one complete digest-valid
+    // row is `atomic_write`'s — temp file in the destination directory, sync, ONE rename,
+    // cleanup on every error path — and it is proven once, in
+    // `setfit_train::tests::setfit_train_a_failed_write_leaves_no_partial_file`. What THIS
+    // file has to guarantee is that it never writes around that writer, which is a property
+    // of its own source.
+    for (fragments, why) in [
+        (
+            vec!["fs::", "rename("],
+            "no rename site of its own: the atomicity is the shared writer's",
+        ),
+        (vec!["File::", "create("], "no unconditional file creation"),
+        (
+            vec!["fs::", "write("],
+            "and no unsynced convenience write, which would leave a partial row on a crash",
+        ),
+    ] {
+        let needle = needle(&fragments);
+        assert_eq!(SETFIT_BENCH_SOURCE.matches(&needle).count(), 0, "{why}");
+    }
+    assert!(
+        SETFIT_BENCH_SOURCE.contains(&needle(&["atomic_", "write("])),
+        "and it does go through the shared writer"
     );
 }
 

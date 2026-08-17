@@ -700,6 +700,43 @@ pub(crate) fn attestation_bytes_from_manifest(bytes: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
+/// The upstream revision this benchmark directory was prepared from.
+///
+/// # Why this lives HERE and not in the caller
+///
+/// `benchmark-manifest.json` has exactly ONE reader in this crate, for the reason
+/// [`attestation_bytes_from_manifest`] records: two readers of one file are two schema
+/// interpretations that can drift, and the drift shows up as a command accepting a directory
+/// another command refuses. `apr setfit bench run` needs the revision for the EVAL-03 row's
+/// `dataset_revision`, so the accessor is added to the owner rather than the consumer.
+///
+/// This reports what the directory SAYS. It deliberately does not report
+/// `source.revision_verified`, which is a separate fact with a separate name: with `--source`
+/// the revision is user-asserted, and a caller that wants to know whether it was fetched must
+/// ask for that rather than infer it from the presence of a string.
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] when the manifest is not JSON or carries no
+/// `source.revision` string.
+pub(crate) fn dataset_revision_from_manifest(bytes: &[u8]) -> Result<String> {
+    let manifest: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+        CliError::ValidationFailed(format!("{MANIFEST_FILE} is not valid JSON: {error}"))
+    })?;
+    manifest
+        .get("source")
+        .and_then(|source| source.get("revision"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            CliError::ValidationFailed(format!(
+                "{MANIFEST_FILE} has no `source.revision` string. A benchmark row records the \
+                 pinned upstream revision its numbers were measured against; a row without one \
+                 cannot be compared to any other row."
+            ))
+        })
+}
+
 /// Re-open the directory that was just written, through the crate's attested boundary.
 ///
 /// The output is only worth anything if the gate a later command must pass ACCEPTS it.
