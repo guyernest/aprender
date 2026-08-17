@@ -307,3 +307,9 @@ fn read_provenance_hex(
 #[cfg(test)]
 #[path = "apr_evaluate_tests.rs"]
 mod apr_evaluate_tests;
+
+// 05-08's tests live in their OWN sibling rather than in `apr_evaluate_tests.rs`, whose
+// assertions are 04-07's independent evidence that the scalar door still behaves as it did.
+#[cfg(test)]
+#[path = "apr_evaluate_row_tests.rs"]
+mod apr_evaluate_row_tests;
