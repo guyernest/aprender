@@ -906,6 +906,63 @@ Not done here, because the standing instruction is one pass per dispatch and thi
 the instruction's purpose (a 54-min pass against a ~55.8-min window) does not bind at s8, where
 a pass is under a minute. Flagged for the coordinator to dispatch rather than assumed.
 
+### D′ END-TO-END VALIDATED at s8 — `bank → combine → assert` reproduces the in-process numbers EXACTLY
+
+Bit-identity of a persisted pass was proven earlier, and one s64 pass was banked, but the full
+D′ pipeline had never been run: nothing had yet gone `bank → combine → separation assertion`
+over a complete cell. That was validated at s8, where it is cheap, rather than discovered to be
+broken after eight hours of s64 passes.
+
+**Nine s8 passes re-banked**, each its own process, all `rc=0` and all persisting exactly one
+pass (`s8:{13,31,53}:{real,control,near-null}`). **Correction to my own estimate:** I projected
+~8 minutes; it took **28.7 minutes** (09:11:26Z → 09:40:10Z). The per-pass tuning time was right
+(49.5–64.8 s) but I ignored per-invocation `cargo test` overhead, which roughly triples a
+sub-minute pass. Cheap either way, and the estimate is corrected rather than quietly forgotten.
+
+**`APRENDER_CALIBRATION_COMBINE="s8:13,s8:31,s8:53"` then ran with no training and `rc=0`**, so
+`ctrl_max < real_min` was asserted for all six classes in all three cells over the persisted
+tables.
+
+**The comparison that licenses the remaining eight s64 passes.** Combined-from-store output
+versus the in-process numbers recorded earlier in this file:
+
+| surface | result |
+|---|---|
+| per-cell table, 18 rows × 9 columns | **identical in every cell** |
+| cross-cell ε basis, 6 classes × 9 columns | **identical in every cell** |
+| `attention_key_bias` `eps/noise` | **1.51e1 both** — the 15.1 margin, unchanged |
+| every `ctrl_max` | `0.000e0` both |
+| `EMBEDDING DELTA MIN` | `1.813e-3` both |
+| binding rows (all six classes) | **identical**, same parameter names and same figures |
+| `attention_key_bias` binding row | `encoder.layer.4.attention.self.key.bias`, `delta_norm=1.714e-7`, `init_norm=1.519e-2`, `grad_norm_max=8.084e-10`, `grad_norm_mean=2.252e-10`, own noise floor `9.051e-10` — **all identical** |
+| wall clock | 501.4 s vs 439.4 s — **differs, correctly**; timing is metadata, never evidence |
+
+Not one measured digit moved. The only thing that differs is the one quantity that *must*
+differ, and it differs because it is excluded from the evidence file by design. **The combine
+path is the equivalence it was argued to be — now measured, not asserted.** The remaining eight
+s64 passes are licensed.
+
+**A dishonest header caught and fixed while validating.** The report printed
+`CROSS-CELL EPSILON BASIS (plan 05-03 freezes from these)` regardless of how many cells were
+measured — so a three-cell s8-only run produced a table inviting 05-03 to freeze ε from half the
+matrix. Since the window rule takes the worst control and best real across *all* measured cells,
+an unmeasured cell can still move `best_real` and shrink every window. The header now states
+coverage and refuses the invitation:
+
+```text
+CROSS-CELL EPSILON BASIS — PROVISIONAL, NOT THE FROZEN EPSILON.
+Derived from 3 of 6 boundary cells. MISSING: s64:13, s64:31, s64:53.
+… Plan 05-03 must NOT freeze epsilon from this table.
+```
+
+It prints the unqualified "freezes from these" heading only when all six cells are present. The
+ε values were byte-identical before and after this change, confirming the fix touches only the
+banner.
+
+**The store now holds 10 of 18 passes** — the complete s8 half plus `s64:13:real` — all committed
+as reviewable artifacts, so the ε basis lives in ONE medium and 05-03 derives it mechanically
+rather than transcribing from prose.
+
 ### What Task 3 still owes once the s64 half lands
 
 Frozen ε per class (window upper edge rounded DOWN to two significant figures) with noise-floor

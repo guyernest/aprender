@@ -2884,7 +2884,40 @@ mod tests {
         ));
 
         if full_conditions {
-            report.push_str("\nCROSS-CELL EPSILON BASIS (plan 05-03 freezes from these)\n");
+            // The header must say WHICH cells the basis covers, because the window rule is
+            // defined across ALL measured cells and an unmeasured cell can still move
+            // `best_real` and shrink every window below. A table headed "plan 05-03 freezes
+            // from these" while half the boundary matrix is missing is an invitation to freeze
+            // a number that the remaining cells would refute — which is exactly the false-green
+            // this report exists to prevent.
+            let full_matrix: Vec<ProductionCell> = PRODUCTION_SHOTS
+                .iter()
+                .flat_map(|&shots| {
+                    PRODUCTION_SEEDS.iter().map(move |&seed| ProductionCell { shots, seed })
+                })
+                .collect();
+            let missing: Vec<String> = full_matrix
+                .iter()
+                .filter(|c| !cells.contains(c))
+                .map(|c| format!("s{}:{}", c.shots, c.seed))
+                .collect();
+            if missing.is_empty() {
+                report.push_str(
+                    "\nCROSS-CELL EPSILON BASIS over the COMPLETE boundary matrix (plan 05-03 \
+                     freezes from these)\n",
+                );
+            } else {
+                report.push_str(&format!(
+                    "\nCROSS-CELL EPSILON BASIS — PROVISIONAL, NOT THE FROZEN EPSILON.\n\
+                     Derived from {} of {} boundary cells. MISSING: {}.\n\
+                     The window rule takes the worst control and the best real across ALL \
+                     measured cells, so an unmeasured cell can still move best_real and shrink \
+                     every window below. Plan 05-03 must NOT freeze epsilon from this table.\n",
+                    cells.len(),
+                    full_matrix.len(),
+                    missing.join(", "),
+                ));
+            }
             report.push_str(
                 "class                worst_ctrl    worst_nnull   best_real     10x_lower     \
                  10x_upper     noise_floor   eps/noise     nnull_moved   supports_margin  \

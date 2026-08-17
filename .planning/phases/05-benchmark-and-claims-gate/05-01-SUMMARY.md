@@ -149,6 +149,15 @@ of 18, and is halted for a decision on execution shape.**
 The compute gate was resolved twice: first Option B (lambda-vector), which proved unreachable;
 then **Option A — run the full matrix locally in release, ~8.29 h explicitly authorized**.
 
+**D′ is now VALIDATED END-TO-END at s8.** The nine s8 passes were re-banked (28.7 min, all
+`rc=0`) and `APRENDER_CALIBRATION_COMBINE="s8:13,s8:31,s8:53"` ran the separation assertion over
+the persisted tables with no training. **Every measured digit is identical to the in-process s8
+run** — all 18 per-cell rows × 9 columns, all 6 ε-basis rows × 9 columns, every binding row, and
+`attention_key_bias eps/noise = 1.51e1` unchanged. The only difference is wall clock (501.4 s vs
+439.4 s), which is metadata and excluded from the evidence file by design. The combine path is
+the equivalence it was argued to be, so the remaining eight s64 passes are licensed. The store
+holds **10 of 18 passes**, all committed.
+
 **D′ is implemented, its precondition is PROVEN, and the first s64 pass is banked.** Cross-process
 determinism was proven before any s64 compute was spent: two fresh processes running the same
 s8 pass persisted **bit-identical** evidence (`5838b3d2…57dc`, 48 555 bytes) while disagreeing by
