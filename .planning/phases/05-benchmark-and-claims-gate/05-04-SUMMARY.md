@@ -353,6 +353,18 @@ generator is a developer-workflow script and is not wired into CI.
 functions as *the* implementation for rows, so `ClassifyEvalReport`'s unfixtured `ece`/`brier`
 cannot drift into the claims path.
 
+## Self-Check: PASSED
+
+- **Created files present on disk:** 9/9 (`gen_claims_fixtures.py`, the four `claims_stats`
+  fixtures, `manifest.sha256`, `tests_claims_stats.rs`, this SUMMARY, `deferred-items.md`).
+- **Commits present in `git log`:** 6/6 (`e08e67627`, `a98f8e124`, `ae78e5fa7`, `ca7bd700c`,
+  `a3d766930`, `ef990b6dc`).
+- **Plan verification block:** `cargo test -p aprender-core --lib calibration` → 71 passed,
+  exit 0. `cargo test -p aprender-core --lib stats::` → 212 passed, exit 0.
+  `pv validate contracts/calibration-v1.yaml` → 0 errors, 0 warnings. Phase 1 fixture corpus,
+  `generate_fixtures.py`, `uv.lock` and `pyproject.toml` → empty `git diff` against the base.
+- **Working tree:** clean.
+
 ---
 *Phase: 05-benchmark-and-claims-gate*
 *Completed: 2026-08-17*
