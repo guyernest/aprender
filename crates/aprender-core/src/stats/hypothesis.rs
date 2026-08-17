@@ -470,3 +470,7 @@ include!("hypothesis_tests.rs");
 #[cfg(test)]
 #[path = "tests_hypothesis_contract.rs"]
 mod tests_hypothesis_contract;
+
+#[cfg(test)]
+#[path = "tests_claims_stats.rs"]
+mod tests_claims_stats;
