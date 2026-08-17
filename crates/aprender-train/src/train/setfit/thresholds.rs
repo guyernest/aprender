@@ -58,8 +58,21 @@ pub(crate) const CONTRACT_YAML: &str =
 /// Extending this set requires a calibration run on the target encoder AND a deliberate
 /// contract edit (D-10(c)). It is not something a downstream executor may widen inline to
 /// unblock a benchmark.
-pub(crate) const CALIBRATED_REGIMES: &[&str] =
-    &["minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4"];
+///
+/// Since 05-02 the tables themselves carry their regime id, so this constant is the
+/// STRING-LIST form the contract-parse test compares against rather than the value the gate
+/// reads — dead in a non-test build, and deliberately still here: it is the declared set that
+/// `calibrated_regimes_are_exactly_the_tables_that_exist` holds the derived set against.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const CALIBRATED_REGIMES: &[&str] = &[FIXTURE_REGIME];
+
+/// The Phase 3 fixture regime — the ONE regime anything here was measured in.
+///
+/// Named once so the calibrated-set constant and the table that carries the fixture's
+/// epsilons ([`Thresholds::fixture_regime`]) are the same string rather than two strings a
+/// future edit could move apart.
+const FIXTURE_REGIME: &str =
+    "minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4";
 
 /// The `seeds=` field marker of the regime grammar.
 const SEEDS_PREFIX: &str = "seeds=";
@@ -256,21 +269,63 @@ pub(crate) struct ClassThreshold {
     pub(crate) gated: bool,
 }
 
-/// The complete frozen table.
+/// ONE regime's measured table: the regime it was measured in, its per-class entries, and its
+/// run-level floor, kept together because they are one measurement.
+///
+/// # Why the table is keyed by regime and not global
+///
+/// An epsilon is a MEASUREMENT, and a measurement is indexed by the coordinates it was taken
+/// at. A single global table can only be applied to a second architecture by pretending the
+/// first architecture's numbers describe it — the non-transfer D-10(c) names, and the reason
+/// the sparse class in particular cannot be assumed to carry over from a 97-row vocabulary to
+/// a 30522-row one. Binding the numbers to their regime makes the wrong application
+/// unexpressible: there is no table to read until [`Thresholds::table_for`] has resolved one.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Thresholds {
+pub(crate) struct RegimeThresholds {
+    /// The calibrated regime id these numbers were measured in — an element of
+    /// [`CALIBRATED_REGIMES`], not a second spelling of it.
+    regime: &'static str,
     /// Per class, in `ParameterClass::ALL` order.
     classes: BTreeMap<&'static str, ClassThreshold>,
     /// The run-level floor on the sparse class's MEDIAN relative delta.
     embedding_delta_floor: f64,
-    /// The regimes these values were measured in.
-    calibrated_regimes: &'static [&'static str],
+}
+
+impl RegimeThresholds {
+    /// The entry for a class. Total over [`ParameterClass::ALL`] by construction.
+    #[must_use]
+    pub(crate) fn of(&self, class: ParameterClass) -> ClassThreshold {
+        self.classes.get(class.tag()).copied().unwrap_or(ClassThreshold {
+            eps: None,
+            scale_floor: 1.0,
+            sparse: false,
+            gated: false,
+        })
+    }
+
+    /// The run-level sparse-class floor MEASURED in this regime.
+    #[must_use]
+    pub(crate) fn embedding_delta_floor(&self) -> f64 {
+        self.embedding_delta_floor
+    }
+}
+
+/// The complete frozen table: one [`RegimeThresholds`] per calibrated regime.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Thresholds {
+    /// One entry per calibrated regime, in [`CALIBRATED_REGIMES`] order. Exactly one today.
+    regimes: Vec<RegimeThresholds>,
 }
 
 impl Thresholds {
-    /// The frozen table, as committed to `setfit-train-lifecycle-v1.yaml`.
+    /// The frozen tables, as committed to `setfit-train-lifecycle-v1.yaml`.
     #[must_use]
     pub(crate) fn frozen() -> Self {
+        Self { regimes: vec![Self::fixture_regime()] }
+    }
+
+    /// The Phase 3 fixture regime's measured table — the only calibration that exists today.
+    fn fixture_regime() -> RegimeThresholds {
         let mut classes = BTreeMap::new();
         classes.insert(
             ParameterClass::Embedding.tag(),
@@ -296,48 +351,96 @@ impl Thresholds {
             ParameterClass::AttentionKeyBias.tag(),
             ClassThreshold { eps: None, scale_floor: 1.0, sparse: false, gated: false },
         );
-        Self { classes, embedding_delta_floor: 2.7e-5, calibrated_regimes: CALIBRATED_REGIMES }
+        RegimeThresholds { regime: FIXTURE_REGIME, classes, embedding_delta_floor: 2.7e-5 }
     }
 
-    /// The entry for a class. Total over [`ParameterClass::ALL`] by construction.
-    #[must_use]
-    pub(crate) fn of(&self, class: ParameterClass) -> ClassThreshold {
-        self.classes.get(class.tag()).copied().unwrap_or(ClassThreshold {
-            eps: None,
-            scale_floor: 1.0,
-            sparse: false,
-            gated: false,
-        })
-    }
-
-    /// The run-level sparse-class floor.
-    #[must_use]
-    pub(crate) fn embedding_delta_floor(&self) -> f64 {
-        self.embedding_delta_floor
-    }
-
-    /// Whether a recorded regime id names an architecture, seed and cell these numbers were
-    /// measured in.
+    /// The table MEASURED in the regime a recorded id names, or `None` if no calibration
+    /// covers those coordinates.
+    ///
+    /// THE lookup. Membership and table selection are one question asked once, so there is no
+    /// state in which an id is judged "calibrated" and then compared against a table that was
+    /// measured somewhere else — nor one in which a threshold is read before membership was
+    /// established, because reading one requires the `&RegimeThresholds` this returns.
     ///
     /// COMPONENT-WISE, not string equality: the run's architecture must equal a calibrated
     /// entry's, and the run's seed and cell must both be members of that entry's measured sets.
     ///
-    /// An id this crate cannot PARSE is not calibrated. That is the fail-closed direction: an
-    /// unreadable id is one whose coordinates are unknown, and unknown coordinates are exactly
-    /// what the gate exists to refuse. The opposite treatment is reserved for a malformed
-    /// CALIBRATED entry, which aborts (see [`parse_calibrated`]).
+    /// An id this crate cannot PARSE resolves to no table. That is the fail-closed direction:
+    /// an unreadable id is one whose coordinates are unknown, and unknown coordinates are
+    /// exactly what the gate exists to refuse. The opposite treatment is reserved for a
+    /// malformed CALIBRATED entry, which aborts (see [`parse_calibrated`]).
+    #[must_use]
+    pub(crate) fn table_for(&self, regime_id: &str) -> Option<&RegimeThresholds> {
+        let observed = RegimeCoordinates::parse(regime_id).ok()?;
+        self.regimes.iter().find(|entry| parse_calibrated(entry.regime).covers(&observed))
+    }
+
+    /// Whether a recorded regime id names an architecture, seed and cell some calibrated table
+    /// was measured in.
+    ///
+    /// The predicate form of [`Self::table_for`], and implemented as exactly that: membership
+    /// cannot answer "yes" for coordinates no table covers, because it IS the table lookup.
+    ///
+    /// The GATE calls `table_for`, not this — a verdict needs the table, and asking twice is
+    /// how the two answers get a chance to differ. This remains for the callers that genuinely
+    /// only need membership (the regime test suites, and the recorded-id documentation in
+    /// `mod.rs` that names it), which is why it is dead in a non-test build rather than gone.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub(crate) fn is_calibrated(&self, regime_id: &str) -> bool {
-        let Ok(observed) = RegimeCoordinates::parse(regime_id) else {
-            return false;
-        };
-        self.calibrated_regimes.iter().any(|entry| parse_calibrated(entry).covers(&observed))
+        self.table_for(regime_id).is_some()
     }
 
     /// The calibrated set, for a diagnostic that does not require reading the contract.
+    ///
+    /// DERIVED from the tables rather than returning [`CALIBRATED_REGIMES`] directly, so a
+    /// regime that is listed but carries no measured table cannot be reported as calibrated.
+    /// `calibrated_regimes_are_exactly_the_tables_that_exist` pins the two together.
     #[must_use]
-    pub(crate) fn calibrated_regimes(&self) -> &'static [&'static str] {
-        self.calibrated_regimes
+    pub(crate) fn calibrated_regimes(&self) -> Vec<&'static str> {
+        self.regimes.iter().map(|entry| entry.regime).collect()
+    }
+
+    /// The single calibrated table, for the TEST call sites that predate per-regime tables.
+    ///
+    /// `#[cfg(test)]`, and that is the load-bearing part: production code cannot read a
+    /// threshold without naming a regime, because the only accessors that do not take one do
+    /// not exist outside a test build. The gate resolves its table with [`Self::table_for`].
+    ///
+    /// # Panics
+    ///
+    /// Once a SECOND regime is calibrated — deliberately, rather than "return the first". A
+    /// regime-less threshold read has no answer when two regimes were measured with different
+    /// numbers, and answering with the first would apply fixture-scale epsilons to a
+    /// production encoder: the exact non-transfer D-10(c) forbids. The plan that adds the
+    /// second entry must route these callers through [`Self::table_for`] with the regime they
+    /// mean, and this panic is what makes forgetting to do so impossible to miss.
+    #[cfg(test)]
+    fn sole(&self) -> &RegimeThresholds {
+        match self.regimes.as_slice() {
+            [only] => only,
+            regimes => panic!(
+                "a regime-less threshold read is ambiguous across {} calibrated regimes: \
+                 resolve the table with `table_for(regime_id)` and read the epsilon from the \
+                 regime the run actually executed in",
+                regimes.len(),
+            ),
+        }
+    }
+
+    /// The sole regime's entry for a class. See [`Self::sole`] for when this stops being a
+    /// well-posed question, and why it is not available to production code.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn of(&self, class: ParameterClass) -> ClassThreshold {
+        self.sole().of(class)
+    }
+
+    /// The sole regime's run-level sparse-class floor. See [`Self::sole`].
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn embedding_delta_floor(&self) -> f64 {
+        self.sole().embedding_delta_floor()
     }
 }
 
@@ -370,6 +473,23 @@ struct EvidenceGateEquation {
 #[derive(Debug, Deserialize)]
 struct CalibrationRegimeEquation {
     calibrated_regimes: Vec<String>,
+    /// Per-regime measured tables, keyed by regime id.
+    ///
+    /// OPTIONAL, and empty against today's contract: the fixture regime's numbers live in
+    /// `evidence_gate.frozen_thresholds` and stay there byte-untouched. The capability to
+    /// parse a per-regime block lands with the per-regime Rust tables so that the plan adding
+    /// the production regime adds DATA and ASSERTIONS only — never a parser, which is the
+    /// change most likely to be written to fit whatever the new entry happens to say.
+    #[serde(default)]
+    per_regime_thresholds: BTreeMap<String, ContractRegimeThresholds>,
+}
+
+/// One regime's block in the contract's `per_regime_thresholds` map.
+#[cfg(test)]
+#[derive(Debug, Deserialize)]
+struct ContractRegimeThresholds {
+    frozen_thresholds: BTreeMap<String, ContractClassThreshold>,
+    embedding_delta_floor_value: f64,
 }
 
 #[cfg(test)]
@@ -488,6 +608,106 @@ mod tests {
                 "the contract lists regime `{regime}` which the Rust constant does not carry",
             );
         }
+
+        // The PER-REGIME block: the shape a second calibration lands in. It is EMPTY against
+        // today's contract — the fixture regime's numbers live in `evidence_gate` above and
+        // are compared there — so this loop is vacuous NOW and non-vacuous the moment a block
+        // appears. Which of those two states holds is pinned by the `len() == 1` assertion
+        // above rather than left to a reader's inspection: a contract carrying a second regime
+        // without its table turns that assertion red, and one carrying a table whose numbers
+        // disagree with the Rust side turns this loop red.
+        for (regime_id, block) in &parsed.equations.calibration_regime.per_regime_thresholds {
+            let table = frozen.table_for(regime_id).unwrap_or_else(|| {
+                panic!(
+                    "the contract carries a threshold table for regime `{regime_id}`, which the \
+                     Rust side does not resolve to any calibrated table",
+                )
+            });
+            assert_eq!(
+                block.frozen_thresholds.len(),
+                ParameterClass::ALL.len(),
+                "`{regime_id}`: one entry per class; a missing class would make the per-class \
+                 comparison below vacuous for exactly the class that went missing",
+            );
+            for class in ParameterClass::ALL {
+                let contracted = block.frozen_thresholds.get(class.tag()).unwrap_or_else(|| {
+                    panic!("`{regime_id}` has no entry for class `{}`", class.tag())
+                });
+                let rust = table.of(class);
+                assert_eq!(rust.eps, contracted.eps, "{regime_id}/{}: epsilon", class.tag());
+                assert_eq!(
+                    rust.scale_floor,
+                    contracted.scale_floor,
+                    "{regime_id}/{}: scale floor",
+                    class.tag(),
+                );
+                assert_eq!(rust.sparse, contracted.sparse, "{regime_id}/{}: sparse", class.tag());
+                assert_eq!(rust.gated, contracted.gated, "{regime_id}/{}: gated", class.tag());
+            }
+            assert_eq!(
+                table.embedding_delta_floor(),
+                block.embedding_delta_floor_value,
+                "{regime_id}: embedding delta floor",
+            );
+        }
+    }
+
+    /// The calibrated SET and the set of regimes that actually carry a table are the same set.
+    ///
+    /// `calibrated_regimes()` is what the `UncalibratedRegime` refusal reports as "these are
+    /// the coordinates we measured". Deriving it from the tables is what makes that claim true
+    /// by construction; this test is what makes the derivation itself checkable — a regime
+    /// listed in the constant with no measured table behind it would be reported to a user as
+    /// calibrated while resolving to nothing.
+    #[test]
+    fn calibrated_regimes_are_exactly_the_tables_that_exist() {
+        let frozen = Thresholds::frozen();
+        let derived = frozen.calibrated_regimes();
+        assert!(!derived.is_empty(), "non-vacuity: at least one regime must carry a table");
+        assert_eq!(
+            derived,
+            CALIBRATED_REGIMES.to_vec(),
+            "every declared calibrated regime must carry a measured table and vice versa",
+        );
+        for regime in derived {
+            assert!(
+                frozen.table_for(regime).is_some(),
+                "`{regime}` is reported as calibrated but resolves to no table",
+            );
+        }
+    }
+
+    /// An UNCALIBRATED id resolves to NO table — the property the whole restructuring exists
+    /// for, asserted on the lookup itself rather than only on the predicate.
+    ///
+    /// The production encoder is the id that matters here: it is the one a Phase 5 benchmark
+    /// cell would carry, and resolving it to the fixture table is precisely how fixture-scale
+    /// epsilons would end up judging a 30522-row vocabulary.
+    #[test]
+    fn uncalibrated_id_resolves_no_table() {
+        let frozen = Thresholds::frozen();
+        for id in [
+            &RegimeCoordinates::render_run(
+                "minilm-full-h384-l6-a12-i1536-v30522@production",
+                1,
+                "s8e1b4",
+            ),
+            &RegimeCoordinates::render_run(&calibrated_architecture(), 2, "s8e1b4"),
+            &RegimeCoordinates::render_run(&calibrated_architecture(), 1, "s64e4b16"),
+            &"not a regime id at all".to_string(),
+        ] {
+            assert!(
+                frozen.table_for(id).is_none(),
+                "`{id}` was never calibrated and must resolve to no threshold table",
+            );
+        }
+
+        // CONTROL: the lookup is not simply returning `None` for everything.
+        let calibrated = RegimeCoordinates::render_run(&calibrated_architecture(), 42, "s16e2b8");
+        assert!(
+            frozen.table_for(&calibrated).is_some(),
+            "a measured (seed, cell) pair must resolve to the table it was measured in",
+        );
     }
 
     /// The gradient-free class is the ONLY ungated one, and it is ungated deliberately.
