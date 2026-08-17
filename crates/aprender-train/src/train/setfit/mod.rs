@@ -1687,7 +1687,13 @@ mod tests {
                     ),
                     "the refusal must name the run's REAL coordinates",
                 );
-                assert_eq!(calibrated.len(), 1, "exactly one calibrated entry");
+                assert_eq!(
+                    calibrated.len(),
+                    2,
+                    "two calibrated entries since plan 05-03 — the Phase 3 fixture slice and the \
+                     Phase 5 production encoder. This run matches NEITHER, and the count is \
+                     asserted so that a THIRD entry appearing cannot pass unnoticed.",
+                );
                 assert!(
                     calibrated[0].contains("seeds=1,42,7"),
                     "the diagnosis must show the seeds that WERE measured: {calibrated:?}",
