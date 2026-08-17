@@ -1,0 +1,880 @@
+contract: setfit-benchmark-claims
+metadata:
+  # 1.0.0 — a NEW contract, so there is no `pv diff` bump to record yet. Ph1 D-23 is one
+  # new contract per phase that REFERENCES the existing ones rather than editing them, and
+  # this is Phase 5's. The first future edit records its own bump here in the house style
+  # of contracts/tweet-eval-stance-benchmark-v1.yaml:1-36 — the exact command
+  #   git show <rev>:contracts/setfit-benchmark-claims-v1.yaml > /tmp/claims-old.yaml
+  #   pv diff /tmp/claims-old.yaml contracts/setfit-benchmark-claims-v1.yaml
+  # (`pv diff` takes TWO FILESYSTEM PATHS — crates/aprender-contracts-cli/src/cli.rs:73-78
+  # — so the old revision is materialized with `git show` first), its suggested bump, and
+  # the reasoning, in the file rather than in a commit message nobody reads again.
+  version: 1.0.0
+  created: '2026-08-17'
+  author: PAIML Engineering
+  kind: kernel
+  description: >
+    The Phase 5 CLAIMS CONTRACT: what a benchmark row contains, what makes a benchmark run
+    COMPLETE, what makes two rows COMPARABLE, what evidence a "no selection happened" claim
+    must produce, which arithmetic turns rows into published numbers, and where the
+    measurement boundaries of every resource metric are. Covers EVAL-03 (the
+    machine-readable row) and EVAL-04 (manifest-defined completeness, exact recomputation),
+    and carries the EVAL-05 resource protocol the rows are measured under.
+
+    Implemented by `aprender-train` (`train::setfit::bench_row` — BenchRow, MethodEvidence,
+    RunManifest) and consumed by the `apr setfit bench run` / `bench report` adapters.
+    Every constant below is committed BEFORE the code that compares against it exists
+    (Ph1 D-14), so a threshold cannot be chosen after seeing a result.
+
+    WHY THIS CONTRACT EXISTS. This phase's whole output is a CLAIM — "SetFit compares thus
+    with the 9B LoRA baseline". A claim is only worth the evidence a reader can recompute,
+    and the failure modes are not arithmetic errors: they are a quietly omitted cell, a
+    pair compared across different sampled IDs, an adapter's bytes presented as a
+    deployable model size, a "peak memory" that is really a training peak, a "cold" latency
+    measured in a process that had just finished training, and a "no model selection
+    happened" assertion that is a boolean nobody can check. Each of those passes every test
+    an implementation would naturally write. This file is where each one is named and given
+    a mechanism.
+
+    THIS CONTRACT REFERENCES RATHER THAN RESTATES. Dataset identity, the label map, the
+    canonical split sizes, the official `F_avg` definition and the contracted seed set are
+    owned by `tweet-eval-stance-benchmark-v1`. The artifact a SetFit row measures is owned
+    by `setfit-apr-v1`. The selection manifest a cell's sampled IDs come from is owned by
+    `contrastive-pair-protocol-v1`. The calibration metrics and the paired statistics are
+    owned by `calibration-v1`. A schema restated in two places is a schema that disagrees
+    with itself; only the seed set is enumerated here, and it is enumerated because the
+    80-cell expectation set must be derivable CLOSED-FORM from this file alone (see
+    `expectation_set`) — that enumeration is asserted equal to the upstream contract's by
+    test, not by hope.
+
+    PROVABILITY HONESTY. `cargo-kani` is not installed in this repository and there is not
+    one `#[kani::proof]` harness anywhere under `crates/`. The `kani_harnesses:` entry
+    below is DECLARED and NOT EXECUTED; it names the runnable, identically bounded test
+    that is the actual evidence. Nothing here should be read as machine-checked.
+
+    ANNOTATION HONESTY. The `#[contract]` attribute in this repository is METADATA-ONLY
+    (aprender-core's build.rs looks for a binding.yaml at a sibling path the APR-MONO merge
+    deleted), so no preconditions are injected into an annotated function. The enforcement
+    mechanism for everything below is the named test, never the annotation.
+  references:
+    - 'Tunstall et al. (2022) Efficient Few-Shot Learning Without Prompts (SetFit) — the reporting convention the headline aggregation copies'
+    - 'Mohammad et al. (2016) SemEval-2016 Task 6: Detecting Stance in Tweets — the origin of official F_avg'
+    - 'Barbieri et al. (2020) TweetEval: Unified Benchmark and Comparative Evaluation for Tweet Classification'
+    - 'Student (1908) The Probable Error of a Mean — the closed-form paired interval used here'
+    - 'Brier (1950) Verification of Forecasts Expressed in Terms of Probability — the unnormalised multiclass score rows carry'
+    - 'contracts/tweet-eval-stance-benchmark-v1.yaml — dataset identity, labels, splits, official F_avg, the contracted seed set'
+    - 'contracts/setfit-apr-v1.yaml — the artifact a SetFit row measures'
+    - 'contracts/contrastive-pair-protocol-v1.yaml — the selection manifest whose hash is the pairing key'
+    - 'contracts/calibration-v1.yaml — top-label ECE, multiclass Brier, and the frozen t critical value'
+    - '.planning/research/PITFALLS.md — PF-007 and PF-008, quoted by id below'
+    - 'scripts/setfit_fixtures/claims_stats/t_critical.json — the pinned-env source of the frozen t literal'
+  depends_on:
+    - tweet-eval-stance-benchmark-v1
+    - setfit-apr-v1
+    - contrastive-pair-protocol-v1
+    - calibration-v1
+
+equations:
+
+  # ==========================================================================
+  # 1. THE EXPECTATION SET — the anti-omission mechanism (D-14, EVAL-04)
+  # ==========================================================================
+
+  expectation_set:
+    formula: 'expectation = methods x shots x seeds ; |expectation| = 2 * 4 * 10 = 80 ; cell_key(m, s, d) = "<method>/s<shots>/seed<seed>"'
+    domain: 'the three enumerated lists below, and nothing else'
+    codomain: 'exactly 80 UNIQUE cell keys, in the deterministic order declared by `ordering`'
+    # THE THREE LISTS ARE MACHINE-READABLE AND ARE THE SINGLE SOURCE OF TRUTH.
+    # `RunManifest::expectation()` in crates/aprender-train/src/train/setfit/bench_row.rs
+    # derives the same product from Rust constants, and a test deserializes THIS FILE with
+    # serde_yaml into typed Vec<String>/Vec<u32> fields and compares the two as SETS plus
+    # CARDINALITY. A substring check over the file text is explicitly forbidden by
+    # `parity_is_a_typed_set_comparison` below: a value sitting in a comment, a list holding
+    # an EXTRA value, and a list holding a DUPLICATE all pass a `contains` check and all
+    # produce a different benchmark.
+    methods:
+      - setfit
+      - lora
+    shots:
+      - 8
+      - 16
+      - 32
+      - 64
+    seeds:
+      - 13
+      - 17
+      - 23
+      - 29
+      - 31
+      - 37
+      - 41
+      - 43
+      - 47
+      - 53
+    expected_cells: 80
+    ordering: 'method in the order declared above, then shots ASCENDING, then seed ASCENDING. Cell keys are unique, so no tie can arise and no tiebreak is needed.'
+    invariants:
+      - 'THE SEED SET IS THE CONTRACTED ONE, NOT A COPY THAT DRIFTED. It is byte-equal to
+        `few_shot_protocol.seeds` in tweet-eval-stance-benchmark-v1.yaml, and
+        OBLIG-TWEET-EVAL-SEED-SET already states that 42 is NOT a contracted seed. It is
+        enumerated HERE anyway because the 80-cell expectation must be closed-form from this
+        one file — a completeness rule that requires reading a second contract to know what
+        complete means is a completeness rule an omission can hide behind. The duplication is
+        made safe by assertion, not by discipline: a test compares the two lists.'
+      - 'EIGHTY IS A PRODUCT, NEVER A COUNT OF FILES. `expected_cells` is asserted equal to
+        `|methods| * |shots| * |seeds|` by the same test that checks the product, so editing
+        one list without the other is red rather than silently re-defining completeness.'
+      - 'DUPLICATES ARE A CONTRACT VIOLATION, not a set that happens to deduplicate. Each of
+        the three lists must have no repeated element; a duplicated seed would leave the
+        Cartesian SET at 80 while the LIST product reads 88, and the cardinality half of the
+        parity test is what catches it.'
+
+  # ==========================================================================
+  # 2. THE ROW SCHEMA (D-12, EVAL-03)
+  # ==========================================================================
+
+  bench_row_schema:
+    formula: 'BenchRow = Envelope{semantic_hash, volatile, payload} ; payload = SharedCore ++ QualityBlock ++ ResourceBlock ++ MethodEvidence ; semantic_hash = SHA-256(canonical_compact_json(payload))'
+    domain: 'one executed (method, shots, seed) cell'
+    codomain: 'one self-verifying row file whose digest is checked BEFORE any field is readable'
+    preconditions:
+      - 'the cell was executed against the RELOADED production artifact, never an in-memory checkpoint (Ph4; PF-008 warning sign 5)'
+      - 'the selection manifest the cell consumed verified its own digest before training began'
+    postconditions:
+      - 'every headline f64 carries its IEEE-754 `_bits: u64` sibling, so a decimal rendering can never become the compared value'
+      - 'the row is `deny_unknown_fields` at every level, so no field can ride along that this schema does not name'
+    schema_version: 1
+    shared_core:
+      method: 'exactly "setfit" or "lora" — the tag that selects the evidence block; no third value and no absent value'
+      shots: 'one of 8, 16, 32, 64'
+      seed: 'one of the ten contracted seeds'
+      dataset_revision: 'the pinned upstream git revision the splits came from'
+      dataset_fingerprint: 'the whole-dataset fingerprint from the attested PreparedDataset'
+      model_revision: 'the encoder (SetFit) or base-model (LoRA) revision string, as resolved'
+      selection_manifest_hash: 'hex SHA-256 of the selection manifest this cell consumed — THE PAIRING KEY'
+      backend_identity: 'grammar `<device>:<implementation>:<kernel>`, READ FROM EXECUTION (Ph4 D-12), never echoed from configuration'
+      host_hostname: 'the host the cell ran on'
+      host_os: 'operating system identifier'
+      host_arch: 'CPU architecture identifier'
+    quality_block:
+      f_avg: 'official F_avg = (F1_against + F1_favor) / 2, per tweet-eval-stance-benchmark-v1 — the HEADLINE metric'
+      macro_f1: 'three-class macro F1, published beside F_avg and never instead of it'
+      per_class_precision: 'one value per label, in `ordered_labels` order'
+      per_class_recall: 'one value per label, in `ordered_labels` order'
+      per_class_f1: 'one value per label, in `ordered_labels` order'
+      mcc: 'Matthews correlation coefficient over the three classes'
+      confusion_matrix: 'row-major [3][3] counts, true label by predicted label'
+      n_test_rows: 'how many rows the metrics were computed over'
+      ordered_labels: 'exactly ["none", "against", "favor"] — recorded explicitly so no metric depends on an implicit index order (PF-008 warning sign 2)'
+      ece_top_label_validation: 'aprender_core::calibration::expected_calibration_error_top_label, on the CANONICAL VALIDATION split only'
+      brier_multiclass_validation: 'aprender_core::calibration::brier_score_multiclass — the UNNORMALISED Brier 1950 form, codomain [0, 2], NOT [0, 1]'
+      calibration_split: 'the fixed string "validation". Calibration diagnostics are validation-only (D-07); a row recording any other value is refused.'
+    resource_block:
+      train_wall_ms: 'wall-clock of the training invocation for this cell'
+      cold_latency_ms: 'ONE single-text classify in a dedicated fresh child process — see `resource_protocol`'
+      cold_measured_in_child_process: 'the literal boolean true; a row may not carry a cold latency measured in a process that also trained'
+      warm_latency_ms_median: 'median of 10 single-text classifies after 3 warmup classifies against the reloaded model'
+      throughput_rows_per_sec: 'n_test_rows divided by the wall time of one full test-split batch pass'
+      throughput_batch_size: 'the batch size that pass used'
+      warmup_count: 'the number of warmup classifies discarded before the warm measurement (3)'
+      train_peak_rss_bytes: 'peak resident set size of the TRAINING process'
+      train_peak_rss_mechanism: 'how that number was obtained — one of the mechanism strings in `resource_protocol`'
+      inference_peak_rss_bytes: 'peak resident set size of the dedicated COLD-MEASUREMENT CHILD — a different process and a different number'
+      inference_peak_rss_mechanism: 'how that number was obtained — one of the mechanism strings in `resource_protocol`'
+      peak_rss_sample_interval_hz: 'PRESENT ONLY when a mechanism is a sampled one; absent for the exact kernel high-water-mark mechanisms'
+      artifact_bytes: 'bytes of the artifact THIS method wrote — SetFit: the standalone APR; LoRA: the adapter alone'
+      deployable_total_bytes: 'bytes a user must ship to serve this model — see `model_size_comparability`'
+    method_evidence:
+      setfit:
+        evidence_table_hash: 'the Ph3 D-12 evidence-table hash, exactly as the APR carries it'
+        apr_artifact_sha256: 'SHA-256 of the setfit-apr-v1 artifact the predictions came from'
+        lock:
+          lock_hash: 'hex SHA-256 of the bytes of the committed lock record at `lock_record_path`'
+          role: '"written" or "consumed", matching the LockRow vocabulary of apr eval'
+          rule: 'the selection rule the lock records'
+          lock_record_path: 'path to the committed canonical lock-record file, RELATIVE to the benchmark directory'
+      lora:
+        base_model_sha256: 'SHA-256 of the base model the adapter is applied to'
+        base_model_bytes: 'bytes of that base model — mandatory, because an adapter alone is not deployable'
+        adapter_sha256: 'SHA-256 of the trained adapter'
+        epochs_requested: 'the epoch count the run was asked for'
+        epochs_completed: 'the epoch count the run actually finished'
+        early_stopping_disabled: 'the literal boolean true'
+        val_split: 'the literal 0.0 — no validation split was carved, so nothing could have been selected on'
+        no_selection_attestation: 'the literal boolean true — see `no_selection_attestation`, which is what makes this checkable'
+        candidate_ledger_sha256: 'hex SHA-256 over the bytes of the append-only candidate ledger'
+        candidates_trained: 'the ledger''s line count, which this contract requires to be exactly 1'
+        candidate_ledger_path: 'path to the ledger, RELATIVE to the benchmark directory'
+    excluded_fields:
+      rule: 'NO BOOTSTRAP, NO RESAMPLING, ANYWHERE IN A ROW (D-06).'
+      forbidden_field_name_substrings:
+        - bootstrap
+        - resample
+        - resampled
+        - shuffle
+        - permutation_test
+      mechanism: 'Two layers, because either alone is weak. STRUCTURAL: every struct in the row is `#[serde(deny_unknown_fields)]`, so a field this schema does not name cannot be deserialized at all — a resampling column cannot ride along in a row someone hand-edits. TEXTUAL: this list names the vocabulary, so a future schema addition proposing one of these names is refused at review rather than at parse time. EVAL-04 says the published numbers must be EXACTLY recomputable; a resampling stream inside the claims path makes "exactly" mean "up to an RNG seed", which is a different and weaker promise.'
+    invariants:
+      - 'A MISSING METHOD-EVIDENCE BLOCK IS UNREPRESENTABLE, NOT NULL-PADDED (D-12). The row
+        is a serde-tagged enum over `method`: a `setfit` row carries the SetFit block and a
+        `lora` row carries the LoRA block, and every provenance field inside each block is
+        non-Option. Null-padding a shared superset would let a LoRA row present SetFit-shaped
+        evidence with empty hashes — exactly the shape SAFE-03 exists to forbid — and would
+        make "the block is missing" indistinguishable from "the block is empty".'
+      - 'THE DIGEST IS VERIFIED BEFORE ANY VALUE IS READABLE. `from_bytes` recomputes
+        SHA-256 over the payload''s own canonical compact bytes and compares it to the
+        envelope BEFORE returning, so a caller cannot hold a BenchRow whose digest does not
+        match its payload. This is the SelectionManifest discipline
+        (aprender-contrastive-data/src/manifest.rs:248-272) and it is copied rather than
+        re-invented.'
+      - 'THE DIGEST IS OVER CANONICAL COMPACT BYTES; THE FILE IS PRETTY. The two forms are
+        produced by ONE serializer each, from the same value, so the file''s whitespace can be
+        chosen for diff review without weakening the digest.'
+      - 'THE VOLATILE BLOCK IS NEVER HASHED. Tool version and any future volatile metadata sit
+        outside the payload, so re-running a cell on a newer build does not change the row''s
+        identity while its measured content is identical.'
+
+  # ==========================================================================
+  # 3. COMPLETENESS (D-14, EVAL-04) — omission must be structurally visible
+  # ==========================================================================
+
+  completeness_rule:
+    formula: 'report(dir) = Ok iff manifest.expectation == expectation_set AND forall c in expectation: status(c) = complete AND sha256(bytes(row_file(c))) == manifest.row_sha256(c) AND row(c).cell == c'
+    domain: 'a benchmark directory and the run manifest it contains'
+    codomain: 'either aggregated claims, or a TYPED refusal naming every failing cell'
+    invariants:
+      - 'COMPLETENESS IS DEFINED BY THE MANIFEST AND THIS CONTRACT, NEVER BY A DIRECTORY
+        LISTING. A directory listing can only report what is present; it cannot report what is
+        missing, because nothing tells it what was expected. The manifest declares all 80 cells
+        BEFORE any cell runs, so a selectively omitted cell is a `pending` entry in a
+        pre-declared table rather than an absence nobody can see (EVAL-04, PF-007
+        falsification 3).'
+      - 'AN EMPTY OR ZERO-CELL BENCHMARK DIRECTORY IS A TYPED REFUSAL BEFORE ANY ROW BYTE IS
+        READ. A gate whose input is empty and which therefore finds no failures is the vacuous
+        gate this repository has now been bitten by more than once (CR-02, and the repo-wide
+        `contract-audit` that prints 132 errors and exits 0). Zero complete cells is a failure,
+        not a clean run.'
+      - 'A MANIFEST WHOSE EXPECTATION SET IS NOT EXACTLY THE 80 CONTRACT-DERIVED CELLS IS A
+        TYPED REFUSAL, ALSO BEFORE ANY ROW BYTE IS READ. Otherwise a producer could declare a
+        12-cell expectation, satisfy it completely, and publish a "complete" run.'
+      - 'THE ROW MUST AGREE WITH ITS SLOT. A row filed under (setfit, 16, 29) whose payload
+        says (setfit, 16, 31) is a refusal, not a relabelling: the manifest entry and the row
+        payload are two independent statements of the same fact and they must agree.'
+      - 'RE-RECORDING IS IDEMPOTENT; CONTRADICTING IS AN ERROR. Recording an already-complete
+        cell with the IDENTICAL row digest returns Ok — that is the resume path after a crash
+        at cell 35, and it is why the manifest carries `status: pending|complete` rather than
+        being written once at the end. Recording an already-complete cell with a DIFFERENT
+        digest is a typed error naming the cell and both digests; a silent overwrite would let
+        a second run of one cell replace a first without leaving a trace.'
+
+  # ==========================================================================
+  # 4. PAIRING (EVAL-02, PF-007) — comparability is not an assumption
+  # ==========================================================================
+
+  pairing_rule:
+    formula: 'forall (s, d) in shots x seeds: row(setfit, s, d).selection_manifest_hash == row(lora, s, d).selection_manifest_hash'
+    domain: 'the 40 (shots, seed) pairs of the completed expectation set'
+    codomain: 'a paired delta per pair, or a typed refusal naming the mismatched pair and both hashes'
+    invariants:
+      - 'A DELTA IS COMPUTED ONLY OVER A MATCHED PAIR. PF-007''s fourth falsification test is
+        exactly this: join on shot, seed, dataset revision and sampled-ID hash, and REJECT
+        unpaired comparisons. Two methods evaluated on different sampled few-shot subsets are
+        not two measurements of the same thing, and at 8 examples per class the subset is a
+        larger source of variation than the method.'
+      - 'THE PAIRING KEY IS THE MANIFEST HASH, NOT THE (shots, seed) LABEL. Two runs can both
+        be labelled (16, 29) and have consumed different manifests — a regenerated dataset, a
+        different exclusion record, a different sampler version. The hash is the only field
+        that can tell them apart, and D-10 makes both methods read that one artifact through
+        the same code path so the guarantee is structural rather than clerical.'
+
+  # ==========================================================================
+  # 5. SELECTION SAFETY AS RECOMPUTABLE EVIDENCE (EVAL-04)
+  # ==========================================================================
+
+  selection_safety_evidence:
+    formula: 'setfit: sha256(bytes(read(lock_record_path))) == lock.lock_hash ; lora: sha256(bytes(read(candidate_ledger_path))) == candidate_ledger_sha256 AND lines(ledger) == candidates_trained == 1'
+    domain: 'a completed row and the benchmark directory it lives in'
+    codomain: 'a verdict recomputed from committed bytes, or a typed refusal'
+    setfit_side:
+      rule: 'The SetFit lock record is COMMITTED as a file at `lock.lock_record_path`, and the report reads those bytes and recomputes their SHA-256, comparing it to the row''s `lock.lock_hash`. The row field is a CLAIM about a file; the file is the evidence. A row whose lock record is absent, or whose bytes hash to something else, is refused.'
+      why: 'The alternative — trusting `lock_hash` because the row says so — makes the whole selection-safety story a string a producer typed. The lock machinery itself (lock.rs, the typestate token minted from a verified run object, Ph3 D-14) is unchanged and is not reimplemented here; what this contract adds is that the benchmark directory carries the bytes, so a reader can check without re-running anything.'
+    lora_side:
+      rule: 'An APPEND-ONLY candidate ledger at `candidate_ledger_path`, one JSONL line per training invocation for that (method, shots, seed) cell, each line written BEFORE that invocation''s test evaluation, each carrying {timestamp, selection_manifest_hash, epochs_requested, seed, config_hash}. `candidate_ledger_sha256` is over the ledger file''s bytes; `candidates_trained` is its line count; this contract requires that count to be EXACTLY 1.'
+      why: 'The LoRA path has no selection-lock machinery (that is a real gap, recorded in the phase context, not a thing this plan invents). Without a ledger, "exactly one candidate was trained" is a boolean the producer asserts about itself. With one, the claim has a recomputable digest and a countable line count, and the ordering — ledger line written before test evaluation — is what makes a second, better candidate visible rather than deletable.'
+      why_before_evaluation: 'A ledger written AFTER evaluation records only the candidates the producer chose to keep. Written before, a discarded candidate has already left a line, so discarding it makes `candidates_trained` read 2 and the row refuse. The ordering IS the property.'
+    residual_risk:
+      statement: 'A PRODUCER THAT CONTROLS BOTH THE LEDGER AND THE ROWS CAN STILL EMIT A MUTUALLY CONSISTENT FORGERY. Nothing here binds the ledger to an external clock, an external witness, or a key the producer does not hold. This raises LoRA selection safety from a SELF-ASSERTED BOOLEAN to RECOMPUTABLE APPEND-ONLY EVIDENCE — a real and checkable improvement — and it does not reach the standard of the SetFit side, where the credential is minted from a verified run object by a typestate that cannot be constructed otherwise.'
+      not_claimed: 'A cryptographic train-then-seal credential for the LoRA side is FUTURE WORK. It is named here rather than omitted, because a contract that quietly overstates its own guarantee is the failure this phase exists to prevent, and "a gate could pass while the claim is false" is this phase''s own stated bar.'
+      not_widened: 'The SetFitCredential seal is NOT widened to cover the LoRA path (Open Q3 option (b), adopted). Making one credential type cover a path whose evidence is weaker would export the weaker guarantee onto everything the credential already protects.'
+
+  # ==========================================================================
+  # 6. LoRA NO-SELECTION ATTESTATION (Open Q3 option (b), strengthened)
+  # ==========================================================================
+
+  no_selection_attestation:
+    formula: 'lora_row valid iff epochs_completed == epochs_requested AND early_stopping_disabled AND val_split == 0.0 AND no_selection_attestation AND candidates_trained == 1 AND sha256(ledger_bytes) == candidate_ledger_sha256'
+    domain: 'a LoRA row and its committed candidate ledger'
+    codomain: 'accepted, or a typed refusal naming the failing conjunct'
+    invariants:
+      - 'ALL SIX CONJUNCTS, NOT A SUBSET. Each closes a different route to a post-hoc choice:
+        an early-stopped run picked a checkpoint; a non-zero validation split created something
+        to pick on; fewer completed epochs than requested means the run ended somewhere other
+        than where it was told to; a second ledger line means a second candidate existed. Any
+        one alone is satisfiable while the claim is false.'
+      - 'THE FIFTH AND SIXTH CONJUNCTS ARE WHAT MAKE THE OTHER FOUR MORE THAN A DECLARATION.
+        The first four are self-reported by the same process that trained. The ledger digest and
+        line count are recomputed by the report from committed bytes.'
+      - 'BOTH METHODS RUN FROZEN PUBLISHED DEFAULTS. Neither side gets a validation-only search
+        budget in this milestone, because a search on the LoRA side would need selection-lock
+        plumbing that does not exist, and an unequal search budget is PF-008''s
+        "unequal comparison" in its purest form.'
+
+  # ==========================================================================
+  # 7. MODEL SIZE COMPARABILITY (PF-008)
+  # ==========================================================================
+
+  model_size_comparability:
+    formula: 'deployable_total_bytes(setfit) = artifact_bytes ; deployable_total_bytes(lora) = base_model_bytes + artifact_bytes'
+    domain: 'a completed row'
+    codomain: 'the one figure a cross-method size claim may be built on'
+    invariants:
+      - 'BOTH FIELDS ARE MANDATORY ON EVERY ROW. `artifact_bytes` answers "what did this method
+        write"; `deployable_total_bytes` answers "what must a user ship to serve this". They are
+        the same number for SetFit, because the APR is standalone, and they differ by three
+        orders of magnitude for a 9B LoRA adapter.'
+      - 'PRESENTING LoRA''S ADAPTER-ONLY `artifact_bytes` BESIDE SETFIT''S STANDALONE APR IS A
+        FORBIDDEN COMPARISON. It is also the most natural chart to draw from the row schema,
+        which is exactly why it is named: an adapter of a few tens of megabytes beside a
+        90 MB standalone classifier reads as parity, while the deployable figures differ by the
+        size of a 9B base model. Any cross-method size claim MUST use
+        `deployable_total_bytes`, and the 05-10 renderer enforces it.'
+      - '`base_model_bytes` IS MANDATORY ON A LoRA ROW, not derivable. The base model is not in
+        the benchmark directory, so a report cannot measure it; a row that omits it makes the
+        deployable figure uncomputable, which is why it is a non-Option field of the LoRA
+        evidence block.'
+
+  # ==========================================================================
+  # 8. STATISTICS (D-05, D-06, D-08) — closed-form, no RNG
+  # ==========================================================================
+
+  claims_statistics:
+    formula: 'per (method, shots): mean = sum(x_i)/n, s = sqrt(sum((x_i - mean)^2)/(n-1)), min, max over the n=10 seeds ; per shots: d_i = x_setfit(i) - x_lora(i) on the same selection_manifest_hash, d_bar = mean(d), CI95 = d_bar +/- t_crit * s_d / sqrt(10)'
+    domain: 'the 80 completed, hash-verified, pair-matched rows'
+    codomain: 'point estimates, dispersion and paired intervals — never a significance verdict'
+    n_seeds: 10
+    degrees_of_freedom: 9
+    t_crit_975_df9: 2.262157162798205
+    t_crit_source: 'scipy.stats.t.ppf(0.975, 9) computed in the pinned uv environment (python 3.13.7 / scipy 1.18.0), recorded at scripts/setfit_fixtures/claims_stats/t_critical.json and frozen in Rust as aprender_core::stats::hypothesis::T_CRIT_975_DF9'
+    std_convention: 'SAMPLE standard deviation with the (n-1) denominator, matching the SetFit paper''s reporting convention so the numbers are directly comparable to published results'
+    invariants:
+      - 'THE FROZEN t LITERAL EXISTS IN TWO PINNED COPIES ON PURPOSE, AND THEY ARE COMPARED.
+        One lives here (contract-resident constant, Ph1 D-14); one lives in
+        `aprender_core::stats::hypothesis::T_CRIT_975_DF9`, asserted by BIT equality against the
+        fixture. A test compares this literal to that constant, so the two cannot drift. A
+        constant that can drift within a tolerance is not frozen.'
+      - 'NO RNG ANYWHERE IN THE CLAIMS PATH (D-06). EVAL-04''s "exactly recompute" is bit-level.
+        A bootstrap would put a resampling stream inside a number a reader is meant to reproduce
+        from the rows alone, so the closed-form paired t is the contracted PRIMARY and a
+        bootstrap column, if ever wanted, is additive and secondary — never a replacement.'
+      - 'NO INVERSE CDF IS IMPLEMENTED. df is fixed at 9 by the ten-seed design, so exactly one
+        critical value is needed and it is frozen rather than computed.'
+      - 'ESTIMATION-FIRST — NO SIGNIFICANCE VERDICTS (D-08, PF-007). The report states point
+        estimates, dispersion and paired CIs. It never prints "significantly better" or
+        "significantly worse". p-values may sit in the machine-readable detail; they may not
+        appear in claim language. A binary verdict is precisely where few-shot seed sensitivity
+        hides: rankings that reverse across seeds become one word.'
+      - 'ZERO-VARIANCE PAIRED INPUT IS A VISIBLE TYPED REFUSAL, NEVER A BLANK CELL. Ten seeds
+        that all move by the same amount is not exotic.
+        `AprenderError::ZeroVarianceDifferences` is the outcome, and the report must render it
+        as a refusal — a non-finite f64 would serialize to `null` and become a MISSING number
+        rather than a visible failure (CR-03).'
+      - 'THE MULTICLASS BRIER IS ON A [0, 2] SCALE. It is the unnormalised Brier 1950 form and
+        at K=2 it is EXACTLY twice the binary score. Any column, threshold or axis assuming
+        [0, 1] is wrong.'
+
+  # ==========================================================================
+  # 9. RESOURCE PROTOCOL (EVAL-05, success criterion 3)
+  # ==========================================================================
+
+  resource_protocol:
+    formula: 'cold = one classify in a FRESH child that only loads and classifies ; warm = median(10 classifies after 3 warmups) ; throughput = n_test_rows / wall(one full test-split batch pass) ; peak_rss is TWO numbers, never one'
+    domain: 'one executed cell on one host'
+    codomain: 'the resource block of one row, every field carrying its measurement boundary'
+    cold_latency:
+      definition: 'ONE single-text classify, performed in a DEDICATED FRESH CHILD PROCESS that does nothing but load the written artifact and classify once.'
+      forbidden: 'A cold latency measured in the process that just finished training. That process''s filesystem cache is warm, its allocator arenas are populated and its pages are resident; the first classify inside it is operationally WARM and calling it cold overstates the loading cost of every method that trains in-process. A row carrying such a measurement is refused via `cold_measured_in_child_process`.'
+    warm_latency:
+      definition: 'The MEDIAN of 10 single-text classifies taken after 3 warmup classifies, measured against the RELOADED model.'
+      warmup_count: 3
+      measured_count: 10
+      note: 'The warmup count follows the `apr bench --warmup` default so the boundary is the one the rest of this repository already uses.'
+    throughput:
+      definition: 'n_test_rows divided by the wall time of ONE full test-split batch pass at the declared `throughput_batch_size`.'
+      note: 'The batch size is RECORDED because throughput without a batch size is not a comparable number (PF-008 warning sign 4). Do NOT propagate apr-finetune-metrics-v1''s `tokens_per_sec`, which multiplies by a hardcoded 512.'
+    peak_rss:
+      rule: 'TWO DISTINCT METRICS, NEVER ONE. `train_peak_rss_bytes` is the peak of the TRAINING process. `inference_peak_rss_bytes` is the peak of the dedicated cold-measurement child.'
+      why: 'A high-water mark is process-CUMULATIVE. Linux `/proc/self/status` VmHWM in a process that trains, then reloads, then infers reports the TRAINING peak — reporting that single number as "peak RSS" beside a method with a different train/infer ratio compares training footprints while claiming to compare inference footprints. Reporting one pooled "peak RSS" is forbidden.'
+      mechanisms:
+        child_max_rss_time_l:
+          platform: macOS
+          how: 'the parent spawns the child under `/usr/bin/time -l` and reads the child''s maximum resident set size after it exits'
+          kind: exact_kernel_high_water_mark
+        child_max_rss_vm_hwm:
+          platform: Linux
+          how: 'the parent spawns the child under `/usr/bin/time -v` (or reads the child''s /proc/<pid>/status VmHWM before reap) and records the child''s true high-water mark'
+          kind: exact_kernel_high_water_mark
+        sysinfo_sampled_hz:
+          platform: any
+          how: 'polling the process''s RSS from the `sysinfo` crate at a fixed rate; the ACTUAL interval MUST be recorded in `peak_rss_sample_interval_hz`'
+          kind: sampled_lower_bound
+      mutually_comparable:
+        - child_max_rss_time_l
+        - child_max_rss_vm_hwm
+      not_comparable:
+        rule: 'A `sysinfo_sampled_<hz>` figure is a SAMPLED LOWER BOUND and is NOT comparable to a `child_max_rss_*` figure. A poll at any finite rate can miss the peak entirely; the bias is one-directional (it can only understate), and its magnitude depends on the allocation pattern, so it cannot be corrected for. It remains permitted as a FALLBACK only.'
+        enforcement: 'A cross-method memory comparison between two different mechanism CLASSES must be labelled at the point of comparison — the 05-10 renderer enforces this, so the label travels with the number rather than living in a methods paragraph.'
+      no_unsafe: 'Gemini''s review proposed `mach_task_basic_info` on macOS. REJECTED: this workspace sets `unsafe_code = "forbid"`, and the child-process route above yields the same true-HWM semantics with no unsafe and the SAME SHAPE on both platforms — which is what makes the SetFit and LoRA numbers comparable at all.'
+    train_time: 'wall-clock of the training invocation, recorded in `train_wall_ms`.'
+    sizes: 'per `model_size_comparability` — `artifact_bytes` and `deployable_total_bytes`, both mandatory.'
+    invariants:
+      - 'RESOURCE METRICS ARE NEVER POOLED ACROSS HOSTS (D-09). SetFit cells run CPU and LoRA
+        cells run on the lambda-vector GPU host; every row records its true host and backend
+        identity, read from execution. These are AS-DEPLOYED METHOD COSTS — which is the
+        milestone''s actual question, cheap CPU SetFit against GPU-hungry 9B LoRA — and they are
+        never framed as same-hardware kernel comparisons. A report that averages across hosts as
+        if they were one host is stating something no measurement supports.'
+      - 'EVERY METRIC CARRIES ITS MECHANISM. A number without its measurement boundary is not a
+        measurement; it is a number. This is why the mechanism strings are mandatory fields
+        rather than a line in a methods section.'
+      - 'QUALITY AND RESOURCE FIGURES COME FROM THE SAME ARTIFACT. PF-008''s fifth warning sign
+        is quality measured on an in-memory checkpoint while size and latency come from a
+        derivative. Benchmark predictions come from the RELOADED production artifact, and that
+        is the artifact whose bytes `artifact_bytes` counts.'
+
+  # ==========================================================================
+  # 10. THE PITFALLS THIS CONTRACT IS BUILT AGAINST
+  # ==========================================================================
+
+  pitfall_bindings:
+    formula: 'PF-007 -> {expectation_set, completeness_rule, pairing_rule, claims_statistics} ; PF-008 -> {bench_row_schema.quality_block, model_size_comparability, resource_protocol, no_selection_attestation}'
+    domain: 'the two release-blocking pitfalls scoped to Phase 5'
+    codomain: 'the equation of this contract that answers each'
+    pf_007:
+      id: PF-007
+      title: 'Few-Shot Statistics Hide Seed Sensitivity'
+      answered_by: 'the complete 80-cell expectation set (no best-seed selection, no missing seed), the shared selection-manifest hash per cell (no comparison across different sampled IDs), per-seed rows plus mean / (n-1) std / min / max / paired deltas (no lone point estimate), and D-08''s estimation-first rule (no binary verdict for a reversal to hide behind).'
+    pf_008:
+      id: PF-008
+      title: 'Performance Claims Use the Wrong Metric or an Unequal Comparison'
+      answered_by: 'official F_avg as the headline with explicit ordered labels (not accuracy, not an unlabelled F1), per-class metrics + MCC + confusion matrix + validation-only calibration published together, `deployable_total_bytes` for any size claim, contracted latency/throughput/peak-RSS boundaries with mandatory mechanism strings, frozen published defaults on both sides, and the SetFit name reserved for the graph-proven contrastively-tuned encoder (Ph3 D-11 / SAFE-03).'
+
+proof_obligations:
+
+  - type: completeness
+    property: >
+      OBLIG-CLAIMS-EXPECTATION-CLOSED-FORM: the 80-cell expectation set is derivable from
+      THIS FILE alone — `equations.expectation_set.methods` x `.shots` x `.seeds` — and the
+      Rust derivation in `RunManifest::expectation()` equals it as a SET and in CARDINALITY.
+      The comparison is a TYPED one: the test deserializes the `include_str!`-ed contract
+      with serde_yaml into `Vec<String>` / `Vec<u32>` fields and compares parsed values.
+
+      A SUBSTRING COMPARISON DOES NOT DISCHARGE THIS OBLIGATION and is forbidden. A
+      `contract_text.contains("29")` check is satisfied by the digit sequence appearing in a
+      comment, in a prose paragraph, or inside an unrelated number; it is satisfied when the
+      contract carries an EXTRA seed the Rust side does not; and it is satisfied when the
+      contract carries a DUPLICATED seed. All three produce a benchmark whose completeness
+      rule means something other than what this contract says.
+      Discharged by FALSIFY-CLAIMS-001.
+    formal: >
+      expectation_set.expected_cells == |methods| * |shots| * |seeds| == 80 &&
+      set(RunManifest::expectation()) == set(methods x shots x seeds) &&
+      |RunManifest::expectation()| == 80 &&
+      no_duplicates(methods) && no_duplicates(shots) && no_duplicates(seeds)
+    applies_to: all
+
+  - type: soundness
+    property: >
+      OBLIG-CLAIMS-DIGEST-BEFORE-READ: `BenchRow::from_bytes` and `RunManifest::from_bytes`
+      recompute SHA-256 over the payload's own canonical compact bytes and compare it to the
+      envelope BEFORE returning a value. A caller therefore cannot hold a row or manifest
+      whose digest disagrees with its payload, and a bit-flipped file is diagnosed as
+      "these are not the bytes that were attested" rather than as a field-level oddity.
+
+      ORDER IS THE PROPERTY, not merely that something is checked. A digest verified after
+      the value is returned protects nothing, because the value has already escaped.
+      Discharged by FALSIFY-CLAIMS-002.
+    formal: >
+      from_bytes(b) == Ok(v) => sha256(canonical_compact(v.payload)) == v.semantic_hash &&
+      digest_check precedes return
+    applies_to: all
+
+  - type: safety
+    property: >
+      OBLIG-CLAIMS-NO-RNG-FIELD: no field of a row may carry a bootstrap, resampled,
+      permuted or shuffled quantity. Two independent mechanisms enforce it: every serde
+      struct in the row is `#[serde(deny_unknown_fields)]`, so an unnamed field cannot be
+      deserialized at all; and this contract names the forbidden vocabulary explicitly in
+      `bench_row_schema.excluded_fields`, so a future schema addition proposing one is
+      refused at review.
+
+      D-06's reason is stronger than taste: EVAL-04 requires the published numbers to be
+      EXACTLY recomputable from the rows. A resampling stream anywhere in the path
+      downgrades "exactly" to "up to an RNG seed".
+      Discharged by FALSIFY-CLAIMS-003.
+    formal: >
+      forall f in fields(BenchRow): f not_in forbidden_field_name_substrings &&
+      deny_unknown_fields(every struct in BenchRow)
+    applies_to: all
+
+  - type: classification
+    property: >
+      OBLIG-CLAIMS-METHOD-TAGGED: a row's method evidence is a SERDE-TAGGED enum selected by
+      `method`, and every provenance field within each variant is non-Option. A `lora` row
+      cannot present SetFit evidence, a `setfit` row cannot present LoRA evidence, and
+      neither can present its own block with the fields absent or null.
+
+      This is D-12 and SAFE-03's spirit made structural: null-padding one shared superset
+      would make "the block is missing" and "the block is empty" the same bytes, and would
+      let a row be shaped like SetFit evidence without being it.
+      Discharged by FALSIFY-CLAIMS-004.
+    formal: >
+      MethodEvidence = Setfit{evidence_table_hash, apr_artifact_sha256, lock{lock_hash, role, rule, lock_record_path}}
+                     | Lora{base_model_sha256, base_model_bytes, adapter_sha256, epochs_requested,
+                            epochs_completed, early_stopping_disabled, val_split, no_selection_attestation,
+                            candidate_ledger_sha256, candidates_trained, candidate_ledger_path} &&
+      forall field f in either variant: type(f) is not Option
+    applies_to: all
+
+  - type: conservation
+    property: >
+      OBLIG-CLAIMS-CELL-IDENTITY: a cell is recorded at most once with one digest. Recording
+      an already-complete cell with the IDENTICAL row digest is IDEMPOTENT and returns Ok
+      (the resume path). Recording it with a DIFFERENT digest is a TYPED error naming the
+      cell and both digests — never a silent overwrite, and never a merge.
+
+      Both halves are load-bearing and they are in tension: without idempotence a crash at
+      cell 35 makes the run unresumable and invites deleting the manifest; without the
+      collision error a re-run of one cell silently replaces its predecessor and the run
+      that produced the published number is no longer the run on disk.
+      Discharged by FALSIFY-CLAIMS-005.
+    formal: >
+      record(m, c, h) == Ok(idempotent) iff status(c) == complete && row_sha256(c) == h ;
+      record(m, c, h') == Err(CellAlreadyRecorded{c, existing, incoming: h'}) iff status(c) == complete && row_sha256(c) != h'
+    applies_to: all
+
+  - type: ordering
+    property: >
+      OBLIG-CLAIMS-DETERMINISTIC-ORDER: `expectation()` and every serialized listing of
+      cells iterate in the contract order — method in the order declared in
+      `expectation_set.methods`, then shots ASCENDING, then seed ASCENDING. Cell keys are
+      unique, so no tie can arise.
+
+      Determinism here is what makes two runs' manifests byte-comparable and what makes
+      PF-007's third falsification test meaningful: shuffling row order must not change an
+      aggregate, which can only be checked against a defined canonical order.
+      Discharged by FALSIFY-CLAIMS-006.
+    formal: >
+      expectation() == sort_by(method_index asc, shots asc, seed asc) &&
+      forall listings L in manifest, report: order(L) == order(expectation())
+    applies_to: all
+
+  - type: soundness
+    property: >
+      OBLIG-CLAIMS-COMPLETENESS-FAIL-CLOSED: `bench report` refuses, with a typed error
+      naming every failing cell, when any expected cell is missing or `pending`, when a row
+      file's bytes do not hash to the manifest's recorded digest, when a row's payload
+      disagrees with the slot it was filed under, or when a (shots, seed) pair's two rows
+      carry different `selection_manifest_hash` values.
+
+      TWO BACKSTOPS RUN FIRST, BEFORE ANY ROW BYTE IS READ: an empty or zero-cell benchmark
+      directory is a refusal, and a manifest whose expectation set is not exactly the 80
+      contract-derived cells is a refusal. Without them a producer can satisfy completeness
+      by declaring almost nothing, and a gate with no input reports success — the vacuity
+      failure this repository has already shipped twice.
+      Discharged by FALSIFY-CLAIMS-007 and FALSIFY-CLAIMS-008.
+    formal: >
+      report(dir) == Ok => |complete_cells| == 80 &&
+        forall c: sha256(bytes(row_file(c))) == manifest.row_sha256(c) && row(c).cell == c &&
+        forall (s, d): row(setfit, s, d).selection_manifest_hash == row(lora, s, d).selection_manifest_hash ;
+      |cells(manifest)| == 0 => Err ; set(cells(manifest)) != expectation_set => Err
+    applies_to: all
+
+  - type: equivalence
+    property: >
+      OBLIG-CLAIMS-SELECTION-RECOMPUTED: selection safety is recomputed from committed
+      bytes, not read from a row field. For a SetFit row, SHA-256 of the file at
+      `lock.lock_record_path` must equal `lock.lock_hash`. For a LoRA row, SHA-256 of the
+      file at `candidate_ledger_path` must equal `candidate_ledger_sha256` and its line
+      count must equal `candidates_trained`, which must be exactly 1.
+
+      THE RESIDUAL IS PART OF THE OBLIGATION, not a caveat outside it: a producer that
+      controls both the ledger and the rows can still emit a mutually consistent forgery.
+      What this obligation establishes is that the claim is RECOMPUTABLE and APPEND-ONLY,
+      which is strictly more than a self-asserted boolean and strictly less than a
+      cryptographic train-then-seal credential. Reporting it as the latter would be the
+      exact dishonesty this contract exists to prevent.
+      Discharged by FALSIFY-CLAIMS-009.
+    formal: >
+      setfit_row valid => sha256(read(lock.lock_record_path)) == lock.lock_hash ;
+      lora_row valid => sha256(read(candidate_ledger_path)) == candidate_ledger_sha256 &&
+                        line_count(candidate_ledger) == candidates_trained == 1
+    applies_to: all
+
+  - type: bound
+    property: >
+      OBLIG-CLAIMS-RESOURCE-BOUNDARIES: every resource number carries the boundary it was
+      measured at. Cold latency is one classify in a dedicated fresh child
+      (`cold_measured_in_child_process: true`); warm latency is the median of 10 after 3
+      warmups against the reloaded model; throughput carries its batch size and warmup
+      count; peak RSS is TWO separate fields with TWO separate mechanism strings, because a
+      kernel high-water mark is process-cumulative and a single pooled figure reports the
+      training peak while claiming to report the inference peak. `child_max_rss_time_l` and
+      `child_max_rss_vm_hwm` are declared MUTUALLY COMPARABLE; `sysinfo_sampled_<hz>` is a
+      SAMPLED LOWER BOUND, must record its interval, and is NOT comparable to either.
+      Resource metrics are never pooled across hosts (D-09).
+      Discharged by FALSIFY-CLAIMS-010.
+    formal: >
+      row.cold_measured_in_child_process == true &&
+      row.warmup_count == 3 && row.throughput_batch_size present &&
+      train_peak_rss_bytes != inference_peak_rss_bytes as FIELDS (two distinct fields, always both present) &&
+      mechanism(m) in {child_max_rss_time_l, child_max_rss_vm_hwm, sysinfo_sampled_<hz>} &&
+      mechanism(m) == sysinfo_sampled_<hz> => peak_rss_sample_interval_hz present
+    applies_to: all
+
+falsification_tests:
+
+  # ==========================================================================
+  # COMMAND FORM. Every crate-level command carries `--lib` and at most ONE
+  # positional filter. `--lib` is a VACUITY guard, not a style choice: without
+  # it several suites print several `test result: ok` lines and an
+  # `expected_output` grep is satisfied by one that ran ZERO matching tests
+  # (measured in this repository — see tweet-eval-stance-benchmark-v1's command
+  # block). `cargo test` also accepts only one TESTNAME; a second positional
+  # exits with "unexpected argument found".
+  # ==========================================================================
+
+  - id: FALSIFY-CLAIMS-001
+    rule: OBLIG-CLAIMS-EXPECTATION-CLOSED-FORM — parity is a TYPED SET comparison
+    prediction: >
+      `expectation_matches_the_contract_as_a_typed_set` deserializes the `include_str!`-ed
+      contract with serde_yaml into typed `Vec<String>` / `Vec<u32>` fields, builds the
+      Cartesian product, and asserts SET equality AND cardinality equality (80) against
+      `RunManifest::expectation()`. Two in-test MUTATED COPIES of the contract string — one
+      with an EXTRA seed, one with a DUPLICATED seed — each make the assertion FAIL, proving
+      the comparison rejects extras and duplicates rather than only detecting absence.
+    test: cargo test -p aprender-train --lib --features setfit bench_row
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_row
+    expected_output: 'test result: ok'
+    if_fails: >
+      Either the contract and the Rust constants have drifted — in which case the benchmark's
+      completeness rule no longer means what this file says — or the test was weakened to a
+      substring check. The substring form passes when the value sits in a comment, when the
+      contract carries an extra seed, and when it carries a duplicate; all three change the
+      benchmark while leaving the gate green, which is why the substring form is forbidden by
+      the obligation rather than merely discouraged.
+
+  - id: FALSIFY-CLAIMS-002
+    rule: OBLIG-CLAIMS-DIGEST-BEFORE-READ — a bit-flipped payload is refused, not returned
+    prediction: >
+      A round trip `bytes -> from_bytes -> to_file_bytes -> from_bytes` preserves the
+      `semantic_hash` exactly. A single bit flipped anywhere in the payload makes `from_bytes`
+      return the digest-mismatch variant, naming the expected and recomputed digests, and no
+      `BenchRow` value is produced.
+    test: cargo test -p aprender-train --lib --features setfit bench_row
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_row
+    expected_output: 'test result: ok'
+    if_fails: >
+      If the mismatch is reported as a field-level parse oddity instead of a digest failure,
+      the digest check has moved after the parse and the diagnosis now points a reader at a
+      data-quality problem in a file that is simply not the attested file. If no error is
+      raised at all, every downstream "hash-verified" claim in the report is unfounded.
+
+  - id: FALSIFY-CLAIMS-003
+    rule: OBLIG-CLAIMS-NO-RNG-FIELD — an unknown field cannot ride along
+    prediction: >
+      A row byte-stream carrying one field this schema does not name (the test uses a
+      bootstrap-shaped one) is refused by `from_bytes` with the deserialization variant naming
+      the offending field, and a source grep shows `deny_unknown_fields` on every serde struct
+      in bench_row.rs.
+    test: cargo test -p aprender-train --lib --features setfit bench_row
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_row
+    expected_output: 'test result: ok'
+    if_fails: >
+      Dropping `deny_unknown_fields` from even one nested struct opens exactly one hole, and
+      the hole is invisible: a hand-edited row carrying a resampled confidence interval
+      deserializes silently, and a published number that was meant to be exactly recomputable
+      is now reproducible only up to an RNG seed.
+
+  - id: FALSIFY-CLAIMS-004
+    rule: OBLIG-CLAIMS-METHOD-TAGGED — a missing evidence block is unrepresentable
+    prediction: >
+      A `setfit` row whose lock block is absent, and a `lora` row whose attestation block is
+      absent, are each refused by `from_bytes` with the missing-block error variant — a
+      DIFFERENT variant from the unknown-field, schema-version and digest refusals, so the five
+      refusals are distinguishable rather than one catch-all.
+    test: cargo test -p aprender-train --lib --features setfit bench_row
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_row
+    expected_output: 'test result: ok'
+    if_fails: >
+      If the evidence blocks become Option-shaped, a LoRA row can present an empty SetFit block
+      and "the block is missing" stops being distinguishable from "the block is empty" — the
+      null-padding D-12 rejects, and the shape SAFE-03 exists to make impossible.
+
+  - id: FALSIFY-CLAIMS-005
+    rule: OBLIG-CLAIMS-CELL-IDENTITY — collide rather than merge, but resume rather than refuse
+    prediction: >
+      `record(cell, h)` on an already-complete cell returns Ok when `h` is IDENTICAL (the
+      resume path) and the typed already-recorded error, naming the cell and both digests, when
+      `h` DIFFERS. Both directions are asserted; asserting only one leaves either resume or
+      collision-detection untested.
+    test: cargo test -p aprender-train --lib --features setfit bench_row
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_row
+    expected_output: 'test result: ok'
+    if_fails: >
+      A silent overwrite means a re-run of one cell replaces its predecessor with no trace, so
+      the run that produced a published number is no longer the run on disk. A refusal on an
+      identical re-record means a crash at cell 35 makes the run unresumable, which is the
+      pressure that gets manifests deleted and re-created — the one action that erases the
+      pre-declared expectation set that makes omission visible at all.
+
+  - id: FALSIFY-CLAIMS-006
+    rule: OBLIG-CLAIMS-DETERMINISTIC-ORDER — the key sequence is pinned, not incidental
+    prediction: >
+      An ordering test asserts the EXACT first five and last five cell keys of
+      `RunManifest::expectation()`: `setfit/s8/seed13 .. setfit/s8/seed31` and
+      `lora/s64/seed43 .. lora/s64/seed53`. Iterating a hash-ordered map instead of the
+      contract order changes those sequences and turns the test red.
+    test: cargo test -p aprender-train --lib --features setfit bench_row
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_row
+    expected_output: 'test result: ok'
+    if_fails: >
+      Non-deterministic listing order makes two manifests of the same run byte-different, which
+      breaks diff review and makes PF-007's "shuffle row order, require unchanged aggregates"
+      check uncheckable — there is no canonical order to shuffle away from.
+
+  - id: FALSIFY-CLAIMS-007
+    rule: OBLIG-CLAIMS-COMPLETENESS-FAIL-CLOSED — a missing, mis-slotted or unpaired cell refuses
+    prediction: >
+      In-band negatives, each refused with its own typed error: a manifest with one cell left
+      `pending`; a row whose bytes were edited so its digest no longer matches the manifest; a
+      row filed under one cell whose payload names another; and a (shots, seed) pair whose two
+      rows carry different `selection_manifest_hash` values. Each names the failing cell.
+    test: cargo test -p aprender-train --lib --features setfit bench_row
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_row
+    expected_output: 'test result: ok'
+    if_fails: >
+      Any one of these passing means the completeness gate can be satisfied by an incomplete or
+      incomparable run, and EVAL-04's central promise — that selective omission is structurally
+      visible — is not kept. Note which one fails: a missing cell is an omission, a hash failure
+      is tampering, and an unpaired hash is PF-007's incomparable comparison. They are different
+      defects with the same symptom.
+
+  - id: FALSIFY-CLAIMS-008
+    rule: OBLIG-CLAIMS-COMPLETENESS-FAIL-CLOSED — the two vacuity backstops fire first
+    prediction: >
+      An empty (zero-cell) manifest is a typed refusal, and a manifest whose expectation set is
+      not exactly the 80 contract-derived cells is a typed refusal — BOTH before any row byte is
+      read. The zero-cell case is asserted to be an ERROR, not an Ok over an empty aggregate.
+    test: cargo test -p aprender-train --lib --features setfit bench_row
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_row
+    expected_output: 'test result: ok'
+    if_fails: >
+      A gate whose input is empty and which therefore finds no failures reports success. This
+      repository has shipped that defect more than once: the repo-wide `contract-audit` prints
+      132 BIND-001 errors and exits 0, and a name-filtered `cargo test` matching nothing exits 0
+      (CR-02). If this backstop is removed, a benchmark run that produced nothing at all is
+      indistinguishable from one that produced everything.
+
+  - id: FALSIFY-CLAIMS-009
+    rule: OBLIG-CLAIMS-SELECTION-RECOMPUTED — selection safety is bytes, not a boolean
+    prediction: >
+      A SetFit row whose committed lock record is edited (so its bytes no longer hash to
+      `lock.lock_hash`) is refused; a LoRA row whose ledger carries TWO lines while
+      `candidates_trained` says 1 is refused; and a LoRA row whose ledger digest does not match
+      `candidate_ledger_sha256` is refused. Each recomputes from the file rather than reading
+      the row field.
+    test: cargo test -p aprender-train --lib --features setfit bench_row
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_row
+    expected_output: 'test result: ok'
+    if_fails: >
+      If any of these passes, the selection-safety claim has collapsed back to a string the
+      producer typed. That is a MEDIUM-severity repudiation risk, and it is the reason the
+      residual is stated in-contract: the honest position is "recomputable append-only
+      evidence", and a gate that stops recomputing silently downgrades it to "asserted" while
+      the contract still says otherwise.
+
+  - id: FALSIFY-CLAIMS-010
+    rule: OBLIG-CLAIMS-RESOURCE-BOUNDARIES — two peak-RSS fields, and a cold latency from a child
+    prediction: >
+      The `ResourceBlock` type carries `train_peak_rss_bytes` and `inference_peak_rss_bytes` as
+      SEPARATE non-Option fields with separate mechanism strings, `cold_measured_in_child_process`
+      is present, and `peak_rss_sample_interval_hz` is the only optional member of the block —
+      present exactly when a `sysinfo_sampled_*` mechanism is recorded. A row omitting either
+      peak field fails to deserialize.
+    test: cargo test -p aprender-train --lib --features setfit bench_row
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_row
+    expected_output: 'test result: ok'
+    if_fails: >
+      Collapsing the two peak fields into one makes the published "peak RSS" of any method that
+      trains in-process its TRAINING peak, because a kernel high-water mark is process-cumulative
+      — and it would be compared against another method with a different train/infer ratio. That
+      comparison is arithmetically correct and factually meaningless, which is the class of
+      defect PF-008 names.
+
+kani_harnesses:
+  - id: KANI-CLAIMS-001
+    obligation: OBLIG-CLAIMS-EXPECTATION-CLOSED-FORM
+    property: >
+      For methods x shots x seeds bounded by the three enumerated lists, `expectation()`
+      produces exactly `|methods| * |shots| * |seeds|` entries, every entry is unique, and the
+      sequence is sorted by (method index, shots ascending, seed ascending).
+
+      NOT EXECUTED IN THIS REPOSITORY. `cargo-kani` is not installed here and this repository
+      contains ZERO `#[kani::proof]` harnesses, so nothing below has been proved by a model
+      checker. Read this entry as a specification of what a future Kani run must establish,
+      never as evidence that it has been established.
+
+      The executable evidence standing in for it today is FALSIFY-CLAIMS-001 (typed set +
+      cardinality parity against the contract, with extra-seed and duplicate-seed negatives)
+      together with FALSIFY-CLAIMS-006 (the pinned key sequence). Those are concrete rather
+      than exhaustive over the bound, which is exactly the gap a real Kani run would close. If
+      either test is deleted or skipped, this harness has no backing at all.
+    bound: 80
+    strategy: bounded_int
+    solver: cadical
+    harness: verify_expectation_is_the_unique_ordered_product
+
+qa_gate:
+  id: F-CLAIMS-001
+  name: SetFit Benchmark Claims Gate
+  description: >
+    The claims gate: a closed-form 80-cell expectation set, digest-verified rows and manifest,
+    method-tagged evidence that cannot be null-padded, cell identity that collides rather than
+    merges, fail-closed completeness with two vacuity backstops, selection safety recomputed
+    from committed bytes, contracted resource boundaries with mandatory mechanism strings, and
+    closed-form estimation-first statistics with no RNG in the path.
+  checks:
+    - validation
+    - falsification
+  pass_criteria: >
+    `pv validate contracts/setfit-benchmark-claims-v1.yaml` exits 0 with 0 errors; the ten
+    falsification tests above all pass; and the `cargo test` filter that runs them matched a
+    NON-ZERO number of tests. The last clause is not pedantry: a name-filtered `cargo test`
+    that matches nothing prints `test result: ok. 0 passed` and exits 0 (CR-02), so a report
+    quoting only `test result: ok` proves nothing about this gate. Quote the count.
+
+    No Kani harness in this contract may be reported as machine-checked while `cargo-kani` is
+    absent from the repository. A harness entry whose named runnable tests are not green is a
+    FAILED gate, not a pending one.
+  falsification: >
+    Weaken the contract-parity test from the typed set comparison to
+    `contract_text.contains(&seed.to_string())` and add an eleventh seed to
+    `equations.expectation_set.seeds` — the parity test must turn RED under the typed form and
+    GREEN under the substring form, which is what demonstrates the substring form cannot
+    discharge OBLIG-CLAIMS-EXPECTATION-CLOSED-FORM. Revert both.
+
+    Separately, rename one required key in this file (for example `expected_cells`) — `make
+    contract-audit-phase5` and the parity test must both turn RED, proving the Makefile wiring
+    and the include_str! pin are non-vacuous. Both mutations must be INDUCED, OBSERVED and
+    REVERTED, with the two exit statuses recorded, before this gate is trusted: a gate that has
+    only ever been seen passing is not evidence.

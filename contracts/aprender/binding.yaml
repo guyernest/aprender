@@ -1495,6 +1495,83 @@ bindings:
   function: load_setfit_apr
   status: implemented
   notes: 'Lands with plan 04-03. Eight ordered rungs; VerifiedSetFitModel has a private constructor reachable only from here, proven non-constructible from outside by a trybuild compile-fail test (APR-04).'
+# --- setfit-benchmark-claims-v1: the Phase 5 claims schema (plan 05-05 task 1) -------------
+#
+# WHY ALL TEN START `pending`, AND WHY THAT IS THE POINT RATHER THAN AN OMISSION. Same
+# ordering as Phase 4 above (Ph1 D-14): the claims contract is committed BEFORE the row type,
+# the bench adapters and the report renderer exist, so no shipped code can quietly answer its
+# questions differently. Two of the ten flip to `implemented` in plan 05-05 task 2, when
+# `bench_row.rs` lands; the remaining eight name the plan that owns them.
+#
+# MEASURED, NOT ASSUMED, and the status was captured directly rather than through a pipe
+# (CLAUDE.md rule 1): before this block existed,
+#   target/release/pv audit contracts/setfit-benchmark-claims-v1.yaml \
+#     --binding contracts/aprender/binding.yaml > /tmp/pv-audit-claims.log 2>&1; rc=$?
+# returned rc=1 with ten "[ERROR] BIND-001 ... has no binding entry" lines, one per equation.
+# `status: pending` is BIND-004, a WARNING (audit/mod.rs:182-194), so `make
+# contract-audit-phase5` passes while the modules are still being written and fails the moment
+# an equation is dropped or renamed out from under its entry. That before/after pair IS the
+# gate's induced failure mode; a gate seen only passing is not evidence.
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: expectation_set
+  module_path: entrenar::train::setfit::bench_row
+  function: RunManifest::expectation
+  status: pending
+  notes: 'Lands with plan 05-05 task 2. The 80-cell Cartesian product derived in code from the same methods/shots/seeds constants the contract enumerates, emitted in the deterministic contract order; pinned to the contract by an include_str! TYPED SET parity test, never a substring check.'
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: bench_row_schema
+  module_path: entrenar::train::setfit::bench_row
+  function: BenchRow::from_bytes
+  status: pending
+  notes: 'Lands with plan 05-05 task 2. The digest-verify-before-return door: deny_unknown_fields at every level, schema_version checked on parse, SHA-256 over the payload''s canonical compact bytes compared BEFORE any value is returned.'
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: completeness_rule
+  module_path: apr_cli::commands::setfit_bench
+  function: bench_report
+  status: pending
+  notes: 'Lands with plan 05-10. The manifest-defined 80-cell gate and its two vacuity backstops (zero cells; an expectation set that is not exactly the contract-derived 80). The manifest half — record()''s idempotent-vs-colliding transition — lands earlier with bench_row.rs.'
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: pairing_rule
+  module_path: apr_cli::commands::setfit_bench
+  function: bench_report
+  status: pending
+  notes: 'Lands with plan 05-10. Per (shots, seed) the two rows must carry an identical selection_manifest_hash; an unpaired pair is a typed refusal, not a delta computed anyway.'
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: selection_safety_evidence
+  module_path: apr_cli::commands::setfit_bench
+  function: bench_report
+  status: pending
+  notes: 'Lands with plan 05-10. The lock digest and the candidate-ledger digest plus line count are RECOMPUTED from committed bytes; the row fields are claims about files, and the files are the evidence. The residual (a producer controlling both can forge consistently) is stated in-contract.'
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: no_selection_attestation
+  module_path: apr_cli::commands::setfit_bench
+  function: bench_report
+  status: pending
+  notes: 'Lands with plan 05-10. All six conjuncts, of which the last two (ledger digest, line count == 1) are what make the first four more than a self-report.'
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: model_size_comparability
+  module_path: apr_cli::commands::setfit_bench
+  function: bench_report
+  status: pending
+  notes: 'Lands with plan 05-10. Any cross-method size claim must use deployable_total_bytes; presenting LoRA''s adapter-only artifact_bytes beside SetFit''s standalone APR is the forbidden comparison the renderer refuses to draw.'
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: claims_statistics
+  module_path: apr_cli::commands::setfit_bench
+  function: bench_report
+  status: pending
+  notes: 'Lands with plan 05-10, calling the closed-form f64 surface plan 05-04 shipped (mean_f64, sample_std_f64, min_max_f64, paired_ci95_df9). The frozen t literal here and aprender_core::stats::hypothesis::T_CRIT_975_DF9 are two pinned copies compared by a test.'
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: resource_protocol
+  module_path: apr_cli::commands::setfit_bench
+  function: bench_run
+  status: pending
+  notes: 'Lands with plan 05-09, which measures the cells: cold latency in a dedicated fresh child, warm as median-of-10-after-3, two separate peak-RSS fields with two separate mechanism strings. The ResourceBlock the numbers land in is defined by bench_row.rs in 05-05 task 2.'
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: pitfall_bindings
+  module_path: apr_cli::commands::setfit_bench
+  function: bench_report
+  status: pending
+  notes: 'Lands with plan 05-10. DECLARATIVE equation: it maps PF-007 and PF-008 onto the mechanisms that answer them, and the RENDERER is where a violation would surface (a best-seed headline, an unlabelled F1, an adapter-only size comparison, a significance verdict). Bound here rather than left unbound because an equation with no binding entry is audited by nothing while looking audited.'
 critical_path:
 - softmax
 - rmsnorm
