@@ -6,14 +6,14 @@ current_phase: 05
 current_phase_name: benchmark-and-claims-gate
 status: executing
 stopped_at: Phase 5 replanned from cross-AI review (13 plans, 8 waves), ready to execute
-last_updated: "2026-08-17T03:58:12.593Z"
+last_updated: "2026-08-17T16:23:10.486Z"
 last_activity: 2026-08-17
 last_activity_desc: Phase 5 planning complete
 progress:
   total_phases: 5
   completed_phases: 4
-  total_plans: 63
-  completed_plans: 50
+  total_plans: 64
+  completed_plans: 54
 ---
 
 # Project State
@@ -43,7 +43,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-08-16 — Phase 05 execution started
+Last activity: 2026-08-17 — Phase 05 execution resumed (wave continue)
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
