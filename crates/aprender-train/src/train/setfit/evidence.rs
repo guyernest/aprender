@@ -723,6 +723,19 @@ mod tests {
     use crate::train::setfit::tune::{run_tuning, validate_evidence};
     use crate::train::setfit::{EncoderTuned, SetFitRun, SetFitTrainError};
 
+    // Imports the PRODUCTION calibration harness (plan 05-01) needs and the fixture matrix
+    // does not: the production checkout's public constructor, and the Phase 2 ingest ladder
+    // used to build a 64-shot-capable corpus (the committed fixture pool tops out at 16).
+    use aprender::setfit::SetFitMiniLm;
+    use aprender_contrastive_data::ledger::AccessLedger;
+    use aprender_contrastive_data::pairs::PairConfig;
+    use aprender_contrastive_data::prepared::{Canonical, CanonicalDeclarations, PreparedDataset};
+    use aprender_contrastive_data::schema::LabeledExample;
+    use aprender_contrastive_data::select::{FewShotSelector, SelectionConfig};
+    use aprender_contrastive_data::split::SplitDeclaration;
+
+    use crate::train::setfit::config::{SetFitTrainConfig, SetFitTrainRequest};
+
     /// Every name the fixture encoder emits, with its expected class. A CASE TABLE, not a
     /// spot check: a mapping tested on three names is a mapping that has not been tested.
     const CASE_TABLE: [(&str, ParameterClass); 18] = [
@@ -1873,5 +1886,634 @@ mod tests {
             panic!("the calibration report must be writable at {destination:?}: {e}")
         });
         println!("calibration report written to {}", destination.display());
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The PRODUCTION calibration matrix (plan 05-01, the F-10 unblock) — measurement only
+    // -----------------------------------------------------------------------------------
+    //
+    // This half of the file measures the SAME quantities as `calibration_matrix_epsilon_basis`
+    // directly above, on the production `sentence-transformers/all-MiniLM-L6-v2` checkout
+    // instead of the committed 437 KB slice. It edits no contract, no threshold and no gate:
+    // the `UncalibratedRegime` refusal lives in `validate_evidence` (judgement time), never in
+    // `run_tuning` / `UpdateEvidence::from_tune_output`, so a production regime can be MEASURED
+    // on today's code with zero relaxation. Freezing anything from these numbers is plan 05-03's
+    // deliberate three-place edit, behind the D-04 human checkpoint.
+
+    /// Contrastive **body** epochs, FROZEN from the pinned `setfit 1.1.3` reference environment.
+    ///
+    /// Read from the hash-locked env rather than from documentation or memory:
+    ///
+    /// ```text
+    /// $ cd scripts/setfit_fixtures && uv run python -c \
+    ///     "from setfit import TrainingArguments; a = TrainingArguments(); \
+    ///      print(a.num_epochs, a.batch_size, a.body_learning_rate)"
+    /// (1, 16) (16, 2) (2e-05, 1e-05)
+    /// ```
+    ///
+    /// Every one of those three is a `(body, head)` PAIR. `SetFitTrainConfig` configures the
+    /// contrastive BODY stage — the only stage this evidence table measures — so the body
+    /// member is the one that maps onto its knobs: epochs 1, batch 16, encoder lr 2e-5.
+    ///
+    /// These two values are baked into every cell label `s{shots}e1b16` and therefore into the
+    /// D-02 contract entry, which is why they are frozen BEFORE any calibration pass rather
+    /// than read off whichever run happened to be convenient afterwards.
+    const PRODUCTION_EPOCHS: u32 = 1;
+
+    /// Contrastive **body** batch size, frozen from the same command. See [`PRODUCTION_EPOCHS`].
+    const PRODUCTION_BATCH: u32 = 16;
+
+    /// Training rows per class in the production synthetic corpus.
+    ///
+    /// The committed fixture pool is 16 per class (`fx::TRAIN_PER_CLASS`) — exactly the
+    /// largest shot count the FIXTURE matrix asks for. The production envelope's boundary is
+    /// `s64`, so the corpus is regenerated here at 64 rather than reused: a selector asked for
+    /// 64 rows from a 16-row pool does not measure an `s64` cell, it fails.
+    const PRODUCTION_TRAIN_PER_CLASS: usize = 64;
+
+    /// The boundary shot counts of the D-02 envelope `{8, 16, 32, 64}`.
+    const PRODUCTION_SHOTS: [u32; 2] = [8, 64];
+
+    /// The min / median / max of the ten contracted seeds
+    /// `{13, 17, 23, 29, 31, 37, 41, 43, 47, 53}`.
+    const PRODUCTION_SEEDS: [u64; 3] = [13, 31, 53];
+
+    /// The production checkout, resolved exactly as `full_weight_parity.rs:54` resolves it.
+    ///
+    /// (Plan 05-01 cites that file under `aprender-train/tests/`; it actually lives at
+    /// `crates/aprender-core/tests/setfit_conformance/full_weight_parity.rs` — same pattern,
+    /// same default, same env var.)
+    fn production_checkout_dir() -> std::path::PathBuf {
+        std::env::var("APRENDER_MINILM_DIR").map_or_else(
+            |_| {
+                let home = std::env::var("HOME").expect("HOME");
+                std::path::PathBuf::from(home).join(".cache/aprender/minilm-l6-v2-1110a243")
+            },
+            std::path::PathBuf::from,
+        )
+    }
+
+    /// Per-class sentence material for the production corpus.
+    ///
+    /// Unconstrained by the slice's 97-row vocabulary — the production encoder carries the
+    /// full 30522-token WordPiece table, so this text needs no `vocab_remap` gymnastics. It is
+    /// still entirely SYNTHETIC: no row of the phase's source corpus appears here (T-3-18).
+    const PRODUCTION_CLASS_WORDS: [(&str, &str); 3] =
+        [("market", "rallied"), ("climate", "shifted"), ("athlete", "trained")];
+
+    /// Eight modifiers times eight objects gives the sixty-four distinct rows each class needs.
+    const PRODUCTION_MODIFIERS: [&str; 8] =
+        ["quick", "brown", "lazy", "warm", "bright", "quiet", "steady", "distant"];
+
+    /// The object half of the grid.
+    const PRODUCTION_OBJECTS: [&str; 8] =
+        ["mat", "rug", "line", "pad", "ledger", "harbor", "summit", "corridor"];
+
+    /// Held-out material for validation and test, disjoint from every train row — a cross-split
+    /// duplicate would be coalesced by the ingest ladder and silently shrink a class pool.
+    const PRODUCTION_HELDOUT: [&str; 2] = ["hesitant", "reluctant"];
+
+    /// The synthetic text for one production row.
+    fn production_row_text(role_index: usize, label: usize, index: usize) -> String {
+        let (subject, verb) = PRODUCTION_CLASS_WORDS[label];
+        if role_index == 0 {
+            let modifier = PRODUCTION_MODIFIERS[index % PRODUCTION_MODIFIERS.len()];
+            let object =
+                PRODUCTION_OBJECTS[(index / PRODUCTION_MODIFIERS.len()) % PRODUCTION_OBJECTS.len()];
+            format!("the {modifier} {subject} {verb} over the {object} .")
+        } else {
+            let modifier = PRODUCTION_HELDOUT[(role_index - 1) % PRODUCTION_HELDOUT.len()];
+            format!("the {modifier} {subject} {verb} again today .")
+        }
+    }
+
+    /// The production synthetic corpus, built through the real `from_labeled_rows` ingest
+    /// ladder — the same door `fx::synthetic_dataset` uses, at production pool size.
+    fn production_dataset(ledger: &mut AccessLedger) -> PreparedDataset<Canonical> {
+        let label_names: Vec<String> =
+            (0..PRODUCTION_CLASS_WORDS.len()).map(|i| format!("class{i}")).collect();
+        let rows = |role: &str, role_index: usize, per_class: usize| -> Vec<LabeledExample> {
+            (0..PRODUCTION_CLASS_WORDS.len())
+                .flat_map(|label| {
+                    (0..per_class).map(move |index| LabeledExample {
+                        id: format!("{role}:{label}-{index}"),
+                        input: production_row_text(role_index, label, index),
+                        label,
+                        label_text: format!("class{label}"),
+                        source_split: role.to_string(),
+                    })
+                })
+                .collect()
+        };
+        let decl = |per_class: usize| SplitDeclaration {
+            expected_class_counts: vec![per_class; PRODUCTION_CLASS_WORDS.len()],
+            label_names: label_names.clone(),
+        };
+        PreparedDataset::<Canonical>::from_labeled_rows(
+            rows("train", 0, PRODUCTION_TRAIN_PER_CLASS),
+            rows("validation", 1, 1),
+            rows("test", 2, 1),
+            &CanonicalDeclarations {
+                train: decl(PRODUCTION_TRAIN_PER_CLASS),
+                validation: decl(1),
+                test: decl(1),
+                label_names,
+            },
+            ledger,
+        )
+        .expect("the production synthetic corpus must be a valid canonical dataset")
+    }
+
+    /// One cell of the production matrix.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ProductionCell {
+        shots: u32,
+        seed: u64,
+    }
+
+    impl ProductionCell {
+        /// The cell label this cell is expected to render, `s{shots}e{E}b{B}`.
+        ///
+        /// PREDICTED here for the report's ordering, and ASSERTED against what the run
+        /// actually rendered. The id that reaches the contract is always the rendered one.
+        fn label(self) -> String {
+            format!("s{}e{PRODUCTION_EPOCHS}b{PRODUCTION_BATCH}", self.shots)
+        }
+    }
+
+    /// The production configuration for one cell, at the frozen E/B.
+    ///
+    /// `encoder_lr_override` is how the two controls are expressed: a control differs from its
+    /// cell in the learning rate and in NOTHING else, so a difference in the measured relative
+    /// deltas is attributable to the learning rate alone. Identical in shape to
+    /// `fx::config_for`, with two deliberate differences: the epochs/batch are the FROZEN
+    /// production values rather than a shrunk fixture cell, and the pair budget is left to the
+    /// contracted closed form (`PairConfig::budget = None`) because that is what a production
+    /// benchmark cell will run.
+    fn production_config(seed: u64, encoder_lr_override: Option<f64>) -> SetFitTrainConfig {
+        let reference = SetFitTrainConfig::reference_defaults(seed);
+        // Non-vacuity: the in-repo reference recipe must agree with the pinned setfit 1.1.3
+        // environment this plan froze E/B from. If the two ever diverge, the cell labels this
+        // harness measures stop describing the cells production runs in.
+        assert_eq!(
+            reference.epochs(),
+            PRODUCTION_EPOCHS,
+            "REFERENCE_EPOCHS disagrees with the pinned setfit 1.1.3 body epochs",
+        );
+        assert_eq!(
+            reference.batch_size(),
+            PRODUCTION_BATCH,
+            "REFERENCE_BATCH_SIZE disagrees with the pinned setfit 1.1.3 body batch size",
+        );
+        SetFitTrainConfig::new(SetFitTrainRequest {
+            encoder_lr: encoder_lr_override.unwrap_or_else(|| reference.encoder_lr()),
+            epochs: PRODUCTION_EPOCHS,
+            batch_size: PRODUCTION_BATCH,
+            warmup_ratio: reference.warmup_ratio(),
+            grad_clip_max_norm: reference.grad_clip_max_norm(),
+            max_length: reference.max_length(),
+            pair_config: PairConfig::new(seed),
+            freeze_policy: Vec::new(),
+            head_regularization: reference.head_regularization(),
+            root_seed: seed,
+            device: "cpu".to_string(),
+            lr_schedule: reference.lr_schedule(),
+        })
+        .expect("the production configuration satisfies the twelve-knob table")
+    }
+
+    /// What one production pass measured.
+    struct ProductionPass {
+        evidence: UpdateEvidence,
+        /// The regime id the RUN rendered — the string plan 05-03 copies byte-for-byte.
+        regime: String,
+        /// Wall-clock seconds. Lives on this stdout-report struct and NOWHERE in serialized
+        /// evidence: a timing field inside `UpdateEvidence` would make two identical runs
+        /// serialize differently and take TRN-06's bitwise claim with it.
+        elapsed_secs: f64,
+        steps: u64,
+    }
+
+    /// Run one production cell under one condition, through the SHIPPED doors only.
+    fn production_pass(
+        dir: &std::path::Path,
+        cell: ProductionCell,
+        encoder_lr_override: Option<f64>,
+    ) -> ProductionPass {
+        let mut ledger = AccessLedger::new();
+        let dataset = production_dataset(&mut ledger);
+        let selection = FewShotSelector::select(
+            &dataset,
+            &SelectionConfig { root_seed: cell.seed, shots_per_class: cell.shots },
+            &mut ledger,
+        )
+        .expect("the production corpus must support this selection");
+        let encoder = SetFitMiniLm::from_pretrained_dir(dir, cell.seed)
+            .expect("the pinned production checkout must load through the bound constructor");
+
+        let run = SetFitRun::prepare(
+            encoder,
+            dataset,
+            selection,
+            production_config(cell.seed, encoder_lr_override),
+        )
+        .expect("the production run must prepare");
+        let (encoder, dataset, selection, config) = run.into_parts();
+
+        // RENDERED by the production code path from the run's own coordinates, never composed
+        // here. T-05-01-01: this is the string the contract entry is copied from.
+        let regime = crate::train::setfit::calibration_regime_id(&encoder, &selection, &config);
+
+        let started = std::time::Instant::now();
+        let out =
+            run_tuning(encoder, &dataset, &selection, &config).expect("the production run tunes");
+        let elapsed_secs = started.elapsed().as_secs_f64();
+
+        let evidence =
+            UpdateEvidence::from_tune_output(&out, &regime).expect("production evidence");
+        let steps = evidence.step_count;
+        ProductionPass { evidence, regime, elapsed_secs, steps }
+    }
+
+    /// Which cells and conditions this invocation runs.
+    enum ProductionMode {
+        /// `APRENDER_CALIBRATION_PROBE=1` — ONE cell (s8, seed 13), REAL condition only, so the
+        /// boundary matrix's wall-clock can be PROJECTED before it is committed to (the
+        /// CLAUDE.md >1hr compute check-in rule).
+        Probe,
+        /// `APRENDER_CALIBRATION_PROSPECTIVE="s16:41,s32:29"` — named contracted-but-unmeasured
+        /// cells, REAL condition only, run AFTER epsilon is frozen. Validation, not derivation.
+        Prospective(Vec<ProductionCell>),
+        /// The full boundary matrix: `{s8, s64} x {13, 31, 53} x {real, control, near-null}`.
+        BoundaryMatrix,
+    }
+
+    /// Read the mode off the environment. Probe wins over prospective if both are set.
+    fn production_mode() -> ProductionMode {
+        if std::env::var("APRENDER_CALIBRATION_PROBE").is_ok_and(|v| v == "1") {
+            return ProductionMode::Probe;
+        }
+        if let Ok(spec) = std::env::var("APRENDER_CALIBRATION_PROSPECTIVE") {
+            let cells: Vec<ProductionCell> = spec
+                .split(',')
+                .filter(|s| !s.trim().is_empty())
+                .map(|entry| {
+                    let (shots, seed) = entry.trim().split_once(':').unwrap_or_else(|| {
+                        panic!("APRENDER_CALIBRATION_PROSPECTIVE entry `{entry}` is not `s<shots>:<seed>`")
+                    });
+                    let shots = shots.trim().strip_prefix('s').unwrap_or_else(|| {
+                        panic!("APRENDER_CALIBRATION_PROSPECTIVE shots `{shots}` must start with `s`")
+                    });
+                    ProductionCell {
+                        shots: shots.parse().expect("shot count"),
+                        seed: seed.trim().parse().expect("seed"),
+                    }
+                })
+                .collect();
+            assert!(!cells.is_empty(), "APRENDER_CALIBRATION_PROSPECTIVE named no cells");
+            return ProductionMode::Prospective(cells);
+        }
+        ProductionMode::BoundaryMatrix
+    }
+
+    /// THE production calibration matrix — `#[ignore]`d, env-gated, and measurement-only.
+    ///
+    /// Eighteen complete `run_tuning` passes over the full 22M-parameter production encoder do
+    /// not belong on any default filter, and the 86.7 MB checkout they need is fetched rather
+    /// than vendored (D-10 / SAFE-02). Absent the checkout the test PRINTS A SKIP naming
+    /// `APRENDER_MINILM_DIR` and returns, exactly as `full_weight_parity.rs` does.
+    ///
+    /// Materialize the checkout:
+    /// `cd scripts/setfit_fixtures && uv run python fetch_full_weights.py`
+    ///
+    /// Timed single-cell probe (run this FIRST — it is what the compute projection is built on):
+    /// ```text
+    /// CARGO_INCREMENTAL=0 APRENDER_CALIBRATION_PROBE=1 \
+    ///   cargo test -p aprender-train --lib --features setfit production_calibration \
+    ///   -- --ignored --nocapture
+    /// ```
+    ///
+    /// The full boundary matrix (probe env var unset):
+    /// ```text
+    /// CARGO_INCREMENTAL=0 cargo test -p aprender-train --lib --features setfit \
+    ///   production_calibration -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "18 full tuning passes on the 86.7 MB production checkout; run explicitly with --ignored (plan 05-01)"]
+    #[allow(clippy::too_many_lines)]
+    fn production_calibration_matrix() {
+        let dir = production_checkout_dir();
+        if !dir.join("full_manifest.json").is_file() {
+            println!(
+                "SKIP production_calibration_matrix: no pinned checkout at {} — set \
+                 APRENDER_MINILM_DIR or run `cd scripts/setfit_fixtures && uv run python \
+                 fetch_full_weights.py`",
+                dir.display(),
+            );
+            return;
+        }
+
+        let mode = production_mode();
+        let (cells, full_conditions, mode_name) = match mode {
+            ProductionMode::Probe => (
+                vec![ProductionCell { shots: PRODUCTION_SHOTS[0], seed: PRODUCTION_SEEDS[0] }],
+                false,
+                "PROBE (one cell, REAL only)",
+            ),
+            ProductionMode::Prospective(ref cells) => {
+                (cells.clone(), false, "PROSPECTIVE VALIDATION (named cells, REAL only)")
+            }
+            ProductionMode::BoundaryMatrix => {
+                let mut out = Vec::with_capacity(PRODUCTION_SHOTS.len() * PRODUCTION_SEEDS.len());
+                for &shots in &PRODUCTION_SHOTS {
+                    for &seed in &PRODUCTION_SEEDS {
+                        out.push(ProductionCell { shots, seed });
+                    }
+                }
+                (out, true, "BOUNDARY MATRIX (2 cells x 3 seeds x 3 conditions)")
+            }
+        };
+
+        let mut report = String::new();
+        report.push_str(&format!("\nPRODUCTION CALIBRATION MODE: {mode_name}\n"));
+        report.push_str(&format!("CHECKOUT: {}\n", dir.display()));
+        report.push_str(&format!(
+            "FROZEN PRODUCTION HYPERPARAMETERS: epochs={PRODUCTION_EPOCHS} \
+             batch={PRODUCTION_BATCH} (pinned setfit 1.1.3 body defaults)\n",
+        ));
+        report.push_str(
+            "\ncell             class                real_min      real_median   real_max      \
+             ctrl_max      nnull_max     nnull_moved   noise_floor   support_frac  \
+             all_moved\n",
+        );
+
+        let mut real_min_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        let mut ctrl_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        let mut median_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        let mut noise_floor_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        let mut near_null_max_across: BTreeMap<&'static str, f64> = BTreeMap::new();
+        let mut near_null_moved_all: BTreeMap<&'static str, bool> = BTreeMap::new();
+        let mut binding_param: BTreeMap<&'static str, String> = BTreeMap::new();
+        let mut embedding_delta_min_across = f64::INFINITY;
+        let mut regimes: Vec<String> = Vec::new();
+        let mut timing_rows: Vec<String> = Vec::new();
+        let mut total_secs = 0.0_f64;
+        let mut passes_run = 0_usize;
+
+        for cell in &cells {
+            let mut record = |name: &str, pass: &ProductionPass| {
+                timing_rows.push(format!(
+                    "  seed {:>3} cell {:<10} condition {:<10} steps={:<6} wall_clock={:.1}s\n",
+                    cell.seed,
+                    cell.label(),
+                    name,
+                    pass.steps,
+                    pass.elapsed_secs,
+                ));
+            };
+
+            let real = production_pass(&dir, *cell, None);
+            passes_run += 1;
+            total_secs += real.elapsed_secs;
+            record("real", &real);
+
+            let control = if full_conditions {
+                let p = production_pass(&dir, *cell, Some(CONTROL_LR));
+                passes_run += 1;
+                total_secs += p.elapsed_secs;
+                record("control", &p);
+                Some(p)
+            } else {
+                None
+            };
+            let near_null = if full_conditions {
+                let p = production_pass(&dir, *cell, Some(NEAR_NULL_LR));
+                passes_run += 1;
+                total_secs += p.elapsed_secs;
+                record("near-null", &p);
+                Some(p)
+            } else {
+                None
+            };
+
+            // Every pass's OWN rendered id, recorded so the report PROVES all cells share one
+            // architecture component rather than asserting it in prose.
+            regimes.push(real.regime.clone());
+            if let Some(p) = control.as_ref() {
+                regimes.push(p.regime.clone());
+            }
+            if let Some(p) = near_null.as_ref() {
+                regimes.push(p.regime.clone());
+            }
+
+            // The cell label the run RENDERED must be the one this cell claims to be — a
+            // selection that drew a different number of rows would silently relabel the cell.
+            assert!(
+                real.regime.contains(&format!("cells={}", cell.label())),
+                "seed {} cell {}: rendered regime `{}` does not name the expected cell label",
+                cell.seed,
+                cell.label(),
+                real.regime,
+            );
+
+            embedding_delta_min_across =
+                embedding_delta_min_across.min(real.evidence.embedding_delta_min);
+
+            for class in ParameterClass::ALL {
+                let real_rows = real.evidence.rows_of_class(class);
+                assert!(!real_rows.is_empty(), "{class} has no rows on the production encoder");
+
+                let real_values: Vec<f64> = real_rows.iter().map(|r| r.relative_delta).collect();
+                let support: Vec<f64> =
+                    real_rows.iter().map(|r| r.delta_support_fraction).collect();
+                let real_min = min_of(&real_values);
+                let cell_noise_floor = max_of(
+                    &real_rows.iter().map(|r| rounding_noise_floor(r)).collect::<Vec<f64>>(),
+                );
+
+                let control_max = control.as_ref().map(|p| {
+                    let rows = p.evidence.rows_of_class(class);
+                    assert_eq!(rows.len(), real_rows.len(), "{class}: control row count");
+                    max_of(&rows.iter().map(|r| r.relative_delta).collect::<Vec<f64>>())
+                });
+                let (near_null_max, near_null_moved) =
+                    near_null.as_ref().map_or((None, None), |p| {
+                        let rows = p.evidence.rows_of_class(class);
+                        assert_eq!(rows.len(), real_rows.len(), "{class}: near-null row count");
+                        (
+                            Some(max_of(
+                                &rows.iter().map(|r| r.relative_delta).collect::<Vec<f64>>(),
+                            )),
+                            Some(rows.iter().all(|r| r.moved)),
+                        )
+                    });
+
+                report.push_str(&format!(
+                    "seed{:<3} {:<10} {:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13} {:<13} \
+                     {:<13} {:<13.3e} {:<13.4} {}\n",
+                    cell.seed,
+                    cell.label(),
+                    class.tag(),
+                    real_min,
+                    median_of(&real_values),
+                    max_of(&real_values),
+                    control_max.map_or_else(|| "-".to_string(), |v| format!("{v:.3e}")),
+                    near_null_max.map_or_else(|| "-".to_string(), |v| format!("{v:.3e}")),
+                    near_null_moved.map_or_else(|| "-".to_string(), |v| v.to_string()),
+                    cell_noise_floor,
+                    median_of(&support),
+                    real_rows.iter().all(|r| r.moved),
+                ));
+
+                // (c) SEPARATION, per class and per cell — the assertion whose failure means
+                // the epsilon window does not exist and the D-04 checkpoint needs raw data
+                // rather than a forced number. Asserted only where a control was run.
+                if let Some(control_max) = control_max {
+                    assert!(
+                        control_max < real_min,
+                        "seed {} cell {} class {}: the 1e-30 control's max relative delta \
+                         ({control_max:e}) is not below the real run's min ({real_min:e})",
+                        cell.seed,
+                        cell.label(),
+                        class.tag(),
+                    );
+                }
+
+                let slot = real_min_across.entry(class.tag()).or_insert(f64::INFINITY);
+                if real_min < *slot {
+                    *slot = real_min;
+                    let binding = real_rows
+                        .iter()
+                        .min_by(|a, b| {
+                            a.relative_delta
+                                .partial_cmp(&b.relative_delta)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map_or_else(String::new, |r| {
+                            format!(
+                                "{} (seed {} cell {}) delta_norm={:.3e} init_norm={:.3e} \
+                                 grad_norm_max={:.3e} grad_norm_mean={:.3e} steps_observed={} \
+                                 noise_floor={:.3e} support_frac={:.4}",
+                                r.name,
+                                cell.seed,
+                                cell.label(),
+                                r.delta_norm,
+                                r.init_norm,
+                                r.grad_norm_max,
+                                r.grad_norm_mean,
+                                r.steps_observed,
+                                rounding_noise_floor(r),
+                                r.delta_support_fraction,
+                            )
+                        });
+                    binding_param.insert(class.tag(), binding);
+                }
+                let slot = noise_floor_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
+                *slot = slot.max(cell_noise_floor);
+                if let Some(v) = near_null_max {
+                    let slot = near_null_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
+                    *slot = slot.max(v);
+                }
+                if let Some(v) = near_null_moved {
+                    let slot = near_null_moved_all.entry(class.tag()).or_insert(true);
+                    *slot = *slot && v;
+                }
+                if let Some(v) = control_max {
+                    let slot = ctrl_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
+                    *slot = slot.max(v);
+                }
+                let slot = median_max_across.entry(class.tag()).or_insert(f64::NEG_INFINITY);
+                *slot = slot.max(median_of(&real_values));
+            }
+        }
+
+        // The architecture@revision component every cell rendered, under the SAME header the
+        // fixture matrix prints — this is the line plan 05-03 copies its entry prefix from.
+        let architecture = regimes
+            .first()
+            .and_then(|r| r.split('|').next())
+            .map_or_else(String::new, str::to_string);
+        report.push_str(&format!("\nCALIBRATION REGIME: {architecture}\n"));
+        report.push_str("\nEVERY RENDERED REGIME ID (verbatim, one per pass)\n");
+        for id in &regimes {
+            report.push_str(&format!("  {id}\n"));
+            assert!(
+                id.starts_with(&architecture),
+                "cells disagree on the architecture component: `{id}` vs `{architecture}`",
+            );
+        }
+
+        report.push_str("\nWALL CLOCK (stdout report only — never an evidence field)\n");
+        for row in &timing_rows {
+            report.push_str(row);
+        }
+        report.push_str(&format!("  TOTAL: {total_secs:.1}s over {passes_run} passes\n"));
+
+        report.push_str(&format!(
+            "\nEMBEDDING DELTA MIN across measured cells: {embedding_delta_min_across:.3e}\n",
+        ));
+
+        if full_conditions {
+            report.push_str("\nCROSS-CELL EPSILON BASIS (plan 05-03 freezes from these)\n");
+            report.push_str(
+                "class                worst_ctrl    worst_nnull   best_real     10x_lower     \
+                 10x_upper     noise_floor   eps/noise     nnull_moved   supports_margin  \
+                 median/min\n",
+            );
+            for class in ParameterClass::ALL {
+                let worst_ctrl = ctrl_max_across.get(class.tag()).copied().unwrap_or(0.0);
+                let best_real = real_min_across.get(class.tag()).copied().unwrap_or(0.0);
+                let worst_median = median_max_across.get(class.tag()).copied().unwrap_or(0.0);
+                let worst_nnull = near_null_max_across.get(class.tag()).copied().unwrap_or(0.0);
+                let lower = worst_ctrl.max(worst_nnull) * 10.0;
+                let upper = best_real / 10.0;
+                let spread = if best_real > 0.0 { worst_median / best_real } else { f64::INFINITY };
+                let noise_floor = noise_floor_across.get(class.tag()).copied().unwrap_or(0.0);
+                let eps_over_noise =
+                    if noise_floor > 0.0 { upper / noise_floor } else { f64::INFINITY };
+                report.push_str(&format!(
+                    "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} \
+                     {:<13.2e} {:<13} {:<16} {:.1e}\n",
+                    class.tag(),
+                    worst_ctrl,
+                    worst_nnull,
+                    best_real,
+                    lower,
+                    upper,
+                    noise_floor,
+                    eps_over_noise,
+                    near_null_moved_all.get(class.tag()).copied().unwrap_or(false),
+                    lower < upper,
+                    spread,
+                ));
+            }
+        } else {
+            report.push_str(
+                "\n(no control conditions in this mode — no epsilon basis is derivable from \
+                 this run, by construction)\n",
+            );
+        }
+
+        report.push_str("\nWHAT BINDS EACH CLASS'S LOWEST REAL DELTA\n");
+        for class in ParameterClass::ALL {
+            report.push_str(&format!(
+                "  {:<20} {}\n",
+                class.tag(),
+                binding_param.get(class.tag()).map_or("-", String::as_str),
+            ));
+        }
+
+        assert!(passes_run > 0, "the matrix must run at least one pass");
+        report.push_str(&format!("\nPASSES RUN: {passes_run}\n"));
+
+        println!("{report}");
+        let destination = std::env::var("SETFIT_PRODUCTION_CALIBRATION_REPORT").map_or_else(
+            |_| std::env::temp_dir().join("setfit-production-calibration.txt"),
+            std::path::PathBuf::from,
+        );
+        std::fs::write(&destination, &report).unwrap_or_else(|e| {
+            panic!("the production calibration report must be writable at {destination:?}: {e}")
+        });
+        println!("production calibration report written to {}", destination.display());
     }
 }
