@@ -1989,13 +1989,13 @@ pub(crate) fn run_classify_core(
                     "selection_semantic_hash": resolved.semantic_hash,
                     "selected_rows": resolved.samples.len(),
                     "epochs_requested": epochs,
-                    "epochs_completed": result.epoch_metrics.len(),
+                    "epochs_completed": result.epochs_completed,
                     "stopped_early": result.stopped_early,
                 })
             );
         } else {
             output::kv("Selection manifest", &resolved.semantic_hash);
-            output::kv("Epochs completed", result.epoch_metrics.len().to_string());
+            output::kv("Epochs completed", result.epochs_completed.to_string());
         }
     }
 

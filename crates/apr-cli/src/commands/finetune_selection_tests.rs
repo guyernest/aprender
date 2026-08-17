@@ -202,3 +202,165 @@ fn a_selection_id_with_no_row_refuses_with_the_missing_count() {
         "and name at least one of them: {text}"
     );
 }
+
+// ------------------------------------------------------------------------------------
+// End-to-end refusals against a REAL attested directory and a REAL selection manifest
+//
+// Nothing here fabricates an attestation: the benchmark directory is produced by running
+// `apr data tweet-eval-stance` over the synthetic source tree, and the manifest by running
+// `apr data select` over that directory — the same discipline `data_contrastive`'s own
+// test module states. A hand-built manifest would only prove this module agrees with
+// itself.
+// ------------------------------------------------------------------------------------
+
+mod attested {
+    use super::super::{resolve_classify_selection, ClassifyOverrides};
+    use crate::commands::data_contrastive::{run_select, SELECTION_MANIFEST_FILE};
+    use crate::commands::data_tweeteval::{self, fixtures, CANONICAL_REVISION};
+    use crate::TweetEvalStanceProfile;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    /// Prepare an attested canonical directory and write a selection manifest into it.
+    fn attested_dir_with_selection(root: &Path, name: &str, tag: &str, seed: u64) -> PathBuf {
+        let source = root.join(format!("{name}-source"));
+        fs::create_dir_all(&source).expect("fixture source directory is creatable");
+        fixtures::write_canonical_fixture_tagged(&source, tag);
+        let out = root.join(name);
+        data_tweeteval::run(
+            &out,
+            TweetEvalStanceProfile::Canonical,
+            Some(&source),
+            CANONICAL_REVISION,
+            false,
+            true,
+            true,
+        )
+        .expect("the synthetic canonical fixture prepares cleanly");
+        run_select(&out, 8, seed, false, None, false, true).expect("select succeeds");
+        out
+    }
+
+    fn overrides<'a>(manifest: &'a Path, seed: u64) -> ClassifyOverrides<'a> {
+        ClassifyOverrides {
+            selection_manifest: Some(manifest),
+            seed: Some(seed),
+            val_split: None,
+            early_stopping_patience: None,
+        }
+    }
+
+    /// The happy path, so the two refusals below are known to be refusing something that
+    /// would otherwise have worked (a refusal test whose positive control is missing
+    /// proves only that the function returns errors).
+    #[test]
+    fn a_valid_manifest_resolves_the_selected_rows_in_selection_order() {
+        let temp = TempDir::new().expect("tempdir");
+        let data = attested_dir_with_selection(temp.path(), "canonical", fixtures::DEFAULT_TAG, 13);
+        let manifest = data.join(SELECTION_MANIFEST_FILE);
+
+        let resolved = resolve_classify_selection(&overrides(&manifest, 13), Some(&data))
+            .expect("a manifest written from THIS directory replays against it")
+            .expect("--selection-manifest was passed, so a selection is resolved");
+
+        // 8 shots for each of the three declared stance classes.
+        assert_eq!(resolved.samples.len(), 24);
+        assert_eq!(
+            resolved.semantic_hash.len(),
+            64,
+            "the row records a hex SHA-256: {}",
+            resolved.semantic_hash
+        );
+        // Selection order is class-ascending, so the first row is class 0 and the last is
+        // class 2 — not the dataset's file order.
+        assert_eq!(resolved.samples[0].label, 0);
+        assert_eq!(resolved.samples[23].label, 2);
+    }
+
+    /// T-05-06-01: a doctored manifest byte is refused by the envelope digest, BEFORE any
+    /// training work. The mutation targets the hashed payload, not the volatile block.
+    #[test]
+    fn a_doctored_manifest_byte_refuses_on_the_envelope_digest() {
+        let temp = TempDir::new().expect("tempdir");
+        let data = attested_dir_with_selection(temp.path(), "canonical", fixtures::DEFAULT_TAG, 13);
+        let manifest = data.join(SELECTION_MANIFEST_FILE);
+
+        let text = fs::read_to_string(&manifest).expect("manifest is readable");
+        let mut value: serde_json::Value = serde_json::from_str(&text).expect("manifest is JSON");
+        let first = value["payload"]["ordered_examples"][0]["id"]
+            .as_str()
+            .expect("the manifest lists ordered examples with ids")
+            .to_string();
+        // One byte: replace the last character of the first selected id with a digit it
+        // is not. The digest over the canonical payload no longer matches the envelope's
+        // recorded digest.
+        let mut doctored = first.clone();
+        let last = doctored.pop().expect("row ids are never empty");
+        doctored.push(if last == '0' { '1' } else { '0' });
+        assert_ne!(doctored, first);
+        value["payload"]["ordered_examples"][0]["id"] = serde_json::json!(doctored);
+        fs::write(
+            &manifest,
+            serde_json::to_vec_pretty(&value).expect("re-encodes"),
+        )
+        .expect("manifest is writable");
+
+        let error = resolve_classify_selection(&overrides(&manifest, 13), Some(&data))
+            .expect_err("a manifest whose payload was edited must be refused");
+        // The refusal comes from the manifest's OWN digest check inside
+        // `SelectionManifest::from_bytes` — i.e. before the dataset is even consulted and
+        // long before a batch is built. Asserting the mechanism, not just "some error":
+        // a replay-stage rejection would also have turned this test green while meaning
+        // something quite different about when the run stops.
+        let text = error.to_string();
+        assert!(
+            text.contains("semantic_hash mismatch"),
+            "the refusal must come from the manifest digest check, and must say so: {text}"
+        );
+    }
+
+    /// T-05-06-01 (second face): a manifest that is internally valid but was written
+    /// against a DIFFERENT preparation cannot be replayed here. Its ids and hashes belong
+    /// to another dataset, so the run refuses instead of training on whatever happens to
+    /// match.
+    #[test]
+    fn a_manifest_from_another_preparation_refuses_against_this_data() {
+        let temp = TempDir::new().expect("tempdir");
+        let mine = attested_dir_with_selection(temp.path(), "mine", fixtures::DEFAULT_TAG, 13);
+        let theirs =
+            attested_dir_with_selection(temp.path(), "theirs", "a different preparation", 17);
+
+        let foreign_manifest = theirs.join(SELECTION_MANIFEST_FILE);
+        assert_ne!(
+            fs::read(&foreign_manifest).expect("their manifest"),
+            fs::read(mine.join(SELECTION_MANIFEST_FILE)).expect("my manifest"),
+            "the two preparations must differ, or this fixture proves nothing"
+        );
+
+        let error = resolve_classify_selection(&overrides(&foreign_manifest, 17), Some(&mine))
+            .expect_err("a manifest from another dataset must not resolve against this one");
+
+        let text = error.to_string();
+        assert!(
+            text.contains("--selection-manifest") || text.contains("contrastive data"),
+            "the refusal must say which input it is rejecting: {text}"
+        );
+    }
+
+    /// A missing manifest file is a refusal that names the command which writes one.
+    #[test]
+    fn a_missing_manifest_file_refuses_with_the_command_that_writes_one() {
+        let temp = TempDir::new().expect("tempdir");
+        let data = attested_dir_with_selection(temp.path(), "canonical", fixtures::DEFAULT_TAG, 13);
+        let absent = data.join("no-such-selection-manifest.json");
+
+        let error = resolve_classify_selection(&overrides(&absent, 13), Some(&data))
+            .expect_err("an absent manifest is a refusal");
+        let text = error.to_string();
+        assert!(
+            text.contains("apr data select"),
+            "the refusal must name the command that produces the missing file: {text}"
+        );
+    }
+}
