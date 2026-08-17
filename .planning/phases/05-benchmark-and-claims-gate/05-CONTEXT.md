@@ -206,6 +206,77 @@ but NOT closed — `/gsd:secure-phase 04` has not run. Its verification is recon
 - Whether `bench run` shells out to existing commands (`apr setfit train`, `apr eval`,
   `apr finetune`) or calls library APIs directly — subject to OPS-03's one-implementation rule.
 
+### F-10 Calibration Unblock — Measured (supersedes parts of D-02/D-03)
+
+Plan 05-01 was front-loaded specifically so F-10 would fail early if it was going to
+(D-01). It did. These decisions are **measured, not deliberated**, and they supersede
+parts of D-02/D-03 written before the evidence existed. Source of record:
+`05-01-calibration-measurements.md`, `05-01-SUMMARY.md`, and the 12 persisted evidence
+files under the plan's calibration store (each carrying a verified `evidence_sha256`).
+
+- **D-16: The 10×/10× window rule does NOT survive production step counts; this supersedes D-03's premise.**
+  At the production envelope (s64 = 1536 steps, quadratic
+  budget `2·max(pos_cap, neg_cap)` with `neg_cap = 3n²`), five of six parameter classes
+  have **no legal ε**: `embedding`, `layer_norm_bias`, `projection_weight`,
+  `projection_bias`, `attention_key_bias`. Only `layer_norm_weight` survives. The
+  collapse is not an artifact of mixing cells — it holds within s64 alone
+  (`real/near-null = 39.7` against a rule requiring `> 100`). Cross-cell:
+  `lower = 10 × 9.278e-9 = 9.278e-8` exceeds `upper = best_real/10 = 1.714e-8` by 5.41×.
+
+  Cause is the **near-null (1e-8) leg**, not the control: the 1e-30 control writes back
+  bit-identical weights at 1536 steps (max `relative_delta` 0.0, zero rows moved), so
+  1e-30 underflows every parameter's ULP however often applied. With `worst_ctrl` pinned
+  at zero, near-null alone sets every window's lower bound, and it grows 56–72× from 24
+  to 1536 steps (299× for `attention_key_bias`).
+
+  05-03 must therefore choose a replacement rule on this evidence. It must NOT freeze ε
+  from the current table: the report's cross-cell basis is explicitly PROVISIONAL (3 of 6
+  boundary cells; s64:31 and s64:53 unmeasured), and unmeasured cells can only narrow
+  windows further, never widen them.
+
+- **D-17: `attention_key_bias` has NO available justification for its current treatment.**
+  Both options are now closed. "Ungated because it receives no gradient
+  (`dL/db_k = 0` by softmax shift-invariance)" is refuted by measurement:
+  `grad_norm_max = 8.084e-10` against a `9.051e-10` noise floor, with deltas scaling with
+  the learning rate (~3600× delta ratio for a 2000× LR ratio, consistent across three s8
+  seeds). In f32 the shift-invariance is only *approximate*, so a ~1e-10 residual gradient
+  is the expected numerical consequence — not a bug, but not zero either. "Gated at a
+  frozen ε" is unavailable because its window is empty.
+
+  Its previously-tracked `eps/noise = 15.1` **must not be carried forward**: that column
+  is `upper / noise_floor` and was computed regardless of whether `lower < upper`, so with
+  `supports_margin = false` it divided an illegal ε by the noise floor. 05-01 fixed the
+  reporting (now `n/a`) in both the production and fixture tables.
+
+  **What is NOT in question:** separation. `ctrl_max = 0.000e0 < real_min` for all six
+  classes in every measured cell. Real training remains cleanly distinguishable from no
+  training. 05-03 must not over-read D-16/D-17 as "calibration is impossible" — what
+  failed is ε-freezing under one specific rule.
+
+- **D-18: The evidence gate is not fail-closed on window collapse — a defect to fix, not a fact to work around.**
+  Separation is *asserted*; `supports_margin` is only
+  *reported*. Verified, not inferred: the four-cell combine exited `rc=0` while printing
+  `EMPTY` five times. A gate that reports success with an empty ε basis is theatre in
+  exactly the surface F-10 exists to protect. Whatever rule D-16 settles on, the run must
+  FAIL when a class has no legal ε.
+
+- **Method facts worth reusing (measured, cheap to lose):** debug and release measure
+  bit-identically (every relative delta, `delta_norm`, `init_norm`, `grad_norm_max` and
+  noise floor agreeing to the last digit) while release is ~34.5× faster — the build
+  profile is a price, not a degree of freedom. Cross-process determinism of persisted
+  evidence is proven bit-identical (same sha256 across two fresh processes), which is what
+  licenses combining per-condition passes. The architecture component
+  `h384-l6-a12-i1536-v30522@1110a243` is byte-identical across `cells=s8e1b16` and
+  `cells=s64e1b16` over a genuinely cross-half 12-pass combine — both halves measured the
+  same 22M-param production encoder, not the 97-token fixture slice, which is what makes
+  D-16 a result about step count rather than about two different models.
+
+- **Open, deliberately untested:** the superlinear-growth **hypothesis** — 299× over a 64×
+  step increase suggests the s8 near-null is underflow-dominated, while at 1536 steps
+  (warmup complete, Adam normalising each step to ~the learning rate) far more updates
+  survive rounding. It would be tested by measuring near-null at an intermediate step
+  count. It has NOT been tested and must not be stated as a result.
+
 </decisions>
 
 <canonical_refs>
@@ -380,77 +451,6 @@ but NOT closed — `/gsd:secure-phase 04` has not run. Its verification is recon
 </deferred>
 
 ---
-
-## Amendment — Execution Evidence (2026-08-17, from plan 05-01)
-
-Plan 05-01 was front-loaded specifically so F-10 would fail early if it was going to
-(D-01). It did. These decisions are **measured, not deliberated**, and they supersede
-parts of D-02/D-03 written before the evidence existed. Source of record:
-`05-01-calibration-measurements.md`, `05-01-SUMMARY.md`, and the 12 persisted evidence
-files under the plan's calibration store (each carrying a verified `evidence_sha256`).
-
-- **D-16: The 10×/10× window rule does NOT survive production step counts. This
-  supersedes D-03's premise.** At the production envelope (s64 = 1536 steps, quadratic
-  budget `2·max(pos_cap, neg_cap)` with `neg_cap = 3n²`), five of six parameter classes
-  have **no legal ε**: `embedding`, `layer_norm_bias`, `projection_weight`,
-  `projection_bias`, `attention_key_bias`. Only `layer_norm_weight` survives. The
-  collapse is not an artifact of mixing cells — it holds within s64 alone
-  (`real/near-null = 39.7` against a rule requiring `> 100`). Cross-cell:
-  `lower = 10 × 9.278e-9 = 9.278e-8` exceeds `upper = best_real/10 = 1.714e-8` by 5.41×.
-
-  Cause is the **near-null (1e-8) leg**, not the control: the 1e-30 control writes back
-  bit-identical weights at 1536 steps (max `relative_delta` 0.0, zero rows moved), so
-  1e-30 underflows every parameter's ULP however often applied. With `worst_ctrl` pinned
-  at zero, near-null alone sets every window's lower bound, and it grows 56–72× from 24
-  to 1536 steps (299× for `attention_key_bias`).
-
-  05-03 must therefore choose a replacement rule on this evidence. It must NOT freeze ε
-  from the current table: the report's cross-cell basis is explicitly PROVISIONAL (3 of 6
-  boundary cells; s64:31 and s64:53 unmeasured), and unmeasured cells can only narrow
-  windows further, never widen them.
-
-- **D-17: `attention_key_bias` has NO available justification for its current treatment.**
-  Both options are now closed. "Ungated because it receives no gradient
-  (`dL/db_k = 0` by softmax shift-invariance)" is refuted by measurement:
-  `grad_norm_max = 8.084e-10` against a `9.051e-10` noise floor, with deltas scaling with
-  the learning rate (~3600× delta ratio for a 2000× LR ratio, consistent across three s8
-  seeds). In f32 the shift-invariance is only *approximate*, so a ~1e-10 residual gradient
-  is the expected numerical consequence — not a bug, but not zero either. "Gated at a
-  frozen ε" is unavailable because its window is empty.
-
-  Its previously-tracked `eps/noise = 15.1` **must not be carried forward**: that column
-  is `upper / noise_floor` and was computed regardless of whether `lower < upper`, so with
-  `supports_margin = false` it divided an illegal ε by the noise floor. 05-01 fixed the
-  reporting (now `n/a`) in both the production and fixture tables.
-
-  **What is NOT in question:** separation. `ctrl_max = 0.000e0 < real_min` for all six
-  classes in every measured cell. Real training remains cleanly distinguishable from no
-  training. 05-03 must not over-read D-16/D-17 as "calibration is impossible" — what
-  failed is ε-freezing under one specific rule.
-
-- **D-18: The evidence gate is not fail-closed on window collapse, and that is a defect to
-  fix, not a fact to work around.** Separation is *asserted*; `supports_margin` is only
-  *reported*. Verified, not inferred: the four-cell combine exited `rc=0` while printing
-  `EMPTY` five times. A gate that reports success with an empty ε basis is theatre in
-  exactly the surface F-10 exists to protect. Whatever rule D-16 settles on, the run must
-  FAIL when a class has no legal ε.
-
-- **Method facts worth reusing (measured, cheap to lose):** debug and release measure
-  bit-identically (every relative delta, `delta_norm`, `init_norm`, `grad_norm_max` and
-  noise floor agreeing to the last digit) while release is ~34.5× faster — the build
-  profile is a price, not a degree of freedom. Cross-process determinism of persisted
-  evidence is proven bit-identical (same sha256 across two fresh processes), which is what
-  licenses combining per-condition passes. The architecture component
-  `h384-l6-a12-i1536-v30522@1110a243` is byte-identical across `cells=s8e1b16` and
-  `cells=s64e1b16` over a genuinely cross-half 12-pass combine — both halves measured the
-  same 22M-param production encoder, not the 97-token fixture slice, which is what makes
-  D-16 a result about step count rather than about two different models.
-
-- **Open, deliberately untested:** the superlinear-growth **hypothesis** — 299× over a 64×
-  step increase suggests the s8 near-null is underflow-dominated, while at 1536 steps
-  (warmup complete, Adam normalising each step to ~the learning rate) far more updates
-  survive rounding. It would be tested by measuring near-null at an intermediate step
-  count. It has NOT been tested and must not be stated as a result.
 
 ---
 
