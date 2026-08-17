@@ -305,12 +305,15 @@ Recent decisions affecting current work:
   dispatched (`git worktree add` died with `No space left on device`), and 05-03's executor
   halted before Task 1 (see `05-03-SUMMARY.md`, `status: halted`). `CARGO_INCREMENTAL=0` was
   NOT in effect, so the mitigation adopted above has lapsed.
-  **Nothing was deleted — the user declined reclamation when asked.** The standing instruction
-  (executor reports, coordinator reclaims) therefore still has an outstanding action.
-  To unblock: reclaim ≥10–20 GiB (`target/debug/incremental` is the recommended drop — pure
-  regenerable state, and every Phase 05 command is release-profile), re-export
-  `CARGO_INCREMENTAL=0`, then re-run `/gsd-execute-phase 5 --wave 2`. Both plans re-dispatch
-  unchanged; no compute is lost, as 05-01's 12 banked calibration passes are intact.
+  **The orchestrator deleted nothing** — the user declined reclamation when asked. It was
+  nevertheless reclaimed from outside this session at 12:05 local: `target/debug` (117 GB),
+  `target/llvm-cov-target` (19 GB) and `target/coverage` were removed, leaving `target/` at
+  1.7 GB and **138 GiB free**, so the `MIN_FREE_GIB = 10` preflight now clears with wide margin
+  and wave 2 was re-dispatched on that basis. Note the reclaim also took `target/release`'s
+  siblings but left `target/release` itself, so release builds are warm-ish, not cold.
+  **`CARGO_INCREMENTAL=0` is still NOT exported** — the mitigation adopted after occurrence #2
+  has lapsed, which is why the cache reached 90 GB. Re-export it before the next long build or
+  this recurs a fourth time.
 
 - [Phase 2]: Decide and version singleton-class and bounded-oversampling behavior during phase planning.
 - [Phase 2 — KNOWN-RED, EXPECTED, NOT A REGRESSION — **WIDENED BY MEASUREMENT IN 02-02**]: `pre-release` Gate 5 fails from Phase 2 wave 2 through phase exit. Cause: `apr-cli` gains a dependency on the new `aprender-contrastive-data` crate, which is not on crates.io until the human-approved publish cascade lands it (RESEARCH Pitfall 8 / Finding F5). **CORRECTION (02-02, measured):** it is NOT only the verifying form. `cargo package --no-verify -p apr-cli` ALSO fails — `--no-verify` skips the packaged-crate BUILD, not the MANIFEST RESOLUTION that rewrites the path dep into a registry dep, and resolution is where it breaks (`no matching package named 'aprender-contrastive-data' found`). Control-verified: with the dependency line temporarily removed the identical command exits 0 and packages 581 files. So ANY `cargo package -p apr-cli`, verifying or not, is red. What IS gated and must stay green: `cargo package --no-verify -p aprender-contrastive-data` (rc=0, 19 files). Exit condition unchanged: publish `aprender-contrastive-data` BEFORE `apr-cli` — a human-approved release action; CLAUDE.md forbids self-serving the publish. `/gsd:verify-work` must read a red Gate 5 as this expected state. Mirrored in `must_haves.caveats` of plans 02-02 and 02-08 and in 02-VALIDATION.md; plan 02-08's acceptance criterion "both `cargo package --no-verify` runs exit 0" is falsified and should be read as the crate-only form.
