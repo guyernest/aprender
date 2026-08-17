@@ -98,4 +98,125 @@ pub enum SetfitCommands {
         #[arg(long = "dry-run")]
         dry_run: bool,
     },
+
+    /// The EVAL-03 benchmark matrix: one cell in, one digest-committed row out
+    ///
+    /// A namespace rather than a flag on `train` because a benchmark cell is not a
+    /// training run with extra reporting: it trains, RELOADS the written artifact,
+    /// measures the contracted resource protocol against the reloaded model, takes
+    /// canonical test access through the Phase 3 lock chain, and emits a row whose
+    /// digest the 05-10 gate recomputes. Contract: `setfit-benchmark-claims-v1`.
+    Bench {
+        #[command(subcommand)]
+        command: BenchCommands,
+    },
+}
+
+/// `apr setfit bench` — the benchmark matrix commands (D-13).
+#[derive(Subcommand, Debug)]
+pub enum BenchCommands {
+    /// Execute ONE method/shot/seed cell, or ingest a row another host executed
+    ///
+    /// # Three mutually exclusive modes, and clap enforces the exclusion
+    ///
+    /// 1. EXECUTION (`--method --shots --seed --data --selection --bench-dir ...`):
+    ///    train, reload, measure, evaluate, emit one row file plus a run-manifest
+    ///    update. One process per cell — see `scripts/run_bench_cells.sh`.
+    /// 2. RECORD (`--record <ROW_FILE> --bench-dir <DIR>`): ingest a row file that a
+    ///    DIFFERENT host executed. The bytes are verified — digest, schema, cell
+    ///    identity and filename agreement — and NOTHING is executed. This is the
+    ///    GPU-host transport path (D-09).
+    /// 3. COLD PROBE (`--cold-probe <ARTIFACT> --probe-text <FILE>`): the dedicated
+    ///    fresh child the resource protocol requires. It loads the artifact, runs
+    ///    exactly one classify, prints one `COLD_LATENCY_MS=<f64>` line and exits.
+    ///    Nobody types this: `bench run` spawns it under `/usr/bin/time` and reads
+    ///    the child's true kernel high-water mark.
+    ///
+    /// The cell key is CONTRACTED. `--shots` must be one of 8/16/32/64 and `--seed`
+    /// one of the ten contracted seeds; 42 is deliberately NOT one of them, so a tool
+    /// that defaults a seed to 42 is refused rather than silently sampling outside the
+    /// protocol it claims to follow.
+    Run {
+        /// `setfit` or `lora`
+        #[arg(long, value_name = "METHOD", conflicts_with_all = ["record", "cold_probe"])]
+        method: Option<String>,
+
+        /// Examples per class: 8, 16, 32 or 64
+        #[arg(long, value_name = "SHOTS", conflicts_with_all = ["record", "cold_probe"])]
+        shots: Option<u32>,
+
+        /// One of the ten contracted seeds (13 17 23 29 31 37 41 43 47 53)
+        #[arg(long, value_name = "SEED", conflicts_with_all = ["record", "cold_probe"])]
+        seed: Option<u32>,
+
+        /// Attested benchmark directory, as written by `apr data tweet-eval-stance`
+        #[arg(long, value_name = "DIR", conflicts_with_all = ["record", "cold_probe"])]
+        data: Option<PathBuf>,
+
+        /// The selection-manifest.json this cell's rows come from — the PAIRING KEY
+        ///
+        /// EVAL-02's identical-sampled-ID guarantee is this file: both methods consume
+        /// the same manifest for a given (shots, seed), and the row records its hash.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["record", "cold_probe"])]
+        selection: Option<PathBuf>,
+
+        /// Where rows, locks, ledgers and the run manifest live
+        ///
+        /// Required by BOTH the execution and the record modes: the run manifest is
+        /// the pre-declared expectation set that makes an omitted cell visible.
+        #[arg(long = "bench-dir", value_name = "DIR", conflicts_with = "cold_probe")]
+        bench_dir: Option<PathBuf>,
+
+        /// Pinned all-MiniLM-L6-v2 checkout (the `setfit` method's encoder)
+        ///
+        /// OFFLINE PREREQUISITE — this command never downloads.
+        #[arg(long = "model-dir", value_name = "DIR", conflicts_with_all = ["record", "cold_probe"])]
+        model_dir: Option<PathBuf>,
+
+        /// Optional training configuration, file-first per the house rule
+        ///
+        /// Absent means the FROZEN published defaults for the method, which is what a
+        /// benchmark cell should use: a per-cell knob is a tuning surface, and tuning
+        /// on the benchmark is the thing `no_selection_attestation` attests did not
+        /// happen.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["record", "cold_probe"])]
+        config: Option<PathBuf>,
+
+        /// Replace an existing row file (or ledger line) for this cell
+        #[arg(long)]
+        force: bool,
+
+        /// Ingest a row file executed elsewhere — verification only, NO execution
+        #[arg(long, value_name = "ROW_FILE", conflicts_with = "cold_probe")]
+        record: Option<PathBuf>,
+
+        /// The dedicated cold-measurement child (spawned by `bench run`, not typed)
+        ///
+        /// Hidden from `-h` and listed in `--help`: it is machinery, not a user
+        /// surface, but a reader auditing the resource protocol must be able to find
+        /// it without reading the source.
+        #[arg(long = "cold-probe", value_name = "ARTIFACT", hide_short_help = true)]
+        cold_probe: Option<PathBuf>,
+
+        /// The LoRA base model, when the cold probe is measuring a LoRA cell
+        ///
+        /// Present: the probe reloads base + adapter through `ClassifyPipeline`.
+        /// Absent: the probe reloads a standalone `setfit-apr-v1`.
+        #[arg(
+            long = "cold-probe-base",
+            value_name = "BASE",
+            hide_short_help = true,
+            requires = "cold_probe"
+        )]
+        cold_probe_base: Option<PathBuf>,
+
+        /// The single text the cold probe classifies
+        #[arg(
+            long = "probe-text",
+            value_name = "FILE",
+            hide_short_help = true,
+            requires = "cold_probe"
+        )]
+        probe_text: Option<PathBuf>,
+    },
 }

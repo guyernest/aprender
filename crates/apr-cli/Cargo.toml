@@ -261,6 +261,17 @@ serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 # T-04-SC's "no new registry package" disposition is satisfied by construction.
 toml = { workspace = true }
 
+# Process RSS sampling — the `sysinfo_sampled_<hz>` FALLBACK mechanism of the
+# EVAL-05 resource protocol (`apr setfit bench run`, 05-09). Inherited from the
+# workspace rather than pinned here so no version literal can drift, and it is the
+# same reasoning `toml` above records: T-05-09-SC's "no new registry package"
+# disposition holds because `sysinfo` is already a workspace dependency.
+#
+# It is the fallback and never the headline: a poll at any finite rate can only
+# UNDERSTATE a peak, so the contract labels it a sampled lower bound and forbids
+# comparing it against a `child_max_rss_*` figure.
+sysinfo = { workspace = true }
+
 # Unicode normalization (NFC) for BPE corpus preprocessing (MODEL-2).
 unicode-normalization = "0.1"
 
