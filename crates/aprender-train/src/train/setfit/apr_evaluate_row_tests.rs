@@ -118,7 +118,10 @@ fn apr_evaluate_rows_returns_one_prediction_and_one_probability_vector_per_row()
         let argmax = probabilities
             .iter()
             .enumerate()
-            .fold((0usize, f64::NEG_INFINITY), |best, (i, &p)| if p > best.1 { (i, p) } else { best })
+            .fold(
+                (0usize, f64::NEG_INFINITY),
+                |best, (i, &p)| if p > best.1 { (i, p) } else { best },
+            )
             .0;
         assert_eq!(
             predicted, argmax,
@@ -148,18 +151,9 @@ fn apr_evaluate_rows_accuracy_equals_the_scalar_doors_value() {
         .expect("the row door must measure the same artifact");
 
     assert_eq!(rows.n_rows(), scalar.n_rows(), "both doors must measure the SAME split");
-    assert_eq!(
-        rows.predicted(),
-        rows.predicted(),
-        "trivially true; kept next to the real assertion so the shape below is not misread",
-    );
 
-    let hits = rows
-        .truth()
-        .iter()
-        .zip(rows.predicted())
-        .filter(|(actual, guess)| actual == guess)
-        .count();
+    let hits =
+        rows.truth().iter().zip(rows.predicted()).filter(|(actual, guess)| actual == guess).count();
     #[allow(clippy::cast_precision_loss)]
     let recomputed = hits as f64 / rows.n_rows() as f64;
     assert!(
@@ -235,8 +229,7 @@ fn apr_evaluate_rows_takes_the_same_credential_type_as_the_scalar_door() {
         code.contains("pub fn evaluate_rows_from_artifact"),
         "non-vacuity: the comment filter must not have eaten the module",
     );
-    let credential_parameters =
-        code.matches("credential: &ReloadedSetFitCredential").count();
+    let credential_parameters = code.matches("credential: &ReloadedSetFitCredential").count();
     assert!(
         credential_parameters >= 2,
         "both doors must name `&ReloadedSetFitCredential`; found {credential_parameters}. A \

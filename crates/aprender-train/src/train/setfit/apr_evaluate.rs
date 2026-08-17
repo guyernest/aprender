@@ -58,11 +58,13 @@
 //! re-checks the two dataset fingerprints against the artifact's own record so the function is
 //! total on its own arguments, and returns a measurement.
 
-use aprender::setfit::{ClassifyRequestDocument, MAX_BATCH_TEXTS};
+use aprender::setfit::{ClassifyRequestDocument, VerifiedSetFitModel, MAX_BATCH_TEXTS};
 use aprender_contrastive_data::prepared::{Canonical, PreparedDataset};
+use aprender_contrastive_data::schema::LabeledExample;
 
 use super::apr_reload::ReloadedSetFitCredential;
 use super::evaluate::{ValidationEvaluation, ValidationMetricKind};
+use super::lock::CanonicalTestGrant;
 use super::SetFitTrainError;
 
 /// A fresh-process evaluation failure.
@@ -102,6 +104,23 @@ pub enum AprEvaluateError {
     },
     /// The validation split has no rows.
     ValidationSplitEmpty,
+    /// The canonical TEST split has no rows.
+    ///
+    /// Its own variant rather than a reuse of [`Self::ValidationSplitEmpty`]: the two name
+    /// different splits, and a report reading "the validation split is empty" about a test
+    /// measurement sends the reader to the wrong file.
+    TestSplitEmpty,
+    /// The grant offered for a test-split measurement belongs to another artifact.
+    ///
+    /// [`CanonicalTestGrant`] checked this when it was issued. A grant is a VALUE, though: it
+    /// can be moved into a struct, cloned and used against whatever credential is in scope
+    /// three functions later, so the door that reads its rows re-checks rather than assuming.
+    TestGrantArtifactMismatch {
+        /// The artifact the grant admits.
+        grant: String,
+        /// The artifact the credential carries.
+        credential: String,
+    },
     /// Core's one classification path refused a batch.
     ClassifyFailed {
         /// The typed error's rendering.
@@ -150,6 +169,15 @@ impl core::fmt::Display for AprEvaluateError {
             Self::ValidationSplitEmpty => {
                 write!(f, "the canonical validation split has no rows to measure")
             }
+            Self::TestSplitEmpty => {
+                write!(f, "the canonical test split has no rows to measure")
+            }
+            Self::TestGrantArtifactMismatch { grant, credential } => write!(
+                f,
+                "the grant offered admits the artifact `{grant}` and the credential carries \
+                 `{credential}`. Test rows released against the wrong artifact are the exact \
+                 substitution the lock chain exists to block",
+            ),
             Self::ClassifyFailed { reason } => {
                 write!(f, "the verified model refused a validation batch: {reason}")
             }
@@ -187,12 +215,256 @@ pub fn evaluate_validation_from_artifact(
     dataset: &PreparedDataset<Canonical>,
     metric: ValidationMetricKind,
 ) -> Result<ValidationEvaluation, SetFitTrainError> {
-    let model = credential.model();
+    // (1) and (2) — the corpus and the label map — are `check_artifact_identity`, which is
+    //     the SAME function the per-row door calls. See its header for why re-checking here
+    //     is not redundancy.
+    let identity = check_artifact_identity(credential, dataset)?;
 
-    // (1) THE CORPUS, from the ARTIFACT'S OWN RECORD. The reload door checked this against
-    //     the dataset it was handed; checking it again here is not redundancy — this function
-    //     takes its own `dataset` argument, and a version that trusted the caller to pass the
-    //     same one would be a door whose guarantee depends on a convention.
+    // (3) THE ROWS. `dataset.validation()` is a `&Split<Validation>` BY TYPE; the
+    //     compatibility profile has no such method (Ph2 D-19), so a compatibility-selected
+    //     evaluation is non-constructible at this call site rather than merely rejected.
+    let split = dataset.validation();
+    let rows = split.rows();
+    if rows.is_empty() {
+        return Err(AprEvaluateError::ValidationSplitEmpty.into());
+    }
+
+    // (4) PREDICT, through the ONE prediction loop this module owns.
+    let predictions = predict_rows(credential.model(), &identity.artifact_labels, rows)?;
+
+    // (5) THE SHARED TAIL. The bounds check, the metric dispatch and the construction of the
+    //     evidence record are the trainer's own `evaluation_from_predictions` — the same
+    //     function `evaluate_validation` calls. This module computes no metric and constructs
+    //     no `ValidationEvaluation`; it hands over PREDICTIONS, never a number.
+    let truth: Vec<usize> = rows.iter().map(|row| row.label).collect();
+    super::evaluate::evaluation_from_predictions(
+        metric,
+        &truth,
+        &predictions.predicted,
+        identity.artifact_labels.len(),
+        // READ OFF the credential, which read it off the loader's digest of the bytes. There
+        // is no parameter here a caller could have supplied.
+        credential.artifact_hash().to_string(),
+        identity.validation_split_fingerprint,
+        identity.dataset_fingerprint,
+    )
+}
+
+// ===========================================================================================
+// The per-row door (05-08, EVAL-01)
+// ===========================================================================================
+
+/// Which split a per-row measurement is taken over.
+///
+/// # The test arm CARRIES the grant, and that is the whole design
+///
+/// `Validation` is a unit variant because the canonical validation split is readable by anyone
+/// holding the dataset. The test split is not: Phase 3's lock chain says test rows are released
+/// only through a [`CanonicalTestGrant`], which is minted from a committed selection lock. So
+/// the test arm takes a grant BY VALUE-REFERENCE rather than a `split: &str` or a
+/// `include_test: bool`. A caller who has not been through the lock chain cannot NAME this
+/// variant's contents, which makes the gate a compile-time fact instead of a runtime check
+/// somebody can forget to write.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum EvaluatedSplit<'grant, 'data> {
+    /// The canonical validation split.
+    Validation,
+    /// The canonical test split, released by a grant.
+    Test(&'grant CanonicalTestGrant<'data>),
+}
+
+impl EvaluatedSplit<'_, '_> {
+    /// The split's stable tag, as it appears in a bench row and in error messages.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::Test(_) => "test",
+        }
+    }
+}
+
+/// Per-row predictions over one evaluated split: the evidence a benchmark row is assembled from.
+///
+/// # Why this exists beside the scalar door rather than instead of it
+///
+/// [`ValidationEvaluation`] is ONE number, because that is all a selection lock needs to order
+/// candidates. `F_avg`, MCC, a confusion matrix and the calibration diagnostics cannot be
+/// recovered from a scalar: they need the per-row predicted class and, for calibration, the full
+/// K-vector. Widening `ValidationEvaluation` to carry them was rejected — it travels inside the
+/// selection lock's canonical bytes, so adding fields would invalidate every lock in existence
+/// for the benefit of a consumer that does not take locks.
+///
+/// # Every field is private and there is no public constructor
+///
+/// The same discipline `ValidationEvaluation` is built on: a value of this type is EVIDENCE that
+/// a measurement happened through the credentialed door, so a constructor taking prediction
+/// vectors would make it a container for a claim.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowPredictions {
+    predicted: Vec<usize>,
+    probabilities: Vec<Vec<f64>>,
+    truth: Vec<usize>,
+    ordered_labels: Vec<String>,
+    artifact_hash: String,
+    split_tag: &'static str,
+}
+
+impl RowPredictions {
+    /// The predicted class index per row, in split-row order.
+    #[must_use]
+    pub fn predicted(&self) -> &[usize] {
+        &self.predicted
+    }
+
+    /// The full K-vector of class probabilities per row, in `ordered_labels` order.
+    #[must_use]
+    pub fn probabilities(&self) -> &[Vec<f64>] {
+        &self.probabilities
+    }
+
+    /// The recorded class index per row, in split-row order.
+    #[must_use]
+    pub fn truth(&self) -> &[usize] {
+        &self.truth
+    }
+
+    /// The labels the head indexes by, in row order.
+    #[must_use]
+    pub fn ordered_labels(&self) -> &[String] {
+        &self.ordered_labels
+    }
+
+    /// How many rows were measured. Never zero: an empty split is a typed refusal.
+    #[must_use]
+    pub fn n_rows(&self) -> usize {
+        self.truth.len()
+    }
+
+    /// The artifact these predictions were produced by, READ OFF the credential.
+    ///
+    /// Carried so a caller stamps a bench row without re-deriving it — and therefore without an
+    /// opportunity to derive it differently.
+    #[must_use]
+    pub fn artifact_hash(&self) -> &str {
+        &self.artifact_hash
+    }
+
+    /// Which split was measured: `"validation"` or `"test"`.
+    ///
+    /// Recorded rather than inferred, because D-07 makes calibration a validation-only
+    /// diagnostic and the assembly must be able to see which vector it was handed.
+    #[must_use]
+    pub const fn split_tag(&self) -> &'static str {
+        self.split_tag
+    }
+}
+
+/// Measure per-row predictions on one canonical split, with a RELOADED artifact.
+///
+/// The per-row sibling of [`evaluate_validation_from_artifact`]. Same credential type, so it is
+/// unreachable without the reload door; same artifact-vs-dataset identity re-check, returning
+/// the same typed errors; the same single prediction loop. It differs only in RETURN SHAPE — it
+/// hands back the two index vectors and the probability matrix instead of reducing them.
+///
+/// This is the ONE evaluation door a benchmark cell calls (OPS-03). Classifying in the adapter
+/// would be a second prediction path over an artifact whose conformance evidence is about this
+/// one.
+///
+/// # Errors
+///
+/// Everything [`evaluate_validation_from_artifact`] returns, plus
+/// [`AprEvaluateError::TestSplitEmpty`] and [`AprEvaluateError::TestGrantArtifactMismatch`] on
+/// the test arm.
+pub fn evaluate_rows_from_artifact(
+    credential: &ReloadedSetFitCredential,
+    dataset: &PreparedDataset<Canonical>,
+    split: EvaluatedSplit<'_, '_>,
+) -> Result<RowPredictions, SetFitTrainError> {
+    let identity = check_artifact_identity(credential, dataset)?;
+
+    // THE ROWS. The validation arm reads them off the dataset by type; the test arm reads them
+    // off the GRANT, which is the only thing entitled to hand them out.
+    let rows: &[LabeledExample] = match split {
+        EvaluatedSplit::Validation => {
+            let rows = dataset.validation().rows();
+            if rows.is_empty() {
+                return Err(AprEvaluateError::ValidationSplitEmpty.into());
+            }
+            rows
+        }
+        EvaluatedSplit::Test(grant) => {
+            if grant.artifact_hash() != credential.artifact_hash() {
+                return Err(AprEvaluateError::TestGrantArtifactMismatch {
+                    grant: grant.artifact_hash().to_string(),
+                    credential: credential.artifact_hash().to_string(),
+                }
+                .into());
+            }
+            let rows = grant.test().rows();
+            if rows.is_empty() {
+                return Err(AprEvaluateError::TestSplitEmpty.into());
+            }
+            rows
+        }
+    };
+
+    let predictions = predict_rows(credential.model(), &identity.artifact_labels, rows)?;
+
+    // The truth vector is bounds-checked HERE rather than downstream. The scalar door gets that
+    // check for free from `evaluation_from_predictions`; this door returns before reaching it,
+    // and an out-of-range index reaching the assembly would index a metric vector's wrong slot
+    // and produce a confidently wrong number rather than an error.
+    let classes = identity.artifact_labels.len();
+    let truth: Vec<usize> = rows.iter().map(|row| row.label).collect();
+    for &label in &truth {
+        if label >= classes {
+            return Err(SetFitTrainError::SelectionLabelOutOfRange { label, classes });
+        }
+    }
+
+    Ok(RowPredictions {
+        predicted: predictions.predicted,
+        probabilities: predictions.probabilities,
+        truth,
+        ordered_labels: identity.artifact_labels,
+        artifact_hash: credential.artifact_hash().to_string(),
+        split_tag: split.tag(),
+    })
+}
+
+// ===========================================================================================
+// The two shared halves — ONE implementation, two return shapes
+// ===========================================================================================
+
+/// What the identity re-check establishes, so neither door recomputes it.
+struct ArtifactIdentity {
+    artifact_labels: Vec<String>,
+    dataset_fingerprint: String,
+    validation_split_fingerprint: String,
+}
+
+/// THE CORPUS AND THE LABEL MAP, from the ARTIFACT'S OWN RECORD.
+///
+/// The reload door checked the corpus against the dataset it was handed; checking it again here
+/// is not redundancy — both evaluation doors take their own `dataset` argument, and a version
+/// that trusted the caller to pass the same one would be a door whose guarantee depends on a
+/// convention.
+///
+/// The label map is read off the REBUILT HEAD, which is the list a classification will actually
+/// index into — not the document's copy of it, which could have drifted.
+///
+/// # Errors
+///
+/// [`AprEvaluateError::ProvenanceUnreadable`], [`AprEvaluateError::DatasetFingerprintMismatch`],
+/// [`AprEvaluateError::ValidationSplitFingerprintMismatch`] or
+/// [`AprEvaluateError::LabelMapMismatch`].
+fn check_artifact_identity(
+    credential: &ReloadedSetFitCredential,
+    dataset: &PreparedDataset<Canonical>,
+) -> Result<ArtifactIdentity, SetFitTrainError> {
+    let model = credential.model();
     let provenance = model.doc_view().provenance.clone();
     let recorded_dataset = read_provenance_hex(&provenance, "dataset_fingerprint")?;
     let recorded_validation = read_provenance_hex(&provenance, "validation_split_fingerprint")?;
@@ -216,8 +488,6 @@ pub fn evaluate_validation_from_artifact(
         .into());
     }
 
-    // (2) THE LABEL MAP. Read off the REBUILT HEAD, which is the list a classification will
-    //     actually index into — not the document's copy of it, which could have drifted.
     let artifact_labels: Vec<String> = model.ordered_labels().to_vec();
     let dataset_labels: Vec<String> = dataset.label_names().to_vec();
     if artifact_labels != dataset_labels {
@@ -227,22 +497,42 @@ pub fn evaluate_validation_from_artifact(
         }
         .into());
     }
+
+    Ok(ArtifactIdentity { artifact_labels, dataset_fingerprint, validation_split_fingerprint })
+}
+
+/// One prediction loop's output: the argmax index and the full K-vector, per row.
+struct RowClassifications {
+    predicted: Vec<usize>,
+    probabilities: Vec<Vec<f64>>,
+}
+
+/// PREDICT, through core's ONE classify path, in batches core's own bound allows.
+///
+/// Chunked rather than one call: `MAX_BATCH_TEXTS` is enforced INSIDE classify, so a split
+/// larger than it would be refused rather than measured, and silently dropping the tail would be
+/// worse than either.
+///
+/// # This is the module's ONLY classify site
+///
+/// Both doors reach it. `apr_evaluate_rows_shares_one_classify_loop_with_the_scalar_door`
+/// asserts the count is exactly one, because two prediction loops over one artifact are two
+/// float pipelines that must agree and eventually will not.
+///
+/// # Errors
+///
+/// [`AprEvaluateError::ClassifyFailed`] for anything core reports, for a response arity that
+/// does not match the request, and for a probability vector whose length is not the label map's;
+/// [`AprEvaluateError::UnknownPredictedLabel`] for a label outside the artifact's ordered set.
+fn predict_rows(
+    model: &VerifiedSetFitModel,
+    artifact_labels: &[String],
+    rows: &[LabeledExample],
+) -> Result<RowClassifications, SetFitTrainError> {
     let classes = artifact_labels.len();
-
-    // (3) THE ROWS. `dataset.validation()` is a `&Split<Validation>` BY TYPE; the
-    //     compatibility profile has no such method (Ph2 D-19), so a compatibility-selected
-    //     evaluation is non-constructible at this call site rather than merely rejected.
-    let split = dataset.validation();
-    let rows = split.rows();
-    if rows.is_empty() {
-        return Err(AprEvaluateError::ValidationSplitEmpty.into());
-    }
-
-    // (4) PREDICT, through core's ONE classify path, in batches core's own bound allows.
-    //     Chunked rather than one call: `MAX_BATCH_TEXTS` is enforced INSIDE classify, so a
-    //     validation split larger than it would be refused rather than measured, and silently
-    //     dropping the tail would be worse than either.
     let mut predicted: Vec<usize> = Vec::with_capacity(rows.len());
+    let mut probabilities: Vec<Vec<f64>> = Vec::with_capacity(rows.len());
+
     for chunk in rows.chunks(MAX_BATCH_TEXTS) {
         let request = ClassifyRequestDocument::new(chunk.iter().map(|row| row.input.clone()));
         let response = model.classify(&request).map_err(|error| {
@@ -257,16 +547,33 @@ pub fn evaluate_validation_from_artifact(
                         label: result.label().to_string(),
                     })
                 })?;
+            // A K-vector of the wrong arity would make the calibration functions read a row of
+            // one length as a row of another, silently mixing classes across row boundaries.
+            // Core's constructor already ties logits to probabilities; nothing ties either to
+            // the HEAD's label count, so that is checked here.
+            let row = result.probabilities();
+            if row.len() != classes {
+                return Err(AprEvaluateError::ClassifyFailed {
+                    reason: format!(
+                        "the classifier returned a {}-wide probability vector for a {classes}-label \
+                         head",
+                        row.len(),
+                    ),
+                }
+                .into());
+            }
             predicted.push(index);
+            probabilities.push(row.to_vec());
         }
     }
+
     // The response is in request order and one row per text (core's envelope constructor
     // enforces a uniform arity), but a length disagreement here would silently mis-pair every
     // prediction with a truth, so it is checked rather than assumed.
     if predicted.len() != rows.len() {
         return Err(AprEvaluateError::ClassifyFailed {
             reason: format!(
-                "the classifier returned {} results for {} validation rows",
+                "the classifier returned {} results for {} rows",
                 predicted.len(),
                 rows.len()
             ),
@@ -274,22 +581,7 @@ pub fn evaluate_validation_from_artifact(
         .into());
     }
 
-    // (5) THE SHARED TAIL. The bounds check, the metric dispatch and the construction of the
-    //     evidence record are the trainer's own `evaluation_from_predictions` — the same
-    //     function `evaluate_validation` calls. This module computes no metric and constructs
-    //     no `ValidationEvaluation`; it hands over PREDICTIONS, never a number.
-    let truth: Vec<usize> = rows.iter().map(|row| row.label).collect();
-    super::evaluate::evaluation_from_predictions(
-        metric,
-        &truth,
-        &predicted,
-        classes,
-        // READ OFF the credential, which read it off the loader's digest of the bytes. There
-        // is no parameter here a caller could have supplied.
-        credential.artifact_hash().to_string(),
-        validation_split_fingerprint,
-        dataset_fingerprint,
-    )
+    Ok(RowClassifications { predicted, probabilities })
 }
 
 /// Read one lowercase-hex provenance field, or refuse by name.
