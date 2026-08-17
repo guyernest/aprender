@@ -32,7 +32,7 @@ Aprender is a next-generation ML framework in pure Rust — **monorepo with 78 w
 - Pivot strategies (e.g. when P0-A blocks, immediately try P0-B; when P0-B blocks, surface §81-class amendment and continue to next prereq)
 
 ### Check in BEFORE acting (real escalations only)
-- Compute spend > 1hr on non-lambda-vector hosts (lambda-vector is pre-authorized per `feedback_compute_pre_authorized.md`)
+- Compute spend > 1hr on non-lambda-vector hosts (lambda-vector is pre-authorized)
 - Destructive ops: `git push --force`, `gh release delete`, dropping branches/tags on main, `cargo yank`
 - Modifying CI workflows (`.github/workflows/*.yml`)
 - Crates.io publish cascade (always ask before `make publish`)
