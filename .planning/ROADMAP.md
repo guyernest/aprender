@@ -274,20 +274,20 @@ contract edit per Phase 3 D-10(c), never an inline relaxation by a Phase 5 execu
 **Branch base**: Phase 5 continues on `gsd/phase-2-contract-gate` per the 02-01 policy (phases
 2-4 all ride this branch; no PR has been opened — opening one is the human's call).
 
-**Plans**: 13 plans in 8 waves
+**Plans**: 4/13 plans executed in 8 waves
 
 Plans:
 **Wave 1** *(the F-10 unblock work — D-01 — plus the independent numerics substrate 05-04, whose t_critical.json fixture is the source of 05-05's frozen contract literal; nothing F-10-downstream runs until the edit lands)*
 
-- [ ] 05-01-PLAN.md — Production calibration measurement: freeze E/B from pinned setfit 1.1.3, timed s8 probe, boundary matrix, ε windows + proposed regime entry (NOT autonomous: conditional >1hr compute check-in)
-- [ ] 05-02-PLAN.md — Per-regime Thresholds restructuring (table_for lookup, fixture semantics byte-identical, len==1 preserved)
-- [ ] 05-04-PLAN.md — Numerics substrate: multiclass top-label ECE + Brier (calibration-v1-bound), f64 paired-t + frozen t_{0.975,9}, scipy/sklearn fixtures in the pinned uv env
+- [x] 05-01-PLAN.md — Production calibration measurement: freeze E/B from pinned setfit 1.1.3, timed s8 probe, boundary matrix, ε windows + proposed regime entry (NOT autonomous: conditional >1hr compute check-in)
+- [x] 05-02-PLAN.md — Per-regime Thresholds restructuring (table_for lookup, fixture semantics byte-identical, len==1 preserved)
+- [x] 05-04-PLAN.md — Numerics substrate: multiclass top-label ECE + Brier (calibration-v1-bound), f64 paired-t + frozen t_{0.975,9}, scipy/sklearn fixtures in the pinned uv env
 
 **Wave 2** *(blocked on Wave 1 for 05-03 and for 05-05 — which copies its frozen t literal from 05-04's t_critical.json; 05-06 is an independent foundation)*
 
 - [ ] 05-03-PLAN.md — The three-place synchronized contract/code/test edit at the D-04 human checkpoint (NOT autonomous), one commit, pv diff evidence, 40-cell envelope coverage test
 - [ ] 05-05-PLAN.md — setfit-benchmark-claims-v1.yaml + BenchRow/RunManifest (method-tagged, deny_unknown_fields, digest-verify-before-return) + $(CONTRACTS)/audit wiring
-- [ ] 05-06-PLAN.md — `apr finetune --task classify --selection-manifest` + explicit seed/val_split/early-stop control + A6 probe + run_classify_core shared entry + the LoRA reload preflight (tracer: adapter save → fresh-process reload → ordered probability vector; hard gate before any 9B compute)
+- [x] 05-06-PLAN.md — `apr finetune --task classify --selection-manifest` + explicit seed/val_split/early-stop control + A6 probe + run_classify_core shared entry + the LoRA reload preflight (tracer: adapter save → fresh-process reload → ordered probability vector; hard gate before any 9B compute)
 
 **Wave 3** *(blocked on Wave 2)*
 
@@ -325,4 +325,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | Complete   | 2026-08-14 |
 | 4. APR Artifact and Production Parity | 22/22 | UAT passed, awaiting secure-phase |  |
-| 5. Benchmark and Claims Gate | 0/13 | Not started | - |
+| 5. Benchmark and Claims Gate | 4/13 | In Progress|  |
