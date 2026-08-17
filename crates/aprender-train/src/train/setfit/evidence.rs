@@ -2092,6 +2092,13 @@ mod tests {
         /// serialize differently and take TRN-06's bitwise claim with it.
         elapsed_secs: f64,
         steps: u64,
+        /// The PROBED device this pass actually resolved to, read off `ResolvedSetFitConfig`
+        /// after `prepare()` rather than echoed from the request string.
+        ///
+        /// CLAUDE.md verification rule 2: never label a run by intent. A report that says
+        /// "cpu" because the config asked for "cpu" proves nothing about what executed; this
+        /// is the resolved value, and the assertion below is what makes it load-bearing.
+        device: String,
     }
 
     /// Run one production cell under one condition, through the SHIPPED doors only.
@@ -2124,6 +2131,17 @@ mod tests {
         // here. T-05-01-01: this is the string the contract entry is copied from.
         let regime = crate::train::setfit::calibration_regime_id(&encoder, &selection, &config);
 
+        // The PROBED device, read off the resolved config. Phase 3 refuses any non-CPU
+        // resolved device outright (`tune_rejects_a_non_cpu_resolved_device`: a
+        // `Device::Cuda { index: 0 }` preflight is `UnsupportedDeviceForPhase3`), so this
+        // measurement is CPU-bound by construction on ANY host — which is exactly why the
+        // choice of host is an authorization question and not a speed one.
+        let device = format!("{:?}", config.device());
+        assert!(
+            device.to_lowercase().contains("cpu"),
+            "the production calibration must execute on CPU; resolved device was {device}",
+        );
+
         let started = std::time::Instant::now();
         let out =
             run_tuning(encoder, &dataset, &selection, &config).expect("the production run tunes");
@@ -2132,7 +2150,7 @@ mod tests {
         let evidence =
             UpdateEvidence::from_tune_output(&out, &regime).expect("production evidence");
         let steps = evidence.step_count;
-        ProductionPass { evidence, regime, elapsed_secs, steps }
+        ProductionPass { evidence, regime, elapsed_secs, steps, device }
     }
 
     /// Which cells and conditions this invocation runs.
@@ -2262,11 +2280,28 @@ mod tests {
 
         for cell in &cells {
             let mut record = |name: &str, pass: &ProductionPass| {
-                timing_rows.push(format!(
-                    "  seed {:>3} cell {:<10} condition {:<10} steps={:<6} wall_clock={:.1}s\n",
+                // STREAMED to stderr as each pass lands, not just accumulated into the
+                // end-of-run report. The full matrix is an ~8-hour unattended job; if it dies
+                // at pass 14 the operator must be able to say WHICH cells completed and at
+                // what cost, rather than losing every measurement to one panic.
+                eprintln!(
+                    "[progress] pass done: seed={} cell={} condition={} device={} steps={} \
+                     wall_clock={:.1}s regime={}",
                     cell.seed,
                     cell.label(),
                     name,
+                    pass.device,
+                    pass.steps,
+                    pass.elapsed_secs,
+                    pass.regime,
+                );
+                timing_rows.push(format!(
+                    "  seed {:>3} cell {:<10} condition {:<10} device={:<8} steps={:<6} \
+                     wall_clock={:.1}s\n",
+                    cell.seed,
+                    cell.label(),
+                    name,
+                    pass.device,
                     pass.steps,
                     pass.elapsed_secs,
                 ));
@@ -2443,7 +2478,9 @@ mod tests {
             );
         }
 
-        report.push_str("\nWALL CLOCK (stdout report only — never an evidence field)\n");
+        report.push_str(
+            "\nWALL CLOCK and RESOLVED DEVICE (stdout report only — never evidence fields)\n",
+        );
         for row in &timing_rows {
             report.push_str(row);
         }
