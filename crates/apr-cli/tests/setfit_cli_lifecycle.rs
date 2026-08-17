@@ -34,32 +34,45 @@
 //! `--version` call whose output is asserted non-empty, so "the child process ran" is a
 //! measurement rather than an assumption before anything is concluded from a later exit code.
 //!
-//! # This chain STOPS, on purpose, and says exactly where
+//! # TWO chains live here, and they end differently ON PURPOSE
 //!
-//! The plan this file implements asks for five green invocations ending in a classified
-//! document. **That chain cannot close on this host, and no test here pretends otherwise.**
-//! The cause is F-10, measured independently three times by 04-12 and again by 04-05 and 04-06:
-//! `CALIBRATED_REGIMES` has exactly one entry, its architecture component is compared for exact
-//! equality, and the only encoder that satisfies it is the phase-3 MiniLM slice — a 97-row
-//! vocabulary closure that cannot compute the `setfit-apr-v1` contract's `probe_unicode`
-//! (canonical id 5915). No `setfit-apr-v1` artifact exists in this repository and none can be
-//! produced by the shipped commands.
+//! **Before Phase 5's 05-03 calibration edit (commit `a63bb130b`), no user-reachable path
+//! produced a `setfit-apr-v1`**: `CALIBRATED_REGIMES` carried exactly one entry, its
+//! architecture component is compared for exact equality, and the only encoder that satisfied it
+//! was the phase-3 MiniLM slice — a 97-row vocabulary closure that cannot compute the
+//! `setfit-apr-v1` contract's `probe_unicode` (canonical id 5915). That was F-10, measured
+//! independently three times by 04-12 and again by 04-05 and 04-06.
 //!
-//! **What was deliberately NOT done.** `SetFitArtifactView`'s fields are public and
-//! `aprender::setfit::write_setfit_apr` is public, so a synthetic APR-capable encoder would
-//! have produced real `setfit-apr-v1` bytes from this very file, and the five-rung chain would
-//! then have gone green and satisfied the plan's acceptance criteria to the letter. The model
-//! classified would not be the model the `train` rung produced, and OPS-02 is a claim about the
-//! JOIN between the rungs. 04-12 identified and refused that shortcut; this file refuses it
-//! again, for the same reason.
+//! `a63bb130b` added a SECOND, measured regime entry for the production
+//! `sentence-transformers/all-MiniLM-L6-v2` checkout, leaving the fixture entry byte-untouched.
+//! So the two chains now differ by their `--model-dir` and by nothing else:
 //!
-//! Instead, this file follows the convention 04-12 established and 04-17 re-confirmed: **a
-//! blocked rung is a PASSING test that asserts the TYPED REFUSAL, and panics with restore
-//! instructions the day the refusal stops happening.** An `#[ignore]`d test in this phase must
-//! still pass under `--ignored` (04-10 gates them that way), so a full-chain test that cannot
-//! pass would be a landmine rather than a placeholder.
+//! * **the SLICE chain still stops**, and its refusal is still asserted rung by rung. The
+//!   fixture directory is a conformance slice, not a `from_pretrained_dir` checkout — it carries
+//!   no `config.json` — so `setfit train` refuses at the encoder door with exit 6 exactly as
+//!   before. That refusal is slice-DIRECTORY-shaped and survives the calibration edit;
+//! * **the PRODUCTION chain now completes**, and the third test in this file walks it: train,
+//!   inspect, evaluate on validation under a written lock, evaluate on canonical test under that
+//!   lock, and classify — one artifact, one SHA-256, five processes.
 //!
-//! # What therefore IS proven, spawned, with real exit codes
+//! **What was deliberately NOT done, and is still not done.** `SetFitArtifactView`'s fields are
+//! public and `aprender::setfit::write_setfit_apr` is public, so a synthetic APR-capable encoder
+//! would have produced real `setfit-apr-v1` bytes from this very file, and the five-rung chain
+//! would have gone green in Phase 4 and satisfied that plan's acceptance criteria to the letter.
+//! The model classified would not have been the model the `train` rung produced, and OPS-02 is a
+//! claim about the JOIN between the rungs. 04-12 identified and refused that shortcut; the
+//! production chain below is the honest form of the same claim, because every rung of it reads a
+//! FILE the previous rung wrote with the shipped binary.
+//!
+//! The blocked-rung convention 04-12 established and 04-17 re-confirmed is retained for the
+//! slice chain: **a blocked rung is a PASSING test that asserts the TYPED REFUSAL, and panics
+//! with restore instructions the day that particular refusal stops happening.** An `#[ignore]`d
+//! test in this phase must still pass under `--ignored` (04-10 gates them that way), so a
+//! full-chain test that cannot pass would be a landmine rather than a placeholder.
+//!
+//! # What is proven, spawned, with real exit codes
+//!
+//! The SLICE chain (test 1) — every rung against `--model-dir <conformance slice>`:
 //!
 //! | rung | invocation | verdict |
 //! |---|---|---|
@@ -67,11 +80,19 @@
 //! | 1 | `data tweet-eval-stance` | 0 — writes an attested benchmark directory |
 //! | 2 | `data select` | 0 — consumes rung 1's directory, writes the selection manifest |
 //! | 3 | `setfit train --dry-run` | 0 — consumes rungs 1+2, reports the merged config and both provenance fingerprints |
-//! | 4 | `setfit train` | **6** — the typed `--model-dir` refusal; F-10's rung, and nothing is written |
+//! | 4 | `setfit train` | **6** — the typed `--model-dir` refusal: the slice carries no `config.json` |
 //! | 5 | `inspect model.apr` | nonzero — the artifact rung 4 did not write is not there |
 //!
-//! Rungs 1 through 3 are a genuine end-to-end CLI chain in which each process consumes the
-//! previous process's output FILES. That is the part of OPS-02 that is real today.
+//! The PRODUCTION chain (test 1b) — the same rungs 0-2, then `--model-dir` pointed at the pinned
+//! 86.7 MB checkout, env-gated on `APRENDER_MINILM_DIR`:
+//!
+//! | rung | invocation | verdict |
+//! |---|---|---|
+//! | 1 | `setfit train` | **0** — `model.apr` on disk, non-empty, with a reported artifact SHA-256 |
+//! | 2 | `inspect model.apr --json` | 0 — the SetFit section, carrying the SAME 64-hex SHA-256 |
+//! | 3 | `eval --split validation --lock-out L` | 0 — `L` on disk, the same SHA-256 in the row |
+//! | 4 | `eval --split test --selection-lock L` | 0 — a SEPARATE process reads `L` and is admitted |
+//! | 5 | `predict --input request.json` | 0 — ordered labels and probabilities, same SHA-256 |
 //!
 //! The TRN-07 half — the durable selection-lock gate holding across process boundaries — is the
 //! second test, and its own header states precisely which half of the workflow is reachable.
@@ -392,26 +413,32 @@ fn listing(root: &Path) -> std::collections::BTreeSet<PathBuf> {
 }
 
 // ==========================================================================================
-// Rung 4's restore instruction
+// Rung 4's restore instruction — for the SLICE chain only
 // ==========================================================================================
 
-/// What to do the day `setfit train` starts succeeding.
+/// What to do the day `setfit train` starts succeeding AGAINST THE CONFORMANCE SLICE.
 ///
 /// Written as a panic message rather than a comment for the reason 04-12 gave: a comment ages
-/// silently, and the person who closes F-10 is not the person who wrote this file.
-const F10_CLOSED: &str = "\
-`apr setfit train` SUCCEEDED. F-10 is CLOSED — an encoder now both passes CALIBRATED_REGIMES \
-and computes the setfit-apr-v1 contract's six probes.\n\
-RESTORE THE FULL CHAIN IN THIS FILE:\n\
-  rung 4: assert exit 0, parse the --json report, capture `artifact_sha256`\n\
-  rung 5: `inspect <APR> --json`   -> the SetFit section, same artifact hash\n\
-  rung 6: `eval <APR> --task classify --split validation --lock-out lock.json --json`\n\
-          -> assert lock.json EXISTS on disk, capture its lock_hash\n\
-  rung 7: `eval <APR> --task classify --split test --selection-lock lock.json --json`\n\
-          -> assert the SAME lock_hash, from a SEPARATE process reading that FILE\n\
-  rung 8: `predict <APR> --input request.json --json`\n\
-          -> parse into aprender::setfit::classify::ClassifyResponse, same artifact_sha256\n\
-Also revisit the second test in this file: its positive half becomes reachable.";
+/// silently, and the person who makes the slice loadable is not the person who wrote this file.
+///
+/// **Scope, restated after Phase 5.** This message no longer means "F-10 is closed" — F-10 was
+/// closed for the PRODUCTION encoder by 05-03's calibration edit (`a63bb130b`), and the chain it
+/// unblocked is walked to completion by
+/// [`setfit_cli_production_chain_completes_after_the_calibration_edit`] below. What this message
+/// means is narrower and still worth catching: the conformance-slice DIRECTORY, which is a
+/// fixture rather than a `from_pretrained_dir` checkout, has become loadable. The two are
+/// independent, which is why the production chain's arrival did not turn this assertion red.
+const SLICE_TRAIN_SUCCEEDED: &str = "\
+`apr setfit train` SUCCEEDED against the CONFORMANCE SLICE directory. That directory is a \
+fixture, not a pretrained checkout: it carries no config.json, which is the refusal this rung \
+asserts. Something has made it loadable.\n\
+WHAT TO DO:\n\
+  - if the slice gained a config.json deliberately, re-point this rung at a directory that is \
+still not a checkout, or convert this rung into a positive assertion and say what it now proves\n\
+  - do NOT simply delete the rung: rung 5 below depends on rung 4 having written nothing\n\
+NOTE: this is NOT the F-10 signal. F-10 was closed at a63bb130b for the production encoder, and \
+`setfit_cli_production_chain_completes_after_the_calibration_edit` already walks that chain \
+through inspect, eval(validation --lock-out), eval(test --selection-lock) and predict.";
 
 // ==========================================================================================
 // Test 1 — the OPS-02 chain, spawned
@@ -421,10 +448,11 @@ Also revisit the second test in this file: its positive half becomes reachable."
 #[ignore = "integration weight: spawns the shipped binary six times and builds a whole \
             benchmark directory and selection. 04-10 runs it as its own invocation — \
             `cargo test -p apr-cli --features setfit --test setfit_cli_lifecycle -- --ignored \
-            lifecycle`. It PASSES: the chain is walked to the rung F-10 removes, and that \
-            rung's refusal is what is asserted"]
+            lifecycle`. It PASSES: the chain is walked against the CONFORMANCE SLICE to the \
+            rung that directory cannot pass, and that rung's refusal is what is asserted. The \
+            production chain is the separate test below"]
 #[allow(clippy::too_many_lines)]
-fn setfit_cli_lifecycle_the_binary_walks_ops_02_to_the_rung_f_10_removes() {
+fn setfit_cli_lifecycle_the_binary_walks_ops_02_against_the_conformance_slice() {
     let temp = TempDir::new().expect("tempdir");
     let root = temp.path();
 
@@ -613,7 +641,14 @@ fn setfit_cli_lifecycle_the_binary_walks_ops_02_to_the_rung_f_10_removes() {
     );
 
     // ------------------------------------------------------------------------------
-    // RUNG 4 — `setfit train` for real. THIS IS THE RUNG F-10 REMOVES.
+    // RUNG 4 — `setfit train` for real, against the CONFORMANCE SLICE directory.
+    //
+    // Before 05-03's calibration edit (a63bb130b) this was described as "the rung F-10
+    // removes". It is not, and the distinction was always measurable from the message: the
+    // refusal names `config.json`, so it fires at `from_pretrained_dir` — the slice is a
+    // conformance FIXTURE, not a pretrained checkout — and never reaches the calibration
+    // regime gate at all. F-10 is closed for the production encoder and the chain that
+    // unblocked is the next test; this rung's refusal is slice-DIRECTORY-shaped and survives.
     //
     // The refusal is at the ENCODER door, and that location is itself the evidence that
     // everything before it ran in this process: the config parsed and merged, --device cpu
@@ -627,7 +662,7 @@ fn setfit_cli_lifecycle_the_binary_walks_ops_02_to_the_rung_f_10_removes() {
 
     assert!(
         !trained.status.success(),
-        "{F10_CLOSED}\n{}",
+        "{SLICE_TRAIN_SUCCEEDED}\n{}",
         trained.transcript()
     );
     assert_eq!(
@@ -639,7 +674,10 @@ fn setfit_cli_lifecycle_the_binary_walks_ops_02_to_the_rung_f_10_removes() {
         trained.transcript()
     );
     trained
-        .expect_refusal("rung 4 cannot complete on this host — F-10")
+        .expect_refusal(
+            "rung 4 cannot complete against the conformance slice: that directory is a fixture, \
+             not a from_pretrained_dir checkout",
+        )
         .expect_mentions(
             "--model-dir",
             "the refusal must name the flag the operator has to change; the library cannot \
@@ -690,6 +728,522 @@ fn setfit_cli_lifecycle_the_binary_walks_ops_02_to_the_rung_f_10_removes() {
     assert!(
         !final_listing.contains(&output),
         "and the artifact must not be, on any path"
+    );
+}
+
+// ==========================================================================================
+// Test 1b — the PRODUCTION chain, which 05-03's calibration edit made reachable
+// ==========================================================================================
+
+/// The pinned production checkout — 6 layers, hidden 384, 30522 tokens, revision `1110a243`.
+///
+/// Resolution order is copied from `aprender-core`'s `full_weight_parity` suite deliberately:
+/// one env var with one default, so a host that materialised the checkout somewhere else moves
+/// BOTH suites with one variable rather than gaining two different notions of "the checkout".
+fn production_checkout_dir() -> PathBuf {
+    std::env::var("APRENDER_MINILM_DIR").map_or_else(
+        |_| {
+            let home = std::env::var("HOME")
+                .expect("HOME must be set to resolve the default production checkout");
+            PathBuf::from(home).join(".cache/aprender/minilm-l6-v2-1110a243")
+        },
+        PathBuf::from,
+    )
+}
+
+/// The production `setfit train` rung's bound.
+///
+/// `SLOW_LIMIT` is 10 minutes and bounds directory-sized IO. This rung is 24 optimizer steps of
+/// a 22M-parameter encoder followed by a head fit and a full artifact round trip, and 05-01
+/// measured the tuning half alone at 51.0 s release / 1758.6 s debug on this box — a 34.5x
+/// spread that the SAME bound has to survive, because a `cargo test` without `--release` is a
+/// legitimate way to run this file. So the bound is generous on purpose: it exists to turn a
+/// HANG into a named failure, not to police a duration.
+const PRODUCTION_LIMIT: Duration = Duration::from_secs(7200);
+
+/// Set to `1` to turn the env-gate's skip into a FAILURE.
+///
+/// CLAUDE.md rule 2, mechanised: a test that silently skips reports the same "ok" as a test that
+/// ran, so a log line saying the ladder is green cannot be told from a log line saying it was
+/// absent. A run that intends to PROVE the production chain exports this, and then the skip path
+/// cannot masquerade as the pass path.
+const REQUIRE_ENV: &str = "APRENDER_PRODUCTION_CHAIN_REQUIRED";
+
+/// Parse one child's stdout as a single JSON document, or say which rung failed to produce one.
+fn parse_json(run: &AprRun, what: &str) -> serde_json::Value {
+    serde_json::from_str(&run.stdout).unwrap_or_else(|error| {
+        panic!(
+            "{what} must emit exactly one JSON document on stdout: {error}\n{}",
+            run.transcript()
+        )
+    })
+}
+
+/// Read a 64-hex SHA-256 out of a JSON document, asserting the shape rather than assuming it.
+///
+/// A truncated, absent or `null` digest is the exact failure that would make the cross-surface
+/// equality below vacuous: `None == None` is true, and so is `"" == ""`.
+fn hex64(document: &serde_json::Value, pointer: &str, what: &str) -> String {
+    let value = document
+        .pointer(pointer)
+        .unwrap_or_else(|| panic!("{what}: no value at JSON pointer {pointer}\n{document:#}"));
+    let text = value
+        .as_str()
+        .unwrap_or_else(|| panic!("{what}: {pointer} is not a string ({value})\n{document:#}"))
+        .to_string();
+    assert_eq!(
+        text.len(),
+        64,
+        "{what}: {pointer} must be a hex SHA-256, not a truncation or a placeholder — got {text:?}"
+    );
+    assert!(
+        text.chars().all(|c| c.is_ascii_hexdigit()),
+        "{what}: {pointer} must be hexadecimal — got {text:?}"
+    );
+    text
+}
+
+/// Rungs 1 and 2 of the chain: the attested benchmark directory and the selection manifest.
+///
+/// Extracted rather than duplicated so the production chain consumes the SAME two commands, in
+/// the same order, with the same fixture recipe as the slice chain above. What differs between
+/// the two chains is `--model-dir` and nothing else, which is what makes the comparison between
+/// their outcomes a measurement of the encoder rather than of two different setups.
+fn prepare_phase2_inputs(root: &Path) -> (PathBuf, PathBuf) {
+    let source = root.join("srctree");
+    write_canonical_source(&source);
+    let benchmark = root.join("benchmark");
+
+    let prepared = run_apr(
+        &[
+            "data",
+            "tweet-eval-stance",
+            "--output",
+            &benchmark.display().to_string(),
+            "--source",
+            &source.display().to_string(),
+        ],
+        SLOW_LIMIT,
+    );
+    prepared.expect_success("the canonical preparation is rung 1");
+    assert!(
+        benchmark.join("benchmark-manifest.json").is_file(),
+        "rung 1 must leave the attestation on disk for the SEPARATE process that is rung 2"
+    );
+
+    let selected = run_apr(
+        &[
+            "data",
+            "select",
+            "--data",
+            &benchmark.display().to_string(),
+            "--shots",
+            "8",
+            "--seed",
+            FIXTURE_SEED,
+        ],
+        SLOW_LIMIT,
+    );
+    selected.expect_success("rung 2 consumes rung 1's attested directory");
+    let selection = benchmark.join("selection-manifest.json");
+    assert!(
+        selection.is_file(),
+        "rung 2 must leave the selection manifest on disk for rung 3 to read"
+    );
+
+    (benchmark, selection)
+}
+
+#[test]
+#[ignore = "integration weight AND host weight: spawns the shipped binary seven times and \
+            TRAINS a 22M-parameter encoder. Needs the pinned 86.7 MB production checkout \
+            (APRENDER_MINILM_DIR, default ~/.cache/aprender/minilm-l6-v2-1110a243); it SKIPS \
+            with a printed message when that is absent, and export \
+            APRENDER_PRODUCTION_CHAIN_REQUIRED=1 to make the skip a failure instead. \
+            DELIBERATELY NOT selected by `make setfit-cli-lifecycle`'s `-- --ignored \
+            lifecycle` filter: this name carries no `lifecycle` substring, so that gate's \
+            2-test floor and its wall clock are both unchanged. Wiring a real training run \
+            into a routine gate would add ~30 min of debug-profile tuning to tier3 (05-01 \
+            measured s8 tuning at 1758.6 s debug / 51.0 s release). Run it explicitly: \
+            APRENDER_PRODUCTION_CHAIN_REQUIRED=1 CARGO_INCREMENTAL=0 cargo test --release -p \
+            apr-cli --features setfit --test setfit_cli_lifecycle -- --ignored --nocapture \
+            production_chain"]
+#[allow(clippy::too_many_lines)]
+fn setfit_cli_production_chain_completes_after_the_calibration_edit() {
+    // ------------------------------------------------------------------------------
+    // WHAT THIS TEST IS EVIDENCE FOR
+    //
+    // D-01 asks for proof that ONE user-produced `setfit-apr-v1` exists before any benchmark
+    // cell depends on one. 05-03 landed the calibration edit and stated plainly that it did
+    // NOT run this ladder: "This plan did not run that ladder and does not claim it passes."
+    // This is that run. Every verdict below is a reaped ExitStatus from the pinned binary, and
+    // every rung reads a FILE the previous rung wrote — there is no in-process hand-off
+    // anywhere in the chain, which is what makes the artifact user-produced rather than
+    // test-produced.
+    //
+    // THE CELL. `s8`, seed 13, epochs 1, batch 16 — the cheapest cell of the production
+    // regime's declared envelope (`cells=s8e1b16,...|seeds=13,...`), so the run resolves a
+    // MEASURED threshold table rather than `UncalibratedRegime`. The seed and the epoch/batch
+    // pair come from the same `write_train_config` the slice chain uses; nothing about the
+    // training request differs between the two chains.
+    // ------------------------------------------------------------------------------
+    let checkout = production_checkout_dir();
+    let config_pin = checkout.join("config.json");
+    if !config_pin.is_file() {
+        let required = std::env::var(REQUIRE_ENV).is_ok_and(|value| value == "1");
+        assert!(
+            !required,
+            "{REQUIRE_ENV}=1 was set, so a skip is a FAILURE: no production checkout at {}. \
+             Materialize it with `cd scripts/setfit_fixtures && uv run python \
+             fetch_full_weights.py`, or point APRENDER_MINILM_DIR at an existing one.",
+            checkout.display()
+        );
+        println!(
+            "[05-07] SKIPPED — no production checkout at {}. Set APRENDER_MINILM_DIR to a \
+             pinned all-MiniLM-L6-v2 directory, or run \
+             `cd scripts/setfit_fixtures && uv run python fetch_full_weights.py`. Export \
+             {REQUIRE_ENV}=1 to make this skip a failure.",
+            checkout.display()
+        );
+        return;
+    }
+    println!(
+        "[05-07] RAN — production checkout {} (config.json present)",
+        checkout.display()
+    );
+
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path();
+
+    // ------------------------------------------------------------------------------
+    // RUNG 0 — the mechanism, before anything is concluded from an exit code.
+    // ------------------------------------------------------------------------------
+    let version = run_apr(&["--version"], FAST_LIMIT);
+    version.expect_success("the pinned binary must execute before anything is read from it");
+    assert!(
+        !version.stdout.trim().is_empty(),
+        "the pinned binary produced an empty --version — the harness, not the CLI, is the \
+         thing under suspicion:\n{}",
+        version.transcript()
+    );
+    println!("[05-07] r0 --version: {}", version.stdout.trim());
+
+    // Rungs 1-2: the same two commands the slice chain runs, same recipe, same seed.
+    let (benchmark, selection) = prepare_phase2_inputs(root);
+    let config = write_train_config(root);
+    let artifact = root.join("model.apr");
+
+    // ------------------------------------------------------------------------------
+    // RUNG 1 (r1) — `setfit train` FOR REAL, against the production checkout.
+    //
+    // This is the exact invocation 04-15 measured at exit 6, with one argument changed. A zero
+    // here is the F-10 flip, observed rather than expected.
+    // ------------------------------------------------------------------------------
+    let train_argv = vec![
+        "--json".to_string(),
+        "setfit".to_string(),
+        "train".to_string(),
+        "--config".to_string(),
+        config.display().to_string(),
+        "--data".to_string(),
+        benchmark.display().to_string(),
+        "--selection".to_string(),
+        selection.display().to_string(),
+        "--model-dir".to_string(),
+        checkout.display().to_string(),
+        "--output".to_string(),
+        artifact.display().to_string(),
+    ];
+    let train_refs: Vec<&str> = train_argv.iter().map(String::as_str).collect();
+    let trained = run_apr(&train_refs, PRODUCTION_LIMIT);
+    trained
+        .expect_no_panic("a training run must return a typed verdict, not a backtrace")
+        .expect_success(
+            "THE FLIP. 04-15 measured this exact rung at exit 6 (ModelLoadFailed) because \
+             CALIBRATED_REGIMES admitted only the phase-3 slice. 05-03's calibration edit \
+             (a63bb130b) added the measured production regime. A nonzero exit here means the \
+             unblock did not reach the shipped binary, and the SUMMARY must say so rather than \
+             the test being relaxed",
+        );
+
+    // NON-EMPTY, not merely present. An existence check alone passes on a zero-byte file, and a
+    // zero-byte file is exactly what a truncated write leaves behind.
+    assert!(
+        artifact.is_file(),
+        "r1 exited 0, so the artifact it reported writing must be on disk at {}",
+        artifact.display()
+    );
+    let artifact_bytes = fs::metadata(&artifact)
+        .expect("the artifact's metadata is readable")
+        .len();
+    assert!(
+        artifact_bytes > 0,
+        "model.apr is ZERO BYTES. An existence check would have passed here; the byte length \
+         is what distinguishes a written artifact from a created-and-abandoned file"
+    );
+
+    let train_report = parse_json(&trained, "r1 `setfit train --json`");
+    let train_sha = hex64(&train_report, "/artifact_sha256", "r1's training report");
+    println!(
+        "[05-07] r1 setfit train: exit {} | model.apr = {artifact_bytes} bytes | \
+         artifact_sha256 = {train_sha}",
+        trained.code()
+    );
+
+    // ------------------------------------------------------------------------------
+    // RUNG 2 (r2) — `inspect --json`. This is ALSO the load proof.
+    //
+    // A byte length says the file is not empty; it says nothing about whether the bytes parse.
+    // `inspect` reads the header, the metadata and the SetFit document out of THIS file and
+    // hashes the whole of it, so a green r2 carrying a 64-hex digest is a statement about the
+    // artifact's contents rather than about its size.
+    // ------------------------------------------------------------------------------
+    let inspected = run_apr(
+        &["inspect", &artifact.display().to_string(), "--json"],
+        SLOW_LIMIT,
+    );
+    inspected
+        .expect_no_panic("inspect must return a typed verdict")
+        .expect_success("r2 reads the artifact r1 wrote — a separate process, one file between");
+    let inspect_report = parse_json(&inspected, "r2 `inspect --json`");
+    let inspect_sha = hex64(
+        &inspect_report,
+        "/setfit/artifact_sha256",
+        "r2's SetFit section",
+    );
+    assert_eq!(
+        inspect_report
+            .pointer("/setfit/schema")
+            .and_then(serde_json::Value::as_str),
+        Some("setfit-apr-v1"),
+        "r2 must report the contract's schema id, or the section is not the one this chain \
+         claims to have produced:\n{inspect_report:#}"
+    );
+    assert_eq!(
+        inspect_report
+            .pointer("/setfit/document_schema_valid")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "and the document must satisfy setfit-apr-v1's closed schema:\n{inspect_report:#}"
+    );
+    let ordered_labels: Vec<String> = inspect_report
+        .pointer("/setfit/ordered_labels")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        ordered_labels.len(),
+        3,
+        "the artifact must carry the corpus's three ordered labels:\n{inspect_report:#}"
+    );
+    println!("[05-07] r2 inspect: artifact_sha256 = {inspect_sha} | labels = {ordered_labels:?}");
+
+    // ------------------------------------------------------------------------------
+    // RUNG 3 (r3) — `eval --split validation --lock-out L`. The decision, COMMITTED.
+    // ------------------------------------------------------------------------------
+    let lock = root.join("lock.json");
+    let validation_argv = vec![
+        "eval".to_string(),
+        artifact.display().to_string(),
+        "--task".to_string(),
+        "classify".to_string(),
+        "--data".to_string(),
+        benchmark.display().to_string(),
+        "--selection".to_string(),
+        selection.display().to_string(),
+        "--split".to_string(),
+        "validation".to_string(),
+        "--lock-out".to_string(),
+        lock.display().to_string(),
+        "--json".to_string(),
+    ];
+    let validation_refs: Vec<&str> = validation_argv.iter().map(String::as_str).collect();
+    let validated = run_apr(&validation_refs, PRODUCTION_LIMIT);
+    validated
+        .expect_no_panic("the evaluator must return a typed verdict")
+        .expect_success(
+            "r3 reloads the artifact against the SAME --data and --selection r1 consumed. A \
+             refusal here would mean the reload door disagrees with the run that produced the \
+             bytes",
+        );
+    assert!(
+        lock.is_file(),
+        "r3 must leave lock.json on disk: r4 is a SEPARATE process and the FILE is the \
+         commitment"
+    );
+    let validation_row = parse_json(&validated, "r3 `eval --split validation --json`");
+    let validation_sha = hex64(&validation_row, "/artifact_sha256", "r3's evaluation row");
+    let lock_hash = hex64(&validation_row, "/lock/lock_hash", "r3's written lock");
+    assert_eq!(
+        validation_row
+            .pointer("/lock/role")
+            .and_then(serde_json::Value::as_str),
+        Some("written"),
+        "r3 WRITES the lock; a row that says 'consumed' would mean the two halves of the \
+         workflow have been transposed:\n{validation_row:#}"
+    );
+    println!(
+        "[05-07] r3 eval(validation): artifact_sha256 = {validation_sha} | lock_hash = \
+         {lock_hash} | accuracy = {}",
+        validation_row["value"]
+    );
+
+    // ------------------------------------------------------------------------------
+    // RUNG 4 (r4) — `eval --split test --selection-lock L`. Canonical test access, granted
+    //               only through the lock a PRIOR process wrote to disk.
+    // ------------------------------------------------------------------------------
+    let test_argv = vec![
+        "eval".to_string(),
+        artifact.display().to_string(),
+        "--task".to_string(),
+        "classify".to_string(),
+        "--data".to_string(),
+        benchmark.display().to_string(),
+        "--selection".to_string(),
+        selection.display().to_string(),
+        "--split".to_string(),
+        "test".to_string(),
+        "--selection-lock".to_string(),
+        lock.display().to_string(),
+        "--json".to_string(),
+    ];
+    let test_refs: Vec<&str> = test_argv.iter().map(String::as_str).collect();
+    let tested = run_apr(&test_refs, PRODUCTION_LIMIT);
+    tested
+        .expect_no_panic("the evaluator must return a typed verdict")
+        .expect_success(
+            "r4 is the POSITIVE half of TRN-07 that was unreachable in Phase 4: a fresh process \
+             reads the lock FILE r3 wrote, mints a test token, and is granted the canonical \
+             split",
+        );
+    let test_row = parse_json(&tested, "r4 `eval --split test --json`");
+    let test_sha = hex64(&test_row, "/artifact_sha256", "r4's evaluation row");
+    let consumed_lock_hash = hex64(&test_row, "/lock/lock_hash", "r4's consumed lock");
+    assert_eq!(
+        consumed_lock_hash, lock_hash,
+        "the lock r4 consumed must be the lock r3 wrote, hash for hash — that identity is the \
+         whole content of 'the lock travels between processes as a file'"
+    );
+    assert_eq!(
+        test_row
+            .pointer("/lock/role")
+            .and_then(serde_json::Value::as_str),
+        Some("consumed"),
+        "and r4 CONSUMES it:\n{test_row:#}"
+    );
+    println!(
+        "[05-07] r4 eval(test): artifact_sha256 = {test_sha} | lock_hash = {consumed_lock_hash} \
+         | accuracy = {} over {} rows",
+        test_row["value"], test_row["n_rows"]
+    );
+
+    // ------------------------------------------------------------------------------
+    // RUNG 5 (r5) — `predict --input <request document>`. The full eight-rung load ladder,
+    //               probe replay included, on the artifact this chain produced.
+    //
+    // `--input` rather than `--text` deliberately: it is the SHARED request document the HTTP
+    // surface accepts, so this rung exercises the same wire form both surfaces do.
+    // ------------------------------------------------------------------------------
+    let request = root.join("request.json");
+    fs::write(
+        &request,
+        br#"{"texts":["authored fixture test sample 0","authored fixture test sample 1"],"include_logits":false}"#,
+    )
+    .expect("the request document is writable");
+
+    let predicted = run_apr(
+        &[
+            "predict",
+            &artifact.display().to_string(),
+            "--input",
+            &request.display().to_string(),
+            "--json",
+        ],
+        PRODUCTION_LIMIT,
+    );
+    predicted
+        .expect_no_panic("predict must return a typed verdict")
+        .expect_success(
+            "r5 runs load_setfit_apr's FULL ladder, probe replay included. This is the rung the \
+             97-row slice closure could never reach: computing probe_unicode (canonical id \
+             5915) needs the production vocabulary",
+        );
+    let response = parse_json(&predicted, "r5 `predict --json`");
+    let predict_sha = hex64(&response, "/artifact_sha256", "r5's classify response");
+    let results = response
+        .pointer("/results")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("r5 must carry a results array:\n{response:#}"));
+    assert_eq!(
+        results.len(),
+        2,
+        "one result per requested text, in order:\n{response:#}"
+    );
+    for (index, result) in results.iter().enumerate() {
+        let label = result["label"]
+            .as_str()
+            .unwrap_or_else(|| panic!("result {index} must carry a label:\n{response:#}"));
+        assert!(
+            ordered_labels.iter().any(|known| known == label),
+            "result {index}'s label {label:?} is not one of the artifact's ordered labels \
+             {ordered_labels:?} — a classification into a label the head does not index is a \
+             defect, not a prediction"
+        );
+        let probabilities = result["probabilities"]
+            .as_array()
+            .unwrap_or_else(|| panic!("result {index} must carry probabilities:\n{response:#}"));
+        assert_eq!(
+            probabilities.len(),
+            ordered_labels.len(),
+            "one probability per ordered label:\n{response:#}"
+        );
+        let mass: f64 = probabilities
+            .iter()
+            .filter_map(serde_json::Value::as_f64)
+            .sum();
+        assert!(
+            (mass - 1.0).abs() < 1e-6,
+            "result {index}'s probability mass is {mass}, not 1 — a vector that does not sum to \
+             one is not a distribution:\n{response:#}"
+        );
+    }
+    println!(
+        "[05-07] r5 predict: artifact_sha256 = {predict_sha} | results = {}",
+        results.len()
+    );
+
+    // ------------------------------------------------------------------------------
+    // ONE ARTIFACT THROUGH EVERY SURFACE.
+    //
+    // Four independent processes each reported a digest for the file they had just read. The
+    // claim this chain exists to support is not "each rung exited 0" — it is that they were all
+    // talking about the SAME artifact, which is what OPS-02 means by a chain. `hex64` above
+    // already refused an absent, null or truncated digest, so none of these comparisons can be
+    // satisfied by two matching nothings.
+    // ------------------------------------------------------------------------------
+    for (surface, digest) in [
+        ("r2 inspect", &inspect_sha),
+        ("r3 eval(validation)", &validation_sha),
+        ("r4 eval(test)", &test_sha),
+        ("r5 predict", &predict_sha),
+    ] {
+        assert_eq!(
+            digest,
+            &train_sha,
+            "{surface} reported a different artifact SHA-256 than the training run that WROTE \
+             the file. Every rung read {}; one artifact through every surface is the claim, and \
+             two digests would mean some rung classified something else",
+            artifact.display()
+        );
+    }
+    println!(
+        "[05-07] ONE ARTIFACT: {train_sha} reported identically by train, inspect, \
+         eval(validation), eval(test) and predict"
     );
 }
 
