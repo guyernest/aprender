@@ -62,8 +62,8 @@ but NOT closed — `/gsd:secure-phase 04` has not run. Its verification is recon
   margin. Measuring all 40 cells (double the training compute) and minimal-then-extend (repeated
   contract edits, mid-benchmark failures possible) were both rejected.
 
-- **D-03: Fresh per-class ε and scale floors are derived from the production measurements, as a
-  SECOND regime entry.** The Phase 3 fixture entry stays byte-untouched, so `pv diff` shows a
+- **D-03: Fresh per-class ε and scale floors are derived from the production measurements, as a SECOND regime entry.**
+  The Phase 3 fixture entry stays byte-untouched, so `pv diff` shows a
   purely additive edit and Phase 1–3 gates keep their exact meaning. Reusing fixture ε was
   rejected as the exact non-transfer D-10(c) warns about: sparse embedding-table relative deltas
   shrink as vocabulary grows from the 97-row fixture closure to the full ~30k vocab. The
@@ -77,8 +77,8 @@ but NOT closed — `/gsd:secure-phase 04` has not run. Its verification is recon
 
 ### Statistical Claims Protocol
 
-- **D-05: Headline aggregation is mean ± sample (n−1) std with min/max, per cell and per shot
-  level.** Matches the SetFit paper's reporting convention so numbers are directly comparable to
+- **D-05: Headline aggregation is mean ± sample (n−1) std with min/max, per cell and per shot level.**
+  Matches the SetFit paper's reporting convention so numbers are directly comparable to
   published results; exactly recomputable from rows with closed-form arithmetic (EVAL-04). This
   closes the pre-recorded STATE.md blocker "Choose validation-only calibration and uncertainty
   estimators before collecting benchmark results" together with D-06/D-07.
@@ -89,8 +89,8 @@ but NOT closed — `/gsd:secure-phase 04` has not run. Its verification is recon
   "exactly recompute" is bit-level, and a bootstrap would put a resampling stream inside it.
   Stats functions get scipy/sklearn reference fixtures per the `glm_tests.rs:280` house precedent.
 
-- **D-07: Calibration diagnostics are top-label ECE + multiclass Brier, canonical validation
-  only.** The existing contract-bound `expected_calibration_error` / `brier_score`
+- **D-07: Calibration diagnostics are top-label ECE + multiclass Brier, canonical validation only.**
+  The existing contract-bound `expected_calibration_error` / `brier_score`
   (`aprender-core/src/calibration.rs`) are binary-only (`&[bool]` labels); this phase extends the
   surface with the standard multiclass pair, bound to explicit ordered labels. Per-class OvR
   suites were rejected as fixture-verification burden the claims don't need.
