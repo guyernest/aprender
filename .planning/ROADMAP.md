@@ -270,7 +270,45 @@ contract edit per Phase 3 D-10(c), never an inline relaxation by a Phase 5 execu
   4. A user can exactly recompute headline means, dispersion, uncertainty, and paired SetFit-versus-LoRA deltas from all stored rows, while any missing, selectively omitted, unmatched, or post-test-selected cell invalidates the report.
   5. A user can compare training time, cold/warm latency, throughput with batch/warmup boundaries, peak memory, artifact size, calibration, and classification quality measured from the same reloaded production artifacts.
 
-**Plans**: TBD
+**Branch base**: Phase 5 continues on `gsd/phase-2-contract-gate` per the 02-01 policy (phases
+2-4 all ride this branch; no PR has been opened — opening one is the human's call).
+
+**Plans**: 13 plans in 7 waves
+
+Plans:
+**Wave 1** *(the F-10 unblock work — D-01; nothing downstream runs until the edit lands)*
+
+- [ ] 05-01-PLAN.md — Production calibration measurement: freeze E/B from pinned setfit 1.1.3, timed s8 probe, boundary matrix, ε windows + proposed regime entry (NOT autonomous: conditional >1hr compute check-in)
+- [ ] 05-02-PLAN.md — Per-regime Thresholds restructuring (table_for lookup, fixture semantics byte-identical, len==1 preserved)
+
+**Wave 2** *(blocked on Wave 1 for 05-03; 05-04/05/06 are independent foundations)*
+
+- [ ] 05-03-PLAN.md — The three-place synchronized contract/code/test edit at the D-04 human checkpoint (NOT autonomous), one commit, pv diff evidence, 40-cell envelope coverage test
+- [ ] 05-04-PLAN.md — Numerics substrate: multiclass top-label ECE + Brier (calibration-v1-bound), f64 paired-t + frozen t_{0.975,9}, scipy/sklearn fixtures in the pinned uv env
+- [ ] 05-05-PLAN.md — setfit-benchmark-claims-v1.yaml + BenchRow/RunManifest (method-tagged, deny_unknown_fields, digest-verify-before-return) + $(CONTRACTS)/audit wiring
+- [ ] 05-06-PLAN.md — `apr finetune --task classify --selection-manifest` + explicit seed/val_split/early-stop control + A6 probe + run_classify_core shared entry
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 05-07-PLAN.md — Production chain proof: spawned train→inspect→eval(lock)→eval(test)→predict ladder green (04-15's rung 4 flips 6→0) + F-10 blast-radius prose re-audit
+- [ ] 05-08-PLAN.md — evaluate_rows_from_artifact per-row evaluator door + QualityBlock assembly (F_avg/MCC/confusion/validation-only ECE+Brier)
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 05-09-PLAN.md — `apr setfit bench run`: one cell per method, contracted resource protocol (cold/warm/throughput/peak-RSS), --record transport ingest, 40-cell driver script
+
+**Wave 5** *(blocked on Wave 4)*
+
+- [ ] 05-10-PLAN.md — bench_gate fail-closed verify + closed-form aggregation + `bench report` (estimation-first) + five in-band doctored negatives + non-vacuous Make/binding gates
+- [ ] 05-11-PLAN.md — lambda-vector checkpoint (A1: access + 9B base-weight hash, NOT autonomous) then the 40 LoRA GPU cells, transported + --record-ingested
+
+**Wave 6** *(blocked on Wave 5 — shared run-manifest file)*
+
+- [ ] 05-12-PLAN.md — The 40 SetFit CPU cells from reloaded production artifacts (NOT autonomous: compute pre-auth gate); 80/80 manifest closure + pairing spot-check
+
+**Wave 7** *(blocked on Wave 6)*
+
+- [ ] 05-13-PLAN.md — The 80-row report (exact-recompute demonstrated bit-for-bit) + D-11 qa refusal message + phase closing audit
 
 ## Progress
 
@@ -283,4 +321,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | Complete   | 2026-08-14 |
 | 4. APR Artifact and Production Parity | 22/22 | UAT passed, awaiting secure-phase |  |
-| 5. Benchmark and Claims Gate | 0/TBD | Not started | - |
+| 5. Benchmark and Claims Gate | 0/13 | Not started | - |
