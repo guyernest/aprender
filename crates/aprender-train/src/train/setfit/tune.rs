@@ -71,7 +71,7 @@ use super::config::{
 use super::epoch::epoch_pair_order;
 use super::evidence::{EvidenceRow, EvidenceSummary, ParameterClass, UpdateEvidence, Verdict};
 use super::reduce;
-use super::thresholds::Thresholds;
+use super::thresholds::{RegimeThresholds, Thresholds};
 use super::SetFitTrainError;
 
 /// The floor learning rate the reference schedule decays to.
@@ -1142,12 +1142,20 @@ pub(crate) fn validate_evidence(
     frozen_count: usize,
 ) -> Result<PassedEvidence, SetFitTrainError> {
     // (1) FAIL CLOSED OUTSIDE THE CALIBRATED REGIME — before any comparison.
-    if !thresholds.is_calibrated(&evidence.calibration_regime_id) {
+    //
+    // The refusal and the table are ONE lookup, deliberately. A membership check followed by a
+    // separate table read is two decisions that can disagree: the second one has to pick a
+    // table, and with more than one calibration in the constant the only thing it can pick
+    // without being told the regime is "the first", which is how fixture-scale epsilons would
+    // come to judge a production encoder. Here every threshold below is read out of
+    // `regime` — the table measured at THESE coordinates — so there is no reachable state in
+    // which a number is compared against a run the number was not measured on.
+    let Some(regime) = thresholds.table_for(&evidence.calibration_regime_id) else {
         return Err(SetFitTrainError::UncalibratedRegime {
             observed: evidence.calibration_regime_id.clone(),
             calibrated: thresholds.calibrated_regimes().iter().map(|s| (*s).to_string()).collect(),
         });
-    }
+    };
 
     let mut summary = EvidenceSummary::of(evidence, trainable_count, frozen_count)
         .map_err(|e| SetFitTrainError::Evidence { reason: e.to_string() })?;
@@ -1163,7 +1171,7 @@ pub(crate) fn validate_evidence(
     // (3) An all-ungated trainable set is unpassable too. Without this, freezing everything
     // EXCEPT the key biases would leave the gate with nothing to check and yield a pass.
     let gated: Vec<&EvidenceRow> =
-        evidence.rows.values().filter(|r| thresholds.of(r.class).gated).collect();
+        evidence.rows.values().filter(|r| regime.of(r.class).gated).collect();
     if gated.is_empty() {
         return Err(SetFitTrainError::NoTestifyingParameters {
             trainable_count,
@@ -1172,7 +1180,7 @@ pub(crate) fn validate_evidence(
     }
 
     // (4) Per-parameter predicates.
-    let worst = worst_failing_gated_parameter(&gated, thresholds, trainable_count, &evidence.rows)?;
+    let worst = worst_failing_gated_parameter(&gated, regime, trainable_count, &evidence.rows)?;
 
     if let Some(offender) = worst {
         return Err(SetFitTrainError::EvidenceRejected {
@@ -1185,7 +1193,7 @@ pub(crate) fn validate_evidence(
     // (5) The run-level sparse aggregate, LAST. Non-finite fails closed for the same reason
     // the per-parameter guard above does: `+inf <= floor` is false, so a diverged embedding
     // class would otherwise clear the run-level floor by having blown up.
-    let floor = thresholds.embedding_delta_floor();
+    let floor = regime.embedding_delta_floor();
     if !evidence.embedding_delta_median.is_finite() || evidence.embedding_delta_median <= floor {
         return Err(SetFitTrainError::EvidenceRejected {
             summary: Box::new(summary),
@@ -1220,13 +1228,13 @@ pub(crate) fn validate_evidence(
 /// are moved verbatim.
 fn worst_failing_gated_parameter(
     gated: &[&EvidenceRow],
-    thresholds: &Thresholds,
+    regime: &RegimeThresholds,
     trainable_count: usize,
     all_rows: &BTreeMap<String, EvidenceRow>,
 ) -> Result<Option<FailedParameter>, SetFitTrainError> {
     let mut worst: Option<(f64, FailedParameter)> = None;
     for row in gated {
-        let entry = thresholds.of(row.class);
+        let entry = regime.of(row.class);
         let Some(eps) = entry.eps else {
             // Unreachable while `gated` and `eps.is_some()` agree, which thresholds.rs
             // asserts. Fail closed rather than skip: a gated class without a threshold must

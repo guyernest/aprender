@@ -58,6 +58,12 @@ pub(crate) const CONTRACT_YAML: &str =
 /// Extending this set requires a calibration run on the target encoder AND a deliberate
 /// contract edit (D-10(c)). It is not something a downstream executor may widen inline to
 /// unblock a benchmark.
+///
+/// Since 05-02 the tables themselves carry their regime id, so this constant is the
+/// STRING-LIST form the contract-parse test compares against rather than the value the gate
+/// reads — dead in a non-test build, and deliberately still here: it is the declared set that
+/// `calibrated_regimes_are_exactly_the_tables_that_exist` holds the derived set against.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CALIBRATED_REGIMES: &[&str] = &[FIXTURE_REGIME];
 
 /// The Phase 3 fixture regime — the ONE regime anything here was measured in.
@@ -374,6 +380,12 @@ impl Thresholds {
     ///
     /// The predicate form of [`Self::table_for`], and implemented as exactly that: membership
     /// cannot answer "yes" for coordinates no table covers, because it IS the table lookup.
+    ///
+    /// The GATE calls `table_for`, not this — a verdict needs the table, and asking twice is
+    /// how the two answers get a chance to differ. This remains for the callers that genuinely
+    /// only need membership (the regime test suites, and the recorded-id documentation in
+    /// `mod.rs` that names it), which is why it is dead in a non-test build rather than gone.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub(crate) fn is_calibrated(&self, regime_id: &str) -> bool {
         self.table_for(regime_id).is_some()
@@ -389,16 +401,21 @@ impl Thresholds {
         self.regimes.iter().map(|entry| entry.regime).collect()
     }
 
-    /// The single calibrated table, for callers that predate per-regime tables.
+    /// The single calibrated table, for the TEST call sites that predate per-regime tables.
+    ///
+    /// `#[cfg(test)]`, and that is the load-bearing part: production code cannot read a
+    /// threshold without naming a regime, because the only accessors that do not take one do
+    /// not exist outside a test build. The gate resolves its table with [`Self::table_for`].
     ///
     /// # Panics
     ///
-    /// Once a SECOND regime is calibrated — deliberately, and this is the point of the panic
-    /// rather than "return the first". A regime-less threshold read has no answer when two
-    /// regimes were measured with different numbers, and answering with the first would apply
-    /// fixture-scale epsilons to a production encoder: the exact non-transfer D-10(c) forbids.
-    /// The plan that adds the second entry must route these callers through
-    /// [`Self::table_for`] with the regime they mean.
+    /// Once a SECOND regime is calibrated — deliberately, rather than "return the first". A
+    /// regime-less threshold read has no answer when two regimes were measured with different
+    /// numbers, and answering with the first would apply fixture-scale epsilons to a
+    /// production encoder: the exact non-transfer D-10(c) forbids. The plan that adds the
+    /// second entry must route these callers through [`Self::table_for`] with the regime they
+    /// mean, and this panic is what makes forgetting to do so impossible to miss.
+    #[cfg(test)]
     fn sole(&self) -> &RegimeThresholds {
         match self.regimes.as_slice() {
             [only] => only,
@@ -412,13 +429,15 @@ impl Thresholds {
     }
 
     /// The sole regime's entry for a class. See [`Self::sole`] for when this stops being a
-    /// well-posed question.
+    /// well-posed question, and why it is not available to production code.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn of(&self, class: ParameterClass) -> ClassThreshold {
         self.sole().of(class)
     }
 
     /// The sole regime's run-level sparse-class floor. See [`Self::sole`].
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn embedding_delta_floor(&self) -> f64 {
         self.sole().embedding_delta_floor()
