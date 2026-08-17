@@ -50,6 +50,36 @@
 //! Every field of every serialized struct here is a hash, a count or a measured norm. A
 //! timing field would make two identical runs serialize differently and would take TRN-06's
 //! bitwise claim with it.
+//!
+//! # The DERIVATION surface, and what its verdict does NOT establish (D-18, plan 05-14)
+//!
+//! The calibration matrices below derive an epsilon BASIS — a per-class window
+//! `[lower, upper]` a frozen epsilon would have to sit inside. Until plan 05-14 that window
+//! was only REPORTED: plan 05-01's four-cell combine exited `rc=0` while printing `EMPTY` for
+//! five of six classes, so a green derivation run was not evidence that an epsilon basis
+//! existed at all. `epsilon_basis` is now the single site that applies the window rule, and it
+//! returns a typed refusal when any class the run's regime GATES has no legal window. The
+//! required set is READ from that regime's frozen table (`Thresholds::table_for`); where no
+//! table resolves — the production regime's state today — EVERY class is required, because a
+//! class the contract has never recorded must not be exempted by omission.
+//!
+//! The RESIDUAL, stated rather than left to be discovered:
+//!
+//! - This makes an empty basis unable to coexist with a green run. It does **not** make a
+//!   non-empty basis SUFFICIENT. A window can be legal and still too thin to be worth
+//!   freezing — `eps/noise` is the column that speaks to that, and it is a judgement input,
+//!   not a gate.
+//! - Coverage can still be PROVISIONAL. A partial measurement stays legal deliberately (05-01's
+//!   per-pass resumable workflow depends on it) and is carried as a typed value rather than
+//!   banner prose, so a consumer cannot read a provisional basis as a freezable one. Collapse
+//!   fails and provisionality does not because, within a fixed rule, `lower` is monotone
+//!   non-decreasing and `upper` monotone non-increasing in the measured cells: a collapse seen
+//!   on a subset can never be cleared by measuring more, while a provisional basis genuinely
+//!   can still change.
+//! - The verdict is RULE-AGNOSTIC. It enforces that the emitted window is a non-empty interval
+//!   for every gated class; it does not choose the arithmetic that produces the bounds. That
+//!   arithmetic is `WINDOW_SAFETY_FACTOR` and the two lines beside it, which plan
+//!   05-03 revisits against 05-01's evidence with these tests still holding afterwards.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1590,6 +1620,884 @@ mod tests {
     /// the same vacuity that disqualified the pair-loss endpoint statistic.
     const NEAR_NULL_LR: f64 = 1e-8;
 
+    // -----------------------------------------------------------------------------------
+    // THE epsilon window rule — ONE site, fail-closed (D-18, plan 05-14)
+    // -----------------------------------------------------------------------------------
+
+    /// The symmetric safety factor the window rule applies to both edges.
+    ///
+    /// Named once because the rule used to be inline ARITHMETIC in two places — the fixture
+    /// matrix's basis table and the production matrix's — which is why plan 05-01's `eps/noise`
+    /// reporting defect had to be fixed twice to stop it surviving in a sibling report. Plan
+    /// 05-03 revisits this factor against 05-01's evidence; the verdict below does not depend on
+    /// its value.
+    const WINDOW_SAFETY_FACTOR: f64 = 10.0;
+
+    /// The measured aggregates one class contributes to the basis.
+    ///
+    /// The first four are what the window rule consumes; the last two are what the report
+    /// prints beside it. They travel together so the report cannot be rendered from one set of
+    /// numbers while the verdict is computed from another.
+    #[derive(Debug, Clone, Copy, Default, PartialEq)]
+    struct ClassAggregates {
+        /// Worst (largest) relative delta the 1e-30 control produced, across measured cells.
+        worst_ctrl: f64,
+        /// Worst (largest) relative delta the 1e-8 near-null control produced.
+        worst_nnull: f64,
+        /// Best (smallest) relative delta a real run produced — the binding upper edge.
+        best_real: f64,
+        /// Worst (largest) per-cell MEDIAN real delta, for the `median/min` spread column.
+        worst_median: f64,
+        /// The f32 rounding-noise floor a frozen epsilon has to clear.
+        noise_floor: f64,
+        /// Whether EVERY near-null row still satisfied the strict `||dTheta|| > 0` predicate.
+        near_null_moved_all: bool,
+    }
+
+    /// Whether a class's derived window is an interval at all.
+    ///
+    /// STRICT: a point is not an interval. Equal bounds carry no value epsilon can take, so
+    /// they are [`WindowStatus::Empty`] with an exceed factor of exactly 1.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum WindowStatus {
+        /// `lower < upper` — there is a value epsilon can take.
+        Legal,
+        /// The lower bound reached or exceeded the upper one.
+        Empty {
+            /// `lower / upper`, or infinity when `upper` is zero.
+            exceed_factor: f64,
+        },
+    }
+
+    /// How much of the boundary matrix a basis was derived from.
+    ///
+    /// TYPED rather than banner prose, so a consumer cannot read a provisional basis as a
+    /// freezable one. Provisional coverage is NOT a refusal: within a fixed rule `lower` is
+    /// monotone non-decreasing and `upper` monotone non-increasing in the measured cells, so a
+    /// collapse observed on a subset can never be cleared by measuring more, while a
+    /// provisional basis genuinely can still change.
+    #[derive(Debug, Clone, PartialEq)]
+    enum BasisCoverage {
+        /// Every cell of the boundary matrix was measured.
+        Complete,
+        /// A subset was measured; the absent cells are named.
+        Provisional {
+            /// How many cells were measured.
+            measured: usize,
+            /// How many the full boundary matrix has.
+            total: usize,
+            /// The cells that were NOT measured, in the full matrix's order.
+            missing: Vec<String>,
+        },
+    }
+
+    /// One class's row of the derived basis.
+    #[derive(Debug, Clone, PartialEq)]
+    struct BasisRow {
+        /// The class this row is about.
+        class: ParameterClass,
+        /// The measurements it was derived from.
+        aggregates: ClassAggregates,
+        /// The window's lower edge.
+        lower: f64,
+        /// The window's upper edge.
+        upper: f64,
+        /// Whether the window is an interval.
+        window: WindowStatus,
+        /// Whether this class must carry a legal window for the run to pass.
+        required: bool,
+        /// Whether a frozen table RESOLVED and declares this class ungated.
+        ///
+        /// Distinct from `!required`: with no table resolved every class is required and NO
+        /// class is declared-ungated, because there is no declaration to read.
+        declared_ungated: bool,
+    }
+
+    impl BasisRow {
+        /// `upper / noise_floor`, suppressed to `n/a` for an EMPTY window.
+        ///
+        /// That column is only meaningful while `upper` is a legal epsilon. Printing it for an
+        /// empty window yields a plausible-looking margin for a class that has no epsilon at
+        /// all; plan 05-01 tracked `1.51e1` for `attention_key_bias` across several reports
+        /// before noticing it was meaningless. Suppressed rather than fixed up, because there
+        /// is no correct value to print.
+        fn eps_over_noise(&self) -> String {
+            match self.window {
+                WindowStatus::Empty { .. } => "n/a".to_string(),
+                WindowStatus::Legal if self.aggregates.noise_floor > 0.0 => {
+                    format!("{:.2e}", self.upper / self.aggregates.noise_floor)
+                }
+                WindowStatus::Legal => "inf".to_string(),
+            }
+        }
+
+        /// The `window` column: `EXISTS`, or `EMPTY` carrying its exceed factor.
+        fn window_tag(&self) -> String {
+            match self.window {
+                WindowStatus::Legal => "EXISTS".to_string(),
+                WindowStatus::Empty { exceed_factor } => format!("EMPTY {exceed_factor:.2}x"),
+            }
+        }
+
+        /// The `gating` column — the annotation that makes an exclusion visible in the artifact
+        /// rather than inferable only from the absence of a failure.
+        fn gating_tag(&self) -> &'static str {
+            if self.declared_ungated {
+                "declared-ungated"
+            } else {
+                "required"
+            }
+        }
+
+        /// `worst_median / best_real`, the spread statistic the report already printed.
+        fn spread(&self) -> f64 {
+            if self.aggregates.best_real > 0.0 {
+                self.aggregates.worst_median / self.aggregates.best_real
+            } else {
+                f64::INFINITY
+            }
+        }
+    }
+
+    /// A derived epsilon basis: every class's window, what the regime required, and how much of
+    /// the boundary matrix it covers.
+    #[derive(Debug, Clone, PartialEq)]
+    struct EpsilonBasis {
+        /// The regime the basis was derived FOR — the id the gated set was looked up by.
+        regime_id: String,
+        /// Whether a frozen table resolved for that id.
+        table_resolved: bool,
+        /// The classes the resolved table gates, empty when no table resolved.
+        gated: Vec<&'static str>,
+        /// One row per [`ParameterClass::ALL`], in that order.
+        rows: Vec<BasisRow>,
+        /// How much of the boundary matrix was measured.
+        coverage: BasisCoverage,
+    }
+
+    impl EpsilonBasis {
+        /// One class's row. Total over [`ParameterClass::ALL`] by construction.
+        fn row(&self, class: ParameterClass) -> &BasisRow {
+            self.rows
+                .iter()
+                .find(|r| r.class == class)
+                .unwrap_or_else(|| panic!("every class has a basis row; {class} did not"))
+        }
+
+        /// The line that states the gated-set lookup's OWN answer.
+        ///
+        /// Printed so the declared-ungated annotations are traceable to a mechanism rather than
+        /// to an assumption, and so any later control can read the verdict's precondition off
+        /// the run instead of proxying it from source or contract text.
+        fn regime_table_line(&self) -> String {
+            if self.table_resolved {
+                format!(
+                    "REGIME TABLE FOR THE DERIVED REGIME: resolved for `{}` — gated classes: \
+                     [{}]\n",
+                    self.regime_id,
+                    self.gated.join(", "),
+                )
+            } else {
+                format!(
+                    "REGIME TABLE FOR THE DERIVED REGIME: absent — no frozen table covers `{}`, \
+                     so EVERY class is required to carry a legal window\n",
+                    self.regime_id,
+                )
+            }
+        }
+    }
+
+    /// One collapsed class, in the typed refusal.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct CollapsedClass {
+        /// The class tag.
+        class: &'static str,
+        /// Its window's lower edge.
+        lower: f64,
+        /// Its window's upper edge.
+        upper: f64,
+        /// `lower / upper`.
+        exceed_factor: f64,
+    }
+
+    /// The typed refusal: at least one class the regime GATES has no legal epsilon window.
+    ///
+    /// Carries the whole basis so the report can still be RENDERED and written on refusal — a
+    /// derivation whose numbers cannot be read is worse than one that fails loudly.
+    #[derive(Debug, Clone, PartialEq)]
+    struct CollapsedWindows {
+        /// The basis that was derived, refusal notwithstanding.
+        basis: EpsilonBasis,
+        /// Every gated class whose window is empty.
+        collapsed: Vec<CollapsedClass>,
+    }
+
+    impl fmt::Display for CollapsedWindows {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            writeln!(
+                f,
+                "EPSILON BASIS COLLAPSED: {} of {} classes have NO legal epsilon window, and \
+                 this regime requires every one of them",
+                self.collapsed.len(),
+                ParameterClass::ALL.len(),
+            )?;
+            writeln!(f, "  regime: {}", self.basis.regime_id)?;
+            writeln!(
+                f,
+                "  frozen table: {}",
+                if self.basis.table_resolved {
+                    format!("resolved — gated classes [{}]", self.basis.gated.join(", "))
+                } else {
+                    "absent — every class is required, because a class the contract has not \
+                     recorded cannot be exempted by omission"
+                        .to_string()
+                },
+            )?;
+            for c in &self.collapsed {
+                writeln!(
+                    f,
+                    "  {:<20} lower {:.3e} EXCEEDS upper {:.3e} by {:.2}x",
+                    c.class, c.lower, c.upper, c.exceed_factor,
+                )?;
+            }
+            write!(
+                f,
+                "  A run whose epsilon basis is empty for a gated class is not evidence that an \
+                 epsilon basis exists (D-18). Do not freeze an epsilon for a class listed above."
+            )
+        }
+    }
+
+    /// THE window rule. One site, called by BOTH matrices, fail-closed on collapse.
+    ///
+    /// `aggregates` is keyed by [`ParameterClass::tag`]; an absent class contributes zeroes, so
+    /// a class nothing was measured for is reported with a degenerate window rather than
+    /// silently dropped from the table.
+    ///
+    /// `measured_cells` and `full_matrix_cells` are compared to derive the typed coverage;
+    /// passing the same list twice states COMPLETE coverage by construction.
+    ///
+    /// # The required set is READ from the regime, never declared here
+    ///
+    /// The gated set comes from `Thresholds::frozen().table_for(regime_id)`. There is
+    /// deliberately no allowlist, no local constant and no environment override: the only way
+    /// to exempt a class from needing an epsilon is a recorded contract table, which is a
+    /// human-approved `pv diff`-flagged edit. Where no table resolves, EVERY class is required.
+    ///
+    /// # Errors
+    ///
+    /// [`CollapsedWindows`] when any REQUIRED class's window is empty. The refusal carries the
+    /// full basis so the caller can still render and write its report before failing — which is
+    /// also why it is BOXED: the refusal is deliberately the larger of the two variants, and an
+    /// unboxed `Result` would pay for it on every success return.
+    fn epsilon_basis(
+        regime_id: &str,
+        aggregates: &BTreeMap<&'static str, ClassAggregates>,
+        measured_cells: &[String],
+        full_matrix_cells: &[String],
+    ) -> Result<EpsilonBasis, Box<CollapsedWindows>> {
+        let frozen = Thresholds::frozen();
+        let table = frozen.table_for(regime_id);
+
+        let gated: Vec<&'static str> = match table {
+            Some(t) => ParameterClass::ALL
+                .into_iter()
+                .filter(|class| t.of(*class).gated)
+                .map(ParameterClass::tag)
+                .collect(),
+            None => Vec::new(),
+        };
+
+        let mut rows = Vec::with_capacity(ParameterClass::ALL.len());
+        for class in ParameterClass::ALL {
+            let agg = aggregates.get(class.tag()).copied().unwrap_or_default();
+            // The ONE strict-window comparison in this file. `10x` in the report's column
+            // headers names THIS factor; 05-03 edits the two lines above the comparison, never
+            // the comparison itself.
+            let lower = agg.worst_ctrl.max(agg.worst_nnull) * WINDOW_SAFETY_FACTOR;
+            let upper = agg.best_real / WINDOW_SAFETY_FACTOR;
+            let window = if lower < upper {
+                WindowStatus::Legal
+            } else {
+                WindowStatus::Empty {
+                    exceed_factor: if upper > 0.0 { lower / upper } else { f64::INFINITY },
+                }
+            };
+            let required = match table {
+                Some(t) => t.of(class).gated,
+                None => true,
+            };
+            rows.push(BasisRow {
+                class,
+                aggregates: agg,
+                lower,
+                upper,
+                window,
+                required,
+                declared_ungated: table.is_some() && !required,
+            });
+        }
+
+        // The missing-cell derivation the production matrix's PROVISIONAL banner already used,
+        // moved here rather than reimplemented — it is the same question and must not be able
+        // to answer it twice differently.
+        let missing: Vec<String> =
+            full_matrix_cells.iter().filter(|c| !measured_cells.contains(c)).cloned().collect();
+        let coverage = if missing.is_empty() {
+            BasisCoverage::Complete
+        } else {
+            BasisCoverage::Provisional {
+                measured: measured_cells.len(),
+                total: full_matrix_cells.len(),
+                missing,
+            }
+        };
+
+        let basis = EpsilonBasis {
+            regime_id: regime_id.to_string(),
+            table_resolved: table.is_some(),
+            gated,
+            rows,
+            coverage,
+        };
+
+        let collapsed: Vec<CollapsedClass> = basis
+            .rows
+            .iter()
+            .filter(|row| row.required)
+            .filter_map(|row| match row.window {
+                WindowStatus::Legal => None,
+                WindowStatus::Empty { exceed_factor } => Some(CollapsedClass {
+                    class: row.class.tag(),
+                    lower: row.lower,
+                    upper: row.upper,
+                    exceed_factor,
+                }),
+            })
+            .collect();
+
+        if collapsed.is_empty() {
+            Ok(basis)
+        } else {
+            Err(Box::new(CollapsedWindows { basis, collapsed }))
+        }
+    }
+
+    /// Render the basis section of a derivation report.
+    ///
+    /// Both matrices call this, so the fixture and production tables can no longer disagree.
+    /// `complete_heading` is the caller's own heading for a COMPLETE basis; a PROVISIONAL one
+    /// renders 05-01's banner verbatim instead.
+    ///
+    /// The verdict is NOT consulted here. A class the resolved table excludes from gating still
+    /// prints its row and, if empty, still appears in the `WINDOWS THAT DO NOT EXIST` block —
+    /// annotated, not omitted. The report and the verdict are separate surfaces.
+    fn render_epsilon_basis(basis: &EpsilonBasis, complete_heading: &str) -> String {
+        let mut out = String::new();
+        out.push('\n');
+        out.push_str(&basis.regime_table_line());
+
+        match &basis.coverage {
+            BasisCoverage::Complete => out.push_str(&format!("\n{complete_heading}\n")),
+            BasisCoverage::Provisional { measured, total, missing } => out.push_str(&format!(
+                "\nCROSS-CELL EPSILON BASIS — PROVISIONAL, NOT THE FROZEN EPSILON.\n\
+                 Derived from {measured} of {total} boundary cells. MISSING: {}.\n\
+                 The window rule takes the worst control and the best real across ALL measured \
+                 cells, so an unmeasured cell can still move best_real and shrink every window \
+                 below. Plan 05-03 must NOT freeze epsilon from this table.\n",
+                missing.join(", "),
+            )),
+        }
+
+        out.push_str(
+            "class                worst_ctrl    worst_nnull   best_real     10x_lower     \
+             10x_upper     noise_floor   eps/noise     nnull_moved   window        \
+             median/min    gating\n",
+        );
+        for row in &basis.rows {
+            out.push_str(&format!(
+                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13} \
+                 {:<13} {:<13} {:<13.1e} {}\n",
+                row.class.tag(),
+                row.aggregates.worst_ctrl,
+                row.aggregates.worst_nnull,
+                row.aggregates.best_real,
+                row.lower,
+                row.upper,
+                row.aggregates.noise_floor,
+                row.eps_over_noise(),
+                row.aggregates.near_null_moved_all,
+                row.window_tag(),
+                row.spread(),
+                row.gating_tag(),
+            ));
+        }
+
+        let empty: Vec<&BasisRow> =
+            basis.rows.iter().filter(|r| !matches!(r.window, WindowStatus::Legal)).collect();
+        if empty.is_empty() {
+            out.push_str("\nEvery class above has a non-empty window (10x_lower < 10x_upper).\n");
+        } else {
+            out.push_str(&format!(
+                "\nWINDOWS THAT DO NOT EXIST — {} of {} classes have NO legal epsilon\n",
+                empty.len(),
+                ParameterClass::ALL.len(),
+            ));
+            for row in &empty {
+                let factor = match row.window {
+                    WindowStatus::Empty { exceed_factor } => exceed_factor,
+                    WindowStatus::Legal => f64::NAN,
+                };
+                out.push_str(&format!(
+                    "  {:<20} lower {:.3e} EXCEEDS upper {:.3e} by {:.2}x{}\n",
+                    row.class.tag(),
+                    row.lower,
+                    row.upper,
+                    factor,
+                    if row.declared_ungated {
+                        " [declared-ungated by the resolved table — excluded from the VERDICT, \
+                         never from this report]"
+                    } else {
+                        ""
+                    },
+                ));
+            }
+            out.push_str(
+                "  The window rule is [10 x max(worst_ctrl, worst_nnull), best_real / 10]. When \
+                 the\n  lower bound exceeds the upper there is no value epsilon can take: it \
+                 cannot be both\n  10x above the strongest not-training signal and 10x below the \
+                 weakest training signal.\n  `eps/noise` reads `n/a` for these classes BY DESIGN \
+                 — that column divides `10x_upper`\n  by the noise floor, and `10x_upper` is not \
+                 a legal epsilon here. Do not freeze an epsilon\n  for a class listed above, and \
+                 do not read its suppressed margin as small rather\n  than absent.\n",
+            );
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The DEFAULT-SUITE falsification of the window verdict (D-18, plan 05-14)
+    //
+    // Every test below runs in a plain `cargo test -p aprender-train --lib --features setfit`:
+    // no `#[ignore]`, no env gate, no 86.7 MB checkout, no training. The aggregates are
+    // ordinary `f64` inputs, which is the whole point — a gate whose falsification needs an
+    // eight-hour job is a gate nobody falsifies.
+    //
+    // NAMING: every test here carries `epsilon_basis` in its name, PREFIXED (`evidence_...`)
+    // so that a grep for the bare window-rule definition still finds exactly one function
+    // rather than one per test. The verify block that gates this work filters on
+    // `epsilon_basis` and asserts a count floor, so a test named outside this convention would
+    // be a durable guard that the block never runs.
+    // -----------------------------------------------------------------------------------
+
+    /// A regime id no frozen table can ever cover.
+    ///
+    /// Its architecture component is not a real encoder fingerprint and never will be, so
+    /// `table_for` resolves `None` for it whatever plan 05-03 lands. That is what makes the
+    /// real-data regression test below RED BY CONSTRUCTION rather than state-dependent: it
+    /// cannot flip green when the production table is frozen.
+    const UNCALIBRATABLE_REGIME: &str =
+        "no-frozen-table-by-construction-05-14@0000000|seeds=13|cells=s64e1b16";
+
+    /// The production regime the 12 committed passes were measured in, verbatim from 05-01.
+    ///
+    /// Resolves NO table today (the architecture differs from the fixture slice's). Unlike
+    /// [`UNCALIBRATABLE_REGIME`] this one is a real id that 05-03 may eventually calibrate,
+    /// which is exactly why the DURABLE test does not use it.
+    const PRODUCTION_REGIME_TODAY: &str =
+        "minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=13|cells=s64e1b16";
+
+    /// A basis in which every class's window is legal: `lower = 1e-6 < upper = 1e-5`.
+    fn legal_aggregates() -> BTreeMap<&'static str, ClassAggregates> {
+        let mut out = BTreeMap::new();
+        for class in ParameterClass::ALL {
+            out.insert(
+                class.tag(),
+                ClassAggregates {
+                    worst_ctrl: 0.0,
+                    worst_nnull: 1.0e-7,
+                    best_real: 1.0e-4,
+                    worst_median: 5.0e-4,
+                    noise_floor: 1.0e-9,
+                    near_null_moved_all: false,
+                },
+            );
+        }
+        out
+    }
+
+    /// Collapse ONE class: `lower = 1e-3` against `upper = 1e-5`, a 100x exceedance.
+    fn collapse_one(
+        aggregates: &mut BTreeMap<&'static str, ClassAggregates>,
+        class: ParameterClass,
+    ) {
+        let entry = aggregates.get_mut(class.tag()).expect("every class has aggregates");
+        entry.worst_nnull = 1.0e-4;
+    }
+
+    /// One cell, measured, out of one — COMPLETE coverage.
+    fn one_cell() -> Vec<String> {
+        vec!["s8:13".to_string()]
+    }
+
+    #[test]
+    fn evidence_epsilon_basis_all_windows_legal_returns_the_success_value() {
+        let basis = epsilon_basis(&regime_id(), &legal_aggregates(), &one_cell(), &one_cell())
+            .expect("a basis whose every class has a legal window is not a refusal");
+
+        assert_eq!(basis.rows.len(), ParameterClass::ALL.len(), "one row per class");
+        for class in ParameterClass::ALL {
+            let row = basis.row(class);
+            assert_eq!(row.window, WindowStatus::Legal, "{class}: window should be legal");
+            // The rows carry their bounds and their noise-floor clearance, not just a verdict.
+            assert!(row.lower < row.upper, "{class}: bounds are an interval");
+            assert!(
+                row.eps_over_noise().starts_with('1'),
+                "{class}: eps/noise is 1e-5 / 1e-9 = 1.00e4, got {}",
+                row.eps_over_noise(),
+            );
+            assert!(row.aggregates.noise_floor > 0.0, "{class}: the noise floor is carried");
+        }
+        assert_eq!(basis.coverage, BasisCoverage::Complete);
+    }
+
+    #[test]
+    fn evidence_epsilon_basis_one_empty_gated_window_refuses_naming_class_and_factor() {
+        let mut aggregates = legal_aggregates();
+        collapse_one(&mut aggregates, ParameterClass::Embedding);
+
+        let collapse = epsilon_basis(&regime_id(), &aggregates, &one_cell(), &one_cell())
+            .expect_err(
+                "a class the fixture regime GATES with no legal window must refuse, not report",
+            );
+
+        assert_eq!(collapse.collapsed.len(), 1, "exactly one class collapsed");
+        let only = collapse.collapsed[0];
+        assert_eq!(only.class, "embedding");
+        // lower = 1e-4 * 10 = 1e-3; upper = 1e-4 / 10 = 1e-5; the factor is 100.
+        assert!(
+            (only.exceed_factor - 100.0).abs() < 1e-9,
+            "the refusal carries the exceed factor, got {}",
+            only.exceed_factor,
+        );
+        let rendered = collapse.to_string();
+        assert!(rendered.contains("embedding"), "the message names the class: {rendered}");
+        assert!(rendered.contains("100.00x"), "the message names the factor: {rendered}");
+    }
+
+    #[test]
+    fn evidence_epsilon_basis_exactly_equal_bounds_refuse_because_the_window_is_strict() {
+        // Chosen to be EXACT in binary f64: 2.0 * 10.0 == 20.0 and 200.0 / 10.0 == 20.0, so
+        // this is a genuine touching-bounds case and not a rounding artifact.
+        let mut aggregates = legal_aggregates();
+        let entry = aggregates
+            .get_mut(ParameterClass::LayerNormWeight.tag())
+            .expect("every class has aggregates");
+        entry.worst_nnull = 2.0;
+        entry.best_real = 200.0;
+
+        let collapse = epsilon_basis(&regime_id(), &aggregates, &one_cell(), &one_cell())
+            .expect_err("equal bounds are a point, not an interval; there is no value to freeze");
+
+        let only = collapse.collapsed[0];
+        assert_eq!(only.class, "layer_norm_weight");
+        assert!((only.lower - 20.0).abs() < f64::EPSILON, "lower is exactly 20.0");
+        assert!((only.upper - 20.0).abs() < f64::EPSILON, "upper is exactly 20.0");
+        assert!(
+            (only.exceed_factor - 1.0).abs() < f64::EPSILON,
+            "touching bounds exceed by exactly 1x, got {}",
+            only.exceed_factor,
+        );
+    }
+
+    #[test]
+    fn evidence_epsilon_basis_declared_ungated_moves_the_verdict_without_removing_the_row() {
+        // ONE empty window, placed on `attention_key_bias` — the class the fixture regime's
+        // frozen table declares ungated (`gated: false`).
+        let mut aggregates = legal_aggregates();
+        collapse_one(&mut aggregates, ParameterClass::AttentionKeyBias);
+
+        // (a) With the table RESOLVED, the declaration is read and the verdict is a success
+        // value — but the row survives, EMPTY, with its factor and its annotation.
+        let basis = epsilon_basis(&regime_id(), &aggregates, &one_cell(), &one_cell())
+            .expect("a class the resolved table declares ungated cannot collapse the verdict");
+        let row = basis.row(ParameterClass::AttentionKeyBias);
+        assert!(!row.required, "the table declares this class ungated");
+        assert!(row.declared_ungated, "and the row records that it was DECLARED, not merely lax");
+        assert!(matches!(row.window, WindowStatus::Empty { .. }), "the window is still empty");
+        let report = render_epsilon_basis(&basis, "HEADING");
+        assert!(report.contains("attention_key_bias"), "the row is not removed:\n{report}");
+        assert!(report.contains("EMPTY 100.00x"), "with its EMPTY status and factor:\n{report}");
+        assert!(report.contains("declared-ungated"), "and its annotation:\n{report}");
+
+        // (b) The two-sided partner: the SAME empty window on a class the SAME table gates.
+        let mut gated_side = legal_aggregates();
+        collapse_one(&mut gated_side, ParameterClass::ProjectionBias);
+        let collapse = epsilon_basis(&regime_id(), &gated_side, &one_cell(), &one_cell())
+            .expect_err("the identical window on a GATED class must refuse");
+        assert_eq!(collapse.collapsed[0].class, "projection_bias");
+        assert!(
+            (collapse.collapsed[0].exceed_factor - 100.0).abs() < 1e-9,
+            "the same window, so the same factor — only the declaration differs",
+        );
+
+        // (c) And the declaration is what moved it: the SAME aggregates as (a) under a regime
+        // that resolves NO table refuse, because an unrecorded class is never ungated by
+        // default.
+        let strict = epsilon_basis(UNCALIBRATABLE_REGIME, &aggregates, &one_cell(), &one_cell())
+            .expect_err("with no table resolved, every class is required");
+        assert_eq!(strict.collapsed[0].class, "attention_key_bias");
+        assert!(
+            !strict.basis.row(ParameterClass::AttentionKeyBias).declared_ungated,
+            "no table resolved means there is no declaration to read",
+        );
+    }
+
+    #[test]
+    fn evidence_epsilon_basis_without_a_resolved_table_every_class_is_required() {
+        assert!(
+            Thresholds::frozen().table_for(PRODUCTION_REGIME_TODAY).is_none(),
+            "the production regime is uncalibrated today — that is the state this test is about",
+        );
+
+        let basis_all_legal =
+            epsilon_basis(PRODUCTION_REGIME_TODAY, &legal_aggregates(), &one_cell(), &one_cell())
+                .expect("no table resolved is not by itself a refusal");
+        assert!(!basis_all_legal.table_resolved);
+        assert!(basis_all_legal.gated.is_empty(), "there is no gated set to report");
+        for class in ParameterClass::ALL {
+            assert!(basis_all_legal.row(class).required, "{class} is required with no table");
+        }
+        assert!(
+            basis_all_legal.regime_table_line().contains("absent"),
+            "the report states the lookup's own answer: {}",
+            basis_all_legal.regime_table_line(),
+        );
+
+        // The class the FIXTURE table would have exempted is required here.
+        let mut aggregates = legal_aggregates();
+        collapse_one(&mut aggregates, ParameterClass::AttentionKeyBias);
+        let collapse =
+            epsilon_basis(PRODUCTION_REGIME_TODAY, &aggregates, &one_cell(), &one_cell())
+                .expect_err("exemption by omission is exactly the hole this closes");
+        assert_eq!(collapse.collapsed[0].class, "attention_key_bias");
+    }
+
+    #[test]
+    fn evidence_epsilon_basis_coverage_is_typed_complete_or_provisional() {
+        let full = vec!["s8:13".to_string(), "s64:13".to_string()];
+
+        let complete = epsilon_basis(&regime_id(), &legal_aggregates(), &full, &full)
+            .expect("all windows legal");
+        assert_eq!(complete.coverage, BasisCoverage::Complete);
+
+        // A partial measurement stays LEGAL — provisional coverage is not a refusal.
+        let provisional = epsilon_basis(&regime_id(), &legal_aggregates(), &one_cell(), &full)
+            .expect("a provisional basis with all windows legal is a success value");
+        assert_eq!(
+            provisional.coverage,
+            BasisCoverage::Provisional {
+                measured: 1,
+                total: 2,
+                missing: vec!["s64:13".to_string()],
+            },
+            "and a consumer can still tell it apart from a freezable one",
+        );
+        let report = render_epsilon_basis(&provisional, "HEADING");
+        assert!(report.contains("PROVISIONAL, NOT THE FROZEN EPSILON"), "{report}");
+        assert!(report.contains("MISSING: s64:13"), "{report}");
+        assert!(
+            !report.contains("HEADING"),
+            "a provisional basis must not wear a complete heading"
+        );
+    }
+
+    #[test]
+    fn evidence_epsilon_basis_report_line_names_whether_a_table_resolved() {
+        let resolved = epsilon_basis(&regime_id(), &legal_aggregates(), &one_cell(), &one_cell())
+            .expect("all windows legal");
+        let line = resolved.regime_table_line();
+        assert!(line.starts_with("REGIME TABLE FOR THE DERIVED REGIME: resolved"), "{line}");
+        assert!(!line.contains("attention_key_bias"), "the gated set EXCLUDES it: {line}");
+        for class in [
+            "embedding",
+            "layer_norm_weight",
+            "layer_norm_bias",
+            "projection_weight",
+            "projection_bias",
+        ] {
+            assert!(line.contains(class), "the gated set names {class}: {line}");
+        }
+
+        let absent =
+            epsilon_basis(UNCALIBRATABLE_REGIME, &legal_aggregates(), &one_cell(), &one_cell())
+                .expect("all windows legal");
+        assert!(
+            absent.regime_table_line().starts_with("REGIME TABLE FOR THE DERIVED REGIME: absent"),
+            "{}",
+            absent.regime_table_line(),
+        );
+    }
+
+    /// Where the 12 banked passes of plan 05-01 live, as committed to the repository.
+    fn committed_calibration_store() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.planning/phases/05-benchmark-and-claims-gate/calibration-store")
+    }
+
+    /// The 12 committed passes still verify from their bytes, and the guard is NON-VACUOUS.
+    ///
+    /// Sidecars are COMPOUND-named — `<pass_stem>.evidence.json` / `<pass_stem>.meta.json` where
+    /// `<pass_stem>` is `{cell_label}-seed{seed}-{condition}`. There is no file called
+    /// `meta.json`, so an implementation that looked for one would discover zero sidecars,
+    /// verify zero pairs and PASS. The PAIR COUNT is therefore asserted FIRST: a guard that
+    /// verifies nothing is worse than no guard.
+    #[test]
+    fn evidence_epsilon_basis_committed_store_digests_verify() {
+        let store = committed_calibration_store();
+        let entries = std::fs::read_dir(&store).unwrap_or_else(|e| {
+            panic!("the committed calibration store must be readable at {}: {e}", store.display())
+        });
+
+        let mut pairs: Vec<(String, std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+        for entry in entries {
+            let path = entry.expect("a readable directory entry").path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(stem) = name.strip_suffix(".evidence.json") else { continue };
+            let meta_path = store.join(format!("{stem}.meta.json"));
+            assert!(
+                meta_path.is_file(),
+                "{stem}: the evidence file has no `{stem}.meta.json` beside it, so its digest \
+                 cannot be checked against anything",
+            );
+            pairs.push((stem.to_string(), path.clone(), meta_path));
+        }
+        pairs.sort();
+        assert_eq!(
+            pairs.len(),
+            12,
+            "expected the 12 banked passes of plan 05-01 under {}; found {}. A count of ZERO \
+             must FAIL here — a guard that discovers no pairs verifies nothing while reporting \
+             success.",
+            store.display(),
+            pairs.len(),
+        );
+
+        for (stem, evidence_path, meta_path) in &pairs {
+            let bytes = std::fs::read(evidence_path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", evidence_path.display()));
+            let meta: PassMeta = serde_json::from_slice(
+                &std::fs::read(meta_path)
+                    .unwrap_or_else(|e| panic!("cannot read {}: {e}", meta_path.display())),
+            )
+            .unwrap_or_else(|e| panic!("cannot parse {}: {e}", meta_path.display()));
+
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            assert_eq!(
+                hex::encode(hasher.finalize()),
+                meta.evidence_sha256,
+                "{stem}: the committed bytes do not hash to the recorded digest — the store is \
+                 corrupt, not stale",
+            );
+
+            let evidence: UpdateEvidence = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| panic!("cannot parse {}: {e}", evidence_path.display()));
+            assert_eq!(
+                evidence.to_canonical_bytes().expect("re-serialize committed evidence"),
+                *bytes,
+                "{stem}: the committed evidence does not round-trip; loading it lost information",
+            );
+        }
+        println!("committed calibration store: {} of 12 pairs verified", pairs.len());
+    }
+
+    /// THE DURABLE REAL-DATA REGRESSION TEST — red by construction, forever.
+    ///
+    /// The aggregates are the ones plan 05-01 MEASURED over the four banked cells
+    /// (`s8:13,s8:31,s8:53,s64:13`), copied from the PHASE-LEVEL FINDING table of
+    /// `05-01-calibration-measurements.md`: `worst_ctrl` is `0.0` for every class (the 1e-30
+    /// control wrote back bit-identical weights), so `worst_nnull` alone sets the lower bound.
+    ///
+    /// It derives under [`UNCALIBRATABLE_REGIME`], for which no table can ever resolve, so the
+    /// strict branch always applies. That is what makes it independent of whatever plan 05-03
+    /// lands: the `--ignored` four-cell combine is a state-dependent control on top of this;
+    /// THIS is the permanent guard.
+    #[test]
+    fn evidence_epsilon_basis_real_four_cell_aggregates_refuse_under_no_resolved_table() {
+        assert!(
+            Thresholds::frozen().table_for(UNCALIBRATABLE_REGIME).is_none(),
+            "this test's whole design is that no table resolves for `{UNCALIBRATABLE_REGIME}`; \
+             if one now does, the guard has stopped being red by construction and must be \
+             re-derived rather than relaxed",
+        );
+
+        // (worst_nnull, best_real) per class, measured — 05-01 PHASE-LEVEL FINDING.
+        let measured: [(ParameterClass, f64, f64); 6] = [
+            (ParameterClass::Embedding, 1.553e-4, 1.813e-3),
+            (ParameterClass::LayerNormWeight, 4.802e-7, 1.891e-4),
+            (ParameterClass::LayerNormBias, 9.844e-5, 7.112e-4),
+            (ParameterClass::ProjectionWeight, 1.051e-4, 1.231e-3),
+            (ParameterClass::ProjectionBias, 1.101e-4, 3.447e-4),
+            (ParameterClass::AttentionKeyBias, 9.278e-9, 1.714e-7),
+        ];
+        let mut aggregates: BTreeMap<&'static str, ClassAggregates> = BTreeMap::new();
+        for (class, worst_nnull, best_real) in measured {
+            aggregates.insert(
+                class.tag(),
+                ClassAggregates {
+                    worst_ctrl: 0.0,
+                    worst_nnull,
+                    best_real,
+                    worst_median: best_real,
+                    noise_floor: 0.0,
+                    near_null_moved_all: true,
+                },
+            );
+        }
+
+        let collapse = epsilon_basis(
+            UNCALIBRATABLE_REGIME,
+            &aggregates,
+            &["s8:13".to_string(), "s8:31".to_string(), "s8:53".to_string(), "s64:13".to_string()],
+            &["s8:13".to_string(), "s8:31".to_string(), "s8:53".to_string(), "s64:13".to_string()],
+        )
+        .expect_err(
+            "five of six classes have NO legal epsilon on the measured four-cell basis; a run \
+             that reports success on this data is the D-18 defect itself",
+        );
+
+        let named: Vec<&str> = collapse.collapsed.iter().map(|c| c.class).collect();
+        assert_eq!(
+            named,
+            vec![
+                "embedding",
+                "layer_norm_bias",
+                "projection_weight",
+                "projection_bias",
+                "attention_key_bias",
+            ],
+            "exactly the five 05-01 recorded; `layer_norm_weight` is the one that survives",
+        );
+
+        // The exceed factors 05-01 published, to two decimals.
+        let expected = [
+            ("embedding", 8.56),
+            ("layer_norm_bias", 13.84),
+            ("projection_weight", 8.54),
+            ("projection_bias", 31.94),
+            ("attention_key_bias", 5.41),
+        ];
+        for ((tag, want), got) in expected.iter().zip(collapse.collapsed.iter()) {
+            assert_eq!(*tag, got.class);
+            assert!(
+                (got.exceed_factor - want).abs() < 0.01,
+                "{tag}: 05-01 recorded {want}x, the shipped rule derives {}x",
+                got.exceed_factor,
+            );
+        }
+    }
+
     /// THE calibration matrix — `#[ignore]`d, and deliberately so.
     ///
     /// Twelve complete `run_tuning` passes over a real-weight MiniLM slice do not belong on
@@ -1755,49 +2663,40 @@ mod tests {
             max_of(&endpoint_deltas) - min_of(&endpoint_deltas),
         ));
 
-        report.push_str("\nCROSS-CELL EPSILON BASIS (03-06 freezes from these)\n");
-        report.push_str(
-            "class                worst_ctrl    worst_nnull   best_real     10x_lower     \
-             10x_upper     noise_floor   eps/noise     nnull_moved   window        \
-             median/min\n",
-        );
+        // The window rule and its verdict live in ONE place (D-18). The lower edge is the WORSE
+        // of the two controls: a frozen epsilon has to sit above anything a not-really-training
+        // run produced, and the 1e-8 control is the one that produces anything at all.
+        let mut aggregates: BTreeMap<&'static str, ClassAggregates> = BTreeMap::new();
         for class in ParameterClass::ALL {
-            let worst_ctrl = ctrl_max_across.get(class.tag()).copied().unwrap_or(0.0);
-            let best_real = real_min_across.get(class.tag()).copied().unwrap_or(0.0);
-            let worst_median = median_max_across.get(class.tag()).copied().unwrap_or(0.0);
-            let worst_nnull = near_null_max_across.get(class.tag()).copied().unwrap_or(0.0);
-            // The lower edge is the WORSE of the two controls: a frozen epsilon has to sit
-            // above anything a not-really-training run produced, and the 1e-8 control is the
-            // one that produces anything at all.
-            let lower = worst_ctrl.max(worst_nnull) * 10.0;
-            let upper = best_real / 10.0;
-            let spread = if best_real > 0.0 { worst_median / best_real } else { f64::INFINITY };
-            let noise_floor = noise_floor_across.get(class.tag()).copied().unwrap_or(0.0);
-            // Suppressed for an EMPTY window for the same reason as the production table: this
-            // column is `upper / noise_floor`, and `upper` is only a legal epsilon while
-            // `lower < upper`. See the production basis for the full note.
-            let window_exists = lower < upper;
-            let eps_over_noise = if !window_exists {
-                "n/a".to_string()
-            } else if noise_floor > 0.0 {
-                format!("{:.2e}", upper / noise_floor)
-            } else {
-                "inf".to_string()
-            };
-            report.push_str(&format!(
-                "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13} \
-                 {:<13} {:<13} {:.1e}\n",
+            aggregates.insert(
                 class.tag(),
-                worst_ctrl,
-                worst_nnull,
-                best_real,
-                lower,
-                upper,
-                noise_floor,
-                eps_over_noise,
-                near_null_moved_all.get(class.tag()).copied().unwrap_or(false),
-                if window_exists { "EXISTS" } else { "EMPTY" },
-                spread,
+                ClassAggregates {
+                    worst_ctrl: ctrl_max_across.get(class.tag()).copied().unwrap_or(0.0),
+                    worst_nnull: near_null_max_across.get(class.tag()).copied().unwrap_or(0.0),
+                    best_real: real_min_across.get(class.tag()).copied().unwrap_or(0.0),
+                    worst_median: median_max_across.get(class.tag()).copied().unwrap_or(0.0),
+                    noise_floor: noise_floor_across.get(class.tag()).copied().unwrap_or(0.0),
+                    near_null_moved_all: near_null_moved_all
+                        .get(class.tag())
+                        .copied()
+                        .unwrap_or(false),
+                },
+            );
+        }
+        // This matrix measures every cell it defines, so its coverage is COMPLETE by
+        // construction — stated by passing the same list twice rather than asserted in prose.
+        let fixture_cells: Vec<String> =
+            variants.iter().map(|v| format!("seed{}:{}", v.root_seed, v.label)).collect();
+        let basis_verdict =
+            epsilon_basis(&regime_id(), &aggregates, &fixture_cells, &fixture_cells);
+        {
+            let basis = match &basis_verdict {
+                Ok(basis) => basis,
+                Err(collapse) => &collapse.basis,
+            };
+            report.push_str(&render_epsilon_basis(
+                basis,
+                "CROSS-CELL EPSILON BASIS (03-06 freezes from these)",
             ));
         }
 
@@ -1895,6 +2794,12 @@ mod tests {
             panic!("the calibration report must be writable at {destination:?}: {e}")
         });
         println!("calibration report written to {}", destination.display());
+
+        // THE VERDICT, asserted only after the report has been written: a derivation whose
+        // numbers cannot be read is worse than one that fails loudly (D-18).
+        if let Err(collapse) = basis_verdict {
+            panic!("{collapse}");
+        }
     }
 
     // -----------------------------------------------------------------------------------
@@ -2892,121 +3797,72 @@ mod tests {
             "\nEMBEDDING DELTA MIN across measured cells: {embedding_delta_min_across:.3e}\n",
         ));
 
+        // The verdict, held until the report has been written to disk (D-18).
+        let mut basis_verdict: Option<Result<EpsilonBasis, Box<CollapsedWindows>>> = None;
         if full_conditions {
             // The header must say WHICH cells the basis covers, because the window rule is
             // defined across ALL measured cells and an unmeasured cell can still move
             // `best_real` and shrink every window below. A table headed "plan 05-03 freezes
             // from these" while half the boundary matrix is missing is an invitation to freeze
             // a number that the remaining cells would refute — which is exactly the false-green
-            // this report exists to prevent.
+            // this report exists to prevent. The banner and its missing-cell list are now
+            // derived from the TYPED coverage value `epsilon_basis` returns.
             let full_matrix: Vec<ProductionCell> = PRODUCTION_SHOTS
                 .iter()
                 .flat_map(|&shots| {
                     PRODUCTION_SEEDS.iter().map(move |&seed| ProductionCell { shots, seed })
                 })
                 .collect();
-            let missing: Vec<String> = full_matrix
-                .iter()
-                .filter(|c| !cells.contains(c))
-                .map(|c| format!("s{}:{}", c.shots, c.seed))
-                .collect();
-            if missing.is_empty() {
-                report.push_str(
-                    "\nCROSS-CELL EPSILON BASIS over the COMPLETE boundary matrix (plan 05-03 \
-                     freezes from these)\n",
-                );
-            } else {
-                report.push_str(&format!(
-                    "\nCROSS-CELL EPSILON BASIS — PROVISIONAL, NOT THE FROZEN EPSILON.\n\
-                     Derived from {} of {} boundary cells. MISSING: {}.\n\
-                     The window rule takes the worst control and the best real across ALL \
-                     measured cells, so an unmeasured cell can still move best_real and shrink \
-                     every window below. Plan 05-03 must NOT freeze epsilon from this table.\n",
-                    cells.len(),
-                    full_matrix.len(),
-                    missing.join(", "),
-                ));
-            }
-            report.push_str(
-                "class                worst_ctrl    worst_nnull   best_real     10x_lower     \
-                 10x_upper     noise_floor   eps/noise     nnull_moved   window        \
-                 median/min\n",
-            );
-            // Classes whose window is EMPTY, collected so the reason can be spelled out below
-            // the table rather than inferred from two columns the reader has to compare.
-            let mut empty_windows: Vec<(&'static str, f64, f64)> = Vec::new();
+            let measured_cells: Vec<String> =
+                cells.iter().map(|c| format!("s{}:{}", c.shots, c.seed)).collect();
+            let full_matrix_cells: Vec<String> =
+                full_matrix.iter().map(|c| format!("s{}:{}", c.shots, c.seed)).collect();
+
+            let mut aggregates: BTreeMap<&'static str, ClassAggregates> = BTreeMap::new();
             for class in ParameterClass::ALL {
-                let worst_ctrl = ctrl_max_across.get(class.tag()).copied().unwrap_or(0.0);
-                let best_real = real_min_across.get(class.tag()).copied().unwrap_or(0.0);
-                let worst_median = median_max_across.get(class.tag()).copied().unwrap_or(0.0);
-                let worst_nnull = near_null_max_across.get(class.tag()).copied().unwrap_or(0.0);
-                let lower = worst_ctrl.max(worst_nnull) * 10.0;
-                let upper = best_real / 10.0;
-                let spread = if best_real > 0.0 { worst_median / best_real } else { f64::INFINITY };
-                let noise_floor = noise_floor_across.get(class.tag()).copied().unwrap_or(0.0);
-                let window_exists = lower < upper;
-                if !window_exists {
-                    empty_windows.push((class.tag(), lower, upper));
-                }
-                // `eps/noise` is `upper / noise_floor`, and `upper` is only a legal epsilon when
-                // `lower < upper`. Printing it for an EMPTY window divides an illegal epsilon by
-                // the noise floor and yields a plausible-looking margin for a class that has no
-                // epsilon at all — this plan tracked such a number (`1.51e1` for
-                // attention_key_bias) across several reports before noticing it was meaningless.
-                // Suppressed rather than fixed up, because there is no correct value to print.
-                let eps_over_noise = if !window_exists {
-                    "n/a".to_string()
-                } else if noise_floor > 0.0 {
-                    format!("{:.2e}", upper / noise_floor)
-                } else {
-                    "inf".to_string()
-                };
-                report.push_str(&format!(
-                    "{:<20} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} {:<13.3e} \
-                     {:<13} {:<13} {:<13} {:.1e}\n",
+                aggregates.insert(
                     class.tag(),
-                    worst_ctrl,
-                    worst_nnull,
-                    best_real,
-                    lower,
-                    upper,
-                    noise_floor,
-                    eps_over_noise,
-                    near_null_moved_all.get(class.tag()).copied().unwrap_or(false),
-                    if window_exists { "EXISTS" } else { "EMPTY" },
-                    spread,
-                ));
-            }
-            if empty_windows.is_empty() {
-                report.push_str(
-                    "\nEvery class above has a non-empty window (10x_lower < 10x_upper).\n",
-                );
-            } else {
-                report.push_str(&format!(
-                    "\nWINDOWS THAT DO NOT EXIST — {} of {} classes have NO legal epsilon\n",
-                    empty_windows.len(),
-                    ParameterClass::ALL.len(),
-                ));
-                for (tag, lower, upper) in &empty_windows {
-                    report.push_str(&format!(
-                        "  {:<20} lower {:.3e} EXCEEDS upper {:.3e} by {:.2}x\n",
-                        tag,
-                        lower,
-                        upper,
-                        if *upper > 0.0 { lower / upper } else { f64::INFINITY },
-                    ));
-                }
-                report.push_str(
-                    "  The window rule is [10 x max(worst_ctrl, worst_nnull), best_real / 10]. \
-                     When the\n  lower bound exceeds the upper there is no value epsilon can \
-                     take: it cannot be both\n  10x above the strongest not-training signal and \
-                     10x below the weakest training signal.\n  `eps/noise` reads `n/a` for these \
-                     classes BY DESIGN — that column divides `10x_upper`\n  by the noise floor, \
-                     and `10x_upper` is not a legal epsilon here. Do not freeze an epsilon\n  \
-                     for a class listed above, and do not read its suppressed margin as small \
-                     rather\n  than absent.\n",
+                    ClassAggregates {
+                        worst_ctrl: ctrl_max_across.get(class.tag()).copied().unwrap_or(0.0),
+                        worst_nnull: near_null_max_across.get(class.tag()).copied().unwrap_or(0.0),
+                        best_real: real_min_across.get(class.tag()).copied().unwrap_or(0.0),
+                        worst_median: median_max_across.get(class.tag()).copied().unwrap_or(0.0),
+                        noise_floor: noise_floor_across.get(class.tag()).copied().unwrap_or(0.0),
+                        near_null_moved_all: near_null_moved_all
+                            .get(class.tag())
+                            .copied()
+                            .unwrap_or(false),
+                    },
                 );
             }
+
+            // The regime the basis is DERIVED FOR, in the calibrated-entry grammar: the
+            // architecture every pass rendered, plus every seed and every cell label this run
+            // measured. That is the shape 05-03 would freeze as a table entry, so the lookup
+            // below asks exactly the question the frozen table would have to answer.
+            let mut seeds: Vec<String> = cells.iter().map(|c| c.seed.to_string()).collect();
+            seeds.sort_unstable();
+            seeds.dedup();
+            let mut labels: Vec<String> = cells.iter().map(|c| c.label()).collect();
+            labels.sort_unstable();
+            labels.dedup();
+            let derived_regime =
+                format!("{architecture}|seeds={}|cells={}", seeds.join(","), labels.join(","));
+
+            let verdict =
+                epsilon_basis(&derived_regime, &aggregates, &measured_cells, &full_matrix_cells);
+            {
+                let basis = match &verdict {
+                    Ok(basis) => basis,
+                    Err(collapse) => &collapse.basis,
+                };
+                report.push_str(&render_epsilon_basis(
+                    basis,
+                    "CROSS-CELL EPSILON BASIS over the COMPLETE boundary matrix (plan 05-03 \
+                     freezes from these)",
+                ));
+            }
+            basis_verdict = Some(verdict);
         } else {
             report.push_str(
                 "\n(no control conditions in this mode — no epsilon basis is derivable from \
@@ -3034,6 +3890,13 @@ mod tests {
             panic!("the production calibration report must be writable at {destination:?}: {e}")
         });
         println!("production calibration report written to {}", destination.display());
+
+        // THE VERDICT, asserted only after the report has been written and its destination
+        // announced. Before plan 05-14 an empty epsilon basis was REPORTED beside `rc=0`; the
+        // four-cell combine printed `EMPTY` five times and exited zero (D-18 / 05-01 FINDING 3).
+        if let Some(Err(collapse)) = basis_verdict {
+            panic!("{collapse}");
+        }
     }
 
     /// D''s load-bearing precondition: the same pass, run in two SEPARATE processes, must
