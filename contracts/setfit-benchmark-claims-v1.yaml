@@ -741,9 +741,10 @@ falsification_tests:
     rule: OBLIG-CLAIMS-DETERMINISTIC-ORDER — the key sequence is pinned, not incidental
     prediction: >
       An ordering test asserts the EXACT first five and last five cell keys of
-      `RunManifest::expectation()`: `setfit/s8/seed13 .. setfit/s8/seed31` and
-      `lora/s64/seed43 .. lora/s64/seed53`. Iterating a hash-ordered map instead of the
-      contract order changes those sequences and turns the test red.
+      `RunManifest::expectation()`: `setfit/s8/seed13, setfit/s8/seed17, setfit/s8/seed23,
+      setfit/s8/seed29, setfit/s8/seed31` and `lora/s64/seed37, lora/s64/seed41,
+      lora/s64/seed43, lora/s64/seed47, lora/s64/seed53`. Iterating a hash-ordered map
+      instead of the contract order changes those sequences and turns the test red.
     test: cargo test -p aprender-train --lib --features setfit bench_row
     test_harness: cargo test -p aprender-train --lib --features setfit bench_row
     expected_output: 'test result: ok'
