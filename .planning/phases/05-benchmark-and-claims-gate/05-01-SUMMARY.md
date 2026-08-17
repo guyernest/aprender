@@ -78,39 +78,64 @@ coverage:
         status: pass
     human_judgment: false
   - id: D4
-    description: "Compute go/no-go for the 18-pass boundary matrix (8.29 h release / 285.8 h debug, both over the CLAUDE.md 60-minute check-in threshold)"
-    verification: []
+    description: "Compute go/no-go for the 18-pass boundary matrix (8.29 h release / 285.8 h debug, both over the CLAUDE.md 60-minute check-in threshold) — RESOLVED: human chose Option B, full matrix on lambda-vector"
+    verification:
+      - kind: other
+        ref: "coordinator message 2026-08-17: Option B, full contracted matrix, trims C1/C2/C3 and option D rejected"
+        status: pass
     human_judgment: true
-    rationale: "CLAUDE.md requires a human check-in BEFORE compute spend over 1 hour on non-lambda-vector hosts. The alternatives (run local, move to lambda-vector, trim the cell/seed subset) trade wall-clock against the strength of the D-02 margin argument, which is a judgement the executor cannot make."
+    rationale: "CLAUDE.md requires a human check-in BEFORE compute spend over 1 hour on non-lambda-vector hosts. Resolved by explicit human decision."
+  - id: D5
+    description: "Dispatch of the boundary matrix to lambda-vector — BLOCKED, host unreachable from this executor"
+    verification:
+      - kind: integration
+        ref: "ssh -o BatchMode=yes -o ConnectTimeout=5 lambda-vector hostname -> rc=255, 'Could not resolve hostname'; ping/dscacheutil/known_hosts/ssh-config/tailscale all negative"
+        status: fail
+    human_judgment: true
+    rationale: "No dispatch path to lambda-vector exists from this host. The coordinator explicitly forbade falling back to a local run, since that would spend the 8.29 h the decision redirected. Needs a human to provide network access or run the two recorded commands on the host directly."
 
-duration: 95min
+duration: 105min
 completed: 2026-08-17
-status: checkpoint
+status: blocked
 ---
 
 # Phase 5 Plan 01: Production Calibration Measurements Summary
 
 **The production calibration harness is built and green, E/B are frozen from the pinned
 environment, and the timed probe turned the boundary matrix from an unpriced assumption into a
-measured 8.3-hour job — which trips the compute check-in, so the matrix was not run.**
+measured 8.3-hour job; the human approved running it on lambda-vector, but that host is
+unreachable from this executor, so the matrix is still unrun and the plan is blocked on dispatch
+rather than on a decision.**
 
 ## Performance
 
-- **Duration:** ~95 min (of which ~35 min was the two timed probe runs)
+- **Duration:** ~105 min (of which ~35 min was the two timed probe runs)
 - **Tasks completed:** 1 of 3
-- **Commits:** 2 (`0763656a8` implementation, plus this metadata commit)
+- **Commits:** 3 (`0763656a8` implementation, plus two metadata commits)
 
-## Status: HALTED AT CHECKPOINT (compute gate)
+## Status: BLOCKED — compute gate resolved, dispatch target unreachable
 
-Plan 05-01 Task 1 step (4) is an explicit conditional stop:
+Two sequential stops, only the second still open.
 
-> if the projected boundary-matrix wall-clock exceeds 60 minutes, STOP after this task, report
-> the projection table as a checkpoint, and wait for the human's go/no-go.
+**Stop 1 (RESOLVED).** Plan 05-01 Task 1 step (4) is an explicit conditional halt: if the
+projected boundary-matrix wall-clock exceeds 60 minutes, stop and wait for a human go/no-go. The
+projection is **8.29 h** (release) / **285.8 h** (debug), so execution stopped and reported.
+The human chose **Option B — run the full contracted matrix (`{s8, s64}` × 3 seeds × 3
+conditions, 18 passes) on lambda-vector**, which is pre-authorized for compute; trims C1/C2/C3
+and option D were explicitly rejected because they weaken the D-02 margin argument.
 
-The projection is **8.29 h** (release profile) / **285.8 h** (debug profile). Both exceed the
-threshold by more than 8x, so execution stopped. **Tasks 2 and 3 were not started, the boundary
-matrix was not run, and no ε has been derived.** Nothing in this plan edits a contract, a
-threshold table, `tune.rs`, or any gate.
+**Stop 2 (OPEN).** *lambda-vector is not reachable from this executor.* `ssh -o BatchMode=yes
+lambda-vector` returns **rc=255, "Could not resolve hostname"**; DNS, `dscacheutil`,
+`known_hosts`, `~/.ssh/config` (one entry, `rvsc`, an AWS EC2 host), tailscale, and the repo's
+`scripts/` are all negative — the three `scripts/` mentions of lambda-vector are prose about its
+disk layout and GPU, not a dispatch path. The full evidence table is in the measurements file.
+
+**The matrix was NOT run locally.** That fallback was explicitly forbidden, and correctly so: it
+would have spent the 8.29 h the human's decision redirected and turned a pre-authorized spend
+into an unauthorized one.
+
+**Tasks 2 and 3 remain not started, the boundary matrix was not run, and no ε has been derived.**
+Nothing in this plan edits a contract, a threshold table, `tune.rs`, or any gate.
 
 ## Accomplishments
 
@@ -204,10 +229,31 @@ cannot be decided without the 1e-30 and 1e-8 controls — which is exactly what 
 matrix runs. Recorded now so the Task 2 re-derivation answers a question that was already open
 rather than one invented after seeing its own result.
 
-## The decision awaiting the human
+## The decision that was made, and what now blocks acting on it
 
-Full table with costs and evidence trade-offs is in the "COMPUTE GATE" section of
-`.planning/phases/05-benchmark-and-claims-gate/05-01-calibration-measurements.md`. In brief:
+The human chose **Option B — the full contracted matrix on lambda-vector**, which is
+pre-authorized for compute so the >1 hr check-in is *removed rather than waived*. Trims C1/C2/C3
+and option D were explicitly rejected for weakening the D-02 margin argument.
+
+**That decision cannot be executed from here: lambda-vector does not resolve.** Unblocking needs
+**one** of:
+
+1. A dispatch path from this host (a `~/.ssh/config` entry, a resolvable name or IP, or an
+   overlay network), after which a fresh executor resumes at Task 2; or
+2. A human running the two recorded commands directly on lambda-vector and returning
+   `$SETFIT_PRODUCTION_CALIBRATION_REPORT` (default `$TMPDIR/setfit-production-calibration.txt`)
+   plus `/tmp/matrix.log`. Task 2's transcription and Task 3's derivation then proceed with
+   nothing re-run.
+
+**A caveat for whoever dispatches it.** lambda-vector is a GPU host, but this measurement is
+CPU-bound by construction — `production_config` sets `device: "cpu"` and the SetFit contrastive
+trainer has no GPU path. Option B's benefit is *authorization*, not speed, exactly as the human's
+rationale said. The 8.29 h figure is this Apple-silicon box; **lambda-vector's wall-clock is
+unknown** and must be re-projected there with the same one-cell probe before the full matrix is
+launched. Carrying 8.29 h over as if it measured that host would be the "label a run by intent"
+error CLAUDE.md rule 2 forbids.
+
+The original options table, for the record:
 
 | # | Option | Cost | Evidence cost |
 |---|---|---|---|
@@ -218,9 +264,28 @@ Full table with costs and evidence trade-offs is in the "COMPUTE GATE" section o
 | C3 | Keep `{s8, s64}`, one seed | ~2.76 h | Loses cross-seed spread, which is what makes the window a window |
 | D | Pin a small explicit pair budget | ~38 min | **Flagged, not offered as equal** — the cell label does not record the budget, so cells would be labelled `s64e1b16` while having trained 64x less |
 
-Recommendation (non-binding): **B, else A.** Options C1–C3 buy time by weakening the margin
-argument in exactly the dimension the cross-AI review already flagged as this plan's soft spot
-(six measured cells as an engineering margin for the other 34).
+Recommendation as given at the time (non-binding): **B, else A.** Options C1–C3 buy time by
+weakening the margin argument in exactly the dimension the cross-AI review already flagged as
+this plan's soft spot (six measured cells as an engineering margin for the other 34). **The
+human chose B.**
+
+### Reachability evidence (mechanism, not intent — CLAUDE.md rule 2)
+
+Executing host read from the machine: `hostname` → `MacBook-Pro-7.local`;
+`uname -a` → `Darwin … RELEASE_ARM64_T6041 arm64`.
+
+| Probe | Result |
+|---|---|
+| `ping -c 1 lambda-vector` | `cannot resolve lambda-vector: Unknown host` |
+| `dscacheutil -q host -a name lambda-vector` | no records |
+| `ssh -o BatchMode=yes -o ConnectTimeout=5 lambda-vector hostname` | **rc=255**, `Could not resolve hostname` |
+| `grep -i '^Host ' ~/.ssh/config` | one entry, `rvsc` (AWS EC2 eu-west-1) — not lambda-vector |
+| `grep -ci lambda ~/.ssh/known_hosts` | `0` |
+| `command -v tailscale` | not installed |
+| `grep -rIn ssh scripts/` | no dispatch path; the three lambda-vector mentions are prose about its disk layout and GPU |
+| `memory/feedback_compute_pre_authorized.md` (named by CLAUDE.md) | not present |
+
+Every status was read directly (`cmd > log 2>&1; rc=$?`), never through a pipe (rule 1).
 
 ## Deviations from Plan
 
@@ -259,7 +324,16 @@ argument in exactly the dimension the cross-AI review already flagged as this pl
 
 ### Additions beyond the plan
 
-**4. Release-profile cross-check probe**
+**4. Dispatch-reachability probe for lambda-vector (after the checkpoint resolved)**
+- **Why:** The approved option names a specific host. Reporting "ran on lambda-vector" from
+  intent is exactly the CLAUDE.md rule 2 failure, so reachability was probed at the mechanism
+  level (DNS, directory service, non-interactive SSH, ssh-config, known_hosts, overlay network,
+  in-repo dispatch scripts) before any attempt to run. All seven paths were negative.
+- **Outcome:** Halted per the coordinator's explicit instruction rather than falling back to a
+  local run, which would have spent the 8.29 h the decision redirected and converted a
+  pre-authorized spend into an unauthorized one.
+
+**5. Release-profile cross-check probe**
 - **Why:** The debug projection (285.8 h) was far enough over the gate that the checkpoint's
   options depended on whether release closes the gap. "Release would fix it" is an assumption;
   CLAUDE.md verification rule 2 says prove the mechanism. The measurement cost ~4 minutes and
@@ -296,11 +370,23 @@ writes only a test harness and a planning document.
 
 ## Next Steps
 
-1. **Human go/no-go on the compute option** (A / B / C1 / C2 / C3).
-2. On approval, resume at **Task 2** — the boundary matrix. Nothing from Task 1 is re-run.
-3. Task 3 then derives ε, composes the proposed regime entry from a Task 2 rendered id, writes
+1. ~~Human go/no-go on the compute option~~ — **DONE: Option B, full matrix on lambda-vector.**
+2. **Provide a dispatch path to lambda-vector** (or run the two recorded commands there by hand
+   and return the report + `/tmp/matrix.log`). This is the only open blocker.
+3. Re-project on that host with the one-cell probe *before* launching the full matrix — its
+   wall-clock is unknown and 8.29 h is this box's number, not lambda-vector's.
+4. Resume at **Task 2** — the boundary matrix, in `--release`. Nothing from Task 1 is re-run.
+5. Task 3 then derives ε, composes the proposed regime entry from a Task 2 rendered id, writes
    the MEASURED-vs-COVERED table, and runs the two-cell prospective validation.
-4. Plan 05-03 carries the deliberate three-place edit to the D-04 checkpoint.
+6. Plan 05-03 carries the deliberate three-place edit to the D-04 checkpoint.
+
+**The `attention_key_bias` verdict is the item to watch.** It is the open question from the
+probe and 05-03's contract edit depends on it: the fixture leaves that class **ungated** on the
+gradient-free argument (`dL/db_k = 0` by softmax shift-invariance), but at production scale it
+shows `grad_norm_max = 8.084e-10` and `real_min relative_delta = 1.714e-7`, ~150× its own
+`rounding_noise_floor` of `1.133e-9`. Task 2's 1e-30 and 1e-8 controls decide it. If the
+gradient-free argument does **not** survive production scale, that changes the proposed regime
+entry and must be surfaced loudly, not absorbed.
 
 **Note for 05-03:** the `cells=` component of the proposed entry is already determined by the
 frozen E/B — `s8e1b16,s16e1b16,s32e1b16,s64e1b16` — and the architecture component is already

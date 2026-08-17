@@ -287,3 +287,99 @@ other 34). Paying 8.3 h once is cheaper than defending a thinner envelope at the
 
 Resuming after a go/no-go needs only Task 2 onward; nothing above is re-run.
 
+---
+
+## COMPUTE GATE RESOLVED — Option B chosen; dispatch BLOCKED
+
+**Human decision (recorded 2026-08-17): Option B — run the full contracted boundary matrix on
+the lambda-vector host.** Full matrix as specified: `{s8, s64}` × seeds `{13, 31, 53}` ×
+`{real, control, near-null}` = 18 passes. Trims C1/C2/C3 rejected; option D rejected. The
+rationale on record: lambda-vector is pre-authorized for compute per CLAUDE.md, so the >1 hr
+check-in requirement is *removed rather than waived*, and it costs zero evidence.
+
+**The dispatch could not be performed: `lambda-vector` is not reachable from this host.**
+
+### The reachability evidence (mechanism, not intent — CLAUDE.md verification rule 2)
+
+Executing host, read from the machine rather than assumed:
+
+```text
+$ hostname
+MacBook-Pro-7.local
+$ uname -a
+Darwin MacBook-Pro-7.local 25.6.0 ... RELEASE_ARM64_T6041 arm64
+```
+
+Every resolution and connection path was tried, and each failed:
+
+| Probe | Command | Result |
+|---|---|---|
+| DNS / mDNS | `ping -c 1 lambda-vector` | `ping: cannot resolve lambda-vector: Unknown host` |
+| Directory service | `dscacheutil -q host -a name lambda-vector` | no records returned |
+| SSH (non-interactive) | `ssh -o BatchMode=yes -o ConnectTimeout=5 lambda-vector hostname` | **rc=255** — `ssh: Could not resolve hostname lambda-vector: nodename nor servname provided, or not known` |
+| SSH client config | `grep -i '^Host ' ~/.ssh/config` | one entry only: `rvsc  ec2-54-72-80-139.eu-west-1.compute.amazonaws.com` — an AWS EC2 box, not lambda-vector |
+| Known hosts | `grep -ci lambda ~/.ssh/known_hosts` | `0` |
+| Overlay network | `command -v tailscale` | not installed |
+| In-repo dispatch path | `grep -rIn ssh scripts/` | no script dispatches to lambda-vector; the three `scripts/` hits naming it are prose comments about its disk layout and GPU, not a connection |
+| Named pre-auth doc | `~/.claude/projects/…/memory/feedback_compute_pre_authorized.md` | not present (the memory dir holds six unrelated files) |
+
+Every status above was read directly (`cmd > log 2>&1; rc=$?`), never through a pipe
+(CLAUDE.md verification rule 1).
+
+**The matrix was NOT run locally.** Falling back to the local box would have spent the 8.29 h the
+human's decision explicitly redirected, and would have converted a pre-authorized spend into an
+unauthorized one. Execution halted instead.
+
+### A caveat the next dispatcher needs
+
+lambda-vector is a **GPU** host, but this measurement is **CPU-bound by construction**:
+`production_config` sets `device: "cpu"`, and the SetFit contrastive trainer has no GPU path.
+So option B's benefit is *authorization*, not speed — exactly as the human's rationale stated.
+The 8.29 h figure is this box's Apple-silicon CPU; **lambda-vector's wall-clock is unknown and
+could be higher or lower**, and must be re-projected there with the same one-cell probe before
+the full matrix is launched. Do not carry 8.29 h over as if it were a measurement of that host —
+that is precisely the "label a run by intent" error.
+
+### Exact commands to run once a dispatch path exists
+
+```bash
+# 0. prerequisite: materialize the 86.7 MB pinned checkout on the target host
+cd scripts/setfit_fixtures && uv run python fetch_full_weights.py
+
+# 1. re-project on THAT host first (one cell, REAL only) — same gate discipline
+CARGO_INCREMENTAL=0 APRENDER_CALIBRATION_PROBE=1 \
+  cargo test --release -p aprender-train --lib --features setfit production_calibration \
+  -- --ignored --nocapture > /tmp/probe.log 2>&1
+rc=$?
+
+# 2. the full 18-pass boundary matrix (probe env var unset)
+CARGO_INCREMENTAL=0 \
+  cargo test --release -p aprender-train --lib --features setfit production_calibration \
+  -- --ignored --nocapture > /tmp/matrix.log 2>&1
+rc=$?
+```
+
+`--release` is correct and is **not** a weakening of the calibration: the debug/release
+bit-identity proven above means the profile is a price, not a degree of freedom. A reader who
+does not know that will assume a release-mode calibration is the weaker one, so it is stated
+here explicitly as well as in the cross-check section.
+
+The harness writes its report to `$SETFIT_PRODUCTION_CALIBRATION_REPORT` (default
+`$TMPDIR/setfit-production-calibration.txt`), which is the artifact to transport back — a
+summarizing wrapper around `cargo test` drops `--nocapture` output entirely.
+
+### What Task 2 still owes when it runs
+
+- 6 per-cell tables (`s8`/`s64` × seeds 13/31/53) over every `ParameterClass`, with the columns
+  the contract's DERIVATION invariant names.
+- `ctrl_max < real_min` recorded for every gated class in every cell (the harness asserts it).
+- At least one full regime id quoted verbatim, architecture component
+  `minilm-slice-h384-l6-a12-i1536-v30522@1110a243`.
+- The **`attention_key_bias` verdict**, which is the open question from the probe and is
+  load-bearing for 05-03: at production scale that class shows
+  `grad_norm_max = 8.084e-10` and `real_min relative_delta = 1.714e-7`, about 150× its own
+  `rounding_noise_floor` of `1.133e-9`. The fixture leaves the class **ungated** on the
+  gradient-free argument (`dL/db_k = 0` by softmax shift-invariance). The 1e-30 and 1e-8
+  controls decide whether that argument survives production scale. If it does **not**, that
+  changes 05-03's proposed regime entry and must be surfaced loudly, not absorbed.
+
