@@ -39,7 +39,7 @@ actuals:
   tasks: 0
   commits: 1
 
-status: blocked
+status: halted
 ---
 
 # Phase 5 Plan 03: Epsilon Basis Decision — HALTED (host blocker, nothing landed)
