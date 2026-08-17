@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 5 planned (13 plans, 7 waves), ready to execute
+stopped_at: Phase 5 replanned from cross-AI review (13 plans, 8 waves), ready to execute
 last_updated: "2026-08-17T01:50:58.888Z"
 last_activity: 2026-08-17 -- Phase 5 planning complete
 progress:
@@ -28,7 +28,19 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 Phase: 04 (apr-artifact-and-production-parity) — EXECUTED, UAT COMPLETE, NOT YET CLOSED
 Plan: 22 of 22 executed
 Status: Phase 04 still awaiting `/gsd:secure-phase 04` (security enforcement ON, no 04-SECURITY.md).
-Phase 05 is PLANNED — 13 plans in 7 waves, verification passed — and ready to execute.
+Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
+against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
+consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
+(its `f1_average_for_classes(&[1,2])` "off-by-one fix" would have INVERTED the phase's headline
+metric — the ordered labels really are `["none","against","favor"]`). Structural changes worth
+knowing before execution: (a) 05-06 gains a tracer task that must PROVE the LoRA
+adapter-save → fresh-process-reload → ordered-probability-vector route before any 9B compute is
+spent — the code confirms the gap (`ClassifyPipeline::from_apr` builds FRESH LoRA layers,
+`forward_only_tokenized` returns `(loss, class)` not a probability vector); (b) 05-11 and 05-12
+now depend on 05-10, so the 80 expensive cells cannot be generated before the gate that judges
+them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
+fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
+a separate, separately-labelled field.
 Last activity: 2026-08-17 -- Phase 5 planning complete
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
