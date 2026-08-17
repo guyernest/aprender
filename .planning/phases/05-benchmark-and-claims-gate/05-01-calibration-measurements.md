@@ -857,6 +857,55 @@ reason to warn, not to block an authorized run. This exists because the final re
 panics on failure: exhausting the disk at the end of a ~54 min pass destroys it at its last
 step.
 
+### D′ pass 1 of 9 BANKED — `s64:13:real`
+
+The first s64 pass to survive and be persisted. It is committed as a reviewable artifact rather
+than only summarised in prose:
+
+```text
+.planning/phases/05-benchmark-and-claims-gate/calibration-store/
+  s64e1b16-seed13-real.evidence.json   67 697 bytes
+  s64e1b16-seed13-real.meta.json
+```
+
+```text
+[progress] pass done: seed=13 cell=s64e1b16 condition=real device=Cpu steps=1536 \
+  wall_clock=3327.1s regime=minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=13|cells=s64e1b16
+[persist] s64e1b16-seed13-real evidence_sha256=23e8b60da8773216d36f15b6280c0858ffc6faf06583f2500cc5ef7122700665
+STATUS: PARTIAL — one persisted pass … No separation assertion has run
+```
+
+`shasum -a 256` on the committed file reproduces `23e8b60d…0665` independently of the harness
+that wrote it. `steps=1536` again, and the regime id is **byte-identical** to the one the lost
+chunk rendered — the same pass, reproduced, and this time kept.
+
+**The banner is `STATUS: PARTIAL`, correctly.** One condition cannot support
+`ctrl_max < real_min`; nothing is claimed here beyond one persisted table.
+
+**A finding that matters for the remaining eight passes: this pass took 3 327.1 s = 55.45 min,
+against a measured survivable window of ~55.8 min.** It fit with about **20 seconds of
+headroom** — and it ran 2.5 % slower than the lost chunk's 3 246.2 s for exactly the same 1 536
+steps, so the variance is real and the margin is inside it. D′ is therefore the right shape for
+reasons beyond convenience: at this margin some passes will lose the race, and the only thing
+that makes that acceptable is that a lost pass now costs **one pass, retryable**, instead of a
+2.71 h cell. Expect retries and treat them as normal operation, not as failures.
+
+### Recommendation: re-bank the nine s8 passes into the store (~8 min)
+
+The s8 half was measured before D′ existed, so its numbers live only as text in this file while
+the store holds s64 tables. That leaves the cross-cell epsilon basis — worst control and best
+real *across all measured cells* — to be assembled by hand from two different media.
+
+Re-running the nine s8 passes under `APRENDER_CALIBRATION_PASS` costs about **8 minutes total**
+(s8 measured 49–65 s per pass), after which `APRENDER_CALIBRATION_COMBINE="s8:13,s8:31,s8:53,
+s64:13,s64:31,s64:53"` derives the whole basis mechanically from the persisted tables, with the
+separation assertion running over all six cells in one place. That removes a transcription step
+from the number 05-03 freezes ε from.
+
+Not done here, because the standing instruction is one pass per dispatch and this is nine — but
+the instruction's purpose (a 54-min pass against a ~55.8-min window) does not bind at s8, where
+a pass is under a minute. Flagged for the coordinator to dispatch rather than assumed.
+
 ### What Task 3 still owes once the s64 half lands
 
 Frozen ε per class (window upper edge rounded DOWN to two significant figures) with noise-floor

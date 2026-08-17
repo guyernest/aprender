@@ -149,6 +149,17 @@ of 18, and is halted for a decision on execution shape.**
 The compute gate was resolved twice: first Option B (lambda-vector), which proved unreachable;
 then **Option A — run the full matrix locally in release, ~8.29 h explicitly authorized**.
 
+**D′ is implemented, its precondition is PROVEN, and the first s64 pass is banked.** Cross-process
+determinism was proven before any s64 compute was spent: two fresh processes running the same
+s8 pass persisted **bit-identical** evidence (`5838b3d2…57dc`, 48 555 bytes) while disagreeing by
+12.35 s of wall clock — confirmed both by the in-tree test
+`cross_process_determinism_of_persisted_evidence` and independently at the shell. Then
+`s64:13:real` ran to completion and was persisted:
+`s64e1b16-seed13-real.evidence.json`, `evidence_sha256=23e8b60d…0665`, `steps=1536`,
+`wall_clock=3327.1s`. **1 of 9 s64 passes banked; STATUS: PARTIAL** — one condition supports no
+separation assertion. Note the margin: 55.45 min against a ~55.8 min window, ~20 s of headroom,
+so expect some passes to need retrying — which under D′ costs one pass, not a cell.
+
 **A′ chunk 1 (`s64:13`) was attempted and killed at 55.8 min with 1 of 3 passes done and no
 tables written.** It did yield the decisive measurement: an s64 pass costs **3 246.2 s
 (54.1 min)** at `steps=1536` (the closed form confirmed at the far end of the envelope), against
@@ -460,13 +471,16 @@ writes only a test harness and a planning document.
 3. **Decide the execution shape for the s64 half (~8.12 h, re-measured).** The only open
    blocker. A′ and B′ are now refuted by measurement (2.71 h per cell against a ~55.8 min
    window):
-   - **D′ (recommended)** — add per-CONDITION persistence so each pass writes its own
-     per-parameter table and a final cheap invocation performs the separation assertion over the
-     persisted numbers. A chunk becomes one 54.1-min pass and, critically, **retryable**: a kill
-     costs one pass instead of a whole cell. No change to what is measured, and it produces
-     exactly the artifact an off-host run would need to transport back.
-   - **C′** — a human runs the s64 half outside this session (no task-lifetime ceiling) and
-     returns the three `STATUS: COMPLETE` reports. Works today, no code change.
+   - **D′ is now BUILT and PROVEN, and 1 of 9 s64 passes is banked.** The remaining **8 passes**
+     are dispatchable one at a time, each ~55 min and retryable:
+     `s64:13:control`, `s64:13:near-null`, then the six for seeds 31 and 53. After a cell's three
+     conditions are banked, `APRENDER_CALIBRATION_COMBINE="s64:13"` runs the separation assertion
+     over them in seconds, with no training.
+   - **Recommended alongside:** re-bank the nine s8 passes into the same store (~8 min total,
+     since an s8 pass is under a minute). Then one `COMBINE` over all six cells derives the
+     cross-cell epsilon basis mechanically, instead of 05-03 assembling it by hand from prose.
+   - **C′** — a human runs the remainder outside this session. Still available, and now cheaper
+     to hand over: the store format is exactly the artifact an off-host run would transport back.
    - ~~A′ (per-seed cell chunks)~~ / ~~B′ (one relaunch)~~ — refuted; a cell cannot fit the
      window and cannot be subdivided without moving the assertion off the measurement.
 4. Finish the **`attention_key_bias` verdict** with the s64 evidence.
