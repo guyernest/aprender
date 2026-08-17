@@ -1025,6 +1025,37 @@ zero, the lower bound is set entirely by the **near-null (1e-8)** leg and the up
 real passes of seeds 31 and 53. The control passes, while still required for the assertion, can
 no longer shrink anything.
 
+### METHOD NOTE — a number derived from a failure is not a measurement of capacity
+
+This went wrong twice in this plan, in the same shape, and the second time it propagated into the
+coordinator's own reasoning before it was caught. Recorded because the fix is a rule, not
+vigilance.
+
+**The two instances.** Both concerned "how long can an unattended task live here":
+
+1. Attempt one died and I reported "~40 min of background task life", then used that figure to
+   reason about what would fit in a chunk.
+2. The `s64:13` chunk died at 55.8 min and I reported a "~55.8 min survivable window", then a
+   "~20 s headroom" margin against it — which the coordinator carried forward.
+
+**The logical error, stated precisely.** A task that DIED at time `T` proves the window is **at
+least `T`** — it survived that long. It says **nothing about the upper bound** unless the death
+is known to have been *caused* by the window. Both times I inverted this and read `T` as a
+ceiling. The 57.5 min completion then contradicted the "55.8 min limit" immediately, which is the
+tell: a ceiling that a later ordinary run walks straight through was never a ceiling.
+
+**The rule.** Capacity claims come from **completions**, never from deaths:
+
+- a completed task of duration `T` proves capacity `≥ T` — usable as a floor;
+- a death at `T` also proves only `≥ T`, and is evidence about the *cause*, not the *capacity*;
+- an upper bound requires either a diagnosed kill mechanism or repeated deaths clustered at a
+  duration that completions never exceed.
+
+This is the same family as CLAUDE.md verification rule 6 ("one failing input is an anecdote") and
+rule 2 ("never label a run by intent — prove the mechanism engaged"): in both cases the missing
+step is asking what the observation actually licenses. **Every remaining timing claim in this
+plan is stated as a floor from a completion.**
+
 ### PRE-REGISTERED CHECK — the architecture component across cell labels (still UNPROVEN)
 
 Recorded before the evidence exists, so it is reported as a result rather than assumed to have
