@@ -728,6 +728,70 @@ the remaining chunks because the harness's FINAL report write panics on failure:
 the end of a 2.6 h cell would destroy the cell's measurements at the last step. **Check free
 space before dispatching each remaining chunk.**
 
+### A′ chunk 1 (`s64:13`) — ATTEMPTED, killed at 55.8 min; 1 of 3 passes done, no tables
+
+The correction above predicted this failure; the run then produced the measurement that proves
+it. Recorded in full because it settles the execution-shape question with numbers.
+
+**What completed.** One pass — the REAL condition — quoted verbatim from `/tmp/s64_seed13.log`:
+
+```text
+[progress] pass done: seed=13 cell=s64e1b16 condition=real device=Cpu steps=1536 \
+  wall_clock=3246.2s regime=minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=13|cells=s64e1b16
+```
+
+Three things this establishes:
+
+1. **The s64 step count is exactly the closed form.** `steps=1536`, as
+   `budget = 2·max(pos_cap, neg_cap) = 6n² = 24576` over batch 16 predicts. The quadratic
+   budget is now confirmed by measurement at *both* ends of the envelope.
+2. **The s64 cell label renders as predicted**, and the architecture component is byte-identical
+   to every s8 id: `minilm-slice-h384-l6-a12-i1536-v30522@1110a243`. This is the first verbatim
+   `s64e1b16` id, and it is what plan 05-03's contract entry copies.
+3. **Measured s64 pass cost: 3 246.2 s (54.1 min)**, i.e. 2.113 s/step — 4 % above the
+   2.033 s/step measured at s8, consistent with a larger selection touching more embedding rows.
+
+**What failed.** The process was terminated externally during pass 2. Same signature as before
+and again not a defect: no panic, no assertion failure, and `/tmp/s64_seed13_timing.txt` has no
+`rc=` line. Timeline from the machine — started `06:39:08Z`, last log write `07:34:54Z`, so it
+**survived 55.8 minutes** and died roughly 100 seconds after pass 1 completed.
+
+**What was lost.** Everything except that one progress line. No report file was written, because
+the per-cell flush fires only after all three conditions complete and the cell is atomic for the
+separation assertion. **Zero s64 per-class tables. ~55.8 minutes of compute spent for one timing
+number and one regime id.**
+
+### The measured constraint that decides the execution shape
+
+| quantity | measured |
+|---|---|
+| survivable unattended window | **~55.8 min** |
+| one s64 pass | **54.1 min** |
+| one s64 cell (3 conditions, atomic for the assertion) | **2.71 h** |
+| the s64 half (9 passes) | **8.12 h** |
+| the full 18-pass matrix (s8 banked + s64) | **8.24 h** |
+
+**A cell does not fit in the window, and cannot be made to.** One *pass* fits with under two
+minutes of headroom — far too tight to rely on. So **no in-session chunking at cell granularity
+can ever complete an s64 cell**: A′ is infeasible as specified, and re-dispatching `s64:31` or
+`s64:53` unchanged would burn ~56 min each and produce nothing but another timing line. That is
+why this halts here instead of continuing to the next seed.
+
+### Options, revised against the measurement
+
+| # | Option | Viability | Evidence cost |
+|---|---|---|---|
+| **C′** | A human runs the s64 half outside this session (no task-lifetime ceiling) and returns the three `STATUS: COMPLETE` reports | **Works today**, no code change | **None** |
+| **D′** | Add per-CONDITION persistence: each pass writes its own per-parameter table to disk; a final cheap invocation loads the three and performs the separation assertion over the persisted numbers | Makes a chunk one pass (54.1 min) and, crucially, **retryable** — a kill costs one pass, not a cell | **None.** The assertion is over recorded numbers either way; performing it across persisted tables is exactly as sound as in-process, and is the same mechanism any off-host run would need to transport results back |
+| A′ as dispatched | Per-seed cell chunks | **Refuted by measurement** — 2.71 h against a ~55.8 min window | — |
+| B′ | One 8.12 h relaunch | Refuted a fortiori | — |
+
+**Recommendation: D′ then C′-if-preferred.** D′ is a contained harness change with no effect on
+what is measured, it makes progress monotonic and retryable instead of all-or-nothing, and it
+also produces exactly the artifact an out-of-session or off-host run would need. It is not a
+scope reduction: the same 18 passes, the same three conditions, the same window rule, the same
+assertion.
+
 ### What Task 3 still owes once the s64 half lands
 
 Frozen ε per class (window upper edge rounded DOWN to two significant figures) with noise-floor

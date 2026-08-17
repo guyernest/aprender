@@ -149,6 +149,16 @@ of 18, and is halted for a decision on execution shape.**
 The compute gate was resolved twice: first Option B (lambda-vector), which proved unreachable;
 then **Option A — run the full matrix locally in release, ~8.29 h explicitly authorized**.
 
+**A′ chunk 1 (`s64:13`) was attempted and killed at 55.8 min with 1 of 3 passes done and no
+tables written.** It did yield the decisive measurement: an s64 pass costs **3 246.2 s
+(54.1 min)** at `steps=1536` (the closed form confirmed at the far end of the envelope), against
+a **measured ~55.8 min survivable unattended window**. An s64 *cell* is 2.71 h and is atomic for
+the separation assertion, so **no in-session chunking at cell granularity can complete one** —
+A′ as dispatched is refuted by measurement, and re-dispatching `s64:31` unchanged would burn
+another ~56 min for nothing. Options are in the measurements file; the recommendation is **D′**
+(per-condition persistence, making a chunk one retryable 54-min pass) or **C′** (run
+out-of-session).
+
 Task 2 is **9 of 18 passes complete**:
 
 - The `s8e1b16` half is **measured across all three seeds with the full three-condition
@@ -447,14 +457,18 @@ writes only a test harness and a planning document.
 1. ~~Human go/no-go on the compute option~~ — **DONE.** Option B (lambda-vector) proved
    unreachable; **Option A** (run locally in release, ~8.29 h) authorized and in progress.
 2. ~~s8 half of the boundary matrix~~ — **DONE**, 9 passes, `rc=0`, tables in the measurements file.
-3. **Decide the execution shape for the s64 half (~7.81 h).** This is the only open blocker:
-   - **A′ (recommended)** — three per-seed chunks of ~52 min each,
-     `APRENDER_CALIBRATION_CELLS="s64:13"` then `s64:31` then `s64:53`. Same passes, same
-     conditions, same assertions; no trim, no budget change. Each chunk lands its own
-     `STATUS: COMPLETE` report.
-   - **B′** — one unattended relaunch of the whole s64 half (risks the same external kill,
-     though loss is now bounded to the in-flight cell).
-   - **C′** — a human runs it outside this session and returns the reports.
+3. **Decide the execution shape for the s64 half (~8.12 h, re-measured).** The only open
+   blocker. A′ and B′ are now refuted by measurement (2.71 h per cell against a ~55.8 min
+   window):
+   - **D′ (recommended)** — add per-CONDITION persistence so each pass writes its own
+     per-parameter table and a final cheap invocation performs the separation assertion over the
+     persisted numbers. A chunk becomes one 54.1-min pass and, critically, **retryable**: a kill
+     costs one pass instead of a whole cell. No change to what is measured, and it produces
+     exactly the artifact an off-host run would need to transport back.
+   - **C′** — a human runs the s64 half outside this session (no task-lifetime ceiling) and
+     returns the three `STATUS: COMPLETE` reports. Works today, no code change.
+   - ~~A′ (per-seed cell chunks)~~ / ~~B′ (one relaunch)~~ — refuted; a cell cannot fit the
+     window and cannot be subdivided without moving the assertion off the measurement.
 4. Finish the **`attention_key_bias` verdict** with the s64 evidence.
 5. Task 3 then derives ε, composes the proposed regime entry from a measured rendered id, writes
    the MEASURED-vs-COVERED table, and runs the two-cell prospective validation.
