@@ -262,6 +262,7 @@ than returning a verdict. Unblocking it requires calibrating on the production e
 its fingerprint to `contracts/setfit-train-lifecycle-v1.yaml` — a deliberate, `pv diff`-flagged
 contract edit per Phase 3 D-10(c), never an inline relaxation by a Phase 5 executor.
 **Requirements**: EVAL-01, EVAL-02, EVAL-03, EVAL-04, EVAL-05
+**UI hint**: no
 **Success Criteria** (what must be TRUE):
 
   1. A user can evaluate ordered predictions with the official `F_avg = (F1_against + F1_favor) / 2`, per-class metrics, three-class macro-F1, MCC, confusion matrix, and validation-only calibration diagnostics bound to explicit ordered labels.
@@ -273,7 +274,7 @@ contract edit per Phase 3 D-10(c), never an inline relaxation by a Phase 5 execu
 **Branch base**: Phase 5 continues on `gsd/phase-2-contract-gate` per the 02-01 policy (phases
 2-4 all ride this branch; no PR has been opened — opening one is the human's call).
 
-**Plans**: 13 plans in 7 waves
+**Plans**: 13 plans in 8 waves
 
 Plans:
 **Wave 1** *(the F-10 unblock work — D-01 — plus the independent numerics substrate 05-04, whose t_critical.json fixture is the source of 05-05's frozen contract literal; nothing F-10-downstream runs until the edit lands)*
@@ -286,7 +287,7 @@ Plans:
 
 - [ ] 05-03-PLAN.md — The three-place synchronized contract/code/test edit at the D-04 human checkpoint (NOT autonomous), one commit, pv diff evidence, 40-cell envelope coverage test
 - [ ] 05-05-PLAN.md — setfit-benchmark-claims-v1.yaml + BenchRow/RunManifest (method-tagged, deny_unknown_fields, digest-verify-before-return) + $(CONTRACTS)/audit wiring
-- [ ] 05-06-PLAN.md — `apr finetune --task classify --selection-manifest` + explicit seed/val_split/early-stop control + A6 probe + run_classify_core shared entry
+- [ ] 05-06-PLAN.md — `apr finetune --task classify --selection-manifest` + explicit seed/val_split/early-stop control + A6 probe + run_classify_core shared entry + the LoRA reload preflight (tracer: adapter save → fresh-process reload → ordered probability vector; hard gate before any 9B compute)
 
 **Wave 3** *(blocked on Wave 2)*
 
@@ -297,16 +298,19 @@ Plans:
 
 - [ ] 05-09-PLAN.md — `apr setfit bench run`: one cell per method, contracted resource protocol (cold/warm/throughput/peak-RSS), --record transport ingest, 40-cell driver script
 
-**Wave 5** *(blocked on Wave 4)*
+**Wave 5** *(blocked on Wave 4 — the claims gate must EXIST before any expensive cell is generated; cross-AI review consensus item 4)*
 
-- [ ] 05-10-PLAN.md — bench_gate fail-closed verify + closed-form aggregation + `bench report` (estimation-first) + five in-band doctored negatives + non-vacuous Make/binding gates
+- [ ] 05-10-PLAN.md — bench_gate fail-closed verify (incl. recomputed lock/ledger provenance) + closed-form aggregation + `bench report` (estimation-first, mechanism-labelled) + six in-band doctored negatives + non-vacuous Make/binding gates
+
+**Wave 6** *(blocked on Wave 5 — 40 GPU cells run only after the gate that judges them exists, and after one pilot cell passes it)*
+
 - [ ] 05-11-PLAN.md — lambda-vector checkpoint (A1: access + 9B base-weight hash, NOT autonomous) then the 40 LoRA GPU cells, transported + --record-ingested
 
-**Wave 6** *(blocked on Wave 5 — shared run-manifest file)*
+**Wave 7** *(blocked on Wave 6 — shared run-manifest file)*
 
-- [ ] 05-12-PLAN.md — The 40 SetFit CPU cells from reloaded production artifacts (NOT autonomous: compute pre-auth gate); 80/80 manifest closure + pairing spot-check
+- [ ] 05-12-PLAN.md — The 40 SetFit CPU cells from reloaded production artifacts (NOT autonomous: compute pre-auth gate; sequential by design — parallel cells would invalidate EVAL-05 resource numbers); 80/80 manifest closure + pairing spot-check
 
-**Wave 7** *(blocked on Wave 6)*
+**Wave 8** *(blocked on Wave 7)*
 
 - [ ] 05-13-PLAN.md — The 80-row report (exact-recompute demonstrated bit-for-bit) + D-11 qa refusal message + phase closing audit
 
