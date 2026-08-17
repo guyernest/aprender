@@ -686,10 +686,13 @@ pub(crate) fn run_verify_policy<C: SetFitCodec>(
     // (Re-measure the buffer with `cargo test -p aprender-train --lib --features setfit
     // verify_into_artifact_bytes -- --nocapture`.)
     //
-    // The ~180 MB the old text cited was a FULL PIN, and it stays an estimate: no test in
-    // this repository can produce one (orchestrator note F-10 — no encoder both passes
-    // `CALIBRATED_REGIMES` and computes the artifact's contract-resident probes). The
-    // scaling is nevertheless the plain one, because the retained buffer IS the artifact:
+    // The ~180 MB the old text cited was a FULL PIN, and it stays an estimate HERE: no test
+    // in THIS crate's default suite produces one, because the production checkout is an
+    // 86.7 MB offline prerequisite rather than a committed fixture. (Before Phase 5's 05-03
+    // calibration edit, commit a63bb130b, no user-reachable path produced one at all —
+    // orchestrator note F-10. That is closed: 05-07's spawned production ladder writes a real
+    // artifact, measured at 90,777,156 bytes for the s8 cell.) The scaling is nevertheless the
+    // plain one, because the retained buffer IS the artifact:
     // whatever a pinned artifact weighs, this holds exactly that and not a multiple of it.
     //
     // `drop(reloaded)` below is untouched and keeps its position. It is the LARGER

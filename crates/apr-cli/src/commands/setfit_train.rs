@@ -1076,28 +1076,36 @@ mod tests {
     //
     // # What they can and cannot assert today
     //
-    // They drive `run` through every stage the shipped libraries can serve and stop at
-    // the first one they cannot. 04-06 recorded TWO independent, measured, phase-level
-    // blockers between this command and a written artifact. **04-17 closed the second.**
+    // They drive `run` through every stage the shipped libraries can serve WITH THE
+    // CONFORMANCE SLICE as `--model-dir`, and stop at the first one that directory cannot
+    // pass. 04-06 recorded TWO independent, measured, phase-level blockers between this
+    // command and a written artifact. **Both are now closed.**
     //
-    // 1. **No encoder can both pass the calibration gate AND carry an artifact**
-    //    (orchestrator note F-10, measured by 04-05). `tune_encoder` judges
+    // 1. ~~No encoder can both pass the calibration gate AND carry an artifact~~
+    //    (orchestrator note F-10, measured by 04-05). Before Phase 5's 05-03 calibration
+    //    edit (commit a63bb130b), `tune_encoder` judged
     //    `encoder.architecture_fingerprint()` against a calibrated set whose only entry
-    //    is the phase-3 slice, and the slice cannot compute two of the artifact's
+    //    was the phase-3 slice — and the slice cannot compute two of the artifact's
     //    contract-resident probes (a 97-row vocab closure; 64 position rows against a
-    //    256-token probe). The production pin is the other side of the same coin: it
-    //    computes every probe and returns `UncalibratedRegime`, which 04-CONTEXT records
-    //    as a deliberate Phase 5 item — "Phase 4 does not silently widen the regime".
-    //    **This is now the SOLE remaining cause**, and it is a Phase 5 item.
+    //    256-token probe) — while the production pin computed every probe and returned
+    //    `UncalibratedRegime`. CLOSED: a63bb130b added a second, MEASURED regime entry for
+    //    the production checkout, additively, leaving the fixture entry byte-untouched.
+    //    `apr setfit train --model-dir <production checkout>` now exits 0 and writes a real
+    //    artifact — measured at 90,777,156 bytes for the s8/seed-13 cell by 05-07's spawned
+    //    ladder (`crates/apr-cli/tests/setfit_cli_lifecycle.rs`,
+    //    `setfit_cli_production_chain_completes_after_the_calibration_edit`).
     // 2. ~~The verified artifact's bytes are not reachable out-of-crate.~~ CLOSED by
     //    04-17 G1: `SetFitRun::<ArtifactReloadedAndVerified>::into_artifact_bytes`. The
     //    second test below now asserts the door LANDED and is called exactly once, which
     //    is the successor of the assertion that used to name the gap.
     //
-    // So these tests assert the stages that DO run, the typed refusal at the first that
-    // does not, and the remaining blocker BY NAME — so that fixing it turns a test red
-    // and points its author at the next thing to do, rather than leaving a comment
-    // nobody re-reads.
+    // What still stops the test below short of an artifact is neither of those: it is the
+    // `--model-dir` it passes. The conformance slice is a FIXTURE, not a
+    // `from_pretrained_dir` checkout (no `config.json`), and the production checkout is an
+    // 86.7 MB offline prerequisite that a `--lib` suite may not require. So these tests
+    // assert the stages that DO run and the typed refusal at the first that does not; the
+    // positive end-to-end rungs live in the spawned ladder named above, where the checkout
+    // can be env-gated.
     // --------------------------------------------------------------------------------
 
     /// The in-repo conformance slice, which is a real directory and is NOT a pinned
@@ -1110,11 +1118,13 @@ mod tests {
     #[test]
     #[ignore = "integration weight: builds a real benchmark directory and selection. Run as \
                 its own invocation — `cargo test -p apr-cli --features setfit --lib \
-                setfit_train -- --ignored` (04-10's setfit-cli-tests leg). It also cannot \
-                reach a written artifact, and since 04-17 closed the artifact-bytes door \
-                the SOLE remaining cause is F-10: no encoder both passes CALIBRATED_REGIMES \
-                and computes the artifact's contract-resident probes. That is a deliberate \
-                Phase 5 item, not a defect in this command"]
+                setfit_train -- --ignored` (04-10's setfit-cli-tests leg). It stops short of \
+                a written artifact because of the `--model-dir` it passes: the conformance \
+                SLICE is a fixture with no config.json, not a from_pretrained_dir checkout. \
+                That is a property of the fixture, not of this command — the production \
+                checkout DOES produce an artifact since 05-03's calibration edit \
+                (a63bb130b), proven by the spawned ladder in \
+                crates/apr-cli/tests/setfit_cli_lifecycle.rs"]
     fn setfit_train_e2e_clears_every_stage_up_to_the_encoder_over_real_phase_two_artifacts() {
         let temp = TempDir::new().expect("tempdir");
         let (data, selection) = phase2_artifacts(temp.path());
@@ -1184,7 +1194,7 @@ mod tests {
         );
     }
 
-    /// The ONE remaining blocker, plus the proof that the other one is gone.
+    /// Why the e2e above stops short of an artifact, plus the proof that 04-17's door landed.
     ///
     /// # Un-ignored by 04-17, and it was never the heavy one
     ///
@@ -1195,16 +1205,22 @@ mod tests {
     ///
     /// # What changed, and what deliberately did not
     ///
-    /// The BLOCKER 1 half (F-10) is byte-for-byte what 04-06 wrote — it is still true and
-    /// still the reason this command cannot produce an artifact. The BLOCKER 2 half was
-    /// `ARTIFACT_BYTES_GAP.contains("into_artifact_bytes")` — "the gap must keep naming the
-    /// exact door that closes it". That door landed, so the assertion's successor is that
-    /// the door is CALLED, exactly once, and that no refusal constant survived it. The claim
-    /// was not weakened to make the test green; it advanced to the next thing that can go
-    /// wrong.
+    /// The FIRST half is what 04-06 wrote, with its CAUSE corrected by 05-07. 04-06 read the
+    /// slice's three fixture files as evidence of F-10 — "no encoder both passes
+    /// CALIBRATED_REGIMES and computes the probes". Since Phase 5's 05-03 calibration edit
+    /// (commit `a63bb130b`) that reading is false: the production checkout passes both. What
+    /// the three files still prove, and all they ever proved from HERE, is that this
+    /// directory is a SLICE — which is why the e2e above stops. Not one assertion moved; only
+    /// the sentence saying what they mean.
+    ///
+    /// The SECOND half was `ARTIFACT_BYTES_GAP.contains("into_artifact_bytes")` — "the gap
+    /// must keep naming the exact door that closes it". That door landed, so the assertion's
+    /// successor is that the door is CALLED, exactly once, and that no refusal constant
+    /// survived it. The claim was not weakened to make the test green; it advanced to the
+    /// next thing that can go wrong.
     #[test]
     fn setfit_train_e2e_records_the_blocker_that_stops_short_of_an_artifact() {
-        // BLOCKER 1, asserted structurally rather than described. The slice fixture is a
+        // THE SLICE, asserted structurally rather than described. The slice fixture is a
         // real MiniLM slice — the pinned tokenizer plus a carved-down encoder — and the
         // two files below are what make it a SLICE and not a pin. `from_pretrained_dir`
         // needs the pin; `from_slice_fixture` reads these, and is `conformance-fixtures`
@@ -1218,8 +1234,8 @@ mod tests {
         assert!(
             dir.join("slice_config.json").is_file() && dir.join("vocab_remap.json").is_file(),
             "and these two are what make it a slice: a 97-row vocabulary closure and the \
-             reduced dimensions F-10 names. If they ever disappear the fixture has become \
-             something else and this whole section needs re-measuring"
+             reduced dimensions. If they ever disappear the fixture has become something \
+             else and this whole section needs re-measuring"
         );
         assert!(
             !dir.join("model.safetensors").is_file(),
@@ -1263,7 +1279,8 @@ mod tests {
     fn setfit_train_the_writer_and_the_bounded_reader_compose_and_a_forced_rewrite_is_identical() {
         // The write half of OPS-02's train leg, exercised on the only bytes available
         // today. It is NOT the artifact-level determinism witness the plan asked for —
-        // that needs a real artifact, which blocker 2 above withholds — but it does prove
+        // that needs a real artifact, which this `--lib` suite has no `--model-dir` for —
+        // but it does prove
         // the two halves of this CLI's artifact file I/O compose: what `atomic_write`
         // lands is byte-for-byte what `setfit_io`'s bounded door reads back, and a
         // second `--force` run over the same input produces the same file rather than a
