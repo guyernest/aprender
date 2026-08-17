@@ -868,14 +868,30 @@ qa_gate:
     absent from the repository. A harness entry whose named runnable tests are not green is a
     FAILED gate, not a pending one.
   falsification: >
-    Weaken the contract-parity test from the typed set comparison to
-    `contract_text.contains(&seed.to_string())` and add an eleventh seed to
-    `equations.expectation_set.seeds` — the parity test must turn RED under the typed form and
-    GREEN under the substring form, which is what demonstrates the substring form cannot
-    discharge OBLIG-CLAIMS-EXPECTATION-CLOSED-FORM. Revert both.
+    THREE MUTATIONS, EACH AGAINST THE GATE IT ACTUALLY EXERCISES. They are listed separately
+    because a single mutation does not turn all three gates red, and saying otherwise would be
+    the "labelled by intent rather than by measurement" error this repository keeps paying for.
 
-    Separately, rename one required key in this file (for example `expected_cells`) — `make
-    contract-audit-phase5` and the parity test must both turn RED, proving the Makefile wiring
-    and the include_str! pin are non-vacuous. Both mutations must be INDUCED, OBSERVED and
-    REVERTED, with the two exit statuses recorded, before this gate is trusted: a gate that has
-    only ever been seen passing is not evidence.
+    (1) THE include_str! PIN. Add an eleventh seed to `equations.expectation_set.seeds`. The
+    typed parity test must turn RED. MEASURED (plan 05-05, status captured directly, never
+    through a pipe): `cargo test -p aprender-train --lib --features setfit bench_row` -> rc=101,
+    "21 passed; 3 failed", with the parity assertion reporting
+    `contract expected_cells 80 != |methods| * |shots| * |seeds| = 88`. Reverted byte-identical
+    (sha256 9c1b96f7...) and re-run rc=0, 24 passed. Note WHICH three failed: the parity test
+    and both mutated-copy negatives, the latter because their own "the mutation must actually
+    apply" guard fires once the anchor text has moved — the negatives cannot go quietly vacuous.
+
+    (2) THE SCHEMA GATE. Rename a required key — `equations.expectation_set.formula` was used.
+    MEASURED: `make contract-validate` -> rc=2 with
+    `[ERROR] SCHEMA-004: equations.expectation_set.formula must not be empty`; reverted
+    byte-identical (sha256 f6ef8d2c...) and re-run rc=0.
+
+    (3) THE BINDING GATE. `make contract-audit-phase5` does NOT turn red on either mutation
+    above — it audits binding coverage, not the enumerated lists, and an expectation-set edit is
+    invisible to it. Its own induced failure is the state BEFORE the ten `status: pending`
+    entries existed in `contracts/aprender/binding.yaml`: MEASURED rc=1 with ten
+    `[ERROR] BIND-001 ... has no binding entry`, then rc=0 with ten `[WARN] BIND-004` once they
+    were added.
+
+    A gate that has only ever been seen passing is not evidence, and a gate credited with a
+    failure it cannot actually detect is worse than one with no recorded failure at all.
