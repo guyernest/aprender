@@ -172,7 +172,10 @@ fn ttest_1samp_f64_on_the_differences_is_the_same_number() {
             paired.statistic, one.statistic,
             "case '{id}': the paired and one-sample statistics must be bit-identical"
         );
-        assert_eq!(paired.pvalue, one.pvalue, "case '{id}': p-values must match");
+        assert_eq!(
+            paired.pvalue, one.pvalue,
+            "case '{id}': p-values must match"
+        );
     }
 }
 
@@ -269,19 +272,16 @@ fn zero_variance_paired_input_is_a_typed_refusal() {
                 panic!("case '{id}': {surface} returned Ok on a zero-variance input")
             });
             match err {
-                AprenderError::ZeroVarianceDifferences {
-                    n,
-                    constant_value,
-                } => {
+                AprenderError::ZeroVarianceDifferences { n, constant_value } => {
                     assert_eq!(n, 10, "case '{id}': {surface} reported n = {n}");
                     assert_eq!(
                         constant_value, constant,
                         "case '{id}': {surface} reported the wrong constant difference"
                     );
                 }
-                other => panic!(
-                    "case '{id}': {surface} returned {other:?}, not ZeroVarianceDifferences"
-                ),
+                other => {
+                    panic!("case '{id}': {surface} returned {other:?}, not ZeroVarianceDifferences")
+                }
             }
         }
     }
@@ -292,13 +292,107 @@ fn zero_variance_refusal_covers_the_all_zero_shape_specifically() {
     // The all-zero case is 0/0, not "a big number over a tiny one". A guard written as
     // `if d_bar != 0.0 && s_d == 0.0` would let this one through as a spuriously fine
     // answer, so it gets its own named test rather than only riding the loop above.
-    let same = [0.5_f64, 0.75, 0.25, 0.625, 0.375, 0.875, 0.125, 0.6875, 0.4375, 0.5625];
-    let err = ttest_rel_f64(&same, &same)
-        .err()
-        .expect("identical arms must refuse");
+    let same = [
+        0.5_f64, 0.75, 0.25, 0.625, 0.375, 0.875, 0.125, 0.6875, 0.4375, 0.5625,
+    ];
+    let err = ttest_rel_f64(&same, &same).expect_err("identical arms must refuse");
     assert!(
         matches!(err, AprenderError::ZeroVarianceDifferences { .. }),
         "identical arms produced {err:?}, not ZeroVarianceDifferences"
+    );
+}
+
+#[test]
+fn numerically_constant_input_also_refuses() {
+    // The SECOND degenerate shape: the values are not bit-identical, but their squared
+    // deviations underflow to zero at this scale, so the computed (n-1) variance is
+    // exactly 0. Without the post-computation `std == 0.0` check the statistic would be
+    // x/0. Reached by real inputs, so it gets a real test rather than a comment.
+    let tiny = [1e-200_f64, 2e-200, 3e-200];
+    let err = ttest_1samp_f64(&tiny, 0.0).expect_err("underflowed variance must refuse");
+    match err {
+        AprenderError::ZeroVarianceDifferences { n, constant_value } => {
+            assert_eq!(n, 3);
+            assert!(
+                (constant_value - 2e-200).abs() < 1e-210,
+                "constant_value should report the mean, got {constant_value:?}"
+            );
+        }
+        other => panic!("underflowed variance produced {other:?}"),
+    }
+}
+
+// ---- the f64 special functions the p-value rests on ----------------------------------
+
+#[test]
+fn ln_gamma_f64_matches_closed_form_values() {
+    // The Lanczos g=7 coefficients are otherwise only validated INDIRECTLY, through the
+    // p-value parity assertions. A transposed digit in the table would show up there as
+    // a confusing tail mismatch; here it shows up as what it is.
+    //
+    //   ln Γ(1/2) = ln √π          ln Γ(1) = 0            ln Γ(5) = ln 24
+    //   ln Γ(9/2) is the a = df/2 argument the df = 9 t-tail actually uses.
+    for (z, want) in [
+        (0.5_f64, std::f64::consts::PI.sqrt().ln()),
+        (1.0, 0.0),
+        (5.0, 24.0_f64.ln()),
+        (4.5, 11.631_728_396_567_448_f64.ln()),
+    ] {
+        let got = ln_gamma_f64(z);
+        assert!(
+            (got - want).abs() < 1e-12,
+            "ln_gamma_f64({z}) = {got}, expected {want}"
+        );
+    }
+}
+
+#[test]
+fn incomplete_beta_f64_satisfies_the_symmetry_identity() {
+    // I_x(a,b) + I_{1-x}(b,a) = 1 exercises BOTH continued-fraction branches on the same
+    // pair, so a defect confined to the `1 - bt * cf(b,a,1-x) / b` arm cannot hide.
+    for (a, b, x) in [
+        (4.5_f64, 0.5_f64, 0.3_f64),
+        (4.5, 0.5, 0.9),
+        (2.0, 3.0, 0.45),
+    ] {
+        let lhs = incomplete_beta_f64(a, b, x) + incomplete_beta_f64(b, a, 1.0 - x);
+        assert!(
+            (lhs - 1.0).abs() < 1e-12,
+            "I_{x}({a},{b}) + I_{{1-x}}({b},{a}) = {lhs}, expected 1"
+        );
+    }
+}
+
+#[test]
+fn t_distribution_pvalue_f64_is_more_accurate_than_the_f32_path() {
+    // Why the claims layer does not simply call the existing f32 tail: at the scale of a
+    // published p-value the f32 path's own rounding is larger than the 1e-9 band the
+    // fixtures are asserted at. This records the size of that gap rather than asserting
+    // it from principle.
+    let cases = fixture_cases(PAIRED_T_FIXTURE);
+    let case = cases
+        .iter()
+        .find(|c| c["id"] == "near_tie")
+        .expect("near_tie fixture case present");
+    let a = f64_array(case, "a");
+    let b = f64_array(case, "b");
+    let want = f64_field(case, "pvalue");
+
+    let f64_p = ttest_rel_f64(&a, &b).expect("finite case").pvalue;
+    let a32: Vec<f32> = a.iter().map(|&v| v as f32).collect();
+    let b32: Vec<f32> = b.iter().map(|&v| v as f32).collect();
+    let f32_p = f64::from(ttest_rel(&a32, &b32).expect("finite case").pvalue);
+
+    assert!(
+        (f64_p - want).abs() < PVALUE_TOL,
+        "f64 p-value {f64_p} vs scipy {want}"
+    );
+    assert!(
+        (f64_p - want).abs() < (f32_p - want).abs(),
+        "the f64 mirror must be strictly closer to scipy than the f32 path: \
+         f64 err {}, f32 err {}",
+        (f64_p - want).abs(),
+        (f32_p - want).abs()
     );
 }
 
@@ -306,9 +400,8 @@ fn zero_variance_refusal_covers_the_all_zero_shape_specifically() {
 
 #[test]
 fn ttest_rel_f64_refuses_length_mismatch() {
-    let err = ttest_rel_f64(&[1.0, 2.0, 3.0], &[1.0, 2.0])
-        .err()
-        .expect("length mismatch must refuse");
+    let err =
+        ttest_rel_f64(&[1.0, 2.0, 3.0], &[1.0, 2.0]).expect_err("length mismatch must refuse");
     assert!(
         matches!(err, AprenderError::DimensionMismatch { .. }),
         "length mismatch produced {err:?}, not DimensionMismatch"
@@ -356,7 +449,10 @@ fn aggregation_helpers_match_the_fixture_moments() {
         );
 
         let (lo, hi) = min_max_f64(&diffs).expect("non-empty");
-        assert!(lo <= mean && mean <= hi, "case '{id}': mean outside [min, max]");
+        assert!(
+            lo <= mean && mean <= hi,
+            "case '{id}': mean outside [min, max]"
+        );
     }
 }
 
