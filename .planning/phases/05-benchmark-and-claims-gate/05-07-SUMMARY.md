@@ -412,4 +412,6 @@ Three things the next plans should carry rather than rediscover:
 | `crates/apr-cli/src/commands/setfit_train.rs` | `test -f` | FOUND |
 | `crates/apr-cli/src/commands/predict_tests.rs` | `test -f` | FOUND |
 | `crates/apr-cli/src/commands/eval/setfit_tests.rs` | `test -f` | FOUND |
-| exactly one top-level `status:` in this frontmatter | `grep -c '^status:'` | 1 |
+| exactly one top-level `status:` in this frontmatter | `grep -c '^status:'` | 1 (line 91) |
+| no file deleted by any of the three commits | `git diff --diff-filter=D --name-only f02a8aadf..HEAD` | empty |
+| working tree clean, no untracked files | `git status --short` | empty |
