@@ -2,345 +2,477 @@
 phase: 05-benchmark-and-claims-gate
 plan: 03
 subsystem: training
-tags: [setfit, calibration-regime, epsilon-basis, contract-gate, d-04, checkpoint, halted]
+tags: [setfit, calibration-regime, epsilon-basis, contract-gate, d-04, f-10-unblock]
 
 requires:
   - phase: 05-benchmark-and-claims-gate
-    provides: "05-01's 12 banked calibration passes — the measurement bank every candidate is derived from"
+    provides: "05-01's 12 banked calibration passes — the measurement bank every candidate was derived from"
   - phase: 05-benchmark-and-claims-gate
     provides: "05-02's per-regime RegimeThresholds / table_for restructure and the deliberate sole() tripwire"
   - phase: 05-benchmark-and-claims-gate
     provides: "05-14's fail-closed epsilon_basis derivation, which this plan turns from RED to GREEN"
 provides:
-  - "05-03-epsilon-basis-decision.md — the candidate lower-bound tables, derived by RUNNING the shipped combine, with the L1/L3 refutations and the D-04 options table (COMMITTED)"
-  - "05-03-prepared-edit.patch — the complete three-place gate edit, prepared, verified, and NOT applied (awaiting D-04 approval)"
+  - "The PRODUCTION calibrated regime — all-MiniLM-L6-v2, 10 contracted seeds x 4 cell labels — frozen on the f32 rounding-noise lower bound at a human-chosen 10x factor"
+  - "F-10 UNBLOCKED at commit a63bb130b: a production-encoder run can now resolve a threshold table instead of hitting UncalibratedRegime"
+  - "05-03-epsilon-basis-decision.md — the candidate lower-bound tables derived by running the shipped combine, with the L1/L3 refutations"
+  - "Thresholds::sole() and its regime-less wrappers REMOVED — every threshold read now names its regime"
 affects: [05-07, 05-09, 05-11, 05-12, 05-13]
 
 tech-stack:
   added: []
   patterns:
     - "a candidate rule's verdict is obtained by CALLING the single fail-closed derivation with that rule, never by open-coding a second comparison"
-    - "the bound is cited, the FACTOR is chosen — and the contract records which is which"
-    - "a prepared-but-unapproved gate edit is preserved as a committed patch artifact, so the ceremony survives worktree teardown without the gate changing"
+    - "the bound is cited, the FACTOR is chosen — and the contract records which is which, printing the bare-condition window beside the chosen one"
+    - "a provisional basis says so beside the frozen values, not only in the memo"
 
 key-files:
   created:
     - .planning/phases/05-benchmark-and-claims-gate/05-03-epsilon-basis-decision.md
     - .planning/phases/05-benchmark-and-claims-gate/05-03-prepared-edit.patch
-  modified: []
+  modified:
+    - contracts/setfit-train-lifecycle-v1.yaml
+    - crates/aprender-train/src/train/setfit/thresholds.rs
+    - crates/aprender-train/src/train/setfit/evidence.rs
+    - crates/aprender-train/src/train/setfit/mod.rs
 
-decisions:
-  - "HALTED AT THE D-04 BLOCKING CHECKPOINT — a designed stop, not a failure. Task 1 is complete and committed; Task 2 requires an explicit human selection of the lower bound; Task 3 is deliberately not started. No contract, threshold-table, constant or test change is committed."
-  - "The candidate tables were derived by RUNNING the shipped combine over the committed store (rc=101, the expected fail-closed refusal), never by hand arithmetic — threat T-05-03-05 names hand-derivation as the tampering vector this plan exists to prevent"
-  - "epsilon_basis was WIDENED to take a named LowerBound rule rather than gaining a sibling function: a second function would have made `grep -c 'fn epsilon_basis'` return 2, and open-coding four candidate comparisons would have destroyed 05-14's one-comparison invariant by construction. Non-comment `lower < upper` is still exactly 1."
-  - "The prepared edit is preserved as a COMMITTED PATCH rather than left in the working tree. The worktree is force-removed on return, so an uncommitted edit would be destroyed; a patch file changes no gate (nothing reads it, no include_str! parses it) and gives the checkpoint a hash-referenceable artifact — the same reasoning the plan gives for committing the memo."
-  - "Recommended NON-BINDING: option A (L2 at the chosen 10x noise-floor factor, attention_key_bias ungated on a measured margin, frozen from the four-cell provisional basis). The strongest argument against it is stated in the memo rather than buried."
-  - "mod.rs is NOT edited. It carries one `calibrated.len(), 1` assertion that the prepared edit turns red, but a parallel executor (05-05) owns that file this wave, so it is reported as a deviation with the exact patch instead."
+key-decisions:
+  - "D-04 selection, verbatim: option 'A — L2, freeze now (provisional)', factor '10x noise_floor'. The executor prepared the edit; the human chose the rule at a blocking checkpoint after seeing all three candidate bounds and both factor columns."
+  - "The candidate tables were derived by RUNNING the shipped combine (rc=101, the expected fail-closed refusal), never by hand arithmetic — threat T-05-03-05 names hand-derivation as the tampering vector this plan exists to prevent."
+  - "epsilon_basis was WIDENED to take a named LowerBound rather than gaining a sibling function: a second function would have made `grep -c 'fn epsilon_basis'` return 2, and open-coding four candidate comparisons would have destroyed 05-14's one-comparison invariant by construction."
+  - "The 10x factor is recorded in the contract as CHOSEN, not cited. The contract states a clearance CONDITION and records 49x-315x as measured, never a `lower = k x floor` formula."
+  - "PROVISIONAL status is stated beside the frozen values in the contract and in the Rust table's doc comment, not only in the memo — a 4-of-6-cell basis must not read as a finished matrix."
+  - "05-12's SetFit compute is NOT pre-authorized. Deferred to wave 7 by explicit human instruction; nothing in the contract, code, memo or this SUMMARY records it as approved."
 
-metrics:
-  duration: ~2h10m
-  tasks_completed: 1
-  files_changed: 2
-  completed: 2026-08-17
+patterns-established:
+  - "LowerBound as a named, passed rule: the fixture regime keeps the contracted near-null bound while the production regime uses the selected one, so two independent calibrations coexist without either inheriting the other's derivation"
+  - "State-dependent guards migrate by asserting the state CHANGE positively rather than by quietly disappearing"
+
+requirements-completed: [EVAL-02]
+
+coverage:
+  - id: D1
+    description: "The production all-MiniLM-L6-v2 regime is calibrated: a benchmark run resolves a measured threshold table instead of UncalibratedRegime"
+    requirement: "EVAL-02"
+    verification:
+      - kind: unit
+        ref: "crates/aprender-train/src/train/setfit/thresholds.rs#production_envelope_is_calibrated"
+        status: pass
+      - kind: unit
+        ref: "crates/aprender-train/src/train/setfit/thresholds.rs#thresholds_match_the_contract"
+        status: pass
+    human_judgment: false
+  - id: D2
+    description: "Every frozen production epsilon is PROVEN legal by running 05-14's fail-closed derivation — the four-cell combine that was RED is GREEN"
+    verification:
+      - kind: integration
+        ref: "APRENDER_CALIBRATION_COMBINE=\"s8:13,s8:31,s8:53,s64:13\" cargo test --release -p aprender-train --lib --features setfit production_calibration -- --ignored (rc 101 -> 0)"
+        status: pass
+    human_judgment: false
+  - id: D3
+    description: "The contract edit is additive apart from named corrections: the fixture entry and its entire frozen_thresholds block are byte-untouched"
+    verification:
+      - kind: other
+        ref: "rtk proxy git diff -U0 HEAD~2 HEAD -- contracts/setfit-train-lifecycle-v1.yaml (fixture entry deletions 0, frozen_thresholds field deletions 0)"
+        status: pass
+      - kind: other
+        ref: "pv validate contracts/setfit-train-lifecycle-v1.yaml (0 errors); pv diff -> major, v2.0.0 -> v3.0.0"
+        status: pass
+    human_judgment: false
+  - id: D4
+    description: "The 05-02 tripwire is MIGRATED not silenced: sole() deleted, all 11 regime-less reads route through table_for"
+    verification:
+      - kind: other
+        ref: "grep -c 'fn sole' thresholds.rs = 0; grep -c 'frozen.of(' evidence.rs = 0"
+        status: pass
+      - kind: unit
+        ref: "cargo test -p aprender-train --lib --features setfit setfit:: (323 passed, 0 failed)"
+        status: pass
+    human_judgment: false
+  - id: D5
+    description: "The lower bound that binds, the chosen factor, the weakened claim, the provisional basis, and the D-03/L3 refutations are recorded in the contract at the strength the evidence supports"
+    verification: []
+    human_judgment: true
+    rationale: "Whether contract prose states a weakening honestly and at the right strength is the judgement the D-04 checkpoint existed to make. It was reviewed and approved by a human; no test can assert that the wording is candid."
+  - id: D6
+    description: "attention_key_bias's disposition is re-derived on a measured margin, with the refuted sentences corrected and the exact-arithmetic sentence kept"
+    verification:
+      - kind: other
+        ref: "byte-identity control: the two refuted sentences appear in deletion hunks; THE MECHANISM invariant's exact-arithmetic sentence appears in none"
+        status: pass
+    human_judgment: true
+    rationale: "That the replacement justification is adequate — rather than merely different — is a judgement about evidentiary standards, made by the human at D-04."
+
+duration: ~3h20m
+completed: 2026-08-17
 
 actuals:
-  tokens: 34000
-  tasks: 1
-  commits: 2
+  tokens: 46000
+  tasks: 3
+  commits: 3
 
-status: halted
+status: complete
 ---
 
-# Phase 5 Plan 03: Epsilon Basis Decision — Task 1 complete, HALTED at the D-04 checkpoint
+# Phase 5 Plan 03: Epsilon Basis Decision Summary
 
-**The 10x/10x rule's replacement is now a decision with measured numbers attached rather than an
-open question: three candidate lower bounds derived by running the shipped combine, two of them
-refuted by arithmetic on the record, and a complete three-place gate edit prepared, verified
-end-to-end, and deliberately NOT applied — awaiting the human's selection at D-04.**
+**The production all-MiniLM-L6-v2 regime is calibrated and F-10 is unblocked — frozen on the
+contract's f32 rounding-noise lower bound at a human-chosen 10x factor, after the 10x/10x rule
+D-03 assumed was measured collapsing for five of six parameter classes at 1536 optimizer steps.**
 
-## Status: HALTED at a BLOCKING HUMAN CHECKPOINT (designed stop)
+## Performance
 
-This is not a blocker and not a failure. Plan 05-03 is `autonomous: false` and Task 2 is
-`checkpoint:decision`. Task 1 is complete and committed; Task 3 has deliberately not begun.
+- **Duration:** ~3h 20m (across a checkpoint halt and re-dispatch)
+- **Tasks:** 3 of 3
+- **Files modified:** 4 (+ 2 planning artifacts created)
 
-**Nothing that changes the gate is committed.** The contract, the threshold table, the constants
-and the tests are byte-identical at `HEAD` to what they were before this plan ran. The two
-commits are both evidence artifacts.
+## Accomplishments
 
-## The measured result
+- **F-10 unblocked at `a63bb130b`.** A production-encoder run now resolves a measured threshold
+  table instead of failing closed with `UncalibratedRegime`. This is the milestone keystone every
+  Phase 5 benchmark cell was blocked on.
+- **D-03's premise refuted on the record, with numbers, in the contract itself** — five of six
+  classes have no legal window at the production envelope, and the collapse holds within `s64`
+  alone (39.7 against a rule needing > 100).
+- **The replacement rule was chosen by a human at a blocking checkpoint**, from three candidates
+  derived by running the shipped combine, with two of them refuted by arithmetic before the
+  choice was offered.
+- **05-14's fail-closed derivation went RED → GREEN on identical input**, so the frozen basis is
+  proven legal by a run rather than asserted from a report.
+- **05-02's `sole()` tripwire was migrated, not silenced:** all eleven regime-less threshold reads
+  now name their regime, and the panicking accessor is gone rather than left armed.
 
-Derived by RUNNING the shipped combine over the 12 committed passes — invocation and status in
-the memo, status captured on its own line, never through a pipe:
+## Task Commits
 
-```
-APRENDER_CALIBRATION_COMBINE="s8:13,s8:31,s8:53,s64:13"  ->  COMBINE_RC=101
-```
+1. **Task 1 — derive candidates, commit the memo, prepare the edit** — `2f76df22f` (docs; memo only, no gate byte)
+2. **Checkpoint halt record + prepared-edit artifact** — `d756cfc67` (docs)
+3. **Task 3 — the approved gate edit** — `a63bb130b` (feat; contract + thresholds.rs + evidence.rs + mod.rs)
 
-`rc=101` is the EXPECTED state: 05-14 made an empty basis a hard refusal, so the same four-cell
-combine 05-01 recorded exiting `rc=0` now refuses. The report is written before the panic, which
-is what makes the candidate tables readable.
+`git log --oneline` order: memo → halt record → gate commit. The halt record sits between them
+because the D-04 checkpoint genuinely stopped execution; it is left in history rather than
+squashed, since the ceremony is the point.
 
-| candidate | lower edge | windows | narrowest gated width |
+## The D-04 decision, recorded verbatim
+
+> Option: **"A — L2, freeze now (provisional)"**
+> Factor: **"10x noise_floor"**
+> 05-12 compute pre-authorization: **"Defer — ask me at wave 7"**
+
+The human was presented with all three candidate lower bounds, both factor columns, the
+claim-given-up statement at full strength, the L3 arithmetic refutation, the
+`attention_key_bias` disposition with its three separately-labelled margins, the coverage
+arithmetic for the two unmeasured cells, `pv diff` + bump, the byte-identity control, and 05-14's
+derivation result. The executor prepared the edit; it did not choose the rule.
+
+**05-12's SetFit compute is NOT pre-authorized.** It is deferred to wave 7. Nothing in the
+contract, the code, the memo or this SUMMARY records it as approved, and 05-12 must ask
+separately.
+
+## What was frozen
+
+| class | frozen eps | over 10x its noise floor | over the bare floor |
 |---|---|---|---|
-| **L1** (D-03, being replaced) | `10 x max(worst_ctrl, worst_nnull)` | **5 of 6 EMPTY** | — |
-| **L2-bare** (bare contracted clearance) | `noise_floor` | 6 of 6 EXIST | 101.94x |
-| **L2-10x** (chosen factor) | `10 x noise_floor` | 6 of 6 EXIST | 10.19x |
+| `embedding` | 1.8e-4 | 10.1x | 101x |
+| `layer_norm_weight` | 1.8e-5 | 30.2x | 302x |
+| `layer_norm_bias` | 7.1e-5 | 119x | 1191x |
+| `projection_weight` | 1.2e-4 | 201x | 2013x |
+| `projection_bias` | 3.4e-5 | 57.0x | 570x |
+| `attention_key_bias` | **null — ungated** | — | — |
 
-L1's exceed factors reproduce 05-01 FINDING 1 to the digit (8.56x, 13.84x, 8.54x, 31.94x, 5.41x),
-and the collapse holds within `s64` alone (39.7 against a rule needing > 100).
+Run-level `embedding_delta_floor` **2.6e-4**, from the smallest embedding MEDIAN across measured
+cells (2.611e-3) over ten, rounded down — read off a run, not hand-computed.
 
-**L3 is refuted by arithmetic, not by taste:** largest admissible near-null factor **0.313**,
-largest admissible factor PRODUCT **3.131** against the contracted 100, `projection_bias` binding.
-Below 1 the margin is INVERTED — epsilon would sit under the near-null delta it must exceed.
+Each value is `best_real / 10` rounded DOWN to two significant figures: the same upper edge and
+the same rounding rule as the fixture derivation. **The change of lower bound does not touch the
+upper edge** — only which values are LEGAL changed, not how they are computed.
 
-**A measured result worth stating because its absence would have been invisible:** the four-cell
-noise floors were re-derived from this run rather than carried forward from the s8 half, and they
-COINCIDE — `s64:13` did not raise any class's floor (`5.960e-8` for all five dense classes in
-every cell; embedding's worst is `1.779e-6` from `s8:53` against `s64:13`'s `1.741e-6`). Folding
-the s64 cell in moved `best_real` but left `lower` alone.
+**The bare-floor clearance band 101x–2013x is comparable to the fixture's recorded 49x–315x**,
+which is the sense in which the contracted clearance condition is satisfied at least as well
+here as where it was first recorded.
 
-## Tasks
+## What the gate gives up, recorded in the contract
 
-| Task | Name | Status | Commit |
-|---|---|---|---|
-| 1 | Derive the candidates, commit the memo, prepare the edit | **COMPLETE** | `2f76df22f` (memo only) |
-| 2 | D-04 checkpoint — the human SELECTS the epsilon basis | **AWAITING HUMAN** | — |
-| 3 | Commit the approved edit and re-verify both ways | NOT STARTED (blocked by Task 2) | — |
+**The gate no longer refuses a genuinely-executed but ~2000x-underpowered contrastive run.** A run
+at `encoder_lr = 1e-8` moves `projection_bias` by `1.101e-4` at s64, and the frozen `3.4e-5` sits
+below that, so such a run passes.
 
-## Task 1 acceptance criteria — all machine-checked
+**What is retained, with its margin:** all three of the adversaries the contract NAMES — a frozen
+encoder, a centroid baseline, and a 1e-30-LR run — produce exactly `0.000e0` at 1536 steps
+(measured: `ctrl_max = 0.000e0` for all six classes in every cell) and stay refused with the
+widest possible margin. The 1e-8 near-null run was never a named adversary; 03-05 introduced it
+to obtain a non-degenerate lower bound because the 1e-30 control bounds epsilon from above only.
 
-| Criterion | Result |
-|---|---|
-| memo exists and carries `CANDIDATE LOWER BOUNDS` | PASS (line 78) |
-| the memo IS the last pre-checkpoint commit's whole content | PASS — `git log -1 --name-only` names it alone |
-| that commit touches NEITHER the contract NOR `thresholds.rs` | PASS |
-| both files nonetheless carry uncommitted edits (prepared, not skipped) | PASS — `git status --porcelain` shows ` M` on both |
-| `grep -c 'fn sole'` in `thresholds.rs` | **0** |
-| `grep -c 'frozen\.of('` in `evidence.rs` | **0** |
-| `grep -c 'fn epsilon_basis'` | **1** |
-| non-comment `lower < upper` in `evidence.rs` | **1** (05-14's invariant held across both plans) |
-| `pv validate` via `cargo run` (never a hardcoded path) | **rc=0, 0 error(s), 0 warning(s)** |
-| `thresholds` suite green AND non-vacuous | **rc=0, `30 passed`** (was 29 + the new envelope test) |
+The contract states the new claim explicitly rather than substituting one bound for the other
+silently: *the encoder moved beyond f32 rounding noise by at least an order of magnitude, and a
+run that does not train produces exactly zero.*
 
-## Judgement-checked evidence
+## The bound is cited; the FACTOR is chosen
 
-**`pv diff`, two filesystem paths, old revision materialized with `git show`:**
+Recorded that way in three places (contract invariant, Rust doc comment, memo). The contract
+states a clearance CONDITION — no parameter may satisfy its threshold by rounding alone — and
+records 49x–315x as the clearance the fixture epsilons *happened to have*. There is no
+`lower = k x floor` formula anywhere in it. The 10x is this plan's choice, made because it mirrors
+the near-null leg's own factor and is strictly stricter than bare clearance, and the contract
+prints the bare-condition window beside the chosen one so a reader can see what the factor bought.
 
-```
-Contract diff: v2.0.0 → v2.0.0
-Suggested bump: major
-  ~ calibration_regime: invariants changed
-  ~ evidence_gate: invariants changed
-  ~ gradient_free_parameters: invariants changed
-```
+**Narrowed precedent, stated at the strength it holds:** the noise floor was ALREADY this
+contract's operative lower bound for one class — the fixture derivation table records
+`layer_norm_weight` with `worst 1e-8` = `0.000e0` and `lower edge` = `0.000e0`, so its near-null
+leg was degenerate and the clearance condition was doing the work. That does not mean the whole
+rule pre-existed, and it does not make the multiplier inherited.
 
-Taken as given — the bump is `pv`'s call. The prepared header records it verbatim along with why
-MAJOR is right on the merits (the production regime's epsilons are not frozen under the 2.x
-derivation rule, and two `attention_key_bias` prose claims are corrected rather than extended).
+## The basis is PROVISIONAL, and says so where the numbers are
 
-**Byte-identity control — and a measurement error caught while running it.** The first pass used a
-bare `git diff -U0` and reported **19** deletion lines. The `rtk` hook rewrites `git diff` into a
-lossy prose summary, so that count was taken on a rewritten stream. Re-run through `rtk proxy`,
-the true count is **20** — the hidden line was `-  version: 2.0.0`. The conclusion is unchanged
-(that line is in the metadata header, which is within the permitted set), but the first
-measurement could not have supported it. Same artifact family as 05-01's `git log --oneline`
-rewrite and 05-14's `test result:` rewrite.
+Four of six boundary cells measured (`s8:{13,31,53}`, `s64:13`); **`s64:31` and `s64:53` were
+never run**. Under this lower bound an unmeasured cell CAN still narrow a window by raising the
+worst noise floor — which is why it is stated beside the frozen values in the contract and in the
+Rust table's doc comment, not only in the memo.
 
-All 20 deletions, on the raw stream: 1 metadata version line; 6 in the header's "ONE CLASS IS
-DELIBERATELY NOT GATED" paragraph; 1 closing the clearance invariant; 2 in
-`gradient_free_parameters`' "cancellation residue" sentences; 1 closing RE-DERIVATION; 2 in
-"EXACTLY ONE FINGERPRINT"; 7 in "CONSEQUENCE FOR PHASE 5". Every one is deliberately amended
-invariant prose or the metadata header.
+The factor that would close each window is its width: `attention_key_bias` 1.51x (ungated, so it
+cannot change the verdict), `embedding` 10.19x, and 31.72x–206.56x for the rest. Noise floors
+have been stable across four cells spanning a 64x range in optimizer steps (`5.960e-8` for every
+dense class in every cell; `1.741e-6`–`1.779e-6` for embedding).
 
-Machine-checked on the raw stream: deleted fixture `calibrated_regimes` entry lines = **0**;
-deleted `frozen_thresholds` field lines (`eps:`/`scale_floor:`/`sparse:`/`gated:`/
-`embedding_delta_floor_value:`) = **0**. The fixture entry and its entire block are untouched.
+**A measured result whose absence would have been invisible:** the four-cell noise floors were
+re-derived from the run rather than carried forward from the s8 half, and they COINCIDE —
+`s64:13` did not raise any class's floor. Folding the s64 cell in moved `best_real` but left
+`lower` alone.
 
-**05-14's fail-closed derivation — RED before, GREEN after, both RUN:**
+`PROSPECTIVE VALIDATION (s16 seed 41, s32 seed 29): NOT RUN — compute budget`, recorded in the
+contract as that literal rather than as a claim.
 
-| state | invocation | rc |
+## Refutations on the record
+
+**D-03's premise (L1):** five of six classes EMPTY, exceed factors 8.56x / 13.84x / 8.54x /
+31.94x / 5.41x, reproducing 05-01 FINDING 1 to the digit; the collapse holds within `s64` alone
+at 39.7 against a rule needing > 100. The cause is the near-null leg, not the control: the 1e-30
+control writes back bit-identical weights even at 1536 steps.
+
+**L3 (relaxing the factors), by arithmetic rather than by taste:** largest admissible near-null
+factor **0.313**, largest admissible factor PRODUCT **3.131** against the contracted 100, binding
+class `projection_bias`. Below 1 the margin is INVERTED — epsilon would sit under the near-null
+delta it must exceed, so a near-null run would PASS. Both figures were recomputed from the run.
+
+## `attention_key_bias`
+
+Ungated, now on a MEASURED margin rather than the refuted gradient-free argument. Three
+quantities kept separate, because conflating them credits the epsilon with a margin it lacks:
+
+| quantity | value | the other five |
 |---|---|---|
-| 05-01 recorded (pre-05-14) | four-cell combine | `0` (the D-18 defect) |
-| after 05-14, before this plan | identical combine | `101` |
-| **against the prepared table** | **identical combine** | **`0`** |
+| raw separation `best_real / noise_floor` | 151x | 1019x – 20654x |
+| the candidate epsilon's clearance `upper / noise_floor` | 15.12x | 101x – 2065x |
+| window WIDTH under the chosen bound | 1.51x | 10.19x – 206.56x |
 
-The green run's report states its own reason:
+**Corrected per D-17:** "those deltas are f32 cancellation residue" and the unqualified "softmax
+shift-invariance makes dL/db_k exactly zero" — both refuted by `grad_norm_max` 8.084e-10 (s8) /
+7.298e-10 (s64) and by deltas scaling with the learning rate. **Kept:** `dL/db_k = 0` in EXACT
+arithmetic, verbatim in THE MECHANISM invariant. The physics explains why the gradient is tiny;
+it does not establish that it is zero.
 
-```
-REGIME TABLE FOR THE DERIVED REGIME: resolved for
-`minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=13,31,53|cells=s64e1b16,s8e1b16`
-— gated classes: [embedding, layer_norm_weight, layer_norm_bias, projection_weight, projection_bias]
-...
-Every class above has a non-empty window (10x_lower < 10x_upper).
-```
+The apparent D-17 collision on `15.1 / 10 = 1.51` is disarmed in the contract and the memo: D-17
+forbids reading `upper / noise_floor` as a MARGIN for an epsilon with no legal window. Under this
+bound the window is non-empty, so `upper` IS a legal epsilon and `upper / lower` is a width —
+arithmetic on two measured quantities.
 
-`attention_key_bias` appears in that table carrying `declared-ungated`, with its numbers intact —
-the row is annotated, never removed.
+## Verification at the COMMITTED state
 
-**The per-regime association loop is LIVE and bites.** Proven by induced mutation rather than
-asserted: perturbing the production `embedding` epsilon `1.8e-4` → `1.9e-4` turned
-`thresholds_match_the_contract` RED, naming the production regime and the class
-(`...|cells=s8e1b16,...,s64e1b16/embedding: epsilon`). Reverted; suite back to `30 passed`.
+Every status captured directly (`cmd > /tmp/out.log 2>&1; rc=$?`), never through a pipe.
 
-**`production_envelope_is_calibrated` is green and two-sided:** all 40 production ids (10 seeds x
-4 cells, rendered through `RegimeCoordinates::render_run` — the run's own grammar) resolve the
-PRODUCTION table; a fixture id still resolves the FIXTURE table; and three out-of-envelope
-coordinates still resolve nothing, so the entry is a measured envelope rather than an
-architecture-wide permit.
+| Check | Command | Result |
+|---|---|---|
+| commit shape | `git log -1 --name-only --format=` | **4 files** — contract, `thresholds.rs`, `evidence.rs`, `mod.rs`; memo NOT included |
+| contract valid | `cargo run --release -p aprender-contracts-cli --bin pv -- validate ...` | **rc=0, 0 error(s), 0 warning(s)** |
+| version bump | `pv diff /tmp/t3-old.yaml contracts/...` (old materialized with `git show HEAD~2:`) | **`v2.0.0 → v3.0.0`, suggested bump: major** — and the file declares 3.0.0 |
+| **05-14 derivation GREEN** | four-cell combine, identical input | **rc=0** (was `rc=101`) |
+| — and it states its reason | `/tmp/t3-green.txt` | `REGIME TABLE ...: resolved`; `Every class above has a non-empty window`; `PASSES RUN: 12` |
+| byte-identity: fixture entry | `rtk proxy git diff -U0 HEAD~2 HEAD -- <contract>` | **0** deleted `calibrated_regimes` fixture lines |
+| byte-identity: fixture table | same | **0** deleted `frozen_thresholds` field lines (20 deletions total, all amended prose + header) |
+| 40-cell envelope | `cargo test ... production_envelope_is_calibrated` | **rc=0, 1 passed** |
+| `UncalibratedRegime` negatives | `cargo test ... regime` | **rc=0, 15 passed** |
+| 05-14's guards | `cargo test ... epsilon_basis` | **rc=0, 9 passed** |
+| **full `setfit::` suite** | `cargo test ... setfit::` | **rc=0, `323 passed; 0 failed; 3 ignored`** |
+| binding audit | `make contract-audit-phase4` | **rc=0**, 15 bound / 15 implemented, `No binding gaps found` |
+| — `BIND-` count | counted in command substitution, never via a redirected file | **0** anchored, **0** unanchored (case-table control: the anchored pattern is not silently blind) |
+| clippy | `cargo clippy --release ... --all-targets` | **rc=0, 0 findings** |
+| rustfmt | `rustfmt --check` on the three Rust files | clean (only pre-existing `apr_reload.rs:331`, reached via `mod` traversal) |
 
-**Isolation:** `epsilon_basis` filter `9 passed` (05-14's guards intact); clippy
-`--all-targets` rc=0 with zero findings in either edited file; `rustfmt` clean on both.
+**The RED → GREEN arc, quoted at three points** so it is legible without re-deriving it:
 
-## What the prepared edit contains (NOT applied)
+| state | four-cell combine | rc |
+|---|---|---|
+| 05-01 recorded (pre-05-14) | identical input | `0` — the D-18 defect: green with five empty windows |
+| after 05-14, before this plan | identical input | `101` |
+| **after this commit** | identical input | **`0`** — for a reason the contract now records |
 
-`05-03-prepared-edit.patch`, 1576 lines, verified faithful by
-`git apply --check --reverse` → **rc=0**. Three files:
+**The per-regime association loop is live and BITES.** Proven by induced mutation, not asserted:
+perturbing the production `embedding` epsilon `1.8e-4` → `1.9e-4` turned
+`thresholds_match_the_contract` RED, naming the production regime and the class. Reverted; suite
+back to green.
 
-- **`contracts/setfit-train-lifecycle-v1.yaml`** — the production `calibrated_regimes` entry (all
-  10 contracted seeds, all 4 cell labels); an additive `per_regime_thresholds` map carrying BOTH
-  regimes' tables; four production-scoped invariants (the near-null bound's unsatisfiability with
-  the table inline and the L3 arithmetic; which bound binds and that the factor is CHOSEN, with
-  both factor columns printed; the weakening stated explicitly with the claim spelled out; and
-  the MEASURED-vs-COVERED record with `PROSPECTIVE VALIDATION: NOT RUN — compute budget`); the
-  ARCHITECTURE FINGERPRINT PROVENANCE note; the D-17 corrections; version 3.0.0 with the `pv diff`
-  record.
-- **`crates/aprender-train/src/train/setfit/thresholds.rs`** — `PRODUCTION_REGIME` +
-  `production_regime()` (eps 1.8e-4 / 1.8e-5 / 7.1e-5 / 1.2e-4 / 3.4e-5, `attention_key_bias`
-  null, floor 2.6e-4); `CALIBRATED_REGIMES` len 1 → 2 with full-list string equality preserved;
-  `sole()` and its two wrappers DELETED; six test reads migrated to `table_for`; the new 40-cell
-  envelope test.
-- **`crates/aprender-train/src/train/setfit/evidence.rs`** — the `LowerBound` rule,
-  `CONTRACTED_NEAR_NULL_LOWER_BOUND` (fixture, unchanged) and `PRODUCTION_LOWER_BOUND`; the
-  report-only `CANDIDATE LOWER BOUNDS` renderer; the `EMBEDDING DELTA MEDIAN MIN` line; the five
-  regime-less reads migrated; two 05-14 state-dependent tests migrated.
+**`production_envelope_is_calibrated` is two-sided:** all 40 production ids (rendered through
+`RegimeCoordinates::render_run`, the run's own grammar) resolve the PRODUCTION table; a fixture id
+still resolves the FIXTURE table; and three out-of-envelope coordinates still resolve nothing — so
+the entry is a measured envelope, not an architecture-wide permit.
+
+## For 05-07: an expectation, not a result
+
+`apr setfit train` on the production encoder is now **expected** to reach exit 0 — the regime gate
+that returned `UncalibratedRegime` at rung 4 of 04-15's ladder now resolves a table. **This plan
+did not run that ladder and does not claim it passes.** Proving it end-to-end is 05-07's
+obligation, and the unblock commit to reference is **`a63bb130b`**.
 
 ## Deviations from Plan
 
 ### 1. [Rule 2 — Missing critical] The run-level floor was the one frozen number the report did not derive
 
-- **Found during:** Task 1 step (1), deriving the recommended table.
-- **Issue:** the contract derives `embedding_delta_floor` from the smallest embedding-class
-  MEDIAN, but the report printed only `EMBEDDING DELTA MIN`. The floor would have had to be
-  hand-computed from the per-cell table — the exact hand-derivation T-05-03-05 exists to prevent.
-- **Fix:** one accumulator and one report line, `EMBEDDING DELTA MEDIAN MIN across measured
-  cells: 2.611e-3`, so `2.6e-4` is read off a run.
-- **In:** the prepared patch (`evidence.rs`), not committed.
+- **Found during:** Task 1, deriving the recommended table.
+- **Issue:** the contract derives `embedding_delta_floor` from the smallest embedding MEDIAN, but
+  the report printed only `EMBEDDING DELTA MIN`. The floor would have had to be hand-computed —
+  the exact hand-derivation T-05-03-05 exists to prevent.
+- **Fix:** one accumulator and one report line (`EMBEDDING DELTA MEDIAN MIN ...: 2.611e-3`).
+- **Commit:** `a63bb130b`.
 
-### 2. [Rule 3 — Blocking] `epsilon_basis` had to be widened rather than duplicated
+### 2. [Rule 3 — Blocking] `epsilon_basis` widened rather than duplicated
 
-- **Issue:** the plan requires four candidate emptiness determinations while 05-14 pins the
-  comparison count at one, and a helper named `epsilon_basis_with` would have made
+- **Issue:** four candidate emptiness determinations were needed while 05-14 pins the comparison
+  count at one, and a helper named `epsilon_basis_with` would have made
   `grep -c 'fn epsilon_basis'` return 2 — failing the plan's own criterion.
-- **Fix:** widened the single function's signature with a named `LowerBound`; all call sites pass
-  an explicit rule. Both counts remain 1.
+- **Fix:** widened the single function with a named `LowerBound`; every call site passes an
+  explicit rule. Both counts remain **1**.
+- **Commit:** `a63bb130b`.
 
 ### 3. [Rule 3 — Blocking] Two of 05-14's state-dependent tests asserted the production regime is uncalibrated
 
-- **Issue:** `evidence_epsilon_basis_without_a_resolved_table_every_class_is_required` asserted
-  `table_for(PRODUCTION_REGIME_TODAY).is_none()`, and
-  `negative_uncalibrated_regime_is_refused_before_any_comparison` asserted
-  `calibrated.len() == 1`. Both are true only until this plan lands.
-- **Fix:** the first now derives under `UNCALIBRATABLE_REGIME` (red by construction, which is why
-  05-14's own doc said the DURABLE test uses it) and asserts the state change POSITIVELY, so the
-  transition is recorded by a test rather than by a test's disappearance; a control was added
-  proving the production table's declaration is what moves the verdict. The second asserts 2 and
-  gains a check that no calibrated entry carries the `minilm-full-` rendering — architecture is
+- **Issue:** one asserted `table_for(PRODUCTION_REGIME_TODAY).is_none()`, the other
+  `calibrated.len() == 1`. Both true only until this plan landed.
+- **Fix:** the first now derives under `UNCALIBRATABLE_REGIME` (red by construction — which is why
+  05-14's own doc said the DURABLE test uses it) and asserts the state change **positively**, so
+  the transition is recorded by a test rather than by a test's disappearance; a control was added
+  proving the production table's *declaration* is what moves the verdict. The second asserts 2 and
+  gained a check that no calibrated entry carries the `minilm-full-` rendering — architecture is
   matched for equality, never by family.
-- **In:** the prepared patch, not committed.
+- **Commit:** `a63bb130b`.
 
-### 4. [SCOPE BOUNDARY — reported, NOT fixed] `mod.rs` carries one assertion the prepared edit turns red
+### 4. [Scope boundary, then explicitly authorized] `mod.rs` was edited in this commit
 
-- **Found during:** Task 1 step (3), running the `setfit::` suite against the prepared edit.
-- **Issue:** `crates/aprender-train/src/train/setfit/mod.rs:1690`, in
-  `regime_gate_an_unswept_seed_is_refused`, asserts `assert_eq!(calibrated.len(), 1, "exactly one
-  calibrated entry")`. With the production regime calibrated this is `2`. Result:
-  **`322 passed; 1 failed`** — the single failure, and it is entirely this literal.
-- **NOT FIXED, deliberately.** The orchestrator's dispatch states that plan 05-05 is editing
-  `mod.rs` concurrently in another worktree this wave, and instructs: "if a task appears to
-  require editing mod.rs or the Makefile, treat it as a deviation and report it rather than
-  editing them." The plan's own `files_modified` also excludes it.
-- **The required change, exactly** (also worth making the two neighbours position-independent,
-  since `calibrated[0]` now depends on list order):
-  ```rust
-  // mod.rs:1690
-  -  assert_eq!(calibrated.len(), 1, "exactly one calibrated entry");
-  +  assert_eq!(calibrated.len(), 2, "two calibrated entries since 05-03");
-  // mod.rs:1692 and :1720 — prefer position-independent forms
-  -  calibrated[0].contains("seeds=1,42,7"),
-  +  calibrated.iter().any(|c| c.contains("seeds=1,42,7")),
-  -  calibrated[0].contains("cells=s16e2b8,s8e1b4"),
-  +  calibrated.iter().any(|c| c.contains("cells=s16e2b8,s8e1b4")),
-  ```
-- **Whoever applies the approved patch must apply this too**, or the `setfit::` suite stays red
-  and Task 3's acceptance criteria cannot be met. It is a one-line semantic change plus two
-  robustness improvements; it relaxes nothing.
+- **Issue:** `mod.rs:1690` asserted `calibrated.len() == 1`. `mod.rs` is outside the plan's
+  `files_modified` and a parallel executor (05-05) was reported as touching it.
+- **Handling:** at the checkpoint I reported it as a deviation with the exact patch rather than
+  editing it. The coordinator verified independently that 05-05 touches `mod.rs` only at line 43
+  (a `pub mod bench_row;` declaration), that 05-05 had completed, and explicitly authorized the
+  one-line change as part of this commit.
+- **Consequence:** the plan's Task 3 verify block asserts the commit names EXACTLY three files;
+  it names **four**. That literal is superseded by the coordinator's instruction, and the fourth
+  file is a single assertion literal, not a gate change.
+- **Commit:** `a63bb130b`.
 
-### 5. [Rule 3 — Blocking] The prepared edit had to be preserved as a committed patch
+### 5. [Rule 3 — Blocking] The prepared edit was preserved as a committed patch across the checkpoint
 
 - **Issue:** D-04 requires the gate edit to stay uncommitted until approved, but this executor
   runs in a worktree the orchestrator force-removes on return — an uncommitted edit is destroyed.
-- **Fix:** `05-03-prepared-edit.patch`, committed. A patch file is not a gate change: nothing
-  reads it, no `include_str!` parses it, no test consults it, and the gate's behaviour at `HEAD`
-  is byte-identical to before. It is the same category as the memo the plan already authorizes
-  committing, for the same stated reason — the checkpoint should review a hash-referenceable
-  artifact rather than a working-tree file that can be silently rewritten.
+- **Fix:** `05-03-prepared-edit.patch`, committed at `d756cfc67`. A patch file is not a gate
+  change: nothing reads it, no `include_str!` parses it, no test consults it.
+- **NOW SUPERSEDED.** The edit it records is committed at `a63bb130b`. The file is retained as the
+  checkpoint's audit trail — **do not `git apply` it**; it would conflict with the committed
+  state. It was left in place rather than deleted because the coordinator's Task 3 instruction
+  scoped this commit to the approved edit, the `mod.rs` line and the SUMMARY.
 
-### 6. [Measurement discipline] The byte-identity control was re-measured
+### 6. [Measurement discipline] Two measurements were re-taken because the first was rewritten
 
-Covered above: the first `git diff -U0` was taken on an `rtk`-rewritten stream and undercounted
-deletions 19 vs 20. Re-run through `rtk proxy`. `git diff` written to the patch file was
-rewritten the same way and produced a **non-applicable** summary — caught by
-`git apply --check --reverse` returning 128, and fixed by regenerating through `rtk proxy`
-(re-checked: rc=0). Both are the CLAUDE.md rule-1/rule-8 family, and both were caught by
-verifying the measurement rather than the result.
+- The `rtk` hook rewrites `git diff` into a lossy prose summary. The first byte-identity control
+  therefore reported **19** deletion lines; re-run through `rtk proxy`, the true count is **20**
+  (the hidden line was `-  version: 2.0.0`, which is in the metadata header and within the
+  permitted set, so the conclusion held — but the first measurement could not have supported it).
+- The same rewrite made `git diff > patch` produce a **non-applicable** file. Caught by
+  `git apply --check --reverse` returning 128, fixed by regenerating through `rtk proxy`,
+  re-checked rc=0.
+- Both are the CLAUDE.md rule-1/rule-8 family, and both were caught by verifying the measurement
+  rather than the result.
 
-## Out-of-scope discovery (NOT fixed)
+---
 
-`crates/aprender-train/src/train/setfit/apr_reload.rs:331` remains unformatted at HEAD —
-pre-existing, untouched by this plan, and already logged by 05-02 and 05-14. `rustfmt` was run on
-the two files this plan owns rather than `cargo fmt -p aprender-train`, so the pre-existing diff
-was not silently absorbed into this plan's changes.
+**Total deviations:** 5 auto-handled (1 missing-critical, 3 blocking, 1 measurement) + 1 scope
+escalation resolved by explicit authorization.
+**Impact:** no scope creep. Every change was required for correctness or by the plan's own
+criteria; the one out-of-scope edit was escalated at the checkpoint and authorized before being
+made.
+
+## Issues Encountered
+
+The plan was re-dispatched after a prior executor halted on a host ENOSPC blocker before Task 1.
+That halt left no partial state to reconcile — the 12 banked calibration passes were intact, so no
+measurement compute had to be re-spent. This run began from Task 1 unchanged. Disk stayed
+comfortable throughout (136 GiB free at the end); `CARGO_INCREMENTAL=0` was exported on every
+build.
 
 ## Known Stubs
 
-None. Every symbol introduced is reached by a test in the default suite, and the one report-only
-renderer is exercised by the combine run quoted above.
+None. Every symbol introduced is reached by a default-suite test, and the one report-only renderer
+is exercised by the combine run quoted above.
+
+## Deferred / out of scope (NOT fixed)
+
+- **`mod.rs:1692` and `:1720` use `calibrated[0]`**, which is position-dependent now that the list
+  has two entries. They are still CORRECT (the fixture entry is first) and were left alone: the
+  coordinator scoped this commit to the one `mod.rs` line. Worth converting to
+  `calibrated.iter().any(...)` in a plan that already owns the file.
+- **`crates/aprender-train/src/train/setfit/apr_reload.rs:331`** remains unformatted at HEAD —
+  pre-existing, untouched here, already logged by 05-02 and 05-14. `rustfmt` was run on the files
+  this plan owns rather than `cargo fmt -p aprender-train`, so the pre-existing diff was not
+  silently absorbed into this plan's changes.
 
 ## Threat Flags
 
 None. No network endpoint, auth path, file-access pattern or trust-boundary schema was introduced.
-The threat register is addressed rather than extended — T-05-03-05 in particular is discharged by
-deriving every candidate through the shipped combine and by printing L3's admissible factors so
-relaxation is refuted by arithmetic on the record.
+The register is discharged rather than extended:
 
-## Downstream impact
+- **T-05-03-01** (gate loosening) — full-list string equality over the 2-entry list preserved;
+  `len()` literal exactly 2; human checkpoint before any commit.
+- **T-05-03-02** (fixture semantics) — byte-identity control with zero fixture deletions; the
+  per-regime association test now compares the fixture block too, so drift is red.
+- **T-05-03-03** (spoofing) — architecture component byte-copied from a measured run id; the
+  envelope test renders all 40 ids through the run's own grammar; the provenance note forbids
+  prefix aliasing and the negatives prove `minilm-full-` still resolves nothing.
+- **T-05-03-04** (repudiation) — `pv diff` + bump recorded in the header; one commit; the
+  selection recorded verbatim.
+- **T-05-03-05** (a rule chosen to close the table) — every candidate derived by RUNNING the
+  shipped combine; L3's admissible factors printed so relaxation is refuted by arithmetic; the
+  selection was the human's; the frozen basis makes 05-14's derivation return the success value.
+- **T-05-03-06** (a weakened claim recorded as unchanged) — the contract states the weakened claim
+  explicitly, naming which adversaries remain refused and which run would now pass.
+- **T-05-03-07** (exemption by omission) — `attention_key_bias`'s exclusion is a recorded contract
+  declaration with measured numbers; with no table resolved every class is required, proven by a
+  default-suite test.
 
-**F-10 is NOT yet unblocked.** The prepared edit would unblock it, but nothing is applied.
-**05-07**, **05-12** and (transitively) **05-09**, **05-11**, **05-13** remain blocked until the
-D-04 selection is made and Task 3 runs.
+## Next Phase Readiness
 
-This is distinct from option F: no basis has been rejected and nothing about the epsilon question
-has been prejudged. The decision is available, fully evidenced, and awaiting one answer.
+**F-10 is unblocked at `a63bb130b`.** 05-07, 05-12 and (transitively) 05-09, 05-11, 05-13 are
+released to run.
 
-## Next Steps
+Two things the next plans must carry rather than rediscover:
 
-1. Human selects at D-04: an option (A–F) **and** a factor (`10x` or bare).
-2. If the selection matches the prepared edit: `git apply` the patch, apply the `mod.rs` change
-   from deviation 4, re-verify both directions, and commit contract + `thresholds.rs` +
-   `evidence.rs` as ONE commit (the memo commit is already in history and is not re-litigated).
-3. If it differs: re-prepare, re-present the full bundle, and amend the memo by a follow-up commit
-   recording the selection — never rewrite it in place.
+1. **05-07** owns proving the `apr setfit train → inspect → eval → predict` ladder reaches exit 0.
+   This plan states that as an expectation only.
+2. **05-12 must ask for its SetFit compute separately** — it is explicitly NOT pre-authorized, and
+   the human deferred the question to wave 7. 05-12 also runs cells SEQUENTIALLY; parallel cell
+   processes would corrupt EVAL-05's resource measurements, so a wall-clock overrun is a
+   checkpoint, never a reason to parallelize.
+
+The provisional basis is the one standing caveat: if a later reviewer wants the asterisk removed,
+`s64:31` and `s64:53` are ~5.6 h of retryable compute and the store is already set up to bank them
+without redoing anything.
 
 ## Self-Check: PASSED
 
 | Claim | Check | Result |
 |---|---|---|
 | `05-03-epsilon-basis-decision.md` exists | `test -f` | FOUND |
-| `05-03-prepared-edit.patch` exists and is faithful | `git apply --check --reverse` | FOUND, rc=0 |
-| memo commit `2f76df22f` exists | `git log --format=%h -1` | FOUND |
-| memo commit contains ONLY the memo | `git log -1 --name-only --format=` | FOUND, 1 file |
-| no gate change committed | `git status --porcelain` shows contract/thresholds/evidence as ` M`, not staged | CONFIRMED |
-| `pv validate` at the prepared state | `cargo run ... pv validate` | rc=0, 0 errors |
-| four-cell combine GREEN against the prepared table | env-gated `--ignored` run | rc=0 |
-| `thresholds` 30 passed, `epsilon_basis` 9 passed | `rtk proxy cargo test` | CONFIRMED |
-| `setfit::` state fully characterised | `rtk proxy cargo test` | 322 passed, 1 failed (mod.rs only — deviation 4) |
+| `05-03-prepared-edit.patch` exists | `test -f` | FOUND |
+| commit `2f76df22f` (memo) | `git log` | FOUND |
+| commit `d756cfc67` (halt record) | `git log` | FOUND |
+| commit `a63bb130b` (gate edit) | `git log` | FOUND |
+| gate commit names 4 files, memo excluded | `git log -1 --name-only --format=` | CONFIRMED |
+| contract at committed state validates | `pv validate` | rc=0, 0 errors |
+| 05-14 derivation GREEN at committed state | four-cell combine | rc=0 |
+| `setfit::` suite | `rtk proxy cargo test` | 323 passed, 0 failed |
+| exactly one top-level `status:` in this frontmatter | `grep -c '^status:'` | 1 |
