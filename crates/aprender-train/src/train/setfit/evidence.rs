@@ -749,7 +749,24 @@ mod tests {
     use aprender::setfit::FreezeGroup;
 
     use crate::train::setfit::test_fixtures as fx;
-    use crate::train::setfit::thresholds::Thresholds;
+    use crate::train::setfit::thresholds::{RegimeThresholds, Thresholds};
+
+    /// The frozen table for the regime a run ACTUALLY executed in.
+    ///
+    /// Since plan 05-03 TWO regimes are calibrated, so a regime-less threshold read has no
+    /// answer: the fixture slice's 97-row-vocabulary epsilons and the production encoder's
+    /// 30522-row ones are different measurements, and answering with "the first" is exactly the
+    /// non-transfer D-10(c) forbids. Plan 05-02 made that unexpressible by deleting the
+    /// regime-less accessors; this helper is how the fixture-scale assertions below say WHICH
+    /// regime they mean — by naming the id the run itself recorded, never a list position.
+    fn table_of_run<'a>(frozen: &'a Thresholds, regime_id: &str) -> &'a RegimeThresholds {
+        frozen.table_for(regime_id).unwrap_or_else(|| {
+            panic!(
+                "the run's recorded regime `{regime_id}` resolves to no calibrated table; this \
+                 assertion is about a run that must be INSIDE a calibrated regime",
+            )
+        })
+    }
     use crate::train::setfit::tune::{run_tuning, validate_evidence};
     use crate::train::setfit::{EncoderTuned, SetFitRun, SetFitTrainError};
 
@@ -1256,8 +1273,9 @@ mod tests {
 
         // The per-class epsilon actually applied is the CONTRACT's, not a local literal.
         let frozen = Thresholds::frozen();
+        let table = table_of_run(&frozen, &summary.calibration_regime_id);
         for class in ParameterClass::ALL {
-            let entry = frozen.of(class);
+            let entry = table.of(class);
             let Some(eps) = entry.eps else { continue };
             for row in passed.table().rows_of_class(class) {
                 assert!(
@@ -1323,16 +1341,19 @@ mod tests {
                 );
                 // Its class is one the contract actually gates.
                 let frozen = Thresholds::frozen();
+                // NOT `table`: that name is already bound by the match arm to the run's
+                // UpdateEvidence. This is the THRESHOLD table for the regime the run recorded.
+                let regime_table = table_of_run(&frozen, &summary.calibration_regime_id);
                 let class = ParameterClass::ALL
                     .into_iter()
                     .find(|c| c.tag() == worst.class)
                     .unwrap_or_else(|| panic!("unknown class `{}`", worst.class));
-                assert!(frozen.of(class).gated, "an ungated class must never be blamed");
+                assert!(regime_table.of(class).gated, "an ungated class must never be blamed");
 
                 // The measured delta and the CONTRACTED epsilon are both present and consistent.
                 assert_eq!(
                     Some(worst.eps),
-                    frozen.of(class).eps,
+                    regime_table.of(class).eps,
                     "the blamed epsilon must be the contract's value for that class",
                 );
                 assert!(
@@ -1401,8 +1422,9 @@ mod tests {
         short.embedding_delta_median *= 1e-3;
 
         // Non-vacuity: EVERY gated row moved, so nothing here is rejectable by `moved`.
+        let fixture_table = table_of_run(&frozen, &short.calibration_regime_id);
         let gated_rows: Vec<&EvidenceRow> =
-            short.rows.values().filter(|r| frozen.of(r.class).gated).collect();
+            short.rows.values().filter(|r| fixture_table.of(r.class).gated).collect();
         assert!(!gated_rows.is_empty());
         assert!(
             gated_rows.iter().all(|r| r.moved && r.delta_norm > 0.0),
@@ -1420,7 +1442,7 @@ mod tests {
                     .into_iter()
                     .find(|c| c.tag() == worst.class)
                     .unwrap_or_else(|| panic!("unknown class `{}`", worst.class));
-                assert_eq!(Some(worst.eps), frozen.of(class).eps);
+                assert_eq!(Some(worst.eps), fixture_table.of(class).eps);
                 assert!(
                     worst.relative_delta > 0.0,
                     "the blamed parameter MOVED ({:e}); only the threshold rejected it",
@@ -1457,8 +1479,21 @@ mod tests {
         match validate_evidence(&bad, &frozen, out.trainable_count, out.frozen_count) {
             Err(SetFitTrainError::UncalibratedRegime { observed, calibrated }) => {
                 assert_eq!(observed, foreign);
-                assert_eq!(calibrated.len(), 1, "exactly one calibrated fingerprint");
+                assert_eq!(
+                    calibrated.len(),
+                    2,
+                    "two calibrated fingerprints since plan 05-03 — the fixture slice and the \
+                     production encoder — and this run matches NEITHER",
+                );
                 assert!(!calibrated.contains(&foreign.to_string()));
+                // The point of the id above: `minilm-full-...@production` differs from the
+                // calibrated production entry `minilm-slice-...@1110a243` in BOTH the prefix and
+                // the revision, so calibrating the production encoder must not have made it
+                // resolvable. An architecture is matched for exact equality, never by family.
+                assert!(
+                    calibrated.iter().all(|c| !c.starts_with("minilm-full-")),
+                    "no calibrated entry may carry the `minilm-full-` rendering: {calibrated:?}",
+                );
                 let rendered =
                     SetFitTrainError::UncalibratedRegime { observed, calibrated }.to_string();
                 assert!(rendered.contains("D-10(c)"), "rendered: {rendered}");
@@ -1633,6 +1668,86 @@ mod tests {
     /// its value.
     const WINDOW_SAFETY_FACTOR: f64 = 10.0;
 
+    /// WHICH measured quantity the window's LOWER edge is derived from, and at what factor.
+    ///
+    /// The upper edge is not a degree of freedom here: it is `best_real / WINDOW_SAFETY_FACTOR`
+    /// under every variant, because nothing 05-01 measured challenges the upper factor. Only the
+    /// lower edge is in question, and `contracts/setfit-train-lifecycle-v1.yaml` records TWO
+    /// candidate lower bounds — this enum is those two, made selectable so a candidate's window
+    /// status is obtained by RUNNING [`epsilon_basis`] rather than by open-coding a second
+    /// emptiness comparison beside it (plan 05-03 Task 1's structural constraint; the
+    /// `lower < upper` in `epsilon_basis` stays the only one in this file).
+    ///
+    /// # The bound is cited; the FACTOR is chosen
+    ///
+    /// [`Self::NotTrainingControl`] carries a factor the contract's DERIVATION invariant states
+    /// (`10 * worst_control_delta <= eps`). [`Self::RoundingNoiseFloor`] does NOT: the contract
+    /// states a clearance CONDITION ("no parameter can satisfy its threshold by rounding alone")
+    /// and records 49x-315x as the clearance the fixture epsilons HAPPENED TO HAVE, never as a
+    /// required `lower = k * floor` formula. Any factor on the noise floor is therefore CHOSEN by
+    /// the plan that selects it and must be recorded as chosen.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum LowerBound {
+        /// `factor * max(worst_ctrl, worst_nnull)` — the D-03 rule, whose factor IS contracted.
+        NotTrainingControl {
+            /// The safety factor applied to the worst not-really-training delta.
+            factor: f64,
+        },
+        /// `factor * noise_floor` — the contracted f32 rounding-noise clearance condition. The
+        /// factor is a CHOICE, not a citation; see the type's docs.
+        RoundingNoiseFloor {
+            /// The safety factor applied to the class's own f32 rounding-noise floor.
+            factor: f64,
+        },
+    }
+
+    impl LowerBound {
+        /// This rule's lower edge for one class's measured aggregates.
+        fn lower(self, agg: &ClassAggregates) -> f64 {
+            match self {
+                Self::NotTrainingControl { factor } => agg.worst_ctrl.max(agg.worst_nnull) * factor,
+                Self::RoundingNoiseFloor { factor } => agg.noise_floor * factor,
+            }
+        }
+
+        /// A short label for the report's candidate table.
+        fn label(self) -> String {
+            match self {
+                Self::NotTrainingControl { factor } => {
+                    format!("{factor:.0} x max(worst_ctrl, worst_nnull)")
+                }
+                Self::RoundingNoiseFloor { factor } => format!("{factor:.0} x noise_floor"),
+            }
+        }
+    }
+
+    /// The lower bound the contract's DERIVATION invariant states, at its contracted factor.
+    ///
+    /// This is the rule the FIXTURE regime's five gated epsilons were frozen under, and the rule
+    /// plan 05-01 measured collapsing at the production envelope. It stays the default every
+    /// existing call site passes, so nothing about the fixture derivation moves.
+    const CONTRACTED_NEAR_NULL_LOWER_BOUND: LowerBound =
+        LowerBound::NotTrainingControl { factor: WINDOW_SAFETY_FACTOR };
+
+    /// The lower bound the PRODUCTION regime's windows are derived under.
+    ///
+    /// Held as its own constant because the production and fixture regimes are separate
+    /// measurements and 05-01 proved the contracted near-null bound does not survive the
+    /// production envelope (five of six classes have no legal epsilon at 1536 optimizer steps).
+    /// Which bound replaces it was decided at plan 05-03's D-04 checkpoint, on the candidate
+    /// tables this file renders, and is recorded in the contract's `calibration_regime`
+    /// invariants: the contract's OTHER lower bound, the f32 rounding-noise clearance condition.
+    ///
+    /// # The bound is cited; the FACTOR is chosen
+    ///
+    /// The contract states the clearance CONDITION and records 49x-315x as what the fixture
+    /// epsilons happened to have — never a required `lower = k * floor` formula. The `10.0`
+    /// below is therefore this plan's CHOICE, made for two stated reasons: it mirrors the
+    /// near-null leg's own factor, and it is strictly stricter than bare clearance. The contract
+    /// records it as chosen and prints the bare-condition window beside it, so a reader can see
+    /// what the factor bought.
+    const PRODUCTION_LOWER_BOUND: LowerBound = LowerBound::RoundingNoiseFloor { factor: 10.0 };
+
     /// The measured aggregates one class contributes to the basis.
     ///
     /// The first four are what the window rule consumes; the last two are what the report
@@ -1773,6 +1888,11 @@ mod tests {
         rows: Vec<BasisRow>,
         /// How much of the boundary matrix was measured.
         coverage: BasisCoverage,
+        /// WHICH lower bound the rows' `lower` edges were derived under.
+        ///
+        /// Carried so a basis is self-describing: a reader of a rendered table can tell which
+        /// rule produced it without inferring the rule from the numbers.
+        lower_bound: LowerBound,
     }
 
     impl EpsilonBasis {
@@ -1895,6 +2015,7 @@ mod tests {
         aggregates: &BTreeMap<&'static str, ClassAggregates>,
         measured_cells: &[String],
         full_matrix_cells: &[String],
+        lower_bound: LowerBound,
     ) -> Result<EpsilonBasis, Box<CollapsedWindows>> {
         let frozen = Thresholds::frozen();
         let table = frozen.table_for(regime_id);
@@ -1913,8 +2034,10 @@ mod tests {
             let agg = aggregates.get(class.tag()).copied().unwrap_or_default();
             // The ONE strict-window comparison in this file. `10x` in the report's column
             // headers names THIS factor; 05-03 edits the two lines above the comparison, never
-            // the comparison itself.
-            let lower = agg.worst_ctrl.max(agg.worst_nnull) * WINDOW_SAFETY_FACTOR;
+            // the comparison itself. The lower edge is now supplied by the caller's named
+            // `LowerBound` rule, so a CANDIDATE bound's per-class status is obtained by calling
+            // this function again rather than by open-coding a second emptiness determination.
+            let lower = lower_bound.lower(&agg);
             let upper = agg.best_real / WINDOW_SAFETY_FACTOR;
             let window = if lower < upper {
                 WindowStatus::Legal
@@ -1959,6 +2082,7 @@ mod tests {
             gated,
             rows,
             coverage,
+            lower_bound,
         };
 
         let collapsed: Vec<CollapsedClass> = basis
@@ -2076,6 +2200,117 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------------------
+    // CANDIDATE LOWER BOUNDS — report only (plan 05-03, the D-04 decision input)
+    // -----------------------------------------------------------------------------------
+
+    /// The candidate lower bounds plan 05-03's D-04 checkpoint chooses between.
+    ///
+    /// Both BOUNDS are already written into `setfit-train-lifecycle-v1.yaml`; the question the
+    /// checkpoint answers is which one binds the production regime, and — separately — what
+    /// factor sits on it. The noise-floor bound is printed at TWO factors precisely because the
+    /// contract supplies the condition and not the factor, so `L2-bare` is what the contract
+    /// literally requires and `L2-10x` is a choice this plan makes and must own.
+    const CANDIDATE_LOWER_BOUNDS: [(&str, LowerBound); 3] = [
+        ("L1      (D-03 rule, being replaced)", LowerBound::NotTrainingControl { factor: 10.0 }),
+        ("L2-bare (bare contracted clearance)", LowerBound::RoundingNoiseFloor { factor: 1.0 }),
+        ("L2-10x  (CHOSEN safety factor)", LowerBound::RoundingNoiseFloor { factor: 10.0 }),
+    ];
+
+    /// Render the candidate lower-bound tables — REPORT ONLY, never a verdict.
+    ///
+    /// # Why this cannot open-code a comparison
+    ///
+    /// Plan 05-14 pins the non-comment count of `lower < upper` in this file at exactly ONE,
+    /// because the duplicated inline arithmetic is why 05-01's `eps/noise` trap had to be fixed
+    /// twice. Four candidate columns each need an emptiness determination, and the naive
+    /// implementation would open-code four more and destroy that invariant by construction. So
+    /// each candidate's status is obtained by CALLING [`epsilon_basis`] with that candidate's
+    /// bounds and reading the per-class status it returns. The refusal carries the whole basis,
+    /// which is what makes a collapsed candidate readable rather than fatal here.
+    fn render_candidate_lower_bounds(
+        regime_id: &str,
+        aggregates: &BTreeMap<&'static str, ClassAggregates>,
+        measured_cells: &[String],
+        full_matrix_cells: &[String],
+    ) -> String {
+        let mut out = String::new();
+        out.push_str(
+            "\nCANDIDATE LOWER BOUNDS — report only, no rule is frozen by printing it.\n\
+             Every candidate shares the contracted upper edge `best_real / 10`; only the LOWER\n\
+             edge differs. `width` is upper/lower — how much room a frozen epsilon has, NOT a\n\
+             margin over anything. A width at or below 1.00x is an EMPTY window.\n",
+        );
+
+        for (name, candidate) in CANDIDATE_LOWER_BOUNDS {
+            let derived =
+                epsilon_basis(regime_id, aggregates, measured_cells, full_matrix_cells, candidate);
+            let basis = match &derived {
+                Ok(basis) => basis,
+                Err(collapse) => &collapse.basis,
+            };
+            out.push_str(&format!(
+                "\n  {name}   lower = {}\n  {:<20} {:<13} {:<13} {:<13} {}\n",
+                candidate.label(),
+                "class",
+                "lower",
+                "upper",
+                "width",
+                "window",
+            ));
+            for row in &basis.rows {
+                let width = if row.lower > 0.0 { row.upper / row.lower } else { f64::INFINITY };
+                out.push_str(&format!(
+                    "  {:<20} {:<13.3e} {:<13.3e} {:<13.2} {}\n",
+                    row.class.tag(),
+                    row.lower,
+                    row.upper,
+                    width,
+                    row.window_tag(),
+                ));
+            }
+        }
+
+        // L3 — relaxing the near-null bound's safety factors, refuted BY ARITHMETIC rather than
+        // by taste, so the numbers are on the record. These are divisions on two measured
+        // quantities, not window-emptiness determinations, so they do not add a comparison site.
+        out.push_str(
+            "\n  L3 — RELAXING THE NEAR-NULL FACTORS. Largest admissible values, per class:\n\
+             \x20   k_low_max  = best_real / (10 x worst_nnull)   (relax the lower factor alone)\n\
+             \x20   product_max = best_real / worst_nnull          (relax BOTH factors)\n\
+             \x20 The contracted product is 100. A product_max BELOW 1 means epsilon would sit\n\
+             \x20 UNDER the near-null delta it must exceed — an INVERTED margin, not a reduced\n\
+             \x20 one, under which a near-null run would PASS.\n",
+        );
+        out.push_str(&format!("  {:<20} {:<15} {}\n", "class", "k_low_max", "product_max"));
+        let mut binding: Option<(&'static str, f64)> = None;
+        for class in ParameterClass::ALL {
+            let agg = aggregates.get(class.tag()).copied().unwrap_or_default();
+            let worst = agg.worst_ctrl.max(agg.worst_nnull);
+            let (k_low_max, product_max) = if worst > 0.0 {
+                (agg.best_real / (WINDOW_SAFETY_FACTOR * worst), agg.best_real / worst)
+            } else {
+                (f64::INFINITY, f64::INFINITY)
+            };
+            out.push_str(&format!(
+                "  {:<20} {:<15.3} {:.3}\n",
+                class.tag(),
+                k_low_max,
+                product_max,
+            ));
+            if binding.is_none_or(|(_, worst_so_far)| product_max < worst_so_far) {
+                binding = Some((class.tag(), product_max));
+            }
+        }
+        if let Some((tag, product_max)) = binding {
+            out.push_str(&format!(
+                "  BINDING CLASS: {tag} — largest admissible factor PRODUCT {product_max:.3} \
+                 against the contracted 100.\n",
+            ));
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------------------------
     // The DEFAULT-SUITE falsification of the window verdict (D-18, plan 05-14)
     //
     // Every test below runs in a plain `cargo test -p aprender-train --lib --features setfit`:
@@ -2142,8 +2377,14 @@ mod tests {
 
     #[test]
     fn evidence_epsilon_basis_all_windows_legal_returns_the_success_value() {
-        let basis = epsilon_basis(&regime_id(), &legal_aggregates(), &one_cell(), &one_cell())
-            .expect("a basis whose every class has a legal window is not a refusal");
+        let basis = epsilon_basis(
+            &regime_id(),
+            &legal_aggregates(),
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect("a basis whose every class has a legal window is not a refusal");
 
         assert_eq!(basis.rows.len(), ParameterClass::ALL.len(), "one row per class");
         for class in ParameterClass::ALL {
@@ -2166,10 +2407,16 @@ mod tests {
         let mut aggregates = legal_aggregates();
         collapse_one(&mut aggregates, ParameterClass::Embedding);
 
-        let collapse = epsilon_basis(&regime_id(), &aggregates, &one_cell(), &one_cell())
-            .expect_err(
-                "a class the fixture regime GATES with no legal window must refuse, not report",
-            );
+        let collapse = epsilon_basis(
+            &regime_id(),
+            &aggregates,
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect_err(
+            "a class the fixture regime GATES with no legal window must refuse, not report",
+        );
 
         assert_eq!(collapse.collapsed.len(), 1, "exactly one class collapsed");
         let only = collapse.collapsed[0];
@@ -2196,8 +2443,14 @@ mod tests {
         entry.worst_nnull = 2.0;
         entry.best_real = 200.0;
 
-        let collapse = epsilon_basis(&regime_id(), &aggregates, &one_cell(), &one_cell())
-            .expect_err("equal bounds are a point, not an interval; there is no value to freeze");
+        let collapse = epsilon_basis(
+            &regime_id(),
+            &aggregates,
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect_err("equal bounds are a point, not an interval; there is no value to freeze");
 
         let only = collapse.collapsed[0];
         assert_eq!(only.class, "layer_norm_weight");
@@ -2219,8 +2472,14 @@ mod tests {
 
         // (a) With the table RESOLVED, the declaration is read and the verdict is a success
         // value — but the row survives, EMPTY, with its factor and its annotation.
-        let basis = epsilon_basis(&regime_id(), &aggregates, &one_cell(), &one_cell())
-            .expect("a class the resolved table declares ungated cannot collapse the verdict");
+        let basis = epsilon_basis(
+            &regime_id(),
+            &aggregates,
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect("a class the resolved table declares ungated cannot collapse the verdict");
         let row = basis.row(ParameterClass::AttentionKeyBias);
         assert!(!row.required, "the table declares this class ungated");
         assert!(row.declared_ungated, "and the row records that it was DECLARED, not merely lax");
@@ -2233,8 +2492,14 @@ mod tests {
         // (b) The two-sided partner: the SAME empty window on a class the SAME table gates.
         let mut gated_side = legal_aggregates();
         collapse_one(&mut gated_side, ParameterClass::ProjectionBias);
-        let collapse = epsilon_basis(&regime_id(), &gated_side, &one_cell(), &one_cell())
-            .expect_err("the identical window on a GATED class must refuse");
+        let collapse = epsilon_basis(
+            &regime_id(),
+            &gated_side,
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect_err("the identical window on a GATED class must refuse");
         assert_eq!(collapse.collapsed[0].class, "projection_bias");
         assert!(
             (collapse.collapsed[0].exceed_factor - 100.0).abs() < 1e-9,
@@ -2244,8 +2509,14 @@ mod tests {
         // (c) And the declaration is what moved it: the SAME aggregates as (a) under a regime
         // that resolves NO table refuse, because an unrecorded class is never ungated by
         // default.
-        let strict = epsilon_basis(UNCALIBRATABLE_REGIME, &aggregates, &one_cell(), &one_cell())
-            .expect_err("with no table resolved, every class is required");
+        let strict = epsilon_basis(
+            UNCALIBRATABLE_REGIME,
+            &aggregates,
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect_err("with no table resolved, every class is required");
         assert_eq!(strict.collapsed[0].class, "attention_key_bias");
         assert!(
             !strict.basis.row(ParameterClass::AttentionKeyBias).declared_ungated,
@@ -2253,16 +2524,42 @@ mod tests {
         );
     }
 
+    /// With NO table resolved, EVERY class is required — exemption by omission stays closed.
+    ///
+    /// # Why this now derives under `UNCALIBRATABLE_REGIME`
+    ///
+    /// Plan 05-14 wrote this test against `PRODUCTION_REGIME_TODAY` and said so explicitly: that
+    /// id "is a real id that 05-03 may eventually calibrate, which is exactly why the DURABLE
+    /// test does not use it". Plan 05-03 calibrated it. So the id no longer demonstrates the
+    /// no-table branch, and the honest migration is to derive under the id that can never
+    /// resolve — not to weaken the assertion.
+    ///
+    /// The state change is not silently dropped: it is asserted POSITIVELY below, so the fact
+    /// that the production regime went from uncalibrated to calibrated is recorded by a test
+    /// rather than by a test's disappearance.
     #[test]
     fn evidence_epsilon_basis_without_a_resolved_table_every_class_is_required() {
+        let frozen = Thresholds::frozen();
         assert!(
-            Thresholds::frozen().table_for(PRODUCTION_REGIME_TODAY).is_none(),
-            "the production regime is uncalibrated today — that is the state this test is about",
+            frozen.table_for(UNCALIBRATABLE_REGIME).is_none(),
+            "this test's design is that no table resolves for `{UNCALIBRATABLE_REGIME}`",
+        );
+        // THE STATE CHANGE, asserted rather than assumed: plan 05-03 calibrated the production
+        // regime, which is why this test no longer derives under it.
+        assert!(
+            frozen.table_for(PRODUCTION_REGIME_TODAY).is_some(),
+            "since plan 05-03 the production regime IS calibrated; if this ever stops holding, \
+             the F-10 unblock has been reverted and that must fail loudly here",
         );
 
-        let basis_all_legal =
-            epsilon_basis(PRODUCTION_REGIME_TODAY, &legal_aggregates(), &one_cell(), &one_cell())
-                .expect("no table resolved is not by itself a refusal");
+        let basis_all_legal = epsilon_basis(
+            UNCALIBRATABLE_REGIME,
+            &legal_aggregates(),
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect("no table resolved is not by itself a refusal");
         assert!(!basis_all_legal.table_resolved);
         assert!(basis_all_legal.gated.is_empty(), "there is no gated set to report");
         for class in ParameterClass::ALL {
@@ -2274,26 +2571,59 @@ mod tests {
             basis_all_legal.regime_table_line(),
         );
 
-        // The class the FIXTURE table would have exempted is required here.
+        // The class BOTH resolved tables declare ungated is required here, because there is no
+        // declaration to read.
         let mut aggregates = legal_aggregates();
         collapse_one(&mut aggregates, ParameterClass::AttentionKeyBias);
-        let collapse =
-            epsilon_basis(PRODUCTION_REGIME_TODAY, &aggregates, &one_cell(), &one_cell())
-                .expect_err("exemption by omission is exactly the hole this closes");
+        let collapse = epsilon_basis(
+            UNCALIBRATABLE_REGIME,
+            &aggregates,
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect_err("exemption by omission is exactly the hole this closes");
         assert_eq!(collapse.collapsed[0].class, "attention_key_bias");
+
+        // CONTROL, so the refusal above cannot be read as "this id refuses everything": under
+        // the now-CALIBRATED production regime the identical aggregates are a success value,
+        // because that table DECLARES the class ungated. The declaration is what moves the
+        // verdict, and only a recorded contract table can supply one.
+        let declared = epsilon_basis(
+            PRODUCTION_REGIME_TODAY,
+            &aggregates,
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect("the production table declares attention_key_bias ungated");
+        assert!(declared.table_resolved);
+        assert!(declared.row(ParameterClass::AttentionKeyBias).declared_ungated);
     }
 
     #[test]
     fn evidence_epsilon_basis_coverage_is_typed_complete_or_provisional() {
         let full = vec!["s8:13".to_string(), "s64:13".to_string()];
 
-        let complete = epsilon_basis(&regime_id(), &legal_aggregates(), &full, &full)
-            .expect("all windows legal");
+        let complete = epsilon_basis(
+            &regime_id(),
+            &legal_aggregates(),
+            &full,
+            &full,
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect("all windows legal");
         assert_eq!(complete.coverage, BasisCoverage::Complete);
 
         // A partial measurement stays LEGAL — provisional coverage is not a refusal.
-        let provisional = epsilon_basis(&regime_id(), &legal_aggregates(), &one_cell(), &full)
-            .expect("a provisional basis with all windows legal is a success value");
+        let provisional = epsilon_basis(
+            &regime_id(),
+            &legal_aggregates(),
+            &one_cell(),
+            &full,
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect("a provisional basis with all windows legal is a success value");
         assert_eq!(
             provisional.coverage,
             BasisCoverage::Provisional {
@@ -2314,8 +2644,14 @@ mod tests {
 
     #[test]
     fn evidence_epsilon_basis_report_line_names_whether_a_table_resolved() {
-        let resolved = epsilon_basis(&regime_id(), &legal_aggregates(), &one_cell(), &one_cell())
-            .expect("all windows legal");
+        let resolved = epsilon_basis(
+            &regime_id(),
+            &legal_aggregates(),
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect("all windows legal");
         let line = resolved.regime_table_line();
         assert!(line.starts_with("REGIME TABLE FOR THE DERIVED REGIME: resolved"), "{line}");
         assert!(!line.contains("attention_key_bias"), "the gated set EXCLUDES it: {line}");
@@ -2329,9 +2665,14 @@ mod tests {
             assert!(line.contains(class), "the gated set names {class}: {line}");
         }
 
-        let absent =
-            epsilon_basis(UNCALIBRATABLE_REGIME, &legal_aggregates(), &one_cell(), &one_cell())
-                .expect("all windows legal");
+        let absent = epsilon_basis(
+            UNCALIBRATABLE_REGIME,
+            &legal_aggregates(),
+            &one_cell(),
+            &one_cell(),
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        )
+        .expect("all windows legal");
         assert!(
             absent.regime_table_line().starts_with("REGIME TABLE FOR THE DERIVED REGIME: absent"),
             "{}",
@@ -2461,6 +2802,7 @@ mod tests {
             &aggregates,
             &["s8:13".to_string(), "s8:31".to_string(), "s8:53".to_string(), "s64:13".to_string()],
             &["s8:13".to_string(), "s8:31".to_string(), "s8:53".to_string(), "s64:13".to_string()],
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
         )
         .expect_err(
             "five of six classes have NO legal epsilon on the measured four-cell basis; a run \
@@ -2687,8 +3029,16 @@ mod tests {
         // construction — stated by passing the same list twice rather than asserted in prose.
         let fixture_cells: Vec<String> =
             variants.iter().map(|v| format!("seed{}:{}", v.root_seed, v.label)).collect();
-        let basis_verdict =
-            epsilon_basis(&regime_id(), &aggregates, &fixture_cells, &fixture_cells);
+        // The FIXTURE regime's five gated epsilons were frozen under the contracted near-null
+        // rule and still satisfy it, so this call site does not move: plan 05-03 changes what
+        // binds the PRODUCTION regime, and the fixture derivation must stay exactly what it was.
+        let basis_verdict = epsilon_basis(
+            &regime_id(),
+            &aggregates,
+            &fixture_cells,
+            &fixture_cells,
+            CONTRACTED_NEAR_NULL_LOWER_BOUND,
+        );
         {
             let basis = match &basis_verdict {
                 Ok(basis) => basis,
@@ -3562,6 +3912,7 @@ mod tests {
         let mut near_null_moved_all: BTreeMap<&'static str, bool> = BTreeMap::new();
         let mut binding_param: BTreeMap<&'static str, String> = BTreeMap::new();
         let mut embedding_delta_min_across = f64::INFINITY;
+        let mut embedding_delta_median_min_across = f64::INFINITY;
         let mut regimes: Vec<String> = Vec::new();
         let mut timing_rows: Vec<String> = Vec::new();
         let mut total_secs = 0.0_f64;
@@ -3642,6 +3993,13 @@ mod tests {
 
             embedding_delta_min_across =
                 embedding_delta_min_across.min(real.evidence.embedding_delta_min);
+            // The run-level `embedding_delta_floor` is derived from the smallest embedding-class
+            // MEDIAN across measured cells, not the smallest MINIMUM — the contract's
+            // embedding_delta_floor equation states the two are deliberately different questions
+            // ("whether the table moved as a body"). Accumulated and printed so the frozen floor
+            // is read off a RUN rather than recomputed by hand from the per-cell table.
+            embedding_delta_median_min_across =
+                embedding_delta_median_min_across.min(real.evidence.embedding_delta_median);
 
             for class in ParameterClass::ALL {
                 let real_rows = real.evidence.rows_of_class(class);
@@ -3796,6 +4154,12 @@ mod tests {
         report.push_str(&format!(
             "\nEMBEDDING DELTA MIN across measured cells: {embedding_delta_min_across:.3e}\n",
         ));
+        report.push_str(&format!(
+            "EMBEDDING DELTA MEDIAN MIN across measured cells: \
+             {embedding_delta_median_min_across:.3e}\n  \
+             (the run-level embedding_delta_floor's upper edge is this / 10, rounded DOWN to two \
+             significant figures — the contract's embedding_delta_floor derivation)\n",
+        ));
 
         // The verdict, held until the report has been written to disk (D-18).
         let mut basis_verdict: Option<Result<EpsilonBasis, Box<CollapsedWindows>>> = None;
@@ -3849,8 +4213,13 @@ mod tests {
             let derived_regime =
                 format!("{architecture}|seeds={}|cells={}", seeds.join(","), labels.join(","));
 
-            let verdict =
-                epsilon_basis(&derived_regime, &aggregates, &measured_cells, &full_matrix_cells);
+            let verdict = epsilon_basis(
+                &derived_regime,
+                &aggregates,
+                &measured_cells,
+                &full_matrix_cells,
+                PRODUCTION_LOWER_BOUND,
+            );
             {
                 let basis = match &verdict {
                     Ok(basis) => basis,
@@ -3862,6 +4231,18 @@ mod tests {
                      freezes from these)",
                 ));
             }
+
+            // The D-04 decision input: every candidate lower bound, each derived by CALLING
+            // `epsilon_basis` with that candidate's rule. Appended to the report before the
+            // verdict is asserted, so the tables survive a refusal (D-18's "write the report
+            // first" property) — which is the state this section was written to be read in.
+            report.push_str(&render_candidate_lower_bounds(
+                &derived_regime,
+                &aggregates,
+                &measured_cells,
+                &full_matrix_cells,
+            ));
+
             basis_verdict = Some(verdict);
         } else {
             report.push_str(

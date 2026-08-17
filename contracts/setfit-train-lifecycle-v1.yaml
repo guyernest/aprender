@@ -1,6 +1,44 @@
 contract: setfit-train-lifecycle
 metadata:
-  version: 2.0.0
+  # 3.0.0 (plan 05-03), and MAJOR is `pv diff`'s own suggestion rather than a judgement call:
+  #   git show HEAD:contracts/setfit-train-lifecycle-v1.yaml > /tmp/setfit-train-lifecycle-old.yaml
+  #   cargo run --release -p aprender-contracts-cli --bin pv -- diff \
+  #     /tmp/setfit-train-lifecycle-old.yaml contracts/setfit-train-lifecycle-v1.yaml
+  #   -> "Contract diff: v2.0.0 -> v2.0.0 / Suggested bump: major"
+  #      "~ calibration_regime: invariants changed
+  #       ~ evidence_gate: invariants changed
+  #       ~ gradient_free_parameters: invariants changed"
+  # (`pv diff` takes TWO FILESYSTEM PATHS — see crates/aprender-contracts-cli/src/cli.rs:73-78 —
+  # so the old revision is materialized with `git show <rev>:<path> > /tmp/...` first.)
+  #
+  # MAJOR is also right on the merits, which is worth stating because a tool's suggestion is easy
+  # to accept for the wrong reason. The DATA half of this edit is purely additive — a second
+  # calibrated_regimes entry, a per_regime_thresholds map, and production-scoped invariants — and
+  # the fixture entry plus its entire frozen_thresholds block are BYTE-UNTOUCHED, proven by a
+  # `git diff -U0` control in which no fixture value line and no fixture entry line appears in
+  # any deletion hunk. What genuinely breaks a 2.x reader is the CLAIM, in two places:
+  #
+  #   1. The production regime's epsilons are NOT frozen under the 2.x derivation rule. Plan
+  #      05-01 measured `10 x worst_near_null <= eps <= best_real / 10` COLLAPSING at 1536
+  #      optimizer steps — five of six classes have no legal epsilon — so that regime's lower
+  #      bound is the contract's OTHER recorded bound, the f32 rounding-noise clearance
+  #      condition, at a factor this edit CHOOSES rather than cites. A consumer that assumed one
+  #      derivation rule across all calibrated regimes is wrong as of 3.0.0. See the PRODUCTION
+  #      REGIME invariants under evidence_gate, which state the weakened claim explicitly rather
+  #      than substituting one bound for the other silently.
+  #   2. Two prose claims about `attention_key_bias` are CORRECTED, not merely extended: "those
+  #      deltas are f32 cancellation residue", and the unqualified form of "softmax
+  #      shift-invariance makes dL/db_k exactly zero" in the description above. Both are refuted
+  #      by measurement (grad_norm_max 8.084e-10 / 7.298e-10; deltas scaling with the learning
+  #      rate). `dL/db_k = 0` IN EXACT ARITHMETIC survives and is retained verbatim in THE
+  #      MECHANISM invariant.
+  #
+  # The FILENAME stays `-v1.yaml`, per the 2.0.0 note below and the tweet-eval precedent.
+  #
+  # This edit is the D-10(c) deliberate contract edit the 2.x "CONSEQUENCE FOR PHASE 5" clause
+  # anticipated. It was prepared by an executor, presented with its measured basis and this diff,
+  # and committed only after a human selected the lower bound at a blocking checkpoint (D-04).
+  version: 3.0.0
   created: '2026-08-09'
   updated: '2026-08-11'
   author: PAIML Engineering
@@ -50,12 +88,17 @@ metadata:
     failing comparison without editing this file, which `pv diff` flags.
 
     ONE CLASS IS DELIBERATELY NOT GATED, AND THAT IS A MEASUREMENT. `attention_key_bias`
-    carries no epsilon and no movement predicate. This is not an exemption of convenience --
-    see calibration_regime and the gradient_free_parameters equation, which record the
-    mechanism (softmax shift-invariance makes dL/db_k exactly zero), the measured gradient
-    magnitudes on both sides of the class boundary, and the reason its movement cannot
-    testify in EITHER direction. A reader looking for permission to re-arm it will find the
-    numbers that say why it must not be.
+    carries no epsilon and no movement predicate, in BOTH calibrated regimes. This is not an
+    exemption of convenience -- see calibration_regime and the gradient_free_parameters
+    equation, which record the mechanism (softmax shift-invariance makes dL/db_k exactly zero
+    IN EXACT ARITHMETIC; the encoder executes f32, where the invariance is only approximate and
+    a residual gradient at the ~1e-10 level is measured), the measured gradient magnitudes on
+    both sides of the class boundary, and the reason its movement cannot testify in EITHER
+    direction. The exact-arithmetic qualifier is load-bearing and was ADDED 2026-08-17: plan
+    05-01 measured grad_norm_max 8.084e-10 on the production encoder, so the unqualified form of
+    this sentence was refuted by the repository''s own evidence. A reader looking for permission
+    to re-arm the class will find the numbers that say why it must not be -- for the production
+    regime, a usable margin an order of magnitude narrower than any other class''s.
 
     ONE RUN-LEVEL STATISTIC IS DELIBERATELY OMITTED. `pair_loss_endpoint` -- a last-k versus
     first-k loss-margin gate -- is NOT armed. Plan 03-05 measured a cross-seed spread of
@@ -182,7 +225,110 @@ equations:
         perturbs it by at most half a ULP. Measured per class as the worst row: 9.398e-8
         (embedding), 5.960e-8 (layer_norm_weight), 5.290e-8 (layer_norm_bias), 5.960e-8
         (projection_weight), 5.960e-8 (projection_bias). Every frozen epsilon is 49x to 315x
-        above its own class floor, so no parameter can satisfy its threshold by rounding alone.'
+        above its own class floor, so no parameter can satisfy its threshold by rounding alone.
+        NOTE ON WHAT THIS STATES: a CONDITION (no parameter may satisfy its threshold by
+        rounding alone) plus a RECORD of the clearance the fixture epsilons happened to have. It
+        is NOT a `lower = k x floor` formula. Any multiplier applied to the noise floor as a
+        lower BOUND is chosen by the plan that applies it, and must be recorded there as chosen —
+        see the PRODUCTION REGIME invariants below, which do exactly that.'
+      - 'PRODUCTION REGIME — THE NEAR-NULL LOWER BOUND IS UNSATISFIABLE AT THIS ENVELOPE. Scoped
+        to `minilm-slice-h384-l6-a12-i1536-v30522@1110a243`; nothing here changes the fixture
+        derivation above. Plan 05-01 measured the boundary matrix on the production encoder at
+        the frozen production hyperparameters (epochs 1, batch 16, pinned setfit 1.1.3 body
+        defaults), 12 passes over four cells (`s8:{13,31,53}` and `s64:13`). At s64 the pair
+        budget is `2 x max(pos_cap, neg_cap)` with `neg_cap = 3n^2`, so a cell is 1536 optimizer
+        steps — 64x the s8 cell. Under `10 x worst_near_null <= eps <= best_real / 10`, FIVE OF
+        SIX CLASSES HAVE NO LEGAL EPSILON:
+
+        | class             | lower 10x nnull | upper best_real/10 | window | lower exceeds upper by |
+        |-------------------|-----------------|--------------------|--------|------------------------|
+        | embedding         | 1.553e-3        | 1.813e-4           | EMPTY  | 8.56x                  |
+        | layer_norm_weight | 4.802e-6        | 1.891e-5           | EXISTS | --                     |
+        | layer_norm_bias   | 9.844e-4        | 7.112e-5           | EMPTY  | 13.84x                 |
+        | projection_weight | 1.051e-3        | 1.231e-4           | EMPTY  | 8.54x                  |
+        | projection_bias   | 1.101e-3        | 3.447e-5           | EMPTY  | 31.94x                 |
+        | attention_key_bias| 9.278e-8        | 1.714e-8           | EMPTY  | 5.41x                  |
+
+        The cause is the NEAR-NULL leg, not the control: the 1e-30 control writes back
+        bit-identical weights even at 1536 steps (101 rows, max relative_delta 0.0, zero rows
+        moved), so worst_control is pinned at exactly 0.000e0 and the 1e-8 leg alone sets every
+        lower bound. It is NOT an artifact of mixing cells — within s64 alone
+        `3.683e-7 / 9.278e-9 = 39.7`, against a rule needing `> 100`.
+        RELAXING THE FACTORS IS REFUTED BY ARITHMETIC, not by preference: the largest admissible
+        near-null factor is 0.313 and the largest admissible factor PRODUCT is 3.131 against the
+        contracted 100 (`projection_bias` binding). A factor below 1 puts epsilon UNDER the
+        near-null delta it must exceed, so a near-null run would PASS. That is an inverted margin,
+        not a reduced one.'
+      - 'PRODUCTION REGIME — WHICH BOUND BINDS, AND THE FACTOR IS CHOSEN. **THE VALUES BELOW ARE
+        FROZEN FROM A PROVISIONAL, FOUR-OF-SIX-CELL BASIS** (`s64:31` and `s64:53` were never
+        measured) — stated here, beside the numbers, so a reader cannot take this for a complete
+        boundary matrix without also reading the MEASURED-versus-COVERED invariant below.
+        The bound that binds is the OTHER lower bound this contract already records: the f32
+        rounding-noise clearance condition. That bound is CITED. The MULTIPLIER on it is CHOSEN BY
+        THIS EDIT and is not inherited from the fixture derivation, which states a condition and
+        records 49x-315x as measured rather than as a required formula. The chosen factor is TEN
+        (`lower = 10 x noise_floor`), for two stated reasons: it mirrors the near-null leg''s own
+        factor, so the two bounds are stated at comparable strength, and it is strictly stricter
+        than bare clearance, so it cannot be weaker than what this contract literally requires.
+        THE SELECTION IS A HUMAN''S, RECORDED VERBATIM at plan 05-03''s blocking D-04 checkpoint,
+        which was presented with all three candidate bounds and both factor columns:
+        option "A — L2, freeze now (provisional)", factor "10x noise_floor". An executor prepared
+        this edit; it did not choose the rule.
+        Both windows are printed so a reader can see what the factor bought:
+
+        | class             | noise_floor | upper     | width at 10x floor | width at bare floor |
+        |-------------------|-------------|-----------|--------------------|---------------------|
+        | embedding         | 1.779e-6    | 1.813e-4  | 10.19x             | 101.94x             |
+        | layer_norm_weight | 5.960e-8    | 1.891e-5  | 31.72x             | 317.24x             |
+        | layer_norm_bias   | 5.960e-8    | 7.112e-5  | 119.32x            | 1193.23x            |
+        | projection_weight | 5.960e-8    | 1.231e-4  | 206.56x            | 2065.56x            |
+        | projection_bias   | 5.960e-8    | 3.447e-5  | 57.83x             | 578.27x             |
+        | attention_key_bias| 1.133e-9    | 1.714e-8  | 1.51x              | 15.12x              |
+
+        The frozen values are the upper edge rounded DOWN to two significant figures, the same
+        rule the fixture derivation uses — the change of lower bound does not touch the upper
+        edge, which remains `best_real / 10`. Each frozen value clears 10x its own class floor by
+        10.1x to 201x, and the bare floor by 101x to 2013x, a band comparable to the fixture''s
+        recorded 49x-315x. The run-level embedding_delta_floor 2.6e-4 is the smallest embedding
+        MEDIAN across measured cells (2.611e-3) divided by ten and rounded down, and sits 14.6x
+        above 10x the sparse class''s floor.'
+      - 'PRODUCTION REGIME — THIS IS A WEAKENING OF THE CLAIM, AND IT IS RECORDED AS ONE. Stated
+        plainly rather than left to be inferred from the substitution. WHAT IS GIVEN UP: the gate
+        no longer refuses a genuinely-executed but 2000x-underpowered contrastive run. A run at
+        encoder_lr 1e-8 moves projection_bias by 1.101e-4 at s64, and the frozen 3.4e-5 sits below
+        that, so such a run PASSES this gate.
+        WHAT IS RETAINED, with its margin: all three of the adversaries this contract NAMES —
+        a frozen encoder, a centroid baseline, and a 1e-30-learning-rate run — produce exactly
+        0.000e0 at 1536 steps (measured: ctrl_max = 0.000e0 for all six classes in every cell),
+        so all three remain refused with the widest possible margin. The 1e-8 near-null run was
+        never a named adversary; plan 03-05 introduced it to obtain a non-degenerate lower bound
+        because the 1e-30 control bounds epsilon from ABOVE only. The clearance condition supplies
+        a different non-degenerate lower bound. The claim this gate now makes for the production
+        regime is: THE ENCODER MOVED BEYOND f32 ROUNDING NOISE BY AT LEAST AN ORDER OF MAGNITUDE,
+        AND A RUN THAT DOES NOT TRAIN PRODUCES EXACTLY ZERO. It is not: the encoder moved more
+        than a 2000x-underpowered run would.
+        PRECEDENT, NARROWED TO WHAT IS TRUE: the noise floor was ALREADY this contract''s
+        operative lower bound for one class — the fixture derivation table records
+        layer_norm_weight with `worst 1e-8` = 0.000e0 and `lower edge` = 0.000e0, so its near-null
+        leg was degenerate and the clearance condition was doing the work. That does not mean the
+        whole rule pre-exists, and it does not make the multiplier inherited.'
+      - 'PRODUCTION REGIME — MEASURED versus COVERED. MEASURED: four of the forty contracted
+        cells — `s8e1b16` at seeds 13, 31 and 53, and `s64e1b16` at seed 13 — 12 complete passes,
+        each persisted with a verified evidence_sha256 and committed as a reviewable artifact.
+        The boundary matrix''s remaining two cells (`s64:31`, `s64:53`) were NOT run; the basis is
+        therefore PROVISIONAL and is recorded as such. COVERED: contract membership covers all 40
+        (seed, cell) pairs, so no benchmark cell can hit UncalibratedRegime mid-matrix (D-02).
+        THAT IS A MEMBERSHIP CLAIM, NOT AN EMPIRICAL ONE. Nothing here asserts that an unmeasured
+        cell will clear its epsilon; empirical threshold success on the other thirty-six cells
+        remains a per-run invariant enforced at judgement time, and the benchmark driver halts on
+        the first evidence failure rather than continuing the matrix.
+        WHAT THE UNMEASURED CELLS COULD STILL DO: under this lower bound an unmeasured cell moves
+        the window by raising the worst noise floor or lowering best_real. The factor required to
+        close each window is its width above: 1.51x for attention_key_bias (which is UNGATED, so
+        it cannot change the verdict), 10.19x for embedding, and 31.72x-206.56x for the rest. The
+        floors have been stable across four cells spanning a 64x range in optimizer steps
+        (5.960e-8 for every dense class in every cell; 1.741e-6-1.779e-6 for embedding).
+        PROSPECTIVE VALIDATION (cells s16 seed 41 and s32 seed 29): NOT RUN — compute budget.'
       - 'THE SCALE FLOOR IS WHY THE RATIO IS DEFINED AT ZERO INIT. Without `max(denom, s_class)`
         the ratio has two failure modes that fail in OPPOSITE directions: with a zero
         initialization and a nonzero delta it is +inf, which is GREATER than every threshold
@@ -223,8 +369,17 @@ equations:
     invariants:
       - 'THESE PARAMETERS CANNOT SERVE AS ENCODER-UPDATE EVIDENCE. Stated plainly and first,
         because their movement is recorded in the evidence table and a later reader will see
-        nonzero deltas there. Those deltas are f32 cancellation residue. They are not proof
-        that tuning occurred, and no downstream consumer may treat them as such.'
+        nonzero deltas there. Those deltas are a REAL but vanishingly small gradient signal, and
+        they are not proof that tuning occurred: the class carries no usable margin at which a
+        threshold could separate training from not-training (see the two invariants below, and
+        the PRODUCTION REGIME invariant that measures it). No downstream consumer may treat them
+        as such.
+        CORRECTED 2026-08-17 (plan 05-01 measurement, D-17). This sentence previously read
+        "Those deltas are f32 cancellation residue." That is REFUTED: plan 05-01 measured
+        grad_norm_max 8.084e-10 (s8) and 7.298e-10 (s64) on the binding key-bias row, and the
+        deltas SCALE WITH THE LEARNING RATE (2e-5 -> 1.714e-7; 1e-8 -> 3.105e-11), which a
+        parameter receiving no gradient cannot do. The conclusion the sentence supported survives;
+        the mechanism it asserted does not.'
       - 'THE MECHANISM. Softmax is invariant to a constant shift of its inputs. The key bias
         b_k enters the pre-softmax logit of every key j for a given query i as the same
         quantity q_i . b_k, so the shift cancels and dL/db_k = 0 in EXACT arithmetic. This is a
@@ -262,7 +417,42 @@ equations:
       - 'RE-DERIVATION, NOT RELAXATION. If a future encoder, kernel or reduction order gives
         the key bias a real gradient, this class loses its basis and must be re-derived rather
         than quietly retained. That is enforced by a test that runs in every `cargo test`, not
-        behind --ignored (see FALSIFY-STL-002).'
+        behind --ignored (see FALSIFY-STL-002). THIS CLAUSE FIRED: the production encoder DOES
+        give the key bias a real (tiny) gradient, and the class was re-derived rather than
+        retained — see the PRODUCTION REGIME invariant below.'
+      - 'PRODUCTION REGIME — THE EXCLUSION IS RE-DERIVED ON A MEASURED MARGIN, NOT ON THE
+        GRADIENT-FREE ARGUMENT. Scoped to
+        `minilm-slice-h384-l6-a12-i1536-v30522@1110a243`. Plan 05-01 measured, over 12 passes on
+        four cells: grad_norm_max 8.084e-10 (s8, binding row
+        `encoder.layer.4.attention.self.key.bias`) and 7.298e-10 (s64,
+        `encoder.layer.1...`) — NON-ZERO — and deltas that SCALE WITH THE LEARNING RATE
+        (real 2e-5 -> 1.714e-7; near-null 1e-8 -> 3.105e-11). A parameter receiving no gradient
+        cannot do that, so at production scale `dL/db_k = 0` does not describe the executing code.
+        WHAT SURVIVES, UNCHANGED: `dL/db_k = 0` in EXACT arithmetic, as THE MECHANISM invariant
+        above states it. The encoder executes f32, in which softmax shift-invariance is only
+        approximate, so a residual gradient at the ~1e-10 level is the expected numerical
+        consequence rather than a bug. The physics explains why the gradient is TINY; it does not
+        establish that it is ZERO.
+        THE DISPOSITION AND ITS MARGIN. The class stays UNGATED, now on a measured argument of
+        the same kind as WHY NO EPSILON above. Three quantities, kept separate because conflating
+        them credits the epsilon with a margin it does not have: the RAW class separation
+        `best_real / noise_floor` is 151x (1.714e-7 / 1.133e-9) against 1019x-20654x for the other
+        five; the candidate epsilon''s own clearance `upper / noise_floor` is 15.12x against
+        101x-2065x; and its window WIDTH under the chosen lower bound is 1.51x against
+        10.19x-206.56x. On every one of the three the class is an order of magnitude or more
+        narrower than any other, so a frozen value there would be dominated by rounding rather
+        than by training — the same reasoning that excluded pair_loss_endpoint, applied for
+        consistency rather than selectively. The basis is also PROVISIONAL (4 of 6 boundary
+        cells), and a 1.51x window is the one window two more cells could plausibly close.
+        NOT LOAD-BEARING: the five gated classes already refuse all three named adversaries at
+        ctrl_max 0.000e0, and an empty gated set remains unpassable via NoTestifyingParameters.
+        WHAT MUST NOT BE CARRIED FORWARD: the previously tracked `eps/noise = 15.1` as a MARGIN
+        for this class under the near-null rule. That column is `upper / noise_floor` and was
+        computed whether or not `lower < upper`; with an empty window the quantity it divides is
+        not a legal epsilon, so the number was meaningless rather than merely small. Under the
+        clearance bound the window is non-empty, so `upper` IS a legal epsilon and `upper / lower`
+        is a WIDTH — arithmetic on two measured quantities, which is a different use and a legal
+        one.'
     preconditions:
       - 'the classifier maps "*.attention.self.key.bias" and nothing else into this class'
     postconditions:
@@ -280,9 +470,105 @@ equations:
     # Machine-readable form of the calibrated set; CALIBRATED_REGIMES is parsed from here.
     calibrated_regimes:
       - 'minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4'
+      - 'minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=13,17,23,29,31,37,41,43,47,53|cells=s8e1b16,s16e1b16,s32e1b16,s64e1b16'
+    # Per-regime measured tables. The FIXTURE regime's numbers also live in
+    # evidence_gate.frozen_thresholds above and are compared there; they are restated here so the
+    # per-regime association test is TWO-SIDED — a loop carrying only the production block would
+    # never notice the fixture's numbers drifting. The two copies are compared against the same
+    # Rust table, so they cannot disagree silently.
+    per_regime_thresholds:
+      'minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4':
+        frozen_thresholds:
+          embedding:
+            eps: 1.1e-5
+            scale_floor: 1.0
+            sparse: true
+            gated: true
+          layer_norm_weight:
+            eps: 2.9e-6
+            scale_floor: 1.0
+            sparse: false
+            gated: true
+          layer_norm_bias:
+            eps: 1.1e-5
+            scale_floor: 1.0
+            sparse: false
+            gated: true
+          projection_weight:
+            eps: 1.8e-5
+            scale_floor: 1.0
+            sparse: false
+            gated: true
+          projection_bias:
+            eps: 8.3e-6
+            scale_floor: 1.0
+            sparse: false
+            gated: true
+          attention_key_bias:
+            eps: null
+            scale_floor: 1.0
+            sparse: false
+            gated: false
+        embedding_delta_floor_value: 2.7e-5
+      'minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=13,17,23,29,31,37,41,43,47,53|cells=s8e1b16,s16e1b16,s32e1b16,s64e1b16':
+        frozen_thresholds:
+          embedding:
+            eps: 1.8e-4
+            scale_floor: 1.0
+            sparse: true
+            gated: true
+          layer_norm_weight:
+            eps: 1.8e-5
+            scale_floor: 1.0
+            sparse: false
+            gated: true
+          layer_norm_bias:
+            eps: 7.1e-5
+            scale_floor: 1.0
+            sparse: false
+            gated: true
+          projection_weight:
+            eps: 1.2e-4
+            scale_floor: 1.0
+            sparse: false
+            gated: true
+          projection_bias:
+            eps: 3.4e-5
+            scale_floor: 1.0
+            sparse: false
+            gated: true
+          attention_key_bias:
+            eps: null
+            scale_floor: 1.0
+            sparse: false
+            gated: false
+        embedding_delta_floor_value: 2.6e-4
     invariants:
-      - 'THE CALIBRATED SET CONTAINS EXACTLY ONE FINGERPRINT:
-        `minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4`'
+      - 'THE CALIBRATED SET CONTAINS EXACTLY TWO FINGERPRINTS, EACH MEASURED ON ITS OWN
+        ARCHITECTURE:
+        `minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4` (the Phase 3
+        fixture slice) and
+        `minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=13,17,23,29,31,37,41,43,47,53|cells=s8e1b16,s16e1b16,s32e1b16,s64e1b16`
+        (the Phase 5 production encoder). CROSS-APPLICATION REMAINS FORBIDDEN. Each entry carries
+        its own measured table in per_regime_thresholds above, membership stays component-wise
+        via `covers`, and a run resolves at most one table. Two entries is not a relaxation of
+        the one-entry rule; it is two independent calibrations, and adding a third requires the
+        same D-10(c) procedure — a measurement on the target encoder and a human-approved,
+        `pv diff`-flagged edit.'
+      - 'ARCHITECTURE FINGERPRINT PROVENANCE — why the production entry says `minilm-slice-`.
+        That prefix is emitted UNCONDITIONALLY by
+        `BertSentenceEncoder::architecture_fingerprint()` and renders for the FULL production
+        checkout exactly as it does for the 97-token fixture slice. The entry string is a
+        rendered-verbatim IDENTITY TOKEN copied from an id plan 05-01''s run actually emitted;
+        it is not a semantic claim that the production encoder is sliced. What distinguishes the
+        two architectures is the DIMENSIONAL component: `h384-l6-a12-i1536-v30522` (6 layers,
+        hidden 384, 12 heads, intermediate 1536, vocabulary 30522 — the full 22M-parameter
+        all-MiniLM-L6-v2) against `h64-l2-a2-i256-v97`. Any change to that rendering is a
+        CONTRACT-BREAKING change requiring a new, separately measured regime entry through this
+        same procedure — NEVER a prefix alias, a family match, or a normalization rule in
+        `RegimeCoordinates::covers`. A normalization rule was proposed in cross-AI review and is
+        REJECTED for exactly this reason: it would make two architectures interchangeable by
+        spelling.'
       - 'THE RECORDED ID STATES THE RUN''S OWN COORDINATES, and only those. The architecture
         comes from the encoder, the seed from the resolved configuration, and the cell label
         from the SELECTION (shots per class) crossed with the configuration (epochs, batch
@@ -325,13 +611,17 @@ equations:
         epoch boundary and doubles the selected rows.'
       - 'A RUN OUTSIDE THIS SET FAILS CLOSED with UncalibratedRegime, BEFORE any threshold
         comparison. It does not receive a lenient verdict, a warning, or a default epsilon.'
-      - 'CONSEQUENCE FOR PHASE 5, stated here because this is where it will be read. Phase 5''s
-        benchmark cells run the production all-MiniLM-L6-v2 encoder, whose fingerprint is NOT
-        in the set above. Those cells are BLOCKED by this gate until someone runs a calibration
-        on the production encoder and adds its fingerprint here. Per D-10(c) that is a
-        deliberate contract edit which `pv diff` flags. It is not a code change, not a
-        threshold relaxation, and not something a Phase 5 executor may do inline to unblock a
-        benchmark run.'
+      - 'CONSEQUENCE FOR PHASE 5 — DISCHARGED 2026-08-17, and the procedure is recorded because
+        the NEXT encoder will need it. Phase 5''s benchmark cells run the production
+        all-MiniLM-L6-v2 encoder, whose fingerprint was NOT in the set above and whose cells were
+        therefore BLOCKED by this gate. They were unblocked the only admissible way: plan 05-01
+        RAN a calibration on the production encoder (12 persisted passes over four boundary
+        cells, each with a verified evidence_sha256, committed as reviewable artifacts), plan
+        05-03 derived the candidate lower bounds by running the shipped combine over those
+        passes, and the entry above was added as a deliberate D-10(c) contract edit which
+        `pv diff` flagged and a human approved at a blocking checkpoint. It was NOT a code change
+        that widened membership, NOT a threshold relaxation, and NOT something an executor did
+        inline to unblock a benchmark run. Any future encoder takes the same route.'
       - 'THE INVARIANCE ARGUMENT, AND ITS LIMIT. The support-restricted denominator makes the
         sparse class''s ratio independent of vocabulary size: a few-shot batch touches roughly
         the same ABSOLUTE number of rows whether the table has 97 or 30522, and dividing by the

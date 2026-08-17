@@ -16,11 +16,14 @@
 //!
 //! # One class carries no epsilon, and that is the point
 //!
-//! `attention_key_bias` has `eps: None` and `gated: false`. Its gradient is analytically zero
-//! by softmax shift-invariance, so its movement is f32 cancellation residue and cannot testify
-//! that tuning occurred — in either direction. See the `gradient_free_parameters` equation of
-//! the contract for the mechanism and the measurements. It is RECORDED in the evidence table
-//! and excluded from the verdict.
+//! `attention_key_bias` has `eps: None` and `gated: false` in BOTH calibrated regimes. Its
+//! gradient is analytically zero by softmax shift-invariance IN EXACT ARITHMETIC; the encoder
+//! executes f32, where that invariance is only approximate, so plan 05-01 measured a residual
+//! gradient of ~1e-10 on the production encoder rather than nothing. Its movement still cannot
+//! testify that tuning occurred — in either direction — but for a MEASURED reason (no usable
+//! margin: see the production table's own doc comment) rather than because it cannot move. See
+//! the `gradient_free_parameters` equation of the contract for the mechanism, the measurements,
+//! and the correction. It is RECORDED in the evidence table and excluded from the verdict.
 //!
 //! # Membership is COMPONENT-WISE, and it has to be
 //!
@@ -50,10 +53,12 @@ pub(crate) const CONTRACT_YAML: &str =
 
 /// The calibration regimes these thresholds were MEASURED in.
 ///
-/// Exactly one entry. A run whose recorded `calibration_regime_id` is not in this set is
-/// refused with `UncalibratedRegime` BEFORE any threshold below is applied to it — an epsilon
-/// measured on a 2-layer/64-hidden/97-vocab slice is not evidence about a
-/// 6-layer/384-hidden/30522-vocab model.
+/// Exactly TWO entries since plan 05-03, each measured on its OWN architecture: the Phase 3
+/// fixture slice and the Phase 5 production encoder. A run whose recorded
+/// `calibration_regime_id` is covered by neither is refused with `UncalibratedRegime` BEFORE any
+/// threshold below is applied to it — an epsilon measured on a 2-layer/64-hidden/97-vocab slice
+/// is not evidence about a 6-layer/384-hidden/30522-vocab model, which is why each entry carries
+/// its own table and `table_for` resolves at most one of them.
 ///
 /// Extending this set requires a calibration run on the target encoder AND a deliberate
 /// contract edit (D-10(c)). It is not something a downstream executor may widen inline to
@@ -64,7 +69,7 @@ pub(crate) const CONTRACT_YAML: &str =
 /// reads — dead in a non-test build, and deliberately still here: it is the declared set that
 /// `calibrated_regimes_are_exactly_the_tables_that_exist` holds the derived set against.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const CALIBRATED_REGIMES: &[&str] = &[FIXTURE_REGIME];
+pub(crate) const CALIBRATED_REGIMES: &[&str] = &[FIXTURE_REGIME, PRODUCTION_REGIME];
 
 /// The Phase 3 fixture regime — the ONE regime anything here was measured in.
 ///
@@ -73,6 +78,33 @@ pub(crate) const CALIBRATED_REGIMES: &[&str] = &[FIXTURE_REGIME];
 /// future edit could move apart.
 const FIXTURE_REGIME: &str =
     "minilm-slice-h64-l2-a2-i256-v97@1110a243|seeds=1,42,7|cells=s16e2b8,s8e1b4";
+
+/// The Phase 5 PRODUCTION regime — the full `all-MiniLM-L6-v2` encoder.
+///
+/// # The architecture component is a RENDERED IDENTITY TOKEN, not a description
+///
+/// It reads `minilm-slice-` for a full 6-layer / 30522-vocabulary encoder because that prefix
+/// is emitted UNCONDITIONALLY by `BertSentenceEncoder::architecture_fingerprint()`, for the
+/// production checkout exactly as for the 97-token fixture slice. The string is copied verbatim
+/// from an id plan 05-01's run actually rendered; what distinguishes the two architectures is
+/// the dimensional component — `h384-l6-a12-i1536-v30522` here against `h64-l2-a2-i256-v97` for
+/// the fixture. Reading the prefix as a claim about slicing is a misreading of a rendering
+/// artifact.
+///
+/// Any change to that rendering is a CONTRACT-BREAKING change requiring a new, separately
+/// measured regime entry through the same `pv diff`-flagged, human-approved procedure that
+/// added this one — never a prefix alias or a normalization rule in
+/// [`RegimeCoordinates::covers`].
+///
+/// # Coverage
+///
+/// All ten contracted seeds and all four cell labels at the frozen production `e1b16`, so no
+/// benchmark cell can hit `UncalibratedRegime` mid-matrix (D-02). That is SYNTACTIC coverage:
+/// the epsilons were MEASURED on four of the forty cells (`s8:{13,31,53}` and `s64:13`), and
+/// empirical threshold success on the other thirty-six remains a per-run invariant enforced at
+/// judgement time, not a claim made here.
+const PRODUCTION_REGIME: &str = "minilm-slice-h384-l6-a12-i1536-v30522@1110a243|\
+     seeds=13,17,23,29,31,37,41,43,47,53|cells=s8e1b16,s16e1b16,s32e1b16,s64e1b16";
 
 /// The `seeds=` field marker of the regime grammar.
 const SEEDS_PREFIX: &str = "seeds=";
@@ -321,7 +353,7 @@ impl Thresholds {
     /// The frozen tables, as committed to `setfit-train-lifecycle-v1.yaml`.
     #[must_use]
     pub(crate) fn frozen() -> Self {
-        Self { regimes: vec![Self::fixture_regime()] }
+        Self { regimes: vec![Self::fixture_regime(), Self::production_regime()] }
     }
 
     /// The Phase 3 fixture regime's measured table — the only calibration that exists today.
@@ -352,6 +384,70 @@ impl Thresholds {
             ClassThreshold { eps: None, scale_floor: 1.0, sparse: false, gated: false },
         );
         RegimeThresholds { regime: FIXTURE_REGIME, classes, embedding_delta_floor: 2.7e-5 }
+    }
+
+    /// The Phase 5 production regime's measured table.
+    ///
+    /// # The lower bound these were frozen under is NOT the fixture's
+    ///
+    /// Plan 05-01 measured the contracted `10 x worst_near_null` lower bound COLLAPSING at the
+    /// production envelope: at 1536 optimizer steps five of six classes have no legal epsilon
+    /// (`embedding` 8.56x, `layer_norm_bias` 13.84x, `projection_weight` 8.54x,
+    /// `projection_bias` 31.94x, `attention_key_bias` 5.41x over their upper edges), and the
+    /// collapse holds within `s64` alone (`3.683e-7 / 9.278e-9 = 39.7` against a rule needing
+    /// `> 100`). These epsilons are therefore frozen under the contract's OTHER recorded lower
+    /// bound — the f32 rounding-noise clearance condition — at a CHOSEN factor of ten. The
+    /// contract's `calibration_regime` invariants record which bound binds, that the factor is
+    /// chosen rather than cited, and the claim that is given up by choosing it.
+    ///
+    /// # The values are frozen from a PROVISIONAL basis
+    ///
+    /// Four of the six boundary cells were measured — `s8e1b16` at seeds 13, 31 and 53, and
+    /// `s64e1b16` at seed 13. `s64:31` and `s64:53` were NOT run. Under this lower bound an
+    /// unmeasured cell can still narrow a window by raising the worst noise floor, so these
+    /// values are frozen on an incomplete matrix by a recorded human decision (plan 05-03's D-04
+    /// checkpoint: option "A — L2, freeze now (provisional)", factor "10x noise_floor"), not
+    /// because the matrix was finished.
+    ///
+    /// # The values
+    ///
+    /// Each is `best_real / 10` across the measured cells, rounded DOWN to two significant
+    /// figures — the same upper edge and the same rounding rule as the fixture derivation, which
+    /// the change of lower bound does not touch. Every value clears `10 x` its class's own
+    /// rounding-noise floor by 10.1x to 201x, and the bare floor by 101x to 2013x.
+    ///
+    /// `attention_key_bias` stays ungated, on a MEASURED justification rather than the refuted
+    /// gradient-free one: its usable margin is an order of magnitude narrower than any other
+    /// class's on every quantity (raw separation 151x against 1019x-20654x; window width 1.51x
+    /// against 10.19x-206.56x), so a frozen value there would be dominated by rounding rather
+    /// than by training. See `gradient_free_parameters` in the contract.
+    fn production_regime() -> RegimeThresholds {
+        let mut classes = BTreeMap::new();
+        classes.insert(
+            ParameterClass::Embedding.tag(),
+            ClassThreshold { eps: Some(1.8e-4), scale_floor: 1.0, sparse: true, gated: true },
+        );
+        classes.insert(
+            ParameterClass::LayerNormWeight.tag(),
+            ClassThreshold { eps: Some(1.8e-5), scale_floor: 1.0, sparse: false, gated: true },
+        );
+        classes.insert(
+            ParameterClass::LayerNormBias.tag(),
+            ClassThreshold { eps: Some(7.1e-5), scale_floor: 1.0, sparse: false, gated: true },
+        );
+        classes.insert(
+            ParameterClass::ProjectionWeight.tag(),
+            ClassThreshold { eps: Some(1.2e-4), scale_floor: 1.0, sparse: false, gated: true },
+        );
+        classes.insert(
+            ParameterClass::ProjectionBias.tag(),
+            ClassThreshold { eps: Some(3.4e-5), scale_floor: 1.0, sparse: false, gated: true },
+        );
+        classes.insert(
+            ParameterClass::AttentionKeyBias.tag(),
+            ClassThreshold { eps: None, scale_floor: 1.0, sparse: false, gated: false },
+        );
+        RegimeThresholds { regime: PRODUCTION_REGIME, classes, embedding_delta_floor: 2.6e-4 }
     }
 
     /// The table MEASURED in the regime a recorded id names, or `None` if no calibration
@@ -401,47 +497,16 @@ impl Thresholds {
         self.regimes.iter().map(|entry| entry.regime).collect()
     }
 
-    /// The single calibrated table, for the TEST call sites that predate per-regime tables.
-    ///
-    /// `#[cfg(test)]`, and that is the load-bearing part: production code cannot read a
-    /// threshold without naming a regime, because the only accessors that do not take one do
-    /// not exist outside a test build. The gate resolves its table with [`Self::table_for`].
-    ///
-    /// # Panics
-    ///
-    /// Once a SECOND regime is calibrated — deliberately, rather than "return the first". A
-    /// regime-less threshold read has no answer when two regimes were measured with different
-    /// numbers, and answering with the first would apply fixture-scale epsilons to a
-    /// production encoder: the exact non-transfer D-10(c) forbids. The plan that adds the
-    /// second entry must route these callers through [`Self::table_for`] with the regime they
-    /// mean, and this panic is what makes forgetting to do so impossible to miss.
-    #[cfg(test)]
-    fn sole(&self) -> &RegimeThresholds {
-        match self.regimes.as_slice() {
-            [only] => only,
-            regimes => panic!(
-                "a regime-less threshold read is ambiguous across {} calibrated regimes: \
-                 resolve the table with `table_for(regime_id)` and read the epsilon from the \
-                 regime the run actually executed in",
-                regimes.len(),
-            ),
-        }
-    }
-
-    /// The sole regime's entry for a class. See [`Self::sole`] for when this stops being a
-    /// well-posed question, and why it is not available to production code.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn of(&self, class: ParameterClass) -> ClassThreshold {
-        self.sole().of(class)
-    }
-
-    /// The sole regime's run-level sparse-class floor. See [`Self::sole`].
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn embedding_delta_floor(&self) -> f64 {
-        self.sole().embedding_delta_floor()
-    }
+    // The regime-less accessors plan 05-02 left behind — `sole()`, `of()` and
+    // `embedding_delta_floor()` — are GONE as of plan 05-03, not merely unused.
+    //
+    // 05-02 made them `#[cfg(test)]` and had `sole()` PANIC once a second regime was calibrated,
+    // deliberately, so the plan that added the production entry would be forced to route every
+    // caller through `table_for` with the regime it means. That plan is this one, and all eleven
+    // call sites were migrated. Leaving the accessors behind as a panic that nothing calls would
+    // re-arm the same landmine for the next reader — a regime-less read that compiles is an
+    // invitation whatever it does at runtime. The panic was the signal; removing it is what
+    // completes the migration.
 }
 
 // ===========================================================================================
@@ -515,6 +580,13 @@ mod tests {
         let parsed: ContractFile =
             serde_yaml::from_str(CONTRACT_YAML).expect("the committed contract must deserialize");
         let frozen = Thresholds::frozen();
+        // `evidence_gate.frozen_thresholds` is the FIXTURE regime's table and says so by naming
+        // it. Since 05-03 a regime-less read has no answer, so the regime is named here rather
+        // than inferred from list order — which is exactly how fixture-scale epsilons would come
+        // to be compared against a production table.
+        let fixture = frozen
+            .table_for(FIXTURE_REGIME)
+            .expect("the fixture regime must resolve to its own measured table");
 
         // Non-vacuity FIRST. An empty map would make every per-class assertion below hold.
         assert_eq!(
@@ -531,7 +603,7 @@ mod tests {
                 .frozen_thresholds
                 .get(class.tag())
                 .unwrap_or_else(|| panic!("contract has no entry for class `{}`", class.tag()));
-            let rust = frozen.of(class);
+            let rust = fixture.of(class);
 
             assert_eq!(
                 rust.eps,
@@ -563,7 +635,7 @@ mod tests {
         }
 
         assert_eq!(
-            frozen.embedding_delta_floor(),
+            fixture.embedding_delta_floor(),
             parsed.equations.evidence_gate.embedding_delta_floor_value,
             "the embedding delta floor must match the contract",
         );
@@ -571,9 +643,13 @@ mod tests {
         let contracted_regimes = &parsed.equations.calibration_regime.calibrated_regimes;
         assert_eq!(
             contracted_regimes.len(),
-            1,
-            "exactly ONE calibrated fingerprint; a second would mean numbers measured on one \
-             architecture are being applied to another",
+            2,
+            "exactly TWO calibrated fingerprints — the Phase 3 fixture slice and the Phase 5 \
+             production encoder — each measured on its OWN architecture. The count is pinned \
+             rather than left open because a third entry appearing without its own measured \
+             table is precisely how numbers measured on one architecture come to be applied to \
+             another (D-10(c)); cross-application stays forbidden, and `table_for` keys on \
+             component-wise `covers`, never on a prefix family.",
         );
         assert_eq!(
             frozen.calibrated_regimes().len(),
@@ -609,14 +685,26 @@ mod tests {
             );
         }
 
-        // The PER-REGIME block: the shape a second calibration lands in. It is EMPTY against
-        // today's contract — the fixture regime's numbers live in `evidence_gate` above and
-        // are compared there — so this loop is vacuous NOW and non-vacuous the moment a block
-        // appears. Which of those two states holds is pinned by the `len() == 1` assertion
-        // above rather than left to a reader's inspection: a contract carrying a second regime
-        // without its table turns that assertion red, and one carrying a table whose numbers
-        // disagree with the Rust side turns this loop red.
-        for (regime_id, block) in &parsed.equations.calibration_regime.per_regime_thresholds {
+        // The PER-REGIME block. 05-02 landed the parser with the block EMPTY, so this loop was
+        // vacuous; plan 05-03 lands the data and it is now live. Its non-vacuity is asserted
+        // FIRST and TWO-SIDED — a loop that iterates nothing passes every assertion inside it,
+        // and one that carried only the production block would never notice the fixture's
+        // numbers drifting.
+        let per_regime = &parsed.equations.calibration_regime.per_regime_thresholds;
+        assert_eq!(
+            per_regime.len(),
+            CALIBRATED_REGIMES.len(),
+            "the contract must carry a per-regime threshold block for EVERY calibrated regime; \
+             a missing block makes the comparison below vacuous for exactly the regime that \
+             went missing",
+        );
+        for regime in CALIBRATED_REGIMES {
+            assert!(
+                per_regime.contains_key(*regime),
+                "the contract has no per_regime_thresholds block for `{regime}`",
+            );
+        }
+        for (regime_id, block) in per_regime {
             let table = frozen.table_for(regime_id).unwrap_or_else(|| {
                 panic!(
                     "the contract carries a threshold table for regime `{regime_id}`, which the \
@@ -648,6 +736,83 @@ mod tests {
                 table.embedding_delta_floor(),
                 block.embedding_delta_floor_value,
                 "{regime_id}: embedding delta floor",
+            );
+        }
+    }
+
+    /// EVERY production benchmark cell resolves the PRODUCTION table — all 40 of them.
+    ///
+    /// D-02: the benchmark runs 10 seeds x 4 shot levels, and a cell that hit
+    /// `UncalibratedRegime` halfway through the matrix would abort a run that had already spent
+    /// its compute. The ids are rendered through the SAME `RegimeCoordinates::render_run`
+    /// grammar the harness renders at evidence-construction time, so this asserts on the strings
+    /// a run would actually stamp rather than on hand-written approximations of them.
+    ///
+    /// # This proves SYNTACTIC coverage and nothing more
+    ///
+    /// Membership is not threshold success. The epsilons were MEASURED on four cells
+    /// (`s8:{13,31,53}` and `s64:13`); the other thirty-six are covered by contract membership,
+    /// and whether a real run in one of them clears its epsilon stays a per-run invariant
+    /// enforced at judgement time. The benchmark driver halts on the first evidence failure
+    /// rather than continuing the matrix.
+    ///
+    /// # Two-sided
+    ///
+    /// A fixture id must still resolve the FIXTURE table, so this cannot pass by resolving
+    /// everything to the production entry — which is precisely the failure a one-sided coverage
+    /// test would wave through.
+    #[test]
+    fn production_envelope_is_calibrated() {
+        /// The ten contracted benchmark seeds.
+        const SEEDS: [u64; 10] = [13, 17, 23, 29, 31, 37, 41, 43, 47, 53];
+        /// The four contracted cell labels, at the frozen production epochs/batch.
+        const CELLS: [&str; 4] = ["s8e1b16", "s16e1b16", "s32e1b16", "s64e1b16"];
+
+        let frozen = Thresholds::frozen();
+        let production_architecture = RegimeCoordinates::parse(PRODUCTION_REGIME)
+            .expect("the production calibrated entry must parse")
+            .architecture;
+
+        let mut checked = 0_usize;
+        for seed in SEEDS {
+            for cell in CELLS {
+                let id = RegimeCoordinates::render_run(&production_architecture, seed, cell);
+                let table = frozen.table_for(&id).unwrap_or_else(|| {
+                    panic!(
+                        "benchmark cell `{id}` resolves to NO calibrated table — it would hit \
+                         UncalibratedRegime mid-matrix, which is what D-02 exists to prevent",
+                    )
+                });
+                assert_eq!(
+                    table.regime, PRODUCTION_REGIME,
+                    "`{id}` resolved a table measured in `{}`, not the production regime",
+                    table.regime,
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 40, "the contracted envelope is 10 seeds x 4 cells");
+
+        // THE OTHER SIDE. A fixture-slice run still resolves the FIXTURE table; if it did not,
+        // the loop above would be satisfied by a lookup that returns the production entry for
+        // anything at all.
+        let fixture_id = RegimeCoordinates::render_run(&calibrated_architecture(), 42, "s16e2b8");
+        let fixture_table = frozen
+            .table_for(&fixture_id)
+            .unwrap_or_else(|| panic!("`{fixture_id}` must still resolve the fixture table"));
+        assert_eq!(
+            fixture_table.regime, FIXTURE_REGIME,
+            "a fixture-slice run must NOT be judged by production-encoder epsilons",
+        );
+
+        // And a production SEED/CELL the envelope does not name still fails closed, so the
+        // entry is a measured envelope rather than a blanket architecture permit.
+        for (seed, cell) in [(1_u64, "s8e1b16"), (13, "s8e2b16"), (13, "s128e1b16")] {
+            let id = RegimeCoordinates::render_run(&production_architecture, seed, cell);
+            assert!(
+                frozen.table_for(&id).is_none(),
+                "`{id}` names coordinates outside the contracted envelope and must resolve to \
+                 no table",
             );
         }
     }
@@ -714,35 +879,50 @@ mod tests {
     #[test]
     fn thresholds_gate_every_class_except_the_gradient_free_one() {
         let frozen = Thresholds::frozen();
-        let ungated: Vec<&str> = ParameterClass::ALL
-            .into_iter()
-            .filter(|c| !frozen.of(*c).gated)
-            .map(ParameterClass::tag)
-            .collect();
-        assert_eq!(
-            ungated,
-            vec![ParameterClass::AttentionKeyBias.tag()],
-            "exactly one class is excluded from the verdict, and it is the one whose gradient \
-             is analytically zero",
-        );
-
-        // A gated class without an epsilon would silently gate on nothing.
-        for class in ParameterClass::ALL {
-            let entry = frozen.of(class);
+        // Asserted PER REGIME. Both were measured independently and both leave exactly the same
+        // class ungated — but for DIFFERENT recorded reasons (the fixture's analytic argument,
+        // the production regime's measured margin), so a shared answer must be checked twice
+        // rather than assumed from one table.
+        assert!(!CALIBRATED_REGIMES.is_empty(), "non-vacuity: there is at least one regime");
+        for regime in CALIBRATED_REGIMES {
+            let table = frozen
+                .table_for(regime)
+                .unwrap_or_else(|| panic!("`{regime}` resolves to no measured table"));
+            let ungated: Vec<&str> = ParameterClass::ALL
+                .into_iter()
+                .filter(|c| !table.of(*c).gated)
+                .map(ParameterClass::tag)
+                .collect();
             assert_eq!(
-                entry.gated,
-                entry.eps.is_some(),
-                "{}: `gated` and the presence of an epsilon must agree, otherwise a class is \
-                 either compared against nothing or carries a threshold nobody applies",
-                class.tag(),
+                ungated,
+                vec![ParameterClass::AttentionKeyBias.tag()],
+                "`{regime}`: exactly one class is excluded from the verdict",
             );
+
+            // A gated class without an epsilon would silently gate on nothing.
+            for class in ParameterClass::ALL {
+                let entry = table.of(class);
+                assert_eq!(
+                    entry.gated,
+                    entry.eps.is_some(),
+                    "`{regime}` / {}: `gated` and the presence of an epsilon must agree, \
+                     otherwise a class is either compared against nothing or carries a threshold \
+                     nobody applies",
+                    class.tag(),
+                );
+            }
         }
     }
 
-    /// The architecture component of the single calibrated entry, for the tests below.
+    /// The architecture component of the FIXTURE entry, for the tests below.
+    ///
+    /// Named explicitly rather than taken as `CALIBRATED_REGIMES.first()`: since 05-03 the list
+    /// holds two entries on two different architectures, and a positional read would silently
+    /// follow whichever one sorted first.
     fn calibrated_architecture() -> String {
-        let entry = CALIBRATED_REGIMES.first().expect("exactly one calibrated entry");
-        RegimeCoordinates::parse(entry).expect("the calibrated entry must parse").architecture
+        RegimeCoordinates::parse(FIXTURE_REGIME)
+            .expect("the fixture calibrated entry must parse")
+            .architecture
     }
 
     /// A run id rendered by the writer is readable by the reader, field for field.
@@ -908,14 +1088,31 @@ mod tests {
     #[test]
     fn thresholds_are_positive_and_finite() {
         let frozen = Thresholds::frozen();
-        for class in ParameterClass::ALL {
-            let entry = frozen.of(class);
-            if let Some(eps) = entry.eps {
-                assert!(eps.is_finite() && eps > 0.0, "{}: epsilon {eps:e}", class.tag());
+        assert!(!CALIBRATED_REGIMES.is_empty(), "non-vacuity: there is at least one regime");
+        for regime in CALIBRATED_REGIMES {
+            let table = frozen
+                .table_for(regime)
+                .unwrap_or_else(|| panic!("`{regime}` resolves to no measured table"));
+            for class in ParameterClass::ALL {
+                let entry = table.of(class);
+                if let Some(eps) = entry.eps {
+                    assert!(
+                        eps.is_finite() && eps > 0.0,
+                        "`{regime}` / {}: epsilon {eps:e}",
+                        class.tag(),
+                    );
+                }
+                assert!(
+                    entry.scale_floor.is_finite() && entry.scale_floor > 0.0,
+                    "`{regime}` / {}",
+                    class.tag(),
+                );
             }
-            assert!(entry.scale_floor.is_finite() && entry.scale_floor > 0.0, "{}", class.tag());
+            let floor = table.embedding_delta_floor();
+            assert!(
+                floor.is_finite() && floor > 0.0,
+                "`{regime}`: embedding delta floor {floor:e}"
+            );
         }
-        let floor = frozen.embedding_delta_floor();
-        assert!(floor.is_finite() && floor > 0.0);
     }
 }
