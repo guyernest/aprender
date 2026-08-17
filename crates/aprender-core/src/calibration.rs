@@ -139,18 +139,40 @@ impl PlattScaling {
 #[must_use]
 pub fn expected_calibration_error(predictions: &[f32], labels: &[bool], n_bins: usize) -> f32 {
     contract_pre_expected_calibration_error!(predictions);
-    let mut bin_sums = vec![0.0; n_bins];
-    let mut bin_correct = vec![0.0; n_bins];
+    ece_over(
+        predictions
+            .iter()
+            .zip(labels.iter())
+            .map(|(&pred, &label)| (pred, label)),
+        predictions.len(),
+        n_bins,
+    )
+}
+
+/// The equal-width binning and weighted `|acc - conf|` reduction shared by both ECE forms.
+///
+/// Extracted so the binning rule — in particular the `.min(n_bins - 1)` clamp, which is what
+/// makes `conf == 1.0` representable rather than out of range — exists ONCE. The binary and
+/// multiclass entry points differ only in how they derive `(confidence, was_correct)` from
+/// their inputs; that mapping stays at the call site, where the D-07 distinction between
+/// positive-class probability and max-class probability is visible. A bin-edge change or a
+/// clamp fix now lands in one body instead of two that must be kept in sync by hand.
+///
+/// `n` is the sample count used as the reduction denominator, passed in because the callers
+/// derive it differently (slice length vs. validated row count).
+fn ece_over(pairs: impl Iterator<Item = (f32, bool)>, n: usize, n_bins: usize) -> f32 {
+    let mut bin_sums = vec![0.0_f32; n_bins];
+    let mut bin_correct = vec![0.0_f32; n_bins];
     let mut bin_counts = vec![0usize; n_bins];
 
-    for (&pred, &label) in predictions.iter().zip(labels.iter()) {
-        let bin = ((pred * n_bins as f32) as usize).min(n_bins - 1);
-        bin_sums[bin] += pred;
-        bin_correct[bin] += if label { 1.0 } else { 0.0 };
+    for (conf, was_correct) in pairs {
+        let bin = ((conf * n_bins as f32) as usize).min(n_bins - 1);
+        bin_sums[bin] += conf;
+        bin_correct[bin] += if was_correct { 1.0 } else { 0.0 };
         bin_counts[bin] += 1;
     }
 
-    let n = predictions.len() as f32;
+    let n = n as f32;
     let mut ece = 0.0;
 
     for i in 0..n_bins {
@@ -270,29 +292,15 @@ pub fn expected_calibration_error_top_label(
     assert!(n_bins > 0, "multiclass calibration: n_bins must be >= 1");
     let n_samples = multiclass_rows(probabilities, n_classes, labels);
 
-    let mut bin_sums = vec![0.0_f32; n_bins];
-    let mut bin_correct = vec![0.0_f32; n_bins];
-    let mut bin_counts = vec![0usize; n_bins];
-
-    for (i, &label) in labels.iter().enumerate() {
-        let row = &probabilities[i * n_classes..(i + 1) * n_classes];
-        let (conf, pred) = top_label(row);
-        let bin = ((conf * n_bins as f32) as usize).min(n_bins - 1);
-        bin_sums[bin] += conf;
-        bin_correct[bin] += if pred == label { 1.0 } else { 0.0 };
-        bin_counts[bin] += 1;
-    }
-
-    let n = n_samples as f32;
-    let mut ece = 0.0;
-    for i in 0..n_bins {
-        if bin_counts[i] > 0 {
-            let avg_conf = bin_sums[i] / bin_counts[i] as f32;
-            let avg_acc = bin_correct[i] / bin_counts[i] as f32;
-            ece += (bin_counts[i] as f32 / n) * (avg_conf - avg_acc).abs();
-        }
-    }
-    ece
+    ece_over(
+        labels.iter().enumerate().map(|(i, &label)| {
+            let row = &probabilities[i * n_classes..(i + 1) * n_classes];
+            let (conf, pred) = top_label(row);
+            (conf, pred == label)
+        }),
+        n_samples,
+        n_bins,
+    )
 }
 
 /// Multiclass Brier score, original (Brier 1950) UNNORMALISED definition (D-07).
