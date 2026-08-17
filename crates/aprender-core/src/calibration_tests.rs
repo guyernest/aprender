@@ -362,7 +362,10 @@ fn assert_green_not_red(id: &str, metric: &str, got: f32, green: f32, red: f32, 
 #[test]
 fn top_label_ece_matches_pinned_env_fixtures() {
     let cases = fixture_cases(ECE_FIXTURES);
-    assert!(cases.len() >= 4, "fixture set shrank below the contracted 4 cases");
+    assert!(
+        cases.len() >= 4,
+        "fixture set shrank below the contracted 4 cases"
+    );
 
     for case in &cases {
         let id = case["id"].as_str().expect("case has an id");
@@ -414,7 +417,10 @@ fn top_label_ece_clamps_confidence_of_exactly_one() {
 #[test]
 fn brier_score_multiclass_matches_pinned_env_fixtures() {
     let cases = fixture_cases(BRIER_FIXTURES);
-    assert!(cases.len() >= 4, "fixture set shrank below the contracted 4 cases");
+    assert!(
+        cases.len() >= 4,
+        "fixture set shrank below the contracted 4 cases"
+    );
 
     for case in &cases {
         let id = case["id"].as_str().expect("case has an id");
@@ -464,7 +470,10 @@ fn brier_score_multiclass_exceeds_one_for_confidently_wrong_k3() {
         "confidently-wrong K=3 predictions must exceed 1.0 under the unnormalised \
          definition; got {got}"
     );
-    assert!(got <= 2.0, "multiclass Brier is bounded above by 2.0; got {got}");
+    assert!(
+        got <= 2.0,
+        "multiclass Brier is bounded above by 2.0; got {got}"
+    );
 }
 
 #[test]
@@ -528,8 +537,11 @@ fn top_label_ece_refuses_row_not_summing_to_one() {
 }
 
 #[test]
-#[should_panic(expected = "empty")]
+#[should_panic(expected = "precondition violated")]
 fn top_label_ece_refuses_empty_input() {
+    // The CONTRACT's `input.len() > 0` precondition fires here, ahead of the structural
+    // asserts -- that ordering is the point, so the expected substring names the
+    // contract's message rather than the local one.
     let _ = expected_calibration_error_top_label(&[], 3, &[], 10);
 }
 
@@ -546,7 +558,7 @@ fn brier_multiclass_refuses_row_not_summing_to_one() {
 }
 
 #[test]
-#[should_panic(expected = "empty")]
+#[should_panic(expected = "precondition violated")]
 fn brier_multiclass_refuses_empty_input() {
     let _ = brier_score_multiclass(&[], 3, &[]);
 }
