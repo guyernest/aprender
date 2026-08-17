@@ -1056,7 +1056,107 @@ rule 2 ("never label a run by intent — prove the mechanism engaged"): in both 
 step is asking what the observation actually licenses. **Every remaining timing claim in this
 plan is stated as a floor from a completion.**
 
-### PRE-REGISTERED CHECK — the architecture component across cell labels (still UNPROVEN)
+### PHASE-LEVEL FINDING — the 10× window rule COLLAPSES at s64 for five of six classes
+
+`s64:13:near-null` is banked (`evidence_sha256=78d45f99…7e16`, `steps=1536`, `wall_clock=3317.3s`,
+digest reproduced independently by `shasum`). It was the most consequential remaining pass because
+`worst_ctrl` is pinned at exactly `0.0`, so the near-null leg alone sets the lower bound of every
+window. **It moved that bound far more than the s8 half predicted, and the ε window no longer
+exists for five of the six classes.**
+
+**`attention_key_bias` first, as the narrowest class.**
+
+| quantity | s8 (24 steps) | s64 (1536 steps) | factor |
+|---|---|---|---|
+| near-null `max relative_delta` | 3.105e-11 (s13), 5.162e-11 (s31), 4.430e-11 (s53) | **9.278e-9** | **299× vs s13; 180× vs the worst s8 seed** |
+| `best_real` | 1.714e-7 | 3.683e-7 | 2.1× |
+| `real / near-null` ratio | **5 520** | **39.7** | the window rule needs **> 100** |
+
+**The margin does not narrow — it ceases to be defined.** The window is
+`[10 × max(worst_ctrl, worst_nnull), best_real / 10]`, so with `worst_nnull = 9.278e-9`:
+
+```text
+lower = 9.278e-8      upper = 1.714e-8      lower > upper by 5.4x   →  EMPTY
+```
+
+There is no interval for ε to sit in. **The previously reported `eps/noise = 15.1` must not be
+carried forward as a margin**: the report still prints `1.51e1`, but that column is
+`upper / noise_floor` and is computed whether or not `lower < upper`. When `supports_margin` is
+`false` the "ε" it divides by the noise floor is not a legal ε, so the number is meaningless
+rather than merely smaller. That is a reporting defect worth fixing before 05-03 reads this table.
+
+**It is not confined to `attention_key_bias`, and not an artifact of cross-cell mixing.** From
+the shipped `COMBINE` path over four cells (`supports_margin` column):
+
+| class | worst_nnull (s64) | best_real | 10× lower | upper | window |
+|---|---|---|---|---|---|
+| embedding | 1.553e-4 | 1.813e-3 | 1.553e-3 | 1.813e-4 | **no** |
+| layer_norm_weight | 4.802e-7 | 1.891e-4 | 4.802e-6 | 1.891e-5 | yes |
+| layer_norm_bias | 9.844e-5 | 7.112e-4 | 9.844e-4 | 7.112e-5 | **no** |
+| projection_weight | 1.051e-4 | 1.231e-3 | 1.051e-3 | 1.231e-4 | **no** |
+| projection_bias | 1.101e-4 | 3.447e-4 | 1.101e-3 | 3.447e-5 | **no** |
+| attention_key_bias | 9.278e-9 | 1.714e-7 | 9.278e-8 | 1.714e-8 | **no** |
+
+Cross-cell mixing makes it worse (the smallest `best_real` comes from s8's 24 steps while the
+largest `worst_nnull` comes from s64's 1536), but **the collapse is real within s64 alone**:
+`3.683e-7 / 9.278e-9 = 39.7 < 100`. Only `layer_norm_weight` survives, and it is also the one
+class whose near-null does not move every row (`nnull_moved = false`). Near-null growth by class
+is 56–72× everywhere except `attention_key_bias` at **299×** — it degraded ~4–5× faster than the
+rest, which is consistent with it having been the class closest to the noise floor to begin with.
+
+**Likely mechanism, stated as a hypothesis and NOT as a measured result.** Growth of 299× across a
+64× increase in steps is superlinear, so this is not a simple longer walk. The plausible reading is
+that at 24 steps most 1e-8 updates fall below the parameters' ULP and vanish, so the s8 near-null
+figure reflects an *underflow-dominated* regime; at 1536 steps, with warmup complete and Adam
+normalising each step to roughly the learning rate, far more updates survive rounding. Emerging
+from an underflow-dominated regime produces exactly this superlinear jump. **This is untested.**
+It would be tested by measuring near-null at an intermediate step count and checking whether the
+delta grows linearly once out of the underflow regime — not by assuming it.
+
+**What this does and does not mean.**
+
+- It does **not** invalidate the separation assertion. `ctrl_max = 0.000e0 < real_min` holds for
+  all six classes in the s64 cell; `COMBINE="s64:13"` exited `rc=0`. Real training is still
+  cleanly distinguishable from no training.
+- It does mean **ε cannot be frozen by the current 10×/10× window rule**, because for five of six
+  classes there is no window at the measured boundary. Either the rule's safety factors have to be
+  revisited on the evidence, or the near-null condition's role in setting the lower bound does —
+  and that is a decision for 05-03 with this table in hand, not something to be resolved by
+  picking a number here.
+- **`rc=0` on a run whose ε basis is empty for five classes is the clearest example yet of why an
+  exit code cannot stand in for a result.** The separation assertion is the only thing asserted;
+  `supports_margin` is *reported*, not enforced. Nothing in the harness fails when the window
+  vanishes.
+
+Seeds 31 and 53 remain. Their **real** passes can raise `best_real` and their **near-null** passes
+can raise `worst_nnull` further; on the s8 evidence the seeds agreed closely, so the direction is
+unlikely to reverse, but that is an expectation and not a measurement.
+
+### PRE-REGISTERED CHECK — the architecture component across cell labels: **PASSES**
+
+Answered by a genuinely cross-half combine — `COMBINE="s8:13,s8:31,s8:53,s64:13"`, twelve passes
+across **both** cell labels in one invocation, so the harness's assertion actually evaluated s64
+ids against an architecture component taken from an s8 id.
+
+```text
+minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=13|cells=s8e1b16     (x3)
+minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=31|cells=s8e1b16     (x3)
+minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=53|cells=s8e1b16     (x3)
+minilm-slice-h384-l6-a12-i1536-v30522@1110a243|seeds=13|cells=s64e1b16    (x3)
+```
+
+The architecture component `minilm-slice-h384-l6-a12-i1536-v30522@1110a243` is **byte-identical
+across `cells=s8e1b16` and `cells=s64e1b16`**, and this is stated as a result: `architecture` was
+taken from the first id (an s8 pass) and `id.starts_with(&architecture)` was then evaluated against
+all twelve, including every s64 id. `PASSES RUN: 12`, `rc=0`.
+
+**Both halves measured the same production encoder** — the full 22M-parameter MiniLM
+(`h384-l6-a12-i1536-v30522`), not the 97-token fixture slice. The s8 and s64 relative deltas are
+therefore comparable, which is what makes the finding above a real result about step count rather
+than an artifact of two different models. Still pending: the same check with `s64:31` and `s64:53`
+included, which will follow automatically as those cells land.
+
+### PRE-REGISTERED CHECK — the architecture component across cell labels (superseded, see above)
 
 Recorded before the evidence exists, so it is reported as a result rather than assumed to have
 passed because a run exited 0.

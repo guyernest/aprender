@@ -149,6 +149,25 @@ of 18, and is halted for a decision on execution shape.**
 The compute gate was resolved twice: first Option B (lambda-vector), which proved unreachable;
 then **Option A — run the full matrix locally in release, ~8.29 h explicitly authorized**.
 
+**PHASE-LEVEL FINDING: the 10× ε window rule collapses at s64 for five of six classes.**
+`s64:13:near-null` is banked (12 of 18 passes), and it moved the lower bound far more than the s8
+half predicted. `attention_key_bias` near-null went from **3.105e-11 (s8) to 9.278e-9 (s64) — 299×**,
+so its window is `lower = 9.278e-8` vs `upper = 1.714e-8`: **empty, lower exceeding upper by 5.4×**.
+The `eps/noise = 15.1` figure must **not** be carried forward — that column is computed whether or
+not a window exists, so when `supports_margin` is `false` it divides an illegal ε by the noise floor
+and is meaningless, not merely smaller. Only `layer_norm_weight` retains a window. The collapse is
+real within s64 alone (`real/near-null = 39.7`, rule needs `> 100`), not an artifact of cross-cell
+mixing. **Separation is unaffected** — `ctrl_max = 0.000e0 < real_min` for all six classes,
+`rc=0` — so real training remains cleanly distinguishable from none; what fails is freezing ε by
+the current rule. That is a 05-03 decision, not a number to pick here.
+
+**Pre-registered cross-label check: PASSES.** A genuinely cross-half combine
+(`s8:13,s8:31,s8:53,s64:13`, 12 passes, both labels in one invocation) evaluated s64 ids against an
+architecture component taken from an s8 id. `minilm-slice-h384-l6-a12-i1536-v30522@1110a243` is
+**byte-identical across `cells=s8e1b16` and `cells=s64e1b16`** — both halves measured the same
+22M-parameter production encoder, which is what makes the finding above a result about step count
+rather than two different models.
+
 **`s64:13:control` banked — 11 of 18 passes.** `evidence_sha256=9c969aa9…c704`, `steps=1536`,
 `wall_clock=3348.9s`, regime byte-identical to the cell's real pass. Two findings: the survivable
 window is **at least 57.5 min** (the earlier 55.8 min was a death observation, i.e. a floor, not a
