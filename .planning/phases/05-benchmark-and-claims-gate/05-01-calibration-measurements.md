@@ -771,6 +771,22 @@ number and one regime id.**
 | the s64 half (9 passes) | **8.12 h** |
 | the full 18-pass matrix (s8 banked + s64) | **8.24 h** |
 
+**How to project a pass, and the overhead term that must be in it.** Every wall-clock projection
+in this file is `steps × per-step cost`, and every one of them was too low, because a pass costs
+`cargo test` startup on top of tuning:
+
+| quantity | measured |
+|---|---|
+| per-step cost, s8 | 2.033 s |
+| per-step cost, s64 | 2.113 s (4 % higher — a larger selection touches more embedding rows) |
+| per-invocation `cargo test` overhead | **~2 min** (no-op rebuild check, link, test-harness start) |
+
+That overhead is a rounding error on a 54-minute s64 pass and **roughly triples a sub-minute s8
+pass** — which is exactly how the s8 re-bank estimate came out at 8 min against 28.7 min actual.
+**Any future per-pass projection must add the ~2 min invocation term, not just tuning time.** The
+error is invisible when pass ≫ overhead and dominant when it is not, which is why it survived
+until a batch of nine short passes exposed it.
+
 **A cell does not fit in the window, and cannot be made to.** One *pass* fits with under two
 minutes of headroom — far too tight to rely on. So **no in-session chunking at cell granularity
 can ever complete an s64 cell**: A′ is infeasible as specified, and re-dispatching `s64:31` or
@@ -962,6 +978,33 @@ banner.
 **The store now holds 10 of 18 passes** — the complete s8 half plus `s64:13:real` — all committed
 as reviewable artifacts, so the ε basis lives in ONE medium and 05-03 derives it mechanically
 rather than transcribing from prose.
+
+### PRE-REGISTERED CHECK — the architecture component across cell labels (still UNPROVEN)
+
+Recorded before the evidence exists, so it is reported as a result rather than assumed to have
+passed because a run exited 0.
+
+**What is proven.** Within the s8 half, nine passes rendered nine regime ids and the harness
+asserted every one starts with the same architecture component
+`minilm-slice-h384-l6-a12-i1536-v30522@1110a243`. That is proof **within** one cell label.
+
+**What is NOT proven.** The assertion has never run across `cells=s8e1b16` and `cells=s64e1b16`
+together. Every combine so far named cells from a single half, so the cross-label comparison has
+simply never been evaluated.
+
+**Why it is the backbone rather than a detail.** That component is what proves the **production
+encoder** was loaded in every cell — `h384-l6-a12-i1536-v30522` is the full 22M-parameter
+MiniLM, not the 97-token fixture slice the earlier phases used. If s8 and s64 cells disagreed on
+it, the two halves would have measured *different models*, and combining their relative deltas
+into one ε window would be meaningless no matter how cleanly the separation assertion passed
+within each half.
+
+**The check.** On the first combine spanning both halves, report explicitly whether
+`minilm-slice-h384-l6-a12-i1536-v30522@1110a243` is byte-identical across both cell labels — as a
+stated result, quoting the ids. **If it does not hold, that is a phase-level finding and it stops
+05-03.** Deferring to the run's exit status is not acceptable here: the assertion is
+`id.starts_with(&architecture)` where `architecture` is taken from the FIRST regime seen, so a
+green run proves agreement only among the ids that run actually loaded.
 
 ### What Task 3 still owes once the s64 half lands
 
