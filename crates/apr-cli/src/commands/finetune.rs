@@ -18,7 +18,53 @@ use entrenar_lora::{
     plan, recommended_learning_rate, MemoryPlanner, MemoryRequirement, MergeEngine, Method,
     OptimalConfig,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+// ==========================================================================================
+// Phase 5 D-10: per-cell control of the classification training internals
+// ==========================================================================================
+
+/// The three internals that used to be bare literals inside `run_classify`.
+///
+/// They are named constants rather than inline literals for one reason: EVAL-02 pairs a
+/// SetFit cell with a LoRA cell, and a value that only exists as a magic number inside a
+/// function body cannot be quoted in a benchmark row. Absent every new flag, the resolved
+/// `TrainingConfig` is byte-identical to what the command produced before.
+pub(crate) const DEFAULT_CLASSIFY_SEED: u64 = 42;
+/// Default held-out validation fraction (see [`DEFAULT_CLASSIFY_SEED`]).
+pub(crate) const DEFAULT_CLASSIFY_VAL_SPLIT: f32 = 0.2;
+/// Default checkpoint cadence in epochs (see [`DEFAULT_CLASSIFY_SEED`]).
+pub(crate) const DEFAULT_CLASSIFY_SAVE_EVERY: usize = 5;
+/// Default early-stopping patience in epochs (see [`DEFAULT_CLASSIFY_SEED`]).
+pub(crate) const DEFAULT_CLASSIFY_EARLY_STOPPING_PATIENCE: usize = 10;
+
+/// The new `apr finetune --task classify` inputs, carried as one value.
+///
+/// One struct rather than four more positional parameters on a signature that already
+/// carries twenty-nine: the classify dispatch chain threads this through unchanged, and a
+/// future `apr setfit bench run` (05-09) constructs it directly rather than re-deriving the
+/// defaults.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ClassifyOverrides<'a> {
+    /// Phase 2 `selection-manifest.json` whose replayed rows become the training set.
+    pub selection_manifest: Option<&'a Path>,
+    /// Explicit training seed. REQUIRED when `selection_manifest` is set.
+    pub seed: Option<u64>,
+    /// Explicit validation fraction. `0.0` disables validation entirely.
+    pub val_split: Option<f32>,
+    /// Explicit early-stopping patience. `0` disables early stopping.
+    pub early_stopping_patience: Option<usize>,
+}
+
+/// The rows a `--selection-manifest` run trains on, plus the hash a benchmark row records.
+#[derive(Debug, Clone)]
+pub(crate) struct ClassifySelection {
+    /// The selected rows, in the selection's contracted order (class ascending, draw order
+    /// within a class) — NOT the dataset's file order.
+    pub samples: Vec<entrenar::finetune::SafetySample>,
+    /// Hex `SHA-256` of the selection's canonical payload: the identifier EVAL-02 pairs on.
+    pub semantic_hash: String,
+}
 
 /// Fine-tuning method selection
 #[derive(Debug, Clone, Copy, Default)]
@@ -1036,6 +1082,7 @@ fn dispatch_finetune_mode(
     task: Option<&str>,
     method: &str,
     vram_gb: f64,
+    classify_overrides: &ClassifyOverrides<'_>,
 ) -> Option<Result<()>> {
     contract_pre_vram_estimation_tolerance!();
     if merge_mode {
@@ -1049,26 +1096,29 @@ fn dispatch_finetune_mode(
 
     if let Some("classify") = task {
         return Some(run_classify(
-            model_path,
-            model_size,
-            data_path,
-            output_path,
-            num_classes,
-            rank.unwrap_or(16),
-            epochs,
-            learning_rate,
-            plan_only,
-            checkpoint_format,
-            oversample,
-            max_seq_len,
-            quantize_nf4,
-            gpus,
-            gpu_backend,
-            role,
-            bind,
-            coordinator,
-            expect_workers,
-            json_output,
+            &ClassifyRun {
+                model_path,
+                model_size,
+                data_path,
+                output_path,
+                num_classes,
+                rank: rank.unwrap_or(16),
+                epochs,
+                learning_rate,
+                plan_only,
+                checkpoint_format,
+                oversample,
+                max_seq_len,
+                quantize_nf4,
+                gpus,
+                gpu_backend,
+                role,
+                bind,
+                coordinator,
+                expect_workers,
+                json_output,
+            },
+            classify_overrides,
         ));
     }
 
@@ -1146,6 +1196,7 @@ pub(crate) fn run(
     json_output: bool,
     experimental_mps: bool,
     gpu_share: u32,
+    classify_overrides: &ClassifyOverrides<'_>,
 ) -> Result<()> {
     contract_pre_rank_bounds_safety!();
     contract_pre_alpha_rank_ratio!();
@@ -1193,6 +1244,7 @@ pub(crate) fn run(
         task,
         method,
         vram_gb,
+        classify_overrides,
     ) {
         return dispatched;
     }
@@ -1553,36 +1605,246 @@ fn display_device_info(gpu_info: &Option<(String, usize)>, gpu_backend: &str) {
     }
 }
 
+/// Everything `apr finetune --task classify` was already passing positionally.
+///
+/// Extracted verbatim from the old `run_classify` parameter list so the flag-resolution
+/// wrapper and [`run_classify_core`] share ONE description of a classify run (OPS-03).
+pub(crate) struct ClassifyRun<'a> {
+    pub model_path: Option<&'a Path>,
+    pub model_size: Option<&'a str>,
+    pub data_path: Option<&'a Path>,
+    pub output_path: Option<&'a Path>,
+    pub num_classes: usize,
+    pub rank: u32,
+    pub epochs: u32,
+    pub learning_rate: f64,
+    pub plan_only: bool,
+    pub checkpoint_format: &'a str,
+    pub oversample: bool,
+    pub max_seq_len: Option<usize>,
+    pub quantize_nf4: bool,
+    pub gpus: Option<&'a str>,
+    pub gpu_backend: &'a str,
+    pub role: Option<&'a str>,
+    pub bind: Option<&'a str>,
+    pub coordinator: Option<&'a str>,
+    pub expect_workers: Option<usize>,
+    pub json_output: bool,
+}
+
+/// Resolve the new flags, then hand ONE fully-explicit configuration to the core.
+///
+/// Everything decided here is decided BEFORE a byte of the model or the corpus is read:
+/// a run that spends minutes loading a 9B base model and only then says
+/// "--selection-manifest requires --seed" has told the operator something it knew at
+/// startup (the discipline `commands/eval/setfit.rs` states in its own step (1)).
+fn run_classify(run: &ClassifyRun<'_>, overrides: &ClassifyOverrides<'_>) -> Result<()> {
+    let selection = resolve_classify_selection(overrides, run.data_path)?;
+    let distributed =
+        build_distributed_config(run.role, run.bind, run.coordinator, run.expect_workers)?;
+    let output_dir = run
+        .output_path
+        .unwrap_or(Path::new("checkpoints"))
+        .to_path_buf();
+    let training = resolve_training_config(overrides, run.epochs, output_dir, distributed);
+    run_classify_core(run, training, selection.as_ref())
+}
+
+/// Build the `TrainingConfig` from the flags, falling back to the historical defaults.
+///
+/// # Why `save_every` moves when early stopping is off
+///
+/// With `--early-stopping-patience 0` the run is in the frozen-defaults benchmark regime:
+/// it trains for exactly `--epochs` epochs and NOTHING may select an epoch on a metric.
+/// The trainer's best-epoch checkpoint is suppressed when validation is disabled (that is
+/// the actual model-selection surface); pushing `save_every` out to `epochs` additionally
+/// keeps the periodic checkpoints from churning across a long cell.
+fn resolve_training_config(
+    overrides: &ClassifyOverrides<'_>,
+    epochs: u32,
+    checkpoint_dir: PathBuf,
+    distributed: Option<entrenar::finetune::DistributedConfig>,
+) -> entrenar::finetune::TrainingConfig {
+    use entrenar::finetune::TrainingConfig;
+
+    let epochs = epochs as usize;
+    let early_stopping_patience = overrides
+        .early_stopping_patience
+        .unwrap_or(DEFAULT_CLASSIFY_EARLY_STOPPING_PATIENCE);
+    let save_every = if early_stopping_patience == 0 {
+        epochs.max(1)
+    } else {
+        DEFAULT_CLASSIFY_SAVE_EVERY
+    };
+
+    TrainingConfig {
+        epochs,
+        val_split: overrides.val_split.unwrap_or(DEFAULT_CLASSIFY_VAL_SPLIT),
+        save_every,
+        early_stopping_patience,
+        checkpoint_dir,
+        seed: overrides.seed.unwrap_or(DEFAULT_CLASSIFY_SEED),
+        log_interval: 1,
+        distributed,
+        ..TrainingConfig::default()
+    }
+}
+
+/// Replay `--selection-manifest` against `--data` and resolve the training rows.
+///
+/// This is the D-10 door and it is deliberately the SAME three calls
+/// `commands/eval/setfit.rs:227-237` makes — `read_attested_canonical`,
+/// `read_selection_manifest`, `Selection::replay`. A wrapper that pre-materialized a
+/// subset file was rejected in discussion precisely because identity would then rest on an
+/// exporter being correct rather than on both methods walking one code path.
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] when `--seed` or `--data` is missing, when the manifest
+/// digest does not verify, when the replay disagrees with the attested dataset, or when a
+/// replayed id has no row in the dataset's train split.
+fn resolve_classify_selection(
+    overrides: &ClassifyOverrides<'_>,
+    data_path: Option<&Path>,
+) -> Result<Option<ClassifySelection>> {
+    use crate::commands::data_contrastive;
+    use aprender_contrastive_data::ledger::AccessLedger;
+    use aprender_contrastive_data::select::Selection;
+
+    let Some(manifest_path) = overrides.selection_manifest else {
+        return Ok(None);
+    };
+
+    // The seed FIRST: it is the cheapest check and the one whose absence invalidates the
+    // cell no matter what the data says.
+    if overrides.seed.is_none() {
+        return Err(CliError::ValidationFailed(
+            "--selection-manifest runs must pin a seed: pass --seed <SEED> alongside \
+             --selection-manifest. A cell whose seed was left to the built-in default is \
+             not reproducible from its row, and the benchmark's pairing gate refuses it."
+                .to_string(),
+        ));
+    }
+
+    let data = data_path.ok_or_else(|| {
+        CliError::ValidationFailed(
+            "--selection-manifest requires --data <DIR>, and <DIR> must be the ATTESTED \
+             CANONICAL dataset directory `apr data tweet-eval-stance` prepared — not a \
+             corpus .jsonl. The manifest names row ids; the directory carries the rows."
+                .to_string(),
+        )
+    })?;
+
+    let mut ledger = AccessLedger::new();
+    let dataset = data_contrastive::read_attested_canonical(data, &mut ledger)?;
+    let manifest = data_contrastive::read_selection_manifest(manifest_path)?;
+    let replayed = Selection::replay(&manifest, &dataset, &mut ledger).map_err(|error| {
+        CliError::ValidationFailed(format!(
+            "--selection-manifest {} does not replay against --data {}: {error} — re-run \
+             `apr data select --data {} --shots <N> --seed <SEED>` against THIS dataset \
+             directory to write a manifest that does.",
+            manifest_path.display(),
+            data.display(),
+            data.display(),
+        ))
+    })?;
+
+    let ordered: Vec<(&str, usize)> = replayed
+        .examples()
+        .iter()
+        .map(|example| (example.id.as_str(), example.label))
+        .collect();
+    let samples = resolve_selected_samples(&ordered, dataset.train().rows())?;
+
+    Ok(Some(ClassifySelection {
+        samples,
+        semantic_hash: aprender_contrastive_data::hash::hex(&replayed.semantic_hash()),
+    }))
+}
+
+/// Map the replayed `(id, label)` list onto the dataset's train rows, in selection order.
+///
+/// `Selection::replay` already refuses a manifest whose rows are not in the dataset, so in
+/// production this cannot fail. It is still a typed refusal rather than a `filter`: a
+/// silently-shortened training set is the failure mode that would produce plausible but
+/// wrong numbers in every cell, and a count is the one number that makes it visible.
+///
+/// Taking plain slices (not a `Selection`) is what makes the refusal unit-testable —
+/// `Selection` has no public constructor, by design.
+fn resolve_selected_samples(
+    ordered: &[(&str, usize)],
+    rows: &[aprender_contrastive_data::schema::LabeledExample],
+) -> Result<Vec<entrenar::finetune::SafetySample>> {
+    use std::collections::HashMap;
+
+    let by_id: HashMap<&str, &aprender_contrastive_data::schema::LabeledExample> =
+        rows.iter().map(|row| (row.id.as_str(), row)).collect();
+
+    let mut samples = Vec::with_capacity(ordered.len());
+    let mut missing: Vec<&str> = Vec::new();
+    for &(id, label) in ordered {
+        match by_id.get(id) {
+            Some(row) => samples.push(entrenar::finetune::SafetySample {
+                input: row.input.clone(),
+                label,
+            }),
+            None => missing.push(id),
+        }
+    }
+
+    if !missing.is_empty() {
+        let shown: Vec<&str> = missing.iter().copied().take(3).collect();
+        return Err(CliError::ValidationFailed(format!(
+            "selection manifest names {} row id(s) with no row in the --data train split \
+             (of {} selected); first missing: {}. The manifest and the dataset directory \
+             are not the same preparation.",
+            missing.len(),
+            ordered.len(),
+            shown.join(", "),
+        )));
+    }
+
+    Ok(samples)
+}
+
 /// Run classification fine-tuning pipeline via entrenar.
 ///
-/// Creates a ClassifyPipeline, loads the corpus, and runs the full training
-/// loop via ClassifyTrainer with epoch management, validation, LR scheduling,
-/// checkpointing, and early stopping.
-#[allow(clippy::too_many_arguments)]
+/// Creates a ClassifyPipeline, loads the corpus (or takes the replayed selection rows),
+/// and runs the full training loop via ClassifyTrainer with epoch management, validation,
+/// LR scheduling, checkpointing, and early stopping.
+///
+/// The `TrainingConfig` arrives fully resolved: this function contains no seed, split or
+/// patience literal, so the flag path and 05-09's bench caller drive one implementation.
 #[allow(clippy::disallowed_methods)]
-fn run_classify(
-    model_path: Option<&Path>,
-    model_size: Option<&str>,
-    data_path: Option<&Path>,
-    output_path: Option<&Path>,
-    num_classes: usize,
-    rank: u32,
-    epochs: u32,
-    learning_rate: f64,
-    plan_only: bool,
-    checkpoint_format: &str,
-    oversample: bool,
-    max_seq_len: Option<usize>,
-    quantize_nf4: bool,
-    gpus: Option<&str>,
-    gpu_backend: &str,
-    role: Option<&str>,
-    bind: Option<&str>,
-    coordinator: Option<&str>,
-    expect_workers: Option<usize>,
-    json_output: bool,
+pub(crate) fn run_classify_core(
+    run: &ClassifyRun<'_>,
+    training_config: entrenar::finetune::TrainingConfig,
+    selection: Option<&ClassifySelection>,
 ) -> Result<()> {
-    use entrenar::finetune::{ClassifyTrainer, TrainingConfig};
+    use entrenar::finetune::ClassifyTrainer;
+
+    let ClassifyRun {
+        model_path,
+        model_size,
+        data_path,
+        output_path: _,
+        num_classes,
+        rank,
+        epochs,
+        learning_rate,
+        plan_only,
+        checkpoint_format,
+        oversample,
+        max_seq_len,
+        quantize_nf4,
+        gpus,
+        gpu_backend,
+        role: _,
+        bind: _,
+        coordinator: _,
+        expect_workers: _,
+        json_output,
+    } = *run;
 
     if !json_output {
         output::section("apr finetune --task classify (Shell Safety Classification)");
@@ -1616,9 +1878,6 @@ fn run_classify(
         );
     }
 
-    // Build distributed training config if requested
-    let distributed_config = build_distributed_config(role, bind, coordinator, expect_workers)?;
-
     if !json_output {
         display_distributed_info();
     }
@@ -1639,19 +1898,32 @@ fn run_classify(
         return Ok(());
     }
 
-    let Some(data) = data_path else {
-        display_classify_next_steps(json_output);
-        return Ok(());
+    // The rows. A `--selection-manifest` run already resolved them through the Phase 2
+    // door BEFORE the model was loaded; otherwise `--data` is the corpus file it has
+    // always been.
+    let samples = match selection {
+        Some(resolved) => {
+            if !json_output {
+                output::kv("Selection manifest", &resolved.semantic_hash);
+                output::kv("Selected rows", resolved.samples.len().to_string());
+            }
+            resolved.samples.clone()
+        }
+        None => {
+            let Some(data) = data_path else {
+                display_classify_next_steps(json_output);
+                return Ok(());
+            };
+
+            if !data.exists() {
+                return Err(CliError::FileNotFound(data.to_path_buf()));
+            }
+
+            pipeline
+                .load_corpus(data)
+                .map_err(|e| CliError::ValidationFailed(format!("Failed to load corpus: {e}")))?
+        }
     };
-
-    if !data.exists() {
-        return Err(CliError::FileNotFound(data.to_path_buf()));
-    }
-
-    // Load corpus
-    let samples = pipeline
-        .load_corpus(data)
-        .map_err(|e| CliError::ValidationFailed(format!("Failed to load corpus: {e}")))?;
 
     let stats = entrenar::finetune::corpus_stats(&samples, num_classes);
 
@@ -1659,10 +1931,7 @@ fn run_classify(
         print_corpus_stats(&stats);
     }
 
-    // Resolve output directory for checkpoints
-    let output_dir = output_path
-        .unwrap_or(Path::new("checkpoints"))
-        .to_path_buf();
+    let output_dir = training_config.checkpoint_dir.clone();
 
     if oversample {
         eprintln!(
@@ -1670,19 +1939,6 @@ fn run_classify(
              available in entrenar 0.7.5. Proceeding without oversampling."
         );
     }
-
-    // Create TrainingConfig from CLI args
-    let training_config = TrainingConfig {
-        epochs: epochs as usize,
-        val_split: 0.2,
-        save_every: 5,
-        early_stopping_patience: 10,
-        checkpoint_dir: output_dir.clone(),
-        seed: 42,
-        log_interval: 1,
-        distributed: distributed_config,
-        ..TrainingConfig::default()
-    };
 
     // Create trainer
     let mut trainer = ClassifyTrainer::new(pipeline, samples, training_config)
@@ -1722,6 +1978,26 @@ fn run_classify(
 
     // Display results
     display_train_result(&result, &output_dir, checkpoint_format, json_output);
+
+    // The row's provenance: which rows trained (T-05-06-04) and whether an epoch was
+    // selected (T-05-06-02). Printed AFTER the metrics so it sits beside them in a log.
+    if let Some(resolved) = selection {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "selection_semantic_hash": resolved.semantic_hash,
+                    "selected_rows": resolved.samples.len(),
+                    "epochs_requested": epochs,
+                    "epochs_completed": result.epoch_metrics.len(),
+                    "stopped_early": result.stopped_early,
+                })
+            );
+        } else {
+            output::kv("Selection manifest", &resolved.semantic_hash);
+            output::kv("Epochs completed", result.epoch_metrics.len().to_string());
+        }
+    }
 
     Ok(())
 }
@@ -2239,3 +2515,7 @@ mod contract_tests;
 #[cfg(test)]
 #[path = "finetune_display_tests.rs"]
 mod display_tests;
+
+#[cfg(test)]
+#[path = "finetune_selection_tests.rs"]
+mod selection_tests;
