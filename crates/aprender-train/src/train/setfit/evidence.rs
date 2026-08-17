@@ -2174,6 +2174,23 @@ mod tests {
         /// per-cell tables, which is how the window rule is defined anyway (worst control and
         /// best real *across all measured cells*).
         CellSubset(Vec<ProductionCell>),
+        /// `APRENDER_CALIBRATION_PASS="s64:13:real"` — ONE cell under ONE condition, persisted
+        /// to the store and nothing else (D').
+        ///
+        /// The unit of work that actually fits the measured ~55.8 minute unattended window, and
+        /// — more importantly — the unit that is RETRYABLE: a kill costs one pass rather than a
+        /// whole three-pass cell. No separation assertion runs here, because a single condition
+        /// cannot support one; the report this writes is always `STATUS: PARTIAL`.
+        SinglePass(ProductionCell, Condition),
+        /// `APRENDER_CALIBRATION_COMBINE="s64:13,s64:31"` — no training at all: load the three
+        /// persisted conditions of each named cell and run the SAME per-class analysis and
+        /// separation assertion the in-process path runs (D').
+        ///
+        /// The code below is shared, not parallel: the only thing this mode changes is where
+        /// the three `ProductionPass` values come from. Everything downstream — the regime
+        /// assertion, the per-class rows, `ctrl_max < real_min`, the epsilon accumulators — is
+        /// literally the same lines executing on the same values.
+        Combine(Vec<ProductionCell>),
         /// The full boundary matrix: `{s8, s64} x {13, 31, 53} x {real, control, near-null}`.
         BoundaryMatrix,
     }
@@ -2201,10 +2218,249 @@ mod tests {
         cells
     }
 
+    // =======================================================================================
+    // D': per-CONDITION persistence
+    //
+    // A cell is three passes, and at s64 a pass is ~54 minutes against a measured ~55.8 minute
+    // unattended window. Running a whole cell in one process therefore cannot complete: the
+    // first attempt died 100 seconds after its first pass, losing the cell. The fix is to let
+    // each PASS be its own invocation, persist what it measured, and perform the separation
+    // assertion in a later cheap invocation over the persisted tables.
+    //
+    // This does not move the assertion off the measurement. `ctrl_max < real_min` compares
+    // recorded numbers either way; the only question is whether the numbers a fresh process
+    // records are the same numbers. That is not assumed here — `cross_process_determinism`
+    // below runs one s8 pass twice in two fresh processes and requires the persisted tables to
+    // be BIT-IDENTICAL. CLAUDE.md verification rule 4: widening a guard's scope requires
+    // re-proving it in the new scope, and the old in-process proof does not transfer.
+    // =======================================================================================
+
+    /// One of the three conditions a cell is measured under.
+    ///
+    /// Previously implicit in three `production_pass` call sites with bare `Option<f64>`
+    /// arguments; named here because a persisted pass has to say on disk which condition it is.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Condition {
+        Real,
+        Control,
+        NearNull,
+    }
+
+    impl Condition {
+        fn tag(self) -> &'static str {
+            match self {
+                Self::Real => "real",
+                Self::Control => "control",
+                Self::NearNull => "near-null",
+            }
+        }
+
+        /// The ONLY thing that differs between conditions. A control differs from its cell in
+        /// the learning rate and in nothing else, which is what makes a difference in the
+        /// measured deltas attributable to the learning rate alone.
+        fn lr_override(self) -> Option<f64> {
+            match self {
+                Self::Real => None,
+                Self::Control => Some(CONTROL_LR),
+                Self::NearNull => Some(NEAR_NULL_LR),
+            }
+        }
+
+        fn parse(s: &str) -> Self {
+            match s.trim() {
+                "real" => Self::Real,
+                "control" => Self::Control,
+                "near-null" => Self::NearNull,
+                other => panic!("unknown condition `{other}`; expected real|control|near-null"),
+            }
+        }
+    }
+
+    /// Where persisted passes live.
+    fn calibration_store() -> std::path::PathBuf {
+        std::env::var("APRENDER_CALIBRATION_STORE").map_or_else(
+            |_| std::env::temp_dir().join("setfit-calibration-store"),
+            std::path::PathBuf::from,
+        )
+    }
+
+    /// The file stem one (cell, condition) pass is persisted under.
+    fn pass_stem(cell: ProductionCell, condition: Condition) -> String {
+        format!("{}-seed{}-{}", cell.label(), cell.seed, condition.tag())
+    }
+
+    /// The NON-deterministic half of a persisted pass: timing and the probed device.
+    ///
+    /// Split into its own file precisely BECAUSE it is not reproducible. `elapsed_secs` differs
+    /// between two identical runs, so folding it into the evidence file would make the
+    /// bit-identity check below unsatisfiable and there would be nothing left to check. The
+    /// evidence file holds only what the assertion consumes; this holds only what the report
+    /// prints.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct PassMeta {
+        cell: String,
+        seed: u64,
+        condition: String,
+        device: String,
+        elapsed_secs: f64,
+        steps: u64,
+        evidence_sha256: String,
+    }
+
+    /// Write one pass to the store.
+    fn persist_pass(
+        store: &std::path::Path,
+        cell: ProductionCell,
+        condition: Condition,
+        pass: &ProductionPass,
+    ) {
+        std::fs::create_dir_all(store)
+            .unwrap_or_else(|e| panic!("cannot create calibration store {}: {e}", store.display()));
+        let stem = pass_stem(cell, condition);
+        let bytes = pass.evidence.to_canonical_bytes().expect("canonical evidence bytes");
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let evidence_sha256 = hex::encode(hasher.finalize());
+
+        let evidence_path = store.join(format!("{stem}.evidence.json"));
+        std::fs::write(&evidence_path, &bytes)
+            .unwrap_or_else(|e| panic!("cannot write {}: {e}", evidence_path.display()));
+        let meta = PassMeta {
+            cell: cell.label(),
+            seed: cell.seed,
+            condition: condition.tag().to_string(),
+            device: pass.device.clone(),
+            elapsed_secs: pass.elapsed_secs,
+            steps: pass.steps,
+            evidence_sha256: evidence_sha256.clone(),
+        };
+        let meta_path = store.join(format!("{stem}.meta.json"));
+        std::fs::write(
+            &meta_path,
+            serde_json::to_vec_pretty(&meta).expect("pass metadata serializes"),
+        )
+        .unwrap_or_else(|e| panic!("cannot write {}: {e}", meta_path.display()));
+
+        eprintln!(
+            "[persist] {stem} evidence_sha256={evidence_sha256} bytes={} -> {}",
+            bytes.len(),
+            store.display(),
+        );
+    }
+
+    /// Read one pass back out of the store.
+    ///
+    /// Two checks make the load lossless rather than merely successful: the bytes must still
+    /// hash to the digest recorded when they were written, and the table PARSED BACK must
+    /// re-serialize to those same bytes. Without the second, a field silently dropped by
+    /// deserialization would sail through — and the assertion would then run on a table that is
+    /// not the one measured.
+    fn load_pass(
+        store: &std::path::Path,
+        cell: ProductionCell,
+        condition: Condition,
+    ) -> ProductionPass {
+        let stem = pass_stem(cell, condition);
+        let evidence_path = store.join(format!("{stem}.evidence.json"));
+        let bytes = std::fs::read(&evidence_path).unwrap_or_else(|e| {
+            panic!(
+                "missing persisted pass {}: {e}\nRun it first with \
+                 APRENDER_CALIBRATION_PASS=\"s{}:{}:{}\"",
+                evidence_path.display(),
+                cell.shots,
+                cell.seed,
+                condition.tag(),
+            )
+        });
+        let meta_path = store.join(format!("{stem}.meta.json"));
+        let meta: PassMeta = serde_json::from_slice(
+            &std::fs::read(&meta_path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", meta_path.display())),
+        )
+        .unwrap_or_else(|e| panic!("cannot parse {}: {e}", meta_path.display()));
+
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let digest = hex::encode(hasher.finalize());
+        assert_eq!(
+            digest, meta.evidence_sha256,
+            "{stem}: the persisted evidence does not hash to the digest recorded when it was \
+             written — the store is corrupt, not stale",
+        );
+
+        let evidence: UpdateEvidence = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("cannot parse {}: {e}", evidence_path.display()));
+        assert_eq!(
+            evidence.to_canonical_bytes().expect("re-serialize persisted evidence"),
+            bytes,
+            "{stem}: the persisted evidence does not round-trip; loading it lost information",
+        );
+
+        ProductionPass {
+            regime: evidence.calibration_regime_id.clone(),
+            steps: evidence.step_count,
+            evidence,
+            elapsed_secs: meta.elapsed_secs,
+            device: meta.device,
+        }
+    }
+
+    /// Free space below which a pass must not be launched, in GiB.
+    ///
+    /// The volume filled to 100% during the first s64 attempt and every shell invocation began
+    /// failing with `ENOSPC`. The final report write PANICS on failure, so exhausting the disk
+    /// at the end of a ~54 minute pass destroys that pass at its last step. A preflight check
+    /// costs milliseconds and protects the whole pass.
+    const MIN_FREE_GIB: u64 = 10;
+
+    /// Refuse to start a pass without room to write its result.
+    ///
+    /// Fails CLOSED on a measurement below the floor and OPEN if free space cannot be measured:
+    /// an unparseable `df` is a reason to warn, not a reason to block an authorized run.
+    fn assert_disk_headroom(path: &std::path::Path) {
+        let out = match std::process::Command::new("df").arg("-Pk").arg(path).output() {
+            Ok(o) if o.status.success() => o.stdout,
+            _ => {
+                eprintln!("[preflight] WARNING: could not run `df`; free-space check SKIPPED");
+                return;
+            }
+        };
+        let text = String::from_utf8_lossy(&out);
+        let Some(avail_kib) = text
+            .lines()
+            .nth(1)
+            .and_then(|l| l.split_whitespace().nth(3))
+            .and_then(|f| f.parse::<u64>().ok())
+        else {
+            eprintln!("[preflight] WARNING: could not parse `df` output; check SKIPPED");
+            return;
+        };
+        let avail_gib = avail_kib / (1024 * 1024);
+        assert!(
+            avail_gib >= MIN_FREE_GIB,
+            "refusing to start a pass with {avail_gib} GiB free on {} (floor {MIN_FREE_GIB} \
+             GiB): a ~54 minute pass whose final write hits ENOSPC is a pass destroyed at its \
+             last step",
+            path.display(),
+        );
+        eprintln!("[preflight] {avail_gib} GiB free on {} — OK", path.display());
+    }
+
     /// Read the mode off the environment. Probe wins over the others if several are set.
     fn production_mode() -> ProductionMode {
         if std::env::var("APRENDER_CALIBRATION_PROBE").is_ok_and(|v| v == "1") {
             return ProductionMode::Probe;
+        }
+        if let Ok(spec) = std::env::var("APRENDER_CALIBRATION_PASS") {
+            let (cell_spec, condition) = spec.trim().rsplit_once(':').unwrap_or_else(|| {
+                panic!("APRENDER_CALIBRATION_PASS `{spec}` is not `s<shots>:<seed>:<condition>`")
+            });
+            let cells = parse_cell_spec("APRENDER_CALIBRATION_PASS", cell_spec);
+            assert_eq!(cells.len(), 1, "APRENDER_CALIBRATION_PASS names exactly one cell");
+            return ProductionMode::SinglePass(cells[0], Condition::parse(condition));
+        }
+        if let Ok(spec) = std::env::var("APRENDER_CALIBRATION_COMBINE") {
+            return ProductionMode::Combine(parse_cell_spec("APRENDER_CALIBRATION_COMBINE", &spec));
         }
         if let Ok(spec) = std::env::var("APRENDER_CALIBRATION_CELLS") {
             return ProductionMode::CellSubset(parse_cell_spec(
@@ -2259,6 +2515,46 @@ mod tests {
         }
 
         let mode = production_mode();
+        let store = calibration_store();
+
+        // D' SINGLE PASS: run one condition, persist it, stop. Handled before the report
+        // machinery because a single condition supports no separation assertion and therefore
+        // has no per-class table to render.
+        if let ProductionMode::SinglePass(cell, condition) = mode {
+            assert_disk_headroom(&store);
+            let pass = production_pass(&dir, cell, condition.lr_override());
+            eprintln!(
+                "[progress] pass done: seed={} cell={} condition={} device={} steps={} \
+                 wall_clock={:.1}s regime={}",
+                cell.seed,
+                cell.label(),
+                condition.tag(),
+                pass.device,
+                pass.steps,
+                pass.elapsed_secs,
+                pass.regime,
+            );
+            assert!(
+                pass.regime.contains(&format!("cells={}", cell.label())),
+                "seed {} cell {}: rendered regime `{}` does not name the expected cell label",
+                cell.seed,
+                cell.label(),
+                pass.regime,
+            );
+            persist_pass(&store, cell, condition, &pass);
+            println!(
+                "\nSTATUS: PARTIAL — one persisted pass (cell {} seed {} condition {}). No \
+                 separation assertion has run; combine the cell's three conditions with \
+                 APRENDER_CALIBRATION_COMBINE=\"s{}:{}\".",
+                cell.label(),
+                cell.seed,
+                condition.tag(),
+                cell.shots,
+                cell.seed,
+            );
+            return;
+        }
+
         let (cells, full_conditions, mode_name) = match mode {
             ProductionMode::Probe => (
                 vec![ProductionCell { shots: PRODUCTION_SHOTS[0], seed: PRODUCTION_SEEDS[0] }],
@@ -2281,6 +2577,29 @@ mod tests {
                     }
                 }
                 (out, true, "BOUNDARY MATRIX (2 cells x 3 seeds x 3 conditions)")
+            }
+            ProductionMode::Combine(ref cells) => (
+                cells.clone(),
+                true,
+                "COMBINE (named cells, FULL 3 conditions loaded from the persisted store — no \
+                 training)",
+            ),
+            ProductionMode::SinglePass(..) => unreachable!("handled above"),
+        };
+
+        // The ONE line that differs between measuring and combining. Everything downstream runs
+        // on `ProductionPass` values and cannot tell which door they came through.
+        let load_from_store = matches!(mode, ProductionMode::Combine(_));
+        let obtain = |cell: ProductionCell, condition: Condition| -> ProductionPass {
+            if load_from_store {
+                load_pass(&store, cell, condition)
+            } else {
+                assert_disk_headroom(&store);
+                let pass = production_pass(&dir, cell, condition.lr_override());
+                // Persisted even on the in-process paths, so a chunk that dies later still
+                // banks every pass it finished.
+                persist_pass(&store, cell, condition, &pass);
+                pass
             }
         };
 
@@ -2363,13 +2682,13 @@ mod tests {
                 ));
             };
 
-            let real = production_pass(&dir, *cell, None);
+            let real = obtain(*cell, Condition::Real);
             passes_run += 1;
             total_secs += real.elapsed_secs;
             record("real", &real);
 
             let control = if full_conditions {
-                let p = production_pass(&dir, *cell, Some(CONTROL_LR));
+                let p = obtain(*cell, Condition::Control);
                 passes_run += 1;
                 total_secs += p.elapsed_secs;
                 record("control", &p);
@@ -2378,7 +2697,7 @@ mod tests {
                 None
             };
             let near_null = if full_conditions {
-                let p = production_pass(&dir, *cell, Some(NEAR_NULL_LR));
+                let p = obtain(*cell, Condition::NearNull);
                 passes_run += 1;
                 total_secs += p.elapsed_secs;
                 record("near-null", &p);
@@ -2625,5 +2944,137 @@ mod tests {
             panic!("the production calibration report must be writable at {destination:?}: {e}")
         });
         println!("production calibration report written to {}", destination.display());
+    }
+
+    /// D''s load-bearing precondition: the same pass, run in two SEPARATE processes, must
+    /// persist BIT-IDENTICAL evidence.
+    ///
+    /// D' moves `ctrl_max < real_min` from a comparison of values computed in one process to a
+    /// comparison of values persisted from three. That the two are equivalent is exactly the
+    /// kind of claim CLAUDE.md verification rule 4 forbids inheriting: widening a guard's scope
+    /// requires re-proving it in the NEW scope, and the in-process proof does not transfer. If
+    /// a fresh process could record even slightly different numbers — a different rayon
+    /// reduction order, an unseeded map iteration, an ambient thread count reaching the
+    /// arithmetic — then the persisted comparison would be measuring something the in-process
+    /// one never measured, and every s64 number derived through it would be unfounded.
+    ///
+    /// This is a real cross-process test, not a same-process stand-in: it re-executes THIS test
+    /// binary twice via `current_exe`, each child writing to its own store, and compares the
+    /// bytes. A same-process double call would prove nothing about process boundaries, which is
+    /// precisely where the doubt lives.
+    ///
+    /// `s8:13:real` is the cheapest pass in the matrix (~40 s), so the whole proof costs about
+    /// two minutes — against the ~8 h it protects.
+    #[test]
+    #[ignore = "spawns two child processes running an s8 production pass each (~2 min); proves D' (plan 05-01)"]
+    fn cross_process_determinism_of_persisted_evidence() {
+        let dir = production_checkout_dir();
+        if !dir.join("full_manifest.json").is_file() {
+            println!(
+                "SKIP cross_process_determinism_of_persisted_evidence: no pinned checkout at {}",
+                dir.display(),
+            );
+            return;
+        }
+
+        let cell = ProductionCell { shots: PRODUCTION_SHOTS[0], seed: PRODUCTION_SEEDS[0] };
+        let stem = pass_stem(cell, Condition::Real);
+        let exe = std::env::current_exe().expect("the running test binary has a path");
+        let base =
+            std::env::temp_dir().join(format!("setfit-determinism-proof-{}", std::process::id()));
+
+        // The FULL test path, derived rather than written out. `--exact` matches the whole
+        // name, so the bare `production_calibration_matrix` filters to zero tests — and a child
+        // that runs NOTHING still exits 0. That is the false-green this proof would be most
+        // embarrassed by, so the child's own count is asserted below rather than inferred from
+        // its exit status. Deriving from `module_path!()` also means a module rename cannot
+        // quietly reintroduce the mismatch.
+        let target = format!(
+            "{}::production_calibration_matrix",
+            module_path!().split_once("::").map_or(module_path!(), |(_, rest)| rest),
+        );
+
+        let run_child = |tag: &str| -> (Vec<u8>, PassMeta) {
+            let store = base.join(tag);
+            let out = std::process::Command::new(&exe)
+                .args(["--exact", &target, "--ignored", "--nocapture"])
+                .env("APRENDER_CALIBRATION_PASS", format!("s{}:{}:real", cell.shots, cell.seed))
+                .env("APRENDER_CALIBRATION_STORE", &store)
+                // The child must take its mode from PASS alone; an inherited mode variable
+                // would silently run a different job than the one this proof describes.
+                .env_remove("APRENDER_CALIBRATION_PROBE")
+                .env_remove("APRENDER_CALIBRATION_CELLS")
+                .env_remove("APRENDER_CALIBRATION_COMBINE")
+                .env_remove("APRENDER_CALIBRATION_PROSPECTIVE")
+                .output()
+                .expect("the child test process spawns");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                out.status.success(),
+                "child pass `{tag}` did not succeed: {}\n--- stdout ---\n{stdout}\n\
+                 --- stderr ---\n{stderr}",
+                out.status,
+            );
+            // A child that filtered to zero tests exits 0 and measures nothing.
+            assert!(
+                stdout.contains("1 passed"),
+                "child pass `{tag}` exited 0 but did not report exactly one test passing — it \
+                 ran NOTHING and proved nothing. Filter was `{target}`.\n--- stdout ---\n{stdout}",
+            );
+            for line in
+                stderr.lines().filter(|l| l.starts_with("[progress]") || l.starts_with("[persist]"))
+            {
+                println!("  child {tag}: {line}");
+            }
+            let evidence = std::fs::read(store.join(format!("{stem}.evidence.json")))
+                .expect("the child persisted its evidence");
+            let meta: PassMeta = serde_json::from_slice(
+                &std::fs::read(store.join(format!("{stem}.meta.json")))
+                    .expect("the child persisted its metadata"),
+            )
+            .expect("child metadata parses");
+            (evidence, meta)
+        };
+
+        let (first, first_meta) = run_child("a");
+        let (second, second_meta) = run_child("b");
+
+        assert_eq!(
+            first_meta.evidence_sha256, second_meta.evidence_sha256,
+            "two fresh processes running {stem} recorded DIFFERENT evidence digests\n  \
+             process a: {}\n  process b: {}\nD' is unsound on this host: the separation \
+             assertion over persisted tables would not be the assertion the in-process path \
+             makes. Do NOT widen a tolerance to hide this.",
+            first_meta.evidence_sha256, second_meta.evidence_sha256,
+        );
+        assert_eq!(
+            first, second,
+            "two fresh processes running {stem} persisted evidence with equal digests but \
+             unequal bytes — which would mean the digest is not injective over these tables",
+        );
+
+        // Non-vacuity: bytes that were empty, or a digest of nothing, would satisfy the
+        // equalities above while proving nothing at all.
+        assert!(
+            first.len() > 1024,
+            "the persisted evidence is implausibly small: {} bytes",
+            first.len()
+        );
+        assert_eq!(first_meta.steps, second_meta.steps, "step counts differ across processes");
+        assert!(first_meta.steps > 0, "a pass that took no optimizer steps proves nothing");
+
+        println!(
+            "\nD' CROSS-PROCESS DETERMINISM: PASS\n  pass:            {stem}\n  \
+             evidence_sha256: {}\n  bytes:           {}\n  steps:           {}\n  \
+             wall_clock:      {:.1}s / {:.1}s (differs by design; timing is NOT evidence)\n",
+            first_meta.evidence_sha256,
+            first.len(),
+            first_meta.steps,
+            first_meta.elapsed_secs,
+            second_meta.elapsed_secs,
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

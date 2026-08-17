@@ -792,6 +792,71 @@ also produces exactly the artifact an out-of-session or off-host run would need.
 scope reduction: the same 18 passes, the same three conditions, the same window rule, the same
 assertion.
 
+### D′ implemented, and its precondition PROVEN before any s64 pass ran
+
+D′ was approved on condition that cross-process determinism be proven first, at s8, before
+spending anything at s64 — because D′ moves `ctrl_max < real_min` from comparing values computed
+in ONE process to comparing values persisted from THREE, and the in-process proof does not
+transfer to the new scope (CLAUDE.md verification rule 4).
+
+**The mechanism.** Three new modes on the existing harness, no change to what is measured:
+
+| env var | effect |
+|---|---|
+| `APRENDER_CALIBRATION_PASS="s64:13:real"` | run ONE cell under ONE condition, persist it, stop |
+| `APRENDER_CALIBRATION_COMBINE="s64:13,…"` | no training: load each cell's three conditions and run the analysis + separation assertion |
+| `APRENDER_CALIBRATION_STORE=<dir>` | where passes are persisted |
+
+**The assertion is not re-implemented for the combine path — it is the same lines.** The only
+thing the new mode changes is where the three `ProductionPass` values come from:
+
+```rust
+let obtain = |cell, condition| if load_from_store { load_pass(…) } else { production_pass(…) };
+```
+
+Everything downstream — the regime-label assertion, the per-class rows, `ctrl_max < real_min`,
+the epsilon accumulators — executes unchanged and cannot tell which door the values came
+through. That is what makes "as sound" structural rather than asserted.
+
+**Persistence is split by determinism, deliberately.** `<stem>.evidence.json` is exactly
+`to_canonical_bytes()` — only what the assertion consumes. `<stem>.meta.json` holds
+`elapsed_secs` and the probed device — only what the report prints. Had timing been folded into
+the evidence file, two identical runs would serialize differently and the bit-identity check
+below would have been unsatisfiable, leaving nothing to check. Loading also asserts the bytes
+still hash to their recorded digest AND that the parsed table re-serializes to those same bytes,
+so a field silently dropped by deserialization cannot sail through.
+
+**THE PROOF — bit-identical across two fresh processes.** Confirmed twice, once by the in-tree
+test `cross_process_determinism_of_persisted_evidence` (re-executes the test binary via
+`current_exe`, one child per run, separate stores) and once independently at the shell level so
+the test could not self-certify:
+
+```text
+5838b3d290e77751db25799ac72efcb9bdebc9d619cde2ff1b0981a91f8357dc  /tmp/dprove-a/s8e1b16-seed13-real.evidence.json
+5838b3d290e77751db25799ac72efcb9bdebc9d619cde2ff1b0981a91f8357dc  /tmp/dprove-b/s8e1b16-seed13-real.evidence.json
+BIT-IDENTICAL: yes        48555 bytes each        steps=24        device=Cpu
+elapsed_secs: 64.53 vs 52.18   ← differs by design; timing is metadata, never evidence
+```
+
+The two processes disagree by 12.35 s of wall clock and by **zero bytes** of measurement. That
+is the whole claim D′ rests on, and it is now measured rather than argued. **D′ is sound on this
+host**, so the separation assertion over persisted tables is the assertion the in-process path
+makes.
+
+**A false-green caught while proving it, worth recording.** The first attempt passed
+`--exact production_calibration_matrix` to the child. `--exact` matches the FULL test path, so
+the filter matched nothing, the child ran **zero tests — and exited 0**. Only the subsequent
+missing-file panic exposed it. A proof harness whose child can silently run nothing is worse
+than no proof, so the child's own count is now asserted (`stdout` must contain `1 passed`) and
+the path is derived from `module_path!()` rather than written out, so a module rename cannot
+quietly reintroduce the mismatch.
+
+**Disk preflight.** `MIN_FREE_GIB = 10`, checked before every pass, failing closed below the
+floor and open (with a warning) if free space cannot be measured — an unparseable `df` is a
+reason to warn, not to block an authorized run. This exists because the final report write
+panics on failure: exhausting the disk at the end of a ~54 min pass destroys it at its last
+step.
+
 ### What Task 3 still owes once the s64 half lands
 
 Frozen ε per class (window upper edge rounded DOWN to two significant figures) with noise-floor
