@@ -590,6 +590,42 @@ exists. What it does mean is that the *justification* recorded in the contract c
 "this parameter receives no gradient", because at production scale it demonstrably does. That
 is a phase-level finding for 05-03 and is flagged as such rather than absorbed.
 
+### What 05-03's replacement justification must be grounded in
+
+So that 05-03 inherits a decision it can act on rather than a number it has to re-interpret:
+
+**The sentence that must go.** Any contract or code comment asserting that
+`attention_key_bias` is excluded from gating *because it receives no gradient* — the
+`dL/db_k = 0` softmax shift-invariance argument as a statement about the executing code. That
+sentence is refuted by this plan's own measurement: `grad_norm_max = 8.084e-10`, and the delta
+scales with the learning rate. Keeping it would be recording an argument in place of a
+measurement, which is exactly what the contract's own clause N-02 ("an argument is not a
+measurement") forbids.
+
+**What is still true and may be kept, restated precisely.** `dL/db_k = 0` holds in *exact*
+arithmetic. What the encoder executes is `f32`, in which softmax shift-invariance is only
+approximate, so the key bias receives a residual gradient at the ~1e-10 level. The physics
+argument survives as an explanation of *why the gradient is tiny*; it does not survive as a
+claim that the gradient is *zero*.
+
+**What the replacement justification must be grounded in — the measured window and its margin,
+not the physics.** Whichever disposition 05-03 chooses, it must cite measured quantities:
+
+- if the class stays **ungated**, the justification is no longer "it cannot move" but a measured
+  statement that its movement is not a usable discriminator at the margin available — and that
+  claim must carry the `eps/noise` margin (**15.1** on the s8 half, the narrowest of the six
+  classes by an order of magnitude) and the observation that it *does* separate real from
+  near-null by ~3300×, so the reader can see what is being given up;
+- if the class becomes **gated**, the frozen ε comes from the same window rule as every other
+  class — `[10 × worst control, best real / 10]`, upper edge rounded DOWN to two significant
+  figures — and must be reported with its noise-floor clearance and binding parameter, exactly
+  like the other five.
+
+**The number that decides between them is the s64 margin**, because s64 runs 64× the optimizer
+steps and accumulated `f32` residual is precisely what would erode a 15.1× clearance. That
+figure is reported per seed in the s64 section, and until all three s64 seeds are in, the
+verdict above stays PRELIMINARY.
+
 ---
 
 ## HALTED — s64 half awaiting a decision
@@ -649,6 +685,48 @@ for SEED in 13 31 53; do
   echo "seed=${SEED} rc=${rc}"
 done
 ```
+
+### CORRECTION to the A′ chunk arithmetic — a chunk is ~2.6 h, not ~52 min
+
+The A′ dispatch was issued on the understanding that one chunk is a ~52-minute unit that "fits
+comfortably inside a background task lifetime". **That conflates a pass with a cell, and the
+distinction is load-bearing.**
+
+- **52 min is one PASS** (1536 steps × 2.033 s/step).
+- **A chunk is one CELL**, and a cell is **three passes** — real (2e-5), control (1e-30) and
+  near-null (1e-8). So `APRENDER_CALIBRATION_CELLS="s64:13"` is **3 × 52 min ≈ 2.6 h**.
+
+Measured confirmation rather than arithmetic alone: the `s64:13` chunk launched at
+`2026-08-17T06:39:08Z` had **not** completed its first pass at 31 minutes elapsed, which is
+consistent with ~52 min/pass and rules out the 52-min-per-chunk reading.
+
+**The cell cannot be subdivided further without losing the assertion that makes the matrix
+mean anything.** The separation check `ctrl_max < real_min` compares the real condition against
+the control *within the same cell*, so real and control must exist in the same process. Running
+conditions as separate invocations would require persisting per-parameter raw data between runs
+and re-deriving the comparison outside the harness — a much larger change that moves the
+assertion out of the measurement. A cell is therefore genuinely atomic at ~2.6 h.
+
+**Consequence for persistence.** The per-cell flush fires only after all three conditions
+complete, so a kill *mid-cell* still loses that cell entirely. The crash-persistence added
+earlier bounds the loss to one cell — which at s64 is 2.6 h, not the ~2.5 min it was at s8.
+
+**So each of the three A′ chunks carries the same ~2.6 h exposure** the chunking was meant to
+avoid; A′ reduces the exposure from 7.81 h to 2.6 h, not to 52 min. That is still a 3× reduction
+and still the best in-session option, but the premise should be corrected rather than inherited.
+
+### Disk exhaustion during this chunk (recorded because it nearly cost the run)
+
+Partway through the `s64:13` chunk the volume filled completely: every shell invocation failed
+with `ENOSPC`, including `true`, because the harness must create a task output file before
+running anything. Freeing stale task outputs restored 4.6 GiB, and removing the **regenerable**
+`target/debug` tree (4.7 GB; all remaining work is release-profile) restored the volume to
+41 GiB free. The running job survived — it had not yet needed to write.
+
+This is the recurring ENOSPC that `CLAUDE.md` already warns about on this host. It matters for
+the remaining chunks because the harness's FINAL report write panics on failure: an ENOSPC at
+the end of a 2.6 h cell would destroy the cell's measurements at the last step. **Check free
+space before dispatching each remaining chunk.**
 
 ### What Task 3 still owes once the s64 half lands
 
