@@ -169,3 +169,60 @@ benchmark cells that write per-row artifacts under `benchmarks/tweeteval-stance/
 ~760Mi headroom those will fail on write, and an ENOSPC failure mid-benchmark is
 indistinguishable from a measurement failure — exactly the confusion the claims gate exists
 to prevent. Reclaim space before dispatching wave 2.
+
+## D-ITEM-05-05-A — 24 `aprender-train` lib tests are red before this plan touched anything
+
+Surfaced by plan 05-05's post-implementation control run of the FULL crate suite
+(`CARGO_INCREMENTAL=0 cargo test -p aprender-train --lib --features setfit`, status captured
+directly: rc=101, `7969 passed; 24 failed; 17 ignored`). None is reachable from this plan's
+change: `bench_row` is a new leaf module under `train::setfit`, and `git diff` against this
+plan's base is EMPTY for both `crates/aprender-compute/` and every failing file's crate path.
+Two independent pre-existing causes, not one:
+
+**(a) 21 non-hermetic GPU tests** — `gpu::guard::*` (8), `gpu::ledger::*` (12), `gpu::wait::*`
+(1). `default_ledger_path()` (`crates/aprender-train/src/gpu/ledger.rs:33-38`) resolves to
+`~/.cache/entrenar/gpu-ledger.json` — a MACHINE-GLOBAL path, not a per-test temp dir. Every
+process on the box shares one ledger file, so two concurrent `cargo test` runs (this phase
+dispatches parallel executors in separate worktrees, on one machine) contend on it. Verified
+not to be an ordering interaction with the new tests: running `gpu::ledger` ALONE still fails
+(`rc=101, 25 passed; 12 failed`). Failures are assertion mismatches on reserved/available MB
+(`left: 17000, right: 10000`), which is the signature of state another process wrote.
+
+**(b) 3 stale insta snapshots** — `prune::snapshot_tests::{snapshot_all_prune_methods,
+snapshot_pipeline_stages, snapshot_schedule_validation_errors}`. The strongest evidence that
+these predate this plan is that their `.snap.new` rejection artifacts are already TRACKED AND
+COMMITTED in git (`git ls-files crates/aprender-train/src/prune/snapshots/ | grep snap.new`
+returns three paths) and are UNMODIFIED by this plan's run. A committed `.snap.new` is a
+recorded, unresolved snapshot disagreement.
+
+**Action:** neither is this plan's to fix (SCOPE BOUNDARY — auto-fix only what the current
+task's changes caused). (a) needs the ledger tests to take a per-test `with_path(tempdir)`,
+which the type already supports (`AccessLedger::with_path`, `:139-141`); leaving it means any
+plan in this phase that runs the full crate suite reads a red exit that has nothing to do with
+its work, and any plan that runs it CONCURRENTLY with a sibling executor makes it worse. (b)
+needs someone to review the three diffs and either accept (`cargo insta accept`) or fix the
+regression, then delete the committed `.snap.new` files — a committed rejection file makes the
+next reader think the disagreement is expected.
+
+**Consequence for gating:** until (a) and (b) are fixed, a Phase 5 plan touching
+`aprender-train` must scope its verification to a test FILTER over its own module and quote the
+matched count, not to the whole-crate suite. 05-05 did exactly that
+(`... --features setfit bench_row` -> rc=0, 24 passed).
+
+## D-ITEM-05-05-B — `cargo clippy -- -D warnings` cannot pass on this workspace
+
+Measured by plan 05-05 (`CARGO_INCREMENTAL=0 cargo clippy -p aprender-train --lib --features
+setfit -- -D warnings`, status captured directly: rc=101). Every finding is in
+`crates/aprender-compute/` — dead code (`compute_chunk_scalar`, `pack_a_block_generic`,
+`pack_b_block_nr16`, `extract_q6k_values`, `NT_STORE_THRESHOLD_BYTES`, `PREFETCH_DISTANCE`,
+...), unused imports (`NeonBackend`, `SUPER_BLOCK_BYTES`/`SUPER_BLOCK_SIZE`, `MR_512V2`/
+`NR_512V2`) and unused variables (`mr_block`, `nr_block`) in the BLIS/SIMD kernels. `git diff`
+against this plan's base for `crates/aprender-compute/` is EMPTY, so none of it is this plan's.
+Findings attributable to `crates/aprender-train/src` in that run: **zero** (grep count 0).
+
+**Action:** not this plan's to fix, and it is a genuine hole rather than noise — CLAUDE.md
+lists `cargo clippy -- -D warnings` as a standing gate and `ci.yml` runs a lint job, so a gate
+this red is either not actually running with `-D warnings` on this path or is scoped narrower
+than the docs claim. Worth resolving as its own ticket: either clear the kernel crate or
+record explicitly which crates the `-D warnings` gate covers. A plan-level clippy check in this
+phase should scope to `crates/aprender-train/src` and read the finding count for its own files.
