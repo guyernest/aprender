@@ -361,6 +361,35 @@ impl RowPredictions {
     }
 }
 
+/// Build per-row predictions directly, from parts — TEST ONLY.
+///
+/// `#[cfg(test)]` and `pub(super)`, and nothing weaker — the precedent
+/// [`super::evaluate::evaluation_for_tests`] set, for the same reason. The metric assembly in
+/// [`super::bench_metrics`] has to be falsified against HAND-COMPUTED cases: six rows whose
+/// confusion matrix a reader can check, and four validation rows whose top confidences sit at
+/// bin centres. Producing those from a real artifact is impossible by construction — the door
+/// computes the predictions, which is the entire point of this module — and a shipped
+/// constructor of this shape would be exactly the caller-asserted evidence `RowPredictions`
+/// exists to refuse.
+#[cfg(test)]
+pub(super) fn row_predictions_for_tests(
+    predicted: Vec<usize>,
+    probabilities: Vec<Vec<f64>>,
+    truth: Vec<usize>,
+    ordered_labels: Vec<String>,
+    artifact_hash: &str,
+    split_tag: &'static str,
+) -> RowPredictions {
+    RowPredictions {
+        predicted,
+        probabilities,
+        truth,
+        ordered_labels,
+        artifact_hash: artifact_hash.to_string(),
+        split_tag,
+    }
+}
+
 /// Measure per-row predictions on one canonical split, with a RELOADED artifact.
 ///
 /// The per-row sibling of [`evaluate_validation_from_artifact`]. Same credential type, so it is

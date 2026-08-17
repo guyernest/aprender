@@ -43,18 +43,18 @@ pub mod apr_evaluate;
 /// The fresh-process door: artifact bytes -> a sealed credential (04-16, D-11, D-16).
 pub mod apr_reload;
 pub mod baseline;
-/// The benchmark row and the hashed run manifest (05-05, EVAL-03 / EVAL-04).
-///
-/// Sited in the library rather than in `apr-cli` because the row schema, the digest
-/// discipline and the 80-cell expectation set are the claim itself; an adapter is a
-/// filesystem shim over them.
-pub mod bench_row;
 /// The EVAL-01 metric assembly: per-row predictions -> a row's `QualityBlock` (05-08).
 ///
 /// Sited beside `bench_row` and NOT in the CLI adapter for the same reason: the reduction
 /// from predictions to a published number is the claim, and an adapter that computed it
 /// would be a second implementation of a metric set that already has one (OPS-03).
 pub mod bench_metrics;
+/// The benchmark row and the hashed run manifest (05-05, EVAL-03 / EVAL-04).
+///
+/// Sited in the library rather than in `apr-cli` because the row schema, the digest
+/// discipline and the 80-cell expectation set are the claim itself; an adapter is a
+/// filesystem shim over them.
+pub mod bench_row;
 /// The complete deterministic state of a finished run, and its canonical wire form (03-08).
 pub mod bundle;
 pub mod config;

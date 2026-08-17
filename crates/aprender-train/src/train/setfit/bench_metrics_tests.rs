@@ -247,10 +247,9 @@ fn bench_metrics_calibration_split_is_validation_and_test_probabilities_cannot_r
 
     // The two splits are SEPARATE PARAMETERS, so the only way to calibrate on test data is to
     // pass test rows in the validation position — which is refused by the split tag.
-    let error =
-        assemble_quality_block(&toy_test_rows(), &toy_test_rows(), &labels()).expect_err(
-            "test probabilities in the validation position must be refused, not calibrated",
-        );
+    let error = assemble_quality_block(&toy_test_rows(), &toy_test_rows(), &labels()).expect_err(
+        "test probabilities in the validation position must be refused, not calibrated",
+    );
     assert!(
         matches!(error, BenchMetricsError::WrongSplit { parameter: "validation_rows", .. }),
         "the refusal must name the parameter; got: {error}",
@@ -283,10 +282,7 @@ fn bench_metrics_label_ordering_changes_attribution_in_both_directions() {
     assert_ne!(permuted, labels(), "non-vacuity: the probe order must actually differ");
     let error = assemble_quality_block(&toy_test_rows(), &toy_validation_rows(), &permuted)
         .expect_err("a declared order that is not the artifact's own must be refused");
-    assert!(
-        matches!(error, BenchMetricsError::LabelOrderMismatch { .. }),
-        "got: {error}",
-    );
+    assert!(matches!(error, BenchMetricsError::LabelOrderMismatch { .. }), "got: {error}",);
 
     // Side two: when BOTH sides carry the permuted order, the assembly accepts it and the
     // numbers stay attached to their INDICES — so the IDENTICAL `f_avg` now averages `favor`
