@@ -18,9 +18,9 @@ provides:
 affects: [05-02, 05-03, 05-07, 05-12]
 
 actuals:
-  tokens: 12000
-  tasks: 1
-  commits: 2
+  tokens: 26000
+  tasks: 1        # Task 1 complete; Task 2 is 9 of 18 passes, halted for a decision
+  commits: 6
 
 tech-stack:
   added: []
@@ -86,34 +86,108 @@ coverage:
     human_judgment: true
     rationale: "CLAUDE.md requires a human check-in BEFORE compute spend over 1 hour on non-lambda-vector hosts. Resolved by explicit human decision."
   - id: D5
-    description: "Dispatch of the boundary matrix to lambda-vector — BLOCKED, host unreachable from this executor"
+    description: "Dispatch of the boundary matrix to lambda-vector — BLOCKED, host unreachable; superseded by Option A (run locally, authorized)"
     verification:
       - kind: integration
         ref: "ssh -o BatchMode=yes -o ConnectTimeout=5 lambda-vector hostname -> rc=255, 'Could not resolve hostname'; ping/dscacheutil/known_hosts/ssh-config/tailscale all negative"
         status: fail
     human_judgment: true
-    rationale: "No dispatch path to lambda-vector exists from this host. The coordinator explicitly forbade falling back to a local run, since that would spend the 8.29 h the decision redirected. Needs a human to provide network access or run the two recorded commands on the host directly."
+    rationale: "No dispatch path existed. Superseded by an explicit human authorization to run the full matrix locally."
+  - id: D6
+    description: "s8 half of the boundary matrix: {s8} x seeds {13,31,53} x {real, control, near-null}, 9 passes, separation ctrl_max < real_min holding for every gated class in every cell"
+    requirement: EVAL-02
+    verification:
+      - kind: integration
+        ref: "APRENDER_CALIBRATION_CELLS=s8:13,s8:31,s8:53 cargo test --release ... production_calibration -- --ignored --nocapture -> rc=0, 9 passes, 439.4 s, STATUS: COMPLETE"
+        status: pass
+    human_judgment: false
+  - id: D7
+    description: "Harness made crash-persistent (per-cell report flush with PARTIAL/COMPLETE banner) and resumable (APRENDER_CALIBRATION_CELLS chunking with full 3 conditions)"
+    verification:
+      - kind: integration
+        ref: "one-cell chunk rc=0 249 s; s8 half chunk rc=0 542 s; both reports carry STATUS: COMPLETE"
+        status: pass
+    human_judgment: false
+  - id: D8
+    description: "s64 half of the boundary matrix (9 passes, ~7.81 h re-projected from measured s8 cost) — NOT RUN, halted for a decision after the first attempt was killed externally at pass 9 of 18"
+    verification: []
+    human_judgment: true
+    rationale: "Standing instruction on partway failure: report what completed, what failed and the measured cost, and halt rather than silently restart or reduce scope. A single ~7.8 h unattended invocation also exceeds the session's background-task lifetime, so the execution shape (per-seed chunks vs one relaunch vs out-of-session) is a decision, not an executor default."
+  - id: D9
+    description: "gradient_free re-derivation for attention_key_bias — PRELIMINARY verdict on 3 s8 seeds: the class moves and its movement scales with the learning rate, so the fixture's bit-exactness justification does not survive production scale; a window still exists but its margin is the narrowest of six classes"
+    requirement: EVAL-02
+    verification:
+      - kind: integration
+        ref: "s8 half report: real_min 1.714e-7/1.721e-7/1.801e-7 vs near-null max 3.105e-11/5.162e-11/4.430e-11, grad_norm_max 8.084e-10, noise floor 1.133e-9, eps/noise 15.1"
+        status: pass
+    human_judgment: true
+    rationale: "Three seeds at one shot count is one cell. The s64 cells run 64x the optimizer steps and accumulated residual is exactly what could move real_min. CLAUDE.md rule 6 -- not a final verdict until the s64 half lands, and the verdict changes 05-03's contract edit."
 
-duration: 105min
+duration: 175min
 completed: 2026-08-17
-status: blocked
+status: partial
 ---
 
 # Phase 5 Plan 01: Production Calibration Measurements Summary
 
-**The production calibration harness is built and green, E/B are frozen from the pinned
-environment, and the timed probe turned the boundary matrix from an unpriced assumption into a
-measured 8.3-hour job; the human approved running it on lambda-vector, but that host is
-unreachable from this executor, so the matrix is still unrun and the plan is blocked on dispatch
-rather than on a decision.**
+**The s8 half of the production boundary matrix is measured across three seeds with full
+controls and clean separation, and it already shows that `attention_key_bias` — the class the
+fixture leaves ungated as gradient-free — moves in proportion to the learning rate at production
+scale; the s64 half (~7.81 h) is unrun after the first attempt was killed externally at pass 9
+of 18, and is halted for a decision on execution shape.**
 
 ## Performance
 
-- **Duration:** ~105 min (of which ~35 min was the two timed probe runs)
-- **Tasks completed:** 1 of 3
-- **Commits:** 3 (`0763656a8` implementation, plus two metadata commits)
+- **Duration:** ~175 min (two timed probes ~35 min; killed matrix attempt ~40 min; re-measured
+  s8 half ~9 min; the rest harness work and analysis)
+- **Tasks completed:** 1 of 3 (Task 2 is 9 of 18 passes)
+- **Commits:** 6
 
-## Status: BLOCKED — compute gate resolved, dispatch target unreachable
+## Status: PARTIAL — s8 half of the boundary matrix measured, s64 half awaiting a decision
+
+**Current state (supersedes the two earlier halt states below, which are kept for the record).**
+The compute gate was resolved twice: first Option B (lambda-vector), which proved unreachable;
+then **Option A — run the full matrix locally in release, ~8.29 h explicitly authorized**.
+
+Task 2 is **9 of 18 passes complete**:
+
+- The `s8e1b16` half is **measured across all three seeds with the full three-condition
+  treatment** (`rc=0`, 439.4 s of tuning, `STATUS: COMPLETE`). Separation `ctrl_max < real_min`
+  holds for every gated class in every s8 cell, asserted in-harness.
+- The `s64e1b16` half is **not run**. Re-projected from the measured s8 cost: ~52 min per pass,
+  **~7.81 h** for the nine passes.
+
+The first unchunked full-matrix attempt was **killed externally at pass 9 of 18** (~40 min in).
+Not a defect — no panic, no assertion failure, no compile error; the wrapper never reached its
+epilogue, which is the signature of a terminated process rather than an exited one. It cost the
+per-class tables for those nine passes because the harness only wrote its report at the end.
+**That weakness is now fixed and the s8 half was re-measured.** Per the standing instruction, I
+did not silently restart the whole matrix or reduce scope; the s64 decision is below.
+
+### The highest-value result so far: `attention_key_bias` does not behave as the fixture assumes
+
+Consistent across all three s8 seeds, the class the fixture leaves **ungated** on the
+gradient-free argument (`dL/db_k = 0` by softmax shift-invariance) **moves, and its movement
+scales with the learning rate**: `grad_norm_max ≈ 8.1e-10`, near-null (1e-8) max ~4e-11 vs real
+(2e-5) min ~1.7e-7 — a ~3600× delta ratio for a 2000× learning-rate ratio. A parameter whose
+delta tracks the learning rate is being trained, not held fixed. In `f32` the softmax
+shift-invariance is only approximate, so a residual gradient at the 1e-10 level is the expected
+numerical consequence rather than a bug.
+
+It is not vacuous either: it separates real from near-null by ~3300× and sits ~150× above its
+own rounding-noise floor, so a window `[5.162e-10, 1.714e-8]` exists. But its `eps/noise` margin
+is **15.1 — the narrowest of the six classes by an order of magnitude** (next narrowest:
+embedding at 102).
+
+**Status: PRELIMINARY.** Three seeds at one shot count is three samples of one cell, and the s64
+cells run 64× the optimizer steps — accumulated residual is exactly what could move `real_min`.
+CLAUDE.md rule 6 applies: not a verdict until the s64 half is measured. **If it holds, it is a
+phase-level finding for 05-03**: the *justification* recorded in the contract cannot remain
+"this parameter receives no gradient", because at production scale it demonstrably does.
+
+---
+
+## Earlier halt state (superseded, kept for the record): dispatch target unreachable
 
 Two sequential stops, only the second still open.
 
@@ -370,15 +444,23 @@ writes only a test harness and a planning document.
 
 ## Next Steps
 
-1. ~~Human go/no-go on the compute option~~ — **DONE: Option B, full matrix on lambda-vector.**
-2. **Provide a dispatch path to lambda-vector** (or run the two recorded commands there by hand
-   and return the report + `/tmp/matrix.log`). This is the only open blocker.
-3. Re-project on that host with the one-cell probe *before* launching the full matrix — its
-   wall-clock is unknown and 8.29 h is this box's number, not lambda-vector's.
-4. Resume at **Task 2** — the boundary matrix, in `--release`. Nothing from Task 1 is re-run.
-5. Task 3 then derives ε, composes the proposed regime entry from a Task 2 rendered id, writes
+1. ~~Human go/no-go on the compute option~~ — **DONE.** Option B (lambda-vector) proved
+   unreachable; **Option A** (run locally in release, ~8.29 h) authorized and in progress.
+2. ~~s8 half of the boundary matrix~~ — **DONE**, 9 passes, `rc=0`, tables in the measurements file.
+3. **Decide the execution shape for the s64 half (~7.81 h).** This is the only open blocker:
+   - **A′ (recommended)** — three per-seed chunks of ~52 min each,
+     `APRENDER_CALIBRATION_CELLS="s64:13"` then `s64:31` then `s64:53`. Same passes, same
+     conditions, same assertions; no trim, no budget change. Each chunk lands its own
+     `STATUS: COMPLETE` report.
+   - **B′** — one unattended relaunch of the whole s64 half (risks the same external kill,
+     though loss is now bounded to the in-flight cell).
+   - **C′** — a human runs it outside this session and returns the reports.
+4. Finish the **`attention_key_bias` verdict** with the s64 evidence.
+5. Task 3 then derives ε, composes the proposed regime entry from a measured rendered id, writes
    the MEASURED-vs-COVERED table, and runs the two-cell prospective validation.
-6. Plan 05-03 carries the deliberate three-place edit to the D-04 checkpoint.
+6. Plan 05-03 carries the deliberate three-place edit to the D-04 checkpoint — and, if the
+   preliminary `attention_key_bias` finding holds, must revise the *justification* it records
+   for leaving that class ungated.
 
 **The `attention_key_bias` verdict is the item to watch.** It is the open question from the
 probe and 05-03's contract edit depends on it: the fixture leaves that class **ungated** on the

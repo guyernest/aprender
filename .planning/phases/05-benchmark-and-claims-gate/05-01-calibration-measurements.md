@@ -383,3 +383,278 @@ summarizing wrapper around `cargo test` drops `--nocapture` output entirely.
   controls decide whether that argument survives production scale. If it does **not**, that
   changes 05-03's proposed regime entry and must be surfaced loudly, not absorbed.
 
+---
+
+## DISPATCH RESOLVED — Option A, run locally, explicitly authorized
+
+**Human decision (recorded 2026-08-17, superseding the Option B attempt): Option A — run the
+FULL contracted boundary matrix on this host, in release. ~8.29 h of local compute explicitly
+authorized.** The CLAUDE.md ">1 hr on non-lambda-vector hosts" check-in was satisfied by that
+authorization, not bypassed. No trim (not C1/C2/C3) and no pinned pair budget (not D).
+
+### Why running locally is the right engineering choice here, not a convenience
+
+**A future reader must not conclude the matrix was run locally because lambda-vector was
+awkward to reach.** It was not a compromise; on the evidence it is plausibly the *fastest*
+available option. The reason is that this measurement is **CPU-bound by construction, on every
+host**:
+
+1. `production_config` (in `evidence.rs`) hardcodes `device: "cpu"` — verified by reading.
+2. Phase 3 **refuses** any non-CPU resolved device outright. `tune_rejects_a_non_cpu_resolved_device`
+   in `tune.rs` asserts that `preflight(&mut encoder, Device::Cuda { index: 0 }, …)` returns
+   `SetFitTrainError::UnsupportedDeviceForPhase3 { resolved: "cuda:0" }`, and carries a CPU
+   control (`preflight(…, Device::Cpu).is_ok()`) so the refusal is not vacuous. A
+   CUDA-resolved device **fails closed by design**.
+
+So lambda-vector — a GPU host — would have run this on *its CPU* too. Option B's benefit was
+never speed; it was that lambda-vector is pre-authorized for compute. With Option A the human
+supplied that authorization directly, and the work runs on an Apple-silicon CPU that is
+plausibly faster than the remote host's.
+
+This is recorded rather than assumed: the harness now reads the **probed** device off
+`ResolvedSetFitConfig` after `prepare()` and asserts it is CPU, then prints it per pass
+(`device=Cpu` in the wall-clock table). A report that said "cpu" because the request string said
+"cpu" would prove nothing about what executed — CLAUDE.md verification rule 2.
+
+### Release profile is a price, not a degree of freedom
+
+Stated again here because it is the single most misreadable choice in this document: the matrix
+runs under `--release`. **This is not a weaker calibration.** The debug/release cross-check above
+showed the two profiles agree to the last printed digit on every relative delta, every binding
+parameter, and every `delta_norm` / `init_norm` / `grad_norm_max` / noise floor. Release changes
+what the run *costs* (34.5× faster), never what it *measures*. Release is also the profile a
+user's `apr setfit train` actually executes, since that ships as a `cargo install` binary.
+
+### Sizing uses the measured closed form, never the plan's 8× assumption
+
+All projections in this document use `budget = 2·max(pos_cap, neg_cap)` with
+`neg_cap = 3n²` — quadratic in shots — confirmed against the harness's own measured `steps=24`
+at s8. s64 is 1536 steps, **64×** s8. The plan's "~8×" is stale and is not used anywhere.
+
+### The command that was run
+
+```bash
+CARGO_INCREMENTAL=0 \
+  cargo test --release -p aprender-train --lib --features setfit production_calibration \
+  -- --ignored --nocapture > /tmp/matrix.log 2>&1
+rc=$?
+```
+
+Status read directly on the next line, never through a pipe (verification rule 1). Host identity
+captured from the machine (`hostname`, `uname -a`) rather than asserted.
+
+---
+
+## Boundary matrix — PARTIAL (s8 half complete, s64 half not run)
+
+**Status: 9 of 18 passes measured.** The `s8e1b16` half is complete across all three seeds with
+the full three-condition treatment. The `s64e1b16` half has **not** been run. No ε is frozen in
+this document; that is Task 3, and it needs the s64 cells.
+
+### What happened to the first full-matrix attempt
+
+The unchunked 18-pass run was launched (`matrix_start_iso=2026-08-17T05:12:29Z`, host
+`MacBook-Pro-7.local`, `Darwin … RELEASE_ARM64_T6041 arm64`) and was **killed externally at
+pass 9 of 18**, about 40 minutes in.
+
+This was **not** a defect and not a measurement failure:
+
+- no panic, no test-assertion failure, no compile error — `grep -in "panic\|assertion\|FAILED\|error\["`
+  over `/tmp/matrix.log` matched only two build-script lines about YAML contract assertion counts;
+- the last log line is an ordinary progress line;
+- the wrapper never reached its epilogue, so `/tmp/matrix_timing.txt` has no `rc=` line — the
+  signature of a terminated process rather than an exited one;
+- all nine completed passes were `s8`, all `device=Cpu`, all `steps=24`, all ~48.7 s.
+
+It cost the per-class tables for those nine passes, because the harness only wrote its report
+after the final pass. **That defect is now fixed** (see below), and the s8 half was re-measured.
+
+### The fix, and why it is not a scope change
+
+Two changes to the harness, verified by running them rather than by inspection:
+
+1. **Incremental persistence.** The report is rewritten after every cell with a
+   `STATUS: PARTIAL` banner instructing the reader to treat any absent cell as *unmeasured*,
+   never as passing; the final write carries `STATUS: COMPLETE`. A kill now costs at most the
+   cell in flight.
+2. **`APRENDER_CALIBRATION_CELLS="s8:13,s8:31,s8:53"`** — a named cell subset run with the
+   **full three conditions**, so the 18 passes can execute as resumable chunks. This
+   **partitions** the work; it does not shrink it. Each chunk runs exactly the passes,
+   conditions and separation assertions the unchunked matrix would have run for those cells, so
+   `{s8,s64} × {13,31,53}` split across invocations is the *same measurement* as one
+   invocation. It is deliberately distinct from `APRENDER_CALIBRATION_PROSPECTIVE`, which stays
+   REAL-only because it validates rather than derives. The cross-cell ε basis is unaffected —
+   the window rule is defined over "all measured cells", so it composes from the union of the
+   per-cell tables.
+
+### The s8 half, measured
+
+`APRENDER_CALIBRATION_CELLS="s8:13,s8:31,s8:53"`, release profile, `rc=0`, 542 s wall clock,
+439.4 s in `run_tuning` over 9 passes, `STATUS: COMPLETE`. Every pass `device=Cpu`,
+`steps=24` — the probed device read off `ResolvedSetFitConfig`, not echoed from the request.
+
+| cell | class | real_min | real_median | real_max | ctrl_max | nnull_max | nnull_moved | noise_floor | support_frac | all_moved |
+|---|---|---|---|---|---|---|---|---|---|---|
+| s13 | embedding | 1.813e-3 | 2.611e-3 | 3.068e-3 | 0.000e0 | 2.761e-6 | true | 1.775e-6 | 0.0195 | true |
+| s13 | layer_norm_weight | 1.891e-4 | 2.177e-4 | 2.605e-4 | 0.000e0 | 6.635e-9 | false | 5.960e-8 | 1.0000 | true |
+| s13 | layer_norm_bias | 7.281e-4 | 2.315e-3 | 2.989e-3 | 0.000e0 | 1.678e-6 | true | 5.960e-8 | 1.0000 | true |
+| s13 | projection_weight | 1.231e-3 | 2.085e-3 | 3.154e-3 | 0.000e0 | 1.804e-6 | true | 5.960e-8 | 1.0000 | true |
+| s13 | projection_bias | 3.447e-4 | 1.784e-3 | 3.182e-3 | 0.000e0 | 1.814e-6 | true | 5.960e-8 | 1.0000 | true |
+| s13 | attention_key_bias | 1.714e-7 | 2.033e-7 | 3.110e-7 | 0.000e0 | 3.105e-11 | true | 1.133e-9 | 0.9987 | true |
+| s31 | embedding | 1.823e-3 | 2.642e-3 | 3.043e-3 | 0.000e0 | 2.846e-6 | true | 1.741e-6 | 0.0195 | true |
+| s31 | layer_norm_weight | 1.914e-4 | 2.141e-4 | 2.617e-4 | 0.000e0 | 5.529e-9 | false | 5.960e-8 | 1.0000 | true |
+| s31 | layer_norm_bias | 7.112e-4 | 2.208e-3 | 2.924e-3 | 0.000e0 | 1.650e-6 | true | 5.960e-8 | 1.0000 | true |
+| s31 | projection_weight | 1.232e-3 | 2.054e-3 | 3.095e-3 | 0.000e0 | 1.788e-6 | true | 5.960e-8 | 1.0000 | true |
+| s31 | projection_bias | 3.730e-4 | 1.633e-3 | 3.140e-3 | 0.000e0 | 1.785e-6 | true | 5.960e-8 | 1.0000 | true |
+| s31 | attention_key_bias | 1.721e-7 | 2.419e-7 | 2.727e-7 | 0.000e0 | 5.162e-11 | true | 1.133e-9 | 0.9961 | true |
+| s53 | embedding | 1.859e-3 | 2.631e-3 | 3.073e-3 | 0.000e0 | 2.808e-6 | true | 1.779e-6 | 0.0195 | true |
+| s53 | layer_norm_weight | 1.895e-4 | 2.202e-4 | 2.578e-4 | 0.000e0 | 6.635e-9 | false | 5.960e-8 | 1.0000 | true |
+| s53 | layer_norm_bias | 7.148e-4 | 2.241e-3 | 2.900e-3 | 0.000e0 | 1.592e-6 | true | 5.960e-8 | 1.0000 | true |
+| s53 | projection_weight | 1.261e-3 | 2.063e-3 | 3.109e-3 | 0.000e0 | 1.745e-6 | true | 5.960e-8 | 1.0000 | true |
+| s53 | projection_bias | 3.734e-4 | 1.838e-3 | 3.157e-3 | 0.000e0 | 1.738e-6 | true | 5.960e-8 | 1.0000 | true |
+| s53 | attention_key_bias | 1.801e-7 | 2.028e-7 | 3.364e-7 | 0.000e0 | 4.430e-11 | true | 1.133e-9 | 0.9974 | true |
+
+(cell label is `s{seed}` above; every row is cell `s8e1b16`.)
+
+**Separation holds for every gated class in every s8 cell.** `ctrl_max` is `0.000e0`
+throughout — the 1e-30 control underflows every parameter's ULP and writes back bit-identical
+weights, exactly as the fixture matrix found — so `ctrl_max < real_min` is satisfied with the
+widest possible margin. The harness asserts this per class per cell and the run exited `rc=0`,
+so the assertion is load-bearing rather than decorative.
+
+### s8 cross-cell basis (NOT the frozen ε — s64 is still missing)
+
+| class | worst_ctrl | worst_nnull | best_real | 10× lower | 10× upper | noise_floor | eps/noise | nnull_moved | window exists |
+|---|---|---|---|---|---|---|---|---|---|
+| embedding | 0.000e0 | 2.846e-6 | 1.813e-3 | 2.846e-5 | 1.813e-4 | 1.779e-6 | 1.02e2 | true | yes |
+| layer_norm_weight | 0.000e0 | 6.635e-9 | 1.891e-4 | 6.635e-8 | 1.891e-5 | 5.960e-8 | 3.17e2 | **false** | yes |
+| layer_norm_bias | 0.000e0 | 1.678e-6 | 7.112e-4 | 1.678e-5 | 7.112e-5 | 5.960e-8 | 1.19e3 | true | yes |
+| projection_weight | 0.000e0 | 1.804e-6 | 1.231e-3 | 1.804e-5 | 1.231e-4 | 5.960e-8 | 2.07e3 | true | yes |
+| projection_bias | 0.000e0 | 1.814e-6 | 3.447e-4 | 1.814e-5 | 3.447e-5 | 5.960e-8 | 5.78e2 | true | yes |
+| attention_key_bias | 0.000e0 | 5.162e-11 | 1.714e-7 | 5.162e-10 | 1.714e-8 | 1.133e-9 | **1.51e1** | true | yes |
+
+A window exists for every class on the s8 half. **These numbers are not the frozen ε**: the
+window rule takes the worst control and the best real across *all* measured cells, and the s64
+cells — 64× the optimizer steps — are precisely the ones most likely to move `best_real`.
+
+---
+
+## gradient_free re-derivation — PRELIMINARY (s8 only)
+
+This is the question 05-03's contract edit depends on, so it is stated carefully and its
+current evidentiary status is stated with it.
+
+**The claim under test.** The fixture leaves `attention_key_bias` **ungated** on a physics
+argument: `dL/db_k = 0` because softmax is invariant to a constant shift of its logits, so the
+attention key bias cannot receive gradient. The contract's own
+"RE-DERIVATION, NOT RELAXATION" clause requires re-checking that at production scale.
+
+**What the s8 half measured** (3 seeds, full 3 conditions):
+
+| quantity | seed 13 | seed 31 | seed 53 |
+|---|---|---|---|
+| real min relative delta | 1.714e-7 | 1.721e-7 | 1.801e-7 |
+| control (1e-30) max | 0.000e0 | 0.000e0 | 0.000e0 |
+| near-null (1e-8) max | 3.105e-11 | 5.162e-11 | 4.430e-11 |
+| `moved` for every member | true | true | true |
+| class rounding-noise floor | 1.133e-9 | 1.133e-9 | 1.133e-9 |
+
+Binding row: `encoder.layer.4.attention.self.key.bias`, `grad_norm_max = 8.084e-10`,
+`grad_norm_mean = 2.252e-10`, `init_norm = 1.519e-2`, own noise floor `9.051e-10`.
+
+**Preliminary verdict, consistent across all three seeds:**
+
+1. **The strict bit-exactness reading of the gradient-free argument does NOT survive production
+   scale.** The key bias moves. Its gradient is not zero — `grad_norm_max ≈ 8.1e-10` — and its
+   movement *scales with the learning rate* (1e-8 → ~4e-11; 2e-5 → ~1.8e-7, a ~3600× ratio for
+   a 2000× learning-rate ratio). A parameter whose delta tracks the learning rate is being
+   trained, not held fixed. `dL/db_k = 0` is exact in real arithmetic; in `f32` the softmax
+   shift-invariance is only approximate, so a residual gradient at the 1e-10 level is the
+   expected numerical consequence, not a bug.
+2. **But the class is not vacuous either.** It separates real training from the near-null
+   control by ~3300× (1.714e-7 vs 5.162e-11), and its real deltas sit ~150× above its own
+   rounding-noise floor. A window `[5.162e-10, 1.714e-8]` exists.
+3. **Its margin is the narrowest of the six classes by an order of magnitude** — `eps/noise`
+   15.1, against 102 for the next-narrowest (embedding) and up to 2070 for
+   `projection_weight`. So if any class is going to fail to support a frozen ε, this is the one.
+
+**Why this is labelled PRELIMINARY and not a verdict.** Three seeds at one shot count is three
+samples of one cell. The s64 cells run 64× the optimizer steps, and accumulated residual is
+exactly the quantity that could move `real_min` — in either direction. CLAUDE.md rule 6: one
+failing input is an anecdote; vary it before naming a cause. The verdict is not final until the
+s64 half is measured.
+
+**Consequence if it holds.** This does not automatically force the class to be *gated* — a
+gate needs a threshold that separates training from not-training, and the measurements show one
+exists. What it does mean is that the *justification* recorded in the contract cannot remain
+"this parameter receives no gradient", because at production scale it demonstrably does. That
+is a phase-level finding for 05-03 and is flagged as such rather than absorbed.
+
+---
+
+## HALTED — s64 half awaiting a decision
+
+The standing instruction for a partway failure: *do NOT silently restart the whole matrix or
+quietly reduce scope to fit; report what completed, what failed, and the measured cost, and halt
+for a decision.* That is this section.
+
+### Ledger
+
+| | passes | measured cost | status |
+|---|---|---|---|
+| `s8e1b16` × {13,31,53} × 3 conditions | 9 | 439.4 s tuning / 542 s wall | **COMPLETE**, `rc=0`, tables above |
+| `s64e1b16` × {13,31,53} × 3 conditions | 9 | not run | **NOT RUN** |
+| first unchunked attempt | 9 of 18 | ~40 min, tables lost | killed externally; no defect |
+
+### Re-projection from the measured s8 cost
+
+Using the measured 48.8 s/pass at 24 steps → **2.033 s/step**, and the closed-form step count
+(`budget = 2·max(pos_cap, neg_cap)`, `neg_cap = 3n²`, so s64 = 1536 steps = 64× s8):
+
+- one s64 pass ≈ 1536 × 2.033 ≈ **3 123 s ≈ 52 min**
+- nine s64 passes ≈ **28 105 s ≈ 7.81 h**
+
+That is the whole remaining cost; the s8 half is banked.
+
+### Why it cannot simply be relaunched as-is
+
+A single unattended invocation of ~7.8 h exceeds the background-task lifetime available in this
+session — that is what killed the first attempt, and a straight relaunch would die at roughly
+the same point. The harness is now chunk-capable and crash-persistent precisely so this is
+survivable.
+
+### Options
+
+| # | Option | Shape | Cost | Evidence cost |
+|---|---|---|---|---|
+| **A′** | Per-seed chunks: `APRENDER_CALIBRATION_CELLS="s64:13"`, then `s64:31`, then `s64:53` | 3 invocations of ~52 min, 3 conditions each | 7.81 h | **None.** Identical passes, conditions and assertions; ε composes from the union of per-cell tables |
+| B′ | One unattended relaunch of the whole s64 half | 1 invocation, 7.81 h | 7.81 h | None if it survives; now bounded to the in-flight cell if killed |
+| C′ | Human runs the s64 half outside this session and returns the reports | — | 7.81 h, none of it in-session | None |
+
+**Recommendation (non-binding): A′.** It is the same 18-pass matrix already authorized, at the
+same cost, partitioned so no invocation must survive longer than ~52 minutes. It trims no cells,
+does not touch the pair budget, and does not weaken the D-02 margin argument. Each chunk lands
+its own `STATUS: COMPLETE` report, so progress is monotonic and a failure costs at most one seed.
+
+Commands for A′:
+
+```bash
+for SEED in 13 31 53; do
+  CARGO_INCREMENTAL=0 \
+    APRENDER_CALIBRATION_CELLS="s64:${SEED}" \
+    SETFIT_PRODUCTION_CALIBRATION_REPORT="/tmp/s64_seed${SEED}_report.txt" \
+    cargo test --release -p aprender-train --lib --features setfit production_calibration \
+    -- --ignored --nocapture > "/tmp/s64_seed${SEED}.log" 2>&1
+  rc=$?
+  echo "seed=${SEED} rc=${rc}"
+done
+```
+
+### What Task 3 still owes once the s64 half lands
+
+Frozen ε per class (window upper edge rounded DOWN to two significant figures) with noise-floor
+clearance and binding parameter; the production `embedding_delta_floor`; the proposed regime
+entry with its architecture component byte-copied from a measured id; the MEASURED-vs-COVERED
+table over all 40 cells; the two-cell prospective validation (`s16` seed 41, `s32` seed 29); and
+the **final** `attention_key_bias` verdict.
+
