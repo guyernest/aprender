@@ -283,7 +283,11 @@ impl Transformer {
         }
 
         let embed = slice_of(&self.embed_tokens.weight, "model.embed_tokens.weight")?;
-        writer.add_tensor_f32("model.embed_tokens.weight", vec![cfg.vocab_size, hidden], &embed);
+        writer.add_tensor_f32_owned(
+            "model.embed_tokens.weight",
+            vec![cfg.vocab_size, hidden],
+            embed,
+        );
 
         for (i, layer) in self.layers.iter().enumerate() {
             let prefix = format!("model.layers.{i}");
@@ -291,7 +295,7 @@ impl Transformer {
             let mut put = |suffix: &str, shape: Vec<usize>, tensor: &Tensor| -> Result<()> {
                 let name = format!("{prefix}.{suffix}");
                 let data = slice_of(tensor, &name)?;
-                writer.add_tensor_f32(name, shape, &data);
+                writer.add_tensor_f32_owned(name, shape, data);
                 Ok(())
             };
 
@@ -322,11 +326,11 @@ impl Transformer {
         }
 
         let norm = slice_of(&self.norm.weight, "model.norm.weight")?;
-        writer.add_tensor_f32("model.norm.weight", vec![hidden], &norm);
+        writer.add_tensor_f32_owned("model.norm.weight", vec![hidden], norm);
 
         if let Some(ref head) = self.lm_head {
             let data = slice_of(head, "lm_head.weight")?;
-            writer.add_tensor_f32("lm_head.weight", vec![cfg.vocab_size, hidden], &data);
+            writer.add_tensor_f32_owned("lm_head.weight", vec![cfg.vocab_size, hidden], data);
         }
 
         writer.write(path).map_err(|e| {

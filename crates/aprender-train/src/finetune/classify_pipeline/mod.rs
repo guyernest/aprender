@@ -1260,12 +1260,15 @@ impl ClassifyPipeline {
         // A layer-count disagreement shows up as an extra tensor the loop never asked
         // for. Catching it here keeps "the adapter has more layers than the model" from
         // looking like a clean load of the first N.
-        let expected_layer_pairs = self.lora_layers.len();
-        let extra = format!("lora.{}.q_proj.lora_a", expected_layer_pairs.div_ceil(2));
+        // `lora_layers` holds TWO entries per transformer layer (q and v — see `layer = idx / 2`
+        // above), so the layer count is half its length. Naming it explicitly keeps the refusal
+        // message from reporting double the real number.
+        let num_lora_layers = self.lora_layers.len() / 2;
+        let extra = format!("lora.{num_lora_layers}.q_proj.lora_a");
         if reader.read_tensor_f32(&extra).is_ok() {
             return Err(crate::Error::ConfigError(format!(
                 "adapter '{}' carries adapters for MORE layers than this pipeline has \
-                 ({expected_layer_pairs} LoRA layers); refusing rather than loading a \
+                 ({num_lora_layers} LoRA layers); refusing rather than loading a \
                  prefix of it",
                 path.display(),
             )));

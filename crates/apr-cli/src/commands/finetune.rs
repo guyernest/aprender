@@ -1994,7 +1994,9 @@ pub(crate) fn run_classify_core(
                 })
             );
         } else {
-            output::kv("Selection manifest", &resolved.semantic_hash);
+            // The manifest hash is already printed above, before training, alongside the
+            // selected-row count — repeating it here adds a second identical line to the
+            // same run. Only the epoch outcome is new at this point.
             output::kv("Epochs completed", result.epochs_completed.to_string());
         }
     }
