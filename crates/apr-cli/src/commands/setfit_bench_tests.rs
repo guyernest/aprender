@@ -1598,3 +1598,447 @@ fn setfit_bench_never_reads_a_status_through_a_pipe() {
          twice in this repository (#2336, #2360)"
     );
 }
+
+// ==========================================================================================
+// `apr setfit bench report` — the renderer (05-10 task 2, D-13/D-15)
+// ==========================================================================================
+//
+// THE RENDERER IS TESTED AGAINST A SYNTHETIC AGGREGATE, NOT A BUILT DIRECTORY.
+//
+// `verify_run` and `aggregate` have their own eighty-row suite in
+// `entrenar::train::setfit::bench_gate`, including the six doctored negatives. What is left to
+// get wrong HERE is the presentation — a technically-true table that reads as a like-for-like
+// benchmark, an adapter's bytes standing in for a deployable size, a verdict word, a blank cell
+// where a degenerate interval belongs. Those are properties of a `RunAggregate` -> `String`
+// function, and constructing the input directly is what lets each be varied ONE AT A TIME. The
+// two-sided incomparability control below is the clearest case: the same fixture with one
+// mechanism string changed is what separates a real label from unconditional boilerplate.
+
+mod report_render {
+    use entrenar::train::setfit::bench_gate::{
+        Ci95, MechanismClass, MethodShotQuality, MethodShotResource, RunAggregate, SeedDelta,
+        SeedValue, SeriesSummary, ShotDelta, ZERO_VARIANCE_NULL_REASON,
+    };
+    use entrenar::train::setfit::bench_row::{
+        Method, BENCH_METHODS, BENCH_SEEDS, BENCH_SHOTS, CLAIMS_CONTRACT_ID,
+    };
+
+    use crate::commands::setfit_bench::report::{
+        render_deltas, render_human, render_quality, render_resource_comparison,
+        render_resource_detail, render_sizes, verified_aggregate, ReportPayload,
+        ADAPTER_ONLY_LABEL, CI_UNAVAILABLE, INCOMPARABLE_NOTE, PER_HOST_FRAMING,
+        QUALITY_TABLE_HEADER, REPORT_PAYLOAD_SCHEMA, SIZE_TABLE_HEADER,
+    };
+
+    /// LoRA's ADAPTER-ONLY byte count.
+    ///
+    /// Chosen so its decimal rendering is not a substring of either deployable figure —
+    /// otherwise "the adapter figure is absent from the size table" would be decided by digit
+    /// coincidence rather than by the property under test. (`40_000_000` was the obvious choice
+    /// and is a substring of `18_040_000_000`.)
+    const LORA_ADAPTER_BYTES: f64 = 41_943_040.0;
+    /// LoRA's deployable total: base + adapter.
+    const LORA_DEPLOYABLE_BYTES: f64 = 18_253_611_008.0;
+    /// SetFit ships ONE standalone file, so its two size figures are equal by construction.
+    const SETFIT_ARTIFACT_BYTES: f64 = 94_371_840.0;
+
+    fn summary(mean: f64) -> SeriesSummary {
+        SeriesSummary {
+            n: 10,
+            mean,
+            std: 0.0025,
+            min: mean - 0.01,
+            max: mean + 0.01,
+        }
+    }
+
+    fn resource_group(
+        method: Method,
+        shots: u32,
+        train_mechanism: &str,
+        train_class: MechanismClass,
+    ) -> MethodShotResource {
+        let (artifact, deployable, host, backend) = match method {
+            Method::Setfit => (
+                SETFIT_ARTIFACT_BYTES,
+                SETFIT_ARTIFACT_BYTES,
+                "local-cpu (macos/aarch64)",
+                "cpu:trueno:simd",
+            ),
+            Method::Lora => (
+                LORA_ADAPTER_BYTES,
+                LORA_DEPLOYABLE_BYTES,
+                "lambda-vector (linux/x86_64)",
+                "gpu:cuda:cublas",
+            ),
+        };
+        MethodShotResource {
+            method,
+            shots,
+            hosts: vec![host.to_string()],
+            backends: vec![backend.to_string()],
+            train_wall_ms: summary(1_000.0),
+            cold_latency_ms: summary(12.0),
+            warm_latency_ms_median: summary(4.0),
+            throughput_rows_per_sec: summary(200.0),
+            throughput_batch_sizes: vec![32],
+            train_peak_rss_bytes: summary(500_000_000.0),
+            train_peak_rss_mechanisms: vec![train_mechanism.to_string()],
+            train_peak_rss_mechanism_classes: vec![train_class],
+            inference_peak_rss_bytes: summary(200_000_000.0),
+            inference_peak_rss_mechanisms: vec!["child_max_rss_vm_hwm".to_string()],
+            inference_peak_rss_mechanism_classes: vec![MechanismClass::ExactKernelHighWaterMark],
+            artifact_bytes: summary(artifact),
+            deployable_total_bytes: summary(deployable),
+        }
+    }
+
+    /// A synthetic aggregate.
+    ///
+    /// `lora_train_mechanism` is the knob the two-sided incomparability control turns: a sampled
+    /// lower bound beside an exact high-water mark must be labelled, and two figures of the SAME
+    /// class must not be — a note that always fires is boilerplate a reader learns to skip,
+    /// which is the same as no note at all.
+    fn synthetic_aggregate(
+        zero_variance_shots: Option<u32>,
+        lora_train_mechanism: &str,
+        lora_train_class: MechanismClass,
+    ) -> RunAggregate {
+        let mut quality = Vec::new();
+        let mut resource = Vec::new();
+        let mut key_sequence = Vec::new();
+        for method in BENCH_METHODS {
+            for shots in BENCH_SHOTS {
+                let base = if method == Method::Setfit { 0.55 } else { 0.45 };
+                quality.push(MethodShotQuality {
+                    method,
+                    shots,
+                    f_avg: summary(base),
+                    macro_f1: summary(base - 0.05),
+                    mcc: summary(base - 0.10),
+                    per_seed: BENCH_SEEDS
+                        .iter()
+                        .map(|seed| SeedValue {
+                            seed: *seed,
+                            f_avg: base,
+                            f_avg_bits: base.to_bits(),
+                            macro_f1: base - 0.05,
+                            mcc: base - 0.10,
+                        })
+                        .collect(),
+                });
+                let (mechanism, class) = if method == Method::Setfit {
+                    ("vm_hwm", MechanismClass::ExactKernelHighWaterMark)
+                } else {
+                    (lora_train_mechanism, lora_train_class)
+                };
+                resource.push(resource_group(method, shots, mechanism, class));
+                for seed in BENCH_SEEDS {
+                    key_sequence.push(format!("{}/s{shots}/seed{seed}", method.tag()));
+                }
+            }
+        }
+
+        let deltas = BENCH_SHOTS
+            .iter()
+            .map(|shots| {
+                let degenerate = zero_variance_shots == Some(*shots);
+                ShotDelta {
+                    shots: *shots,
+                    per_seed_deltas: BENCH_SEEDS
+                        .iter()
+                        .map(|seed| SeedDelta {
+                            seed: *seed,
+                            delta: 0.10,
+                            delta_bits: 0.10_f64.to_bits(),
+                        })
+                        .collect(),
+                    mean_delta: 0.10,
+                    std_delta: if degenerate { None } else { Some(0.01) },
+                    ci95: if degenerate {
+                        Ci95 {
+                            low: None,
+                            high: None,
+                            half_width: None,
+                            std_err: None,
+                            null_reason: Some(ZERO_VARIANCE_NULL_REASON.to_string()),
+                        }
+                    } else {
+                        Ci95 {
+                            low: Some(0.09),
+                            high: Some(0.11),
+                            half_width: Some(0.01),
+                            std_err: Some(0.004),
+                            null_reason: None,
+                        }
+                    },
+                    t_statistic: if degenerate { None } else { Some(25.0) },
+                    p_value: if degenerate { None } else { Some(0.000_001) },
+                }
+            })
+            .collect();
+
+        RunAggregate {
+            contract_id: CLAIMS_CONTRACT_ID.to_string(),
+            n_seeds: 10,
+            degrees_of_freedom: 9,
+            t_crit_975_df9: 2.262_157_162_798_205,
+            key_sequence,
+            quality,
+            deltas,
+            resource,
+        }
+    }
+
+    /// The everyday report: two hosts, two train mechanisms, no degenerate level.
+    fn ordinary() -> RunAggregate {
+        synthetic_aggregate(
+            None,
+            "sysinfo_sampled_10hz",
+            MechanismClass::SampledLowerBound,
+        )
+    }
+
+    #[test]
+    fn setfit_bench_report_prints_no_verdict_word_and_names_the_interval() {
+        let rendered = render_human(&ordinary()).to_lowercase();
+        // D-08. A binary verdict is precisely where few-shot seed sensitivity hides: rankings
+        // that reverse across seeds become one word.
+        for verdict in ["significant", "significantly", "better than", "worse than"] {
+            assert!(
+                !rendered.contains(verdict),
+                "the report rendered the verdict word `{verdict}`; claim language is \
+                 estimation-first (D-08)"
+            );
+        }
+        // NON-VACUITY: every absence assertion above also holds over an empty string.
+        assert!(
+            rendered.contains("95% ci"),
+            "the report must state the interval it publishes"
+        );
+        assert!(rendered.len() > 1_000, "the report must have rendered");
+    }
+
+    #[test]
+    fn setfit_bench_report_human_output_carries_the_per_host_framing_line() {
+        let rendered = render_human(&ordinary());
+        assert!(
+            rendered.contains(PER_HOST_FRAMING),
+            "D-09: resource figures are as-deployed method costs on two deliberately different \
+             hosts, and a report that does not say so states something no measurement supports"
+        );
+        assert!(rendered.contains(QUALITY_TABLE_HEADER));
+        assert!(rendered.contains(SIZE_TABLE_HEADER));
+    }
+
+    #[test]
+    fn setfit_bench_report_labels_a_mixed_mechanism_comparison_and_leaves_a_matched_one_alone() {
+        // MIXED: a sampled LOWER BOUND beside an exact kernel high-water mark.
+        let mixed = render_resource_comparison(&ordinary().resource);
+        assert!(
+            mixed.contains(INCOMPARABLE_NOTE),
+            "a sysinfo_sampled_* figure beside a child_max_rss_* figure must be labelled AT THE \
+             POINT OF COMPARISON, not in a methods paragraph: {mixed}"
+        );
+
+        // THE CONTROL, and it is the half that matters. A note that fires unconditionally is
+        // boilerplate a reader learns to skip, which is the same as no note at all.
+        let matched = synthetic_aggregate(None, "vm_hwm", MechanismClass::ExactKernelHighWaterMark);
+        let matched = render_resource_comparison(&matched.resource);
+        assert!(
+            !matched.contains(INCOMPARABLE_NOTE),
+            "two figures of the SAME mechanism class must NOT carry the incomparability note: \
+             {matched}"
+        );
+        // Both renderings still print BOTH mechanism strings on every row.
+        assert!(matched.contains("vm_hwm"));
+        assert!(mixed.contains("sysinfo_sampled_10hz"));
+        assert!(mixed.contains("child_max_rss_vm_hwm"));
+    }
+
+    #[test]
+    fn setfit_bench_report_resource_detail_names_every_measurement_scope() {
+        let rendered = render_resource_detail(&ordinary().resource);
+        for scope in [
+            "train peak RSS",
+            "inference peak RSS",
+            "cold latency (fresh child)",
+            "warm latency (median of 10 after 3)",
+        ] {
+            assert!(
+                rendered.contains(scope),
+                "a number without its measurement boundary is not a measurement; `{scope}` is \
+                 missing"
+            );
+        }
+        // Peak RSS is NEVER rendered as a single unlabelled "peak memory" number.
+        assert!(!rendered.contains("peak memory"));
+        assert!(rendered.contains(ADAPTER_ONLY_LABEL));
+    }
+
+    #[test]
+    fn setfit_bench_report_size_table_uses_deployable_and_never_the_adapter_only_figure() {
+        let rendered = render_sizes(&ordinary().resource);
+        assert!(
+            rendered.contains("deployable_total_bytes"),
+            "the cross-method size table must NAME the field it uses"
+        );
+        assert!(rendered.contains("18253611008"), "lora's deployable figure");
+        assert!(rendered.contains("94371840"), "setfit's standalone figure");
+        assert!(
+            !rendered.contains("41943040"),
+            "LoRA's ADAPTER-ONLY bytes must never appear in the cross-method size table. An \
+             adapter of a few tens of megabytes beside a 90 MiB standalone classifier reads as \
+             parity, while the deployable figures differ by the size of a 9B base model: \
+             {rendered}"
+        );
+        // ... and the adapter figure IS shown, labelled, in the per-method detail — so its
+        // absence above is a PLACEMENT rule rather than a suppression.
+        let detail = render_resource_detail(&ordinary().resource);
+        assert!(detail.contains("41943040"));
+    }
+
+    #[test]
+    fn setfit_bench_report_renders_a_zero_variance_delta_as_a_named_absence() {
+        let degenerate = synthetic_aggregate(
+            Some(8),
+            "sysinfo_sampled_10hz",
+            MechanismClass::SampledLowerBound,
+        );
+        let rendered = render_deltas(&degenerate.deltas);
+        assert!(
+            rendered.contains(CI_UNAVAILABLE),
+            "a degenerate interval is a VISIBLE named state, never a blank cell: {rendered}"
+        );
+        // The point estimate survives: it is well defined and it is what a reader wants.
+        assert!(rendered.contains("0.1000"));
+        // The non-degenerate levels still print an interval, so the branch is not a global
+        // switch that silenced every CI.
+        assert!(rendered.contains("[0.0900, 0.1100]"), "{rendered}");
+
+        // The JSON carries the machine-readable reason and NO numeric bound.
+        let payload = ReportPayload::new(&degenerate);
+        let value = serde_json::to_value(&payload).expect("payload serializes");
+        let ci = &value["detail"]["deltas"][0]["ci95"];
+        assert_eq!(ci["null_reason"], ZERO_VARIANCE_NULL_REASON);
+        assert!(ci.get("low").is_none(), "no numeric bound may be emitted");
+        assert!(ci.get("high").is_none());
+    }
+
+    #[test]
+    fn setfit_bench_report_json_payload_round_trips_with_per_seed_deltas_and_p_values() {
+        let report = ordinary();
+        let payload = ReportPayload::new(&report);
+        let rendered = serde_json::to_string(&payload).expect("payload serializes");
+        let value: serde_json::Value = serde_json::from_str(&rendered).expect("round trips");
+
+        assert_eq!(value["schema"], REPORT_PAYLOAD_SCHEMA);
+        assert_eq!(value["contract_id"], CLAIMS_CONTRACT_ID);
+        // D-08: p-values may sit in the machine-readable DETAIL and may not appear in claim
+        // language. The `detail` key is a structural statement of that boundary.
+        let first = &value["detail"]["deltas"][0];
+        assert_eq!(
+            first["per_seed_deltas"]
+                .as_array()
+                .expect("per-seed deltas are an array")
+                .len(),
+            10
+        );
+        assert!(first["p_value"].is_number(), "p-values live in the detail");
+        assert!(first["t_statistic"].is_number());
+        // Both size fields travel, so a reader can check the placement rule for themselves.
+        let lora = value["detail"]["resource"]
+            .as_array()
+            .expect("resource is an array")
+            .iter()
+            .find(|group| group["method"] == "lora")
+            .expect("a lora group");
+        assert!(lora["artifact_bytes"]["mean"].is_number());
+        assert!(lora["deployable_total_bytes"]["mean"].is_number());
+        assert!(lora["train_peak_rss_mechanisms"][0].is_string());
+    }
+
+    #[test]
+    fn setfit_bench_report_quality_table_publishes_macro_f1_beside_f_avg() {
+        let rendered = render_quality(&ordinary().quality);
+        assert!(rendered.contains("F_avg"));
+        assert!(rendered.contains("macro F1"));
+        assert!(rendered.contains("setfit"));
+        assert!(rendered.contains("lora"));
+    }
+
+    // --- The refusal path -----------------------------------------------------------------
+
+    #[test]
+    fn setfit_bench_report_refuses_an_incomplete_run_naming_the_cell_and_renders_nothing() {
+        use entrenar::train::setfit::bench_row::RunManifest;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        // A freshly DECLARED manifest: all eighty cells pending, no rows on disk. That is what
+        // a selectively omitted run looks like, taken to its limit.
+        std::fs::write(
+            dir.path().join("run-manifest.json"),
+            RunManifest::declare()
+                .to_file_bytes()
+                .expect("manifest serializes"),
+        )
+        .expect("manifest write");
+
+        let error = verified_aggregate(dir.path()).expect_err("an incomplete run is a refusal");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("setfit/s8/seed13"),
+            "the refusal must NAME the failing cell: {rendered}"
+        );
+        assert!(
+            rendered.contains("--record"),
+            "the refusal must name the remedy: {rendered}"
+        );
+        // ZERO TABLE OUTPUT. The rendering functions are not reached AT ALL, which is a stronger
+        // statement than "the output happened not to contain a header".
+        assert!(
+            !rendered.contains(QUALITY_TABLE_HEADER),
+            "a refused run must produce no table: {rendered}"
+        );
+        assert!(!rendered.contains(SIZE_TABLE_HEADER));
+    }
+
+    #[test]
+    fn setfit_bench_report_refuses_a_directory_with_no_run_manifest() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let error = verified_aggregate(dir.path()).expect_err("no manifest is a refusal");
+        let rendered = error.to_string();
+        assert!(rendered.contains("no run manifest"), "{rendered}");
+        assert!(
+            rendered.contains("cannot report what is missing"),
+            "completeness is defined by the manifest and the contract, never by a listing: \
+             {rendered}"
+        );
+    }
+}
+
+#[test]
+fn setfit_bench_layout_and_filename_grammar_come_from_the_library() {
+    // ONE spelling. The 05-10 gate resolves rows, locks and ledgers by these names, and a second
+    // copy here could drift — reporting `row_file_missing` for a path this writer never used.
+    let source = SETFIT_BENCH_SOURCE
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let delegation = needle(&[
+        "pub(crate) use entrenar::train::setfit::bench_gate::",
+        "row_file_name",
+    ]);
+    assert!(
+        source.contains(&delegation),
+        "row_file_name must be the library's, not a second copy"
+    );
+    assert_eq!(ROWS_DIR, entrenar::train::setfit::bench_gate::ROWS_DIR);
+    assert_eq!(LOCKS_DIR, entrenar::train::setfit::bench_gate::LOCKS_DIR);
+    assert_eq!(LEDGER_DIR, entrenar::train::setfit::bench_gate::LEDGER_DIR);
+    assert_eq!(
+        RUN_MANIFEST_FILE,
+        entrenar::train::setfit::bench_gate::RUN_MANIFEST_FILE
+    );
+}
