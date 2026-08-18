@@ -69,6 +69,7 @@ fn registered_commands() -> Vec<&'static str> {
         "distill",
         "train",
         "pretrain",
+        "predict",
         "tokenize",
         "tune",
         "bench",

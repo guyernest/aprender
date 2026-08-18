@@ -259,6 +259,12 @@ commands:
     requires_model: false
     side_effects: [filesystem, gpu]
 
+  - name: predict
+    category: training
+    description: "Classify text with a model — auto-detects the family from the artifact's typed tag"
+    requires_model: true
+    side_effects: [filesystem]
+
   - name: tokenize
     category: training
     description: "Tokenizer training pipeline (plan/apply)"
