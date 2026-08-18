@@ -274,7 +274,7 @@ contract edit per Phase 3 D-10(c), never an inline relaxation by a Phase 5 execu
 **Branch base**: Phase 5 continues on `gsd/phase-2-contract-gate` per the 02-01 policy (phases
 2-4 all ride this branch; no PR has been opened — opening one is the human's call).
 
-**Plans**: 9/14 plans executed in 8 waves — replanned 2026-08-17 after 05-01's measurements refuted 05-03's premise. At production step count (s64 = 1536 steps) five of six parameter classes have NO legal ε under the contracted 10×/10× rule (only `layer_norm_weight` survives); recorded as `05-CONTEXT.md` D-16..D-18. 05-03 was reshaped from "prepare → approve → commit" to "derive candidates → SELECT → commit" (D-04 ceremony intact) and now decides which of two already-contracted lower bounds binds. 05-14 was ADDED (wave 1, before 05-03) to make the evidence gate fail-closed on window collapse — it currently exits `rc=0` while printing `EMPTY` five times, because separation is asserted while `supports_margin` is only reported. No other plan's wave or depends_on changed; 05-14 is numbered 14 rather than inserted so the dependency graph is not renumbered.
+**Plans**: 11/14 plans executed in 8 waves — replanned 2026-08-17 after 05-01's measurements refuted 05-03's premise. At production step count (s64 = 1536 steps) five of six parameter classes have NO legal ε under the contracted 10×/10× rule (only `layer_norm_weight` survives); recorded as `05-CONTEXT.md` D-16..D-18. 05-03 was reshaped from "prepare → approve → commit" to "derive candidates → SELECT → commit" (D-04 ceremony intact) and now decides which of two already-contracted lower bounds binds. 05-14 was ADDED (wave 1, before 05-03) to make the evidence gate fail-closed on window collapse — it currently exits `rc=0` while printing `EMPTY` five times, because separation is asserted while `supports_margin` is only reported. No other plan's wave or depends_on changed; 05-14 is numbered 14 rather than inserted so the dependency graph is not renumbered.
 
 Plans:
 **Wave 1** *(the F-10 unblock work — D-01 — plus the independent numerics substrate 05-04, whose t_critical.json fixture is the source of 05-05's frozen contract literal; nothing F-10-downstream runs until the edit lands)*
@@ -297,11 +297,11 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 05-09-PLAN.md — `apr setfit bench run`: one cell per method, contracted resource protocol (cold/warm/throughput/peak-RSS), --record transport ingest, 40-cell driver script
+- [x] 05-09-PLAN.md — `apr setfit bench run`: one cell per method, contracted resource protocol (cold/warm/throughput/peak-RSS), --record transport ingest, 40-cell driver script
 
 **Wave 5** *(blocked on Wave 4 — the claims gate must EXIST before any expensive cell is generated; cross-AI review consensus item 4)*
 
-- [ ] 05-10-PLAN.md — bench_gate fail-closed verify (incl. recomputed lock/ledger provenance) + closed-form aggregation + `bench report` (estimation-first, mechanism-labelled) + six in-band doctored negatives + non-vacuous Make/binding gates
+- [x] 05-10-PLAN.md — bench_gate fail-closed verify (incl. recomputed lock/ledger provenance) + closed-form aggregation + `bench report` (estimation-first, mechanism-labelled) + six in-band doctored negatives + non-vacuous Make/binding gates
 
 **Wave 6** *(blocked on Wave 5 — 40 GPU cells run only after the gate that judges them exists, and after one pilot cell passes it)*
 
@@ -326,4 +326,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | Complete   | 2026-08-14 |
 | 4. APR Artifact and Production Parity | 22/22 | UAT passed, awaiting secure-phase |  |
-| 5. Benchmark and Claims Gate | 9/14 | In Progress|  |
+| 5. Benchmark and Claims Gate | 11/14 | In Progress|  |
