@@ -29,7 +29,7 @@
 #![allow(clippy::disallowed_methods)] // serde_json::json! macro expands to .unwrap() internally
 
 use crate::server::NotificationSink;
-use crate::tools::subprocess::{run_apr, spawn_streaming};
+use crate::tools::subprocess::{apr_binary, run_apr, spawn_streaming};
 use crate::types::{InputSchema, JsonRpcNotification, ToolCallResult, ToolDefinition};
 
 /// Tool name registered with MCP clients.
@@ -125,7 +125,10 @@ pub fn call_with_sink(
     let argv: Vec<&str> = owned.iter().map(String::as_str).collect();
 
     match (sink, progress_token) {
-        (Some(sink), Some(token)) => stream_with_sink("apr", &argv, sink, &token),
+        // The pinned binary, NOT a bare `"apr"` — see the same note in
+        // `tools::run::call_with_options`. `run_apr` below already resolves
+        // through `apr_binary()`; the two paths must drive the same build.
+        (Some(sink), Some(token)) => stream_with_sink(apr_binary(), &argv, sink, &token),
         _ => run_apr(&argv),
     }
 }
@@ -137,7 +140,7 @@ pub fn call_with_sink(
 /// aggregated stdout (same shape as `run_apr`'s success body).
 #[must_use]
 pub fn stream_with_sink(
-    program: &str,
+    program: impl AsRef<std::ffi::OsStr>,
     args: &[&str],
     sink: &NotificationSink,
     progress_token: &serde_json::Value,

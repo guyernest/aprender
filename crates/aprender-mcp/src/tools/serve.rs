@@ -16,6 +16,7 @@
 
 #![allow(clippy::disallowed_methods)] // serde_json::json! macro expands to .unwrap() internally
 
+use crate::tools::subprocess::apr_binary;
 use crate::types::{ContentBlock, InputSchema, ToolCallResult, ToolDefinition};
 use std::process::{Command, Stdio};
 
@@ -70,7 +71,12 @@ pub fn call(args: &serde_json::Value) -> ToolCallResult {
         },
     };
 
-    let spawn_result = Command::new("apr")
+    // The SAME pin every other subprocess tool uses. A bare `Command::new("apr")`
+    // here re-opened both failure modes `apr_binary()` exists to close: a
+    // `.mcp.json` configured with an absolute path leaves no `apr` on PATH at all,
+    // and a stale `apr` on PATH makes this tool serve a build the server is not.
+    let program = apr_binary();
+    let spawn_result = Command::new(program)
         .arg("serve")
         .arg(model_path)
         .arg("--port")
@@ -82,7 +88,12 @@ pub fn call(args: &serde_json::Value) -> ToolCallResult {
     let child = match spawn_result {
         Ok(c) => c,
         Err(e) => {
-            return ToolCallResult::error(format!("failed to spawn apr serve: {e}"));
+            // Name the binary actually spawned, not the literal "apr" — a
+            // resolution failure must not read as "apr is broken".
+            return ToolCallResult::error(format!(
+                "failed to spawn `{} serve`: {e}",
+                program.to_string_lossy()
+            ));
         }
     };
 

@@ -17,7 +17,7 @@
 #![allow(clippy::disallowed_methods)] // serde_json::json! macro expands to .unwrap() internally
 
 use crate::server::NotificationSink;
-use crate::tools::subprocess::{run_apr_cancellable, spawn_streaming, CANCEL_GRACE_MS};
+use crate::tools::subprocess::{apr_binary, run_apr_cancellable, spawn_streaming, CANCEL_GRACE_MS};
 use crate::types::{InputSchema, JsonRpcNotification, ToolCallResult, ToolDefinition};
 use std::sync::mpsc::Receiver;
 
@@ -120,7 +120,11 @@ pub fn call_with_sink(
     let argv: Vec<&str> = owned.iter().map(String::as_str).collect();
 
     match (streaming, sink, progress_token) {
-        (true, Some(sink), Some(token)) => stream_with_sink("apr", &argv, sink, &token),
+        // The pinned binary, NOT a bare `"apr"`. `run_apr_cancellable` below
+        // already resolves through `apr_binary()`; spelling `"apr"` here made
+        // `apr.run` drive a DIFFERENT binary depending only on whether the
+        // client happened to pass a `progressToken`.
+        (true, Some(sink), Some(token)) => stream_with_sink(apr_binary(), &argv, sink, &token),
         _ => run_apr_cancellable(&argv, cancel_rx, CANCEL_GRACE_MS),
     }
 }
@@ -135,7 +139,7 @@ pub fn call_with_sink(
 /// body) so non-streaming consumers get the full payload too.
 #[must_use]
 pub fn stream_with_sink(
-    program: &str,
+    program: impl AsRef<std::ffi::OsStr>,
     args: &[&str],
     sink: &NotificationSink,
     progress_token: &serde_json::Value,
