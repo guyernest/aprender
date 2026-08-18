@@ -10,7 +10,7 @@ type = "pmcp-run"
 version = "1.0.0"
 
 [aws]
-region = "eu-west-1"
+region = "us-east-1"
 
 [server]
 name = "aprender-setfit-predict"
