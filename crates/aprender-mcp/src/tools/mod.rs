@@ -11,6 +11,7 @@
 
 pub mod bench;
 pub mod finetune;
+pub mod predict;
 pub mod qa;
 pub mod registry;
 pub mod run;
@@ -25,6 +26,7 @@ pub use registry::{DispatchFn, McpToolEntry, ToolIndex};
 
 pub use bench::bench_tool_definition;
 pub use finetune::finetune_tool_definition;
+pub use predict::predict_tool_definition;
 pub use qa::qa_tool_definition;
 pub use run::run_tool_definition;
 pub use serve::serve_tool_definition;
