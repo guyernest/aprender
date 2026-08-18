@@ -156,6 +156,8 @@ pub(crate) mod serve;
 pub(crate) mod serve_plan;
 pub(crate) mod serve_plan_output;
 #[cfg(feature = "setfit")]
+pub(crate) mod setfit_bench;
+#[cfg(feature = "setfit")]
 pub(crate) mod setfit_train;
 pub(crate) mod shard;
 pub(crate) mod shared_cache;

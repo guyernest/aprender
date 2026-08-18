@@ -856,6 +856,55 @@ fn dispatch_setfit_command(
             *dry_run,
             cli.json,
         ),
+        // `cli.offline` is deliberately NOT threaded here either, for the reason the
+        // `Train` arm records: `bench run` opens no socket. It reads a prepared
+        // dataset directory, a selection manifest and an offline `--model-dir`, and
+        // it spawns exactly one child — this same binary, resolved through
+        // `current_exe`. An `--offline` switch would advertise a capability that does
+        // not exist.
+        SetfitCommands::Bench { command } => dispatch_setfit_bench_command(command, cli),
+    }
+}
+
+/// Dispatch `apr setfit bench` subcommands.
+#[cfg(feature = "setfit")]
+fn dispatch_setfit_bench_command(
+    command: &BenchCommands,
+    cli: &Cli,
+) -> std::result::Result<(), CliError> {
+    match command {
+        BenchCommands::Run {
+            method,
+            shots,
+            seed,
+            data,
+            selection,
+            bench_dir,
+            model_dir,
+            base_model,
+            config,
+            force,
+            record,
+            cold_probe,
+            cold_probe_base,
+            probe_text,
+        } => commands::setfit_bench::run(&commands::setfit_bench::BenchRunArgs {
+            method: method.as_deref(),
+            shots: *shots,
+            seed: *seed,
+            data: data.as_deref(),
+            selection: selection.as_deref(),
+            bench_dir: bench_dir.as_deref(),
+            model_dir: model_dir.as_deref(),
+            base_model: base_model.as_deref(),
+            config: config.as_deref(),
+            force: *force,
+            record: record.as_deref(),
+            cold_probe: cold_probe.as_deref(),
+            cold_probe_base: cold_probe_base.as_deref(),
+            probe_text: probe_text.as_deref(),
+            json: cli.json,
+        }),
     }
 }
 

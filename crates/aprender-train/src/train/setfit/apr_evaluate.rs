@@ -361,6 +361,105 @@ impl RowPredictions {
     }
 }
 
+/// Build per-row predictions for the 9B LoRA BASELINE, from its reloaded pipeline's output.
+///
+/// # This is NOT a hole in the SetFit witness, and the difference is structural
+///
+/// [`RowPredictions`] has no public constructor because a SetFit value of it is EVIDENCE that
+/// a measurement went through the credentialed door: [`evaluate_rows_from_artifact`] takes a
+/// [`ReloadedSetFitCredential`], which only the load ladder can mint. That guarantee is about
+/// `setfit-apr-v1` ARTIFACTS, and the LoRA baseline has none — its artifacts are a base
+/// transformer plus an adapter, and no `setfit-apr-v1` load ladder can ever be run over them.
+///
+/// So the benchmark's two methods need two entrances to ONE metric assembly. The alternative
+/// designs were both worse:
+///
+/// - A second assembly for LoRA would be a second definition of `F_avg`, MCC, the confusion
+///   matrix and the calibration diagnostics — the exact drift `bench_metrics` exists to
+///   prevent, and it would be invisible because both would look right.
+/// - Widening `ReloadedSetFitCredential` to admit a LoRA pipeline would make the SetFit
+///   witness a container for a claim, which is what its private constructor forbids.
+///
+/// What this door does NOT do is let a caller assert a SetFit measurement: `split_tag` is
+/// checked against the two the assembly accepts, the shapes are checked against each other and
+/// against `ordered_labels`, and `artifact_hash` is recorded rather than trusted. It cannot
+/// produce a row that claims to have come from a verified `setfit-apr-v1`, because the
+/// artifact hash it stamps is the ADAPTER's and the row that carries it declares
+/// `method: lora` — which [`super::bench_row::BenchRow::from_bytes`] independently requires to
+/// agree with a `MethodEvidence::Lora` block.
+///
+/// # Errors
+///
+/// [`AprEvaluateError::ValidationSplitEmpty`] or [`AprEvaluateError::TestSplitEmpty`] for an
+/// empty split; [`SetFitTrainError::SelectionLabelOutOfRange`] for a truth index outside the
+/// label map; [`AprEvaluateError::LabelMapMismatch`] when a probability row is not
+/// `ordered_labels.len()` long or the two vectors disagree in length.
+pub fn row_predictions_from_lora(
+    probabilities: &[Vec<f64>],
+    truth: &[usize],
+    ordered_labels: &[String],
+    artifact_hash: &str,
+    split_tag: &'static str,
+) -> Result<RowPredictions, SetFitTrainError> {
+    let classes = ordered_labels.len();
+    if probabilities.len() != truth.len() {
+        return Err(AprEvaluateError::LabelMapMismatch {
+            artifact: vec![format!("{} probability rows", probabilities.len())],
+            dataset: vec![format!("{} truth rows", truth.len())],
+        }
+        .into());
+    }
+    if probabilities.is_empty() {
+        return Err(match split_tag {
+            "test" => AprEvaluateError::TestSplitEmpty,
+            _ => AprEvaluateError::ValidationSplitEmpty,
+        }
+        .into());
+    }
+    for row in probabilities {
+        if row.len() != classes {
+            return Err(AprEvaluateError::LabelMapMismatch {
+                artifact: vec![format!("a {}-wide probability row", row.len())],
+                dataset: ordered_labels.to_vec(),
+            }
+            .into());
+        }
+    }
+    // Bounds-checked HERE, for the reason `evaluate_rows_from_artifact` states: an
+    // out-of-range index reaching the assembly would index a metric vector's wrong slot and
+    // produce a confidently wrong number rather than an error.
+    for &label in truth {
+        if label >= classes {
+            return Err(SetFitTrainError::SelectionLabelOutOfRange { label, classes });
+        }
+    }
+
+    // The predicted class is `argmax` with the LOWEST index winning a tie — the same
+    // deterministic rule the SetFit head's own reduction uses, so a tie does not resolve
+    // differently depending on which method produced the vector.
+    let predicted: Vec<usize> = probabilities
+        .iter()
+        .map(|row| {
+            let mut best = 0_usize;
+            for index in 1..row.len() {
+                if row[index] > row[best] {
+                    best = index;
+                }
+            }
+            best
+        })
+        .collect();
+
+    Ok(RowPredictions {
+        predicted,
+        probabilities: probabilities.to_vec(),
+        truth: truth.to_vec(),
+        ordered_labels: ordered_labels.to_vec(),
+        artifact_hash: artifact_hash.to_string(),
+        split_tag,
+    })
+}
+
 /// Build per-row predictions directly, from parts — TEST ONLY.
 ///
 /// `#[cfg(test)]` and `pub(super)`, and nothing weaker — the precedent
