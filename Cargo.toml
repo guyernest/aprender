@@ -51,6 +51,8 @@ members = [
     "crates/aprender-orchestrate",
     # --- MCP server (Model Context Protocol) ---
     "crates/aprender-mcp",
+    # Thin single-model MCP server: SetFit classification via pmcp (pmcp.run template)
+    "crates/aprender-mcp-setfit",
     # --- APR-MONO Phase 2f: satellite repos (main crates) ---
     "crates/aprender-profile",
     "crates/aprender-profile-core",
