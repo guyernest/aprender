@@ -51,10 +51,13 @@ pub use aprender::setfit::VerifiedSetFitModel as Model;
 pub const TOOL_NAME: &str = "classify";
 
 /// Tool description served on `tools/list`.
-pub const TOOL_DESCRIPTION: &str = "Classify a batch of texts with the SetFit classifier this \
-     server was deployed with. Returns one result per text, in input order: label, per-class \
-     probabilities, margin, token_count, truncated. Bounded at 256 texts and ~1 MiB of request \
-     body per call.";
+pub const TOOL_DESCRIPTION: &str = "Classify texts with the SetFit classifier this server was \
+     deployed with. Each element of `texts` is ONE complete document (e.g. one whole social-media \
+     post) and yields exactly one classification — NEVER split a single document into multiple \
+     elements (fragments classify worse than the whole) and never join separate documents into \
+     one element. Long texts are handled by the model itself (truncation is reported per result). \
+     Returns one result per element, in input order: label, per-class probabilities, margin, \
+     token_count, truncated. Bounded at 256 texts and ~1 MiB of request body per call.";
 
 /// The MCP argument surface of [`TOOL_NAME`].
 ///
@@ -67,7 +70,9 @@ pub const TOOL_DESCRIPTION: &str = "Classify a batch of texts with the SetFit cl
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ClassifyArgs {
-    /// The ordered texts to classify. Order is response order.
+    /// The ordered texts to classify; order is response order. One COMPLETE
+    /// document per element (a whole post, comment, or message) — do not split
+    /// a document across elements, and do not concatenate documents into one.
     pub texts: Vec<String>,
     /// Include per-class logits in each result. Defaults to false.
     #[serde(default)]
