@@ -51,6 +51,10 @@ crates/aprender-shell/qa_test_artifacts/
 # Root-level models/ only (NOT src/models/ which is source code)
 /models/
 /models
+# Root-level data/ only (CB-510: root-anchored, never a bare pattern).
+# Benchmark preparations (apr data tweet-eval-stance) land here, and the
+# original tweet text must never be committed to this repository.
+/data/
 .pmat-metrics/
 .cargo/config.toml
 
