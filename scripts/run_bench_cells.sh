@@ -187,22 +187,30 @@ generate_selections() {
             # Built by expansion rather than by a helper called in a command
             # substitution: forty subshells to format forty strings is a fork per
             # cell for nothing.
-            target="$BENCH_DIR/selections/s${shots}-seed${seed}.json"
+            #
+            # `apr data select --output` takes a DIRECTORY and writes
+            # `selection-manifest.json` inside it - MEASURED at
+            # data_contrastive.rs's `output.unwrap_or(data).join(...)`, not
+            # assumed from the flag's name. Passing a file path would have
+            # produced `.../s8-seed13.json/selection-manifest.json` and left
+            # every `--selection` in this script pointing at nothing.
+            target_dir="$BENCH_DIR/selections/s${shots}-seed${seed}"
+            target="$target_dir/selection-manifest.json"
             if [[ -f "$target" ]]; then
                 continue
             fi
-            # `--output` writes the draw straight to its per-cell name. The
-            # earlier shape of this loop let `apr data select` write its default
-            # `selection-manifest.json` into DATA_DIR and then renamed it, which
-            # gave every cell a moment where the same draw existed under two
-            # names — and left the last cell's draw sitting in the dataset
-            # directory as an unlabelled forty-first file.
+            mkdir -p "$target_dir"
             "$APR" data select --data "$DATA_DIR" --shots "$shots" --seed "$seed" \
-                --output "$target"
+                --output "$target_dir"
             rc=$?
             if [[ "$rc" -ne 0 ]]; then
                 printf 'FAIL selection s%s/seed%s (apr data select exited %s)\n' \
                     "$shots" "$seed" "$rc" >&2
+                exit "$EXIT_TRANSIENT"
+            fi
+            if [[ ! -f "$target" ]]; then
+                printf 'FAIL selection s%s/seed%s (apr data select exited 0 but wrote no %s)\n' \
+                    "$shots" "$seed" "$target" >&2
                 exit "$EXIT_TRANSIENT"
             fi
         done
@@ -280,7 +288,10 @@ is_evidence_failure() {
 run_one_cell() {
     shots="$1"
     seed="$2"
-    selection=$(selection_path "$shots" "$seed")
+    # The SAME path `generate_selections` wrote. Built by expansion in both
+    # places rather than by a shared helper called in a command substitution;
+    # the driver-gate test asserts the two spellings agree.
+    selection="$BENCH_DIR/selections/s${shots}-seed${seed}/selection-manifest.json"
     log="$BENCH_DIR/logs/${METHOD}-s${shots}-seed${seed}.log"
     mkdir -p "$BENCH_DIR/logs"
 

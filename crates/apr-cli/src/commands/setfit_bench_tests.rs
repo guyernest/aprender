@@ -1520,6 +1520,38 @@ fn driver_resume_is_hash_based_not_a_bare_existence_check() {
 }
 
 #[test]
+fn driver_writes_and_reads_the_selection_at_one_path() {
+    // The generator and the consumer build this path in two places. They must agree, and the
+    // agreement is worth a gate rather than a convention: `apr data select --output` takes a
+    // DIRECTORY and writes `selection-manifest.json` inside it, so an earlier version of this
+    // script that passed a FILE path would have written
+    // `.../s8-seed13.json/selection-manifest.json` and pointed every `--selection` at nothing
+    // — a failure that surfaces forty cells later as "file not found".
+    let body = driver_without_comments();
+    let stem = "$BENCH_DIR/selections/s${shots}-seed${seed}";
+    let write_site = format!("target_dir=\"{stem}\"");
+    let read_site = format!("selection=\"{stem}/selection-manifest.json\"");
+    assert!(
+        body.contains(&write_site),
+        "the generator must write into the per-cell directory; got:\n{body}"
+    );
+    assert!(
+        body.contains(&read_site),
+        "and the consumer must read selection-manifest.json from that SAME directory"
+    );
+    assert!(
+        body.contains("--output \"$target_dir\""),
+        "`--output` takes a directory — passing a file path silently nests the manifest one \
+         level deeper"
+    );
+    assert!(
+        body.contains("if [[ ! -f \"$target\" ]]"),
+        "and the generator must prove the file appeared: `apr data select` exiting 0 is not \
+         evidence that THIS path now holds a manifest"
+    );
+}
+
+#[test]
 fn driver_covers_exactly_the_contracted_matrix() {
     let body = driver_without_comments();
     // The matrix literals in the script must be the contract's, checked against the LIBRARY's
