@@ -43,6 +43,10 @@ use pmcp::Server;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+// Transport crates (the Lambda wrapper) hold the loaded model in their state;
+// re-exported so they depend on this crate alone, not on aprender-core.
+pub use aprender::setfit::VerifiedSetFitModel as Model;
+
 /// The one tool this server advertises.
 pub const TOOL_NAME: &str = "classify";
 

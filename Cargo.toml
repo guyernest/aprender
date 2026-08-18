@@ -53,6 +53,7 @@ members = [
     "crates/aprender-mcp",
     # Thin single-model MCP server: SetFit classification via pmcp (pmcp.run template)
     "crates/aprender-mcp-setfit",
+    "crates/aprender-mcp-setfit-lambda",
     # --- APR-MONO Phase 2f: satellite repos (main crates) ---
     "crates/aprender-profile",
     "crates/aprender-profile-core",
