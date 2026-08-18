@@ -181,9 +181,10 @@ fn render_schema_json(tool: &ToolEntry) -> String {
                 "description".to_string(),
                 Value::String(arg.description.clone()),
             );
-            // `items` must precede nothing in particular for canonical JSON —
-            // serde_json::Map preserves insertion order and the live side is
-            // canonicalized identically by the FALSIFY-MCP-008 harness.
+            // Insertion order is irrelevant here: without serde_json's
+            // `preserve_order` feature a `Map` IS a BTreeMap, so keys come out
+            // sorted, and FALSIFY-MCP-008 compares parsed `Value`s rather than
+            // bytes either way. Placed after `description` for readability only.
             if let Some(items_type) = &arg.items_type {
                 let mut items = Map::new();
                 items.insert("type".to_string(), Value::String(items_type.clone()));

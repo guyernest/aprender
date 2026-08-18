@@ -43,49 +43,76 @@ pub fn predict_tool_definition() -> ToolDefinition {
     }
 }
 
-/// Execute `apr.predict` by spawning `apr predict <model> --text <t>... --json`.
-#[must_use]
-pub fn call(args: &serde_json::Value) -> ToolCallResult {
+/// Build the argv for `apr predict`, or return the client-facing refusal.
+///
+/// Split out from [`call`] so the argument SHAPE is unit-testable without
+/// spawning anything — the hyphen handling below is exactly the kind of detail
+/// that is invisible in a test that only asserts on error strings.
+fn build_argv(args: &serde_json::Value) -> Result<Vec<String>, String> {
     let Some(model_path) = args.get("model_path").and_then(|v| v.as_str()) else {
-        return ToolCallResult::error("Missing required argument: model_path");
+        return Err("Missing required argument: model_path".to_string());
     };
     let Some(texts) = args.get("texts").and_then(|v| v.as_array()) else {
-        return ToolCallResult::error("Missing required argument: texts (array of strings)");
+        return Err("Missing required argument: texts (array of strings)".to_string());
     };
     if texts.is_empty() {
         // An empty batch is a client bug, not an empty result: `apr predict`
         // with no --text would read differently (and the response's ordered
         // contract would be vacuous). Refuse here rather than spawn.
-        return ToolCallResult::error("Argument `texts` must contain at least one text");
+        return Err("Argument `texts` must contain at least one text".to_string());
     }
     let include_logits = args
         .get("include_logits")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    // `as_str()` borrows from `args`, which outlives this call, so the argv can
-    // hold `&str` directly — no owned copy of the (deliberately unbounded) batch.
-    // `predict`, model, 2 per text, `--logits`, `--json`.
-    let mut argv: Vec<&str> = Vec::with_capacity(2 * texts.len() + 4);
-    argv.push("predict");
-    argv.push(model_path);
+    // `predict`, model, 1 per text, `--logits`, `--json`.
+    let mut argv: Vec<String> = Vec::with_capacity(texts.len() + 4);
+    argv.push("predict".to_string());
+    // A relative path beginning with `-` is a clap FLAG, not a positional.
+    // `./` makes it a path again without naming a different file.
+    if model_path.starts_with('-') {
+        argv.push(format!("./{model_path}"));
+    } else {
+        argv.push(model_path.to_string());
+    }
     for (index, value) in texts.iter().enumerate() {
         // Reject a non-string element instead of lossily stringifying it — a
         // silently coerced `42` would be classified as the literal "42" and the
         // caller would never learn their input was not what they sent.
         let Some(text) = value.as_str() else {
-            return ToolCallResult::error(format!(
+            return Err(format!(
                 "Argument `texts[{index}]` must be a string, got: {value}"
             ));
         };
-        argv.push("--text");
-        argv.push(text);
+        // `--text=<value>`, NOT `--text <value>`.
+        //
+        // This is not a style choice. clap does not set `allow_hyphen_values`
+        // on `apr predict --text`, so a SEPARATE value beginning with `-` is
+        // parsed as a flag: `apr predict m.apr --text "-1 star"` dies with
+        // `error: unexpected argument '-1' found` before any model is opened.
+        // A classifier over free text meets those constantly ("-1 star",
+        // "--> awful", "-10/10") and the client would get a clap usage dump
+        // instead of a classification. The `=` form takes everything after the
+        // first `=` as the value, hyphen or not.
+        argv.push(format!("--text={text}"));
     }
     if include_logits {
-        argv.push("--logits");
+        argv.push("--logits".to_string());
     }
-    argv.push("--json");
-    run_apr(&argv)
+    argv.push("--json".to_string());
+    Ok(argv)
+}
+
+/// Execute `apr.predict` by spawning `apr predict <model> --text=<t>... --json`.
+#[must_use]
+pub fn call(args: &serde_json::Value) -> ToolCallResult {
+    let argv = match build_argv(args) {
+        Ok(argv) => argv,
+        Err(message) => return ToolCallResult::error(message),
+    };
+    let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_apr(&borrowed)
 }
 
 /// HELIX-IDEA-002 — unified-signature shim for the inventory dispatcher.
@@ -160,6 +187,69 @@ mod tests {
         let result = call(&serde_json::json!({ "model_path": "m.apr", "texts": [] }));
         assert_eq!(result.is_error, Some(true));
         assert!(result.content[0].text.contains("at least one"));
+    }
+
+    /// A text beginning with `-` must survive to the model.
+    ///
+    /// Regression guard for a REAL clap refusal, reproduced against the built
+    /// binary: `apr predict m.apr --text "-1 star" --json` exits with
+    /// `error: unexpected argument '-1' found`, because `--text` does not set
+    /// `allow_hyphen_values`. Free-text classification meets such inputs
+    /// constantly, so a separated `--text <value>` here is the defect.
+    #[test]
+    fn hyphen_leading_text_uses_the_equals_form() {
+        let argv = build_argv(&serde_json::json!({
+            "model_path": "m.apr",
+            "texts": ["-1 star", "--> awful"],
+        }))
+        .expect("valid arguments");
+        assert_eq!(
+            argv,
+            vec![
+                "predict",
+                "m.apr",
+                "--text=-1 star",
+                "--text=--> awful",
+                "--json",
+            ]
+        );
+        assert!(
+            !argv.iter().any(|a| a == "--text"),
+            "a separated `--text` reopens the clap-parses-the-value-as-a-flag defect: {argv:?}"
+        );
+    }
+
+    /// A model path beginning with `-` is a clap flag unless it is re-anchored.
+    #[test]
+    fn hyphen_leading_model_path_is_re_anchored() {
+        let argv = build_argv(&serde_json::json!({
+            "model_path": "-weird.apr",
+            "texts": ["ok"],
+        }))
+        .expect("valid arguments");
+        assert_eq!(argv[1], "./-weird.apr");
+    }
+
+    /// `include_logits` maps to `--logits`, and only when asked.
+    #[test]
+    fn include_logits_maps_to_the_logits_flag() {
+        let with = build_argv(&serde_json::json!({
+            "model_path": "m.apr",
+            "texts": ["ok"],
+            "include_logits": true,
+        }))
+        .expect("valid arguments");
+        assert_eq!(
+            with,
+            vec!["predict", "m.apr", "--text=ok", "--logits", "--json"]
+        );
+
+        let without = build_argv(&serde_json::json!({
+            "model_path": "m.apr",
+            "texts": ["ok"],
+        }))
+        .expect("valid arguments");
+        assert!(!without.iter().any(|a| a == "--logits"));
     }
 
     /// A non-string element must be refused, never coerced: a silently
