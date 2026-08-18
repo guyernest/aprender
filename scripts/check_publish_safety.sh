@@ -204,7 +204,12 @@ passthrough_exempt="default full dev dhat-heap code"
 missing_passthrough=""
 apr_cli_features=$(awk '/^\[features\]/{f=1;next} /^\[/{f=0} f && /^[a-zA-Z0-9_-]+ *=/{sub(/ *=.*/,""); print}' \
     crates/apr-cli/Cargo.toml 2>/dev/null | sort -u)
-apr_cli_default=$(grep -m1 '^default *= *\[' crates/apr-cli/Cargo.toml 2>/dev/null)
+# The WHOLE `default = [...]` array, which may wrap across lines. `grep -m1`
+# read only the first line, so the day someone reformats that array every
+# feature in it turns into a bogus "missing passthrough" FAIL. awk collects
+# from `default = [` to the closing `]` instead.
+apr_cli_default=$(awk '/^default *= *\[/{c=1} c{printf "%s", $0; if (/\]/) exit}' \
+    crates/apr-cli/Cargo.toml 2>/dev/null)
 # Here-string, not a pipe: a piped `while read` runs in a subshell and
 # `missing_passthrough` would not survive the loop, silently passing the gate.
 while IFS= read -r feat; do
@@ -246,9 +251,10 @@ fi
 # only the crate-local one has any effect, so editing the repo-root copy changes
 # nothing while every gate stays green against the stale file.
 #
-# EXPLICIT allowlist, not a basename sweep. Most crate-local contracts are genuinely
-# distinct documents that merely share a filename (three unrelated matmul-v1.yaml,
-# most with no root counterpart), so a blanket rule would be false-positive noise.
+# Scoped by BASENAME COLLISION, not by an allowlist: a crate-local contract is a
+# mirror exactly when a file of the same basename exists in the root catalog.
+# Crate-local contracts with no root counterpart (three unrelated matmul-v1.yaml
+# among them) are genuinely distinct documents and are ignored.
 echo -n "  Mirrored contract sync check... "
 checked=$((checked + 1))
 # DERIVED, not hand-listed: a crate-local contract is a mirror exactly when a
@@ -260,9 +266,14 @@ checked=$((checked + 1))
 # crate-local contracts with no root counterpart (correctly ignored). The
 # staging crate is the vendored provable-contracts UPSTREAM corpus — a different
 # project whose ~43 files merely share basenames — so it is skipped wholesale.
-# `not_mirrored` exists for the day a genuine same-name-different-document
-# collision appears outside staging; it fails loudly at add time, not silently.
-not_mirrored=""
+#
+# MIRROR_FLOOR is the vacuity guard. Everything below is relative to the CWD,
+# and `find` on a missing tree prints nothing and exits quietly, so without a
+# floor a wrong CWD or a renamed directory reports `OK (0 mirrors)` — the exact
+# shape of CR-02 (a zero-match filter exiting 0 while printing "ok"). The floor
+# is a LOWER bound, not the exact count, so adding a 12th mirror does not turn
+# this red for the wrong reason.
+MIRROR_FLOOR=11
 mirrored_contracts=$(find crates -maxdepth 3 -path '*/contracts/*.yaml' \
     -not -path '*/aprender-contracts-staging/*' -not -path '*/target/*' 2>/dev/null | sort)
 mirror_drift=""
@@ -275,10 +286,6 @@ while IFS= read -r mirror; do
     root_copy="contracts/${mirror##*/}"
     # No root counterpart => a crate-local-only contract, not a mirror.
     [ -f "$root_copy" ] || continue
-    case " $not_mirrored " in
-        *" $mirror "*) continue ;;
-        *) ;;
-    esac
     mirror_count=$((mirror_count + 1))
     # Accumulate with a '|' separator rather than embedded newlines, then expand
     # at print time: a multi-line string assignment trips the shell linter here.
@@ -292,6 +299,13 @@ if [ -n "$mirror_drift" ]; then
     printf '%s\n' "$mirror_drift" | tr '|' '\n' | grep -v '^$'
     echo "  Only the crate-local copy is read at build time, so a repo-root-only edit has NO effect."
     echo "  Fix: copy whichever side you edited over the other, then rebuild so codegen re-runs."
+    errors=$((errors + 1))
+elif [ "$mirror_count" -lt "$MIRROR_FLOOR" ]; then
+    echo "FAIL"
+    echo "FAIL: only $mirror_count mirrored contracts found, expected at least $MIRROR_FLOOR."
+    echo "  A comparison that compared nothing passes for free. Either this ran from the wrong"
+    echo "  directory (every path here is CWD-relative), or mirrors were genuinely removed."
+    echo "  If they were removed on purpose, lower MIRROR_FLOOR in this script deliberately."
     errors=$((errors + 1))
 else
     echo "OK ($mirror_count mirrors)"

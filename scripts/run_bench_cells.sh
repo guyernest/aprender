@@ -46,11 +46,16 @@
 # rc IS NEVER READ THROUGH A PIPE
 # ---------------------------------------------------------------------------
 #
-# Every `rc=$?` sits on the line immediately after the command it describes, and
+# Every `rc` is captured with `|| rc=$?` on the command it describes, and
 # nothing in this script pipes a command whose status it then reads. CLAUDE.md
 # Verification Discipline rule 1: that defect has shipped twice in this
 # repository (#2336 captured tee's status; #2360 captured grep's), and both
 # times the result was a gate that could not fail while printing success.
+#
+# The `||` is load-bearing under `set -e`. A bare `rc=$?` on the NEXT line never
+# runs: `set -e` exits the shell on the failing command itself, taking the whole
+# refusal-classification path with it. That form shipped here and made the
+# EXIT_EVIDENCE / EXIT_TRANSIENT distinction below unreachable.
 
 set -euo pipefail
 
@@ -200,9 +205,13 @@ generate_selections() {
                 continue
             fi
             mkdir -p "$target_dir"
+            # `|| rc=$?` for the same reason as run_one_cell: under `set -e` a
+            # bare `rc=$?` on the next line never runs, so the EXIT_TRANSIENT
+            # branch below was unreachable and the operator got apr's raw status
+            # instead of the resume-is-safe signal.
+            rc=0
             "$APR" data select --data "$DATA_DIR" --shots "$shots" --seed "$seed" \
-                --output "$target_dir"
-            rc=$?
+                --output "$target_dir" || rc=$?
             if [[ "$rc" -ne 0 ]]; then
                 printf 'FAIL selection s%s/seed%s (apr data select exited %s)\n' \
                     "$shots" "$seed" "$rc" >&2
@@ -307,12 +316,19 @@ run_one_cell() {
     else
         model_flag="--base-model"
     fi
+    # `|| rc=$?`, NOT a bare `rc=$?` on the next line. This script runs under
+    # `set -e`, and `set -e` fires on the FAILING invocation itself: the shell
+    # exits right there, so a following `rc=$?` is unreachable and every line
+    # below it - the refusal dump, is_evidence_failure, EXIT_EVIDENCE vs
+    # EXIT_TRANSIENT - is dead code. The operator got apr's raw status and no
+    # classification at all. A command on the left of `||` is exempt from
+    # `set -e`, and `$?` inside the right-hand side is that command's status.
+    rc=0
     "$APR" setfit bench run \
         --method "$METHOD" --shots "$shots" --seed "$seed" \
         --data "$DATA_DIR" --selection "$selection" \
         --bench-dir "$BENCH_DIR" "$model_flag" "$MODEL_OR_BASE" \
-        > "$log" 2>&1
-    rc=$?
+        > "$log" 2>&1 || rc=$?
 
     if [ "$rc" -eq 0 ]; then
         printf 'PASS %s s%s seed%s\n' "$METHOD" "$shots" "$seed"
