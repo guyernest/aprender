@@ -214,6 +214,64 @@ else
     echo "OK"
 fi
 
+# Check 11: mirrored contracts must match the repo-root catalog byte-for-byte.
+#
+# A handful of contracts are tracked TWICE: once under the crate that consumes them
+# at build time, once in the repo-root contracts/ catalog that `pv` and humans read.
+# The duplication is forced — a published crate cannot reach ../../contracts/ (cargo
+# package only includes files under the crate dir), and a tracked symlink is rejected
+# by check 1 (PMAT-SQI). So both copies stay and this check keeps them equal.
+#
+# The failure it prevents is silent: the two files are indistinguishable by name and
+# only the crate-local one has any effect, so editing the repo-root copy changes
+# nothing while every gate stays green against the stale file.
+#
+# EXPLICIT allowlist, not a basename sweep. Most crate-local contracts are genuinely
+# distinct documents that merely share a filename (three unrelated matmul-v1.yaml,
+# most with no root counterpart), so a blanket rule would be false-positive noise.
+echo -n "  Mirrored contract sync check... "
+checked=$((checked + 1))
+# The six apr-cli entries are `include_str!` inputs for `apr explain`
+# (kernel_explain/mod.rs embeds them via a macro-concatenated path, so the literal
+# "apr-cli/contracts" appears nowhere and a naive grep reports them unreferenced).
+mirrored_contracts='crates/aprender-mcp/contracts/apr-mcp-tool-schemas-v1.yaml
+crates/aprender-train/contracts/tokenizer-v1.yaml
+crates/aprender-train/contracts/training-loop-v1.yaml
+crates/aprender-simulate/contracts/loss-functions-v1.yaml
+crates/aprender-serve/contracts/tokenizer-v1.yaml
+crates/apr-cli/contracts/softmax-kernel-v1.yaml
+crates/apr-cli/contracts/rope-kernel-v1.yaml
+crates/apr-cli/contracts/quantized-dot-product-v1.yaml
+crates/apr-cli/contracts/tensor-layout-v1.yaml
+crates/apr-cli/contracts/transpose-kernel-v1.yaml
+crates/apr-cli/contracts/kernel-fusion-v1.yaml'
+mirror_drift=""
+# Here-string, not a pipe: a piped `while read` runs in a subshell and
+# `mirror_drift` would not survive the loop, silently passing the gate.
+while IFS= read -r mirror; do
+    [ -n "$mirror" ] || continue
+    root_copy="contracts/$(basename "$mirror")"
+    # Accumulate with a '|' separator rather than embedded newlines, then expand
+    # at print time: a multi-line string assignment trips the shell linter here.
+    if [ ! -f "$mirror" ]; then
+        mirror_drift="${mirror_drift}|    MISSING build input: $mirror"
+    elif [ ! -f "$root_copy" ]; then
+        mirror_drift="${mirror_drift}|    MISSING root catalog copy: $root_copy"
+    elif ! cmp -s "$mirror" "$root_copy"; then
+        mirror_drift="${mirror_drift}|    DRIFTED: $mirror != $root_copy"
+    fi
+done <<< "$mirrored_contracts"
+if [ -n "$mirror_drift" ]; then
+    echo "FAIL"
+    echo "FAIL: mirrored contracts out of sync with the repo-root catalog:"
+    printf '%s\n' "$mirror_drift" | tr '|' '\n' | grep -v '^$'
+    echo "  Only the crate-local copy is read at build time, so a repo-root-only edit has NO effect."
+    echo "  Fix: copy whichever side you edited over the other, then rebuild so codegen re-runs."
+    errors=$((errors + 1))
+else
+    echo "OK"
+fi
+
 # Summary
 echo ""
 if [ "$errors" -gt 0 ]; then
