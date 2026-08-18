@@ -1497,11 +1497,45 @@ bindings:
   notes: 'Lands with plan 04-03. Eight ordered rungs; VerifiedSetFitModel has a private constructor reachable only from here, proven non-constructible from outside by a trybuild compile-fail test (APR-04).'
 # --- setfit-benchmark-claims-v1: the Phase 5 claims schema (plan 05-05 task 1) -------------
 #
-# WHY ALL TEN START `pending`, AND WHY THAT IS THE POINT RATHER THAN AN OMISSION. Same
+# STATUS AS OF PLAN 05-10 (wave 5): TEN of ten are `implemented`, and `make
+# contract-audit-phase5` now requires ZERO BIND- lines of any severity rather than tolerating
+# BIND-004 warnings. The phase's implementing code has all landed: `bench_row.rs` (05-05),
+# `bench_metrics.rs` (05-08), the `bench run` adapter and its resource protocol (05-09), and
+# `bench_gate.rs` plus the `bench report` renderer (05-10).
+#
+# WHY ALL TEN STARTED `pending`, AND WHY THAT WAS THE POINT RATHER THAN AN OMISSION. Same
 # ordering as Phase 4 above (Ph1 D-14): the claims contract is committed BEFORE the row type,
 # the bench adapters and the report renderer exist, so no shipped code can quietly answer its
-# questions differently. Two of the ten flip to `implemented` in plan 05-05 task 2, when
-# `bench_row.rs` lands; the remaining eight name the plan that owns them.
+# questions differently.
+#
+# EACH FLIP WAS VERIFIED AGAINST THE SHIPPED SOURCE, NOT TRANSCRIBED — the discipline the
+# Phase 4 block above records, applied here, and it found the same class of defect it found
+# there. `pv audit` reads the `status` field and CANNOT resolve a symbol, so a
+# `module_path`/`function` pair that names nothing is a claim nothing checks. TWO of the ten
+# rows named functions that do not exist and never did on this branch:
+#
+#   - six rows named `apr_cli::commands::setfit_bench::bench_report`. There is no such
+#     function. The completeness, pairing, selection-safety and no-selection equations are
+#     implemented by `entrenar::train::setfit::bench_gate::verify_run` — in the LIBRARY, because
+#     "which cells make a run complete" is the claim and an adapter that decided it would be a
+#     second definition. The two presentation equations are implemented by the renderer's own
+#     functions, named individually below.
+#   - one row named `apr_cli::commands::setfit_bench::bench_run`. The entry point is `run`; the
+#     resource protocol itself is `resource::measure_cold`, which is the dedicated fresh child
+#     the contract's `cold_latency` and `inference_peak_rss` rules are about.
+#
+# Both were corrected here rather than flipped over, because flipping a status while leaving a
+# `function` column that resolves to nothing records exactly the unverifiable green the Phase 4
+# block declined to record.
+#
+# MEASURED, NOT ASSUMED, and the status was captured directly rather than through a pipe
+# (CLAUDE.md rule 1): before this block existed,
+#   target/release/pv audit contracts/setfit-benchmark-claims-v1.yaml \
+#     --binding contracts/aprender/binding.yaml > /tmp/pv-audit-claims.log 2>&1; rc=$?
+# returned rc=1 with ten "[ERROR] BIND-001 ... has no binding entry" lines, one per equation.
+# `status: pending` is BIND-004, a WARNING (audit/mod.rs:182-194) — which is why plan 05-10
+# also tightened the gate: with every equation implemented, a BIND-004 here now means an
+# equation has REGRESSED to pending, and the gate says so instead of printing it and exiting 0.
 #
 # MEASURED, NOT ASSUMED, and the status was captured directly rather than through a pipe
 # (CLAUDE.md rule 1): before this block existed,
@@ -1516,62 +1550,62 @@ bindings:
   equation: expectation_set
   module_path: entrenar::train::setfit::bench_row
   function: RunManifest::expectation
-  status: pending
-  notes: 'Lands with plan 05-05 task 2. The 80-cell Cartesian product derived in code from the same methods/shots/seeds constants the contract enumerates, emitted in the deterministic contract order; pinned to the contract by an include_str! TYPED SET parity test, never a substring check.'
+  status: implemented
+  notes: 'Landed with plan 05-05 task 2. The 80-cell Cartesian product derived in code from the same methods/shots/seeds constants the contract enumerates, emitted in the deterministic contract order; pinned to the contract by an include_str! TYPED SET parity test, never a substring check. Flipped to implemented by plan 05-10 after resolving the symbol against bench_row.rs.'
 - contract: setfit-benchmark-claims-v1.yaml
   equation: bench_row_schema
   module_path: entrenar::train::setfit::bench_row
   function: BenchRow::from_bytes
-  status: pending
-  notes: 'Lands with plan 05-05 task 2. The digest-verify-before-return door: deny_unknown_fields at every level, schema_version checked on parse, SHA-256 over the payload''s canonical compact bytes compared BEFORE any value is returned.'
+  status: implemented
+  notes: 'Landed with plan 05-05 task 2. The digest-verify-before-return door: deny_unknown_fields at every level, schema_version checked on parse, SHA-256 over the payload''s canonical compact bytes compared BEFORE any value is returned. Flipped by plan 05-10 after resolving the symbol.'
 - contract: setfit-benchmark-claims-v1.yaml
   equation: completeness_rule
-  module_path: apr_cli::commands::setfit_bench
-  function: bench_report
-  status: pending
-  notes: 'Lands with plan 05-10. The manifest-defined 80-cell gate and its two vacuity backstops (zero cells; an expectation set that is not exactly the contract-derived 80). The manifest half — record()''s idempotent-vs-colliding transition — lands earlier with bench_row.rs.'
+  module_path: entrenar::train::setfit::bench_gate
+  function: verify_run
+  status: implemented
+  notes: 'Landed with plan 05-10. The manifest-defined 80-cell gate and its two vacuity backstops (zero cells; an expectation set that is not exactly the contract-derived 80), both checked BEFORE any row byte is read. Sited in the LIBRARY, not the adapter: aggregate() takes a VerifiedRunSet that only verify_run can construct, so a partial-data report cannot be expressed. The manifest half — record()''s idempotent-vs-colliding transition — landed earlier with bench_row.rs. Row corrected from the non-existent `apr_cli::commands::setfit_bench::bench_report`.'
 - contract: setfit-benchmark-claims-v1.yaml
   equation: pairing_rule
-  module_path: apr_cli::commands::setfit_bench
-  function: bench_report
-  status: pending
-  notes: 'Lands with plan 05-10. Per (shots, seed) the two rows must carry an identical selection_manifest_hash; an unpaired pair is a typed refusal, not a delta computed anyway.'
+  module_path: entrenar::train::setfit::bench_gate
+  function: verify_run
+  status: implemented
+  notes: 'Landed with plan 05-10. Per (shots, seed) the two rows must carry an identical selection_manifest_hash; an unpaired pair is the typed UnpairedSelection refusal naming both hashes, not a delta computed anyway. Doctored negative 3 pins it. Row corrected from the non-existent `bench_report`.'
 - contract: setfit-benchmark-claims-v1.yaml
   equation: selection_safety_evidence
-  module_path: apr_cli::commands::setfit_bench
-  function: bench_report
-  status: pending
-  notes: 'Lands with plan 05-10. The lock digest and the candidate-ledger digest plus line count are RECOMPUTED from committed bytes; the row fields are claims about files, and the files are the evidence. The residual (a producer controlling both can forge consistently) is stated in-contract.'
+  module_path: entrenar::train::setfit::bench_gate
+  function: verify_run
+  status: implemented
+  notes: 'Landed with plan 05-10. The lock digest and the candidate-ledger digest plus line count are RECOMPUTED from the committed bytes; the row fields are claims about files, and the files are the evidence. Doctored negative 6 covers both forgery sub-cases (a two-line ledger whose digest field was updated to match, and an edited lock record). The residual — a producer controlling both can forge consistently — is stated in the module doc and in-contract. Row corrected from the non-existent `bench_report`.'
 - contract: setfit-benchmark-claims-v1.yaml
   equation: no_selection_attestation
-  module_path: apr_cli::commands::setfit_bench
-  function: bench_report
-  status: pending
-  notes: 'Lands with plan 05-10. All six conjuncts, of which the last two (ledger digest, line count == 1) are what make the first four more than a self-report.'
+  module_path: entrenar::train::setfit::bench_gate
+  function: verify_run
+  status: implemented
+  notes: 'Landed with plan 05-10. All six conjuncts, of which the last two (ledger digest, line count == 1) are what make the first four more than a self-report; each is exercised by its own negative rather than one standing in for the set. Row corrected from the non-existent `bench_report`.'
 - contract: setfit-benchmark-claims-v1.yaml
   equation: model_size_comparability
-  module_path: apr_cli::commands::setfit_bench
-  function: bench_report
-  status: pending
-  notes: 'Lands with plan 05-10. Any cross-method size claim must use deployable_total_bytes; presenting LoRA''s adapter-only artifact_bytes beside SetFit''s standalone APR is the forbidden comparison the renderer refuses to draw.'
+  module_path: apr_cli::commands::setfit_bench::report
+  function: render_sizes
+  status: implemented
+  notes: 'Landed with plan 05-10. The cross-method size table uses deployable_total_bytes and names that field in its header; LoRA''s adapter-only artifact_bytes appears only in render_resource_detail, labelled "adapter only". A test asserts the adapter figure''s decimal is ABSENT from the size table (with byte constants chosen so neither figure is a substring of the other). Row corrected from the non-existent `bench_report`.'
 - contract: setfit-benchmark-claims-v1.yaml
   equation: claims_statistics
-  module_path: apr_cli::commands::setfit_bench
-  function: bench_report
-  status: pending
-  notes: 'Lands with plan 05-10, calling the closed-form f64 surface plan 05-04 shipped (mean_f64, sample_std_f64, min_max_f64, paired_ci95_df9). The frozen t literal here and aprender_core::stats::hypothesis::T_CRIT_975_DF9 are two pinned copies compared by a test.'
+  module_path: aprender::stats::hypothesis
+  function: paired_ci95_df9
+  status: implemented
+  notes: 'Landed with plan 05-04 and consumed by 05-10''s bench_gate::aggregate, which reimplements nothing: mean_f64, sample_std_f64, min_max_f64, paired_ci95_df9 and ttest_rel_f64 are the only arithmetic in the claims path, and there is no RNG import (a source scan enforces it). Bound to the OWNER of the closed form rather than to its caller. The frozen t literal in the contract and aprender::stats::hypothesis::T_CRIT_975_DF9 are two pinned copies compared by BIT equality in bench_gate_tests.rs. Row corrected from the non-existent `bench_report`.'
 - contract: setfit-benchmark-claims-v1.yaml
   equation: resource_protocol
-  module_path: apr_cli::commands::setfit_bench
-  function: bench_run
-  status: pending
-  notes: 'Lands with plan 05-09, which measures the cells: cold latency in a dedicated fresh child, warm as median-of-10-after-3, two separate peak-RSS fields with two separate mechanism strings. The ResourceBlock the numbers land in is defined by bench_row.rs in 05-05 task 2.'
+  module_path: apr_cli::commands::setfit_bench::resource
+  function: measure_cold
+  status: implemented
+  notes: 'Landed with plan 05-09, which measures the cells: cold latency and inference peak RSS in a DEDICATED FRESH CHILD spawned under /usr/bin/time, warm as median-of-10-after-3 against the reloaded model, and two separate peak-RSS fields with two separate mechanism strings derived from the FORM that parsed rather than from cfg!(target_os). The ResourceBlock the numbers land in is defined by bench_row.rs. Row corrected from the non-existent `bench_run`; `measure_cold` is the function the contract''s cold_latency and peak_rss rules are actually about.'
 - contract: setfit-benchmark-claims-v1.yaml
   equation: pitfall_bindings
-  module_path: apr_cli::commands::setfit_bench
-  function: bench_report
-  status: pending
-  notes: 'Lands with plan 05-10. DECLARATIVE equation: it maps PF-007 and PF-008 onto the mechanisms that answer them, and the RENDERER is where a violation would surface (a best-seed headline, an unlabelled F1, an adapter-only size comparison, a significance verdict). Bound here rather than left unbound because an equation with no binding entry is audited by nothing while looking audited.'
+  module_path: apr_cli::commands::setfit_bench::report
+  function: render_human
+  status: implemented
+  notes: 'Landed with plan 05-10. DECLARATIVE equation: it maps PF-007 and PF-008 onto the mechanisms that answer them, and the RENDERER is where a violation would surface (a best-seed headline, an unlabelled F1, an adapter-only size comparison, a verdict word). render_human composes every table, and its tests scan the whole output for verdict vocabulary and pair every absence assertion with a non-vacuity one. Row corrected from the non-existent `bench_report`.'
 critical_path:
 - softmax
 - rmsnorm

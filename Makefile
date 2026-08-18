@@ -39,7 +39,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests contract-audit-phase4 contract-audit-phase5 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests
 
 # Default target
 all: tier2
@@ -360,6 +360,17 @@ tier3:
 # (378), and all seven trybuild compile-fail cases. The CI half needs a workflow edit and is
 # item 4 of 03-HUMAN-UAT.md; this closes the tier3 half, which needs no approval.
 	@$(MAKE) setfit-tests
+# ─── Phase 5 (plan 05-10). CR-01's lesson, applied one phase later ──────────
+#
+# `setfit-tests` above filters on the module path `setfit::`, which DOES reach the
+# Phase 5 modules in aprender-train — but it reaches NOTHING in apr-cli, whose
+# `setfit_bench` suite (58 tests, including the report renderer's two-sided
+# incomparability control and its no-verdict-word scan) is behind the same non-default
+# `setfit` feature and is therefore compiled out of tier3's `cargo test --all` and CI's
+# `cargo nextest run --workspace --lib` exactly as CR-01 described. This line is the
+# tier3 half of that gap, and it also gives the Phase 5 floors somewhere to be raised
+# as 05-11/05-12/05-13 add tests, rather than hiding inside the Phase 3+4 numbers.
+	@$(MAKE) setfit-bench-tests
 # REVIEW CR-02: the replay check was written, committed, and wired into NOTHING. Two clean
 # runs agreeing proves reproducibility; only this proves the reproduced order is the
 # INTENDED one. Without it the pair of gates above can both pass on a wrong-but-consistent
@@ -2072,38 +2083,78 @@ contract-audit-phase4: ## Audit Phase 4 binding coverage (BLOCKING, wired into t
 # BIND-001 errors and exit 0 anyway. And an empty $(PHASE5_CONTRACTS) must FAIL rather than
 # report success over nothing (CR-02).
 #
-# WHY `pending` MUST PASS HERE AND `BIND-001` MUST NOT, exactly as in Phase 4. Plan 05-05
-# task 1 commits this schema BEFORE the row type, the bench adapters and the report renderer
-# exist — that ordering is the point (Ph1 D-14). So all ten equations are registered
-# `status: pending` in $(BINDING), which `pv audit` reports as BIND-004, a WARNING
-# (audit/mod.rs:182-194). A MISSING entry stays BIND-001, an ERROR. The gate therefore
-# tolerates "not written yet" and refuses "not tracked at all", and it tightens by itself as
-# each later plan flips its binding to `implemented`.
+# WHY THIS GATE IS STRICTER THAN ITS PHASE 2/3/4 TWINS, AS OF PLAN 05-10. Those tolerate
+# `status: pending`, which `pv audit` reports as BIND-004 — a WARNING (audit/mod.rs:182-194),
+# so `pv audit` exits 0 and the recipe's `$$status` check passes. That tolerance existed for a
+# reason: plan 05-05 task 1 committed this schema BEFORE the row type, the bench adapters and
+# the report renderer existed, which is the point (Ph1 D-14), and a gate that refused a pending
+# equation would have made the correct ordering impossible.
 #
-# EVIDENCE DISCIPLINE, matching the three blocks above. Both states were MEASURED with the
-# status captured directly, never through a pipe:
-#   - BEFORE the bindings were added: `target/release/pv audit
-#     contracts/setfit-benchmark-claims-v1.yaml --binding $(BINDING)
-#     > /tmp/pv-audit-claims.log 2>&1; rc=$$?` -> rc=1, with ten
-#     "[ERROR] BIND-001 ... has no binding entry" lines, one per equation.
-#   - AFTER: rc=0, "Total equations: 10 / Bound equations: 10", ten
-#     "[WARN] BIND-004 ... is pending implementation" lines.
-# That pair IS this gate's induced failure mode: it was observed RED and then GREEN on a real
-# difference, not merely observed passing. A gate that has only ever been seen passing is not
-# evidence.
+# That reason has now expired. Every one of the ten equations is `implemented` (05-05, 05-08,
+# 05-09, 05-10), so a BIND-004 line here no longer means "not written yet" — it means an
+# equation has REGRESSED to pending, or a new one was added and left untracked. Tolerating it
+# would be tolerating exactly the thing the gate is for. The recipe therefore ALSO requires
+# ZERO `BIND-` lines of any severity, which is a strictly stronger check than reading `$$?`:
+# the repo-wide `contract-audit` prints 132 BIND-001 ERRORS and exits 0, so a status alone has
+# already been shown here to be an unreliable summary of what a tool reported.
+#
+# THE OUTPUT IS CAPTURED TO A FILE AND THEN SCANNED, never piped into a counter whose status is
+# read — CLAUDE.md Verification rule 1. And the scan is guarded for NON-VACUITY: an empty or
+# missing audit log would produce zero BIND- lines and pass, which is the same vacuous success
+# the `audited` counter below exists to prevent one level up, so the log must contain the
+# summary line `Total equations:` before its BIND- count is trusted.
+#
+# EVIDENCE DISCIPLINE, matching the three blocks above. THREE states were MEASURED, each with
+# the status captured directly and never through a pipe:
+#   - BEFORE any bindings existed (plan 05-05): rc=1, ten
+#     "[ERROR] BIND-001 ... has no binding entry" lines.
+#   - WITH all ten `pending` (plans 05-05..05-09): rc=0, ten
+#     "[WARN] BIND-004 ... is pending implementation" lines — which the OLD recipe passed and
+#     the NEW one refuses.
+#   - AFTER plan 05-10 flipped all ten to `implemented`: rc=0, zero BIND- lines,
+#     "Implemented: 10".
+# Plan 05-10 then induced a failure OF THE STRENGTHENED FORM: one row flipped back to
+# `status: pending` -> rc=2, one "[WARN] BIND-004" line, "Implemented: 9", and the FAIL block
+# below. Reverted -> rc=0, "Implemented: 10", zero BIND- lines. That is the control that
+# matters, because `pv audit` ALONE still exits 0 on that input.
+#
+# AND A CONTROL THAT DID NOT FIRE, RECORDED BECAUSE IT IS THE MORE USEFUL FINDING. Plan 05-10
+# was asked to prove non-vacuity by "pointing one binding row at a nonexistent symbol and
+# observing the audit refuse". MEASURED: `function: this_symbol_does_not_exist_anywhere` on the
+# `pairing_rule` row -> rc=0, "Implemented: 10", zero BIND- lines. `pv audit` DOES NOT RESOLVE
+# SYMBOLS; it reads the `status` field, exactly as $(BINDING)'s own Phase 4 block states
+# (which is why plan 04-10 declined to flip a status it could not verify). So this gate cannot
+# detect a `module_path`/`function` pair that names nothing, and NOTHING in this repository can
+# — those columns are a claim on the author, checked by review and by the resolution each plan
+# performs before it flips a status, never by the audit. Do not credit this gate with a failure
+# it cannot actually detect: a gate credited with a detection it does not have is worse than
+# one with no recorded failure at all.
 contract-audit-phase5: ## Audit Phase 5 binding coverage (BLOCKING, wired into tier3)
 	@echo "Auditing binding coverage for the Phase 5 contracts..."
+	@mkdir -p target
 	@unbound=""; \
+	warned=""; \
 	audited=0; \
 	for contract in $(PHASE5_CONTRACTS); do \
 		echo "  $$contract"; \
 		audited=$$((audited + 1)); \
+		log="target/contract-audit-phase5-$$audited.log"; \
 		set +e; \
-		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+		$(PV_BIN) audit "$$contract" --binding $(BINDING) > "$$log" 2>&1; \
 		status=$$?; \
 		set -e; \
+		cat "$$log"; \
 		if [ "$$status" -ne 0 ]; then \
 			unbound="$$unbound $$contract"; \
+		fi; \
+		if ! grep -q 'Total equations:' "$$log"; then \
+			echo "FAIL: $$log carries no 'Total equations:' summary, so its BIND- count is not"; \
+			echo "evidence of anything. The audit did not run, or its output format moved."; \
+			exit 1; \
+		fi; \
+		found=$$(grep -c 'BIND-' "$$log" || true); \
+		if [ "$$found" -ne 0 ]; then \
+			warned="$$warned $$contract($$found)"; \
 		fi; \
 	done; \
 	if [ "$$audited" -eq 0 ]; then \
@@ -2113,10 +2164,18 @@ contract-audit-phase5: ## Audit Phase 5 binding coverage (BLOCKING, wired into t
 	if [ -n "$$unbound" ]; then \
 		echo "FAIL: unbound equations remain in:$$unbound"; \
 		echo "Every equation of a Phase 5 contract needs an entry in $(BINDING)."; \
-		echo "An equation still being written belongs there as 'status: pending', not absent."; \
 		exit 1; \
 	fi; \
-	echo "Phase 5 binding audit: $$audited contract(s) audited, every equation is bound"
+	if [ -n "$$warned" ]; then \
+		echo "FAIL: BIND- findings remain in:$$warned"; \
+		echo "Every Phase 5 equation is implemented as of plan 05-10, so a BIND- line here"; \
+		echo "means one has REGRESSED to pending, or a new equation was added without a"; \
+		echo "binding entry. Note that a BIND-004 warning does NOT set a nonzero exit status:"; \
+		echo "the repo-wide contract-audit prints 132 BIND-001 errors and exits 0, which is"; \
+		echo "why this gate counts the lines rather than trusting the status alone."; \
+		exit 1; \
+	fi; \
+	echo "Phase 5 binding audit: $$audited contract(s) audited, zero BIND- findings"
 
 # ============================================================================
 # PHASE 3 REPRODUCIBILITY GATES (TRN-06 / D-16 / D-13)
@@ -2247,6 +2306,104 @@ setfit-tests: ## REVIEW CR-01 (tier3 half): RUN the feature-gated Phase 3+4 test
 	fi
 	@$(call assert_tests_ran,target/setfit-tests-ui.log,1,setfit-tests/trybuild)
 	@echo "  setfit surface: core + train lib tests and all eight compile-fail proofs ran"
+
+# ============================================================================
+# PHASE 5 BENCHMARK + CLAIMS-GATE SUITES (EVAL-03 / EVAL-04 / EVAL-05)
+# ============================================================================
+#
+# WHY THIS IS A SEPARATE TARGET FROM setfit-tests. That target filters on the module
+# path `setfit::`, which selects the Phase 3+4 surface in BOTH crates. The Phase 5
+# surface is four DIFFERENT filters across TWO crates, and `cargo test` accepts at most
+# ONE positional (a second exits `error: unexpected argument found`) — so it is four
+# invocations either way, and giving them their own target is what lets their floors be
+# raised as this phase grows without disturbing the Phase 3+4 numbers.
+#
+# THE FLOORS BELOW ARE MEASURED, NOT ESTIMATED, and each status was captured DIRECTLY
+# off its own cargo command, never through a pipe (CLAUDE.md rule 1). Measured at the
+# head of plan 05-10, warm tree:
+#
+#   cargo test -p aprender-train --lib --features setfit bench_row     -> rc=0, 24 passed
+#   cargo test -p aprender-train --lib --features setfit bench_gate    -> rc=0, 31 passed
+#   cargo test -p aprender-train --lib --features setfit bench_metrics -> rc=0, 14 passed
+#   cargo test -p apr-cli        --lib --features setfit setfit_bench  -> rc=0, 58 passed
+#
+# The floors sit just under those, as the Phase 3 and Phase 4 pairs do (100 under 102,
+# 230 under 235). RE-MEASURE AND RAISE THEM WHENEVER A PLAN ADDS TESTS HERE: Phase 4
+# roughly doubled the core suite while its floor stayed at the Phase 3 value, so an
+# entire module could have been compiled out and the gate would still have gone green.
+# A stale floor reintroduces the vacuous pass the floor exists to prevent.
+#
+# TIER PLACEMENT WAS MEASURED, AND THE FIRST GUESS WAS WRONG BY TWENTY-FOLD. Two
+# consecutive runs on an already-built tree: 166 s and 236 s wall (417 s user — this
+# box compiles in parallel). Test EXECUTION inside that is 0.04 + 1.56 + 0.01 + 0.09 s;
+# everything else is cargo rebuilding.
+#
+# The cause is worth recording, because it is a property of the target's SHAPE and not
+# a cold cache. `cargo test -p aprender-train --features setfit` and `cargo test
+# -p apr-cli --features setfit` unify features differently across their shared
+# dependency graphs, so the two produce different fingerprints and each alternation
+# re-links the other's artifacts. `setfit-tests` above has the same shape for the same
+# reason (aprender-core then aprender-train), and a single invocation is not available:
+# `cargo test` accepts at most ONE positional filter.
+#
+# So: tier3 ONLY, comfortably inside its 1-5 minute budget and nowhere near tier2's
+# <5 s. The plan allowed a tier2 subset if a fast leg measured under 5 s. No leg does —
+# the CHEAPEST leg still pays the whole cross-crate re-link — and splitting the gate to
+# put half of it in tier2 would buy a second re-link for no earlier signal.
+#
+# rc is captured on the line AFTER each redirect, and `set +e` so the diagnostic is
+# reachable under this Makefile's `.SHELLFLAGS := -e -c` (REVIEW WR-01).
+setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and CLI suites
+	@echo "Phase 5 benchmark + claims gate: row schema, fail-closed gate, metrics, CLI report"
+	@mkdir -p target
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --lib --features setfit bench_row \
+		> target/setfit-bench-row.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/setfit-bench-row.log; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: the BenchRow/RunManifest suite is red (rc=$$rc)"; \
+		echo "The row schema and the 80-cell expectation set ARE the claim; see"; \
+		echo "target/setfit-bench-row.log"; \
+		exit $$rc; \
+	fi
+	@$(call assert_tests_ran,target/setfit-bench-row.log,22,setfit-bench-tests/bench_row)
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --lib --features setfit bench_gate \
+		> target/setfit-bench-gate.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/setfit-bench-gate.log; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: the claims gate is red (rc=$$rc)"; \
+		echo "This suite carries the SIX doctored negatives — a missing cell, a trimmed"; \
+		echo "row, an unpaired pair, edited row bytes, post-test selection, and forged"; \
+		echo "provenance. A red here means one of those dishonesty shapes is no longer"; \
+		echo "detected, or is no longer detected as its OWN refusal. See"; \
+		echo "target/setfit-bench-gate.log"; \
+		exit $$rc; \
+	fi
+	@$(call assert_tests_ran,target/setfit-bench-gate.log,29,setfit-bench-tests/bench_gate)
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --lib --features setfit bench_metrics \
+		> target/setfit-bench-metrics.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/setfit-bench-metrics.log; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: the EVAL-01 metric assembly is red (rc=$$rc)"; \
+		echo "See target/setfit-bench-metrics.log"; \
+		exit $$rc; \
+	fi
+	@$(call assert_tests_ran,target/setfit-bench-metrics.log,12,setfit-bench-tests/bench_metrics)
+	@set +e; CARGO_INCREMENTAL=0 cargo test -p apr-cli --lib --features setfit setfit_bench \
+		> target/setfit-bench-cli.log 2>&1; rc=$$?; \
+	set -e; \
+	tail -3 target/setfit-bench-cli.log; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: the bench run/report adapters are red (rc=$$rc)"; \
+		echo "This suite carries the two-sided incomparability control and the"; \
+		echo "no-verdict-word scan; a red there means the report may now read as a"; \
+		echo "like-for-like benchmark it is not. See target/setfit-bench-cli.log"; \
+		exit $$rc; \
+	fi
+	@$(call assert_tests_ran,target/setfit-bench-cli.log,55,setfit-bench-tests/apr-cli)
+	@echo "  phase 5 bench surface: row, gate (six negatives), metrics and CLI report all ran"
 
 setfit-repro-inproc: ## TRN-06/D-16 (tier2 half): in-process two-clean-runs equality
 	@echo "TRN-06: in-process two-run equality (D-16's fast, non-authoritative half)"
