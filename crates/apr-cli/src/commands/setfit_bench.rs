@@ -106,6 +106,8 @@ pub(crate) struct BenchRunArgs<'a> {
     pub(crate) bench_dir: Option<&'a Path>,
     /// The pinned encoder checkout (execution mode, `setfit`).
     pub(crate) model_dir: Option<&'a Path>,
+    /// The base model the adapter applies to (execution mode, `lora`).
+    pub(crate) base_model: Option<&'a Path>,
     /// Optional training configuration (execution mode).
     pub(crate) config: Option<&'a Path>,
     /// Replace an existing row file or ledger.
@@ -1036,6 +1038,7 @@ fn execute_mode(bench_dir: &Path, args: &BenchRunArgs<'_>) -> Result<()> {
         selection,
         bench_dir,
         model_dir: args.model_dir,
+        base_model: args.base_model,
         config: args.config,
         force: args.force,
         json: args.json,
@@ -1059,12 +1062,108 @@ pub(crate) struct CellRequest<'a> {
     pub(crate) bench_dir: &'a Path,
     /// The pinned encoder checkout (`setfit` only).
     pub(crate) model_dir: Option<&'a Path>,
+    /// The base model the adapter applies to (`lora` only).
+    pub(crate) base_model: Option<&'a Path>,
     /// Optional training configuration.
     pub(crate) config: Option<&'a Path>,
     /// Replace an existing row file or ledger.
     pub(crate) force: bool,
     /// The global `--json`.
     pub(crate) json: bool,
+}
+
+/// Everything the Phase 2 ingest produces, replayed against itself and against the cell.
+pub(crate) struct Phase2 {
+    /// The attested canonical dataset.
+    pub(crate) dataset: aprender_contrastive_data::prepared::PreparedDataset<
+        aprender_contrastive_data::prepared::Canonical,
+    >,
+    /// The replayed selection.
+    pub(crate) selection: aprender_contrastive_data::select::Selection,
+    /// The manifest's own digest — THE PAIRING KEY both methods record.
+    pub(crate) manifest_semantic_hash: String,
+    /// The pinned upstream revision the directory was prepared from.
+    pub(crate) dataset_revision: String,
+}
+
+/// Read `--data` and `--selection` through the doors `data_contrastive` owns.
+///
+/// # ONE ingest for BOTH methods, which is the whole of EVAL-02
+///
+/// The same three calls `commands/eval/setfit.rs` and `apr finetune --selection-manifest`
+/// make — `read_attested_canonical`, `read_selection_manifest`, `Selection::replay`. A
+/// per-method ingest would make "identical sampled IDs" rest on two readers agreeing, which
+/// is the exporter-correctness argument the phase deliberately rejected.
+///
+/// # Errors
+///
+/// [`CliError::ValidationFailed`] for any attested-ingest or replay rejection, and for a
+/// selection whose draw does not describe the cell being run.
+pub(crate) fn read_phase2(request: &CellRequest<'_>) -> Result<Phase2> {
+    use aprender_contrastive_data::ledger::AccessLedger;
+    use aprender_contrastive_data::select::Selection;
+
+    use crate::commands::{data_contrastive, data_tweeteval};
+
+    let mut ledger = AccessLedger::new();
+    let dataset = data_contrastive::read_attested_canonical(request.data, &mut ledger)?;
+    let manifest = data_contrastive::read_selection_manifest(request.selection)?;
+    let selection = Selection::replay(&manifest, &dataset, &mut ledger).map_err(|error| {
+        CliError::ValidationFailed(format!(
+            "--selection {} does not replay against --data {}: {error}",
+            request.selection.display(),
+            request.data.display()
+        ))
+    })?;
+
+    // THE CELL KEY AND THE SELECTION MUST DESCRIBE THE SAME DRAW. Nothing else checks this:
+    // `Selection::replay` proves the manifest describes THIS dataset, and the row records
+    // `shots`/`seed` from the FLAGS. A cell run with `--seed 13` against a manifest drawn at
+    // seed 17 would publish a row filed under seed 13 whose rows are seed 17's, and every
+    // paired delta in the report would be comparing two different draws while looking
+    // correctly paired — which is precisely the comparison PF-007 exists to forbid.
+    if selection.root_seed() != u64::from(request.cell.seed) {
+        return Err(CliError::ValidationFailed(format!(
+            "--seed {} disagrees with the selection manifest, which was drawn at root seed {}. \
+             The row would be filed under a seed its rows do not come from.",
+            request.cell.seed,
+            selection.root_seed()
+        )));
+    }
+    if selection.shots_per_class() != request.cell.shots {
+        return Err(CliError::ValidationFailed(format!(
+            "--shots {} disagrees with the selection manifest, which carries {} per class.",
+            request.cell.shots,
+            selection.shots_per_class()
+        )));
+    }
+
+    let manifest_path = request.data.join(data_tweeteval::MANIFEST_FILE);
+    let manifest_bytes = read_bounded(&manifest_path)?;
+    let dataset_revision = data_tweeteval::dataset_revision_from_manifest(&manifest_bytes)?;
+
+    // THE PAIRING KEY, derived from the REPLAYED selection and cross-checked against the
+    // manifest's own envelope. `apr finetune --selection-manifest` records
+    // `hex(replayed.semantic_hash())` (05-06), so deriving it the same way here is what makes
+    // the two methods' rows pair at all. The equality check is the two-sided half: if the
+    // envelope and the replay ever disagreed, one method's rows would pair on a value the
+    // other's never carried, and the report would silently drop every delta.
+    let manifest_semantic_hash = aprender_contrastive_data::hash::hex(&selection.semantic_hash());
+    if manifest_semantic_hash != manifest.semantic_hash {
+        return Err(CliError::ValidationFailed(format!(
+            "the selection manifest's envelope declares {} but the replayed selection hashes \
+             to {manifest_semantic_hash}. The pairing key is ambiguous, so no row may be \
+             written from it.",
+            manifest.semantic_hash
+        )));
+    }
+
+    Ok(Phase2 {
+        dataset,
+        selection,
+        manifest_semantic_hash,
+        dataset_revision,
+    })
 }
 
 /// Where the cell ran, read from the host rather than declared.
@@ -1178,70 +1277,7 @@ mod setfit_cell {
     /// The selection rule this command commits under — again `apr eval`'s.
     const EVAL_RULE: SelectionRule = SelectionRule::MaxMetricLowestIndexTieBreak;
 
-    /// Everything the Phase 2 ingest produces, replayed against itself.
-    struct Phase2 {
-        dataset: PreparedDataset<Canonical>,
-        selection: Selection,
-        manifest_semantic_hash: String,
-        dataset_revision: String,
-    }
-
-    /// Read `--data` and `--selection` through the doors `data_contrastive` owns.
-    ///
-    /// The same three calls `commands/eval/setfit.rs` and `apr finetune --selection-manifest`
-    /// make — `read_attested_canonical`, `read_selection_manifest`, `Selection::replay`. This
-    /// is EVAL-02's identical-sampled-ID guarantee: both methods walk one code path rather
-    /// than trusting an exporter.
-    fn read_phase2(request: &CellRequest<'_>) -> Result<Phase2> {
-        let mut ledger = AccessLedger::new();
-        let dataset = data_contrastive::read_attested_canonical(request.data, &mut ledger)?;
-        let manifest = data_contrastive::read_selection_manifest(request.selection)?;
-        let selection = Selection::replay(&manifest, &dataset, &mut ledger).map_err(|error| {
-            CliError::ValidationFailed(format!(
-                "--selection {} does not replay against --data {}: {error}",
-                request.selection.display(),
-                request.data.display()
-            ))
-        })?;
-
-        // THE CELL KEY AND THE SELECTION MUST DESCRIBE THE SAME DRAW. Nothing else checks
-        // this: `Selection::replay` proves the manifest describes THIS dataset, and the row
-        // records `shots`/`seed` from the FLAGS. A cell run with `--seed 13` against a
-        // manifest drawn at seed 17 would publish a row filed under seed 13 whose rows are
-        // seed 17's, and every paired-delta in the report would be comparing two different
-        // draws while looking correctly paired.
-        if selection.root_seed() != u64::from(request.cell.seed) {
-            return Err(CliError::ValidationFailed(format!(
-                "--seed {} disagrees with the selection manifest, which was drawn at root seed \
-                 {}. The row would be filed under a seed its rows do not come from.",
-                request.cell.seed,
-                selection.root_seed()
-            )));
-        }
-        if selection.shots_per_class() != request.cell.shots {
-            return Err(CliError::ValidationFailed(format!(
-                "--shots {} disagrees with the selection manifest, which carries {} per class.",
-                request.cell.shots,
-                selection.shots_per_class()
-            )));
-        }
-
-        let manifest_bytes = read_bounded(&request.data.join(data_tweeteval::MANIFEST_FILE))
-            .map_err(|error| {
-                CliError::ValidationFailed(format!(
-                    "{}: {error}",
-                    request.data.join(data_tweeteval::MANIFEST_FILE).display()
-                ))
-            })?;
-        let dataset_revision = data_tweeteval::dataset_revision_from_manifest(&manifest_bytes)?;
-
-        Ok(Phase2 {
-            dataset,
-            selection,
-            manifest_semantic_hash: manifest.semantic_hash.clone(),
-            dataset_revision,
-        })
-    }
+    use super::{read_phase2, Phase2};
 
     /// Execute one SetFit cell.
     #[allow(clippy::too_many_lines)]
@@ -1551,38 +1587,626 @@ mod setfit_cell {
 // The LoRA cell path
 // ==========================================================================================
 
-/// Wave-4 task 3 fills this module. See [`setfit_cell`].
+/// The 9B LoRA baseline cell.
+///
+/// # The reload route is 05-06 Task 3's, called BY NAME
+///
+/// `ClassifyPipeline::load_adapter` and `ClassifyPipeline::predict_proba_tokenized` are the
+/// two entries that plan's preflight PROVED, in a fresh process, with a two-sided control
+/// (fresh-process vs in-process max |diff| 0.000000000; with-adapter vs without 0.194929659).
+/// Before it, no adapter load route existed: `ClassifyPipeline::from_apr` builds FRESH LoRA
+/// layers and `resume_from_apr_checkpoint` installs tensors through `if let Ok(..)`, a silent
+/// partial load by construction. Forty remote 9B cells against an improvised reload is the
+/// failure mode that ordering exists to prevent, so this module invents nothing.
+///
+/// # The training call is `run_classify_core`, not a second trainer
+///
+/// One implementation drives both `apr finetune --task classify` and this cell. The
+/// `TrainingConfig` is constructed here EXPLICITLY — contracted seed, `val_split 0.0`,
+/// `early_stopping_patience 0` — so no default literal reaches the benchmark path.
 pub(crate) mod lora {
-    use std::path::Path;
+    use std::io::Write as _;
+    use std::path::{Path, PathBuf};
 
-    use super::{CellRequest, CliError, Result};
+    use entrenar::finetune::{ClassifyConfig, ClassifyPipeline, SafetySample};
+    use entrenar::train::setfit::bench_metrics::assemble_quality_block;
+    use entrenar::train::setfit::bench_row::{
+        sha256_hex, BenchRowPayload, LoraEvidence, MethodEvidence, ResourceBlock,
+        BENCH_ROW_SCHEMA_VERSION, CLAIMS_CONTRACT_ID, WARMUP_COUNT,
+    };
+    use entrenar::transformer::{Transformer, TransformerConfig};
+
+    use crate::commands::finetune::{ClassifyOutcome, ClassifyRun, ClassifySelection};
+
+    use super::resource::{self, TrainRssSampler, THROUGHPUT_BATCH_SIZE};
+    use super::{
+        emit_row, host_identity, ledger_relative_path, read_bounded, read_phase2, write_probe_text,
+        CellRequest, CliError, Result,
+    };
+
+    // ---- The FROZEN published defaults (D-07). No per-cell knob exists. ---------------------
+
+    /// The three TweetEval stance classes.
+    const NUM_CLASSES: usize = 3;
+    /// Published `apr finetune --task classify` default.
+    const LORA_RANK: u32 = 16;
+    /// Published default.
+    const LEARNING_RATE: f64 = 1e-4;
+    /// Published default.
+    const EPOCHS: u32 = 3;
+    /// Published default.
+    const MAX_SEQ_LEN: usize = 512;
+    /// No validation is carved, so there is nothing to select an epoch on.
+    const VAL_SPLIT: f32 = 0.0;
+    /// `0` means DISABLED — the meaning 05-06 corrected. It used to mean "stop after one
+    /// epoch", which is the opposite of the intent.
+    const EARLY_STOPPING_PATIENCE: usize = 0;
+    /// The checkpoint format `apr finetune` writes.
+    const CHECKPOINT_FORMAT: &str = "apr";
+    /// The adapter file `ClassifyTrainer::save_adapter_apr` writes into each epoch directory.
+    const ADAPTER_FILE: &str = "model.adapter.apr";
+
+    /// Execute one LoRA cell.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn execute(request: &CellRequest<'_>) -> Result<()> {
+        let base_model = request.base_model.ok_or_else(|| {
+            CliError::ValidationFailed(
+                "--base-model <FILE> is required for a lora cell. An adapter alone is not \
+                 deployable, so the row records base_model_bytes and deployable_total_bytes = \
+                 base + adapter; neither is computable without the base."
+                    .to_string(),
+            )
+        })?;
+        if request.config.is_some() {
+            return Err(CliError::ValidationFailed(
+                "--config belongs to the setfit method. The LoRA cell runs the FROZEN published \
+                 `apr finetune --task classify` defaults, which is what makes the comparison a \
+                 comparison of methods rather than of tuning effort."
+                    .to_string(),
+            ));
+        }
+
+        // (1) Phase 2's artifacts, through the SAME door the setfit cell uses.
+        let phase2 = read_phase2(request)?;
+        let selection = ClassifySelection {
+            samples: selected_samples(&phase2)?,
+            semantic_hash: phase2.manifest_semantic_hash.clone(),
+        };
+
+        // (2) THE CANDIDATE LEDGER, appended BEFORE training starts and therefore before any
+        //     test access. `no_selection_attestation` claims no uncontracted model selection
+        //     happened; a claim nothing can contradict is not evidence. The ledger is what
+        //     makes it checkable: 05-10 recomputes its digest and requires exactly one line.
+        let ledger_rel = ledger_relative_path(request.cell);
+        let ledger_path = request.bench_dir.join(&ledger_rel);
+        let config_hash = config_hash(base_model);
+        append_candidate(
+            &ledger_path,
+            request.cell,
+            request.force,
+            &phase2.manifest_semantic_hash,
+            &config_hash,
+        )?;
+
+        // (3) THE TRAINING CALL. Explicit configuration, no literal from a default table.
+        let checkpoint_dir = request.bench_dir.join("lora").join(format!(
+            "{}-s{}-seed{}",
+            request.cell.method.tag(),
+            request.cell.shots,
+            request.cell.seed
+        ));
+        let training = entrenar::finetune::TrainingConfig {
+            epochs: EPOCHS as usize,
+            val_split: VAL_SPLIT,
+            save_every: EPOCHS as usize,
+            early_stopping_patience: EARLY_STOPPING_PATIENCE,
+            checkpoint_dir: checkpoint_dir.clone(),
+            seed: u64::from(request.cell.seed),
+            log_interval: 1,
+            distributed: None,
+            ..entrenar::finetune::TrainingConfig::default()
+        };
+        let run = ClassifyRun {
+            model_path: Some(base_model),
+            model_size: None,
+            data_path: None,
+            output_path: Some(&checkpoint_dir),
+            num_classes: NUM_CLASSES,
+            rank: LORA_RANK,
+            epochs: EPOCHS,
+            learning_rate: LEARNING_RATE,
+            plan_only: false,
+            checkpoint_format: CHECKPOINT_FORMAT,
+            oversample: false,
+            max_seq_len: Some(MAX_SEQ_LEN),
+            quantize_nf4: false,
+            gpus: None,
+            gpu_backend: "auto",
+            role: None,
+            bind: None,
+            coordinator: None,
+            expect_workers: None,
+            json_output: request.json,
+        };
+
+        let sampler = TrainRssSampler::start();
+        let outcome =
+            crate::commands::finetune::run_classify_core(&run, training, Some(&selection))?
+                .ok_or_else(|| {
+                    CliError::ValidationFailed(
+                        "the classify run returned without training. A benchmark cell has no \
+                     non-training path — this is a defect, not an empty result."
+                            .to_string(),
+                    )
+                })?;
+        let train_peak = sampler.finish();
+
+        // (4) THE ATTESTATION'S OWN PRECONDITION. `epochs_completed == epochs_requested` is
+        //     what makes "no epoch was selected on a metric" checkable from the row alone.
+        if outcome.epochs_completed != outcome.epochs_requested || outcome.stopped_early {
+            return Err(CliError::ValidationFailed(format!(
+                "the cell requested {} epochs and completed {} (stopped_early={}). A row \
+                 attesting no selection cannot be written from a run that ended somewhere the \
+                 configuration did not ask for.",
+                outcome.epochs_requested, outcome.epochs_completed, outcome.stopped_early
+            )));
+        }
+        // `best/` is the ACTUAL model-selection surface (05-06's finding). Its existence would
+        // mean an epoch was chosen on a metric, which is exactly what the attestation denies.
+        let best_dir = outcome.checkpoint_dir.join("best");
+        if best_dir.exists() {
+            return Err(CliError::ValidationFailed(format!(
+                "{} exists, so an epoch was selected on a validation metric. \
+                 no_selection_attestation cannot be written over that.",
+                best_dir.display()
+            )));
+        }
+
+        // (5) THE WRITTEN ADAPTER. Resolved by NAME from the epoch the run says it completed,
+        //     never by "whatever the newest directory is": `save_checkpoint`'s result is
+        //     discarded inside the trainer, so a failed final write would otherwise leave an
+        //     EARLIER epoch's adapter to be attested as the trained model.
+        let final_epoch = outcome.epochs_completed.saturating_sub(1);
+        let adapter_path = outcome
+            .checkpoint_dir
+            .join(format!("epoch-{final_epoch}"))
+            .join(ADAPTER_FILE);
+        if !adapter_path.is_file() {
+            return Err(CliError::ValidationFailed(format!(
+                "{} is missing. The run reported {} completed epochs, so this is the adapter \
+                 the row would attest — and the trainer discards its own checkpoint-write \
+                 result, so an absent file here means the final write failed silently.",
+                adapter_path.display(),
+                outcome.epochs_completed
+            )));
+        }
+
+        let adapter_bytes = std::fs::metadata(&adapter_path)
+            .map_err(CliError::Io)?
+            .len();
+        let base_bytes = std::fs::metadata(base_model).map_err(CliError::Io)?.len();
+        let adapter_sha256 = sha256_of_file(&adapter_path)?;
+        let base_model_sha256 = base_model_digest(base_model)?;
+
+        // (6) THE RELOAD, then the measurements — mirroring the SetFit path's discipline.
+        //     Never the in-memory final-epoch training state: EVAL-05's numbers come from the
+        //     production artifacts a user would actually ship.
+        let probe_text = phase2
+            .dataset
+            .test()
+            .rows()
+            .first()
+            .map(|row| row.input.clone())
+            .ok_or_else(|| {
+                CliError::ValidationFailed(
+                    "the canonical test split has no rows, so there is nothing to probe with"
+                        .to_string(),
+                )
+            })?;
+        let probe_path = write_probe_text(request.bench_dir, request.cell, &probe_text)?;
+        let cold = resource::measure_cold(&adapter_path, Some(base_model), &probe_path)?;
+
+        let mut pipeline = reload(
+            base_model,
+            &adapter_path,
+            &outcome.model_config,
+            outcome.classify_config.clone(),
+        )?;
+
+        let warm_tokens = tokenize_one(&pipeline, &probe_text)?;
+        let warm_latency_ms_median = resource::warm_latency_ms_median(WARMUP_COUNT, || {
+            let probabilities = pipeline.predict_proba_tokenized(&warm_tokens);
+            if probabilities.len() != NUM_CLASSES {
+                return Err(CliError::InferenceFailed(format!(
+                    "the reloaded pipeline returned {} probabilities for {NUM_CLASSES} classes",
+                    probabilities.len()
+                )));
+            }
+            Ok(())
+        })?;
+
+        // (7) THE TEST-SPLIT PASS. One loop produces BOTH the throughput measurement and the
+        //     per-row probability vectors, so the numbers a row publishes and the pass they
+        //     were timed over cannot be two different passes.
+        let test_rows = phase2.dataset.test().rows();
+        let tokenized: Vec<Vec<u32>> = test_rows
+            .iter()
+            .map(|row| tokenize_one(&pipeline, &row.input))
+            .collect::<Result<_>>()?;
+        let mut probabilities: Vec<Vec<f64>> = Vec::with_capacity(test_rows.len());
+        let throughput_rows_per_sec = resource::throughput_rows_per_sec(
+            test_rows.len(),
+            THROUGHPUT_BATCH_SIZE,
+            |from, to| {
+                for tokens in &tokenized[from..to] {
+                    let row = pipeline.predict_proba_tokenized(tokens);
+                    if row.len() != NUM_CLASSES {
+                        return Err(CliError::InferenceFailed(format!(
+                            "the reloaded pipeline returned {} probabilities for {NUM_CLASSES} \
+                             classes",
+                            row.len()
+                        )));
+                    }
+                    probabilities.push(row.into_iter().map(f64::from).collect());
+                }
+                Ok(())
+            },
+        )?;
+
+        // (8) THE QUALITY BLOCK — assembled by the SAME method-agnostic library function the
+        //     SetFit cell uses. Two assemblies would be two definitions of `F_avg`.
+        let ordered_labels: Vec<String> = phase2.dataset.label_names().to_vec();
+        let truth: Vec<usize> = test_rows.iter().map(|row| row.label).collect();
+        let test_predictions = row_predictions_from_probabilities(
+            &probabilities,
+            &truth,
+            &ordered_labels,
+            &adapter_sha256,
+            "test",
+        )?;
+        // Calibration is validation-only (D-07), so the validation split gets its own pass.
+        let validation_rows = phase2.dataset.validation().rows();
+        let validation_predictions = {
+            let mut rows: Vec<Vec<f64>> = Vec::with_capacity(validation_rows.len());
+            for row in validation_rows {
+                let tokens = tokenize_one(&pipeline, &row.input)?;
+                rows.push(
+                    pipeline
+                        .predict_proba_tokenized(&tokens)
+                        .into_iter()
+                        .map(f64::from)
+                        .collect(),
+                );
+            }
+            let truth: Vec<usize> = validation_rows.iter().map(|row| row.label).collect();
+            row_predictions_from_probabilities(
+                &rows,
+                &truth,
+                &ordered_labels,
+                &adapter_sha256,
+                "validation",
+            )?
+        };
+        let quality =
+            assemble_quality_block(&test_predictions, &validation_predictions, &ordered_labels)
+                .map_err(|error| CliError::ValidationFailed(error.to_string()))?;
+
+        // (9) THE LEDGER'S FINAL STATE, digested AFTER the run.
+        let ledger_bytes = read_bounded(&ledger_path)?;
+        let candidates_trained = u32::try_from(
+            ledger_bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        if candidates_trained != 1 {
+            return Err(CliError::ValidationFailed(format!(
+                "{} carries {candidates_trained} candidate lines; the contract requires exactly \
+                 1. More than one candidate for a cell IS the uncontracted model selection the \
+                 attestation says did not happen.",
+                ledger_path.display()
+            )));
+        }
+
+        let payload = BenchRowPayload {
+            schema_version: BENCH_ROW_SCHEMA_VERSION,
+            contract_id: CLAIMS_CONTRACT_ID.to_string(),
+            method: request.cell.method,
+            shots: request.cell.shots,
+            seed: request.cell.seed,
+            dataset_revision: phase2.dataset_revision.clone(),
+            dataset_fingerprint: phase2
+                .dataset
+                .validation_witness()
+                .dataset_fingerprint_hex(),
+            model_revision: base_model_sha256.clone(),
+            selection_manifest_hash: phase2.manifest_semantic_hash.clone(),
+            // BACKEND IDENTITY FROM EXECUTION (Ph4 D-12). `outcome.gpu` is what the PIPELINE
+            // reported; the cpu form cannot fabricate a GPU name because there is no branch
+            // here that reads a device flag. Verification Discipline rule 2: if the row says
+            // GPU, a pipeline-read GPU name exists.
+            backend_identity: backend_identity(outcome.gpu.as_ref()),
+            host: host_identity(),
+            quality,
+            resource: ResourceBlock {
+                train_wall_ms: outcome.total_time_ms,
+                cold_latency_ms: cold.cold_latency_ms,
+                cold_measured_in_child_process: true,
+                warm_latency_ms_median,
+                throughput_rows_per_sec,
+                throughput_batch_size: THROUGHPUT_BATCH_SIZE,
+                warmup_count: WARMUP_COUNT,
+                train_peak_rss_bytes: train_peak.bytes,
+                train_peak_rss_mechanism: train_peak.mechanism.clone(),
+                inference_peak_rss_bytes: cold.peak_rss_bytes,
+                inference_peak_rss_mechanism: cold.peak_rss_mechanism.to_string(),
+                peak_rss_sample_interval_hz: train_peak.sample_interval_hz,
+                // THE SIZE SPLIT (review consensus item 8). `artifact_bytes` is the ADAPTER
+                // ALONE, which is the honest answer to "what did this method produce"; the
+                // deployable size is base + adapter, which is the only field a cross-method
+                // size claim may be built on. An adapter-only figure standing in for a
+                // deployable size would understate LoRA by three orders of magnitude.
+                artifact_bytes: adapter_bytes,
+                deployable_total_bytes: base_bytes.saturating_add(adapter_bytes),
+            },
+            evidence: MethodEvidence::Lora(LoraEvidence {
+                base_model_sha256,
+                base_model_bytes: base_bytes,
+                adapter_sha256,
+                epochs_requested: outcome.epochs_requested,
+                epochs_completed: outcome.epochs_completed,
+                early_stopping_disabled: EARLY_STOPPING_PATIENCE == 0,
+                val_split: f64::from(VAL_SPLIT),
+                no_selection_attestation: true,
+                candidate_ledger_sha256: sha256_hex(&ledger_bytes),
+                candidates_trained,
+                candidate_ledger_path: ledger_rel,
+            }),
+        };
+
+        let (row_path, row_hash) = emit_row(request.bench_dir, payload, request.force)?;
+        if request.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "command": "setfit-bench-run",
+                    "cell": request.cell.render(),
+                    "row": row_path.display().to_string(),
+                    "row_sha256": row_hash,
+                    "executed": true,
+                })
+            );
+        } else {
+            println!("{} -> {} ({row_hash})", request.cell, row_path.display());
+        }
+        Ok(())
+    }
+
+    /// The replayed rows, as the trainer's own sample type.
+    ///
+    /// Through `finetune::resolve_selected_samples`, which is the mapping the CLI flag path
+    /// already uses: the selection's contracted order (class ascending, draw order within a
+    /// class) is a property of that function, and a second mapping here would be a second
+    /// order that could disagree with the one `apr finetune` trains on.
+    fn selected_samples(phase2: &super::Phase2) -> Result<Vec<SafetySample>> {
+        let ordered: Vec<(&str, usize)> = phase2
+            .selection
+            .examples()
+            .iter()
+            .map(|example| (example.id.as_str(), example.label))
+            .collect();
+        crate::commands::finetune::resolve_selected_samples(&ordered, phase2.dataset.train().rows())
+    }
+
+    /// Append EXACTLY ONE candidate line, refusing a second without `--force`.
+    ///
+    /// Opened with `append(true)`, never truncate and never rewrite: the ledger's value is
+    /// that it accumulates. A writer that could shorten it could erase the second candidate
+    /// it is here to reveal.
+    /// Takes plain values rather than a `&Phase2` so it is directly unit-testable: a
+    /// `PreparedDataset` cannot be built in a unit test, and a refusal that can only be
+    /// exercised through a training run is a refusal nothing checks.
+    pub(super) fn append_candidate(
+        ledger_path: &Path,
+        cell: entrenar::train::setfit::bench_row::CellKey,
+        force: bool,
+        selection_manifest_hash: &str,
+        config_hash: &str,
+    ) -> Result<()> {
+        if ledger_path.exists() {
+            let existing = read_bounded(ledger_path)?;
+            let lines = existing
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .count();
+            if lines > 0 && !force {
+                return Err(CliError::ValidationFailed(format!(
+                    "{} already records {lines} candidate(s) for cell {cell}. A SECOND \
+                     candidate for one cell is exactly the uncontracted model selection this \
+                     cell's attestation says did not happen — pass --force only if you are \
+                     deliberately replacing the run that produced the published number.",
+                    ledger_path.display(),
+                )));
+            }
+        }
+        if let Some(parent) = ledger_path.parent() {
+            std::fs::create_dir_all(parent).map_err(CliError::Io)?;
+        }
+        // `--force` starts a FRESH ledger rather than appending to the old one, so
+        // `candidates_trained == 1` stays a true statement about the run being recorded rather
+        // than a count of every run this directory has ever seen.
+        let line = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "selection_manifest_hash": selection_manifest_hash,
+            "epochs_requested": EPOCHS,
+            "seed": cell.seed,
+            "config_hash": config_hash,
+        });
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(!force)
+            .write(true)
+            .truncate(force)
+            .open(ledger_path)
+            .map_err(CliError::Io)?;
+        writeln!(file, "{line}").map_err(CliError::Io)?;
+        file.sync_all().map_err(CliError::Io)?;
+        Ok(())
+    }
 
     /// The reloaded base + adapter pipeline, through the route 05-06 Task 3 proved.
-    pub(crate) fn reload_base_and_adapter(
-        _base: &Path,
-        _adapter: &Path,
-    ) -> Result<entrenar::finetune::ClassifyPipeline> {
-        Err(CliError::ValidationFailed(
-            "the LoRA reload path lands in plan 05-09 task 3".to_string(),
-        ))
+    pub(crate) fn reload_base_and_adapter(base: &Path, adapter: &Path) -> Result<ClassifyPipeline> {
+        // The cold probe reaches this without an outcome in hand, so the architecture comes
+        // from the base artifact's own metadata — the same resolver `apr finetune` uses.
+        let model_config =
+            crate::commands::model_config::resolve_transformer_config(Some(base), None)?;
+        let classify_config = ClassifyConfig {
+            num_classes: NUM_CLASSES,
+            lora_rank: LORA_RANK as usize,
+            lora_alpha: LORA_RANK as f32,
+            #[allow(clippy::cast_possible_truncation)]
+            learning_rate: LEARNING_RATE as f32,
+            epochs: EPOCHS as usize,
+            max_seq_len: MAX_SEQ_LEN,
+            ..ClassifyConfig::default()
+        };
+        reload(base, adapter, &model_config, classify_config)
     }
 
-    /// Tokenize one text through the pipeline's own tokenizer.
-    pub(crate) fn tokenize_one(
-        _pipeline: &entrenar::finetune::ClassifyPipeline,
-        _text: &str,
-    ) -> Result<Vec<u32>> {
-        Err(CliError::ValidationFailed(
-            "the LoRA tokenize path lands in plan 05-09 task 3".to_string(),
-        ))
+    /// Build the pipeline and install the written adapter into it.
+    fn reload(
+        base: &Path,
+        adapter: &Path,
+        model_config: &TransformerConfig,
+        classify_config: ClassifyConfig,
+    ) -> Result<ClassifyPipeline> {
+        let transformer = Transformer::from_apr(base, model_config)
+            .map_err(|error| CliError::ModelLoadFailed(format!("{}: {error}", base.display())))?;
+        let mut pipeline = ClassifyPipeline::from_model(transformer, model_config, classify_config);
+        // `load_adapter` reads and shape-checks EVERY tensor before installing any, so a
+        // refusal leaves the pipeline untouched. A partial adapter classifies confidently and
+        // is not the model that was trained.
+        pipeline.load_adapter(adapter).map_err(|error| {
+            CliError::ModelLoadFailed(format!("{}: {error}", adapter.display()))
+        })?;
+        Ok(pipeline)
     }
 
-    pub(super) fn execute(request: &CellRequest<'_>) -> Result<()> {
-        Err(CliError::ValidationFailed(format!(
-            "cell {} cannot be executed by this build yet: `apr setfit bench run`'s LoRA \
-             execution path lands in plan 05-09 task 3.",
-            request.cell
-        )))
+    /// Tokenize one text through the pipeline's OWN tokenizer.
+    ///
+    /// `pre_tokenize` is the pipeline's single tokenization implementation — the same one
+    /// training used. Reproducing its byte-level fallback here would be a second tokenizer,
+    /// and a benchmark whose evaluation tokenizes differently from its training is measuring
+    /// something other than the model.
+    pub(crate) fn tokenize_one(pipeline: &ClassifyPipeline, text: &str) -> Result<Vec<u32>> {
+        let sample = SafetySample {
+            input: text.to_string(),
+            label: 0,
+        };
+        pipeline
+            .pre_tokenize(std::slice::from_ref(&sample))
+            .into_iter()
+            .next()
+            .map(|tokenized| tokenized.token_ids)
+            .ok_or_else(|| {
+                CliError::InferenceFailed(
+                    "pre_tokenize returned no sample for one input".to_string(),
+                )
+            })
+    }
+
+    /// `<device>:<implementation>:<kernel>`, three segments like the SetFit side's.
+    ///
+    /// The cpu arm cannot fabricate a GPU string: it is reached exactly when the pipeline
+    /// reported no GPU, and it names no device it did not observe.
+    fn backend_identity(gpu: Option<&(String, usize)>) -> String {
+        match gpu {
+            Some((name, _)) => format!("gpu({name}):entrenar-classify:lora"),
+            None => "cpu:entrenar-classify:lora".to_string(),
+        }
+    }
+
+    /// SHA-256 over a file's bytes, streamed.
+    fn sha256_of_file(path: &Path) -> Result<String> {
+        use sha2::Digest as _;
+        let mut file = std::fs::File::open(path).map_err(CliError::Io)?;
+        let mut hasher = sha2::Sha256::new();
+        std::io::copy(&mut file, &mut hasher).map_err(CliError::Io)?;
+        let digest: [u8; 32] = hasher.finalize().into();
+        Ok(aprender_contrastive_data::hash::hex(&digest))
+    }
+
+    /// The base model's digest, CACHED beside the weights.
+    ///
+    /// A 9B base is hashed once per host rather than once per cell: forty cells x a
+    /// multi-gigabyte read is an hour of I/O that measures nothing. The cache is keyed by the
+    /// file's own path and is re-derived whenever it is absent, so a stale cache is a missing
+    /// cache rather than a wrong digest.
+    fn base_model_digest(base: &Path) -> Result<String> {
+        let cache = base.with_extension("sha256");
+        if cache.is_file() {
+            let cached = String::from_utf8(read_bounded(&cache)?)
+                .map_err(|error| CliError::InvalidFormat(error.to_string()))?;
+            let cached = cached.trim().to_string();
+            if cached.len() == 64 && cached.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Ok(cached);
+            }
+        }
+        let digest = sha256_of_file(base)?;
+        // Best effort, and through the SHARED atomic writer like every other file this module
+        // creates: an unwritable directory must not fail the cell (the digest is already
+        // computed and correct), but a half-written cache would be read back as a corrupt
+        // digest on the next cell and refused there instead of here.
+        let _ = super::atomic_write(&cache, format!("{digest}\n").as_bytes(), true);
+        Ok(digest)
+    }
+
+    /// A stable digest over the knobs this cell ran, for the ledger line.
+    fn config_hash(base_model: &Path) -> String {
+        let document = serde_json::json!({
+            "base_model": base_model.display().to_string(),
+            "num_classes": NUM_CLASSES,
+            "lora_rank": LORA_RANK,
+            "learning_rate": LEARNING_RATE,
+            "epochs": EPOCHS,
+            "max_seq_len": MAX_SEQ_LEN,
+            "val_split": VAL_SPLIT,
+            "early_stopping_patience": EARLY_STOPPING_PATIENCE,
+        });
+        sha256_hex(document.to_string().as_bytes())
+    }
+
+    /// Wrap per-row probabilities in the library's evidence type.
+    ///
+    /// `RowPredictions` has no public constructor by design — a value of it is EVIDENCE that a
+    /// measurement happened through the credentialed SetFit door. The LoRA method has no such
+    /// door and never will: its artifacts are not `setfit-apr-v1`. So the vectors are handed
+    /// to the assembly through the library's declared LoRA entry rather than by forging the
+    /// SetFit witness.
+    fn row_predictions_from_probabilities(
+        probabilities: &[Vec<f64>],
+        truth: &[usize],
+        ordered_labels: &[String],
+        artifact_hash: &str,
+        split_tag: &'static str,
+    ) -> Result<entrenar::train::setfit::apr_evaluate::RowPredictions> {
+        entrenar::train::setfit::apr_evaluate::row_predictions_from_lora(
+            probabilities,
+            truth,
+            ordered_labels,
+            artifact_hash,
+            split_tag,
+        )
+        .map_err(|error| CliError::ValidationFailed(error.to_string()))
+    }
+
+    /// The checkpoint directory layout this module resolves against, named for the tests.
+    #[must_use]
+    pub(crate) fn adapter_path_for(checkpoint_dir: &Path, epochs_completed: u32) -> PathBuf {
+        checkpoint_dir
+            .join(format!("epoch-{}", epochs_completed.saturating_sub(1)))
+            .join(ADAPTER_FILE)
     }
 }
 

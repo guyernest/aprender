@@ -991,6 +991,340 @@ fn setfit_bench_emit_row_records_the_digest_the_row_file_carries() {
 }
 
 // ==========================================================================================
+// The LoRA cell: the candidate ledger and the size split
+// ==========================================================================================
+
+/// A synthetic LoRA row, for the size-field and attestation proofs.
+fn lora_payload(
+    cell: CellKey,
+    base_bytes: u64,
+    adapter_bytes: u64,
+) -> entrenar::train::setfit::bench_row::BenchRowPayload {
+    use entrenar::train::setfit::bench_row::{LoraEvidence, MethodEvidence};
+
+    let mut payload = synthetic::payload(cell, adapter_bytes);
+    payload.resource.artifact_bytes = adapter_bytes;
+    payload.resource.deployable_total_bytes = base_bytes + adapter_bytes;
+    payload.evidence = MethodEvidence::Lora(LoraEvidence {
+        base_model_sha256: "ff".repeat(32),
+        base_model_bytes: base_bytes,
+        adapter_sha256: "ab".repeat(32),
+        epochs_requested: 3,
+        epochs_completed: 3,
+        early_stopping_disabled: true,
+        val_split: 0.0,
+        no_selection_attestation: true,
+        candidate_ledger_sha256: "cd".repeat(32),
+        candidates_trained: 1,
+        candidate_ledger_path: ledger_relative_path(cell),
+    });
+    payload
+}
+
+#[test]
+fn setfit_bench_lora_rows_split_adapter_bytes_from_deployable_bytes() {
+    // The measured 05-06 preflight numbers, so the arithmetic is checked against a real
+    // artifact pair rather than round ones: base.apr 783236, model.adapter.apr 10180,
+    // deployable 793416.
+    let cell = CellKey::new(Method::Lora, 8, 13);
+    let payload = lora_payload(cell, 783_236, 10_180);
+
+    assert_eq!(
+        payload.resource.artifact_bytes, 10_180,
+        "artifact_bytes is the ADAPTER ALONE — the honest answer to what this method produced"
+    );
+    assert_eq!(
+        payload.resource.deployable_total_bytes, 793_416,
+        "and deployable_total_bytes is base + adapter, the ONLY field a cross-method size \
+         claim may be built on"
+    );
+    assert_ne!(
+        payload.resource.artifact_bytes, payload.resource.deployable_total_bytes,
+        "the two must DIFFER for LoRA: an adapter-only figure standing in for a deployable \
+         size understates the method by orders of magnitude (PF-008)"
+    );
+
+    let entrenar::train::setfit::bench_row::MethodEvidence::Lora(evidence) = &payload.evidence
+    else {
+        panic!("the synthetic row is a lora row");
+    };
+    assert_eq!(
+        evidence.base_model_bytes + payload.resource.artifact_bytes,
+        payload.resource.deployable_total_bytes,
+        "and the three fields must be arithmetically consistent, so a reader can check the \
+         claim without owning the files"
+    );
+    assert_eq!(
+        evidence.candidates_trained, 1,
+        "exactly one candidate: a second is the uncontracted model selection the attestation \
+         denies"
+    );
+    assert!(evidence.no_selection_attestation);
+    assert!(evidence.early_stopping_disabled);
+    assert_eq!(evidence.val_split, 0.0);
+    assert_eq!(
+        evidence.epochs_completed, evidence.epochs_requested,
+        "equality is what makes `no epoch was selected on a metric` checkable from the row"
+    );
+
+    // And it survives the library's own door, which independently requires the method tag and
+    // the evidence block to agree.
+    let row = BenchRow::new(payload);
+    let bytes = row.to_file_bytes().expect("serializes");
+    BenchRow::from_bytes(&bytes).expect("a well-formed lora row verifies");
+}
+
+#[test]
+fn setfit_bench_lora_ledger_refuses_a_second_candidate_without_force() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let cell = CellKey::new(Method::Lora, 32, 41);
+    let ledger = temp.path().join(ledger_relative_path(cell));
+
+    super::lora::append_candidate(&ledger, cell, false, "manifesthash", "confighash")
+        .expect("the first candidate is recorded");
+    let after_first = std::fs::read_to_string(&ledger).expect("the ledger is readable");
+    assert_eq!(
+        after_first.lines().filter(|l| !l.is_empty()).count(),
+        1,
+        "exactly one line"
+    );
+    assert!(
+        after_first.contains("manifesthash") && after_first.contains("confighash"),
+        "and it records what the run was: {after_first}"
+    );
+
+    let error = super::lora::append_candidate(&ledger, cell, false, "manifesthash", "confighash")
+        .expect_err("a SECOND candidate for one cell must be refused");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("lora-s32-seed41.jsonl"),
+        "the refusal must name the ledger path so an operator can inspect it; got: {rendered}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&ledger).expect("still readable"),
+        after_first,
+        "and a refused append must not have written anything — a ledger that grew on the \
+         refusal path would itself become the second candidate it refused"
+    );
+}
+
+#[test]
+fn setfit_bench_lora_ledger_force_starts_a_fresh_ledger_rather_than_appending() {
+    // `candidates_trained == 1` must stay a true statement about the RUN being recorded, not
+    // a count of every run this directory has ever seen. Appending under --force would make
+    // the count grow forever and the contract's "exactly 1" unreachable after a single retry.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let cell = CellKey::new(Method::Lora, 8, 13);
+    let ledger = temp.path().join(ledger_relative_path(cell));
+
+    super::lora::append_candidate(&ledger, cell, false, "first", "cfg").expect("first");
+    super::lora::append_candidate(&ledger, cell, true, "second", "cfg").expect("forced replace");
+
+    let text = std::fs::read_to_string(&ledger).expect("readable");
+    assert_eq!(
+        text.lines().filter(|l| !l.is_empty()).count(),
+        1,
+        "--force replaces rather than appends"
+    );
+    assert!(
+        text.contains("second") && !text.contains("first"),
+        "got: {text}"
+    );
+}
+
+#[test]
+fn setfit_bench_lora_ledger_is_appended_before_the_training_call_in_source_order() {
+    // The ledger's whole value is that it is written BEFORE the run it describes and before
+    // any test access. A ledger appended afterwards records only the candidate that survived,
+    // which is precisely the selection it exists to reveal.
+    let append_site = SETFIT_BENCH_SOURCE
+        .find(&needle(&["append_candi", "date(\n"]))
+        .expect("the ledger append site is in this file");
+    let train_site = SETFIT_BENCH_SOURCE
+        .find(&needle(&["run_classify_", "core(&run"]))
+        .expect("the training call is in this file");
+    assert!(
+        append_site < train_site,
+        "the ledger append (byte {append_site}) must precede the training call (byte \
+         {train_site}) in source order"
+    );
+}
+
+#[test]
+fn setfit_bench_lora_path_drives_the_named_library_doors_and_no_second_implementation() {
+    // The reload route is the one 05-06 Task 3 PROVED, called by those exact names. Forty
+    // remote 9B cells against an improvised reload is the failure this ordering prevents.
+    for (fragments, why) in [
+        (vec!["run_classify_", "core"], "the shared training entry"),
+        (
+            vec!["load_", "adapter("],
+            "05-06's strict, never-partial adapter reload",
+        ),
+        (
+            vec!["predict_proba_", "tokenized("],
+            "05-06's ordered probability-vector entry",
+        ),
+        (
+            vec!["pre_", "tokenize("],
+            "the pipeline's OWN tokenizer — not a reproduction of its byte-level fallback",
+        ),
+        (
+            vec!["assemble_quality_", "block("],
+            "the SAME method-agnostic assembly the setfit cell uses",
+        ),
+        (
+            vec!["outcome.", "gpu"],
+            "the GPU identity, carried out of the run rather than re-derived",
+        ),
+    ] {
+        let needle = needle(&fragments);
+        assert!(
+            SETFIT_BENCH_SOURCE.contains(&needle),
+            "the LoRA path must drive {why}"
+        );
+    }
+
+    // And `outcome.gpu` is itself the PIPELINE's accessors, read one call away in the module
+    // that owns the run. The scan crosses the file boundary deliberately: asserting only on
+    // this file would prove the field is used and say nothing about where its value came
+    // from, which is the whole D-12 question.
+    const FINETUNE_SOURCE: &str = include_str!("finetune.rs");
+    assert!(
+        FINETUNE_SOURCE.contains(&needle(&["pipeline.gpu_", "name()"])),
+        "ClassifyOutcome.gpu must come from ClassifyPipeline::gpu_name"
+    );
+    assert!(
+        FINETUNE_SOURCE.contains(&needle(&["gpu_total_", "memory()"])),
+        "and from ClassifyPipeline::gpu_total_memory"
+    );
+
+    // And no second implementation of the things those doors already own.
+    for (fragments, why) in [
+        (vec!["fn ", "softmax"], "no second softmax"),
+        (vec!["exp", "()  //"], "no hand-rolled normalisation"),
+    ] {
+        let needle = needle(&fragments);
+        assert_eq!(SETFIT_BENCH_SOURCE.matches(&needle).count(), 0, "{why}");
+    }
+}
+
+#[test]
+fn setfit_bench_lora_path_contains_no_default_training_literal() {
+    // The three values 05-06 replaced: seed 42, val_split 0.2, patience 10. A benchmark cell
+    // whose configuration fell back to a default table would be reproducible only by someone
+    // who knew which build wrote it.
+    for forbidden in ["seed: 42", "val_split: 0.2", "early_stopping_patience: 10"] {
+        assert!(
+            !SETFIT_BENCH_SOURCE.contains(forbidden),
+            "the bench path must carry no default training literal; found `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn setfit_bench_lora_backend_identity_cannot_fabricate_a_gpu() {
+    // Verification Discipline rule 2: if the row says GPU, a pipeline-read GPU name must
+    // exist. The cpu arm is reached exactly when the pipeline reported none, and it names no
+    // device it did not observe.
+    assert!(
+        SETFIT_BENCH_SOURCE.contains("\"cpu:entrenar-classify:lora\""),
+        "the no-GPU arm must be a fixed cpu identity"
+    );
+    assert!(
+        SETFIT_BENCH_SOURCE.contains("gpu({name})"),
+        "and the GPU arm must interpolate the name the PIPELINE reported"
+    );
+    // There is no path from a flag to the identity: `--gpu-backend` is passed to the trainer,
+    // never read back into the row.
+    assert_eq!(
+        SETFIT_BENCH_SOURCE
+            .matches(&needle(&["gpu_backend", ":"]))
+            .count(),
+        1,
+        "gpu_backend appears exactly once, as the ClassifyRun field it hands to the trainer — \
+         never as a source for backend_identity"
+    );
+}
+
+#[test]
+fn setfit_bench_lora_adapter_path_is_the_completed_epoch_not_the_newest_directory() {
+    // Resolved BY NAME from the epoch the run reported. `ClassifyTrainer::save_checkpoint`'s
+    // result is discarded (`let _ = ...`), so a silently-failed final write must surface as a
+    // missing file rather than as an earlier epoch's adapter being attested as the trained
+    // model.
+    let dir = std::path::Path::new("/bench/lora/lora-s8-seed13");
+    assert_eq!(
+        super::lora::adapter_path_for(dir, 3),
+        dir.join("epoch-2").join("model.adapter.apr"),
+        "three completed epochs are 0,1,2 — the final adapter is epoch-2"
+    );
+    assert_eq!(
+        super::lora::adapter_path_for(dir, 1),
+        dir.join("epoch-0").join("model.adapter.apr")
+    );
+    assert_eq!(
+        super::lora::adapter_path_for(dir, 0),
+        dir.join("epoch-0").join("model.adapter.apr"),
+        "a zero-epoch run has no adapter; the path is still well-formed so the caller's \
+         is_file() check is what refuses, with a message naming the file"
+    );
+}
+
+#[test]
+fn setfit_bench_lora_row_predictions_door_checks_its_shapes() {
+    use entrenar::train::setfit::apr_evaluate::row_predictions_from_lora;
+
+    let labels = synthetic::labels();
+
+    let rows = row_predictions_from_lora(
+        &[vec![0.7, 0.2, 0.1], vec![0.1, 0.1, 0.8]],
+        &[0, 2],
+        &labels,
+        "adapterhash",
+        "test",
+    )
+    .expect("well-formed vectors are accepted");
+    assert_eq!(
+        rows.predicted(),
+        &[0, 2],
+        "argmax with the lowest index winning a tie — the same deterministic rule the SetFit \
+         head's reduction uses, so a tie does not resolve differently per method"
+    );
+    assert_eq!(rows.split_tag(), "test");
+    assert_eq!(rows.ordered_labels(), labels.as_slice());
+
+    // A tie must go to the LOWEST index, asserted rather than assumed.
+    let tied = row_predictions_from_lora(
+        &[vec![0.5, 0.5, 0.0]],
+        &[0],
+        &labels,
+        "adapterhash",
+        "validation",
+    )
+    .expect("a tie is not an error");
+    assert_eq!(tied.predicted(), &[0]);
+
+    // And the refusals.
+    assert!(
+        row_predictions_from_lora(&[], &[], &labels, "h", "test").is_err(),
+        "an empty split is a refusal, not a row of NaNs"
+    );
+    assert!(
+        row_predictions_from_lora(&[vec![0.5, 0.5, 0.0]], &[0, 1], &labels, "h", "test").is_err(),
+        "probability rows and truth rows must agree in count"
+    );
+    assert!(
+        row_predictions_from_lora(&[vec![0.5, 0.5]], &[0], &labels, "h", "test").is_err(),
+        "a probability row narrower than the label map would publish per-class numbers under \
+         another class's name"
+    );
+    assert!(
+        row_predictions_from_lora(&[vec![0.5, 0.5, 0.0]], &[7], &labels, "h", "test").is_err(),
+        "a truth index outside the map would index a metric vector's wrong slot"
+    );
+}
+
+// ==========================================================================================
 // Source assertions: the shape the resource protocol requires
 // ==========================================================================================
 
@@ -1029,6 +1363,188 @@ fn setfit_bench_creates_files_only_through_the_shared_atomic_writer() {
     assert!(
         SETFIT_BENCH_SOURCE.contains(&needle(&["atomic_", "write("])),
         "and it does go through the shared writer"
+    );
+
+    // THE ONE DELIBERATE EXCEPTION, pinned so it stays one. The candidate ledger is
+    // APPEND-ONLY: a rename-based writer replaces its destination, which would erase the
+    // accumulated line the ledger exists to reveal. So it opens with `OpenOptions` — exactly
+    // once, and with `append`.
+    let open_options = needle(&["OpenOptions", "::new()"]);
+    assert_eq!(
+        SETFIT_BENCH_SOURCE.matches(&open_options).count(),
+        1,
+        "exactly ONE hand-opened file in this module, and it is the append-only ledger"
+    );
+    assert!(
+        SETFIT_BENCH_SOURCE.contains(&needle(&[".append", "(!force)"])),
+        "and it opens in APPEND mode: a truncating ledger could not record a second candidate"
+    );
+}
+
+// ==========================================================================================
+// The 40-cell driver script
+// ==========================================================================================
+
+/// The driver, embedded at compile time.
+///
+/// `include_str!` rather than a runtime read, on `bench_row`'s precedent: a gate that silently
+/// skips when its input is absent proves nothing, and a path that resolves differently under
+/// `cargo test` and in a packaged crate is a defect waiting for a release.
+const DRIVER_SOURCE: &str = include_str!("../../../../scripts/run_bench_cells.sh");
+
+/// The driver with every comment line removed.
+///
+/// The gates below are about what the script DOES. Its own explanatory comments say the words
+/// `--jobs` and `rm` deliberately — the header explains at length why there is no parallel
+/// dispatch — and a scan that counted those would be a gate the documentation could turn red.
+fn driver_without_comments() -> String {
+    DRIVER_SOURCE
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn driver_has_no_parallel_dispatch_construct() {
+    // Concurrent cell processes would race the run-manifest AND invalidate every EVAL-05
+    // resource number by contending for CPU and memory. There is deliberately no `--jobs`,
+    // and the absence is a gate rather than a convention.
+    let body = driver_without_comments();
+    for construct in ["--jobs", "xargs -P", "parallel "] {
+        assert!(
+            !body.contains(construct),
+            "the driver must contain no parallel-dispatch construct; found `{construct}`"
+        );
+    }
+    for line in body.lines() {
+        assert!(
+            !line.trim_end().ends_with('&') || line.trim_end().ends_with("&&"),
+            "a background-job `&` would be a parallel dispatch with no flag to grep for: {line}"
+        );
+    }
+}
+
+#[test]
+fn driver_pins_the_binary_and_sets_the_shell_flags() {
+    assert!(
+        DRIVER_SOURCE.contains("set -euo pipefail"),
+        "an executable script sets the flags; only a SOURCED library stays option-neutral"
+    );
+    assert!(
+        DRIVER_SOURCE.contains(". scripts/apr_bin.sh || exit 1"),
+        "the pin is SOURCED and fails by return status — `set` in a sourced file mutates the \
+         caller's shell, which once killed the nightly six lines in"
+    );
+    assert!(
+        !DRIVER_SOURCE.contains("\"apr\" ") && !DRIVER_SOURCE.contains("\napr "),
+        "and never a bare `apr`: four binaries once coexisted on this dev box and a bare `apr` \
+         resolved to a 26-day-old one"
+    );
+}
+
+#[test]
+fn driver_never_reads_a_status_through_a_pipe() {
+    // Every `rc=$?` must sit on the line immediately after the command it describes, and no
+    // line may pipe into something whose status is then read. This defect shipped twice here
+    // (#2336 captured tee's status, #2360 captured grep's) and both times produced a gate
+    // that could not fail while printing success.
+    let body = driver_without_comments();
+    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    for (index, line) in lines.iter().enumerate() {
+        if !line.starts_with("rc=$?") {
+            continue;
+        }
+        let previous = lines
+            .get(index.wrapping_sub(1))
+            .copied()
+            .unwrap_or_default();
+        assert!(
+            !previous.contains('|'),
+            "`rc=$?` at line {index} follows a pipeline (`{previous}`), so it captures the LAST \
+             command's status rather than the one it appears to describe"
+        );
+    }
+    assert!(
+        lines.iter().any(|line| line.starts_with("rc=$?")),
+        "and the scan must have something to scan — a driver with no rc capture would satisfy \
+         the loop above vacuously"
+    );
+}
+
+#[test]
+fn driver_holds_a_single_writer_lock_with_distinct_failure_exit_codes() {
+    let body = driver_without_comments();
+    assert!(
+        body.contains("noclobber"),
+        "the lock must be taken with an ATOMIC primitive; a test-then-create has a window two \
+         drivers can both pass"
+    );
+    assert!(
+        body.contains("EXIT_LOCKED"),
+        "and a held lock has its own exit code"
+    );
+
+    // The evidence class and the transient class must be DISTINGUISHABLE. Conflating them
+    // would make "just re-run it" the advice for a finding no re-run can fix.
+    for code in ["EXIT_EVIDENCE=3", "EXIT_TRANSIENT=4", "EXIT_LOCKED=5"] {
+        assert!(body.contains(code), "missing distinct exit code `{code}`");
+    }
+    assert!(
+        body.contains("is_evidence_failure"),
+        "and the classifier that chooses between them"
+    );
+    assert!(
+        body.contains("UncalibratedRegime"),
+        "whose vocabulary names the refusals 05-03's coverage claim depends on halting for"
+    );
+}
+
+#[test]
+fn driver_resume_is_hash_based_not_a_bare_existence_check() {
+    let body = driver_without_comments();
+    assert!(
+        body.contains("semantic_hash"),
+        "a row file that EXISTS is not evidence the cell completed; resume compares the row's \
+         own envelope digest against the digest the run manifest recorded"
+    );
+    assert!(
+        body.contains("run-manifest.json"),
+        "and the manifest is what completeness is defined by — a directory listing can only \
+         report what is present, never what is missing"
+    );
+    assert!(
+        body.contains("cell_is_complete"),
+        "through one predicate, so the skip decision has one definition"
+    );
+}
+
+#[test]
+fn driver_covers_exactly_the_contracted_matrix() {
+    let body = driver_without_comments();
+    // The matrix literals in the script must be the contract's, checked against the LIBRARY's
+    // constants rather than against a second copy of the four numbers.
+    for shots in BENCH_SHOTS {
+        assert!(
+            body.contains(&shots.to_string()),
+            "the driver's shot list must contain {shots}"
+        );
+    }
+    for seed in BENCH_SEEDS {
+        assert!(
+            body.contains(&seed.to_string()),
+            "the driver's seed list must contain {seed}"
+        );
+    }
+    assert!(
+        !body.contains("SEEDS=(13 17 23 29 31 37 41 42"),
+        "and 42 is NOT among them"
+    );
+    // The vacuity floor: a loop that covered nothing must not exit 0 with a tally of zeroes.
+    assert!(
+        body.contains("-ne 40"),
+        "the driver must assert its own coverage count — CR-02's precedent is a zero-match \
+         filter that printed `test result: ok`"
     );
 }
 

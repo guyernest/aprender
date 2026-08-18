@@ -56,6 +56,45 @@ pub(crate) struct ClassifyOverrides<'a> {
     pub early_stopping_patience: Option<usize>,
 }
 
+/// What a completed classify run RECORDED, for a caller that has to attest it.
+///
+/// # Why `run_classify_core` returns this instead of `()`
+///
+/// A benchmark row attests `epochs_completed == epochs_requested`, reloads the written
+/// adapter through the route 05-06 proved, and records a backend identity read FROM
+/// EXECUTION. None of those three facts is recoverable from the process's stdout, and every
+/// one of them is already in this function's hands when it finishes. Returning `()` and
+/// having `setfit_bench.rs` re-derive them would mean a second construction of the pipeline
+/// and a second `TrainingConfig` — which is exactly the "two descriptions of one run" that
+/// `ClassifyRun` was extracted to prevent (OPS-03).
+///
+/// The CLI flag path discards it, which is the correct asymmetry: a human running
+/// `apr finetune --task classify` reads the printed report, and a benchmark cell needs the
+/// values behind it.
+#[derive(Debug, Clone)]
+pub(crate) struct ClassifyOutcome {
+    /// The epoch count the run was ASKED for.
+    pub epochs_requested: u32,
+    /// The epoch count the loop actually finished.
+    pub epochs_completed: u32,
+    /// Whether early stopping fired. Always `false` in the benchmark regime.
+    pub stopped_early: bool,
+    /// Where the checkpoints — including `model.adapter.apr` — were written.
+    pub checkpoint_dir: PathBuf,
+    /// The GPU the pipeline REPORTED, read off the pipeline rather than off a flag.
+    ///
+    /// `None` means no GPU was engaged. A caller may not substitute a device name from
+    /// configuration: CLAUDE.md Verification Discipline rule 2 — if a row says GPU, a
+    /// pipeline-read GPU name must exist.
+    pub gpu: Option<(String, usize)>,
+    /// The resolved transformer architecture, so a reload builds the SAME shape.
+    pub model_config: entrenar::transformer::TransformerConfig,
+    /// The resolved classify configuration, for the same reason.
+    pub classify_config: entrenar::finetune::ClassifyConfig,
+    /// Wall-clock of the training loop, as the trainer measured it.
+    pub total_time_ms: u64,
+}
+
 /// The rows a `--selection-manifest` run trains on, plus the hash a benchmark row records.
 #[derive(Debug, Clone)]
 pub(crate) struct ClassifySelection {
@@ -1647,7 +1686,9 @@ fn run_classify(run: &ClassifyRun<'_>, overrides: &ClassifyOverrides<'_>) -> Res
         .unwrap_or(Path::new("checkpoints"))
         .to_path_buf();
     let training = resolve_training_config(overrides, run.epochs, output_dir, distributed);
-    run_classify_core(run, training, selection.as_ref())
+    // The flag path discards the outcome: a human reads the printed report. The benchmark
+    // cell is the caller that needs the values behind it.
+    run_classify_core(run, training, selection.as_ref()).map(|_| ())
 }
 
 /// Build the `TrainingConfig` from the flags, falling back to the historical defaults.
@@ -1771,7 +1812,10 @@ fn resolve_classify_selection(
 ///
 /// Taking plain slices (not a `Selection`) is what makes the refusal unit-testable —
 /// `Selection` has no public constructor, by design.
-fn resolve_selected_samples(
+/// `pub(crate)` so 05-09's bench cell resolves its rows through THIS mapping rather than a
+/// second one. Two id->row mappings are two orderings that can disagree, and the order is the
+/// selection's contracted one.
+pub(crate) fn resolve_selected_samples(
     ordered: &[(&str, usize)],
     rows: &[aprender_contrastive_data::schema::LabeledExample],
 ) -> Result<Vec<entrenar::finetune::SafetySample>> {
@@ -1815,12 +1859,17 @@ fn resolve_selected_samples(
 ///
 /// The `TrainingConfig` arrives fully resolved: this function contains no seed, split or
 /// patience literal, so the flag path and 05-09's bench caller drive one implementation.
+///
+/// Returns `None` on the two paths that deliberately do not train — `--plan-only`, and a run
+/// with neither a selection nor a `--data` corpus. Those are `Ok` for the flag path and a
+/// typed refusal for a benchmark cell, which is why the distinction is in the RETURN TYPE
+/// rather than in a boolean the caller has to remember to check.
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn run_classify_core(
     run: &ClassifyRun<'_>,
     training_config: entrenar::finetune::TrainingConfig,
     selection: Option<&ClassifySelection>,
-) -> Result<()> {
+) -> Result<Option<ClassifyOutcome>> {
     use entrenar::finetune::ClassifyTrainer;
 
     let ClassifyRun {
@@ -1882,6 +1931,9 @@ pub(crate) fn run_classify_core(
         display_distributed_info();
     }
 
+    // Kept for the outcome: a benchmark cell must rebuild the SAME pipeline shape to reload
+    // the adapter it just wrote, and re-deriving the config there would be a second recipe.
+    let classify_config_recorded = classify_config.clone();
     let pipeline = load_classify_pipeline(model_path, &model_config, classify_config)?;
 
     // Capture GPU info before pipeline is moved into trainer
@@ -1895,7 +1947,7 @@ pub(crate) fn run_classify_core(
 
     if plan_only {
         display_classify_plan(&pipeline, &model_config, num_classes, rank, json_output);
-        return Ok(());
+        return Ok(None);
     }
 
     // The rows. A `--selection-manifest` run already resolved them through the Phase 2
@@ -1912,7 +1964,7 @@ pub(crate) fn run_classify_core(
         None => {
             let Some(data) = data_path else {
                 display_classify_next_steps(json_output);
-                return Ok(());
+                return Ok(None);
             };
 
             if !data.exists() {
@@ -2001,7 +2053,18 @@ pub(crate) fn run_classify_core(
         }
     }
 
-    Ok(())
+    Ok(Some(ClassifyOutcome {
+        epochs_requested: epochs,
+        epochs_completed: u32::try_from(result.epochs_completed).unwrap_or(u32::MAX),
+        stopped_early: result.stopped_early,
+        checkpoint_dir: output_dir,
+        // Read off the PIPELINE, which is where the device actually is. A caller that took
+        // this from `--gpu-backend` would report a GPU because somebody typed one.
+        gpu: gpu_info,
+        model_config,
+        classify_config: classify_config_recorded,
+        total_time_ms: result.total_time_ms,
+    }))
 }
 
 /// Display training results: per-epoch metrics table, best epoch, and summary.

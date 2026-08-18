@@ -173,6 +173,15 @@ pub enum BenchCommands {
         #[arg(long = "model-dir", value_name = "DIR", conflicts_with_all = ["record", "cold_probe"])]
         model_dir: Option<PathBuf>,
 
+        /// The base model the LoRA adapter applies to (the `lora` method)
+        ///
+        /// A separate flag from --model-dir because it is a different KIND of thing: the
+        /// SetFit encoder is a checkout directory, and this is one `.apr` file whose bytes
+        /// the row records as `base_model_bytes`. An adapter alone is not deployable, and
+        /// `deployable_total_bytes` is base + adapter — so the base has to be nameable.
+        #[arg(long = "base-model", value_name = "FILE", conflicts_with_all = ["record", "cold_probe"])]
+        base_model: Option<PathBuf>,
+
         /// Optional training configuration, file-first per the house rule
         ///
         /// Absent means the FROZEN published defaults for the method, which is what a
