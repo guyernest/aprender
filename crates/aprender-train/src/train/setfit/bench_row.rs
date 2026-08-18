@@ -182,11 +182,7 @@ impl CellKey {
     /// [`RunManifest::record`] are the doors that refuse an uncontracted cell.
     #[must_use]
     pub const fn new(method: Method, shots: u32, seed: u32) -> Self {
-        Self {
-            method,
-            shots,
-            seed,
-        }
+        Self { method, shots, seed }
     }
 
     /// The stable rendering `"<method>/s<shots>/seed<seed>"`.
@@ -229,10 +225,7 @@ pub struct VolatileBenchMetadata {
 
 impl Default for VolatileBenchMetadata {
     fn default() -> Self {
-        Self {
-            created_at: String::new(),
-            tool_version: env!("CARGO_PKG_VERSION").to_string(),
-        }
+        Self { created_at: String::new(), tool_version: env!("CARGO_PKG_VERSION").to_string() }
     }
 }
 
@@ -495,14 +488,9 @@ impl BenchRow {
     /// rather than panicking, which [`Self::from_bytes`] then refuses.
     #[must_use]
     pub fn new(payload: BenchRowPayload) -> Self {
-        let semantic_hash = payload
-            .to_canonical_bytes()
-            .map_or_else(|_| String::new(), |bytes| sha256_hex(&bytes));
-        Self {
-            semantic_hash,
-            volatile: VolatileBenchMetadata::default(),
-            payload,
-        }
+        let semantic_hash =
+            payload.to_canonical_bytes().map_or_else(|_| String::new(), |bytes| sha256_hex(&bytes));
+        Self { semantic_hash, volatile: VolatileBenchMetadata::default(), payload }
     }
 
     /// The on-disk byte form: pretty JSON plus a terminating newline.
@@ -553,9 +541,7 @@ impl BenchRow {
 
         let cell = row.payload.cell();
         if !cell.is_contracted() {
-            return Err(BenchRowError::UncontractedCell {
-                cell: cell.render(),
-            });
+            return Err(BenchRowError::UncontractedCell { cell: cell.render() });
         }
 
         // The tag and the block are two statements of the same fact; they must agree.
@@ -612,10 +598,7 @@ fn classify_row_parse_failure(bytes: &[u8], error: &serde_json::Error) -> BenchR
         };
     };
     let Some(evidence) = value.get("payload").and_then(|p| p.get("evidence")) else {
-        return missing_evidence(
-            method,
-            "the payload carries no `evidence` block".to_string(),
-        );
+        return missing_evidence(method, "the payload carries no `evidence` block".to_string());
     };
     let Ok(probe) = serde_json::from_value::<EvidenceProbe>(evidence.clone()) else {
         return missing_evidence(
@@ -789,14 +772,9 @@ impl RunManifest {
     /// Seal a payload, computing its digest.
     #[must_use]
     pub fn seal(payload: RunManifestPayload) -> Self {
-        let semantic_hash = payload
-            .to_canonical_bytes()
-            .map_or_else(|_| String::new(), |bytes| sha256_hex(&bytes));
-        Self {
-            semantic_hash,
-            volatile: VolatileBenchMetadata::default(),
-            payload,
-        }
+        let semantic_hash =
+            payload.to_canonical_bytes().map_or_else(|_| String::new(), |bytes| sha256_hex(&bytes));
+        Self { semantic_hash, volatile: VolatileBenchMetadata::default(), payload }
     }
 
     /// The on-disk byte form: pretty JSON plus a terminating newline.
@@ -862,11 +840,7 @@ impl RunManifest {
     /// How many declared cells are complete.
     #[must_use]
     pub fn completed(&self) -> usize {
-        self.payload
-            .cells
-            .iter()
-            .filter(|entry| entry.status == CellStatus::Complete)
-            .count()
+        self.payload.cells.iter().filter(|entry| entry.status == CellStatus::Complete).count()
     }
 
     /// The recorded digest of `cell`, if it is complete.
@@ -893,23 +867,13 @@ impl RunManifest {
         cell: CellKey,
         row_sha256: &str,
     ) -> Result<RecordOutcome, BenchRowError> {
-        let Some(index) = self
-            .payload
-            .cells
-            .iter()
-            .position(|entry| entry.cell() == cell)
-        else {
-            return Err(BenchRowError::UnknownCell {
-                cell: cell.render(),
-            });
+        let Some(index) = self.payload.cells.iter().position(|entry| entry.cell() == cell) else {
+            return Err(BenchRowError::UnknownCell { cell: cell.render() });
         };
 
         // Read the existing state first, so nothing is mutated on the refusal path.
         if self.payload.cells[index].status == CellStatus::Complete {
-            let existing = self.payload.cells[index]
-                .row_sha256
-                .clone()
-                .unwrap_or_default();
+            let existing = self.payload.cells[index].row_sha256.clone().unwrap_or_default();
             if existing == row_sha256 {
                 return Ok(RecordOutcome::AlreadyRecorded);
             }
@@ -951,11 +915,9 @@ fn canonical_bytes<T: Serialize>(value: &T, context: &str) -> Result<Vec<u8>, Be
 }
 
 fn pretty_file_bytes<T: Serialize>(value: &T, context: &str) -> Result<Vec<u8>, BenchRowError> {
-    let mut bytes =
-        serde_json::to_vec_pretty(value).map_err(|error| BenchRowError::Serialization {
-            context: context.to_string(),
-            detail: error.to_string(),
-        })?;
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+        BenchRowError::Serialization { context: context.to_string(), detail: error.to_string() }
+    })?;
     bytes.push(b'\n');
     Ok(bytes)
 }
@@ -1109,11 +1071,7 @@ impl fmt::Display for BenchRowError {
                 "cell {cell} is not in the declared expectation set, so there is no slot to \
                  record it in",
             ),
-            Self::CellAlreadyRecorded {
-                cell,
-                existing,
-                incoming,
-            } => write!(
+            Self::CellAlreadyRecorded { cell, existing, incoming } => write!(
                 f,
                 "cell {cell} is already recorded with digest {existing}, and {incoming} was \
                  offered. A differing re-record is refused rather than silently overwritten: \

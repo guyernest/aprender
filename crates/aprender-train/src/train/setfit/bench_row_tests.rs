@@ -51,10 +51,7 @@ const BENCH_ROW_SOURCE: &str = include_str!("bench_row.rs");
 
 /// Non-comment source lines only, so prose can neither satisfy nor trip a structural guard.
 fn non_comment_source(src: &str) -> String {
-    src.lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    src.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")
 }
 
 /// How many times `needle` occurs in `haystack`. `str::matches` rather than a membership
@@ -220,10 +217,7 @@ fn bench_row_expectation_is_eighty_unique_cells() {
     let unique: BTreeSet<CellKey> = cells.iter().copied().collect();
     assert_eq!(cells.len(), EXPECTED_CELLS);
     assert_eq!(unique.len(), EXPECTED_CELLS, "no cell key may repeat");
-    assert_eq!(
-        EXPECTED_CELLS,
-        BENCH_METHODS.len() * BENCH_SHOTS.len() * BENCH_SEEDS.len()
-    );
+    assert_eq!(EXPECTED_CELLS, BENCH_METHODS.len() * BENCH_SHOTS.len() * BENCH_SEEDS.len());
 }
 
 #[test]
@@ -272,11 +266,7 @@ fn quality_block() -> QualityBlock {
         mcc_bits: 0.4375_f64.to_bits(),
         confusion_matrix: vec![vec![20, 15, 10], vec![12, 150, 27], vec![8, 14, 24]],
         n_test_rows: 280,
-        ordered_labels: vec![
-            "none".to_string(),
-            "against".to_string(),
-            "favor".to_string(),
-        ],
+        ordered_labels: vec!["none".to_string(), "against".to_string(), "favor".to_string()],
         ece_top_label_validation: 0.0625,
         ece_top_label_validation_bits: 0.0625_f64.to_bits(),
         brier_multiclass_validation: 0.5,
@@ -385,10 +375,7 @@ fn bench_row_round_trips_with_a_stable_semantic_hash() {
     let second = parsed.to_file_bytes().expect("re-serialize");
     let reparsed = BenchRow::from_bytes(&second).expect("and verify again");
 
-    assert_eq!(
-        first, second,
-        "the on-disk form must be byte-stable across a round trip"
-    );
+    assert_eq!(first, second, "the on-disk form must be byte-stable across a round trip");
     assert_eq!(row.semantic_hash, parsed.semantic_hash);
     assert_eq!(parsed.semantic_hash, reparsed.semantic_hash);
     assert_eq!(row.payload, reparsed.payload);
@@ -516,10 +503,7 @@ fn bench_row_five_refusals_are_five_distinct_variants() {
     let e_digest = BenchRow::from_bytes(&bytes_of(&flipped)).expect_err("digest");
 
     let mut lockless = row_json(&row);
-    lockless["payload"]["evidence"]["setfit"]
-        .as_object_mut()
-        .expect("object")
-        .remove("lock");
+    lockless["payload"]["evidence"]["setfit"].as_object_mut().expect("object").remove("lock");
     let lockless = reseal(&mut lockless);
     let e_setfit = BenchRow::from_bytes(&lockless).expect_err("missing lock");
 
@@ -540,11 +524,7 @@ fn bench_row_five_refusals_are_five_distinct_variants() {
         e_lora.variant_tag(),
     ];
     let distinct: BTreeSet<&'static str> = tags.iter().copied().collect();
-    assert_eq!(
-        distinct.len(),
-        5,
-        "the five refusals collapsed into {tags:?}"
-    );
+    assert_eq!(distinct.len(), 5, "the five refusals collapsed into {tags:?}");
 }
 
 #[test]
@@ -556,20 +536,14 @@ fn bench_row_refuses_an_uncontracted_cell() {
     let off_seed = BenchRow::new(off_seed.payload);
     let err = BenchRow::from_bytes(&off_seed.to_file_bytes().expect("serialize"))
         .expect_err("an uncontracted seed is refused");
-    assert!(
-        matches!(err, BenchRowError::UncontractedCell { .. }),
-        "got {err:?}"
-    );
+    assert!(matches!(err, BenchRowError::UncontractedCell { .. }), "got {err:?}");
 
     let mut off_shots = setfit_row();
     off_shots.payload.shots = 7;
     let off_shots = BenchRow::new(off_shots.payload);
     let err = BenchRow::from_bytes(&off_shots.to_file_bytes().expect("serialize"))
         .expect_err("an uncontracted shot count is refused");
-    assert!(
-        matches!(err, BenchRowError::UncontractedCell { .. }),
-        "got {err:?}"
-    );
+    assert!(matches!(err, BenchRowError::UncontractedCell { .. }), "got {err:?}");
 }
 
 #[test]
@@ -579,10 +553,7 @@ fn bench_row_refuses_evidence_that_contradicts_its_method_tag() {
     let spoofed = BenchRow::new(payload(Method::Lora, setfit_evidence()));
     let err = BenchRow::from_bytes(&spoofed.to_file_bytes().expect("serialize"))
         .expect_err("a spoofed method tag is refused");
-    assert!(
-        matches!(err, BenchRowError::MissingLoraEvidence { .. }),
-        "got {err:?}"
-    );
+    assert!(matches!(err, BenchRowError::MissingLoraEvidence { .. }), "got {err:?}");
 }
 
 // ===========================================================================================
@@ -605,10 +576,7 @@ fn bench_row_manifest_round_trips_and_verifies_its_digest() {
     let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     value["payload"]["cells"][0]["status"] = serde_json::json!("complete");
     let err = RunManifest::from_bytes(&bytes_of(&value)).expect_err("a stale digest is refused");
-    assert!(
-        matches!(err, BenchRowError::SemanticHashMismatch { .. }),
-        "got {err:?}"
-    );
+    assert!(matches!(err, BenchRowError::SemanticHashMismatch { .. }), "got {err:?}");
 }
 
 #[test]
@@ -621,10 +589,7 @@ fn bench_row_manifest_record_is_idempotent_on_an_identical_hash() {
     // The resume path: a driver restarted after a crash re-records the cell it already
     // finished. Refusing here is what gets manifests deleted and re-created, which erases
     // the pre-declared expectation set that makes omission visible at all.
-    assert_eq!(
-        manifest.record(cell, &hash),
-        Ok(RecordOutcome::AlreadyRecorded)
-    );
+    assert_eq!(manifest.record(cell, &hash), Ok(RecordOutcome::AlreadyRecorded));
     assert_eq!(manifest.completed(), 1);
 }
 
@@ -636,9 +601,7 @@ fn bench_row_manifest_record_collides_on_a_differing_hash() {
     let second = "2".repeat(64);
 
     assert_eq!(manifest.record(cell, &first), Ok(RecordOutcome::Recorded));
-    let err = manifest
-        .record(cell, &second)
-        .expect_err("a contradicting re-record is refused");
+    let err = manifest.record(cell, &second).expect_err("a contradicting re-record is refused");
     assert!(
         matches!(
             &err,
@@ -658,10 +621,7 @@ fn bench_row_manifest_record_refuses_a_cell_outside_the_expectation() {
     let err = manifest
         .record(CellKey::new(Method::Setfit, 16, 42), &"3".repeat(64))
         .expect_err("42 is not a contracted seed");
-    assert!(
-        matches!(err, BenchRowError::UnknownCell { .. }),
-        "got {err:?}"
-    );
+    assert!(matches!(err, BenchRowError::UnknownCell { .. }), "got {err:?}");
 }
 
 #[test]
@@ -675,10 +635,7 @@ fn bench_row_manifest_refuses_an_empty_expectation_set() {
     let resealed = reseal(&mut value);
 
     let err = RunManifest::from_bytes(&resealed).expect_err("zero cells is an ERROR, not an Ok");
-    assert!(
-        matches!(err, BenchRowError::EmptyExpectationSet),
-        "got {err:?}"
-    );
+    assert!(matches!(err, BenchRowError::EmptyExpectationSet), "got {err:?}");
 }
 
 #[test]
@@ -713,10 +670,7 @@ fn bench_row_manifest_refuses_a_reordered_expectation_set() {
     let resealed = reseal(&mut value);
 
     let err = RunManifest::from_bytes(&resealed).expect_err("a reordered manifest is refused");
-    assert!(
-        matches!(err, BenchRowError::ExpectationSetMismatch { .. }),
-        "got {err:?}"
-    );
+    assert!(matches!(err, BenchRowError::ExpectationSetMismatch { .. }), "got {err:?}");
 }
 
 #[test]
@@ -726,10 +680,7 @@ fn bench_row_manifest_refuses_a_wrong_schema_version() {
     let manifest = RunManifest::seal(manifest.payload);
     let err = RunManifest::from_bytes(&manifest.to_file_bytes().expect("serialize"))
         .expect_err("a foreign schema version is refused");
-    assert!(
-        matches!(err, BenchRowError::UnsupportedSchemaVersion { .. }),
-        "got {err:?}"
-    );
+    assert!(matches!(err, BenchRowError::UnsupportedSchemaVersion { .. }), "got {err:?}");
 }
 
 // ===========================================================================================

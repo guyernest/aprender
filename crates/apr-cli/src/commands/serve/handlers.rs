@@ -1402,7 +1402,6 @@ pub fn build_demo_streaming_apr_cpu_router_for_test() -> axum::Router {
 // SetFit classifier serving (Phase 4, D-09 / D-10 / OPS-05)
 // ============================================================================
 
-
 /// Serve a `setfit-apr-v1` artifact over `POST /v1/classify` (D-09, OPS-05).
 ///
 /// # The server never comes up around an unverified model

@@ -331,11 +331,10 @@ pub fn reload_verified_run_from_apr(
     // implements `Deserializer` for `&Value`, so the error text and field handling are
     // unchanged and the copy disappears. `apr eval --split validation` reloads once per
     // `--candidate`, so this recurs per candidate.
-    let recorded: ProvenanceRecord =
-        serde::Deserialize::deserialize(&model.doc_view().provenance)
-            .map_err(|error: serde_json::Error| AprReloadError::ProvenanceUnreadable {
-                reason: error.to_string(),
-            })?;
+    let recorded: ProvenanceRecord = serde::Deserialize::deserialize(&model.doc_view().provenance)
+        .map_err(|error: serde_json::Error| AprReloadError::ProvenanceUnreadable {
+            reason: error.to_string(),
+        })?;
 
     // ---- The provenance identity gate: three checks, COARSE TO FINE, no rebuild yet. ----
     // The order is load-bearing, not stylistic. See this module's header: the three

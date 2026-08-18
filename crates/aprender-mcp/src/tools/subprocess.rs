@@ -47,7 +47,10 @@ fn resolve_apr_binary(
     }
     if let Ok(path) = current_exe {
         // `apr` on unix, `apr.exe` on Windows — both stem to "apr".
-        if path.file_stem().is_some_and(|stem| stem == OsStr::new("apr")) {
+        if path
+            .file_stem()
+            .is_some_and(|stem| stem == OsStr::new("apr"))
+        {
             return path.into_os_string();
         }
     }
@@ -67,6 +70,7 @@ fn resolve_apr_binary(
 /// 2. When a *different* `apr` is on PATH, the server silently drives a binary
 ///    it is not — a v0.63.0 server shelling out to a stale build. Four `apr`
 ///    binaries have coexisted on one dev box (see CLAUDE.md "pin the binary").
+///
 /// Resolved once: `current_exe()` is a syscall and the answer cannot change for
 /// the lifetime of the process.
 ///
@@ -78,9 +82,8 @@ fn resolve_apr_binary(
 #[must_use]
 pub fn apr_binary() -> &'static OsStr {
     static RESOLVED: OnceLock<OsString> = OnceLock::new();
-    RESOLVED.get_or_init(|| {
-        resolve_apr_binary(std::env::var_os(APR_BIN_ENV), std::env::current_exe())
-    })
+    RESOLVED
+        .get_or_init(|| resolve_apr_binary(std::env::var_os(APR_BIN_ENV), std::env::current_exe()))
 }
 
 /// Default grace window between SIGTERM and SIGKILL for cancelled calls.
@@ -330,7 +333,11 @@ where
 /// Generic-over-program variant of [`run_apr_streaming`] used by tests that
 /// need to inject a mock subprocess.
 #[must_use]
-pub fn spawn_streaming<F>(program: impl AsRef<OsStr>, args: &[&str], mut on_line: F) -> ToolCallResult
+pub fn spawn_streaming<F>(
+    program: impl AsRef<OsStr>,
+    args: &[&str],
+    mut on_line: F,
+) -> ToolCallResult
 where
     F: FnMut(&str),
 {
@@ -433,10 +440,7 @@ mod tests {
     fn resolve_apr_uses_current_exe_not_bare_path() {
         let resolved =
             resolve_apr_binary(None, Ok(PathBuf::from("/opt/aprender/target/release/apr")));
-        assert_eq!(
-            resolved,
-            OsString::from("/opt/aprender/target/release/apr")
-        );
+        assert_eq!(resolved, OsString::from("/opt/aprender/target/release/apr"));
         assert_ne!(resolved, OsString::from("apr"));
     }
 
@@ -467,10 +471,8 @@ mod tests {
     /// Only when `current_exe()` is unavailable does PATH lookup apply.
     #[test]
     fn resolve_apr_falls_back_to_path_when_current_exe_fails() {
-        let resolved = resolve_apr_binary(
-            None,
-            Err(std::io::Error::other("current_exe unavailable")),
-        );
+        let resolved =
+            resolve_apr_binary(None, Err(std::io::Error::other("current_exe unavailable")));
         assert_eq!(resolved, OsString::from("apr"));
     }
 

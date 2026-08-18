@@ -681,7 +681,7 @@ pub fn verify_run(
                 cell: cell.render(),
                 path: path.display().to_string(),
                 detail: other.to_string(),
-            }
+            },
         })?;
 
         let recorded = entry.row_sha256.clone().unwrap_or_default();
