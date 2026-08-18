@@ -1142,6 +1142,47 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../aprender-core/tests/fixtures/setfit")
     }
 
+    /// A complete, accepted `--config` for `apr setfit train`.
+    ///
+    /// Twelve knobs with no defaults means the first question anyone running this
+    /// command hits is "what does a valid config even look like" — this is that
+    /// answer, and it is the exact file used to train a real `setfit-apr-v1`
+    /// end-to-end (seed 17, 8 shots, TweetEval stance).
+    fn reference_config_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/setfit/train-config.json")
+    }
+
+    /// The reference config must survive the PRODUCTION door, not a re-parse.
+    ///
+    /// `parse_config` is what `--config` actually calls, and for this type
+    /// deserialization IS validation: the wire form routes through
+    /// `SetFitTrainConfig::new`, so an unknown key or an out-of-range knob is
+    /// rejected here rather than surfacing mid-training. A fixture nothing
+    /// executes rots into a plausible-looking file that no longer loads; this
+    /// test is what stops that. It caught `max_length: 128` on first authoring —
+    /// the pinned tokenizer truncates at 256 and takes no max-length parameter
+    /// (contract setfit-train-lifecycle-v1, TRN-02).
+    #[test]
+    fn reference_train_config_fixture_is_accepted_by_the_real_parser() {
+        let path = reference_config_path();
+        assert!(
+            path.exists(),
+            "reference config fixture missing at {}",
+            path.display()
+        );
+        let config = parse_config(&path).unwrap_or_else(|error| {
+            panic!(
+                "reference config fixture must parse and validate through parse_config, \
+                 but was rejected: {error}"
+            )
+        });
+        // Spot-check the knobs a reader is most likely to copy wrong. `max_length`
+        // is the one the pinned tokenizer constrains; `root_seed` must be a
+        // contracted benchmark seed so the fixture doubles as a runnable example.
+        assert_eq!(config.max_length() as usize, MAX_SEQUENCE_LENGTH);
+        assert_eq!(config.root_seed(), 17);
+    }
+
     #[test]
     #[ignore = "integration weight: builds a real benchmark directory and selection. Run as \
                 its own invocation — `cargo test -p apr-cli --features setfit --lib \
