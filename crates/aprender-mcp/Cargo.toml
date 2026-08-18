@@ -46,6 +46,13 @@ anyhow = { workspace = true, optional = true }
 # iterates `inventory::iter::<McpToolEntry>` at startup. See
 # contracts/apr-mcp-tool-inventory-v1.yaml.
 inventory = "0.3"
+# `apr.predict` hands its batch to the CLI through `--input <FILE>`, the shared
+# `ClassifyRequestDocument`, rather than one `--text=` per text: argv is capped
+# by the OS (`ARG_MAX` is 1 MiB here — the SAME number as the contract's
+# `max_request_body_bytes`, minus the environment), so a contract-legal batch
+# did not fit through it. Already a workspace dep at 3.27 in the lockfile, so
+# this adds no transitive cost.
+tempfile = { workspace = true }
 # M5 prep: pmcp 2.3 is PAIML's Rust MCP SDK, already pinned in
 # aprender-orchestrate for the MCP client side. Pulled in here as an optional
 # dep so PR 1 is a zero-behaviour-change patch — the dispatcher still runs on

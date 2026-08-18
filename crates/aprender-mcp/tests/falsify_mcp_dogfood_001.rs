@@ -217,7 +217,9 @@ fn write_mock_apr_shim(dir: &Path) {
         writeln!(f, "  serve)").expect("serve open");
         writeln!(f, "    exit 0 ;;").expect("serve close");
 
-        // apr.predict — wraps `apr predict <model> --text ... --json`.
+        // apr.predict — wraps `apr predict <model> --input <doc> --json`. The batch
+        // rides in the request document, not argv, so the shim sees a fixed argv
+        // whatever the batch size (see the tool module's ARG_MAX note).
         writeln!(f, "  predict)").expect("predict open");
         writeln!(
             f,
