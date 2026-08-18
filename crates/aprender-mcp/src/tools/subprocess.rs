@@ -12,10 +12,64 @@
 //! thin wrapper for tools that don't support cancellation yet.
 
 use crate::types::ToolCallResult;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
+
+/// Environment override naming the `apr` binary subprocess tools should drive.
+pub const APR_BIN_ENV: &str = "APR_BIN";
+
+/// Resolve the `apr` binary this server drives, given an explicit override and
+/// the current executable path. Pure so the precedence is testable without
+/// mutating process environment from parallel tests.
+///
+/// Precedence: `APR_BIN` → `current_exe()` **if it is itself an `apr`** → `"apr"` (PATH).
+///
+/// The `file_stem == "apr"` guard is load-bearing, not defensive dressing. This
+/// module is linked into any binary that depends on the crate — most importantly
+/// the unit-test harness, whose `current_exe()` is `aprender_mcp-<hash>`. Without
+/// the guard, `run_apr` spawns *the test binary itself* with `apr`'s arguments;
+/// the harness reads them as a test filter, runs nothing, and exits 0, so a
+/// spawn-failure test silently reports success. Self-spawning is a worse failure
+/// than the PATH bug it replaces, so anything not named `apr` falls back to PATH.
+fn resolve_apr_binary(
+    override_bin: Option<OsString>,
+    current_exe: std::io::Result<PathBuf>,
+) -> OsString {
+    if let Some(explicit) = override_bin {
+        if !explicit.is_empty() {
+            return explicit;
+        }
+    }
+    if let Ok(path) = current_exe {
+        // `apr` on unix, `apr.exe` on Windows — both stem to "apr".
+        if path.file_stem().is_some_and(|stem| stem == OsStr::new("apr")) {
+            return path.into_os_string();
+        }
+    }
+    // The OS could not tell us what we are, or we are not an `apr`.
+    OsString::from("apr")
+}
+
+/// The `apr` binary to spawn.
+///
+/// The MCP server IS an `apr` subcommand (`apr mcp`), so the running executable
+/// is by construction a correct, version-matched `apr`. Spawning a PATH-resolved
+/// `"apr"` instead has two failure modes, both observed:
+///
+/// 1. `.mcp.json` configured with an absolute path (`{"command":"/path/to/apr",
+///    "args":["mcp"]}`) leaves no `apr` on PATH, so every subprocess tool fails
+///    with `Failed to spawn ...: No such file or directory`.
+/// 2. When a *different* `apr` is on PATH, the server silently drives a binary
+///    it is not — a v0.63.0 server shelling out to a stale build. Four `apr`
+///    binaries have coexisted on one dev box (see CLAUDE.md "pin the binary").
+#[must_use]
+fn apr_binary() -> OsString {
+    resolve_apr_binary(std::env::var_os(APR_BIN_ENV), std::env::current_exe())
+}
 
 /// Default grace window between SIGTERM and SIGKILL for cancelled calls.
 ///
@@ -36,10 +90,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// - Spawn failure → `error("Failed to spawn apr ...: <io-err>")`
 #[must_use]
 pub fn run_apr(args: &[&str]) -> ToolCallResult {
-    let output = match Command::new("apr").args(args).output() {
+    let program = apr_binary();
+    let output = match Command::new(&program).args(args).output() {
         Ok(o) => o,
         Err(e) => {
-            let cmd = format!("apr {}", args.join(" "));
+            // Name the binary actually spawned, not the literal "apr". The old
+            // message said `apr` regardless of what ran, which is precisely why
+            // a PATH-resolution failure read as "apr is broken" instead of
+            // "the server looked for apr somewhere you did not expect".
+            let cmd = format!("{} {}", program.to_string_lossy(), args.join(" "));
             return ToolCallResult::error(format!("Failed to spawn `{cmd}`: {e}"));
         }
     };
@@ -82,19 +141,20 @@ pub fn run_apr_cancellable(
     cancel_rx: &Receiver<()>,
     grace_ms: u64,
 ) -> ToolCallResult {
-    spawn_cancellable("apr", args, cancel_rx, grace_ms)
+    spawn_cancellable(&apr_binary(), args, cancel_rx, grace_ms)
 }
 
 /// Test-visible generic over the binary name. `run_apr_cancellable` is the
-/// `"apr"`-bound wrapper clients should use in production code.
+/// `apr`-bound wrapper clients should use in production code.
 #[must_use]
 pub fn spawn_cancellable(
-    program: &str,
+    program: impl AsRef<OsStr>,
     args: &[&str],
     cancel_rx: &Receiver<()>,
     grace_ms: u64,
 ) -> ToolCallResult {
-    let cmd_display = format!("{program} {}", args.join(" "));
+    let program = program.as_ref();
+    let cmd_display = format!("{} {}", program.to_string_lossy(), args.join(" "));
 
     let mut child = match Command::new(program)
         .args(args)
@@ -252,17 +312,18 @@ pub fn run_apr_streaming<F>(args: &[&str], on_line: F) -> ToolCallResult
 where
     F: FnMut(&str),
 {
-    spawn_streaming("apr", args, on_line)
+    spawn_streaming(&apr_binary(), args, on_line)
 }
 
 /// Generic-over-program variant of [`run_apr_streaming`] used by tests that
 /// need to inject a mock subprocess.
 #[must_use]
-pub fn spawn_streaming<F>(program: &str, args: &[&str], mut on_line: F) -> ToolCallResult
+pub fn spawn_streaming<F>(program: impl AsRef<OsStr>, args: &[&str], mut on_line: F) -> ToolCallResult
 where
     F: FnMut(&str),
 {
-    let cmd_display = format!("{program} {}", args.join(" "));
+    let program = program.as_ref();
+    let cmd_display = format!("{} {}", program.to_string_lossy(), args.join(" "));
 
     let mut child = match Command::new(program)
         .args(args)
@@ -340,6 +401,66 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::thread;
+
+    /// An explicit `APR_BIN` override wins over everything else.
+    #[test]
+    fn resolve_apr_prefers_explicit_override() {
+        let resolved = resolve_apr_binary(
+            Some(OsString::from("/opt/custom/apr")),
+            Ok(PathBuf::from("/usr/local/bin/apr")),
+        );
+        assert_eq!(resolved, OsString::from("/opt/custom/apr"));
+    }
+
+    /// With no override, the server drives ITSELF — the binary running
+    /// `apr mcp` is by construction a correct `apr`. Regression guard: a bare
+    /// `"apr"` here is the defect (every subprocess tool fails with "No such
+    /// file or directory" when apr is not on PATH, and silently drives a
+    /// DIFFERENT binary when a stale one is).
+    #[test]
+    fn resolve_apr_uses_current_exe_not_bare_path() {
+        let resolved =
+            resolve_apr_binary(None, Ok(PathBuf::from("/opt/aprender/target/release/apr")));
+        assert_eq!(
+            resolved,
+            OsString::from("/opt/aprender/target/release/apr")
+        );
+        assert_ne!(resolved, OsString::from("apr"));
+    }
+
+    /// A `current_exe()` that is NOT an `apr` must never be spawned as one.
+    /// Regression guard for a real failure: under `cargo test`, `current_exe()`
+    /// is `aprender_mcp-<hash>`, and returning it made `run_apr` invoke the test
+    /// harness with apr's arguments — the harness read them as a test filter and
+    /// exited 0, so the spawn-failure test flipped from Some(true) to None.
+    #[test]
+    fn resolve_apr_refuses_a_current_exe_that_is_not_apr() {
+        let resolved = resolve_apr_binary(
+            None,
+            Ok(PathBuf::from("/tmp/target/debug/deps/aprender_mcp-9f2b1c")),
+        );
+        assert_eq!(resolved, OsString::from("apr"));
+    }
+
+    /// Windows names it `apr.exe`; stripping the extension must still match.
+    /// Uses a `/`-separated path deliberately: `PathBuf` applies *host* path
+    /// semantics, so a literal `C:\tools\apr.exe` has no separators on unix and
+    /// stems to `C:\tools\apr`, testing the harness rather than the code.
+    #[test]
+    fn resolve_apr_accepts_exe_suffix() {
+        let resolved = resolve_apr_binary(None, Ok(PathBuf::from("/tools/apr.exe")));
+        assert_eq!(resolved, OsString::from("/tools/apr.exe"));
+    }
+
+    /// Only when `current_exe()` is unavailable does PATH lookup apply.
+    #[test]
+    fn resolve_apr_falls_back_to_path_when_current_exe_fails() {
+        let resolved = resolve_apr_binary(
+            None,
+            Err(std::io::Error::other("current_exe unavailable")),
+        );
+        assert_eq!(resolved, OsString::from("apr"));
+    }
 
     /// Spawning `apr` with an unrecognised subcommand yields a tool error
     /// (non-zero exit), not a panic.
