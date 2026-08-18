@@ -556,6 +556,12 @@ visualization = ["cli", "apr-cli/visualization"]
 zram = ["cli", "apr-cli/zram"]
 xet = ["cli", "apr-cli/xet"]
 whisper = ["cli", "apr-cli/whisper"]
+# Native SetFit classifier training + `apr setfit` / SetFit `apr predict` routing.
+# Without this passthrough `cargo install aprender --features setfit` fails with
+# "the package 'aprender' does not contain this feature" — the milestone's headline
+# capability is unreachable from the only published install path. Guarded by
+# scripts/check_publish_safety.sh (subcommand-gating features must be forwarded).
+setfit = ["cli", "apr-cli/setfit"]
 full = ["cli", "apr-cli/full"]
 
 [lib]

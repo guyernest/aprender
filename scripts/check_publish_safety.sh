@@ -174,6 +174,46 @@ else
     echo "OK ($aprender_count files)"
 fi
 
+# Check 10: every apr-cli feature that GATES A SUBCOMMAND must have a root-facade
+# passthrough. The published crate is `aprender`, not `apr-cli`, so a feature with
+# no passthrough cannot be enabled by any `cargo install aprender` invocation —
+# `--features <name>` errors out and `--features full` silently omits it. Found by
+# `cargo install aprender --features setfit` failing while every CI SetFit test
+# passed, because CI tests `-p <crate> --features setfit` and never the facade.
+# The decision surface is the facade's [features] table, so that is what is scanned.
+echo -n "  Facade feature passthrough check... "
+checked=$((checked + 1))
+# Features that gate dispatch but are deliberately NOT user-installable.
+# dev  = `apr mono` internal maintenance subcommands.
+# full = the aggregate itself; it is a passthrough, not a gated capability.
+passthrough_exempt="dev full"
+missing_passthrough=""
+gating_features=$(grep -rhoE '#\[cfg\(feature = "[a-z-]+"\)\]' crates/apr-cli/src/dispatch*.rs 2>/dev/null \
+    | sed -E 's/.*"([a-z-]+)".*/\1/' | sort -u)
+# Here-string, not a pipe: a piped `while read` runs in a subshell and
+# `missing_passthrough` would not survive the loop, silently passing the gate.
+while IFS= read -r feat; do
+    [ -n "$feat" ] || continue
+    case " $passthrough_exempt " in
+        *" $feat "*) continue ;;
+        *) ;;
+    esac
+    # The passthrough must both exist AND forward to apr-cli/<feat>; a bare
+    # `feat = []` would satisfy `cargo --features feat` while enabling nothing.
+    if ! grep -qE "^${feat} = \[.*\"apr-cli/${feat}\".*\]" Cargo.toml; then
+        missing_passthrough="$missing_passthrough $feat"
+    fi
+done <<< "$gating_features"
+if [ -n "$missing_passthrough" ]; then
+    echo "FAIL"
+    echo "FAIL: apr-cli features gate subcommands but have no root-facade passthrough:$missing_passthrough"
+    echo "  Effect: 'cargo install aprender --features <name>' errors; '--features full' silently omits it."
+    echo "  Fix: add the feature to the root Cargo.toml features table, forwarding to cli and apr-cli/<name>."
+    errors=$((errors + 1))
+else
+    echo "OK"
+fi
+
 # Summary
 echo ""
 if [ "$errors" -gt 0 ]; then
