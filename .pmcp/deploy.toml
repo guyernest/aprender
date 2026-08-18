@@ -1,8 +1,10 @@
 # Deployment config for the thin SetFit MCP server (pmcp.run).
-# Deploy with:
-#   APRENDER_SETFIT_MODEL=/abs/path/to/model.apr \
-#     cargo pmcp deploy --target-type pmcp-run --target <named-target> \
-#       --manifest-path crates/aprender-mcp-setfit-lambda
+# The deploy ROOT is the repo root: cargo-pmcp discovers the Lambda wrapper
+# crate (crates/aprender-mcp-setfit-lambda, bin `bootstrap`) by scanning the
+# workspace, and `cargo pmcp configure use <target>` anchors its active-target
+# state here. Deploy from the repo root:
+#   APRENDER_SETFIT_MODEL=$PWD/models/<model>.apr \
+#     cargo pmcp deploy --target <named-target> --no-color
 # The named target (~/.pmcp/config.toml) supplies the account/region binding.
 
 [target]

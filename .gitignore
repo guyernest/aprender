@@ -55,6 +55,13 @@ crates/aprender-shell/qa_test_artifacts/
 # Benchmark preparations (apr data tweet-eval-stance) land here, and the
 # original tweet text must never be committed to this repository.
 /data/
+# CDK deploy project (cargo pmcp): installed deps and synth output only —
+# the CDK source (deploy/bin, deploy/lib, cdk.json) is committed.
+/deploy/node_modules/
+/deploy/cdk.out/
+/deploy/.build/
+# cargo-pmcp per-checkout state (which named target is active on THIS machine)
+/.pmcp/active-target
 .pmat-metrics/
 .cargo/config.toml
 
