@@ -905,6 +905,13 @@ fn dispatch_setfit_bench_command(
             probe_text: probe_text.as_deref(),
             json: cli.json,
         }),
+        BenchCommands::Report { bench_dir, out } => {
+            commands::setfit_bench::report::run(&commands::setfit_bench::report::BenchReportArgs {
+                bench_dir,
+                json: cli.json,
+                out: out.as_deref(),
+            })
+        }
     }
 }
 

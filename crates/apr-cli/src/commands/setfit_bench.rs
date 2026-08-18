@@ -65,17 +65,14 @@ use crate::error::{CliError, Result};
 /// `setfit_io::read_setfit_apr_file_bounded`, the ONE bounded artifact door.
 pub(crate) const MAX_BENCH_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Row files live here, relative to `--bench-dir`.
-pub(crate) const ROWS_DIR: &str = "rows";
-
-/// Committed SetFit selection-lock records live here.
-pub(crate) const LOCKS_DIR: &str = "locks";
-
-/// Append-only LoRA candidate ledgers live here.
-pub(crate) const LEDGER_DIR: &str = "ledger";
-
-/// The pre-declared expectation set lives here.
-pub(crate) const RUN_MANIFEST_FILE: &str = "run-manifest.json";
+// The directory layout is the LIBRARY's, not this adapter's. `bench report` (05-10) resolves
+// rows, locks and ledgers by these same names, and two spellings of a path are two paths: a
+// drift between the writer here and the reader there would make every cell look un-run while
+// reporting a missing-file error naming a path the writer never used. Re-exported rather than
+// restated so there is exactly one definition.
+pub(crate) use entrenar::train::setfit::bench_gate::{
+    LEDGER_DIR, LOCKS_DIR, ROWS_DIR, RUN_MANIFEST_FILE,
+};
 
 /// The machine-readable line the cold-probe child prints, and its parent parses.
 ///
@@ -217,20 +214,13 @@ pub(crate) fn resolve_cell(
     Ok(CellKey::new(method, shots, seed))
 }
 
-/// The row filename grammar, produced by ONE function.
+/// The row filename grammar, produced by ONE function — the LIBRARY's.
 ///
-/// `{method}-s{shots}-seed{seed}.json`. Two spellings of a filename are two filenames, and the
-/// resume path compares a recorded digest against the file this name resolves to — so a drift
-/// here would silently make every cell look un-run.
-#[must_use]
-pub(crate) fn row_file_name(cell: CellKey) -> String {
-    format!(
-        "{}-s{}-seed{}.json",
-        cell.method.tag(),
-        cell.shots,
-        cell.seed
-    )
-}
+/// `{method}-s{shots}-seed{seed}.json`. Two spellings of a filename are two filenames, and both
+/// the resume path here and `bench report`'s gate compare a recorded digest against the file
+/// this name resolves to — so a drift between two copies would silently make every cell look
+/// un-run. Delegated rather than restated.
+pub(crate) use entrenar::train::setfit::bench_gate::row_file_name;
 
 /// The committed SetFit lock record's path, RELATIVE to the bench directory.
 #[must_use]
@@ -2207,6 +2197,472 @@ pub(crate) mod lora {
         checkpoint_dir
             .join(format!("epoch-{}", epochs_completed.saturating_sub(1)))
             .join(ADAPTER_FILE)
+    }
+}
+
+// ==========================================================================================
+// `apr setfit bench report` — verified data only, estimation-first (D-13/D-15, EVAL-04)
+// ==========================================================================================
+
+/// The report: verify the whole directory, then render what was verified and nothing else.
+///
+/// # This module renders. It decides nothing.
+///
+/// Completeness, pairing, provenance recomputation and every statistic live in
+/// `entrenar::train::setfit::bench_gate`. `aggregate` takes a `VerifiedRunSet`, which has no
+/// public constructor, so this adapter CANNOT print a partial table even by mistake: there is
+/// no value it could compute one from.
+///
+/// # The two things a renderer can get wrong that no arithmetic check would catch
+///
+/// 1. **A technically-true table that reads as a like-for-like benchmark.** Every resource
+///    column therefore carries its mechanism string and its measurement scope, and a row that
+///    puts a `sysinfo_sampled_*` LOWER BOUND beside a `child_max_rss_*` exact kernel high-water
+///    mark prints [`INCOMPARABLE_NOTE`] on that row. The note is proven TWO-SIDED — a
+///    same-mechanism control asserts its absence — so it is not unconditional boilerplate a
+///    reader learns to skip.
+/// 2. **An adapter's bytes standing in for a deployable model size.** The cross-method size
+///    table uses `deployable_total_bytes` only. LoRA's adapter-only `artifact_bytes` appears in
+///    the per-method detail, labelled, and never in the comparison.
+pub(crate) mod report {
+    use std::path::Path;
+
+    use entrenar::train::setfit::bench_gate::{
+        aggregate, mechanisms_are_comparable, verify_run, MethodShotQuality, MethodShotResource,
+        RunAggregate, SeriesSummary, ShotDelta,
+    };
+    use entrenar::train::setfit::bench_row::{Method, RunManifest, BENCH_METHODS, BENCH_SHOTS};
+
+    use super::{read_bounded, RUN_MANIFEST_FILE};
+    use crate::commands::setfit_train::atomic_write;
+    use crate::error::{CliError, Result};
+
+    /// Everything `bench report` carries, resolved from clap.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct BenchReportArgs<'a> {
+        /// Where rows, locks, ledgers and the run manifest live.
+        pub(crate) bench_dir: &'a Path,
+        /// Emit the machine-readable detail on stdout instead of the human tables.
+        pub(crate) json: bool,
+        /// Also write the machine-readable detail to this file.
+        pub(crate) out: Option<&'a Path>,
+    }
+
+    // --- Pinned strings. Constants rather than inline literals so the tests assert the SHIPPED
+    // --- text rather than a copy of it that can drift.
+
+    /// The quality table's header.
+    pub(crate) const QUALITY_TABLE_HEADER: &str =
+        "QUALITY - official F_avg, mean +/- (n-1) std [min, max]";
+
+    /// The paired-delta table's header.
+    pub(crate) const DELTA_TABLE_HEADER: &str =
+        "PAIRED DELTA - F_avg(setfit) - F_avg(lora), same selection manifest, 95% CI";
+
+    /// The per-method resource detail's header.
+    pub(crate) const RESOURCE_TABLE_HEADER: &str =
+        "RESOURCE - per method and host, every figure with its measurement boundary";
+
+    /// The cross-method resource comparison's header.
+    pub(crate) const RESOURCE_COMPARISON_HEADER: &str =
+        "RESOURCE COMPARISON - setfit beside lora, mechanism-labelled at the point of comparison";
+
+    /// The cross-method size table's header. It NAMES `deployable`, because the field it uses is
+    /// the claim.
+    pub(crate) const SIZE_TABLE_HEADER: &str =
+        "MODEL SIZE - deployable_total_bytes, what a user must ship to serve this";
+
+    /// The D-09 framing line every resource section carries.
+    pub(crate) const PER_HOST_FRAMING: &str = "as-deployed method costs; hosts differ by design \
+                                               and are never averaged together";
+
+    /// The note a mixed-mechanism comparison row carries.
+    pub(crate) const INCOMPARABLE_NOTE: &str =
+        "mechanisms differ: sampled lower bound vs exact kernel high-water mark - not a \
+         like-for-like comparison";
+
+    /// What a degenerate paired interval renders as.
+    pub(crate) const CI_UNAVAILABLE: &str = "CI unavailable (zero variance)";
+
+    /// The estimation-first statement (D-08).
+    ///
+    /// It deliberately does NOT contain the word a verdict would use. A report that prints a
+    /// binary better/worse is precisely where few-shot seed sensitivity hides: rankings that
+    /// reverse across seeds become one word.
+    pub(crate) const ESTIMATION_FIRST_NOTE: &str =
+        "Estimation-first (D-08): point estimates, dispersion and paired 95% CIs only. No \
+         binary verdict is printed; p-values live in the --json detail.";
+
+    /// How LoRA's adapter-only figure is labelled where it IS shown.
+    pub(crate) const ADAPTER_ONLY_LABEL: &str = "adapter only";
+
+    /// The machine-readable payload's schema tag.
+    pub(crate) const REPORT_PAYLOAD_SCHEMA: &str = "setfit-bench-report-v1";
+
+    /// The `--json` / `--out` payload.
+    ///
+    /// The aggregate sits under `detail` rather than at the top level because that is what it
+    /// IS: the machine-readable detail, and the ONLY place a p-value appears. D-08 permits
+    /// p-values in the detail and forbids them in claim language, and a key named `detail` is a
+    /// structural statement of that boundary rather than a convention a future renderer can
+    /// forget.
+    #[derive(Debug, serde::Serialize)]
+    pub(crate) struct ReportPayload<'a> {
+        /// The payload schema.
+        pub(crate) schema: &'static str,
+        /// The claims contract the numbers were computed under.
+        pub(crate) contract_id: &'a str,
+        /// Per-seed deltas, p-values, every mechanism string, and both size fields.
+        pub(crate) detail: &'a RunAggregate,
+    }
+
+    impl<'a> ReportPayload<'a> {
+        /// Wrap an aggregate.
+        pub(crate) fn new(report: &'a RunAggregate) -> Self {
+            Self {
+                schema: REPORT_PAYLOAD_SCHEMA,
+                contract_id: &report.contract_id,
+                detail: report,
+            }
+        }
+    }
+
+    /// What to do about a refusal, appended to every typed gate error.
+    const REMEDY: &str =
+        "The report has no partial-data mode: a missing, substituted, unmatched or \
+         post-test-selected cell invalidates the whole run (EVAL-04). Re-run the named cell \
+         with `apr setfit bench run --method <M> --shots <S> --seed <D> --bench-dir <DIR>`, or, \
+         if it ran on the other host, ingest its row with `--record <ROW_FILE>`.";
+
+    /// Read the run manifest. It must EXIST — a report over a declared-on-the-spot manifest
+    /// would be a report over eighty pending cells, which is a confusing way to say "there is
+    /// no run here".
+    fn load_manifest_required(bench_dir: &Path) -> Result<RunManifest> {
+        let path = bench_dir.join(RUN_MANIFEST_FILE);
+        if !path.exists() {
+            return Err(CliError::ValidationFailed(format!(
+                "{}: no run manifest. Completeness is defined by that file and the contract, \
+                 never by a directory listing — a listing can only report what is present, and \
+                 cannot report what is missing. Run at least one cell with `apr setfit bench \
+                 run --bench-dir {}` to declare it.",
+                path.display(),
+                bench_dir.display()
+            )));
+        }
+        let bytes = read_bounded(&path)?;
+        RunManifest::from_bytes(&bytes)
+            .map_err(|error| CliError::ValidationFailed(format!("{}: {error}", path.display())))
+    }
+
+    /// Verify the directory and aggregate it, or return the typed refusal.
+    ///
+    /// Separated from [`run`] so a test can assert that a refused run set produces an error and
+    /// NO rendered table — the rendering functions are simply never reached, which is a stronger
+    /// statement than "the output happened not to contain a header".
+    pub(crate) fn verified_aggregate(bench_dir: &Path) -> Result<RunAggregate> {
+        let manifest = load_manifest_required(bench_dir)?;
+        let verified = verify_run(&manifest, bench_dir)
+            .map_err(|error| CliError::ValidationFailed(format!("{error}\n\n{REMEDY}")))?;
+        Ok(aggregate(&verified))
+    }
+
+    /// Render a verified benchmark directory.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::ValidationFailed`] for any gate refusal (naming the cell and, for provenance,
+    /// the file), a missing manifest, or a serialization failure; [`CliError::Io`] for the
+    /// optional `--out` write.
+    pub(crate) fn run(args: &BenchReportArgs<'_>) -> Result<()> {
+        let report = verified_aggregate(args.bench_dir)?;
+        let payload = ReportPayload::new(&report);
+
+        if let Some(out) = args.out {
+            let mut bytes = serde_json::to_vec_pretty(&payload).map_err(|error| {
+                CliError::ValidationFailed(format!("the report did not serialize: {error}"))
+            })?;
+            bytes.push(b'\n');
+            atomic_write(out, &bytes, true)?;
+        }
+
+        if args.json {
+            let rendered = serde_json::to_string_pretty(&payload).map_err(|error| {
+                CliError::ValidationFailed(format!("the report did not serialize: {error}"))
+            })?;
+            println!("{rendered}");
+        } else {
+            print!("{}", render_human(&report));
+        }
+        Ok(())
+    }
+
+    // --- Rendering -------------------------------------------------------------------------
+
+    /// One summary as `mean +/- std [min, max]`.
+    fn summary_cell(summary: &SeriesSummary) -> String {
+        format!(
+            "{:>10.4} {:>9.4} {:>10.4} {:>10.4}",
+            summary.mean, summary.std, summary.min, summary.max
+        )
+    }
+
+    /// The header block: what was verified, and what a reader may conclude from it.
+    fn render_header(report: &RunAggregate) -> String {
+        format!(
+            "SetFit vs LoRA - benchmark claims report\n\
+             contract: {}\n\
+             design:   {} seeds per cell, df = {}, 95% CI uses the frozen t = {:.15}\n\
+             verified: every cell of the contracted matrix. A missing, substituted, unmatched or\n\
+             \x20         post-test-selected cell would have REFUSED this report rather than\n\
+             \x20         shrunk it, and provenance was recomputed from the committed lock and\n\
+             \x20         ledger bytes rather than read off the rows.\n\
+             residual: a producer holding both the rows and those files could still emit a\n\
+             \x20         mutually consistent forgery. This report proves consistency, not truth.\n\n",
+            report.contract_id, report.n_seeds, report.degrees_of_freedom, report.t_crit_975_df9
+        )
+    }
+
+    /// The quality table: per `(method, shots)`, the headline and its dispersion.
+    pub(crate) fn render_quality(quality: &[MethodShotQuality]) -> String {
+        let mut out = String::from(QUALITY_TABLE_HEADER);
+        out.push('\n');
+        out.push_str(
+            "method   shots       mean       std        min        max   \
+             (macro F1 mean / MCC mean)\n",
+        );
+        for group in quality {
+            out.push_str(&format!(
+                "{:<8} {:>5} {} {:>12.4} {:>8.4}\n",
+                group.method.tag(),
+                group.shots,
+                summary_cell(&group.f_avg),
+                group.macro_f1.mean,
+                group.mcc.mean
+            ));
+        }
+        out.push_str(
+            "F_avg = (F1_against + F1_favor) / 2, the official TweetEval stance metric. Macro F1\n\
+             is published BESIDE it and never instead of it.\n",
+        );
+        out
+    }
+
+    /// The paired-delta table, with the degenerate case stated rather than blanked.
+    pub(crate) fn render_deltas(deltas: &[ShotDelta]) -> String {
+        let mut out = String::from(DELTA_TABLE_HEADER);
+        out.push('\n');
+        out.push_str("shots   mean delta   95% CI\n");
+        for delta in deltas {
+            let interval = match (delta.ci95.low, delta.ci95.high) {
+                (Some(low), Some(high)) => format!("[{low:.4}, {high:.4}]"),
+                // NEVER a blank cell and never a `null`: a degenerate interval is a visible,
+                // named state, and its point estimate is still reported because it is well
+                // defined and it is what a reader wants.
+                _ => CI_UNAVAILABLE.to_string(),
+            };
+            out.push_str(&format!(
+                "{:>5} {:>12.4}   {interval}\n",
+                delta.shots, delta.mean_delta
+            ));
+        }
+        out.push_str(ESTIMATION_FIRST_NOTE);
+        out.push('\n');
+        out
+    }
+
+    /// The per-method resource detail. Every figure carries its measurement boundary.
+    pub(crate) fn render_resource_detail(resource: &[MethodShotResource]) -> String {
+        let mut out = String::from(RESOURCE_TABLE_HEADER);
+        out.push('\n');
+        out.push_str(PER_HOST_FRAMING);
+        out.push_str("\n\n");
+        for group in resource {
+            out.push_str(&format!(
+                "{} / s{}  host: {}  backend: {}\n",
+                group.method.tag(),
+                group.shots,
+                group.hosts.join(", "),
+                group.backends.join(", ")
+            ));
+            out.push_str(&format!(
+                "  train wall                            {:>12.1} ms\n",
+                group.train_wall_ms.mean
+            ));
+            out.push_str(&format!(
+                "  cold latency (fresh child)            {:>12.1} ms\n",
+                group.cold_latency_ms.mean
+            ));
+            out.push_str(&format!(
+                "  warm latency (median of 10 after 3)   {:>12.1} ms\n",
+                group.warm_latency_ms_median.mean
+            ));
+            out.push_str(&format!(
+                "  throughput                            {:>12.1} rows/s @ batch {}\n",
+                group.throughput_rows_per_sec.mean,
+                join_u32(&group.throughput_batch_sizes)
+            ));
+            out.push_str(&format!(
+                "  train peak RSS                        {:>12.0} B   mechanism: {} [{}]\n",
+                group.train_peak_rss_bytes.mean,
+                group.train_peak_rss_mechanisms.join(", "),
+                class_tags(group.train_peak_rss_mechanism_classes.as_slice())
+            ));
+            out.push_str(&format!(
+                "  inference peak RSS                    {:>12.0} B   mechanism: {} [{}]\n",
+                group.inference_peak_rss_bytes.mean,
+                group.inference_peak_rss_mechanisms.join(", "),
+                class_tags(group.inference_peak_rss_mechanism_classes.as_slice())
+            ));
+            // THE ADAPTER-ONLY FIGURE, LABELLED, AND ONLY HERE. It answers "what did this method
+            // write", which is a different question from "what must a user ship".
+            out.push_str(&format!(
+                "  artifact bytes ({ADAPTER_ONLY_LABEL} for lora)  {:>12.0} B\n",
+                group.artifact_bytes.mean
+            ));
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Render the batch sizes a group used.
+    ///
+    /// A LIST rather than one number: throughput without a batch size is not a comparable
+    /// figure (PF-008 warning sign 4), and if a group's ten cells somehow ran at two batch
+    /// sizes a reader must see that rather than see the first one.
+    fn join_u32(values: &[u32]) -> String {
+        values
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Render a list of mechanism classes as their tags.
+    fn class_tags(classes: &[entrenar::train::setfit::bench_gate::MechanismClass]) -> String {
+        classes
+            .iter()
+            .map(|class| class.tag())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The cross-method resource comparison — where the mechanism labels EARN their place.
+    ///
+    /// This is the only table that puts a SetFit figure beside a LoRA one, so it is the only
+    /// place a like-for-like reading can be created by accident. Both mechanism strings are
+    /// printed on every row, and a row whose two sides come from different mechanism CLASSES
+    /// carries [`INCOMPARABLE_NOTE`].
+    pub(crate) fn render_resource_comparison(resource: &[MethodShotResource]) -> String {
+        let mut out = String::from(RESOURCE_COMPARISON_HEADER);
+        out.push('\n');
+        out.push_str(PER_HOST_FRAMING);
+        out.push_str("\n\n");
+        for shots in BENCH_SHOTS {
+            let setfit = resource
+                .iter()
+                .find(|g| g.method == Method::Setfit && g.shots == shots);
+            let lora = resource
+                .iter()
+                .find(|g| g.method == Method::Lora && g.shots == shots);
+            let (Some(setfit), Some(lora)) = (setfit, lora) else {
+                continue;
+            };
+            out.push_str(&format!("s{shots}\n"));
+            out.push_str(&comparison_row(
+                "train peak RSS",
+                setfit.train_peak_rss_bytes.mean,
+                &setfit.train_peak_rss_mechanisms,
+                lora.train_peak_rss_bytes.mean,
+                &lora.train_peak_rss_mechanisms,
+            ));
+            out.push_str(&comparison_row(
+                "inference peak RSS",
+                setfit.inference_peak_rss_bytes.mean,
+                &setfit.inference_peak_rss_mechanisms,
+                lora.inference_peak_rss_bytes.mean,
+                &lora.inference_peak_rss_mechanisms,
+            ));
+            out.push('\n');
+        }
+        out
+    }
+
+    /// One comparison row, with both mechanisms and the note when they are not comparable.
+    fn comparison_row(
+        label: &str,
+        setfit_value: f64,
+        setfit_mechanisms: &[String],
+        lora_value: f64,
+        lora_mechanisms: &[String],
+    ) -> String {
+        let setfit_mechanism = setfit_mechanisms.join(", ");
+        let lora_mechanism = lora_mechanisms.join(", ");
+        let mut row = format!(
+            "  {label:<20} setfit {setfit_value:>14.0} B ({setfit_mechanism})  |  lora \
+             {lora_value:>14.0} B ({lora_mechanism})\n"
+        );
+        // COMPARABLE ONLY IF EVERY PAIRING IS. A group whose ten cells used two mechanisms is
+        // labelled by the strictest of them, because a table cannot be half comparable.
+        let comparable = !setfit_mechanisms.is_empty()
+            && !lora_mechanisms.is_empty()
+            && setfit_mechanisms.iter().all(|s| {
+                lora_mechanisms
+                    .iter()
+                    .all(|l| mechanisms_are_comparable(s, l))
+            });
+        if !comparable {
+            row.push_str(&format!("    ^ {INCOMPARABLE_NOTE}\n"));
+        }
+        row
+    }
+
+    /// The cross-method size table. `deployable_total_bytes` ONLY.
+    ///
+    /// An adapter of a few tens of megabytes beside a 90 MB standalone classifier reads as
+    /// parity, while the deployable figures differ by the size of a 9B base model. That is the
+    /// most natural chart to draw from the row schema, which is exactly why the field this
+    /// table may use is named in the contract and enforced here.
+    pub(crate) fn render_sizes(resource: &[MethodShotResource]) -> String {
+        let mut out = String::from(SIZE_TABLE_HEADER);
+        out.push('\n');
+        out.push_str("method   shots   deployable_total_bytes\n");
+        for method in BENCH_METHODS {
+            for shots in BENCH_SHOTS {
+                let Some(group) = resource
+                    .iter()
+                    .find(|g| g.method == method && g.shots == shots)
+                else {
+                    continue;
+                };
+                out.push_str(&format!(
+                    "{:<8} {:>5} {:>24.0}\n",
+                    method.tag(),
+                    shots,
+                    group.deployable_total_bytes.mean
+                ));
+            }
+        }
+        out.push_str(
+            "A cross-method size claim uses THIS column and no other. LoRA's adapter-only\n\
+             artifact bytes are in the per-method detail above, labelled; an adapter is not a\n\
+             deployable model, and presenting it beside SetFit's standalone APR would understate\n\
+             LoRA by the size of its base model.\n",
+        );
+        out
+    }
+
+    /// The whole human report.
+    #[must_use]
+    pub(crate) fn render_human(report: &RunAggregate) -> String {
+        let mut out = render_header(report);
+        out.push_str(&render_quality(&report.quality));
+        out.push('\n');
+        out.push_str(&render_deltas(&report.deltas));
+        out.push('\n');
+        out.push_str(&render_resource_detail(&report.resource));
+        out.push_str(&render_resource_comparison(&report.resource));
+        out.push_str(&render_sizes(&report.resource));
+        out
     }
 }
 

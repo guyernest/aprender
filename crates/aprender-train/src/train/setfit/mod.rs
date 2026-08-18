@@ -43,6 +43,14 @@ pub mod apr_evaluate;
 /// The fresh-process door: artifact bytes -> a sealed credential (04-16, D-11, D-16).
 pub mod apr_reload;
 pub mod baseline;
+/// The claims gate: fail-closed verification + closed-form aggregation (05-10, EVAL-04).
+///
+/// Sited beside `bench_row` and NOT in the CLI adapter for the reason `bench_metrics` records:
+/// "which cells make a run complete" and "which arithmetic turns rows into published numbers"
+/// ARE the claim, and an adapter that decided either would be a second definition of the thing
+/// the contract exists to fix. The CLI's `bench report` is a filesystem-and-rendering shim over
+/// `verify_run` + `aggregate`.
+pub mod bench_gate;
 /// The EVAL-01 metric assembly: per-row predictions -> a row's `QualityBlock` (05-08).
 ///
 /// Sited beside `bench_row` and NOT in the CLI adapter for the same reason: the reduction

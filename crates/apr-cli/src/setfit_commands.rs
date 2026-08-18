@@ -228,4 +228,36 @@ pub enum BenchCommands {
         )]
         probe_text: Option<PathBuf>,
     },
+
+    /// Verify a whole benchmark directory and render the claims report
+    ///
+    /// # Verified data only — there is no partial-data mode
+    ///
+    /// The report refuses, naming the cell (and, for provenance, the FILE whose bytes
+    /// disagreed), when any expected cell is missing or `pending`, when a row's digest
+    /// does not match, when a row's payload disagrees with the slot it was filed under,
+    /// when a (shots, seed) pair's two rows consumed DIFFERENT selection manifests, when
+    /// a committed lock record or candidate ledger does not hash to what its row claims,
+    /// or when a LoRA cell's no-selection attestation does not hold. Nothing is rendered
+    /// on any of those paths: a partial table is a number, and a number is what a reader
+    /// takes away.
+    ///
+    /// # Estimation-first
+    ///
+    /// Point estimates, dispersion and paired 95% CIs. No binary verdict is printed;
+    /// p-values live in the `--json` detail only (D-08), because a verdict is precisely
+    /// where few-shot seed sensitivity hides — rankings that reverse across seeds become
+    /// one word.
+    Report {
+        /// Where rows, locks, ledgers and the run manifest live
+        #[arg(long = "bench-dir", value_name = "DIR")]
+        bench_dir: PathBuf,
+
+        /// Write the machine-readable detail to this file as well
+        ///
+        /// The same payload `--json` prints: per-seed deltas, p-values, every mechanism
+        /// string and both size fields.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
 }
