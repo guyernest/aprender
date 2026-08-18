@@ -286,6 +286,10 @@ is_evidence_failure() {
 }
 
 run_one_cell() {
+    # `local` throughout, matching cell_is_complete: these names collide with the
+    # caller's sweep loop variables, and an unqualified assignment here would
+    # silently rewrite the loop's own `shots`/`seed` mid-iteration.
+    local shots seed selection log model_flag rc
     shots="$1"
     seed="$2"
     # The SAME path `generate_selections` wrote. Built by expansion in both
@@ -295,21 +299,20 @@ run_one_cell() {
     log="$BENCH_DIR/logs/${METHOD}-s${shots}-seed${seed}.log"
     mkdir -p "$BENCH_DIR/logs"
 
+    # The two methods differ in exactly one token: the flag naming the model.
+    # Spelling the whole invocation twice means every future flag has to be added
+    # twice, and a one-sided edit yields a defect the other method never sees.
     if [ "$METHOD" = "setfit" ]; then
-        "$APR" setfit bench run \
-            --method setfit --shots "$shots" --seed "$seed" \
-            --data "$DATA_DIR" --selection "$selection" \
-            --bench-dir "$BENCH_DIR" --model-dir "$MODEL_OR_BASE" \
-            > "$log" 2>&1
-        rc=$?
+        model_flag="--model-dir"
     else
-        "$APR" setfit bench run \
-            --method lora --shots "$shots" --seed "$seed" \
-            --data "$DATA_DIR" --selection "$selection" \
-            --bench-dir "$BENCH_DIR" --base-model "$MODEL_OR_BASE" \
-            > "$log" 2>&1
-        rc=$?
+        model_flag="--base-model"
     fi
+    "$APR" setfit bench run \
+        --method "$METHOD" --shots "$shots" --seed "$seed" \
+        --data "$DATA_DIR" --selection "$selection" \
+        --bench-dir "$BENCH_DIR" "$model_flag" "$MODEL_OR_BASE" \
+        > "$log" 2>&1
+    rc=$?
 
     if [ "$rc" -eq 0 ]; then
         printf 'PASS %s s%s seed%s\n' "$METHOD" "$shots" "$seed"

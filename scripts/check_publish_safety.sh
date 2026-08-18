@@ -183,13 +183,28 @@ fi
 # The decision surface is the facade's [features] table, so that is what is scanned.
 echo -n "  Facade feature passthrough check... "
 checked=$((checked + 1))
-# Features that gate dispatch but are deliberately NOT user-installable.
-# dev  = `apr mono` internal maintenance subcommands.
-# full = the aggregate itself; it is a passthrough, not a gated capability.
-passthrough_exempt="dev full"
+# The scanned set is apr-cli's [features] TABLE — the closed set cargo itself
+# reads — not `#[cfg(feature = ...)]` occurrences in dispatch*.rs. Scanning source
+# was wrong twice over: it missed `hf-hub` and `safetensors-compare` (they gate
+# `apr publish` / `apr compare-hf` from commands/*.rs, never dispatch*.rs), and it
+# caught `setfit` — the defect that motivated this check — only by luck, because
+# its cfgs happened to also appear there. A source regex also cannot see
+# `all(...)`/`any(...)` wrappers, and `[a-z-]+` silently skips any feature name
+# containing a digit or underscore. The table has none of those failure modes.
+#
+# A feature is reachable by a `cargo install aprender` user if it has a facade
+# passthrough OR is in apr-cli's `default` (which the facade inherits).
+# Exempt, with reasons:
+#   default   — the meta-feature itself, not a capability.
+#   full      — the aggregate; it IS a passthrough.
+#   dev       — `apr mono` internal maintenance subcommands.
+#   dhat-heap — heap-profiling build, not a shipped capability.
+#   code      — retained for backwards-compat; the subcommand is no longer gated.
+passthrough_exempt="default full dev dhat-heap code"
 missing_passthrough=""
-gating_features=$(grep -rhoE '#\[cfg\(feature = "[a-z-]+"\)\]' crates/apr-cli/src/dispatch*.rs 2>/dev/null \
-    | sed -E 's/.*"([a-z-]+)".*/\1/' | sort -u)
+apr_cli_features=$(awk '/^\[features\]/{f=1;next} /^\[/{f=0} f && /^[a-zA-Z0-9_-]+ *=/{sub(/ *=.*/,""); print}' \
+    crates/apr-cli/Cargo.toml 2>/dev/null | sort -u)
+apr_cli_default=$(grep -m1 '^default *= *\[' crates/apr-cli/Cargo.toml 2>/dev/null)
 # Here-string, not a pipe: a piped `while read` runs in a subshell and
 # `missing_passthrough` would not survive the loop, silently passing the gate.
 while IFS= read -r feat; do
@@ -198,12 +213,17 @@ while IFS= read -r feat; do
         *" $feat "*) continue ;;
         *) ;;
     esac
+    # Reachable because the facade inherits apr-cli's default feature set.
+    case "$apr_cli_default" in
+        *"\"$feat\""*) continue ;;
+        *) ;;
+    esac
     # The passthrough must both exist AND forward to apr-cli/<feat>; a bare
     # `feat = []` would satisfy `cargo --features feat` while enabling nothing.
     if ! grep -qE "^${feat} = \[.*\"apr-cli/${feat}\".*\]" Cargo.toml; then
         missing_passthrough="$missing_passthrough $feat"
     fi
-done <<< "$gating_features"
+done <<< "$apr_cli_features"
 if [ -n "$missing_passthrough" ]; then
     echo "FAIL"
     echo "FAIL: apr-cli features gate subcommands but have no root-facade passthrough:$missing_passthrough"
@@ -231,33 +251,38 @@ fi
 # most with no root counterpart), so a blanket rule would be false-positive noise.
 echo -n "  Mirrored contract sync check... "
 checked=$((checked + 1))
-# The six apr-cli entries are `include_str!` inputs for `apr explain`
-# (kernel_explain/mod.rs embeds them via a macro-concatenated path, so the literal
-# "apr-cli/contracts" appears nowhere and a naive grep reports them unreferenced).
-mirrored_contracts='crates/aprender-mcp/contracts/apr-mcp-tool-schemas-v1.yaml
-crates/aprender-train/contracts/tokenizer-v1.yaml
-crates/aprender-train/contracts/training-loop-v1.yaml
-crates/aprender-simulate/contracts/loss-functions-v1.yaml
-crates/aprender-serve/contracts/tokenizer-v1.yaml
-crates/apr-cli/contracts/softmax-kernel-v1.yaml
-crates/apr-cli/contracts/rope-kernel-v1.yaml
-crates/apr-cli/contracts/quantized-dot-product-v1.yaml
-crates/apr-cli/contracts/tensor-layout-v1.yaml
-crates/apr-cli/contracts/transpose-kernel-v1.yaml
-crates/apr-cli/contracts/kernel-fusion-v1.yaml'
+# DERIVED, not hand-listed: a crate-local contract is a mirror exactly when a
+# file of the same basename exists in the root catalog. An allowlist would fail
+# the same silent way the thing it guards fails — add a 12th mirror, forget the
+# script, nothing goes red. Deriving cannot go stale.
+#
+# Measured over the tree when this was written: 11 mirrors, 0 drift, 49
+# crate-local contracts with no root counterpart (correctly ignored). The
+# staging crate is the vendored provable-contracts UPSTREAM corpus — a different
+# project whose ~43 files merely share basenames — so it is skipped wholesale.
+# `not_mirrored` exists for the day a genuine same-name-different-document
+# collision appears outside staging; it fails loudly at add time, not silently.
+not_mirrored=""
+mirrored_contracts=$(find crates -maxdepth 3 -path '*/contracts/*.yaml' \
+    -not -path '*/aprender-contracts-staging/*' -not -path '*/target/*' 2>/dev/null | sort)
 mirror_drift=""
 # Here-string, not a pipe: a piped `while read` runs in a subshell and
 # `mirror_drift` would not survive the loop, silently passing the gate.
+mirror_count=0
 while IFS= read -r mirror; do
     [ -n "$mirror" ] || continue
-    root_copy="contracts/$(basename "$mirror")"
+    # Parameter expansion, not $(basename): one fork per file for nothing.
+    root_copy="contracts/${mirror##*/}"
+    # No root counterpart => a crate-local-only contract, not a mirror.
+    [ -f "$root_copy" ] || continue
+    case " $not_mirrored " in
+        *" $mirror "*) continue ;;
+        *) ;;
+    esac
+    mirror_count=$((mirror_count + 1))
     # Accumulate with a '|' separator rather than embedded newlines, then expand
     # at print time: a multi-line string assignment trips the shell linter here.
-    if [ ! -f "$mirror" ]; then
-        mirror_drift="${mirror_drift}|    MISSING build input: $mirror"
-    elif [ ! -f "$root_copy" ]; then
-        mirror_drift="${mirror_drift}|    MISSING root catalog copy: $root_copy"
-    elif ! cmp -s "$mirror" "$root_copy"; then
+    if ! cmp -s "$mirror" "$root_copy"; then
         mirror_drift="${mirror_drift}|    DRIFTED: $mirror != $root_copy"
     fi
 done <<< "$mirrored_contracts"
@@ -269,7 +294,7 @@ if [ -n "$mirror_drift" ]; then
     echo "  Fix: copy whichever side you edited over the other, then rebuild so codegen re-runs."
     errors=$((errors + 1))
 else
-    echo "OK"
+    echo "OK ($mirror_count mirrors)"
 fi
 
 # Summary

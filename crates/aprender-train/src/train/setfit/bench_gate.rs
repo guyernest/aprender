@@ -663,28 +663,24 @@ pub fn verify_run(
         // digest, and it returns nothing on either failure. The two outcomes are separated here
         // because they are different defects with the same symptom — a trimmed block is an
         // omission, a digest mismatch is tampering.
-        let row = BenchRow::from_bytes(&bytes).map_err(|error| {
-            if error.variant_tag() == "semantic_hash_mismatch" {
-                let (expected, got) = match &error {
-                    super::bench_row::BenchRowError::SemanticHashMismatch { expected, got } => {
-                        (expected.clone(), got.clone())
-                    }
-                    // Unreachable: the tag above IS this variant. Kept total rather than
-                    // panicking, because a gate that aborts is worse than one that reports.
-                    _ => (String::new(), String::new()),
-                };
+        // Match the variant directly rather than dispatching on `variant_tag()` and
+        // then re-matching: the string compare discarded the type information the
+        // second match needed back, which forced an unreachable arm to stay total.
+        // Matching once makes that arm impossible to write, and moves `expected`/
+        // `got` out of the owned error instead of cloning them.
+        let row = BenchRow::from_bytes(&bytes).map_err(|error| match error {
+            super::bench_row::BenchRowError::SemanticHashMismatch { expected, got } => {
                 BenchGateError::RowDigestMismatch {
                     cell: cell.render(),
                     path: path.display().to_string(),
                     expected,
                     got,
                 }
-            } else {
-                BenchGateError::RowSchemaRefused {
-                    cell: cell.render(),
-                    path: path.display().to_string(),
-                    detail: error.to_string(),
-                }
+            }
+            other => BenchGateError::RowSchemaRefused {
+                cell: cell.render(),
+                path: path.display().to_string(),
+                detail: other.to_string(),
             }
         })?;
 

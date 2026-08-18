@@ -17,6 +17,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// Environment override naming the `apr` binary subprocess tools should drive.
@@ -66,9 +67,20 @@ fn resolve_apr_binary(
 /// 2. When a *different* `apr` is on PATH, the server silently drives a binary
 ///    it is not — a v0.63.0 server shelling out to a stale build. Four `apr`
 ///    binaries have coexisted on one dev box (see CLAUDE.md "pin the binary").
+/// Resolved once: `current_exe()` is a syscall and the answer cannot change for
+/// the lifetime of the process.
+///
+/// `pub` because this is the only implementation in the tree that honours
+/// `APR_BIN` and refuses to self-spawn; the hand-rolled
+/// `current_exe().unwrap_or_else(|_| PathBuf::from("apr"))` spellings elsewhere
+/// silently fall back to a PATH `apr` that CLAUDE.md documents as having resolved
+/// to a 26-day-old build.
 #[must_use]
-fn apr_binary() -> OsString {
-    resolve_apr_binary(std::env::var_os(APR_BIN_ENV), std::env::current_exe())
+pub fn apr_binary() -> &'static OsStr {
+    static RESOLVED: OnceLock<OsString> = OnceLock::new();
+    RESOLVED.get_or_init(|| {
+        resolve_apr_binary(std::env::var_os(APR_BIN_ENV), std::env::current_exe())
+    })
 }
 
 /// Default grace window between SIGTERM and SIGKILL for cancelled calls.

@@ -1233,7 +1233,6 @@ mod setfit_cell {
     use entrenar::train::setfit::apr_codec::AprCodec;
     use entrenar::train::setfit::apr_evaluate::{
         evaluate_rows_from_artifact, evaluate_validation_from_artifact, EvaluatedSplit,
-        RowPredictions,
     };
     use entrenar::train::setfit::apr_reload::{
         reload_verified_run_from_apr, ReloadedSetFitCredential,
@@ -1568,9 +1567,6 @@ mod setfit_cell {
         Ok(())
     }
 
-    /// Silence the unused-import warning when a helper is only used by one arm.
-    #[allow(dead_code)]
-    fn _row_predictions_type_is_named(_: &RowPredictions) {}
 }
 
 // ==========================================================================================

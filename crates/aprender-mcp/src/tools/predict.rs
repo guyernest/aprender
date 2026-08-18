@@ -58,30 +58,28 @@ pub fn call(args: &serde_json::Value) -> ToolCallResult {
         // contract would be vacuous). Refuse here rather than spawn.
         return ToolCallResult::error("Argument `texts` must contain at least one text");
     }
-    // Reject a non-string element instead of lossily stringifying it — a
-    // silently coerced `42` would be classified as the literal "42" and the
-    // caller would never learn their input was not what they sent.
-    let mut owned: Vec<String> = Vec::with_capacity(texts.len());
-    for (index, value) in texts.iter().enumerate() {
-        match value.as_str() {
-            Some(text) => owned.push(text.to_string()),
-            None => {
-                return ToolCallResult::error(format!(
-                    "Argument `texts[{index}]` must be a string, got: {value}"
-                ));
-            }
-        }
-    }
-
     let include_logits = args
         .get("include_logits")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    let mut argv: Vec<&str> = vec!["predict", model_path];
-    for text in &owned {
+    // `as_str()` borrows from `args`, which outlives this call, so the argv can
+    // hold `&str` directly — no owned copy of the (deliberately unbounded) batch.
+    // `predict`, model, 2 per text, `--logits`, `--json`.
+    let mut argv: Vec<&str> = Vec::with_capacity(2 * texts.len() + 4);
+    argv.push("predict");
+    argv.push(model_path);
+    for (index, value) in texts.iter().enumerate() {
+        // Reject a non-string element instead of lossily stringifying it — a
+        // silently coerced `42` would be classified as the literal "42" and the
+        // caller would never learn their input was not what they sent.
+        let Some(text) = value.as_str() else {
+            return ToolCallResult::error(format!(
+                "Argument `texts[{index}]` must be a string, got: {value}"
+            ));
+        };
         argv.push("--text");
-        argv.push(text.as_str());
+        argv.push(text);
     }
     if include_logits {
         argv.push("--logits");
