@@ -30,12 +30,10 @@ RUST_LOG = "info"
 # resolves this path against $LAMBDA_TASK_ROOT. Embedding it in the binary
 # instead produced a 95MB bootstrap that OOM-killed pmcp.run's
 # deployment-creation backend ("signal: killed", 2x reproduced 2026-08-18).
-# PILOT WORKAROUND: the artifact is a setfit-apr-v1 .apr, shipped under a .db
-# name because the platform's asset allowlist does not yet admit .apr (filed
-# as a platform finding 2026-08-18; our loader validates the FORMAT via the
-# verification ladder and never reads the extension). Rename back once .apr
-# is allowlisted.
-APRENDER_SETFIT_MODEL = "assets/models/setfit-abortion-s17x8.db"
+# The artifact ships under its true .apr name: the platform allowlist admits
+# .apr/.safetensors/.gguf as of dev Amplify build #1114 (2026-08-19), closing
+# pilot finding #2. The path resolves against $LAMBDA_TASK_ROOT.
+APRENDER_SETFIT_MODEL = "assets/models/setfit-abortion-s17x8.apr"
 
 [secrets]
 
@@ -78,7 +76,7 @@ error_threshold = 10
 latency_threshold_ms = 15000
 
 [assets]
-include = ["models/setfit-abortion-s17x8.db"]
+include = ["models/setfit-abortion-s17x8.apr"]
 exclude = [
     "**/*.tmp",
     "**/.DS_Store",
