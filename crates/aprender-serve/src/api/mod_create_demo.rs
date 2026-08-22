@@ -69,8 +69,13 @@ pub struct ChatCompletionRequest {
     /// Maximum tokens to generate
     #[serde(default)]
     pub max_tokens: Option<usize>,
-    /// Sampling temperature
-    #[serde(default)]
+    /// Sampling temperature.
+    ///
+    /// A temperature outside `[0, ∞)` finite is rejected at deserialization
+    /// (aprender#2375) — see `types::deserialize_temperature_f32`. `/api/chat`
+    /// and `/api/generate` build this struct in Rust rather than deserializing
+    /// it, so their own `options.temperature` carries the same guard.
+    #[serde(default, deserialize_with = "crate::api::types::deserialize_temperature_f32")]
     pub temperature: Option<f32>,
     /// Nucleus sampling
     #[serde(default)]
@@ -91,9 +96,12 @@ pub struct ChatCompletionRequest {
     /// qwen3-moe-sampling-v1 V1_002: same seed → same tokens.
     #[serde(default)]
     pub seed: Option<u64>,
-    /// Number of completions to generate
-    #[serde(default = "default_n")]
-    pub n: usize,
+    /// Number of completions to generate.
+    ///
+    /// Only `1` is supported; any other value is rejected at deserialization
+    /// (see [`ChoiceCount`]) rather than silently ignored.
+    #[serde(default)]
+    pub n: ChoiceCount,
     /// Stream responses
     #[serde(default)]
     pub stream: bool,
@@ -114,10 +122,6 @@ pub struct ChatCompletionRequest {
     /// `{"type":"function","function":{"name":"..."}}`). `"none"` skips parsing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<OpenAiToolChoice>,
-}
-
-fn default_n() -> usize {
-    1
 }
 
 /// Chat message
@@ -584,9 +588,15 @@ impl ChatCompletionChunk {
         Self::new(id, model, Some(text.to_string()), None)
     }
 
-    /// Create final chunk with finish reason
-    fn done(id: &str, model: &str) -> Self {
-        Self::new(id, model, None, Some("stop".to_string()))
+    /// Create the terminal chunk, carrying the reason generation ACTUALLY ended.
+    ///
+    /// Dogfood 0.63.0 (#2375 finding 6): this used to take no reason and write
+    /// the literal `"stop"`, so a stream truncated at `max_tokens` reported
+    /// `"stop"` while the non-streaming response for the same request reported
+    /// `"length"`. The parameter is a [`FinishReason`], not a `&str`, so the
+    /// literal cannot be reintroduced at a call site.
+    fn done(id: &str, model: &str, finish: FinishReason) -> Self {
+        Self::new(id, model, None, Some(finish.as_str().to_string()))
     }
 }
 

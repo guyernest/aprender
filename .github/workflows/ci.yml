@@ -55,6 +55,16 @@ jobs:
       # paiml/infra commit f4fccf9 (PR #66, "use exec script not symlink").
       # 2026-05-12: re-enabled — image verified to ship `/usr/local/bin/rustc-sccache`
       # (sccache 0.14.0), shared cache at `/home/noah/data/sccache` (warm, ~11GB).
+      # 2026-08-20: that "warm, ~11GB" was NOT health — it was the cache pinned
+      # at sccache's DEFAULT 10 GiB cap. /var/log/ci-metrics/sccache-*.json has
+      # recorded cache_size and max_cache_size on every job all along (18,292
+      # files); nothing ever compared them. All of the newest 4000 samples read
+      # cache_size within ~2 KB of max_cache_size, i.e. an LRU evicting on every
+      # write. paiml-mcp-agent-toolkit-coverage was running 1240 compile requests
+      # for 5 hits and 811 misses. Cap raised to 50G in paiml/infra#230 and
+      # paiml/.github#50; the workspace-test job below passes the SAME value,
+      # because a server capped lower EVICTS the shared cache back down to its
+      # own cap — a mixed cap is strictly worse than a uniform small one.
       enable_sccache: true
       use_nextest: true
       # NOTE: coverage_min (the opt-in coverage ratchet from the build-system audit)
@@ -84,7 +94,13 @@ jobs:
   # registry unreachable. Mirrored in the `mutants` job below.
   workspace-test:
     runs-on: [self-hosted, X64, Linux, clean-room]
-    timeout-minutes: 85  # bumped to match 75min step + 10min overhead
+    # 100, not 85. The step below sets `timeout-minutes: 75`, but "Set up runner"
+    # (image pull) has measured at 20 minutes, so 20 + 75 = 95 > 85 and the JOB
+    # timeout always fired first -- producing a bare "The operation was canceled"
+    # that names no step. Job 95162862834 died exactly on the 85-minute mark this
+    # way. The step timeout must be the one that can fire, because it points at
+    # the step; the job timeout is the backstop behind it.
+    timeout-minutes: 100
     env:
       IMAGE: localhost:5000/sovereign-ci:stable
       PR_OR_REF: ${{ github.event.pull_request.number || github.ref_name }}
@@ -264,6 +280,7 @@ jobs:
             -e CARGO_TARGET_DIR=/workspace/target \
             -e RUSTC_WRAPPER=rustc-sccache \
             -e SCCACHE_DIR=/sccache \
+            -e SCCACHE_CACHE_SIZE=50G \
             -e CARGO_INCREMENTAL=0 \
             -e CARGO_BUILD_JOBS=8 \
             -e CARGO_PROFILE_TEST_DEBUG=line-tables-only \
@@ -407,11 +424,22 @@ jobs:
             -e CARGO_TARGET_DIR=/workspace/target \
             -e RUSTC_WRAPPER=rustc-sccache \
             -e SCCACHE_DIR=/sccache \
+            -e SCCACHE_CACHE_SIZE=50G \
             -e CARGO_INCREMENTAL=0 \
             -e CARGO_BUILD_JOBS=8 \
             "$IMAGE" \
             bash -c 'cargo test -p aprender-compute --lib 2>&1 | tee /tmp/compute-test.log; grep -q "test result: ok\." /tmp/compute-test.log && ! grep -q "test result: FAILED" /tmp/compute-test.log'
       - name: Integration tests
+        # #2465: the four FALSIFY-AUTH targets were appended here because they
+        # were DARK — `falsify_auth_002` appeared nowhere in .github/, scripts/
+        # or Makefile, and neither did the contract loader
+        # `apr_serve_api_key_auth_contract` that is supposed to promote
+        # apr-serve-api-key-auth-v1 from DRAFT to ACTIVE. All 17 tests pass; they
+        # simply never ran. This is also the line that hides such targets: adding
+        # a `tests/*.rs` file does nothing until its name appears HERE, and only
+        # one PR at a time may edit this single physical line without hitting a
+        # merge-queue conflict.
+        #
         # perf/ci-nextest (rank 3 — integration collapse): INTENTIONALLY SKIPPED.
         # The investigation ranked collapsing these 8 `cargo test -p X --test Y`
         # invocations into ONE `cargo nextest run -E '...'` as rank 3 (low lever:
@@ -436,10 +464,11 @@ jobs:
             -e CARGO_TARGET_DIR=/workspace/target \
             -e RUSTC_WRAPPER=rustc-sccache \
             -e SCCACHE_DIR=/sccache \
+            -e SCCACHE_CACHE_SIZE=50G \
             -e CARGO_INCREMENTAL=0 \
             -e CARGO_BUILD_JOBS=8 \
             "$IMAGE" \
-            bash -c 'cargo test -p aprender-core --test monorepo_invariants && cargo test -p aprender-core --test readme_contract && cargo test -p apr-cli --test cli_commands && cargo test -p aprender-core --test beat_sklearn_iris && cargo test -p aprender-core --test beat_sklearn_nmi && cargo test -p aprender-core --test beat_sklearn_metrics_parity && cargo test -p aprender-core --test beat_sklearn_gaussiannb_accuracy && cargo test -p aprender-core --test beat_sklearn_svc_accuracy && cargo test -p aprender-core --test beat_sklearn_pipeline_encoder && cargo test -p aprender-serve --test beat_fail_closed_garbage && cargo test -p aprender-compute --lib beat_nf4_bitsandbytes_equivalence && cargo test -p aprender-core --test beat_pytorch_autograd_grad && cargo test -p aprender-train-lora --lib beat_lora_merge_forward_equivalence && cargo test -p apr-cli --release --test beat_pytorch_deploy_footprint && cargo test -p aprender-serve --test beat_fail_closed_structural && cargo test -p aprender-serve --test ollama_http_compat && cargo test -p apr-cli --test ollama_ndjson_streaming && cargo test -p apr-cli --test falsification_chat_http_cli'
+            bash -c 'cargo test -p aprender-core --test monorepo_invariants && cargo test -p aprender-core --test readme_contract && cargo test -p apr-cli --test cli_commands && cargo test -p aprender-train-inspect --test falsify_no_fabricated_metadata_2519 && cargo test -p aprender-train-bench --test falsify_no_fabricated_benchmarks_2519 && cargo test -p aprender-train-shell --test falsify_no_fabricated_fetch_2519 && cargo test -p aprender-core --test beat_sklearn_iris && cargo test -p aprender-core --test beat_sklearn_nmi && cargo test -p aprender-core --test beat_sklearn_metrics_parity && cargo test -p aprender-core --test beat_sklearn_gaussiannb_accuracy && cargo test -p aprender-core --test beat_sklearn_svc_accuracy && cargo test -p aprender-core --test beat_sklearn_pipeline_encoder && cargo test -p aprender-serve --test beat_fail_closed_garbage && cargo test -p aprender-compute --lib beat_nf4_bitsandbytes_equivalence && cargo test -p aprender-core --test beat_pytorch_autograd_grad && cargo test -p aprender-train-lora --lib beat_lora_merge_forward_equivalence && cargo test -p apr-cli --release --test beat_pytorch_deploy_footprint && cargo test -p aprender-serve --test beat_fail_closed_structural && cargo test -p aprender-serve --test ollama_http_compat && cargo test -p apr-cli --test ollama_ndjson_streaming && cargo test -p apr-cli --test falsification_chat_http_cli && cargo test -p aprender-contracts --test apr_serve_api_key_auth_contract && cargo test -p apr-cli --test falsify_auth_001 --test falsify_auth_002 --test falsify_auth_003 --no-fail-fast && cargo test -p apr-cli --test beat_apr_data_alimentar_reach && cargo test -p apr-cli --test beat_apr_sibling_cli_reach && cargo build --examples --workspace --keep-going'
       - name: Build.rs crate-root escape check (v0.31.1 yank guard)
         # Static Poka-Yoke: flags build.rs files that panic on files outside
         # CARGO_MANIFEST_DIR, which break `cargo install` from crates.io.
@@ -531,8 +560,106 @@ jobs:
       # installed 0.61.0 to ~/.cargo/bin and then executed a 24-day-old 0.60.0
       # from ~/.local/bin, so every beat validated stale code while reporting
       # green. Text-only check, no build.
-      - name: Every CI-surface `apr` invocation must be pinned
+      - name: Every execution-surface `apr` reference must be pinned
         run: bash scripts/check_apr_bin_pinned.sh
+      # The guard's own must-match/must-not-match table plus one mutation per
+      # SCANNED SURFACE, in that surface's own syntax. #2358: extending the
+      # scope to scripts/** and .claude/skills/** did NOT carry the old proof
+      # over - the Makefile lesson repeated itself twice (a skill bash fence and
+      # a `!`...`` inline command were both invisible to a pattern that was
+      # correct everywhere else). Run the table; do not re-read the regex.
+      - name: "`apr`-pinning guard must still turn RED (case table + surfaces)"
+        run: bash scripts/check_apr_bin_pinned.sh --self-test
+      # deny.toml is 7.2 KB of licence / banned-crate / source-allowlist policy
+      # that ran in NO workflow -- only `make deny`, which is not a prerequisite
+      # of any tier, so nothing but a human typing it ever invoked it. Meanwhile
+      # cargo-deny 0.20.2 ships INSIDE the CI image already.
+      #
+      # Because nothing ran it, the policy drifted out of sync with the repo's
+      # own deliberate architecture and now fails on main:
+      #     advisories ok, bans FAILED, licenses FAILED, sources ok
+      # Both failures were config drift, not defects (see the deny.toml comments).
+      # Fixed there; wired here so it cannot drift unnoticed again.
+      #
+      # `ci / security` from the reusable workflow runs `cargo audit`, which does
+      # NOT read deny.toml -- so this covers licences, bans and sources, which
+      # nothing else does.
+      - name: cargo-deny (licences, bans, sources, advisories)
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -w /workspace \
+            "$IMAGE" \
+            cargo deny check
+      # check_apr_bin_pinned asserts CALLERS pin the binary; it says nothing
+      # about which binary the resolver hands them. apr_bin.sh returned
+      # target/release/apr whenever it existed, so a stale release build beside
+      # a debug build made FROM HEAD hard-failed every gate that sources it --
+      # while telling the caller to `cargo install`. Resolution order is now
+      # evidence-driven, and this is the falsifier for it. Costs no cargo build:
+      # the fixture binaries are shell scripts that print a version string.
+      - name: apr_bin.sh must resolve the HEAD-built binary, whatever its profile
+        run: bash scripts/check_apr_bin_resolution.sh
+      # CLAUDE.md mandates bashrs over shellcheck; CI honoured that for SEVEN of
+      # 72 scripts (`bashrs lint scripts/check_book_*.sh` in book.yml).
+      # apr_bin.sh -- sourced by every gate in this repo -- was not one of them,
+      # and pmat reports Functions:0 / Cyclomatic:0 for it because pmat does not
+      # parse shell. Ratcheted rather than fixed: turning the glob on outright
+      # surfaces ~851 diagnostics, most of them bashrs false positives on
+      # hand-written bash, and a gate that cannot go green gets disabled.
+      - name: bashrs must see every script in scripts/ (shrink-only)
+        run: |
+          cargo install bashrs --locked --quiet || true
+          bash scripts/check_shell_lint_ratchet.sh
+      # Poka-yoke: Cargo.lock was 15 days stale on main (last touched 2026-08-01,
+      # manifests changed 08-10 and 08-11). Every CI job runs cargo WITHOUT
+      # --locked, so cargo rewrote the lock in place and stayed green; the only
+      # jobs that pass --locked are in binary-release.yml, i.e. the RELEASE path,
+      # which was broken on main. Resolution only, no build, ~1s.
+      - name: Cargo.lock must match the manifests
+        run: bash scripts/check_lockfile_current.sh
+      - name: "lockfile guard must still turn RED (case table)"
+        run: bash scripts/check_lockfile_current.sh --self-test
+      # Poka-yoke: nextest IGNORES an unknown config key with a warning instead
+      # of failing. `slow-warning = "60s"` is not a nextest key, so profile.ci
+      # had no per-test timeout and a hung run died at the job's 85-minute
+      # timeout naming nothing -- evicting #2502 from the merge queue. The
+      # warning was in every workspace-test log and nobody read it, so it is a
+      # hard failure now. Runs nextest's real parser on a 3-line crate.
+      - name: nextest must ignore no key in .config/nextest.toml
+        # Runs INSIDE the image: cargo-nextest is installed there, not on the
+        # host runner (the first version of this step failed with "SKIP:
+        # cargo-nextest not installed" -> exit 1, which is the guard failing
+        # closed in the wrong place). The probe crate has ZERO dependencies, so
+        # CARGO_NET_OFFLINE=1 is safe and no registry mount is needed.
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -w /workspace \
+            -e CARGO_NET_OFFLINE=1 \
+            "$IMAGE" \
+            bash scripts/check_nextest_config_keys.sh
+      - name: "nextest-key guard must still turn RED (case table)"
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -w /workspace \
+            -e CARGO_NET_OFFLINE=1 \
+            "$IMAGE" \
+            bash scripts/check_nextest_config_keys.sh --self-test
+      # Hand-rolled argv parsing is banned. simular's `match args[1]` silently
+      # DROPPED --seed: unknown flags fell through a catch-all, a valueless flag
+      # was discarded, and an unparseable value became the default instead of an
+      # error. The command exits 0 and does the wrong thing.
+      #
+      # Structural, and complementary to dogfood_surfaces.sh, which probes
+      # BEHAVIOUR (feed each binary an unknown flag, demand rejection). The probe
+      # catches today's broken parsers; this bans the construct, so the guarantee
+      # does not rely on a probe happening to hit the broken case.
+      - name: No binary may hand-roll argv parsing
+        run: bash scripts/check_no_hand_rolled_parsers.sh
+      - name: "hand-rolled-parser guard must still turn RED (case table)"
+        run: bash scripts/check_no_hand_rolled_parsers.sh --self-test
       # Poka-yoke: `set` in a SOURCED file mutates the caller's shell. apr_bin.sh
       # opened with `set -euo pipefail`; qwen-story.sh sources it and had chosen
       # `set -uo pipefail` deliberately (it must run every beat and tally the
@@ -542,6 +669,318 @@ jobs:
       # this is mechanical rather than a review note. Text-only, no build.
       - name: Sourced libraries must not mutate the caller's shell options
         run: bash scripts/check_sourced_libs_option_neutral.sh --self-test
+      # Poka-yoke: a Cargo `exclude` entry is a gitignore pattern, so a bare
+      # `"tests/"` is NOT anchored to the package root - it matches at every
+      # depth. CB-510 was the same bug with `"models/"` hiding `src/models/`.
+      # In v0.63.0 it dropped 443 files from the published aprender-serve and
+      # left 11 (serve) + 18 (train) `mod tests;` declarations pointing at
+      # directories that are not in the tarball, so neither published crate can
+      # compile its own test suite. Text-only check, no build.
+      - name: No exclude pattern may swallow a src/ directory
+        run: bash scripts/check_exclude_anchored.sh
+      # Poka-yoke: a contract may not name an enforcement command that cannot
+      # run. #2504: apr-cli-commands-v1.yaml declared five falsification
+      # conditions enforced by `cargo test --test apr_cli_commands ...`; there
+      # is no such target, so all five exited 101. The underlying tests are real
+      # and DO run (line 327, inside workspace-test) — what was fiction is the
+      # contract's account of HOW, which destroys the discrimination between
+      # "stale pointer" and "missing gate" that a contract exists to provide.
+      # Nothing caught it because these strings sit under a `falsification:`
+      # key the typed Contract struct does not have, so serde drops them and
+      # `pv validate` never sees them. Self-test first (Verification Discipline
+      # #7). Needs `cargo metadata` only — no build.
+      - name: Enforcement guard's own case table must pass before it judges
+        run: bash scripts/check_contract_enforcement.sh --self-test
+      - name: No contract may name an enforcement command that cannot run
+        run: bash scripts/check_contract_enforcement.sh
+      # Poka-yoke: a release gate must name the STAGE at which it is satisfiable.
+      # #2543: Gate 5 of the pre-release skill runs `cargo package -p apr-cli`,
+      # which re-resolves all 26 workspace siblings against crates.io. Pre-bump
+      # they resolve to the published copy of the SAME version number, missing
+      # every symbol added since, so the verify build dies on dozens of
+      # E0432/E0433 SYMBOL-not-found errors. Nothing is broken — the gate is
+      # unsatisfiable at that stage — but a release engineer meeting it cold
+      # reads it as a blocker and aborts the cut. Nothing in CI ran Gate 5, so
+      # the ordering constraint lived only as folklore in a memory file. This
+      # guard requires the skill to declare the stage per crate and requires the
+      # declaration to be TRUE against `cargo metadata`. Self-test first
+      # (Verification Discipline #7). Text + `cargo metadata --offline` only —
+      # no build, no network.
+      - name: Gate-5 stage guard's own case table must pass before it judges
+        run: bash scripts/check_gate5_stage.sh --self-test
+      - name: A pre-release gate must name the stage it is valid at (#2543)
+        run: bash scripts/check_gate5_stage.sh
+      # Poka-yoke: capturing `cmd 2>&1` into one variable and then parsing it as
+      # JSON puts the command's diagnostics in front of its data. On 2026-08-11
+      # the nightly story reported `no format_parity gate found in --json output
+      # (got: '')` for a gate that had run and PASSED, because `apr qa --json`
+      # writes JSON to stdout while the CUDA path emits `[trueno#243]` lines to
+      # stderr. A false FAIL reddens main for a non-reason. The converse matters
+      # too: a Rust panic arrives on stderr, so the panic checks must keep
+      # reading the merged view. Behavioural, text-only, no build.
+      - name: Story JSON parsing must read stdout, not the merged stream
+        run: bash scripts/check_story_json_streams.sh
+      # Poka-yoke: a path filter is a claim that nothing outside those paths can
+      # break the gate. book.yml filtered on `book/**`, so the CLI/book parity gate
+      # never ran when the CLI gained a command — `apr beat-run` shipped in #1995
+      # with no chapter and the gate stayed green for three months, hiding a lib
+      # parity failure, a `pv` step that exited 127, and two chapter examples
+      # training to NaN behind it. Text-only check, no build.
+      - name: A path-filtered workflow must not be able to go dark
+        run: |
+          bash scripts/check_workflow_path_filters.sh --self-test
+          bash scripts/check_workflow_path_filters.sh
+      # Poka-yoke: mac-server runs 16 runners under ONE $HOME, so
+      # $HOME/.cargo/bin is shared mutable state. `cargo install` replaces a
+      # binary there while another job is mid-run and about to exec it — on
+      # 2026-07-31 Coverage Nightly died on
+      # `could not execute process .../cargo-llvm-cov ... No such file or
+      # directory (os error 2)` and posted an EMPTY coverage figure, i.e. a
+      # missing measurement (#2353). Text-only check, no build.
+      - name: Self-hosted jobs must install cargo tools into a private root
+        run: |
+          bash scripts/check_cargo_install_private_root.sh --self-test
+          bash scripts/check_cargo_install_private_root.sh
+      # Poka-yoke: the nightly's pmat bug-hunt printed eight manifest headers and
+      # ZERO rows every night since the cron was added (#2356), so the workflow's
+      # "manifest grew by >5" alert branch never had a non-zero input. Three
+      # causes, each silent: the jq filters named `.function`/`.churn.commit_count`
+      # /`.faults` where pmat emits `function_name`/`commit_count`/
+      # `fault_annotations`; the churn and fault hunts passed the beat label as a
+      # free-text query, which is a relevance filter applied BEFORE `--path` and
+      # collapses a module-scoped hunt to nothing; and three hunted paths had been
+      # deleted or moved. All three present as "the manifest is empty tonight",
+      # which used to be indistinguishable from "the code is clean tonight" -
+      # pmat_hunt returned 0 unconditionally. It now fails the beat. Behavioural
+      # against a stubbed pmat, text-only, no build.
+      - name: The pmat bug-hunt manifest must be able to produce rows
+        run: bash scripts/check_story_pmat_hunt.sh
+      # Poka-yoke: the 0.63.0 dogfood audit found 201 defects in code that was
+      # shipped, tested and covered. The 5 Whys (docs/audits/dogfood-0.63.0-hansei.md)
+      # landed on: nothing mechanical requires an assertion to EXCLUDE an outcome.
+      # `assert!(status == OK || status == BAD_REQUEST || status == NOT_IMPLEMENTED)`
+      # passes whatever the endpoint does, earns identical line coverage to an
+      # assert_eq!, and is exempt from diff-scoped mutation testing on
+      # pre-existing surface. 320 such sites existed; the first one tightened
+      # showed a test named `test_apr_explain_endpoint` never reaching the
+      # explain handler at all. Baseline-ratcheted so the debt only falls.
+      # Text-only check, no build.
+      - name: Assertions must exclude an outcome, not merely reach one
+        run: bash scripts/check_assertions_exclude.sh
+      - name: Assertion-exclusion guard case table
+        run: bash scripts/check_assertions_exclude.sh --self-test
+
+      # FALSIFY-README-00*: README metric claims must match measurement. The
+      # guard existed and ran nowhere -- its only caller was scripts/dogfood-book.sh,
+      # which is itself in no workflow and no Makefile target, so it was
+      # unreachable. It was also pattern-narrow: it matched `**M** provable
+      # contracts` and took `head -1`, while the README carried THREE different
+      # contract counts (1771 in the table, 1158 at line 225, 1767 at line 256).
+      # It now checks every contract-count claim, so the README cannot contradict
+      # itself either. Text-only, no build -- and as of 2026-08-19 that is
+      # actually true: the CLI-count check used to `cargo run -p apr-cli` from
+      # this bare (non-container) step, which took 14 minutes and then failed,
+      # since cargo is not reliably on PATH for raw run: steps here. It now
+      # reads contracts/apr-cli-commands-v1.yaml, whose equivalence to the real
+      # binary is enforced by FALSIFY-CLI-001/002 in the integration line.
+      - name: README claims must match measurement
+        run: bash scripts/check_readme_claims.sh
+
+      # Three guards that existed and could not block a merge. The publish-safety
+      # one is the gate credited with keeping a 28 MB test.apr out of a published
+      # package, and it was `make`-only -- invoked by whoever remembered to type
+      # it. Its size check also looked at 2 of 72 publishable crates and never
+      # measured a size, so the 5.4 MB of .pmat-baseline.json it now catches had
+      # been shipping to crates.io unseen.
+      - name: Publish safety (binary/oversize files in published packages)
+        run: bash scripts/check_publish_safety.sh
+      - name: Every include!() file is tracked by git (CB-510)
+        run: bash scripts/check_include_files.sh
+      # #2512: these two were invoked by NO workflow -- one Makefile-only
+      # (`make tier3`, which CI does not run), one reachable from nothing at all.
+      # Both pass today and are cheap, so there was never a reason for them to be
+      # dark; nothing was watching.
+      - name: Every contract cites a test that exists (strict-test-binding)
+        run: bash scripts/check_contract_test_binding.sh
+      - name: aprender-core builds for wasm32
+        run: bash scripts/check_wasm32_core_builds.sh
+      # aprender#2546: `provable-contracts*` were renamed to `aprender-contracts*`
+      # and the published names left frozen at 0.3.1. A pin on the old name
+      # resolved SILENTLY and installed a tool sixty versions behind. The names
+      # are now carried forward as facades in crates/facades/, which is a
+      # separate workspace -- `cargo check --workspace` does NOT reach it, so
+      # without this step the facades are dark by construction. The self-test
+      # (text-only, no build) runs first, per the convention above.
+      - name: Renamed-crate facades case table
+        run: bash scripts/check_facade_compat.sh --self-test
+      - name: provable-contracts 0.3.1 code still compiles against the facades
+        run: bash scripts/check_facade_compat.sh
+      # aprender#2558: nothing detected two crates declaring the same `[[bin]]
+      # name`. FOUR things claimed `pv` -- the crates.io pipe viewer, /usr/bin/pv,
+      # aprender-contracts-cli and the provable-contracts-cli facade -- all
+      # writing ~/.cargo/bin/pv. MEASURED: `cargo install` FAILS CLOSED on that
+      # collision (exit 101, first binary survives); it does NOT overwrite, so
+      # the hazard is a BLOCKED install rather than a silent clobber. The
+      # facade gave up the name; this stops the next one being noticed by
+      # accident. Scans BOTH workspaces: crates/facades is `exclude`d from the
+      # root, so a root-only scan is inert by construction. `apr` is a
+      # deliberate duplicate and passes via a declared-intent allowlist. The
+      # text-only case table runs first, per the convention above.
+      - name: Duplicate bin-name case table
+        run: bash scripts/check_duplicate_bin_names.sh --self-test
+      - name: No two crates may claim one bin name
+        run: bash scripts/check_duplicate_bin_names.sh
+      # aprender#2559: the release cascade could not SEE the facades. TIERS[] in
+      # scripts/cascade-publish.sh was exactly the 70 publishable crates of the
+      # ROOT workspace -- a perfect match, no drift -- so nothing indicated the
+      # three publishable crates in the second, `exclude`d workspace were
+      # missing. FINAL VERIFICATION iterated the same TIERS[], so their absence
+      # printed as "ALL crates at 0.63.0". This step also checks the ORDER: a
+      # facade resolves its upstream from the REGISTRY, so publishing it first
+      # yields a crate that cannot compile for anyone -- while inside this tree
+      # it resolves through `path` and looks perfectly fine. Case table first.
+      - name: Cascade-coverage case table
+        run: bash scripts/check_cascade_covers_all_crates.sh --self-test
+      - name: The release cascade must cover and order every publishable crate
+        run: bash scripts/check_cascade_covers_all_crates.sh
+      # The bump half of the same defect. `cargo set-version --workspace` cannot
+      # reach an `exclude`d workspace and does not warn, so three files in
+      # crates/facades/ have to ride in every bump commit. scripts/bump-version.sh
+      # does that; these two rows keep its case table live and assert the tree is
+      # version-consistent right now (which check_facade_compat.sh R3/R5 also
+      # backstop from the compat side).
+      - name: Version-bump case table (reaches the excluded workspace)
+        run: bash scripts/bump-version.sh --self-test
+      - name: Every workspace is at a consistent version
+        run: bash scripts/bump-version.sh --check
+      # The meta-guard. Four guards were found unwired by accident while looking
+      # for something else; without this the fifth is found the same way.
+      - name: Every check_*.sh is named by a workflow
+        run: bash scripts/check_guards_are_wired.sh
+      - name: Wiring guard case table
+        run: bash scripts/check_guards_are_wired.sh --self-test
+      # aprender-profile appeared in this file ZERO times while carrying 58
+      # integration test targets. Running them found 110 failures -- 109 from a
+      # single stale binary name left by the APR-MONO rename, dead since. Gated
+      # now so the crate cannot go dark again. --lib only: the integration
+      # targets shell out to the built binary and take minutes.
+      - name: aprender-profile lib tests (was gated by nothing)
+        run: cargo test -p aprender-profile --lib
+      - name: Book rust examples compile
+        run: bash scripts/check_book_examples_compile.sh
+      # CB-510: a Cargo.toml `exclude` pattern can strip an include!() target
+      # from the published crate while git still tracks it, so the crate compiles
+      # in-tree and fails for everyone installing from crates.io. This guard is
+      # Gate 1 of the pre-release skill and it could not fail: it scanned `src/`
+      # and packaged `-p aprender`, the PRE-MONOREPO layout. Root `src/` now holds
+      # 2 files with zero include!(), so it reported "All 0 include!() files are
+      # included" for every release since consolidation, while 1798 live under
+      # crates/. Now checks all 10 publishable crates that have include!() against
+      # their OWN package listing, and refuses to pass on an empty scan.
+      - name: include!() targets must survive cargo package (CB-510)
+        run: bash scripts/check_package_includes.sh
+      - name: Package-includes guard case table
+        run: bash scripts/check_package_includes.sh --self-test
+      # The manifest-level sibling guard proves no Cargo.toml DECLARES an in-tree
+      # crate from crates.io. It passes, and it is not sufficient: a dependency we
+      # legitimately take from the registry can drag an in-tree name in
+      # TRANSITIVELY, and no manifest here mentions it. `whisper-apr = "0.2"`
+      # resolves crates.io `aprender 0.27.8` -- this monorepo depending on a
+      # published copy of ITSELF, 36 minors stale -- plus registry trueno,
+      # realizar, trueno-quant, batuta-common, renacer-core.
+      #
+      # NOT `cargo tree --duplicates`: trueno/realizar/batuta-common are [lib]
+      # names, so the lockfile holds exactly ONE package of each (the registry
+      # one). They are not duplicates and never will be; measured, --duplicates
+      # catches 0 of 8 under default features. The lockfile is the only surface
+      # that sees all of them, and it is feature-independent.
+      - name: No in-tree crate name may resolve from crates.io
+        run: bash scripts/check_lockfile_no_registry_siblings.sh
+      - name: Lockfile sibling guard case table
+        run: bash scripts/check_lockfile_no_registry_siblings.sh --self-test
+      # .gitignore DECLARES, the index CONTRADICTS, and nothing compared them.
+      # `.gitignore:62` says `**/.pmat-work/`; git tracked 461 of those anyway,
+      # 315 MB of regenerable pmat scratch read by nothing in the build. Ratchet
+      # only -- 320 remain and they are not all removable (proptest-regressions
+      # MUST stay tracked; there the ignore RULE is what is wrong). Text-only.
+      - name: No tracked file may be declared ignored
+        run: bash scripts/check_no_tracked_ignored_files.sh
+      - name: Tracked-ignored guard case table
+        run: bash scripts/check_no_tracked_ignored_files.sh --self-test
+      # Poka-yoke: APR-MONO made every sibling a path alias under crates/, but
+      # `trueno = "0.16"` still BUILDS - cargo resolves the crates.io copy
+      # alongside the in-tree one, so the tree compiles two mutually
+      # type-incompatible `trueno`s and the published-crate dependency cycle the
+      # consolidation removed comes back. Nothing goes red; you only see it in
+      # `cargo tree --duplicates`. At 88791ff55 the lockfile held four registry
+      # copies of trueno beside the path one. CLAUDE.md has forbidden this in
+      # prose since the consolidation - prose is not a gate.
+      # The name set is package names UNION lib names, because they diverge here
+      # (package aprender-compute has lib trueno): a guard built from package
+      # names alone would sail straight past the one declaration it exists to
+      # stop. Vacuity-guarded three ways, including a positive control that must
+      # be flagged before any clean verdict is printed. Text-only, no build.
+      # Self-test first: if the guard is blind, that matters more than its verdict.
+      - name: Sibling-crate pathing guard case table
+        run: bash scripts/check_workspace_siblings_pathed.sh --self-test
+      - name: In-tree siblings must be pathed, never pulled from crates.io
+        run: bash scripts/check_workspace_siblings_pathed.sh
+      # A publishable crate depending on a `publish = false` one is invisible to
+      # build/test/clippy -- the path dep resolves locally -- and only fails at
+      # `cargo publish`, i.e. mid-release-cascade. #2493 did exactly this
+      # (apr-cli -> aprender-qa-cli) and the tree was green throughout. The
+      # v0.50.0 cascade died this way at 29 of 68 crates. Text-only, no build.
+      - name: Publishable crates may not depend on unpublishable ones
+        run: bash scripts/check_publishable_deps_publishable.sh
+      - name: Publishable-deps guard case table
+        run: bash scripts/check_publishable_deps_publishable.sh --self-test
+
+      # `cargo deny` ran in ZERO workflows -- only `make deny`. Positive control:
+      # 9 workflows mention `cargo`, 0 mentioned `deny`. Meanwhile the `security`
+      # job runs `cargo audit` with continue-on-error, which cannot fail the build
+      # AND does not read deny.toml. The whole advisory surface was one tool that
+      # ignores the exemption file, in a job that cannot fail, plus one tool that
+      # honours it running nowhere -- so all 29 exemptions gated nothing.
+      #
+      # Install-if-missing: free once the runner has it, self-healing if a runner
+      # is rebuilt from a base image without it.
+      #
+      # PRIVATE INSTALL ROOT (scripts/check_cargo_install_private_root.sh):
+      # mac-server runs 16 runners under one $HOME, so a shared `cargo install`
+      # replaces a binary another running job is about to exec (aprender#2353:
+      # cargo-llvm-cov ENOENT, empty coverage figure). Install into a per-run
+      # root and put it FIRST on PATH so the freshly installed binary is the one
+      # that runs, here and in the steps that follow.
+      - name: Install cargo-deny (if absent)
+        env:
+          CARGO_INSTALL_ROOT: /tmp/cargo-deny-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if ! command -v cargo-deny > /dev/null 2>&1; then
+            cargo install cargo-deny --locked
+            echo "$CARGO_INSTALL_ROOT/bin" >> "$GITHUB_PATH"
+            export PATH="$CARGO_INSTALL_ROOT/bin:$PATH"
+          fi
+          cargo deny --version
+      - name: Advisories must pass, with deny.toml exemptions honoured
+        run: cargo deny check advisories
+      # Separate from the check above on purpose: a newly-FIXED upstream must
+      # never fail anyone's build. It fails only this guard, whose remedy is
+      # deleting a line.
+      - name: Every deny.toml exemption must still be live
+        run: bash scripts/check_deny_exemptions_live.sh
+      # A test gated on a path outside the workspace is green on every machine
+      # that lacks it, which is every machine but one. The monorepo merged 20
+      # sibling repos in-tree, so gates like
+      #   file_exists("/home/noah/src/realizar/src/quantize.rs")
+      # now probe a path that CANNOT exist again -- realizar is
+      # crates/aprender-serve. Five such gates remain and none of them reads the
+      # file it probes; the path only decides whether to skip. Ratcheted, because
+      # repointing them makes dormant tests run for the first time and belongs in
+      # its own change. Text-only check, no build.
+      - name: Tests must not gate on paths outside the workspace
+        run: bash scripts/check_test_fixture_paths.sh
+      - name: Fixture-path guard case table
+        run: bash scripts/check_test_fixture_paths.sh --self-test
 
   # Top-level gate: satisfies org ruleset "Green Main" which requires check named "gate".
   # The reusable workflow produces "ci / gate" but rulesets need exact match on "gate".
@@ -700,6 +1139,36 @@ jobs:
             "$IMAGE" \
             bash -c '
               set -uo pipefail
+              # The sovereign-ci image bakes cargo-nextest but NOT cargo-mutants,
+              # so `cargo mutants` exited 101 (no such command) on every run. Before
+              # #2514 hardened the outcomes.json check, that 101 was read as
+              # "0 mutants in diff. Pass." -- the gate passed BECAUSE the tool was
+              # absent. Installing it here is a stopgap; it belongs baked into the
+              # image (paiml/infra), which is tracked separately.
+              #
+              # Assert it RUNS after installing. An install that half-succeeds must
+              # not reach the gate looking like a clean diff -- that is the same
+              # failure mode #2514 just closed.
+              # Private install root, per scripts/check_cargo_install_private_root.sh.
+              # This install already runs INSIDE the ephemeral container (CARGO_HOME
+              # is /usr/local/cargo and the container is --rm), so it cannot reach
+              # the host toolchain -- but the guard reads workflow text and cannot
+              # see that, and "the guard cannot tell" is not a reason to exempt.
+              # Declaring the root makes it true rather than merely argued.
+              export CARGO_INSTALL_ROOT=/tmp/cargo-mutants-root
+              export PATH="$CARGO_INSTALL_ROOT/bin:$PATH"
+              if ! cargo mutants --version > /dev/null 2>&1; then
+                echo "cargo-mutants absent from image; installing"
+                cargo install cargo-mutants --locked --version 27.1.0 > /tmp/mi.log 2>&1 || {
+                  echo "::error::cargo-mutants install failed; the gate cannot run"
+                  tail -20 /tmp/mi.log
+                  exit 1
+                }
+              fi
+              cargo mutants --version || {
+                echo "::error::cargo-mutants still not runnable after install"
+                exit 1
+              }
               # --in-diff pr.diff: mutate only PR-touched lines.
               # cargo-mutants exits non-zero when mutants survive; we still
               # parse outcomes.json so the threshold (MUTANTS_MAX_MISSED) is
@@ -710,16 +1179,32 @@ jobs:
               echo "cargo-mutants exit: $MUT_EXIT"
               OUTCOMES=mutants.out/outcomes.json
               if [ ! -f "$OUTCOMES" ]; then
-                # No outcomes file means cargo-mutants found no mutants in the
-                # diff (e.g. diff only touched non-Rust / non-mutable lines).
-                echo "No mutants.out/outcomes.json — 0 mutants in diff. Pass."
+                # #2481 F-7: this used to be an unconditional `exit 0` on the
+                # theory that no outcomes file means no mutants in the diff.
+                # That is one reason the file can be absent. The other is that
+                # cargo-mutants CRASHED before writing it -- and that passed
+                # too. MUT_EXIT distinguishes them, and it was captured on the
+                # line above and then never tested.
+                if [ "$MUT_EXIT" -ne 0 ]; then
+                  echo "::error::cargo-mutants exited $MUT_EXIT and wrote no outcomes.json. The gate cannot tell whether the diff was clean or the run died, so it refuses rather than passing."
+                  exit 1
+                fi
+                echo "No mutants.out/outcomes.json and cargo-mutants exited 0 — 0 mutants in diff. Pass."
                 exit 0
               fi
               MISSED=$(grep -o "\"summary\"[^}]*\"missed\":[0-9]*" "$OUTCOMES" \
                 | grep -o "\"missed\":[0-9]*" | grep -o "[0-9]*" | head -1)
               TIMEOUT=$(grep -o "\"timeout\":[0-9]*" "$OUTCOMES" \
                 | grep -o "[0-9]*" | head -1)
-              MISSED=${MISSED:-0}; TIMEOUT=${TIMEOUT:-0}
+              # #2481 F-7: `MISSED=${MISSED:-0}` made an UNPARSEABLE outcomes.json
+              # read as "zero missed" -- so a cargo-mutants JSON format change
+              # would silently disarm this gate rather than break it. Not being
+              # able to measure is not the same as measuring zero.
+              if [ -z "$MISSED" ] || [ -z "$TIMEOUT" ]; then
+                echo "::error::could not parse missed/timeout out of $OUTCOMES. The gate refuses rather than assuming zero — check whether cargo-mutants changed its JSON shape."
+                head -40 "$OUTCOMES" || true
+                exit 1
+              fi
               echo "Diff-scoped mutation result: missed=$MISSED timeout=$TIMEOUT (max allowed missed=$MUTANTS_MAX_MISSED)"
               UNCAUGHT=$((MISSED + TIMEOUT))
               if [ "$UNCAUGHT" -gt "$MUTANTS_MAX_MISSED" ]; then

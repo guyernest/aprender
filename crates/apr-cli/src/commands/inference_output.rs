@@ -179,6 +179,11 @@ struct InferenceOutput {
     used_gpu: Option<bool>,
     /// GH-250: Generated token IDs for parity checking
     generated_tokens: Option<Vec<u32>>,
+    /// Decoded text for each entry of `generated_tokens`, in the same order.
+    ///
+    /// Populated only when `--stream` asked for it (see
+    /// [`decode_token_pieces`]) — every other mode renders the whole `text`.
+    token_texts: Option<Vec<String>>,
 }
 
 /// Execute inference on model
@@ -198,16 +203,6 @@ fn execute_inference(
             "{}",
             format!("Using mmap for {}MB model", metadata.len() / 1024 / 1024).dimmed()
         );
-    }
-
-    // GH-516: Whisper speech recognition — detect audio input + whisper model
-    #[cfg(feature = "whisper")]
-    if let Some(input) = input_path {
-        let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let is_audio = matches!(ext, "wav" | "mp3" | "flac" | "ogg" | "m4a");
-        if is_audio {
-            return execute_with_whisper(model_path, input, options);
-        }
     }
 
     // Try realizar inference if feature enabled
@@ -235,8 +230,61 @@ fn execute_inference(
             tok_per_sec: None,
             used_gpu: None,
             generated_tokens: None,
+            token_texts: None,
         })
     }
+}
+
+/// Decode each generated token id to its own text piece, using the model's own
+/// tokenizer.
+///
+/// # Why
+///
+/// `apr run --stream` emitted one NDJSON event per token whose `text` field was
+/// **always** the empty string — the token ids were right (the terminal `final`
+/// event decoded them into the full reply) but the per-token decode was simply
+/// never done. A consumer rendering `text` as events arrive saw nothing at all
+/// until the run finished, which is the entire point of the flag.
+///
+/// Single-token decode is the same thing the HTTP streaming path does
+/// (`decode_token(&tokenizer, token_id, clean)` in the SSE handler), so a
+/// `--stream` consumer and an SSE consumer see the same pieces. A multi-byte
+/// character split across two tokens decodes to a replacement char in the piece
+/// that carries only part of it; the `final` event always carries the
+/// authoritative full text.
+///
+/// Returns `None` when no tokenizer can be resolved for the model — the caller
+/// then leaves `text` empty rather than inventing pieces.
+#[cfg(feature = "inference")]
+fn decode_token_pieces(model_path: &Path, ids: &[u32]) -> Option<Vec<String>> {
+    if ids.is_empty() {
+        return Some(Vec::new());
+    }
+
+    // GGUF carries its vocabulary inside the file.
+    if let Ok(mapped) = realizar::gguf::MappedGGUFModel::from_path(model_path) {
+        return Some(ids.iter().map(|&id| mapped.model.decode(&[id])).collect());
+    }
+
+    // APR / SafeTensors: sibling tokenizer.json (hash-prefixed or plain).
+    if let Some(tok) = realizar::apr::AprV2Model::load_tokenizer(model_path) {
+        return Some(ids.iter().map(|&id| tok.decode(&[id])).collect());
+    }
+
+    None
+}
+
+/// Map a realizar inference failure onto `CliError::InferenceFailed`.
+///
+/// #2403: the variant already renders as `"Inference failed: {0}"`
+/// (`error.rs:45`), so wrapping the payload in another `"Inference failed: "`
+/// printed the context twice — `apr run` on an unsupported architecture
+/// emitted `error: Inference failed: Inference failed: Format error: ...`,
+/// which is what MCP clients relayed verbatim. The payload must carry the
+/// underlying diagnosis only.
+#[cfg(feature = "inference")]
+fn inference_error<E: std::fmt::Display>(e: E) -> CliError {
+    CliError::InferenceFailed(e.to_string())
 }
 
 /// Execute inference using realizar engine
@@ -295,8 +343,7 @@ fn execute_with_realizar(
     }
 
     // Run inference via realizar
-    let result = run_inference(&config)
-        .map_err(|e| CliError::InferenceFailed(format!("Inference failed: {e}")))?;
+    let result = run_inference(&config).map_err(inference_error)?;
 
     // Report performance if benchmarking
     if options.benchmark {
@@ -317,6 +364,15 @@ fn execute_with_realizar(
     } else {
         Some(Vec::new())
     };
+    // Only `--stream` renders per-token text, and resolving the tokenizer costs
+    // a second open of the model file — so do not pay it on every run.
+    let token_texts = if options.stream {
+        generated_tokens
+            .as_deref()
+            .and_then(|ids| decode_token_pieces(model_path, ids))
+    } else {
+        None
+    };
     Ok(InferenceOutput {
         text: result.text,
         tokens_generated: Some(result.generated_token_count),
@@ -324,56 +380,33 @@ fn execute_with_realizar(
         tok_per_sec: Some(result.tok_per_sec),
         used_gpu: Some(result.used_gpu),
         generated_tokens,
+        token_texts,
     })
 }
 
-/// GH-516: Execute whisper speech recognition using our own whisper-apr crate.
-/// Zero external deps — whisper.apr is our implementation.
-#[cfg(feature = "whisper")]
-fn execute_with_whisper(
-    model_path: &Path,
-    audio_path: &Path,
-    options: &RunOptions,
-) -> Result<InferenceOutput> {
-    use whisper_apr::audio::decode::load_audio_file;
+#[cfg(all(test, feature = "inference"))]
+mod tests_2403 {
+    use super::inference_error;
 
-    let start = std::time::Instant::now();
+    /// #2403 — `apr run` on a qwen3.5 GGUF emitted
+    /// `error: Inference failed: Inference failed: Format error: ...`, and MCP
+    /// relayed that doubled prefix verbatim. The context belongs to the error
+    /// variant's Display, not to the payload.
+    #[test]
+    fn inference_context_appears_exactly_once() {
+        let rendered = inference_error(
+            "Format error: Architecture 'qwen35' uses SSM/Gated Delta Net layers",
+        )
+        .to_string();
 
-    if options.verbose {
-        eprintln!("[WHISPER] Loading model: {}", model_path.display());
-        eprintln!("[WHISPER] Audio input: {}", audio_path.display());
+        assert_eq!(
+            rendered.matches("Inference failed:").count(),
+            1,
+            "context applied more than once: {rendered}"
+        );
+        assert_eq!(
+            rendered,
+            "Inference failed: Format error: Architecture 'qwen35' uses SSM/Gated Delta Net layers"
+        );
     }
-
-    // Load audio
-    let audio = load_audio_file(audio_path)
-        .map_err(|e| CliError::InferenceFailed(format!("Audio load failed: {e}")))?;
-
-    if options.verbose {
-        eprintln!("[WHISPER] Audio: {} samples ({:.1}s at 16kHz)", audio.len(), audio.len() as f64 / 16000.0);
-    }
-
-    // Load model from .apr file
-    let model_data = std::fs::read(model_path)?;
-    let whisper = whisper_apr::WhisperApr::load_from_apr(&model_data)
-        .map_err(|e| CliError::InferenceFailed(format!("Whisper model load failed: {e}")))?;
-
-    if options.verbose {
-        eprintln!("[WHISPER] Model loaded, transcribing...");
-    }
-
-    // Transcribe — handles mel extraction + encoder + decoder internally
-    let result = whisper.transcribe(&audio, Default::default())
-        .map_err(|e| CliError::InferenceFailed(format!("Transcription failed: {e}")))?;
-
-    let duration = start.elapsed();
-
-    let word_count = result.text.split_whitespace().count();
-    Ok(InferenceOutput {
-        text: result.text,
-        tokens_generated: Some(word_count),
-        inference_ms: Some(duration.as_secs_f64() * 1000.0),
-        tok_per_sec: Some(word_count as f64 / duration.as_secs_f64()),
-        used_gpu: Some(false),
-        generated_tokens: None,
-    })
 }

@@ -49,8 +49,18 @@ use crate::{
     tokenizer::BPETokenizer,
 };
 
+// aprender#2376(3): request-scoped cancellation for the generate handlers.
+mod cancel_scope;
+pub(crate) use cancel_scope::cancel_on_disconnect;
+pub use cancel_scope::request_cancel_token;
+
 // PMAT-802: Extracted handlers
-#[cfg(feature = "cuda")]
+//
+// aprender#2465(1): NOT `#[cfg(feature = "cuda")]` on the module. Every
+// CUDA-dependent item inside is individually gated; the decode loop
+// (`q4k_decode`) and its cancellation falsifiers are not, so they compile and
+// run under the default feature set. Gating the whole module put the only
+// cancellation-free decode loop in the crate outside every CI test job.
 pub mod apr_q4k_scheduler;
 #[cfg(feature = "cuda")]
 pub mod cuda_batch_scheduler;
@@ -63,7 +73,14 @@ pub(crate) use openai_handlers::{
 // PMAT-923: Ollama HTTP compat (/api/chat, /api/generate) — delegates to the
 // OpenAI chat path so `apr serve` is a drop-in Ollama HTTP replacement.
 mod ollama_handlers;
-pub(crate) use ollama_handlers::{ollama_chat_handler, ollama_generate_handler};
+pub(crate) use ollama_handlers::{
+    ollama_chat_handler, ollama_embeddings_handler, ollama_generate_handler, ollama_show_handler,
+    ollama_tags_handler, ollama_version_handler,
+};
+// What this server actually measured about the model it loaded. Metadata
+// handlers read it instead of substituting plausible-looking constants.
+mod model_source;
+pub use model_source::{detect_format_from_magic, gguf_qtype_name, ModelSourceInfo};
 mod gpu_handlers;
 pub(crate) use gpu_handlers::{
     batch_generate_handler, batch_tokenize_handler, generate_handler,
@@ -108,8 +125,8 @@ pub use types::{default_max_tokens, default_top_k};
 pub(crate) use types::{default_strategy, default_temperature, default_top_p};
 pub use types::{
     BatchGenerateRequest, BatchGenerateResponse, BatchTokenizeRequest, BatchTokenizeResponse,
-    ErrorResponse, GenerateRequest, GenerateResponse, HealthResponse, ModelsResponse,
-    StreamDoneEvent, StreamTokenEvent, TokenizeRequest, TokenizeResponse,
+    ChoiceCount, ErrorResponse, FinishReason, GenerateRequest, GenerateResponse, HealthResponse,
+    ModelsResponse, StreamDoneEvent, StreamTokenEvent, TokenizeRequest, TokenizeResponse,
 };
 
 /// Application state shared across handlers
@@ -198,6 +215,30 @@ pub struct AppState {
     verbose: bool,
     /// GH-103: Enable inference tracing (propagates into QuantizedGenerateConfig.trace)
     trace: bool,
+    /// What the loader measured about the served model (path, size, format,
+    /// quantization, context length). `None` means this server was built
+    /// without that knowledge — the metadata handlers then report the fields
+    /// as ABSENT rather than inventing values.
+    model_source: Option<Arc<ModelSourceInfo>>,
+}
+
+impl AppState {
+    /// Attach measured model provenance/metadata.
+    ///
+    /// Call this from whatever loaded the model; it is what makes
+    /// `/realize/model`, `/api/tags` and `/api/show` report the truth instead
+    /// of constants.
+    #[must_use]
+    pub fn with_model_source(mut self, source: ModelSourceInfo) -> Self {
+        self.model_source = Some(Arc::new(source));
+        self
+    }
+
+    /// Measured model provenance/metadata, if the loader supplied any.
+    #[must_use]
+    pub fn model_source(&self) -> Option<&ModelSourceInfo> {
+        self.model_source.as_deref()
+    }
 }
 
 /// Helper to create default audit infrastructure
@@ -218,6 +259,41 @@ impl crate::audit::AuditSink for InMemorySinkWrapper {
 
     fn flush(&self) -> Result<(), crate::audit::AuditError> {
         self.0.flush()
+    }
+}
+
+/// HTTP status for a model/tokenizer resolution failure.
+///
+/// One server-side condition must map to one status code. Before this existed the
+/// identical `"Model registry error: No model available"` came back as 404 from
+/// `/tokenize`, `/stream/generate` and `/realize/embed` but as 500 from
+/// `/batch/tokenize` and `/batch/generate`, so a client retry policy keyed on
+/// status treated the same failure as permanent on one route and as a server bug
+/// on the next (aprender#2376 finding 5).
+///
+/// * [`RealizarError::ModelNotFound`] — the client named a model this server does
+///   not have: 404, the route and request are fine.
+/// * [`RealizarError::RegistryError`] — the server has no usable model at all.
+///   That is a server-side condition, so 503 (the shape `/metrics/dispatch`
+///   already uses), never 404: the resource exists, the server cannot serve it.
+pub(crate) fn model_resolution_status(err: &RealizarError) -> StatusCode {
+    match err {
+        RealizarError::ModelNotFound(_) => StatusCode::NOT_FOUND,
+        RealizarError::RegistryError(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// HTTP status for a generation failure.
+///
+/// A prompt or `max_tokens` that does not fit the model's context window is fully
+/// determined by the request, so it is a client error. Reporting it as 500 tells
+/// the caller the server broke and invites a retry of the identical request
+/// (aprender#2376 findings 9 and 11).
+pub(crate) fn generation_error_status(err: &RealizarError) -> StatusCode {
+    match err {
+        RealizarError::ContextLimitExceeded { .. } => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

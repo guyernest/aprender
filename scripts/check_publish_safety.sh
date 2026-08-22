@@ -16,6 +16,8 @@
 
 set -uo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 errors=0
 checked=0
 
@@ -99,26 +101,84 @@ else
     echo "OK"
 fi
 
-# Check 6: No large binary files (>1MB) in publishable packages
+# Check 6: No large or binary files in publishable packages
+#
+# This check had two holes, and the defect it is credited with catching (a 28 MB
+# test.apr) would slip through both today:
+#
+#   1. It iterated `for pkg in aprender apr-cli` -- 2 of the 72 publishable
+#      crates. The 0.63.0 CB-510 recurrence was in aprender-serve, which is not
+#      one of them. A 2 MB blob planted in aprender-core passed cleanly.
+#   2. Its name and comment say ">1MB" and it never measured a size. It grepped
+#      an extension list, so a 100 MB .txt passed and a 1 KB .bin failed. The
+#      threshold in the title did not exist in the code.
+#
+# It then acquired a THIRD hole, of exactly the same species as the first
+# (aprender#2559): "every publishable crate" meant one `cargo metadata` on the
+# ROOT workspace, and `crates/facades/` is a second workspace `exclude`d from
+# the root. Its three crates are published to crates.io and were never size- or
+# hygiene-scanned -- and could not be, because `cargo package -p
+# provable-contracts` from the repo root is rc=101, "did not match any
+# packages". The `|| continue` below turned that into a silent skip.
+#
+# Now: scripts/lib/cascade_universe.py -- every publishable crate in every
+# workspace, each with the manifest path needed to reach it -- an actual byte
+# threshold, and a count that must be accounted for rather than skipped.
 echo -n "  Package size check... "
 checked=$((checked + 1))
 large_files=""
-for pkg in aprender apr-cli; do
-    # Check for binary/model files that shouldn't be in packages
-    binaries=$(cargo package -p "$pkg" --list --allow-dirty 2>/dev/null \
-        | grep -E '\.(apr|gguf|safetensors|bin|pt|onnx|wav|mp3|db|db-shm|db-wal)$' || true)
-    if [ -n "$binaries" ]; then
-        large_files="${large_files}${pkg}: ${binaries}\n"
+skipped_pkgs=""
+scanned_pkgs=0
+MAX_PACKAGED_BYTES=1048576
+
+universe=$(python3 "${REPO_ROOT:-.}/scripts/lib/cascade_universe.py" "${REPO_ROOT:-.}")
+
+while IFS=$'\t' read -r pkg _ver manifest _ws; do
+    [ -n "$pkg" ] || continue
+    # --manifest-path, not -p: `-p` cannot name a crate outside this workspace.
+    listing=$(cargo package --manifest-path "$manifest" --list --allow-dirty 2>/dev/null < /dev/null) \
+        || { skipped_pkgs="${skipped_pkgs} ${pkg}"; continue; }
+    if [ -z "$listing" ]; then
+        skipped_pkgs="${skipped_pkgs} ${pkg}"
+        continue
     fi
-done
+    pkg_dir=$(dirname "$manifest")
+    scanned_pkgs=$((scanned_pkgs + 1))
+
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        # SIZE, not extension. The old rule failed on an extension list and
+        # never measured anything, which is both too strict and too loose: it
+        # would reject a 77-byte golden .apr fixture while passing a 3.6 MB
+        # .pmat-baseline.json. Every real instance of this defect -- the 28 MB
+        # test.apr, and the 5.4 MB of baseline JSON found when this check was
+        # first pointed at all 72 crates -- is a SIZE problem.
+        if [ -f "$pkg_dir/$f" ]; then
+            sz=$(stat -c%s "$pkg_dir/$f" 2>/dev/null || echo 0)
+            if [ "$sz" -gt "$MAX_PACKAGED_BYTES" ]; then
+                large_files="${large_files}${pkg}: ${f} (${sz} bytes > ${MAX_PACKAGED_BYTES})\n"
+            fi
+        fi
+    done <<< "$listing"
+done <<< "$universe"
+
 if [ -n "$large_files" ]; then
     echo "FAIL"
-    echo "FAIL: Binary/model files found in packages:"
+    echo "FAIL: large or binary files found in published packages:"
     echo -e "$large_files"
-    echo "Fix: add to Cargo.toml [package] exclude or .gitignore"
+    echo "Fix: add to Cargo.toml [package] exclude (root-anchored) or .gitignore"
+    errors=$((errors + 1))
+elif [ "$scanned_pkgs" -lt 70 ]; then
+    # Vacuity, in the direction this check has now failed twice: a scan that
+    # covered almost nothing reports no large files and reads as a clean pass.
+    # An unscannable crate is a RESULT, not a skip.
+    echo "FAIL"
+    echo "FAIL: only $scanned_pkgs package(s) were actually scanned, expected 70+."
+    echo "Unscannable:${skipped_pkgs:- (none named)}"
+    echo "The ENUMERATION is broken, not the packages."
     errors=$((errors + 1))
 else
-    echo "OK"
+    echo "OK ($scanned_pkgs packages)"
 fi
 
 # Check 7: No hardcoded /home/ paths in non-test production source

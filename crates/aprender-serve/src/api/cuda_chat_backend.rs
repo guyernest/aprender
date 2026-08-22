@@ -6,6 +6,7 @@ fn try_safetensors_cuda_backend(
     request: &ChatCompletionRequest,
     request_id: &str,
     start: Instant,
+    cancel: &CancelToken,
 ) -> Option<Response> {
     let model_lock = state.safetensors_cuda_model()?;
     let tokenizer = match require_tokenizer(state) {
@@ -83,6 +84,7 @@ async fn try_cuda_backend(
     request_id: &str,
     trace_level: Option<&str>,
     start: Instant,
+    cancel: &CancelToken,
 ) -> Option<Response> {
     // PMAT-821: config now built by chat_quantized_config (in openai_handlers.rs).
     let ttft_trace = std::env::var("TTFT_TRACE").is_ok();
@@ -112,6 +114,7 @@ async fn try_cuda_backend(
         &tokenizer,
         state.model_eos_token_id(),
         state.should_trace(trace_level),
+        cancel,
     );
     let max_tokens = q_config.max_tokens;
 
@@ -139,13 +142,15 @@ async fn try_cuda_backend(
             let cuda_model_clone = cuda_model_lock.clone();
             let prompt_ids_clone = prompt_ids.clone();
             let q_config_clone = q_config.clone();
+            let sink_metrics = state.metrics.clone();
 
             tokio::task::spawn_blocking(move || {
                 let mut cuda_model = cuda_model_clone.write().expect("operation failed");
                 let result = cuda_model.generate_gpu_resident_streaming(
                     &prompt_ids_clone,
                     &q_config_clone,
-                    |token_id| tx.blocking_send(Ok(token_id)).is_ok(),
+                    // Stops when the client goes away — see `streaming_token_sink`.
+                    crate::api::openai_handlers::streaming_token_sink(tx.clone(), sink_metrics),
                 );
                 if let Err(e) = result {
                     let _ = tx.blocking_send(Err(e.to_string()));
@@ -160,7 +165,7 @@ async fn try_cuda_backend(
             request.model.clone(),
             state.metrics.clone(),
             start,
-            false,
+            max_tokens,
         ));
     }
 
@@ -231,6 +236,7 @@ fn try_quantized_backend(
     request_id: &str,
     trace_level: Option<&str>,
     start: Instant,
+    cancel: &CancelToken,
 ) -> Option<Response> {
     // PMAT-821: config now built by chat_quantized_config (in openai_handlers.rs).
     let quantized_model = state.quantized_model()?;
@@ -254,6 +260,7 @@ fn try_quantized_backend(
         &tokenizer,
         state.model_eos_token_id(),
         state.should_trace(trace_level),
+        cancel,
     );
     let max_tokens = q_config.max_tokens;
 
@@ -262,12 +269,14 @@ fn try_quantized_backend(
         let quantized_model_clone = quantized_model.clone();
         let prompt_ids_clone = prompt_ids.clone();
         let q_config_clone = q_config.clone();
+        let sink_metrics = state.metrics.clone();
 
         tokio::task::spawn_blocking(move || {
             let result = quantized_model_clone.generate_with_cache_streaming(
                 &prompt_ids_clone,
                 &q_config_clone,
-                |token_id| tx.blocking_send(Ok(token_id)).is_ok(),
+                // Stops when the client goes away — see `streaming_token_sink`.
+                crate::api::openai_handlers::streaming_token_sink(tx.clone(), sink_metrics),
             );
             if let Err(e) = result {
                 let _ = tx.blocking_send(Err(e.to_string()));
@@ -281,7 +290,7 @@ fn try_quantized_backend(
             request.model.clone(),
             state.metrics.clone(),
             start,
-            true,
+            max_tokens,
         ));
     }
 
@@ -322,17 +331,18 @@ fn convert_token_ids(ids: &[usize]) -> Result<Vec<u32>, String> {
         .collect()
 }
 
-/// Build generation config from request parameters
+/// Build generation config from request parameters.
+///
+/// #2375: `temperature: 0` — the OpenAI-canonical deterministic request —
+/// reached `apply_temperature` unchanged here and made this backend answer
+/// HTTP 500 ("Temperature must be a positive finite number") for every dense
+/// model. The resolution now lives in ONE place, shared with `/v1/completions`.
 fn build_gen_config(request: &ChatCompletionRequest) -> GenerationConfig {
-    let max_tokens = request.max_tokens.unwrap_or(256);
-    let temperature = request.temperature.unwrap_or(0.7);
-    let mut config = GenerationConfig::default()
-        .with_max_tokens(max_tokens)
-        .with_temperature(temperature);
-    if let Some(top_p) = request.top_p {
-        config.strategy = SamplingStrategy::TopP { p: top_p };
-    }
-    config
+    crate::api::realize_handlers::resolve_dense_generation_config(
+        request.temperature.unwrap_or(0.7),
+        request.top_p,
+        request.max_tokens.unwrap_or(256),
+    )
 }
 
 /// Registry-based model fallback (no specialized backend).
@@ -341,6 +351,7 @@ fn registry_fallback(
     request: &ChatCompletionRequest,
     request_id: &str,
     start: Instant,
+    cancel: &CancelToken,
 ) -> Response {
     let model_id = if request.model == "default" || request.model.is_empty() {
         None
@@ -361,7 +372,7 @@ fn registry_fallback(
 
     let prompt_tokens = prompt_ids.len();
     let prompt: Vec<usize> = prompt_ids.iter().map(|&id| id as usize).collect();
-    let config = build_gen_config(request);
+    let config = build_gen_config(request).with_cancel(cancel.clone());
 
     let generated = match model.generate(&prompt, &config) {
         Ok(g) => g,
@@ -386,6 +397,7 @@ fn registry_fallback(
             request_id.to_string(),
             request.model.clone(),
             request.stop.as_deref(),
+            request.max_tokens.unwrap_or(256),
         );
     }
 
@@ -480,7 +492,14 @@ async fn try_apr_q4k_chat_backend(
     request_id: &str,
     trace_level: Option<&str>,
     start: Instant,
+    cancel: &crate::generate::CancelToken,
 ) -> Option<Response> {
+    // aprender#2465(1): this backend hands the work to the Q4K scheduler THREAD,
+    // and handing a loop to another thread does not stop it. The dropped response
+    // future cannot reach that thread, and the scheduler returns one accumulated
+    // AprQ4kResponse so there is no per-token send left to fail either — the
+    // request carries the token and the decode loop polls it. The previous comment
+    // here claimed the hand-off was itself the answer; it was not.
     use crate::api::apr_q4k_scheduler::AprQ4kRequest;
 
     let q4k_tx = state.apr_q4k_tx()?;
@@ -507,6 +526,7 @@ async fn try_apr_q4k_chat_backend(
             max_tokens,
             temperature,
             eos_ids,
+            cancel: cancel.clone(),
             response_tx,
         })
         .await
@@ -575,6 +595,7 @@ async fn try_apr_q4k_chat_backend(
 pub async fn openai_chat_completions_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Extension(cancel): Extension<CancelToken>,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Response {
     let start = Instant::now();
@@ -605,47 +626,65 @@ pub async fn openai_chat_completions_handler(
             .as_millis()
     );
 
-    if let Some(r) = try_qwen3_moe_backend(&state, &request, &request_id, start) {
+    if let Some(r) = try_qwen3_moe_backend(&state, &request, &request_id, start, &cancel) {
         return r;
     }
 
     #[cfg(feature = "gpu")]
-    if let Some(r) = try_gpu_backend(&state, &request, &request_id, trace_level.as_deref(), start) {
+    if let Some(r) = try_gpu_backend(
+        &state,
+        &request,
+        &request_id,
+        trace_level.as_deref(),
+        start,
+        &cancel,
+    ) {
         return r;
     }
 
     #[cfg(feature = "gpu")]
-    if let Some(r) =
-        try_cached_backend(&state, &request, &request_id, trace_level.as_deref(), start)
-    {
+    if let Some(r) = try_cached_backend(
+        &state,
+        &request,
+        &request_id,
+        trace_level.as_deref(),
+        start,
+        &cancel,
+    ) {
         return r;
     }
 
     #[cfg(feature = "cuda")]
-    if let Some(r) = try_cuda_backend(&state, &request, &request_id, trace_level.as_deref(), start).await
+    if let Some(r) =
+        try_cuda_backend(&state, &request, &request_id, trace_level.as_deref(), start, &cancel).await
     {
         return r;
     }
 
     // ALB-110: APR Q4K GPU backend via dedicated inference thread
     #[cfg(feature = "cuda")]
-    if let Some(r) = try_apr_q4k_chat_backend(&state, &request, &request_id, trace_level.as_deref(), start).await {
+    if let Some(r) = try_apr_q4k_chat_backend(&state, &request, &request_id, trace_level.as_deref(), start, &cancel).await {
         return r;
     }
 
     // #169: SafeTensors CUDA backend (format parity)
     #[cfg(feature = "cuda")]
-    if let Some(r) = try_safetensors_cuda_backend(&state, &request, &request_id, start) {
+    if let Some(r) = try_safetensors_cuda_backend(&state, &request, &request_id, start, &cancel) {
         return r;
     }
 
-    if let Some(r) =
-        try_quantized_backend(&state, &request, &request_id, trace_level.as_deref(), start)
-    {
+    if let Some(r) = try_quantized_backend(
+        &state,
+        &request,
+        &request_id,
+        trace_level.as_deref(),
+        start,
+        &cancel,
+    ) {
         return r;
     }
 
-    registry_fallback(&state, &request, &request_id, start)
+    registry_fallback(&state, &request, &request_id, start, &cancel)
 }
 
 /// aprender#1789 Option B: qwen3_moe MoE-aware dispatch for /v1/chat/completions.
@@ -670,6 +709,7 @@ fn try_qwen3_moe_backend(
     request: &ChatCompletionRequest,
     request_id: &str,
     start: Instant,
+    cancel: &CancelToken,
 ) -> Option<Response> {
     use crate::gguf::QuantizedGenerateConfig;
 
@@ -758,6 +798,7 @@ fn try_qwen3_moe_backend(
         repeat_last_n: request.repeat_last_n.unwrap_or(defaults.repeat_last_n),
         seed: request.seed.unwrap_or(defaults.seed),
         stop_tokens,
+        cancel: cancel.clone(),
         ..defaults
     };
 
@@ -770,6 +811,7 @@ fn try_qwen3_moe_backend(
         let quantized_clone = quantized.clone();
         let input_ids_clone = input_ids.clone();
         let gen_config_clone = gen_config.clone();
+        let sink_metrics = state.metrics.clone();
 
         tokio::task::spawn_blocking(move || {
             let result = crate::infer::qwen3_moe_generate::run_qwen3_moe_generate_streaming(
@@ -777,7 +819,8 @@ fn try_qwen3_moe_backend(
                 &quantized_clone,
                 &input_ids_clone,
                 &gen_config_clone,
-                |token_id| tx.blocking_send(Ok(token_id)).is_ok(),
+                // Stops when the client goes away — see `streaming_token_sink`.
+                crate::api::openai_handlers::streaming_token_sink(tx.clone(), sink_metrics),
             );
             if let Err(e) = result {
                 let _ = tx.blocking_send(Err(e.to_string()));
@@ -791,7 +834,7 @@ fn try_qwen3_moe_backend(
             request.model.clone(),
             state.metrics.clone(),
             start,
-            true,
+            max_tokens,
         ));
     }
 

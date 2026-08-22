@@ -205,7 +205,7 @@
             }) => {
                 assert_eq!(file, PathBuf::from("model.apr"));
                 assert_eq!(filter, Some("encoder".to_string()));
-                assert_eq!(format, "mermaid");
+                assert_eq!(format, crate::commands::tree::TreeFormat::Mermaid);
                 assert!(sizes);
                 assert_eq!(depth, Some(3));
             }
@@ -226,7 +226,7 @@
                 filter,
                 ..
             }) => {
-                assert_eq!(format, "ascii");
+                assert_eq!(format, crate::commands::tree::TreeFormat::Ascii);
                 assert!(!sizes);
                 assert!(depth.is_none());
                 assert!(filter.is_none());
@@ -243,7 +243,7 @@
     /// --assert / --tolerance).
     #[test]
     fn test_parse_probar_command() {
-        use ProbarSubcommand;
+        use TestSubcommand;
         let args = vec![
             "apr",
             "probar",
@@ -260,8 +260,8 @@
         ];
         let cli = parse_cli(args).expect("Failed to parse");
         match *cli.command {
-            Commands::Extended(ExtendedCommands::Probar { command }) => match command {
-                ProbarSubcommand::Tensor {
+            Commands::Extended(ExtendedCommands::Test { command }) => match command {
+                TestSubcommand::Tensor {
                     file,
                     output,
                     format,
@@ -286,12 +286,12 @@
     /// Test parsing 'apr probar tensor' with defaults
     #[test]
     fn test_parse_probar_defaults() {
-        use ProbarSubcommand;
+        use TestSubcommand;
         let args = vec!["apr", "probar", "tensor", "model.apr"];
         let cli = parse_cli(args).expect("Failed to parse");
         match *cli.command {
-            Commands::Extended(ExtendedCommands::Probar { command }) => match command {
-                ProbarSubcommand::Tensor {
+            Commands::Extended(ExtendedCommands::Test { command }) => match command {
+                TestSubcommand::Tensor {
                     output,
                     format,
                     golden,
@@ -325,12 +325,14 @@
         match *cli.command {
             Commands::Debug {
                 file,
+                action,
                 drama,
                 hex,
                 strings,
                 limit,
             } => {
-                assert_eq!(file, PathBuf::from("model.apr"));
+                assert_eq!(file, Some(PathBuf::from("model.apr")));
+                assert!(action.is_none(), "no subcommand was given");
                 assert!(drama);
                 assert!(hex);
                 assert!(strings);

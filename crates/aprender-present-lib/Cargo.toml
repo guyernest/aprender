@@ -1,5 +1,5 @@
 [package]
-exclude = ["tests/", "benches/", "docs/", ".github/", ".pmat/", "target/", ".profraw", ".profdata", ".vscode/", ".idea/", "proptest-regressions/"]
+exclude = ["/tests/", "benches/", "docs/", ".github/", ".pmat/", "target/", ".profraw", ".profdata", ".vscode/", ".idea/", "proptest-regressions/"]
 name = "aprender-present-lib"
 description = "WASM-first visualization and rapid application framework"
 version.workspace = true
@@ -36,7 +36,7 @@ console_error_panic_hook = { workspace = true }
 getrandom = { workspace = true }
 
 [dev-dependencies]
-provable-contracts = "0.3"
+provable-contracts = { path = "../aprender-contracts", package = "aprender-contracts" }
 presentar-test = { path = "../aprender-present-test", package = "aprender-present-test" }
 sha2 = "0.10"
 hex = "0.4"

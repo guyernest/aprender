@@ -4,13 +4,13 @@
 //! Contains context window management and native Realize API endpoints.
 #![allow(unreachable_pub)] // Items re-exported as pub from api/mod.rs
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::StatusCode, Extension, Json};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "gpu")]
 use super::ContinuousBatchRequest;
-use super::{AppState, ChatMessage, ErrorResponse, Usage};
-use crate::generate::{GenerationConfig, SamplingStrategy};
+use super::{AppState, ChatMessage, ChoiceCount, ErrorResponse, FinishReason, Usage};
+use crate::generate::{CancelToken, GenerationConfig, SamplingStrategy};
 use crate::registry::ModelInfo;
 
 // ============================================================================
@@ -383,16 +383,32 @@ pub struct ModelMetadataResponse {
     pub id: String,
     /// Model name
     pub name: String,
-    /// Model format (GGUF, APR, SafeTensors)
-    pub format: String,
-    /// Model size in bytes
-    pub size_bytes: u64,
+    /// Container format (`gguf`, `apr`, `safetensors`), detected from the
+    /// file's magic bytes. Absent when this server did not measure it — never
+    /// defaulted to `"gguf"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Model size in bytes, measured from the file. Absent when unknown;
+    /// `0` is not used as a stand-in for "we did not look".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
     /// Quantization type
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantization: Option<String>,
-    /// Context window size
-    pub context_length: usize,
-    /// Model lineage from Pacha
+    /// Context window this server will actually serve (the KV-cache bound,
+    /// i.e. what `--context-length` set). Absent when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<usize>,
+    /// The model's own advertised maximum context, when the loader read one.
+    /// A separate fact from `context_length`; conflating them is how the
+    /// shipped handler reported 4096 for a 32768-context model served at 128.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_max_context_length: Option<usize>,
+    /// Model architecture the loader identified (e.g. `qwen2`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+    /// Model lineage. Present ONLY when a real content hash was computed —
+    /// provenance is either measured or absent, never synthesised.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lineage: Option<ModelLineage>,
     /// Whether model is loaded
@@ -448,8 +464,15 @@ pub struct CompletionRequest {
     /// Maximum tokens to generate
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<usize>,
-    /// Temperature
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Temperature.
+    ///
+    /// A temperature outside `[0, ∞)` finite is rejected at deserialization
+    /// (aprender#2375) — see `types::deserialize_temperature_f64`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::api::types::deserialize_temperature_f64"
+    )]
     pub temperature: Option<f64>,
     /// Top-p sampling
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -457,6 +480,18 @@ pub struct CompletionRequest {
     /// Stop sequences
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
+    /// Stream the completion as `text/event-stream` chunks.
+    ///
+    /// Dogfood 0.63.0 (#2375 findings 3/5): this field did not exist, so
+    /// `{"stream":true}` was dropped by serde as an unknown key and every
+    /// streaming client (`openai.completions.create(..., stream=True)`) got one
+    /// buffered JSON body where it expected an SSE iterator.
+    #[serde(default)]
+    pub stream: bool,
+    /// Number of completions to return; only `1` is supported and any other
+    /// value is rejected at deserialization (see [`ChoiceCount`]).
+    #[serde(default)]
+    pub n: ChoiceCount,
 }
 
 /// OpenAI-compatible completions response
@@ -488,6 +523,39 @@ pub struct CompletionChoice {
     pub logprobs: Option<serde_json::Value>,
     /// Finish reason
     pub finish_reason: String,
+}
+
+/// One `data:` frame of a streamed `/v1/completions` response.
+///
+/// Same envelope as [`CompletionResponse`] minus `usage`, which OpenAI omits
+/// from completion chunks. `finish_reason` is `null` on every chunk but the
+/// last — clients use exactly that transition to know the stream ended.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionChunk {
+    /// Response ID (identical across every chunk of one completion)
+    pub id: String,
+    /// Object type: always `text_completion`
+    pub object: String,
+    /// Creation timestamp
+    pub created: u64,
+    /// Model used
+    pub model: String,
+    /// Chunk choices
+    pub choices: Vec<CompletionChunkChoice>,
+}
+
+/// One choice inside a [`CompletionChunk`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionChunkChoice {
+    /// Text delta for this chunk
+    pub text: String,
+    /// Choice index
+    pub index: usize,
+    /// Log probabilities (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<serde_json::Value>,
+    /// `null` until the terminal chunk, then the reason generation ended.
+    pub finish_reason: Option<String>,
 }
 
 include!("realize_handlers_embed_completion.rs");

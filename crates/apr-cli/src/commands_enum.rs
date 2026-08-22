@@ -1,4 +1,24 @@
 
+/// Compute backends `--backend` accepts on `apr run` / `apr chat`.
+///
+/// The flag used to be a free-form `String`: `--backend banana` printed
+/// `Backend override: banana` and then quietly ran the default backend. That is
+/// the exact failure the `--backend cuda` guard in `dispatch.rs` exists to
+/// prevent — a run whose throughput number was taken through a backend the
+/// caller did not ask for — so a typo must be rejected by the parser, not
+/// echoed back.
+pub const BACKEND_VALUES: [&str; 3] = ["cuda", "cpu", "wgpu"];
+
+/// Trace detail levels `--trace-level` accepts.
+///
+/// Each value is dispatched on by string equality in `run_entry.rs`; an
+/// unrecognised value silently selected "no extra trace output at all" while
+/// printing `Trace level: <typo>` as though it had taken effect.
+pub const TRACE_LEVEL_VALUES: [&str; 5] = ["none", "basic", "layer", "payload", "chrome"];
+
+/// Output formats `apr run -f/--format` accepts.
+pub const RUN_FORMAT_VALUES: [&str; 4] = ["text", "json", "srt", "vtt"];
+
 /// Output format for `apr code` non-interactive mode (PMAT-CODE-OUTPUT-FORMAT-001).
 /// Mirrors Claude Code's `claude -p --output-format <fmt>` parity row.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
@@ -51,7 +71,7 @@ pub enum Commands {
         #[arg(short, long)]
         task: Option<String>,
         /// Output format (text, json, srt, vtt)
-        #[arg(short = 'f', long, default_value = "text")]
+        #[arg(short = 'f', long, default_value = "text", value_parser = RUN_FORMAT_VALUES)]
         format: String,
         /// Disable GPU acceleration (force CPU-only inference)
         #[arg(long, alias = "cpu", conflicts_with = "gpu")]
@@ -80,7 +100,7 @@ pub enum Commands {
         /// Trace detail level (none, basic, layer, payload, chrome)
         /// "chrome" outputs chrome://tracing JSON integrating layer trace + brick profile.
         /// F-CLIPARITY-01 / PMAT-386 / paiml/aprender#574
-        #[arg(long, value_name = "LEVEL", default_value = "basic")]
+        #[arg(long, value_name = "LEVEL", default_value = "basic", value_parser = TRACE_LEVEL_VALUES)]
         trace_level: String,
         /// Shorthand for --trace --trace-level payload (tensor value inspection)
         #[arg(long)]
@@ -131,7 +151,7 @@ pub enum Commands {
         #[arg(short, long)]
         verbose: bool,
         /// PMAT-488: Compute backend override (cuda, cpu, wgpu)
-        #[arg(long, value_name = "BACKEND")]
+        #[arg(long, value_name = "BACKEND", value_parser = BACKEND_VALUES)]
         backend: Option<String>,
     },
     /// Inference server (plan/run)
@@ -170,11 +190,18 @@ pub enum Commands {
         #[arg(long)]
         quality: bool,
     },
-    /// Simple debugging output ("drama" mode available)
+    /// Simple debugging output ("drama" mode available), or a debug subcommand
+    ///
+    /// `apr debug model.apr` dumps the file. `apr debug embed-viz --model M`
+    /// projects the model's token-embedding table to 2-D — the producer
+    /// `apr embed-viz-lint` reads (aprender#2377 finding 3).
     Debug {
-        /// Path to .apr model file
+        /// Path to .apr model file (omit only when using a subcommand)
         #[arg(value_name = "FILE")]
-        file: PathBuf,
+        file: Option<PathBuf>,
+        /// Debug subcommand, e.g. `embed-viz`
+        #[command(subcommand)]
+        action: Option<DebugCommands>,
         /// Theatrical "drama" mode output
         #[arg(long)]
         drama: bool,
@@ -252,7 +279,8 @@ pub enum Commands {
         quant_roundtrip: bool,
         /// CRUX-B-20: cosine threshold for the quant-roundtrip exit-code gate.
         /// Any tensor with cosine < threshold makes the command exit non-zero.
-        #[arg(long, default_value = "0.95")]
+        #[arg(long, default_value = "0.95",
+              value_parser = crate::commands::threshold_arg::parse_cosine_f32)]
         threshold: f32,
         /// CRUX-B-20: suppress the threshold exit-code gate (still emits the report).
         #[arg(long)]
@@ -325,6 +353,14 @@ pub enum Commands {
         /// Path to .apr model file
         #[arg(value_name = "FILE")]
         file: PathBuf,
+        /// Fail on warnings as well as errors.
+        ///
+        /// By default only ERROR-level findings fail the run. Every real model
+        /// carries advisory metadata warnings (missing license, model_card,
+        /// provenance), so gating on warnings meant `apr lint` could not exit 0
+        /// on anything and its exit code told you nothing.
+        #[arg(long)]
+        strict: bool,
     },
     /// Evaluate a BeatBenchmark contract against a measured value (PMAT-741)
     #[command(name = "beat-run")]
@@ -401,6 +437,9 @@ pub enum Commands {
         /// Plan mode (validate inputs, show export plan, no execution)
         #[arg(long)]
         plan: bool,
+        /// #2392: Overwrite an existing output file (refused without it)
+        #[arg(short, long)]
+        force: bool,
     },
     /// Import from external formats (hf://org/repo, local files, URLs)
     Import {
@@ -634,6 +673,9 @@ pub enum Commands {
         /// Plan mode (validate inputs, show merge plan, no execution)
         #[arg(long)]
         plan: bool,
+        /// #2392: Overwrite an existing output file (refused without it)
+        #[arg(short, long)]
+        force: bool,
     },
     /// Quantize model weights (GH-243)
     Quantize {
@@ -715,8 +757,14 @@ pub enum Commands {
         #[arg(short, long)]
         print: bool,
 
-        /// Prompt text (positional, for -p mode)
-        #[arg(trailing_var_arg = true)]
+        /// Prompt text (positional, for -p mode).
+        ///
+        /// NOT `trailing_var_arg`: that made clap absorb everything after the
+        /// first prompt word into the prompt, so `apr code -p "hi" --model X`
+        /// silently discarded `--model` and ran whatever auto-discovery found
+        /// — a wrong-model execution with no diagnostic — and typo'd flags
+        /// produced no parse error at all. Options are now parsed in any
+        /// position; a prompt that genuinely starts with `-` needs `--`.
         prompt: Vec<String>,
 
         /// Max turns before stopping
@@ -753,4 +801,78 @@ pub enum Commands {
     #[cfg(feature = "dev")]
     #[command(subcommand)]
     Mono(crate::commands::mono::MonoCommands),
+
+    /// RAG pipeline: index, query, transcribe (was the `trueno-rag` binary)
+    #[command(subcommand)]
+    Rag(aprender_rag_cli::Commands),
+
+    /// zram device management (was the `trueno-zram` binary)
+    #[command(subcommand)]
+    Zram(aprender_zram_cli::Commands),
+
+    /// Discrete-event simulation: run, render, validate, verify, emc-check
+    /// (was the `simular` binary)
+    // disable_help_subcommand: simular's `Commands` carries an explicit `Help`
+    // variant. Standalone that is fine -- its own `Cli` sets
+    // disable_help_subcommand = true, so clap does not also generate one. That
+    // attribute lives on `Cli`, which apr never constructs: it embeds the
+    // `Commands` enum directly, so clap's auto-`help` came back and collided:
+    //     Command sim: command name `help` is duplicated
+    // clap's duplicate check is #[cfg(debug_assertions)], so a release build
+    // would have SHIPPED the ambiguity instead of panicking.
+    #[command(subcommand, disable_help_subcommand = true)]
+    Sim(simular::cli::Commands),
+
+    /// Compute-graph profiling: profile, bench, roofline, doctor
+    /// (was the `aprender-cgp` binary)
+    #[command(subcommand)]
+    Cgp(cgp::cli::Commands),
+
+    /// Provable-contracts: validate, lint, score, kani, proof-status
+    /// (the `pv` binary keeps shipping under its own name; this is the
+    /// in-apr route to the same commands)
+    #[command(subcommand)]
+    Pv(aprender_contracts_cli::cli::Commands),
+}
+
+/// Subcommands for `apr debug` (aprender#2377 finding 3).
+///
+/// `embed-viz` is the PRODUCER for `apr embed-viz-lint`: CRUX-F-18 shipped the
+/// lint with help pointing at `apr debug embed-viz`, which did not exist, so
+/// its schema / row-count / determinism gates had never run on real data.
+#[derive(Subcommand, Debug)]
+pub enum DebugCommands {
+    /// Project a model's token-embedding table to 2-D and write the
+    /// `token_id,token_str,x,y` CSV `apr embed-viz-lint` reads.
+    ///
+    /// Reads the real embedding tensor (GGUF / APR / SafeTensors, dequantising
+    /// as needed). `--projection umap` is REFUSED with a non-zero exit rather
+    /// than labelling a different algorithm's output "umap".
+    EmbedViz {
+        /// Model file holding the embedding table
+        #[arg(long, value_name = "FILE")]
+        model: PathBuf,
+        /// Embedding tensor name (default: auto-detect the known names)
+        #[arg(long, value_name = "NAME")]
+        tensor: Option<String>,
+        /// Projection method: exact `pca`, seeded `random`, or `umap` (refused)
+        #[arg(long, value_enum, default_value_t = EmbedProjection::Pca)]
+        projection: EmbedProjection,
+        /// Seed pinning the random projection, so a rerun is byte-identical
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        seed: u64,
+        /// Project only the first N vocabulary rows (default: all)
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+        /// Token text, one per line, for the `token_str` column. Without it apr
+        /// reads the GGUF vocabulary, or writes `<unresolved>`
+        #[arg(long, value_name = "FILE")]
+        tokens: Option<PathBuf>,
+        /// Write the CSV here instead of stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Overwrite an existing --output file (refused without it)
+        #[arg(short, long)]
+        force: bool,
+    },
 }

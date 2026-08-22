@@ -42,6 +42,8 @@
 
 #![allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap() internally
 
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -79,29 +81,13 @@ fn setfit_apr_binary() -> PathBuf {
         );
         return pinned;
     }
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let pkg_spec = format!("aprender@{}", env!("CARGO_PKG_VERSION"));
-    let status = Command::new(&cargo)
-        .args([
-            "build",
-            "--bin",
-            "apr",
-            "-p",
-            &pkg_spec,
-            "--features",
-            "setfit",
-            "--quiet",
-        ])
-        .status()
-        .expect("invoke `cargo build --bin apr --features setfit`");
-    assert!(status.success(), "cargo build --bin apr failed: {status:?}");
-    let path = assert_cmd::cargo::cargo_bin("apr");
-    assert!(
-        path.is_file(),
-        "no apr binary at {} after build",
-        path.display()
-    );
-    path
+    // The shared builder, not `assert_cmd::cargo::cargo_bin`: that guesses the
+    // path from the profile directory, and `.cargo/config.toml` redirects the
+    // target dir in this repo, so the guess names a file that is not there.
+    // `apr_binary_with_features` takes the path cargo REPORTS for the build it
+    // just ran, and `setfit` is required — a default-features `apr predict`
+    // refuses to route a `setfit-apr-v1` artifact.
+    common::apr_binary_with_features("setfit")
 }
 
 fn request(id: u64, method: &str, params: serde_json::Value) -> String {

@@ -10,81 +10,22 @@
 //! SIGTERM → (grace window) → SIGKILL on the spawned subprocess when a
 //! cancellation is signalled. The non-cancellable [`run_apr`] is kept as a
 //! thin wrapper for tools that don't support cancellation yet.
+//!
+//! #2418: the failure path used to pick *either* stderr *or* stdout — stdout
+//! only when stderr was empty. `apr qa` writes its JSON gate report to stdout
+//! and a one-line summary to stderr, so every failing QA run (the tool's
+//! primary use case) reached the client as a single line with the >3 KB
+//! report thrown away. [`failure_result`] now keeps the summary as the first
+//! content block and attaches the report as a second one, so a failing gate
+//! is as inspectable as a passing one.
 
-use crate::types::ToolCallResult;
-use std::ffi::{OsStr, OsString};
+use crate::apr_bin::apr_binary;
+use crate::types::{ContentBlock, ToolCallResult};
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-
-/// Environment override naming the `apr` binary subprocess tools should drive.
-pub const APR_BIN_ENV: &str = "APR_BIN";
-
-/// Resolve the `apr` binary this server drives, given an explicit override and
-/// the current executable path. Pure so the precedence is testable without
-/// mutating process environment from parallel tests.
-///
-/// Precedence: `APR_BIN` → `current_exe()` **if it is itself an `apr`** → `"apr"` (PATH).
-///
-/// The `file_stem == "apr"` guard is load-bearing, not defensive dressing. This
-/// module is linked into any binary that depends on the crate — most importantly
-/// the unit-test harness, whose `current_exe()` is `aprender_mcp-<hash>`. Without
-/// the guard, `run_apr` spawns *the test binary itself* with `apr`'s arguments;
-/// the harness reads them as a test filter, runs nothing, and exits 0, so a
-/// spawn-failure test silently reports success. Self-spawning is a worse failure
-/// than the PATH bug it replaces, so anything not named `apr` falls back to PATH.
-fn resolve_apr_binary(
-    override_bin: Option<OsString>,
-    current_exe: std::io::Result<PathBuf>,
-) -> OsString {
-    if let Some(explicit) = override_bin {
-        if !explicit.is_empty() {
-            return explicit;
-        }
-    }
-    if let Ok(path) = current_exe {
-        // `apr` on unix, `apr.exe` on Windows — both stem to "apr".
-        if path
-            .file_stem()
-            .is_some_and(|stem| stem == OsStr::new("apr"))
-        {
-            return path.into_os_string();
-        }
-    }
-    // The OS could not tell us what we are, or we are not an `apr`.
-    OsString::from("apr")
-}
-
-/// The `apr` binary to spawn.
-///
-/// The MCP server IS an `apr` subcommand (`apr mcp`), so the running executable
-/// is by construction a correct, version-matched `apr`. Spawning a PATH-resolved
-/// `"apr"` instead has two failure modes, both observed:
-///
-/// 1. `.mcp.json` configured with an absolute path (`{"command":"/path/to/apr",
-///    "args":["mcp"]}`) leaves no `apr` on PATH, so every subprocess tool fails
-///    with `Failed to spawn ...: No such file or directory`.
-/// 2. When a *different* `apr` is on PATH, the server silently drives a binary
-///    it is not — a v0.63.0 server shelling out to a stale build. Four `apr`
-///    binaries have coexisted on one dev box (see CLAUDE.md "pin the binary").
-///
-/// Resolved once: `current_exe()` is a syscall and the answer cannot change for
-/// the lifetime of the process.
-///
-/// `pub` because this is the only implementation in the tree that honours
-/// `APR_BIN` and refuses to self-spawn; the hand-rolled
-/// `current_exe().unwrap_or_else(|_| PathBuf::from("apr"))` spellings elsewhere
-/// silently fall back to a PATH `apr` that CLAUDE.md documents as having resolved
-/// to a 26-day-old build.
-#[must_use]
-pub fn apr_binary() -> &'static OsStr {
-    static RESOLVED: OnceLock<OsString> = OnceLock::new();
-    RESOLVED
-        .get_or_init(|| resolve_apr_binary(std::env::var_os(APR_BIN_ENV), std::env::current_exe()))
-}
 
 /// Default grace window between SIGTERM and SIGKILL for cancelled calls.
 ///
@@ -96,6 +37,46 @@ pub const CANCEL_GRACE_MS: u64 = 30_000;
 /// Poll interval when waiting for subprocess exit / cancel signal.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Render one argv element so the echoed command can actually be re-run.
+///
+/// `format!("apr {}", args.join(" "))` produced `--prompt What is 2+2?`, which
+/// is a different command from the one that ran (#2403). Anything outside the
+/// POSIX-safe set is single-quoted, with embedded quotes escaped the shell way.
+fn quote_arg(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"@%+=:,./-_".contains(&b));
+    if safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
+/// Build the `isError` result for a subprocess that exited non-zero.
+///
+/// The first content block is the one-line summary the client already relied
+/// on. When the command wrote to BOTH streams the stdout payload is attached
+/// as a second block instead of being discarded (#2418).
+fn failure_result(cmd_display: &str, code: i32, stdout: &str, stderr: &str) -> ToolCallResult {
+    let summary = if stderr.trim().is_empty() {
+        stdout.to_string()
+    } else {
+        stderr.to_string()
+    };
+    let mut content = vec![ContentBlock::text(format!(
+        "`{cmd_display}` failed (exit {code}): {summary}"
+    ))];
+    if !stderr.trim().is_empty() && !stdout.trim().is_empty() {
+        content.push(ContentBlock::text(stdout.to_string()));
+    }
+    ToolCallResult {
+        content,
+        is_error: Some(true),
+    }
+}
+
 /// Spawn `apr <args...>` and wait synchronously. Shorthand for the
 /// non-cancellable path used by every tool except `apr.run`.
 ///
@@ -105,16 +86,20 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// - Spawn failure → `error("Failed to spawn apr ...: <io-err>")`
 #[must_use]
 pub fn run_apr(args: &[&str]) -> ToolCallResult {
-    let program = apr_binary();
-    let output = match Command::new(&program).args(args).output() {
+    run_program(apr_binary(), args)
+}
+
+/// Generic-over-program variant of [`run_apr`]. [`run_apr`] binds `program`
+/// to [`crate::apr_bin::apr_binary`] — the running `apr` executable — so the
+/// version the user launched is the version that answers.
+#[must_use]
+pub fn run_program<P: AsRef<OsStr>>(program: P, args: &[&str]) -> ToolCallResult {
+    let program = program.as_ref();
+    let cmd_display = display_cmd(program, args);
+    let output = match Command::new(program).args(args).output() {
         Ok(o) => o,
         Err(e) => {
-            // Name the binary actually spawned, not the literal "apr". The old
-            // message said `apr` regardless of what ran, which is precisely why
-            // a PATH-resolution failure read as "apr is broken" instead of
-            // "the server looked for apr somewhere you did not expect".
-            let cmd = format!("{} {}", program.to_string_lossy(), args.join(" "));
-            return ToolCallResult::error(format!("Failed to spawn `{cmd}`: {e}"));
+            return ToolCallResult::error(format!("Failed to spawn `{cmd_display}`: {e}"));
         }
     };
 
@@ -123,21 +108,33 @@ pub fn run_apr(args: &[&str]) -> ToolCallResult {
 
     if output.status.success() {
         if stdout.trim().is_empty() {
-            let cmd = format!("apr {}", args.join(" "));
-            ToolCallResult::error(format!("`{cmd}` produced no output"))
+            ToolCallResult::error(format!("`{cmd_display}` produced no output"))
         } else {
             ToolCallResult::success(stdout)
         }
     } else {
         let code = output.status.code().unwrap_or(-1);
-        let detail = if stderr.trim().is_empty() {
-            stdout
-        } else {
-            stderr
-        };
-        let cmd = format!("apr {}", args.join(" "));
-        ToolCallResult::error(format!("`{cmd}` failed (exit {code}): {detail}"))
+        failure_result(&cmd_display, code, &stdout, &stderr)
     }
+}
+
+/// Render `program args...` for user-facing error messages, quoted so the echoed
+/// command can actually be re-run.
+///
+/// This used to be `args.join(" ")`, which is the #2403 defect: `--prompt What is
+/// 2+2?` is a DIFFERENT command from the one that ran, and a user copying it out
+/// of an error message gets a different failure than the one being reported.
+///
+/// The merge that produced this file kept the `OsStr` signature (every call site
+/// passes `apr_binary()`, an OsStr) but had dropped the quoting, leaving
+/// `quote_arg` orphaned — clippy's dead-code error is what surfaced the lost fix.
+fn display_cmd(program: &OsStr, args: &[&str]) -> String {
+    let mut out = quote_arg(&program.to_string_lossy());
+    for a in args {
+        out.push(' ');
+        out.push_str(&quote_arg(a));
+    }
+    out
 }
 
 /// Spawn `apr <args...>` cancellable via `cancel_rx`.
@@ -156,20 +153,21 @@ pub fn run_apr_cancellable(
     cancel_rx: &Receiver<()>,
     grace_ms: u64,
 ) -> ToolCallResult {
-    spawn_cancellable(&apr_binary(), args, cancel_rx, grace_ms)
+    spawn_cancellable(apr_binary(), args, cancel_rx, grace_ms)
 }
 
-/// Test-visible generic over the binary name. `run_apr_cancellable` is the
-/// `apr`-bound wrapper clients should use in production code.
+/// Generic over the binary. `run_apr_cancellable` binds `program` to
+/// [`crate::apr_bin::apr_binary`] — the running `apr` executable — which is
+/// what production code should use.
 #[must_use]
-pub fn spawn_cancellable(
-    program: impl AsRef<OsStr>,
+pub fn spawn_cancellable<P: AsRef<OsStr>>(
+    program: P,
     args: &[&str],
     cancel_rx: &Receiver<()>,
     grace_ms: u64,
 ) -> ToolCallResult {
     let program = program.as_ref();
-    let cmd_display = format!("{} {}", program.to_string_lossy(), args.join(" "));
+    let cmd_display = display_cmd(program, args);
 
     let mut child = match Command::new(program)
         .args(args)
@@ -222,12 +220,7 @@ pub fn spawn_cancellable(
                 }
             } else {
                 let code = status.code().unwrap_or(-1);
-                let detail = if stderr.trim().is_empty() {
-                    stdout
-                } else {
-                    stderr
-                };
-                ToolCallResult::error(format!("`{cmd_display}` failed (exit {code}): {detail}"))
+                failure_result(&cmd_display, code, &stdout, &stderr)
             }
         }
         Err(CancelReason::Signalled) => {
@@ -327,14 +320,14 @@ pub fn run_apr_streaming<F>(args: &[&str], on_line: F) -> ToolCallResult
 where
     F: FnMut(&str),
 {
-    spawn_streaming(&apr_binary(), args, on_line)
+    spawn_streaming(apr_binary(), args, on_line)
 }
 
-/// Generic-over-program variant of [`run_apr_streaming`] used by tests that
-/// need to inject a mock subprocess.
+/// Generic-over-program variant of [`run_apr_streaming`]. Production callers
+/// pass [`crate::apr_bin::apr_binary`]; tests use it to inject a mock.
 #[must_use]
-pub fn spawn_streaming<F>(
-    program: impl AsRef<OsStr>,
+pub fn spawn_streaming<P: AsRef<OsStr>, F>(
+    program: P,
     args: &[&str],
     mut on_line: F,
 ) -> ToolCallResult
@@ -342,7 +335,7 @@ where
     F: FnMut(&str),
 {
     let program = program.as_ref();
-    let cmd_display = format!("{} {}", program.to_string_lossy(), args.join(" "));
+    let cmd_display = display_cmd(program, args);
 
     let mut child = match Command::new(program)
         .args(args)
@@ -421,59 +414,107 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
-    /// An explicit `APR_BIN` override wins over everything else.
+    /// #2418 — a failing `apr qa` writes its JSON gate report to stdout and a
+    /// one-line summary to stderr. The report is the whole point of the tool;
+    /// it must survive the failure path, not be replaced by the summary.
     #[test]
-    fn resolve_apr_prefers_explicit_override() {
-        let resolved = resolve_apr_binary(
-            Some(OsString::from("/opt/custom/apr")),
-            Ok(PathBuf::from("/usr/local/bin/apr")),
+    fn failure_keeps_the_stdout_report_when_stderr_also_spoke() {
+        let report = r#"{"passed":false,"gates":[{"name":"ollama_parity","passed":false}]}"#;
+        let result = failure_result(
+            "apr qa m.gguf --json",
+            5,
+            report,
+            "error: Validation failed",
         );
-        assert_eq!(resolved, OsString::from("/opt/custom/apr"));
-    }
 
-    /// With no override, the server drives ITSELF — the binary running
-    /// `apr mcp` is by construction a correct `apr`. Regression guard: a bare
-    /// `"apr"` here is the defect (every subprocess tool fails with "No such
-    /// file or directory" when apr is not on PATH, and silently drives a
-    /// DIFFERENT binary when a stale one is).
-    #[test]
-    fn resolve_apr_uses_current_exe_not_bare_path() {
-        let resolved =
-            resolve_apr_binary(None, Ok(PathBuf::from("/opt/aprender/target/release/apr")));
-        assert_eq!(resolved, OsString::from("/opt/aprender/target/release/apr"));
-        assert_ne!(resolved, OsString::from("apr"));
-    }
-
-    /// A `current_exe()` that is NOT an `apr` must never be spawned as one.
-    /// Regression guard for a real failure: under `cargo test`, `current_exe()`
-    /// is `aprender_mcp-<hash>`, and returning it made `run_apr` invoke the test
-    /// harness with apr's arguments — the harness read them as a test filter and
-    /// exited 0, so the spawn-failure test flipped from Some(true) to None.
-    #[test]
-    fn resolve_apr_refuses_a_current_exe_that_is_not_apr() {
-        let resolved = resolve_apr_binary(
-            None,
-            Ok(PathBuf::from("/tmp/target/debug/deps/aprender_mcp-9f2b1c")),
+        assert_eq!(result.is_error, Some(true));
+        let whole: String = result
+            .content
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            whole.contains("ollama_parity"),
+            "gate report must reach the client, got: {whole}"
         );
-        assert_eq!(resolved, OsString::from("apr"));
+        assert!(
+            whole.contains("failed (exit 5)"),
+            "summary line must survive too, got: {whole}"
+        );
     }
 
-    /// Windows names it `apr.exe`; stripping the extension must still match.
-    /// Uses a `/`-separated path deliberately: `PathBuf` applies *host* path
-    /// semantics, so a literal `C:\tools\apr.exe` has no separators on unix and
-    /// stems to `C:\tools\apr`, testing the harness rather than the code.
+    /// End-to-end through a real subprocess that writes to BOTH streams and
+    /// exits non-zero — the exact shape of a failing `apr qa`.
+    ///
+    /// The report is asserted on the SECOND content block specifically. The
+    /// first block echoes the command, and the command here IS the script
+    /// text, so an `any()` over all blocks passed even with the report
+    /// discarded — that is how the first draft of this test survived its own
+    /// mutation check.
     #[test]
-    fn resolve_apr_accepts_exe_suffix() {
-        let resolved = resolve_apr_binary(None, Ok(PathBuf::from("/tools/apr.exe")));
-        assert_eq!(resolved, OsString::from("/tools/apr.exe"));
+    fn cancellable_failure_carries_both_streams() {
+        let (_tx, rx) = mpsc::channel::<()>();
+        let result = spawn_cancellable(
+            "sh",
+            &[
+                "-c",
+                "printf '{\"gates\":\"REP\"}\\nORT\\n'; echo SUMMARY >&2; exit 5",
+            ],
+            &rx,
+            CANCEL_GRACE_MS,
+        );
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0].text.contains("SUMMARY"),
+            "stderr dropped: {}",
+            result.content[0].text
+        );
+        assert_eq!(
+            result.content.len(),
+            2,
+            "stdout report dropped, only got: {:?}",
+            result.content
+        );
+        assert!(
+            result.content[1].text.contains("{\"gates\":\"REP\"}\nORT"),
+            "stdout report mangled: {}",
+            result.content[1].text
+        );
     }
 
-    /// Only when `current_exe()` is unavailable does PATH lookup apply.
+    /// A failure with nothing on stderr still reports stdout in the summary,
+    /// and does not emit a redundant duplicate block.
     #[test]
-    fn resolve_apr_falls_back_to_path_when_current_exe_fails() {
-        let resolved =
-            resolve_apr_binary(None, Err(std::io::Error::other("current_exe unavailable")));
-        assert_eq!(resolved, OsString::from("apr"));
+    fn failure_with_empty_stderr_reports_stdout_once() {
+        let result = failure_result("apr qa m.gguf", 1, "only-stdout", "   \n");
+        assert_eq!(result.content.len(), 1);
+        assert!(result.content[0].text.contains("only-stdout"));
+    }
+
+    /// #2403 (secondary) — the echoed reproduction command must be
+    /// copy-pasteable. `--prompt What is 2+2?` is a different command from the
+    /// one that ran.
+    #[test]
+    fn echoed_command_is_shell_quoted() {
+        let cmd = display_cmd(
+            OsStr::new("apr"),
+            &["run", "m.gguf", "--prompt", "What is 2+2?"],
+        );
+        assert_eq!(cmd, "apr run m.gguf --prompt 'What is 2+2?'");
+    }
+
+    /// Quoting must be idempotent for safe argv elements (no needless noise)
+    /// and must survive an embedded single quote.
+    #[test]
+    fn quoting_leaves_safe_args_alone_and_escapes_quotes() {
+        assert_eq!(quote_arg("--max-tokens"), "--max-tokens");
+        assert_eq!(
+            quote_arg("/home/noah/models/a.gguf"),
+            "/home/noah/models/a.gguf"
+        );
+        assert_eq!(quote_arg(""), "''");
+        assert_eq!(quote_arg("it's"), r"'it'\''s'");
     }
 
     /// Spawning `apr` with an unrecognised subcommand yields a tool error
@@ -482,6 +523,65 @@ mod tests {
     fn spawn_failure_maps_to_tool_error() {
         let result = run_apr(&["this-subcommand-does-not-exist"]);
         assert_eq!(result.is_error, Some(true));
+    }
+
+    /// FALSIFIER (#2384): `run_apr` must execute the *resolved* `apr` binary,
+    /// not a hard-coded `Command::new("apr")` that the OS looks up on `$PATH`.
+    ///
+    /// The field defect: `apr mcp` shipped in 0.63.0 returned results produced
+    /// by a 0.60.0 binary that happened to be first on `$PATH`, while
+    /// `apr.version` kept answering 0.63.0.
+    ///
+    /// Here we designate a specific binary via `$APR_BIN` and assert its
+    /// marker output comes back as the tool payload. Before the fix, `run_apr`
+    /// ignored resolution entirely and this returned whatever `apr` `$PATH`
+    /// produced — never the marker.
+    ///
+    /// The shim mirrors the real CLI's exit semantics (unknown subcommand →
+    /// exit 2) so it is compatible with `spawn_failure_maps_to_tool_error`
+    /// should the two overlap while `$APR_BIN` is set.
+    #[test]
+    #[cfg(unix)]
+    fn falsify_2384_run_apr_executes_the_resolved_binary() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Unique per process: a fixed path lets two concurrent runs of this
+        // test binary delete each other's shim mid-flight.
+        let dir =
+            std::env::temp_dir().join(format!("aprender-mcp-2384-run-apr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir scratch");
+        let shim = dir.join("apr");
+        {
+            let mut f = std::fs::File::create(&shim).expect("create shim");
+            writeln!(f, "#!/bin/sh").expect("shebang");
+            writeln!(f, "if [ \"$1\" = \"validate\" ]; then").expect("if");
+            writeln!(f, "  echo '{{\"marker\":\"APR-BIN-RESOLVED-SHIM\"}}'").expect("body");
+            writeln!(f, "  exit 0").expect("ok");
+            writeln!(f, "fi").expect("fi");
+            writeln!(f, "exit 2").expect("unknown subcommand");
+            f.sync_all().expect("sync");
+        }
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+
+        // Edition 2021 — `set_var` is safe here.
+        std::env::set_var(crate::apr_bin::APR_BIN_ENV, &shim);
+        let result = run_apr(&["validate", "/dev/null", "--json"]);
+        std::env::remove_var(crate::apr_bin::APR_BIN_ENV);
+
+        assert!(
+            result.is_error.is_none(),
+            "resolved shim should succeed, got: {}",
+            result.content[0].text
+        );
+        assert!(
+            result.content[0].text.contains("APR-BIN-RESOLVED-SHIM"),
+            "run_apr must execute the resolved binary; got: {}",
+            result.content[0].text
+        );
     }
 
     /// Cancellable path: a never-firing receiver lets the subprocess run to

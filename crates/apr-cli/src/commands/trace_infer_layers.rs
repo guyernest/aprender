@@ -108,21 +108,33 @@
     // create_* helper function tests
     // ========================================================================
 
+    /// #2407: this test used to assert `output_stats.expect(...)` with
+    /// `count == 768` — i.e. it required the fabricated statistics block to be
+    /// present. Nothing is measured on this path: no tensor is read, so mean,
+    /// std, l2_norm, min, max and max_abs were all hard-coded 0.0 and a client
+    /// checking `l2_norm == 0.0` saw a dead embedding on a healthy model. The
+    /// declared width is now reported as `hidden_dim`, which is what it is.
     #[test]
-    fn test_create_embedding_layer() {
+    fn test_create_embedding_layer_reports_width_not_fabricated_stats() {
         let layer = create_embedding_layer(768);
         assert_eq!(layer.name, "embedding");
         assert_eq!(layer.index, None);
         assert!(layer.anomalies.is_empty());
-        let output = layer.output_stats.expect("should have output stats");
-        assert_eq!(output.count, 768);
+        assert!(
+            layer.output_stats.is_none(),
+            "no forward pass ran, so no output statistics may be reported"
+        );
+        assert_eq!(layer.hidden_dim, Some(768));
     }
 
     #[test]
     fn test_create_embedding_layer_zero_dim() {
         let layer = create_embedding_layer(0);
-        let output = layer.output_stats.expect("should have output stats");
-        assert_eq!(output.count, 0);
+        assert!(layer.output_stats.is_none());
+        assert_eq!(
+            layer.hidden_dim, None,
+            "an unknown width is absent, not reported as 0"
+        );
     }
 
     #[test]
@@ -151,13 +163,13 @@
 
     #[test]
     fn test_create_transformer_layers_zero() {
-        let layers = create_transformer_layers(0, None);
+        let layers = create_transformer_layers(0);
         assert!(layers.is_empty());
     }
 
     #[test]
     fn test_create_transformer_layers_basic() {
-        let layers = create_transformer_layers(3, None);
+        let layers = create_transformer_layers(3);
         assert_eq!(layers.len(), 3);
         assert_eq!(layers[0].name, "transformer_block_0");
         assert_eq!(layers[0].index, Some(0));
@@ -167,26 +179,43 @@
         assert_eq!(layers[2].index, Some(2));
     }
 
+    // #2407: filtering moved out of the constructors into apply_layer_filter,
+    // which is applied once to a fully-built skeleton. These tests follow it.
+
     #[test]
-    fn test_create_transformer_layers_with_filter() {
-        let layers = create_transformer_layers(10, Some("block_5"));
+    fn test_apply_layer_filter_with_filter() {
+        let (layers, notes) = apply_layer_filter(create_transformer_layers(10), Some("block_5"));
         assert_eq!(layers.len(), 1);
         assert_eq!(layers[0].name, "transformer_block_5");
+        assert!(notes.is_empty(), "a filter that matched needs no note");
     }
 
     #[test]
-    fn test_create_transformer_layers_filter_no_match() {
-        let layers = create_transformer_layers(3, Some("nonexistent"));
-        assert!(layers.is_empty());
+    fn test_apply_layer_filter_no_match_returns_empty_and_says_so() {
+        // The old behaviour: an empty result here let the caller's
+        // `if layers.is_empty()` fallback fabricate a
+        // "(layer trace metadata not available)" layer carrying the anomaly
+        // "No layer information in metadata" — on a model with 3 real layers.
+        let (layers, notes) = apply_layer_filter(create_transformer_layers(3), Some("nonexistent"));
+        assert!(layers.is_empty(), "nothing matched, so nothing is returned");
+        assert_eq!(notes, vec![r#"layer filter "nonexistent" matched 0 of 3 layers"#]);
     }
 
     #[test]
-    fn test_create_transformer_layers_filter_multiple_match() {
+    fn test_apply_layer_filter_multiple_match() {
         // Filter "block_1" matches "transformer_block_1" and "transformer_block_10" etc.
-        let layers = create_transformer_layers(15, Some("block_1"));
+        let (layers, notes) = apply_layer_filter(create_transformer_layers(15), Some("block_1"));
         // Matches: block_1, block_10, block_11, block_12, block_13, block_14
-        assert!(layers.len() >= 1);
+        assert!(!layers.is_empty());
         assert!(layers.iter().any(|l| l.name == "transformer_block_1"));
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn test_apply_layer_filter_none_is_a_passthrough() {
+        let (layers, notes) = apply_layer_filter(create_transformer_layers(4), None);
+        assert_eq!(layers.len(), 4);
+        assert!(notes.is_empty());
     }
 
     // ========================================================================
@@ -208,6 +237,7 @@
             LayerTrace {
                 name: "layer_0".to_string(),
                 index: Some(0),
+                hidden_dim: None,
                 input_stats: None,
                 output_stats: None,
                 weight_stats: None,
@@ -216,6 +246,7 @@
             LayerTrace {
                 name: "layer_1".to_string(),
                 index: Some(1),
+                hidden_dim: None,
                 input_stats: None,
                 output_stats: None,
                 weight_stats: None,
@@ -234,6 +265,7 @@
             LayerTrace {
                 name: "layer_0".to_string(),
                 index: Some(0),
+                hidden_dim: None,
                 input_stats: None,
                 output_stats: None,
                 weight_stats: None,
@@ -242,6 +274,7 @@
             LayerTrace {
                 name: "layer_1".to_string(),
                 index: Some(1),
+                hidden_dim: None,
                 input_stats: None,
                 output_stats: None,
                 weight_stats: None,
@@ -326,7 +359,7 @@
         hp.insert("n_layer".to_string(), serde_json::json!(3));
         hp.insert("n_embd".to_string(), serde_json::json!(256));
 
-        let layers = extract_layers_from_hyperparameters(&hp, None);
+        let layers = extract_layers_from_hyperparameters(&hp);
         // embedding + 3 transformer blocks + final_layer_norm = 5
         assert_eq!(layers.len(), 5);
         assert_eq!(layers[0].name, "embedding");
@@ -342,7 +375,7 @@
         hp.insert("n_embd".to_string(), serde_json::json!(256));
         // no n_layer key → 0 layers
 
-        let layers = extract_layers_from_hyperparameters(&hp, None);
+        let layers = extract_layers_from_hyperparameters(&hp);
         // embedding + 0 transformer + final_layer_norm = 2
         assert_eq!(layers.len(), 2);
         assert_eq!(layers[0].name, "embedding");
@@ -355,9 +388,11 @@
         hp.insert("n_layer".to_string(), serde_json::json!(5));
         hp.insert("n_embd".to_string(), serde_json::json!(256));
 
-        let layers = extract_layers_from_hyperparameters(&hp, Some("block_3"));
-        // Only transformer_block_3 should match the filter + embedding + final_layer_norm
+        let (layers, notes) =
+            apply_layer_filter(extract_layers_from_hyperparameters(&hp), Some("block_3"));
+        // Only transformer_block_3 matches the filter
         assert!(layers.iter().any(|l| l.name == "transformer_block_3"));
+        assert!(notes.is_empty());
     }
 
     // ========================================================================
@@ -372,19 +407,32 @@
         assert!(result.expect("should be Some").is_ok());
     }
 
+    /// FALSIFIER (#2394 finding 6): `--diff` without `--reference` must stop.
+    ///
+    /// `apr trace model.gguf --diff` printed "Diff mode requires --reference"
+    /// and then ran an ordinary single-model trace and exited 0 — the tool
+    /// stated its own requirement and ignored it, so a scripted diff came back
+    /// looking successful. This test used to assert exactly that behaviour
+    /// (`result.is_none()`, i.e. "fall through and trace anyway"), which is
+    /// why the defect survived: it was the bug's alibi.
     #[test]
     fn test_handle_special_modes_diff_without_reference() {
         let path = Path::new("/tmp/model.apr");
-        // diff mode without reference just prints a message and returns None
-        let result = handle_special_modes(path, None, false, true, false);
-        assert!(result.is_none());
+        let result = handle_special_modes(path, None, false, true, false)
+            .expect("--diff without --reference must be handled, not fall through to a trace");
+        let err = result.expect_err("--diff without --reference must be an error");
+        assert!(
+            err.to_string().contains("--reference"),
+            "the refusal must name the missing flag, got: {err}"
+        );
     }
 
     #[test]
     fn test_handle_special_modes_diff_with_reference() {
         let path = Path::new("/tmp/model.apr");
         let ref_path = Path::new("/tmp/ref.apr");
-        // diff mode with reference prints message and returns None (not handled here)
+        // With a reference the combination is valid: diff mode announces the
+        // pair and falls through to the trace path (returns None).
         let result = handle_special_modes(path, Some(ref_path), false, true, false);
         assert!(result.is_none());
     }

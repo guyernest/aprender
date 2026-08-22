@@ -163,9 +163,14 @@ async fn test_openai_embeddings_endpoint_basic() {
         .expect("test value should be present");
 
     let status = response.status();
-    assert!(
-        status == StatusCode::OK || status == StatusCode::NOT_FOUND,
-        "Unexpected status: {status}"
+    // aprender#2376(5): the shared test state has NO model, so this condition is
+    // deterministic — a server with no usable model answers 503 on every route.
+    // The old assertion accepted a SET of statuses that included the defect, so it
+    // could not fail and held the 404-here/500-there split in place.
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no model is resident: expected 503"
     );
 }
 
@@ -190,9 +195,14 @@ async fn test_openai_embeddings_without_model() {
         .expect("test value should be present");
 
     let status = response.status();
-    assert!(
-        status == StatusCode::OK || status == StatusCode::NOT_FOUND,
-        "Unexpected status: {status}"
+    // aprender#2376(5): the shared test state has NO model, so this condition is
+    // deterministic — a server with no usable model answers 503 on every route.
+    // The old assertion accepted a SET of statuses that included the defect, so it
+    // could not fail and held the 404-here/500-there split in place.
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no model is resident: expected 503"
     );
 }
 
@@ -218,9 +228,14 @@ async fn test_openai_embeddings_long_text() {
         .expect("test value should be present");
 
     let status = response.status();
-    assert!(
-        status == StatusCode::OK || status == StatusCode::NOT_FOUND,
-        "Unexpected status: {status}"
+    // aprender#2376(5): the shared test state has NO model, so this condition is
+    // deterministic — a server with no usable model answers 503 on every route.
+    // The old assertion accepted a SET of statuses that included the defect, so it
+    // could not fail and held the 404-here/500-there split in place.
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no model is resident: expected 503"
     );
 }
 
@@ -310,17 +325,19 @@ fn test_model_metadata_response_zero_size() {
     let response = ModelMetadataResponse {
         id: "streaming-model".to_string(),
         name: "Streaming Model".to_string(),
-        format: "GGUF".to_string(),
-        size_bytes: 0,
+        format: Some("GGUF".to_string()),
+        size_bytes: Some(0),
         quantization: None,
-        context_length: 4096,
+        context_length: Some(4096),
+        model_max_context_length: None,
+        architecture: None,
         lineage: None,
         loaded: false,
     };
 
     let json = serde_json::to_string(&response).expect("serialize");
     let parsed: ModelMetadataResponse = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(parsed.size_bytes, 0);
+    assert_eq!(parsed.size_bytes, Some(0));
 }
 
 #[test]
@@ -330,10 +347,12 @@ fn test_model_metadata_response_all_quantizations() {
         let response = ModelMetadataResponse {
             id: format!("model-{quant}"),
             name: format!("Model {quant}"),
-            format: "GGUF".to_string(),
-            size_bytes: 1000,
+            format: Some("GGUF".to_string()),
+            size_bytes: Some(1000),
             quantization: Some(quant.to_string()),
-            context_length: 2048,
+            context_length: Some(2048),
+            model_max_context_length: None,
+            architecture: None,
             lineage: None,
             loaded: true,
         };

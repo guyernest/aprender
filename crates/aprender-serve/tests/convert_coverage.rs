@@ -25,6 +25,7 @@ fn create_minimal_gguf_transformer(
     intermediate_dim: usize,
 ) -> GGUFTransformer {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "test_arch".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim,
@@ -37,7 +38,6 @@ fn create_minimal_gguf_transformer(
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -859,6 +859,7 @@ fn test_conversion_with_bias_weights() {
 fn test_gguf_transformer_with_gate_weights() {
     // Create GGUF transformer with FFN gate weights (SwiGLU style)
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "swiglu_test".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 8,
@@ -871,7 +872,6 @@ fn test_gguf_transformer_with_gate_weights() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -1497,6 +1497,7 @@ fn test_to_apr_bytes_many_layers() {
 #[test]
 fn test_from_gguf_transformer_with_all_biases() {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "biased".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 8,
@@ -1509,7 +1510,6 @@ fn test_from_gguf_transformer_with_all_biases() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -1562,6 +1562,7 @@ fn test_from_gguf_transformer_with_all_biases() {
 #[test]
 fn test_from_gguf_transformer_with_ffn_norm() {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "normed_ffn".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 8,
@@ -1574,7 +1575,6 @@ fn test_from_gguf_transformer_with_ffn_norm() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -1625,6 +1625,7 @@ fn test_from_gguf_transformer_preserves_intermediate_dim() {
 #[test]
 fn test_from_gguf_transformer_different_kv_heads() {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "gqa".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 32,
@@ -1637,7 +1638,6 @@ fn test_from_gguf_transformer_different_kv_heads() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -2196,6 +2196,7 @@ fn test_apr_bytes_reserved_bytes() {
 #[test]
 fn test_gguf_transformer_with_output_norm_bias() {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "with_bias".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 8,
@@ -2208,7 +2209,6 @@ fn test_gguf_transformer_with_output_norm_bias() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -2252,6 +2252,7 @@ fn test_gguf_transformer_with_output_norm_bias() {
 #[test]
 fn test_gguf_transformer_with_lm_head_bias() {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "lm_bias".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 8,
@@ -2264,7 +2265,6 @@ fn test_gguf_transformer_with_lm_head_bias() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -2312,6 +2312,7 @@ fn test_gguf_transformer_with_lm_head_bias() {
 #[test]
 fn test_layer_attn_norm_bias_preservation() {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "attn_norm_bias".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 8,
@@ -2324,7 +2325,6 @@ fn test_layer_attn_norm_bias_preservation() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -2367,6 +2367,7 @@ fn test_layer_attn_norm_bias_preservation() {
 #[test]
 fn test_layer_qkv_bias_preservation() {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "qkv_bias".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 8,
@@ -2379,7 +2380,6 @@ fn test_layer_qkv_bias_preservation() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -2422,6 +2422,7 @@ fn test_layer_qkv_bias_preservation() {
 #[test]
 fn test_layer_attn_output_bias_preservation() {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "attn_out_bias".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 8,
@@ -2434,7 +2435,6 @@ fn test_layer_attn_output_bias_preservation() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -2477,6 +2477,7 @@ fn test_layer_attn_output_bias_preservation() {
 #[test]
 fn test_layer_ffn_up_bias_preservation() {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "ffn_up_bias".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 8,
@@ -2489,7 +2490,6 @@ fn test_layer_ffn_up_bias_preservation() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,
@@ -2532,6 +2532,7 @@ fn test_layer_ffn_up_bias_preservation() {
 #[test]
 fn test_layer_ffn_down_bias_preservation() {
     let config = GGUFConfig {
+        query_pre_attn_scalar: None,
         architecture: "ffn_down_bias".to_string(),
         constraints: ArchConstraints::from_architecture("llama"),
         hidden_dim: 8,
@@ -2544,7 +2545,6 @@ fn test_layer_ffn_down_bias_preservation() {
         rope_theta: 10000.0,
         eps: 1e-5,
         rope_type: 0,
-        query_pre_attn_scalar: None,
         bos_token_id: None,
         eos_token_id: None,
         explicit_head_dim: None,

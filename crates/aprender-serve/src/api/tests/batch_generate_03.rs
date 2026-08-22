@@ -21,10 +21,14 @@ async fn test_batch_generate_handler_via_http() {
         )
         .await
         .expect("test value should be present");
-    assert!(
-        response.status() == StatusCode::OK
-            || response.status() == StatusCode::NOT_FOUND
-            || response.status() == StatusCode::INTERNAL_SERVER_ERROR
+    // aprender#2376(5): the shared test state has NO model, so this condition is
+    // deterministic — a server with no usable model answers 503 on every route.
+    // The old assertion accepted a SET of statuses that included the defect, so it
+    // could not fail and held the 404-here/500-there split in place.
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no model is resident: expected 503"
     );
 }
 
@@ -181,7 +185,7 @@ fn test_chat_completion_request_serde() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 1,
+        n: crate::api::ChoiceCount::ONE,
         stream: false,
         stop: None,
         user: None,
@@ -371,10 +375,14 @@ async fn test_stream_generate_handler_via_http() {
         )
         .await
         .expect("test value should be present");
-    assert!(
-        response.status() == StatusCode::OK
-            || response.status() == StatusCode::NOT_FOUND
-            || response.status() == StatusCode::INTERNAL_SERVER_ERROR
+    // aprender#2376(5): the shared test state has NO model, so this condition is
+    // deterministic — a server with no usable model answers 503 on every route.
+    // The old assertion accepted a SET of statuses that included the defect, so it
+    // could not fail and held the 404-here/500-there split in place.
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no model is resident: expected 503"
     );
 }
 

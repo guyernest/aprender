@@ -110,12 +110,40 @@ members = [
     # "crates/aprender-test",
 ]
 exclude = [
+    # Pulls burn 0.21 -> rusqlite 0.37 -> libsqlite3-sys 0.35, while aprender-rag
+    # pins rusqlite 0.32 -> libsqlite3-sys 0.30. A `-sys` crate that links the
+    # native `sqlite3` may appear only ONCE in a dependency graph, so this crate
+    # cannot be a workspace member until one side moves. That is why the comment
+    # below says to build it manually — the reason was never written down.
+    'crates/aprender-train-canary',
+    # 29,541 lines that NO cargo command has ever built. Bringing it in as a
+    # member surfaced `error[E0433]: could not find visualize in renacer` — it
+    # does not compile, and has not for as long as it has been invisible.
+    # Excluded EXPLICITLY (it was previously neither member nor excluded, so
+    # `cargo metadata` simply failed) and tracked in #2470. Its stale path dep on
+    # `../../crates/trueno-zram-core` is fixed in this commit so whoever revives
+    # it is not chasing a phantom.
+    'crates/aprender-zram/bins/trueno-ublk',
     "tools/ccpa-sft-export",
     "fuzz",
     # Old workspace root shells (no package, just held sub-crates):
     "crates/aprender-viz-ttop",
     "crates/aprender-present",
     "crates/aprender-test",
+    # crates.io compatibility facades for the names APR-MONO renamed
+    # (provable-contracts{,-macros,-cli} -> aprender-contracts{,-macros,-cli}).
+    # NOT members, and not an oversight: a facade must carry the SAME `[lib]
+    # name` as the crate it fronts or old `use provable_contracts::…` code does
+    # not resolve, and two primary packages sharing one lib name in one
+    # workspace collide on the uplifted rlib. MEASURED with the facade as a
+    # member:
+    #   warning: output filename collision at
+    #     /mnt/nvme-raid0/targets/aprender/debug/libprovable_contracts.rlib
+    #     = note: this may become a hard error in the future; see
+    #             https://github.com/rust-lang/cargo/issues/6313
+    # They live in their own workspace at crates/facades/ and are built in CI by
+    # scripts/check_facade_compat.sh (ci.yml, job `guard-runner-labels`).
+    "crates/facades",
     # aprender-train-canary is intentionally NOT a member — see the exclusion
     # note above. It is a publish=false, dev-only GPU/burn benchmark whose
     # Cargo.toml pins `[patch.crates-io] trueno = { path = "/home/noah/src/trueno" }`
@@ -205,8 +233,12 @@ minijinja = { version = "2.14", features = ["loader", "serde"] }
 tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
 
 # Contracts
-provable-contracts = "0.3"
-provable-contracts-macros = "0.3"
+# APR-MONO self-containment: `provable-contracts` was merged in-tree as
+# `crates/aprender-contracts` (lib name `provable_contracts`). Declaring it from
+# crates.io compiled a SECOND copy of the contract engine alongside the in-tree
+# one — exactly the duplicate-crate + publish-cycle the consolidation removed.
+provable-contracts = { path = "crates/aprender-contracts", version = "0.63.0", package = "aprender-contracts" }
+provable-contracts-macros = { path = "crates/aprender-contracts-macros", version = "0.63.0", package = "aprender-contracts-macros" }
 aprender-contracts-macros = { path = "crates/aprender-contracts-macros", version = "0.63.0" }
 
 # YAML
@@ -236,6 +268,14 @@ renacer-core = { path = "crates/aprender-profile-core", version = "0.63.0", pack
 repartir = { path = "crates/aprender-distribute", version = "0.63.0", package = "aprender-distribute" }
 simular = { path = "crates/aprender-simulate", version = "0.63.0", package = "aprender-simulate" }
 probar = { path = "crates/aprender-test-lib", version = "0.63.0", package = "aprender-test-lib" }
+# `jugar-probar` is the crates.io/lib name of the same in-tree crate as `probar`
+# above. Both aliases resolve to ONE package; consumers that spelled it
+# `jugar-probar = "0.4"|"0.5"|"1.0"` were building three extra copies.
+jugar-probar = { path = "crates/aprender-test-lib", version = "0.63.0", package = "aprender-test-lib" }
+# NOTE: the matching `jugar-probar-derive` alias already exists further down this
+# same table (it points at crates/aprender-test-derive). crates/aprender-test-lib
+# was pinning `jugar-probar-derive = "=1.0.3"` from crates.io regardless — the
+# alias was sitting there unused.
 aprender-train = { path = "crates/aprender-train", version = "0.63.0" }
 entrenar = { path = "crates/aprender-train", version = "0.63.0", package = "aprender-train" }
 aprender-train-common = { path = "crates/aprender-train-common", version = "0.63.0" }
@@ -246,6 +286,7 @@ aprender-profile = { path = "crates/aprender-profile", version = "0.63.0" }
 aprender-profile-core = { path = "crates/aprender-profile-core", version = "0.63.0" }
 aprender-zram-core = { path = "crates/aprender-zram-core", version = "0.63.0" }
 aprender-zram-adaptive = { path = "crates/aprender-zram-adaptive", version = "0.63.0" }
+aprender-zram-cli = { path = "crates/aprender-zram-cli", version = "0.63.0" }
 aprender-present-core = { path = "crates/aprender-present-core", version = "0.63.0" }
 aprender-present-terminal = { path = "crates/aprender-present-terminal", version = "0.63.0" }
 aprender-present-widgets = { path = "crates/aprender-present-widgets", version = "0.63.0" }
@@ -255,6 +296,10 @@ aprender-present-test = { path = "crates/aprender-present-test", version = "0.63
 aprender-db = { path = "crates/aprender-db", version = "0.63.0" }
 aprender-graph = { path = "crates/aprender-graph", version = "0.63.0" }
 aprender-rag = { path = "crates/aprender-rag", version = "0.63.0" }
+aprender-rag-cli = { path = "crates/aprender-rag-cli", version = "0.63.0" }
+aprender-qa-cli = { path = "crates/aprender-qa-cli", version = "0.63.0" }
+aprender-cgp = { path = "crates/aprender-cgp", version = "0.63.0" }
+aprender-contracts-cli = { path = "crates/aprender-contracts-cli", version = "0.63.0" }
 aprender-data = { path = "crates/aprender-data", version = "0.63.0" }
 # Phase 2 D-01: deterministic, leakage-safe contrastive data construction.
 aprender-contrastive-data = { path = "crates/aprender-contrastive-data", version = "0.63.0" }
@@ -558,13 +603,16 @@ training-gpu = ["cli", "apr-cli/training-gpu"]
 visualization = ["cli", "apr-cli/visualization"]
 zram = ["cli", "apr-cli/zram"]
 xet = ["cli", "apr-cli/xet"]
-whisper = ["cli", "apr-cli/whisper"]
 # Native SetFit classifier training + `apr setfit` / SetFit `apr predict` routing.
 # Without this passthrough `cargo install aprender --features setfit` fails with
 # "the package 'aprender' does not contain this feature" — the milestone's headline
 # capability is unreachable from the only published install path. Guarded by
 # scripts/check_publish_safety.sh (subcommand-gating features must be forwarded).
 setfit = ["cli", "apr-cli/setfit"]
+# `apr ptx` (PTX analysis). Advertised in --help on every build, so the remedy
+# for a default install has to exist and has to be cheap: this pulls only the
+# analyzer + PTX emitter, not the CUDA/training stack that `full` implies (#2399).
+ptx = ["cli", "apr-cli/trueno-explain"]
 full = ["cli", "apr-cli/full"]
 
 [lib]

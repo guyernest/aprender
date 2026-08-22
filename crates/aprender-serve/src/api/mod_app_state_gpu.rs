@@ -65,6 +65,7 @@ impl AppState {
             setfit_model: None,
             verbose: false,
             trace: false,
+            model_source: None,
         })
     }
 
@@ -121,6 +122,7 @@ impl AppState {
             setfit_model: None,
             verbose: false,
             trace: false,
+            model_source: None,
         })
     }
 
@@ -185,6 +187,7 @@ impl AppState {
             setfit_model: None,
             verbose: false,
             trace: false,
+            model_source: None,
         })
     }
 
@@ -252,6 +255,7 @@ impl AppState {
             setfit_model: None,
             verbose: false,
             trace: false,
+            model_source: None,
         })
     }
 
@@ -308,6 +312,7 @@ impl AppState {
             setfit_model: None,
             verbose: false,
             trace: false,
+            model_source: None,
         })
     }
 
@@ -369,6 +374,7 @@ impl AppState {
             setfit_model: None,
             verbose: false,
             trace: false,
+            model_source: None,
         })
     }
 
@@ -602,6 +608,7 @@ impl AppState {
             setfit_model: None,
             verbose: false,
             trace: false,
+            model_source: None,
         })
     }
 
@@ -650,6 +657,7 @@ impl AppState {
             setfit_model: None,
             verbose: false,
             trace: false,
+            model_source: None,
         })
     }
 

@@ -22,6 +22,7 @@ fn test_execute_invalid_repo_id_no_slash() {
         false,
         None,
         &[],
+        false,
     );
 
     assert!(result.is_err());
@@ -54,6 +55,7 @@ fn test_execute_invalid_repo_id_too_many_slashes() {
         false,
         None,
         &[],
+        false,
     );
 
     assert!(result.is_err());
@@ -82,6 +84,7 @@ fn test_execute_directory_not_found() {
         false,
         None,
         &[],
+        false,
     );
 
     assert!(result.is_err());
@@ -112,6 +115,7 @@ fn test_execute_no_model_files() {
         false,
         None,
         &[],
+        false,
     );
 
     assert!(result.is_err());
@@ -147,6 +151,7 @@ fn test_execute_dry_run_success() {
         true, // verbose
         None,
         &[],
+        false,
     );
 
     assert!(result.is_ok());
@@ -194,6 +199,7 @@ fn test_falsify_pub_extra_002_sha_mismatch_aborts() {
         false, // verbose
         Some(&manifest_path),
         &[],
+        false,
     );
 
     match result {
@@ -257,6 +263,7 @@ fn test_falsify_pub_extra_003_extra_file_passthrough() {
         true, // verbose
         Some(&manifest_path),
         std::slice::from_ref(&extra_file),
+        false,
     );
 
     assert!(
@@ -791,4 +798,152 @@ fn test_safetensors_needing_alias_no_safetensors_skips_alias() {
         std::path::PathBuf::from("/tmp/model.gguf"),
     ];
     assert!(super::safetensors_needing_alias(&paths).is_none());
+}
+
+// =========================================================================
+// `--json` must emit JSON, not human-formatted text.
+//
+// apr 0.63.0 (from crates.io) ignored `--json` on `apr publish`: the dry run
+// printed a banner and then the entire generated model card, YAML front-matter
+// and all, so `apr publish DIR REPO --dry-run --json | jq .` failed at
+// character 0. The model card now lives in the `readme` string field.
+// =========================================================================
+
+/// Build a dry-run plan over a throwaway artifact of known size.
+///
+/// `slug` MUST be unique per test. Every caller used to share one fixed path,
+/// `$TMPDIR/apr_publish_json_fixture/model.safetensors`, and the harness runs
+/// these tests on parallel threads — so one test's `fs::write` truncated the
+/// file to 0 bytes in the window where the other was stat-ing it for
+/// `size_bytes`. That surfaced as `size_bytes: 0` against the expected 16,
+/// reproducible at ~1/25 full-suite runs under load.
+fn dry_run_plan_fixture(slug: &str, manifest: Option<&Path>) -> DryRunPlan {
+    let dir = std::env::temp_dir().join(format!("apr_publish_json_fixture_{slug}"));
+    let _ = fs::create_dir_all(&dir);
+    let artifact = dir.join("model.safetensors");
+    let _ = fs::write(&artifact, b"not-a-real-model");
+    build_dry_run_plan(
+        "paiml/test-model",
+        std::slice::from_ref(&artifact),
+        &[],
+        manifest,
+        "---\nlicense: mit\n---\n\n# test-model\n",
+    )
+}
+
+#[test]
+fn test_publish_dry_run_json_stdout_parses_as_json() {
+    let plan = dry_run_plan_fixture("json_stdout", None);
+    let stdout = plan.stdout(true);
+
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "`apr publish --dry-run --json` must write parseable JSON to stdout, \
+             but a consumer got {e}. Actual stdout was:\n{stdout}"
+        )
+    });
+    assert_eq!(parsed["repo_id"], "paiml/test-model");
+    assert_eq!(parsed["mode"], "dry-run");
+    assert_eq!(parsed["files"][0]["kind"], "artifact");
+    assert_eq!(parsed["files"][0]["size_bytes"], 16);
+    // The model card is a JSON string, not raw YAML dumped onto stdout.
+    assert!(
+        parsed["readme"]
+            .as_str()
+            .is_some_and(|s| s.contains("license: mit")),
+        "readme must be carried as a string field: {parsed:?}"
+    );
+    assert!(
+        !stdout.contains("=== DRY RUN COMPLETE ==="),
+        "human banner leaked into `--json` stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_publish_dry_run_human_mode_is_still_human() {
+    let plan = dry_run_plan_fixture("human_mode", None);
+    let stdout = plan.stdout(false);
+    assert!(
+        stdout.contains("=== DRY RUN: Would publish to paiml/test-model ==="),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("=== DRY RUN COMPLETE ==="),
+        "stdout: {stdout}"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stdout).is_err(),
+        "human mode must not be silently emitting JSON:\n{stdout}"
+    );
+}
+
+// =========================================================================
+// FALSIFY-PUBLISH-SPDX-001 — `--license` must agree with validate-manifest
+// =========================================================================
+
+/// 0.63.0 lower-cased `--license 'NOT-A-LICENSE'` straight into the model
+/// card's YAML front matter, where the Hub ignores an unrecognised value,
+/// while `apr validate-manifest` FALSIFY-PM-004 fails closed on the same
+/// string (issue #2391).
+#[test]
+fn execute_rejects_non_spdx_license_before_any_io() {
+    let temp_dir = std::env::temp_dir().join("apr_pub_spdx_reject");
+    let _ = fs::create_dir_all(&temp_dir);
+
+    for bad in ["NOT-A-LICENSE", "NOT-A-LICENSE-!!", "Apache2", "whatever"] {
+        let result = execute(
+            &temp_dir,
+            "paiml/x",
+            None,
+            bad,
+            "text-generation",
+            None,
+            &[],
+            None,
+            true, // dry_run — must still refuse
+            false,
+            None,
+            &[],
+            false, // json
+        );
+        match result {
+            Err(CliError::ValidationFailed(msg)) => {
+                assert!(msg.contains("SPDX"), "must say why: {msg}");
+                assert!(msg.contains(bad), "must echo the value: {msg}");
+            }
+            other => panic!("--license {bad:?} must be rejected, got {other:?}"),
+        }
+    }
+}
+
+/// Control: the shipped default and the identifiers validate-manifest accepts
+/// must get past this guard (they fail later, on the empty directory).
+#[test]
+fn execute_accepts_valid_spdx_identifiers() {
+    let temp_dir = std::env::temp_dir().join("apr_pub_spdx_accept");
+    let _ = fs::create_dir_all(&temp_dir);
+
+    for ok in ["mit", "MIT", "Apache-2.0", "llama3.1", "custom"] {
+        let result = execute(
+            &temp_dir,
+            "paiml/x",
+            None,
+            ok,
+            "text-generation",
+            None,
+            &[],
+            None,
+            true,
+            false,
+            None,
+            &[],
+            false, // json
+        );
+        if let Err(CliError::ValidationFailed(msg)) = &result {
+            assert!(
+                !msg.contains("SPDX"),
+                "{ok} must not be rejected as non-SPDX: {msg}"
+            );
+        }
+    }
 }

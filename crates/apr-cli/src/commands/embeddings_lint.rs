@@ -18,6 +18,7 @@
 //! and stamps the FALSIFY id in stderr so CI log scrapers can pinpoint
 //! the violation.
 
+use super::lint_error::{load_json_observation, LintError};
 use crate::commands::embeddings_classifier::{
     classify_determinism, classify_embeddings_response_shape, classify_usage_tokens,
     parse_embeddings_flag, DeterminismOutcome, EmbeddingRow, EmbeddingsFlagOutcome,
@@ -41,21 +42,8 @@ struct GateReport {
     passed: bool,
 }
 
-pub fn run(args: EmbeddingsLintArgs) -> Result<(), String> {
-    let path = Path::new(&args.observation_file);
-    if !path.exists() {
-        return Err(format!(
-            "FALSIFY-CRUX-C-13: observation file not found: {}",
-            args.observation_file
-        ));
-    }
-    let raw = fs::read_to_string(path)
-        .map_err(|e| format!("FALSIFY-CRUX-C-13: failed to read observation: {e}"))?;
-    if raw.trim().is_empty() {
-        return Err("FALSIFY-CRUX-C-13: observation file is empty".to_string());
-    }
-    let obs: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("FALSIFY-CRUX-C-13: observation is not valid JSON: {e}"))?;
+pub fn run(args: EmbeddingsLintArgs) -> Result<(), LintError> {
+    let obs: Value = load_json_observation(&args.observation_file, "FALSIFY-CRUX-C-13")?;
 
     let mut reports: Vec<GateReport> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
@@ -90,9 +78,9 @@ pub fn run(args: EmbeddingsLintArgs) -> Result<(), String> {
     }
 
     if reports.is_empty() {
-        return Err(
-            "FALSIFY-CRUX-C-13: observation has none of shape/determinism/usage/flag".to_string(),
-        );
+        return Err(LintError::unusable(
+            "FALSIFY-CRUX-C-13: observation has none of shape/determinism/usage/flag",
+        ));
     }
 
     if args.json {
@@ -100,7 +88,11 @@ pub fn run(args: EmbeddingsLintArgs) -> Result<(), String> {
             "contract": "CRUX-C-13",
             "gates": reports,
         });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .expect("the --json report is a locally-built serde_json::Value")
+        );
     } else {
         for r in &reports {
             let tag = if r.passed { "PASS" } else { "FAIL" };
@@ -109,12 +101,52 @@ pub fn run(args: EmbeddingsLintArgs) -> Result<(), String> {
     }
 
     if !failures.is_empty() {
-        return Err(failures.join("\n"));
+        return Err(LintError::gate_failed(failures.join("\n")));
     }
     Ok(())
 }
 
+/// The three fields the shape gate reasons over must all be present and of
+/// the right JSON type. Anything else is unknown evidence, not a pass.
+fn require_shape_fields(v: &Value) -> Result<(), String> {
+    if !v.is_object() {
+        return Err(format!("`shape` is not an object: {v}"));
+    }
+    for field in ["input_len", "hidden_size"] {
+        match v.get(field) {
+            None => return Err(format!("missing `{field}`")),
+            Some(x) if x.as_u64().is_none() => {
+                return Err(format!("`{field}` is not a non-negative integer: {x}"))
+            }
+            Some(_) => {}
+        }
+    }
+    match v.get("data") {
+        None => Err("missing `data`".to_string()),
+        Some(x) if !x.is_array() => Err(format!("`data` is not an array: {x}")),
+        Some(_) => Ok(()),
+    }
+}
+
 fn run_shape_gate(v: &Value) -> (GateReport, Option<String>) {
+    // `{"shape": {}}` used to default input_len/hidden_size to 0 and `data`
+    // to the empty vector, so 0 == 0 and the gate reported
+    // `Ok { n_rows: 0 }` — a verdict about evidence that was never present.
+    if let Err(why) = require_shape_fields(v) {
+        let desc = format!("shape evidence unreadable: {why}");
+        let err = Some(format!(
+            "FALSIFY-CRUX-C-13-001 shape gate could not be evaluated: {desc}"
+        ));
+        return (
+            GateReport {
+                gate: "shape",
+                falsify_id: "FALSIFY-CRUX-C-13-001",
+                outcome: desc,
+                passed: false,
+            },
+            err,
+        );
+    }
     let input_len = v.get("input_len").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
     let hidden_size = v.get("hidden_size").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
 
@@ -294,29 +326,31 @@ mod tests {
             observation_file: "/no/such/emb.json".to_string(),
             json: false,
         };
-        let err = run(args).unwrap_err();
-        assert!(err.contains("FALSIFY-CRUX-C-13"));
-        assert!(err.contains("not found"));
+        let err = run(args).unwrap_err().to_string();
+        // The whole *-lint family reports a missing input identically:
+        // "File not found: <path>" with exit 3 (commands::lint_error).
+        assert!(err.contains("File not found"), "got: {err}");
+        assert!(err.contains("/no/such/emb.json"), "got: {err}");
     }
 
     #[test]
     fn empty_file_is_error() {
         let f = write_obs("  ");
-        let err = run(args_for(&f)).unwrap_err();
+        let err = run(args_for(&f)).unwrap_err().to_string();
         assert!(err.contains("observation file is empty"));
     }
 
     #[test]
     fn invalid_json_is_error() {
         let f = write_obs("][");
-        let err = run(args_for(&f)).unwrap_err();
+        let err = run(args_for(&f)).unwrap_err().to_string();
         assert!(err.contains("not valid JSON"));
     }
 
     #[test]
     fn empty_object_has_no_gates() {
         let f = write_obs("{}");
-        let err = run(args_for(&f)).unwrap_err();
+        let err = run(args_for(&f)).unwrap_err().to_string();
         assert!(err.contains("none of shape/determinism/usage/flag"));
     }
 
@@ -336,7 +370,7 @@ mod tests {
             r#"{"shape": {"input_len": 5, "hidden_size": 3,
                 "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]}}"#,
         );
-        let err = run(args_for(&f)).unwrap_err();
+        let err = run(args_for(&f)).unwrap_err().to_string();
         assert!(err.contains("FALSIFY-CRUX-C-13-001"));
     }
 
@@ -355,7 +389,7 @@ mod tests {
     #[test]
     fn usage_gate_mismatch_fails() {
         let f = write_obs(r#"{"usage": {"prompt": 8, "total": 9}}"#);
-        let err = run(args_for(&f)).unwrap_err();
+        let err = run(args_for(&f)).unwrap_err().to_string();
         assert!(err.contains("FALSIFY-CRUX-C-13-003"));
     }
 
@@ -370,6 +404,50 @@ mod tests {
     #[test]
     fn flag_gate_disabled_default_passes() {
         let f = write_obs(r#"{"flag": {"argv": ["apr", "serve"], "expected": "disabled"}}"#);
+        assert!(run(args_for(&f)).is_ok());
+    }
+
+    // ── shape gate: an empty section is unknown, not Ok ───────────────────
+    //
+    // Dogfood 0.63.0 #2377 finding 4: `{"shape": {}}` defaulted input_len,
+    // hidden_size and data to 0/0/[] and reported `Ok { n_rows: 0 }`.
+
+    #[test]
+    fn shape_gate_empty_section_is_unreadable_not_ok() {
+        let f = write_obs(r#"{"shape": {}}"#);
+        let err = run(args_for(&f)).unwrap_err().to_string();
+        assert!(
+            err.contains("could not be evaluated"),
+            "an empty shape section must fail the gate, got: {err}"
+        );
+    }
+
+    #[test]
+    fn shape_gate_missing_data_is_unreadable() {
+        let f = write_obs(r#"{"shape": {"input_len": 0, "hidden_size": 4}}"#);
+        let err = run(args_for(&f)).unwrap_err().to_string();
+        assert!(err.contains("missing `data`"), "got: {err}");
+    }
+
+    #[test]
+    fn shape_gate_scalar_section_is_unreadable() {
+        let f = write_obs(r#"{"shape": "nonsense"}"#);
+        let err = run(args_for(&f)).unwrap_err().to_string();
+        assert!(err.contains("not an object"), "got: {err}");
+    }
+
+    #[test]
+    fn shape_gate_wrong_typed_input_len_is_unreadable() {
+        let f = write_obs(r#"{"shape": {"input_len": "2", "hidden_size": 3, "data": []}}"#);
+        let err = run(args_for(&f)).unwrap_err().to_string();
+        assert!(err.contains("input_len"), "got: {err}");
+    }
+
+    #[test]
+    fn shape_gate_explicit_zero_rows_still_passes() {
+        // A genuine empty-input response is still a pass — the fix rejects
+        // absent evidence, not a legitimately empty one.
+        let f = write_obs(r#"{"shape": {"input_len": 0, "hidden_size": 4, "data": []}}"#);
         assert!(run(args_for(&f)).is_ok());
     }
 

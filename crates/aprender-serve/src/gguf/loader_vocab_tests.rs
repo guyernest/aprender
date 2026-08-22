@@ -251,6 +251,48 @@ mod tests {
         assert_eq!(apr_bytes[4], 2, "version major");
     }
 
+    /// An unrecognized GGML quant type must ABORT the APR write, not be labelled F32.
+    ///
+    /// `apr_qtype_to_dtype` used `.map_or("F32", ..)`, and its result is written
+    /// straight into the APR tensor index. A model carrying a quant type this
+    /// build does not know therefore had its quantized bytes emitted LABELLED
+    /// F32 — a structurally valid file whose reader decodes Q-blocks as raw
+    /// floats and produces garbage weights, silently. Same class as the GPU
+    /// `unwrap_or(Q4K)` that `gpu_unsupported_quant_qtype` exists to prevent;
+    /// the conversion path simply had no equivalent gate.
+    ///
+    /// Asserts on `to_apr_bytes()` rather than on the helper, so it proves the
+    /// failure PROPAGATES rather than merely that the helper can return Err.
+    #[test]
+    fn unknown_qtype_aborts_apr_write_instead_of_labelling_it_f32() {
+        let (mut model, _) = build_model_via_gguf_roundtrip();
+
+        // Control: the untouched model converts cleanly, so a later failure is
+        // attributable to the qtype and not to the fixture.
+        model
+            .to_apr_bytes()
+            .expect("control: unmodified model must convert");
+
+        // 99 is not in GgmlQuantType::from_id's table.
+        model.lm_head_weight.qtype = 99;
+
+        // `.map(|b| b.len())` so a regression reports "wrote N bytes" instead of
+        // dumping the whole APR file into the failure message.
+        let err = model
+            .to_apr_bytes()
+            .map(|b| format!("wrote {} bytes instead of failing", b.len()))
+            .expect_err("an unknown quant type must abort the APR write");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("99"),
+            "the error must name the offending quant type: {msg}"
+        );
+        assert!(
+            !msg.is_empty() && msg.to_lowercase().contains("quant"),
+            "the error must say what went wrong: {msg}"
+        );
+    }
+
     #[test]
     fn test_to_apr_bytes_tensor_count_nonzero() {
         let (model, _) = build_model_via_gguf_roundtrip();
@@ -277,6 +319,61 @@ mod tests {
         assert_eq!(metadata["architecture"], "llama");
         assert_eq!(metadata["hidden_size"], 64);
         assert_eq!(metadata["num_layers"], 1);
+    }
+
+    /// A weight-tied export writes the LM head with its full shape and ZERO
+    /// bytes — the embedding matrix IS the head. Selecting that placeholder
+    /// handed matmul an empty buffer, so `apr run` / `apr serve` / `apr code`
+    /// died on the qwen2.5-coder-0.5b APR with HTTP 500 "matmul weight has
+    /// EMPTY data buffer ... likely a MoE per-expert tensor" — on a dense
+    /// model, which sends the reader after entirely the wrong thing.
+    #[test]
+    fn test_from_apr_ties_lm_head_to_embedding_when_head_is_zero_length() {
+        use std::io::Write as _;
+
+        let (mut model, _) = build_model_via_gguf_roundtrip();
+        let hidden_dim = model.config.hidden_dim;
+        let vocab_size = model.config.vocab_size;
+
+        // Reproduce the export: `output.weight` keeps its shape, loses its data.
+        model.lm_head_weight.data.clear();
+        let apr_bytes = model.to_apr_bytes().expect("to_apr_bytes");
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("create tmp");
+        tmp.write_all(&apr_bytes).expect("write");
+        tmp.flush().expect("flush");
+
+        let mapped = crate::apr::MappedAprModel::from_path(tmp.path()).expect("map");
+        let reloaded = OwnedQuantizedModel::from_apr(&mapped)
+            .expect("a tied-embedding APR must load, not trip over the empty head");
+
+        assert!(
+            !reloaded.lm_head_weight.data.is_empty(),
+            "lm_head must fall back to the embedding matrix, not stay empty"
+        );
+
+        // Behaviour, not shape: the head projection has to actually run — this
+        // is the call that returned InvalidShape("matmul weight has EMPTY data
+        // buffer") — AND every logit must equal the dot product of the hidden
+        // state with that token's embedding row. A transposed or misaligned
+        // tie still produces finite numbers, so asserting finiteness alone
+        // would let the wrong orientation through.
+        let hidden_state: Vec<f32> =
+            (0..hidden_dim).map(|i| 0.01 + (i % 7) as f32 * 0.003).collect();
+        let logits = reloaded
+            .fused_matmul(&hidden_state, &reloaded.lm_head_weight)
+            .expect("lm_head matmul must succeed for a tied-embedding model");
+        assert_eq!(logits.len(), vocab_size, "one logit per vocab entry");
+        for token in 0..vocab_size {
+            let row = &reloaded.token_embedding[token * hidden_dim..(token + 1) * hidden_dim];
+            let expected: f32 =
+                row.iter().zip(hidden_state.iter()).map(|(w, x)| w * x).sum();
+            assert!(
+                (logits[token] - expected).abs() <= 1e-3 * expected.abs().max(1.0),
+                "logit[{token}] = {} but the tied head must give <hidden, embed[{token}]> = {expected}",
+                logits[token]
+            );
+        }
     }
 
     #[test]

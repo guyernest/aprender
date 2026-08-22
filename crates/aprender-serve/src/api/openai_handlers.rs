@@ -15,16 +15,16 @@ use axum::{
         sse::{Event, Sse},
         IntoResponse, Response,
     },
-    Json,
+    Extension, Json,
 };
 use futures::stream::Stream;
 
 use super::{
     build_trace_data, clean_chat_output, format_chat_messages, AppState, ChatChoice,
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ErrorResponse,
-    OpenAIModel, OpenAIModelsResponse, Usage,
+    FinishReason, OpenAIModel, OpenAIModelsResponse, Usage,
 };
-use crate::generate::{GenerationConfig, SamplingStrategy};
+use crate::generate::{CancelToken, GenerationConfig, SamplingStrategy};
 use crate::tokenizer::BPETokenizer;
 
 // ============================================================================
@@ -170,11 +170,16 @@ mod pmat760_top_k_tests {
 /// (`chat_gen_params` / `resolve_chat_top_k`).
 ///
 /// Discharges F-CHAT-HANDLER-THREADS-PARAMS-001 in `contracts/openai-compat-v1.yaml`.
+///
+/// `cancel` is the request's cancellation signal (aprender#2376(3)). It is a
+/// required parameter rather than an `Option` so a new chat backend cannot
+/// silently produce a config whose decode loop outlives its client.
 fn chat_quantized_config(
     request: &ChatCompletionRequest,
     tokenizer: &BPETokenizer,
     model_eos: Option<u32>,
     trace: bool,
+    cancel: &crate::generate::CancelToken,
 ) -> crate::gguf::QuantizedGenerateConfig {
     let defaults = crate::gguf::QuantizedGenerateConfig::default();
     let (max_tokens, temperature, eos_token_id) = chat_gen_params(request, tokenizer, model_eos);
@@ -188,6 +193,7 @@ fn chat_quantized_config(
         seed: request.seed.unwrap_or(defaults.seed),
         stop_tokens: vec![eos_token_id],
         trace,
+        cancel: cancel.clone(),
         ..defaults
     }
 }
@@ -222,7 +228,7 @@ mod pmat821_chat_handler_threading_tests {
             repeat_penalty: None,
             repeat_last_n: None,
             seed: None,
-            n: 1,
+            n: crate::api::ChoiceCount::ONE,
             stream: false,
             stop: None,
             user: None,
@@ -243,7 +249,13 @@ mod pmat821_chat_handler_threading_tests {
         // which is orthogonal to top_p but keeps the request realistic.
         request.temperature = Some(0.7);
         let tokenizer = test_tokenizer();
-        let config = chat_quantized_config(&request, &tokenizer, None, false);
+        let config = chat_quantized_config(
+            &request,
+            &tokenizer,
+            None,
+            false,
+            &crate::generate::CancelToken::never(),
+        );
         assert!(
             (config.top_p - 0.5).abs() < f32::EPSILON,
             "handler dropped top_p: expected 0.5, got {}",
@@ -258,7 +270,13 @@ mod pmat821_chat_handler_threading_tests {
         request.repeat_penalty = Some(1.3);
         request.temperature = Some(0.7);
         let tokenizer = test_tokenizer();
-        let config = chat_quantized_config(&request, &tokenizer, None, false);
+        let config = chat_quantized_config(
+            &request,
+            &tokenizer,
+            None,
+            false,
+            &crate::generate::CancelToken::never(),
+        );
         assert!(
             (config.repeat_penalty - 1.3).abs() < f32::EPSILON,
             "handler dropped repeat_penalty: expected 1.3, got {}",
@@ -273,7 +291,13 @@ mod pmat821_chat_handler_threading_tests {
         request.seed = Some(7);
         request.temperature = Some(0.7);
         let tokenizer = test_tokenizer();
-        let config = chat_quantized_config(&request, &tokenizer, None, false);
+        let config = chat_quantized_config(
+            &request,
+            &tokenizer,
+            None,
+            false,
+            &crate::generate::CancelToken::never(),
+        );
         assert_eq!(config.repeat_last_n, 128, "handler dropped repeat_last_n");
         assert_eq!(config.seed, 7, "handler dropped seed");
     }
@@ -286,7 +310,13 @@ mod pmat821_chat_handler_threading_tests {
         let request = base_request();
         let tokenizer = test_tokenizer();
         let defaults = QuantizedGenerateConfig::default();
-        let config = chat_quantized_config(&request, &tokenizer, None, false);
+        let config = chat_quantized_config(
+            &request,
+            &tokenizer,
+            None,
+            false,
+            &crate::generate::CancelToken::never(),
+        );
         assert!(
             (config.top_p - defaults.top_p).abs() < f32::EPSILON,
             "no-param top_p must equal default"
@@ -324,16 +354,16 @@ fn finalize_chat_text(
     completion_tokens: usize,
     max_tokens: usize,
 ) -> (String, String) {
-    let orig_len = text.len();
-    let text = crate::api::realize_handlers::truncate_at_stop(text, stops);
-    let stopped = text.len() < orig_len;
-    let finish_reason = if !stopped && completion_tokens >= max_tokens {
-        "length"
-    } else {
-        "stop"
-    }
-    .to_string();
-    (text, finish_reason)
+    // #2465(2): the body moved to `apply_stop_sequences`, which `/v1/completions`
+    // now calls as well. Chat behaviour is unchanged — this is the same computation,
+    // in one place, so a fix to either surface reaches both.
+    let (text, finish_reason) = crate::api::realize_handlers::apply_stop_sequences(
+        text,
+        stops,
+        completion_tokens,
+        max_tokens,
+    );
+    (text, finish_reason.as_str().to_string())
 }
 
 /// PMAT-801: parse tool calls out of a chat completion's generated text.
@@ -475,14 +505,22 @@ fn sse_event(value: &impl serde::Serialize) -> Option<Result<Event, Infallible>>
         .map(|data| Ok(Event::default().data(data)))
 }
 
-/// Decode a token and optionally clean the output, returning the text if non-empty.
-fn decode_token(tokenizer: &BPETokenizer, token_id: u32, clean: bool) -> Option<String> {
+/// Decode a single streamed token, returning the text if non-empty.
+///
+/// The decode is deliberately RAW. `clean_chat_output()` must never be applied
+/// per token: it opens with `text.trim_start()` and closes with `.trim()`, so
+/// running it on one token at a time deletes the leading space or newline that
+/// BPE carries on the token itself (`"Ġquick"` -> `" quick"` -> `"quick"`).
+/// Concatenating the deltas then yields `"Thequickbrownfox"` while the
+/// non-streaming response for the same prompt reads `"The quick brown fox"`.
+/// Its other jobs cannot work per-token either: stop sequences and the
+/// `Human:`/`Assistant:` turn markers span several tokens, so a single-token
+/// `find()` never matches them. Whole-response cleaning belongs to the
+/// non-streaming path, which already does it.
+///
+/// This mirrors the same removal PMAT-759 made on `pregenerated_sse_response`.
+fn decode_token(tokenizer: &BPETokenizer, token_id: u32) -> Option<String> {
     let text = tokenizer.decode(&[token_id]).ok()?;
-    let text = if clean {
-        clean_chat_output(&text)
-    } else {
-        text
-    };
     if text.is_empty() {
         None
     } else {
@@ -503,8 +541,14 @@ fn pregenerated_sse_response(
     request_id: String,
     model_name: String,
     stops: Option<&[String]>,
+    max_tokens: usize,
 ) -> Response {
-    let deltas = streaming_text_deltas(&tokenizer, &token_ids, stops);
+    let completion_tokens = token_ids.len();
+    let StreamedText { deltas, stopped } = streaming_text_deltas(&tokenizer, &token_ids, stops);
+    // #2375(6): `max_tokens` is a parameter so this path CANNOT emit a finish
+    // reason without knowing the budget it was generated under. The terminal
+    // chunk now agrees with the non-streaming body for the same request.
+    let finish = FinishReason::from_generation(stopped, completion_tokens, max_tokens);
     let stream = async_stream::stream! {
         if let Some(evt) = sse_event(&ChatCompletionChunk::initial(&request_id, &model_name)) {
             yield evt;
@@ -517,7 +561,7 @@ fn pregenerated_sse_response(
             }
         }
 
-        if let Some(evt) = sse_event(&ChatCompletionChunk::done(&request_id, &model_name)) {
+        if let Some(evt) = sse_event(&ChatCompletionChunk::done(&request_id, &model_name, finish)) {
             yield evt;
         }
         yield Ok::<_, Infallible>(Event::default().data("[DONE]".to_string()));
@@ -525,7 +569,44 @@ fn pregenerated_sse_response(
     Sse::new(stream).into_response()
 }
 
+/// The `on_token` callback every streaming backend hands to its decode loop.
+///
+/// This is the mechanism that stops an ABANDONED stream, and the reason the
+/// cancellation layer is allowed to disarm its guard on completion
+/// (aprender#2375(1)): a streaming handler returns its SSE response while the
+/// decode loop is still running, so cancelling on completion emptied every
+/// reply. What covers the abandoned case instead is this chain —
+///
+/// > hyper drops the response body → the SSE receiver drops → this send fails →
+/// > the callback returns `false` → `generate_with_cache_streaming` breaks.
+///
+/// It is one function because all three streaming backends (quantized, CUDA,
+/// Qwen3-MoE) carried their own copy of `|t| tx.blocking_send(Ok(t)).is_ok()`,
+/// and a copy is exactly how one of them would end up ignoring the send result
+/// and burning a core for a client that left.
+///
+/// The abandonment is RECORDED, which is what makes the mechanism observable:
+/// `record_stream_abandoned` fires once per abandoned stream, and a second
+/// record for the same stream means the loop did not break.
+pub(crate) fn streaming_token_sink(
+    tx: tokio::sync::mpsc::Sender<Result<u32, String>>,
+    metrics: Arc<crate::metrics::MetricsCollector>,
+) -> impl FnMut(u32) -> bool {
+    move |token_id| {
+        if tx.blocking_send(Ok(token_id)).is_ok() {
+            return true;
+        }
+        metrics.record_stream_abandoned();
+        false
+    }
+}
+
 /// Build a true-streaming SSE response with keep-alive (tokens arrive via channel).
+///
+/// Deltas are raw per-token decodes — see `decode_token`. The `clean` parameter
+/// this function used to take is gone on purpose: two of its three call sites
+/// passed `true`, and per-token cleaning silently deleted every space and
+/// newline from the stream.
 // serde_json::json!() uses infallible unwrap
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn true_streaming_sse_response(
@@ -535,7 +616,7 @@ pub(crate) fn true_streaming_sse_response(
     model_name: String,
     metrics: Arc<crate::metrics::MetricsCollector>,
     start: Instant,
-    clean: bool,
+    max_tokens: usize,
 ) -> Response {
     use tokio_stream::wrappers::ReceiverStream;
     use tokio_stream::StreamExt;
@@ -553,7 +634,7 @@ pub(crate) fn true_streaming_sse_response(
             match result {
                 Ok(token_id) => {
                     completion_tokens += 1;
-                    if let Some(text) = decode_token(&tokenizer, token_id, clean) {
+                    if let Some(text) = decode_token(&tokenizer, token_id) {
                         let chunk = ChatCompletionChunk::content(&request_id, &model_name, &text);
                         if let Some(evt) = sse_event(&chunk) {
                             yield evt;
@@ -569,7 +650,10 @@ pub(crate) fn true_streaming_sse_response(
             }
         }
 
-        if let Some(evt) = sse_event(&ChatCompletionChunk::done(&request_id, &model_name)) {
+        // #2375(6): a token stream that delivered the whole budget was cut off at
+        // `max_tokens`; anything shorter ended on a stop/EOS token.
+        let finish = FinishReason::from_generation(false, completion_tokens, max_tokens);
+        if let Some(evt) = sse_event(&ChatCompletionChunk::done(&request_id, &model_name, finish)) {
             yield evt;
         }
 
@@ -598,6 +682,7 @@ fn try_gpu_backend(
     request_id: &str,
     trace_level: Option<&str>,
     start: Instant,
+    cancel: &crate::generate::CancelToken,
 ) -> Option<Response> {
     use crate::gpu::GpuGenerateConfig;
 
@@ -624,6 +709,7 @@ fn try_gpu_backend(
         top_k: resolve_chat_top_k(temperature, request.top_k),
         stop_tokens: vec![eos_token_id as usize],
         trace: state.should_trace(trace_level),
+        cancel: cancel.clone(),
     };
 
     let mut model = match gpu_model_lock.write() {
@@ -658,6 +744,7 @@ fn try_gpu_backend(
             request_id.to_string(),
             request.model.clone(),
             request.stop.as_deref(),
+            max_tokens,
         ));
     }
 
@@ -691,6 +778,7 @@ fn try_cached_backend(
     request_id: &str,
     trace_level: Option<&str>,
     start: Instant,
+    cancel: &crate::generate::CancelToken,
 ) -> Option<Response> {
     use crate::gguf::QuantizedGenerateConfig;
 
@@ -716,6 +804,7 @@ fn try_cached_backend(
         top_k: resolve_chat_top_k(temperature, request.top_k),
         stop_tokens: vec![eos_token_id],
         trace: state.should_trace(trace_level),
+        cancel: cancel.clone(),
         ..Default::default()
     };
 
@@ -724,7 +813,8 @@ fn try_cached_backend(
         .generate_with_cache(&prompt_ids, &q_config)
     {
         Ok(g) => g,
-        Err(e) => return Some(fail_response(state, StatusCode::INTERNAL_SERVER_ERROR, e)),
+        // aprender#2376(9): context-budget rejections are 400, not 500.
+        Err(e) => return Some(fail_response(state, super::generation_error_status(&e), e)),
     };
 
     let token_ids: Vec<u32> = generated.iter().skip(prompt_tokens).copied().collect();
@@ -740,6 +830,7 @@ fn try_cached_backend(
             request_id.to_string(),
             request.model.clone(),
             request.stop.as_deref(),
+            max_tokens,
         ));
     }
 

@@ -23,6 +23,14 @@ pub(crate) struct LayerTrace {
     pub name: String,
     /// Layer index (if applicable)
     pub index: Option<usize>,
+    /// Hidden dimension read from model metadata, when the metadata carries
+    /// one for this layer. This is a declared shape, not a measurement.
+    ///
+    /// #2407: the embedding entry used to report this width inside a
+    /// fabricated all-zero `output_stats` block (`count: 1536`, every other
+    /// field `0.0`), which reads to a client as a measured, dead layer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden_dim: Option<usize>,
     /// Input statistics
     pub input_stats: Option<TensorStats>,
     /// Output statistics
@@ -161,11 +169,27 @@ impl TensorStats {
     }
 }
 
+/// Where the per-layer statistics in a trace result came from.
+///
+/// #2407: `apr trace` without `--payload` never runs a forward pass — it
+/// reads the layer skeleton out of file metadata and leaves every
+/// `*_stats` field null. Emitting that as a bare success made it
+/// indistinguishable from "traced fine, nothing anomalous". The result now
+/// says which it is.
+const STATS_SOURCE_METADATA_ONLY: &str = "metadata-only";
+
+/// Note attached to every metadata-only trace result.
+const METADATA_ONLY_NOTE: &str = "no activations were computed: this trace reports the layer skeleton read from file metadata, so every *_stats field is null and anomaly detection did not run. Use `apr trace --payload --json <model>` to execute a forward pass and get real per-layer statistics.";
+
 /// Trace result for JSON output
 #[derive(Serialize)]
 struct TraceResult {
     file: String,
     format: String,
+    /// `"metadata-only"` — see [`STATS_SOURCE_METADATA_ONLY`].
+    stats_source: &'static str,
+    /// Machine-readable caveats about this result (empty when there are none).
+    notes: Vec<String>,
     layers: Vec<LayerTrace>,
     summary: TraceSummary,
 }
@@ -226,19 +250,47 @@ fn handle_special_modes_with_json(
         return Some(run_traced_inference(path));
     }
 
-    if diff {
-        if let Some(ref_path) = reference {
+    match DiffMode::resolve(diff, reference) {
+        Err(refusal) => return Some(Err(refusal)),
+        Ok(Some(DiffMode { reference })) => {
             println!(
                 "Diffing trace between {} and {}",
                 path.display(),
-                ref_path.display()
+                reference.display()
             );
-        } else {
-            println!("Diff mode requires --reference");
         }
+        Ok(None) => {}
     }
 
     None
+}
+
+/// `--diff`, resolved: a diff always has something to diff against.
+///
+/// dogfood-0.63.0, issue #2394 finding 6: `apr trace model.gguf --diff`
+/// printed "Diff mode requires --reference", then ignored its own requirement,
+/// ran an ordinary single-model trace and exited 0 — so a scripted diff
+/// produced a plain trace that looked like a successful comparison. The
+/// invalid combination is now unrepresentable: a `DiffMode` cannot be built
+/// without a reference path, and `resolve` is the only way to build one.
+struct DiffMode<'a> {
+    reference: &'a Path,
+}
+
+impl<'a> DiffMode<'a> {
+    /// `Ok(None)` when `--diff` was not requested; `Err` when it was requested
+    /// without the reference it needs.
+    fn resolve(diff: bool, reference: Option<&'a Path>) -> Result<Option<Self>, CliError> {
+        if !diff {
+            return Ok(None);
+        }
+        match reference {
+            Some(reference) => Ok(Some(Self { reference })),
+            None => Err(CliError::ValidationFailed(
+                "--diff requires --reference <MODEL>: there is nothing to diff against".to_string(),
+            )),
+        }
+    }
 }
 
 /// Resolve a model path: download from HuggingFace if `hf://` URI, else return unchanged.

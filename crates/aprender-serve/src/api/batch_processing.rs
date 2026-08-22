@@ -48,7 +48,7 @@ async fn process_batch(
         // Send responses
         match results {
             Ok(all_token_ids) => {
-                for (request, token_ids) in batch.drain(..).zip(all_token_ids.into_iter()) {
+                for (request, token_ids) in batch.drain(..).zip(all_token_ids) {
                     let response = ContinuousBatchResponse {
                         token_ids,
                         prompt_len: request.prompt_tokens.len(),
@@ -214,6 +214,65 @@ pub async fn gpu_status_handler(
     }))
 }
 
+/// Encode a batch of prompts with the server's tokenizer.
+///
+/// aprender#2465(3): this replaced `p.bytes().map(|b| b as u32)`, which answered
+/// from UTF-8 byte VALUES. A prompt "世界" became six ids (0xE4,0xB8,0x96,0xE7,0x95,
+/// 0x8C) naming six unrelated vocabulary entries, and ASCII was wrong too — "Hello"
+/// became five ids [72,101,108,108,111] whatever the vocabulary actually says. Every
+/// completion this route returned was therefore computed from a token sequence the
+/// model was never given, while the response looked exactly like a real one, and two
+/// routes on one server disagreed about the tokenization of one string.
+///
+/// An empty prompt is refused rather than handed to the model as an empty context.
+#[cfg(feature = "gpu")]
+fn encode_batch_prompts(tokenizer: &BPETokenizer, prompts: &[String]) -> Result<Vec<Vec<u32>>, ApiErr> {
+    let mut encoded = Vec::with_capacity(prompts.len());
+    for (idx, prompt) in prompts.iter().enumerate() {
+        let ids = tokenizer.encode(prompt);
+        if ids.is_empty() {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                format!("Prompt {idx} is empty: nothing to generate from"),
+            ));
+        }
+        encoded.push(ids);
+    }
+    Ok(encoded)
+}
+
+/// Decode a batch of generated sequences with the same tokenizer that encoded them.
+///
+/// aprender#2465(3), decode half: `tokens.iter().map(|&t| t as u8 as char)` read the
+/// id as a byte and the byte as a codepoint, so every id above 255 wrapped and every
+/// real token came back as one mojibake character. An id outside the vocabulary is
+/// now an honest error, not a substituted character.
+#[cfg(feature = "gpu")]
+fn decode_batch_results(
+    tokenizer: &BPETokenizer,
+    generated: Vec<Vec<u32>>,
+    prompts_tokens: &[Vec<u32>],
+) -> Result<Vec<GpuBatchResult>, ApiErr> {
+    let mut results = Vec::with_capacity(generated.len());
+    for (idx, tokens) in generated.into_iter().enumerate() {
+        let prompt_len = prompts_tokens.get(idx).map_or(0, Vec::len);
+        let num_generated = tokens.len().saturating_sub(prompt_len);
+        let text = tokenizer.decode(&tokens).map_err(|e| {
+            api_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to decode generated tokens: {e}"),
+            )
+        })?;
+        results.push(GpuBatchResult {
+            index: idx,
+            token_ids: tokens,
+            text,
+            num_generated,
+        });
+    }
+    Ok(results)
+}
+
 /// GPU batch completions handler (PARITY-022)
 /// POST /v1/batch/completions - GPU-accelerated batch inference
 #[cfg(feature = "gpu")]
@@ -245,17 +304,19 @@ pub async fn gpu_batch_completions_handler(
     let gpu_ready = cached_model.is_gpu_cache_warm();
     let batch_size = request.prompts.len();
 
-    // Tokenize all prompts
-    // For GPU batch, we need token IDs as Vec<Vec<u32>>
-    let prompts_tokens: Vec<Vec<u32>> = request
-        .prompts
-        .iter()
-        .map(|p| {
-            // Simple tokenization for batch - uses model's vocab
-            // In production, use a proper tokenizer
-            p.bytes().map(|b| b as u32).collect()
-        })
-        .collect();
+    // aprender#2465(3): tokenize with the SAME tokenizer `/tokenize` and
+    // `/v1/completions` resolve — see `encode_batch_prompts`. A route that cannot
+    // resolve one fails here with the status that names why, and never falls back
+    // to answering from byte values.
+    let tokenizer = state.get_tokenizer(None).map_err(|e| {
+        (
+            super::model_resolution_status(&e),
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    let prompts_tokens = encode_batch_prompts(&tokenizer, &request.prompts)?;
 
     // Create generation config
     let gen_config = crate::gguf::QuantizedGenerateConfig {
@@ -309,21 +370,8 @@ pub async fn gpu_batch_completions_handler(
     let total_tokens: usize = results.iter().map(Vec::len).sum();
     let throughput_tps = total_tokens as f64 / elapsed.as_secs_f64();
 
-    // Build response
-    let batch_results: Vec<GpuBatchResult> = results
-        .into_iter()
-        .enumerate()
-        .map(|(idx, tokens)| {
-            let prompt_len = prompts_tokens.get(idx).map_or(0, Vec::len);
-            let num_generated = tokens.len().saturating_sub(prompt_len);
-            GpuBatchResult {
-                index: idx,
-                token_ids: tokens.clone(),
-                text: tokens.iter().map(|&t| t as u8 as char).collect(),
-                num_generated,
-            }
-        })
-        .collect();
+    // Build response — decoded by the same tokenizer that encoded the prompts.
+    let batch_results = decode_batch_results(&tokenizer, results, &prompts_tokens)?;
 
     Ok(Json(GpuBatchResponse {
         results: batch_results,
@@ -365,8 +413,11 @@ pub async fn models_handler(
                 id: "default".to_string(),
                 name: "Default Model".to_string(),
                 description: "Single model deployment".to_string(),
-                format: "unknown".to_string(),
-                loaded: true,
+                // aprender#2376(6): was the literal "unknown" while /realize/model
+                // hardcoded "gguf" — two endpoints on one server contradicting each
+                // other about one model. Both now read the resident backend.
+                format: state.model_format().to_string(),
+                loaded: state.model_loaded(),
             }],
         }))
     }
@@ -377,9 +428,12 @@ pub async fn tokenize_handler(
     State(state): State<AppState>,
     Json(request): Json<TokenizeRequest>,
 ) -> Result<Json<TokenizeResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let (_model, tokenizer) = state.get_model(request.model_id.as_deref()).map_err(|e| {
+    // aprender#2376(1): tokenizing needs a tokenizer, not the dense f32 Model.
+    // Asking get_model() for one made this route unreachable on every
+    // `apr serve run model.gguf`, where the weights are in `quantized_model`.
+    let tokenizer = state.get_tokenizer(request.model_id.as_deref()).map_err(|e| {
         (
-            StatusCode::NOT_FOUND,
+            super::model_resolution_status(&e),
             Json(ErrorResponse {
                 error: e.to_string(),
             }),
@@ -402,6 +456,7 @@ pub async fn tokenize_handler(
 fn try_cuda_generate(
     state: &AppState,
     request: &GenerateRequest,
+    cancel: &CancelToken,
 ) -> Result<Option<GenerateResponse>, ApiErr> {
     use crate::gguf::QuantizedGenerateConfig;
 
@@ -423,7 +478,8 @@ fn try_cuda_generate(
         },
         stop_tokens: vec![eos_id(&tokenizer, state.model_eos_token_id())],
         trace: false,
-                ..Default::default()
+        cancel: cancel.clone(),
+        ..Default::default()
     };
 
     let mut cuda_model = cuda_model_lock.write().map_err(|_| {

@@ -339,9 +339,51 @@ fn test_f375_toggle_safety_zero_cost() {
         "Disabled profiling should not record stats"
     );
 
-    // Near-zero overhead (just timer creation)
-    assert!(overhead_ns < 1000.0, "Disabled overhead too high: {:.1}ns", overhead_ns);
-    println!("F375: Disabled overhead = {:.1}ns", overhead_ns);
+    // NO wall-clock assertion. Two have now failed this REQUIRED check:
+    //
+    //   * `overhead_ns < 1000.0` -- an absolute bound, failed at 1043.1ns (4%
+    //     over) with 16 CI jobs sharing one box.
+    //   * `overhead_ns < enabled_ns` -- a ratio, which was supposed to cancel
+    //     machine speed out. It failed at "disabled 156.0ns vs enabled 111.8ns"
+    //     and blocked every open PR. The ratio does not cancel WARMUP: the
+    //     disabled loop runs first, cold, and the enabled loop second, warm, so
+    //     at ~100ns/iteration the measurement order dominates the thing being
+    //     measured. Adding warmup passes would shrink the flake without
+    //     eliminating it -- at this magnitude the signal is smaller than the
+    //     scheduling noise on a shared runner.
+    //
+    // #2425 removed three wall-clock assertions from `workspace-test` for this
+    // reason; this is the fourth it did not reach. What "toggle safety, zero
+    // cost" actually claims is verified STRUCTURALLY above and below, and those
+    // assertions are deterministic:
+    //
+    //   * disabled records 0 tiles -- it really did no work
+    //   * enabled records exactly `iterations` tiles -- the comparison is not
+    //     vacuous, both paths were genuinely exercised
+    //
+    // A regression that made disabled profiling do real work would break the
+    // count assertion, which is the property worth gating on. Timings are
+    // REPORTED for humans and asserted by the benchmark suite, which owns
+    // performance claims and is not a merge gate.
+    let mut enabled = BrickProfiler::new();
+    enabled.enable_tile_profiling();
+    let start_enabled = std::time::Instant::now();
+    for i in 0..iterations {
+        let timer = enabled.start_tile(TileLevel::Micro, i as u32, 0);
+        enabled.stop_tile(timer, 1, 1);
+    }
+    let enabled_ns = start_enabled.elapsed().as_nanos() as f64 / iterations as f64;
+
+    assert_eq!(
+        enabled.tile_stats(TileLevel::Micro).count,
+        iterations as u64,
+        "enabled profiling must record every tile, else the disabled count above proves nothing"
+    );
+
+    println!(
+        "F375: disabled = {overhead_ns:.1}ns, enabled = {enabled_ns:.1}ns (ratio {:.2}x)",
+        enabled_ns / overhead_ns.max(1.0)
+    );
 }
 
 /// F376: Summary format contains required sections

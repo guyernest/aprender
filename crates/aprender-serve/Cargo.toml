@@ -16,7 +16,8 @@ readme = "README.md"
 keywords = ["machine-learning", "inference", "model-serving", "gguf", "transformer"]
 categories = ["science", "web-programming::http-server"]
 exclude = [
-    "artifacts/", "models/", "docs/", "tests/", "benches/", "book/",
+    ".pmat-baseline.json",
+    "artifacts/", "models/", "docs/", "/tests/", "benches/", "book/",
     "target/", ".pmat/", ".pmat-work/", ".vscode/", ".idea/",
     "*.profraw", "*.profdata", "proptest-regressions/",
 ]
@@ -55,7 +56,7 @@ trueno-db = { workspace = true, optional = true }
 trueno-quant = { workspace = true }
 
 # Contract macros for pre/post-condition enforcement (zero cost in release)
-provable-contracts-macros = { version = "0.2" }
+provable-contracts-macros = { workspace = true }
 
 # PMAT-284: Core tracing primitives (zero-dep, breaks renacer circular dep)
 renacer-core = { workspace = true }
@@ -78,7 +79,9 @@ axum = { version = "0.7", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 tokio-stream = { version = "0.1", optional = true }
 tower = { version = "0.5", default-features = false, features = ["util"], optional = true }
-tower-http = { version = "0.6", features = ["cors"], optional = true }
+# `catch-panic`: #2506 — a handler panic dropped the connection, so the client
+# got a transport error rather than an actionable JSON 500.
+tower-http = { version = "0.6", features = ["cors", "catch-panic"], optional = true }
 futures = { version = "0.3", optional = true }
 async-stream = { version = "0.3", optional = true }
 
@@ -95,7 +98,7 @@ ureq = { version = "2", features = ["json"], optional = true }
 crossterm = { version = "0.28", optional = true }
 
 # HTTP client for real model server benchmarking (blocking for bench harness)
-reqwest = { version = "0.11", features = ["json", "blocking"], optional = true }
+reqwest = { version = "0.12", features = ["json", "blocking"], optional = true }
 
 # Serialization (for REST API, not ML code)
 serde = { version = "1", features = ["derive"] }
@@ -166,10 +169,10 @@ serde_yaml_ng = "0.10"
 
 [dev-dependencies]
 # Contract trait enforcement (Section 23)
-provable-contracts = { version = "0.2" }
+provable-contracts = { path = "../aprender-contracts", package = "aprender-contracts" }
 
 # Visual regression testing framework (playbooks, TUI testing, GPU pixel verification)
-jugar-probar = { version = "0.4", features = ["tui", "gpu"] }
+jugar-probar = { path = "../aprender-test-lib", package = "aprender-test-lib", features = ["tui", "gpu"] }
 
 # GPU edge-case test framework (null fuzzing, boundary probing, lifecycle chaos)
 trueno-cuda-edge = { path = "../aprender-cuda-edge", package = "aprender-cuda-edge" }
@@ -203,7 +206,7 @@ hyper = { version = "1.4", features = ["full"] }
 mime = "0.3"
 
 # For external HTTP benchmarking (REAL model server calls)
-reqwest = { version = "0.11", features = ["json", "blocking"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 
 # For CLI integration tests
 assert_cmd = "2.0"

@@ -32,6 +32,12 @@ fn dispatch_core_command(cli: &Cli) -> Option<Result<(), CliError>> {
         return Some(result);
     }
 
+    // Sibling CLIs whose whole command surface used to be reachable only from
+    // their own binary (trueno-rag, trueno-zram).
+    if let Some(result) = dispatch_sibling_cli_commands(cli) {
+        return Some(result);
+    }
+
     // Monorepo management (publish, shims, audit, archive) — dev-only
     #[cfg(feature = "dev")]
     if let Commands::Mono(command) = cli.command.as_ref() {
@@ -41,6 +47,56 @@ fn dispatch_core_command(cli: &Cli) -> Option<Result<(), CliError>> {
     contract_post_side_effect_classification!(&());
     contract_post_output_format_fidelity!(&());
     None
+}
+
+/// Dispatch the commands whose implementation lives in a sibling crate's CLI
+/// library: `apr rag` -> `aprender_rag_cli`, `apr zram` -> `aprender_zram_cli`.
+///
+/// Each arm calls the SAME `dispatch` function the standalone binary calls, so
+/// `apr rag index` and `trueno-rag index` cannot drift apart. Before this, both
+/// command enums lived in a `main.rs`, which is importable by nothing -- the
+/// separate binary was the only way to reach any of it.
+fn dispatch_sibling_cli_commands(cli: &Cli) -> Option<Result<(), CliError>> {
+    match cli.command.as_ref() {
+        Commands::Rag(command) => Some(
+            aprender_rag_cli::dispatch(command.clone())
+                .map_err(|e| CliError::ValidationFailed(format!("rag: {e}"))),
+        ),
+        Commands::Zram(command) => {
+            let format = if cli.json {
+                aprender_zram_cli::output::OutputFormat::Json
+            } else {
+                aprender_zram_cli::output::OutputFormat::Table
+            };
+            Some(
+                aprender_zram_cli::dispatch(command, format)
+                    .map_err(|e| CliError::ValidationFailed(format!("zram: {e}"))),
+            )
+        }
+        Commands::Sim(command) => {
+            // #2493 and #2527 each converted simular to clap independently and
+            // chose different type names; the batch takes #2527's (richer case
+            // table, and it owns the parser ban). Its root is `Cli` with an
+            // Option<Commands>, not `Args` with a bare `command`.
+            let code = simular::cli::run_cli(simular::cli::Cli {
+                command: Some(command.clone()),
+            });
+            Some(if code == std::process::ExitCode::SUCCESS {
+                Ok(())
+            } else {
+                Err(CliError::ValidationFailed("sim command failed".to_string()))
+            })
+        }
+        Commands::Cgp(command) => Some(
+            cgp::cli::dispatch(command.clone(), cli.json)
+                .map_err(|e| CliError::ValidationFailed(format!("cgp: {e}"))),
+        ),
+        Commands::Pv(command) => Some(
+            aprender_contracts_cli::dispatch(command.clone())
+                .map_err(|e| CliError::ValidationFailed(format!("pv: {e}"))),
+        ),
+        _ => None,
+    }
 }
 
 /// Dispatch runtime commands: check, run, serve.
@@ -225,6 +281,54 @@ or drop `--backend`."
     })
 }
 
+/// Dispatch `apr debug`: either the file dump or a debug subcommand.
+///
+/// aprender#2377 finding 3: `embed-viz-lint`'s help documented
+/// `apr debug embed-viz` and no such subcommand existed. `file` is now optional
+/// because a subcommand supplies its own input, and `apr debug` with neither
+/// must REFUSE rather than dump nothing and exit 0.
+fn dispatch_debug(
+    cli: &Cli,
+    file: Option<&Path>,
+    action: Option<&DebugCommands>,
+    flags: (bool, bool, bool, usize),
+) -> Result<(), CliError> {
+    if let Some(DebugCommands::EmbedViz {
+        model,
+        tensor,
+        projection,
+        seed,
+        limit,
+        tokens,
+        output,
+        force,
+    }) = action
+    {
+        return commands::embed_viz::run(&commands::embed_viz::EmbedVizArgs {
+            model: model.clone(),
+            tensor: tensor.clone(),
+            projection: *projection,
+            seed: *seed,
+            limit: *limit,
+            tokens: tokens.clone(),
+            output: output.clone(),
+            force: *force,
+        });
+    }
+    let file = file.ok_or_else(|| {
+        CliError::ValidationFailed(
+            "apr debug: needs a model FILE (`apr debug model.apr`) or a subcommand \
+             (`apr debug embed-viz --model model.apr`)"
+                .to_string(),
+        )
+    })?;
+    let (drama, hex, strings, limit) = flags;
+    let (j, verb) = (cli.json, cli.verbose);
+    crate::pipe::with_stdin_support(file, |p| {
+        debug::run(p, drama, hex, strings, limit, j, verb)
+    })
+}
+
 /// Dispatch inspection commands: inspect, debug, validate, lint, explain, canary.
 #[allow(clippy::many_single_char_names)]
 fn dispatch_inspection_commands(cli: &Cli) -> Option<Result<(), CliError>> {
@@ -247,14 +351,17 @@ fn dispatch_inspection_commands(cli: &Cli) -> Option<Result<(), CliError>> {
         // GH-685: forward cli.verbose to debug
         Commands::Debug {
             file,
+            action,
             drama,
             hex,
             strings,
             limit,
-        } => {
-            let (d, h, s, l, j, verb) = (*drama, *hex, *strings, *limit, cli.json, cli.verbose);
-            crate::pipe::with_stdin_support(file, |p| debug::run(p, d, h, s, l, j, verb))
-        }
+        } => dispatch_debug(
+            cli,
+            file.as_deref(),
+            action.as_ref(),
+            (*drama, *hex, *strings, *limit),
+        ),
 
         Commands::Validate {
             file,
@@ -275,9 +382,9 @@ fn dispatch_inspection_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             validate_manifest::run(file, artifact.as_deref(), cli.json, live_check)
         }
 
-        Commands::Lint { file } => {
-            let (j, q) = (cli.json, cli.quiet);
-            crate::pipe::with_stdin_support(file, |p| lint::run(p, j, q))
+        Commands::Lint { file, strict } => {
+            let (j, q, st) = (cli.json, cli.quiet, *strict);
+            crate::pipe::with_stdin_support(file, |p| lint::run(p, j, q, st))
         }
 
         Commands::BeatRun { contract, measured } => {
@@ -457,6 +564,11 @@ fn dispatch_quant_roundtrip(
 ) -> Result<(), CliError> {
     use commands::diff_quant_roundtrip::{build_report, render_tsv};
 
+    // GH-2391: `any_below_threshold` is an OR of `cosine < threshold`. Against a
+    // NaN threshold every term is false, so the CRUX-B-20 exit-code gate reports
+    // a clean roundtrip for a quantization it never checked.
+    commands::threshold_arg::guard_f32("--threshold", threshold, commands::threshold_arg::COSINE)?;
+
     let report = build_report(reference, quantized, threshold)?;
 
     if json {
@@ -490,6 +602,7 @@ fn dispatch_format_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             batch,
             json,
             plan,
+            force,
         } => {
             match file
                 .as_ref()
@@ -505,6 +618,7 @@ fn dispatch_format_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                     batch.as_deref(),
                     *json || cli.json,
                     *plan,
+                    *force,
                 ),
                 Err(e) => Err(e),
             }
@@ -541,6 +655,7 @@ fn dispatch_format_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 tokenizer.as_ref(),
                 *enforce_provenance,
                 *allow_no_config,
+                cli.json,
             )
         }
         Commands::Convert {
@@ -658,6 +773,7 @@ fn dispatch_model_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             density,
             seed,
             plan,
+            force,
         } => {
             let resolved: std::result::Result<Vec<std::path::PathBuf>, _> = files
                 .iter()
@@ -675,6 +791,7 @@ fn dispatch_model_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                     *seed,
                     cli.json,
                     *plan,
+                    *force,
                 ),
                 Err(e) => Err(e),
             }
@@ -826,6 +943,12 @@ fn dispatch_model_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             output,
             verify,
         } => {
+            // CRUX-A-20: `pull` declares its OWN `--offline` in addition to the
+            // clap global, and the dataset / `--verify` branches below never
+            // enter `pull::run`. Arm the enforcement scope here, around all
+            // three branches, from the variant's own flag — so the refusal does
+            // not depend on clap continuing to populate the global as well.
+            let _offline_scope = crate::commands::offline::scope(*offline);
             // SHIP-TWO-001 §26.8: when first positional is the literal
             // "dataset", treat the second positional as the HF dataset
             // repo and dispatch to the dataset puller. Otherwise fall
@@ -853,12 +976,19 @@ fn dispatch_model_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 crate::commands::pull::resolve_cache_dir_for_ref(model_ref)
                     .and_then(|dir| crate::commands::pull_verify::run_verify(&dir))
             } else {
-                pull::run(model_ref, *force, *dry_run, revision.as_deref(), *offline)
+                pull::run(
+                    model_ref,
+                    *force,
+                    *dry_run,
+                    revision.as_deref(),
+                    *offline,
+                    cli.json,
+                )
             }
         }
         Commands::Registry { command } => crate::commands::registry::run(command.clone()),
         Commands::List => pull::list(cli.json, cli.quiet),
-        Commands::Rm { model_ref } => pull::remove(model_ref),
+        Commands::Rm { model_ref } => pull::remove(model_ref, cli.json),
         Commands::Tui { file } => tui::run(file.clone()),
         Commands::Mcp {} => mcp::run(),
 

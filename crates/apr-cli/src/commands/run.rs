@@ -169,6 +169,12 @@ pub(crate) struct RunOptions {
     pub repeat_last_n: usize,
     /// Process prompt tokens one-by-one (debug prefill)
     pub split_prompt: bool,
+    /// `--stream`: emit one NDJSON event per generated token.
+    ///
+    /// Known here (not only at the print site) because streaming is the one
+    /// mode that needs per-token decoded text, and resolving the tokenizer for
+    /// it costs a second open of the model file.
+    pub stream: bool,
 }
 
 impl Default for RunOptions {
@@ -196,6 +202,7 @@ impl Default for RunOptions {
             repeat_penalty: 1.0,
             repeat_last_n: 64,
             split_prompt: false,
+            stream: false,
         }
     }
 }
@@ -217,13 +224,26 @@ pub(crate) struct RunResult {
     pub used_gpu: Option<bool>,
     /// GH-250: Generated token IDs for parity checking
     pub generated_tokens: Option<Vec<u32>>,
+    /// Per-token decoded text, positionally aligned with `generated_tokens`.
+    ///
+    /// `Some` only in `--stream` mode and only when a tokenizer for the model
+    /// could be resolved. `--stream` used to emit `"text":""` for every token
+    /// because nothing ever decoded the ids one at a time.
+    pub token_texts: Option<Vec<String>>,
 }
 
-/// Run the model on input
-#[provable_contracts_macros::contract("apr-cli-operations-v1", equation = "long_running_graceful")]
-pub(crate) fn run_model(source: &str, options: &RunOptions) -> Result<RunResult> {
-    let start = Instant::now();
-
+/// Resolve a user-supplied model argument into a [`ModelSource`].
+///
+/// This is the single source of truth for "is this a local file, an `hf://`
+/// repo, or a URL?" — every command that accepts a model argument must use it
+/// rather than re-deriving the rules. `apr chat` used to carry a copy that
+/// omitted the local-path guards and rewrote every argument containing a slash
+/// to `hf://<arg>`, so an absolute path became `hf:///home/...` and 404'd.
+///
+/// `offline` suppresses the HuggingFace API probe that picks the best file in a
+/// repo; the caller's own offline handling in [`resolve_model`] then reports a
+/// cache miss instead of reaching the network.
+pub(crate) fn resolve_model_source(source: &str, offline: bool) -> Result<ModelSource> {
     // Resolve alias if applicable
     let resolved_source =
         crate::commands::aliases::resolve_short_name(source).unwrap_or_else(|| source.to_string());
@@ -239,14 +259,30 @@ pub(crate) fn run_model(source: &str, options: &RunOptions) -> Result<RunResult>
         resolved_source
     };
 
-    // GH-213: Actually query HF to find the best GGUF file
-    let fully_resolved_source = match crate::commands::pull::resolve_hf_model(&hf_uri) {
-        Ok(crate::commands::pull::ResolvedModel::SingleFile(uri)) => uri,
-        _ => hf_uri,
+    // GH-213: Actually query HF to find the best GGUF file.
+    // Only for something that is already an hf:// reference: `resolve_hf_model`
+    // normalizes any slash-bearing, scheme-less argument back into `hf://<arg>`
+    // (`normalize_hf_uri`), which would undo the local-path decision above and
+    // turn an existing `models/tiny.gguf` into the repo `hf://models/tiny.gguf`.
+    // Skipped offline as well — it is a network call.
+    let fully_resolved_source = if offline || !hf_uri.starts_with("hf://") {
+        hf_uri
+    } else {
+        match crate::commands::pull::resolve_hf_model(&hf_uri) {
+            Ok(crate::commands::pull::ResolvedModel::SingleFile(uri)) => uri,
+            _ => hf_uri,
+        }
     };
 
-    // Parse source
-    let model_source = ModelSource::parse(&fully_resolved_source)?;
+    ModelSource::parse(&fully_resolved_source)
+}
+
+/// Run the model on input
+#[provable_contracts_macros::contract("apr-cli-operations-v1", equation = "long_running_graceful")]
+pub(crate) fn run_model(source: &str, options: &RunOptions) -> Result<RunResult> {
+    let start = Instant::now();
+
+    let model_source = resolve_model_source(source, options.offline)?;
 
     // Resolve model path (download if needed, respecting offline mode)
     let model_path = resolve_model(&model_source, options.force, options.offline)?;
@@ -279,6 +315,7 @@ pub(crate) fn run_model(source: &str, options: &RunOptions) -> Result<RunResult>
         tok_per_sec: output.tok_per_sec,
         used_gpu: output.used_gpu,
         generated_tokens: output.generated_tokens,
+        token_texts: output.token_texts,
     })
 }
 
@@ -291,6 +328,11 @@ pub(crate) fn run_model(source: &str, options: &RunOptions) -> Result<RunResult>
 ///
 /// Per Section 9.2 (Sovereign AI): "apr run --offline is mandatory for production"
 pub(crate) fn resolve_model(source: &ModelSource, force: bool, offline: bool) -> Result<PathBuf> {
+    // CRUX-A-20: `chat` called this with a hardcoded `offline = false`, so
+    // `apr --offline chat hf://org/repo` downloaded the model. Consult the
+    // process-wide offline latch as well as the parameter, so a caller that
+    // forgets to forward the flag cannot re-enable the network.
+    let offline = offline || crate::commands::offline::network_forbidden();
     match source {
         ModelSource::Local(path) => Ok(path.clone()),
         ModelSource::HuggingFace { org, repo, file } => {
@@ -303,7 +345,24 @@ pub(crate) fn resolve_model(source: &ModelSource, force: bool, offline: bool) ->
             }
 
             if offline {
-                // OFFLINE MODE: Reject any network access attempt
+                // OFFLINE MODE: Reject any network access attempt.
+                //
+                // CRUX-A-20: a BARE `hf://org/repo` gets a different message,
+                // because "not cached" would be a claim we cannot support. The
+                // caller reached here having asked the Hub API which file the
+                // repo means (`run_model` → `resolve_hf_model`) and been
+                // refused, so `file` is None and the pacha cache — keyed on the
+                // full `hf://org/repo/<file>` — cannot be probed at all. The
+                // file may well be cached under a name we cannot name.
+                if file.is_none() {
+                    return Err(CliError::ValidationFailed(format!(
+                        "OFFLINE MODE: cannot resolve hf://{org}/{repo} to a file. \
+                         Which file a bare repo means is only knowable from the \
+                         HuggingFace API, and network access is disabled. Name the \
+                         file (e.g. hf://{org}/{repo}/model.safetensors), pass a \
+                         local path, or cache it first with: apr import hf://{org}/{repo}"
+                    )));
+                }
                 return Err(CliError::ValidationFailed(format!(
                     "OFFLINE MODE: Model hf://{org}/{repo} not cached. \
                      Network access is disabled. Cache the model first with: \

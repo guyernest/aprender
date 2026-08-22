@@ -1,5 +1,5 @@
 [package]
-exclude = ["tests/", "benches/", "docs/", ".github/", ".pmat/", "target/", ".profraw", ".profdata", ".vscode/", ".idea/", "proptest-regressions/"]
+exclude = ["/tests/", "benches/", "docs/", ".github/", ".pmat/", "target/", ".profraw", ".profdata", ".vscode/", ".idea/", "proptest-regressions/"]
 name = "aprender-present-core"
 description = "Core types and traits for Presentar UI framework"
 version.workspace = true
@@ -20,7 +20,7 @@ serde_json = { workspace = true }
 # closed compute→gpu→present-core→compute (and …→simulate→present-core→…) cycles. The
 # never-enabled `simd` feature's trueno-backed helpers are dropped; the always-on
 # auto-vectorized f64 ComputeBlocks (batch_sum_f64, …) remain.
-provable-contracts-macros = "0.3"
+provable-contracts-macros = { workspace = true }
 
 [build-dependencies]
 serde = { workspace = true }

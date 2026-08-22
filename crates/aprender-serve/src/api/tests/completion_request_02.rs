@@ -2,6 +2,8 @@
 #[test]
 fn test_completion_request_clone() {
     let req = CompletionRequest {
+        stream: false,
+        n: crate::api::ChoiceCount::ONE,
         model: "test".to_string(),
         prompt: "Hello".to_string(),
         max_tokens: Some(50),
@@ -22,6 +24,8 @@ fn test_completion_request_clone() {
 #[test]
 fn test_completion_request_debug() {
     let req = CompletionRequest {
+        stream: false,
+        n: crate::api::ChoiceCount::ONE,
         model: "debug-model".to_string(),
         prompt: "debug prompt".to_string(),
         max_tokens: None,
@@ -52,10 +56,12 @@ fn test_model_metadata_response_with_lineage() {
     let response = ModelMetadataResponse {
         id: "test-model".to_string(),
         name: "Test Model".to_string(),
-        format: "GGUF".to_string(),
-        size_bytes: 4_000_000_000,
+        format: Some("GGUF".to_string()),
+        size_bytes: Some(4_000_000_000),
         quantization: Some("Q4_K_M".to_string()),
-        context_length: 8192,
+        context_length: Some(8192),
+        model_max_context_length: None,
+        architecture: None,
         lineage: Some(lineage),
         loaded: true,
     };
@@ -74,18 +80,20 @@ fn test_model_metadata_response_large_size() {
     let response = ModelMetadataResponse {
         id: "large-model".to_string(),
         name: "Large Model".to_string(),
-        format: "SafeTensors".to_string(),
-        size_bytes: 70_000_000_000, // 70GB
+        format: Some("SafeTensors".to_string()),
+        size_bytes: Some(70_000_000_000), // 70GB
         quantization: None,
-        context_length: 32768,
+        context_length: Some(32768),
+        model_max_context_length: None,
+        architecture: None,
         lineage: None,
         loaded: false,
     };
 
     let json = serde_json::to_string(&response).expect("serialize");
     let parsed: ModelMetadataResponse = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(parsed.size_bytes, 70_000_000_000);
-    assert_eq!(parsed.context_length, 32768);
+    assert_eq!(parsed.size_bytes, Some(70_000_000_000));
+    assert_eq!(parsed.context_length, Some(32768));
 }
 
 #[test]
@@ -93,10 +101,12 @@ fn test_model_metadata_response_clone() {
     let response = ModelMetadataResponse {
         id: "test".to_string(),
         name: "Test".to_string(),
-        format: "GGUF".to_string(),
-        size_bytes: 1000,
+        format: Some("GGUF".to_string()),
+        size_bytes: Some(1000),
         quantization: Some("Q4_0".to_string()),
-        context_length: 2048,
+        context_length: Some(2048),
+        model_max_context_length: None,
+        architecture: None,
         lineage: None,
         loaded: true,
     };
@@ -111,10 +121,12 @@ fn test_model_metadata_response_debug() {
     let response = ModelMetadataResponse {
         id: "debug".to_string(),
         name: "Debug".to_string(),
-        format: "APR".to_string(),
-        size_bytes: 0,
+        format: Some("APR".to_string()),
+        size_bytes: Some(0),
         quantization: None,
-        context_length: 512,
+        context_length: Some(512),
+        model_max_context_length: None,
+        architecture: None,
         lineage: None,
         loaded: false,
     };
@@ -250,9 +262,14 @@ async fn test_realize_embed_long_input() {
 
     // Should handle long input gracefully
     let status = response.status();
-    assert!(
-        status == StatusCode::OK || status == StatusCode::NOT_FOUND,
-        "Unexpected status: {status}"
+    // aprender#2376(5): the shared test state has NO model, so this condition is
+    // deterministic — a server with no usable model answers 503 on every route.
+    // The old assertion accepted a SET of statuses that included the defect, so it
+    // could not fail and held the 404-here/500-there split in place.
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no model is resident: expected 503"
     );
 }
 
@@ -278,9 +295,14 @@ async fn test_realize_embed_unicode_input() {
         .expect("test value should be present");
 
     let status = response.status();
-    assert!(
-        status == StatusCode::OK || status == StatusCode::NOT_FOUND,
-        "Unexpected status: {status}"
+    // aprender#2376(5): the shared test state has NO model, so this condition is
+    // deterministic — a server with no usable model answers 503 on every route.
+    // The old assertion accepted a SET of statuses that included the defect, so it
+    // could not fail and held the 404-here/500-there split in place.
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no model is resident: expected 503"
     );
 }
 

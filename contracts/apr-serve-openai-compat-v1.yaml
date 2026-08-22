@@ -1,7 +1,7 @@
 contract: apr-serve-openai-compat
 metadata:
   kind: pattern
-  version: "1.15.0"
+  version: "1.18.0"
   description: >
     OpenAI-compatible serve layer (/v1/chat/completions, /v1/completions,
     /v1/embeddings) fidelity invariants. Established by an adversarial audit
@@ -43,17 +43,30 @@ proof_obligations:
       streamed event's data is parseable JSON, never the literal "data: {...}".
   - type: invariant
     property: >
-      STOP-APPLIED (DISCHARGED for NON-STREAMING — PMAT-754/755/756): every NON-STREAMING
-      completion AND chat backend applies the request's stop sequences (post-decode
-      truncation at the EARLIEST stop position) via the shared truncate_at_stop() helper, so
-      the returned (non-streamed) text never contains a stop string. /v1/completions:
-      try_cached_completions, try_quantized_completions (PMAT-754), try_gpu_completions,
-      try_apr_q4k_completions (PMAT-755). /v1/chat/completions: build_chat_response runs
-      finalize_chat_text() across ALL 7 build_chat_response call sites
-      (gpu/quantized/cached/q4k/qwen3_moe/registry), AND the inline try_safetensors_cuda_backend
-      builder (which bypasses build_chat_response) also calls finalize_chat_text — together
-      with finish_reason="stop" when a stop string truncated (precedence over "length")
-      (PMAT-756).
+      STOP-APPLIED (DISCHARGED for NON-STREAMING — PMAT-754/755/756, REPAIRED #2465(2)):
+      every NON-STREAMING completion AND chat backend applies the request's stop sequences
+      (post-decode truncation at the EARLIEST stop position) via the shared truncate_at_stop()
+      helper, so the returned (non-streamed) text never contains a stop string.
+      This invariant read DISCHARGED while it was FALSE, and the reason is instructive: it
+      was written as an ENUMERATION of backends that each had to remember a separate
+      truncate_at_stop() line, and the enumeration was incomplete. registry_completions —
+      the CPU dense backend that answers /v1/completions for every .apr / .safetensors /
+      registry model, and the ONLY one reachable without a GPU feature — was never in the
+      list and never called the helper; nor was try_batch_completion, nor the inline
+      cuda_model fallback in completions_inner. #2465(2) replaced the enumeration with a
+      funnel: completion_resp() takes `stops` as a REQUIRED parameter and calls
+      apply_stop_sequences() (= truncate_at_stop + FinishReason::from_generation), so a
+      backend that forgets stops no longer compiles. /v1/completions: registry_completions,
+      try_batch_completion, try_cached_completions, try_quantized_completions (PMAT-754),
+      try_gpu_completions, try_apr_q4k_completions (PMAT-755), try_cuda_gguf_completions
+      (PMAT-761), and the inline cuda_model fallback. /v1/chat/completions:
+      build_chat_response runs finalize_chat_text() across ALL 7 build_chat_response call
+      sites (gpu/quantized/cached/q4k/qwen3_moe/registry), AND the inline
+      try_safetensors_cuda_backend builder (which bypasses build_chat_response) also calls
+      finalize_chat_text — which is now a one-line delegation to the SAME
+      apply_stop_sequences, so the two surfaces cannot drift by one being fixed and not the
+      other. finish_reason="stop" when a stop string truncated (precedence over "length")
+      (PMAT-756) is likewise computed in that one function.
       STREAMING (PRE-GENERATED paths DISCHARGED — PMAT-758/759): chat_completions_stream.rs
       (PMAT-758) AND pregenerated_sse_response (PMAT-759, the cuda/gpu/cached chat streaming
       backends + registry fallback) now apply stop via streaming_text_deltas(). STILL OPEN:
@@ -225,14 +238,153 @@ proof_obligations:
       OLLAMA-API-ROUTED-ON-APR-SERVE non-streaming shape (no-regression). On a
       backend error the stream still terminates with a well-formed `done:true`
       object, never a bare error object lacking `done`.
+  - type: invariant
+    property: >
+      OLLAMA-CREATED-AT-IS-RFC3339: every Ollama-wire timestamp apr emits —
+      `created_at` on the coalesced `/api/chat` and `/api/generate` bodies, on
+      EVERY NDJSON stream chunk (intermediate and terminal), and `modified_at`
+      in the `/api/tags` model list — is a real RFC 3339 UTC instant with
+      nanosecond precision (`2026-08-09T16:55:33.983535246Z`), NOT a bare Unix
+      epoch with a `Z` appended (`1786293998.000000000Z`). This is a HARD
+      requirement, not cosmetic: ollama's own Go client declares these fields
+      as `time.Time` (api.ChatResponse.CreatedAt, api.GenerateResponse.CreatedAt,
+      api.ListModelResponse.ModifiedAt), so the value is decoded by
+      `time.Time.UnmarshalJSON`, which accepts RFC 3339 and nothing else. A
+      value it cannot parse makes `encoding/json` abandon the WHOLE object, so
+      the client observes an empty message, `done:false` and zeroed counts —
+      the response is dropped in its entirety, not merely mis-timestamped, and
+      a streaming client loop watching `done` never terminates. The timestamp
+      must also denote the current instant (UTC offset zero), so a decoding
+      client gets a usable time rather than the zero value. Holds for BOTH
+      implementations of the helper: the apr-cli adapter that `apr serve`
+      mounts (crates/apr-cli/src/commands/serve/ollama.rs::created_at_now) and
+      the realizar-side handlers any caller mounting create_router gets
+      (crates/aprender-serve/src/api/ollama_handlers.rs::created_at_now).
+
+  - type: invariant
+    property: >
+      OLLAMA-COMPAT-ON-THE-REALIZAR-ROUTER (dogfood 0.63.0, #2396): the Ollama
+      surface obligations above are stated for the apr-cli APR-CPU router.
+      `apr serve run <GGUF>` mounts a DIFFERENT router — realizar
+      create_router, via apr-cli run_cpu_server — and 0.63.0 shipped that one
+      unfixed: `stream:true` was parsed and discarded (one buffered
+      application/json object with content-length 181), and /api/tags,
+      /api/show and /api/version answered 404 while the startup banner
+      advertised "Ollama-Parity Endpoints". On the realizar router,
+      `stream:true` now responds application/x-ndjson with NO content-length:
+      a sequence of `{...,done:false}` objects whose content/response
+      fragments CONCATENATE to the full generation, terminated by exactly one
+      `{...,done:true,done_reason:"stop",prompt_eval_count,eval_count}`.
+      Non-terminal objects omit the counts rather than sending zeros.
+      `stream:false` is unchanged (one application/json object). NOTE ON
+      SCOPE: this router's chat backend has no token callback, so the
+      fragments are produced from the finished generation — the WIRE PROTOCOL
+      is correct and clients no longer freeze, but time-to-first-object is
+      unchanged. /api/tags, /api/show and /api/version are routed.
+  - type: invariant
+    property: >
+      MODEL-METADATA-MEASURED-OR-ABSENT (dogfood 0.63.0, #2402): every field
+      the metadata endpoints (/realize/model, /api/tags, /api/show) report is
+      either MEASURED or ABSENT from the JSON. There is no defaulted value.
+      0.63.0 returned `size_bytes: 0`, `quantization: "Q4_K_M"`,
+      `context_length: 4096`, `format: "gguf"` and
+      `content_hash: "blake3:0".repeat(16)` as constants for every model — on a
+      1.04 GiB Q4_K GGUF served with `--context-length 128` against a
+      32768-context model, all five were wrong. The content_hash is the worst
+      of them: a 128-character string shaped exactly like a BLAKE3 digest,
+      which a consumer cannot distinguish from a real one and will store and
+      compare as provenance. `lineage` is therefore emitted ONLY when a hash
+      was actually computed over the model bytes. Measured values come from
+      api/model_source.rs::ModelSourceInfo: size and container format from the
+      FILE (magic bytes, not the extension), quantization from the qtype of
+      the loaded projection tensors (not GGUF's advisory general.file_type),
+      architecture from the loader. The context the server was CONFIGURED with
+      (`--context-length`) and the model's own advertised maximum are reported
+      as two SEPARATE fields; conflating them is what produced the 4096.
+  - type: invariant
+    property: >
+      ERROR-MESSAGES-NAME-A-REAL-REMEDY (dogfood 0.63.0, #2402): an error body
+      that tells the caller how to fix the problem must name a remedy that
+      exists. POST /realize/reload without registry mode answers 501; 0.63.0's
+      body said "Start server with --registry flag", and `apr serve run
+      --registry <FILE>` is rejected by clap with exit 2 (no such flag on
+      `apr serve run` or on `apr serve`), so the endpoint was unreachable by
+      any documented invocation. The message now states that the CLI does not
+      expose registry mode, names the embedder API that does
+      (AppState::with_registry), and gives the working alternative (restart
+      with `apr serve run <MODEL>`).
+  - type: invariant
+    property: >
+      COMPLETIONS-STREAM-FLAG-HONOURED (dogfood 0.63.0, #2375 findings 3 and 5,
+      DISCHARGED): POST /v1/completions with "stream":true responds
+      Content-Type text/event-stream with NO content-length — a sequence of
+      `data: {json}` frames whose `choices[0].text` fragments CONCATENATE to
+      exactly the text the same request returns without the flag, terminated by
+      a frame carrying `finish_reason` and then `data: [DONE]`. 0.63.0 could not
+      do this in two independent ways: CompletionRequest had no `stream` field
+      at all (serde dropped the key), and openai_completions_handler returned
+      Result<Json<CompletionResponse>, RErr>, a type that cannot carry an SSE
+      body. Both are fixed, and the streaming decision is made in exactly ONE
+      place — the handler wraps a single `completions_inner` that returns a
+      CompletionResponse — so no backend return path can forget it.
+      NO-REGRESSION: an absent or false `stream` still returns one
+      application/json object carrying `usage`.
+  - type: invariant
+    property: >
+      STREAM-FINISH-REASON-MEASURED (dogfood 0.63.0, #2375 finding 6,
+      DISCHARGED): the terminal chunk of a STREAMED chat completion reports the
+      reason generation actually ended, and it equals the `finish_reason` the
+      NON-streaming response gives for the identical request — "length" when the
+      max_tokens budget was consumed with no stop match, "stop" otherwise.
+      0.63.0 emitted the literal "stop" unconditionally (ChatCompletionChunk::done
+      took no reason), so a truncated stream was indistinguishable from a
+      finished one. The constructor now takes a FinishReason, which is obtained
+      from FinishReason::from_generation(stopped, completion_tokens, max_tokens);
+      there is no &str parameter left to hardcode, and both SSE builders
+      (pregenerated_sse_response, true_streaming_sse_response) take max_tokens,
+      so a terminal chunk cannot be built without the budget it was generated
+      under.
+  - type: invariant
+    property: >
+      N-PARAM-HONOURED-OR-REFUSED (dogfood 0.63.0, #2375 finding 9, DISCHARGED):
+      this server returns exactly one choice per request, so a request asking for
+      more is REFUSED rather than answered 200 with one choice. `n` is typed
+      ChoiceCount on both ChatCompletionRequest and CompletionRequest, and its
+      Deserialize rejects any value but 1 — an unhonoured `n` is not
+      representable in a deserialized request, so no handler can ignore it. The
+      refusal reaches the client with its reason: a validator marks a message as
+      client-visible (CLIENT_VISIBLE_MARKER) and the GH-649 422 sanitizer
+      forwards marked text while still hiding raw serde internals.
+      NO-REGRESSION: `n:1` and an absent `n` are served normally.
+  - type: invariant
+    property: >
+      PREDICT-ERROR-STATES-WHAT-IS-LOADED (dogfood 0.63.0, #2375 finding 8,
+      DISCHARGED): /v1/predict's 503 must not contradict /health and must not
+      name a Rust API the client cannot call. 0.63.0 answered "No APR model
+      loaded. Use AppState::demo() or load a .apr model." on a server whose log
+      read "APR loaded: 291 tensors" — `apr_model` holds a classical estimator
+      while a generative .apr loads into the quantized/transformer slots. The
+      body now distinguishes "a generative model is loaded, this endpoint serves
+      APR classifier/regressor models" from "nothing is loaded", and points at
+      /v1/completions and /v1/chat/completions. A source-scanning falsifier
+      keeps any shipped string literal in the crate from naming
+      AppState::demo() / AppState::new() again. (AppState::with_registry stays
+      permitted: ERROR-MESSAGES-NAME-A-REAL-REMEDY names it deliberately as the
+      embedder API that enables registry mode.)
 
 falsification_tests:
   - id: FALSIFY-STOP-TRUNCATE-754
     name: pmat754_stop_truncation_tests
-    prediction: 'truncate_at_stop(text, stops) truncates at the EARLIEST stop position (not the first-listed): truncate_at_stop("hello world", ["world","hello"]) == ""; keeps text when no stop matches; ignores empty stop strings; unchanged when stops is None. try_cached_completions / try_quantized_completions apply it so their output never contains a stop string.'
+    prediction: 'truncate_at_stop(text, stops) truncates at the EARLIEST stop position (not the first-listed): truncate_at_stop("hello world", ["world","hello"]) == ""; keeps text when no stop matches; ignores empty stop strings; unchanged when stops is None. Since #2465(2) the completion backends reach it through apply_stop_sequences()/completion_resp() rather than each calling it themselves, so their output never contains a stop string.'
     test_harness: 'cargo test -p aprender-serve --lib pmat754_stop_truncation_tests'
     expected_output: "test result: ok"
     if_fails: 'A completion backend returns text containing the stop string (or runs to max_tokens past it), violating OpenAI stop semantics — the pre-PMAT-754 behavior in the cached/quantized backends.'
+  - id: FALSIFY-COMPLETION-STOP-2465
+    name: completions_stop_2465
+    prediction: 'Over the REAL router and a real (tiny, deterministic) dense model, POST /v1/completions {"prompt":"a1-b1-c1","max_tokens":4,"temperature":0} returns the full "a0-b0-c0a0-b0-c0a0-b0-c0a0-b0-c0" with finish_reason "length" (the CONTROL — every stop assertion is compared against it, so none can pass by generation being broken). The SAME request with stop:["-b"] returns exactly "a0" — cut at the EARLIEST stop position, never containing "-b" — with finish_reason "stop" (a matched stop beats the exhausted token budget). stop:["-c","-b"] cuts at the earlier "-b", not the first-LISTED "-c". An unmatched stop and an empty stop string both leave the completion whole. stream:true reassembles to the same stopped text, so no SSE delta leaks the stop string.'
+    test_harness: 'cargo test -p aprender-serve --lib completions_stop_2465'
+    expected_output: "test result: ok"
+    if_fails: 'The 0.63.0 behaviour: /v1/completions accepts a stop sequence and cannot end a completion. registry_completions (the CPU dense backend — the one reachable without any GPU feature) never read request.stop, so the response was byte-identical to the no-stop control, stop string included, labelled finish_reason "length". Verbatim pre-fix body: {"choices":[{"finish_reason":"length","index":0,"text":"a0-b0-c0a0-b0-c0a0-b0-c0a0-b0-c0"}],...}'
   - id: FALSIFY-CHAT-STOP-756
     name: pmat756_chat_stop_tests
     prediction: 'finalize_chat_text(text, stops, completion_tokens, max_tokens) truncates the chat message at the earliest stop position via the shared truncate_at_stop helper and sets finish_reason: a matched stop string => "stop" (even when completion_tokens >= max_tokens — stop precedence over length); no stop match + max_tokens hit => "length"; no stop match under max_tokens => "stop"; stops=None leaves text untouched. build_chat_response runs it for all 7 /v1/chat/completions backends so the returned message never contains a stop string.'
@@ -277,7 +429,7 @@ falsification_tests:
     if_fails: 'The /v1/chat/completions handler ignores request.tools (the pre-PMAT-801 behavior — the in-tree tool-calling library had ZERO call sites outside grammar/), so a tool call in the model output is never surfaced as response tool_calls / finish_reason:"tool_calls"; OR a no-tools request is no longer byte-identical; OR arguments serializes as a nested object instead of a JSON string.'
   - id: FALSIFY-STREAM-TEMP-ZERO-790
     name: pmat790_stream_temperature_zero_tests
-    prediction: 'resolve_stream_generation_config(temperature, top_p, max_tokens) maps temperature 0.0 to SamplingStrategy::Greedy with a positive (no-op 1.0) temperature, so sample_token() runs WITHOUT error and selects the argmax — directly exercising the model.generate -> sample_token -> apply_temperature chain the streaming handler runs. temperature 0 ignores top_p (stays Greedy). Positive temperatures are unchanged: greedy by default, top-p when set, and remain runnable.'
+    prediction: 'resolve_dense_generation_config(temperature, top_p, max_tokens) — the SHARED resolver, reached by /v1/chat/completions, /v1/completions and the /stream route alike — maps temperature 0.0 to SamplingStrategy::Greedy with a positive (no-op 1.0) temperature, so sample_token() runs WITHOUT error and selects the argmax — directly exercising the model.generate -> sample_token -> apply_temperature chain the streaming handler runs. temperature 0 ignores top_p (stays Greedy). Positive temperatures are unchanged: greedy by default, top-p when set, and remain runnable.'
     test_harness: 'cargo test -p aprender-serve --lib pmat790_stream_temperature_zero_tests'
     expected_output: "test result: ok"
     if_fails: 'The streaming /v1/chat/completions handler passes temperature 0.0 straight into GenerationConfig, so apply_temperature(0.0) returns Err and the handler answers HTTP 500 for every streaming chat completion with temperature 0 (the canonical OpenAI deterministic request) — the pre-PMAT-790 behavior.'
@@ -323,3 +475,123 @@ falsification_tests:
     test_harness: 'cargo test -p apr-cli --test ollama_ndjson_streaming api_chat_stream_false_is_single_coalesced_object'
     expected_output: "test result: ok"
     if_fails: 'POST /api/chat with explicit stream:false no longer returns a single coalesced object (it streams NDJSON), breaking the OLLAMA-API-ROUTED-ON-APR-SERVE non-streaming wire shape — the stream flag is not honored.'
+  - id: FALSIFY-OLLAMA-CREATED-AT-RFC3339-CLI
+    name: commands::serve::ollama::tests
+    prediction: 'On the apr-cli adapter apr serve mounts: created_at_now() parses with chrono::DateTime::parse_from_rfc3339, denotes the current instant (within 60s) at UTC offset 0; the serialized coalesced /api/chat and /api/generate bodies, EVERY line of the NDJSON stream (token chunks + terminal done:true), and /api/tags modified_at all parse as RFC 3339. The oracle is proven discriminating by a companion test asserting the old shape "1786293998.000000000Z" is REJECTED by the same parser. RED on the pre-fix format!("{secs}.000000000Z") — 4 tests fail with `input contains invalid characters`; GREEN on chrono::Utc::now().to_rfc3339_opts(Nanos, true).'
+    test_harness: 'cargo test -p apr-cli --lib commands::serve::ollama'
+    expected_output: "test result: ok"
+    if_fails: 'apr serve emits a non-RFC-3339 created_at/modified_at, so ollama Go clients decoding into time.Time drop the ENTIRE response (empty message, done:false, zero counts) on /api/chat, /api/generate, every NDJSON chunk, and /api/tags — the apr 0.63.0 behaviour.'
+  - id: FALSIFY-OLLAMA-CREATED-AT-RFC3339-REALIZAR
+    name: api::ollama_handlers::tests
+    prediction: 'On the realizar-side handlers mounted by create_router: created_at_now() parses with chrono::DateTime::parse_from_rfc3339, denotes the current instant (within 60s) at UTC offset 0, and the serialized OllamaChatResponse / OllamaGenerateResponse created_at fields parse as RFC 3339, with the same bare-epoch-rejection oracle test. RED on the pre-fix epoch string — 3 tests fail with `input contains invalid characters`.'
+    test_harness: 'cargo test -p aprender-serve --lib api::ollama_handlers'
+    expected_output: "test result: ok"
+    if_fails: 'A caller mounting realizar create_router serves a non-RFC-3339 created_at, so an ollama Go client discards the whole /api/chat or /api/generate response.'
+  - id: FALSIFY-OLLAMA-REALIZAR-ROUTER-NDJSON-2396
+    name: api_chat_with_stream_true_returns_ndjson_terminated_by_done
+    prediction: 'On the router `apr serve run <GGUF>` actually mounts (realizar create_router, reached via apr-cli run_cpu_server — NOT the apr-cli APR-CPU router PMAT-928 fixed), POST /api/chat and POST /api/generate with stream:true answer Content-Type application/x-ndjson with NO content-length header, and a body of newline-delimited JSON objects in which only the LAST carries done:true (plus done_reason, prompt_eval_count, eval_count); the non-terminal objects omit the counts entirely. stream:false still returns exactly one application/json object (no-regression). RED on 0.63.0, where the realizar handlers hardcoded stream:false and answered application/json with content-length 181 for a stream:true request.'
+    test_harness: 'cargo test -p aprender-serve --lib api::tests::ollama_compat_http'
+    expected_output: "test result: ok"
+    if_fails: 'A stream:true /api/chat or /api/generate request against the GGUF serve path returns one buffered application/json object, so every Ollama-compatible UI (ollama CLI, Open WebUI, continue.dev) shows a frozen cursor for the whole generation — the shipped 0.63.0 behaviour on the realizar router.'
+  - id: FALSIFY-OLLAMA-REALIZAR-ROUTER-DISCOVERY-2396
+    name: api_tags_is_routed_and_lists_a_model_the_client_can_ask_for
+    prediction: 'GET /api/tags, POST /api/show and GET /api/version are ROUTED on realizar create_router — each answers 200 with its own body, never the axum not_found fallback (`{"error":"not_found"}`). /api/tags lists exactly one model whose `name` is an addressable `model:tag` echoed in `model`; /api/show carries `details` and a `capabilities` list containing "completion"; /api/version returns a semver-shaped string. RED on 0.63.0, where all three returned HTTP 404 while the startup banner advertised "Ollama-Parity Endpoints".'
+    test_harness: 'cargo test -p aprender-serve --lib api::tests::ollama_compat_http'
+    expected_output: "test result: ok"
+    if_fails: 'The Ollama discovery routes are unwired on the router apr serve mounts for GGUF, so `ollama list`, Open WebUI, LangChain ChatOllama and LlamaIndex cannot enumerate the model and never issue a chat request at all.'
+  - id: FALSIFY-MODEL-METADATA-MEASURED-OR-ABSENT-2402
+    name: realize_model_never_emits_a_synthetic_content_hash
+    prediction: 'GET /realize/model, GET /api/tags and POST /api/show emit a field ONLY when the loader measured it. With no ModelSourceInfo attached, size_bytes / context_length / quantization / format and the whole `lineage` block are ABSENT from the JSON, and the body contains no "blake3:0blake3:0" substring. With a ModelSourceInfo built from a real file, size_bytes equals the file size, format comes from the magic bytes (an APR file reports "apr", not "gguf"), and `context_length` (what --context-length set) and `model_max_context_length` (the model''s own advertised maximum) are reported as SEPARATE values. RED on 0.63.0, which hardcoded size_bytes:0, quantization:"Q4_K_M", context_length:4096, format:"gguf" and content_hash:"blake3:0".repeat(16).'
+    test_harness: 'cargo test -p aprender-serve --lib api::tests::ollama_compat_http'
+    expected_output: "test result: ok"
+    if_fails: 'A metadata endpoint substitutes a plausible-looking constant for an unmeasured field. The content_hash case is the worst: a 128-character string shaped exactly like a BLAKE3 digest is indistinguishable to a consumer from a real one, so fabricated provenance gets stored and compared as if it were measured.'
+  - id: FALSIFY-RELOAD-501-NAMES-A-REAL-REMEDY-2402
+    name: realize_reload_501_does_not_advertise_a_nonexistent_flag
+    prediction: 'POST /realize/reload without registry mode answers 501 with an error body that does NOT contain "Start server with --registry flag", DOES state that the CLI does not expose registry mode, and DOES name the working alternative (`apr serve run`). RED on 0.63.0, whose 501 body pointed at a --registry flag that clap rejects with exit 2 on both `apr serve run` and `apr serve`.'
+    test_harness: 'cargo test -p aprender-serve --lib realize_reload_501_does_not_advertise_a_nonexistent_flag'
+    expected_output: "test result: ok"
+    if_fails: 'The 501 tells the caller to pass a flag that does not exist, so the endpoint is unreachable by any documented invocation and the error message sends users down a dead end.'
+  - id: FALSIFY-COMPLETIONS-STREAM-SSE-2375
+    name: completions_stream_true_is_sse_not_a_buffered_json_body
+    prediction: 'POST /v1/completions with "stream":true answers 200 text/event-stream with NO content-length, a body of `data: {json}` frames each carrying object "text_completion", terminated by `data: [DONE]`. RED on 0.63.0, which answered application/json with a content-length because CompletionRequest had no stream field and the handler returned Json<CompletionResponse>.'
+    test_harness: 'cargo test -p aprender-serve --lib openai_compat_2375::completions_stream_true_is_sse_not_a_buffered_json_body'
+    expected_output: "test result: ok"
+    if_fails: 'openai.completions.create(..., stream=True) receives one buffered JSON body where the client library expects an SSE iterator, so every streaming completion client hangs or throws.'
+  - id: FALSIFY-COMPLETIONS-STREAM-REASSEMBLY-2375
+    name: completion_sse_frames_reassemble_to_the_completion_text
+    prediction: 'completion_sse_response(&completion) emits more than one text frame whose `choices[0].text` values CONCATENATE to the completion text byte-for-byte, every non-terminal frame has finish_reason null and the shared id, the terminal frame carries the finish_reason the backend computed ("length" for a budget-truncated completion), and the body ends with `data: [DONE]`.'
+    test_harness: 'cargo test -p aprender-serve --lib openai_compat_2375::completion_sse_frames_reassemble_to_the_completion_text'
+    expected_output: "test result: ok"
+    if_fails: 'A client that concatenates the streamed deltas gets different text from the non-streamed body, or sees a finish_reason before the stream ended.'
+  - id: FALSIFY-COMPLETIONS-STREAM-NO-REGRESSION-2375
+    name: completions_without_stream_stays_a_single_json_object
+    prediction: 'POST /v1/completions WITHOUT stream answers application/json: a single object with object "text_completion" and a `usage` block, and no `data: ` framing anywhere in the body. Guards the streaming fix against becoming unconditional.'
+    test_harness: 'cargo test -p aprender-serve --lib openai_compat_2375::completions_without_stream_stays_a_single_json_object'
+    expected_output: "test result: ok"
+    if_fails: 'Non-streaming clients receive an SSE body, which is the mirror-image break of the defect being fixed.'
+  - id: FALSIFY-STREAM-FINISH-REASON-2375
+    name: chat_stream_finish_reason_matches_the_non_streamed_one
+    prediction: 'For one chat request issued twice — once buffered, once with stream:true — the terminal SSE chunk finish_reason EQUALS the non-streaming choices[0].finish_reason (both "length" at a max_tokens:3 budget). RED on 0.63.0, which returned "length" buffered and "stop" streamed for the same request.'
+    test_harness: 'cargo test -p aprender-serve --lib openai_compat_2375::chat_stream_finish_reason_matches_the_non_streamed_one'
+    expected_output: "test result: ok"
+    if_fails: 'A streaming client cannot tell a truncated answer from a finished one, so every "continue from where you stopped" flow silently drops the tail of the generation.'
+  - id: FALSIFY-STREAM-FINISH-REASON-BUDGET-2375
+    name: true_streaming_terminal_chunk_distinguishes_length_from_stop
+    prediction: 'true_streaming_sse_response fed 3 tokens reports finish_reason "length" under max_tokens 3 and "stop" under max_tokens 64. A hardcoded literal cannot satisfy both halves; the parameter carries the budget into the terminal chunk on the live mpsc (cuda/quantized) streaming path.'
+    test_harness: 'cargo test -p aprender-serve --lib openai_compat_2375::true_streaming_terminal_chunk_distinguishes_length_from_stop'
+    expected_output: "test result: ok"
+    if_fails: 'The GPU/CUDA streaming path reports a constant finish_reason, mislabelling every budget-truncated stream as a natural stop.'
+  - id: FALSIFY-N-PARAM-REFUSED-2375
+    name: chat_request_with_n_greater_than_one_is_rejected_not_silently_ignored
+    prediction: '/v1/chat/completions with "n":3 and /v1/completions with "n":5 answer a 4xx whose body names the problem ("n must be 1"), while "n":1 and an absent n are served 200 with exactly one choice. RED on 0.63.0, where n:3 returned 200 with one choice byte-identical to the same request without n.'
+    test_harness: 'cargo test -p aprender-serve --lib openai_compat_2375::chat_request_with_n_greater_than_one_is_rejected_not_silently_ignored'
+    expected_output: "test result: ok"
+    if_fails: 'A client doing best-of-n sampling silently receives one sample with no warning and no way to detect it.'
+  - id: FALSIFY-PREDICT-ERROR-TRUTHFUL-2375
+    name: predict_without_an_estimator_says_what_is_actually_loaded
+    prediction: 'On a server with a generative model resident and no APR estimator, POST /v1/predict answers 503 whose body does NOT claim "No APR model loaded" and DOES name /v1/completions or /v1/chat/completions as the endpoint that serves this model. RED on 0.63.0, whose body contradicted /health and told HTTP clients to call an internal Rust constructor.'
+    test_harness: 'cargo test -p aprender-serve --lib openai_compat_2375::predict_without_an_estimator_says_what_is_actually_loaded'
+    expected_output: "test result: ok"
+    if_fails: 'An operator reads "No APR model loaded" on a server that has just logged "APR loaded: 291 tensors" and debugs the wrong problem.'
+  - id: FALSIFY-NO-RUST-API-IN-SHIPPED-STRINGS-2375
+    name: no_shipped_string_leaks_an_internal_rust_constructor
+    prediction: 'No string literal under crates/aprender-serve/src (excluding the test tree and comments) names the AppState demo/new constructors. The scan visits >100 files and asserts it reached apr_handlers.rs, so a scan that silently found nothing cannot pass as clean.'
+    test_harness: 'cargo test -p aprender-serve --lib openai_compat_2375::no_shipped_string_leaks_an_internal_rust_constructor'
+    expected_output: "test result: ok"
+    if_fails: 'An HTTP error body instructs a client to call a Rust constructor it cannot reach, which is what #2375 finding 8 shipped.'
+  - id: FALSIFY-CHAT-STREAM-BODY-NONEMPTY-2375
+    name: streamed_chat_body_carries_the_same_text_as_the_buffered_one
+    prediction: 'Through create_router (cancellation layer mounted), POST /v1/chat/completions with "stream":true on a quantized server returns text/event-stream whose concatenated choices[0].delta.content equals the non-streamed choices[0].message.content for the identical request — asserted twice, once through the tower service and once over a REAL socket served by axum::serve, so the result cannot be an artefact of oneshot. RED against the cancel_on_disconnect layer as first shipped, where the concatenation was "" because the per-request CancelOnDrop guard fired the instant the handler returned and the background decode loop observed it on its first poll.'
+    test_harness: 'cargo test -p aprender-serve --lib stream_and_metrics_2375::streamed_chat_body'
+    expected_output: "test result: ok"
+    if_fails: 'Every streaming chat reply is an empty but well-formed event stream: opening chunk, terminal chunk, [DONE], no content. The whitespace falsifier (sse_stream_whitespace) cannot see this because it calls true_streaming_sse_response directly and never routes a request.'
+  - id: FALSIFY-CHAT-STREAM-ROUTE-QUANTIZED-2375
+    name: chat_completions_stream_route_serves_a_quantized_server
+    prediction: 'POST /v1/chat/completions/stream on a quantized-only AppState (what apr serve run model.gguf builds) answers 200 text/event-stream, terminates with data: [DONE], and its concatenated deltas equal the /v1/chat/completions body for the same request; the frame shapes of the two routes are identical. RED on 0.63.0, which answered 404 {"error":"Model registry error: No model available"} because the route resolved the dense f32 Model only.'
+    test_harness: 'cargo test -p aprender-serve --lib -- stream_and_metrics_2375::chat_completions_stream_route_serves_a_quantized_server stream_and_metrics_2375::stream_route_and_stream_flag_agree_on_the_frame_shape'
+    expected_output: "test result: ok"
+    if_fails: 'A route the server mounts unconditionally and prints in its own startup banner is dead on every GGUF/APR deployment, or has drifted back into a second, divergent implementation of chat completion.'
+  - id: FALSIFY-DENSE-TEMP-ZERO-2375
+    name: temperature_zero_is_served_on_every_openai_route
+    prediction: '"temperature":0 — the OpenAI-canonical deterministic request — is answered 200 by /v1/chat/completions, /v1/chat/completions/stream AND /v1/completions on a dense server, and no response body contains "Temperature must be a positive". RED on the two non-stream routes, which answered 500 {"error":"Invalid shape: Temperature must be a positive finite number"} because PMAT-790 fixed one handler with a private copy of the resolution.'
+    test_harness: 'cargo test -p aprender-serve --lib stream_and_metrics_2375::temperature_zero_is_served_on_every_openai_route'
+    expected_output: "test result: ok"
+    if_fails: 'Deterministic decoding — what every eval harness and every reproducibility test asks for — is a server error on the dense backends.'
+  - id: FALSIFY-METRICS-PERCENTILES-MEASURED-2375
+    name: v1_metrics_percentiles_are_measured_alongside_a_nonzero_average
+    prediction: 'After five completed chat requests on one AppState, GET /v1/metrics reports latency_p50_ms > 0, p50 <= p95 <= p99, and a p50 within an order of magnitude of the realizar_avg_latency_ms that GET /metrics reports for the SAME state at the same instant. Unit-level: MetricsCollector::latency_percentiles over 100 samples of 1..=100 ms returns exactly (50, 95, 99) ms — values no multiple of the 50.5 ms mean can produce — and returns None when nothing has been recorded.'
+    test_harness: 'cargo test -p aprender-serve --lib -- stream_and_metrics_2375::v1_metrics_percentiles_are_measured_alongside_a_nonzero_average percentiles_are_order_statistics_not_multiples_of_the_mean'
+    expected_output: "test result: ok"
+    if_fails: 'A monitor graphs a flat 0 ms p50/p95/p99 under real load (the GPU build, which is what cargo install produces), or graphs avg*1.5 and avg*2.0 as if they were the tail (the non-GPU build). Neither describes any request that happened.'
+  - id: FALSIFY-METRICS-MODEL-NAME-2375
+    name: v1_metrics_model_name_is_derived_from_the_model_this_server_loaded
+    prediction: 'Two servers differing ONLY in the model file they were pointed at report two DIFFERENT model_names from GET /v1/metrics, each the file stem of its own model ("albor-370m-v1-q4_k_m" and "qwen2.5-coder-1.5b-instruct-q4k"). A server with a model but no source path reports the id /v1/models advertises ("default"); a server with no model reports "N/A" and latency_p50_ms 0.0. RED on 0.63.0, which reported "phi-2-q4_k_m" for any cached GPU model and "N/A" for everything else — and RED on any constant, which is what a single-fixture "not N/A" assertion could not do: the first version of this falsifier passed while the observed value was the constant "default" and the deriving branch ran in no test at all.'
+    test_harness: 'cargo test -p aprender-serve --lib -- stream_and_metrics_2375::v1_metrics_model_name_is_derived_from_the_model_this_server_loaded stream_and_metrics_2375::v1_metrics_reports_no_model_name_when_nothing_is_loaded'
+    expected_output: "test result: ok"
+    if_fails: 'Every server in a fleet reports the same wrong model name, or no name at all, to whatever is monitoring it.'
+  - id: FALSIFY-TEMP-DOMAIN-2375
+    name: unservable_temperature_is_refused_on_every_generating_route
+    prediction: 'A temperature outside the servable domain (finite, >= 0) is refused with a 4xx that names the field, on all NINE routes of create_router_with_config that accept one and can generate: /v1/chat/completions, /v1/chat/completions/stream, /v1/completions, /v1/batch/completions, /api/chat, /api/generate, /generate, /stream/generate and /batch/generate (the last three validated temperature only inside their QUANTIZED backend, so on a dense server they answered 500 "Temperature must be a positive finite number" — measured, then fixed). Cases: -1 (negative) and 1e40 (finite as f64, +inf once narrowed to f32); 1e400 is refused by serde_json''s own number parser, so it is asserted only for the class it proves (client error, no sampler leak). No body contains "Temperature must be a positive". A servable 0.7 on the same route and the same server is still answered. Unit-level: resolve_dense_generation_config is TOTAL — 0, -1, -0, NaN, +inf, -inf and f32::MIN all resolve to a greedy config that sample_token runs without error, while 0.7 with top_p still resolves to nucleus sampling with the temperature unchanged.'
+    test_harness: 'cargo test -p aprender-serve --lib -- stream_and_metrics_2375::unservable_temperature_is_refused_on_every_generating_route stream_and_metrics_2375::temperature_domain_is_total'
+    expected_output: "test result: ok"
+    if_fails: 'Fixing temperature 0 alone leaves the rest of the domain reaching apply_temperature, which answers 500 {"error":"Invalid shape: Temperature must be a positive finite number"} — the exact body the fix set out to eliminate — on the dense backends, and serves inverted-distribution output with a 200 on the quantized ones (mutation-verified: removing the guard from ChatCompletionRequest answered temperature -1 with 200 OK and generated text). A comparison-only guard (t < 0.0) additionally lets NaN through, because every comparison with NaN is false (aprender#2391).'

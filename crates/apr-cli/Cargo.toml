@@ -114,7 +114,6 @@ training = ["dep:entrenar", "dep:entrenar-lora", "dep:aprender-train-distill", "
 # defaulting a training path into every `cargo install aprender`.
 setfit = ["training", "aprender/setfit", "entrenar?/setfit", "realizar?/setfit"]
 training-gpu = ["training"]
-whisper = ["whisper-apr"]
 dhat-heap = ["dep:dhat"]
 full = ["inference", "cuda", "cuda-batch", "visualization", "zram", "training", "training-gpu", "code", "xet", "trueno-explain", "setfit"]
 
@@ -130,7 +129,7 @@ aprender-contracts = { workspace = true }
 # MCP (Model Context Protocol) server — `apr mcp` subcommand
 aprender-mcp = { path = "../aprender-mcp", version = "0.63.0" }
 async-stream = "0.3"
-provable-contracts-macros = "0.3"
+provable-contracts-macros = { workspace = true }
 
 # Shared formatting and system utilities (Batuta stack)
 batuta-common = { workspace = true }
@@ -144,11 +143,6 @@ batuta = { version = "0.63.0", path = "../aprender-orchestrate", package = "apre
 # Inference engine (workspace path dep — enables cuda/gpu feature forwarding)
 # GH-573: shim (0.9.1) didn't forward cuda feature → 0.7 tok/s instead of 273 tok/s
 realizar = { workspace = true, optional = true }
-
-# Whisper speech recognition (GH-516: apr run --input audio.wav)
-# Zero external deps — our own implementation in ../whisper.apr
-# GH-344: path dep via .cargo/config.toml.dev-overrides when available
-whisper-apr = { version = "0.2", optional = true }
 
 # SIMD compute library (for BrickProfiler in §12.11 unified profiling)
 # MUST use crates.io version to match aprender's trueno dependency
@@ -252,6 +246,16 @@ dhat = { version = "0.3", optional = true }
 alimentar = { workspace = true }
 # Phase 2: contrastive data protocol — apr data select/pairs + TweetEval adapter core
 aprender-contrastive-data = { workspace = true }
+# APR-MONO: the ONE binary must reach every capability. These two crates each
+# shipped their whole command surface behind a separate binary (trueno-rag,
+# trueno-zram) that nothing could import; apr now dispatches into the SAME
+# `dispatch` fn those binaries call, so the surfaces cannot drift.
+aprender-rag-cli = { workspace = true }
+aprender-zram-cli = { workspace = true }
+# simular: hand-rolled parser, wired as a verbatim passthrough (apr sim ...)
+simular = { workspace = true }
+aprender-cgp = { workspace = true }
+aprender-contracts-cli = { workspace = true }
 half = "2.4.1"
 # YAML config parsing (distillation configs, ALB-011)
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
@@ -300,7 +304,7 @@ assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.14"
 proptest = "1.6"
-jugar-probar = { version = "0.4", features = ["tui"] }
+jugar-probar = { path = "../aprender-test-lib", package = "aprender-test-lib", features = ["tui"] }
 regex = "1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 axum-test = "16"

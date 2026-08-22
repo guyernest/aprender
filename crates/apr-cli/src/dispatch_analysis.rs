@@ -1,3 +1,55 @@
+/// Dispatch `apr dataset …` (aprender#2377 finding 3).
+///
+/// Its own function so the producer arms do not push
+/// `dispatch_analysis_commands` further past the complexity threshold it was
+/// already over.
+fn dispatch_dataset_command(command: &DatasetCommands, cli: &Cli) -> Result<(), CliError> {
+    match command {
+        DatasetCommands::AudioInspect {
+            file,
+            format,
+            output,
+            force,
+        } => commands::audio_inspect::run(
+            file,
+            format == "json" || cli.json,
+            output.as_deref(),
+            *force,
+        ),
+    }
+}
+
+/// Dispatch `apr kernel …` (aprender#2377 finding 3).
+fn dispatch_kernel_command(command: &KernelCommands, cli: &Cli) -> Result<(), CliError> {
+    match command {
+        KernelCommands::Parity {
+            kernel,
+            reference,
+            seq_len,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            seed,
+            json,
+            output,
+            force,
+        } => commands::kernel_parity::run(
+            *kernel,
+            *reference,
+            commands::kernel_parity::ParityDims {
+                seq_len: *seq_len,
+                num_heads: *num_heads,
+                num_kv_heads: *num_kv_heads,
+                head_dim: *head_dim,
+                seed: *seed,
+            },
+            *json || cli.json,
+            output.as_deref(),
+            *force,
+        ),
+    }
+}
+
 /// Dispatch analysis commands (cbtop, probar, compare-hf, hex, tree, flow, oracle).
 ///
 /// Returns `None` if the command is not an analysis command, allowing the caller
@@ -69,8 +121,8 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
 
         // GH-876 Milestone 1: Probar is now a subcommand container.
         // The existing flat-args behavior moved under `apr probar tensor <FILE>`.
-        ExtendedCommands::Probar { command } => match command {
-            ProbarSubcommand::Tensor {
+        ExtendedCommands::Test { command } => match command {
+            TestSubcommand::Tensor {
                 file,
                 output,
                 format,
@@ -78,17 +130,28 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 layer,
                 assert,
                 tolerance,
-            } => crate::error::resolve_model_path(file).and_then(|r| {
-                probar::run(
-                    &r,
-                    output,
-                    format.parse().unwrap_or(probar::ExportFormat::Both),
-                    golden.as_deref(),
-                    layer.as_deref(),
-                    *assert,
-                    *tolerance,
-                )
-            }),
+            } => {
+                // An unparseable --format used to be swallowed by
+                // `.unwrap_or(Both)`, so `--format bogus` silently exported
+                // something the user never asked for. FromStr already produces
+                // the right message; surface it.
+                format
+                    .parse::<probar::ExportFormat>()
+                    .map_err(crate::error::CliError::ValidationFailed)
+                    .and_then(|export_format| {
+                        crate::error::resolve_model_path(file).and_then(|r| {
+                            probar::run(
+                                &r,
+                                output,
+                                export_format,
+                                golden.as_deref(),
+                                layer.as_deref(),
+                                *assert,
+                                *tolerance,
+                            )
+                        })
+                    })
+            }
         },
 
         ExtendedCommands::CompareHf {
@@ -135,7 +198,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 observation_file: observation_file.to_string_lossy().to_string(),
                 json: cli.json,
             })
-            .map_err(crate::error::CliError::Aprender)
+            .map_err(Into::into)
         }
 
         ExtendedCommands::Fp8Lint { observation_file } => {
@@ -143,7 +206,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 observation_file: observation_file.to_string_lossy().into_owned(),
                 json: cli.json,
             })
-            .map_err(crate::error::CliError::Aprender)
+            .map_err(Into::into)
         }
 
         ExtendedCommands::Nf4Lint { observation_file } => {
@@ -151,7 +214,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 observation_file: observation_file.to_string_lossy().to_string(),
                 json: cli.json,
             })
-            .map_err(crate::error::CliError::Aprender)
+            .map_err(Into::into)
         }
 
         ExtendedCommands::GptqLint { observation_file } => {
@@ -159,7 +222,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 observation_file: observation_file.to_string_lossy().to_string(),
                 json: cli.json,
             })
-            .map_err(crate::error::CliError::Aprender)
+            .map_err(Into::into)
         }
 
         ExtendedCommands::OomLint {
@@ -221,6 +284,10 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             *loss_tolerance,
             cli.json,
         ),
+
+        // aprender#2377 finding 3: the PRODUCERS the *-lint help documents.
+        ExtendedCommands::Dataset { command } => dispatch_dataset_command(command, cli),
+        ExtendedCommands::Kernel { command } => dispatch_kernel_command(command, cli),
 
         ExtendedCommands::AudioInspectLint {
             json_file,
@@ -301,6 +368,169 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             ))),
         },
 
+        _ => return dispatch_analysis_commands_rest(cli),
+    };
+    Some(result)
+}
+
+/// Run one alimentar command through `alimentar::cli::dispatch` -- the SAME
+/// function the standalone binary calls, so `apr data x <cmd>` and
+/// `alimentar <cmd>` cannot drift.
+///
+/// The command is re-parsed from argv rather than moved out of the parsed value:
+/// the apr dispatch chain takes `&Cli`, and alimentar's arg types are not all
+/// Clone. Anchored on the `data`/`x` PAIR, not a fixed index -- a first version
+/// used fixed indices, ate the subcommand, and every invocation failed with
+/// "unrecognized subcommand <path>".
+fn dispatch_alimentar_passthrough(
+    cmd: &alimentar::cli::Commands,
+) -> std::result::Result<(), CliError> {
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let start = raw
+        .windows(2)
+        .position(|w| w[0] == *"data" && w[1] == *"x")
+        .map(|p| p + 2)
+        .ok_or_else(|| {
+            CliError::ValidationFailed("could not locate `data x` in the command line".to_string())
+        })?;
+    let mut argv: Vec<std::ffi::OsString> = vec![raw[0].clone()];
+    argv.extend_from_slice(&raw[start..]);
+    let _ = cmd;
+    let code =
+        alimentar::cli::dispatch(<alimentar::cli::Cli as clap::Parser>::parse_from(argv).command);
+    if code == std::process::ExitCode::SUCCESS {
+        Ok(())
+    } else {
+        Err(CliError::ValidationFailed(
+            "alimentar command failed".to_string(),
+        ))
+    }
+}
+
+fn dispatch_data_command(command: &DataCommands, cli: &Cli) -> std::result::Result<(), CliError> {
+    let json = cli.json;
+    match command {
+        DataCommands::TweetEvalStance {
+            output,
+            profile,
+            source,
+            revision,
+            force,
+        } => commands::data_tweeteval::run(
+            output,
+            *profile,
+            source.as_deref(),
+            revision,
+            *force,
+            cli.offline,
+            json,
+        ),
+        // `cli.offline` is deliberately NOT passed to these two arms. Neither command
+        // opens a socket — `aprender-contrastive-data` cannot (the D-04 bytes boundary is
+        // enforced by `make contrastive-data-boundary`) and the adapter only reads local
+        // files. Threading `offline` through so it could be ignored would advertise a
+        // network switch on a command that has no network to switch off.
+        DataCommands::Select {
+            data,
+            shots,
+            seed,
+            any_seed,
+            output,
+            force,
+        } => commands::data_contrastive::run_select(
+            data,
+            *shots,
+            *seed,
+            *any_seed,
+            output.as_deref(),
+            *force,
+            json,
+        ),
+        DataCommands::Pairs {
+            selection,
+            data,
+            budget,
+            hard_cap,
+            dump,
+            force,
+        } => commands::data_contrastive::run_pairs(
+            selection,
+            data,
+            *budget,
+            *hard_cap,
+            dump.as_deref(),
+            *force,
+            json,
+        ),
+        DataCommands::Alimentar(cmd) => dispatch_alimentar_passthrough(cmd),
+        DataCommands::Audit {
+            file,
+            num_classes,
+            input_column,
+            label_column,
+            preamble_prefix,
+        } => data::run_audit(
+            file,
+            *num_classes,
+            input_column,
+            label_column,
+            preamble_prefix.as_deref(),
+            json,
+        ),
+        DataCommands::Split {
+            file,
+            train,
+            val,
+            test,
+            label_column,
+            seed,
+            output,
+        } => data::run_split(file, label_column, *train, *val, *test, *seed, output, json),
+        DataCommands::Balance {
+            file,
+            strategy,
+            label_column,
+            num_classes,
+            seed,
+            output,
+        } => data::run_balance(
+            file,
+            label_column,
+            strategy,
+            *num_classes,
+            *seed,
+            output.as_deref(),
+            json,
+        ),
+        DataCommands::Decontaminate {
+            file,
+            reference,
+            ngram,
+            threshold,
+            json: json_flag,
+        } => data::run_decontaminate(file, reference, *ngram, *threshold, *json_flag || json),
+        DataCommands::Dedup {
+            file,
+            output,
+            json: json_flag,
+        } => data::run_dedup(file, output, *json_flag || json),
+    }
+}
+
+/// Second half of the `apr` extended-command match.
+///
+/// `dispatch_analysis_commands` carried all 56 arms at cognitive complexity 35
+/// against a threshold of 25 -- measured identical on origin/main -- so the
+/// pre-commit gate rejected EVERY change to this file regardless of content. It
+/// had blocked three unrelated commits before this one. Split with a tail call
+/// rather than an `if let` guard: the guard form costs as much complexity as the
+/// arms it removes, which is why an earlier attempt moved the number the wrong
+/// way (35 -> 34 after extracting 40 arms).
+fn dispatch_analysis_commands_rest(cli: &Cli) -> Option<Result<(), CliError>> {
+    let Commands::Extended(ref ext) = *cli.command.as_ref() else {
+        return None;
+    };
+    let result = match ext {
         ExtendedCommands::OtlpLint {
             otlp_file,
             require_apr_span,
@@ -357,7 +587,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                     json: cli.json,
                 },
             )
-            .map_err(crate::error::CliError::Aprender)
+            .map_err(Into::into)
         }
 
         ExtendedCommands::ImatrixLint { observation_file } => {
@@ -365,7 +595,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 observation_file: observation_file.to_string_lossy().to_string(),
                 json: cli.json,
             })
-            .map_err(crate::error::CliError::Aprender)
+            .map_err(Into::into)
         }
 
         ExtendedCommands::EmbeddingsLint { observation_file } => {
@@ -373,7 +603,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 observation_file: observation_file.to_string_lossy().into_owned(),
                 json: cli.json,
             })
-            .map_err(crate::error::CliError::Aprender)
+            .map_err(Into::into)
         }
 
         ExtendedCommands::UnifiedSearchLint { observation_file } => {
@@ -383,7 +613,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                     json: cli.json,
                 },
             )
-            .map_err(crate::error::CliError::Aprender)
+            .map_err(Into::into)
         }
 
         ExtendedCommands::RmGcLint { observation_file } => {
@@ -391,7 +621,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 observation_file: observation_file.to_string_lossy().to_string(),
                 json: cli.json,
             })
-            .map_err(crate::error::CliError::Aprender)
+            .map_err(Into::into)
         }
 
         ExtendedCommands::SharedCacheLint { observation_file } => {
@@ -399,7 +629,7 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 observation_file: observation_file.to_string_lossy().to_string(),
                 json: cli.json,
             })
-            .map_err(crate::error::CliError::Aprender)
+            .map_err(Into::into)
         }
 
         // CRUX-K-11: Modelfile DSL parser.
@@ -452,10 +682,14 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             sizes,
             depth,
         } => crate::error::resolve_model_path(file).and_then(|resolved| {
+            // `format` arrives already parsed (clap rejects unknown values at
+            // the boundary), so there is no error left here to swallow — the
+            // `.unwrap_or(Ascii)` that used to live on this line is what made
+            // `--format bogusvalue` print an ascii tree at exit 0 (#2394).
             let tree_format = if cli.json {
                 tree::TreeFormat::Json
             } else {
-                format.parse().unwrap_or(tree::TreeFormat::Ascii)
+                *format
             };
             tree::run(&resolved, filter.as_deref(), tree_format, *sizes, *depth)
         }),
@@ -588,9 +822,14 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             file,
             max_shard_size,
             output,
-        } => dispatch_shard(file, max_shard_size, output, cli.json),
+            force,
+        } => dispatch_shard(file, max_shard_size, output, *force, cli.json),
 
-        ExtendedCommands::Unshard { input, output } => dispatch_unshard(input, output, cli.json),
+        ExtendedCommands::Unshard {
+            input,
+            output,
+            force,
+        } => dispatch_unshard(input, output, *force, cli.json),
 
         ExtendedCommands::Diagnose {
             checkpoint_dir,
@@ -615,8 +854,13 @@ fn dispatch_shard(
     file: &std::path::Path,
     max_shard_size: &str,
     output: &std::path::Path,
+    force: bool,
     json: bool,
 ) -> Result<(), CliError> {
+    // #2392 finding 4: a shard set is identified by its weight-map index. Writing
+    // a second set into the same directory silently replaces the index (and the
+    // shards it names) — refuse unless the user asked for it.
+    crate::error::refuse_overwrite(&output.join("model.safetensors.index.json"), force)?;
     match commands::shard::run_shard(file, max_shard_size, output) {
         Ok(report) => {
             if json {
@@ -661,8 +905,10 @@ fn dispatch_shard(
 fn dispatch_unshard(
     input: &std::path::Path,
     output: &std::path::Path,
+    force: bool,
     json: bool,
 ) -> Result<(), CliError> {
+    crate::error::refuse_overwrite(output, force)?;
     match commands::shard::run_unshard(input, output) {
         Ok(report) => {
             if json {
@@ -914,112 +1160,6 @@ fn dispatch_setfit_bench_command(
         }
     }
 }
-
-/// Dispatch `apr data` subcommands to alimentar-backed implementations.
-fn dispatch_data_command(command: &DataCommands, cli: &Cli) -> std::result::Result<(), CliError> {
-    let json = cli.json;
-    match command {
-        DataCommands::TweetEvalStance {
-            output,
-            profile,
-            source,
-            revision,
-            force,
-        } => commands::data_tweeteval::run(
-            output,
-            *profile,
-            source.as_deref(),
-            revision,
-            *force,
-            cli.offline,
-            json,
-        ),
-        // `cli.offline` is deliberately NOT passed to these two arms. Neither command
-        // opens a socket — `aprender-contrastive-data` cannot (the D-04 bytes boundary is
-        // enforced by `make contrastive-data-boundary`) and the adapter only reads local
-        // files. Threading `offline` through so it could be ignored would advertise a
-        // network switch on a command that has no network to switch off.
-        DataCommands::Select {
-            data,
-            shots,
-            seed,
-            any_seed,
-            output,
-            force,
-        } => commands::data_contrastive::run_select(
-            data,
-            *shots,
-            *seed,
-            *any_seed,
-            output.as_deref(),
-            *force,
-            json,
-        ),
-        DataCommands::Pairs {
-            selection,
-            data,
-            budget,
-            hard_cap,
-            dump,
-            force,
-        } => commands::data_contrastive::run_pairs(
-            selection,
-            data,
-            *budget,
-            *hard_cap,
-            dump.as_deref(),
-            *force,
-            json,
-        ),
-        DataCommands::Audit {
-            file,
-            num_classes,
-            input_column,
-            label_column,
-            preamble_prefix,
-        } => data::run_audit(
-            file,
-            *num_classes,
-            input_column,
-            label_column,
-            preamble_prefix.as_deref(),
-            json,
-        ),
-        DataCommands::Split {
-            file,
-            train,
-            val,
-            test,
-            label_column,
-            seed,
-            output,
-        } => data::run_split(file, label_column, *train, *val, *test, *seed, output, json),
-        DataCommands::Balance {
-            file,
-            strategy,
-            label_column,
-            num_classes,
-            seed,
-            output,
-        } => data::run_balance(
-            file,
-            label_column,
-            strategy,
-            *num_classes,
-            *seed,
-            output.as_deref(),
-            json,
-        ),
-        DataCommands::Decontaminate {
-            file,
-            reference,
-            ngram,
-            threshold,
-            json: json_flag,
-        } => data::run_decontaminate(file, reference, *ngram, *threshold, *json_flag || json),
-    }
-}
-
 #[cfg(feature = "training")]
 /// Dispatch `apr train` subcommands to entrenar-backed implementations.
 #[provable_contracts_macros::contract(
@@ -1105,7 +1245,7 @@ fn dispatch_train_command(command: &TrainCommands, cli: &Cli) -> std::result::Re
                 model_size,
                 model_path.as_deref(),
                 *num_classes,
-                output,
+                output.as_deref(),
                 strategy,
                 *budget,
                 *scout,
@@ -1347,9 +1487,14 @@ fn dispatch_tune_command(
             json,
         )
     } else {
+        // `--method bogus` used to `unwrap_or(Auto)`: TuneMethod::from_str already
+        // produced a perfectly good "Unknown method: … Use: auto, full, lora,
+        // qlora" and it was thrown away, so a typo silently planned a DIFFERENT
+        // method and the banner confirmed the typo back to the user.
+        let method: tune::TuneMethod = method.parse().map_err(CliError::ValidationFailed)?;
         tune::run(
             file,
-            method.parse().unwrap_or(tune::TuneMethod::Auto),
+            method,
             rank,
             vram,
             plan,
@@ -1359,6 +1504,21 @@ fn dispatch_tune_command(
             json,
         )
     }
+}
+
+/// What `apr ptx` says when this binary was built without the PTX analyzer.
+///
+/// `cargo install aprender` builds default features, which do not include
+/// `trueno-explain`, so every `apr ptx` invocation fails while `apr --help`
+/// still advertises the command (#2399 finding 1). The old text — "ptx command
+/// requires --features full" — named a compile flag rather than something the
+/// user of an installed binary can act on, and pointed at `full`, which drags
+/// in CUDA and training rather than the one crate `ptx` actually needs.
+#[cfg(not(feature = "trueno-explain"))]
+fn ptx_unavailable_message() -> String {
+    "apr ptx needs the PTX analyzer, which this build does not include. \
+     Reinstall with it: cargo install aprender --features ptx"
+        .to_string()
 }
 
 /// Dispatch profiling and QA commands (profile, bench, eval, qa, parity, ptx, ptx-map, tune).
@@ -1421,6 +1581,7 @@ fn dispatch_profiling_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 *ollama,
                 *no_gpu,
                 compare.as_deref(),
+                cli.json,
             )
         }),
 
@@ -1526,6 +1687,7 @@ fn dispatch_profiling_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 text.as_deref(),
                 Some(*max_tokens),
                 Some(*threshold),
+                device,
                 cli.json,
             ),
         }),
@@ -1616,31 +1778,32 @@ fn dispatch_profiling_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             json,
             verbose,
         } => {
-            match file
-                .as_ref()
-                .map(|f| crate::error::resolve_model_path(f))
-                .transpose()
+            // #2399 finding 1: the feature check must come FIRST. It used to run
+            // after path resolution, so on a default build `apr ptx missing.ptx`
+            // answered "File not found" (exit 3) — a user could spend a long time
+            // fixing a path for a command this binary cannot run at all.
+            #[cfg(not(feature = "trueno-explain"))]
             {
-                Ok(resolved) => {
-                    #[cfg(feature = "full")]
-                    {
-                        commands::ptx_explain::run(
-                            resolved.as_deref(),
-                            kernel.as_deref(),
-                            *strict,
-                            *bugs,
-                            *json || cli.json,
-                            *verbose || cli.verbose,
-                        )
-                    }
-                    #[cfg(not(feature = "full"))]
-                    {
-                        Err(CliError::Aprender(
-                            "ptx command requires --features full".into(),
-                        ))
-                    }
+                let _ = (file, kernel, strict, bugs, json, verbose);
+                Err(CliError::FeatureDisabled(ptx_unavailable_message()))
+            }
+            #[cfg(feature = "trueno-explain")]
+            {
+                match file
+                    .as_ref()
+                    .map(|f| crate::error::resolve_model_path(f))
+                    .transpose()
+                {
+                    Ok(resolved) => commands::ptx_explain::run(
+                        resolved.as_deref(),
+                        kernel.as_deref(),
+                        *strict,
+                        *bugs,
+                        *json || cli.json,
+                        *verbose || cli.verbose,
+                    ),
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
             }
         }
 
@@ -1751,6 +1914,7 @@ fn dispatch_extended_command(cli: &Cli) -> Result<(), CliError> {
                 trace_output.clone(),
                 trace_level.as_str(),
                 *profile,
+                cli.offline,
             )
         }
 
@@ -1808,6 +1972,7 @@ fn dispatch_extended_command(cli: &Cli) -> Result<(), CliError> {
             cli.verbose,
             None,
             &[],
+            cli.json,
         ),
 
         ExtendedCommands::Tools(ToolCommands::Encrypt {

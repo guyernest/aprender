@@ -6,10 +6,17 @@
 //! - Visualization: Make problems visible
 
 pub(crate) mod aliases;
+pub(crate) mod threshold_arg;
+// GH-2391 falsifiers for the whole threshold/tolerance flag family, not just
+// the *-lint commands the module originally covered.
+#[cfg(test)]
+mod threshold_arg_gh2391;
+
 pub(crate) mod attn_parity_classifier;
 pub(crate) mod attn_parity_lint;
 pub(crate) mod attn_viz_classifier;
 pub(crate) mod attn_viz_lint;
+pub(crate) mod audio_inspect;
 pub(crate) mod audio_inspect_classifier;
 pub(crate) mod audio_inspect_lint;
 pub(crate) mod auto_quant;
@@ -47,6 +54,7 @@ pub(crate) mod diagnose;
 pub(crate) mod dry_sampling_classifier;
 pub(crate) mod dry_sampling_lint;
 pub(crate) mod embed;
+pub(crate) mod embed_viz;
 pub(crate) mod embed_viz_classifier;
 pub(crate) mod embed_viz_lint;
 pub(crate) mod embeddings_classifier;
@@ -82,9 +90,17 @@ pub(crate) mod imatrix_lint;
 pub(crate) mod import;
 pub(crate) mod inspect;
 pub(crate) mod kernel_explain;
+pub(crate) mod kernel_parity;
 pub(crate) mod kv_timeline_classifier;
 pub(crate) mod kv_timeline_lint;
 pub(crate) mod lint;
+pub(crate) mod lint_error;
+// Poka-yoke for the *-lint family error surface (#2377-8/-9): scans the family's
+// own source so the class cannot be reintroduced by the next copy-paste.
+#[cfg(test)]
+mod lint_exit_convention_tests;
+pub(crate) mod lint_family_guard;
+pub(crate) mod lint_vacuity;
 pub(crate) mod manifest;
 pub(crate) mod mcp;
 pub(crate) mod merge;
@@ -111,6 +127,7 @@ pub(crate) mod otlp_classifier;
 pub(crate) mod otlp_lint;
 pub(crate) mod parity;
 pub(crate) mod pipeline;
+pub(crate) mod png_encode;
 pub(crate) mod ppl;
 // GENERIC prediction (D-06). Not feature-gated: the command must be able to say
 // "this is a SetFit classifier and this binary cannot classify it" (exit 9) rather
@@ -125,7 +142,10 @@ pub(crate) mod prometheus_classifier;
 pub(crate) mod prometheus_lint;
 pub(crate) mod prune;
 pub(crate) mod ps_schema;
-#[cfg(feature = "full")]
+// #2399: gated on the crate it actually needs (aprender-explain, aliased
+// `trueno-explain`) rather than on `full`, so `--features ptx` is enough and a
+// user does not have to pull CUDA + training to analyze a .ptx file.
+#[cfg(feature = "trueno-explain")]
 pub(crate) mod ptx_explain;
 pub(crate) mod ptx_map;
 pub(crate) mod publish;
@@ -137,6 +157,7 @@ pub(crate) mod qa_capability;
 pub(crate) mod qualify;
 pub(crate) mod quant_preservation;
 pub(crate) mod quantize;
+pub(crate) mod quantize_flag_parity;
 pub(crate) mod react_trace_classifier;
 pub(crate) mod react_trace_lint;
 pub(crate) mod recipe;
@@ -164,6 +185,7 @@ pub(crate) mod shared_cache;
 pub(crate) mod shared_cache_lint;
 pub(crate) mod showcase;
 pub(crate) mod sign_artifacts;
+pub(crate) mod spdx;
 pub(crate) mod stamp;
 pub(crate) mod stop_op;
 pub(crate) mod tensors;

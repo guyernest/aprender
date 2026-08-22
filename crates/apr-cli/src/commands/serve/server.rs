@@ -1,4 +1,60 @@
 
+/// The quantization actually present in the loaded weights.
+///
+/// Derived from the qtype of the projection tensors themselves — the ground
+/// truth — not from GGUF's advisory `general.file_type`, which goes stale when
+/// a file is requantized. Returns the modal qtype across every layer's
+/// attention-output and FFN projections, or `None` when no layer carries a
+/// qtype this build knows a name for. Never guesses "Q4_K_M".
+#[cfg(feature = "inference")]
+fn dominant_quantization(model: &realizar::gguf::OwnedQuantizedModel) -> Option<&'static str> {
+    use std::collections::HashMap;
+
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    for layer in model.layers() {
+        let mut tally = |qtype: u32| *counts.entry(qtype).or_insert(0) += 1;
+        tally(layer.attn_output_weight.qtype);
+        tally(layer.ffn_up_weight.qtype);
+        tally(layer.ffn_down_weight.qtype);
+        if let Some(gate) = layer.ffn_gate_weight.as_ref() {
+            tally(gate.qtype);
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(qtype, n)| realizar::api::gguf_qtype_name(qtype).map(|name| (name, n)))
+        .max_by_key(|&(_, n)| n)
+        .map(|(name, _)| name)
+}
+
+/// Everything this process actually knows about the model it just loaded.
+///
+/// Facts come from three places, all measured: the file (size, container
+/// format from magic bytes), the loaded weights (architecture, quantization,
+/// the model's own advertised context length) and the operator's flags
+/// (`--context-length`). No field is defaulted — an unmeasured field is
+/// reported as absent by the metadata handlers.
+#[cfg(feature = "inference")]
+fn measured_model_source(
+    model: &realizar::gguf::OwnedQuantizedModel,
+    config: &ServerConfig,
+) -> realizar::api::ModelSourceInfo {
+    let base = config
+        .model_path
+        .as_deref()
+        .map(realizar::api::ModelSourceInfo::from_path)
+        .unwrap_or_default();
+
+    let mut source = base
+        .with_architecture(model.config().architecture.as_str())
+        .with_model_max_context_length(model.config().context_length)
+        .with_context_length(config.context_length);
+    if let Some(quantization) = dominant_quantization(model) {
+        source = source.with_quantization(quantization);
+    }
+    source
+}
+
 /// Run the CPU inference server
 ///
 /// `mapped_model` is `None` for non-GGUF formats (APR / SafeTensors). For
@@ -14,23 +70,35 @@ fn run_cpu_server(
     mapped_model: Option<std::sync::Arc<realizar::gguf::MappedGGUFModel>>,
     config: &ServerConfig,
 ) -> Result<()> {
-    use realizar::api::{create_router, AppState};
+    use realizar::api::{create_router_with_config, AppState};
+
+    // Measure the model BEFORE it is moved into AppState. Anything not
+    // measurable here stays absent — `/realize/model` no longer substitutes
+    // `size_bytes: 0` / `context_length: 4096` / `quantization: "Q4_K_M"`.
+    let model_source = measured_model_source(&quantized_model, config);
 
     let mut state = AppState::with_quantized_model_and_vocab(quantized_model, vocab)
-        .map_err(|e| CliError::InferenceFailed(format!("Failed to create app state: {e}")))?;
+        .map_err(|e| CliError::InferenceFailed(format!("Failed to create app state: {e}")))?
+        .with_model_source(model_source);
     if let Some(mapped) = mapped_model {
         state = state.with_mapped_gguf_model(mapped);
     }
     let state = state.with_verbose(config.verbose); // GH-152: Pass verbose flag to handlers
 
-    // Create realizar's full inference router (Ollama-parity endpoints)
-    let app = create_router(state);
+    // Create realizar's full inference router (Ollama-parity endpoints).
+    // --no-cors / --no-metrics must reach the router, not stop at the banner.
+    let app = create_router_with_config(state, config.router_config());
 
     // Create tokio runtime and run server
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| CliError::InferenceFailed(format!("Failed to create runtime: {e}")))?;
 
     let bind_addr = config.bind_addr();
+    // aprender#2376(8): the banner is read from the router's own table, not restated.
+    // The previous hand-written list named 11 of the 31 mounted routes and omitted
+    // /tokenize, /realize/*, /models and the health probes entirely, while a
+    // separate list printed before format detection named routes that 404.
+    let endpoints = realizar::api::advertised_routes(&config.router_config());
 
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -45,14 +113,10 @@ fn run_cpu_server(
                 .bold()
         );
         println!();
-        println!("{}", "Ollama-Parity Endpoints:".cyan());
-        println!("  GET  /health              - Health check");
-        println!("  GET  /metrics             - Prometheus metrics");
-        println!("  POST /generate            - Text generation");
-        println!("  POST /stream/generate     - SSE streaming");
-        println!("  POST /batch/generate      - Batch inference");
-        println!("  POST /v1/completions      - OpenAI-compatible");
-        println!("  POST /v1/chat/completions - Chat completions");
+        println!("{}", "Endpoints:".cyan());
+        for endpoint in &endpoints {
+            println!("  {endpoint}");
+        }
         println!();
         println!(
             "{}",
@@ -83,7 +147,7 @@ fn start_gguf_server_gpu_batched(
     mapped_model: std::sync::Arc<realizar::gguf::MappedGGUFModel>,
     config: &ServerConfig,
 ) -> Result<()> {
-    use realizar::api::{create_router, spawn_batch_processor, AppState, BatchConfig};
+    use realizar::api::{create_router_with_config, spawn_batch_processor, AppState, BatchConfig};
     use realizar::gguf::OwnedQuantizedModelCachedSync;
 
     println!(
@@ -135,6 +199,7 @@ fn start_gguf_server_gpu_batched(
     println!("  GPU threshold: {}", batch_config.gpu_threshold);
 
     let bind_addr = config.bind_addr();
+    let router_config = config.router_config();
 
     // Run everything inside the runtime context
     runtime.block_on(async move {
@@ -146,7 +211,7 @@ fn start_gguf_server_gpu_batched(
         let state = state.with_batch_config(batch_tx, batch_config);
 
         // Create router
-        let app = create_router(state);
+        let app = create_router_with_config(state, router_config);
 
         let listener = tokio::net::TcpListener::bind(&bind_addr)
             .await

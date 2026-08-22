@@ -18,6 +18,44 @@ use super::{
 // APR-Specific API Handlers (spec §15.1)
 // ============================================================================
 
+/// The 503 for `/v1/predict` when no APR *estimator* is resident.
+///
+/// Dogfood 0.63.0 (#2375 finding 8): the previous body was
+/// `"No APR model loaded. Use AppState::demo() or load a .apr model."` and it
+/// was returned verbatim by a server whose own log said
+/// `Detected format: APR / APR loaded: 291 tensors` — because `apr_model` holds
+/// a classical estimator (classifier/regressor) while a *generative* .apr is
+/// loaded into the quantized/transformer slots. So the message contradicted an
+/// observable fact, and its only advice named `AppState::demo()`, an internal
+/// Rust constructor no HTTP client can call.
+///
+/// The replacement reports what this server actually has, and points at the
+/// endpoints that can serve it.
+fn no_estimator_loaded(state: &AppState) -> (StatusCode, Json<ErrorResponse>) {
+    // Two distinct operator situations, and each names the ARTIFACT to supply
+    // (a `.apr` estimator), not just the endpoint to call. aprender#2376(7)'s
+    // falsifier requires both `/v1/predict` and `.apr` to appear: the original
+    // text said "Use AppState::demo() or load a .apr model", instructing an HTTP
+    // client to call a Rust constructor it has no access to. Telling a client
+    // which endpoint to use instead is useful but does not tell whoever STARTED
+    // the server what to do differently.
+    let error = if state.model_loaded() {
+        "This server has a generative model loaded, not an APR estimator. \
+         /v1/predict serves APR classifier/regressor models — start the server \
+         with a .apr estimator to use it; for text generation on this server use \
+         /v1/completions or /v1/chat/completions."
+    } else {
+        "No APR estimator model is loaded. Start the server with a .apr \
+         classifier/regressor model to use /v1/predict."
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            error: error.to_string(),
+        }),
+    )
+}
+
 /// APR prediction handler (/v1/predict)
 ///
 /// Handles classification and regression predictions for APR models.
@@ -43,16 +81,11 @@ pub(crate) async fn apr_predict_handler(
         ));
     }
 
-    // Get APR model from state
-    let apr_model = state.apr_model.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "No APR model loaded. Use AppState::demo() or load a .apr model."
-                    .to_string(),
-            }),
-        )
-    })?;
+    // Get APR estimator from state
+    let apr_model = state
+        .apr_model
+        .as_ref()
+        .ok_or_else(|| no_estimator_loaded(&state))?;
 
     // Log request to audit trail
     let model_name = apr_model
@@ -179,7 +212,7 @@ pub(crate) async fn apr_predict_handler(
 // serde_json::json!() uses infallible unwrap
 #[allow(clippy::disallowed_methods)]
 pub(crate) async fn apr_explain_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(request): Json<ExplainRequest>,
 ) -> Result<Json<ExplainResponse>, (StatusCode, Json<ErrorResponse>)> {
     let start = std::time::Instant::now();
@@ -208,62 +241,53 @@ pub(crate) async fn apr_explain_handler(
         ));
     }
 
-    // Demo SHAP values (in production, would use ShapExplainer)
-    let shap_values: Vec<f32> = request
-        .features
-        .iter()
-        .enumerate()
-        .map(|(i, _)| 0.1 - (i as f32 * 0.02))
-        .collect();
+    // aprender#2375(2): this returned FABRICATED explanations with HTTP 200.
+    //
+    // The SHAP values were derived from the feature INDEX — `0.1 - i * 0.02` —
+    // so they did not depend on the feature VALUES, and `prediction` was the
+    // literal 0.95. `State` was bound as `_state`, so the response was
+    // identical whether a model was loaded or not. A caller integrating
+    // against it gets numbers shaped exactly like an explanation, with nothing
+    // behind them.
+    //
+    // Kernel SHAP needs a BACKGROUND DATASET to compute expected values
+    // (`ShapExplainer::new(background, model_fn)` in aprender::interpret), and
+    // `ExplainRequest` carries none — there is no honest way to compute this
+    // from one request. So it fails, and says what is missing.
+    //
+    // Same rule the CLI now follows for `apr trace --reference` (#2407): an
+    // advertised surface whose implementation is a stub must FAIL, not emit
+    // something plausible and return success.
+    //
+    // Model presence is checked FIRST so the caller gets the most specific
+    // error, matching how /v1/predict reports the same condition.
+    let _apr_model = state.apr_model.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: format!(
+                    "No APR model loaded: /v1/explain requires a .apr model, and this \
+                     server is serving {}.",
+                    state.model_format()
+                ),
+            }),
+        )
+    })?;
 
-    let explanation = ShapExplanation {
-        base_value: 0.0,
-        shap_values: shap_values.clone(),
-        feature_names: request.feature_names.clone(),
-        prediction: 0.95,
-    };
-
-    // Build summary from top features
-    let mut feature_importance: Vec<_> = request
-        .feature_names
-        .iter()
-        .zip(shap_values.iter())
-        .collect();
-    feature_importance.sort_by(|a, b| {
-        b.1.abs()
-            .partial_cmp(&a.1.abs())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let top_features: Vec<_> = feature_importance
-        .iter()
-        .take(request.top_k_features)
-        .collect();
-
-    let summary = if top_features.is_empty() {
-        "No significant features found.".to_string()
-    } else {
-        let feature_strs: Vec<String> = top_features
-            .iter()
-            .map(|(name, val)| {
-                let direction = if **val > 0.0 { "+" } else { "-" };
-                format!("{} ({})", name, direction)
-            })
-            .collect();
-        format!("Top contributing features: {}", feature_strs.join(", "))
-    };
-
-    let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-    Ok(Json(ExplainResponse {
-        request_id,
-        model: request.model.unwrap_or_else(|| "default".to_string()),
-        prediction: serde_json::json!(0.95),
-        confidence: Some(0.95),
-        explanation,
-        summary,
-        latency_ms,
-    }))
+    let _ = (start, request_id, request.top_k_features);
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ErrorResponse {
+            error: format!(
+                "/v1/explain is not implemented: computing {} attributions requires a \
+                 background dataset to establish expected values, which this request does \
+                 not carry. Until it does, this endpoint returns an error rather than \
+                 fabricated values (it previously returned index-derived SHAP numbers and \
+                 a hardcoded prediction of 0.95 with HTTP 200).",
+                request.method
+            ),
+        }),
+    ))
 }
 
 /// APR audit handler (/v1/audit/:request_id)

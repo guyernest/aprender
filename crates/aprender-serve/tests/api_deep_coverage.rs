@@ -572,6 +572,8 @@ fn test_completion_request_minimal() {
 #[test]
 fn test_completion_request_with_stop_sequences() {
     let request = CompletionRequest {
+        stream: false,
+        n: realizar::api::ChoiceCount::ONE,
         model: "gpt-4".to_string(),
         prompt: "Tell me".to_string(),
         max_tokens: Some(100),
@@ -637,12 +639,14 @@ fn test_completion_choice_with_logprobs() {
 #[test]
 fn test_model_metadata_response_without_quantization() {
     let response = ModelMetadataResponse {
+        architecture: None,
+        model_max_context_length: None,
         id: "model-1".to_string(),
         name: "Full precision".to_string(),
-        format: "safetensors".to_string(),
-        size_bytes: 10_000_000_000,
+        format: Some("safetensors".to_string()),
+        size_bytes: Some(10_000_000_000),
         quantization: None,
-        context_length: 8192,
+        context_length: Some(8192),
         lineage: None,
         loaded: true,
     };
@@ -857,7 +861,7 @@ fn test_chat_completion_request_with_stop_sequences() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 1,
+        n: realizar::api::ChoiceCount::ONE,
         stream: false,
         stop: Some(vec!["END".to_string()]),
         user: Some("user-123".to_string()),
@@ -1328,7 +1332,7 @@ fn test_chat_completion_request_debug() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 1,
+        n: realizar::api::ChoiceCount::ONE,
         stream: false,
         stop: None,
         user: None,
@@ -1404,7 +1408,7 @@ fn test_complete_chat_completion_flow() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 1,
+        n: realizar::api::ChoiceCount::ONE,
         stream: false,
         stop: None,
         user: None,
@@ -1816,12 +1820,14 @@ fn test_completion_choice_empty_text() {
 #[test]
 fn test_model_metadata_response_large_size() {
     let response = ModelMetadataResponse {
+        architecture: None,
+        model_max_context_length: None,
         id: "llama-70b".to_string(),
         name: "LLaMA 70B".to_string(),
-        format: "gguf".to_string(),
-        size_bytes: 140_000_000_000, // 140 GB
+        format: Some("gguf".to_string()),
+        size_bytes: Some(140_000_000_000), // 140 GB
         quantization: Some("Q4_K_M".to_string()),
-        context_length: 128000,
+        context_length: Some(128000),
         lineage: None,
         loaded: false,
     };
@@ -1902,7 +1908,7 @@ fn test_chat_completion_request_empty_messages() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 1,
+        n: realizar::api::ChoiceCount::ONE,
         stream: false,
         stop: None,
         user: None,

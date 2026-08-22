@@ -309,7 +309,7 @@ fn test_chat_completion_request_minimal() {
     let request: ChatCompletionRequest = serde_json::from_str(json).expect("should deserialize");
     assert_eq!(request.model, "gpt-4");
     assert_eq!(request.messages.len(), 1);
-    assert_eq!(request.n, 1); // default
+    assert_eq!(request.n.get(), 1); // default
     assert!(!request.stream); // default
 }
 
@@ -340,7 +340,7 @@ fn test_chat_completion_request_full() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 2,
+        n: realizar::api::ChoiceCount::ONE,
         stream: true,
         stop: Some(vec!["STOP".to_string()]),
         user: Some("user-id".to_string()),
@@ -355,7 +355,8 @@ fn test_chat_completion_request_full() {
     assert_eq!(deserialized.model, "gpt-4");
     assert_eq!(deserialized.messages.len(), 2);
     assert_eq!(deserialized.max_tokens, Some(256));
-    assert_eq!(deserialized.n, 2);
+    // aprender#2375(9): `n` round-trips as the only supported value, 1.
+    assert_eq!(deserialized.n.get(), 1);
     assert!(deserialized.stream);
 }
 
@@ -814,6 +815,8 @@ fn test_embedding_response_serialization() {
 #[test]
 fn test_completion_request_serialization() {
     let request = CompletionRequest {
+        stream: false,
+        n: realizar::api::ChoiceCount::ONE,
         model: "gpt-3.5-turbo".to_string(),
         prompt: "Once upon a time".to_string(),
         max_tokens: Some(50),
@@ -880,12 +883,14 @@ fn test_completion_choice_with_logprobs() {
 #[test]
 fn test_model_metadata_response_full() {
     let response = ModelMetadataResponse {
+        architecture: None,
+        model_max_context_length: None,
         id: "phi-2".to_string(),
         name: "Phi-2".to_string(),
-        format: "gguf".to_string(),
-        size_bytes: 2_700_000_000,
+        format: Some("gguf".to_string()),
+        size_bytes: Some(2_700_000_000),
         quantization: Some("Q4_K_M".to_string()),
-        context_length: 2048,
+        context_length: Some(2048),
         lineage: Some(ModelLineage {
             uri: "pacha://phi-2:latest".to_string(),
             version: "1.0.0".to_string(),
@@ -900,7 +905,7 @@ fn test_model_metadata_response_full() {
     let deserialized: ModelMetadataResponse =
         serde_json::from_str(&json).expect("should deserialize");
 
-    assert_eq!(deserialized.format, "gguf");
+    assert_eq!(deserialized.format.as_deref(), Some("gguf"));
     assert!(deserialized.lineage.is_some());
     let lineage = deserialized.lineage.unwrap();
     assert_eq!(lineage.parent, Some("phi-1.5".to_string()));
@@ -909,12 +914,14 @@ fn test_model_metadata_response_full() {
 #[test]
 fn test_model_metadata_response_minimal() {
     let response = ModelMetadataResponse {
+        architecture: None,
+        model_max_context_length: None,
         id: "simple".to_string(),
         name: "Simple Model".to_string(),
-        format: "apr".to_string(),
-        size_bytes: 100_000,
+        format: Some("apr".to_string()),
+        size_bytes: Some(100_000),
         quantization: None,
-        context_length: 512,
+        context_length: Some(512),
         lineage: None,
         loaded: false,
     };
@@ -1795,7 +1802,7 @@ fn test_chat_completion_request_with_stop() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 1,
+        n: realizar::api::ChoiceCount::ONE,
         stream: false,
         stop: Some(vec!["STOP".to_string(), "END".to_string()]),
         user: None,
@@ -1819,7 +1826,7 @@ fn test_chat_completion_request_with_user() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 1,
+        n: realizar::api::ChoiceCount::ONE,
         stream: false,
         stop: None,
         user: Some("user-12345".to_string()),
@@ -2645,12 +2652,14 @@ fn test_reload_request_only_path() {
 #[test]
 fn test_model_metadata_response_no_quantization() {
     let response = ModelMetadataResponse {
+        architecture: None,
+        model_max_context_length: None,
         id: "fp16-model".to_string(),
         name: "Full Precision Model".to_string(),
-        format: "safetensors".to_string(),
-        size_bytes: 10_000_000_000,
+        format: Some("safetensors".to_string()),
+        size_bytes: Some(10_000_000_000),
         quantization: None,
-        context_length: 8192,
+        context_length: Some(8192),
         lineage: None,
         loaded: true,
     };
@@ -2704,6 +2713,8 @@ fn test_completion_request_all_optional_none() {
 #[test]
 fn test_completion_request_with_multiple_stop_sequences() {
     let request = CompletionRequest {
+        stream: false,
+        n: realizar::api::ChoiceCount::ONE,
         model: "test".to_string(),
         prompt: "Once upon".to_string(),
         max_tokens: Some(100),
@@ -2835,7 +2846,7 @@ fn test_chat_completion_request_n_multiple() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 5, // Request 5 completions
+        n: realizar::api::ChoiceCount::ONE, // Request 5 completions
         stream: false,
         stop: None,
         user: None,
@@ -2859,7 +2870,7 @@ fn test_chat_completion_request_streaming() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 1,
+        n: realizar::api::ChoiceCount::ONE,
         stream: true,
         stop: None,
         user: None,
@@ -3047,7 +3058,7 @@ fn test_predict_request_default_include_confidence() {
 fn test_chat_completion_request_default_n() {
     let json = r#"{"model": "test", "messages": []}"#;
     let request: ChatCompletionRequest = serde_json::from_str(json).expect("should deserialize");
-    assert_eq!(request.n, 1); // default value
+    assert_eq!(request.n.get(), 1); // default value
 }
 
 #[test]
@@ -3470,7 +3481,7 @@ fn test_chat_completion_request_with_stop_sequences() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 1,
+        n: realizar::api::ChoiceCount::ONE,
         stream: false,
         stop: Some(vec!["END".to_string(), "STOP".to_string()]),
         user: Some("user-123".to_string()),
@@ -3534,12 +3545,14 @@ fn test_prediction_with_score_one() {
 #[test]
 fn test_model_metadata_full_with_all_fields() {
     let response = ModelMetadataResponse {
+        architecture: None,
+        model_max_context_length: None,
         id: "model-v2".to_string(),
         name: "Test Model V2".to_string(),
-        format: "apr".to_string(),
-        size_bytes: 5_000_000_000,
+        format: Some("apr".to_string()),
+        size_bytes: Some(5_000_000_000),
         quantization: Some("Q4_K_M".to_string()),
-        context_length: 32768,
+        context_length: Some(32768),
         lineage: Some(ModelLineage {
             uri: "pacha://test:v2".to_string(),
             version: "2.0.0".to_string(),
@@ -3554,7 +3567,7 @@ fn test_model_metadata_full_with_all_fields() {
     let deserialized: ModelMetadataResponse =
         serde_json::from_str(&json).expect("should deserialize");
 
-    assert_eq!(deserialized.context_length, 32768);
+    assert_eq!(deserialized.context_length, Some(32768));
     assert!(deserialized.lineage.is_some());
     let lineage = deserialized.lineage.unwrap();
     assert_eq!(lineage.recipe, Some("finetune-chat".to_string()));
@@ -3744,6 +3757,8 @@ fn test_usage_various_sizes() {
 #[test]
 fn test_completion_request_with_all_params() {
     let request = CompletionRequest {
+        stream: false,
+        n: realizar::api::ChoiceCount::ONE,
         model: "gpt-3.5-turbo-instruct".to_string(),
         prompt: "Once upon a time".to_string(),
         max_tokens: Some(256),
@@ -4251,7 +4266,7 @@ fn test_chat_completion_request_all_optional_fields() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 3,
+        n: realizar::api::ChoiceCount::ONE,
         stream: true,
         stop: Some(vec![
             "END".to_string(),
@@ -4266,7 +4281,7 @@ fn test_chat_completion_request_all_optional_fields() {
     let json = serde_json::to_string(&request).expect("serialize");
     let deserialized: ChatCompletionRequest = serde_json::from_str(&json).expect("deserialize");
 
-    assert_eq!(deserialized.n, 3);
+    assert_eq!(deserialized.n.get(), 1);
     assert!(deserialized.stream);
     assert_eq!(deserialized.stop.as_ref().unwrap().len(), 3);
     assert_eq!(deserialized.user, Some("user-abc123".to_string()));
@@ -4347,6 +4362,8 @@ fn test_gpu_batch_request_temperature_variations() {
 fn test_completion_request_stop_sequences() {
     // No stop sequences
     let no_stop = CompletionRequest {
+        stream: false,
+        n: realizar::api::ChoiceCount::ONE,
         model: "test".to_string(),
         prompt: "Hello".to_string(),
         max_tokens: None,
@@ -4359,6 +4376,8 @@ fn test_completion_request_stop_sequences() {
 
     // Multiple stop sequences
     let multi_stop = CompletionRequest {
+        stream: false,
+        n: realizar::api::ChoiceCount::ONE,
         model: "test".to_string(),
         prompt: "Hello".to_string(),
         max_tokens: Some(100),
@@ -4585,12 +4604,14 @@ fn test_completion_response_with_logprobs() {
 fn test_model_metadata_response_variations() {
     // GGUF model with quantization
     let gguf = ModelMetadataResponse {
+        architecture: None,
+        model_max_context_length: None,
         id: "llama-7b-q4".to_string(),
         name: "LLaMA 7B Q4_K_M".to_string(),
-        format: "gguf".to_string(),
-        size_bytes: 4_000_000_000,
+        format: Some("gguf".to_string()),
+        size_bytes: Some(4_000_000_000),
         quantization: Some("Q4_K_M".to_string()),
-        context_length: 4096,
+        context_length: Some(4096),
         lineage: Some(ModelLineage {
             uri: "pacha://llama:7b".to_string(),
             version: "1.0.0".to_string(),
@@ -4606,12 +4627,14 @@ fn test_model_metadata_response_variations() {
 
     // SafeTensors model without quantization
     let safetensors = ModelMetadataResponse {
+        architecture: None,
+        model_max_context_length: None,
         id: "bert-base".to_string(),
         name: "BERT Base".to_string(),
-        format: "safetensors".to_string(),
-        size_bytes: 440_000_000,
+        format: Some("safetensors".to_string()),
+        size_bytes: Some(440_000_000),
         quantization: None,
-        context_length: 512,
+        context_length: Some(512),
         lineage: None,
         loaded: false,
     };
@@ -4723,7 +4746,7 @@ fn test_chat_completion_request_clone() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 1,
+        n: realizar::api::ChoiceCount::ONE,
         stream: false,
         stop: None,
         user: None,

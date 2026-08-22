@@ -168,7 +168,7 @@ fn test_format_chat_messages_assistant_role_more_cov() {
 
 #[test]
 fn test_default_n_function_more_cov() {
-    assert_eq!(default_n(), 1);
+    assert_eq!(crate::api::ChoiceCount::default().get(), 1);
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn test_chat_completion_request_all_fields_more_cov() {
         repeat_penalty: None,
         repeat_last_n: None,
         seed: None,
-        n: 2,
+        n: crate::api::ChoiceCount::ONE,
         stream: true,
         stop: Some(vec!["END".to_string()]),
         user: Some("test-user".to_string()),
@@ -260,7 +260,15 @@ async fn test_tokenize_with_model_id_more_cov() {
         .expect("test");
 
     let status = response.status();
-    assert!(status == StatusCode::OK || status == StatusCode::NOT_FOUND);
+    // aprender#2376(5): the shared test state has NO model, so this condition is
+    // deterministic — a server with no usable model answers 503 on every route.
+    // The old assertion accepted a SET of statuses that included the defect, so it
+    // could not fail and held the 404-here/500-there split in place.
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no model is resident: expected 503"
+    );
 }
 
 #[tokio::test]
@@ -307,7 +315,15 @@ async fn test_realize_embed_with_model_more_cov() {
         .expect("test");
 
     let status = response.status();
-    assert!(status == StatusCode::OK || status == StatusCode::NOT_FOUND);
+    // aprender#2376(5): the shared test state has NO model, so this condition is
+    // deterministic — a server with no usable model answers 503 on every route.
+    // The old assertion accepted a SET of statuses that included the defect, so it
+    // could not fail and held the 404-here/500-there split in place.
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no model is resident: expected 503"
+    );
 }
 
 #[test]

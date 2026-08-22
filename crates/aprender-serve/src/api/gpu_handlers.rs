@@ -10,7 +10,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::sse::{Event, Sse},
-    Json,
+    Extension, Json,
 };
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use super::{
     BatchTokenizeRequest, BatchTokenizeResponse, ErrorResponse, GenerateRequest, GenerateResponse,
     ModelsResponse, StreamDoneEvent, StreamTokenEvent, TokenizeRequest, TokenizeResponse,
 };
-use crate::generate::{GenerationConfig, SamplingStrategy};
+use crate::generate::{CancelToken, GenerationConfig, SamplingStrategy};
 use crate::registry::ModelInfo;
 use crate::tokenizer::BPETokenizer;
 
@@ -82,8 +82,13 @@ pub struct GpuBatchRequest {
     /// Maximum tokens to generate per prompt
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
-    /// Temperature for sampling (0.0 = greedy)
-    #[serde(default)]
+    /// Temperature for sampling (0.0 = greedy).
+    ///
+    /// Rejected at deserialization when outside `[0, ∞)` finite (aprender#2375).
+    #[serde(
+        default,
+        deserialize_with = "crate::api::types::deserialize_temperature_f32_required"
+    )]
     pub temperature: f32,
     /// Top-k sampling (1 = greedy)
     #[serde(default = "default_top_k")]

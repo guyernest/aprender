@@ -3,6 +3,21 @@
 //! This library is the foundation for the apr CLI binary.
 //! Exports CLI structures for testing and reuse.
 
+// PMAT-540 declared `#![cfg_attr(coverage_nightly, coverage(off))]` in twenty
+// files of this crate but never declared the feature that makes `coverage(off)`
+// legal, and nothing in the workspace did. On the pinned stable toolchain
+// (rust-toolchain.toml = 1.93.0) the `cfg_attr` is inert, so nobody noticed; the
+// moment a coverage run sets `--cfg coverage_nightly` — which is exactly what
+// `pmat quality-gates` does via `cargo +nightly llvm-cov` — the crate stops
+// compiling:
+//
+//     crates/apr-cli/src/generated_contracts.rs:9:31: error[E0658]:
+//     the `#[coverage]` attribute is an experimental feature
+//
+// and the coverage gate reports "failed to run" rather than a number. A gate
+// that cannot run is not a gate that passed. This declaration is likewise
+// gated, so stable builds are byte-identical.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 // APR-MONO: Clippy pedantic allows for monorepo transition.
 // unwrap() eliminated (524 → expect()). Style lints from 20 merged crates
 // are suppressed at crate level. Will be incrementally addressed.
@@ -22,6 +37,14 @@ use std::path::{Path, PathBuf};
 #[macro_use]
 #[allow(unused_macros, clippy::duplicated_attributes)]
 mod generated_contracts;
+
+// #2401: `--quiet` / `--verbose` control. MUST come before `mod commands;` —
+// it shadows `println!`/`print!` for every module declared after it, which is
+// how the two global flags reach ~9 000 call sites without any command having
+// to remember to forward a parameter.
+#[macro_use]
+#[allow(unused_macros)]
+pub mod verbosity;
 
 mod commands;
 pub mod error;
@@ -109,11 +132,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Verbose output
+    /// Verbose output: dispatch resolution, plus per-command detail where there is more to show
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
-    /// Quiet mode (errors only)
+    /// Quiet mode: suppress stdout (errors still go to stderr; --json still prints)
     #[arg(short, long, global = true)]
     pub quiet: bool,
 

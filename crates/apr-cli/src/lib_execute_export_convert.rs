@@ -11,7 +11,8 @@
             batch: None,
             json: false,
             plan: false,
-        });
+                force: true,
+            });
         let result = execute_command(&cli);
         assert!(result.is_err(), "Export should fail with non-existent file");
     }
@@ -63,7 +64,7 @@
         let cli = make_cli(Commands::Extended(ExtendedCommands::Tree {
             file: PathBuf::from("/tmp/nonexistent_model_tree_test.apr"),
             filter: None,
-            format: "ascii".to_string(),
+            format: crate::commands::tree::TreeFormat::Ascii,
             sizes: false,
             depth: None,
         }));
@@ -89,9 +90,9 @@
     /// (via the GH-876 tensor subcommand)
     #[test]
     fn test_execute_probar_file_not_found() {
-        use ProbarSubcommand;
-        let cli = make_cli(Commands::Extended(ExtendedCommands::Probar {
-            command: ProbarSubcommand::Tensor {
+        use TestSubcommand;
+        let cli = make_cli(Commands::Extended(ExtendedCommands::Test {
+            command: TestSubcommand::Tensor {
                 file: PathBuf::from("/tmp/nonexistent_model_probar_test.apr"),
                 output: PathBuf::from("/tmp/probar-out"),
                 format: "both".to_string(),

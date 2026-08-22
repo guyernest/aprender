@@ -1025,7 +1025,7 @@ fn tolerance_bindings() -> Vec<(&'static str, f32, &'static str)> {
 /// preconditions/postconditions/invariants, and `pv equations --format` accepts
 /// `text|latex|ptx|asm`.
 fn contract_tolerances(path: &Path) -> BTreeMap<String, f64> {
-    let contract = setfit_contract_schema::schema::parse_contract(path)
+    let contract = provable_contracts::schema::parse_contract(path)
         .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()));
     let mut out = BTreeMap::new();
     for o in &contract.proof_obligations {
@@ -1040,7 +1040,7 @@ fn contract_tolerances(path: &Path) -> BTreeMap<String, f64> {
 }
 
 fn contract_version(path: &Path) -> String {
-    setfit_contract_schema::schema::parse_contract(path)
+    provable_contracts::schema::parse_contract(path)
         .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()))
         .metadata
         .version

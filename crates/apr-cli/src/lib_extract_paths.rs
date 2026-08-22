@@ -5,7 +5,7 @@
         let cmd = Commands::Extended(ExtendedCommands::Tree {
             file: PathBuf::from("model.apr"),
             filter: None,
-            format: "ascii".to_string(),
+            format: crate::commands::tree::TreeFormat::Ascii,
             sizes: false,
             depth: None,
         });
@@ -371,7 +371,8 @@
     #[test]
     fn test_execute_debug_file_not_found() {
         let cli = make_cli(Commands::Debug {
-            file: PathBuf::from("/tmp/nonexistent_model_debug_test.apr"),
+            file: Some(PathBuf::from("/tmp/nonexistent_model_debug_test.apr")),
+            action: None,
             drama: false,
             hex: false,
             strings: false,
@@ -439,6 +440,7 @@
     fn test_execute_lint_file_not_found() {
         let cli = make_cli(Commands::Lint {
             file: PathBuf::from("/tmp/nonexistent_model_lint_test.apr"),
+                strict: false,
         });
         let result = execute_command(&cli);
         assert!(result.is_err(), "Lint should fail with non-existent file");

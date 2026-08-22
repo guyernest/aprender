@@ -225,6 +225,14 @@ pub(crate) fn run(
             let mut reader = BufReader::new(file);
 
             let header = read_and_parse_header(&mut reader)?;
+            // aprender#2564: the header is 64 bytes and its offsets are simply
+            // BELIEVED. Without this, `apr inspect` reads a 1 KiB fragment of a
+            // 991 MB model and reports `valid: true, tensor_count: 291` with a
+            // data offset of 3.66 MiB -- past EOF -- while validate/tensors/lint/qa
+            // all reject the same file. Two commands in one binary disagreeing about
+            // one file is bad; the one that says VALID being the documented
+            // first-line diagnostic, and the JSON a CI gate consumes, is the defect.
+            check_header_fits_file(&header, file_size)?;
             let metadata_info = read_metadata(&mut reader, &header);
 
             // APR-05. Built ONCE, from the document the metadata read already
@@ -601,6 +609,35 @@ fn output_metadata_over_cap_text(metadata: &MetadataInfo) {
 /// of it. A table that exercised only the two already-reachable consumers would be
 /// precisely the "guard that does not scan the surface where the DECISION is made"
 /// that CLAUDE.md rule 5 calls theater.
+/// Refuse a header whose own offsets do not fit inside the file.
+///
+/// Every offset here is read from the 64-byte header and is attacker- or
+/// truncation-controlled. A partial download is the common case: the header
+/// arrives intact and describes a body that never did. The error text matches
+/// the other commands' so a user who runs two of them sees one story.
+fn check_header_fits_file(header: &HeaderData, file_size: u64) -> Result<(), CliError> {
+    let too_big = |what: &str, need: u64| {
+        CliError::InvalidFormat(format!(
+            "Invalid header: file too small for {what} \
+             (header claims {need} bytes, file is {file_size})"
+        ))
+    };
+
+    if header.data_offset > file_size {
+        return Err(too_big("tensor data", header.data_offset));
+    }
+    if header.tensor_index_offset > file_size {
+        return Err(too_big("the tensor index", header.tensor_index_offset));
+    }
+    let meta_end = header
+        .metadata_offset
+        .saturating_add(u64::from(header.metadata_size));
+    if meta_end > file_size {
+        return Err(too_big("metadata", meta_end));
+    }
+    Ok(())
+}
+
 pub(crate) fn read_metadata(reader: &mut BufReader<File>, header: &HeaderData) -> MetadataInfo {
     if header.metadata_size == 0 {
         return MetadataInfo::default();

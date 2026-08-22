@@ -1,5 +1,5 @@
 metadata:
-  version: 1.0.0
+  version: 1.1.0
   created: '2026-04-06'
   author: PAIML Engineering
   registry: true
@@ -20,8 +20,22 @@ metadata:
 
 kind: CLICommandContract
 name: apr-cli-commands
-version: "1.0.0"
-scope: "all apr CLI subcommands (77 commands — original 57 + `mcp` added 2026-04-17 via PR #864 + `registry` added 2026-04-20 via CRUX-A-01 + `ollama-chat-lint` added 2026-04-21 via CRUX-C-04 SHIP-001 retrofit + `dry-sampling-lint` added 2026-04-21 via CRUX-C-23 SHIP-001 retrofit + `awq-lint` added 2026-04-21 via CRUX-B-08 SHIP-001 retrofit + `oom-lint` added 2026-04-21 via CRUX-F-13 SHIP-001 + `tool-use-lint` added 2026-04-21 via CRUX-C-11 SHIP-001 retrofit + `gbnf-lint` added 2026-04-21 via CRUX-C-10 SHIP-001 retrofit + `typical-p-lint` added 2026-04-21 via CRUX-C-22 SHIP-001 retrofit + `grad-norm` added 2026-04-21 via CRUX-F-09 + `registry-quota-lint` added 2026-04-21 via CRUX-A-22 SHIP-001 retrofit + `fp8-lint` added 2026-04-22 via CRUX-B-11 SHIP-001 retrofit + `imatrix-lint` added 2026-04-22 via CRUX-B-07 SHIP-001 retrofit + `nf4-lint` added 2026-04-22 via CRUX-B-10 SHIP-001 retrofit + `gptq-lint` added 2026-04-22 via CRUX-B-09 SHIP-001 retrofit + `embeddings-lint` added 2026-04-23 via CRUX-C-13 SHIP-001 retrofit + `unified-search-lint` added 2026-04-23 via CRUX-A-23 SHIP-001 retrofit + `rm-gc-lint` added 2026-04-23 via CRUX-A-25 SHIP-001 retrofit + `shared-cache-lint` added 2026-04-23 via CRUX-A-21 SHIP-001 retrofit + `ppl` added 2026-04-23 via CRUX-E-02 SHIP-001 retrofit)"
+version: "1.1.0"
+scope: |
+  All apr CLI subcommands. The authoritative list is this file's own
+  `commands:` block; it is mirrored by
+  crates/apr-cli/tests/cli_commands.rs::registered_commands and checked
+  against `apr --help` by FALSIFY-CLI-005.
+
+  Deliberately no hand-maintained total here. There was one, and it read
+  "77 commands" followed by a prose changelog of every addition since --
+  while the list below held 111. A count inside the contract that certifies
+  counts, drifting 34 behind its own data, with no guard watching it: a
+  fourth copy of a number three other places already agree on.
+
+  To get the number, parse the list. Note `grep -c '^  - name:'` is WRONG
+  -- it returns 117 because other same-indent `name:` keys exist in this
+  file. Parse the YAML.
 binary: "apr"
 install: "cargo install aprender"
 
@@ -50,6 +64,7 @@ commands:
     description: "Inference server (plan/run)"
     requires_model: true
     side_effects: [network, filesystem]
+    subcommands: [plan, run]
 
   - name: chat
     category: inference
@@ -75,6 +90,7 @@ commands:
     description: "Simple debugging output"
     requires_model: true
     side_effects: []
+    subcommands: [embed-viz]
 
   - name: validate
     category: inspection
@@ -117,6 +133,22 @@ commands:
     description: "List tensor names and shapes"
     requires_model: true
     side_effects: []
+
+  # aprender#2377 finding 3: the producers `*-lint` help documents.
+  # See contracts/apr-lint-producers-v1.yaml.
+  - name: dataset
+    category: inspection
+    description: "Dataset inspection tools (audio-inspect)"
+    requires_model: false
+    side_effects: []
+    subcommands: [audio-inspect]
+
+  - name: kernel
+    category: analysis
+    description: "Kernel-level parity measurements (parity)"
+    requires_model: false
+    side_effects: []
+    subcommands: [parity]
 
   - name: trace
     category: inspection
@@ -198,6 +230,8 @@ commands:
     side_effects: [filesystem]
 
   # ── Model Registry ──
+    subcommands: [chain, compare-inference, convert, diff-tensors, fingerprint, inspect, validate-stats, verify]
+
   - name: pull
     category: registry
     description: "Download and cache model from HuggingFace"
@@ -221,6 +255,7 @@ commands:
     description: "Registry operations (CRUX-A-01): inspect alias map, etc."
     requires_model: false
     side_effects: []
+    subcommands: [aliases]
 
   - name: publish
     category: registry
@@ -252,6 +287,7 @@ commands:
     description: "Training pipeline (plan/apply)"
     requires_model: false
     side_effects: [filesystem, gpu]
+    subcommands: [apply, archive, cluster-status, halving, plan, submit, sweep, watch]
 
   - name: pretrain
     category: training
@@ -270,6 +306,7 @@ commands:
     description: "Tokenizer training pipeline (plan/apply)"
     requires_model: false
     side_effects: [filesystem]
+    subcommands: [apply, encode-corpus, import-hf, plan, repair-manifest, train]
 
   - name: tune
     category: training
@@ -313,6 +350,7 @@ commands:
     description: "Manage canary tests for regression"
     requires_model: false
     side_effects: [filesystem]
+    subcommands: [check, create]
 
   - name: compare-hf
     category: evaluation
@@ -363,6 +401,7 @@ commands:
     description: "Data quality pipeline"
     requires_model: false
     side_effects: [filesystem]
+    subcommands: [audit, balance, decontaminate, dedup, split, x]
 
   - name: pipeline
     category: data
@@ -371,6 +410,8 @@ commands:
     side_effects: [filesystem]
 
   # ── TUI & Monitoring ──
+    subcommands: [apply, plan, status, validate]
+
   - name: tui
     category: ui
     description: "Interactive terminal UI"
@@ -388,6 +429,7 @@ commands:
     description: "List, show, and compare training experiment runs"
     requires_model: false
     side_effects: []
+    subcommands: [diff, ls, show]
 
   - name: experiment
     category: ui
@@ -396,6 +438,8 @@ commands:
     side_effects: []
 
   # ── Miscellaneous ──
+    subcommands: [view]
+
   - name: showcase
     category: misc
     description: "Qwen2.5-Coder showcase demo"
@@ -413,15 +457,29 @@ commands:
         description: "Parse a Modelfile and emit config as JSON or human-readable text"
         requires_model: false
         side_effects: []
+    subcommands: [parse]
 
-  - name: probar
+  - name: test
     category: misc
+    aliases: [probar]
     description: |
-      Probar testing framework — visual regression, replay, compliance, audio/video, more.
-      GH-876 Milestone 1: `apr probar tensor` (PMAT-481 tensor visual regression).
-      Follow-up milestones add the remaining probador subcommands (test, record,
-      report, coverage, init, config, serve, build, watch, playbook, comply,
-      av-sync, audio, video, animation, stress, llm).
+      Test harness for web, LLM, media and replay — powered by probador.
+
+      Renamed from `probar` (Spanish "to try"), which named the VERB and so told
+      a reader nothing about the subject. Follows the `apr data` precedent: a
+      plain noun for the user-facing command, the Spanish name kept for the
+      engine and credited in the description. `apr probar` remains as a HIDDEN
+      alias so existing scripts keep working.
+
+      Subcommands group by what is UNDER TEST, not by verb:
+        web     WASM/browser build and runtime  (serve, build, watch, comply, stress)
+        llm     inference correctness/throughput/cost against an endpoint
+                (test, load, bench, sweep, score, experiment, data-audit)
+        media   rendered output vs ground truth (av-sync, audio, video, animation)
+        replay  the runner itself             (record, playbook, coverage, report)
+
+      Only `tensor` is routed today (PMAT-481 visual regression); the rest land
+      as they are delegated to the probador library.
     requires_model: false
     side_effects: [filesystem]
     subcommands:
@@ -429,6 +487,7 @@ commands:
         description: "Export tensor activations for visual regression testing (PMAT-481)"
         requires_model: true
         side_effects: [filesystem]
+    subcommands: [tensor]
 
   - name: diagnose
     category: misc
@@ -528,7 +587,7 @@ commands:
 
   - name: rm-gc-lint
     category: inspection
-    description: "Lint a captured `apr rm` / `apr gc` blob-GC observation (CRUX-A-25)"
+    description: "Lint a captured `apr rm` / externally captured gc blob-GC observation (CRUX-A-25)"
     requires_model: false
     side_effects: []
 
@@ -576,25 +635,25 @@ commands:
 
   - name: explain-token-lint
     category: inspection
-    description: "Validate captured `apr explain --format jsonl` sampler-chain trace (CRUX-F-19): schema + Σ post_prob ≈ 1 + sampled_id present in candidates + optional greedy=argmax assertion"
+    description: "Validate an externally captured token-selection JSONL sampler-chain trace (CRUX-F-19; no apr producer yet): schema + Σ post_prob ≈ 1 + sampled_id present in candidates + optional greedy=argmax assertion"
     requires_model: false
     side_effects: []
 
   - name: check-finite-lint
     category: inspection
-    description: "Validate captured `apr trace --check-finite` outputs (CRUX-F-11): error JSON shape (6 keys + value ∈ {nan,+inf,-inf}) + layer-coverage list (min_layers + transformer-op prefixes)"
+    description: "Validate externally captured check-finite outputs (CRUX-F-11; no apr producer yet): error JSON shape (6 keys + value ∈ {nan,+inf,-inf}) + layer-coverage list (min_layers + transformer-op prefixes)"
     requires_model: false
     side_effects: []
 
   - name: attn-viz-lint
     category: inspection
-    description: "Validate captured `apr attn-viz` outputs (CRUX-F-17): 4-D attention dump row-softmax normalization + causal-mask zero + HTML heatmap count"
+    description: "Validate an externally captured attention dump (CRUX-F-17; no apr producer yet): 4-D attention dump row-softmax normalization + causal-mask zero + HTML heatmap count"
     requires_model: false
     side_effects: []
 
   - name: embed-viz-lint
     category: inspection
-    description: "Validate captured `apr debug embed-viz` CSV (CRUX-F-18): schema (4 columns + finite coords + non-negative token_id) + optional row-count=vocab_size + optional byte-identical determinism check"
+    description: "Validate an externally captured embedding-projection CSV (CRUX-F-18; no apr producer yet): schema (4 columns + finite coords + non-negative token_id) + optional row-count=vocab_size + optional byte-identical determinism check"
     requires_model: false
     side_effects: []
 
@@ -606,7 +665,7 @@ commands:
 
   - name: react-trace-lint
     category: inspection
-    description: "Validate captured `apr agent --trace` ReAct loop trace (CRUX-I-06): termination reason matches exit-code (final_answer=0, max_iterations|timeout=2, tool_error=3, parse_fail=4) + iteration bound + scratchpad grammar (Thought/Action/Observation/Final Answer)"
+    description: "Validate an externally captured ReAct loop trace (CRUX-I-06; no apr producer yet): termination reason matches exit-code (final_answer=0, max_iterations|timeout=2, tool_error=3, parse_fail=4) + iteration bound + scratchpad grammar (Thought/Action/Observation/Final Answer)"
     requires_model: false
     side_effects: []
 
@@ -618,13 +677,13 @@ commands:
 
   - name: ddp-metrics-lint
     category: inspection
-    description: "Validate two captured `apr finetune --parallel ddp --json` outputs (CRUX-D-11): scaling efficiency T_N/(N*T_1) >= 0.85 + loss parity |L_N - L_1|/L_1 <= 0.01 + per-step allreduce bandwidth > 0"
+    description: "Validate two externally captured DDP metrics JSONs, N=1 and N=k (CRUX-D-11; no apr producer yet): scaling efficiency T_N/(N*T_1) >= 0.85 + loss parity |L_N - L_1|/L_1 <= 0.01 + per-step allreduce bandwidth > 0"
     requires_model: false
     side_effects: []
 
   - name: audio-inspect-lint
     category: inspection
-    description: "Validate captured `apr dataset audio-inspect --format json` body (CRUX-H-13): amplitude bounds (finite + [-1,1]) + sample_rate (canonical set or expected) + channel_shape (positive + optional channel-count match)"
+    description: "Validate an externally captured audio-inspect JSON body (CRUX-H-13; no apr producer yet): amplitude bounds (finite + [-1,1]) + sample_rate (canonical set or expected) + channel_shape (positive + optional channel-count match)"
     requires_model: false
     side_effects: []
 
@@ -688,30 +747,88 @@ commands:
     requires_model: false
     side_effects: [stdio]
 
+  # ── Consolidated sibling CLIs (APR-MONO) ──
+  # Each was reachable ONLY from its own binary; the command enum lived in a
+  # main.rs, importable by nothing. apr now calls the SAME dispatch fn.
+
+  - name: rag
+    category: pipeline
+    description: "RAG pipeline: index, query, transcribe (was the trueno-rag binary)"
+    requires_model: false
+    side_effects: [filesystem]
+    subcommands: [demo, extract-frames, index, info, query, transcribe]
+
+  - name: zram
+    category: tools
+    description: "zram device management (was the trueno-zram binary)"
+    requires_model: false
+    side_effects: [filesystem]
+    subcommands: [benchmark, create, remove, status]
+
+  - name: sim
+    category: tools
+    description: "Discrete-event simulation (was the simular binary)"
+    requires_model: false
+    side_effects: [filesystem]
+    # `version` comes from #2527's simular clap conversion, which the batch
+    # takes over #2493's. FALSIFY-CLI-006 caught the omission.
+    subcommands: [emc-check, emc-validate, list-emc, render, run, validate, verify, version]
+
+  - name: cgp
+    category: tools
+    description: "Compute-graph profiling (was the aprender-cgp binary)"
+    requires_model: false
+    side_effects: [filesystem]
+    subcommands: [baseline, bench, compete, contract, diff, doctor, explain, profile, roofline, trace, tui]
+
+  - name: pv
+    category: tools
+    description: "Provable-contracts CLI (also ships as the standalone pv binary)"
+    requires_model: false
+    side_effects: [filesystem]
+    subcommands: [audit, book, certify, check-parity, codegen, coq, coverage, diff, equations, explain, extract-pytorch, flux, fuzz, generate, graph, infer, invariants, kaizen, kani, lean, lean-status, lint, migrate, mirai, pipeline, probar, proof-status, query, roofline, scaffold, score, status, tla, unlock, validate, verify-bindings, verify-pipeline, verify-structure]
+
 # ── Falsification Conditions ──
 
 falsification:
   - name: FALSIFY-CLI-001
     description: "Command listed in contract but missing from `apr --help`"
     check: "Every command.name in this YAML must appear in `apr --help` output"
-    enforcement: "cargo test --test apr_cli_commands test_all_contract_commands_exist"
+    enforcement: "cargo test -p apr-cli --test cli_commands test_all_contract_commands_exist"
 
   - name: FALSIFY-CLI-002
     description: "Command in `apr --help` but missing from contract"
     check: "Every command in `apr --help` must have an entry in this YAML"
-    enforcement: "cargo test --test apr_cli_commands test_no_unregistered_commands"
+    enforcement: "cargo test -p apr-cli --test cli_commands test_no_unregistered_commands"
 
   - name: FALSIFY-CLI-003
     description: "Command --help exits with non-zero code"
     check: "Every command must exit 0 on --help"
-    enforcement: "cargo test --test apr_cli_commands test_all_commands_help"
+    enforcement: "cargo test -p apr-cli --test cli_commands test_all_commands_respond_to_help"
 
   - name: FALSIFY-CLI-004
     description: "Command panics on --help"
     check: "No command may panic when invoked with --help"
-    enforcement: "cargo test --test apr_cli_commands test_all_commands_help"
+    enforcement: "cargo test -p apr-cli --test cli_commands test_all_commands_respond_to_help"
 
   - name: FALSIFY-CLI-005
     description: "Command count drifts from contract"
     check: "The number of commands in `apr --help` must equal the count in this YAML"
-    enforcement: "cargo test --test apr_cli_commands test_command_count_matches"
+    enforcement: "cargo test -p apr-cli --test cli_commands test_command_count_matches"
+
+  - name: FALSIFY-CLI-THRESHOLD-NAN-001
+    description: >
+      A tolerance/threshold flag accepts a value that makes its gate
+      unfalsifiable. Every CRUX lint gate compares an observation against a
+      threshold (`mad > tol_abs`, `efficiency < floor`, `used_pct < threshold`);
+      IEEE-754 makes every comparison against NaN false, so a NaN threshold
+      makes the failing branch unreachable — the command exits 0 and the report
+      prints `Ok` next to the violating number. A negative value does the same
+      to the floor-style gates. Shipped in 0.63.0 on 8 flags across 5 commands
+      (see #2391).
+    check: >
+      Every f64 tolerance/threshold flag must reject NaN, ±inf and
+      out-of-domain values at parse time (exit 2), and each lint `run()` must
+      re-check its thresholds so a non-clap caller also fails closed. The
+      shared validator is crates/apr-cli/src/commands/threshold_arg.rs.
+    enforcement: "cargo test -p apr-cli --test cli_commands nan_threshold_never_reports_a_failing_lint_gate_as_ok"

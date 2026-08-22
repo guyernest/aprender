@@ -9,6 +9,24 @@
 
 # Use bash for shell commands
 SHELL := /bin/bash
+# Recipes ran as `bash -c` with NO pipefail, so any `cmd | tail`/`| grep` reported
+# the LAST command's status and a failing producer was laundered to success. That
+# is the defect class this repo keeps rediscovering (see the Verification
+# Discipline section of CLAUDE.md: "Never read $? through a pipe").
+#
+# Measured on this Makefile before the change: 577 recipe lines, 14 with a pipe.
+# The worst was the release gate itself, `contracts:` -> `pv lint contracts/ 2>&1
+# | tail -5`, which could never fail the build no matter what pv reported.
+#
+# DELIBERATELY `-o pipefail` ONLY, not `-eu -o pipefail`. Measured exposure of the
+# other two flags on this file: 248 recipe lines use `;` chains (-e would abort
+# them mid-recipe) and 74 reference `$$VAR` (-u would error on any unset one).
+# Changing three variables at once across 577 lines is how a "small" fix becomes
+# an outage. pipefail is provably orthogonal to both -- verified with fixtures:
+# a `;` chain and an unset var both still exit 0 under pipefail alone -- so it
+# closes the laundering class and touches nothing else. Add -e/-u later, one at
+# a time, each with its own blast-radius measurement.
+.SHELLFLAGS := -o pipefail -c
 
 # Disable built-in rules for performance
 .SUFFIXES:
@@ -39,7 +57,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests lint-current check-wasm32
 
 # Default target
 all: tier2
@@ -145,6 +163,14 @@ test-spec: ## Run ALL spec falsification tests (structural only, no models)
 # Linting
 lint:
 	cargo clippy -- -D warnings
+
+# Toolchain CEILING gate (aprender#2370). `lint` above runs through the
+# rust-toolchain.toml pin, so clippy findings from NEWER releases accumulate
+# unseen until someone's toolchain outruns the pin. This lints on current
+# stable instead, and refuses to pass vacuously. Mirror of `check_msrv.sh`,
+# which guards the floor.
+lint-current:
+	@bash scripts/check_clippy_current_stable.sh
 
 # Format check
 fmt:
@@ -290,6 +316,10 @@ tier3:
 	@bash scripts/check_include_files.sh
 	@echo "Checking publish safety (symlinks, companion lookups)..."
 	@bash scripts/check_publish_safety.sh
+	@echo "Checking cargo-deny policy (licences, bans, sources, advisories)..."
+	@$(MAKE) --no-print-directory deny
+	@echo "Checking exclude patterns are root-anchored (CB-510 class)..."
+	@bash scripts/check_exclude_anchored.sh
 	@echo "Checking build.rs crate-root escapes (v0.31.1 yank class)..."
 	@bash scripts/check_build_rs_paths.sh
 	@echo "Checking self-hosted CI jobs pin a discriminating runner label..."
@@ -434,6 +464,14 @@ tier3:
 # against tier3's 1-5 minute budget. Its four failure modes were each induced,
 # observed and reverted rather than assumed — see the target's own comment block.
 	@$(MAKE) contrastive-data-boundary
+	@echo "Checking the toolchain-ceiling guard's comparator (aprender#2370)..."
+	@bash scripts/check_clippy_current_stable.sh --self-test
+	@echo "Checking no contract cites a test that does not exist (aprender#2465)..."
+	@bash scripts/check_contract_test_binding.sh --self-test
+	@bash scripts/check_contract_test_binding.sh
+	@echo "Checking no contract names an enforcement command that cannot run (aprender#2504)..."
+	@bash scripts/check_contract_enforcement.sh --self-test
+	@bash scripts/check_contract_enforcement.sh
 	@if [ -d tests/golden ]; then \
 		if . scripts/apr_bin.sh 2>/dev/null; then \
 			echo "Running probar golden regression with profiling... ($$APR)"; \
@@ -947,7 +985,7 @@ coverage-check: coverage
 # contracts/ and is the documented entry point (never hand-rolled bash).
 contracts:
 	@echo "== provable contracts: pv lint contracts/ =="
-	@pv lint contracts/ 2>&1 | tail -5
+	@. scripts/pv_bin.sh && "$$PV" lint contracts/ 2>&1 | tail -5
 	@echo "== contract engine tests =="
 	@cargo test -p aprender-contracts --lib 2>&1 | grep -E "test result" | tail -1
 
@@ -979,6 +1017,9 @@ coverage: ## Coverage summary + threshold check (warm: ~3min)
 	if [ "$$LF" -gt 0 ]; then COV_PCT=$$((LH * 100 / LF)); else COV_PCT=0; fi; \
 	echo "TOTAL: $$LH/$$LF lines covered ($${COV_PCT}%)"; \
 	echo "TOTAL $$LH $$LF $${COV_PCT}%" > target/coverage/summary.txt; \
+	mkdir -p .pmat-metrics; \
+	printf '{"coverage_pct":%s}' "$$COV_PCT" > .pmat-metrics/coverage.result; \
+	echo "   wrote .pmat-metrics/coverage.result ($${COV_PCT}%) for pmat score"; \
 	test -f ~/.cargo/config.toml.bak && mv ~/.cargo/config.toml.bak ~/.cargo/config.toml || true; \
 	if [ "$$COV_PCT" -lt "$(COV_FLOOR)" ]; then \
 		echo "❌ REGRESSION: coverage $${COV_PCT}% fell below the enforced floor $(COV_FLOOR)%"; \
@@ -1098,12 +1139,24 @@ audit:
 # Validate dependencies (duplicates + security)
 deps-validate:
 	@echo "🔍 Validating dependencies..."
-	@cargo tree --duplicate | grep -v "^$$" || echo "✅ No duplicate dependencies"
-	@cargo audit || echo "⚠️  Security issues found"
+	@# `cmd | grep ... || echo` reads GREP's status, not cargo's, so this target
+	@# exited 0 while printing 1,828 lines of duplicates. Nothing invoked it either.
+	@# Same class as #2336/#2360. Redirect, then read the real status.
+	@cargo tree --duplicates > /tmp/apr-dup.txt 2>&1; \
+	if [ -s /tmp/apr-dup.txt ]; then \
+		echo "FAIL: duplicate dependencies present:"; cat /tmp/apr-dup.txt; exit 1; \
+	fi; \
+	echo "OK: no duplicate dependencies"
+	@cargo audit > /tmp/apr-audit.txt 2>&1; rc=$$?; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: cargo audit reported issues:"; cat /tmp/apr-audit.txt; exit 1; \
+	fi; \
+	echo "OK: cargo audit clean"
 
 # Run cargo-deny checks (licenses, bans, advisories, sources)
 deny:
 	@echo "🔒 Running cargo-deny checks..."
+	@bash scripts/check_deny_exemptions_live.sh
 	@if command -v cargo-deny >/dev/null 2>&1; then \
 		cargo deny check; \
 	else \
@@ -1540,7 +1593,13 @@ showcase-headless: ## Run cbtop in headless mode with JSON output (simulated dat
 	@cargo run --release -p apr-cli -- cbtop --headless --simulated --json --output target/showcase-results.json --iterations 100
 	@echo "✅ Results saved to target/showcase-results.json"
 
-showcase-ci: ## Run showcase benchmark in CI mode with threshold check
+# NOTE (#2397): `cbtop --ci` now honours the report's own FAIL/red verdict, not
+# just the explicit --throughput number. The --simulated pipeline jitters each
+# brick +/-20% around its budget, so roughly half land over budget and this
+# target exits non-zero. That is the true state of the simulated data; it used
+# to print "CI validation passed" over a report that read "Status: FAIL | CI:
+# red" only because the exit path never consulted the verdict.
+showcase-ci: ## Run showcase benchmark in CI mode with threshold check (RED on simulated data — see #2397)
 	@echo "🔍 Running showcase CI validation (throughput >= 100 tok/s)..."
 	@cargo run --release -p apr-cli -- cbtop --headless --simulated --ci --throughput 100 --iterations 100
 	@echo "✅ CI validation passed"
@@ -2956,7 +3015,11 @@ publish: ## Publish crate(s) to crates.io — strips [patch], publishes, then ve
 	fi
 	@CRATE=$(CRATE); \
 	if [ -z "$$CRATE" ]; then \
-		echo "Usage: make publish CRATE=aprender   (or apr-cli, entrenar-lora)"; \
+		echo "Usage: make publish CRATE=aprender   (or apr-cli, provable-contracts, ...)"; \
+		echo "       any crate listed by: python3 scripts/lib/cascade_universe.py ."; \
+		echo "       -- INCLUDING the crates/facades/ workspace, which is excluded"; \
+		echo "          from the root and which this target could not reach at all"; \
+		echo "          before aprender#2559."; \
 		echo "Restoring config..."; \
 		if [ -f .cargo/config.toml.publish-backup ]; then \
 			cp .cargo/config.toml.publish-backup .cargo/config.toml; \
@@ -2965,7 +3028,29 @@ publish: ## Publish crate(s) to crates.io — strips [patch], publishes, then ve
 		exit 1; \
 	fi; \
 	echo "Publishing $$CRATE..."; \
-	cargo publish -p $$CRATE --allow-dirty --locked; \
+	SEL="-p $$CRATE"; \
+	MANIFEST=$$(python3 scripts/lib/cascade_universe.py . | awk -F'\t' -v c="$$CRATE" '$$1==c{print $$3}'); \
+	WSROOT=$$(python3 scripts/lib/cascade_universe.py . | awk -F'\t' -v c="$$CRATE" '$$1==c{print $$4}'); \
+	if [ -z "$$MANIFEST" ]; then \
+		echo "FAIL: $$CRATE is not a publishable crate in ANY workspace here."; \
+		echo "      (scripts/lib/cascade_universe.py enumerates all of them)"; \
+		if [ -f .cargo/config.toml.publish-backup ]; then \
+			cp .cargo/config.toml.publish-backup .cargo/config.toml; \
+			rm -f .cargo/config.toml.publish-backup; \
+		fi; \
+		exit 1; \
+	fi; \
+	if [ "$$WSROOT" != "$$(pwd)" ]; then \
+		echo "  ($$CRATE lives in the excluded workspace $$WSROOT; selecting by --manifest-path,"; \
+		echo "   because \`cargo publish -p $$CRATE\` from here is rc=101 'did not match any packages')"; \
+		SEL="--manifest-path $$MANIFEST"; \
+	fi; \
+	DRY=""; \
+	if [ -n "$$PUBLISH_DRY_RUN" ]; then \
+		echo "  (PUBLISH_DRY_RUN set: packaging and resolving, but NOT uploading)"; \
+		DRY="--dry-run --no-verify"; \
+	fi; \
+	cargo publish $$SEL $$DRY --allow-dirty --locked; \
 	STATUS=$$?; \
 	echo "Restoring .cargo/config.toml..."; \
 	if [ -f .cargo/config.toml.publish-backup ]; then \
@@ -2975,6 +3060,10 @@ publish: ## Publish crate(s) to crates.io — strips [patch], publishes, then ve
 	if [ $$STATUS -ne 0 ]; then \
 		echo "FAIL: cargo publish failed"; \
 		exit $$STATUS; \
+	fi; \
+	if [ -n "$$PUBLISH_DRY_RUN" ]; then \
+		echo "DRY RUN OK: $$CRATE resolved and packaged; nothing was uploaded."; \
+		exit 0; \
 	fi; \
 	echo ""; \
 	echo "=== POST-PUBLISH VERIFICATION (PMAT-517) ==="; \
@@ -3015,6 +3104,9 @@ publish: ## Publish crate(s) to crates.io — strips [patch], publishes, then ve
 		fi; \
 		echo "POST-PUBLISH VERIFICATION: PASSED"; \
 	fi
+
+check-wasm32: ## Verify aprender-core still compiles for wasm32-unknown-unknown (aprender#2310)
+	@bash scripts/check_wasm32_core_builds.sh
 
 check-siblings: ## Verify sibling repos exist and versions are compatible
 	@echo "Checking sibling repositories..."

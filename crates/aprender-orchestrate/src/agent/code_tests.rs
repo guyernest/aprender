@@ -205,6 +205,57 @@ fn test_check_invalid_apr_returns_false_on_empty_dirs() {
     let _ = result;
 }
 
+/// `--resume <unknown-id>` used to start a FRESH session and exit 0, so a
+/// typo'd id left the operator believing a conversation was being continued
+/// that the model had no history of. It must fail, and name the id.
+///
+/// The unreadable `--manifest` is a tripwire: it is the next thing `cmd_code`
+/// would hit, so if the resume check is removed this test fails on the wrong
+/// message in milliseconds instead of launching a model.
+#[test]
+fn test_cmd_code_rejects_unknown_resume_session_id() {
+    let id = "no-such-session-2398-falsifier";
+    let err = cmd_code(
+        None,
+        std::path::PathBuf::from("."),
+        Some(Some(id.to_string())),
+        vec!["hi".to_string()],
+        true,
+        50,
+        Some(std::path::PathBuf::from("/nonexistent/manifest-2398.toml")),
+        None,
+        "text",
+        "text",
+    )
+    .expect_err("an unknown --resume id must be an error, not a silent fresh session");
+    let msg = err.to_string();
+    assert!(msg.contains("no such session"), "must say the session is unknown; got: {msg}");
+    assert!(msg.contains(id), "must name the id the operator typed; got: {msg}");
+}
+
+/// `--project /typo` used to be ignored, running the agent against the CURRENT
+/// directory while the operator believed it was scoped elsewhere.
+#[test]
+fn test_cmd_code_rejects_nonexistent_project_dir() {
+    let dir = "/nonexistent-project-dir-2398";
+    let err = cmd_code(
+        None,
+        std::path::PathBuf::from(dir),
+        None,
+        vec!["hi".to_string()],
+        true,
+        50,
+        Some(std::path::PathBuf::from("/nonexistent/manifest-2398.toml")),
+        None,
+        "text",
+        "text",
+    )
+    .expect_err("a --project path that is not a directory must be an error");
+    let msg = err.to_string();
+    assert!(msg.contains("--project"), "must name the flag; got: {msg}");
+    assert!(msg.contains(dir), "must name the path; got: {msg}");
+}
+
 #[test]
 fn test_cmd_code_signature_matches_spec() {
     // Verify the public API signature exists and is callable
@@ -897,4 +948,51 @@ mod non_interactive_format_tests {
         let msg = format!("{err}");
         assert!(msg.contains("invalid JSON"), "error must mention JSON: {msg}");
     }
+}
+
+// ============================================================================
+// #2444: --max-turns must be spent before a turn runs
+// ============================================================================
+
+/// FALSIFIER (#2444 finding 1): `--max-turns 0` must not buy a turn.
+///
+/// `apr code --max-turns 0 -p "Say OK"` used to launch `apr serve`, answer,
+/// and exit 0 — on two different prompts. The non-interactive branch called
+/// `run_single_prompt` without ever reading `max_turns`, which is only
+/// consumed by the REPL; the cap was inert at every value in `-p` mode. The
+/// REPL has always treated 0 as "no turns" (`turn_count >= max_turns` breaks
+/// before reading input), so this is the same meaning applied to both modes.
+#[test]
+fn max_turns_zero_refuses_a_single_prompt_run() {
+    let mut budget = TurnBudget::new(0);
+    let refusal = permit_single_prompt(&mut budget, /* non_interactive */ true)
+        .expect_err("--max-turns 0 must refuse a -p run, not permit one");
+    let msg = refusal.to_string();
+    assert!(
+        msg.contains("--max-turns 0"),
+        "the refusal must name the flag and its value, got: {msg}"
+    );
+}
+
+/// The cap must still permit the runs it allows — a gate that always refuses
+/// is as useless as one that never does.
+#[test]
+fn max_turns_one_permits_exactly_one_single_prompt_run() {
+    let mut budget = TurnBudget::new(1);
+    assert!(permit_single_prompt(&mut budget, true)
+        .expect("one turn of budget must permit a -p run")
+        .is_some());
+    // The permit was spent: a second turn is no longer affordable.
+    assert!(budget.try_permit().is_none(), "budget must be consumed");
+}
+
+/// An interactive session takes no permit here — the REPL spends the same
+/// budget per turn — so `--max-turns 0` still reaches the REPL's own
+/// "max turns reached" message rather than erroring at startup.
+#[test]
+fn interactive_sessions_take_no_single_prompt_permit() {
+    let mut budget = TurnBudget::new(0);
+    let permit = permit_single_prompt(&mut budget, /* non_interactive */ false)
+        .expect("interactive startup must not be refused here");
+    assert!(permit.is_none());
 }

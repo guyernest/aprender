@@ -144,7 +144,8 @@
                 quality: false,
             },
             Commands::Debug {
-                file: PathBuf::from("m.apr"),
+                file: Some(PathBuf::from("m.apr")),
+                action: None,
                 drama: false,
                 hex: false,
                 strings: false,
@@ -165,6 +166,7 @@
             },
             Commands::Lint {
                 file: PathBuf::from("m.apr"),
+                strict: false,
             },
             Commands::Extended(ExtendedCommands::Qa {
                 file: PathBuf::from("m.apr"),
@@ -212,7 +214,7 @@
             Commands::Extended(ExtendedCommands::Tree {
                 file: PathBuf::from("m.apr"),
                 filter: None,
-                format: "ascii".to_string(),
+                format: crate::commands::tree::TreeFormat::Ascii,
                 sizes: false,
                 depth: None,
             }),
@@ -344,7 +346,8 @@
             density: 0.2,
             seed: 42,
             plan: false,
-        };
+                force: true,
+            };
         let paths = extract_model_paths(&cmd);
         assert_eq!(paths.len(), 3);
     }

@@ -46,6 +46,9 @@ fn registered_commands() -> Vec<&'static str> {
         "manifest",
         "explain",
         "tensors",
+        // aprender#2377 finding 3: the producers `*-lint` help documents.
+        "dataset",
+        "kernel",
         "trace",
         "diff",
         "hex",
@@ -92,7 +95,10 @@ fn registered_commands() -> Vec<&'static str> {
         "runs",
         "experiment",
         "showcase",
-        "probar",
+        // Renamed from "probar" (#2525). `apr probar` survives as a HIDDEN
+        // clap alias, and clap omits hidden aliases from --help -- so the
+        // name that must appear in this list is the visible one.
+        "test",
         "modelfile",
         "diagnose",
         "ollama-chat-lint",
@@ -138,6 +144,12 @@ fn registered_commands() -> Vec<&'static str> {
         "decrypt",
         "mcp",
         "code",
+        // APR-MONO: sibling CLIs that had no route through apr at all
+        "rag",
+        "zram",
+        "sim",
+        "cgp",
+        "pv",
     ]
 }
 
@@ -455,5 +467,288 @@ fn backend_cuda_on_non_cuda_build_refuses_instead_of_falling_back() {
         "FALSIFY-BACKEND-CUDA-HONESTY-001: `--backend cuda` fell through to the wgpu \
          backend — this is the exact silent-downgrade this gate exists to prevent.\n\
          Output:\n{combined}"
+    );
+}
+
+/// True when the report printed `<gate> : Ok` — i.e. a positive assertion that
+/// the named gate examined the observation and was satisfied by it.
+fn report_says_gate_is_ok(stdout: &str, gate: &str) -> bool {
+    stdout.lines().any(|line| {
+        let line = line.trim();
+        match line.split_once(':') {
+            Some((label, verdict)) => label.trim() == gate && verdict.trim().starts_with("Ok"),
+            None => false,
+        }
+    })
+}
+
+/// FALSIFY-CLI-THRESHOLD-NAN-001: a NaN (or negative) tolerance must never turn
+/// a failing CRUX lint gate into a reported pass.
+///
+/// Every one of these gates compares an observation against a threshold —
+/// `mad > tol_abs`, `efficiency < floor`, `used_pct < threshold`. IEEE-754
+/// makes every comparison against NaN false, so in apr 0.63.0 `--tol-abs nan`,
+/// `--scaling-floor nan`, `--preempt-threshold nan`, `--tolerance nan` and
+/// `--epsilon nan` each made the failing branch unreachable: the command exited
+/// 0 AND the report printed a positive `Ok` next to the violating number, e.g.
+/// `scaling_efficiency : Ok { efficiency: 0.0025 }` for a 0.25%-efficient DDP
+/// run. A CI log scraper reading that gets the wrong answer.
+///
+/// Each case runs twice against the SAME observation file: once with the
+/// shipped defaults (must fail — proving the body is genuinely bad and the gate
+/// works) and once with the disarming value (must also fail).
+#[test]
+fn nan_threshold_never_reports_a_failing_lint_gate_as_ok() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = |name: &str, body: &str| -> String {
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).expect("write fixture");
+        path.display().to_string()
+    };
+
+    let kv = p(
+        "kv.json",
+        r#"{"block_size_tokens":16,"total_blocks":100,"peak_used_pct":0.1,"preemption_count":3,
+            "timeline":[{"step":0,"t_ms":1.0,"used_blocks":10,"free_blocks":90,
+                         "used_pct":0.10,"active_seqs":1,"preempted_seqs":3}]}"#,
+    );
+    let parity = p("parity.json", r#"{"max_abs_diff":999.0,"cosine_sim":-0.5}"#);
+    let attn = p("attn.json", "[[[[3.0,2.0],[0.5,0.5]]]]");
+    let explain = p(
+        "explain.jsonl",
+        "{\"step\":0,\"sampled_id\":7,\"candidates\":[\
+         {\"token_id\":7,\"pre_prob\":0.9,\"post_prob\":0.5,\"rank\":0},\
+         {\"token_id\":3,\"pre_prob\":0.1,\"post_prob\":0.1,\"rank\":1}]}\n",
+    );
+    let ddp1 = p("ddp1.json", r#"{"tokens_per_sec":1000.0,"final_loss":2.0}"#);
+    let ddpn = p(
+        "ddpn.json",
+        r#"{"tokens_per_sec":10.0,"final_loss":9.9,
+            "ddp_metrics":{"allreduce_bandwidth_gbps":[12.5]}}"#,
+    );
+
+    // (args that fail at the defaults, the disarming values, the gate label
+    //  that must never be reported as Ok)
+    let cases: Vec<(Vec<String>, Vec<String>, &str)> = vec![
+        (
+            vec!["kv-timeline-lint".into(), "--timeline-file".into(), kv],
+            vec!["--preempt-threshold".into(), "nan".into()],
+            "preemption_trigger",
+        ),
+        (
+            vec!["attn-parity-lint".into(), "--parity-file".into(), parity],
+            vec![
+                "--tol-abs".into(),
+                "nan".into(),
+                "--tol-cos".into(),
+                "nan".into(),
+            ],
+            "parity_numerics",
+        ),
+        (
+            vec!["attn-viz-lint".into(), "--attn-file".into(), attn],
+            vec![
+                "--tolerance".into(),
+                "nan".into(),
+                "--epsilon".into(),
+                "nan".into(),
+            ],
+            "row_softmax",
+        ),
+        (
+            vec!["explain-token-lint".into(), "--jsonl-file".into(), explain],
+            vec!["--tolerance".into(), "nan".into()],
+            "probs_normalize",
+        ),
+        (
+            vec![
+                "ddp-metrics-lint".into(),
+                "--metrics-1gpu-file".into(),
+                ddp1,
+                "--metrics-ngpu-file".into(),
+                ddpn,
+                "--world-size".into(),
+                "4".into(),
+            ],
+            vec![
+                "--scaling-floor".into(),
+                "nan".into(),
+                "--loss-tolerance".into(),
+                "nan".into(),
+            ],
+            "scaling_efficiency",
+        ),
+    ];
+
+    for (base, disarm, gate) in cases {
+        let control = apr_binary().args(&base).output().expect("run apr");
+        assert!(
+            !control.status.success(),
+            "FALSIFY-CLI-THRESHOLD-NAN-001 control: `apr {}` must FAIL at the shipped \
+             defaults, otherwise the disarm case below proves nothing.\nstdout:\n{}",
+            base.join(" "),
+            String::from_utf8_lossy(&control.stdout)
+        );
+
+        let mut args = base.clone();
+        args.extend(disarm.iter().cloned());
+        let out = apr_binary().args(&args).output().expect("run apr");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !out.status.success(),
+            "FALSIFY-CLI-THRESHOLD-NAN-001: `apr {}` exited 0 — a NaN threshold disarmed \
+             the {gate} gate on a body that fails at the defaults.\nstdout:\n{stdout}",
+            args.join(" ")
+        );
+        assert!(
+            !report_says_gate_is_ok(&stdout, gate),
+            "FALSIFY-CLI-THRESHOLD-NAN-001: the report asserted `{gate} : Ok` for an \
+             observation it never actually checked.\nstdout:\n{stdout}"
+        );
+    }
+}
+
+// ============================================================================
+// FALSIFY-CLI-006: the DEPTH-2 surface must be locked, not just the top level
+// ============================================================================
+//
+// SURF-13 (#2505): `registered_commands()` holds only top-level names -- none
+// of them contains a space -- so of 238 invocable paths only 111 were gated.
+// The other 127 could be renamed or deleted and every surface gate stayed
+// green. 81 of those 127 are added by this branch's six consolidated sibling
+// CLIs, which is why the lock lands with them rather than after them.
+//
+// Same shape as FALSIFY-CLI-002/005 one level down: the contract's
+// `subcommands:` list and the built binary must agree in BOTH directions.
+
+/// Parse the `Commands:` block out of one `--help` invocation.
+fn help_subcommands(path: &[&str]) -> Vec<String> {
+    let mut cmd = apr_binary();
+    cmd.args(path).arg("--help");
+    let out = cmd.output().expect("apr --help");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    let mut subs = Vec::new();
+    let mut in_commands = false;
+    for line in stdout.lines() {
+        if line.starts_with("Commands:") {
+            in_commands = true;
+            continue;
+        }
+        if in_commands {
+            if line.starts_with("Options:") || line.starts_with("Arguments:") {
+                break;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(' ') {
+                    if let Some(name) = rest.split_whitespace().next() {
+                        if name != "help" {
+                            subs.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    subs
+}
+
+/// `(parent, [children])` for every parent the CONTRACT declares as having a
+/// `subcommands:` list.
+fn contract_subcommands() -> Vec<(String, Vec<String>)> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/apr-cli-commands-v1.yaml"
+    );
+    let text = std::fs::read_to_string(path).expect("read the command contract");
+
+    let mut out = Vec::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("  - name: ") {
+            current = Some(rest.trim().trim_matches('"').to_string());
+        } else if let Some(rest) = line.strip_prefix("    subcommands: [") {
+            let kids: Vec<String> = rest
+                .trim_end_matches(']')
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if let Some(parent) = current.clone() {
+                out.push((parent, kids));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn every_declared_subcommand_exists_in_the_binary() {
+    let declared = contract_subcommands();
+
+    // Vacuity: a parse that found nothing would make the loop below pass
+    // trivially -- which is exactly how a depth-2 gate reports green while
+    // gating nothing.
+    assert!(
+        declared.len() >= 20,
+        "only {} parents parsed from the contract; the parser is broken, not the tree",
+        declared.len()
+    );
+    let total: usize = declared.iter().map(|(_, k)| k.len()).sum();
+    // Vacuity floor, NOT an exact count -- it exists to catch a broken parser,
+    // not to freeze the surface. Lowered 120 -> 105 when `apr qa-playbook` and
+    // its 15 subcommands were removed (#2539: it routed into aprender-qa-cli,
+    // which is `publish = false`, making apr-cli impossible to publish). The
+    // real count went 128 -> 113; keep the floor comfortably below it so
+    // ordinary command changes do not trip a check about parser health.
+    assert!(
+        total >= 105,
+        "only {total} depth-2 paths parsed; the contract parser is broken"
+    );
+
+    for (parent, kids) in &declared {
+        let actual = help_subcommands(&[parent.as_str()]);
+        let missing: Vec<&String> = kids.iter().filter(|k| !actual.contains(k)).collect();
+        assert!(
+            missing.is_empty(),
+            "FALSIFY-CLI-006: contract declares `apr {parent} {missing:?}` but the \
+             binary does not offer them.\nbinary has: {actual:?}"
+        );
+    }
+}
+
+#[test]
+fn every_subcommand_in_the_binary_is_declared() {
+    let declared: std::collections::HashMap<String, Vec<String>> =
+        contract_subcommands().into_iter().collect();
+
+    let mut undeclared: Vec<String> = Vec::new();
+    let mut seen = 0usize;
+    for parent in registered_commands() {
+        let actual = help_subcommands(&[parent]);
+        if actual.is_empty() {
+            continue;
+        }
+        seen += actual.len();
+        let empty = Vec::new();
+        let kids = declared.get(parent).unwrap_or(&empty);
+        for a in &actual {
+            if !kids.contains(a) {
+                undeclared.push(format!("{parent} {a}"));
+            }
+        }
+    }
+
+    // Vacuity companion: if no parent reported children, "nothing undeclared"
+    // would be true and meaningless.
+    assert!(
+        seen >= 105,
+        "only {seen} depth-2 paths seen in the binary; the help parser is broken"
+    );
+    assert!(
+        undeclared.is_empty(),
+        "FALSIFY-CLI-006: the binary offers depth-2 commands the contract does not \
+         declare: {undeclared:?}\nAdd them to contracts/apr-cli-commands-v1.yaml \
+         under their parent's `subcommands:`."
     );
 }

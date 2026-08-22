@@ -1,5 +1,5 @@
 [package]
-exclude = ["tests/", "benches/", "docs/", ".github/", "book/", ".pmat/", "target/", ".profraw", ".profdata", ".vscode/", ".idea/", "proptest-regressions/"]
+exclude = ["/tests/", "benches/", "docs/", ".github/", "book/", ".pmat/", "target/", ".profraw", ".profdata", ".vscode/", ".idea/", "proptest-regressions/"]
 name = "aprender-simulate"
 version.workspace = true
 edition = "2021"
@@ -12,6 +12,10 @@ keywords = ["simulation", "physics", "monte-carlo", "optimization", "reproducibl
 categories = ["simulation", "science", "mathematics"]
 
 [dependencies]
+# CLI argument parsing (declarative only — hand-rolled argv parsing is banned,
+# see scripts/check_no_hand_rolled_parsers.sh and src/cli/args.rs)
+clap = { workspace = true }
+
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -81,7 +85,7 @@ bitflags = "2.6"
 
 # Work stealing for Heijunka
 crossbeam-deque = "0.8"
-provable-contracts-macros = { version = "0.2" }
+provable-contracts-macros = { workspace = true }
 
 # Z3 removed from Cargo.toml to reduce Cargo.lock bloat (CB-081)
 # Re-add with: z3 = { version = "0.12", optional = true }
@@ -93,7 +97,7 @@ serde_yaml = "0.9"
 
 [dev-dependencies]
 # Contract trait enforcement (Section 23)
-provable-contracts = { version = "0.2" }
+provable-contracts = { path = "../aprender-contracts", package = "aprender-contracts" }
 # Property-based testing (Popperian falsification)
 proptest = "1.5"
 criterion = { version = "0.5", default-features = false }
