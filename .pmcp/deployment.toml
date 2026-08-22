@@ -1,6 +1,0 @@
-# Auto-generated deployment info for landing page integration
-# This file is created automatically when deploying to pmcp-run
-
-[deployment]
-server_id = "aprender-setfit-predict"
-endpoint = "https://aprender-setfit-predict.us-east.true-mcp.com/mcp"

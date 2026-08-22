@@ -100,3 +100,11 @@ per-layer-trace/
 # - aprender-train/checkpoints -> machine-local /mnt/... (package-excluded)
 /crates/aprender-present/contracts
 /crates/aprender-train/checkpoints
+
+# Local agent/tooling state — machine-specific, never part of the source tree.
+# Root-anchored (CB-510): a bare `gsd/` would also match any src/**/gsd/.
+/.gsd/
+/.serena/
+# `deploy.toml` IS curated and tracked; `deployment.toml` is written by
+# `cargo pmcp deploy` on every run and only records the last endpoint.
+/.pmcp/deployment.toml
