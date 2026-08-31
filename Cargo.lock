@@ -864,6 +864,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aprender-mcp-setfit-train"
+version = "0.63.0"
+dependencies = [
+ "async-trait",
+ "pmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "aprender-monte-carlo"
 version = "0.63.0"
 dependencies = [
@@ -1393,7 +1405,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tower 0.5.3",
- "tower-http",
+ "tower-http 0.6.11",
  "tracing",
  "ureq 2.12.1",
  "uuid",
@@ -1508,7 +1520,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tower 0.5.3",
- "tower-http",
+ "tower-http 0.6.11",
 ]
 
 [[package]]
@@ -1661,7 +1673,7 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tower 0.5.3",
- "tower-http",
+ "tower-http 0.6.11",
  "trybuild",
  "unicode-normalization",
  "uuid",
@@ -3214,6 +3226,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64-simd"
@@ -9810,14 +9828,14 @@ dependencies = [
 
 [[package]]
 name = "pmcp"
-version = "2.9.0"
+version = "2.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88c9cf51f3ce3953091a5f58e4de10d11a739705058dc9d9a5c66103c7c1cba6"
+checksum = "8a9c0d3cb27c49e1680236e0ef4c15d166018fdd892d9fe9334b9b02da5c5e2c"
 dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.9",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "dashmap",
@@ -9837,6 +9855,7 @@ dependencies = [
  "parking_lot",
  "pmcp-widget-utils",
  "regex",
+ "ring",
  "rustls 0.23.40",
  "schemars 1.2.1",
  "serde",
@@ -9849,7 +9868,7 @@ dependencies = [
  "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tower 0.5.3",
- "tower-http",
+ "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -9858,6 +9877,8 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
+ "zeroize",
 ]
 
 [[package]]
@@ -10905,7 +10926,7 @@ dependencies = [
  "tokio-rustls 0.26.4",
  "tokio-util",
  "tower 0.5.3",
- "tower-http",
+ "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -10946,7 +10967,7 @@ dependencies = [
  "tokio-rustls 0.26.4",
  "tokio-util",
  "tower 0.5.3",
- "tower-http",
+ "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -13210,6 +13231,21 @@ dependencies = [
  "tower-service",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b11f75e912b0c2be01b63d8cf8057b8c3f97cf34abb3d431a3a4c8675498e233"
+dependencies = [
+ "bitflags 2.13.0",
+ "bytes",
+ "http 1.4.2",
+ "percent-encoding",
+ "pin-project-lite",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]

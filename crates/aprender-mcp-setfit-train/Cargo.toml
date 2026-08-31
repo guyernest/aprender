@@ -1,0 +1,58 @@
+[package]
+name = "aprender-mcp-setfit-train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Thin single-algorithm MCP training server: SetFit few-shot training as an async MCP Task over the pmcp SDK"
+keywords = ["mcp", "setfit", "training", "aprender", "pmcp"]
+categories = ["science", "web-programming"]
+readme = "README.md"
+# Not published until the pmcp.run pilot proves the pattern — same policy as
+# aprender-mcp-setfit. The crate is a deployment unit, not a library.
+publish = false
+
+[lib]
+name = "aprender_mcp_setfit_train"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aprender-mcp-setfit-train"
+path = "src/main.rs"
+
+[dependencies]
+# PAIML's Rust MCP SDK. 2.19 is where MCP Tasks matured (typed `tasks/*`
+# dispatch, `ServerBuilder::task_store`, the s45/s50 lifecycle examples).
+# NOTE: this pin raises the whole workspace's resolved `pmcp` from 2.9 to 2.19,
+# including the already-shipping predict crates whose manifests still say "2.9".
+# They compile unchanged, but "the servers ship on ONE SDK" is currently only
+# semver unification in Cargo.lock, not a declared invariant — promoting pmcp to
+# `[workspace.dependencies]` is the real fix and is deliberately left to its own
+# change, since it edits crates with a PR in flight.
+#
+# NO `streamable-http`: this crate is stdio only (`run_stdio`), and that feature
+# drags axum/hyper/rustls/ring in. The HTTP transport belongs to a future
+# `-lambda` wrapper, exactly as the predict pair splits it.
+#
+# BUT the package-count saving is NOT banked by any build this repo runs.
+# `resolver = "2"` unifies features per package across one invocation, and
+# `aprender-mcp-setfit`/`-lambda` DO request `streamable-http`, so
+# `cargo build --release` and CI's `--workspace` nextest both compile the one
+# `pmcp` rlib with axum/hyper/rustls and link it into this stdio-only binary.
+# The saving is real only for an isolated `cargo build -p aprender-mcp-setfit-train`.
+# Declaring the narrow feature set here is still right — it is what makes the
+# isolated build cheap and states the dependency honestly — but do not quote a
+# workspace-wide package count from it.
+pmcp = { version = "2.19", features = ["schema-generation"] }
+schemars = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+# `TaskStore` is an `#[async_trait]` trait, so the decorator that implements it
+# needs the same attribute.
+async-trait = "0.1"
+
+[lints]
+workspace = true
