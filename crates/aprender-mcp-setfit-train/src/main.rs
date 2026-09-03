@@ -22,9 +22,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use aprender_mcp_setfit_train::{
-    build_server, JobRegistry, TrainerPaths, TrainingTaskStore, SERVER_NAME,
+    build_server, AprenderTaskStore, CancelSink, InMemoryTaskBackend, RunningJobs, TrainerPaths,
+    SERVER_NAME,
 };
-use pmcp::server::task_store::{InMemoryTaskStore, TaskStore};
 
 /// What argv asked for: a configured server, or just its own documentation.
 #[derive(Debug)]
@@ -149,14 +149,18 @@ async fn main() -> ExitCode {
     }
 
     let paths = Arc::new(paths);
-    let registry = Arc::new(JobRegistry::default());
-    // The decorator IS the pairing hook: pmcp drives `tasks/*` through it, and
-    // it reports each minted task back to the registry. Handing the builder the
-    // bare InMemoryTaskStore would leave every submit unpaired.
-    let store: Arc<dyn TaskStore> = Arc::new(TrainingTaskStore::new(
-        Arc::new(InMemoryTaskStore::new()),
-        Arc::clone(&registry),
-    ));
+    // Single-flight admission AND the cancel relay. The store owns the task
+    // RECORD; this owns the running child; `CancelSink` is the seam. Cancelling
+    // a record without stopping the work would leave a CPU-saturating trainer
+    // alive and every later submit refused.
+    let running = Arc::new(RunningJobs::new());
+    // `InMemoryTaskBackend` is the right backend for a long-lived stdio
+    // process. The serverless deployment swaps in a DynamoDB backend behind the
+    // same seam — the store, the tools and this wiring do not change.
+    let store = Arc::new(
+        AprenderTaskStore::new(Arc::new(InMemoryTaskBackend::new()))
+            .with_cancel_sink(Arc::clone(&running) as Arc<dyn CancelSink>),
+    );
 
     eprintln!(
         "{SERVER_NAME}: apr={} data={} out={} — serving `train`/`train_status` on stdio",
@@ -167,8 +171,8 @@ async fn main() -> ExitCode {
 
     let server = match build_server(
         paths,
-        registry,
         store,
+        running,
         SERVER_NAME,
         env!("CARGO_PKG_VERSION"),
     ) {

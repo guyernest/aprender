@@ -18,9 +18,10 @@
 //!    the terminal state against the id and owner dispatch actually used;
 //! 5. `tasks/result` serves the status payload with the trainer's own
 //!    `--json` report, and the artifact it names EXISTS on disk;
-//! 6. the payload's `task_id` matches the polled task and its `job_id` selects
-//!    the SAME job through `train_status` — the correlation that makes "both
-//!    roads agree" a claim about one run rather than about whatever ran last;
+//! 6. the payload's `task_id` matches the polled task, and `train_status`
+//!    called with THAT id serves a byte-identical payload — the correlation
+//!    that makes "both roads agree" a claim about one run rather than about
+//!    whatever happened to run last;
 //! 7. an unknown argument key is refused end-to-end (`deny_unknown_fields`).
 //!
 //! Not covered here because it would cost a second 127-second run: a PLAIN
@@ -410,7 +411,7 @@ fn a_training_run_completes_as_an_mcp_task_over_live_stdio() {
     );
 
     // 7) The correlation: this payload names the task we polled, and its
-    // job_id selects the SAME job through the polling road. Asserting
+    // that same id selects the SAME run through the polling road. Asserting
     // train_status's *latest* job would pass even if the task had been paired
     // with someone else's run — which is exactly the defect the decorator
     // replaced.
@@ -419,7 +420,9 @@ fn a_training_run_completes_as_an_mcp_task_over_live_stdio() {
         serde_json::json!(task_id),
         "the status payload must name the task it was published against"
     );
-    let job_id = payload["job_id"].as_str().expect("job_id in payload");
+    // One identity: the task id IS the run id, so a task client and a polling
+    // client cannot be talking about different things.
+    assert_eq!(payload["task_id"], serde_json::json!(task_id));
     let status = call(
         &mut stdin,
         &rx,
@@ -427,7 +430,7 @@ fn a_training_run_completes_as_an_mcp_task_over_live_stdio() {
         "tools/call",
         serde_json::json!({
             "name": aprender_mcp_setfit_train::TOOL_STATUS,
-            "arguments": { "job_id": job_id }
+            "arguments": { "task_id": task_id }
         }),
         "train_status response",
     );

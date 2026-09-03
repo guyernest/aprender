@@ -867,11 +867,11 @@ dependencies = [
 name = "aprender-mcp-setfit-train"
 version = "0.63.0"
 dependencies = [
- "async-trait",
  "pmcp",
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
 ]
 

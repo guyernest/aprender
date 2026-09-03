@@ -50,9 +50,10 @@ schemars = "1.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-# `TaskStore` is an `#[async_trait]` trait, so the decorator that implements it
-# needs the same attribute.
-async-trait = "0.1"
+# NO `async-trait` dependency: `pmcp::async_trait` re-exports the same macro,
+# so the store's trait impls use that instead — the dependency note chess-mcp
+# records for the same reason.
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

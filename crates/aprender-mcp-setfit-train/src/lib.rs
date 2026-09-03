@@ -11,80 +11,69 @@
 //! apr-cli — `read_attested_canonical`'s own doc says widening it was rejected
 //! precisely so there can never be "two readers of benchmark-manifest.json".
 //! An in-process trainer here would be that second (third) reader. So this
-//! server SUPERVISES a pinned `apr` binary as a child process instead: the same
-//! validation, the same atomic artifact write, the same `--json` report — and
-//! the same job shape that later runs unchanged inside a Lambda container or as
-//! a SageMaker container entrypoint.
+//! server SUPERVISES a pinned `apr` binary as a child process, and the binary
+//! is PINNED (an explicit path, probed at startup), never resolved from `PATH`.
 //!
-//! The binary is PINNED (an explicit path, validated at startup), never
-//! resolved from `PATH` — four coexisting `apr` binaries on one dev box is the
-//! documented failure mode this rule exists for.
+//! # The task lifecycle follows chess-mcp's model
 //!
-//! # The task is paired by OBSERVATION, not by guessing
+//! [`task_store`] carries the full rationale; the shape here is its consumer:
 //!
-//! pmcp mints the store task id AFTER the tool handler returns, so a handler
-//! can never know the id its own call will be given. The SDK has no hook for
-//! COMPLETION — its s50 example says so outright — but it does have one for
-//! CREATION and CANCELLATION, and it is the [`TaskStore`] the application
-//! already supplies: dispatch calls `store.create(owner, ttl)` and
-//! `store.cancel(task_id, owner)` on YOUR store, inside the same request
-//! future as the handler.
+//! 1. the handler clears the handoff, resolves the owner, and MINTS the task
+//!    itself via `mint_for_request` — so it holds the canonical id BEFORE it
+//!    dispatches anything;
+//! 2. the run's inputs go into the task's envelope, not into the dispatch
+//!    payload;
+//! 3. the work is dispatched and the handler returns a task-shaped `working`
+//!    value; pmcp's create gate consults the armed handoff and returns THIS
+//!    task rather than minting a second one;
+//! 4. whoever finishes the work performs the terminal write
+//!    ([`AprenderTaskStore::finish`]), guarded so a straggler cannot overwrite
+//!    a verdict that already landed;
+//! 5. a dispatch that fails compensates immediately, so a task never wedges in
+//!    `working` waiting for work that was never started.
 //!
-//! [`TrainingTaskStore`] is that hook. `create` records the minted id and the
-//! owner dispatch actually resolved against the job this submit admitted, and
-//! `cancel` relays straight into the child's kill. The waiter then writes the
-//! terminal state itself when the child exits. There is no polling loop and no
-//! pairing heuristic.
-//!
-//! An earlier revision paired by "bind the store task to the oldest job with no
-//! task id" and leaned on single-flight to make that unambiguous. It is not:
-//! `submit_job` also runs for PLAIN (non-task-augmented) calls, which mint no
-//! store task at all, so such a job stayed unbound forever and the NEXT
-//! task-augmented call adopted it — serving the previous run's report under the
-//! new task's id. Single-flight bounds "one job RUNNING", never "one job
-//! unbound in history"; those are different invariants.
-//!
-//! Observing the owner rather than assuming it also removes a second trap: the
-//! owner is not a constant but the output of a per-era decision (`"local"` only
-//! for an unauthenticated 2025-11-25 client; the OAuth subject with a provider,
-//! `""` on 2026-07-28). A hardcoded bucket silently matches nothing the moment
-//! a client authenticates or negotiates v2.
+//! Today "dispatch" is a spawned in-process waiter, which is what a long-lived
+//! stdio server needs. The serverless deployment replaces step 3's dispatch
+//! with a Step Functions execution and step 4's writer with a finalizer Lambda,
+//! and swaps [`InMemoryTaskBackend`] for a DynamoDB backend behind the same
+//! seam. Steps 1, 2 and 5 do not change — which is the point of doing it this
+//! way now rather than later.
 //!
 //! # One job at a time
 //!
-//! [`JobRegistry`] refuses a second submit while one runs: training saturates
-//! the CPU, and the deploy target is one container per job. This is a RESOURCE
-//! policy — with the pairing observed, it no longer carries any correctness
-//! weight.
+//! [`RunningJobs`] refuses a second submit while one runs. This is a RESOURCE
+//! policy about THIS process's CPU — training saturates it at ~4 GB RSS — so
+//! per-process state is the CORRECT scope for it, unlike task state, which
+//! must be durable and shared. It carries no correctness weight for the task
+//! pairing: the handoff does that.
 //!
 //! # Fail on the REQUEST before blaming the run
 //!
-//! Submit runs `apr setfit train --dry-run` SYNCHRONOUSLY first — the CLI's own
-//! pre-flight (config validated as a whole, device resolved, output refused,
-//! data/selection strictly replayed) — so a bad request is refused at the MCP
-//! boundary in seconds, as a tool error, instead of surfacing minutes later as
-//! a failed job. Note the cost: pmcp dispatches requests through a single
-//! worker (`Server::spawn_request_worker` — "request handling stays
-//! serialized"), so this window blocks every other request too. That is why the
-//! pre-flight budget is minutes-free and deliberately tight.
+//! Submit runs `apr setfit train --dry-run` synchronously first — the CLI's own
+//! pre-flight — so a bad request is refused at the MCP boundary in seconds
+//! instead of surfacing minutes later as a failed job. Note the cost: pmcp
+//! dispatches requests through a single worker
+//! (`Server::spawn_request_worker` — "request handling stays serialized"), so
+//! this window blocks every other request too, which is why the budget is
+//! deliberately tight.
+
+mod task_store;
+
+pub use task_store::{
+    AprenderTaskStore, BackendError, CancelSink, InMemoryTaskBackend, StoredTask, TaskBackend,
+};
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
-use async_trait::async_trait;
-use pmcp::server::task_store::{
-    StoreConfig, TaskInputDelivery, TaskInputSnapshot, TaskStore, TaskStoreError,
-};
 use pmcp::server::typed_tool::TypedTool;
 use pmcp::types::capabilities::ServerCapabilities;
-use pmcp::types::mrtr::{InputRequests, InputResponses};
-use pmcp::types::tasks::Task;
 use pmcp::types::{CallToolResult, Content, TaskStatus, TaskSupport, ToolExecution};
+use pmcp::RequestHandlerExtra;
 use pmcp::Server;
-use tokio::sync::{oneshot, Mutex, Notify};
+use tokio::sync::Notify;
 
 pub use args::{StatusArgs, TrainArgs};
 
@@ -97,60 +86,35 @@ pub const TOOL_TRAIN: &str = "train";
 /// The polling companion for clients without MCP Tasks support.
 pub const TOOL_STATUS: &str = "train_status";
 
+/// The owner bucket an UNAUTHENTICATED request binds to.
+///
+/// This mirrors pmcp's private `V1_UNAUTHENTICATED_OWNER`, and it has to: the
+/// handler mints under this owner and pmcp's create gate looks the handoff up
+/// under whatever ITS `resolve_owner` returned. If the two ever disagree, the
+/// gate mints a second task and the client polls an id nobody updates — which
+/// the E2E's task-id correlation assertion is what would catch. With an auth
+/// provider configured both sides use the authenticated subject instead and
+/// this constant stops mattering.
+pub const UNAUTHENTICATED_OWNER: &str = "local";
+
 /// TTL requested for minted training tasks: generous next to the measured
 /// envelope (127 s wall for the 8-shot reference train on an M-series host),
 /// because an expired task discards a finished artifact's result.
 const TASK_TTL_MS: u64 = 3_600_000;
 
-/// Budget for the synchronous `--dry-run` pre-flight. It replays manifests and
-/// deliberately does NOT open the encoder, so it is a seconds-scale step — and
-/// because pmcp serializes request handling, this is also the worst case for
-/// how long the server can answer nothing else. Tight on purpose.
+/// Budget for the synchronous `--dry-run` pre-flight — also the worst case for
+/// how long this server can answer nothing else. Tight on purpose.
 const DRY_RUN_TIMEOUT_SECS: u64 = 30;
 
-/// How long the waiter will wait for dispatch to mint this submit's task
-/// before concluding there is none. `store.create` runs milliseconds after the
-/// handler returns while training runs for minutes, so this only ever matters
-/// for a child that fails almost instantly.
-///
-/// A PLAIN call does not resolve it early. Nothing clears the pending slot on
-/// the no-task path — only the next `begin` overwrites it — so a plain
-/// submit's waiter always burns this full timeout before returning. That is
-/// harmless (the job's terminal state is already recorded by then) but it is
-/// not what an earlier revision of this comment claimed, and the difference
-/// matters if the value is ever raised.
-const BIND_GRACE: Duration = Duration::from_secs(5);
-
-/// Envelope version for every JSON payload this server emits (status tool
-/// result, submit handle and mirrored task result alike — one shape, three
-/// doors).
+/// Envelope version for every JSON payload this server emits.
 const STATUS_SCHEMA_VERSION: u64 = 1;
 
-/// Cap on each captured output stream in a failure message: enough to carry a
-/// refusal, not a whole training log.
+/// Cap on each captured output stream in a failure message.
 const OUTPUT_TAIL_BYTES: usize = 2_000;
-
-/// TRANSPORT bound on the client-supplied `config` document, mirroring
-/// `aprender::setfit::MAX_REQUEST_BODY_BYTES` (1 MiB), which the predict
-/// sibling enforces for the same reason: a reading surface owes a size bound
-/// even when it owes no semantic validation.
-///
-/// Without it a single call could hand this server an arbitrarily large JSON
-/// object, which it would parse, re-serialize into a second full copy, and
-/// then WRITE INTO `output_dir` before the CLI ever saw it — an OOM or a
-/// filled disk on the container deploy target the README describes. The
-/// twelve-knob SetFit config is a few hundred bytes; this is four orders of
-/// magnitude of headroom.
-const MAX_CONFIG_BYTES: usize = 1_048_576;
-
-/// The `taskId` the submit handle carries purely to satisfy pmcp's create gate.
-/// Dispatch discards it and mints the canonical id, so it is written to say so.
-const GATE_TASK_ID: &str = "handler-fabricated-discarded";
 
 mod args {
     // The JsonSchema derive expands serde_json::json!, which expands to
-    // .unwrap() internally — same scoped exception as aprender-mcp-setfit's
-    // args module, kept this narrow so the ban still covers everything else.
+    // .unwrap() internally — kept this narrow so the ban covers everything else.
     #![allow(clippy::disallowed_methods)]
 
     use schemars::JsonSchema;
@@ -160,11 +124,12 @@ mod args {
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct TrainArgs {
-        /// The full twelve-knob SetFit training configuration, passed through
-        /// VERBATIM to `apr setfit train --config`. This server validates
-        /// nothing about it on purpose: the CLI's single validating
-        /// constructor is the one implementation of config legality, and a
-        /// second validator here could only drift from it.
+        /// The full twelve-knob SetFit training configuration, passed VERBATIM
+        /// to `apr setfit train --config`. This server validates nothing about
+        /// it on purpose: the CLI's single validating constructor is the one
+        /// implementation of config legality, and a second validator here could
+        /// only drift from it. Its SIZE is bounded (see `MAX_CONFIG_BYTES`) —
+        /// that is a transport bound, a different question from legality.
         pub config: serde_json::Value,
     }
 
@@ -172,18 +137,23 @@ mod args {
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct StatusArgs {
-        /// A `job_id` returned by `train`. Omitted: the most recent job.
-        #[serde(default)]
-        pub job_id: Option<String>,
+        /// The `task_id` a `train` call returned.
+        pub task_id: String,
     }
 }
 
+/// The bound this reading surface owes on a client-supplied document, mirroring
+/// the predict sibling's `MAX_REQUEST_BODY_BYTES`. `config` is a
+/// `serde_json::Value`, so `deny_unknown_fields` cannot reach inside it and
+/// nothing else would stop a caller handing us a 500 MB object to parse, copy
+/// and write to disk.
+pub const MAX_CONFIG_BYTES: usize = 1_048_576;
+
 /// Everything the operator provisions; nothing here comes from the client.
 ///
-/// The client varies the training CONFIG; the server owns which dataset,
-/// which selection, which encoder checkout and where artifacts land. That is
-/// the thin-server philosophy applied to training: a business-curated
-/// connector to one training recipe, not a general job runner.
+/// The client varies the training CONFIG; the server owns which dataset, which
+/// selection, which encoder checkout and where artifacts land — the thin-server
+/// philosophy applied to training.
 #[derive(Debug, Clone)]
 pub struct TrainerPaths {
     /// The pinned `apr` binary (must carry the `setfit` feature).
@@ -205,13 +175,6 @@ impl TrainerPaths {
     /// # Errors
     ///
     /// A human-readable message naming the path and what was expected of it.
-    ///
-    /// Every message names BOTH doors — the flag and its environment variable.
-    /// The documented Lambda/transport-wrapper deployment configures this
-    /// server entirely through `APRENDER_SETFIT_TRAIN_*` with no argv at all,
-    /// so a refusal that names only `--model-dir` sends that operator grepping
-    /// their container spec for a flag nobody ever passed. `resolve()` in the
-    /// stdio runner already names both; these messages used to name one.
     pub fn validate(&self) -> Result<(), String> {
         if !self.apr_bin.is_file() {
             return Err(format!(
@@ -258,8 +221,8 @@ impl TrainerPaths {
     /// pre-flight with clap's `unrecognized subcommand`.
     ///
     /// This function's whole promise is "name the first missing piece at
-    /// STARTUP, not at the first submit"; the likeliest missing piece was the
-    /// one it did not look for. `--help` is free (no model load, no I/O).
+    /// STARTUP"; the likeliest missing piece was the one it did not look for.
+    /// `--help` is free — no model load, no I/O.
     fn probe_setfit_subcommand(&self) -> Result<(), String> {
         let probe = std::process::Command::new(&self.apr_bin)
             .args(["setfit", "train", "--help"])
@@ -274,9 +237,9 @@ impl TrainerPaths {
             )),
             Ok(out) if !out.status.success() => Err(format!(
                 "--apr-bin (APRENDER_SETFIT_TRAIN_APR_BIN) {} does not answer \
-                 `setfit train --help` ({}): build it with \
-                 `--features setfit` — setfit is NOT in apr-cli's default feature set, so a \
-                 plain `cargo build --release` produces an apr this server cannot use.\n{}",
+                 `setfit train --help` ({}): build it with `--features setfit` — setfit is NOT \
+                 in apr-cli's default feature set, so a plain `cargo build --release` produces \
+                 an apr this server cannot use.\n{}",
                 self.apr_bin.display(),
                 out.status,
                 tail(&out.stderr, OUTPUT_TAIL_BYTES)
@@ -286,458 +249,91 @@ impl TrainerPaths {
     }
 }
 
-/// A job's terminal verdict. `None` on the [`Job`] means still running — so
-/// "which phase" and "what came out of it" are ONE field, and the states that
-/// used to be representable but meaningless (completed-with-an-error,
-/// failed-with-a-report) no longer exist.
+/// The one training run this process will admit at a time, and the handle that
+/// stops it.
 #[derive(Debug)]
-enum JobOutcome {
-    /// Exit 0: the parsed `--json` report.
-    Completed(serde_json::Value),
-    /// Non-zero exit, or a supervision failure: what the CLI said.
-    Failed(String),
-    /// Killed by a relayed `tasks/cancel`.
-    Cancelled,
-}
-
-impl JobOutcome {
-    const fn phase(&self) -> &'static str {
-        match self {
-            Self::Completed(_) => "completed",
-            Self::Failed(_) => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    const fn is_failure(&self) -> bool {
-        !matches!(self, Self::Completed(_))
-    }
-}
-
-/// The store task dispatch minted for one submit, as OBSERVED in
-/// [`TrainingTaskStore::create`] — never assumed.
-#[derive(Debug, Clone)]
-struct Binding {
+struct RunningJob {
     task_id: String,
-    owner_id: String,
-}
-
-/// One training run, from submit to terminal state.
-#[derive(Debug)]
-struct Job {
-    id: String,
-    started_unix_ms: u64,
-    finished_unix_ms: Option<u64>,
-    /// `None` while running; the child's verdict once terminal.
-    outcome: Option<JobOutcome>,
-    artifact_path: PathBuf,
-    /// The store task this job was paired with, if the call was task-augmented.
-    binding: Option<Binding>,
-    /// Fired to kill the child (relayed `tasks/cancel`).
     cancel: Arc<Notify>,
 }
 
-/// The one status shape every surface serves — `train_status`'s result, the
-/// submit handle, and the terminal task result are all THIS, so no two doors
-/// can tell different stories about the same run.
-#[derive(Debug, serde::Serialize)]
-struct StatusPayload<'a> {
-    schema_version: u64,
-    job_id: &'a str,
-    /// The paired store task, so a task client can query `train_status` about
-    /// its own run and a polling client can discover its task id. Absent for a
-    /// plain call, which mints no task.
-    task_id: Option<&'a str>,
-    phase: &'static str,
-    started_unix_ms: u64,
-    finished_unix_ms: Option<u64>,
-    artifact_path: String,
-    report: Option<&'a serde_json::Value>,
-    error: Option<&'a str>,
-    /// Present only on the submit handle: the two keys pmcp's create gate
-    /// requires to recognize a task-shaped value. The id is the handler's and
-    /// is DISCARDED — the store mints the canonical one — so it is deliberately
-    /// self-describing rather than plausible.
-    #[serde(rename = "taskId", skip_serializing_if = "Option::is_none")]
-    gate_task_id: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ttl: Option<u64>,
+/// Single-flight admission plus the cancel relay.
+///
+/// Per-process by design: it is about this container's CPU, not about task
+/// state. A second container admitting its own job is correct behaviour, not a
+/// bug — which is exactly why task state lives in the store instead.
+#[derive(Debug, Default)]
+pub struct RunningJobs {
+    current: Mutex<Option<RunningJob>>,
 }
 
-impl Job {
-    fn status_payload(&self) -> StatusPayload<'_> {
-        // `phase` comes from `JobOutcome::phase()` in EVERY arm. An earlier
-        // revision hardcoded "completed" here while `phase()` also defined it,
-        // so the one mapping lived in two places and no test forced them to
-        // agree — changing either silently diverged from the other.
-        let phase = self.outcome.as_ref().map_or("running", JobOutcome::phase);
-        let (report, error) = match self.outcome.as_ref() {
-            None => (None, None),
-            Some(JobOutcome::Completed(report)) => (Some(report), None),
-            Some(JobOutcome::Failed(message)) => (None, Some(message.as_str())),
-            Some(JobOutcome::Cancelled) => (None, Some("cancelled by the client (tasks/cancel)")),
-        };
-        StatusPayload {
-            schema_version: STATUS_SCHEMA_VERSION,
-            job_id: &self.id,
-            task_id: self.binding.as_ref().map(|b| b.task_id.as_str()),
-            phase,
-            started_unix_ms: self.started_unix_ms,
-            finished_unix_ms: self.finished_unix_ms,
-            artifact_path: self.artifact_path.display().to_string(),
-            report,
-            error,
-            gate_task_id: None,
-            status: None,
-            ttl: None,
-        }
+impl RunningJobs {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Infallible in practice (string keys, no custom serializers); Null rather
-    /// than a panic if that ever changes.
-    fn status_value(&self) -> serde_json::Value {
-        serde_json::to_value(self.status_payload()).unwrap_or(serde_json::Value::Null)
+    fn guard(&self) -> MutexGuard<'_, Option<RunningJob>> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-}
 
-/// A successful admission: what the caller needs to drive the run.
-#[derive(Debug)]
-struct Admitted {
-    job_id: String,
-    artifact_path: PathBuf,
-    cancel: Arc<Notify>,
-    /// Resolves when [`TrainingTaskStore::create`] pairs this submit with the
-    /// task dispatch minted for it. Resolves to `Err` if the sender is dropped
-    /// — which is exactly what a plain, non-task-augmented call does.
-    binding: oneshot::Receiver<Binding>,
-}
-
-/// The submit awaiting its store task, if any. Single-flight means at most one.
-#[derive(Debug)]
-struct Pending {
-    job_id: String,
-    tx: oneshot::Sender<Binding>,
-}
-
-/// The single-flight job book. All jobs are kept (a finished job's report stays
-/// queryable for the life of the server); at most one is running.
-#[derive(Default)]
-pub struct JobRegistry {
-    jobs: Mutex<Vec<Job>>,
-    pending: Mutex<Option<Pending>>,
-    seq: AtomicU64,
-}
-
-impl JobRegistry {
-    /// Admit a job, or refuse because one is already running (single-flight).
-    ///
-    /// # Errors
-    ///
-    /// The running job's id, so the caller can poll it instead of retrying.
-    async fn begin(&self, output_dir: &Path) -> Result<Admitted, String> {
-        let mut jobs = self.jobs.lock().await;
-        if let Some(active) = jobs.iter().find(|j| j.outcome.is_none()) {
+    /// Admit `task_id`, or refuse naming the job already running.
+    fn try_admit(&self, task_id: &str) -> Result<Arc<Notify>, String> {
+        let mut current = self.guard();
+        if let Some(running) = current.as_ref() {
             return Err(format!(
                 "a training job is already running ({}); this server trains one model at a \
                  time — poll `{TOOL_STATUS}` and resubmit when it finishes",
-                active.id
+                running.task_id
             ));
         }
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let started = unix_ms();
-        let job_id = format!("job-{started}-{seq}");
-        let artifact_path = output_dir.join(format!("{job_id}.apr"));
         let cancel = Arc::new(Notify::new());
-        jobs.push(Job {
-            id: job_id.clone(),
-            started_unix_ms: started,
-            finished_unix_ms: None,
-            outcome: None,
-            artifact_path: artifact_path.clone(),
-            binding: None,
+        *current = Some(RunningJob {
+            task_id: task_id.to_string(),
             cancel: Arc::clone(&cancel),
         });
-        let (tx, binding) = oneshot::channel();
-        // Replacing any previous slot drops its sender, which resolves that
-        // waiter's receiver as Err — the correct answer for a submit whose
-        // call never became a task.
-        *self.pending.lock().await = Some(Pending {
-            job_id: job_id.clone(),
-            tx,
-        });
-        Ok(Admitted {
-            job_id,
-            artifact_path,
-            cancel,
-            binding,
-        })
+        Ok(cancel)
     }
 
-    /// Record a job's terminal verdict. Unknown ids are ignored (a job can only
-    /// finish once; the waiter is the sole caller).
-    async fn finish(&self, job_id: &str, outcome: JobOutcome) {
-        let mut jobs = self.jobs.lock().await;
-        if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-            job.finished_unix_ms = Some(unix_ms());
-            job.outcome = Some(outcome);
+    /// Release the slot, but only if `task_id` still owns it.
+    fn release(&self, task_id: &str) {
+        let mut current = self.guard();
+        if current.as_ref().is_some_and(|r| r.task_id == task_id) {
+            *current = None;
         }
     }
+}
 
-    /// The status payload for `job_id`, or the most recent job when `None`.
-    async fn status(&self, job_id: Option<&str>) -> Option<serde_json::Value> {
-        let jobs = self.jobs.lock().await;
-        match job_id {
-            Some(id) => jobs.iter().find(|j| j.id == id).map(Job::status_value),
-            None => jobs.last().map(Job::status_value),
-        }
-    }
-
-    /// The submit response: this job's status payload plus the two keys pmcp's
-    /// create gate requires to recognize a task-shaped value (`taskId` and
-    /// `status`), and the TTL it carries onto the minted task.
-    ///
-    /// Building it from the SAME payload every other door serves is what makes
-    /// "one shape, three doors" true rather than aspirational — a hand-rolled
-    /// handle here is how the submit response drifts from `train_status`.
-    async fn submit_handle(&self, job_id: &str) -> Option<serde_json::Value> {
-        let jobs = self.jobs.lock().await;
-        let job = jobs.iter().find(|j| j.id == job_id)?;
-        let mut payload = job.status_payload();
-        // Dispatch DISCARDS this id and mints its own, so it is deliberately
-        // self-describing rather than plausible: anything that echoes it back
-        // is reading the wrong field.
-        payload.gate_task_id = Some(GATE_TASK_ID);
-        payload.status = Some("working");
-        payload.ttl = Some(TASK_TTL_MS);
-        Some(serde_json::to_value(payload).unwrap_or(serde_json::Value::Null))
-    }
-
-    /// The terminal payload for `job_id` and whether it is a failure.
-    async fn terminal_payload(&self, job_id: &str) -> Option<(serde_json::Value, bool)> {
-        let jobs = self.jobs.lock().await;
-        let job = jobs.iter().find(|j| j.id == job_id)?;
-        let failed = job.outcome.as_ref()?.is_failure();
-        Some((job.status_value(), failed))
-    }
-
-    /// Pair the submit awaiting a task with the one dispatch just minted.
-    /// Exact: the slot names the job, so nothing is inferred from ordering.
-    async fn bind_pending(&self, task_id: &str, owner_id: &str) {
-        let Some(pending) = self.pending.lock().await.take() else {
-            return;
-        };
-        let binding = Binding {
-            task_id: task_id.to_string(),
-            owner_id: owner_id.to_string(),
-        };
-        if let Some(job) = self
-            .jobs
-            .lock()
-            .await
-            .iter_mut()
-            .find(|j| j.id == pending.job_id)
-        {
-            job.binding = Some(binding.clone());
-        }
-        // The waiter may already be gone (a child that failed before the task
-        // was minted); its terminal state is still in `jobs` either way.
-        let _ = pending.tx.send(binding);
-    }
-
-    /// Relay a store-side cancellation into a child kill.
-    async fn cancel_by_task(&self, task_id: &str) {
-        let jobs = self.jobs.lock().await;
-        if let Some(job) = jobs.iter().find(|j| {
-            j.outcome.is_none() && j.binding.as_ref().is_some_and(|b| b.task_id == task_id)
-        }) {
+impl CancelSink for RunningJobs {
+    fn cancel(&self, task_id: &str) {
+        let current = self.guard();
+        if let Some(running) = current.as_ref().filter(|r| r.task_id == task_id) {
             // `notify_one`, NOT `notify_waiters`: the latter wakes only waiters
-            // ALREADY registered and stores no permit, and there is a real
-            // window where none is. `run_child` registers on the first poll of
-            // its `select!`, which is after `tokio::spawn` schedules it and
-            // after the synchronous `cmd.spawn()` — while `bind_pending` has
-            // already made the job cancellable the instant the handler
-            // returned. A cancel landing in that window was silently dropped:
-            // the store said `cancelled`, the trainer ran to completion, and
-            // the two doors disagreed about one run. `notify_one` latches.
-            job.cancel.notify_one();
+            // already registered and stores no permit, and `run_child` registers
+            // on the first poll of its `select!` — after the spawn is scheduled.
+            // A cancel landing in that window would be silently dropped.
+            running.cancel.notify_one();
         }
     }
 }
 
-/// A [`TaskStore`] decorator that watches the two lifecycle events pmcp drives
-/// through the store, and forwards everything else untouched.
+/// The owner this request's task belongs to.
 ///
-/// This is the pairing hook described in the crate doc. It deliberately
-/// implements EVERY trait method rather than inheriting defaults: the SDK's
-/// defaults are refusals (`set_result` answers "store does not support terminal
-/// results"), so an unforwarded method would not be a passthrough — it would
-/// silently disable the inner store's real implementation.
-pub struct TrainingTaskStore {
-    inner: Arc<dyn TaskStore>,
-    registry: Arc<JobRegistry>,
+/// Derived from the request rather than assumed, because the owner is the
+/// output of a per-era decision, not a constant: the authenticated subject when
+/// there is one, [`UNAUTHENTICATED_OWNER`] otherwise. Assuming a constant is
+/// how a store silently matches nothing the moment a client authenticates.
+fn resolve_owner(extra: &RequestHandlerExtra) -> String {
+    extra.auth_context().map_or_else(
+        || UNAUTHENTICATED_OWNER.to_string(),
+        |ctx| ctx.subject.clone(),
+    )
 }
 
-impl TrainingTaskStore {
-    /// Wrap `inner`, reporting creations and cancellations to `registry`.
-    #[must_use]
-    pub fn new(inner: Arc<dyn TaskStore>, registry: Arc<JobRegistry>) -> Self {
-        Self { inner, registry }
-    }
-}
-
-impl std::fmt::Debug for TrainingTaskStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TrainingTaskStore").finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl TaskStore for TrainingTaskStore {
-    // --- the two hooks -----------------------------------------------------
-
-    async fn create(&self, owner_id: &str, ttl: Option<u64>) -> Result<Task, TaskStoreError> {
-        let task = self.inner.create(owner_id, ttl).await?;
-        self.registry.bind_pending(&task.task_id, owner_id).await;
-        // The store only FILTERS expired records out of reads; it frees them
-        // here. This is the process's one recurring event, so it is where the
-        // sweep belongs — no timer, and no unbounded growth either.
-        let _ = self.inner.cleanup_expired().await;
-        Ok(task)
-    }
-
-    async fn cancel(&self, task_id: &str, owner_id: &str) -> Result<Task, TaskStoreError> {
-        // The relay is NOT behind `?`. The store's verdict is about the RECORD
-        // (Expired past `TASK_TTL_MS`, NotFound after a sweep, an already
-        // terminal transition); the child is a separate fact, and there is no
-        // other cancel road — a plain submit mints no task and `train_status`
-        // is read-only. Short-circuiting left a CPU-saturating trainer alive
-        // with `outcome: None`, so single-flight then refused every later
-        // submit for the life of the process. `cancel_by_task` only ever
-        // selects a RUNNING job whose binding names this exact task, so
-        // relaying on the error path cannot kill someone else's run.
-        let outcome = self.inner.cancel(task_id, owner_id).await;
-        self.registry.cancel_by_task(task_id).await;
-        outcome
-    }
-
-    // --- pure delegation ---------------------------------------------------
-
-    async fn get(&self, task_id: &str, owner_id: &str) -> Result<Task, TaskStoreError> {
-        self.inner.get(task_id, owner_id).await
-    }
-
-    async fn update_status(
-        &self,
-        task_id: &str,
-        owner_id: &str,
-        status: TaskStatus,
-        message: Option<String>,
-    ) -> Result<Task, TaskStoreError> {
-        self.inner
-            .update_status(task_id, owner_id, status, message)
-            .await
-    }
-
-    async fn list(
-        &self,
-        owner_id: &str,
-        cursor: Option<&str>,
-    ) -> Result<(Vec<Task>, Option<String>), TaskStoreError> {
-        self.inner.list(owner_id, cursor).await
-    }
-
-    async fn cleanup_expired(&self) -> Result<usize, TaskStoreError> {
-        self.inner.cleanup_expired().await
-    }
-
-    fn config(&self) -> &StoreConfig {
-        self.inner.config()
-    }
-
-    async fn set_result(
-        &self,
-        task_id: &str,
-        owner_id: &str,
-        result: CallToolResult,
-    ) -> Result<(), TaskStoreError> {
-        self.inner.set_result(task_id, owner_id, result).await
-    }
-
-    async fn get_result(
-        &self,
-        task_id: &str,
-        owner_id: &str,
-    ) -> Result<CallToolResult, TaskStoreError> {
-        self.inner.get_result(task_id, owner_id).await
-    }
-
-    fn supports_results(&self) -> bool {
-        self.inner.supports_results()
-    }
-
-    async fn deliver_task_inputs(
-        &self,
-        task_id: &str,
-        owner_id: &str,
-        responses: InputResponses,
-    ) -> Result<TaskInputDelivery, TaskStoreError> {
-        self.inner
-            .deliver_task_inputs(task_id, owner_id, responses)
-            .await
-    }
-
-    async fn task_input_snapshot(
-        &self,
-        task_id: &str,
-        owner_id: &str,
-    ) -> Result<TaskInputSnapshot, TaskStoreError> {
-        self.inner.task_input_snapshot(task_id, owner_id).await
-    }
-
-    async fn record_input_requests(
-        &self,
-        task_id: &str,
-        owner_id: &str,
-        requests: InputRequests,
-    ) -> Result<Task, TaskStoreError> {
-        self.inner
-            .record_input_requests(task_id, owner_id, requests)
-            .await
-    }
-
-    async fn set_error(
-        &self,
-        task_id: &str,
-        owner_id: &str,
-        error: serde_json::Value,
-    ) -> Result<(), TaskStoreError> {
-        self.inner.set_error(task_id, owner_id, error).await
-    }
-
-    async fn get_error(
-        &self,
-        task_id: &str,
-        owner_id: &str,
-    ) -> Result<serde_json::Value, TaskStoreError> {
-        self.inner.get_error(task_id, owner_id).await
-    }
-
-    fn supports_inputs(&self) -> bool {
-        self.inner.supports_inputs()
-    }
-}
-
-fn unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
-}
-
-/// The base `apr setfit train` invocation — every knob the operator owns.
-/// One builder so the dry-run and the real run cannot drift.
+/// The base `apr setfit train` invocation. One builder, so the dry run and the
+/// real run cannot drift.
 fn train_command(
     paths: &TrainerPaths,
     config_path: &Path,
@@ -760,22 +356,16 @@ fn train_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // A dying server must not orphan a CPU-saturating trainer. This is
-        // also what makes cancellation-by-drop safe below.
+        // A dying server must not orphan a CPU-saturating trainer. This is also
+        // what makes cancellation-by-drop safe.
         .kill_on_drop(true);
     cmd
 }
 
 /// `apr setfit train --json` writes ONE pretty-printed report and nothing else
-/// to stdout (`report_json` uses `to_string_pretty`), so the whole buffer is
-/// the document.
-///
-/// An earlier revision also scanned backwards for the last parseable LINE, to
-/// tolerate "a stray leading line". That fallback could never fire — a
-/// pretty-printed report's last line is `}` — so it was a bandaid attached to
-/// no wound, and its unit test only ever exercised a compact form this CLI does
-/// not emit. If stdout ever gains a second writer, this must fail loudly rather
-/// than quietly find something else that parses.
+/// to stdout, so the whole buffer is the document. If stdout ever gains a
+/// second writer this must fail loudly rather than quietly find something else
+/// that parses.
 fn parse_json_report(stdout: &[u8]) -> Option<serde_json::Value> {
     serde_json::from_slice(stdout).ok()
 }
@@ -794,11 +384,9 @@ fn tail(stream: &[u8], max: usize) -> String {
     format!("…{}", &text[start..])
 }
 
-/// What a failing child said — BOTH streams.
-///
-/// Keeping only stderr is defect #2418, which `aprender-mcp`'s subprocess
-/// module already paid for once: a failing `apr` can still have written its
-/// `--json` report to stdout, and reporting only stderr threw it away.
+/// What a failing child said — BOTH streams. Keeping only stderr is defect
+/// #2418, which `aprender-mcp`'s subprocess module already paid for once: a
+/// failing `apr` can still have written its `--json` report to stdout.
 fn failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
     let err = tail(stderr, OUTPUT_TAIL_BYTES);
     let out = tail(stdout, OUTPUT_TAIL_BYTES);
@@ -810,253 +398,398 @@ fn failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
     }
 }
 
-/// The CLI's own four request checks, run synchronously. `None` means the
-/// request is accepted; `Some` is the refusal, in the CLI's words.
+/// A job's terminal verdict.
+#[derive(Debug)]
+enum Outcome {
+    Completed(serde_json::Value),
+    Failed(String),
+    Cancelled,
+}
+
+impl Outcome {
+    const fn phase(&self) -> &'static str {
+        match self {
+            Self::Completed(_) => "completed",
+            Self::Failed(_) => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// The MCP task status a verdict maps onto. `Failed` is a real status the
+    /// SDK's state machine accepts, so a task client can tell a failed run from
+    /// a successful one by STATUS and need not parse the payload.
+    const fn task_status(&self) -> TaskStatus {
+        match self {
+            Self::Completed(_) => TaskStatus::Completed,
+            Self::Failed(_) => TaskStatus::Failed,
+            Self::Cancelled => TaskStatus::Cancelled,
+        }
+    }
+}
+
+/// The ONE status shape every surface serves — `train_status`'s result and the
+/// terminal task result alike — so no two doors can tell different stories.
+fn run_payload(
+    task_id: &str,
+    artifact_path: &str,
+    phase: &str,
+    report: Option<&serde_json::Value>,
+    error: Option<&str>,
+) -> serde_json::Value {
+    #[derive(serde::Serialize)]
+    struct Payload<'a> {
+        schema_version: u64,
+        task_id: &'a str,
+        phase: &'a str,
+        artifact_path: &'a str,
+        report: Option<&'a serde_json::Value>,
+        error: Option<&'a str>,
+    }
+    serde_json::to_value(Payload {
+        schema_version: STATUS_SCHEMA_VERSION,
+        task_id,
+        phase,
+        artifact_path,
+        report,
+        error,
+    })
+    .unwrap_or(serde_json::Value::Null)
+}
+
+/// What a run needs handed to whoever finishes it. Today the in-process waiter
+/// already holds these; it is written anyway because the serverless finalizer
+/// will have nothing else — and a side channel that only exists on the path
+/// that does not need it would be dead on the path that does.
+fn run_envelope(config_path: &str, artifact_path: &str) -> serde_json::Value {
+    #[derive(serde::Serialize)]
+    struct Envelope<'a> {
+        config_path: &'a str,
+        artifact_path: &'a str,
+    }
+    serde_json::to_value(Envelope {
+        config_path,
+        artifact_path,
+    })
+    .unwrap_or(serde_json::Value::Null)
+}
+
+fn terminal_result(payload: &serde_json::Value, failed: bool) -> CallToolResult {
+    let content = vec![Content::Text {
+        text: payload.to_string(),
+    }];
+    if failed {
+        CallToolResult::error(content)
+    } else {
+        CallToolResult::new(content)
+    }
+}
+
+/// The CLI's own request checks, run synchronously. `None` means accepted.
 async fn preflight(
     paths: &TrainerPaths,
     config_path: &Path,
     artifact_path: &Path,
 ) -> Option<String> {
     let mut dry = train_command(paths, config_path, artifact_path);
-    // No `.stdout(Stdio::null())` here: `Command::output()` re-pipes BOTH
-    // streams unconditionally before spawning, so nulling stdout is a no-op
-    // that only made the refusal below LOOK justified in throwing stdout away.
     dry.arg("--dry-run");
     match tokio::time::timeout(Duration::from_secs(DRY_RUN_TIMEOUT_SECS), dry.output()).await {
         Err(_) => Some(format!(
             "pre-flight (--dry-run) exceeded {DRY_RUN_TIMEOUT_SECS}s"
         )),
         Ok(Err(e)) => Some(format!("cannot spawn {}: {e}", paths.apr_bin.display())),
-        // BOTH streams, via the same helper the real run uses. Reporting only
-        // stderr is defect #2418 again, and it has a second bite here: a
-        // non-zero exit with an empty stderr (a signal kill, an OOM) rendered
-        // the refusal as the literal `training request refused: ` — no reason
-        // at all. `failure_detail`'s (true, true) arm exists for exactly that.
+        // BOTH streams: `Command::output()` re-pipes stdout regardless of what
+        // the builder asked for, and a signal kill leaves stderr empty — which
+        // rendered as a refusal with no reason at all.
         Ok(Ok(out)) if !out.status.success() => Some(failure_detail(&out.stdout, &out.stderr)),
         Ok(Ok(_)) => None,
     }
 }
 
-/// Admit, pre-flight, spawn, and return the submit handle.
-///
-/// The handle is [`StatusPayload`] plus the two keys pmcp's create gate needs:
-/// a task-augmented client gets a store-minted task id back and polls
-/// `tasks/get`; a plain client gets this payload as an ordinary result and
-/// polls `train_status` with its `job_id`. All three doors serve one shape.
-async fn submit_job(
-    paths: Arc<TrainerPaths>,
-    registry: Arc<JobRegistry>,
-    store: Arc<dyn TaskStore>,
-    config: serde_json::Value,
-) -> pmcp::Result<serde_json::Value> {
-    let admitted = registry
-        .begin(&paths.output_dir)
-        .await
-        .map_err(pmcp::Error::validation)?;
-    let job_id = admitted.job_id.clone();
-
-    // The config travels as a FILE because the CLI is file-first — and the
-    // file is kept beside the artifact, so a finished run's exact requested
-    // config is always reconstructible.
-    let config_path = paths.output_dir.join(format!("{job_id}.config.json"));
-    let refusal = match serde_json::to_vec_pretty(&config) {
-        Err(e) => Some(format!("config serialization: {e}")),
-        Ok(bytes) if bytes.len() > MAX_CONFIG_BYTES => Some(format!(
-            "config document is {} bytes, over the {MAX_CONFIG_BYTES}-byte transport \
-             bound; the SetFit training config is twelve knobs, not a payload",
-            bytes.len()
-        )),
-        Ok(bytes) => match tokio::fs::write(&config_path, &bytes).await {
-            Err(e) => Some(format!("cannot write {}: {e}", config_path.display())),
-            Ok(()) => preflight(&paths, &config_path, &admitted.artifact_path).await,
-        },
-    };
-    if let Some(message) = refusal {
-        registry
-            .finish(&job_id, JobOutcome::Failed(message.clone()))
-            .await;
-        return Err(pmcp::Error::validation(format!(
-            "training request refused: {message}"
-        )));
-    }
-
-    // Snapshot the answer BEFORE the child can move the job, so the handle
-    // this call returns always describes a running job.
-    let handle = registry.submit_handle(&job_id).await.ok_or_else(|| {
-        pmcp::Error::internal(format!("job {job_id} vanished before it answered"))
-    })?;
-
-    // The real run, supervised. The waiter owns the child end to end: pipes,
-    // exit status, cancellation, the ONE `finish`, and the terminal write into
-    // the store once it knows which task this submit became.
-    let Admitted {
-        artifact_path,
-        cancel,
-        binding,
-        ..
-    } = admitted;
-    let waiter_job_id = job_id;
-    tokio::spawn(async move {
-        let outcome = run_child(&paths, &config_path, &artifact_path, &cancel).await;
-        registry.finish(&waiter_job_id, outcome).await;
-        // No task was minted for a plain call: the sender was dropped, this
-        // resolves Err, and nothing is written to the store. Correct, and the
-        // reason the old "adopt the oldest unbound job" pairing was wrong.
-        let Ok(Ok(binding)) = tokio::time::timeout(BIND_GRACE, binding).await else {
-            return;
-        };
-        let Some((payload, failed)) = registry.terminal_payload(&waiter_job_id).await else {
-            return;
-        };
-        publish_terminal(store.as_ref(), &binding, &payload, failed).await;
-    });
-
-    Ok(handle)
-}
-
-/// Write a finished job's verdict onto its task. Every call is tolerated
-/// rather than unwrapped: a task can expire, or already be `Cancelled` (whose
-/// transition to `Completed` the store's state machine correctly refuses), and
-/// the registry still holds the truth for `train_status` either way.
-async fn publish_terminal(
-    store: &dyn TaskStore,
-    binding: &Binding,
-    payload: &serde_json::Value,
-    failed: bool,
-) {
-    let content = vec![Content::Text {
-        text: payload.to_string(),
-    }];
-    let result = if failed {
-        CallToolResult::error(content)
-    } else {
-        CallToolResult::new(content)
-    };
-    // Both writes are attempted unconditionally. An early return on a failed
-    // `set_result` left the task in `working` FOREVER — a polling client never
-    // stops — which is strictly worse than a terminal state with no result.
-    // A store that legitimately refuses (an already-`Cancelled` record) ignores
-    // both, and the registry still holds the truth for `train_status`.
-    let _ = store
-        .set_result(&binding.task_id, &binding.owner_id, result)
-        .await;
-    let _ = store
-        .update_status(
-            &binding.task_id,
-            &binding.owner_id,
-            TaskStatus::Completed,
-            None,
-        )
-        .await;
-}
-
 /// Supervise one training child to its terminal state.
 ///
-/// `wait_with_output` is what keeps both pipes draining while the child runs —
-/// a child that fills a pipe nobody reads deadlocks, and this is tokio's
-/// guarantee rather than a local invariant to re-derive. Cancellation drops
-/// that future, and `kill_on_drop` reaps the child.
+/// `wait_with_output` keeps both pipes draining while the child runs — a child
+/// that fills a pipe nobody reads deadlocks, and this makes that tokio's
+/// guarantee rather than a local invariant. Cancellation drops that future and
+/// `kill_on_drop` reaps the child.
 async fn run_child(
     paths: &TrainerPaths,
     config_path: &Path,
     artifact_path: &Path,
     cancel: &Notify,
-) -> JobOutcome {
+) -> Outcome {
     let mut cmd = train_command(paths, config_path, artifact_path);
     let child = match cmd.spawn() {
         Ok(child) => child,
-        Err(e) => {
-            return JobOutcome::Failed(format!("cannot spawn {}: {e}", paths.apr_bin.display()))
-        }
+        Err(e) => return Outcome::Failed(format!("cannot spawn {}: {e}", paths.apr_bin.display())),
     };
-
     let output = tokio::select! {
         output = child.wait_with_output() => output,
-        () = cancel.notified() => return JobOutcome::Cancelled,
+        () = cancel.notified() => return Outcome::Cancelled,
     };
-
     match output {
         Ok(out) if out.status.success() => parse_json_report(&out.stdout).map_or_else(
             || {
-                JobOutcome::Failed(
+                Outcome::Failed(
                     "the trainer exited 0 but printed no parseable --json report".to_string(),
                 )
             },
-            JobOutcome::Completed,
+            Outcome::Completed,
         ),
-        Ok(out) => JobOutcome::Failed(format!(
+        Ok(out) => Outcome::Failed(format!(
             "the trainer exited with {}: {}",
             out.status,
             failure_detail(&out.stdout, &out.stderr)
         )),
-        Err(e) => JobOutcome::Failed(format!("waiting on the trainer failed: {e}")),
+        Err(e) => Outcome::Failed(format!("waiting on the trainer failed: {e}")),
     }
 }
 
-/// Assemble the server: two tools and the task store, nothing else.
+/// Turn a dispatch failure into a FAILED task, then report it to the caller.
 ///
-/// `store` must be the [`TrainingTaskStore`] — it is both what pmcp dispatches
-/// `tasks/*` through AND what pairs each submit with its task.
+/// A task minted for work that was never started must never be left `working`:
+/// the client would poll a task nobody will ever finish. Mirrors chess's
+/// `compensate_dispatch_failure`.
+async fn compensate(
+    store: &AprenderTaskStore,
+    task_id: &str,
+    owner: &str,
+    artifact_path: &str,
+    reason: String,
+) -> pmcp::Error {
+    let payload = run_payload(task_id, artifact_path, "failed", None, Some(&reason));
+    let _ = store
+        .finish(
+            task_id,
+            owner,
+            TaskStatus::Failed,
+            terminal_result(&payload, true),
+        )
+        .await;
+    pmcp::Error::validation(format!("training request refused: {reason}"))
+}
+
+/// Mint, stash, dispatch, answer — the handler.
+async fn submit(
+    paths: Arc<TrainerPaths>,
+    store: Arc<AprenderTaskStore>,
+    running: Arc<RunningJobs>,
+    extra: &RequestHandlerExtra,
+    config: serde_json::Value,
+) -> pmcp::Result<serde_json::Value> {
+    // (a) Drop any arm left by an earlier call that never opened the create
+    // gate — a plain, non-task-augmented submit does exactly that.
+    store.clear_handoff();
+
+    // (b) The transport bound, before anything is parsed further or written.
+    let config_bytes = serde_json::to_vec_pretty(&config)
+        .map_err(|e| pmcp::Error::internal(format!("config serialization: {e}")))?;
+    if config_bytes.len() > MAX_CONFIG_BYTES {
+        return Err(pmcp::Error::validation(format!(
+            "config is {} bytes; this server accepts at most {MAX_CONFIG_BYTES}",
+            config_bytes.len()
+        )));
+    }
+
+    let owner = resolve_owner(extra);
+
+    // (c) Mint FIRST: the id is what the artifact path, the envelope and any
+    // out-of-band dispatch are all keyed on.
+    let task = store
+        .mint_for_request(&owner, Some(TASK_TTL_MS))
+        .await
+        .map_err(|e| pmcp::Error::internal(format!("cannot mint a training task: {e}")))?;
+    let task_id = task.task_id.clone();
+    let artifact_path = paths.output_dir.join(format!("{task_id}.apr"));
+    let artifact_display = artifact_path.display().to_string();
+
+    // (d) Single-flight. Refused here rather than before the mint so the
+    // refusal names the RUNNING job and this task compensates cleanly.
+    let cancel = match running.try_admit(&task_id) {
+        Ok(cancel) => cancel,
+        Err(message) => {
+            return Err(compensate(&store, &task_id, &owner, &artifact_display, message).await)
+        }
+    };
+
+    // (e) The config travels as a FILE because the CLI is file-first, and is
+    // kept beside the artifact so a finished run is reconstructible. The
+    // envelope carries the same inputs for whoever finishes the work — the
+    // finalizer, once this dispatch is a state machine.
+    let config_path = paths.output_dir.join(format!("{task_id}.config.json"));
+    if let Err(e) = tokio::fs::write(&config_path, &config_bytes).await {
+        running.release(&task_id);
+        let message = format!("cannot write {}: {e}", config_path.display());
+        return Err(compensate(&store, &task_id, &owner, &artifact_display, message).await);
+    }
+    if let Err(e) = store
+        .put_envelope(
+            &task_id,
+            &owner,
+            run_envelope(&config_path.display().to_string(), &artifact_display),
+        )
+        .await
+    {
+        running.release(&task_id);
+        let message = format!("cannot record the run envelope: {e}");
+        return Err(compensate(&store, &task_id, &owner, &artifact_display, message).await);
+    }
+
+    // (f) Pre-flight: the CLI's own four request checks, in its own words.
+    if let Some(reason) = preflight(&paths, &config_path, &artifact_path).await {
+        running.release(&task_id);
+        return Err(compensate(&store, &task_id, &owner, &artifact_display, reason).await);
+    }
+
+    // (g) Dispatch. In-process today; a Step Functions execution in the
+    // serverless deployment. Either way the task id is already known, which is
+    // the whole point of minting in the handler.
+    let waiter = Arc::clone(&paths);
+    let waiter_store = Arc::clone(&store);
+    let waiter_running = Arc::clone(&running);
+    let waiter_task = task_id.clone();
+    let waiter_owner = owner.clone();
+    let waiter_artifact = artifact_display.clone();
+    tokio::spawn(async move {
+        let outcome = run_child(&waiter, &config_path, &artifact_path, &cancel).await;
+        waiter_running.release(&waiter_task);
+        let (report, error) = match &outcome {
+            Outcome::Completed(report) => (Some(report), None),
+            Outcome::Failed(message) => (None, Some(message.as_str())),
+            Outcome::Cancelled => (None, Some("cancelled by the client (tasks/cancel)")),
+        };
+        let payload = run_payload(
+            &waiter_task,
+            &waiter_artifact,
+            outcome.phase(),
+            report,
+            error,
+        );
+        let failed = !matches!(outcome, Outcome::Completed(_));
+        // Tolerated, not unwrapped: the task can have expired or already been
+        // cancelled, and `finish` deliberately no-ops on a second terminal write.
+        let _ = waiter_store
+            .finish(
+                &waiter_task,
+                &waiter_owner,
+                outcome.task_status(),
+                terminal_result(&payload, failed),
+            )
+            .await;
+    });
+
+    // (h) The task-shaped answer. `taskId` + `status` are what open pmcp's
+    // create gate; the armed handoff is what makes the store return THIS task
+    // instead of minting a second one. A plain call gets this value verbatim
+    // and can poll `train_status` with the same id.
+    let mut value = run_payload(&task_id, &artifact_display, "working", None, None);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("taskId".to_string(), serde_json::Value::String(task_id));
+        object.insert(
+            "status".to_string(),
+            serde_json::Value::String("working".to_string()),
+        );
+        object.insert("ttl".to_string(), serde_json::Value::from(TASK_TTL_MS));
+    }
+    Ok(value)
+}
+
+/// Read a run's status back out of the task store.
+async fn status(
+    store: &AprenderTaskStore,
+    extra: &RequestHandlerExtra,
+    task_id: &str,
+) -> pmcp::Result<serde_json::Value> {
+    use pmcp::server::task_store::TaskStore;
+    let owner = resolve_owner(extra);
+    let task = store
+        .get(task_id, &owner)
+        .await
+        .map_err(|e| pmcp::Error::validation(format!("no task {task_id} on this server: {e}")))?;
+    // A terminal task's payload is the result the worker wrote — one shape,
+    // both doors. A working task has no result yet, so synthesize the same
+    // shape from the envelope, which holds the artifact path.
+    if let Ok(result) = store.get_result(task_id, &owner).await {
+        if let Some(Content::Text { text }) = result.content.first() {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) {
+                return Ok(payload);
+            }
+        }
+    }
+    let artifact = store
+        .get_envelope(task_id, &owner)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|envelope| {
+            envelope
+                .get("artifact_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let phase = if task.status.is_terminal() {
+        // Terminal with no readable result: report the status honestly rather
+        // than claiming `working` forever.
+        format!("{:?}", task.status).to_lowercase()
+    } else {
+        "working".to_string()
+    };
+    Ok(run_payload(task_id, &artifact, &phase, None, None))
+}
+
+/// Assemble the server: two tools and the task store, nothing else.
 ///
 /// # Errors
 ///
 /// `pmcp::Error` if the builder refuses the configuration.
 pub fn build_server(
     paths: Arc<TrainerPaths>,
-    registry: Arc<JobRegistry>,
-    store: Arc<dyn TaskStore>,
+    store: Arc<AprenderTaskStore>,
+    running: Arc<RunningJobs>,
     name: &str,
     version: &str,
 ) -> pmcp::Result<Server> {
     let train_paths = Arc::clone(&paths);
-    let train_registry = Arc::clone(&registry);
     let train_store = Arc::clone(&store);
+    let train_running = Arc::clone(&running);
     // `TypedTool::new` derives the schema (with `$ref`s inlined) and
     // deserializes the arguments itself — the same pipeline
-    // `tool_typed_with_description` uses for `train_status` below, so the two
-    // tools cannot advertise schemas built different ways. The explicit
-    // registration stays because only `TypedTool` carries `with_execution`.
-    let train_tool = TypedTool::new(TOOL_TRAIN, move |args: TrainArgs, _extra| {
+    // `tool_typed_with_description` uses for `train_status`, so the two tools
+    // cannot advertise schemas built different ways. The explicit registration
+    // stays because only `TypedTool` carries `with_execution`.
+    let train_tool = TypedTool::new(TOOL_TRAIN, move |args: TrainArgs, extra| {
         let paths = Arc::clone(&train_paths);
-        let registry = Arc::clone(&train_registry);
         let store = Arc::clone(&train_store);
-        Box::pin(async move { submit_job(paths, registry, store, args.config).await })
+        let running = Arc::clone(&train_running);
+        Box::pin(async move { submit(paths, store, running, &extra, args.config).await })
     })
     .with_description(
         "Start a SetFit few-shot training run on this server's curated dataset and \
-         encoder. Returns an MCP task handle (poll tasks/get) for task-augmented \
-         calls, and a job_id for train_status either way. One job runs at a time.",
+         encoder. Returns an MCP task: poll tasks/get for status and tasks/result \
+         for the trainer's report, or poll train_status with the same task_id. One \
+         job runs at a time.",
     )
     .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional));
 
-    let status_registry = Arc::clone(&registry);
-    Server::builder()
+    let status_store = Arc::clone(&store);
+    let server = Server::builder()
         .name(name)
         .version(version)
         .capabilities(ServerCapabilities::tools_only())
         .tool(TOOL_TRAIN, train_tool)
         .tool_typed_with_description::<StatusArgs, _, _>(
             TOOL_STATUS,
-            "Report a training job's phase, and on completion the trainer's full \
+            "Report a training task's phase, and on completion the trainer's full \
              --json report (artifact path + sha256, provenance, resolved config). \
-             Without job_id: the most recent job.",
-            move |args, _extra| {
-                let registry = Arc::clone(&status_registry);
-                async move {
-                    registry
-                        .status(args.job_id.as_deref())
-                        .await
-                        .ok_or_else(|| {
-                            pmcp::Error::validation(match args.job_id {
-                                Some(id) => format!("no job named {id} on this server"),
-                                None => "no training job has been submitted yet".to_string(),
-                            })
-                        })
-                }
+             Takes the task_id that `train` returned.",
+            move |args: StatusArgs, extra| {
+                let store = Arc::clone(&status_store);
+                async move { status(&store, &extra, &args.task_id).await }
             },
         )
         .task_store(store)
-        .build()
+        .build()?;
+    Ok(server)
 }
 
 #[cfg(test)]
@@ -1064,31 +797,24 @@ pub fn build_server(
 mod tests {
     use super::*;
 
-    fn registry() -> JobRegistry {
-        JobRegistry::default()
-    }
-
     #[test]
     fn train_args_refuse_unknown_keys() {
-        let err = serde_json::from_value::<TrainArgs>(serde_json::json!({
-            "config": {},
-            "shots": 8
-        }))
-        .expect_err("unknown key must be refused");
+        let err =
+            serde_json::from_value::<TrainArgs>(serde_json::json!({ "config": {}, "shots": 8 }))
+                .expect_err("unknown key must be refused");
         assert!(err.to_string().contains("shots"), "{err}");
     }
 
     #[test]
-    fn status_args_default_to_latest() {
-        let args: StatusArgs = serde_json::from_value(serde_json::json!({}))
-            .expect("empty status args are the latest-job query");
-        assert!(args.job_id.is_none());
+    fn status_args_require_a_task_id() {
+        serde_json::from_value::<StatusArgs>(serde_json::json!({}))
+            .expect_err("task_id is not optional — there is no 'latest' across containers");
     }
 
     #[test]
     fn a_pretty_printed_report_is_the_whole_document() {
-        let stdout = b"{\n  \"command\": \"setfit train\"\n}\n";
-        let report = parse_json_report(stdout).expect("pretty report parses");
+        let report = parse_json_report(b"{\n  \"command\": \"setfit train\"\n}\n")
+            .expect("pretty report parses");
         assert_eq!(report["command"], "setfit train");
         assert!(
             parse_json_report(b"warming up\n{\"command\":\"x\"}\n").is_none(),
@@ -1114,144 +840,67 @@ mod tests {
         assert!(clipped.len() <= 64 + '…'.len_utf8());
     }
 
-    #[tokio::test]
-    async fn single_flight_refuses_a_second_admit_and_names_the_first() {
-        let registry = registry();
-        let dir = std::env::temp_dir();
-        let first = registry.begin(&dir).await.expect("first admit");
-        let refusal = registry
-            .begin(&dir)
-            .await
-            .expect_err("second admit refused");
-        assert!(refusal.contains(&first.job_id), "{refusal}");
-        registry
-            .finish(&first.job_id, JobOutcome::Failed("test".into()))
-            .await;
-        registry.begin(&dir).await.expect("admit after terminal");
+    #[test]
+    fn single_flight_refuses_a_second_admit_and_names_the_first() {
+        let running = RunningJobs::new();
+        running.try_admit("task-a").expect("first admit");
+        let refusal = running.try_admit("task-b").expect_err("second refused");
+        assert!(refusal.contains("task-a"), "{refusal}");
+        running.release("task-a");
+        running.try_admit("task-b").expect("admit after release");
     }
 
-    #[tokio::test]
-    async fn binding_pairs_the_submit_that_is_actually_pending() {
-        let registry = registry();
-        let dir = std::env::temp_dir();
-        let admitted = registry.begin(&dir).await.expect("admit");
-        registry.bind_pending("task-a", "owner-1").await;
-        let binding = admitted.binding.await.expect("the waiter is told its task");
-        assert_eq!(binding.task_id, "task-a");
-        assert_eq!(binding.owner_id, "owner-1");
-        let status = registry.status(None).await.expect("status");
-        assert_eq!(status["task_id"], "task-a", "the pairing is observable");
-        // The slot is consumed: a second create cannot re-pair the same job.
-        registry.bind_pending("task-b", "owner-1").await;
-        assert_eq!(
-            registry.status(None).await.expect("status")["task_id"],
-            "task-a"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_plain_call_leaves_no_binding_for_a_later_task_to_adopt() {
-        let registry = registry();
-        let dir = std::env::temp_dir();
-        // A plain (non-task-augmented) submit: admitted, finished, never bound.
-        let plain = registry.begin(&dir).await.expect("plain admit");
-        registry
-            .finish(
-                &plain.job_id,
-                JobOutcome::Completed(serde_json::json!({"a":1})),
-            )
-            .await;
-        // A later task-augmented submit mints a task. It must bind to ITSELF.
-        let augmented = registry.begin(&dir).await.expect("second admit");
-        registry.bind_pending("task-late", "owner-1").await;
-        let bound = augmented.binding.await.expect("bound");
-        assert_eq!(bound.task_id, "task-late");
-        let plain_status = registry.status(Some(&plain.job_id)).await.expect("plain");
+    #[test]
+    fn release_only_frees_the_slot_its_own_task_holds() {
+        let running = RunningJobs::new();
+        running.try_admit("task-a").expect("admit");
+        // A straggler from a previous run must not free the current job's slot.
+        running.release("task-stale");
         assert!(
-            plain_status["task_id"].is_null(),
-            "the plain job must NOT adopt a later call's task: {plain_status}"
+            running.try_admit("task-b").is_err(),
+            "task-a still holds the slot"
         );
-        let (payload, failed) = registry
-            .terminal_payload(&plain.job_id)
-            .await
-            .expect("plain job is terminal");
-        assert!(!failed);
-        assert_eq!(payload["report"]["a"], 1, "each job keeps its own report");
+        running.release("task-a");
+        running.try_admit("task-b").expect("now free");
     }
 
-    #[tokio::test]
-    async fn the_submit_handle_is_the_status_payload_plus_the_gate_keys() {
-        let registry = registry();
-        let dir = std::env::temp_dir();
-        let job = registry.begin(&dir).await.expect("admit");
-        let handle = registry
-            .submit_handle(&job.job_id)
-            .await
-            .expect("handle for a live job");
-        // The two keys pmcp's create gate requires, or no task is ever minted.
-        assert_eq!(handle["taskId"], GATE_TASK_ID);
-        assert_eq!(handle["status"], "working");
-        assert_eq!(handle["ttl"], serde_json::json!(TASK_TTL_MS));
-        // ...and the SAME payload train_status serves, so a plain client that
-        // gets this back reads the identical shape it will later poll.
-        let status = registry.status(Some(&job.job_id)).await.expect("status");
-        for key in [
-            "schema_version",
-            "job_id",
-            "task_id",
-            "phase",
-            "started_unix_ms",
-            "artifact_path",
-        ] {
-            assert_eq!(
-                handle[key], status[key],
-                "handle and status differ at {key}"
-            );
-        }
-        assert!(
-            status.get("taskId").is_none() && status.get("ttl").is_none(),
-            "the gate keys belong to the submit handle only: {status}"
-        );
-    }
-
-    #[tokio::test]
-    async fn status_reports_one_shape_for_every_phase() {
-        let registry = registry();
-        let dir = std::env::temp_dir();
-        let job = registry.begin(&dir).await.expect("admit");
-        let running = registry.status(None).await.expect("latest");
-        assert_eq!(running["job_id"], serde_json::json!(job.job_id));
-        assert_eq!(running["phase"], "running");
-        assert_eq!(running["schema_version"], 1);
-        assert!(running["report"].is_null() && running["error"].is_null());
-        registry.finish(&job.job_id, JobOutcome::Cancelled).await;
-        let cancelled = registry.status(Some(&job.job_id)).await.expect("by id");
-        assert_eq!(cancelled["phase"], "cancelled");
-        assert!(cancelled["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("tasks/cancel")));
-        assert!(registry.status(Some("job-nope")).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn cancel_only_fires_for_the_running_job_that_owns_the_task() {
-        let registry = registry();
-        let dir = std::env::temp_dir();
-        let job = registry.begin(&dir).await.expect("admit");
-        registry.bind_pending("task-a", "owner-1").await;
-        // An unrelated task id must not kill this job; a notify with no
-        // waiters is a no-op, so we assert on the selection instead.
-        registry.cancel_by_task("task-other").await;
+    #[test]
+    fn every_verdict_maps_to_a_distinct_task_status() {
         assert_eq!(
-            registry.status(None).await.expect("status")["phase"],
-            "running"
+            Outcome::Completed(serde_json::Value::Null).task_status(),
+            TaskStatus::Completed
         );
-        registry.finish(&job.job_id, JobOutcome::Cancelled).await;
-        // Terminal jobs are never selected for cancellation.
-        registry.cancel_by_task("task-a").await;
         assert_eq!(
-            registry.status(None).await.expect("status")["phase"],
-            "cancelled"
+            Outcome::Failed(String::new()).task_status(),
+            TaskStatus::Failed,
+            "a failed run must be distinguishable by STATUS, not only by payload"
         );
+        assert_eq!(Outcome::Cancelled.task_status(), TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn the_payload_shape_is_one_shape() {
+        let report = serde_json::json!({ "artifact_sha256": "ab" });
+        let done = run_payload("t-1", "/tmp/x.apr", "completed", Some(&report), None);
+        assert_eq!(done["schema_version"], 1);
+        assert_eq!(done["task_id"], "t-1");
+        assert_eq!(done["report"]["artifact_sha256"], "ab");
+        assert!(done["error"].is_null());
+        let working = run_payload("t-1", "/tmp/x.apr", "working", None, None);
+        // Same keys, whichever door serves it.
+        let (mut a, mut b): (Vec<_>, Vec<_>) = (
+            done.as_object().expect("obj").keys().collect(),
+            working.as_object().expect("obj").keys().collect(),
+        );
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_failed_run_is_an_error_result() {
+        let payload = run_payload("t-1", "/tmp/x.apr", "failed", None, Some("boom"));
+        assert!(terminal_result(&payload, true).is_error);
+        assert!(!terminal_result(&payload, false).is_error);
     }
 }
