@@ -22,8 +22,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use aprender_mcp_setfit_train::{
-    build_server, AprenderTaskStore, CancelSink, InMemoryTaskBackend, RunningJobs, TrainerPaths,
-    SERVER_NAME,
+    build_server, AprenderTaskStore, CancelSink, Dispatcher, InMemoryTaskBackend, LocalDispatcher,
+    RunningJobs, TrainerPaths, SERVER_NAME,
 };
 
 /// Which transport to serve.
@@ -235,13 +235,14 @@ async fn main() -> ExitCode {
         paths.output_dir.display(),
     );
 
-    let server = match build_server(
-        paths,
-        store,
-        running,
-        SERVER_NAME,
-        env!("CARGO_PKG_VERSION"),
-    ) {
+    // This runner trains IN THIS PROCESS: it is a long-lived server, so the
+    // local dispatcher is the right one. The serverless request Lambda builds
+    // the same server around a Step Functions dispatcher and needs none of the
+    // paths above.
+    let dispatcher: Arc<dyn Dispatcher> =
+        Arc::new(LocalDispatcher::new(paths, running, Arc::clone(&store)));
+
+    let server = match build_server(store, dispatcher, SERVER_NAME, env!("CARGO_PKG_VERSION")) {
         Ok(server) => server,
         Err(error) => {
             eprintln!("error: server construction refused: {error}");

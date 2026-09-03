@@ -1,0 +1,528 @@
+//! The LOCAL dispatcher: run the training child in this process.
+//!
+//! This is the whole of "training happens here" — the pinned `apr` binary, the
+//! operator-provisioned paths, single-flight admission, the child supervisor
+//! and the terminal write. It is what a long-lived server (stdio, or streamable
+//! HTTP on a host that outlives its requests) uses.
+//!
+//! # Why this is a MODULE and not the server
+//!
+//! The serverless request Lambda dispatches to a Step Functions execution and
+//! never trains anything itself: it has no `apr`, no dataset and no 88 MB
+//! encoder checkout, and it must not, because the pmcp.run deployment package
+//! has a 250 MB ceiling that the platform's own backend has already OOM-killed
+//! once. Keeping every local concern behind [`Dispatcher`] is what lets the
+//! request server be built without any of it.
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
+use pmcp::async_trait;
+use pmcp::types::TaskStatus;
+use tokio::sync::Notify;
+
+use crate::task_store::{AprenderTaskStore, CancelSink};
+use crate::{
+    run_payload, terminal_result, Dispatcher, DRY_RUN_TIMEOUT_SECS, OUTPUT_TAIL_BYTES, TOOL_STATUS,
+};
+
+/// Everything the operator provisions; nothing here comes from the client.
+///
+/// The client varies the training CONFIG; the server owns which dataset, which
+/// selection, which encoder checkout and where artifacts land — the thin-server
+/// philosophy applied to training.
+#[derive(Debug, Clone)]
+pub struct TrainerPaths {
+    /// The pinned `apr` binary (must carry the `setfit` feature).
+    pub apr_bin: PathBuf,
+    /// Attested benchmark directory, as written by `apr data tweet-eval-stance`.
+    pub data: PathBuf,
+    /// The selection manifest, as written by `apr data select`.
+    pub selection: PathBuf,
+    /// Pinned all-MiniLM-L6-v2 checkout (the CLI never downloads).
+    pub model_dir: PathBuf,
+    /// Where per-job config files and trained artifacts are written.
+    pub output_dir: PathBuf,
+}
+
+impl TrainerPaths {
+    /// Refuse a misconfigured server at STARTUP, naming the first missing
+    /// piece — not at the first submit, minutes into someone's workflow.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable message naming the path and what was expected of it.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.apr_bin.is_file() {
+            return Err(format!(
+                "--apr-bin (APRENDER_SETFIT_TRAIN_APR_BIN) {} is not a file; point it at a \
+                 pinned, setfit-featured `apr` (the $APR that scripts/apr_bin.sh exports)",
+                self.apr_bin.display()
+            ));
+        }
+        if !self.data.is_dir() {
+            return Err(format!(
+                "--data (APRENDER_SETFIT_TRAIN_DATA) {} is not a directory; expected an \
+                 attested benchmark dir (benchmark-manifest.json + split JSONL)",
+                self.data.display()
+            ));
+        }
+        if !self.selection.is_file() {
+            return Err(format!(
+                "--selection (APRENDER_SETFIT_TRAIN_SELECTION) {} is not a file; expected a \
+                 selection-manifest.json",
+                self.selection.display()
+            ));
+        }
+        if !self.model_dir.is_dir() {
+            return Err(format!(
+                "--model-dir (APRENDER_SETFIT_TRAIN_MODEL_DIR) {} is not a directory; expected \
+                 a pinned all-MiniLM-L6-v2 checkout",
+                self.model_dir.display()
+            ));
+        }
+        std::fs::create_dir_all(&self.output_dir).map_err(|e| {
+            format!(
+                "--output-dir (APRENDER_SETFIT_TRAIN_OUTPUT_DIR) {} cannot be created: {e}",
+                self.output_dir.display()
+            )
+        })?;
+        self.probe_setfit_subcommand()
+    }
+
+    /// `is_file()` is not enough: `setfit` is deliberately NOT in apr-cli's
+    /// `default` feature set, so the `apr` a plain `cargo build --release`
+    /// produces — the command the repo's own docs give — has no `setfit`
+    /// subcommand at all. That binary passes every check above, the server
+    /// starts, advertises `train`, and then dies on EVERY submit inside the
+    /// pre-flight with clap's `unrecognized subcommand`.
+    ///
+    /// This function's whole promise is "name the first missing piece at
+    /// STARTUP"; the likeliest missing piece was the one it did not look for.
+    /// `--help` is free — no model load, no I/O.
+    fn probe_setfit_subcommand(&self) -> Result<(), String> {
+        let probe = std::process::Command::new(&self.apr_bin)
+            .args(["setfit", "train", "--help"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output();
+        match probe {
+            Err(e) => Err(format!(
+                "--apr-bin (APRENDER_SETFIT_TRAIN_APR_BIN) {} could not be executed: {e}",
+                self.apr_bin.display()
+            )),
+            Ok(out) if !out.status.success() => Err(format!(
+                "--apr-bin (APRENDER_SETFIT_TRAIN_APR_BIN) {} does not answer \
+                 `setfit train --help` ({}): build it with `--features setfit` — setfit is NOT \
+                 in apr-cli's default feature set, so a plain `cargo build --release` produces \
+                 an apr this server cannot use.\n{}",
+                self.apr_bin.display(),
+                out.status,
+                tail(&out.stderr, OUTPUT_TAIL_BYTES)
+            )),
+            Ok(_) => Ok(()),
+        }
+    }
+}
+
+/// The one training run this process will admit at a time, and the handle that
+/// stops it.
+#[derive(Debug)]
+struct RunningJob {
+    task_id: String,
+    cancel: Arc<Notify>,
+}
+
+/// Single-flight admission plus the cancel relay.
+///
+/// Per-process by design: it is about this container's CPU, not about task
+/// state. A second container admitting its own job is correct behaviour, not a
+/// bug — which is exactly why task state lives in the store instead.
+#[derive(Debug, Default)]
+pub struct RunningJobs {
+    current: Mutex<Option<RunningJob>>,
+}
+
+impl RunningJobs {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn guard(&self) -> MutexGuard<'_, Option<RunningJob>> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Admit `task_id`, or refuse naming the job already running.
+    fn try_admit(&self, task_id: &str) -> Result<Arc<Notify>, String> {
+        let mut current = self.guard();
+        if let Some(running) = current.as_ref() {
+            return Err(format!(
+                "a training job is already running ({}); this server trains one model at a \
+                 time — poll `{TOOL_STATUS}` and resubmit when it finishes",
+                running.task_id
+            ));
+        }
+        let cancel = Arc::new(Notify::new());
+        *current = Some(RunningJob {
+            task_id: task_id.to_string(),
+            cancel: Arc::clone(&cancel),
+        });
+        Ok(cancel)
+    }
+
+    /// Release the slot, but only if `task_id` still owns it.
+    fn release(&self, task_id: &str) {
+        let mut current = self.guard();
+        if current.as_ref().is_some_and(|r| r.task_id == task_id) {
+            *current = None;
+        }
+    }
+}
+
+impl CancelSink for RunningJobs {
+    fn cancel(&self, task_id: &str) {
+        let current = self.guard();
+        if let Some(running) = current.as_ref().filter(|r| r.task_id == task_id) {
+            // `notify_one`, NOT `notify_waiters`: the latter wakes only waiters
+            // already registered and stores no permit, and `run_child` registers
+            // on the first poll of its `select!` — after the spawn is scheduled.
+            // A cancel landing in that window would be silently dropped.
+            running.cancel.notify_one();
+        }
+    }
+}
+
+/// The base `apr setfit train` invocation. One builder, so the dry run and the
+/// real run cannot drift.
+fn train_command(
+    paths: &TrainerPaths,
+    config_path: &Path,
+    artifact_path: &Path,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(&paths.apr_bin);
+    cmd.arg("setfit")
+        .arg("train")
+        .arg("--config")
+        .arg(config_path)
+        .arg("--data")
+        .arg(&paths.data)
+        .arg("--selection")
+        .arg(&paths.selection)
+        .arg("--model-dir")
+        .arg(&paths.model_dir)
+        .arg("--output")
+        .arg(artifact_path)
+        .arg("--json")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // A dying server must not orphan a CPU-saturating trainer. This is also
+        // what makes cancellation-by-drop safe.
+        .kill_on_drop(true);
+    cmd
+}
+
+/// `apr setfit train --json` writes ONE pretty-printed report and nothing else
+/// to stdout, so the whole buffer is the document. If stdout ever gains a
+/// second writer this must fail loudly rather than quietly find something else
+/// that parses.
+fn parse_json_report(stdout: &[u8]) -> Option<serde_json::Value> {
+    serde_json::from_slice(stdout).ok()
+}
+
+/// At most the last `max` bytes of a captured stream, on a char boundary.
+fn tail(stream: &[u8], max: usize) -> String {
+    let text = String::from_utf8_lossy(stream);
+    let text = text.trim();
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut start = text.len() - max;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &text[start..])
+}
+
+/// What a failing child said — BOTH streams. Keeping only stderr is defect
+/// #2418, which `aprender-mcp`'s subprocess module already paid for once: a
+/// failing `apr` can still have written its `--json` report to stdout.
+fn failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
+    let err = tail(stderr, OUTPUT_TAIL_BYTES);
+    let out = tail(stdout, OUTPUT_TAIL_BYTES);
+    match (err.is_empty(), out.is_empty()) {
+        (false, false) => format!("{err}\n--- stdout ---\n{out}"),
+        (false, true) => err,
+        (true, false) => out,
+        (true, true) => "the trainer produced no output".to_string(),
+    }
+}
+
+/// A job's terminal verdict.
+#[derive(Debug)]
+enum Outcome {
+    Completed(serde_json::Value),
+    Failed(String),
+    Cancelled,
+}
+
+impl Outcome {
+    const fn phase(&self) -> &'static str {
+        match self {
+            Self::Completed(_) => "completed",
+            Self::Failed(_) => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// The MCP task status a verdict maps onto. `Failed` is a real status the
+    /// SDK's state machine accepts, so a task client can tell a failed run from
+    /// a successful one by STATUS and need not parse the payload.
+    const fn task_status(&self) -> TaskStatus {
+        match self {
+            Self::Completed(_) => TaskStatus::Completed,
+            Self::Failed(_) => TaskStatus::Failed,
+            Self::Cancelled => TaskStatus::Cancelled,
+        }
+    }
+}
+
+/// The CLI's own request checks, run synchronously. `None` means accepted.
+async fn preflight(
+    paths: &TrainerPaths,
+    config_path: &Path,
+    artifact_path: &Path,
+) -> Option<String> {
+    let mut dry = train_command(paths, config_path, artifact_path);
+    dry.arg("--dry-run");
+    match tokio::time::timeout(Duration::from_secs(DRY_RUN_TIMEOUT_SECS), dry.output()).await {
+        Err(_) => Some(format!(
+            "pre-flight (--dry-run) exceeded {DRY_RUN_TIMEOUT_SECS}s"
+        )),
+        Ok(Err(e)) => Some(format!("cannot spawn {}: {e}", paths.apr_bin.display())),
+        // BOTH streams: `Command::output()` re-pipes stdout regardless of what
+        // the builder asked for, and a signal kill leaves stderr empty — which
+        // rendered as a refusal with no reason at all.
+        Ok(Ok(out)) if !out.status.success() => Some(failure_detail(&out.stdout, &out.stderr)),
+        Ok(Ok(_)) => None,
+    }
+}
+
+/// Supervise one training child to its terminal state.
+///
+/// `wait_with_output` keeps both pipes draining while the child runs — a child
+/// that fills a pipe nobody reads deadlocks, and this makes that tokio's
+/// guarantee rather than a local invariant. Cancellation drops that future and
+/// `kill_on_drop` reaps the child.
+async fn run_child(
+    paths: &TrainerPaths,
+    config_path: &Path,
+    artifact_path: &Path,
+    cancel: &Notify,
+) -> Outcome {
+    let mut cmd = train_command(paths, config_path, artifact_path);
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => return Outcome::Failed(format!("cannot spawn {}: {e}", paths.apr_bin.display())),
+    };
+    let output = tokio::select! {
+        output = child.wait_with_output() => output,
+        () = cancel.notified() => return Outcome::Cancelled,
+    };
+    match output {
+        Ok(out) if out.status.success() => parse_json_report(&out.stdout).map_or_else(
+            || {
+                Outcome::Failed(
+                    "the trainer exited 0 but printed no parseable --json report".to_string(),
+                )
+            },
+            Outcome::Completed,
+        ),
+        Ok(out) => Outcome::Failed(format!(
+            "the trainer exited with {}: {}",
+            out.status,
+            failure_detail(&out.stdout, &out.stderr)
+        )),
+        Err(e) => Outcome::Failed(format!("waiting on the trainer failed: {e}")),
+    }
+}
+
+/// Runs the training child in THIS process.
+///
+/// Holds everything the request side must not need: the pinned binary, the
+/// operator's paths, and the single-flight guard. The store comes along because
+/// the waiter performs the terminal write itself — there is no finalizer on
+/// this path, and nothing else would ever move the task off `working`.
+pub struct LocalDispatcher {
+    paths: Arc<TrainerPaths>,
+    running: Arc<RunningJobs>,
+    store: Arc<AprenderTaskStore>,
+}
+
+impl std::fmt::Debug for LocalDispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalDispatcher")
+            .field("paths", &self.paths)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LocalDispatcher {
+    #[must_use]
+    pub fn new(
+        paths: Arc<TrainerPaths>,
+        running: Arc<RunningJobs>,
+        store: Arc<AprenderTaskStore>,
+    ) -> Self {
+        Self {
+            paths,
+            running,
+            store,
+        }
+    }
+}
+
+#[async_trait]
+impl Dispatcher for LocalDispatcher {
+    fn artifact_uri(&self, task_id: &str) -> String {
+        self.paths
+            .output_dir
+            .join(format!("{task_id}.apr"))
+            .display()
+            .to_string()
+    }
+
+    async fn dispatch(
+        &self,
+        task_id: &str,
+        owner: &str,
+        config: &serde_json::Value,
+    ) -> Result<(), String> {
+        // Single-flight FIRST: refusing before any file is written keeps a
+        // refused submit from leaving a config behind.
+        let cancel = self.running.try_admit(task_id)?;
+
+        let artifact_path = self.paths.output_dir.join(format!("{task_id}.apr"));
+        let config_path = self.paths.output_dir.join(format!("{task_id}.config.json"));
+        let bytes =
+            serde_json::to_vec_pretty(config).map_err(|e| format!("config serialization: {e}"))?;
+        if let Err(e) = tokio::fs::write(&config_path, &bytes).await {
+            self.running.release(task_id);
+            return Err(format!("cannot write {}: {e}", config_path.display()));
+        }
+
+        // The CLI's own four request checks, in its own words, before the task
+        // is allowed to look like a running job.
+        if let Some(reason) = preflight(&self.paths, &config_path, &artifact_path).await {
+            self.running.release(task_id);
+            return Err(reason);
+        }
+
+        let paths = Arc::clone(&self.paths);
+        let running = Arc::clone(&self.running);
+        let store = Arc::clone(&self.store);
+        let task_id = task_id.to_string();
+        let owner = owner.to_string();
+        let artifact_display = artifact_path.display().to_string();
+        tokio::spawn(async move {
+            let outcome = run_child(&paths, &config_path, &artifact_path, &cancel).await;
+            running.release(&task_id);
+            let (report, error) = match &outcome {
+                Outcome::Completed(report) => (Some(report), None),
+                Outcome::Failed(message) => (None, Some(message.as_str())),
+                Outcome::Cancelled => (None, Some("cancelled by the client (tasks/cancel)")),
+            };
+            let payload = run_payload(&task_id, &artifact_display, outcome.phase(), report, error);
+            let failed = !matches!(outcome, Outcome::Completed(_));
+            // Tolerated, not unwrapped: the task can have expired or already
+            // been cancelled, and `finish` no-ops on a second terminal write.
+            let _ = store
+                .finish(
+                    &task_id,
+                    &owner,
+                    outcome.task_status(),
+                    terminal_result(&payload, failed),
+                )
+                .await;
+        });
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pretty_printed_report_is_the_whole_document() {
+        let report = parse_json_report(b"{\n  \"command\": \"setfit train\"\n}\n")
+            .expect("pretty report parses");
+        assert_eq!(report["command"], "setfit train");
+        assert!(
+            parse_json_report(b"warming up\n{\"command\":\"x\"}\n").is_none(),
+            "a second writer on stdout must fail loudly, not be scanned around"
+        );
+    }
+
+    #[test]
+    fn a_failure_keeps_both_streams() {
+        let detail = failure_detail(b"{\"partial\":true}", b"error: refused");
+        assert!(detail.contains("error: refused"), "{detail}");
+        assert!(
+            detail.contains("{\"partial\":true}"),
+            "stdout must survive a failure (#2418): {detail}"
+        );
+        assert_eq!(failure_detail(b"", b""), "the trainer produced no output");
+    }
+
+    #[test]
+    fn tail_clips_on_char_boundaries() {
+        let clipped = tail("héllo wörld".repeat(400).as_bytes(), 64);
+        assert!(clipped.starts_with('…'));
+        assert!(clipped.len() <= 64 + '…'.len_utf8());
+    }
+
+    #[test]
+    fn single_flight_refuses_a_second_admit_and_names_the_first() {
+        let running = RunningJobs::new();
+        running.try_admit("task-a").expect("first admit");
+        let refusal = running.try_admit("task-b").expect_err("second refused");
+        assert!(refusal.contains("task-a"), "{refusal}");
+        running.release("task-a");
+        running.try_admit("task-b").expect("admit after release");
+    }
+
+    #[test]
+    fn release_only_frees_the_slot_its_own_task_holds() {
+        let running = RunningJobs::new();
+        running.try_admit("task-a").expect("admit");
+        // A straggler from a previous run must not free the current job's slot.
+        running.release("task-stale");
+        assert!(
+            running.try_admit("task-b").is_err(),
+            "task-a still holds the slot"
+        );
+        running.release("task-a");
+        running.try_admit("task-b").expect("now free");
+    }
+
+    #[test]
+    fn every_verdict_maps_to_a_distinct_task_status() {
+        assert_eq!(
+            Outcome::Completed(serde_json::Value::Null).task_status(),
+            TaskStatus::Completed
+        );
+        assert_eq!(
+            Outcome::Failed(String::new()).task_status(),
+            TaskStatus::Failed,
+            "a failed run must be distinguishable by STATUS, not only by payload"
+        );
+        assert_eq!(Outcome::Cancelled.task_status(), TaskStatus::Cancelled);
+    }
+}
