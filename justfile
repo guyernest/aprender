@@ -6,8 +6,12 @@
 #
 #   just --list                       # what is here
 #   just build-trainer-asset          # the worker Lambda package
-#   just synth-training env=dev       # validate the IaC, create nothing
-#   just deploy-training env=dev      # create/update the AWS resources
+#   just synth-training dev           # validate the IaC, create nothing
+#   just deploy-training dev          # create/update the AWS resources
+#
+# Arguments are POSITIONAL (`just synth-training dev`). `env=dev` is accepted
+# too, because just passes it positionally rather than as an override and the
+# resulting `--context env=env=dev` is a confusing way to learn that.
 
 set shell := ["bash", "-uc"]
 
@@ -71,17 +75,17 @@ build-trainer-asset: build-apr-arm64
 
 # Validate the IaC. Creates nothing, contacts no account.
 synth-training env="dev":
-    cd deploy-extensions && npx cdk synth --context env={{env}} --quiet
-    @echo "  synth OK for env={{env}}"
+    @cd deploy-extensions && npx cdk synth --context env={{ trim_start_match(env, "env=") }} --quiet
+    @echo "  synth OK for env={{ trim_start_match(env, "env=") }}"
 
 # Show what a deploy WOULD change, against the real account.
 diff-training env="dev" profile="ze-kasher-dev":
-    cd deploy-extensions && npx cdk diff --context env={{env}} --profile {{profile}}
+    cd deploy-extensions && npx cdk diff --context env={{ trim_start_match(env, "env=") }} --profile {{profile}}
 
 # Create/update the training infrastructure. Real resources, real money.
 deploy-training env="dev" profile="ze-kasher-dev":
-    cd deploy-extensions && npx cdk deploy --context env={{env}} --profile {{profile}}
+    cd deploy-extensions && npx cdk deploy --context env={{ trim_start_match(env, "env=") }} --profile {{profile}}
 
 # Tear it down. dev destroys data by design; prod RETAINs the table and bucket.
 destroy-training env="dev" profile="ze-kasher-dev":
-    cd deploy-extensions && npx cdk destroy --context env={{env}} --profile {{profile}}
+    cd deploy-extensions && npx cdk destroy --context env={{ trim_start_match(env, "env=") }} --profile {{profile}}
