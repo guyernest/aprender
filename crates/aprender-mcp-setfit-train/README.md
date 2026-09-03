@@ -60,22 +60,32 @@ only the dispatch and the writer change.
 | `train` | `config: object` — the twelve-knob SetFit training config, passed verbatim to `apr setfit train --config` (bounded at 1 MiB) | A task-shaped `working` value carrying `task_id`. Task-augmented callers poll `tasks/get` and read `tasks/result`; plain callers poll `train_status` with the same id. |
 | `train_status` | `task_id: string` | `{schema_version, task_id, phase, artifact_path, report, error}` — `report` is the trainer's own `--json` report (artifact sha256, provenance, resolved config). The same payload the terminal task result carries. |
 
-## Run locally (stdio)
+## Run it
+
+**Streamable HTTP is the default** — this is a remote MCP server. Stdio is the
+local-development opt-in, for a client that spawns the binary directly.
 
 ```bash
-. scripts/apr_bin.sh || exit 1   # pin the setfit-featured apr
+. scripts/apr_bin.sh || exit 1   # never a bare `apr`, never a hardcoded path
+
+# Remote (default): binds 127.0.0.1:8080; the bound address is printed.
 cargo run -p aprender-mcp-setfit-train -- \
   --apr-bin "$APR" \
   --data data/tweet-eval-stance \
   --selection data/tweet-eval-stance/selection-manifest.json \
   --model-dir ~/.cache/aprender/minilm-l6-v2-1110a243 \
-  --output-dir /tmp/setfit-train-out
+  --output-dir /tmp/setfit-train-out \
+  --addr 0.0.0.0:8080          # accept remote clients; :0 lets the OS pick
+
+# Local: stdio, for Claude Desktop / Claude Code / Cursor.
+cargo run -p aprender-mcp-setfit-train -- ... --stdio
 ```
 
-Every flag also reads `APRENDER_SETFIT_TRAIN_<FLAG>` from the environment.
+Every flag also reads `APRENDER_SETFIT_TRAIN_<FLAG>`, including
+`APRENDER_SETFIT_TRAIN_ADDR`, so a container configures the server without argv.
 The operator provisions the dataset, selection, encoder checkout and output
-directory; the client varies only the training config. Measured envelope for
-the 8-shot reference recipe: **127 s wall, 4.0 GB peak RSS** (M-series CPU).
+directory; the client varies only the training config. Measured envelope for the
+8-shot reference recipe: **127 s wall, 4.0 GB peak RSS** (M-series CPU).
 
 ## Tests
 
@@ -84,7 +94,12 @@ cargo test -p aprender-mcp-setfit-train -- --nocapture      # unit + E2E; --noca
                                                             # what makes the SKIP line
                                                             # VISIBLE (libtest swallows a
                                                             # passing test's stdout)
+# Armed: a REAL training run as an MCP task, once per transport.
 APR_MCP_E2E_SETFIT_TRAIN_BIN="$APR" \
-  cargo test -p aprender-mcp-setfit-train --test e2e_stdio  # armed: a REAL training run
-                                                            # as an MCP task over stdio
+  cargo test -p aprender-mcp-setfit-train --test e2e_http   # streamable HTTP (the deployed
+                                                            # transport): sessions, Accept
+                                                            # negotiation, a real socket
+APR_MCP_E2E_SETFIT_TRAIN_BIN="$APR" \
+  cargo test -p aprender-mcp-setfit-train --test e2e_stdio  # stdio (what a local client
+                                                            # spawns)
 ```

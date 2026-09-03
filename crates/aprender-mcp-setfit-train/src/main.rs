@@ -26,20 +26,44 @@ use aprender_mcp_setfit_train::{
     SERVER_NAME,
 };
 
+/// Which transport to serve.
+///
+/// HTTP is the DEFAULT because a remote MCP server is the deployment this org
+/// encourages; stdio is the local-development opt-in. That is also the shape
+/// the in-house `approval-mcp` server uses ("HTTP-first", its D-02/D-03).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transport {
+    /// Streamable HTTP on `addr` — remote clients, many sessions.
+    Http(std::net::SocketAddr),
+    /// Stdio — what a local client (Claude Desktop, Claude Code, Cursor)
+    /// spawns directly.
+    Stdio,
+}
+
 /// What argv asked for: a configured server, or just its own documentation.
 #[derive(Debug)]
 enum Parsed {
-    Paths(TrainerPaths),
+    Serve {
+        paths: TrainerPaths,
+        transport: Transport,
+    },
     /// `--help`/`-h`/`--version`/`-V`: print and exit 0.
     Message(String),
 }
 
 const USAGE: &str = "\
-aprender-mcp-setfit-train — thin single-algorithm MCP training server (SetFit, stdio)
+aprender-mcp-setfit-train — thin single-algorithm MCP training server (SetFit)
 
 USAGE:
     aprender-mcp-setfit-train --apr-bin <PATH> --data <DIR> --selection <FILE> \\
-                              --model-dir <DIR> --output-dir <DIR>
+                              --model-dir <DIR> --output-dir <DIR> [--addr <ADDR> | --stdio]
+
+TRANSPORT (streamable HTTP by default — this is a remote server):
+    --addr <ADDR>    bind address for streamable HTTP (default 127.0.0.1:8080;
+                     use 0.0.0.0:<port> to accept remote clients, and :0 to let
+                     the OS pick, which is printed on startup)
+    --stdio          serve stdio instead, for a local client that spawns this
+                     binary directly
 
 Every flag also reads an environment variable; the flag wins:
     --apr-bin     APRENDER_SETFIT_TRAIN_APR_BIN     a pinned apr built with --features setfit
@@ -81,6 +105,8 @@ fn resolve(flag: &str, env: &str, value: Option<PathBuf>) -> Result<PathBuf, Str
 fn parse_paths(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Parsed, String> {
     let (mut apr_bin, mut data, mut selection, mut model_dir, mut output_dir) =
         (None, None, None, None, None);
+    let mut stdio = false;
+    let mut addr: Option<std::net::SocketAddr> = None;
     let _argv0 = args.next();
     while let Some(arg) = args.next() {
         let flag = arg.to_string_lossy().into_owned();
@@ -93,6 +119,20 @@ fn parse_paths(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Par
             // A binary that documents five flags and five env vars must be
             // able to say so. These used to fall into `other` and exit 2 with
             // "unknown argument --help".
+            "--stdio" => {
+                stdio = true;
+                continue;
+            }
+            "--addr" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| String::from("--addr requires a bind address"))?;
+                let text = value.to_string_lossy().into_owned();
+                addr = Some(text.parse().map_err(|e| {
+                    format!("--addr {text} is not a bind address (host:port): {e}")
+                })?);
+                continue;
+            }
             "--help" | "-h" => return Ok(Parsed::Message(USAGE.to_string())),
             "--version" | "-V" => {
                 return Ok(Parsed::Message(format!(
@@ -112,17 +152,43 @@ fn parse_paths(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Par
             .ok_or_else(|| format!("{flag} requires a path"))?;
         *slot = Some(PathBuf::from(value));
     }
-    Ok(Parsed::Paths(TrainerPaths {
-        apr_bin: resolve("--apr-bin", "APRENDER_SETFIT_TRAIN_APR_BIN", apr_bin)?,
-        data: resolve("--data", "APRENDER_SETFIT_TRAIN_DATA", data)?,
-        selection: resolve("--selection", "APRENDER_SETFIT_TRAIN_SELECTION", selection)?,
-        model_dir: resolve("--model-dir", "APRENDER_SETFIT_TRAIN_MODEL_DIR", model_dir)?,
-        output_dir: resolve(
-            "--output-dir",
-            "APRENDER_SETFIT_TRAIN_OUTPUT_DIR",
-            output_dir,
-        )?,
-    }))
+    if stdio && addr.is_some() {
+        return Err(String::from(
+            "--stdio and --addr are mutually exclusive: pick one transport",
+        ));
+    }
+    let transport = if stdio {
+        Transport::Stdio
+    } else {
+        // The env var exists so a container can set the bind address without
+        // argv, exactly like the five paths.
+        let from_env = std::env::var("APRENDER_SETFIT_TRAIN_ADDR")
+            .ok()
+            .map(|text| {
+                text.parse::<std::net::SocketAddr>().map_err(|e| {
+                    format!("APRENDER_SETFIT_TRAIN_ADDR {text} is not a bind address: {e}")
+                })
+            })
+            .transpose()?;
+        Transport::Http(
+            addr.or(from_env)
+                .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 8080))),
+        )
+    };
+    Ok(Parsed::Serve {
+        paths: TrainerPaths {
+            apr_bin: resolve("--apr-bin", "APRENDER_SETFIT_TRAIN_APR_BIN", apr_bin)?,
+            data: resolve("--data", "APRENDER_SETFIT_TRAIN_DATA", data)?,
+            selection: resolve("--selection", "APRENDER_SETFIT_TRAIN_SELECTION", selection)?,
+            model_dir: resolve("--model-dir", "APRENDER_SETFIT_TRAIN_MODEL_DIR", model_dir)?,
+            output_dir: resolve(
+                "--output-dir",
+                "APRENDER_SETFIT_TRAIN_OUTPUT_DIR",
+                output_dir,
+            )?,
+        },
+        transport,
+    })
 }
 
 /// A current-thread runtime: this server supervises one child process and
@@ -132,8 +198,8 @@ fn parse_paths(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Par
 /// is already saturating the CPU at ~4 GB RSS.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let paths = match parse_paths(std::env::args_os()) {
-        Ok(Parsed::Paths(paths)) => paths,
+    let (paths, transport) = match parse_paths(std::env::args_os()) {
+        Ok(Parsed::Serve { paths, transport }) => (paths, transport),
         Ok(Parsed::Message(text)) => {
             println!("{text}");
             return ExitCode::SUCCESS;
@@ -163,7 +229,7 @@ async fn main() -> ExitCode {
     );
 
     eprintln!(
-        "{SERVER_NAME}: apr={} data={} out={} — serving `train`/`train_status` on stdio",
+        "{SERVER_NAME}: apr={} data={} out={}",
         paths.apr_bin.display(),
         paths.data.display(),
         paths.output_dir.display(),
@@ -183,16 +249,40 @@ async fn main() -> ExitCode {
         }
     };
 
-    if let Err(error) = server.run_stdio().await {
-        eprintln!("error: stdio server terminated: {error}");
-        return ExitCode::FAILURE;
+    match transport {
+        Transport::Http(addr) => {
+            // The bound address is PRINTED, not assumed: `--addr :0` is the
+            // only way an E2E can take a free port, and it needs to be told
+            // which one it got. stderr, because stdout is the stdio protocol's
+            // and a server that serves both must not differ in that habit.
+            match aprender_mcp_setfit_train::serve_http(server, addr).await {
+                Ok((bound, handle)) => {
+                    eprintln!("{SERVER_NAME}: streamable HTTP listening on http://{bound}");
+                    if let Err(error) = handle.await {
+                        eprintln!("error: HTTP server terminated: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("error: cannot serve HTTP on {addr}: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        Transport::Stdio => {
+            eprintln!("{SERVER_NAME}: serving `train`/`train_status` on stdio");
+            if let Err(error) = server.run_stdio().await {
+                eprintln!("error: stdio server terminated: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
     }
     ExitCode::SUCCESS
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_paths, Parsed};
+    use super::{parse_paths, Parsed, Transport};
     use std::ffi::OsString;
 
     fn argv(args: &[&str]) -> Vec<OsString> {
@@ -223,14 +313,102 @@ mod tests {
             .into_iter(),
         )
         .expect("a complete argv parses");
-        let Parsed::Paths(paths) = parsed else {
+        let Parsed::Serve { paths, transport } = parsed else {
             panic!("a complete argv is not a --help request")
         };
+        assert_eq!(
+            transport,
+            Transport::Http(std::net::SocketAddr::from(([127, 0, 0, 1], 8080))),
+            "HTTP is the default transport — this is a remote server"
+        );
         assert_eq!(paths.apr_bin, std::path::Path::new("/bin/apr"));
         assert_eq!(paths.data, std::path::Path::new("/d/data"));
         assert_eq!(paths.selection, std::path::Path::new("/s/selection.json"));
         assert_eq!(paths.model_dir, std::path::Path::new("/m/model"));
         assert_eq!(paths.output_dir, std::path::Path::new("/o/out"));
+    }
+
+    /// The org default. A regression here silently turns a remote server into
+    /// a local-only one, which no other assertion would notice.
+    #[test]
+    fn http_is_the_default_and_stdio_is_opt_in() {
+        let base = [
+            "--apr-bin",
+            "/bin/apr",
+            "--data",
+            "/d",
+            "--selection",
+            "/s",
+            "--model-dir",
+            "/m",
+            "--output-dir",
+            "/o",
+        ];
+        let parsed = parse_paths(argv(&base).into_iter()).expect("parses");
+        let Parsed::Serve { transport, .. } = parsed else {
+            panic!("not a --help request")
+        };
+        assert_eq!(
+            transport,
+            Transport::Http(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
+        );
+
+        let mut with_stdio = base.to_vec();
+        with_stdio.push("--stdio");
+        let Parsed::Serve { transport, .. } =
+            parse_paths(argv(&with_stdio).into_iter()).expect("parses")
+        else {
+            panic!("not a --help request")
+        };
+        assert_eq!(transport, Transport::Stdio);
+    }
+
+    #[test]
+    fn an_explicit_addr_is_honoured_and_conflicts_are_refused() {
+        let mut args = vec![
+            "--apr-bin",
+            "/bin/apr",
+            "--data",
+            "/d",
+            "--selection",
+            "/s",
+            "--model-dir",
+            "/m",
+            "--output-dir",
+            "/o",
+            "--addr",
+            "0.0.0.0:9000",
+        ];
+        let Parsed::Serve { transport, .. } = parse_paths(argv(&args).into_iter()).expect("parses")
+        else {
+            panic!("not a --help request")
+        };
+        assert_eq!(
+            transport,
+            Transport::Http(std::net::SocketAddr::from(([0, 0, 0, 0], 9000)))
+        );
+
+        args.push("--stdio");
+        let err = parse_paths(argv(&args).into_iter())
+            .expect_err("two transports is a configuration error, not a silent precedence rule");
+        assert!(err.contains("mutually exclusive"), "{err}");
+
+        let bad = vec![
+            "--apr-bin",
+            "/bin/apr",
+            "--data",
+            "/d",
+            "--selection",
+            "/s",
+            "--model-dir",
+            "/m",
+            "--output-dir",
+            "/o",
+            "--addr",
+            "not-an-address",
+        ];
+        let err = parse_paths(argv(&bad).into_iter()).expect_err("a bad addr must be refused");
+        assert!(err.contains("--addr"), "{err}");
     }
 
     #[test]
@@ -278,7 +456,7 @@ mod tests {
             ]);
             args.push(weird.clone());
             let parsed = parse_paths(args.into_iter()).expect("non-UTF-8 paths parse");
-            let Parsed::Paths(paths) = parsed else {
+            let Parsed::Serve { paths, .. } = parsed else {
                 panic!("not a --help request")
             };
             assert_eq!(paths.model_dir.as_os_str(), weird);

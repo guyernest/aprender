@@ -227,6 +227,10 @@ fn a_training_run_completes_as_an_mcp_task_over_live_stdio() {
             .arg(&model_dir)
             .arg("--output-dir")
             .arg(&output_dir)
+            // REQUIRED now: streamable HTTP is the default transport, so a
+            // spawn without this would bind a socket and never answer a byte
+            // on the pipes this test writes to.
+            .arg("--stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

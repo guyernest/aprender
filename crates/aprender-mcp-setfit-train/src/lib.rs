@@ -737,6 +737,54 @@ async fn status(
     Ok(run_payload(task_id, &artifact, &phase, None, None))
 }
 
+/// The streamable-HTTP config this server serves.
+///
+/// `max_request_bytes` is narrowed from pmcp's 4 MB default to
+/// [`MAX_CONFIG_BYTES`], because the config object is the only large thing a
+/// client sends and pmcp rejects an oversized body with HTTP 413 BEFORE any
+/// JSON parsing. The in-handler check stays: it is the only bound on stdio,
+/// which has no HTTP body to reject.
+///
+/// Sessions are LEFT ON (the default). A standalone remote server outlives its
+/// requests, so a session is meaningful; the serverless wrapper is the thing
+/// that must use `stateless()`, because API Gateway routes successive requests
+/// to different containers each with a fresh in-memory session map.
+#[must_use]
+pub fn http_config() -> pmcp::server::streamable_http_server::StreamableHttpServerConfig {
+    pmcp::server::streamable_http_server::StreamableHttpServerConfig {
+        max_request_bytes: MAX_CONFIG_BYTES,
+        ..Default::default()
+    }
+}
+
+/// Serve `server` over streamable HTTP until the task ends.
+///
+/// Returns the bound address alongside the join handle so a caller that asked
+/// for port 0 can report where it actually landed — which is what makes an
+/// E2E able to drive this transport without guessing a free port.
+///
+/// # Errors
+///
+/// Whatever binding or serving reports.
+pub async fn serve_http(
+    server: Server,
+    addr: std::net::SocketAddr,
+) -> pmcp::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+    // The SDK takes the server behind ONE `Arc<tokio::sync::Mutex<_>>` shared
+    // by every session, and `dispatch_public_request` holds that lock across
+    // the whole of `handle_request_with_context`. That is what keeps the mint
+    // handoff's single slot correct on this transport: the tool handler and the
+    // create gate that consumes its arm cannot be interleaved with another
+    // request's. See `task_store`'s note on the same invariant.
+    let server = Arc::new(tokio::sync::Mutex::new(server));
+    let http = pmcp::server::streamable_http_server::StreamableHttpServer::with_config(
+        addr,
+        server,
+        http_config(),
+    );
+    http.start().await
+}
+
 /// Assemble the server: two tools and the task store, nothing else.
 ///
 /// # Errors
