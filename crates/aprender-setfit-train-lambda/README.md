@@ -1,4 +1,4 @@
-# aprender-mcp-setfit-train-lambda
+# aprender-setfit-train-lambda
 
 The AWS deployment of the SetFit training MCP server: two Lambda entry points
 and the AWS ends of the seams `aprender-mcp-setfit-train` leaves open.

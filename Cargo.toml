@@ -57,7 +57,7 @@ members = [
     # Thin single-algorithm MCP TRAINING server: SetFit training as an async MCP Task
     "crates/aprender-mcp-setfit-train",
     # Its AWS deployment: the request function and the training worker
-    "crates/aprender-mcp-setfit-train-lambda",
+    "crates/aprender-setfit-train-lambda",
     # --- APR-MONO Phase 2f: satellite repos (main crates) ---
     "crates/aprender-profile",
     "crates/aprender-profile-core",

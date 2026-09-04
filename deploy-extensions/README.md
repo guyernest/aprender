@@ -87,17 +87,26 @@ is also why its output is generated and gitignored rather than committed: this
 tree is destined for a public upstream repo, and an account id has no business
 travelling there.
 
-Step 5 needs `--manifest-path`, which is why it is a recipe. The workspace has
-two `bootstrap` binaries, and the repo ROOT holds the **predict** server's
-`.pmcp/deploy.toml` — so a bare `cargo pmcp deploy` from the repo root resolves
-project `aprender-setfit-predict` and builds `aprender-mcp-setfit-lambda`. It
-does not warn; the only tell is which crate it compiles. Measured with
-`cargo pmcp deploy outputs`:
+Step 5 is a recipe because getting it wrong deploys the **predict** server under
+the training server's name, and looks like a success while doing it.
 
-| invocation | resolved project |
-|---|---|
-| `--manifest-path crates/aprender-mcp-setfit-train-lambda` | `aprender-setfit-train` |
-| no flag, from the repo root | `aprender-setfit-predict` |
+cargo-pmcp picks the package to build in `find_lambda_package_dir`: first a
+directory `<deploy-root>/{server_name}-lambda`, then the FIRST `*-lambda`
+workspace package exposing a `bootstrap` binary. This workspace has two such
+packages and the predict one sorts first, so any deploy root that does not
+satisfy the first branch silently builds `aprender-mcp-setfit-lambda`.
+
+That is why the deploy root is `crates/` and the crate is named
+`aprender-setfit-train-lambda`: together they make
+`crates/aprender-setfit-train-lambda/` match the first branch by construction.
+`[server] binary` exists in cargo-pmcp's schema but the Lambda path never reads
+it, so the directory name is the only lever.
+
+**The tell:** `aprender-setfit-train-lambda` in the compile log. If you see
+`aprender-mcp-setfit-lambda`, it is building the wrong server and nothing else
+matters until that is fixed — the endpoint will come up healthy and answer every
+MCP call with `no embedded model in this build`, which is the predict binary's
+error.
 
 It also raises `ulimit -n`. Linking the aarch64 bootstrap opens ~245 object
 files through cargo-zigbuild's wrapper, and under macOS's default soft limit
@@ -124,7 +133,7 @@ drop it; `put-role-policy` replaces by name, so re-running is free.
 # owner scoping, expiry filtering, the guarded terminal write.
 AWS_PROFILE=ze-kasher-dev AWS_REGION=us-east-1 \
 APRENDER_SETFIT_E2E_TASKS_TABLE=aprender-setfit-training-tasks-dev \
-  cargo test -p aprender-mcp-setfit-train-lambda --test dynamodb_contract
+  cargo test -p aprender-setfit-train-lambda --test dynamodb_contract
 ```
 
 The same suite runs against DynamoDB Local with no account at all — see the

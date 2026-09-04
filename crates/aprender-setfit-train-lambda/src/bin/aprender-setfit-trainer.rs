@@ -35,7 +35,7 @@ use aprender_mcp_setfit_train::{
     execute_run, prepare_run, run_payload, terminal_result, AprenderTaskStore, Outcome,
     TrainerPaths,
 };
-use aprender_mcp_setfit_train_lambda::{upload_artifact, DynamoDbTaskBackend, TrainingJob};
+use aprender_setfit_train_lambda::{upload_artifact, DynamoDbTaskBackend, TrainingJob};
 use lambda_runtime::{service_fn, Error, LambdaEvent};
 use pmcp::server::task_store::{TaskStore, TaskStoreError};
 use pmcp::types::TaskStatus;

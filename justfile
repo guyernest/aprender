@@ -49,7 +49,7 @@ build-apr-arm64:
 build-trainer-arm64:
     @command -v cargo-zigbuild >/dev/null || cargo install cargo-zigbuild
     cargo zigbuild --release --target {{target}} \
-        -p aprender-mcp-setfit-train-lambda --bin aprender-setfit-trainer
+        -p aprender-setfit-train-lambda --bin aprender-setfit-trainer
     @file target/{{target}}/release/aprender-setfit-trainer | grep -q 'ARM aarch64' \
         || { echo "ERROR: not an aarch64 binary — check the target"; exit 1; }
     @ls -lh target/{{target}}/release/aprender-setfit-trainer \
@@ -166,7 +166,7 @@ pmcp-train-config env="dev" profile="ze-kasher-dev":
         *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2
            exit 2 ;;
     esac
-    DIR="crates/aprender-mcp-setfit-train-lambda/.pmcp"
+    DIR="crates/.pmcp"
     get() {
         aws ssm get-parameter --profile "{{profile}}" \
             --name "/aprender/setfit-train/${ENV}/$1" \
@@ -222,7 +222,7 @@ pmcp-train-grant env="dev" profile="ze-kasher-dev" server="aprender-setfit-train
     ROLE_ARN="$(aws lambda get-function --profile "{{profile}}" \
         --function-name "{{server}}" --query Configuration.Role --output text 2>/dev/null)" || {
         echo "ERROR: no Lambda named '{{server}}' — deploy the request function first:" >&2
-        echo "       cargo pmcp deploy --manifest-path crates/aprender-mcp-setfit-train-lambda --target <t>" >&2
+        echo "       just pmcp-train-deploy" >&2
         exit 1
     }
     ROLE="${ROLE_ARN##*/}"
@@ -240,21 +240,25 @@ pmcp-train-grant env="dev" profile="ze-kasher-dev" server="aprender-setfit-train
 
 # Deploy the TRAINING request function to pmcp.run.
 #
-# Two things this exists to stop you forgetting, both of which cost a full
-# failed build to learn:
+# Two things this exists to stop you forgetting, both of which cost a deploy to
+# learn — one of them a deploy that SUCCEEDED and served the wrong server:
 #
-# 1. `--manifest-path`. The workspace has TWO `bootstrap` binaries and the repo
-#    ROOT holds the PREDICT server's .pmcp/deploy.toml, so a bare
-#    `cargo pmcp deploy` from the repo root resolves project
-#    `aprender-setfit-predict` and builds aprender-mcp-setfit-lambda — the wrong
-#    server, silently, until you read which crate it compiled. Verified with
-#    `cargo pmcp deploy outputs`: with the flag it resolves aprender-setfit-train,
-#    without it aprender-setfit-predict.
+# 1. `--manifest-path crates`. cargo-pmcp picks the package to build in
+#    `find_lambda_package_dir`: first `<deploy-root>/{server_name}-lambda`, then
+#    the FIRST `*-lambda` workspace package with a `bootstrap` binary. Two
+#    packages match that fallback here and the predict one sorts first, so
+#    anything but the exact deploy root builds aprender-mcp-setfit-lambda and
+#    ships it under this server's name. It does not warn: the endpoint comes up
+#    healthy and every MCP call answers with the predict binary's
+#    "no embedded model in this build".
 #
 # 2. `ulimit -n`. Linking the aarch64 bootstrap opens ~245 object files through
 #    cargo-zigbuild's wrapper; under macOS's default soft limit the link dies
 #    with `ProcessFdQuotaExceeded`, which reads like a toolchain fault rather
 #    than a shell setting. 65536 is ample and the hard limit is unlimited.
+#
+# The tell that it is building the right thing: `aprender-setfit-train-lambda`
+# in the compile log. `aprender-mcp-setfit-lambda` means it is not.
 #
 # After this, `just pmcp-train-grant <env>` — the function has no access to the
 # table or the worker until it runs.
@@ -262,7 +266,7 @@ pmcp-train-deploy target="":
     #!/usr/bin/env bash
     set -euo pipefail
     ulimit -n 65536 || echo "WARNING: could not raise the fd limit; a link may fail with ProcessFdQuotaExceeded" >&2
-    CONFIG="crates/aprender-mcp-setfit-train-lambda/.pmcp/deploy.toml"
+    CONFIG="crates/.pmcp/deploy.toml"
     test -f "$CONFIG" || {
         echo "ERROR: $CONFIG does not exist — generate it from the stack first:" >&2
         echo "       just pmcp-train-config dev" >&2
@@ -273,5 +277,5 @@ pmcp-train-deploy target="":
         echo "       just pmcp-train-config dev" >&2
         exit 1
     }
-    cargo pmcp deploy --manifest-path crates/aprender-mcp-setfit-train-lambda \
+    cargo pmcp deploy --manifest-path crates \
         {{ if target == "" { "" } else { "--target " + target } }} --no-color

@@ -1,5 +1,5 @@
 [package]
-name = "aprender-mcp-setfit-train-lambda"
+name = "aprender-setfit-train-lambda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -37,7 +37,7 @@ name = "aprender-setfit-trainer"
 path = "src/bin/aprender-setfit-trainer.rs"
 
 [lib]
-name = "aprender_mcp_setfit_train_lambda"
+name = "aprender_setfit_train_lambda"
 path = "src/lib.rs"
 
 [dependencies]

@@ -4,17 +4,25 @@
 # `just pmcp-train-config <env>` and is gitignored. cargo-pmcp reads the
 # generated one.
 #
-# The deploy ROOT is this crate directory, not the repo root — deliberately.
-# There are now TWO `bootstrap` binaries in the workspace (the predict wrapper
-# and this one), and cargo-pmcp discovers a deployable by scanning for that
-# name. Anchoring the root here is what keeps the two deployments from being
-# each other's:
+# The deploy ROOT is `crates/`, and the crate is named `aprender-setfit-train-lambda`
+# to match. Neither is cosmetic — together they are the ONLY thing that makes
+# cargo-pmcp build this server rather than the predict one.
 #
-#   cargo pmcp deploy --manifest-path crates/aprender-mcp-setfit-train-lambda \
-#                     --target <named-target> --no-color
+# cargo-pmcp resolves the package to build in `find_lambda_package_dir`
+# (builder.rs): it first looks for a directory `<deploy-root>/{server_name}-lambda`
+# and, failing that, takes the FIRST `*-lambda` workspace package exposing a
+# `bootstrap` binary. This workspace has two such packages, and the predict one
+# sorts first — so the fallback silently builds `aprender-mcp-setfit-lambda` and
+# deploys it under THIS server's name and URL. That happened: the endpoint came
+# up healthy and answered every MCP request with "no embedded model in this
+# build", which is the predict binary's error.
 #
-# If a deploy ever reports the predict server's name, that is this ambiguity —
-# check the discovered package before suspecting anything else.
+# With `[server] name = "aprender-setfit-train"` and this file at `crates/`, the
+# first branch resolves `crates/aprender-setfit-train-lambda/` and matches by
+# construction. `[server] binary` exists in cargo-pmcp's schema but the Lambda
+# path never reads it, so the directory name is the only lever.
+#
+# Deploy with:  just pmcp-train-deploy
 #
 # ORDER MATTERS. This function invokes a worker and writes to a table that
 # neither it nor pmcp.run creates:

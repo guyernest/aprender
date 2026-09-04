@@ -23,7 +23,7 @@ use std::sync::Arc;
 use aprender_mcp_setfit_train::{
     build_server, AprenderTaskStore, Dispatcher, MAX_CONFIG_BYTES, SERVER_NAME,
 };
-use aprender_mcp_setfit_train_lambda::{DynamoDbTaskBackend, LambdaDispatcher};
+use aprender_setfit_train_lambda::{DynamoDbTaskBackend, LambdaDispatcher};
 use lambda_http::{run, service_fn, Body, Error, Request, Response};
 use once_cell::sync::OnceCell;
 use pmcp::server::streamable_http_server::StreamableHttpServerConfig;

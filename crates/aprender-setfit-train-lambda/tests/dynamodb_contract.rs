@@ -32,12 +32,12 @@
 //! AWS_ENDPOINT_URL=http://localhost:8000 \
 //! AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local AWS_REGION=us-east-1 \
 //! APRENDER_SETFIT_E2E_TASKS_TABLE=setfit-training-tasks-test \
-//!   cargo test -p aprender-mcp-setfit-train-lambda --test dynamodb_contract
+//!   cargo test -p aprender-setfit-train-lambda --test dynamodb_contract
 //!
 //! # The deployed dev table
 //! AWS_PROFILE=ze-kasher-dev AWS_REGION=us-east-1 \
 //! APRENDER_SETFIT_E2E_TASKS_TABLE=aprender-setfit-training-tasks-dev \
-//!   cargo test -p aprender-mcp-setfit-train-lambda --test dynamodb_contract
+//!   cargo test -p aprender-setfit-train-lambda --test dynamodb_contract
 //! ```
 //!
 //! Every test scopes itself to a fresh random owner id and writes records with
@@ -49,7 +49,7 @@
 use std::sync::Arc;
 
 use aprender_mcp_setfit_train::{AprenderTaskStore, BackendError, StoredTask, TaskBackend};
-use aprender_mcp_setfit_train_lambda::DynamoDbTaskBackend;
+use aprender_setfit_train_lambda::DynamoDbTaskBackend;
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, KeySchemaElement, KeyType, ScalarAttributeType,
 };
