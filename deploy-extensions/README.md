@@ -71,14 +71,14 @@ just deploy-training dev
 #    gitignored .pmcp/deploy.toml from the tracked .pmcp/deploy.toml.template.
 just pmcp-train-config dev
 
-# 5. Attach the RequestLambdaPolicy stack output to the pmcp.run request
-#    function's execution role — DynamoDB RW on the table plus
-#    lambda:InvokeFunction on the worker. Published rather than attached
-#    because that role belongs to a stack this one does not own.
-
-# 6. Deploy the request function.
+# 5. Deploy the request function.
 cargo pmcp deploy --manifest-path crates/aprender-mcp-setfit-train-lambda \
                   --target <named-target> --no-color
+
+# 6. Grant it access to the table and the worker. AFTER the deploy, because
+#    pmcp.run creates the execution role — there is nothing to attach to
+#    until it has.
+just pmcp-train-grant dev
 ```
 
 Step 4 is not a convenience. The artifact bucket carries the account id for
@@ -87,10 +87,23 @@ is also why its output is generated and gitignored rather than committed: this
 tree is destined for a public upstream repo, and an account id has no business
 travelling there.
 
-Step 6 needs `--manifest-path`: the workspace has two `bootstrap` binaries (the
+Step 5 needs `--manifest-path`: the workspace has two `bootstrap` binaries (the
 predict wrapper and this one) and cargo-pmcp discovers a deployable by scanning
 for that name. If a deploy reports the predict server's name, that is this
 ambiguity and not anything subtler.
+
+Step 6 comes last for a reason worth stating, because the intuitive order is
+the reverse: the policy names resources this stack owns, but it attaches to a
+role that **pmcp.run** creates, whose name carries a random suffix
+(`pmcp-<hash>-<server>-ExecutionRole-<id>`). So it cannot be attached before
+the deploy, and the recipe discovers the role from the function rather than
+asking anyone to copy it. Between steps 5 and 6 the server is live and every
+`train` call compensates to `failed` with an AccessDenied — a clear error
+rather than a hang, but not a working server.
+
+Re-run step 6 after any pmcp.run redeploy. It is an out-of-band change to a
+role that a platform-owned CloudFormation stack manages, and a stack update may
+drop it; `put-role-policy` replaces by name, so re-running is free.
 
 ## Verifying it
 

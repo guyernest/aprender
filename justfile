@@ -194,3 +194,46 @@ pmcp-train-config env="dev" profile="ze-kasher-dev":
         print(f"  {key:34s} {value}")
     PY
     echo "  wrote $DIR/deploy.toml (gitignored) for env=$ENV"
+
+# Grant the deployed request function access to the table and the worker.
+#
+# Runs AFTER `cargo pmcp deploy`, not before: pmcp.run creates the function's
+# execution role, so there is nothing to attach to until it has. Between the
+# deploy and this, the server is live and every `train` call compensates to
+# `failed` with an AccessDenied — a clear error rather than a hang, but not a
+# working server.
+#
+# The role name carries a random suffix (pmcp-<hash>-<server>-ExecutionRole-<id>),
+# so it is DISCOVERED from the function rather than written down, and the policy
+# document is read from the stack output so there is one source of truth for it.
+#
+# Idempotent — `put-role-policy` replaces by name. Worth re-running after any
+# pmcp.run redeploy: this is an out-of-band change to a role that a
+# platform-owned CloudFormation stack manages, and a stack update may drop it.
+pmcp-train-grant env="dev" profile="ze-kasher-dev" server="aprender-setfit-train":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="{{ trim_start_match(env, "env=") }}"
+    case "$ENV" in
+        dev|prod) ;;
+        *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2
+           exit 2 ;;
+    esac
+    ROLE_ARN="$(aws lambda get-function --profile "{{profile}}" \
+        --function-name "{{server}}" --query Configuration.Role --output text 2>/dev/null)" || {
+        echo "ERROR: no Lambda named '{{server}}' — deploy the request function first:" >&2
+        echo "       cargo pmcp deploy --manifest-path crates/aprender-mcp-setfit-train-lambda --target <t>" >&2
+        exit 1
+    }
+    ROLE="${ROLE_ARN##*/}"
+    POLICY="$(aws cloudformation describe-stacks --profile "{{profile}}" \
+        --stack-name "aprender-setfit-training-${ENV}" \
+        --query "Stacks[0].Outputs[?OutputKey=='RequestLambdaPolicy'].OutputValue" \
+        --output text)"
+    test -n "$POLICY" || { echo "ERROR: stack aprender-setfit-training-${ENV} has no RequestLambdaPolicy output" >&2; exit 1; }
+    aws iam put-role-policy --profile "{{profile}}" \
+        --role-name "$ROLE" \
+        --policy-name "aprender-setfit-train-${ENV}" \
+        --policy-document "$POLICY"
+    echo "  granted on role: $ROLE"
+    echo "  policy:          aprender-setfit-train-${ENV}"
