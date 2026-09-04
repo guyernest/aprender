@@ -28,9 +28,11 @@
 //!
 //! # What is NOT solved here: owner scoping without auth
 //!
-//! With no auth provider configured, `resolve_owner` answers
-//! `UNAUTHENTICATED_OWNER` for every caller, so every client of a deployed
-//! server shares ONE owner bucket. Task ids are unguessable, so nobody stumbles
+//! With no auth provider configured, every caller shares ONE owner bucket. On
+//! pmcp.run that bucket is `unknown`, not `UNAUTHENTICATED_OWNER` — the
+//! platform supplies an auth context whose subject is the literal `"unknown"`
+//! even when `[auth] enabled = false` (measured on the deployed server,
+//! 2026-09-04), so `resolve_owner` takes its authenticated arm. Task ids are unguessable, so nobody stumbles
 //! onto another run's result — but `tasks/list` enumerates the bucket, which
 //! means it enumerates everyone. That is acceptable for a single-tenant pilot
 //! and NOT acceptable for a shared deployment; the fix is to configure an auth

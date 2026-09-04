@@ -87,15 +87,23 @@ pub const TOOL_TRAIN: &str = "train";
 /// The polling companion for clients without MCP Tasks support.
 pub const TOOL_STATUS: &str = "train_status";
 
-/// The owner bucket an UNAUTHENTICATED request binds to.
+/// The owner bucket an UNAUTHENTICATED request binds to **when the transport
+/// supplies no auth context at all** — which is stdio, and only stdio.
 ///
 /// This mirrors pmcp's private `V1_UNAUTHENTICATED_OWNER`, and it has to: the
 /// handler mints under this owner and pmcp's create gate looks the handoff up
 /// under whatever ITS `resolve_owner` returned. If the two ever disagree, the
 /// gate mints a second task and the client polls an id nobody updates — which
-/// the E2E's task-id correlation assertion is what would catch. With an auth
-/// provider configured both sides use the authenticated subject instead and
-/// this constant stops mattering.
+/// the E2E's task-id correlation assertion is what would catch.
+///
+/// MEASURED on the deployed server (2026-09-04): pmcp.run supplies an auth
+/// context even with `[auth] enabled = false`, whose subject is the literal
+/// `"unknown"`. So [`resolve_owner`] takes its `Some` arm and every task on
+/// that deployment is owned by `unknown`, never by this constant. Nothing
+/// breaks — every door resolves the owner the same way, which is the whole
+/// reason the owner is derived per request rather than assumed — but a query
+/// written against `local` finds nothing there, and this comment used to imply
+/// it would.
 pub const UNAUTHENTICATED_OWNER: &str = "local";
 
 /// TTL requested for minted training tasks: generous next to the measured
