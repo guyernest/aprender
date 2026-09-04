@@ -237,3 +237,41 @@ pmcp-train-grant env="dev" profile="ze-kasher-dev" server="aprender-setfit-train
         --policy-document "$POLICY"
     echo "  granted on role: $ROLE"
     echo "  policy:          aprender-setfit-train-${ENV}"
+
+# Deploy the TRAINING request function to pmcp.run.
+#
+# Two things this exists to stop you forgetting, both of which cost a full
+# failed build to learn:
+#
+# 1. `--manifest-path`. The workspace has TWO `bootstrap` binaries and the repo
+#    ROOT holds the PREDICT server's .pmcp/deploy.toml, so a bare
+#    `cargo pmcp deploy` from the repo root resolves project
+#    `aprender-setfit-predict` and builds aprender-mcp-setfit-lambda — the wrong
+#    server, silently, until you read which crate it compiled. Verified with
+#    `cargo pmcp deploy outputs`: with the flag it resolves aprender-setfit-train,
+#    without it aprender-setfit-predict.
+#
+# 2. `ulimit -n`. Linking the aarch64 bootstrap opens ~245 object files through
+#    cargo-zigbuild's wrapper; under macOS's default soft limit the link dies
+#    with `ProcessFdQuotaExceeded`, which reads like a toolchain fault rather
+#    than a shell setting. 65536 is ample and the hard limit is unlimited.
+#
+# After this, `just pmcp-train-grant <env>` — the function has no access to the
+# table or the worker until it runs.
+pmcp-train-deploy target="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ulimit -n 65536 || echo "WARNING: could not raise the fd limit; a link may fail with ProcessFdQuotaExceeded" >&2
+    CONFIG="crates/aprender-mcp-setfit-train-lambda/.pmcp/deploy.toml"
+    test -f "$CONFIG" || {
+        echo "ERROR: $CONFIG does not exist — generate it from the stack first:" >&2
+        echo "       just pmcp-train-config dev" >&2
+        exit 1
+    }
+    grep -q 'UNSET-run-just-pmcp-train-config' "$CONFIG" && {
+        echo "ERROR: $CONFIG still holds UNSET placeholders; regenerate it:" >&2
+        echo "       just pmcp-train-config dev" >&2
+        exit 1
+    }
+    cargo pmcp deploy --manifest-path crates/aprender-mcp-setfit-train-lambda \
+        {{ if target == "" { "" } else { "--target " + target } }} --no-color

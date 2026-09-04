@@ -71,9 +71,9 @@ just deploy-training dev
 #    gitignored .pmcp/deploy.toml from the tracked .pmcp/deploy.toml.template.
 just pmcp-train-config dev
 
-# 5. Deploy the request function.
-cargo pmcp deploy --manifest-path crates/aprender-mcp-setfit-train-lambda \
-                  --target <named-target> --no-color
+# 5. Deploy the request function. The recipe carries --manifest-path and
+#    raises the fd limit; both are required and both fail confusingly.
+just pmcp-train-deploy
 
 # 6. Grant it access to the table and the worker. AFTER the deploy, because
 #    pmcp.run creates the execution role — there is nothing to attach to
@@ -87,10 +87,22 @@ is also why its output is generated and gitignored rather than committed: this
 tree is destined for a public upstream repo, and an account id has no business
 travelling there.
 
-Step 5 needs `--manifest-path`: the workspace has two `bootstrap` binaries (the
-predict wrapper and this one) and cargo-pmcp discovers a deployable by scanning
-for that name. If a deploy reports the predict server's name, that is this
-ambiguity and not anything subtler.
+Step 5 needs `--manifest-path`, which is why it is a recipe. The workspace has
+two `bootstrap` binaries, and the repo ROOT holds the **predict** server's
+`.pmcp/deploy.toml` — so a bare `cargo pmcp deploy` from the repo root resolves
+project `aprender-setfit-predict` and builds `aprender-mcp-setfit-lambda`. It
+does not warn; the only tell is which crate it compiles. Measured with
+`cargo pmcp deploy outputs`:
+
+| invocation | resolved project |
+|---|---|
+| `--manifest-path crates/aprender-mcp-setfit-train-lambda` | `aprender-setfit-train` |
+| no flag, from the repo root | `aprender-setfit-predict` |
+
+It also raises `ulimit -n`. Linking the aarch64 bootstrap opens ~245 object
+files through cargo-zigbuild's wrapper, and under macOS's default soft limit
+the link dies with `ProcessFdQuotaExceeded` — which reads like a toolchain
+fault rather than a shell setting.
 
 Step 6 comes last for a reason worth stating, because the intuitive order is
 the reverse: the policy names resources this stack owns, but it attaches to a
