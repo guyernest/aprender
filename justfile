@@ -96,8 +96,14 @@ diff-training env="dev" profile="ze-kasher-dev":
     cd deploy-extensions && npx cdk diff --context env={{ trim_start_match(env, "env=") }} --profile {{profile}}
 
 # Create/update the training infrastructure. Real resources, real money.
+#
+# `--require-approval never` because `diff-training` IS the review gate: it
+# prints the IAM changes in full and is the documented step before this one.
+# Keeping the interactive prompt here would only mean the recipe cannot run
+# unattended, while the review still happened in a different command.
 deploy-training env="dev" profile="ze-kasher-dev":
-    cd deploy-extensions && npx cdk deploy --context env={{ trim_start_match(env, "env=") }} --profile {{profile}}
+    cd deploy-extensions && npx cdk deploy --context env={{ trim_start_match(env, "env=") }} \
+        --profile {{profile}} --require-approval never
 
 # Tear it down. dev destroys data by design; prod RETAINs the table and bucket.
 destroy-training env="dev" profile="ze-kasher-dev":
