@@ -59,42 +59,71 @@ fn test_owner(label: &str) -> String {
     format!("test-{label}-{nanos}")
 }
 
-/// Connect, creating the table when the endpoint is a local one that has none.
+/// Connect. Creates the table ONLY against a local endpoint.
 ///
 /// Returns `None` when the suite is not armed, and every test reports that as a
 /// skip rather than a pass — a green run of a suite that connected to nothing
 /// is exactly the vacuous gate this repo keeps paying for.
+///
+/// # Why creation is gated on `AWS_ENDPOINT_URL`
+///
+/// An earlier revision created the table unconditionally, reasoning that
+/// against a deployed one it would simply fail with `ResourceInUseException`.
+/// It did not fail — it SUCCEEDED, because the table had not been deployed yet,
+/// and left a real `aprender-setfit-training-tasks-dev` that CloudFormation
+/// does not own. The next `just deploy-training dev` would then have failed
+/// with "already exists", and the fix would have looked like a CDK problem.
+///
+/// A test may create infrastructure it also destroys, in an endpoint that is
+/// entirely its own. It may not create infrastructure in an account where a
+/// stack is the owner of that name. So: local endpoint, create; real account,
+/// require the deploy to have happened and say so.
 async fn backend() -> Option<(Arc<DynamoDbTaskBackend>, String)> {
     let table = std::env::var(TABLE_ENV).ok()?;
     let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let client = aws_sdk_dynamodb::Client::new(&config);
 
-    // Idempotent: against the deployed table this fails with
-    // ResourceInUseException, which is the answer we want. Against DynamoDB
-    // Local it is what makes the suite self-contained.
-    let key = |name: &str, kind: KeyType| {
-        KeySchemaElement::builder()
-            .attribute_name(name)
-            .key_type(kind)
-            .build()
-    };
-    let attr = |name: &str| {
-        AttributeDefinition::builder()
-            .attribute_name(name)
-            .attribute_type(ScalarAttributeType::S)
-            .build()
-    };
-    let _ = client
-        .create_table()
+    if std::env::var_os("AWS_ENDPOINT_URL").is_some() {
+        let key = |name: &str, kind: KeyType| {
+            KeySchemaElement::builder()
+                .attribute_name(name)
+                .key_type(kind)
+                .build()
+        };
+        let attr = |name: &str| {
+            AttributeDefinition::builder()
+                .attribute_name(name)
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+        };
+        let _ = client
+            .create_table()
+            .table_name(&table)
+            .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+            .set_key_schema(Some(vec![
+                key("owner_id", KeyType::Hash).ok()?,
+                key("task_id", KeyType::Range).ok()?,
+            ]))
+            .set_attribute_definitions(Some(vec![attr("owner_id").ok()?, attr("task_id").ok()?]))
+            .send()
+            .await;
+    } else if client
+        .describe_table()
         .table_name(&table)
-        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
-        .set_key_schema(Some(vec![
-            key("owner_id", KeyType::Hash).ok()?,
-            key("task_id", KeyType::Range).ok()?,
-        ]))
-        .set_attribute_definitions(Some(vec![attr("owner_id").ok()?, attr("task_id").ok()?]))
         .send()
-        .await;
+        .await
+        .is_err()
+    {
+        // Fail once, here, naming the real cause — rather than eight times with
+        // whatever the first write happens to say.
+        panic!(
+            "table `{table}` is not readable in this account.\n\
+             This suite does NOT create tables against a real account: the CDK \
+             stack owns that name.\n\
+             Deploy it first:  just deploy-training dev\n\
+             Or run against DynamoDB Local, which the module doc shows."
+        );
+    }
 
     Some((
         Arc::new(DynamoDbTaskBackend::new(client, table.clone())),

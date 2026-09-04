@@ -41,6 +41,7 @@
 use std::collections::HashMap;
 
 use aprender_mcp_setfit_train::{BackendError, StoredTask, TaskBackend};
+use aws_sdk_dynamodb::error::DisplayErrorContext;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::Client;
 use pmcp::async_trait;
@@ -68,25 +69,56 @@ const ATTR_TASK: &str = "task";
 const ATTR_RESULT: &str = "result";
 const ATTR_ENVELOPE: &str = "envelope";
 
-/// `owner_id`, `task_id` and `version` all appear in condition expressions, and
-/// `VERSION` is on DynamoDB's reserved-word list. Aliasing all three rather
-/// than only the one that bites today means a later expression cannot
-/// reintroduce the problem by naming a word that becomes reserved.
-fn attr_names() -> HashMap<String, String> {
-    [
-        ("#owner", ATTR_OWNER),
-        ("#tid", ATTR_TASK_ID),
-        ("#ver", ATTR_VERSION),
-    ]
-    .into_iter()
-    .map(|(alias, name)| (alias.to_string(), name.to_string()))
-    .collect()
+/// The alias each expression may use. `VERSION` is on DynamoDB's reserved-word
+/// list, so `#ver = :expected` is not optional; the other two are aliased for
+/// consistency.
+const ALIAS_OWNER: (&str, &str) = ("#owner", ATTR_OWNER);
+const ALIAS_TASK_ID: (&str, &str) = ("#tid", ATTR_TASK_ID);
+const ALIAS_VERSION: (&str, &str) = ("#ver", ATTR_VERSION);
+
+/// Build the `ExpressionAttributeNames` map for ONE expression.
+///
+/// # Every alias must be used, and every use must be aliased
+///
+/// DynamoDB rejects a map containing an alias the expression does not mention:
+/// `ValidationException: Value provided in ExpressionAttributeNames unused in
+/// expressions`. An earlier revision passed all three aliases to all three
+/// expressions on the reasoning that a superset was harmless and future-proof.
+/// It is not harmless — it made EVERY PutItem and Query this backend issues
+/// fail, and nothing but a request to a real endpoint could show it. That is
+/// what `tests/dynamodb_contract.rs` is for, and it is the run that found this.
+///
+/// So each call site passes exactly the aliases its own expression names, and
+/// `expression_names_match_their_expressions` below holds the correspondence.
+fn attr_names(aliases: &[(&str, &str)]) -> HashMap<String, String> {
+    aliases
+        .iter()
+        .map(|(alias, name)| ((*alias).to_string(), (*name).to_string()))
+        .collect()
 }
+
+/// The condition that makes a mint an insert rather than an overwrite.
+const EXPR_PUT_NEW: &str = "attribute_not_exists(#owner) AND attribute_not_exists(#tid)";
+/// The compare-and-swap guard.
+const EXPR_CAS: &str = "#ver = :expected";
+/// One owner's partition.
+const EXPR_QUERY_OWNER: &str = "#owner = :owner";
 
 fn internal(message: impl Into<String>) -> BackendError {
     BackendError::Store(TaskStoreError::Internal {
         message: message.into(),
     })
+}
+
+/// Render an AWS SDK error with its CAUSE, not just its outermost layer.
+///
+/// `{e}` on an `SdkError` prints `"service error"` — three words that name no
+/// table, no operation and no reason. Every one of this file's failure paths
+/// used it, so a missing table, a denied action and a malformed expression were
+/// all the same unactionable string. `DisplayErrorContext` walks the source
+/// chain and is what the SDK ships for exactly this.
+fn aws(context: &str, e: &impl std::error::Error) -> BackendError {
+    internal(format!("{context}: {}", DisplayErrorContext(e)))
 }
 
 /// A record is live when it has no expiry or its expiry is still ahead.
@@ -242,8 +274,8 @@ impl TaskBackend for DynamoDbTaskBackend {
             // Minting generates a fresh id, so an existing item here is an
             // id-collision bug rather than a normal race — but it must never be
             // an overwrite, which is what an unconditional PutItem would be.
-            .condition_expression("attribute_not_exists(#owner) AND attribute_not_exists(#tid)")
-            .set_expression_attribute_names(Some(attr_names()))
+            .condition_expression(EXPR_PUT_NEW)
+            .set_expression_attribute_names(Some(attr_names(&[ALIAS_OWNER, ALIAS_TASK_ID])))
             .send()
             .await
             .map_err(|e| {
@@ -252,7 +284,7 @@ impl TaskBackend for DynamoDbTaskBackend {
                 {
                     BackendError::Conflict
                 } else {
-                    internal(format!("DynamoDB PutItem failed: {e}"))
+                    aws("DynamoDB PutItem failed", &e)
                 }
             })?;
         Ok(())
@@ -273,7 +305,7 @@ impl TaskBackend for DynamoDbTaskBackend {
         let output = request
             .send()
             .await
-            .map_err(|e| internal(format!("DynamoDB GetItem failed: {e}")))?;
+            .map_err(|e| aws("DynamoDB GetItem failed", &e))?;
         let Some(item) = output.item else {
             return Ok(None);
         };
@@ -303,8 +335,8 @@ impl TaskBackend for DynamoDbTaskBackend {
             .put_item()
             .table_name(&self.table)
             .set_item(Some(item))
-            .condition_expression("#ver = :expected")
-            .set_expression_attribute_names(Some(attr_names()))
+            .condition_expression(EXPR_CAS)
+            .set_expression_attribute_names(Some(attr_names(&[ALIAS_VERSION])))
             .expression_attribute_values(
                 ":expected",
                 AttributeValue::N(expected_version.to_string()),
@@ -320,7 +352,7 @@ impl TaskBackend for DynamoDbTaskBackend {
                 {
                     BackendError::Conflict
                 } else {
-                    internal(format!("DynamoDB conditional PutItem failed: {e}"))
+                    aws("DynamoDB conditional PutItem failed", &e)
                 }
             })?;
         Ok(())
@@ -335,8 +367,8 @@ impl TaskBackend for DynamoDbTaskBackend {
             .client
             .query()
             .table_name(&self.table)
-            .key_condition_expression("#owner = :owner")
-            .set_expression_attribute_names(Some(attr_names()))
+            .key_condition_expression(EXPR_QUERY_OWNER)
+            .set_expression_attribute_names(Some(attr_names(&[ALIAS_OWNER])))
             .expression_attribute_values(":owner", AttributeValue::S(owner_id.to_string()))
             // Newest first, matching the in-memory backend and the SDK's own
             // store. Task ids are random, so this orders by id, not by time —
@@ -351,7 +383,7 @@ impl TaskBackend for DynamoDbTaskBackend {
         let output = request
             .send()
             .await
-            .map_err(|e| internal(format!("DynamoDB Query failed: {e}")))?;
+            .map_err(|e| aws("DynamoDB Query failed", &e))?;
         let now = now_epoch_secs();
         let mut records = Vec::new();
         for item in output.items.unwrap_or_default() {
@@ -454,13 +486,43 @@ mod tests {
         assert!(is_live(&record(1, None), u64::MAX), "no TTL never expires");
     }
 
+    /// The case table for the alias maps, in BOTH directions.
+    ///
+    /// DynamoDB requires exact correspondence: an alias in the map that the
+    /// expression does not mention is a ValidationException, and an alias in
+    /// the expression that the map does not define is one too. Shipping all
+    /// three aliases everywhere failed the first direction on every write, and
+    /// a one-direction check would not have caught it.
     #[test]
-    fn every_expression_name_is_aliased() {
-        let names = attr_names();
-        // VERSION is a DynamoDB reserved word; an unaliased `version = :x`
-        // condition fails at runtime with a parse error, not at compile time.
-        assert_eq!(names["#ver"], ATTR_VERSION);
-        assert_eq!(names["#owner"], ATTR_OWNER);
-        assert_eq!(names["#tid"], ATTR_TASK_ID);
+    fn expression_names_match_their_expressions() {
+        for (expression, aliases) in [
+            (EXPR_PUT_NEW, &[ALIAS_OWNER, ALIAS_TASK_ID][..]),
+            (EXPR_CAS, &[ALIAS_VERSION][..]),
+            (EXPR_QUERY_OWNER, &[ALIAS_OWNER][..]),
+        ] {
+            let names = attr_names(aliases);
+            for alias in names.keys() {
+                assert!(
+                    expression.contains(alias),
+                    "`{alias}` is defined but unused in `{expression}` —                      DynamoDB rejects the whole request for this"
+                );
+            }
+            for alias in ["#owner", "#tid", "#ver"] {
+                if expression.contains(alias) {
+                    assert!(
+                        names.contains_key(alias),
+                        "`{alias}` is used in `{expression}` but not defined"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_reserved_word_is_never_written_bare() {
+        // VERSION is on DynamoDB's reserved-word list, so a bare
+        // `version = :x` is a parse error at runtime, not a compile error.
+        assert!(!EXPR_CAS.contains("version"), "{EXPR_CAS}");
+        assert_eq!(ALIAS_VERSION.1, ATTR_VERSION);
     }
 }

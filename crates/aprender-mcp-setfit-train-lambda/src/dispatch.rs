@@ -25,6 +25,7 @@
 //! take.
 
 use aprender_mcp_setfit_train::Dispatcher;
+use aws_sdk_lambda::error::DisplayErrorContext;
 use aws_sdk_lambda::primitives::Blob;
 use aws_sdk_lambda::types::InvocationType;
 use pmcp::async_trait;
@@ -67,7 +68,9 @@ pub async fn upload_artifact(
         .body(body)
         .send()
         .await
-        .map_err(|e| format!("cannot upload to {artifact_uri}: {e}"))?;
+        // DisplayErrorContext, not `{e}`: an SdkError's own Display is
+        // "service error", which names neither the bucket nor the reason.
+        .map_err(|e| format!("cannot upload to {artifact_uri}: {}", DisplayErrorContext(&e)))?;
     Ok(())
 }
 
@@ -146,7 +149,12 @@ impl Dispatcher for LambdaDispatcher {
             .payload(Blob::new(payload))
             .send()
             .await
-            .map_err(|e| format!("cannot start the training worker: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "cannot start the training worker: {}",
+                    DisplayErrorContext(&e)
+                )
+            })?;
         // An Event invoke answers 202 when the request is queued. Anything else
         // means it was not, and the caller must compensate the task rather than
         // leave a client polling work nobody is doing.
