@@ -139,7 +139,15 @@ export class SetFitTrainingStack extends cdk.Stack {
       logGroup: trainerLogs,
       environment: {
         APRENDER_SETFIT_TASKS_TABLE: this.tasksTable.tableName,
-        APRENDER_SETFIT_ARTIFACT_BUCKET: this.artifactBucket.bucketName,
+        // NO artifact-bucket variable here, deliberately. The worker does not
+        // choose where an artifact goes — it uploads to the `artifact_uri` the
+        // request side wrote into the task's envelope, so that URI is the one
+        // spelling of the destination and the client is shown the same string.
+        // The bucket grant below is what enforces it: an envelope naming some
+        // other bucket fails on permissions rather than writing there. A
+        // variable here would look like the setting that decides, and would be
+        // read by nobody.
+        //
         // Paths inside the package, resolved against $LAMBDA_TASK_ROOT by the
         // worker. Named here so the layout is declared in ONE place rather than
         // agreed by convention between the build script and the Rust.
