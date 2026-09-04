@@ -877,6 +877,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aprender-mcp-setfit-train-lambda"
+version = "0.63.0"
+dependencies = [
+ "aprender-mcp-setfit-train",
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "aws-sdk-lambda",
+ "aws-sdk-s3",
+ "lambda_http",
+ "lambda_runtime",
+ "once_cell",
+ "pmcp",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aprender-monte-carlo"
 version = "0.63.0"
 dependencies = [
@@ -2653,6 +2674,57 @@ dependencies = [
  "pin-project-lite",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "aws-sdk-dynamodb"
+version = "1.116.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c937c55ae3030bec4431c0d9146e33d2b3e5f54bb47ed32597068200c56affc"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.2",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
+name = "aws-sdk-lambda"
+version = "1.131.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2548b20e9e2116b1325b1b8623787d265a2a513f35843dc579f9afa090a06be5"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.2",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]

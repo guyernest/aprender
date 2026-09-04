@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use aprender_mcp_setfit_train::{
     build_server, AprenderTaskStore, CancelSink, Dispatcher, InMemoryTaskBackend, LocalDispatcher,
-    RunningJobs, TrainerPaths, SERVER_NAME,
+    RunningJobs, TrainerPaths, ENV_APR_BIN, ENV_DATA, ENV_MODEL_DIR, ENV_OUTPUT_DIR, ENV_SELECTION,
+    SERVER_NAME,
 };
 
 /// Which transport to serve.
@@ -177,15 +178,11 @@ fn parse_paths(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Par
     };
     Ok(Parsed::Serve {
         paths: TrainerPaths {
-            apr_bin: resolve("--apr-bin", "APRENDER_SETFIT_TRAIN_APR_BIN", apr_bin)?,
-            data: resolve("--data", "APRENDER_SETFIT_TRAIN_DATA", data)?,
-            selection: resolve("--selection", "APRENDER_SETFIT_TRAIN_SELECTION", selection)?,
-            model_dir: resolve("--model-dir", "APRENDER_SETFIT_TRAIN_MODEL_DIR", model_dir)?,
-            output_dir: resolve(
-                "--output-dir",
-                "APRENDER_SETFIT_TRAIN_OUTPUT_DIR",
-                output_dir,
-            )?,
+            apr_bin: resolve("--apr-bin", ENV_APR_BIN, apr_bin)?,
+            data: resolve("--data", ENV_DATA, data)?,
+            selection: resolve("--selection", ENV_SELECTION, selection)?,
+            model_dir: resolve("--model-dir", ENV_MODEL_DIR, model_dir)?,
+            output_dir: resolve("--output-dir", ENV_OUTPUT_DIR, output_dir)?,
         },
         transport,
     })

@@ -60,7 +60,10 @@
 mod local;
 mod task_store;
 
-pub use local::{LocalDispatcher, RunningJobs, TrainerPaths};
+pub use local::{
+    execute_run, prepare_run, LocalDispatcher, Outcome, PreparedRun, RunningJobs, TrainerPaths,
+    ENV_APR_BIN, ENV_DATA, ENV_MODEL_DIR, ENV_OUTPUT_DIR, ENV_SELECTION,
+};
 pub use task_store::{
     AprenderTaskStore, BackendError, CancelSink, InMemoryTaskBackend, StoredTask, TaskBackend,
 };
@@ -190,7 +193,13 @@ fn resolve_owner(extra: &RequestHandlerExtra) -> String {
 
 /// The ONE status shape every surface serves — `train_status`'s result and the
 /// terminal task result alike — so no two doors can tell different stories.
-fn run_payload(
+///
+/// Public because the terminal writer is not always in this process: under the
+/// Lambda deployment a worker on another host performs it minutes later, and it
+/// must write the SAME shape the request side would have. A second formatter
+/// there is how two doors start telling different stories.
+#[must_use]
+pub fn run_payload(
     task_id: &str,
     artifact_path: &str,
     phase: &str,
@@ -237,7 +246,12 @@ fn run_envelope(config: &serde_json::Value, artifact_uri: &str) -> serde_json::V
     .unwrap_or(serde_json::Value::Null)
 }
 
-fn terminal_result(payload: &serde_json::Value, failed: bool) -> CallToolResult {
+/// Wrap a terminal payload as the tool result the store persists.
+///
+/// Public for the same reason as [`run_payload`]: the out-of-process worker
+/// performs the terminal write.
+#[must_use]
+pub fn terminal_result(payload: &serde_json::Value, failed: bool) -> CallToolResult {
     let content = vec![Content::Text {
         text: payload.to_string(),
     }];

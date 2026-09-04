@@ -47,7 +47,44 @@ pub struct TrainerPaths {
     pub output_dir: PathBuf,
 }
 
+/// The env var naming the pinned `apr`.
+pub const ENV_APR_BIN: &str = "APRENDER_SETFIT_TRAIN_APR_BIN";
+/// The env var naming the attested benchmark directory.
+pub const ENV_DATA: &str = "APRENDER_SETFIT_TRAIN_DATA";
+/// The env var naming the selection manifest.
+pub const ENV_SELECTION: &str = "APRENDER_SETFIT_TRAIN_SELECTION";
+/// The env var naming the pinned encoder checkout.
+pub const ENV_MODEL_DIR: &str = "APRENDER_SETFIT_TRAIN_MODEL_DIR";
+/// The env var naming where configs and artifacts are written.
+pub const ENV_OUTPUT_DIR: &str = "APRENDER_SETFIT_TRAIN_OUTPUT_DIR";
+
 impl TrainerPaths {
+    /// Read every path from the environment.
+    ///
+    /// The Lambda worker has no argv to configure — the CDK stack sets these
+    /// five variables — so this is its only door. The stdio/HTTP runner accepts
+    /// flags that fall back to the SAME constants, which is why they are
+    /// constants rather than literals repeated in two places.
+    ///
+    /// # Errors
+    ///
+    /// Names the first unset variable, in the same voice [`Self::validate`]
+    /// uses for the first missing path.
+    pub fn from_env() -> Result<Self, String> {
+        fn var(name: &str) -> Result<PathBuf, String> {
+            std::env::var_os(name)
+                .map(PathBuf::from)
+                .ok_or_else(|| format!("{name} is unset"))
+        }
+        Ok(Self {
+            apr_bin: var(ENV_APR_BIN)?,
+            data: var(ENV_DATA)?,
+            selection: var(ENV_SELECTION)?,
+            model_dir: var(ENV_MODEL_DIR)?,
+            output_dir: var(ENV_OUTPUT_DIR)?,
+        })
+    }
+
     /// Refuse a misconfigured server at STARTUP, naming the first missing
     /// piece — not at the first submit, minutes into someone's workflow.
     ///
@@ -266,14 +303,19 @@ fn failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
 
 /// A job's terminal verdict.
 #[derive(Debug)]
-enum Outcome {
+pub enum Outcome {
+    /// The trainer exited 0 and printed a parseable `--json` report.
     Completed(serde_json::Value),
+    /// Anything else: a refused request, a non-zero exit, an unreadable report.
     Failed(String),
+    /// A `tasks/cancel` reached the running child.
     Cancelled,
 }
 
 impl Outcome {
-    const fn phase(&self) -> &'static str {
+    /// The `phase` string this verdict reports in the status payload.
+    #[must_use]
+    pub const fn phase(&self) -> &'static str {
         match self {
             Self::Completed(_) => "completed",
             Self::Failed(_) => "failed",
@@ -284,13 +326,75 @@ impl Outcome {
     /// The MCP task status a verdict maps onto. `Failed` is a real status the
     /// SDK's state machine accepts, so a task client can tell a failed run from
     /// a successful one by STATUS and need not parse the payload.
-    const fn task_status(&self) -> TaskStatus {
+    #[must_use]
+    pub const fn task_status(&self) -> TaskStatus {
         match self {
             Self::Completed(_) => TaskStatus::Completed,
             Self::Failed(_) => TaskStatus::Failed,
             Self::Cancelled => TaskStatus::Cancelled,
         }
     }
+}
+
+/// A run that has passed the CLI's own pre-flight and is ready to execute.
+///
+/// Produced by [`prepare_run`], consumed by [`execute_run`]. The split is not
+/// decoration: the in-process dispatcher must answer the MCP call the moment
+/// pre-flight passes and run the child afterwards, while the Lambda worker does
+/// both back to back. One preparation, two schedules.
+#[derive(Debug, Clone)]
+pub struct PreparedRun {
+    /// Where this run's config JSON was written.
+    pub config_path: PathBuf,
+    /// Where the trainer will write the `.apr` artifact.
+    pub artifact_path: PathBuf,
+}
+
+/// Materialize a run's config and put it through `apr setfit train --dry-run`.
+///
+/// The ONE door to "is this request legal", shared by the in-process dispatcher
+/// and the Lambda worker — the CLI's single validating constructor decides, and
+/// neither caller re-implements it.
+///
+/// # Errors
+///
+/// The CLI's own refusal text, or whatever stopped the config being written.
+pub async fn prepare_run(
+    paths: &TrainerPaths,
+    task_id: &str,
+    config: &serde_json::Value,
+) -> Result<PreparedRun, String> {
+    let artifact_path = paths.output_dir.join(format!("{task_id}.apr"));
+    let config_path = paths.output_dir.join(format!("{task_id}.config.json"));
+    let bytes =
+        serde_json::to_vec_pretty(config).map_err(|e| format!("config serialization: {e}"))?;
+    tokio::fs::write(&config_path, &bytes)
+        .await
+        .map_err(|e| format!("cannot write {}: {e}", config_path.display()))?;
+    if let Some(reason) = preflight(paths, &config_path, &artifact_path).await {
+        return Err(reason);
+    }
+    Ok(PreparedRun {
+        config_path,
+        artifact_path,
+    })
+}
+
+/// Supervise a prepared run to its terminal verdict.
+///
+/// `cancel` is the relay a `tasks/cancel` fires into. A caller with no way to
+/// be cancelled (the Lambda worker: an invocation in flight cannot be
+/// interrupted from outside) passes a `Notify` nobody notifies, which is honest
+/// rather than a special case — the guarded terminal write is what makes a
+/// cancel that lands mid-run correct there.
+pub async fn execute_run(paths: &TrainerPaths, prepared: &PreparedRun, cancel: &Notify) -> Outcome {
+    run_child(
+        paths,
+        &prepared.config_path,
+        &prepared.artifact_path,
+        cancel,
+    )
+    .await
 }
 
 /// The CLI's own request checks, run synchronously. `None` means accepted.
@@ -408,30 +512,24 @@ impl Dispatcher for LocalDispatcher {
         // refused submit from leaving a config behind.
         let cancel = self.running.try_admit(task_id)?;
 
-        let artifact_path = self.paths.output_dir.join(format!("{task_id}.apr"));
-        let config_path = self.paths.output_dir.join(format!("{task_id}.config.json"));
-        let bytes =
-            serde_json::to_vec_pretty(config).map_err(|e| format!("config serialization: {e}"))?;
-        if let Err(e) = tokio::fs::write(&config_path, &bytes).await {
-            self.running.release(task_id);
-            return Err(format!("cannot write {}: {e}", config_path.display()));
-        }
-
-        // The CLI's own four request checks, in its own words, before the task
-        // is allowed to look like a running job.
-        if let Some(reason) = preflight(&self.paths, &config_path, &artifact_path).await {
-            self.running.release(task_id);
-            return Err(reason);
-        }
+        // The CLI's own request checks, in its own words, before the task is
+        // allowed to look like a running job. A refusal releases the slot.
+        let prepared = match prepare_run(&self.paths, task_id, config).await {
+            Ok(prepared) => prepared,
+            Err(reason) => {
+                self.running.release(task_id);
+                return Err(reason);
+            }
+        };
 
         let paths = Arc::clone(&self.paths);
         let running = Arc::clone(&self.running);
         let store = Arc::clone(&self.store);
         let task_id = task_id.to_string();
         let owner = owner.to_string();
-        let artifact_display = artifact_path.display().to_string();
+        let artifact_display = prepared.artifact_path.display().to_string();
         tokio::spawn(async move {
-            let outcome = run_child(&paths, &config_path, &artifact_path, &cancel).await;
+            let outcome = execute_run(&paths, &prepared, &cancel).await;
             running.release(&task_id);
             let (report, error) = match &outcome {
                 Outcome::Completed(report) => (Some(report), None),

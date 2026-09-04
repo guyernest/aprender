@@ -40,13 +40,28 @@ build-apr-arm64:
         || { echo "ERROR: not an aarch64 binary — check the target"; exit 1; }
     @ls -lh target/{{target}}/release/apr | awk '{print "  apr (arm64): " $5}'
 
+# Cross-compile the training worker — the Lambda that actually runs `apr`.
+#
+# Same toolchain as `build-apr-arm64` and for the same reason: no Docker, so no
+# memory ceiling to be SIGKILLed against. This binary is small (it supervises a
+# child and talks to DynamoDB and S3); the weight in the package is `apr` and
+# the encoder, not this.
+build-trainer-arm64:
+    @command -v cargo-zigbuild >/dev/null || cargo install cargo-zigbuild
+    cargo zigbuild --release --target {{target}} \
+        -p aprender-mcp-setfit-train-lambda --bin aprender-setfit-trainer
+    @file target/{{target}}/release/aprender-setfit-trainer | grep -q 'ARM aarch64' \
+        || { echo "ERROR: not an aarch64 binary — check the target"; exit 1; }
+    @ls -lh target/{{target}}/release/aprender-setfit-trainer \
+        | awk '{print "  trainer (arm64): " $5}'
+
 # Assemble the worker's Lambda package: bootstrap + apr + dataset + encoder.
 #
 # The encoder ships as a SUBSET. The checkout carries both `model.safetensors`
 # and `full_model.apr` at ~87 MB each, and the importer reads only the latter
 # (`WEIGHT_FILE_CANDIDATES`), so copying the directory wholesale would put 87 MB
 # of unread bytes into a package with a 250 MB ceiling.
-build-trainer-asset: build-apr-arm64
+build-trainer-asset: build-apr-arm64 build-trainer-arm64
     #!/usr/bin/env bash
     set -euo pipefail
     test -d "{{minilm_dir}}" || {
@@ -63,14 +78,12 @@ build-trainer-asset: build-apr-arm64
         cp "{{minilm_dir}}/$f" "{{asset}}/assets/encoder/$f"
     done
     cp "{{minilm_dir}}/1_Pooling/config.json" "{{asset}}/assets/encoder/1_Pooling/config.json"
-    # The worker binary lands here once its crate exists; until then the guard
-    # in bin/app.ts refuses to synth, which is the intended failure.
-    if [ -f "target/{{target}}/release/aprender-setfit-trainer" ]; then
-        cp "target/{{target}}/release/aprender-setfit-trainer" "{{asset}}/bootstrap"
-        chmod +x "{{asset}}/bootstrap"
-    else
-        echo "NOTE: worker binary not built yet — package staged without bootstrap"
-    fi
+    # Lambda's Custom Runtime API requires the handler binary to be named
+    # `bootstrap`; the workspace keeps a descriptive name so cargo-pmcp does not
+    # mistake the worker for a second deployable. The rename happens here, in
+    # the one place that knows it is building a Lambda package.
+    cp "target/{{target}}/release/aprender-setfit-trainer" "{{asset}}/bootstrap"
+    chmod +x "{{asset}}/bootstrap"
     du -sh "{{asset}}" | awk '{print "  worker package: " $1 " (Lambda zip limit 250 MB)"}'
 
 # Validate the IaC. Creates nothing, contacts no account.
