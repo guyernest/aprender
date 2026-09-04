@@ -151,6 +151,16 @@ pmcp-train-config env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
     ENV="{{ trim_start_match(env, "env=") }}"
+    # The SAME guard bin/app.ts applies, because this recipe reaches the account
+    # WITHOUT going through the CDK app and so inherits none of its validation.
+    # Unguarded, a typo becomes an SSM path and comes back as
+    # "Parameter name: can't be prefixed with ssm" — a message about a rule the
+    # caller did not break, naming nothing they typed.
+    case "$ENV" in
+        dev|prod) ;;
+        *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2
+           exit 2 ;;
+    esac
     CONFIG="crates/aprender-mcp-setfit-train-lambda/.pmcp/deploy.toml"
     get() {
         aws ssm get-parameter --profile "{{profile}}" \
