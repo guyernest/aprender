@@ -84,6 +84,27 @@ build-trainer-asset: build-apr-arm64 build-trainer-arm64
     # the one place that knows it is building a Lambda package.
     cp "target/{{target}}/release/aprender-setfit-trainer" "{{asset}}/bootstrap"
     chmod +x "{{asset}}/bootstrap"
+    # Both binaries are dynamically linked, so the runtime's glibc has to be new
+    # enough. `provided.al2023` ships 2.34, and a toolchain bump that raises the
+    # floor past it fails at INVOCATION with `GLIBC_2.xx not found` — after a
+    # successful build, a successful deploy, and a client waiting on a task.
+    # Measured 2026-09-03: both need at most 2.30.
+    python3 - "{{asset}}/assets/apr" "{{asset}}/bootstrap" <<'PY'
+    import re, sys
+    CEILING = 34  # provided.al2023
+    worst = 0
+    for path in sys.argv[1:]:
+        need = [int(v) for v in re.findall(rb'GLIBC_2\.(\d+)', open(path, 'rb').read())]
+        top = max(need, default=0)
+        worst = max(worst, top)
+        print(f"  glibc floor: {path.split('/')[-1]} needs <= 2.{top}")
+        if top > CEILING:
+            sys.exit(
+                f"ERROR: {path} needs GLIBC_2.{top}, above provided.al2023's 2.{CEILING}.\n"
+                f"       Pin the target instead: cargo zigbuild --target "
+                f"aarch64-unknown-linux-gnu.2.{CEILING}"
+            )
+    PY
     du -sh "{{asset}}" | awk '{print "  worker package: " $1 " (Lambda zip limit 250 MB)"}'
 
 # Validate the IaC. Creates nothing, contacts no account.

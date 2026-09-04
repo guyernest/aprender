@@ -169,7 +169,11 @@ async fn put_new_refuses_to_overwrite_an_existing_record() {
     );
     // And the original must be intact — an overwrite that reported an error
     // would be worse than one that reported success.
-    let back = backend.get(&owner, "t-dup").await.expect("get").expect("some");
+    let back = backend
+        .get(&owner, "t-dup")
+        .await
+        .expect("get")
+        .expect("some");
     assert_eq!(back.version, 1);
 }
 
@@ -198,7 +202,11 @@ async fn cas_conflicts_on_a_stale_version_and_succeeds_on_the_current_one() {
         .expect_err("CAS against a stale version must fail");
     assert!(matches!(err, BackendError::Conflict), "{err:?}");
 
-    let back = backend.get(&owner, "t-cas").await.expect("get").expect("some");
+    let back = backend
+        .get(&owner, "t-cas")
+        .await
+        .expect("get")
+        .expect("some");
     assert_eq!(back.task.status, TaskStatus::Completed, "the winner stands");
 }
 
@@ -236,7 +244,11 @@ async fn the_store_contract_holds_over_dynamodb() {
         .await
         .expect("mint");
     store
-        .put_envelope(&task.task_id, &owner, serde_json::json!({"config":{"shots":8}}))
+        .put_envelope(
+            &task.task_id,
+            &owner,
+            serde_json::json!({"config":{"shots":8}}),
+        )
         .await
         .expect("put envelope");
 
@@ -255,7 +267,12 @@ async fn the_store_contract_holds_over_dynamodb() {
 
     // The guarded terminal write, across what would be two processes.
     store
-        .finish(&task.task_id, &owner, TaskStatus::Completed, result("first"))
+        .finish(
+            &task.task_id,
+            &owner,
+            TaskStatus::Completed,
+            result("first"),
+        )
         .await
         .expect("terminal write");
     store
@@ -319,7 +336,11 @@ async fn an_expired_record_reads_as_gone_before_ttl_reclaims_it() {
     expired.expires_at_secs = Some(1);
     backend.put_new(&owner, expired).await.expect("insert");
     assert!(
-        backend.get(&owner, "t-expired").await.expect("get").is_none(),
+        backend
+            .get(&owner, "t-expired")
+            .await
+            .expect("get")
+            .is_none(),
         "an expired record must not be served just because TTL has not \
          collected it yet"
     );

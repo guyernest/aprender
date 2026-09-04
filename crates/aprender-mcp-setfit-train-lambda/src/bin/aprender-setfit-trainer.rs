@@ -37,7 +37,7 @@ use aprender_mcp_setfit_train::{
 };
 use aprender_mcp_setfit_train_lambda::{upload_artifact, DynamoDbTaskBackend, TrainingJob};
 use lambda_runtime::{service_fn, Error, LambdaEvent};
-use pmcp::server::task_store::TaskStore;
+use pmcp::server::task_store::{TaskStore, TaskStoreError};
 use pmcp::types::TaskStatus;
 use tokio::sync::Notify;
 use tracing_subscriber::EnvFilter;
@@ -120,12 +120,18 @@ fn watch_for_cancel(
                     cancel.notify_one();
                     return;
                 }
-                // A vanished record means the task expired mid-run. There is
+                // A VANISHED record means the task expired mid-run: there is
                 // nobody left to hand a result to, so stop the work too.
-                Err(e) => {
-                    tracing::info!("task {} is no longer readable ({e}); stopping", job.task_id);
+                Err(TaskStoreError::NotFound { .. }) => {
+                    tracing::info!("task {} is gone; stopping the trainer", job.task_id);
                     cancel.notify_one();
                     return;
+                }
+                // Anything else is the STORE failing, not the task ending. A
+                // throttle or a transient network error must not kill a healthy
+                // 127-second run — it just means this tick learned nothing.
+                Err(e) => {
+                    tracing::warn!("cancel poll for {} failed, retrying: {e}", job.task_id);
                 }
                 Ok(_) => {}
             }
