@@ -67,7 +67,8 @@ just deploy-training dev
 #    because its measured peak is 4.0 GB. CloudWatch's "Max Memory Used" on the
 #    worker's log group is what settles whether it actually does.
 
-# 4. Point the request function at what step 3 created, from SSM.
+# 4. Point the request function at what step 3 created, from SSM. Writes the
+#    gitignored .pmcp/deploy.toml from the tracked .pmcp/deploy.toml.template.
 just pmcp-train-config dev
 
 # 5. Attach the RequestLambdaPolicy stack output to the pmcp.run request
@@ -81,7 +82,10 @@ cargo pmcp deploy --manifest-path crates/aprender-mcp-setfit-train-lambda \
 ```
 
 Step 4 is not a convenience. The artifact bucket carries the account id for
-global uniqueness, so its name does not exist until step 3 has run.
+global uniqueness, so its name does not exist until step 3 has run — and that
+is also why its output is generated and gitignored rather than committed: this
+tree is destined for a public upstream repo, and an account id has no business
+travelling there.
 
 Step 6 needs `--manifest-path`: the workspace has two `bootstrap` binaries (the
 predict wrapper and this one) and cargo-pmcp discovers a deployable by scanning
