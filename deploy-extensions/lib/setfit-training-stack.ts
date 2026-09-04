@@ -275,6 +275,18 @@ export class SetFitTrainingStack extends cdk.Stack {
             Resource: `${this.artifactBucket.bucketArn}/datasets/*`,
           },
           {
+            // Without ListBucket, S3 answers HeadObject on a MISSING key with
+            // 403 rather than 404 — it will not disclose whether the key
+            // exists to a caller who could not list it. Measured on the first
+            // live negative test: the "nothing uploaded yet" branch was
+            // unreachable and the client got an AccessDenied dump instead.
+            // Scoped to the prefix, so it discloses nothing about artifacts.
+            Effect: 'Allow',
+            Action: ['s3:ListBucket'],
+            Resource: this.artifactBucket.bucketArn,
+            Condition: { StringLike: { 's3:prefix': ['datasets/*'] } },
+          },
+          {
             // The download link `train_status` mints for a completed artifact.
             Effect: 'Allow',
             Action: ['s3:GetObject'],

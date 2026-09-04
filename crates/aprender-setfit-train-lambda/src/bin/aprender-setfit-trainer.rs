@@ -210,7 +210,14 @@ async fn run_job(worker: &Worker, job: TrainingJob) {
     let dataset = match envelope.get("dataset_uri").and_then(|v| v.as_str()) {
         None => None,
         Some(uri) => match fetch_dataset(&worker.s3, uri, &dataset_dir).await {
-            Ok(dir) => Some(dir),
+            Ok(dir) => {
+                tracing::info!(
+                    "task {}: dataset {uri} unpacked to {}",
+                    job.task_id,
+                    dir.display()
+                );
+                Some(dir)
+            }
             Err(reason) => {
                 worker
                     .record(&job, &artifact_uri, &Outcome::Failed(reason))
@@ -223,7 +230,14 @@ async fn run_job(worker: &Worker, job: TrainingJob) {
 
     let prepared = match prepare_run(&worker.paths, &job.task_id, config, dataset.as_deref()).await
     {
-        Ok(prepared) => prepared,
+        Ok(prepared) => {
+            tracing::info!(
+                "task {}: pre-flight passed on {}; training",
+                job.task_id,
+                prepared.data.display()
+            );
+            prepared
+        }
         // The CLI's own refusal, in its own words — the same text a local
         // submit would have returned synchronously.
         Err(reason) => {

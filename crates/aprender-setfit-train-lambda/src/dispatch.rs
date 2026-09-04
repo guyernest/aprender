@@ -222,6 +222,10 @@ impl Dispatcher for LambdaDispatcher {
                 .send()
                 .await
                 .map_err(|e| {
+                    // `is_not_found` fires only if the signer also holds
+                    // s3:ListBucket on the prefix: without it S3 answers a
+                    // missing key with 403, not 404, and this branch never
+                    // runs. The CDK policy grants it for that reason.
                     if e.as_service_error().is_some_and(|se| se.is_not_found()) {
                         format!(
                             "nothing has been uploaded to {uri} yet; PUT the archive to the \
