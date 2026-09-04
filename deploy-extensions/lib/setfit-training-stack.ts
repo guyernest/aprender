@@ -46,7 +46,39 @@ export interface SetFitTrainingStackProps extends cdk.StackProps {
    * why `cdk synth` fails loudly rather than deploying an empty function.
    */
   readonly trainerAssetPath: string;
+
+  /**
+   * Worker memory in MB. Defaults to {@link TRAINER_MEMORY_MB}.
+   *
+   * A parameter and not a constant because Lambda's per-function memory ceiling
+   * is a PER-ACCOUNT limit that does not appear in Service Quotas and is raised
+   * only through an AWS Support case. A fresh account is capped at 3008 MB, and
+   * this account is: the first deploy failed with `'MemorySize' value failed to
+   * satisfy constraint: Member must have value less than or equal to 3008`.
+   *
+   * Below {@link TRAINER_MEMORY_MB} the reference train is expected to OOM —
+   * see that constant. Setting this lower is a deliberate choice to measure
+   * rather than a configuration knob, so it is passed explicitly:
+   *
+   *   just deploy-training dev 3008
+   */
+  readonly trainerMemoryMb?: number;
 }
+
+/**
+ * What the worker needs, from measurement: the 8-shot reference train peaks at
+ * **4.0 GB RSS** and runs 127 s wall on an M-series CPU. 6 GB leaves headroom
+ * for a slower core and a larger shot count.
+ *
+ * This is the number the design is justified against. An account whose ceiling
+ * is below 4 GB cannot run that train, and no amount of configuration changes
+ * that — the fix is an AWS Support case to raise the account's Lambda memory
+ * limit, not a smaller number here.
+ */
+export const TRAINER_MEMORY_MB = 6144;
+
+/** Peak RSS measured for the 8-shot reference train, in MB. */
+export const MEASURED_PEAK_RSS_MB = 4096;
 
 export class SetFitTrainingStack extends cdk.Stack {
   public readonly tasksTable: dynamodb.Table;
@@ -117,6 +149,20 @@ export class SetFitTrainingStack extends cdk.Stack {
       removalPolicy,
     });
 
+    // A worker below the measured peak is a deploy that succeeds and then fails
+    // every training run with an OOM. That is worth stating at synth time, next
+    // to the number, rather than leaving it to be discovered in CloudWatch.
+    const memorySize = props.trainerMemoryMb ?? TRAINER_MEMORY_MB;
+    if (memorySize < MEASURED_PEAK_RSS_MB) {
+      cdk.Annotations.of(this).addWarning(
+        `TrainerFunction memory is ${memorySize} MB, below the ${MEASURED_PEAK_RSS_MB} MB ` +
+          `peak RSS measured for the 8-shot reference train. The plumbing will work and ` +
+          `the training run is expected to OOM — CloudWatch's "Max Memory Used" is what ` +
+          `settles it. The fix is an AWS Support case raising this account's Lambda ` +
+          `memory limit (not in Service Quotas), then redeploy without the override.`,
+      );
+    }
+
     this.trainer = new lambda.Function(this, 'TrainerFunction', {
       functionName: `aprender-setfit-trainer-${env}`,
       // PROVIDED_AL2023 + arm64: the worker is a Rust custom runtime, and the
@@ -126,11 +172,11 @@ export class SetFitTrainingStack extends cdk.Stack {
       architecture: lambda.Architecture.ARM_64,
       handler: 'bootstrap',
       code: lambda.Code.fromAsset(props.trainerAssetPath),
-      // MEASURED, not guessed: the 8-shot reference train peaks at 4.0 GB RSS
-      // and runs 127 s wall on an M-series CPU. 6 GB leaves headroom for a
-      // slower core and a larger shot count; 900 s is Lambda's ceiling and
-      // ~7x the measured run.
-      memorySize: 6144,
+      // MEASURED, not guessed — see TRAINER_MEMORY_MB. Overridable only because
+      // the per-account ceiling is a support case, not a setting; the warning
+      // below fires whenever the deployed value is under the measured peak.
+      memorySize,
+      // 900 s is Lambda's own ceiling and ~7x the measured 127 s run.
       timeout: cdk.Duration.seconds(900),
       // The trained artifact is ~87 MB and is written to /tmp before upload,
       // alongside the config. 512 MB (the default) would fit today and leaves

@@ -54,6 +54,18 @@ just diff-training dev
 
 # 3. Create the table, the bucket and the worker.
 just deploy-training dev
+#
+#    If this fails with `'MemorySize' value failed to satisfy constraint:
+#    Member must have value less than or equal to 3008`, the account's Lambda
+#    memory ceiling has never been raised. That limit is NOT in Service Quotas —
+#    it is an AWS Support case. Until it is raised you can deploy under it and
+#    measure, which synth then warns about:
+#
+#        just deploy-training dev 3008
+#
+#    The plumbing works at 3008 MB; the reference train is expected to OOM,
+#    because its measured peak is 4.0 GB. CloudWatch's "Max Memory Used" on the
+#    worker's log group is what settles whether it actually does.
 
 # 4. Point the request function at what step 3 created, from SSM.
 just pmcp-train-config dev
@@ -102,8 +114,8 @@ stack is willing to lose.
 | Artifact lifecycle | 7 days | 90 days |
 | Log retention | 1 week | 3 months |
 
-The worker is identical in both: 6144 MB, 900 s, arm64, 2 GB of `/tmp`, and
-**zero retries**. A retry re-runs a 127-second CPU-saturating job, and a failure
+The worker is identical in both: 6144 MB (unless overridden — see step 3),
+900 s, arm64, 2 GB of `/tmp`, and **zero retries**. A retry re-runs a 127-second CPU-saturating job, and a failure
 here is a bad config or a broken package rather than a transient — the guarded
 terminal write makes a retry safe, but it cannot make one useful.
 

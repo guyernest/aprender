@@ -108,22 +108,32 @@ build-trainer-asset: build-apr-arm64 build-trainer-arm64
     du -sh "{{asset}}" | awk '{print "  worker package: " $1 " (Lambda zip limit 250 MB)"}'
 
 # Validate the IaC. Creates nothing, contacts no account.
-synth-training env="dev":
-    @cd deploy-extensions && npx cdk synth --context env={{ trim_start_match(env, "env=") }} --quiet
+synth-training env="dev" memory_mb="":
+    @cd deploy-extensions && npx cdk synth --context env={{ trim_start_match(env, "env=") }} \
+        {{ if memory_mb == "" { "" } else { "--context trainerMemoryMb=" + memory_mb } }} --quiet
     @echo "  synth OK for env={{ trim_start_match(env, "env=") }}"
 
 # Show what a deploy WOULD change, against the real account.
-diff-training env="dev" profile="ze-kasher-dev":
-    cd deploy-extensions && npx cdk diff --context env={{ trim_start_match(env, "env=") }} --profile {{profile}}
+diff-training env="dev" memory_mb="" profile="ze-kasher-dev":
+    cd deploy-extensions && npx cdk diff --context env={{ trim_start_match(env, "env=") }} \
+        {{ if memory_mb == "" { "" } else { "--context trainerMemoryMb=" + memory_mb } }} \
+        --profile {{profile}}
 
 # Create/update the training infrastructure. Real resources, real money.
+#
+# The optional second argument overrides the worker's memory, for an account
+# whose Lambda ceiling is below the measured 4 GB envelope (a fresh account is
+# capped at 3008 MB, and that ceiling is an AWS Support case, not a Service
+# Quota). `just deploy-training dev 3008` deploys under it; synth then WARNS
+# that training is expected to OOM, which is the point of measuring.
 #
 # `--require-approval never` because `diff-training` IS the review gate: it
 # prints the IAM changes in full and is the documented step before this one.
 # Keeping the interactive prompt here would only mean the recipe cannot run
 # unattended, while the review still happened in a different command.
-deploy-training env="dev" profile="ze-kasher-dev":
+deploy-training env="dev" memory_mb="" profile="ze-kasher-dev":
     cd deploy-extensions && npx cdk deploy --context env={{ trim_start_match(env, "env=") }} \
+        {{ if memory_mb == "" { "" } else { "--context trainerMemoryMb=" + memory_mb } }} \
         --profile {{profile}} --require-approval never
 
 # Tear it down. dev destroys data by design; prod RETAINs the table and bucket.

@@ -37,6 +37,21 @@ if (!fs.existsSync(path.join(trainerAssetPath, 'bootstrap'))) {
   );
 }
 
+/**
+ * Worker memory override, for an account whose Lambda ceiling is below what the
+ * measured envelope needs. Absent, the stack uses its justified default and the
+ * deploy fails loudly against a low ceiling — which is the right failure, since
+ * silently shrinking to fit would produce a worker that OOMs every run.
+ */
+const memoryContext = app.node.tryGetContext('trainerMemoryMb');
+const trainerMemoryMb =
+  memoryContext === undefined ? undefined : Number(memoryContext);
+if (trainerMemoryMb !== undefined && !Number.isFinite(trainerMemoryMb)) {
+  throw new Error(
+    `--context trainerMemoryMb=${memoryContext} is not a number`,
+  );
+}
+
 new SetFitTrainingStack(app, `aprender-setfit-training-${environment}`, {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
@@ -45,6 +60,7 @@ new SetFitTrainingStack(app, `aprender-setfit-training-${environment}`, {
   },
   environment,
   trainerAssetPath,
+  trainerMemoryMb,
   description: `SetFit training: task state, artifact bucket and the training worker (${environment})`,
 });
 
