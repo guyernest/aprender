@@ -292,6 +292,7 @@ fn a_training_run_completes_as_an_mcp_task_over_live_stdio() {
     let mut expected = vec![
         aprender_mcp_setfit_train::TOOL_TRAIN,
         aprender_mcp_setfit_train::TOOL_STATUS,
+        aprender_mcp_setfit_train::TOOL_UPLOAD,
     ];
     expected.sort_unstable();
     assert_eq!(

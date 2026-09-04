@@ -24,13 +24,30 @@
 //! split, and it is paid in seconds rather than in the minutes a full run would
 //! take.
 
-use aprender_mcp_setfit_train::Dispatcher;
+use std::time::Duration;
+
+use aprender_mcp_setfit_train::{mint_id, DatasetUpload, Dispatcher, DATASET_FORMAT};
 use aws_sdk_lambda::error::DisplayErrorContext;
 use aws_sdk_lambda::primitives::Blob;
 use aws_sdk_lambda::types::InvocationType;
+use aws_sdk_s3::presigning::PresigningConfig;
 use pmcp::async_trait;
 
+use crate::dataset::{dataset_key_in, DATASET_PREFIX, DATASET_SUFFIX, MAX_DATASET_BYTES};
 use crate::TrainingJob;
+
+/// Where artifacts live in the bucket. The download presign is scoped to it.
+pub const ARTIFACT_PREFIX: &str = "tasks/";
+
+/// How long an upload URL stays valid. Long enough to run `tar` and `curl` by
+/// hand with a coffee in between; short enough that a URL pasted into a chat
+/// is stale by the time anyone else reads it.
+pub const UPLOAD_URL_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// How long a download URL stays valid — matched to the task's own TTL, so a
+/// client that polled to completion is never handed a link that outlives the
+/// record it came from by much.
+pub const DOWNLOAD_URL_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Split an `s3://bucket/key` URI. `None` when it is not one.
 ///
@@ -74,10 +91,12 @@ pub async fn upload_artifact(
     Ok(())
 }
 
-/// Dispatches training to the worker Lambda.
+/// Dispatches training to the worker Lambda, and signs the S3 URLs a client
+/// uploads to and downloads from.
 #[derive(Debug, Clone)]
 pub struct LambdaDispatcher {
     lambda: aws_sdk_lambda::Client,
+    s3: aws_sdk_s3::Client,
     function: String,
     bucket: String,
 }
@@ -86,14 +105,21 @@ impl LambdaDispatcher {
     #[must_use]
     pub fn new(
         lambda: aws_sdk_lambda::Client,
+        s3: aws_sdk_s3::Client,
         function: impl Into<String>,
         bucket: impl Into<String>,
     ) -> Self {
         Self {
             lambda,
+            s3,
             function: function.into(),
             bucket: bucket.into(),
         }
+    }
+
+    /// The URI a freshly minted dataset slot is addressed by.
+    fn dataset_uri_for(&self, id: &str) -> String {
+        format!("s3://{}/{DATASET_PREFIX}{id}{DATASET_SUFFIX}", self.bucket)
     }
 
     /// Build one from the ambient AWS configuration.
@@ -108,6 +134,7 @@ impl LambdaDispatcher {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         Ok(Self::new(
             aws_sdk_lambda::Client::new(&config),
+            aws_sdk_s3::Client::new(&config),
             function,
             bucket,
         ))
@@ -125,12 +152,93 @@ impl Dispatcher for LambdaDispatcher {
         format!("s3://{}/tasks/{task_id}.apr", self.bucket)
     }
 
+    async fn dataset_upload(&self) -> Result<DatasetUpload, String> {
+        let id = mint_id();
+        let key = format!("{DATASET_PREFIX}{id}{DATASET_SUFFIX}");
+        let presign = PresigningConfig::expires_in(UPLOAD_URL_TTL)
+            .map_err(|e| format!("cannot build a presigning config: {e}"))?;
+        let signed = self
+            .s3
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .presigned(presign)
+            .await
+            .map_err(|e| format!("cannot sign an upload URL: {}", DisplayErrorContext(&e)))?;
+        Ok(DatasetUpload {
+            dataset_uri: self.dataset_uri_for(&id),
+            upload_url: signed.uri().to_string(),
+            expires_in_secs: UPLOAD_URL_TTL.as_secs(),
+            method: "PUT",
+            format: DATASET_FORMAT,
+        })
+    }
+
+    async fn artifact_download_url(&self, artifact_uri: &str) -> Option<String> {
+        // Only an artifact THIS deployment wrote: same bucket, artifact prefix.
+        // A local path or a foreign bucket gets no link rather than a link that
+        // 403s, and never a signature over a key the role could not read anyway.
+        let (bucket, key) = crate::parse_s3_uri(artifact_uri)?;
+        if bucket != self.bucket || !key.starts_with(ARTIFACT_PREFIX) {
+            return None;
+        }
+        let presign = PresigningConfig::expires_in(DOWNLOAD_URL_TTL).ok()?;
+        self.s3
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .presigned(presign)
+            .await
+            .ok()
+            .map(|signed| signed.uri().to_string())
+    }
+
     async fn dispatch(
         &self,
         task_id: &str,
         owner: &str,
         _config: &serde_json::Value,
+        dataset_uri: Option<&str>,
     ) -> Result<(), String> {
+        // A dataset is checked HERE, synchronously, for the two things the
+        // client can get wrong: a URI this deployment did not issue, and an
+        // upload that never happened. Both would otherwise surface from the
+        // worker as a failed task — correct, but a minute later and one hop
+        // removed from the mistake.
+        if let Some(uri) = dataset_uri {
+            let key = dataset_key_in(&self.bucket, uri).ok_or_else(|| {
+                format!(
+                    "dataset_uri must be one this server issued — \
+                     s3://{}/{DATASET_PREFIX}<id>{DATASET_SUFFIX} from `dataset_upload_url` — \
+                     not {uri}",
+                    self.bucket
+                )
+            })?;
+            let head = self
+                .s3
+                .head_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|e| {
+                    if e.as_service_error().is_some_and(|se| se.is_not_found()) {
+                        format!(
+                            "nothing has been uploaded to {uri} yet; PUT the archive to the \
+                                 upload_url first, then call train"
+                        )
+                    } else {
+                        format!("cannot read {uri}: {}", DisplayErrorContext(&e))
+                    }
+                })?;
+            let size = head.content_length().unwrap_or(0);
+            if size > MAX_DATASET_BYTES {
+                return Err(format!(
+                    "dataset {uri} is {size} bytes, over the {MAX_DATASET_BYTES}-byte ceiling"
+                ));
+            }
+        }
+
         let job = TrainingJob {
             task_id: task_id.to_string(),
             owner: owner.to_string(),
@@ -188,6 +296,18 @@ mod tests {
         assert!(parse_s3_uri("s3://bucket-with-no-key").is_none());
         assert!(parse_s3_uri("s3:///key-with-no-bucket").is_none());
         assert!(parse_s3_uri("https://bucket.s3.amazonaws.com/key").is_none());
+    }
+
+    #[test]
+    fn a_dataset_uri_this_deployment_minted_is_one_it_accepts() {
+        // The two ends — minted by `dataset_upload`, checked by `dispatch` —
+        // written from the same constants, and this is where both are visible.
+        let uri = format!(
+            "s3://{}/{DATASET_PREFIX}{}{DATASET_SUFFIX}",
+            "bkt",
+            mint_id()
+        );
+        assert!(dataset_key_in("bkt", &uri).is_some(), "{uri}");
     }
 
     #[test]

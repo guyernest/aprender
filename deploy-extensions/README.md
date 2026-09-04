@@ -75,9 +75,11 @@ just pmcp-train-config dev
 #    raises the fd limit; both are required and both fail confusingly.
 just pmcp-train-deploy
 
-# 6. Grant it access to the table and the worker. AFTER the deploy, because
-#    pmcp.run creates the execution role — there is nothing to attach to
-#    until it has.
+# 6. Grant it access to the table, the worker and the two S3 prefixes it
+#    presigns for. AFTER the deploy, because pmcp.run creates the execution
+#    role — there is nothing to attach to until it has. Re-run it after any
+#    `deploy-training` too: the policy document is a stack output, and this is
+#    what carries a changed one across to the platform-owned role.
 just pmcp-train-grant dev
 ```
 
@@ -125,6 +127,43 @@ rather than a hang, but not a working server.
 Re-run step 6 after any pmcp.run redeploy. It is an out-of-band change to a
 role that a platform-owned CloudFormation stack manages, and a stack update may
 drop it; `put-role-policy` replaces by name, so re-running is free.
+
+## Training on your own dataset
+
+The `train` tool takes an optional `dataset_uri`. Absent, the run uses the
+benchmark packaged with the worker; present, the worker fetches what it names.
+MCP has no file-upload primitive, so the upload is out of band:
+
+```bash
+# 1. Pack an attested benchmark directory (what `apr data tweet-eval-stance`
+#    and `apr data select` write). Flat, with selection-manifest.json at the root.
+just dataset-pack path/to/my-attested-dir /tmp/mine.tar.gz
+
+# 2. From an MCP client, call `dataset_upload_url` (no arguments). It returns
+#    an `upload_url` (PUT, valid 15 minutes) and a `dataset_uri`.
+
+# 3. Upload.
+curl -X PUT --upload-file /tmp/mine.tar.gz "<upload_url>"
+
+# 4. Call `train` with {"config": ..., "dataset_uri": "<dataset_uri>"}.
+```
+
+`train` checks the URI synchronously — that it is one this deployment issued,
+and that something was actually uploaded to it — so a forgotten step 3 is a
+tool error, not a task that fails a minute later. What the archive CONTAINS is
+judged by the CLI's own pre-flight in the worker, exactly as the packaged
+dataset is: this deployment looks for one file by name and validates nothing.
+
+Producing an attested directory from arbitrary labeled data is `apr data` work
+that does not exist yet; today the only producer is `apr data tweet-eval-stance`.
+
+## Getting the trained artifact
+
+`train_status` on a completed task carries `artifact_url`: a presigned GET,
+valid one hour, minted at read time. It is never stored — the verdict in the
+task store must stay true for the task's whole TTL, and a signed URL does not.
+`tasks/result` serves the stored verdict and so has no link; poll `train_status`
+for the download.
 
 ## Verifying it
 

@@ -10,6 +10,8 @@
 //! | `TaskBackend` | `InMemoryTaskBackend` | [`DynamoDbTaskBackend`] |
 //! | `Dispatcher` | `LocalDispatcher` (spawn a child) | [`LambdaDispatcher`] (async invoke) |
 //! | terminal write | the spawning process | the worker binary |
+//! | dataset in | a directory on the machine | an S3 object the client PUT to a presigned URL |
+//! | artifact out | a file on the machine | a presigned GET, minted by `train_status` at read time |
 //!
 //! The tool surface, the task store, the mint handoff, the status payload and
 //! the ONE implementation of "run `apr setfit train`" all stay upstream. If
@@ -40,10 +42,15 @@
 //! authenticated subject with no code change. Stated here rather than left for
 //! someone to discover.
 
+mod dataset;
 mod dispatch;
 mod dynamodb;
 
-pub use dispatch::{parse_s3_uri, upload_artifact, LambdaDispatcher};
+pub use dataset::{fetch_dataset, DATASET_PREFIX, DATASET_SUFFIX, MAX_DATASET_BYTES};
+pub use dispatch::{
+    parse_s3_uri, upload_artifact, LambdaDispatcher, ARTIFACT_PREFIX, DOWNLOAD_URL_TTL,
+    UPLOAD_URL_TTL,
+};
 pub use dynamodb::{DynamoDbTaskBackend, MAX_ITEM_BYTES};
 
 /// The DynamoDB table holding task records. Set by the CDK stack on the worker

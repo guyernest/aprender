@@ -214,6 +214,10 @@ export class SetFitTrainingStack extends cdk.Stack {
 
     this.tasksTable.grantReadWriteData(this.trainer);
     this.artifactBucket.grantWrite(this.trainer);
+    // Datasets a client uploaded live under their own prefix, and the worker
+    // may only READ them. Scoping the grant to the prefix is what makes an
+    // envelope naming any other key fail on permissions before a byte moves.
+    this.artifactBucket.grantRead(this.trainer, 'datasets/*');
 
     // ---------------------------------------------------------------------
     // What the request Lambda needs to know
@@ -242,7 +246,7 @@ export class SetFitTrainingStack extends cdk.Stack {
     // reaching into a stack it does not own.
     new cdk.CfnOutput(this, 'RequestLambdaPolicy', {
       description:
-        'Attach to the pmcp.run request Lambda role: DynamoDB RW on the tasks table + lambda:InvokeFunction on the trainer',
+        'Attach to the pmcp.run request Lambda role: DynamoDB RW on the tasks table, lambda:InvokeFunction on the trainer, and the S3 rights it PRESIGNS with (a presigned URL carries the signer\'s permissions, so the request function needs PutObject on datasets/ and GetObject on tasks/ even though it never moves a byte itself)',
       value: JSON.stringify({
         Version: '2012-10-17',
         Statement: [
@@ -261,6 +265,20 @@ export class SetFitTrainingStack extends cdk.Stack {
             Effect: 'Allow',
             Action: ['lambda:InvokeFunction'],
             Resource: this.trainer.functionArn,
+          },
+          {
+            // The upload slot: the client PUTs with a URL this role signed.
+            // HeadObject on the same prefix is how `train` refuses a
+            // dataset_uri nothing was uploaded to, synchronously.
+            Effect: 'Allow',
+            Action: ['s3:PutObject', 's3:GetObject'],
+            Resource: `${this.artifactBucket.bucketArn}/datasets/*`,
+          },
+          {
+            // The download link `train_status` mints for a completed artifact.
+            Effect: 'Allow',
+            Action: ['s3:GetObject'],
+            Resource: `${this.artifactBucket.bucketArn}/tasks/*`,
           },
         ],
       }),

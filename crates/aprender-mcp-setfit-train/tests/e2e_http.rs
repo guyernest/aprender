@@ -277,14 +277,19 @@ fn a_training_run_completes_as_an_mcp_task_over_streamable_http() {
     let mut expected = vec![
         aprender_mcp_setfit_train::TOOL_TRAIN,
         aprender_mcp_setfit_train::TOOL_STATUS,
+        aprender_mcp_setfit_train::TOOL_UPLOAD,
     ];
     expected.sort_unstable();
     assert_eq!(names, expected);
 
     // 3) task-augmented train (v1 trigger: the `task` field).
+    // `dataset_uri` names the SAME directory the server defaults to, so the
+    // run is the reference run — what changes is that the paths reach the CLI
+    // through the per-run override rather than the packaged default. On the
+    // local dispatcher a dataset URI is a directory on this machine.
     let submit = serde_json::json!({
         "name": aprender_mcp_setfit_train::TOOL_TRAIN,
-        "arguments": { "config": config },
+        "arguments": { "config": config, "dataset_uri": data.display().to_string() },
         "task": {}
     });
     let created = client.call("tools/call", submit.clone(), "task-augmented train");

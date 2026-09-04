@@ -6,12 +6,18 @@
 //! stay two strings.
 //!
 //! ```text
-//!   read envelope  ->  pre-flight  ->  run apr  ->  upload  ->  terminal write
-//!        |               |               |            |
-//!        +---------------+---------------+------------+--> any failure is a
-//!                                                          `failed` task with
-//!                                                          the reason in it
+//!   read envelope -> fetch dataset -> pre-flight -> run apr -> upload -> terminal write
+//!        |               |               |            |          |
+//!        +---------------+---------------+------------+----------+--> any failure is a
+//!                                                                     `failed` task with
+//!                                                                     the reason in it
 //! ```
+//!
+//! "fetch dataset" is a no-op for a run on the packaged dataset. When the
+//! envelope names one the client uploaded, it is brought down and unpacked
+//! under `/tmp` first, and the CLI's pre-flight then judges it exactly as it
+//! judges the packaged one — this binary looks for one file by name and
+//! validates nothing.
 //!
 //! The invariant that makes this safe to retry, race or interrupt is upstream:
 //! `AprenderTaskStore::finish` is guarded, so the FIRST terminal write wins and
@@ -35,7 +41,9 @@ use aprender_mcp_setfit_train::{
     execute_run, prepare_run, run_payload, terminal_result, AprenderTaskStore, Outcome,
     TrainerPaths,
 };
-use aprender_setfit_train_lambda::{upload_artifact, DynamoDbTaskBackend, TrainingJob};
+use aprender_setfit_train_lambda::{
+    fetch_dataset, upload_artifact, DynamoDbTaskBackend, TrainingJob,
+};
 use lambda_runtime::{service_fn, Error, LambdaEvent};
 use pmcp::server::task_store::{TaskStore, TaskStoreError};
 use pmcp::types::TaskStatus;
@@ -82,7 +90,14 @@ impl Worker {
             Outcome::Failed(message) => (None, Some(message.as_str())),
             Outcome::Cancelled => (None, Some("cancelled by the client (tasks/cancel)")),
         };
-        let payload = run_payload(&job.task_id, artifact_uri, outcome.phase(), report, error);
+        let payload = run_payload(
+            &job.task_id,
+            artifact_uri,
+            outcome.phase(),
+            report,
+            error,
+            None,
+        );
         let failed = !matches!(outcome, Outcome::Completed(_));
         if let Err(e) = self
             .store
@@ -186,7 +201,28 @@ async fn run_job(worker: &Worker, job: TrainingJob) {
         return;
     };
 
-    let prepared = match prepare_run(&worker.paths, &job.task_id, config).await {
+    // A client-supplied dataset comes down first. Its scratch directory is
+    // removed with the run's other files, whatever the outcome.
+    let dataset_dir = worker
+        .paths
+        .output_dir
+        .join(format!("{}-dataset", job.task_id));
+    let dataset = match envelope.get("dataset_uri").and_then(|v| v.as_str()) {
+        None => None,
+        Some(uri) => match fetch_dataset(&worker.s3, uri, &dataset_dir).await {
+            Ok(dir) => Some(dir),
+            Err(reason) => {
+                worker
+                    .record(&job, &artifact_uri, &Outcome::Failed(reason))
+                    .await;
+                let _ = tokio::fs::remove_dir_all(&dataset_dir).await;
+                return;
+            }
+        },
+    };
+
+    let prepared = match prepare_run(&worker.paths, &job.task_id, config, dataset.as_deref()).await
+    {
         Ok(prepared) => prepared,
         // The CLI's own refusal, in its own words — the same text a local
         // submit would have returned synchronously.
@@ -194,6 +230,7 @@ async fn run_job(worker: &Worker, job: TrainingJob) {
             worker
                 .record(&job, &artifact_uri, &Outcome::Failed(reason))
                 .await;
+            let _ = tokio::fs::remove_dir_all(&dataset_dir).await;
             return;
         }
     };
@@ -220,6 +257,7 @@ async fn run_job(worker: &Worker, job: TrainingJob) {
 
     worker.record(&job, &artifact_uri, &outcome).await;
     clean_up(&[&prepared.artifact_path, &prepared.config_path]).await;
+    let _ = tokio::fs::remove_dir_all(&dataset_dir).await;
 }
 
 #[tokio::main]

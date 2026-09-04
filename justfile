@@ -279,3 +279,27 @@ pmcp-train-deploy target="":
     }
     cargo pmcp deploy --manifest-path crates \
         {{ if target == "" { "" } else { "--target " + target } }} --no-color
+
+# Pack an attested benchmark directory for `dataset_upload_url`.
+#
+# The archive is FLAT — `tar -C <dir> .` — so `selection-manifest.json` sits at
+# its root. The worker also accepts the one-directory-down layout `tar` makes
+# when run beside the directory, so this is convenience, not a requirement.
+#
+#   just dataset-pack                                     # the packaged benchmark
+#   just dataset-pack path/to/my-attested-dir out.tar.gz
+#
+# Then, from an MCP client:
+#   1. call dataset_upload_url            -> upload_url, dataset_uri
+#   2. curl -X PUT --upload-file <out> "<upload_url>"
+#   3. call train with {config, dataset_uri}
+dataset-pack dir="data/tweet-eval-stance" out="/tmp/setfit-dataset.tar.gz":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f "{{dir}}/selection-manifest.json" || {
+        echo "ERROR: {{dir}} has no selection-manifest.json — run \`apr data select\` on it first" >&2
+        exit 1
+    }
+    tar -czf "{{out}}" -C "{{dir}}" .
+    ls -lh "{{out}}" | awk '{print "  packed: " $9 " (" $5 ")"}'
+    tar -tzf "{{out}}" | sed 's|^\./||' | grep -v '^$' | sort | sed 's/^/    /'

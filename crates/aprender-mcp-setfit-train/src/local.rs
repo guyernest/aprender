@@ -25,8 +25,14 @@ use tokio::sync::Notify;
 
 use crate::task_store::{AprenderTaskStore, CancelSink};
 use crate::{
-    run_payload, terminal_result, Dispatcher, DRY_RUN_TIMEOUT_SECS, OUTPUT_TAIL_BYTES, TOOL_STATUS,
+    run_payload, terminal_result, DatasetUpload, Dispatcher, DRY_RUN_TIMEOUT_SECS,
+    OUTPUT_TAIL_BYTES, TOOL_STATUS, TOOL_UPLOAD,
 };
+
+/// The selection manifest's name inside a dataset directory — where
+/// `apr data select` writes it, and the one file this crate looks for by name.
+/// Everything else in the directory is the CLI's to validate.
+pub const SELECTION_MANIFEST: &str = "selection-manifest.json";
 
 /// Everything the operator provisions; nothing here comes from the client.
 ///
@@ -237,24 +243,20 @@ impl CancelSink for RunningJobs {
 
 /// The base `apr setfit train` invocation. One builder, so the dry run and the
 /// real run cannot drift.
-fn train_command(
-    paths: &TrainerPaths,
-    config_path: &Path,
-    artifact_path: &Path,
-) -> tokio::process::Command {
+fn train_command(paths: &TrainerPaths, run: &PreparedRun) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(&paths.apr_bin);
     cmd.arg("setfit")
         .arg("train")
         .arg("--config")
-        .arg(config_path)
+        .arg(&run.config_path)
         .arg("--data")
-        .arg(&paths.data)
+        .arg(&run.data)
         .arg("--selection")
-        .arg(&paths.selection)
+        .arg(&run.selection)
         .arg("--model-dir")
         .arg(&paths.model_dir)
         .arg("--output")
-        .arg(artifact_path)
+        .arg(&run.artifact_path)
         .arg("--json")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -348,6 +350,43 @@ pub struct PreparedRun {
     pub config_path: PathBuf,
     /// Where the trainer will write the `.apr` artifact.
     pub artifact_path: PathBuf,
+    /// The attested benchmark directory this run trains on: the operator's
+    /// packaged default, or a directory the client supplied.
+    pub data: PathBuf,
+    /// Its selection manifest.
+    pub selection: PathBuf,
+}
+
+/// Which dataset a run trains on: the packaged default, or a client-supplied
+/// directory that must at least contain a selection manifest.
+///
+/// Only the manifest's PRESENCE is checked here, because it is the one file
+/// this crate has to find by name. Whether the directory is a valid attested
+/// benchmark — manifest digests, split fingerprints, replayable selection — is
+/// the CLI's judgement, delivered by the pre-flight in its own words, and a
+/// second judge here could only disagree with it.
+///
+/// # Errors
+///
+/// When the supplied directory has no selection manifest.
+pub fn run_inputs(
+    paths: &TrainerPaths,
+    dataset: Option<&Path>,
+) -> Result<(PathBuf, PathBuf), String> {
+    match dataset {
+        None => Ok((paths.data.clone(), paths.selection.clone())),
+        Some(dir) => {
+            let selection = dir.join(SELECTION_MANIFEST);
+            if !selection.is_file() {
+                return Err(format!(
+                    "dataset {} has no {SELECTION_MANIFEST}; a dataset is an attested benchmark \
+                     directory as `apr data tweet-eval-stance` and `apr data select` write it",
+                    dir.display()
+                ));
+            }
+            Ok((dir.to_path_buf(), selection))
+        }
+    }
 }
 
 /// Materialize a run's config and put it through `apr setfit train --dry-run`.
@@ -363,7 +402,9 @@ pub async fn prepare_run(
     paths: &TrainerPaths,
     task_id: &str,
     config: &serde_json::Value,
+    dataset: Option<&Path>,
 ) -> Result<PreparedRun, String> {
+    let (data, selection) = run_inputs(paths, dataset)?;
     let artifact_path = paths.output_dir.join(format!("{task_id}.apr"));
     let config_path = paths.output_dir.join(format!("{task_id}.config.json"));
     let bytes =
@@ -371,13 +412,16 @@ pub async fn prepare_run(
     tokio::fs::write(&config_path, &bytes)
         .await
         .map_err(|e| format!("cannot write {}: {e}", config_path.display()))?;
-    if let Some(reason) = preflight(paths, &config_path, &artifact_path).await {
-        return Err(reason);
-    }
-    Ok(PreparedRun {
+    let prepared = PreparedRun {
         config_path,
         artifact_path,
-    })
+        data,
+        selection,
+    };
+    if let Some(reason) = preflight(paths, &prepared).await {
+        return Err(reason);
+    }
+    Ok(prepared)
 }
 
 /// Supervise a prepared run to its terminal verdict.
@@ -388,22 +432,12 @@ pub async fn prepare_run(
 /// rather than a special case — the guarded terminal write is what makes a
 /// cancel that lands mid-run correct there.
 pub async fn execute_run(paths: &TrainerPaths, prepared: &PreparedRun, cancel: &Notify) -> Outcome {
-    run_child(
-        paths,
-        &prepared.config_path,
-        &prepared.artifact_path,
-        cancel,
-    )
-    .await
+    run_child(paths, prepared, cancel).await
 }
 
 /// The CLI's own request checks, run synchronously. `None` means accepted.
-async fn preflight(
-    paths: &TrainerPaths,
-    config_path: &Path,
-    artifact_path: &Path,
-) -> Option<String> {
-    let mut dry = train_command(paths, config_path, artifact_path);
+async fn preflight(paths: &TrainerPaths, run: &PreparedRun) -> Option<String> {
+    let mut dry = train_command(paths, run);
     dry.arg("--dry-run");
     match tokio::time::timeout(Duration::from_secs(DRY_RUN_TIMEOUT_SECS), dry.output()).await {
         Err(_) => Some(format!(
@@ -424,13 +458,8 @@ async fn preflight(
 /// that fills a pipe nobody reads deadlocks, and this makes that tokio's
 /// guarantee rather than a local invariant. Cancellation drops that future and
 /// `kill_on_drop` reaps the child.
-async fn run_child(
-    paths: &TrainerPaths,
-    config_path: &Path,
-    artifact_path: &Path,
-    cancel: &Notify,
-) -> Outcome {
-    let mut cmd = train_command(paths, config_path, artifact_path);
+async fn run_child(paths: &TrainerPaths, run: &PreparedRun, cancel: &Notify) -> Outcome {
+    let mut cmd = train_command(paths, run);
     let child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => return Outcome::Failed(format!("cannot spawn {}: {e}", paths.apr_bin.display())),
@@ -502,19 +531,48 @@ impl Dispatcher for LocalDispatcher {
             .to_string()
     }
 
+    async fn dataset_upload(&self) -> Result<DatasetUpload, String> {
+        Err(format!(
+            "this server runs locally and takes no uploads: pass `dataset_uri` to `train` as the \
+             path of an attested benchmark directory on this machine. `{TOOL_UPLOAD}` is how the \
+             cloud deployment takes a dataset."
+        ))
+    }
+
+    async fn artifact_download_url(&self, _artifact_uri: &str) -> Option<String> {
+        // The artifact is a local file the client can already read; there is
+        // nothing to sign and nothing to expire.
+        None
+    }
+
     async fn dispatch(
         &self,
         task_id: &str,
         owner: &str,
         config: &serde_json::Value,
+        dataset_uri: Option<&str>,
     ) -> Result<(), String> {
+        // Locally a dataset URI is a directory path. Refuse anything else up
+        // front, in the same voice the cloud dispatcher uses for a URI it did
+        // not issue, so a client learns the rule from either deployment.
+        let dataset = dataset_uri.map(Path::new);
+        if let Some(dir) = dataset {
+            if !dir.is_dir() {
+                return Err(format!(
+                    "dataset_uri {} is not a directory on this machine; this server takes a local \
+                     attested benchmark directory, not a URL",
+                    dir.display()
+                ));
+            }
+        }
+
         // Single-flight FIRST: refusing before any file is written keeps a
         // refused submit from leaving a config behind.
         let cancel = self.running.try_admit(task_id)?;
 
         // The CLI's own request checks, in its own words, before the task is
         // allowed to look like a running job. A refusal releases the slot.
-        let prepared = match prepare_run(&self.paths, task_id, config).await {
+        let prepared = match prepare_run(&self.paths, task_id, config, dataset).await {
             Ok(prepared) => prepared,
             Err(reason) => {
                 self.running.release(task_id);
@@ -536,7 +594,14 @@ impl Dispatcher for LocalDispatcher {
                 Outcome::Failed(message) => (None, Some(message.as_str())),
                 Outcome::Cancelled => (None, Some("cancelled by the client (tasks/cancel)")),
             };
-            let payload = run_payload(&task_id, &artifact_display, outcome.phase(), report, error);
+            let payload = run_payload(
+                &task_id,
+                &artifact_display,
+                outcome.phase(),
+                report,
+                error,
+                None,
+            );
             let failed = !matches!(outcome, Outcome::Completed(_));
             // Tolerated, not unwrapped: the task can have expired or already
             // been cancelled, and `finish` no-ops on a second terminal write.
@@ -608,6 +673,78 @@ mod tests {
         );
         running.release("task-a");
         running.try_admit("task-b").expect("now free");
+    }
+
+    fn paths_in(root: &Path) -> TrainerPaths {
+        TrainerPaths {
+            apr_bin: root.join("apr"),
+            data: root.join("default-data"),
+            selection: root.join("default-data").join(SELECTION_MANIFEST),
+            model_dir: root.join("encoder"),
+            output_dir: root.join("out"),
+        }
+    }
+
+    fn scratch(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("setfit-train-{label}-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn no_dataset_means_the_packaged_default() {
+        let root = scratch("default");
+        let paths = paths_in(&root);
+        let (data, selection) = run_inputs(&paths, None).expect("defaults");
+        assert_eq!(data, paths.data);
+        assert_eq!(selection, paths.selection);
+    }
+
+    #[test]
+    fn a_supplied_dataset_routes_both_paths_through_it() {
+        let root = scratch("supplied");
+        let paths = paths_in(&root);
+        let dataset = root.join("mine");
+        std::fs::create_dir_all(&dataset).expect("dataset dir");
+        std::fs::write(dataset.join(SELECTION_MANIFEST), b"{}").expect("manifest");
+        let (data, selection) = run_inputs(&paths, Some(&dataset)).expect("supplied");
+        assert_eq!(data, dataset);
+        assert_eq!(selection, dataset.join(SELECTION_MANIFEST));
+        // And the command the CLI sees names the supplied paths, not the
+        // packaged ones — this is the whole point of the override.
+        let run = PreparedRun {
+            config_path: root.join("c.json"),
+            artifact_path: root.join("a.apr"),
+            data: data.clone(),
+            selection: selection.clone(),
+        };
+        let cmd = train_command(&paths, &run);
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let after = |flag: &str| {
+            let i = args.iter().position(|a| a == flag).expect(flag);
+            args[i + 1].clone()
+        };
+        assert_eq!(after("--data"), data.display().to_string());
+        assert_eq!(after("--selection"), selection.display().to_string());
+        assert!(!args.iter().any(|a| a.contains("default-data")), "{args:?}");
+    }
+
+    #[test]
+    fn a_dataset_without_a_selection_manifest_is_refused_by_name() {
+        let root = scratch("nomanifest");
+        let paths = paths_in(&root);
+        let dataset = root.join("bare");
+        std::fs::create_dir_all(&dataset).expect("dataset dir");
+        let err = run_inputs(&paths, Some(&dataset)).expect_err("must refuse");
+        assert!(err.contains(SELECTION_MANIFEST), "{err}");
+        assert!(err.contains("bare"), "must name the directory: {err}");
     }
 
     #[test]

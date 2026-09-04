@@ -61,11 +61,13 @@ mod local;
 mod task_store;
 
 pub use local::{
-    execute_run, prepare_run, LocalDispatcher, Outcome, PreparedRun, RunningJobs, TrainerPaths,
-    ENV_APR_BIN, ENV_DATA, ENV_MODEL_DIR, ENV_OUTPUT_DIR, ENV_SELECTION,
+    execute_run, prepare_run, run_inputs, LocalDispatcher, Outcome, PreparedRun, RunningJobs,
+    TrainerPaths, ENV_APR_BIN, ENV_DATA, ENV_MODEL_DIR, ENV_OUTPUT_DIR, ENV_SELECTION,
+    SELECTION_MANIFEST,
 };
 pub use task_store::{
-    AprenderTaskStore, BackendError, CancelSink, InMemoryTaskBackend, StoredTask, TaskBackend,
+    mint_id, AprenderTaskStore, BackendError, CancelSink, InMemoryTaskBackend, StoredTask,
+    TaskBackend,
 };
 
 use std::sync::Arc;
@@ -76,7 +78,7 @@ use pmcp::types::{CallToolResult, Content, TaskStatus, TaskSupport, ToolExecutio
 use pmcp::RequestHandlerExtra;
 use pmcp::Server;
 
-pub use args::{StatusArgs, TrainArgs};
+pub use args::{StatusArgs, TrainArgs, UploadArgs};
 
 /// The server identity both the stdio runner and any transport wrapper report.
 pub const SERVER_NAME: &str = "aprender-setfit-train";
@@ -86,6 +88,16 @@ pub const TOOL_TRAIN: &str = "train";
 
 /// The polling companion for clients without MCP Tasks support.
 pub const TOOL_STATUS: &str = "train_status";
+
+/// Mints a slot a client can upload a dataset into, for `train`'s `dataset_uri`.
+pub const TOOL_UPLOAD: &str = "dataset_upload_url";
+
+/// What an uploaded dataset must be. Stated once, served to clients verbatim
+/// from `dataset_upload_url`, and the only layout the worker looks for.
+pub const DATASET_FORMAT: &str = "a .tar.gz of an attested benchmark directory: \
+benchmark-manifest.json, selection-manifest.json and the train/validation/test JSONL at the \
+archive root (or all inside one top-level directory) — exactly what `apr data \
+tweet-eval-stance` and `apr data select` write";
 
 /// The owner bucket an UNAUTHENTICATED request binds to **when the transport
 /// supplies no auth context at all** — which is stdio, and only stdio.
@@ -147,7 +159,21 @@ mod args {
         /// only drift from it. Its SIZE is bounded (see `MAX_CONFIG_BYTES`) —
         /// that is a transport bound, a different question from legality.
         pub config: serde_json::Value,
+        /// Which dataset to train on. Absent, the server's packaged dataset.
+        /// On the cloud deployment this is the `dataset_uri` that
+        /// `dataset_upload_url` returned, after the upload; on a local server
+        /// it is the path of an attested benchmark directory on that machine.
+        #[serde(default)]
+        pub dataset_uri: Option<String>,
     }
+
+    /// Arguments for [`super::TOOL_UPLOAD`]: there are none. An empty object
+    /// with `deny_unknown_fields`, so a client that passes a filename or a
+    /// size here learns immediately that the upload happens OUT OF BAND, at
+    /// the URL this tool returns, not through this call.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct UploadArgs {}
 
     /// Arguments for [`super::TOOL_STATUS`].
     #[derive(Debug, Deserialize, JsonSchema)]
@@ -175,15 +201,48 @@ pub trait Dispatcher: Send + Sync {
     /// path today; an `s3://` URI under Step Functions.
     fn artifact_uri(&self, task_id: &str) -> String;
 
+    /// Mint somewhere a client can put a dataset, and the URI to name it by.
+    ///
+    /// MCP has no file-upload primitive (2025-11-25): tools take JSON. So the
+    /// upload happens OUT OF BAND — this hands back a time-limited URL to PUT
+    /// the archive at, and the `dataset_uri` the client then passes to `train`.
+    /// A dispatcher with no upload story says so in its error.
+    async fn dataset_upload(&self) -> Result<DatasetUpload, String>;
+
+    /// A time-limited URL a client can download a COMPLETED artifact from.
+    ///
+    /// Minted at read time, never stored: a presigned URL expires, and the
+    /// terminal payload in the task store must stay true for the task's whole
+    /// TTL. `None` where the artifact needs no signing (a local file).
+    async fn artifact_download_url(&self, artifact_uri: &str) -> Option<String>;
+
     /// Start the work, or refuse it. Refusing is expected — the local
     /// dispatcher runs the CLI's own pre-flight here, so a bad config is a tool
-    /// error in seconds rather than a failed job minutes later.
+    /// error in seconds rather than a failed job minutes later — and a
+    /// `dataset_uri` this dispatcher did not issue, or that was never uploaded,
+    /// is refused here too rather than by the worker minutes later.
     async fn dispatch(
         &self,
         task_id: &str,
         owner: &str,
         config: &serde_json::Value,
+        dataset_uri: Option<&str>,
     ) -> Result<(), String>;
+}
+
+/// What [`Dispatcher::dataset_upload`] hands a client.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DatasetUpload {
+    /// Pass this to `train` as `dataset_uri` once the upload has completed.
+    pub dataset_uri: String,
+    /// PUT the archive here. Expires; the dataset behind it does not.
+    pub upload_url: String,
+    /// How long `upload_url` stays valid.
+    pub expires_in_secs: u64,
+    /// The HTTP method `upload_url` accepts.
+    pub method: &'static str,
+    /// What the archive must contain — [`DATASET_FORMAT`], verbatim.
+    pub format: &'static str,
 }
 
 /// The owner this request's task belongs to.
@@ -206,6 +265,11 @@ fn resolve_owner(extra: &RequestHandlerExtra) -> String {
 /// Lambda deployment a worker on another host performs it minutes later, and it
 /// must write the SAME shape the request side would have. A second formatter
 /// there is how two doors start telling different stories.
+///
+/// `artifact_url` is the one field that is NOT part of the stored verdict: it
+/// is a time-limited download link, filled in by `train_status` at read time
+/// and always `null` in what the worker persists. The key is present either
+/// way so the shape is one shape.
 #[must_use]
 pub fn run_payload(
     task_id: &str,
@@ -213,6 +277,7 @@ pub fn run_payload(
     phase: &str,
     report: Option<&serde_json::Value>,
     error: Option<&str>,
+    artifact_url: Option<&str>,
 ) -> serde_json::Value {
     #[derive(serde::Serialize)]
     struct Payload<'a> {
@@ -220,6 +285,7 @@ pub fn run_payload(
         task_id: &'a str,
         phase: &'a str,
         artifact_path: &'a str,
+        artifact_url: Option<&'a str>,
         report: Option<&'a serde_json::Value>,
         error: Option<&'a str>,
     }
@@ -228,6 +294,7 @@ pub fn run_payload(
         task_id,
         phase,
         artifact_path,
+        artifact_url,
         report,
         error,
     })
@@ -241,15 +308,26 @@ pub fn run_payload(
 /// travels here rather than a path only this process can read. Owner-scoped and
 /// TTL-bounded, and deliberately off the `TaskStore` trait so the SDK can never
 /// serve it to a client.
-fn run_envelope(config: &serde_json::Value, artifact_uri: &str) -> serde_json::Value {
+///
+/// `dataset_uri` travels here too — a short handle to an object in a bucket the
+/// worker's role can read, never the dataset itself. The envelope lives in a
+/// DynamoDB item with a 400 KB ceiling; a dataset does not fit and must not.
+fn run_envelope(
+    config: &serde_json::Value,
+    artifact_uri: &str,
+    dataset_uri: Option<&str>,
+) -> serde_json::Value {
     #[derive(serde::Serialize)]
     struct Envelope<'a> {
         config: &'a serde_json::Value,
         artifact_uri: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dataset_uri: Option<&'a str>,
     }
     serde_json::to_value(Envelope {
         config,
         artifact_uri,
+        dataset_uri,
     })
     .unwrap_or(serde_json::Value::Null)
 }
@@ -282,7 +360,7 @@ async fn compensate(
     artifact_path: &str,
     reason: String,
 ) -> pmcp::Error {
-    let payload = run_payload(task_id, artifact_path, "failed", None, Some(&reason));
+    let payload = run_payload(task_id, artifact_path, "failed", None, Some(&reason), None);
     let _ = store
         .finish(
             task_id,
@@ -300,6 +378,7 @@ async fn submit(
     dispatcher: Arc<dyn Dispatcher>,
     extra: &RequestHandlerExtra,
     config: serde_json::Value,
+    dataset_uri: Option<String>,
 ) -> pmcp::Result<serde_json::Value> {
     // (a) Drop any arm left by an earlier call that never opened the create
     // gate — a plain, non-task-augmented submit does exactly that.
@@ -328,7 +407,11 @@ async fn submit(
     // (d) The envelope carries this run's inputs to whoever finishes it —
     // owner-scoped and TTL-bounded, never the dispatch payload.
     if let Err(e) = store
-        .put_envelope(&task_id, &owner, run_envelope(&config, &artifact_uri))
+        .put_envelope(
+            &task_id,
+            &owner,
+            run_envelope(&config, &artifact_uri, dataset_uri.as_deref()),
+        )
         .await
     {
         let message = format!("cannot record the run envelope: {e}");
@@ -336,7 +419,10 @@ async fn submit(
     }
 
     // (e) Dispatch. A refusal here compensates, so the task never wedges.
-    if let Err(reason) = dispatcher.dispatch(&task_id, &owner, &config).await {
+    if let Err(reason) = dispatcher
+        .dispatch(&task_id, &owner, &config, dataset_uri.as_deref())
+        .await
+    {
         return Err(compensate(&store, &task_id, &owner, &artifact_uri, reason).await);
     }
 
@@ -344,7 +430,7 @@ async fn submit(
     // the armed handoff makes the store return THIS task rather than minting a
     // second one. A plain call gets this value verbatim and polls
     // `train_status` with the same id.
-    let mut value = run_payload(&task_id, &artifact_uri, "working", None, None);
+    let mut value = run_payload(&task_id, &artifact_uri, "working", None, None, None);
     if let Some(object) = value.as_object_mut() {
         object.insert("taskId".to_string(), serde_json::Value::String(task_id));
         object.insert(
@@ -357,8 +443,14 @@ async fn submit(
 }
 
 /// Read a run's status back out of the task store.
+///
+/// This door — not `tasks/result` — is where a completed artifact's download
+/// link appears. The SDK serves `tasks/result` straight from the store, and
+/// the store holds the verdict the worker wrote, which is deliberately free of
+/// anything that expires. The link is minted here, at read time, every time.
 async fn status(
     store: &AprenderTaskStore,
+    dispatcher: &dyn Dispatcher,
     extra: &RequestHandlerExtra,
     task_id: &str,
 ) -> pmcp::Result<serde_json::Value> {
@@ -373,7 +465,22 @@ async fn status(
     // shape from the envelope, which holds the artifact path.
     if let Ok(result) = store.get_result(task_id, &owner).await {
         if let Some(Content::Text { text }) = result.content.first() {
-            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) {
+            if let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(text) {
+                let completed = payload.get("phase").and_then(|p| p.as_str()) == Some("completed");
+                if completed {
+                    let artifact = payload
+                        .get("artifact_path")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let url = dispatcher.artifact_download_url(&artifact).await;
+                    if let Some(object) = payload.as_object_mut() {
+                        object.insert(
+                            "artifact_url".to_string(),
+                            url.map_or(serde_json::Value::Null, serde_json::Value::String),
+                        );
+                    }
+                }
                 return Ok(payload);
             }
         }
@@ -397,7 +504,16 @@ async fn status(
     } else {
         "working".to_string()
     };
-    Ok(run_payload(task_id, &artifact, &phase, None, None))
+    Ok(run_payload(task_id, &artifact, &phase, None, None, None))
+}
+
+/// Hand a client somewhere to put a dataset.
+async fn upload(dispatcher: &dyn Dispatcher) -> pmcp::Result<serde_json::Value> {
+    let slot = dispatcher
+        .dataset_upload()
+        .await
+        .map_err(pmcp::Error::validation)?;
+    serde_json::to_value(slot).map_err(|e| pmcp::Error::internal(e.to_string()))
 }
 
 /// The streamable-HTTP config this server serves.
@@ -448,7 +564,7 @@ pub async fn serve_http(
     http.start().await
 }
 
-/// Assemble the server: two tools and the task store, nothing else.
+/// Assemble the server: three tools and the task store, nothing else.
 ///
 /// # Errors
 ///
@@ -469,17 +585,23 @@ pub fn build_server(
     let train_tool = TypedTool::new(TOOL_TRAIN, move |args: TrainArgs, extra| {
         let store = Arc::clone(&train_store);
         let dispatcher = Arc::clone(&train_dispatcher);
-        Box::pin(async move { submit(store, dispatcher, &extra, args.config).await })
+        Box::pin(
+            async move { submit(store, dispatcher, &extra, args.config, args.dataset_uri).await },
+        )
     })
     .with_description(
-        "Start a SetFit few-shot training run on this server's curated dataset and \
-         encoder. Returns an MCP task: poll tasks/get for status and tasks/result \
-         for the trainer's report, or poll train_status with the same task_id. One \
-         job runs at a time.",
+        "Start a SetFit few-shot training run with this server's encoder, on its packaged \
+         dataset or on one you uploaded (pass the dataset_uri that dataset_upload_url \
+         returned). Returns an MCP task: poll tasks/get for status and tasks/result for \
+         the trainer's report, or poll train_status with the same task_id — train_status \
+         is also where a completed artifact's download link appears. One job runs at a \
+         time.",
     )
     .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional));
 
     let status_store = Arc::clone(&store);
+    let status_dispatcher = Arc::clone(&dispatcher);
+    let upload_dispatcher = Arc::clone(&dispatcher);
     let server = Server::builder()
         .name(name)
         .version(version)
@@ -488,11 +610,25 @@ pub fn build_server(
         .tool_typed_with_description::<StatusArgs, _, _>(
             TOOL_STATUS,
             "Report a training task's phase, and on completion the trainer's full \
-             --json report (artifact path + sha256, provenance, resolved config). \
-             Takes the task_id that `train` returned.",
+             --json report (artifact path + sha256, provenance, resolved config) plus \
+             artifact_url, a time-limited link to download the .apr. Takes the task_id \
+             that `train` returned.",
             move |args: StatusArgs, extra| {
                 let store = Arc::clone(&status_store);
-                async move { status(&store, &extra, &args.task_id).await }
+                let dispatcher = Arc::clone(&status_dispatcher);
+                async move { status(&store, dispatcher.as_ref(), &extra, &args.task_id).await }
+            },
+        )
+        .tool_typed_with_description::<UploadArgs, _, _>(
+            TOOL_UPLOAD,
+            "Mint an upload slot for a training dataset. Returns a time-limited URL to PUT \
+             a .tar.gz of an attested benchmark directory (benchmark-manifest.json, \
+             selection-manifest.json and the train/validation/test JSONL — what `apr data` \
+             writes), and the dataset_uri to pass to `train` once the upload completes. \
+             Takes no arguments; the upload itself happens at the returned URL, not here.",
+            move |_args: UploadArgs, _extra| {
+                let dispatcher = Arc::clone(&upload_dispatcher);
+                async move { upload(dispatcher.as_ref()).await }
             },
         )
         .task_store(store)
@@ -514,6 +650,42 @@ mod tests {
     }
 
     #[test]
+    fn train_args_take_an_optional_dataset() {
+        let plain: TrainArgs =
+            serde_json::from_value(serde_json::json!({ "config": {} })).expect("no dataset");
+        assert!(plain.dataset_uri.is_none());
+        let with: TrainArgs = serde_json::from_value(
+            serde_json::json!({ "config": {}, "dataset_uri": "s3://b/datasets/x.tar.gz" }),
+        )
+        .expect("with dataset");
+        assert_eq!(
+            with.dataset_uri.as_deref(),
+            Some("s3://b/datasets/x.tar.gz")
+        );
+    }
+
+    #[test]
+    fn upload_args_refuse_anything_at_all() {
+        serde_json::from_value::<UploadArgs>(serde_json::json!({})).expect("empty is the shape");
+        // A filename here means the client thinks the upload goes THROUGH the
+        // tool. It does not, and the refusal is where they learn that.
+        serde_json::from_value::<UploadArgs>(serde_json::json!({ "file": "data.tar.gz" }))
+            .expect_err("an argument must be refused");
+    }
+
+    #[test]
+    fn the_envelope_carries_the_dataset_handle_only_when_there_is_one() {
+        let bare = run_envelope(&serde_json::json!({}), "s3://b/tasks/t.apr", None);
+        assert!(bare.get("dataset_uri").is_none(), "{bare}");
+        let with = run_envelope(
+            &serde_json::json!({}),
+            "s3://b/tasks/t.apr",
+            Some("s3://b/datasets/d.tar.gz"),
+        );
+        assert_eq!(with["dataset_uri"], "s3://b/datasets/d.tar.gz");
+    }
+
+    #[test]
     fn status_args_require_a_task_id() {
         serde_json::from_value::<StatusArgs>(serde_json::json!({}))
             .expect_err("task_id is not optional — there is no 'latest' across containers");
@@ -522,12 +694,16 @@ mod tests {
     #[test]
     fn the_payload_shape_is_one_shape() {
         let report = serde_json::json!({ "artifact_sha256": "ab" });
-        let done = run_payload("t-1", "/tmp/x.apr", "completed", Some(&report), None);
+        let done = run_payload("t-1", "/tmp/x.apr", "completed", Some(&report), None, None);
         assert_eq!(done["schema_version"], 1);
         assert_eq!(done["task_id"], "t-1");
         assert_eq!(done["report"]["artifact_sha256"], "ab");
         assert!(done["error"].is_null());
-        let working = run_payload("t-1", "/tmp/x.apr", "working", None, None);
+        assert!(
+            done["artifact_url"].is_null(),
+            "never stored, minted at read time"
+        );
+        let working = run_payload("t-1", "/tmp/x.apr", "working", None, None, None);
         // Same keys, whichever door serves it.
         let (mut a, mut b): (Vec<_>, Vec<_>) = (
             done.as_object().expect("obj").keys().collect(),
@@ -540,7 +716,7 @@ mod tests {
 
     #[test]
     fn a_failed_run_is_an_error_result() {
-        let payload = run_payload("t-1", "/tmp/x.apr", "failed", None, Some("boom"));
+        let payload = run_payload("t-1", "/tmp/x.apr", "failed", None, Some("boom"), None);
         assert!(terminal_result(&payload, true).is_error);
         assert!(!terminal_result(&payload, false).is_error);
     }

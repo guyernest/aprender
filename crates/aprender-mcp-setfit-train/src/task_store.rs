@@ -427,7 +427,7 @@ impl AprenderTaskStore {
         let now = rfc3339_now();
         // `Task` is #[non_exhaustive]: the builder is the only construction
         // path that survives the SDK adding a field.
-        let task = Task::new(mint_task_id(), TaskStatus::Working)
+        let task = Task::new(mint_id(), TaskStatus::Working)
             .with_ttl(ttl)
             .with_timestamps(now.clone(), now);
         let task = task.with_poll_interval(self.config.default_poll_interval_ms);
@@ -572,7 +572,12 @@ impl AprenderTaskStore {
 /// A v4-shaped random id, without a uuid dependency: 122 random bits in the
 /// canonical layout. Collisions are not a practical concern and `put_new`
 /// answers `Conflict` if one ever happened.
-fn mint_task_id() -> String {
+///
+/// Public because it is the ONE id shape this server mints — tasks here, and
+/// dataset upload slots in the cloud dispatcher — so a client sees one kind of
+/// handle rather than two.
+#[must_use]
+pub fn mint_id() -> String {
     let mut bytes = [0u8; 16];
     // Two independent entropy sources xor'd per byte: the OS-seeded hasher
     // state and the monotonic clock. Neither is a CSPRNG on its own; a task id
@@ -906,8 +911,8 @@ mod tests {
 
     #[test]
     fn minted_ids_are_distinct_and_v4_shaped() {
-        let a = mint_task_id();
-        let b = mint_task_id();
+        let a = mint_id();
+        let b = mint_id();
         assert_ne!(a, b);
         assert_eq!(a.len(), 36, "{a}");
         assert_eq!(a.as_bytes()[14], b'4', "version nibble: {a}");

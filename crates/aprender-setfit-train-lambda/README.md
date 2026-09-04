@@ -17,6 +17,8 @@ adds nothing else:
 | `TaskBackend` | `InMemoryTaskBackend` | `DynamoDbTaskBackend` |
 | `Dispatcher` | `LocalDispatcher` (spawn a child) | `LambdaDispatcher` (async invoke) |
 | terminal write | the spawning process | `aprender-setfit-trainer` |
+| dataset in | a directory on the machine | an S3 object the client PUT to a presigned URL |
+| artifact out | a file on the machine | a presigned GET, minted by `train_status` on read |
 
 The tool surface, the task store, the mint handoff, the status payload and the
 one implementation of "run `apr setfit train`" all stay upstream.
@@ -37,6 +39,16 @@ They are one crate because they are the two halves of one distributed
 transaction and share its vocabulary — the task backend, the run envelope, the
 status payload. Cargo builds each binary separately, so one package does not
 mean one deployment package.
+
+## Datasets and artifacts cross the boundary as S3 objects
+
+MCP has no file-upload primitive, so `dataset_upload_url` hands the client a
+presigned PUT and the `dataset_uri` to name the result by; `train` verifies the
+URI is one this deployment issued and that the upload happened, and the worker
+fetches and unpacks it before the CLI's pre-flight judges it. A completed
+artifact comes back the same way in reverse: `train_status` mints a presigned
+GET at read time, never stored, so the verdict in the task store stays true for
+the task's whole TTL. Both grants are prefix-scoped (`datasets/`, `tasks/`).
 
 ## Why the split exists at all
 
