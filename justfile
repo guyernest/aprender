@@ -5,9 +5,14 @@
 # Makefile never covered.
 #
 #   just --list                       # what is here
+#
+# Two deployments, two tools, easy to conflate — the names are by WHAT ships:
 #   just build-trainer-asset          # the worker Lambda package
 #   just synth-training dev           # validate the IaC, create nothing
-#   just deploy-training dev          # create/update the AWS resources
+#   just deploy-training dev          # CDK: table, bucket, WORKER (ours)
+#   just pmcp-train-config dev        # write the request function's config from the stack
+#   just pmcp-train-deploy            # cargo-pmcp: the REQUEST FUNCTION (pmcp.run)
+#   just pmcp-train-grant dev         # attach the request function's IAM policy
 #
 # Arguments are POSITIONAL (`just synth-training dev`). `env=dev` is accepted
 # too, because just passes it positionally rather than as an override and the
