@@ -13,6 +13,14 @@
 //! different backend — which is the claim the `TaskBackend` seam makes and the
 //! only way to falsify it.
 //!
+//! Its first ever run earned it: every `PutItem` and `Query` the backend issued
+//! was being rejected with `ValidationException`, because the
+//! `ExpressionAttributeNames` map defined aliases the expressions did not
+//! mention. The item mapping — the part the unit tests cover — was correct. The
+//! expression is validated only by the service, so the deployed server would
+//! have accepted a `train` call and then failed to record anything, on the
+//! first request.
+//!
 //! # Arming it
 //!
 //! Skipped unless `APRENDER_SETFIT_E2E_TASKS_TABLE` names a table. Two ways to
