@@ -25,6 +25,8 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - **Parity ladder before optimiser claims:** data prep (0 diff) → objective at the oracle's MAP (1e-12) → finite-difference
   gradient at a *perturbed* point → fit → forecast diff vs oracle → **control**: how much does the oracle disagree with
   itself (Newton vs L-BFGS, another seed / lr)? A diff inside that band is parity.
+- **Datasets are sorted by `ds` and de-duplicated at load, in BOTH the Rust driver and the Python oracle** (`wp_log_R.csv` is not chronological; spike 006's cross-check caught the mismatch).
+- **Accuracy claims use rolling origins and MASE** (period 7 daily / 12 monthly), with naive + seasonal-naive rows and a horizon slice; a single split flatters every model.
 - **Never select by test error**: learning rates and epochs are selected by *train* loss; test MAE is only reported.
 - **Prophet fit config:** exact L1, objective ÷ T, non-finite guard, `LbfgsF64::new(2000, 1e-7, 20)`, restart from
   the stall point until improvement < 1e-6 relative (≤ 8 rounds), cache `value_and_grad` by x, wall-clock budget.
