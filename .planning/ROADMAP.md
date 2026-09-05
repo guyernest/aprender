@@ -22,6 +22,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit. (all 10 plans code-complete 2026-08-11; verification returned `human_needed` — 5/5 roadmap criteria verified, 47/50 must-have truths. **All 5 items adjudicated 2026-08-14**: `03-HUMAN-UAT.md` is `status: complete`, `03-VERIFICATION.md` reads `passed`. The 4 code-review blockers were VERIFICATION-layer weaknesses, not implementation defects — see `03-REVIEW.md`.) (completed 2026-08-14)
 - [ ] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs. (all 22 plans code-complete 2026-08-16; verification returned `gaps_found` — 0/5 roadmap criteria fully met (2 FAILED, 3 PARTIAL), 94/95 must-have truths, and 04-11's per-crate mutation gate unmet. Five gap-closure plans 04-18..04-22 landed 2026-08-16 for the user-scoped subset that does NOT depend on F-10. **UAT ran 2026-08-16 at `b3f816c25`: 12 tests, 12 passed, 0 issues — `04-UAT.md`.** Verification reconciled to `gaps_acknowledged` with its verdict UNAMENDED. Closed since the report: BIND-004/backend_identity, WR-08, WR-09, WR-10, both D-04-11-A production survivors, F-07. **Still NOT closed:** F-10 (→ Phase 5, keeps SC1/SC3 UNMET and OPS-01/OPS-02 NOT MET), the per-crate mutation baselines + aggregate score (→ standalone compute ticket by human ruling; no mutation score exists for Phase 4), WR-01 (`fs::rename` not race-free), and SAFE-02's "in CI" clause (the 16 ci.yml setfit legs have never executed). **Blocked on `/gsd:secure-phase 04`** — security enforcement is ON and no `04-SECURITY.md` exists; `04-REVIEW.md` holds six unreferenced Warnings incl. a symlink-following non-exclusive temp file in the selection-lock write path. **This box has now been wrongly `[x]`-ed TWICE by `roadmap.update-plan-progress`, which marks a phase complete as soon as summary_count reaches plan_count — before any verifier runs and regardless of unmet must-haves. Do not re-check it until secure-phase lands and F-10 closes.**)
 - [ ] **Phase 5: Benchmark and Claims Gate** - Produce the complete reproducible 40-cell SetFit-versus-9B-LoRA evidence set and reject incomplete or unequal claims.
+- [ ] **Phase 6: Native Time-Series Forecasting Stack** - Ship pure-Rust Prophet, NeuralProphet and Chronos-Bolt forecasters behind stateless `forecast` MCP tools, each proven to parity with its Python original. (added 2026-09-05 from ten VALIDATED spikes; independent of Phases 1–5)
 
 ## Phase Details
 
@@ -315,10 +316,48 @@ Plans:
 
 - [ ] 05-13-PLAN.md — The 80-row report (exact-recompute demonstrated bit-for-bit) + D-11 qa refusal message + phase closing audit
 
+### Phase 6: Native Time-Series Forecasting Stack
+
+**Goal**: Users can forecast a time series in one stateless MCP call — `ds[]`, `y[]`, horizon in;
+forecast with bands and components out — from pure-Rust Prophet and NeuralProphet ports and an
+embedded zero-shot Chronos-Bolt, each proven to parity with its Python original and served the
+way SetFit is served (thin pmcp servers, stdio + streamable-HTTP, Lambda-shaped).
+**Depends on**: none of Phases 1–5 functionally — an independent track that reuses the Phase 4
+thin-MCP pattern (`crates/aprender-mcp-setfit`, `crates/aprender-mcp-setfit-lambda`) and may run
+alongside Phase 5's remaining GPU waves.
+**Requirements**: TBD
+**Requirements note**: forecasting has no REQ-IDs in `.planning/REQUIREMENTS.md` (that document is
+the SetFit milestone's). The binding requirements are the five `prophet-forecast-mcp` decisions in
+`.planning/spikes/MANIFEST.md`, transcribed as D-01..D-05 in `06-CONTEXT.md`, plus the Success
+Criteria below.
+**UI hint**: no (the demo page is a static, spike-proven MCP client copied into each server crate;
+not a product UI)
+**Spike evidence**: ten VALIDATED spikes (001–010), packaged as `Skill("spike-findings-aprender")`
+in `.claude/skills/spike-findings-aprender/`; raw experiments, oracle fixtures and run outputs in
+`.planning/spikes/`.
+**Success Criteria** (what must be TRUE):
+
+  1. A user can call one stateless `forecast` tool on `aprender-mcp-forecast` (stdio and streamable-HTTP) with `ds`, `y`, `horizon`, `freq` and `model: prophet | neuralprophet`, and receive `yhat`, `yhat_lower`, `yhat_upper`, `trend`, named components, timing and a diagnostics object in under 2 s for a 3 000-point daily series; every malformed input (unknown field, fewer than 10 or more than 20 000 points, unsorted, duplicate or impossible dates, constant `y`, horizon 0 or above 3 650, unknown `freq`, logistic growth without a valid `cap`) is a validation error, never a silent default.
+  2. The Prophet port in `aprender-forecast` reproduces Python Prophet 1.4.0 on the committed Peyton Manning, air passengers, retail sales and `wp_log_R` fixtures as tests that run in CI: data preparation 0.0 diff, objective at Python's MAP within 1e-9, Python's parameters through the Rust predict path within 1e-10, fitted objective no worse than Python's + 0.5, future forecast inside Prophet's own Newton-vs-L-BFGS band, components reconstructing `yhat`, and 80 % band widths within 2 % of Python's.
+  3. The NeuralProphet port reaches 365-day-ahead holdout MAE ≤ 0.47 on Peyton with the lag-free model (Python NeuralProphet 0.9.0: 0.461) and beats the naive one-step baseline with `n_lags = 30`, using a graph-connected Huber loss and data preparation that matches the committed NeuralProphet oracle fixture.
+  4. A user can call the same `forecast` shape on `aprender-mcp-chronos` with Chronos-Bolt-tiny f16 weights embedded in the binary: the nine native quantiles match the Python `chronos-forecasting` 2.3.1 oracle within 2 % of the series std through the server (1e-6 absolute with f32 weights), a 2 048-point context forecasts in under 100 ms, `horizon > 64` is refused unless `allow_long_horizon: true` and then carries a warning, the release binary is under 30 MB, and cold start to first forecast over stdio is under 150 ms.
+  5. Eight concurrent requests to the Prophet/NeuralProphet streamable-HTTP server return responses bit-identical to their sequential results in less than half the sequential wall time (router pool), and every gate is green: both servers' e2e tests, the workspace lib tests, `cargo clippy -- -D warnings` on the new crates, `cargo fmt --all -- --check`, and `pv validate` on every new contract.
+
+**Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy. The NEON GEMM
+kernel (spike 008) is already in this tree and on `perf/neon-gemm-8x6-microkernel` in the
+`aprender-neon-upstream` worktree; opening that upstream PR is a human checkpoint, not a Phase 6
+task.
+
+**Plans**: 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 6 to break down)
+
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5; Phase 6 is an independent track that may run alongside Phase 5's remaining GPU waves
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -327,3 +366,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | Complete   | 2026-08-14 |
 | 4. APR Artifact and Production Parity | 22/22 | UAT passed, awaiting secure-phase |  |
 | 5. Benchmark and Claims Gate | 11/14 | In Progress|  |
+| 6. Native Time-Series Forecasting Stack | 0/0 | Not started |  |
