@@ -490,6 +490,15 @@ Clippy's lint set is **not monotonic**: the #2370 tree is clean on 1.93/1.96/1.9
 - `docs/BEATS.md` - the public beat scoreboard. Gated against `contracts/` by
   `crates/aprender-core/tests/readme_contract.rs`
 
+## Spike Findings (forecasting stack)
+
+- **Spike findings for aprender** (implementation patterns, constraints, gotchas) → `Skill("spike-findings-aprender")`
+
+Ten VALIDATED spikes (Prophet / NeuralProphet ports, stateless `forecast` MCP servers, Chronos
+zero-shot ports and server, NEON GEMM kernel) are packaged as implementation blueprints in
+`.claude/skills/spike-findings-aprender/`. Load the skill before building any of that; the raw
+experiments stay in `.planning/spikes/` (`MANIFEST.md`, `CONVENTIONS.md`, `WRAP-UP-SUMMARY.md`).
+
 ## APR CLI (`cargo install aprender`)
 
 111 commands across 10 categories as of 2026-08-15; the registry is

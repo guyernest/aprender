@@ -24,6 +24,11 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - Zero-shot model spikes: `models/<name>` is a symlink to the HF snapshot or a sibling spike's weights (gitignored);
   `tools/oracle.py` dumps a ladder (scaling → features → embeddings → hidden rows → quantiles, model AND pipeline
   outputs, timings) plus edge probes into one `fixtures/*_fixture.json`; the driver prints one ladder table.
+- **Wrapped findings live in `.claude/skills/spike-findings-aprender/`** (`/gsd-spike --wrap-up`, 2026-09-05):
+  one reference per feature area plus `sources/NNN-*/` (README, Cargo.toml, build.rs, src/, tools/, tests/, static/,
+  RUN-OUTPUT, results, PR.md). Fixtures, `models/`, `report*.html` and `*.log` are NOT copied — cite
+  `.planning/spikes/NNN-*/fixtures/` from the reference. Re-run the wrap-up after new spikes; the skill's
+  `processed_spikes` list is the filter.
 
 ## Patterns
 - **Parity ladder before optimiser claims:** data prep (0 diff) → objective at the oracle's MAP (1e-12) → finite-difference
@@ -60,6 +65,15 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - **Concurrency probes carry a throughput row.** pmcp's streamable-HTTP router holds one `Arc<Mutex<Server>>`
   across each tool call, so a single router serialises fits; a pool of K routers behind a round-robin `fallback`
   handler (spike 010) restores parallelism with bit-identical outputs.
+- **Tool boundary refuses, never defaults** (004, 007): `#[serde(deny_unknown_fields)]`, `MIN_POINTS`/`MAX_POINTS`/
+  `MAX_HORIZON` consts, `ds` strictly ascending, unique, real calendar dates (`parse_date` round-trips through
+  `civil_from_days`), `ds`/`y` same length, unknown `freq` refused, constant `y` refused (Prophet diverges), `y`
+  nullable only for zero-shot models. Refusals are `pmcp::Error::validation`; each one has an e2e case.
+- **Zero-shot horizon gating** (006 → 007): accept the model's native horizon by default; beyond it require an
+  explicit `allow_long_horizon: true` and put a `warning` in the response that cites the measured degradation.
+- **Determinism under load** (010): a `seed` argument (default 42) drives every RNG per request; the release check
+  is the JSON signature of `ds/yhat/bands/trend/components` for a request run alone vs under 8–16 concurrent
+  requests — must be identical, and the wall-time row must show parallelism (else the transport is serialising).
 
 ## Tools & Libraries
 - `pmcp = { version = "2.19", features = ["streamable-http", "schema-generation"] }`, `schemars = "1.0"`, `axum = "0.8"`,
