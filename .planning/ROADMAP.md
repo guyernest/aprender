@@ -348,10 +348,32 @@ kernel (spike 008) is already in this tree and on `perf/neon-gemm-8x6-microkerne
 `aprender-neon-upstream` worktree; opening that upstream PR is a human checkpoint, not a Phase 6
 task.
 
-**Plans**: 0 plans
+**Plans**: 9 plans in 5 waves (planned 2026-09-05; tracer-first — 06-01 proves one Prophet path end-to-end before any expansion; two `autonomous: false` plans carry the phase's human decisions: the FALSIFY-MONO-011 `[[bin]]` allowlist treatment (06-02, wave 1) and the `.github/workflows/ci.yml` embedded-weights leg (06-08, wave 4). Four contracts, not three: `forecast-tool-boundary`, `prophet-parity`, `neuralprophet-parity`, `chronos-bolt-parity` — NeuralProphet's SC3 bars get their own file rather than riding in the Prophet contract. Fixtures are copied in-crate; Lambda wrappers deferred; `SmoothL1Loss` filed as a core ticket.)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 6 to break down)
+**Wave 1** *(no file overlap; sequential execution is the recommended default on this shared branch — export `CARGO_INCREMENTAL=0`, the disk is at 94 %)*
+
+- [ ] 06-01-PLAN.md — TRACER: `aprender-forecast` (dates, types, fit, forecast door, Prophet port, 17 fixtures copied, Peyton rung-2 parity test) + `aprender-mcp-forecast` (pmcp server, stdio + streamable-HTTP, one e2e happy path) + root members; then the np.rs port completing `model: neuralprophet` (wave 1)
+- [ ] 06-02-PLAN.md — HUMAN DECISION (blocking): FALSIFY-MONO-011 `[[bin]]` allowlist treatment for the six thin MCP deployment units, applied with a two-sided control; the three README drift fixes (two missing READMEs, the setfit monorepo link) (wave 1, NOT autonomous)
+
+**Wave 2** *(blocked on 06-01; four parallel plans, zero `files_modified` overlap)*
+
+- [ ] 06-03-PLAN.md — `contracts/prophet-parity-v1.yaml` + the full seven-fixture Prophet ladder as `--lib` tests reading the contract + the measured debug-timing decision on `[profile.dev.package.aprender-forecast] opt-level = 3` (wave 2)
+- [ ] 06-04-PLAN.md — `contracts/neuralprophet-parity-v1.yaml` + NP parity (oracle data prep, lag-free MAE ≤ 0.47, AR-Net beats naive, Huber connectivity, mini-batch/tape invariants) + NP door refusals (wave 2)
+- [ ] 06-05-PLAN.md — `just fetch-chronos-tiny` (pinned revision + sha256, f16 derived) + `build.rs` cfg(chronos_weights) + bolt/safetensors/chronos-door ports + `contracts/chronos-bolt-parity-v1.yaml` + gated Bolt ladder with the two-sided counted-skip proof (wave 2)
+- [ ] 06-06-PLAN.md — `contracts/forecast-tool-boundary-v1.yaml` + the complete D-11 refusal e2e set + strict schema + router pool (`pooled_app`, `--pool 8`) + equality-under-load + spawned-binary stdio e2e (wave 2)
+
+**Wave 3** *(blocked on 06-05 and 06-06)*
+
+- [ ] 06-07-PLAN.md — `aprender-mcp-chronos`: embedded-weights build.rs, resolve_model, server, page, `--coldstart`/`--bench`, gated e2e through the server (1e-6 f32 / 2 % f16, `allow_long_horizon` + warning, forwards 46), shared-shape invariant, embedded-build proof (wave 3)
+
+**Wave 4** *(blocked on 06-06 and 06-07; NOT autonomous — human checkpoint on ci.yml)*
+
+- [ ] 06-08-PLAN.md — host-gated `just` recipes (chronos-gate, embed-build, bench, coldstart, forecast-bench, pool-ratio, mase-rolling-origin) + the spike-006 MASE example + `06-EVIDENCE.md` measured on aarch64 release + the ci.yml proposal as a patch → blocking human decision (wave 4, NOT autonomous)
+
+**Wave 5** *(blocked on everything)*
+
+- [ ] 06-09-PLAN.md — Makefile `$(CONTRACTS)`/`PHASE6_CONTRACTS`/`contract-audit-phase6` (tier3) + binding rows (zero BIND-) + README counts re-derived + CLAUDE.md Realizar-first exception row (D-07) + both drift gates green + the CI decision applied + `deferred-items.md` + SmoothL1Loss ticket + closing clippy/fmt/check/nextest sweep (wave 5)
 
 
 ## Progress
@@ -366,4 +388,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5; Phase 6 is an independen
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | Complete   | 2026-08-14 |
 | 4. APR Artifact and Production Parity | 22/22 | UAT passed, awaiting secure-phase |  |
 | 5. Benchmark and Claims Gate | 11/14 | In Progress|  |
-| 6. Native Time-Series Forecasting Stack | 0/0 | Not started |  |
+| 6. Native Time-Series Forecasting Stack | 0/9 | Planned (9 plans, 5 waves; 2026-09-05) |  |
