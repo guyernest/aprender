@@ -963,20 +963,22 @@ Part of the [aprender](https://github.com/paiml/aprender) monorepo — see `crat
 | A6 | Spike-measured latencies (release, Apple M4 Pro) transfer to the release build of the ported crates | Validation Architecture | SC1/SC4 timing thresholds may need re-measurement after the pedantic-clippy edits; re-run `--bench`/`--coldstart` |
 | A7 | pmcp 2.19.3's `router_with_config` behaves identically when nested under `/mcp` via `axum::Router::nest` in a workspace crate as it did in the spike | Pattern 2 | Same crate version, same code; low risk |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+_All five were resolved by the 2026-09-05 plan set; the resolving plan is marked inline on each item._
 
 1. **FALSIFY-MONO-011 `[[bin]]` allowlist (human decision, blocks CI green).**
    - What we know: shrink-only at 27; 4 SetFit crates already violate (measured); Phase 6 adds `aprender-mcp-forecast` and `aprender-mcp-chronos` (+2), or +4 with lambda wrappers. Policy text: "migrate the capability to an `apr` subcommand instead of granting a new exemption." An `apr forecast` subcommand is explicitly deferred (CONTEXT).
    - What's unclear: whether the human wants (a) a documented exemption class "thin MCP deployment units, `publish = false`" with the baseline raised to cover the six (or eight) crates, (b) the SetFit precedent fixed separately first, or (c) binaries moved under `apr` (contradicts D-06 and the deferral).
-   - Recommendation: first plan task, `autonomous: false`, presenting (a) with the exact diff (add the six names in a new comment block; `ALLOWLIST_BASELINE = 33`; keep the stale-entry check). Nothing else in the phase can make `monorepo_invariants` green.
+   - Recommendation: first plan task, `autonomous: false`, presenting (a) with the exact diff (add the six names in a new comment block; `ALLOWLIST_BASELINE = 33`; keep the stale-entry check). Nothing else in the phase can make `monorepo_invariants` green. **RESOLVED: 06-02** (Task 1 is the blocking human decision with four options — deployment-unit-class recommended over the single-list-33 above; Task 2 applies it with a two-sided ratchet control).
 
-2. **Fixture location** — copy into `crates/aprender-forecast/tests/fixtures/` (≈ 7 MB duplicated in git) vs reference `.planning/spikes/*/fixtures/`. Recommendation: copy (Pitfall 6); D-08 leaves this to the planner.
+2. **Fixture location** — copy into `crates/aprender-forecast/tests/fixtures/` (≈ 7 MB duplicated in git) vs reference `.planning/spikes/*/fixtures/`. Recommendation: copy (Pitfall 6); D-08 leaves this to the planner. **RESOLVED: 06-01** (Task 2 copies the 17 files into `crates/aprender-forecast/tests/fixtures/`, byte-verified with `cmp` against the spike originals).
 
-3. **Lambda wrapper crates now or later** (Claude's discretion). Recommendation: defer — each adds a `bootstrap` `[[bin]]` (Open Question 1), cargo-pmcp's `*-lambda` fallback is already ambiguous (Pitfall 11), and deployment is out of scope. Ship `http_app`/`stateless()` so the wrapper is a 60-line copy later.
+3. **Lambda wrapper crates now or later** (Claude's discretion). Recommendation: defer — each adds a `bootstrap` `[[bin]]` (Open Question 1), cargo-pmcp's `*-lambda` fallback is already ambiguous (Pitfall 11), and deployment is out of scope. Ship `http_app`/`stateless()` so the wrapper is a 60-line copy later. **RESOLVED: 06-01** (deferred as recommended, recorded in the plan; 06-09 Task 3 files it as D-ITEM-06-01).
 
-4. **Fix `SmoothL1Loss` in core now?** Recommendation: file as a core ticket with the F3 quote; the phase does not depend on it (D-10), and touching `aprender-core` pulls the 14 285-test lib into every PR cycle.
+4. **Fix `SmoothL1Loss` in core now?** Recommendation: file as a core ticket with the F3 quote; the phase does not depend on it (D-10), and touching `aprender-core` pulls the 14 285-test lib into every PR cycle. **RESOLVED: 06-09** (Task 3 files the core ticket — D-ITEM-06-02; 06-04 asserts `weighted_huber` graph connectivity instead of fixing core).
 
-5. **Which parity numbers are CI assertions vs. aarch64-only gates** — timing (SC1 "< 2 s", SC4 "< 100 ms", "< 150 ms cold start", "< 30 MB binary") cannot be asserted on the X64 CI box or in debug builds. Recommendation: assert parity + refusals in CI; timings and binary size in `just forecast-bench` / `just chronos-coldstart` / `just chronos-gate` recorded in the phase VALIDATION evidence on the M4 host.
+5. **Which parity numbers are CI assertions vs. aarch64-only gates** — timing (SC1 "< 2 s", SC4 "< 100 ms", "< 150 ms cold start", "< 30 MB binary") cannot be asserted on the X64 CI box or in debug builds. Recommendation: assert parity + refusals in CI; timings and binary size in `just forecast-bench` / `just chronos-coldstart` / `just chronos-gate` recorded in the phase VALIDATION evidence on the M4 host. **RESOLVED: 06-08** (host-gated `just` recipes + `06-EVIDENCE.md` measured on aarch64 release; CI asserts parity and refusals via 06-03/04/05/06/07; the one CI-workflow edit is 06-08's blocking human decision, applied by 06-09).
 
 ## Environment Availability
 
