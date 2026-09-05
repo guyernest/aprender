@@ -54,11 +54,11 @@ pub use jidoka::{JidokaError, JidokaGuard};
 pub use profiler::{BlisLevelStats, BlisProfileLevel, BlisProfiler, KaizenMetrics};
 
 // Re-export microkernel functions
-#[cfg(target_arch = "aarch64")]
-pub use microkernels::microkernel_8x8_neon;
 pub use microkernels::microkernel_scalar;
 #[cfg(target_arch = "x86_64")]
 pub use microkernels::{microkernel_8x6_avx2, microkernel_8x6_avx2_asm, microkernel_8x6_true_asm};
+#[cfg(target_arch = "aarch64")]
+pub use microkernels::{microkernel_8x6_neon, microkernel_8x8_neon};
 
 // Re-export backend selection types
 pub use backend_selection::{
