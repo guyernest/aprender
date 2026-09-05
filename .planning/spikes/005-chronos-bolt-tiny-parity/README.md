@@ -83,7 +83,9 @@ timings and a stage profile. `report.html` shows y, the q10–q90 fan, and Rust 
    reduction LLVM will not vectorise.
 6. **8-accumulator dot product → 36 ms** (5×), parity unchanged. Same profile through
    `blis::gemm_blis`: 137 ms — trueno's packed GEMM is *slower* than the plain loops on these
-   skinny shapes in this build (cause not investigated here; `microkernel_8x8_neon` exists).
+   skinny shapes. Cause, by reading not by profiling: the inner tile loop at
+   `crates/aprender-compute/src/blis/compute.rs:117` calls `microkernel_scalar`; a `microkernel_8x8_neon`
+   exists in the same module but this path does not use it.
    Short series already beat torch: air 3.0 ms vs 2.6 ms, short100 2.3 ms vs 2.6 ms.
 
 ## Results
@@ -102,8 +104,9 @@ with plain loops and already at parity on short series.
 **Surprises**
 - The rollout scheme changed in 2025 (9 paths, re-quantiled); anyone porting from the paper or an
   old notebook gets a forecast that is off by half a unit past step 64.
-- Both trueno GEMM entry points lost to hand-written loops by 4× here. Before the build leans on
-  them, measure them on transformer-shaped GEMMs (129×256×1024) and fix the dispatch.
+- Both trueno GEMM entry points lost to hand-written loops by 4× here because `gemm_blis` runs the
+  scalar microkernel (`blis/compute.rs:117`). Wiring `microkernel_8x8_neon` in is the core fix; verify
+  on transformer-shaped GEMMs (129×256×1024) with a before/after table.
 - A REG token, a 2-row "vocabulary" and a bias-free T5 are all the model needs; there is no tokenizer.
 
 **Signal for the build**
