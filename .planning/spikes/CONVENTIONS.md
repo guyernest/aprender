@@ -19,7 +19,11 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - Multi-fixture drivers loop over `fixtures/*.json`; the first fixture gets the deep probes.
 - MCP spikes: `src/lib.rs` (tool + `http_app`), `src/main.rs` (`--stdio` default, `--http PORT`, `--bench`),
   `static/index.html` (a real MCP client), `tests/e2e.rs` (in-process streamable-HTTP).
-- The `rtk` hook filters `cargo test` output; run the `target/release/deps/<test>-*` binary directly for `println!` lines.
+- The `rtk` hook filters `cargo test` / `cargo clippy` output; run the `target/release/deps/<test>-*` binary directly
+  for `println!` lines, and `rtk proxy cargo clippy …` when the raw warning list matters.
+- Zero-shot model spikes: `models/<name>` is a symlink to the HF snapshot or a sibling spike's weights (gitignored);
+  `tools/oracle.py` dumps a ladder (scaling → features → embeddings → hidden rows → quantiles, model AND pipeline
+  outputs, timings) plus edge probes into one `fixtures/*_fixture.json`; the driver prints one ladder table.
 
 ## Patterns
 - **Parity ladder before optimiser claims:** data prep (0 diff) → objective at the oracle's MAP (1e-12) → finite-difference
@@ -37,10 +41,30 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - **Model ports:** dump a ladder of intermediate tensors from the oracle (scaling, embeddings, hidden states) and
   compare bottom-up before comparing outputs; add edge probes (NaN, short, constant, huge scale) as a second fixture.
 - **Hot loops:** write dot products with 8 independent accumulators (LLVM will not vectorise a strict-order float
-  reduction); measure `trueno::Matrix::matmul` / `blis::gemm_blis` on the actual shapes before relying on them —
-  in spike 005 both were 4× slower than plain loops on 129×256×1024.
+  reduction). Since spike 008 `blis::gemm_blis` has a NEON 8×6 microkernel on aarch64 (65–77 GFLOP/s, 0.7× faer):
+  route every multi-row product through it (projections, feed-forward, patch embeddings, attention scores/context);
+  keep `dot8` for single rows. The rayon `blis::gemm` (feature `parallel`) splits M only in 128-row blocks — expect
+  ≤ 1.4× on transformer shapes below ~500 tokens.
+- **Kernel or core changes are parity work:** measure before/after with the *maintainer's own instrument*
+  (`benches/gemm_comparison.rs` for GEMM) on the same machine, run the control on untouched `upstream/main` in a
+  git worktree (`git worktree add ../aprender-<topic> -b <branch> upstream/main`), diff raw clippy output between the
+  trees, and ship a `contracts/*.yaml` with falsification tests. A flaky test is reported with its solo-run
+  failure rate on both trees, never attributed to the change.
+- **Model ports keep only the transposed `[in, out]` weights** (the plain-loop A/B copies double memory: Chronos-2
+  peaked at 1.45 GB). `safetensors.rs` from spike 007 decodes F32/F16/BF16 from a byte slice, so embedded and
+  on-disk weights share one loader; write f16 copies with `tools/to_f16.py` and *measure* the accuracy cost per
+  model (0.1 % of scale for Bolt-tiny, 0.3–0.6 % for Chronos-2, 3 % on five-point series).
+- **Embedded weights:** `build.rs` stages `model.safetensors` + `config.json` from a build-time env var
+  (`CHRONOS_EMBED_DIR`) into `OUT_DIR` for `include_bytes!`, empty markers when unset, and the runtime falls back
+  to the same-named `*_MODEL_DIR` path — the `aprender-mcp-setfit-lambda` pattern.
+- **Concurrency probes carry a throughput row.** pmcp's streamable-HTTP router holds one `Arc<Mutex<Server>>`
+  across each tool call, so a single router serialises fits; a pool of K routers behind a round-robin `fallback`
+  handler (spike 010) restores parallelism with bit-identical outputs.
 
 ## Tools & Libraries
 - `pmcp = { version = "2.19", features = ["streamable-http", "schema-generation"] }`, `schemars = "1.0"`, `axum = "0.8"`,
   `reqwest = "0.12"` (dev) — all already in the workspace lock.
-- Avoid: `aprender::nn::loss::SmoothL1Loss` (no gradient); `FISTA` for f64 problems (f32, fixed step).
+- `half = "2.7"` (F16/BF16 decode), `tower = "0.5"` (router pool `oneshot`), `trueno` feature `parallel` only to
+  measure; `uv run --python 3.12 --with huggingface_hub` for weight downloads.
+- Avoid: `aprender::nn::loss::SmoothL1Loss` (no gradient); `FISTA` for f64 problems (f32, fixed step); relying on
+  `Instant::now()` deltas being non-zero on Apple Silicon (41.67 ns ticks).
