@@ -56,7 +56,8 @@ that emerged from the user's choices while spiking; every reference below honour
 ## Source Files
 
 Original spike source files are preserved in `sources/NNN-spike-name/` (README.md, Cargo.toml,
-build.rs, `src/`, `tools/`, `tests/`, `static/`, RUN-OUTPUT*.md, results*.json, PR.md, BENCH.md).
+build.rs, `src/`, `tools/`, `tests/`, `static/index.html` (the demo pages — real MCP clients), RUN-OUTPUT*.md,
+results*.json, PR.md, BENCH.md).
 Not copied, to keep the skill small: parity fixtures (`fixtures/*.json`, ~10 MB, committed under
 `.planning/spikes/NNN-*/fixtures/`), model weights (`models/`, gitignored — download from the Hub),
 `report*.html` and raw `*.log` files (still in `.planning/spikes/`).
