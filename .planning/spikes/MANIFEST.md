@@ -15,6 +15,7 @@ single-purpose MCP server (pmcp, Lambda/pmcp.run) for time-series forecasting.
   round-trip (decided 2026-09-04 at spike alignment).
 - Both Prophet (MAP / L-BFGS) and NeuralProphet (autograd / AdamW) are in scope; NeuralProphet
   is spiked in this session, not deferred.
+- Chronos (zero-shot foundation model) joins the idea as a THIRD forecaster with its own thin server (one model per server); Chronos-Bolt first, Chronos-2 later (decided 2026-09-04).
 - Correctness bar for the Prophet port is parity with Python Prophet 1.4.0 on the Peyton Manning
   dataset (fixture: `001-prophet-map-fit-lbfgs/fixtures/peyton_manning_prophet140.json`), not
   self-consistency.
@@ -27,3 +28,4 @@ single-purpose MCP server (pmcp, Lambda/pmcp.run) for time-series forecasting.
 | 002 | prophet-forecast-mcp | neuralprophet-autograd | standard | Given the same series, when trend + Fourier + AR-Net is trained with AdamW + SmoothL1 on the f32 autograd, then holdout MAE is comparable to 001 using only existing ops | VALIDATED ✓ (test MAE 0.451 vs NP 0.461, 500× faster; core SmoothL1Loss is detached) | neuralprophet, autograd, ar-net |
 | 003 | prophet-forecast-mcp | prophet-intervals-and-components | standard | Given the 001 fit, when future changepoints are simulated and components decomposed, then the 80% band covers ~80% of a holdout and components sum to yhat; logistic, multiplicative and holidays fit | VALIDATED ✓ (bands within ~1% of Python, holdout coverage 0.81–0.83 both; L-BFGS needs restarts) | prophet, uncertainty, holidays |
 | 004 | prophet-forecast-mcp | forecast-mcp-thin-server | standard | Given a pmcp thin server with one stateless `forecast` tool, when called with ds/y/horizon, then fit + forecast returns in under 2s for 3k points and a browser page charts it | VALIDATED ✓ (Peyton 1.41 s round trip; 3k pts 0.21 s; iteration cap + budget for 20k; page is an MCP client) | mcp, pmcp, latency, ui |
+| 005 | prophet-forecast-mcp | chronos-bolt-tiny-parity | standard | Given `amazon/chronos-bolt-tiny` safetensors, when its T5 encoder-decoder (patch embedding, instance scaling, REG token, relative position bias, quantile head) is run in Rust, then the 9 quantiles match the Python `chronos-forecasting` pipeline on Peyton and air passengers within a committed tolerance, including the autoregressive rollout past 64 steps | VALIDATED ✓ (quantiles to 1e-6, rollout to 1.5e-5, 6 edge probes; 36 ms/forward plain Rust vs 5.9 ms torch; trueno GEMMs 4× slower than loops) | chronos, t5, zero-shot, safetensors, parity |
