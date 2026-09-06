@@ -297,6 +297,28 @@ fn test_no_unauthorized_binaries() {
     ]
     .into();
 
+    // A SECOND category, ratcheted separately, decided by a human at plan
+    // 06-02 Task 1 (option `deployment-unit-class`; RESEARCH Open Question 1).
+    //
+    // Policy: publish = false thin MCP servers whose capability IS a protocol
+    // surface; adding one requires a CONTEXT decision, never a same-PR edit.
+    //
+    // These are NOT migration debt and must not be folded into `allowed_bins`.
+    // An entry there is a capability awaiting `apr <subcommand>`; an entry here
+    // has no `apr` destination to await, because the capability is the MCP
+    // protocol surface itself and the binary IS the deployment unit
+    // (pmcp.run process / Lambda `bootstrap`). Keeping the two registers apart
+    // is what lets the sentence above `allowed_bins` stay literally true.
+    let deployment_unit_bins: HashSet<&str> = [
+        "aprender-mcp-setfit",          // the thin pmcp server template (Phase 4)
+        "aprender-mcp-setfit-lambda",   // its AWS Lambda custom runtime (bootstrap)
+        "aprender-mcp-setfit-train",    // the SetFit training server
+        "aprender-setfit-train-lambda", // the training server's Lambda runtime
+        "aprender-mcp-forecast",        // Prophet/NeuralProphet forecast server (Phase 6 D-06)
+        "aprender-mcp-chronos",         // Chronos-Bolt server (Phase 6 D-06; created in plan 06-07)
+    ]
+    .into();
+
     // Ask cargo what binaries the workspace actually BUILDS, rather than
     // grepping manifests for `[[bin]]`. Cargo auto-discovers `src/main.rs` with
     // no `[[bin]]` section at all, and six packages rely on that —
@@ -327,7 +349,9 @@ fn test_no_unauthorized_binaries() {
                 .any(|k| k == "bin")
         });
         if ships_bin {
-            if !allowed_bins.contains(name.as_str()) {
+            if !allowed_bins.contains(name.as_str())
+                && !deployment_unit_bins.contains(name.as_str())
+            {
                 violations.push(name.clone());
             }
             with_bins.push(name);
@@ -372,6 +396,23 @@ fn test_no_unauthorized_binaries() {
         allowed_bins.len()
     );
 
+    // RATCHET 2: the deployment-unit register is shrink-only for a different
+    // reason. There is no `apr` subcommand to migrate a protocol surface into,
+    // so growth here is not debt being paid down — it is a new user-facing
+    // binary being minted. Raising this number is a phase-CONTEXT decision
+    // (the human gate at 06-02 Task 1), never an edit made alongside the crate
+    // that needs it.
+    const DEPLOYMENT_UNIT_BASELINE: usize = 6;
+    assert!(
+        deployment_unit_bins.len() <= DEPLOYMENT_UNIT_BASELINE,
+        "FALSIFY-MONO-011: the thin-MCP deployment-unit register grew to {} \
+         (baseline {DEPLOYMENT_UNIT_BASELINE}). It is shrink-only: a new \
+         publish = false MCP server binary requires a recorded CONTEXT decision \
+         (a `gate=\"blocking-human\"` checkpoint), never a same-PR edit to this \
+         list.",
+        deployment_unit_bins.len()
+    );
+
     // And it must not rot: an allowlisted crate that no longer ships a [[bin]]
     // is a stale exemption hiding the fact that the migration already happened.
     let stale: Vec<&str> = allowed_bins
@@ -383,6 +424,25 @@ fn test_no_unauthorized_binaries() {
         stale.is_empty(),
         "FALSIFY-MONO-011: these crates are allowlisted but ship no [[bin]] — the \
          exemption is stale and must be deleted so the ratchet reflects real debt: {stale:?}"
+    );
+
+    // Same rot check for the deployment-unit register. A thin MCP server that
+    // stopped shipping a binary is no longer a deployment unit, and leaving it
+    // named here inflates the baseline that guards the category.
+    //
+    // `crates_dir.join(c).exists()` is load-bearing for a FORWARD-LOOKING entry:
+    // `aprender-mcp-chronos` is decided but not yet created (plan 06-07), and a
+    // missing directory is not stale.
+    let stale_units: Vec<&str> = deployment_unit_bins
+        .iter()
+        .filter(|c| !with_bins.iter().any(|b| b == *c) && crates_dir.join(c).exists())
+        .copied()
+        .collect();
+    assert!(
+        stale_units.is_empty(),
+        "FALSIFY-MONO-011: these crates are registered as thin-MCP deployment \
+         units but ship no [[bin]] — the entry is stale and must be deleted so \
+         the baseline reflects real deployment units: {stale_units:?}"
     );
 }
 
