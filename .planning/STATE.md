@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
-stopped_at: Completed 06-04-PLAN.md
-last_updated: "2026-09-06T06:07:47.591Z"
+stopped_at: Completed 06-05-PLAN.md
+last_updated: "2026-09-06T13:46:03.733Z"
 last_activity: 2026-09-05
 last_activity_desc: Phase 06 execution started
-state_head: 8f56295b2689ab8882c92cf56a7a9dd3351e2eef
+state_head: 92584e90200d8a3711537cb7ef7c44db2bc49ea8
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 73
-  completed_plans: 65
+  completed_plans: 66
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
-Plan: 5 of 9
+Plan: 6 of 9
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -192,6 +192,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P02 | 20 min | 3 tasks | 4 files |
 | Phase 06 P03 | 24 min | 2 tasks | 3 files |
 | Phase 06 P04 | 23 min | 3 tasks | 4 files |
+| Phase 06 P05 | 46 min | 4 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -250,6 +251,8 @@ Recent decisions affecting current work:
 - [Phase 06]: FALSIFY-MONO-011 treats thin MCP deployment units as a SECOND, separately-ratcheted category (human decision `deployment-unit-class`, 06-02 Task 1) — Human answered the gate="blocking-human" checkpoint with "deployment-unit-class", no wording changes. `allowed_bins` and ALLOWLIST_BASELINE = 27 stay byte-identical so "migration debt" keeps meaning migration debt; a new `deployment_unit_bins` set of six names (the four SetFit crates plus aprender-mcp-forecast and the not-yet-created aprender-mcp-chronos) gets its own DEPLOYMENT_UNIT_BASELINE = 6 shrink-only assert and its own stale-entry check. Policy sentence: "publish = false thin MCP servers whose capability IS a protocol surface; adding one requires a CONTEXT decision, never a same-PR edit." The existing ratchet's claim that every entry is a capability awaiting `apr <subcommand>` migration stays true because CONTEXT explicitly defers `apr forecast`, so these six are not awaiting migration. Rejected: single-list-33 (blurs debt with deployment unit), phase6-only-29 (leaves the gate RED, SC5 unreachable), halt (contradicts D-06 and the `apr forecast` deferral).
 - [Phase 06]: NeuralProphet-lite ships behind the one forecast tool with the D-10 training rules as invariant tests: graph-connected Huber (core's own smooth-L1 loss is detached and returns None gradients), strict mini-batches (full batch collapses the fit to MAE 2.6), clear_graph() per step, and lr selected by TRAIN loss — Selecting by test error would have reported 0.4112 instead of 0.4463 on this very dataset - a fitted curve presented as a forecast. The bars are one-sided thresholds rather than value-parity residuals because NeuralProphet's lr-finder and torch RNG are not reproducible from the committed oracle.
 - [Phase 06]: Contract bars must be read with the contract name written IN FULL at each call site, never through a Rust constant — The acceptance criterion is a STATIC link check (grep -c). A Rust constant reads the right file at runtime but makes the link invisible to the grep, so the guard silently stops guarding. Fixed at 12 call sites in 06-04.
+- [Phase 06]: D-13 memory clause AMENDED (blocking human decision `amend-memory-clause`): the shipped Bolt keeps BOTH weight layouts — dot8 needs contiguous [out, in] rows for D-14 single rows, gemm_blis needs the [in, out] transpose for multi-row. Cost asserted and printed: 69.18 MB resident vs 34.61 MB, exactly 2.00x. NOT the SC4 < 30 MB binary bar. — The frozen quantiles_abs_f32 = 1.0e-6 was measured under this routing; deleting the untransposed copies would move every single-row product onto gemv and change the float accumulation order, so the bar would stop being evidence. Re-confirmed in-tree at 9.5367e-7.
+- [Phase 06]: The enforced Chronos f16 sha256 is f5dc2ef53533c8896bcb120a754c52c39d8917c15750a9e845192014dfa74a67, NOT the f9a033b4... RESEARCH A3 predicted: safetensors 0.8.0 orders the two __metadata__ keys differently than the spike-007 writer did. Same 101 tensors, byte-identical 17,305,344-byte body; only the header differs. — Re-pinning to the value this toolchain reproduces keeps the check fail-closed; loosening it to a warning would have deleted the property REVIEW-06-03 asked for. Both values are documented in the justfile, the crate README and contracts/chronos-bolt-parity-v1.yaml.
 
 ### Pending Todos
 
@@ -333,6 +336,7 @@ Recent decisions affecting current work:
 - [Phase 5]: Choose validation-only calibration and uncertainty estimators before collecting benchmark results.
 - [Cross-cutting]: Preserve CPU-only package/MSRV/feature combinations and executable contract conventions from the repository's pre-release and APR dogfood skills.
 - make tier2 is RED on arm64: pre-existing clippy errors across 5 crates untouched by phase 2. Re-measured at 02-08: **24 errors, 44 locations** — aprender-compute 38, zram-core 3, present-terminal 1, core 1, serve 1; **zero in aprender-contrastive-data**, whose only appearance in the tier2 log is its `Checking` line. All arch-gated SIMD; CI runs X64-Linux-only so these aarch64-live arms are never linted. Proven independent of 02-03. See deferred-items D-ITEM-02.
+- contracts/chronos-bolt-parity-v1.yaml quantiles_abs_f32_nonaarch64 = 5.0e-6 is PROVISIONAL AND UNMEASURED: no x86_64 run has happened, and every CI job here is [self-hosted, X64]. FALSIFY-CHRONOS-002 obliges the first x86_64 run to record its measured max|delta| and tighten the bar in a pv diff-visible edit.
 
 ## Deferred Items
 
@@ -346,6 +350,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-06T06:07:23.217Z
-Stopped at: Completed 06-04-PLAN.md
+Last session: 2026-09-06T13:45:31.180Z
+Stopped at: Completed 06-05-PLAN.md
 Resume file: None
