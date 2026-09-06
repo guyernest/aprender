@@ -30,14 +30,15 @@
 //!
 //! [`dates`] is civil-date arithmetic (no calendar library, D-17); [`types`] is the tool
 //! boundary; [`fit`] is the D-09 L-BFGS recipe; [`prophet`] is the port itself;
-//! [`forecast`](forecast()) is the door. `np` (NeuralProphet-lite) lands in plan 06-04 and
-//! the Chronos modules in 06-05.
+//! [`forecast`](forecast()) is the door; [`np`] is the NeuralProphet-lite port (D-10). The
+//! Chronos modules land in plan 06-05.
 
 pub mod dates;
 pub mod types;
 
 pub mod fit;
 pub mod forecast;
+pub mod np;
 pub mod prophet;
 
 #[cfg(test)]

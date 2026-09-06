@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use crate::dates::{format_ymd, future_days, parse_date};
 use crate::fit::{fit_prophet, FIT_BUDGET_SECS, MAX_ITERS_PER_ROUND};
+use crate::np;
 use crate::prophet::{
     auto_seasonalities, make_design, predict, Growth, Holiday, Mode, Seasonality, Spec,
 };
@@ -205,12 +206,141 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                 }),
             })
         }
-        // THE ONE TRACER STUB (REVIEW-06-06). The arm, the `ForecastArgs` field set and
-        // this dispatch site are already in their final form; plan 06-04 Task 1 replaces
-        // exactly this arm body with the verbatim spike arm and deletes this sentence.
-        "neuralprophet" => Err(ForecastError::Validation(
-            "model neuralprophet is ported in plan 06-04".into(),
-        )),
+        // Ported verbatim from `sources/004-forecast-mcp-thin-server/src/lib.rs:226-262`
+        // (D-08), replacing 06-01's refusing tracer stub (REVIEW-06-06). Every training
+        // rule below is D-10 and is pinned by an invariant test in `np::parity`.
+        "neuralprophet" => {
+            if freq != "D" {
+                return Err(ForecastError::Validation(
+                    "neuralprophet supports freq D only".into(),
+                ));
+            }
+            let n_lags = args.n_lags.unwrap_or(0);
+            if n_lags > 365 {
+                return Err(ForecastError::Validation("n_lags ≤ 365".into()));
+            }
+            let n_train = ds.len();
+            let d = np::NpData::new(&ds, &args.y, n_train, 10, 0.8);
+            if n_lags >= d.n_train_grid {
+                return Err(ForecastError::Validation(
+                    "n_lags must be smaller than the series span in days".into(),
+                ));
+            }
+            let t0 = Instant::now();
+            // spike-002 lesson: a short lr sweep selected by TRAIN loss stands in for NP's
+            // range test (D-10 — never select by test error); 4x the auto epochs when lags
+            // are on (the linear AR case needs the budget), capped at 320.
+            let mut best: Option<(f64, f64, np::NpModel, np::TrainLog)> = None;
+            let lrs: &[f64] = if n_lags > 0 {
+                &[0.03, 0.1]
+            } else {
+                &[0.01, 0.03, 0.1]
+            };
+            for &lr in lrs {
+                let cfg = np::TrainConfig {
+                    n_lags,
+                    ar_layers: if n_lags > 0 { vec![32] } else { vec![] },
+                    max_lr: lr,
+                    epochs: if n_lags > 0 {
+                        Some(np::auto_epochs(n_train).min(320))
+                    } else {
+                        None
+                    },
+                    batch: None,
+                    weight_decay: 1e-3,
+                    huber_beta: 0.3,
+                    newer_w: 2.0,
+                    seed,
+                };
+                let (m, log) = np::train(&d, &cfg, false);
+                let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
+                if !fl.is_finite() {
+                    continue;
+                }
+                if best.as_ref().is_none_or(|b| fl < b.0) {
+                    best = Some((fl, lr, m, log));
+                }
+            }
+            let (train_loss, selected_lr, m, log) = best.ok_or_else(|| {
+                ForecastError::Internal("training diverged for every learning rate".into())
+            })?;
+            let fit_seconds = t0.elapsed().as_secs_f64();
+            let t1 = Instant::now();
+            let (yhat, trend) = if n_lags == 0 {
+                (
+                    np::predict_ts(&d, &m, &fut),
+                    np::predict_trend(&d, &m, &fut),
+                )
+            } else {
+                (
+                    np::predict_ar_recursive(&d, &m, &fut),
+                    np::predict_trend(&d, &m, &fut),
+                )
+            };
+            // Residual-based band. NeuralProphet itself would use quantile regression; that
+            // was NOT spiked (CONTEXT deferred), and the diagnostics say so rather than
+            // implying a coverage guarantee this band does not have.
+            let fitted = if n_lags == 0 {
+                np::predict_ts(&d, &m, &ds)
+            } else {
+                let idx: Vec<usize> = ds
+                    .iter()
+                    .map(|day| (day - d.t0) as usize)
+                    .filter(|i| *i >= n_lags)
+                    .collect();
+                let pr = np::predict_ar_1step(&d, &m, &idx);
+                let mut out = vec![f64::NAN; ds.len()];
+                let mut k = 0;
+                for (i, day) in ds.iter().enumerate() {
+                    if (day - d.t0) as usize >= n_lags {
+                        out[i] = pr[k];
+                        k += 1;
+                    }
+                }
+                out
+            };
+            let resid: Vec<f64> = fitted
+                .iter()
+                .zip(&args.y)
+                .filter(|(f, _)| f.is_finite())
+                .map(|(f, y)| y - f)
+                .collect();
+            let sd = (resid.iter().map(|r| r * r).sum::<f64>() / resid.len().max(1) as f64).sqrt();
+            let z = normal_quantile((1.0 + interval_width) / 2.0);
+            let predict_seconds = t1.elapsed().as_secs_f64();
+            let mut components = serde_json::Map::new();
+            components.insert("trend".into(), serde_json::json!(trend));
+            // Bound before the move so the literal stays in declaration order
+            // (clippy::inconsistent_struct_constructor is a workspace `warn`).
+            let yhat_lower: Vec<f64> = yhat.iter().map(|v| v - z * sd).collect();
+            let yhat_upper: Vec<f64> = yhat.iter().map(|v| v + z * sd).collect();
+            Ok(ForecastResponse {
+                model: "neuralprophet".into(),
+                freq,
+                n_history: ds.len(),
+                fit_seconds,
+                predict_seconds,
+                ds: fut.iter().map(|d| format_ymd(*d)).collect(),
+                yhat,
+                yhat_lower,
+                yhat_upper,
+                trend,
+                components,
+                diagnostics: serde_json::json!({
+                    "n_lags": n_lags,
+                    "ar_layers": if n_lags > 0 { vec![32] } else { vec![] },
+                    "epochs": log.epochs,
+                    "batch": log.batch,
+                    "steps": log.steps,
+                    "params": log.n_params,
+                    "selected_lr": selected_lr,
+                    "final_train_loss": train_loss,
+                    "residual_sd": sd,
+                    "band": "residual-sd based, not NeuralProphet's quantile regression",
+                    "seasonalities": d.seasons.iter().map(|s| format!("{} (order {})", s.name, s.order)).collect::<Vec<_>>()
+                }),
+            })
+        }
         other => Err(ForecastError::Validation(format!(
             "model {other:?}: prophet or neuralprophet"
         ))),
@@ -263,5 +393,142 @@ pub fn normal_quantile(p: f64) -> f64 {
         let q = (-2.0 * (1.0 - p).ln()).sqrt();
         -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
             / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::forecast;
+    use crate::dates::{days_from_civil, format_ymd};
+    use crate::prophet::Rng;
+    use crate::types::{ForecastArgs, ForecastError};
+    use aprender::autograd::{clear_graph, graph_tape_len};
+
+    /// A 120-point synthetic DAILY series: linear trend + a weekly sine + a little noise.
+    /// Deliberately short — these tests prove dispatch, refusals and tape hygiene, never
+    /// accuracy. Correctness against the NeuralProphet 0.9.0 oracle is `np::parity`.
+    fn synthetic_daily(n: usize) -> (Vec<String>, Vec<f64>) {
+        let mut rng = Rng::new(7);
+        let t0 = days_from_civil(2020, 1, 1);
+        let mut ds = Vec::with_capacity(n);
+        let mut y = Vec::with_capacity(n);
+        for i in 0..n {
+            ds.push(format_ymd(t0 + i as i64));
+            let t = i as f64;
+            y.push(
+                10.0 + 0.01 * t
+                    + (2.0 * std::f64::consts::PI * t / 7.0).sin()
+                    + 0.05 * rng.normal(),
+            );
+        }
+        (ds, y)
+    }
+
+    fn np_args(n: usize, horizon: usize) -> ForecastArgs {
+        let (ds, y) = synthetic_daily(n);
+        ForecastArgs {
+            ds,
+            y,
+            horizon,
+            freq: None,
+            model: Some("neuralprophet".into()),
+            growth: None,
+            cap: None,
+            seasonality_mode: None,
+            interval_width: None,
+            holidays: None,
+            n_lags: None,
+            seed: None,
+        }
+    }
+
+    #[test]
+    fn neuralprophet_arm_dispatches_and_returns_a_band() {
+        clear_graph();
+        let args = np_args(120, 14);
+        let r = forecast(&args).expect("the neuralprophet arm must dispatch, not refuse");
+        assert_eq!(r.model, "neuralprophet");
+        assert_eq!(r.ds.len(), 14, "one row per horizon step");
+        assert_eq!(r.yhat.len(), 14);
+        assert_eq!(r.trend.len(), 14);
+        for i in 0..14 {
+            assert!(
+                r.yhat_lower[i] < r.yhat_upper[i],
+                "row {i}: band must be strictly ordered ({} !< {})",
+                r.yhat_lower[i],
+                r.yhat_upper[i]
+            );
+            assert!(r.yhat[i].is_finite(), "row {i}: yhat must be finite");
+        }
+        let lr = r.diagnostics["selected_lr"]
+            .as_f64()
+            .expect("diagnostics.selected_lr");
+        assert!(
+            [0.01, 0.03, 0.1].iter().any(|c| (c - lr).abs() < 1e-12),
+            "the lag-free sweep is {{0.01, 0.03, 0.1}} selected by TRAIN loss (D-10); got {lr}"
+        );
+        assert!(
+            r.diagnostics["band"]
+                .as_str()
+                .expect("diagnostics.band")
+                .contains("not NeuralProphet's quantile regression"),
+            "the band must SAY it is residual-sd based, not quantile regression"
+        );
+        // D-10 tape hygiene: `clear_graph()` after every step means a completed fit leaves
+        // the thread-local tape empty for the next caller on this thread.
+        assert_eq!(
+            graph_tape_len(),
+            0,
+            "the autograd tape must be empty after a completed neuralprophet fit"
+        );
+    }
+
+    #[test]
+    fn neuralprophet_refuses_non_daily_freq() {
+        let mut args = np_args(120, 14);
+        args.freq = Some("W".into());
+        match forecast(&args) {
+            Err(ForecastError::Validation(m)) => assert!(
+                m.contains("supports freq D only"),
+                "message must name the fix; got {m:?}"
+            ),
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+    }
+
+    #[test]
+    fn neuralprophet_refuses_n_lags_above_365() {
+        let mut args = np_args(120, 14);
+        args.n_lags = Some(366);
+        match forecast(&args) {
+            Err(ForecastError::Validation(m)) => {
+                assert!(m.contains("365"), "message must name the bound; got {m:?}");
+            }
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+    }
+
+    #[test]
+    fn neuralprophet_refuses_n_lags_at_or_above_span() {
+        // 120 consecutive daily points => n_train_grid == 120, so n_lags 120 leaves no
+        // complete window. This must refuse at the door, never panic inside the fit.
+        let mut args = np_args(120, 14);
+        args.n_lags = Some(120);
+        match forecast(&args) {
+            Err(ForecastError::Validation(m)) => assert!(
+                m.contains("smaller than the series span"),
+                "message must name the fix; got {m:?}"
+            ),
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
     }
 }
