@@ -17,10 +17,10 @@ here disagrees with its command, the command wins.
 
 | Fact | Derive with | Sample (2026-08-13) |
 |------|-------------|---------------------|
-| Workspace crates | `cargo metadata --no-deps --format-version 1 \| python3 -c "import json,sys;print(len(json.load(sys.stdin)['packages']))"` | 78 — 77 under `crates/` plus the root facade |
-| Dirs under `crates/` | `ls -1d crates/*/ \| wc -l` | 82. **This is not the crate count**: 4 are `exclude`d in the root `Cargo.toml`, and `aprender-contracts-staging` has no manifest. A directory is not a crate |
+| Workspace crates | `cargo metadata --no-deps --format-version 1 \| python3 -c "import json,sys;print(len(json.load(sys.stdin)['packages']))"` | 86 — 85 under `crates/` plus the root facade (re-derived 2026-09-06) |
+| Dirs under `crates/` | `ls -1d crates/*/ \| wc -l` | 92 (2026-09-06). **This is not the crate count**: 5 are `exclude`d in the root `Cargo.toml` (`aprender-present`, `aprender-test`, `aprender-train-canary`, `aprender-viz-ttop`, `facades`) and 2 have no manifest (`aprender-contracts-staging`, `deploy`), so 92 - 7 = the 85 members under `crates/`. A directory is not a crate |
 | `apr` subcommands | `apr --help`; registry is `contracts/apr-cli-commands-v1.yaml` §`commands`, mirrored by `crates/apr-cli/tests/cli_commands.rs::registered_commands` | 111, in 10 categories |
-| Provable contracts | `find contracts -name '*.yaml' \| wc -l` | 1768 |
+| Provable contracts | `find contracts -name '*.yaml' \| wc -l` | 1790 (re-derived 2026-09-06) |
 | Workspace lib tests | the `Summary` line of CI's `workspace-test` job (see Build Commands for the exact nextest invocation) | **80,604 passed**, 130 skipped, across 69 binaries — CI run `31631488466`, `main` @ `d40756541`, 2026-08-12 |
 | Released version | `git tag --sort=-creatordate \| head -1` · `gh release list` | **v0.63.0**, 2026-08-01 ("provenance") |
 
@@ -198,8 +198,7 @@ the crate count run the command in the Project Overview table, don't trust a num
 | GGUF/SafeTensors Loading | Never | Primary | - |
 | CUDA/GPU Inference | Never | Primary | Kernels |
 | SetFit Classification Inference | **Primary** (aprender-core: loader + `VerifiedSetFitModel::classify`) | HTTP transport ONLY (route/`AppState`/readiness — calls core) | Compute |
-| Forecast Inference + its SafeTensors load | **Primary** (`crates/aprender-forecast/`: the Prophet/NeuralProphet/Chronos-Bolt numeric path behind one `forecast()` door) | Never | Compute (`gemm_blis`/`gemv`) |
-| Stateless Forecast Serving (MCP) | **Primary** (`crates/aprender-mcp-forecast/`: pmcp stdio + streamable-HTTP transport ONLY — calls the library door) | Never | Compute |
+| Time-Series Forecasting (Prophet / NeuralProphet fit+predict, Chronos-Bolt zero-shot) | **Primary** (`crates/aprender-forecast`; thin pmcp servers `crates/aprender-mcp-forecast` and `crates/aprender-mcp-chronos` are transport only) | Never | Compute (`blis::gemm_blis`, NEON 8x6 kernel) |
 
 **The SetFit row is a deliberate, documented EXCEPTION (Phase 4 D-09), not drift.**
 Realizar-first exists because core's LLM inference was ~750x slower than realizar's
@@ -210,27 +209,31 @@ core's verified model; it does not reimplement the tokenizer, pooling or head. S
 second, unproven port would violate OPS-03 (one implementation per operation) and re-open
 every Phase 1 conformance fixture. Schema and load rules: `contracts/setfit-apr-v1.yaml`.
 
-**The two forecast rows are the SAME exception, ratified the same way (Phase 6 D-03/D-07).**
-They follow SetFit deliberately rather than inventing a second precedent. The
-realizar-first rule is a *performance* argument — core's LLM inference was ~750x slower
-than realizar's kernels — and it does not reach here either. Prophet and NeuralProphet
-have no realizar path at all: they are MAP/L-BFGS and autograd fits, i.e. training-shaped
-work that belongs in the training crate by the table's own first row. Chronos-Bolt is a
-~9M-param T5 encoder whose ONLY parity-proven implementation is the fixture-verified port
-in `crates/aprender-forecast/src/bolt.rs`, measured against chronos-forecasting 2.3.1
+**The Forecasting row is a second deliberate EXCEPTION (Phase 6 D-07), for a different
+reason.** It follows SetFit deliberately rather than inventing a second precedent, but
+the realizar-first rule — a *performance* argument, core's LLM inference being ~750x
+slower than realizar's kernels — does not reach here at all. Prophet and NeuralProphet
+"inference" IS a fit: L-BFGS on a Stan-shaped objective and AdamW on the autograd, which
+is training-side machinery by this table's own first row, and the fit runs inside every
+stateless `forecast` call (D-01). They have no realizar path to be slower than.
+Chronos-Bolt is an 8.65M-parameter T5 with no tokenizer, no KV cache and no LLM kernels;
+its ONLY parity-proven implementation is the spike-005/007 port in
+`crates/aprender-forecast/src/bolt.rs`, at 9.5e-7 against `chronos-forecasting` 2.3.1
 (`contracts/chronos-bolt-parity-v1.yaml`) — so, exactly as with SetFit, the evidence lives
-where the code is, and a second unproven port would violate OPS-03 and re-open every
-parity fixture.
+where the code is, and serving a second, unproven port through realizar would violate
+OPS-03 (one implementation per operation) and re-open every parity fixture.
 
 The SafeTensors carve-out is scoped to that one loader, not a general licence: it reads a
 single pinned Chronos checkpoint and nothing else. The GGUF row is untouched — forecasting
 never loads GGUF.
 
-The MCP servers are transport ONLY, and that boundary is enforced rather than asserted:
-`contracts/forecast-tool-boundary-v1.yaml` holds every bound and refusal for both servers,
-and the library door re-checks nothing the transport already validated. A server that grew
-its own numerics would be the drift this row does not licence. `crates/aprender-mcp-setfit/`
-is the template both follow.
+The thin servers own the tool boundary and transport only; `aprender-serve` is untouched.
+That boundary is enforced rather than asserted: `contracts/forecast-tool-boundary-v1.yaml`
+holds every bound and refusal for both servers, and the library door re-checks nothing the
+transport already validated. A server that grew its own numerics would be the drift this
+row does not licence. `crates/aprender-mcp-setfit/` is the template both follow. Tolerances
+and the tool boundary: `contracts/forecast-tool-boundary-v1.yaml`,
+`contracts/chronos-bolt-parity-v1.yaml`.
 
 ```rust
 // WRONG - bypasses realizar, 0.3 tok/s
