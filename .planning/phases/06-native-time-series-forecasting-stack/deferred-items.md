@@ -130,3 +130,102 @@ NOT committed by this plan: a cache blob is not a reviewable artifact, and commi
 inside a contract commit would make every future `pv` run produce a spurious diff for the
 next author. The real question — should `.pv/` be tracked at all, or `.gitignore`d like
 other tool caches — belongs to whoever owns `pv`, not to a forecasting plan.
+
+### D-ITEM-06-07-a — the router pool is deferred as an advanced feature; its gate is disarmed, not passing
+
+**Owner decision (2026-09-06):** the pmcp router pool (`pooled_app`, `--pool K`) is an
+advanced feature held for a later stage. It stays in the tree — it is measured, correct and
+opt-out (`pool <= 1` returns the plain `http_app`) — but nothing gates its *engagement*.
+
+What is deferred, precisely:
+
+- `just forecast-pool-ratio` **does not exist**. `contracts/forecast-tool-boundary-v1.yaml`
+  cited it as the test for `FALSIFY-BOUNDARY-011`, so that test could never run. It is now
+  marked `status: deferred` and removed from the contract's `guarantee` block, because a
+  gate that cannot evaluate must not be counted as green.
+- `pool_equality` asserts **determinism, not engagement**. Both concurrency tests pass
+  bit-identically (8/8, 16/16, `max|Δ yhat| = 0.0`) even with the pool collapsed to a single
+  router — a stateless router is trivially deterministic. So no test in CI would notice the
+  pool silently reverting to one instance.
+
+What is NOT deferred and still holds:
+
+- `FALSIFY-BOUNDARY-012` — the `POOL SPEEDUP:` line and its `arch`/`profile`/`workers`/`cpus`
+  provenance fields are printed and format-checked by the unit test today. Arming the gate
+  later needs the recipe only, not a re-derivation of the format.
+- The measured evidence stands and is reproducible: `POOL=1 -> 1.002x`, `POOL=8 -> 2.070x`,
+  same host, same eight requests. The `1.002x` control is what makes the other number
+  evidence rather than an assertion, and it reproduces spike-010's finding that pmcp's
+  router mutex — not CPU — serialises concurrent fits.
+
+To arm it later: add the `forecast-pool-ratio` recipe (release build, aarch64, three runs,
+parse the single `POOL SPEEDUP:` line, assert best ratio >= 2.0), flip
+`FALSIFY-BOUNDARY-011` off `status: deferred`, and restore it to the `guarantee` block.
+The upstream fix — pmcp not holding `Arc<Mutex<Server>>` across the whole tool future —
+would delete the pool entirely; that is the better long-term resolution.
+
+---
+
+## From plan 06-08 (host-gated evidence recipes) — 2026-09-06
+
+### 1. `FALSIFY-BOUNDARY-011` can now be re-armed (was blocked on this plan)
+
+The note above says the gate was deferred because "`just forecast-pool-ratio` **does not
+exist**". It exists as of commit `adc8a560a` and PASSES on aarch64 release: three attempts at
+5.150 / 5.162 / 5.146, best 5.162x against a 2.0 bar (06-EVIDENCE.md §3). The remaining work
+is contract-side only — flip `FALSIFY-BOUNDARY-011` off `status: deferred` in
+`contracts/forecast-tool-boundary-v1.yaml` and restore it to the `guarantee` block. Not done
+here because that file is outside this plan's `files_modified` and already carries
+uncommitted edits from an earlier review pass; 06-09 is the natural home.
+
+Caveat to carry with it: the bar is **host-gated**. `forecast-pool-ratio` measures a release
+build on aarch64; the CI runner is X64 and builds debug. The contract should say which host
+the gate is claimed on, or CI will be asked to assert a number nobody measured there.
+
+### 2. PRE-EXISTING: `cargo clippy -- -D warnings` is red workspace-wide on aarch64 macOS
+
+Not caused by this plan; recorded because plan 06-08 Task 1's verify tripped over it and the
+finding would otherwise be lost.
+
+`cargo clippy -p aprender-forecast --all-targets -- -D warnings` exits 101 with **18 errors,
+all in `crates/aprender-compute/`** and none in the crate being linted. Confirmed by control:
+the same command with the new example removed from the tree produces the identical 18-finding
+set, and `cargo clippy -p aprender-forecast --example mase_rolling_origin -- -D warnings`
+reports the same 18, again none in `aprender-forecast`. (Mechanism: trailing `-- -D warnings`
+becomes `CLIPPY_ARGS`, which clippy applies to every locally-compiled crate, not just the
+selected package.)
+
+The findings:
+
+- `unreachable expression` x3 — `blis/backend_selection.rs:127`, `brick/simd_config/mod.rs:88`,
+  `hardware/mod.rs:375`. Each follows an unconditional `return ComputeBackend::Neon` /
+  `SimdWidth::Neon128` that is **cfg-gated to aarch64**, so the trailing scalar fallback is
+  live code on x86_64 and dead here. **This class is arch-conditional and therefore invisible
+  to CI**, which is X64 — the same shape as CLAUDE.md #2370's "findings accumulate where no
+  gate looks".
+- `dead_code` x9 — `pack_a_block_generic`, `pack_b_block_generic`, `pack_b_block_nr16`,
+  `matmul_q4k_f32_parallel`, `compute_chunk_q4k_scalar`, `compute_chunk_scalar`,
+  `extract_q6k_values`, `PREFETCH_DISTANCE`, `NT_STORE_THRESHOLD_BYTES`, `GEMV_TILE_THRESHOLD`.
+- `unused_imports` x3 — `q4k/gemv/mod.rs:14`, `blis/packing.rs:419`, `vector/ops/rounding.rs:9`.
+- `unused_variables` x2 — `brick/quant_ops/mod.rs:219,318` (`backend`).
+
+Consequence worth stating plainly: **`make tier1` / `make tier2` cannot pass on an aarch64
+macOS dev box today.** Whoever picks this up should fix `aprender-compute`, not add
+`#[allow]`s, and should re-run on BOTH arches — the point of the finding is that one arch's
+green says nothing about the other's.
+
+### 3. PRE-EXISTING: substantial uncommitted phase-06 work in the tree
+
+At plan 06-08's start the working tree carried 14 modified source files this plan did not
+create — `crates/aprender-forecast/src/{forecast,np,prophet,safetensors,test_support,types,
+chronos}.rs`, `build.rs`, `crates/aprender-mcp-forecast/src/{lib,main}.rs`,
+`contracts/forecast-tool-boundary-v1.yaml`,
+`crates/aprender-core/tests/monorepo_invariants.rs`. They look like review-hardening from a
+pass over 06-06/06-07 (a `MAX_SPAN_DAYS` bound, cross-model option refusals, a `MAX_POOL`
+ceiling) that was never committed: `git show HEAD:crates/aprender-forecast/src/forecast.rs`
+has no `MAX_SPAN_DAYS`.
+
+06-08 did not commit them (out of scope) but every measurement in 06-EVIDENCE.md ran against
+them, which is why that file records the delta's sha256 beside the commit hash. **Someone
+should decide whether that work lands or reverts before the phase closes** — right now the
+branch's committed state and its tested state are different things.
