@@ -278,3 +278,301 @@ from `adc8a560a` **plus** a recorded sha256 delta
 (`bd42a46dda0f0c660cc450b1c97d50f2c017d9111a6164a73272793b7dbcb2b6`, source-only) rather than
 from a real commit. The delta digest stays as the honest record until then; it is not a
 substitute for landing the work.
+
+---
+
+# Phase 06 close-out register (plan 06-09)
+
+Everything above was logged AS IT WAS FOUND, keyed by the plan that found it
+(`D-ITEM-06-<plan>-<letter>`). This section is the phase's CLOSING register, keyed by
+DEFERRAL TOPIC (`D-ITEM-06-01` .. `D-ITEM-06-08`) as 06-09's plan specifies. **The two
+numbering schemes overlap in text and mean different things** — `D-ITEM-06-03-a` above is
+"the third plan's first finding" (cargo rebuild cost), while `D-ITEM-06-03` below is "the
+third deferral topic" (the CI embedded-weights leg). Stated here rather than silently
+renumbered, because renaming a record that other documents already cite is worse than an
+explained collision.
+
+Every entry carries its source, so the next milestone can start from the evidence rather
+than from the claim.
+
+## D-ITEM-06-01 — the two Lambda wrapper crates are deferred
+
+`aprender-mcp-forecast-lambda` and `aprender-mcp-chronos-lambda` (thin copies of
+`crates/aprender-mcp-setfit-lambda`) were explicitly Claude's discretion — 06-CONTEXT.md
+"Claude's Discretion": "include if they fit in one plan". They did not, for two reasons that
+are structural rather than budgetary:
+
+1. Each wrapper adds a `bootstrap` `[[bin]]`, and every binary in this workspace has to be
+   registered in `crates/aprender-core/tests/monorepo_invariants.rs`. Plan 06-02 made that
+   register a POLICY decision (`allowed_bins` = migration debt vs `deployment_unit_bins` =
+   `publish = false` thin servers), and 06-09 landed FALSIFY-MONO-011, which now also
+   enforces `publish = false` on the deployment-unit register. Adding two names is a
+   decision, not a same-PR edit — the invariant test says so in its own failure message.
+2. `cargo pmcp deploy`'s `*-lambda` discovery is ambiguous with more than one candidate
+   (06-RESEARCH Pitfall 11), so shipping two wrappers without resolving that would ship a
+   deploy step nobody can predict.
+
+Source: 06-CONTEXT.md "Claude's Discretion"; 06-RESEARCH.md Pitfall 11; 06-02 (the register).
+
+## D-ITEM-06-02 — core `nn::loss::SmoothL1Loss` is detached from the autograd graph
+
+**Filed, not fixed: https://github.com/paiml/aprender/issues/3034**
+
+`crates/aprender-core/src/nn/loss.rs:170-195` computes the loss through a raw `Vec<f32>` map
+and then builds a FRESH tensor from that data:
+
+```rust
+        let diff = pred.sub(target);
+        let loss_data: Vec<f32> = diff
+            .data()
+            .iter()
+            .map(|&x| {
+                let abs_x = x.abs();
+                if abs_x < self.beta {
+                    0.5 * x * x / self.beta
+                } else {
+                    abs_x - 0.5 * self.beta
+                }
+            })
+            .collect();
+
+        let loss = Tensor::new(&loss_data, pred.shape());   // <-- the graph ends here
+```
+
+`diff` is on the graph; `diff.data()` leaves it; `Tensor::new` starts a new parentless tensor.
+Backward through it contributes nothing, so a model trained with this loss receives zero
+gradient from it and every value-based test still passes.
+
+Workaround in the tree today: `aprender_forecast::np::weighted_huber`
+(`crates/aprender-forecast/src/np.rs`), built from differentiable ops, asserted connected by
+`np::tests::weighted_huber_is_graph_connected`, and pinned by the `huber_built_from_ops`
+equation in `contracts/neuralprophet-parity-v1.yaml`. That workaround lives in a forecasting
+crate and is not a fix for core.
+
+Proposed fix, in the issue: compose from ops — `diff.abs()`,
+`diff.pow(2.0).mul_scalar(0.5 / beta)`, `abs_diff.sub_scalar(0.5 * beta)`, selected by a
+CONSTANT mask (the mask is data-dependent but not differentiable; the two branches must be).
+
+**The gate matters more than the one fix:** a connectivity test for EVERY loss in `nn::loss`,
+because "returns a plausible number and a dead graph" is invisible to value assertions.
+
+NOT fixed in Phase 6 by explicit prohibition (06-09 plan): touching `aprender-core` pulls its
+full lib suite into every cycle of a forecasting plan.
+
+Source: 06-CONTEXT.md D-10 and "Claude's Discretion"; 06-RESEARCH.md Open Question 4; spike 002.
+
+## D-ITEM-06-03 — the CI embedded-weights leg (D-18 clause 2), and the x86_64 measurement it waits on
+
+**CI decision, read from 06-08-SUMMARY.md's single bare-token line: `measure-x86-first`.**
+(Verbatim reply line, also in that SUMMARY: `CI decision (verbatim): CI decision:
+measure-x86-first`. No `CI mount:` line was recorded — mount path used: **none given**.)
+
+**Applied exactly, and applying it means NOT editing ci.yml.** `.github/` is provably
+untouched by plan 06-09: both `git diff --name-only <plan-start>..HEAD -- .github` and
+`git diff --name-only HEAD -- .github` are EMPTY, as they were for 06-07 and 06-08. The
+06-09 plan's `files_modified` lists `.github/workflows/ci.yml` because the plan was written
+before the decision existed; the recorded human decision supersedes that entry. This is a
+deliberate non-edit, not a missed task.
+
+Both hunks stay preserved in
+`.planning/phases/06-native-time-series-forecasting-stack/06-ci-chronos-step.patch`, verified
+by 06-09 to still pass `git apply --check` (rc=0) against ci.yml at plan-start
+`18758190ba853665e39aec9b02d0c362e83f4aa7`.
+
+**D-18 clause 2 is therefore a NAMED CI GAP, not a silent drop.** It is evidenced locally by
+`just chronos-gate` and `06-EVIDENCE.md` §4 only. It carries three names for one obligation —
+this entry (`D-ITEM-06-03`), **REVIEW-06-02**, and **windows-ledger entry #4** — and closing
+any one of them closes all three. Do not treat them as three items.
+
+The gating work, in order:
+
+1. Run `just chronos-gate` ONCE on an x86_64 Linux host with the weights (lambda-vector
+   qualifies and is pre-authorized compute per CLAUDE.md).
+2. Read TWO things off it: the printed `f32_quantile_bar` line, and the measured max|delta|
+   from `peyton_ladder_matches_oracle_f32`.
+3. Tighten `quantiles_abs_f32_nonaarch64` (see D-ITEM-06-04) to measurement + margin, as a
+   `pv diff`-visible contract edit.
+4. THEN decide on the patch. Only after step 3 is there evidence to wire a CI leg onto.
+
+Why not `apply-now` (06-08's finding, recorded so it is not rediscovered): hunk (a) has TWO
+unprovisioned prerequisites — a runner-local weights mount (`/srv/models` in the diff is a
+PLACEHOLDER) and a way for `uv run --with huggingface_hub --with safetensors --with numpy` to
+resolve inside the network-less `sovereign-ci:stable` clean-room (a warm uv-cache mount, or
+those three packages baked into the image). A step that dies at the weight-hash check before
+running a single test is a red run that proves nothing.
+
+Hunk (b) — `cargo test -p aprender-mcp-forecast --test e2e_stdio` appended to the single
+Integration-tests line — needs NO runner provisioning and can be taken independently at any
+time. See D-ITEM-06-06.
+
+If no x86_64 host is reachable, this collapses to `defer` by 06-08's own option table, with
+both hunks still in the patch file.
+
+Source: 06-08-SUMMARY.md (`CI decision:`); 06-08 Task 3's blocking-human checkpoint;
+06-CONTEXT.md D-18; REVIEW-06-02.
+
+## D-ITEM-06-04 — the Chronos f32 tolerance is measured on aarch64 and PROVISIONAL everywhere else
+
+The frozen bar `quantiles_abs_f32 = 1.0e-6` was measured on **aarch64 with the NEON kernel**:
+Peyton Manning max|delta| = **9.5367e-7**, i.e. ~4.6 % margin (06-05). Every CI job in this
+repo runs on `[self-hosted, X64, Linux, clean-room]`, where nothing has been measured.
+
+Plan 06-05 therefore added a second, arch-keyed equation to
+`contracts/chronos-bolt-parity-v1.yaml`:
+
+    quantiles_abs_f32_nonaarch64 = 5.0e-6    <- PROVISIONAL, UNMEASURED
+
+5x headroom, chosen so a first x86_64 run reports a NUMBER rather than a failure of unknown
+size. The contract says so in those words. **A provisional bar is not a passing bar** — it is
+a stated unknown, and it is the only equation in the phase whose value is not evidence.
+
+The exact command that produces the missing number, on an x86_64 host:
+
+    CHRONOS_MODEL_DIR=<f32 dir> cargo test -p aprender-forecast --lib \
+        -- bolt::parity chronos::parity -- --nocapture
+
+Read the printed `f32_quantile_bar` line and the measured max|delta|, then tighten
+`quantiles_abs_f32_nonaarch64` to measurement + margin as a `pv diff`-visible contract edit.
+(`just chronos-gate` wraps the same run with the weight re-verification — see D-ITEM-06-03.)
+
+The aarch64 evidence in `06-EVIDENCE.md` is unaffected either way.
+
+Source: 06-05-SUMMARY.md; REVIEW-06-02; `contracts/chronos-bolt-parity-v1.yaml`.
+
+## D-ITEM-06-05 — everything 06-CONTEXT.md listed as out of scope, one line each
+
+Product / scope tiers:
+
+- **Chronos-2 tier** of `aprender-mcp-chronos` — 21 quantiles, 1024-step direct horizon, 8192
+  context, 228 MB f16, ~0.5 s/forecast, and it needs a streaming loader to avoid a 1.45 GB
+  load peak (spike 009). MANIFEST: "Chronos-Bolt first, Chronos-2 later".
+  Source: 06-CONTEXT.md Deferred Ideas.
+- **`model: auto` routing** ("monthly or <= 64 steps -> Chronos, else NeuralProphet/Prophet") —
+  the policy is MEASURED (spike 006) but it spans two servers, so it is a product decision,
+  documented not built. Source: 06-CONTEXT.md Deferred Ideas / Not in scope.
+- **`freq` H** — needs fractional days through the whole Prophet pipeline; `future_days`
+  refuses H today with a message (D-17). Not spiked. Source: 06-CONTEXT.md Not in scope.
+- **Country-holiday calendars** — not spiked. Source: 06-CONTEXT.md Not in scope.
+- **NeuralProphet quantile regression and `n_forecasts > 1`** — not spiked; the NP arm's band
+  is residual-based today and its diagnostics say so rather than implying otherwise.
+  Source: 06-CONTEXT.md Not in scope; `crates/aprender-forecast/src/forecast.rs`.
+- **Multivariate / covariate inputs** — not spiked. Source: 06-CONTEXT.md Not in scope.
+- **`apr forecast` CLI subcommand** — touches `contracts/apr-cli-commands-v1.yaml` and the
+  111-command registry, so it needs its own ticket and its own contract edit.
+  Source: 06-CONTEXT.md Not in scope.
+
+Upstream / follow-up items surfaced by the spikes:
+
+- **Opening the upstream NEON PR** — a HUMAN CHECKPOINT by D-05 and MANIFEST, explicitly not
+  a Phase 6 task. The kernel is assumed and unmodified by this phase.
+  Source: 06-CONTEXT.md D-05.
+- **pmcp router-lock report to paiml/pmcp** — pmcp 2.19's streamable-HTTP router holds one
+  `Arc<Mutex<Server>>` across the whole tool future, which serialises concurrent fits. The
+  router pool exists only to work around it; the upstream fix would DELETE the pool, which is
+  the better long-term resolution (see D-ITEM-06-07-a above).
+  Source: 06-CONTEXT.md D-12 / Deferred Ideas; spike 010.
+- **Parallel-GEMM N-split for M <= 256** — Source: 06-CONTEXT.md Deferred Ideas.
+- **Streaming safetensors loader** — the prerequisite for the Chronos-2 tier.
+  Source: 06-CONTEXT.md Deferred Ideas.
+- **8x12 NEON tile** (the current kernel is 8x6) — Source: 06-CONTEXT.md Deferred Ideas.
+- **`test_brick_profiler_reset_v2` timer-resolution flake** — Source: 06-CONTEXT.md Deferred
+  Ideas.
+- **Other core fixes the spikes surfaced**, beyond D-ITEM-06-02: `where` / `clamp` / `cat`
+  autograd ops; `WolfeSearch` initial-step scaling and non-finite backtracking; `LbfgsF64`
+  double evaluation at `x`; an f64 proximal solver. Source: 06-CONTEXT.md Deferred Ideas.
+
+Operations:
+
+- **Deployment to pmcp.run / Lambda and the MCP client configs** — the crates are
+  Lambda-shaped; deploying is operations, after the crates exist. Blocked in practice on
+  D-ITEM-06-01. Source: 06-CONTEXT.md Not in scope / Deferred Ideas.
+
+## D-ITEM-06-06 — `tests/e2e_stdio.rs` is DARK in CI
+
+CI runs `--lib` across the workspace plus ONE explicit line listing individual `--test`
+targets. `crates/aprender-mcp-forecast/tests/e2e_stdio.rs` is NOT on that line, so it does not
+run in CI — it passes locally and proves nothing about a merge.
+
+The 06-08 decision did NOT list it: `measure-x86-first` leaves both patch hunks unapplied,
+and hunk (b) is exactly the one line that would arm it. Hunk (b) needs no runner provisioning
+and can be taken on its own at any time; it was not split out only because the recorded
+decision was to gate on the x86_64 measurement first (D-ITEM-06-03).
+
+Source: 06-CONTEXT.md "Claude's Discretion" (test organisation) and CLAUDE.md Testing;
+06-ci-chronos-step.patch hunk (b).
+
+## D-ITEM-06-07 — two cross-AI review findings REJECTED as REFUTED, with their falsifying observations
+
+Recorded so a future reviewer re-raising either starts from the experiment rather than from
+the claim. Neither was "fixed", because neither was real. Full rationale lives in 06-01's and
+06-05's `<review_dispositions>` blocks and in 06-REVIEWS.md's orchestrator-verification table.
+
+1. **"`[profile.dev.package.X]` does not reach test builds."** REFUTED. It does: the `test`
+   profile INHERITS `dev`, including per-package overrides. The
+   `[profile.dev.package.aprender-forecast] opt-level = 3` entry that the Prophet fits need is
+   therefore live under `cargo test`, which is where it matters. No change was made.
+
+2. **"`cargo test -- a b` silently drops the second positional filter."** REFUTED. It does
+   not: modern libtest UNIONS positional filters, so
+   `cargo test -p aprender-forecast --lib -- bolt::parity chronos::parity` runs both sets.
+   This one matters because the Chronos gate depends on it — had the claim been true, the
+   gate would have been measuring half of what it reports. No change was made.
+
+## D-ITEM-06-08 — the D-13 memory clause was AMENDED; the one locked CONTEXT decision this phase overrode
+
+D-13 AMENDED amend-memory-clause
+
+**What was overridden.** 06-CONTEXT.md D-13's final sentence, quoted as written:
+
+> "Only transposed `[in, out]` weights are kept in memory."
+
+**Why it could not hold.** D-14's second clause, quoted as written:
+
+> "single rows through the 8-accumulator dot"
+
+`dot8` reads contiguous `[out, in]` rows (spike sources/007 `bolt.rs:20-31`, `66-73`). So the
+layout D-13 deletes is exactly the layout D-14's kernel consumes. The two clauses cannot both
+hold: honouring D-13's memory sentence would either delete the rows `dot8` needs, or force a
+transpose per single-row call, which is not the kernel D-14 names.
+
+**The branch taken and its evidence.** `amend-memory-clause`: BOTH layouts stay resident, and
+`contracts/chronos-bolt-parity-v1.yaml`'s `weights_dual_layout_documented` equation says so
+(it REPLACES `weights_transposed_only`, which no longer exists — REVIEW-06-01). The evidence
+is that the frozen parity bar was measured with both layouts resident: aarch64 Peyton Manning
+f32 max|delta| = **9.5367e-7** against the contract-read **1.0e-6**. Dropping a layout changes
+accumulation order through a 12-layer T5, so the alternative (`drop-untransposed`) was not a
+refactor — it required a RE-MEASUREMENT of every parity rung, which is why the choice was put
+to a human rather than taken by the planner.
+
+**The disclosed cost, stated rather than buried.** The weight arrays are resident roughly
+TWICE — about **69 MB for f32 tiny** (34.6 MB per copy). Note explicitly: SC4's "< 30 MB" is a
+**BINARY SIZE** bound and is NOT what this touches. Two different quantities; conflating them
+would make this amendment look like a broken success criterion when it is not.
+
+**Where the amendment now lives** (three places, so it cannot vanish with this file):
+06-05's must-have truth; `contracts/chronos-bolt-parity-v1.yaml`'s
+`weights_dual_layout_documented` equation, bound in `contracts/aprender/binding.yaml` to
+`aprender_forecast::bolt` / `Bolt::load`; and 06-07's prohibition list.
+
+**Governance.** The amendment was ratified by **06-05 Task 2's blocking human
+`checkpoint:decision`**, not by the planner. The bare token is recorded in 06-05-SUMMARY.md as
+`D-13 decision: amend-memory-clause`. 06-CONTEXT.md's D-13 text is deliberately LEFT AS
+WRITTEN as the historical record, with this entry as its amendment — a locked decision
+rewritten in place would leave no evidence that it ever changed.
+
+## D-ITEM-06-09 — `cargo clippy -- -D warnings` is red workspace-wide, and SC5 is not scoped to it
+
+Restating the boundary because it is the item most likely to be misread as a failed criterion.
+
+SC5's clippy clause reads, verbatim in ROADMAP.md: "`cargo clippy -- -D warnings` on the new
+crates". It is ALREADY SCOPED to the new crates, and on those it is GREEN. The 18 pre-existing
+findings in `crates/aprender-compute` (plus one in `aprender-core`'s own lib) that make a
+workspace-wide `-D warnings` red on aarch64 are OUT OF SCOPE for SC5 and were deliberately not
+fixed here. They remain tracked as D-ITEM-06-01-b, D-ITEM-06-02-a, and item 2 of the 06-08
+section above, which carry the measured controls.
+
+Consequence still worth stating plainly: `make tier1` / `make tier2` cannot pass on an aarch64
+macOS dev box today. Whoever picks it up should fix `aprender-compute` rather than add
+`#[allow]`s, and should re-run on BOTH arches — three of the findings are arch-conditional and
+therefore invisible to CI, which is X64. That is the same shape as CLAUDE.md #2370's "findings
+accumulate where no gate looks".

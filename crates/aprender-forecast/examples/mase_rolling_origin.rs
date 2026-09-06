@@ -382,10 +382,7 @@ fn main() {
     for s in &series {
         for &(n_train, h) in s.splits {
             let (tr_ds, tr_y) = (&s.ds[..n_train], &s.y[..n_train]);
-            let (te_ds, te_y) = (
-                &s.ds[n_train..n_train + h],
-                &s.y[n_train..n_train + h],
-            );
+            let (te_ds, te_y) = (&s.ds[n_train..n_train + h], &s.y[n_train..n_train + h]);
             // MASE denominator: in-sample seasonal-naive MAE on the TRAINING window only.
             let denom = (s.period..n_train)
                 .map(|i| (tr_y[i] - tr_y[i - s.period]).abs())
@@ -474,7 +471,10 @@ fn main() {
             .join(" | "),
         HORIZON_SLICE + 1
     );
-    println!("|---|{}---|---|---|---|---|---|---|", "---|".repeat(series.len()));
+    println!(
+        "|---|{}---|---|---|---|---|---|---|",
+        "---|".repeat(series.len())
+    );
     for m in &models {
         let per: Vec<f64> = series
             .iter()
@@ -533,7 +533,9 @@ fn main() {
     );
     println!("- Monthly series, or horizon <= {HORIZON_SLICE} steps → Chronos-Bolt zero-shot.");
     println!("- Daily series with a long horizon → NeuralProphet-lite (best mean MASE), or Prophet when bands and named components matter.");
-    println!("- Chronos past {HORIZON_SLICE} steps only behind `allow_long_horizon`, with a warning.");
+    println!(
+        "- Chronos past {HORIZON_SLICE} steps only behind `allow_long_horizon`, with a warning."
+    );
     println!("\nNo router is implemented here or in either MCP server; this is the evidence a future one would start from.");
     println!("\nTotal wall time {:.0} s.", t_all.elapsed().as_secs_f64());
 }
