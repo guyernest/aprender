@@ -30,16 +30,24 @@
 //!
 //! [`dates`] is civil-date arithmetic (no calendar library, D-17); [`types`] is the tool
 //! boundary; [`fit`] is the D-09 L-BFGS recipe; [`prophet`] is the port itself;
-//! [`forecast`](forecast()) is the door; [`np`] is the NeuralProphet-lite port (D-10). The
-//! Chronos modules land in plan 06-05.
+//! [`forecast`](forecast()) is the door; [`np`] is the NeuralProphet-lite port (D-10).
+//!
+//! The Chronos-Bolt zero-shot stack is [`bolt`] (the T5 forward, D-14 GEMM routing),
+//! [`safetensors`] (the F32/F16/BF16 byte-slice decoder) and [`chronos`] (its own door:
+//! [`chronos::validate`] then [`chronos::forecast`]). It is a SECOND door, not a `model:` arm of
+//! the first: Chronos is zero-shot with no fit, nullable `y`, its own bounds (D-11: 4 points,
+//! horizon 1024) and its own server (D-03, one model per server).
 
 pub mod dates;
 pub mod types;
 
+pub mod bolt;
+pub mod chronos;
 pub mod fit;
 pub mod forecast;
 pub mod np;
 pub mod prophet;
+pub mod safetensors;
 
 #[cfg(test)]
 pub(crate) mod test_support;
