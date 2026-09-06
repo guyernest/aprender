@@ -339,6 +339,12 @@ fn test_no_unauthorized_binaries() {
 
     let mut violations = Vec::new();
     let mut with_bins: Vec<String> = Vec::new();
+    // The deployment-unit register's DEFINING property is `publish = false`: that is what
+    // makes "the binary IS the deployment unit" true rather than "a second user-facing
+    // binary on crates.io". Until now that property lived only in the prose above, and the
+    // scan read `targets` alone — so flipping any of these crates to `publish = true` would
+    // ship a non-`apr` binary to crates.io with this gate fully green.
+    let mut publishable_units = Vec::new();
     for pkg in packages {
         let name = pkg["name"].as_str().unwrap_or_default().to_string();
         let ships_bin = pkg["targets"].as_array().into_iter().flatten().any(|t| {
@@ -353,6 +359,13 @@ fn test_no_unauthorized_binaries() {
                 && !deployment_unit_bins.contains(name.as_str())
             {
                 violations.push(name.clone());
+            }
+            // cargo metadata reports `publish = false` as an EMPTY array and an
+            // unrestricted package as `null`, so "not publishable" is `Some(empty)`.
+            if deployment_unit_bins.contains(name.as_str())
+                && !pkg["publish"].as_array().is_some_and(|a| a.is_empty())
+            {
+                publishable_units.push(name.clone());
             }
             with_bins.push(name);
         }
@@ -377,8 +390,21 @@ fn test_no_unauthorized_binaries() {
     assert!(
         violations.is_empty(),
         "FALSIFY-MONO-011: Unauthorized [[bin]] sections found in: {:?}\n\
-         Only apr-cli should produce user-facing binaries.",
+         Binaries are authorized in exactly two registers: `allowed_bins` (migration\n\
+         debt, awaiting an `apr <subcommand>`) and `deployment_unit_bins` (publish = false\n\
+         thin MCP servers whose capability IS a protocol surface). Adding a name to either\n\
+         is a policy decision, never a same-PR edit.",
         violations
+    );
+
+    assert!(
+        publishable_units.is_empty(),
+        "FALSIFY-MONO-011: {:?} are registered as deployment units but are NOT\n\
+         `publish = false`. The register's whole justification is that the binary is a\n\
+         deployment unit (pmcp.run process / Lambda bootstrap) and never a user-facing\n\
+         crates.io binary — set `publish = false`, or move the crate to `allowed_bins`\n\
+         with a recorded CONTEXT decision.",
+        publishable_units
     );
 
     // RATCHET: the allowlist is a migration debt register, not a permanent

@@ -494,7 +494,6 @@ impl<'a> Model<'a> {
         r: &[f64],
     ) -> Vec<f64> {
         let d = self.d;
-        let p = p.clone();
         let n = d.t.len();
         let s = p.sigma_obs;
         let inv_s2 = 1.0 / (s * s);
@@ -1135,7 +1134,8 @@ mod parity {
     /// most expensive thing in this module (RESEARCH Pitfall 9). `OnceLock::get_or_init`
     /// blocks the second caller rather than duplicating the work.
     fn fitted(stem: &'static str) -> Arc<(Params, FitInfo)> {
-        static CELLS: [OnceLock<Arc<(Params, FitInfo)>>; 7] = [const { OnceLock::new() }; 7];
+        static CELLS: [OnceLock<Arc<(Params, FitInfo)>>; FIXTURES.len()] =
+            [const { OnceLock::new() }; FIXTURES.len()];
         CELLS[fixture_index(stem)]
             .get_or_init(|| {
                 let l = ladder(stem);
@@ -1151,7 +1151,8 @@ mod parity {
     /// Fit-independent by construction, which is exactly why the band rung uses it on the
     /// three spike-001 fixtures: their optimiser disagreement cannot leak into a band verdict.
     fn python_forecast(stem: &'static str) -> Arc<Forecast> {
-        static CELLS: [OnceLock<Arc<Forecast>>; 7] = [const { OnceLock::new() }; 7];
+        static CELLS: [OnceLock<Arc<Forecast>>; FIXTURES.len()] =
+            [const { OnceLock::new() }; FIXTURES.len()];
         CELLS[fixture_index(stem)]
             .get_or_init(|| {
                 let l = ladder(stem);

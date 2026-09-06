@@ -66,6 +66,14 @@ constants:
   fit_min_points: 10
   fit_max_points: 20000
   fit_max_horizon: 3650
+  # `fit_max_points` bounds how MANY points arrive; these bound the work each one can
+  # BUY. Every entry below closed a request whose payload was inside the three bounds
+  # above and whose cost was not: a span-based daily grid, and holiday windows that are
+  # a per-request design-column multiplier.
+  fit_max_span_days: 20000
+  fit_max_holiday_window: 365
+  fit_max_holiday_columns: 1000
+  fit_max_holiday_dates: 1000
   # aprender-mcp-chronos (zero-shot: Chronos-Bolt T5, no fit)
   chronos_min_points: 4
   chronos_max_points: 20000
@@ -412,7 +420,8 @@ falsification_tests:
     if_fails: 'Fit state is shared across requests, or an RNG is seeded from something other than the per-request seed. A response that depends on what else the server was doing cannot be reproduced from its request, which is exactly the repudiation T-06-07 registers.'
 
   - id: FALSIFY-BOUNDARY-011
-    rule: 'The pooled server clears the speed-up floor on the gated host'
+    status: deferred
+    rule: 'DEFERRED (Phase 6, owner decision): the pooled server clears the speed-up floor on the gated host. The router pool is an ADVANCED feature deferred to a later stage; `just forecast-pool-ratio` is NOT implemented, so this test does not run and must not be read as a passing gate. See D-ITEM-06-07-a.'
     prediction: '`just forecast-pool-ratio` builds in release on aarch64, runs the pool_equality burst three times, parses the single `POOL SPEEDUP:` line from each and asserts the BEST ratio >= 2.0.'
     test: 'just forecast-pool-ratio'
     if_fails: 'Either the router pool is not engaged (check that pooled_app is dispatching round-robin across K routers rather than returning a single http_app), or the host is throttled and the run is not evidence. NOTE (REVIEW-06-04): this bar is deliberately NOT a cargo test filter. The unit test prints the ratio and asserts only equality; a wall-clock ratio measured under four Tokio workers and eight heterogeneous blocking fits is a benchmark claim, and putting it in the correctness suite makes the suite flaky without making the pool faster.'
@@ -497,8 +506,12 @@ qa_gate:
     - 'the spawned binary answers the same one tool over stdio and refuses an unknown key (local; dark in CI pending 06-08)'
     - 'HOST-GATED, NOT IN CI: best-of-3 pool speed-up >= 2.0 on an aarch64 release build, via `just forecast-pool-ratio`'
   pass_criteria: >
-    All FALSIFY-BOUNDARY correctness tests pass on every host, and FALSIFY-BOUNDARY-011 passes on
-    the gated aarch64 release host. A refusal case that has only ever been observed passing is not
+    All FALSIFY-BOUNDARY correctness tests pass on every host. FALSIFY-BOUNDARY-011 is DEFERRED
+    (Phase 6, owner decision — the router pool is an advanced feature held for a later stage) and
+    is therefore NOT part of this guarantee: `just forecast-pool-ratio` does not exist, so the
+    speed-up floor is unmeasured, not met. FALSIFY-BOUNDARY-012 still holds — the `POOL SPEEDUP`
+    line and its provenance fields are printed and format-checked by the unit test today, so the
+    deferred gate can be armed later without re-deriving the format. A refusal case that has only ever been observed passing is not
     evidence: each refusal message asserted here must have been seen RED under an induced change
     (edit the needle, observe the named case fail, restore).
   falsification: >

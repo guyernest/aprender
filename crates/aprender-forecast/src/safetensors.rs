@@ -37,10 +37,15 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Weights, String), String> {
         return Err("safetensors: file too short".into());
     }
     let n = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes")) as usize;
+    // `8 + n` is attacker arithmetic: a header prefix near `u64::MAX` overflows `usize`,
+    // which panics in debug and wraps in release. `checked_add` keeps the documented
+    // `Err` contract on both profiles.
+    let base = 8usize
+        .checked_add(n)
+        .ok_or("safetensors: header length overflows")?;
     let header: serde_json::Value =
-        serde_json::from_slice(bytes.get(8..8 + n).ok_or("safetensors: truncated header")?)
+        serde_json::from_slice(bytes.get(8..base).ok_or("safetensors: truncated header")?)
             .map_err(|e| format!("header json: {e}"))?;
-    let base = 8 + n;
     let mut out = HashMap::new();
     let mut dtype_seen = String::new();
     for (name, meta) in header.as_object().ok_or("header not an object")? {
@@ -48,19 +53,34 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Weights, String), String> {
             continue;
         }
         let dtype = meta["dtype"].as_str().ok_or("dtype")?;
+        // Every field below is read out of a file this function documents itself as
+        // REFUSING when malformed, so none of them may panic: a negative or float `shape`
+        // entry, a short `data_offsets`, or an offset that overflows when rebased all have
+        // to come back as the declared `Err(String)`.
         let shape: Vec<usize> = meta["shape"]
             .as_array()
             .ok_or("shape")?
             .iter()
-            .map(|v| v.as_u64().expect("dim") as usize)
-            .collect();
+            .map(|v| {
+                v.as_u64()
+                    .map(|d| d as usize)
+                    .ok_or_else(|| format!("{name}: shape entry is not a non-negative integer"))
+            })
+            .collect::<Result<_, _>>()?;
         let offs = meta["data_offsets"].as_array().ok_or("offsets")?;
-        let (a, b) = (
-            offs[0].as_u64().expect("a") as usize,
-            offs[1].as_u64().expect("b") as usize,
-        );
+        let offset = |i: usize| -> Result<usize, String> {
+            let v = offs
+                .get(i)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("{name}: data_offsets[{i}] missing or not an integer"))?;
+            usize::try_from(v)
+                .ok()
+                .and_then(|v| base.checked_add(v))
+                .ok_or_else(|| format!("{name}: data_offsets[{i}] out of range"))
+        };
+        let (a, b) = (offset(0)?, offset(1)?);
         let raw = bytes
-            .get(base + a..base + b)
+            .get(a..b)
             .ok_or_else(|| format!("{name}: data out of range"))?;
         let data: Vec<f32> = match dtype {
             "F32" => raw
@@ -81,7 +101,12 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Weights, String), String> {
                 ))
             }
         };
-        let numel: usize = shape.iter().product();
+        // `product()` wraps in release, so `[2^32, 2^32]` would collapse to 0 and make the
+        // length check below pass on a truncated tensor.
+        let numel: usize = shape
+            .iter()
+            .try_fold(1usize, |acc, d| acc.checked_mul(*d))
+            .ok_or_else(|| format!("{name}: shape {shape:?} overflows"))?;
         if data.len() != numel {
             return Err(format!("{name}: {} values for shape {shape:?}", data.len()));
         }

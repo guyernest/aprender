@@ -20,6 +20,34 @@ pub const MAX_HORIZON: usize = 3_650;
 /// Fewer points than this and there is nothing to fit.
 pub const MIN_POINTS: usize = 10;
 
+/// Hard upper bound on the DAILY SPAN (`last - first + 1`) a fit may cover.
+///
+/// `MAX_POINTS` bounds how many points arrive; it does NOT bound how far apart they are.
+/// `np::NpData::new` materialises an imputed DAILY GRID over `first..=last`, so ten points
+/// a millennium apart bought a 3.6-million-row grid and hundreds of MB of feature matrices
+/// from a ~200-byte request. Equal to `MAX_POINTS` so the grid can never exceed the rows a
+/// fully dense series at the point ceiling would produce (D-11).
+pub const MAX_SPAN_DAYS: i64 = MAX_POINTS as i64;
+
+/// Hard upper bound on `|lower_window|` and `upper_window` for a single holiday.
+///
+/// `prophet::columns` emits one design column per offset in `lower_window..=upper_window`,
+/// so the two `i64` fields were an unbounded column multiplier: only their SIGN was
+/// checked. A year of window either side is past anything Prophet's own users write.
+pub const MAX_HOLIDAY_WINDOW: i64 = 365;
+
+/// Hard upper bound on the total number of holiday design columns across all holidays.
+///
+/// Bounds `sum(window_width)` the way [`MAX_HOLIDAY_WINDOW`] bounds one term of it, so a
+/// long list of individually legal holidays cannot multiply back into the same blow-up.
+pub const MAX_HOLIDAY_COLUMNS: usize = 1_000;
+
+/// Hard upper bound on the number of dates one holiday may carry.
+///
+/// `prophet::feature_row` scans this list per row per holiday column, so it is a second
+/// multiplier on the design build.
+pub const MAX_HOLIDAY_DATES: usize = 1_000;
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HolidayArg {
@@ -109,7 +137,10 @@ impl std::error::Error for ForecastError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ForecastArgs, ForecastError, MAX_HORIZON, MAX_POINTS, MIN_POINTS};
+    use super::{
+        ForecastArgs, ForecastError, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES, MAX_HOLIDAY_WINDOW,
+        MAX_HORIZON, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
+    };
     use crate::test_support::constant_u64;
 
     /// The fit server's three bounds are EQUAL to the contract, not merely similar.
@@ -134,6 +165,40 @@ mod tests {
             constant_u64("forecast-tool-boundary-v1", "fit_max_horizon"),
             "types::MAX_HORIZON must equal constants.fit_max_horizon in forecast-tool-boundary-v1"
         );
+    }
+
+    /// The four cost bounds against the SAME contract, for the SAME reason.
+    ///
+    /// `fit_max_points` bounds how many points arrive; these bound the work each one can
+    /// buy. They are the bounds a request can be inside all three headline limits and
+    /// still blow past — a span-based daily grid, and a holiday window that is a design
+    /// column multiplier — so they are contract-owned exactly like the headline three.
+    #[test]
+    fn cost_bounds_match_contract() {
+        for (name, key, value) in [
+            ("MAX_SPAN_DAYS", "fit_max_span_days", MAX_SPAN_DAYS as u64),
+            (
+                "MAX_HOLIDAY_WINDOW",
+                "fit_max_holiday_window",
+                MAX_HOLIDAY_WINDOW as u64,
+            ),
+            (
+                "MAX_HOLIDAY_COLUMNS",
+                "fit_max_holiday_columns",
+                MAX_HOLIDAY_COLUMNS as u64,
+            ),
+            (
+                "MAX_HOLIDAY_DATES",
+                "fit_max_holiday_dates",
+                MAX_HOLIDAY_DATES as u64,
+            ),
+        ] {
+            assert_eq!(
+                value,
+                constant_u64("forecast-tool-boundary-v1", key),
+                "types::{name} must equal constants.{key} in forecast-tool-boundary-v1"
+            );
+        }
     }
 
     /// The Chronos door's three bounds against the SAME contract.

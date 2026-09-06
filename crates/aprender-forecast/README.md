@@ -42,7 +42,7 @@ routes, readiness — and calls `forecast()`; it re-implements nothing (OPS-03).
 ## Correctness bar
 
 Not self-consistency: **parity with Python Prophet 1.4.0**. The ladder's load-bearing
-rung, `prophet::parity::peyton_objective_at_python_map_within_1e9`, evaluates the Rust
+rung, `prophet::parity::peyton_manning_objective_at_python_map`, evaluates the Rust
 objective at Python's MAP on the Peyton Manning series and compares it to Python's own
 unnormalised log posterior. The oracle fixtures, their provenance, their generating
 environments and the commands that regenerate them are documented in

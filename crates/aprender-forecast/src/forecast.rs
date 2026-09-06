@@ -19,7 +19,8 @@ use crate::prophet::{
     auto_seasonalities, make_design, predict, Growth, Holiday, Mode, Seasonality, Spec,
 };
 use crate::types::{
-    ForecastArgs, ForecastError, ForecastResponse, MAX_HORIZON, MAX_POINTS, MIN_POINTS,
+    ForecastArgs, ForecastError, ForecastResponse, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
+    MAX_HOLIDAY_WINDOW, MAX_HORIZON, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
 };
 
 /// Fit and forecast in ONE stateless call (D-01: no fit -> artifact -> forecast round-trip).
@@ -70,6 +71,15 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             "ds must be strictly ascending with no duplicates".into(),
         ));
     }
+    // MAX_POINTS bounds how MANY points arrive, never how far apart they are, and the
+    // NeuralProphet path materialises an imputed DAILY grid over the whole span — ten
+    // points a millennium apart bought a 3.6-million-row grid. Bound the span too.
+    let span_days = ds[ds.len() - 1] - ds[0] + 1;
+    if span_days > MAX_SPAN_DAYS {
+        return Err(ForecastError::Validation(format!(
+            "ds spans {span_days} days, which exceeds max_span_days {MAX_SPAN_DAYS}"
+        )));
+    }
     let freq = args.freq.clone().unwrap_or_else(|| "D".into());
     let fut = future_days(ds[ds.len() - 1], args.horizon, &freq)?;
     let model_name = args.model.clone().unwrap_or_else(|| "prophet".into());
@@ -90,6 +100,30 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
         return Err(ForecastError::Validation(
             "y is constant; nothing to fit (Prophet special-cases this too)".into(),
         ));
+    }
+
+    // An option that belongs to the OTHER model is refused, never silently dropped: the
+    // worst failure class at this door is the caller getting a plausible answer to a
+    // question they did not ask (D-11). `deny_unknown_fields` catches a misspelt key; only
+    // this catches a well-formed key aimed at the wrong arm.
+    if model_name == "prophet" && args.n_lags.is_some() {
+        return Err(ForecastError::Validation(
+            "n_lags is neuralprophet-only; set model to \"neuralprophet\"".into(),
+        ));
+    }
+    if model_name == "neuralprophet" {
+        for (name, present) in [
+            ("growth", args.growth.is_some()),
+            ("cap", args.cap.is_some()),
+            ("seasonality_mode", args.seasonality_mode.is_some()),
+            ("holidays", args.holidays.is_some()),
+        ] {
+            if present {
+                return Err(ForecastError::Validation(format!(
+                    "{name} is prophet-only; set model to \"prophet\""
+                )));
+            }
+        }
     }
 
     match model_name.as_str() {
@@ -117,6 +151,14 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                 let cap = args
                     .cap
                     .ok_or_else(|| ForecastError::Validation("logistic growth needs cap".into()))?;
+                // `y` is checked for finiteness above; `cap` was not, and JSON `1e400`
+                // parses to `f64::INFINITY`, for which `cap <= y_max` is false. An infinite
+                // cap makes every trend value infinite, which serialises as JSON `null`.
+                if !cap.is_finite() {
+                    return Err(ForecastError::Validation(
+                        "cap must be a finite number".into(),
+                    ));
+                }
                 if cap <= y_max {
                     return Err(ForecastError::Validation(format!(
                         "cap {cap} must exceed max(y) = {y_max}"
@@ -124,11 +166,36 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                 }
             }
             let mut holidays = Vec::new();
+            // `prophet::columns` emits one design column per offset in the window, so an
+            // unbounded window is an unbounded column count from a ~200-byte request.
+            let mut holiday_columns = 0usize;
             for h in args.holidays.as_deref().unwrap_or(&[]) {
                 if h.lower_window > 0 || h.upper_window < 0 {
                     return Err(ForecastError::Validation(format!(
                         "holiday {:?}: lower_window ≤ 0 ≤ upper_window",
                         h.name
+                    )));
+                }
+                if h.lower_window < -MAX_HOLIDAY_WINDOW || h.upper_window > MAX_HOLIDAY_WINDOW {
+                    return Err(ForecastError::Validation(format!(
+                        "holiday {:?}: windows must be within ±{MAX_HOLIDAY_WINDOW} days",
+                        h.name
+                    )));
+                }
+                if h.dates.len() > MAX_HOLIDAY_DATES {
+                    return Err(ForecastError::Validation(format!(
+                        "holiday {:?}: {} dates exceeds max_holiday_dates {MAX_HOLIDAY_DATES}",
+                        h.name,
+                        h.dates.len()
+                    )));
+                }
+                // Both windows are now within ±MAX_HOLIDAY_WINDOW, so the width is small
+                // enough that this sum cannot overflow before the ceiling refuses it.
+                holiday_columns += (h.upper_window - h.lower_window + 1) as usize;
+                if holiday_columns > MAX_HOLIDAY_COLUMNS {
+                    return Err(ForecastError::Validation(format!(
+                        "holiday windows expand to more than max_holiday_columns \
+                         {MAX_HOLIDAY_COLUMNS} design columns"
                     )));
                 }
                 let days: Vec<i64> = h
@@ -266,16 +333,12 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             })?;
             let fit_seconds = t0.elapsed().as_secs_f64();
             let t1 = Instant::now();
-            let (yhat, trend) = if n_lags == 0 {
-                (
-                    np::predict_ts(&d, &m, &fut),
-                    np::predict_trend(&d, &m, &fut),
-                )
+            // `predict_trend` is branch-independent; only the yhat path differs.
+            let trend = np::predict_trend(&d, &m, &fut);
+            let yhat = if n_lags == 0 {
+                np::predict_ts(&d, &m, &fut)
             } else {
-                (
-                    np::predict_ar_recursive(&d, &m, &fut),
-                    np::predict_trend(&d, &m, &fut),
-                )
+                np::predict_ar_recursive(&d, &m, &fut)
             };
             // Residual-based band. NeuralProphet itself would use quantile regression; that
             // was NOT spiked (CONTEXT deferred), and the diagnostics say so rather than
@@ -348,8 +411,16 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
 }
 
 /// Acklam's inverse normal CDF (enough for band z-scores).
+///
+/// The clamp is load-bearing and matches `aprender::monte_carlo::engine::inverse_normal_cdf`,
+/// which this is a transcription of. Without it the tails divide infinity by infinity:
+/// `interval_width = 0.9999999999999999` is the largest value the door accepts, and
+/// `(1.0 + w) / 2.0` rounds to EXACTLY 1.0, so `(1.0 - p).ln()` is `-inf`, `q` is `inf`
+/// and the returned z is `NaN` — which `serde_json` then writes as JSON `null` for every
+/// `yhat_lower`/`yhat_upper` in an otherwise successful response.
 #[must_use]
 pub fn normal_quantile(p: f64) -> f64 {
+    let p = p.clamp(1e-15, 1.0 - 1e-15);
     let a = [
         -3.969683028665376e1,
         2.209460984245205e2,
@@ -398,7 +469,7 @@ pub fn normal_quantile(p: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::forecast;
+    use super::{forecast, normal_quantile};
     use crate::dates::{days_from_civil, format_ymd};
     use crate::prophet::Rng;
     use crate::types::{ForecastArgs, ForecastError};
@@ -530,5 +601,104 @@ mod tests {
                 other.map(|r| r.model)
             ),
         }
+    }
+
+    // ---------------------------------------------------------------- door hardening ---
+    // Every case below reached a crash, an unbounded allocation or a silently wrong
+    // answer before it was closed. They live in `--lib` (which CI runs) rather than in
+    // `tests/`, which is not on ci.yml's explicit `--test` line.
+
+    fn refusal(args: &ForecastArgs, needle: &str) {
+        match forecast(args) {
+            Err(ForecastError::Validation(m)) => assert!(
+                m.contains(needle),
+                "message must name the fix; wanted {needle:?}, got {m:?}"
+            ),
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+    }
+
+    /// `MAX_POINTS` bounds how MANY points arrive, never how far apart they are, and the
+    /// NeuralProphet path materialises an imputed daily grid over the whole span.
+    #[test]
+    fn a_span_far_wider_than_the_point_count_is_refused() {
+        let mut args = np_args(12, 7);
+        args.ds = (0..12)
+            .map(|i| format_ymd(days_from_civil(1500, 1, 1) + i * 30_000))
+            .collect();
+        refusal(&args, "max_span_days");
+    }
+
+    /// The two window fields were only SIGN-checked, so two integers expanded into an
+    /// unbounded number of design columns from a ~200-byte request.
+    #[test]
+    fn an_enormous_holiday_window_is_refused() {
+        let (ds, y) = synthetic_daily(60);
+        let mut args = np_args(60, 7);
+        args.model = None;
+        args.ds = ds;
+        args.y = y;
+        args.holidays = Some(vec![crate::types::HolidayArg {
+            name: "x".into(),
+            dates: vec!["2020-02-01".into()],
+            lower_window: -2_000_000_000,
+            upper_window: 0,
+        }]);
+        refusal(&args, "365");
+    }
+
+    /// A well-formed option aimed at the wrong arm was silently DROPPED: the caller got a
+    /// plausible answer to a question they did not ask.
+    #[test]
+    fn an_option_belonging_to_the_other_model_is_refused_not_dropped() {
+        let mut prophet = np_args(60, 7);
+        prophet.model = None;
+        prophet.n_lags = Some(7);
+        refusal(&prophet, "neuralprophet-only");
+
+        let mut np = np_args(60, 7);
+        np.growth = Some("logistic".into());
+        refusal(&np, "prophet-only");
+    }
+
+    /// JSON `1e400` parses to `f64::INFINITY`, for which `cap <= y_max` is false.
+    #[test]
+    fn an_infinite_cap_is_refused() {
+        let mut args = np_args(60, 7);
+        args.model = None;
+        args.growth = Some("logistic".into());
+        args.cap = Some(f64::INFINITY);
+        refusal(&args, "finite");
+    }
+
+    /// `(1.0 + w) / 2.0` rounds to EXACTLY 1.0 for the largest accepted `interval_width`,
+    /// and the un-clamped tail then divided infinity by infinity.
+    #[test]
+    fn the_widest_accepted_interval_still_yields_a_finite_z() {
+        let w = 0.999_999_999_999_999_9_f64;
+        assert!(w < 1.0, "the door accepts anything strictly below 1.0");
+        assert!(
+            ((1.0 + w) / 2.0 - 1.0).abs() < f64::EPSILON,
+            "the midpoint really does round to 1.0"
+        );
+        let z = normal_quantile((1.0 + w) / 2.0);
+        assert!(z.is_finite(), "band z must stay finite, got {z}");
+    }
+
+    /// 20 points seven days apart select NO auto seasonality, and `season_dim() == 0`
+    /// tripped trueno's `Contract transpose: input is empty` inside the fit.
+    #[test]
+    fn a_weekly_spaced_series_still_fits_instead_of_panicking() {
+        let mut args = np_args(20, 7);
+        args.ds = (0..20)
+            .map(|i| format_ymd(days_from_civil(2020, 1, 1) + i * 7))
+            .collect();
+        args.y = (0..20).map(|i| 10.0 + f64::from(i) * 0.5).collect();
+        let r = forecast(&args).expect("a weekly-spaced series is a legal request");
+        assert_eq!(r.yhat.len(), 7);
+        assert!(r.yhat.iter().all(|v| v.is_finite()));
     }
 }

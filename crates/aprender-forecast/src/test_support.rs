@@ -6,12 +6,6 @@
 //! `ds` because `wp_log_R.csv` is not chronological, and tolerances are READ from the
 //! contract rather than written as literals so the contract stays the source of truth.
 
-// `contract_path`, `equation_tolerance` and `constant_u64` have no caller until plan 06-03
-// replaces this plan's one `1e-9` literal with a contract read, and 06-05/06-06 add the
-// Chronos constants. They are written here, once, with the rest of the readers rather than
-// being reinvented per plan. Scoped to this cfg(test)-only module — never crate-wide.
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
@@ -75,6 +69,55 @@ pub(crate) fn contract_path(name: &str) -> PathBuf {
         .join(format!("{name}.yaml"))
 }
 
+/// Parse a contract once per process and hand out cheap clones of the parsed tree.
+///
+/// `serde_yaml` on a 30-50 KB contract costs ~6.5 ms, and the parity ladders call the two
+/// readers below ~87 times for Prophet alone — re-reading and re-parsing per call was
+/// roughly 0.5 s of pure repeat work. The contracts are immutable for the life of a test
+/// binary, so one parse each is enough. D-15's contract-as-source-of-truth is untouched:
+/// this memoizes the file plumbing under it, not the lookup.
+///
+/// # Panics
+///
+/// Panics if the contract is missing or unparseable.
+fn contract_doc(contract: &str) -> std::sync::Arc<serde_yaml::Value> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+    static DOCS: OnceLock<Mutex<HashMap<String, Arc<serde_yaml::Value>>>> = OnceLock::new();
+    let cache = DOCS.get_or_init(|| Mutex::new(HashMap::new()));
+
+    // Read the cache, then RELEASE the lock. Parsing under the guard would hold a global
+    // mutex across ~6.5 ms of file I/O plus deserialisation — serialising every test thread
+    // on first touch, the opposite of what this memo is for — and, worse, a missing or
+    // malformed contract panics inside that critical section. Unwinding out of a held guard
+    // poisons the mutex, so the ONE accurate "contract X must exist at <path>" failure
+    // would be followed by dozens of "contract cache mutex poisoned" panics in unrelated
+    // tests, none of which name the real defect.
+    if let Some(hit) = cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(contract)
+    {
+        return Arc::clone(hit);
+    }
+    let path = contract_path(contract);
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("contract {contract} must exist at {}: {e}", path.display()));
+    let doc = Arc::new(
+        serde_yaml::from_str(&raw)
+            .unwrap_or_else(|e| panic!("contract {contract} is not valid YAML: {e}")),
+    );
+    // A racing thread may have parsed the same contract meanwhile; either Arc is equally
+    // correct, so keep whichever landed first and hand back that one.
+    Arc::clone(
+        cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(contract.to_string())
+            .or_insert(doc),
+    )
+}
+
 /// Read `equations.<equation>.float_tolerance` from a contract.
 ///
 /// Tolerances belong to the contract, not to a test literal: a test that hardcodes one can
@@ -84,11 +127,7 @@ pub(crate) fn contract_path(name: &str) -> PathBuf {
 ///
 /// Panics if the contract is missing, unparseable, or does not carry that key.
 pub(crate) fn equation_tolerance(contract: &str, equation: &str) -> f64 {
-    let path = contract_path(contract);
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("contract {contract} must exist at {}: {e}", path.display()));
-    let doc: serde_yaml::Value = serde_yaml::from_str(&raw)
-        .unwrap_or_else(|e| panic!("contract {contract} is not valid YAML: {e}"));
+    let doc = contract_doc(contract);
     doc.get("equations")
         .and_then(|e| e.get(equation))
         .and_then(|e| e.get("float_tolerance"))
@@ -104,11 +143,7 @@ pub(crate) fn equation_tolerance(contract: &str, equation: &str) -> f64 {
 ///
 /// Panics if the contract is missing, unparseable, or does not carry that key.
 pub(crate) fn constant_u64(contract: &str, key: &str) -> u64 {
-    let path = contract_path(contract);
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("contract {contract} must exist at {}: {e}", path.display()));
-    let doc: serde_yaml::Value = serde_yaml::from_str(&raw)
-        .unwrap_or_else(|e| panic!("contract {contract} is not valid YAML: {e}"));
+    let doc = contract_doc(contract);
     doc.get("constants")
         .and_then(|c| c.get(key))
         .and_then(serde_yaml::Value::as_u64)

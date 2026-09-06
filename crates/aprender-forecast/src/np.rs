@@ -131,6 +131,12 @@ pub fn trend_feats(t: f64, cps: &[f64], out: &mut Vec<f32>) {
     out.extend(phi.iter().map(|v| *v as f32));
 }
 
+/// NeuralProphet's own `end_w`, and the default [`TrainConfig::newer_w`] carries.
+///
+/// Used by the PREDICTION paths, whose `Rows::w` no loss ever reads; training reads the
+/// caller's `cfg.newer_w` instead of this.
+pub const DEFAULT_END_W: f64 = 2.0;
+
 /// Newer-samples weight (NP `_get_time_based_sample_weight`, `end_w = 2`, `start_t = 0`).
 pub fn sample_weight(t: f64, end_w: f64) -> f32 {
     let time = t.clamp(0.0, 1.0);
@@ -206,7 +212,22 @@ impl NpData {
         let cps: Vec<f64> = (0..=n_changepoints)
             .map(|i| changepoints_range * i as f64 / (n_changepoints + 1) as f64)
             .collect();
-        let seasons = np_auto_seasonalities(&ds_days[..n_train_rows]);
+        // The auto rules can select NOTHING — 20 points seven days apart give span 133
+        // (no yearly) and min_dt exactly 7.0 (no weekly, the test is `< 7.0`) — and
+        // `season_dim() == 0` then builds a `Linear::without_bias(0, 1)` whose transpose
+        // trips trueno's `Contract transpose: input is empty`. Through the server that is
+        // an `Internal` for a caller-fixable input; with debug assertions off it is worse,
+        // a silently zero seasonality term. Prophet's arm already fills the same hole with
+        // a harmless weekly column (`forecast.rs`); do the same here, on the daily grid
+        // this struct imputes, so the design always has K >= 1.
+        let mut seasons = np_auto_seasonalities(&ds_days[..n_train_rows]);
+        if seasons.is_empty() {
+            seasons.push(NpSeason {
+                name: "weekly".into(),
+                period: 7.0,
+                order: 3,
+            });
+        }
         NpData {
             grid_days: (first..=last).collect(),
             grid_y,
@@ -433,7 +454,12 @@ pub struct Rows {
     pub sd: usize,
 }
 
-pub fn rows_for(d: &NpData, days: &[i64], y_norm: &[f32]) -> Rows {
+/// `end_w` is [`TrainConfig::newer_w`]: the sample weight at the END of the series, with
+/// 1.0 at the start. It is a PARAMETER rather than the literal `2.0` it used to be because
+/// `newer_w` is a public knob on a public config — hardcoding it here meant a caller could
+/// set `newer_w: 4.0`, get a fit trained at 2.0, and be told nothing. Prediction paths pass
+/// the same default; `Rows::w` is only read by the training loss.
+pub fn rows_for(d: &NpData, days: &[i64], y_norm: &[f32], end_w: f64) -> Rows {
     let (td, sd) = (d.trend_dim(), d.season_dim());
     let (mut tr, mut se, mut w) = (
         Vec::with_capacity(days.len() * td),
@@ -442,7 +468,7 @@ pub fn rows_for(d: &NpData, days: &[i64], y_norm: &[f32]) -> Rows {
     );
     for &day in days {
         d.row_feats(day, &mut tr, &mut se);
-        w.push(sample_weight(d.t_of(day), 2.0));
+        w.push(sample_weight(d.t_of(day), end_w));
     }
     Rows {
         tr,
@@ -470,7 +496,7 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     let mut model = NpModel::new(d, cfg.n_lags, &cfg.ar_layers, &mut rng);
     let n_grid = d.n_train_grid;
     let y_norm: Vec<f32> = d.grid_y[..n_grid].iter().map(|v| d.norm(*v)).collect();
-    let rows = rows_for(d, &d.grid_days[..n_grid], &y_norm);
+    let rows = rows_for(d, &d.grid_days[..n_grid], &y_norm, cfg.newer_w);
     let l = cfg.n_lags;
     // NP trains the lag-free model on the OBSERVED rows only (no imputation needed);
     // with lags it trains on the imputed daily grid so every window is complete.
@@ -553,7 +579,7 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
 
 /// Trend + seasonality prediction (original scale) for arbitrary days.
 pub fn predict_ts(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
-    let rows = rows_for(d, days, &vec![0.0; days.len()]);
+    let rows = rows_for(d, days, &vec![0.0; days.len()], DEFAULT_END_W);
     let xt = Tensor::from_vec(rows.tr.clone(), &[days.len(), rows.td]);
     let xs = Tensor::from_vec(rows.se.clone(), &[days.len(), rows.sd]);
     let out = no_grad(|| m.forward(&xt, &xs, None));
@@ -565,7 +591,7 @@ pub fn predict_ts(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
 pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize]) -> Vec<f64> {
     let l = m.n_lags;
     let y_norm: Vec<f32> = d.grid_y.iter().map(|v| d.norm(*v)).collect();
-    let rows = rows_for(d, &d.grid_days, &y_norm);
+    let rows = rows_for(d, &d.grid_days, &y_norm, DEFAULT_END_W);
     let b = idx.len();
     let xt = Tensor::from_vec(gather(&rows.tr, rows.td, idx), &[b, rows.td]);
     let xs = Tensor::from_vec(gather(&rows.se, rows.sd, idx), &[b, rows.sd]);
@@ -583,7 +609,7 @@ pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize]) -> Vec<f64> {
 
 /// Trend component only (original scale) for arbitrary days.
 pub fn predict_trend(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
-    let rows = rows_for(d, days, &vec![0.0; days.len()]);
+    let rows = rows_for(d, days, &vec![0.0; days.len()], DEFAULT_END_W);
     let xt = Tensor::from_vec(rows.tr.clone(), &[days.len(), rows.td]);
     let out = no_grad(|| m.trend.forward(&xt).broadcast_add(&m.bias));
     clear_graph();

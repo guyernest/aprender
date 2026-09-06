@@ -170,7 +170,6 @@ pub fn pooled_app(pool: usize, name: &str, version: &str) -> pmcp::Result<axum::
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap() internally
 mod e2e {
     use super::{build_server, http_app};
     use aprender_forecast::dates::{days_from_civil, format_ymd};
@@ -916,7 +915,6 @@ mod e2e {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap() internally
 mod tests {
     use aprender_forecast::ForecastArgs;
 
@@ -975,7 +973,6 @@ mod tests {
 /// aarch64 release host. There is no timing assertion and no `cfg!(target_arch)` gate
 /// anywhere in this module.
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap() internally
 mod pool_equality {
     use std::sync::Arc;
     use std::time::Instant;

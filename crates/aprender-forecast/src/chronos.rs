@@ -298,7 +298,11 @@ pub fn forecast(model: &Model, args: &ChronosArgs) -> Result<ChronosResponse, Fo
     let to64 = |v: &Vec<f32>| v.iter().map(|x| f64::from(*x)).collect::<Vec<f64>>();
     let mut quantiles = serde_json::Map::new();
     for (i, lvl) in cfg.quantiles.iter().enumerate() {
-        quantiles.insert(format!("{lvl:.1}"), serde_json::json!(to64(&q[i])));
+        // `{lvl:.1}` is LOSSY: `cfg.quantiles` comes verbatim from the checkpoint's
+        // config.json, and a grid like [0.05, 0.1, 0.5, 0.9, 0.95] collapses 0.05/0.1 and
+        // 0.9/0.95 onto the same key. Later inserts win, so the surviving "0.9" series is
+        // q95 while claiming to be q90 — a mislabelled number, not a dropped one.
+        quantiles.insert(lvl.to_string(), serde_json::json!(to64(&q[i])));
     }
     let rollouts = forwards.saturating_sub(1) / cfg.quantiles.len();
     let warning = (args.horizon > cfg.prediction_length).then(|| {

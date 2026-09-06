@@ -30,6 +30,10 @@ const DEFAULT_PORT: u16 = 8765;
 /// `contracts/forecast-tool-boundary-v1.yaml`. Size it to the blocking-thread budget:
 /// K is the number of fits that can be in flight at once, and each one is seconds of CPU.
 const DEFAULT_POOL: usize = 8;
+/// Ceiling on `--pool`. Each router is a whole `pmcp::Server` plus a spawned outbound-drain
+/// task, and the useful range is the blocking-thread budget (tokio's default is 512), so
+/// anything past this is a resource mistake rather than a configuration.
+const MAX_POOL: usize = 256;
 
 /// A synthetic daily series with drifting slope, yearly + weekly terms and noise.
 fn synth(n: usize, seed: u64) -> (Vec<String>, Vec<f64>) {
@@ -107,9 +111,10 @@ fn build() -> Option<pmcp::Server> {
 
 /// Parse the tail of `--http [PORT] [--pool K]` in either order.
 ///
-/// Returns `None` for a usage error (an unparseable port, a `--pool` with no value, or a
-/// `--pool` value that is not a number) so `main` can exit 2 rather than silently
-/// defaulting — the same refuse-never-default rule the tool boundary itself follows.
+/// Returns `None` for a usage error (an unparseable port, a `--pool` with no value, a
+/// `--pool` value that is not a number, or a `--pool` above [`MAX_POOL`]) so `main` can
+/// exit 2 rather than silently defaulting — the same refuse-never-default rule the tool
+/// boundary itself follows.
 fn parse_http_args(rest: &[String]) -> Option<(u16, usize)> {
     let mut port = DEFAULT_PORT;
     let mut pool = DEFAULT_POOL;
@@ -117,6 +122,13 @@ fn parse_http_args(rest: &[String]) -> Option<(u16, usize)> {
     while i < rest.len() {
         if rest[i] == "--pool" {
             pool = rest.get(i + 1)?.parse().ok()?;
+            // `pooled_app` does `Vec::with_capacity(pool)` and builds one `Server` plus one
+            // tokio drain task per router, so an unbounded K is a crash (`--pool
+            // 18446744073709551615` panics with "capacity overflow") or a task storm before
+            // the listener is ever bound. A usage error is the documented outcome.
+            if pool > MAX_POOL {
+                return None;
+            }
             i += 2;
         } else {
             port = rest[i].parse().ok()?;
