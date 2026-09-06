@@ -435,3 +435,8 @@ seven-fixture ladder before anyone concludes the feedback-latency target is met.
 ---
 *Phase: 06-native-time-series-forecasting-stack*
 *Completed: 2026-09-05*
+
+## Self-Check: PASSED
+
+All 17 `key-files.created` entries exist on disk; all three commits
+(`725d5c7b2`, `13f785820`, `5e971ea3e`) are present in `git log --all`.
