@@ -535,3 +535,189 @@ mod tests {
         assert!(props.contains_key("freq"));
     }
 }
+
+#[cfg(test)]
+mod parity {
+    //! The SC4 door-level rungs: f16 weight precision and the horizon/rollout reporting.
+    //!
+    //! Weight-gated with `#[cfg_attr(not(chronos_weights), ignore = "...")]` so an unarmed run
+    //! reports them as COUNTED skips (D-18). Every bar is read from
+    //! `contracts/chronos-bolt-parity-v1.yaml` at test time (D-15).
+
+    use super::{forecast, load_model_from_dir, ChronosArgs, Model};
+    use crate::test_support::{constant_u64, equation_tolerance, load_json, read_csv};
+    use std::path::PathBuf;
+
+    /// `CHRONOS_MODEL_DIR` as a path. `expect`, not skip: when `chronos_weights` is armed the
+    /// variable held a `model.safetensors` at build time.
+    fn armed_dir() -> PathBuf {
+        PathBuf::from(
+            std::env::var_os("CHRONOS_MODEL_DIR")
+                .expect("CHRONOS_MODEL_DIR is set whenever cfg(chronos_weights) is armed"),
+        )
+    }
+
+    /// A `ds`/`y` pair from the committed Peyton CSV, last `n` rows.
+    fn peyton_tail(n: usize) -> (Vec<String>, Vec<Option<f64>>) {
+        let (ds, y) = read_csv("peyton_manning.csv");
+        let start = ds.len() - n;
+        (
+            ds[start..].to_vec(),
+            y[start..].iter().map(|v| Some(*v)).collect(),
+        )
+    }
+
+    /// FALSIFY-CHRONOS-010: the locally derived f16 weights forecast within 2 % of the series
+    /// standard deviation of the pinned f32 weights (SC4's f16 literal).
+    ///
+    /// Both directories exist whenever the recipe has run — it derives f16 from the verified f32
+    /// — so their absence when armed is a defect, not a skip. The dtype assertions rule out the
+    /// failure mode where the test loads the same file twice and compares it to itself.
+    #[test]
+    #[cfg_attr(
+        not(chronos_weights),
+        ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
+    )]
+    fn f16_weights_within_two_percent_of_std() {
+        let base = armed_dir();
+        let root = base.parent().expect("CHRONOS_MODEL_DIR has a parent");
+        let f32_model: Model =
+            load_model_from_dir(&root.join("f32")).expect("the f32 weights must load");
+        let f16_model: Model =
+            load_model_from_dir(&root.join("f16")).expect("the derived f16 weights must load");
+        assert_eq!(f32_model.dtype, "F32", "the f32 directory must hold F32");
+        assert_eq!(f16_model.dtype, "F16", "the f16 directory must hold F16");
+        assert_eq!(
+            f32_model.n_params, f16_model.n_params,
+            "the derivation must not add or drop a tensor"
+        );
+
+        let (_, y) = read_csv("peyton_manning.csv");
+        let ctx: Vec<f32> = y.iter().map(|v| *v as f32).collect();
+        let q32 = f32_model.bolt.forward(&ctx);
+        let q16 = f16_model.bolt.forward(&ctx);
+
+        // The series std is the oracle's own `scale` for this series (0.8718), not a number this
+        // test derives for itself.
+        let std = load_json("chronos_bolt_tiny_fixture.json")["series"]["peyton"]["scale"]
+            .as_f64()
+            .expect("scale");
+        let rel = equation_tolerance("chronos-bolt-parity-v1", "f16_rel_std");
+        let bar = rel * std;
+        let delta = q32
+            .iter()
+            .flatten()
+            .zip(q16.iter().flatten())
+            .map(|(a, b)| f64::from((a - b).abs()))
+            .fold(0.0, f64::max);
+        println!(
+            "f16 vs f32: max|delta| {delta:.4e} = {:.4} % of the series std {std:.4} \
+             (bar {rel} x std = {bar:e})",
+            100.0 * delta / std
+        );
+        assert!(
+            delta <= bar,
+            "f16 quantiles differ from f32 by {delta:e}, over {rel} x std {std} = {bar:e}"
+        );
+    }
+
+    /// FALSIFY-CHRONOS-012: a rolled-forward horizon carries a warning naming the rollout, and
+    /// the forward/rollout counts are the documented arithmetic.
+    ///
+    /// The series is deliberately SHORT (200 points): `forwards` and `rollouts` depend only on
+    /// the horizon, so a 2905-point context would cost 46 full-length forwards to assert the same
+    /// two integers.
+    #[test]
+    #[cfg_attr(
+        not(chronos_weights),
+        ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
+    )]
+    fn door_reports_warning_and_forwards_for_365() {
+        let model = load_model_from_dir(&armed_dir()).expect("the armed weights must load");
+        let (ds, y) = peyton_tail(200);
+        let long = ChronosArgs {
+            ds: ds.clone(),
+            y: y.clone(),
+            horizon: 365,
+            freq: None,
+            allow_long_horizon: true,
+        };
+        let r = forecast(&model, &long).expect("365 steps with the flag is accepted");
+        let warning = r
+            .warning
+            .as_deref()
+            .expect("a rolled-forward horizon warns");
+        println!("warning: {warning}");
+        assert!(
+            warning.contains("rollout"),
+            "the warning must name the rollout: {warning}"
+        );
+        assert_eq!(
+            r.diagnostics["forwards"].as_u64().expect("forwards"),
+            constant_u64("chronos-bolt-parity-v1", "rollout_forwards_for_365")
+        );
+        assert_eq!(r.diagnostics["rollouts"].as_u64().expect("rollouts"), 5);
+        assert_eq!(r.ds.len(), 365, "365 future timestamps");
+        assert_eq!(r.yhat.len(), 365);
+
+        // A horizon inside the native window carries NO warning key at all.
+        let native = ChronosArgs {
+            ds,
+            y,
+            horizon: constant_u64("chronos-bolt-parity-v1", "native_horizon") as usize,
+            freq: None,
+            allow_long_horizon: false,
+        };
+        let r = forecast(&model, &native).expect("a native-horizon call is accepted");
+        assert!(
+            r.warning.is_none(),
+            "a horizon within the native window must carry no warning: {:?}",
+            r.warning
+        );
+        assert_eq!(r.diagnostics["forwards"].as_u64().expect("forwards"), 1);
+        assert_eq!(r.diagnostics["rollouts"].as_u64().expect("rollouts"), 0);
+    }
+
+    /// The context cap (T-06-02): a series longer than `context_length` is truncated from the
+    /// left rather than refused or fed whole, and the response REPORTS how much was used.
+    #[test]
+    #[cfg_attr(
+        not(chronos_weights),
+        ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
+    )]
+    fn door_context_used_is_capped_at_2048() {
+        let model = load_model_from_dir(&armed_dir()).expect("the armed weights must load");
+        // 3000 points, SYNTHETIC: the committed Peyton CSV is 2905 rows, so a real series long
+        // enough to exceed the 2048 cap by a comfortable margin has to be generated. Only the
+        // LENGTH is under test here, not any numeric value.
+        let n = 3000usize;
+        let day0 = crate::dates::days_from_civil(2010, 1, 1);
+        let ds: Vec<String> = (0..n)
+            .map(|i| crate::dates::format_ymd(day0 + i as i64))
+            .collect();
+        let y: Vec<Option<f64>> = (0..n)
+            .map(|i| Some(10.0 + (i as f64 / 30.0).sin()))
+            .collect();
+        let r = forecast(
+            &model,
+            &ChronosArgs {
+                ds,
+                y,
+                horizon: 8,
+                freq: None,
+                allow_long_horizon: false,
+            },
+        )
+        .expect("a 3000-point series is inside max_points");
+        let cap = constant_u64("chronos-bolt-parity-v1", "context_length") as usize;
+        println!(
+            "n_history {} -> context_used {}",
+            r.n_history, r.context_used
+        );
+        assert_eq!(r.n_history, n);
+        assert_eq!(
+            r.context_used, cap,
+            "a series longer than the context length must report the CAP, not its own length"
+        );
+    }
+}

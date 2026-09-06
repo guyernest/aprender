@@ -262,6 +262,12 @@ pub fn relative_bucket(
     bucket as usize
 }
 
+/// The instance-norm scale floor. A constant series has population std exactly 0, and the
+/// Chronos pipeline floors it here rather than dividing by zero. It is a MODEL constant, not a
+/// tolerance — which is why it is named once and referenced, so the parity module can use the
+/// same value without writing a bare literal inside a region that bans them.
+pub const SCALE_FLOOR: f32 = 1e-5;
+
 /// `[out, in]` -> `[in, out]`.
 #[must_use]
 pub fn transpose(w: &[f32], out: usize, inp: usize) -> Vec<f32> {
@@ -849,7 +855,7 @@ impl Bolt {
             (finite.iter().map(|v| (v - loc) * (v - loc)).sum::<f32>() / finite.len() as f32).sqrt()
         };
         if scale == 0.0 {
-            scale = 1e-5;
+            scale = SCALE_FLOOR;
         }
         // left-pad with NaN to a multiple of the patch size, then patch
         let p = cfg.patch;
@@ -1067,6 +1073,62 @@ mod tests {
         );
     }
 
+    /// D-14's FIRST clause, proven the same behavioural way (FALSIFY-CHRONOS-014): a multi-row
+    /// product must reach `gemm_blis` over the `[in, out]` transpose, not the plain-loop path.
+    ///
+    /// The two assertions are a pair. Bit-identity to `linear_fast` alone would be satisfied by a
+    /// host where the two kernels happen to agree, so the difference from `linear` is asserted as
+    /// "at least one of 20 differs" and the count is printed.
+    #[test]
+    fn multi_row_routing_is_gemm_blis_at_production_defaults() {
+        let (rows, inp, out) = (7usize, 67usize, 23usize);
+        let mut dot8_differs = 0usize;
+        for seed in 1..=20u64 {
+            let x = rand_vec(seed, rows * inp);
+            let w = rand_vec(seed ^ 0x1234, out * inp);
+            let wt = transpose(&w, out, inp);
+
+            let routed = proj(true, false, &x, rows, inp, &w, &wt, out, None);
+            let gemm_path = linear_fast(&x, rows, inp, &wt, out, None);
+            assert_eq!(
+                routed, gemm_path,
+                "seed {seed}: proj(fast=true) on {rows} rows must be bit-identical to the \
+                 gemm_blis path (D-14 first clause); it routed somewhere else"
+            );
+
+            if linear(&x, rows, inp, &w, out, None) != routed {
+                dot8_differs += 1;
+            }
+        }
+        println!(
+            "multi-row routing: gemm_blis bit-identical on 20/20 seeds; dot8 path differed on \
+             {dot8_differs}/20 seeds"
+        );
+        assert!(
+            dot8_differs >= 1,
+            "the dot8 path agreed with gemm_blis on all 20 seeded inputs, so the assertion above \
+             cannot distinguish the two kernels — the routing proof is vacuous on this host"
+        );
+    }
+
+    /// `torch_quantile`'s linear interpolation, which the re-quantiled rollout depends on.
+    /// Lives in `mod tests`, NOT in `mod parity`: it is arithmetic on a synthetic sorted slice,
+    /// so its `1e-6` is an exactness epsilon and not a parity bar. The region-scoped literal scan
+    /// over `mod parity` found it there first, and that is why it moved — a literal inside the
+    /// parity region is indistinguishable from a smuggled bar.
+    #[test]
+    fn torch_quantile_interpolates_linearly() {
+        let sorted = [0.0f32, 1.0, 2.0, 3.0, 4.0];
+        assert!((super::torch_quantile(&sorted, 0.0) - 0.0).abs() < 1e-6);
+        assert!((super::torch_quantile(&sorted, 0.5) - 2.0).abs() < 1e-6);
+        assert!((super::torch_quantile(&sorted, 1.0) - 4.0).abs() < 1e-6);
+        // 0.1 * (5 - 1) = 0.4 -> between sorted[0] and sorted[1]
+        assert!((super::torch_quantile(&sorted, 0.1) - 0.4).abs() < 1e-6);
+        let nq =
+            crate::test_support::constant_u64("chronos-bolt-parity-v1", "quantile_levels") as usize;
+        assert_eq!(nq, 9, "the contract's quantile level count");
+    }
+
     /// REVIEW-06-01, and the D-13 amendment ratified by plan 06-05's blocking human decision
     /// `amend-memory-clause`.
     ///
@@ -1131,6 +1193,450 @@ mod tests {
             params, 8_652_672,
             "the config-derived parameter count must equal the 8,652,672 the model card and the \
              committed safetensors header both report"
+        );
+    }
+}
+
+#[cfg(test)]
+mod parity {
+    //! The SC4 Bolt parity ladder against `chronos-forecasting` 2.3.1.
+    //!
+    //! Every weight-dependent test carries
+    //! `#[cfg_attr(not(chronos_weights), ignore = "...")]`, so an unarmed run reports them as
+    //! COUNTED skips with the arming reason printed rather than as a silent green (D-18). The
+    //! print-a-skip-line-and-return style is forbidden here (a `println!` naming SKIP followed
+    //! by an early `return`): it reports `0 ignored`, i.e. a silent green. This file never writes
+    //! that pattern, so a `! grep -q` on it is a real file-wide ban rather than a reviewer's
+    //! memory — the discipline 06-04 established for D-10.
+    //!
+    //! Every numeric bar is READ from `contracts/chronos-bolt-parity-v1.yaml` at test time
+    //! (D-15) — no tolerance literal lives in this module.
+
+    use super::relative_bucket;
+    use crate::test_support::{constant_u64, equation_tolerance, load_json, read_csv};
+    use std::sync::OnceLock;
+
+    /// The armed model, loaded once per test binary.
+    ///
+    /// `expect` rather than skip: when `chronos_weights` is set, `CHRONOS_MODEL_DIR` held a
+    /// `model.safetensors` at BUILD time, so its absence at run time is a defect.
+    fn model() -> &'static crate::chronos::Model {
+        static M: OnceLock<crate::chronos::Model> = OnceLock::new();
+        M.get_or_init(|| {
+            let dir = std::env::var_os("CHRONOS_MODEL_DIR").expect(
+                "CHRONOS_MODEL_DIR is set whenever cfg(chronos_weights) is armed; absence is a \
+                 defect, never a reason to skip",
+            );
+            crate::chronos::load_model_from_dir(std::path::Path::new(&dir))
+                .expect("the armed weights directory must load")
+        })
+    }
+
+    /// The f32 quantile bar, ARCHITECTURE-KEYED (REVIEW-06-02), printed with the ARCH it chose.
+    ///
+    /// aarch64 asserts the SC4 literal 1.0e-6, measured 9.54e-7 with the spike-008 NEON
+    /// microkernel live. Anywhere else — every CI job in this repository — asserts the
+    /// PROVISIONAL, UNMEASURED `quantiles_abs_f32_nonaarch64`, whose contract entry obliges the
+    /// first such run to record its measured value and tighten the bar.
+    fn f32_quantile_bar() -> f64 {
+        let equation = if cfg!(target_arch = "aarch64") {
+            "quantiles_abs_f32"
+        } else {
+            "quantiles_abs_f32_nonaarch64"
+        };
+        let bar = equation_tolerance("chronos-bolt-parity-v1", equation);
+        println!(
+            "f32 quantile bar: chronos-bolt-parity-v1.{equation} = {bar:e} (ARCH={})",
+            std::env::consts::ARCH
+        );
+        bar
+    }
+
+    fn max_abs(a: &[f32], b: &[f32]) -> f64 {
+        assert_eq!(a.len(), b.len(), "length {} vs {}", a.len(), b.len());
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| f64::from((x - y).abs()))
+            .fold(0.0, f64::max)
+    }
+
+    fn vecf(v: &serde_json::Value) -> Vec<f32> {
+        v.as_array()
+            .expect("array")
+            .iter()
+            .map(|x| x.as_f64().map_or(f32::NAN, |f| f as f32))
+            .collect()
+    }
+
+    fn vecq(v: &serde_json::Value) -> Vec<Vec<f32>> {
+        v.as_array().expect("array").iter().map(vecf).collect()
+    }
+
+    fn flat(q: &[Vec<f32>]) -> Vec<f32> {
+        q.iter().flatten().copied().collect()
+    }
+
+    fn peyton() -> Vec<f32> {
+        let (_, y) = read_csv("peyton_manning.csv");
+        y.iter().map(|v| *v as f32).collect()
+    }
+
+    /// One series' shared rungs: mask, patch count, loc, scale, the six hidden states.
+    /// Returns the forward so the caller can bar the quantiles its own way.
+    fn ladder_rungs(name: &str, y: &[f32]) -> super::Forward {
+        let m = model();
+        let d = m.bolt.cfg.d_model;
+        let fixture = load_json("chronos_bolt_tiny_fixture.json");
+        let f = &fixture["series"][name];
+        let fwd = m.bolt.forward_ladder(y);
+        let l = fwd.attention_mask.len();
+
+        let py_mask: Vec<bool> = f["attention_mask"]
+            .as_array()
+            .expect("attention_mask")
+            .iter()
+            .map(|v| v.as_f64().expect("f") > 0.5)
+            .collect();
+        assert_eq!(
+            fwd.attention_mask, py_mask,
+            "{name}: the attention mask must be EQUAL to the oracle's — it carries no tolerance"
+        );
+        assert_eq!(
+            l,
+            f["n_patches_plus_reg"].as_u64().expect("n") as usize,
+            "{name}: patch count including the REG token"
+        );
+
+        let ls_bar = equation_tolerance("chronos-bolt-parity-v1", "loc_scale_rel");
+        let py_loc = f["loc"].as_f64().expect("loc");
+        let py_scale = f["scale"].as_f64().expect("scale");
+        let d_loc = (f64::from(fwd.loc) - py_loc).abs() / py_loc.abs().max(1.0);
+        let d_scale =
+            (f64::from(fwd.scale) - py_scale).abs() / py_scale.max(f64::from(super::SCALE_FLOOR));
+        println!("{name}: loc rel {d_loc:.3e}, scale rel {d_scale:.3e} (bar {ls_bar:e})");
+        assert!(
+            d_loc <= ls_bar,
+            "{name}: loc rel {d_loc:e} over bar {ls_bar:e}"
+        );
+        assert!(
+            d_scale <= ls_bar,
+            "{name}: scale rel {d_scale:e} over bar {ls_bar:e}"
+        );
+
+        let h_bar = equation_tolerance("chronos-bolt-parity-v1", "hidden_states_abs");
+        let rungs = [
+            (
+                "input_embeds first patch",
+                max_abs(
+                    &fwd.input_embeds[..d],
+                    &vecf(&f["input_embeds_first_patch"]),
+                ),
+            ),
+            (
+                "input_embeds last patch",
+                max_abs(
+                    &fwd.input_embeds[(l - 2) * d..(l - 1) * d],
+                    &vecf(&f["input_embeds_last_patch"]),
+                ),
+            ),
+            (
+                "REG embedding",
+                max_abs(
+                    &fwd.input_embeds[(l - 1) * d..l * d],
+                    &vecf(&f["reg_embed"]),
+                ),
+            ),
+            (
+                "encoder first token",
+                max_abs(
+                    &fwd.encoder_hidden[..d],
+                    &vecf(&f["encoder_last_hidden_first"]),
+                ),
+            ),
+            (
+                "encoder REG token",
+                max_abs(
+                    &fwd.encoder_hidden[(l - 1) * d..l * d],
+                    &vecf(&f["encoder_last_hidden_reg"]),
+                ),
+            ),
+            (
+                "decoder hidden",
+                max_abs(&fwd.decoder_hidden, &vecf(&f["decoder_last_hidden"])),
+            ),
+        ];
+        for (rung, delta) in rungs {
+            println!("{name}: {rung} max|delta| {delta:.3e} (bar {h_bar:e})");
+            assert!(
+                delta <= h_bar,
+                "{name}: {rung} max|delta| {delta:e} over the contract bar {h_bar:e}"
+            );
+        }
+        fwd
+    }
+
+    /// FALSIFY-CHRONOS-001 / -004 / -005: the full Peyton Manning ladder on the ARCH-selected bar.
+    #[test]
+    #[cfg_attr(
+        not(chronos_weights),
+        ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
+    )]
+    fn peyton_ladder_matches_oracle_f32() {
+        let y = peyton();
+        let fwd = ladder_rungs("peyton", &y);
+
+        let bar = f32_quantile_bar();
+        let fixture = load_json("chronos_bolt_tiny_fixture.json");
+        let py_q = vecq(&fixture["series"]["peyton"]["quantiles_64"]);
+        let delta = max_abs(&flat(&fwd.quantiles), &flat(&py_q));
+        println!("peyton: quantiles_64 max|delta| {delta:.4e} against bar {bar:e}");
+        assert!(
+            delta <= bar,
+            "peyton quantiles_64 max|delta| {delta:e} over the contract bar {bar:e} \
+             (ARCH={}) — record this number in the contract if this is the first run on this \
+             architecture",
+            std::env::consts::ARCH
+        );
+
+        // The standalone oracle must agree with the ladder fixture; if it does not, one of the
+        // two committed files was regenerated alone and neither can be trusted.
+        let oracle = load_json("peyton_tiny_oracle.json");
+        let oracle_q = vecq(&oracle["quantiles_64"]);
+        assert_eq!(
+            max_abs(&flat(&py_q), &flat(&oracle_q)),
+            0.0,
+            "the two committed Peyton oracles must be byte-equal on quantiles_64"
+        );
+    }
+
+    /// FALSIFY-CHRONOS-003: the two shorter series, barred RELATIVE to their own scale.
+    #[test]
+    #[cfg_attr(
+        not(chronos_weights),
+        ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
+    )]
+    fn air_and_short100_ladders_match_oracle() {
+        let peyton = peyton();
+        let (_, air_y) = read_csv("air_passengers.csv");
+        let air: Vec<f32> = air_y.iter().map(|v| *v as f32).collect();
+        let short100 = peyton[peyton.len() - 100..].to_vec();
+
+        let rel = equation_tolerance("chronos-bolt-parity-v1", "quantiles_rel_scale");
+        let fixture = load_json("chronos_bolt_tiny_fixture.json");
+        for (name, y) in [("air", air), ("short100", short100)] {
+            let fwd = ladder_rungs(name, &y);
+            let py_q = vecq(&fixture["series"][name]["quantiles_64"]);
+            let delta = max_abs(&flat(&fwd.quantiles), &flat(&py_q));
+            let bar = rel * f64::from(fwd.scale);
+            println!(
+                "{name}: quantiles_64 max|delta| {delta:.4e} = {:.3e} relative to scale \
+                 {:.4} (bar {rel:e} x scale = {bar:e})",
+                delta / f64::from(fwd.scale),
+                fwd.scale
+            );
+            assert!(
+                delta <= bar,
+                "{name} quantiles_64 max|delta| {delta:e} over {rel:e} x scale {} = {bar:e}",
+                fwd.scale
+            );
+        }
+    }
+
+    /// FALSIFY-CHRONOS-008 / -009: the 365-step rollout AND the control that pins which pipeline
+    /// the oracle came from. Without the control the rung would prove only that SOME rollout was
+    /// implemented.
+    #[test]
+    #[cfg_attr(
+        not(chronos_weights),
+        ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
+    )]
+    fn rollout_365_matches_oracle_and_median_only_does_not() {
+        let m = model();
+        let cfg = &m.bolt.cfg;
+        let y = peyton();
+        let oracle = load_json("peyton_tiny_oracle.json");
+        let py365 = vecq(&oracle["quantiles_365"]);
+
+        let (q365, forwards) = m.bolt.predict(&y, 365);
+        let expected_forwards =
+            constant_u64("chronos-bolt-parity-v1", "rollout_forwards_for_365") as usize;
+        assert_eq!(
+            forwards, expected_forwards,
+            "the rollout shape is arithmetic, not an observation: 1 direct forward + 5 blocks x \
+             9 quantile paths"
+        );
+
+        let bar = equation_tolerance("chronos-bolt-parity-v1", "rollout_365_abs");
+        let delta = max_abs(&flat(&q365), &flat(&py365));
+        let first64 = max_abs(
+            &flat(&q365.iter().map(|q| q[..64].to_vec()).collect::<Vec<_>>()),
+            &flat(&py365.iter().map(|q| q[..64].to_vec()).collect::<Vec<_>>()),
+        );
+        println!(
+            "rollout 365: all steps max|delta| {delta:.3e} (bar {bar:e}); first 64 steps \
+             {first64:.3e}; {forwards} forwards"
+        );
+        assert!(
+            delta <= bar,
+            "365-step rollout max|delta| {delta:e} over the contract bar {bar:e}"
+        );
+
+        // ---- the control: the pre-2025 median-only rollout (spike 005 lines 70-82) ----
+        let mut ctx: Vec<f32> = y[y.len() - cfg.context_length..].to_vec();
+        let mut out: Vec<Vec<f32>> = vec![Vec::new(); cfg.quantiles.len()];
+        let mut remaining = 365i64;
+        while remaining > 0 {
+            let f = m.bolt.forward(&ctx);
+            for (o, q) in out.iter_mut().zip(&f) {
+                o.extend_from_slice(q);
+            }
+            ctx.extend_from_slice(&f[4]);
+            if ctx.len() > cfg.context_length {
+                ctx.drain(..ctx.len() - cfg.context_length);
+            }
+            remaining -= cfg.prediction_length as i64;
+        }
+        for o in out.iter_mut() {
+            o.truncate(365);
+        }
+        let control = max_abs(&flat(&out), &flat(&py365));
+        let separation = equation_tolerance(
+            "chronos-bolt-parity-v1",
+            "rollout_scheme_nine_path_requantiled",
+        );
+        println!(
+            "control (median-only rollout): max|delta| {control:.3e} against the SAME oracle \
+             (must EXCEED {separation:e})"
+        );
+        assert!(
+            control > separation,
+            "the median-only control differs from the oracle by only {control:e}, which does not \
+             exceed {separation:e} — the fixture no longer discriminates between the two rollout \
+             schemes, so the rung above has stopped being evidence"
+        );
+    }
+
+    /// FALSIFY-CHRONOS-006 / -007: the six edge probes, `constant` on the absolute bar.
+    #[test]
+    #[cfg_attr(
+        not(chronos_weights),
+        ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
+    )]
+    fn edge_probes_match_oracle() {
+        let m = model();
+        let probes = load_json("chronos_probes.json");
+        assert_eq!(
+            probes["chronos_version"].as_str().expect("version"),
+            "2.3.1",
+            "the probe oracle must be the pinned chronos-forecasting version"
+        );
+        let rel = equation_tolerance("chronos-bolt-parity-v1", "probe_quantiles_rel_scale");
+        let abs_bar = equation_tolerance("chronos-bolt-parity-v1", "probe_constant_abs");
+        let cases = probes["cases"].as_object().expect("cases");
+        assert_eq!(cases.len(), 6, "six probes are committed");
+        for (name, c) in cases {
+            let y = vecf(&c["y"]);
+            let py_q = vecq(&c["quantiles"]);
+            let pl = py_q[0].len();
+            let fwd = m.bolt.forward_ladder(&y);
+            let (q, _) = m.bolt.predict(&y, pl);
+
+            let py_mask: Vec<bool> = c["attention_mask"]
+                .as_array()
+                .expect("mask")
+                .iter()
+                .map(|v| v.as_f64().expect("f") > 0.5)
+                .collect();
+            assert_eq!(
+                fwd.attention_mask, py_mask,
+                "{name}: attention mask must be EQUAL — it is where a NaN or padding regression \
+                 shows up first"
+            );
+
+            let delta = max_abs(&flat(&q), &flat(&py_q));
+            let bar = if name == "constant" {
+                abs_bar
+            } else {
+                rel * f64::from(fwd.scale).max(1e-12)
+            };
+            println!(
+                "probe {name}: n {} -> {pl}, scale {:.4e}, max|delta| {delta:.3e} (bar {bar:e})",
+                y.len(),
+                fwd.scale
+            );
+            assert!(
+                delta <= bar,
+                "probe {name}: max|delta| {delta:e} over the contract bar {bar:e}"
+            );
+        }
+    }
+
+    /// KANI-CHRONOS-001's runnable, identically bounded evidence. NOT weight-gated: the bucket
+    /// function is pure arithmetic, so it runs on every CI leg whether or not weights exist.
+    ///
+    /// The committed fixtures publish no bucket table, so the reference here is the 18 offsets
+    /// spike 005 recorded in `RUN-OUTPUT.md` section 1 against transformers'
+    /// `_relative_position_bucket`, plus the structural properties over the whole
+    /// `[-context_length, context_length]` grid.
+    #[test]
+    fn relative_buckets_match_fixture_over_grid() {
+        let (nb, maxd) = (32usize, 128usize);
+        let recorded: [(i64, usize, usize); 18] = [
+            (-200, 15, 31),
+            (-128, 15, 31),
+            (-100, 15, 30),
+            (-17, 10, 16),
+            (-16, 10, 16),
+            (-8, 8, 8),
+            (-1, 1, 1),
+            (0, 0, 0),
+            (1, 17, 0),
+            (7, 23, 0),
+            (8, 24, 0),
+            (15, 25, 0),
+            (16, 26, 0),
+            (31, 27, 0),
+            (64, 30, 0),
+            (127, 31, 0),
+            (128, 31, 0),
+            (500, 31, 0),
+        ];
+        for (rel, bidi, causal) in recorded {
+            assert_eq!(
+                relative_bucket(rel, true, nb, maxd),
+                bidi,
+                "bidirectional bucket for offset {rel}"
+            );
+            assert_eq!(
+                relative_bucket(rel, false, nb, maxd),
+                causal,
+                "causal bucket for offset {rel}"
+            );
+        }
+
+        let ctx = constant_u64("chronos-bolt-parity-v1", "context_length") as i64;
+        for rel in -ctx..=ctx {
+            for bidirectional in [true, false] {
+                let b = relative_bucket(rel, bidirectional, nb, maxd);
+                assert!(
+                    b < nb,
+                    "bucket {b} is out of range for offset {rel} (bidirectional {bidirectional}) \
+                     — it indexes the bias table"
+                );
+            }
+            // Causal attention never looks forward: every non-negative offset is bucket 0.
+            if rel >= 0 {
+                assert_eq!(relative_bucket(rel, false, nb, maxd), 0);
+            }
+            // Bidirectional splits the table: future offsets live in the upper half.
+            if rel > 0 {
+                assert!(relative_bucket(rel, true, nb, maxd) >= nb / 2);
+            }
+        }
+        println!(
+            "relative_bucket: 18 recorded offsets exact, and {} grid points in both modes stay \
+             inside [0, {nb})",
+            2 * ctx + 1
         );
     }
 }
