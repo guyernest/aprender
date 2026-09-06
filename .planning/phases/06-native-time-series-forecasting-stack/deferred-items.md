@@ -103,3 +103,30 @@ is still correct (the fits genuinely need it), but the "~91 s against a 60 s tar
 
 **Not fixed here:** the build scripts belong to `aprender-compute` and `aprender-core`, which
 this plan does not touch, and diagnosing which key is unstable is its own task. Owner: 06-09.
+
+## From plan 06-06 (2026-09-06)
+
+### D-ITEM-06-01-a is now CLOSED (not deferred any further)
+
+`cargo test -p aprender-core --test readme_contract` is **15 passed / 0 failed** as of
+`14eceff67`. The three failures 06-01 logged were closed one at a time by the plan that
+moved each count:
+
+| Gate | Closed by |
+|---|---|
+| `FALSIFY-README-CRATE-001` / `-002` | closed between 06-01 and 06-06 (both crate READMEs and the monorepo link now present) |
+| `FALSIFY-README-007` (contract count) | 06-06 — adding `contracts/forecast-tool-boundary-v1.yaml` moved `find contracts -name '*.yaml'` to 1790, so this plan's edit turned it red and this plan corrected the row |
+
+Nothing here is deferred; the row is left as the audit trail for the phase.
+
+### D-ITEM-06-06-a — `.pv/contracts.idx`, `.pv/contracts.idx.mtime`, `.pv/lint-previous.json` are dirty in the working tree
+
+These three TRACKED files are `pv`'s local index cache and are rewritten by any `pv`
+invocation, including a read-only `pv validate`. They were **already modified before this
+plan's first command** (visible in the pre-plan `git status`), so the drift predates
+06-06; running `pv` here only advanced it further.
+
+NOT committed by this plan: a cache blob is not a reviewable artifact, and committing one
+inside a contract commit would make every future `pv` run produce a spurious diff for the
+next author. The real question — should `.pv/` be tracked at all, or `.gitignore`d like
+other tool caches — belongs to whoever owns `pv`, not to a forecasting plan.
