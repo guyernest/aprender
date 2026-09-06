@@ -5,10 +5,10 @@ current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
 stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-09-06T03:41:33.105Z"
+last_updated: "2026-09-06T04:41:53.323Z"
 last_activity: 2026-09-05
 last_activity_desc: Phase 06 execution started
-state_head: 5e971ea3e1babacbcfb0a96288ec102e50be689c
+state_head: 3026880b129669f91cb209d58c8ff5320bf1a5ff
 progress:
   total_phases: 6
   completed_phases: 1
@@ -244,6 +244,7 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-09: scripts/check_apr_bin_pinned.sh does NOT scan docs — measured with a two-sided control (a bare apr added to the doc is silent; a bare @apr Makefile recipe fires BARE-APR Makefile:1282), both reverted; nobody should later assume documentation is covered
 - [Phase 03]: 03-10: the GSD tracking handlers damaged STATE.md/ROADMAP.md a FIFTH time, and this time the damage was a FALSE COMPLETION CLAIM, not a cosmetic field: `roadmap.update-plan-progress <phase> <plan> complete` marks the WHOLE PHASE `[x] (completed <date>)` and flips the Progress table to Complete as soon as summary_count == plan_count — before the verifier runs and regardless of unmet must_haves. `state.begin-phase` separately wrote `Plan: 1 of 10` on a resume at plan 10 and put the phase percentage in a field the body renders as a plan percentage. The orchestrator MUST diff both files after every handler call and revert any completion claim the verifier has not earned; reading the handler's own JSON (`"complete": true`) is not evidence of anything
 - [Phase 02]: 02-09: the GSD state handlers corrupted STATE.md a THIRD time and in a NEW way — update-progress reported percent 100 while writing 40 into the frontmatter (and 94/20 on the earlier call: it writes the PHASE percentage into a field the body renders as a PLAN percentage), record-session silently ignored its positional stopped-at argument, record-metric REJECTS the documented positional form and needs --phase/--plan/--duration flags, and advance-plan clobbered last_activity to a bare date. Every field repaired by hand and read back
+- [Phase 06]: FALSIFY-MONO-011 treats thin MCP deployment units as a SECOND, separately-ratcheted category (human decision `deployment-unit-class`, 06-02 Task 1) — Human answered the gate="blocking-human" checkpoint with "deployment-unit-class", no wording changes. `allowed_bins` and ALLOWLIST_BASELINE = 27 stay byte-identical so "migration debt" keeps meaning migration debt; a new `deployment_unit_bins` set of six names (the four SetFit crates plus aprender-mcp-forecast and the not-yet-created aprender-mcp-chronos) gets its own DEPLOYMENT_UNIT_BASELINE = 6 shrink-only assert and its own stale-entry check. Policy sentence: "publish = false thin MCP servers whose capability IS a protocol surface; adding one requires a CONTEXT decision, never a same-PR edit." The existing ratchet's claim that every entry is a capability awaiting `apr <subcommand>` migration stays true because CONTEXT explicitly defers `apr forecast`, so these six are not awaiting migration. Rejected: single-list-33 (blurs debt with deployment unit), phase6-only-29 (leaves the gate RED, SC5 unreachable), halt (contradicts D-06 and the `apr forecast` deferral).
 
 ### Pending Todos
 
