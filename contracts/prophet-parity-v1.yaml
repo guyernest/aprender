@@ -388,8 +388,12 @@ qa_gate:
     - 'no tolerance literal inside the parity test module — every bar is contract-read'
   pass_criteria: 'All FALSIFY-PROPHET tests pass and each was observed RED under an induced tolerance change.'
   falsification: >
-    Tighten `equations.fitted_objective_slack.float_tolerance` from 0.5 to a value below the measured
-    slack and re-run `cargo test -p aprender-forecast --lib prophet::parity::fit_objective_and_forecast`:
-    FALSIFY-PROPHET-005 must go red and must name the fixture and the measured slack, proving the
-    tolerance is genuinely read from this file rather than duplicated as a test literal. Restore and
-    observe green.
+    OBSERVED, not merely prescribed. Tighten `equations.band_width_rel.float_tolerance` from 0.02 to
+    0.0001 — changing ONLY this file, not one line of Rust — and re-run
+    `cargo test -p aprender-forecast --lib prophet::parity`: FALSIFY-PROPHET-009 goes red on all
+    seven fixtures (25 passed / 7 failed) and each failure quotes the NEW bar (`over the contract bar
+    1e-4`), proving the ladder reads its bars from here at test time rather than duplicating them as
+    literals. A byte-identical revert restores 32 passed / 0 failed. Note that
+    `fitted_objective_slack` cannot be induced-RED by TIGHTENING a positive value: every committed
+    fixture lands BELOW Python's objective (-0.0095 to -1.73), so the induced negative there is a
+    NEGATIVE slack (e.g. -1.0), not a smaller positive one.

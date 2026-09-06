@@ -863,137 +863,911 @@ pub fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast {
 
 #[cfg(test)]
 mod parity {
-    use super::{make_design, Mode, Model, Params, Seasonality, Spec};
-    use crate::dates::parse_ymd;
-    use crate::test_support::load_json;
+    //! The Prophet 1.4.0 parity ladder (SC2, D-04).
+    //!
+    //! ONE TEST PER RUNG PER FIXTURE, so a regression names the rung and the fixture rather
+    //! than "Prophet broke". The rungs, in the order they must be believed:
+    //!
+    //! 1. `<f>_data_prep_exact` — the Stan data block, rebuilt from raw `(ds, y)`.
+    //! 2. `<f>_objective_at_python_map` — the objective at PYTHON's MAP vs Python's own `-lp`.
+    //! 3. `<f>_predict_path_via_python_params` — Python's parameters through Rust `predict`,
+    //!    with the named components and the `trend*(1+mul)+add == yhat` identity.
+    //! 4. `<f>_fit_objective_and_forecast` — what the Rust MAP fit itself reaches, plus the
+    //!    D-09 diagnostics.
+    //! 5. `<f>_band_widths_within_contract` — the 80 % interval widths.
+    //!
+    //! NO TOLERANCE LITERAL LIVES HERE (D-15). Every bar is read at test time from
+    //! `contracts/prophet-parity-v1.yaml` through [`equation_tolerance`], and `max_rounds`
+    //! through [`constant_u64`]. A bar that lives in a test can be loosened without the
+    //! contract noticing; a bar that lives in the contract moves only as a `pv diff`-visible
+    //! edit.
+    //!
+    //! WHAT IS DELIBERATELY NOT BARRED. `air_passengers` and `retail_sales` have no committed
+    //! future-`yhat` control band: the yearly Fourier block is near-unidentified on monthly
+    //! data, so Prophet's own two optimisers disagree there by far more than any epsilon worth
+    //! writing down. Those numbers are RECORDED (printed, and carried in the assertion message)
+    //! and asserted against nothing — the contract says why.
 
-    /// D-04 rung 2 — the one ladder rung this tracer plan hangs on.
+    use super::{
+        make_design, predict, Design, Forecast, Growth, Holiday, Mode, Model, Params, Seasonality,
+        Spec,
+    };
+    use crate::dates::{civil_from_days, days_from_civil, future_days, parse_ymd};
+    use crate::fit::{fit_prophet, FitInfo};
+    use crate::test_support::{constant_u64, equation_tolerance, load_json};
+    use serde_json::Value;
+    use std::sync::{Arc, OnceLock};
+
+    /// The uncertainty seed every band rung draws with. The fixtures' Python bands come from
+    /// Prophet's own RNG, so this only has to be FIXED, never matched — the bar is relative
+    /// and wide enough to cover the ~1.2 % seed-to-seed variance the spike measured.
+    const SEED: u64 = 42;
+
+    /// The seven committed Prophet 1.4.0 oracles: `(test-name stem, fixture file)`.
     ///
-    /// The bar is not self-consistency: it is that the Rust objective evaluated at PYTHON
-    /// Prophet 1.4.0's MAP reproduces Python's own `-lp` at that point. Everything about
-    /// the port — the priors, the exact L1 on `delta`, the `2σ²` term, the `n·ln σ` term,
-    /// the Fourier column order and the changepoint grid — has to be right simultaneously
-    /// for this number to land, which is why one rung is worth a whole tracer.
-    ///
-    /// The fixture stores a LOG POSTERIOR (positive) while the model computes a NEGATIVE
-    /// log posterior, so the residual is the SUM. `Model::new` scales by `1/T` (the D-09
-    /// recipe); that scale is undone here exactly as `sources/001 main.rs:146-158` does,
-    /// because the fixture number is unscaled.
-    ///
-    /// `1e-9` is the ONLY tolerance literal this plan writes; plan 06-03 replaces it with
-    /// `test_support::equation_tolerance` once `contracts/` carries the equation.
-    #[test]
-    fn peyton_objective_at_python_map_within_1e9() {
-        let fx = load_json("peyton_manning_prophet140.json");
-        assert_eq!(
-            fx["prophet_version"], "1.4.0",
-            "the bar is Python Prophet 1.4.0, not whatever regenerated the fixture"
+    /// The first three are spike 001 (they publish `log_posterior_at_map_unnormalized` and
+    /// carry no `uncertainty` block); the last four are spike 003 (they publish `columns`,
+    /// `s_a`, `s_m` and a precomputed `uncertainty` block, and no `-lp`).
+    const FIXTURES: [(&str, &str); 7] = [
+        ("peyton_manning", "peyton_manning_prophet140.json"),
+        ("air_passengers", "air_passengers_prophet140.json"),
+        ("retail_sales", "retail_sales_prophet140.json"),
+        ("peyton_default", "peyton_default_prophet140.json"),
+        ("peyton_holidays", "peyton_holidays_prophet140.json"),
+        ("wp_log_r_logistic", "wp_log_R_logistic_prophet140.json"),
+        ("air_multiplicative", "air_multiplicative_prophet140.json"),
+    ];
+
+    /// The two fixtures that carry a committed Newton-vs-L-BFGS control band on future `yhat`.
+    const PEYTON_BANDED: [&str; 2] = ["peyton_manning", "peyton_default"];
+
+    fn fixture_index(stem: &str) -> usize {
+        FIXTURES
+            .iter()
+            .position(|(s, _)| *s == stem)
+            .unwrap_or_else(|| panic!("{stem} is not one of the seven committed fixtures"))
+    }
+
+    fn f64s(v: &Value, what: &str) -> Vec<f64> {
+        v.as_array()
+            .unwrap_or_else(|| panic!("{what} must be a JSON array"))
+            .iter()
+            .map(|x| {
+                x.as_f64()
+                    .unwrap_or_else(|| panic!("{what} must hold only numbers"))
+            })
+            .collect()
+    }
+
+    fn strings(v: &Value, what: &str) -> Vec<String> {
+        v.as_array()
+            .unwrap_or_else(|| panic!("{what} must be a JSON array"))
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .unwrap_or_else(|| panic!("{what} must hold only strings"))
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn days(v: &Value, what: &str) -> Vec<i64> {
+        strings(v, what).iter().map(|s| parse_ymd(s)).collect()
+    }
+
+    fn max_abs_diff(a: &[f64], b: &[f64], what: &str) -> f64 {
+        assert_eq!(a.len(), b.len(), "{what}: length mismatch");
+        assert!(!a.is_empty(), "{what}: refusing to compare empty vectors");
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    fn mean(v: &[f64]) -> f64 {
+        assert!(!v.is_empty(), "mean of an empty slice");
+        v.iter().sum::<f64>() / v.len() as f64
+    }
+
+    /// Mean width of an interval, the quantity Prophet's fixtures publish.
+    fn mean_width(lo: &[f64], hi: &[f64]) -> f64 {
+        assert_eq!(lo.len(), hi.len(), "band bounds must be parallel");
+        mean(&lo.iter().zip(hi).map(|(a, b)| b - a).collect::<Vec<_>>())
+    }
+
+    /// Assert a RELATIVE agreement and report the measured deviation either way.
+    fn within_rel(rust: f64, python: f64, rel_bar: f64, what: &str) {
+        assert!(
+            python.abs() > 0.0,
+            "{what}: the Python reference is zero, so a relative bar is meaningless"
         );
+        let dev = (rust - python).abs() / python.abs();
+        println!(
+            "    {what}: rust {rust:.6} vs python {python:.6} -> {:.4} % ",
+            dev * 100.0
+        );
+        assert!(
+            dev <= rel_bar,
+            "{what}: rust {rust} vs python {python} is {dev:e} relative, over the contract bar {rel_bar:e}"
+        );
+    }
 
-        // ---- rebuild Stan's data from the raw (ds, y), exactly as sources/001 does ----
-        let ds_days: Vec<i64> = fx["history"]["ds"]
-            .as_array()
-            .expect("history.ds")
-            .iter()
-            .map(|v| parse_ymd(v.as_str().expect("ds string")))
-            .collect();
-        let y: Vec<f64> = fx["history"]["y"]
-            .as_array()
-            .expect("history.y")
-            .iter()
-            .map(|v| v.as_f64().expect("y f64"))
-            .collect();
+    /// One fixture, loaded once and rebuilt into the design the port would build itself.
+    struct Ladder {
+        fx: Value,
+        design: Design,
+        ds_days: Vec<i64>,
+        forecast_days: Vec<i64>,
+        n_hist: usize,
+    }
 
+    impl Ladder {
+        /// Python Prophet 1.4.0's MAP, verbatim from the fixture.
+        fn python_params(&self) -> Params {
+            let arr = |key: &str| f64s(&self.fx["params"][key], &format!("params.{key}"));
+            Params {
+                k: self.fx["params"]["k"].as_f64().expect("params.k"),
+                m: self.fx["params"]["m"].as_f64().expect("params.m"),
+                delta: arr("delta"),
+                beta: arr("beta"),
+                sigma_obs: self.fx["params"]["sigma_obs"]
+                    .as_f64()
+                    .expect("params.sigma_obs"),
+            }
+        }
+
+        /// Spike-003 fixtures carry the precomputed `uncertainty` block; spike-001 ones do not.
+        fn is_spike_003(&self) -> bool {
+            self.fx.get("uncertainty").is_some_and(|u| u.is_object())
+        }
+
+        /// The Python objective at Python's MAP, UNSCALED, sign convention `f = -log posterior`.
+        ///
+        /// Where the fixture publishes `log_posterior_at_map_unnormalized` this is Python's own
+        /// number. Where it does not (the four spike-003 files), it is the Rust objective at
+        /// Python's MAP — a legitimate stand-in precisely because rung 2 proves, on every
+        /// fixture that DOES publish `-lp`, that this quantity is Python's objective.
+        fn f_python(&self) -> f64 {
+            if let Some(lp) = self
+                .fx
+                .get("log_posterior_at_map_unnormalized")
+                .and_then(Value::as_f64)
+            {
+                -lp
+            } else {
+                let model = Model::new(&self.design);
+                model.objective(&model.pack(&self.python_params())) / model.scale
+            }
+        }
+    }
+
+    /// Rebuild the fixture's `Spec` from the fixture alone — never from a hand-copied default.
+    fn spec_of(fx: &Value) -> Spec {
+        let mode_of = |v: &Value| {
+            if v.as_str() == Some("multiplicative") {
+                Mode::Multiplicative
+            } else {
+                Mode::Additive
+            }
+        };
         let seasonalities: Vec<Seasonality> = fx["seasonalities"]
             .as_array()
             .expect("seasonalities")
             .iter()
-            .map(|s| {
-                assert_eq!(s["mode"], "additive", "the Peyton oracle is additive");
-                Seasonality {
-                    name: s["name"].as_str().expect("name").to_string(),
-                    period: s["period"].as_f64().expect("period"),
-                    order: usize::try_from(s["fourier_order"].as_u64().expect("fourier_order"))
-                        .expect("fourier order fits usize"),
-                    prior_scale: s["prior_scale"].as_f64().expect("prior_scale"),
-                    mode: Mode::Additive,
-                }
+            .map(|s| Seasonality {
+                name: s["name"].as_str().expect("seasonality.name").to_string(),
+                period: s["period"].as_f64().expect("seasonality.period"),
+                order: usize::try_from(s["fourier_order"].as_u64().expect("fourier_order"))
+                    .expect("fourier order fits usize"),
+                prior_scale: s["prior_scale"].as_f64().expect("seasonality.prior_scale"),
+                mode: mode_of(&s["mode"]),
             })
             .collect();
 
+        // Holidays arrive as one row per (name, date); group them, preserving first-seen order.
+        let mut holidays: Vec<Holiday> = Vec::new();
+        let holiday_prior = fx["holidays_prior_scale"].as_f64().unwrap_or(10.0);
+        let no_holidays: Vec<Value> = Vec::new();
+        for h in fx["holidays"].as_array().unwrap_or(&no_holidays) {
+            let name = h["holiday"].as_str().expect("holiday.holiday").to_string();
+            let day = parse_ymd(h["ds"].as_str().expect("holiday.ds"));
+            if let Some(existing) = holidays.iter_mut().find(|x| x.name == name) {
+                existing.days.push(day);
+            } else {
+                holidays.push(Holiday {
+                    name,
+                    days: vec![day],
+                    lower_window: h["lower_window"].as_i64().expect("lower_window"),
+                    upper_window: h["upper_window"].as_i64().expect("upper_window"),
+                    prior_scale: holiday_prior,
+                });
+            }
+        }
+
         let mut spec = Spec::default_linear(seasonalities);
+        spec.growth = match fx["growth"].as_str() {
+            Some("logistic") => Growth::Logistic,
+            Some("flat") => Growth::Flat,
+            _ => Growth::Linear,
+        };
+        spec.cap = fx["cap"].as_f64();
+        spec.holidays = holidays;
+        spec.holidays_mode = mode_of(&fx["seasonality_mode"]);
         spec.changepoint_prior_scale = fx["changepoint_prior_scale"]
             .as_f64()
             .expect("changepoint_prior_scale");
-        let design = make_design(&ds_days, &y, &spec);
+        if let Some(u) = fx.get("uncertainty") {
+            spec.interval_width = u["interval_width"].as_f64().expect("interval_width");
+            spec.uncertainty_samples = usize::try_from(
+                u["uncertainty_samples"]
+                    .as_u64()
+                    .expect("uncertainty_samples"),
+            )
+            .expect("uncertainty_samples fits usize");
+        }
+        spec
+    }
 
-        // The design must match Stan's before the objective means anything.
+    fn ladder(stem: &'static str) -> Ladder {
+        let file = FIXTURES[fixture_index(stem)].1;
+        let fx = load_json(file);
         assert_eq!(
-            design.k,
-            fx["seasonality_columns"].as_array().expect("cols").len(),
-            "column count"
+            fx["prophet_version"], "1.4.0",
+            "{stem}: the bar is Python Prophet 1.4.0, not whatever regenerated the fixture"
         );
+        let ds_days = days(&fx["history"]["ds"], "history.ds");
+        let y = f64s(&fx["history"]["y"], "history.y");
+        let forecast_days = days(&fx["forecast"]["ds"], "forecast.ds");
+        let design = make_design(&ds_days, &y, &spec_of(&fx));
+        let n_hist = ds_days.len();
+        Ladder {
+            fx,
+            design,
+            ds_days,
+            forecast_days,
+            n_hist,
+        }
+    }
+
+    /// The D-09 MAP fit for one fixture, computed at most ONCE per test binary run.
+    ///
+    /// The fit rung and the spike-003 band rung both need it, and a Peyton-sized fit is the
+    /// most expensive thing in this module (RESEARCH Pitfall 9). `OnceLock::get_or_init`
+    /// blocks the second caller rather than duplicating the work.
+    fn fitted(stem: &'static str) -> Arc<(Params, FitInfo)> {
+        static CELLS: [OnceLock<Arc<(Params, FitInfo)>>; 7] = [const { OnceLock::new() }; 7];
+        CELLS[fixture_index(stem)]
+            .get_or_init(|| {
+                let l = ladder(stem);
+                let rounds = usize::try_from(constant_u64("prophet-parity-v1", "max_rounds"))
+                    .expect("max_rounds fits usize");
+                Arc::new(fit_prophet(&l.design, rounds))
+            })
+            .clone()
+    }
+
+    /// PYTHON's parameters through Rust `predict`, over the fixture's own forecast grid.
+    ///
+    /// Fit-independent by construction, which is exactly why the band rung uses it on the
+    /// three spike-001 fixtures: their optimiser disagreement cannot leak into a band verdict.
+    fn python_forecast(stem: &'static str) -> Arc<Forecast> {
+        static CELLS: [OnceLock<Arc<Forecast>>; 7] = [const { OnceLock::new() }; 7];
+        CELLS[fixture_index(stem)]
+            .get_or_init(|| {
+                let l = ladder(stem);
+                Arc::new(predict(
+                    &l.design,
+                    &l.python_params(),
+                    &l.forecast_days,
+                    SEED,
+                ))
+            })
+            .clone()
+    }
+
+    fn component<'a>(f: &'a Forecast, name: &str) -> &'a [f64] {
+        &f.components
+            .iter()
+            .find(|(n, _)| n.as_str() == name)
+            .unwrap_or_else(|| panic!("predict must return a `{name}` component"))
+            .1
+    }
+
+    // ---------------------------------------------------------------- rung 1 ----
+
+    /// Rung 1: the Stan data block, rebuilt from the raw `(ds, y)` alone.
+    ///
+    /// The bar is EXACT (`data_prep_exact` is 0.0 in the contract): the spike measured
+    /// `0.00e0` on all seven fixtures, so any non-zero difference is a defect, not noise.
+    fn data_prep_exact(stem: &'static str) {
+        let l = ladder(stem);
+        let t = equation_tolerance("prophet-parity-v1", "data_prep_exact");
+        let (d, fx) = (&l.design, &l.fx);
+
+        let ours: Vec<(String, f64, usize)> = d
+            .spec
+            .seasonalities
+            .iter()
+            .map(|s| (s.name.clone(), s.period, s.order))
+            .collect();
+        let theirs: Vec<(String, f64, usize)> = fx["seasonalities"]
+            .as_array()
+            .expect("seasonalities")
+            .iter()
+            .map(|s| {
+                (
+                    s["name"].as_str().expect("name").to_string(),
+                    s["period"].as_f64().expect("period"),
+                    usize::try_from(s["fourier_order"].as_u64().expect("fourier_order"))
+                        .expect("fits usize"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ours, theirs,
+            "{stem}: seasonality (name, period, fourier_order) list must match Prophet's"
+        );
+
         assert!(
-            (design.y_scale - fx["y_scale"].as_f64().expect("y_scale")).abs() < 1e-12,
-            "y_scale {} vs {}",
-            design.y_scale,
+            (d.y_scale - fx["y_scale"].as_f64().expect("y_scale")).abs() <= t,
+            "{stem}: y_scale {} vs {}",
+            d.y_scale,
             fx["y_scale"]
         );
         assert!(
-            (design.t_scale_days - fx["t_scale_days"].as_f64().expect("t_scale_days")).abs() < 1e-9,
-            "t_scale_days"
+            (d.t_scale_days - fx["t_scale_days"].as_f64().expect("t_scale_days")).abs() <= t,
+            "{stem}: t_scale_days {} vs {}",
+            d.t_scale_days,
+            fx["t_scale_days"]
         );
-        let fx_cp = fx["changepoints_t"].as_array().expect("changepoints_t");
-        assert_eq!(
-            design.changepoints_t.len(),
-            fx_cp.len(),
-            "changepoint count"
-        );
-        let cp_diff = design
-            .changepoints_t
-            .iter()
-            .zip(fx_cp)
-            .map(|(a, b)| (a - b.as_f64().expect("cp f64")).abs())
-            .fold(0.0_f64, f64::max);
-        assert!(cp_diff < 1e-12, "changepoints_t max abs diff {cp_diff:e}");
 
-        // ---- objective at Python's MAP ----
-        let arr = |key: &str| -> Vec<f64> {
-            fx["params"][key]
-                .as_array()
-                .unwrap_or_else(|| panic!("params.{key}"))
+        let d_prior = max_abs_diff(
+            &d.prior_scales,
+            &f64s(&fx["prior_scales"], "prior_scales"),
+            "prior_scales",
+        );
+        let d_t = max_abs_diff(&d.t, &f64s(&fx["history"]["t"], "history.t"), "t");
+        let d_y = max_abs_diff(
+            &d.y_scaled,
+            &f64s(&fx["history"]["y_scaled"], "history.y_scaled"),
+            "y_scaled",
+        );
+        let d_cp = max_abs_diff(
+            &d.changepoints_t,
+            &f64s(&fx["changepoints_t"], "changepoints_t"),
+            "changepoints_t",
+        );
+
+        let flat = |v: &Value, what: &str| -> Vec<f64> {
+            v.as_array()
+                .unwrap_or_else(|| panic!("{what} must be an array of rows"))
                 .iter()
-                .map(|v| v.as_f64().expect("param f64"))
+                .flat_map(|r| f64s(r, what))
                 .collect()
         };
-        let py = Params {
-            k: fx["params"]["k"].as_f64().expect("params.k"),
-            m: fx["params"]["m"].as_f64().expect("params.m"),
-            delta: arr("delta"),
-            beta: arr("beta"),
-            sigma_obs: fx["params"]["sigma_obs"]
-                .as_f64()
-                .expect("params.sigma_obs"),
-        };
-        assert_eq!(py.beta.len(), design.k, "beta length vs design K");
-        assert_eq!(
-            py.delta.len(),
-            design.changepoints_t.len(),
-            "delta length vs changepoints"
+        let d_x = max_abs_diff(
+            &d.x[..3 * d.k],
+            &flat(&fx["X_first3"], "X_first3"),
+            "X first 3 rows",
+        )
+        .max(max_abs_diff(
+            &d.x[(l.n_hist - 3) * d.k..],
+            &flat(&fx["X_last3"], "X_last3"),
+            "X last 3 rows",
+        ));
+
+        println!(
+            "  {stem} rung 1: t {d_t:.2e}, y_scaled {d_y:.2e}, changepoints_t {d_cp:.2e} ({} cps), X {d_x:.2e} (K={})",
+            d.changepoints_t.len(),
+            d.k
+        );
+        assert!(
+            d_t <= t && d_y <= t && d_cp <= t && d_x <= t && d_prior <= t,
+            "{stem}: data-prep parity is EXACT in the contract; measured t {d_t:e}, y_scaled {d_y:e}, changepoints_t {d_cp:e}, X {d_x:e}, prior_scales {d_prior:e} against bar {t:e}"
         );
 
-        let model = Model::new(&design);
-        // Model::new scales the objective by 1/T (D-09). The fixture number is unscaled,
-        // so undo the scale before comparing — sources/001 main.rs:146-158.
-        let f_rust = model.objective(&model.pack(&py)) / model.scale;
-        let lp = fx["log_posterior_at_map_unnormalized"]
+        if l.is_spike_003() {
+            let ours_cols: Vec<String> = d.cols.iter().map(|c| c.name.clone()).collect();
+            assert_eq!(
+                ours_cols,
+                strings(&fx["columns"], "columns"),
+                "{stem}: design column names AND order must match Prophet's"
+            );
+            let d_sa = max_abs_diff(&d.s_a, &f64s(&fx["s_a"], "s_a"), "s_a");
+            let d_sm = max_abs_diff(&d.s_m, &f64s(&fx["s_m"], "s_m"), "s_m");
+            assert!(
+                d_sa <= t && d_sm <= t,
+                "{stem}: additive/multiplicative selectors differ: s_a {d_sa:e}, s_m {d_sm:e}"
+            );
+            if let Some(cap_scaled) = d.cap_scaled.as_ref() {
+                let d_cap = max_abs_diff(
+                    cap_scaled,
+                    &f64s(&fx["history"]["cap_scaled"], "history.cap_scaled"),
+                    "cap_scaled",
+                );
+                assert!(
+                    d_cap <= t,
+                    "{stem}: logistic cap_scaled differs by {d_cap:e}"
+                );
+            }
+        } else {
+            assert_eq!(
+                d.k,
+                fx["seasonality_columns"]
+                    .as_array()
+                    .expect("seasonality_columns")
+                    .len(),
+                "{stem}: design column count"
+            );
+        }
+    }
+
+    #[test]
+    fn peyton_manning_data_prep_exact() {
+        data_prep_exact("peyton_manning");
+    }
+    #[test]
+    fn air_passengers_data_prep_exact() {
+        data_prep_exact("air_passengers");
+    }
+    #[test]
+    fn retail_sales_data_prep_exact() {
+        data_prep_exact("retail_sales");
+    }
+    #[test]
+    fn peyton_default_data_prep_exact() {
+        data_prep_exact("peyton_default");
+    }
+    #[test]
+    fn peyton_holidays_data_prep_exact() {
+        data_prep_exact("peyton_holidays");
+    }
+    #[test]
+    fn wp_log_r_logistic_data_prep_exact() {
+        data_prep_exact("wp_log_r_logistic");
+    }
+    #[test]
+    fn air_multiplicative_data_prep_exact() {
+        data_prep_exact("air_multiplicative");
+    }
+
+    // ---------------------------------------------------------------- rung 2 ----
+
+    /// Rung 2 (D-04): the Rust objective at PYTHON's MAP against Python's own `-lp`.
+    ///
+    /// Everything about the port — the priors, the exact L1 on `delta`, the `2σ²` term, the
+    /// `n·ln σ` term, the Fourier column order and the changepoint grid — has to be right
+    /// simultaneously for this number to land.
+    ///
+    /// ONLY THE THREE SPIKE-001 FIXTURES CAN CARRY THIS RUNG. The four spike-003 files publish
+    /// no `log_posterior_at_map_unnormalized`, so there is no oracle to compare against there;
+    /// writing a seventh "objective" test that compared Rust to Rust would be theatre. The
+    /// contract states the asymmetry, and the spike-003 fixtures are held instead by
+    /// `fitted_objective_slack` plus the whole Python-parameters-through-Rust chain.
+    fn objective_at_python_map(stem: &'static str) {
+        let l = ladder(stem);
+        let t = equation_tolerance("prophet-parity-v1", "objective_at_python_map_abs");
+        let lp = l.fx["log_posterior_at_map_unnormalized"]
             .as_f64()
-            .expect("log_posterior_at_map_unnormalized");
+            .expect("this rung binds only fixtures that publish Python's -lp");
+
+        let py = l.python_params();
+        assert_eq!(py.beta.len(), l.design.k, "{stem}: beta length vs design K");
+        assert_eq!(
+            py.delta.len(),
+            l.design.changepoints_t.len(),
+            "{stem}: delta length vs changepoints"
+        );
+
+        // `Model::new` scales by 1/T (the D-09 recipe); the fixture number is unscaled, so the
+        // scale is undone before comparing. The fixture stores a POSITIVE log posterior while
+        // the model computes a NEGATIVE one, so the residual is the SUM.
+        let model = Model::new(&l.design);
+        let f_rust = model.objective(&model.pack(&py)) / model.scale;
         let residual = (f_rust + lp).abs();
-        assert!(
-            residual <= 1e-9,
-            "rung 2: Rust f(θ_py) = {f_rust:.12}, Python −lp = {:.12}, abs diff {residual:e} > 1e-9",
+        println!(
+            "  {stem} rung 2: f_rust {f_rust:.12}, python -lp {:.12}, residual {residual:e}",
             -lp
         );
+        assert!(
+            residual <= t,
+            "{stem} rung 2: Rust f(theta_py) = {f_rust:.12}, Python -lp = {:.12}, abs diff {residual:e} over the contract bar {t:e}",
+            -lp
+        );
+    }
+
+    #[test]
+    fn peyton_manning_objective_at_python_map() {
+        objective_at_python_map("peyton_manning");
+    }
+    #[test]
+    fn air_passengers_objective_at_python_map() {
+        objective_at_python_map("air_passengers");
+    }
+    #[test]
+    fn retail_sales_objective_at_python_map() {
+        objective_at_python_map("retail_sales");
+    }
+
+    // ---------------------------------------------------------------- rung 3 ----
+
+    /// Rung 3: PYTHON's parameters through Rust `predict`, plus components and the
+    /// reconstruction identity. Fit-independent, so no optimiser difference can excuse it.
+    fn predict_path_via_python_params(stem: &'static str) {
+        let l = ladder(stem);
+        let f = python_forecast(stem);
+
+        // `make_future_dataframe(periods=365)` parity: the fixture's forecast grid is the
+        // history followed by 365 DAILY rows, which is exactly what `dates::future_days` builds.
+        assert_eq!(
+            &l.forecast_days[..l.n_hist],
+            &l.ds_days[..],
+            "{stem}: the forecast grid must start with the history"
+        );
+        let last = *l.ds_days.last().expect("non-empty history");
+        assert_eq!(
+            &l.forecast_days[l.n_hist..],
+            future_days(last, l.forecast_days.len() - l.n_hist, "D")
+                .expect("D is supported")
+                .as_slice(),
+            "{stem}: the future grid must be daily from the last history day"
+        );
+
+        let py_yhat = f64s(&l.fx["forecast"]["yhat"], "forecast.yhat");
+        let py_trend = f64s(&l.fx["forecast"]["trend"], "forecast.trend");
+        let d_yhat = max_abs_diff(&f.yhat, &py_yhat, "yhat");
+        let d_trend = max_abs_diff(&f.trend, &py_trend, "trend");
+
+        let rel_bar =
+            equation_tolerance("prophet-parity-v1", "predict_path_rel_yscale") * l.design.y_scale;
+        println!(
+            "  {stem} rung 3: yhat {d_yhat:.2e}, trend {d_trend:.2e} (y_scale {}, relative bar {rel_bar:.2e})",
+            l.design.y_scale
+        );
+        assert!(
+            d_yhat <= rel_bar && d_trend <= rel_bar,
+            "{stem}: Python params through Rust predict differ by yhat {d_yhat:e} / trend {d_trend:e}, over the y_scale-relative bar {rel_bar:e}"
+        );
+
+        if PEYTON_BANDED.contains(&stem) {
+            let abs_bar = equation_tolerance("prophet-parity-v1", "predict_path_abs_peyton");
+            assert!(
+                d_yhat <= abs_bar && d_trend <= abs_bar,
+                "{stem}: D-04's ABSOLUTE predict-path bar {abs_bar:e} missed — yhat {d_yhat:e}, trend {d_trend:e}"
+            );
+        }
+
+        // Named components: compare every component the fixture publishes AND predict returns.
+        // The fixture also carries `<name>_lower` / `<name>_upper` (sampled) and, for logistic
+        // growth, `cap` — none of which has a point-estimate twin, so they never match by name.
+        let comp_bar = equation_tolerance("prophet-parity-v1", "components_via_python_params_abs");
+        let py_comps = l.fx["forecast"]["components"]
+            .as_object()
+            .expect("forecast.components");
+        let mut checked: Vec<String> = Vec::new();
+        for (name, values) in &f.components {
+            if let Some(py) = py_comps.get(name) {
+                let d = max_abs_diff(values, &f64s(py, name), name);
+                assert!(
+                    d <= comp_bar,
+                    "{stem}: component `{name}` differs by {d:e}, over the contract bar {comp_bar:e}"
+                );
+                checked.push(format!("{name} {d:.1e}"));
+            }
+        }
+        assert!(
+            !checked.is_empty(),
+            "{stem}: no named component was compared — the fixture's component names drifted"
+        );
+
+        // The decomposition must reconstruct the number the tool returns.
+        let add = component(&f, "additive_terms");
+        let mul = component(&f, "multiplicative_terms");
+        let recon: Vec<f64> = (0..f.yhat.len())
+            .map(|i| f.trend[i] * (1.0 + mul[i]) + add[i])
+            .collect();
+        let d_recon = max_abs_diff(&recon, &f.yhat, "reconstruction");
+        println!(
+            "  {stem} rung 3 components: {} | rebuild {d_recon:.1e}",
+            checked.join(", ")
+        );
+        assert!(
+            d_recon <= equation_tolerance("prophet-parity-v1", "components_rebuild_yhat_abs"),
+            "{stem}: trend*(1+multiplicative_terms)+additive_terms misses yhat by {d_recon:e}"
+        );
+    }
+
+    #[test]
+    fn peyton_manning_predict_path_via_python_params() {
+        predict_path_via_python_params("peyton_manning");
+    }
+    #[test]
+    fn air_passengers_predict_path_via_python_params() {
+        predict_path_via_python_params("air_passengers");
+    }
+    #[test]
+    fn retail_sales_predict_path_via_python_params() {
+        predict_path_via_python_params("retail_sales");
+    }
+    #[test]
+    fn peyton_default_predict_path_via_python_params() {
+        predict_path_via_python_params("peyton_default");
+    }
+    #[test]
+    fn peyton_holidays_predict_path_via_python_params() {
+        predict_path_via_python_params("peyton_holidays");
+    }
+    #[test]
+    fn wp_log_r_logistic_predict_path_via_python_params() {
+        predict_path_via_python_params("wp_log_r_logistic");
+    }
+    #[test]
+    fn air_multiplicative_predict_path_via_python_params() {
+        predict_path_via_python_params("air_multiplicative");
+    }
+
+    // ---------------------------------------------------------------- rung 4 ----
+
+    /// Rung 4: what the Rust MAP fit itself reaches, and the D-09 diagnostics it must report.
+    ///
+    /// The bar is ONE-SIDED objective slack, never parameter equality and never
+    /// daily-resolution `yhat` on monthly data (`prophet-fit-and-predict.md`): the yearly
+    /// Fourier block is near-unidentified on air/retail, so many parameter vectors sit within a
+    /// fraction of an objective unit of Python's MAP and draw visibly different curves.
+    fn fit_objective_and_forecast(stem: &'static str) {
+        let l = ladder(stem);
+        let max_rounds = usize::try_from(constant_u64("prophet-parity-v1", "max_rounds"))
+            .expect("max_rounds fits usize");
+        let handle = fitted(stem);
+        let (p, info) = (&handle.0, &handle.1);
+
+        let f_python = l.f_python();
+        let slack = equation_tolerance("prophet-parity-v1", "fitted_objective_slack");
+        println!(
+            "  {stem} rung 4: f_rust {:.4} vs f_python {f_python:.4} (delta {:+.4}); {} rounds, {} iters, {} evals, status {}",
+            info.objective,
+            info.objective - f_python,
+            info.rounds,
+            info.iterations,
+            info.evals,
+            info.status
+        );
+        assert!(
+            info.objective <= f_python + slack,
+            "{stem}: the Rust fit landed at {} against Python's {f_python}, i.e. {:+} — over the contract slack {slack}",
+            info.objective,
+            info.objective - f_python
+        );
+
+        // D-09 diagnostics, observable on every fixture.
+        assert!(
+            info.rounds <= max_rounds,
+            "{stem}: {} restart rounds exceeds the contract's max_rounds {max_rounds}",
+            info.rounds
+        );
+        assert!(
+            !info.budget_hit,
+            "{stem}: the cooperative fit budget was crossed at a round boundary — a fixture-sized fit must never reach it"
+        );
+        assert!(
+            info.status == "Stalled" || info.status == "Converged",
+            "{stem}: L-BFGS terminal status {:?} is not one the D-09 recipe accepts",
+            info.status
+        );
+
+        let f = predict(&l.design, p, &l.forecast_days, SEED);
+        let py_yhat = f64s(&l.fx["forecast"]["yhat"], "forecast.yhat");
+        let future = max_abs_diff(&f.yhat[l.n_hist..], &py_yhat[l.n_hist..], "future yhat");
+        let history = max_abs_diff(&f.yhat[..l.n_hist], &py_yhat[..l.n_hist], "history yhat");
+        println!("  {stem} rung 4 forecast: history max|d yhat| {history:.4}, future {future:.4}");
+
+        if PEYTON_BANDED.contains(&stem) {
+            let band = equation_tolerance("prophet-parity-v1", "future_yhat_band_peyton_abs");
+            assert!(
+                future <= band,
+                "{stem}: future max|d yhat| {future} is outside Prophet's OWN Newton-vs-L-BFGS band {band}"
+            );
+        } else {
+            // RECORDED, NOT BARRED. The contract says why: no committed control band exists for
+            // these fixtures, so an epsilon here would bar optimiser luck rather than parity.
+            assert!(
+                future.is_finite(),
+                "{stem}: future max|d yhat| must at least be finite (measured {future})"
+            );
+        }
+    }
+
+    #[test]
+    fn peyton_manning_fit_objective_and_forecast() {
+        fit_objective_and_forecast("peyton_manning");
+    }
+    #[test]
+    fn air_passengers_fit_objective_and_forecast() {
+        fit_objective_and_forecast("air_passengers");
+    }
+    #[test]
+    fn retail_sales_fit_objective_and_forecast() {
+        fit_objective_and_forecast("retail_sales");
+    }
+    #[test]
+    fn peyton_default_fit_objective_and_forecast() {
+        fit_objective_and_forecast("peyton_default");
+    }
+    #[test]
+    fn peyton_holidays_fit_objective_and_forecast() {
+        fit_objective_and_forecast("peyton_holidays");
+    }
+    #[test]
+    fn wp_log_r_logistic_fit_objective_and_forecast() {
+        fit_objective_and_forecast("wp_log_r_logistic");
+    }
+    #[test]
+    fn air_multiplicative_fit_objective_and_forecast() {
+        fit_objective_and_forecast("air_multiplicative");
+    }
+
+    // ---------------------------------------------------------------- rung 5 ----
+
+    /// Rung 5: the 80 % interval widths, relative to Python's.
+    ///
+    /// TWO REFERENCE SHAPES, because the two fixture families publish different things.
+    /// The spike-003 files carry precomputed `uncertainty.*_mean_width` values, and the Rust
+    /// side there is the Rust FIT (the spike-003 probe). The spike-001 files carry no
+    /// `uncertainty` block at all, so their reference is DERIVED from the fixture's own
+    /// `forecast.yhat_upper - forecast.yhat_lower` — and the Rust side is PYTHON's parameters
+    /// through Rust `predict`, the same fit-independent call rung 3 makes, so air/retail's
+    /// unbarred optimiser disagreement cannot leak into a band verdict.
+    fn band_widths_within_contract(stem: &'static str) {
+        let l = ladder(stem);
+        let rel = equation_tolerance("prophet-parity-v1", "band_width_rel");
+        let n = l.n_hist;
+
+        if l.is_spike_003() {
+            let handle = fitted(stem);
+            let f = predict(&l.design, &handle.0, &l.forecast_days, SEED);
+            let u = &l.fx["uncertainty"];
+            let py = |key: &str| {
+                u[key]
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("uncertainty.{key}"))
+            };
+            println!("  {stem} rung 5 (spike-003 reference, Rust fit params):");
+            within_rel(
+                mean_width(&f.yhat_lower[..n], &f.yhat_upper[..n]),
+                py("hist_band_mean_width"),
+                rel,
+                &format!("{stem} history band width"),
+            );
+            within_rel(
+                mean_width(&f.yhat_lower[n..], &f.yhat_upper[n..]),
+                py("future_band_mean_width"),
+                rel,
+                &format!("{stem} future band width"),
+            );
+            let last30 = f.yhat.len() - 30;
+            within_rel(
+                mean_width(&f.yhat_lower[last30..], &f.yhat_upper[last30..]),
+                py("future_band_last30_mean_width"),
+                equation_tolerance("prophet-parity-v1", "band_width_last30_rel"),
+                &format!("{stem} last-30 band width"),
+            );
+            within_rel(
+                mean_width(&f.trend_lower[n..], &f.trend_upper[n..]),
+                py("future_trend_band_mean_width"),
+                equation_tolerance("prophet-parity-v1", "trend_band_width_rel"),
+                &format!("{stem} future trend band width"),
+            );
+        } else {
+            let f = python_forecast(stem);
+            let py_lo = f64s(&l.fx["forecast"]["yhat_lower"], "forecast.yhat_lower");
+            let py_hi = f64s(&l.fx["forecast"]["yhat_upper"], "forecast.yhat_upper");
+            println!("  {stem} rung 5 (reference DERIVED from the fixture's own band, Python params through Rust predict):");
+            within_rel(
+                mean_width(&f.yhat_lower[..n], &f.yhat_upper[..n]),
+                mean_width(&py_lo[..n], &py_hi[..n]),
+                rel,
+                &format!("{stem} history band width"),
+            );
+            within_rel(
+                mean_width(&f.yhat_lower[n..], &f.yhat_upper[n..]),
+                mean_width(&py_lo[n..], &py_hi[n..]),
+                rel,
+                &format!("{stem} future band width"),
+            );
+        }
+    }
+
+    #[test]
+    fn peyton_manning_band_widths_within_contract() {
+        band_widths_within_contract("peyton_manning");
+    }
+    #[test]
+    fn air_passengers_band_widths_within_contract() {
+        band_widths_within_contract("air_passengers");
+    }
+    #[test]
+    fn retail_sales_band_widths_within_contract() {
+        band_widths_within_contract("retail_sales");
+    }
+    #[test]
+    fn peyton_default_band_widths_within_contract() {
+        band_widths_within_contract("peyton_default");
+    }
+    #[test]
+    fn peyton_holidays_band_widths_within_contract() {
+        band_widths_within_contract("peyton_holidays");
+    }
+    #[test]
+    fn wp_log_r_logistic_band_widths_within_contract() {
+        band_widths_within_contract("wp_log_r_logistic");
+    }
+    #[test]
+    fn air_multiplicative_band_widths_within_contract() {
+        band_widths_within_contract("air_multiplicative");
+    }
+
+    // ------------------------------------------------- the bounded date grid ----
+
+    /// The runnable evidence behind KANI-PROPHET-001 (declared, not executed).
+    ///
+    /// A grid over the three supported frequencies, 20 start days chosen to sit on leap days,
+    /// month ends and year ends, and horizons up to the contract's bound: the future grid is
+    /// strictly increasing and starts strictly after the last history day, and every `MS` date
+    /// is the first of a month.
+    #[test]
+    fn future_days_strictly_increasing_bounded() {
+        let starts = [
+            (1968, 2, 28),
+            (1968, 2, 29),
+            (1968, 3, 1),
+            (1970, 1, 1),
+            (1999, 12, 31),
+            (2000, 1, 1),
+            (2000, 2, 29),
+            (2001, 2, 28),
+            (2004, 2, 29),
+            (2008, 1, 31),
+            (2012, 12, 1),
+            (2015, 1, 1),
+            (2016, 2, 29),
+            (2019, 4, 30),
+            (2020, 2, 29),
+            (2021, 3, 31),
+            (2023, 5, 31),
+            (2024, 2, 29),
+            (2024, 12, 31),
+            (2100, 2, 28),
+        ];
+        assert_eq!(starts.len(), 20, "the grid is 20 start days wide");
+        let mut cases = 0usize;
+        for (y, m, d) in starts {
+            let last = days_from_civil(y, m, d);
+            for freq in ["D", "W", "MS"] {
+                for horizon in [1_usize, 28, 365, 3650] {
+                    let grid = future_days(last, horizon, freq)
+                        .unwrap_or_else(|e| panic!("{freq} is supported: {e:?}"));
+                    assert_eq!(grid.len(), horizon, "{freq}/{horizon}: length");
+                    assert!(
+                        grid[0] > last,
+                        "{freq}/{horizon} from {y}-{m}-{d}: the grid must start after the history"
+                    );
+                    assert!(
+                        grid.windows(2).all(|w| w[0] < w[1]),
+                        "{freq}/{horizon} from {y}-{m}-{d}: the grid must be strictly increasing"
+                    );
+                    if freq == "MS" {
+                        for &day in &grid {
+                            let (_, _, dom) = civil_from_days(day);
+                            assert_eq!(
+                                dom, 1,
+                                "MS/{horizon} from {y}-{m}-{d}: every date is the 1st of a month"
+                            );
+                        }
+                    }
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(cases, 20 * 3 * 4, "the whole bounded grid was enumerated");
     }
 }

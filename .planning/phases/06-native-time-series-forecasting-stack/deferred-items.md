@@ -72,3 +72,34 @@ touches, and the fix (an `#[allow]`, a `cfg` restructure, or deleting the dead b
 judgement call belonging to whoever owns `src/demo/`. Note that the 06-01 wording of
 D-ITEM-06-01-b — "cannot pass for ANY crate in this tree" — has a second cause: not just
 `-D warnings` reaching path dependencies, but `aprender-core`'s own lib.
+
+---
+
+## D-ITEM-06-03-a — every `cargo test` invocation in this workspace pays a ~12 s forced rebuild
+
+**Found during:** plan 06-03 Task 2, measuring the warm parity-ladder wall (RESEARCH Pitfall 9).
+
+**Measured, not inferred.** Three consecutive `cargo test -p aprender-forecast --lib
+prophet::parity` invocations with `CARGO_INCREMENTAL=0`, no source edit between them:
+
+| Invocation | cargo wall | `Finished ... in` | test execution |
+|---|---|---|---|
+| warm run 1 | 14 s | 12.21 s | 1.73 s |
+| warm run 2 | 14 s | 12.20 s | 1.78 s |
+| the same 32 tests, running `target/debug/deps/aprender_forecast-*` DIRECTLY | — | — | 1.77–1.79 s |
+
+Every run recompiles `aprender-compute`, `aprender-core` and `aprender-forecast` even though
+nothing changed. Both `crates/aprender-compute/build.rs` and `crates/aprender-core/build.rs`
+exist; one or both is missing a `cargo:rerun-if-changed` (or emits an always-changing key), so
+cargo can never call the unit fresh.
+
+**Why it matters beyond this plan.** 06-01 Task 2's profile decision was taken on a
+per-invocation wall (`13 s`) and projected as `7 x 13 = 91 s` for the ladder. Re-measured this
+session, that 13 s proxy is **11.73 s of forced rebuild + 1.64 s of test** — so the projection
+multiplied a CONSTANT per-invocation build cost seven times. The real ladder is ONE invocation:
+1.73 s of tests, 14 s wall. The `[profile.dev.package.aprender-forecast] opt-level = 3` decision
+is still correct (the fits genuinely need it), but the "~91 s against a 60 s target" concern
+06-01 left for this plan is **closed as a measurement artefact**, not as an optimisation win.
+
+**Not fixed here:** the build scripts belong to `aprender-compute` and `aprender-core`, which
+this plan does not touch, and diagnosing which key is unstable is its own task. Owner: 06-09.
