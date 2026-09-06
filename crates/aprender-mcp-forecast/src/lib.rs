@@ -114,23 +114,84 @@ pub fn http_app(server: Server) -> axum::Router {
         .nest("/mcp", mcp)
 }
 
+/// K independent MCP routers behind a round-robin front handler (D-12).
+///
+/// # Why this exists — a MEASURED serialisation, not a hunch
+///
+/// pmcp 2.19.3's streamable-HTTP router holds ONE
+/// `Arc<tokio::sync::Mutex<Server>>` across the whole tool future
+/// (`pmcp-2.19.3/src/server/streamable_http_server.rs:2094` and `:2122`). A tool that
+/// spends seconds inside `spawn_blocking` therefore holds that lock for the whole fit,
+/// and the next request waits — not for CPU, for the mutex. Spike 010 measured eight
+/// concurrent fits against ONE router at **1.0x** the sequential wall (i.e. no
+/// concurrency at all) and the same eight against **eight** routers at **3.9x**.
+///
+/// Each router owns its own `Server`, so K tool calls can be in flight at once. Nothing
+/// is shared between them: the door is stateless, the seed is per request, and
+/// `pool_equality` asserts that a response computed under load is bit-identical to the
+/// same response computed alone.
+///
+/// `pool <= 1` returns the single-router [`http_app`] unchanged, so the pool is opt-out
+/// as well as opt-in.
+///
+/// # Errors
+///
+/// `pmcp::Error` if any of the K server builders refuses the configuration.
+pub fn pooled_app(pool: usize, name: &str, version: &str) -> pmcp::Result<axum::Router> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    if pool <= 1 {
+        return Ok(http_app(build_server(name, version)?));
+    }
+    let mut built = Vec::with_capacity(pool);
+    for _ in 0..pool {
+        built.push(http_app(build_server(name, version)?));
+    }
+    let routers = Arc::new(built);
+    let next = Arc::new(AtomicUsize::new(0));
+    Ok(
+        axum::Router::new().fallback(move |req: axum::extract::Request| {
+            let routers = Arc::clone(&routers);
+            let next = Arc::clone(&next);
+            async move {
+                let i = next.fetch_add(1, Ordering::Relaxed) % routers.len();
+                // `axum::Router`'s service error type is `Infallible`, so the `match e {}`
+                // is an uninhabited-type coercion, not `.unwrap()` — it passes .clippy.toml.
+                routers[i]
+                    .clone()
+                    .oneshot(req)
+                    .await
+                    .unwrap_or_else(|e| match e {})
+            }
+        }),
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap() internally
 mod e2e {
     use super::{build_server, http_app};
     use aprender_forecast::dates::{days_from_civil, format_ymd};
 
-    struct Client {
+    pub(super) struct Client {
         http: reqwest::Client,
         url: String,
         next: u64,
     }
 
     impl Client {
-        async fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
-            self.next += 1;
+        /// The `&self` form, so a burst of concurrent tasks can share ONE client behind
+        /// an `Arc`. The caller supplies the JSON-RPC id.
+        pub(super) async fn call_id(
+            &self,
+            id: u64,
+            method: &str,
+            params: serde_json::Value,
+        ) -> serde_json::Value {
             let body = serde_json::json!({
-                "jsonrpc": "2.0", "id": self.next, "method": method, "params": params
+                "jsonrpc": "2.0", "id": id, "method": method, "params": params
             });
             let r = self
                 .http
@@ -151,9 +212,20 @@ mod e2e {
             serde_json::from_str(payload)
                 .unwrap_or_else(|e| panic!("{method}: non-JSON: {e}\n{text}"))
         }
+
+        /// Sequential convenience form: allocates the next id itself.
+        pub(super) async fn call(
+            &mut self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> serde_json::Value {
+            self.next += 1;
+            let id = self.next;
+            self.call_id(id, method, params).await
+        }
     }
 
-    fn tool_output(v: &serde_json::Value) -> serde_json::Value {
+    pub(super) fn tool_output(v: &serde_json::Value) -> serde_json::Value {
         if let Some(s) = v["result"].get("structuredContent") {
             return s.clone();
         }
@@ -163,7 +235,7 @@ mod e2e {
         serde_json::from_str(text).expect("tool JSON")
     }
 
-    fn csv(raw: &str) -> (Vec<String>, Vec<f64>) {
+    pub(super) fn csv(raw: &str) -> (Vec<String>, Vec<f64>) {
         let mut ds = Vec::new();
         let mut y = Vec::new();
         for line in raw.lines().skip(1) {
@@ -324,7 +396,14 @@ mod e2e {
     /// Bring up a fresh in-process server and complete `initialize`.
     async fn serve() -> Client {
         let server = build_server("aprender-forecast-test", "0.0.0").expect("server");
-        let app = http_app(server);
+        client_for(http_app(server)).await
+    }
+
+    /// Serve ANY axum app on an ephemeral loopback port and return an initialized client.
+    ///
+    /// Shared with `pool_equality`, which passes a [`crate::pooled_app`] instead of the
+    /// single-router `http_app`.
+    pub(super) async fn client_for(app: axum::Router) -> Client {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -873,5 +952,287 @@ mod tests {
                 "{optional} must be advertised as an optional property: {schema}"
             );
         }
+    }
+}
+
+/// Equality under load (D-12, SC5) — the CORRECTNESS half of the pool claim.
+///
+/// # What is asserted here, and what is deliberately NOT (REVIEW-06-04)
+///
+/// ASSERTED: a response computed while eight (then sixteen) requests are in flight is
+/// **bit-identical** to the same response computed alone. That is a correctness claim, it
+/// holds on every host, and it is what makes a forecast reproducible from its request
+/// (threat T-06-07).
+///
+/// NOT ASSERTED: the wall-clock speed-up. Both cross-AI reviewers reached this
+/// independently. With four Tokio workers, eight heterogeneous `spawn_blocking` fits and
+/// BLAS underneath, the ratio moves with CPU throttling and unrelated background load
+/// *independently of the router serialisation the pool exists to remove* — so a hard
+/// `assert!(speedup >= 2.0)` in the correctness suite fails for reasons the pool does not
+/// control, and a suite that cries wolf gets its real failures ignored. The ratio is
+/// instead PRINTED, once, in a machine-parsable line carrying its own provenance, and
+/// `just forecast-pool-ratio` (plan 06-08) is what asserts `>= 2.0`, best-of-3, on the
+/// aarch64 release host. There is no timing assertion and no `cfg!(target_arch)` gate
+/// anywhere in this module.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap() internally
+mod pool_equality {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use aprender_forecast::dates::{days_from_civil, format_ymd};
+    use aprender_forecast::prophet::Rng;
+
+    use super::e2e::{client_for, csv, tool_output};
+    use super::pooled_app;
+
+    /// The default pool size, mirrored from `constants.pool_default` in
+    /// `contracts/forecast-tool-boundary-v1.yaml`.
+    const POOL: usize = 8;
+
+    /// The fields whose bits must not depend on what else the server was doing.
+    fn signature(out: &serde_json::Value) -> String {
+        serde_json::json!({
+            "ds": out["ds"], "yhat": out["yhat"],
+            "yhat_lower": out["yhat_lower"], "yhat_upper": out["yhat_upper"],
+            "trend": out["trend"], "components": out["components"]
+        })
+        .to_string()
+    }
+
+    /// Worst pointwise disagreement in `yhat`, so a mismatch reports a MAGNITUDE rather
+    /// than only "the strings differ".
+    fn max_abs_diff(a: &serde_json::Value, b: &serde_json::Value) -> f64 {
+        let col = |v: &serde_json::Value| -> Vec<f64> {
+            v["yhat"]
+                .as_array()
+                .expect("yhat array")
+                .iter()
+                .map(|x| x.as_f64().expect("yhat entry"))
+                .collect()
+        };
+        col(a)
+            .iter()
+            .zip(col(b))
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f64::max)
+    }
+
+    /// A deterministic synthetic daily series: trend + yearly + weekly + seeded noise.
+    fn synth(n: usize, seed: u64) -> (Vec<String>, Vec<f64>) {
+        let mut rng = Rng::new(seed);
+        let start = days_from_civil(2012, 1, 1);
+        let mut ds = Vec::with_capacity(n);
+        let mut y = Vec::with_capacity(n);
+        let mut level = 10.0 + seed as f64;
+        for i in 0..n {
+            let day = start + i as i64;
+            level += 0.002;
+            let f = day as f64;
+            y.push(
+                level
+                    + 0.8 * (2.0 * std::f64::consts::PI * f / 365.25).sin()
+                    + 0.3 * (2.0 * std::f64::consts::PI * f / 7.0).cos()
+                    + 0.2 * rng.normal(),
+            );
+            ds.push(format_ymd(day));
+        }
+        (ds, y)
+    }
+
+    /// The eight distinct requests the burst issues: four Prophet fits on a 1 000-point
+    /// daily series with different seeds and horizons, two lag-free NeuralProphet fits and
+    /// two `n_lags = 30` NeuralProphet fits (the autograd-tape-heaviest path) on 500
+    /// points.
+    ///
+    /// `FORECAST_POOL_SERIES=peyton` swaps in the real 2 905-point Peyton Manning series —
+    /// the set `just forecast-pool-ratio` (06-08) measures on a release build. The default
+    /// is sized to stay inside a debug-profile feedback loop.
+    fn requests() -> Vec<serde_json::Value> {
+        let peyton = std::env::var("FORECAST_POOL_SERIES").is_ok_and(|v| v == "peyton");
+        let (long, short) = if peyton {
+            let p = csv(include_str!("../fixtures/peyton_manning.csv"));
+            (p.clone(), p)
+        } else {
+            (synth(1_000, 1), synth(500, 2))
+        };
+        let (ld, ly) = long;
+        let (sd, sy) = short;
+        vec![
+            serde_json::json!({"ds": ld, "y": ly, "horizon": 30, "model": "prophet", "seed": 1}),
+            serde_json::json!({"ds": ld, "y": ly, "horizon": 60, "model": "prophet", "seed": 2}),
+            serde_json::json!({
+                "ds": ld, "y": ly, "horizon": 30, "model": "prophet", "seed": 3,
+                "seasonality_mode": "multiplicative"
+            }),
+            serde_json::json!({"ds": ld, "y": ly, "horizon": 90, "model": "prophet", "seed": 4}),
+            serde_json::json!({
+                "ds": sd, "y": sy, "horizon": 30, "model": "neuralprophet", "seed": 5
+            }),
+            serde_json::json!({
+                "ds": sd, "y": sy, "horizon": 14, "model": "neuralprophet", "seed": 6
+            }),
+            serde_json::json!({
+                "ds": sd, "y": sy, "horizon": 30, "model": "neuralprophet",
+                "n_lags": 30, "seed": 7
+            }),
+            serde_json::json!({
+                "ds": sd, "y": sy, "horizon": 14, "model": "neuralprophet",
+                "n_lags": 30, "seed": 8
+            }),
+        ]
+    }
+
+    fn call_body(args: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"name": "forecast", "arguments": args})
+    }
+
+    fn ok_output(reply: &serde_json::Value, what: &str) -> serde_json::Value {
+        assert!(
+            reply.get("error").is_none() && reply["result"]["isError"] != true,
+            "{what} failed: {reply}"
+        );
+        tool_output(reply)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn eight_concurrent_requests_are_bit_identical_to_sequential() {
+        let app = pooled_app(POOL, "aprender-forecast-pool-test", "0.0.0").expect("pooled app");
+        let client = Arc::new(client_for(app).await);
+        let reqs = requests();
+
+        // 1. Sequential baseline.
+        let t0 = Instant::now();
+        let mut base = Vec::with_capacity(reqs.len());
+        for (i, args) in reqs.iter().enumerate() {
+            let reply = client
+                .call_id(100 + i as u64, "tools/call", call_body(args))
+                .await;
+            base.push(ok_output(&reply, &format!("sequential request {i}")));
+        }
+        let seq = t0.elapsed();
+
+        // 2. The same requests, all at once, against the pooled app.
+        let t1 = Instant::now();
+        let handles: Vec<_> = reqs
+            .iter()
+            .enumerate()
+            .map(|(i, args)| {
+                let client = Arc::clone(&client);
+                let body = call_body(args);
+                tokio::spawn(
+                    async move { client.call_id(1_000 + i as u64, "tools/call", body).await },
+                )
+            })
+            .collect();
+        let mut outs = Vec::with_capacity(reqs.len());
+        for (i, h) in handles.into_iter().enumerate() {
+            let reply = h.await.expect("concurrent task join");
+            outs.push(ok_output(&reply, &format!("concurrent request {i}")));
+        }
+        let conc = t1.elapsed();
+
+        // 3. THE ONLY ASSERTION: equality. Bit-identical, not close.
+        let identical = outs
+            .iter()
+            .zip(&base)
+            .filter(|(o, b)| signature(o) == signature(b))
+            .count();
+        let worst = outs
+            .iter()
+            .zip(&base)
+            .map(|(o, b)| max_abs_diff(o, b))
+            .fold(0.0, f64::max);
+        assert_eq!(
+            identical,
+            reqs.len(),
+            "every concurrent response must be bit-identical to its sequential result; \
+             {identical}/{} matched, worst |d yhat| {worst:e}",
+            reqs.len()
+        );
+        assert_eq!(
+            worst, 0.0,
+            "a per-request-seeded deterministic pipeline has no legitimate source of \
+             variation under concurrency; worst |d yhat| was {worst:e}"
+        );
+
+        // 4. The ratio is REPORTED, never asserted (REVIEW-06-04). `just
+        //    forecast-pool-ratio` (06-08) greps this exact line and is what applies the
+        //    >= 2.0 bar, best-of-3, on the aarch64 release host. The arch/profile/cpus
+        //    fields are what make a later comparison mean anything: a ratio without the
+        //    machine it was measured on is a number, not a measurement.
+        let speedup = seq.as_secs_f64() / conc.as_secs_f64();
+        let cpus = std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get);
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        println!(
+            "POOL SPEEDUP: {speedup:.3}x seq={}ms conc={}ms arch={} profile={profile} \
+             workers=4 cpus={cpus}",
+            seq.as_millis(),
+            conc.as_millis(),
+            std::env::consts::ARCH
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sixteen_concurrent_neuralprophet_fits_stay_identical() {
+        // The tape-heaviest path (`n_lags = 30` drives the AR-Net through autograd), two
+        // alternating series, 16 at once against 8 routers — so each router also has to
+        // serve two calls back to back without leaking state between them. No timing
+        // assertion here either, and this test prints no POOL SPEEDUP line: exactly one
+        // such line per run is the contract with 06-08.
+        let app = pooled_app(POOL, "aprender-forecast-pool-test", "0.0.0").expect("pooled app");
+        let client = Arc::new(client_for(app).await);
+        let series = [synth(500, 11), synth(500, 12)];
+        let stress: Vec<serde_json::Value> = (0..16)
+            .map(|i| {
+                let (ds, y) = &series[i % 2];
+                serde_json::json!({
+                    "ds": ds, "y": y, "horizon": 14, "model": "neuralprophet",
+                    "n_lags": 30, "seed": 42
+                })
+            })
+            .collect();
+
+        let mut expected = Vec::with_capacity(2);
+        for (i, args) in stress.iter().take(2).enumerate() {
+            let reply = client
+                .call_id(5_000 + i as u64, "tools/call", call_body(args))
+                .await;
+            expected.push(signature(&ok_output(&reply, &format!("baseline {i}"))));
+        }
+
+        let handles: Vec<_> = stress
+            .iter()
+            .enumerate()
+            .map(|(i, args)| {
+                let client = Arc::clone(&client);
+                let body = call_body(args);
+                tokio::spawn(
+                    async move { client.call_id(6_000 + i as u64, "tools/call", body).await },
+                )
+            })
+            .collect();
+
+        let mut identical = 0;
+        let mut errors = 0;
+        for (i, h) in handles.into_iter().enumerate() {
+            let reply = h.await.expect("stress task join");
+            if reply.get("error").is_some() || reply["result"]["isError"] == true {
+                errors += 1;
+                continue;
+            }
+            if signature(&tool_output(&reply)) == expected[i % 2] {
+                identical += 1;
+            }
+        }
+        assert_eq!(errors, 0, "no request may fail under a 16-wide burst");
+        assert_eq!(
+            identical, 16,
+            "all 16 concurrent NeuralProphet fits must equal their sequential result"
+        );
     }
 }

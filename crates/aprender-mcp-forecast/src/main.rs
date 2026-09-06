@@ -1,15 +1,19 @@
 //! Local runner for the thin forecast MCP server.
 //!
 //! Default transport is stdio — what MCP clients (Claude Desktop, Claude Code, Cursor)
-//! spawn directly. `--http [PORT]` serves the same one tool over streamable-HTTP plus the
-//! same-origin demo page; `--bench [sizes...]` prints a fit/predict table on synthetic
-//! series. Everything human-readable goes to stderr: stdout belongs to the protocol. The
+//! spawn directly. `--http [PORT] [--pool K]` serves the same one tool over
+//! streamable-HTTP plus the same-origin demo page, behind K independent MCP routers
+//! (D-12: pmcp 2.19.3 holds one `Arc<Mutex<Server>>` across the whole tool future, so a
+//! single router serialises concurrent fits); `--bench [sizes...]` prints a fit/predict
+//! table on synthetic series. Everything human-readable goes to stderr: stdout belongs to the protocol. The
 //! `--bench` table is a report on a non-protocol run, so it prints to stdout by design.
 //!
 //! ```bash
 //! aprender-mcp-forecast                 # stdio
-//! aprender-mcp-forecast --http 8765     # demo page + /mcp on loopback
-//! aprender-mcp-forecast --bench 1000    # timing table
+//! aprender-mcp-forecast --http 8765               # demo page + /mcp, 8 routers
+//! aprender-mcp-forecast --http 8765 --pool 16     # 16 concurrent fits in flight
+//! aprender-mcp-forecast --http 8765 --pool 1      # one router (the pre-pool behaviour)
+//! aprender-mcp-forecast --bench 1000              # timing table
 //! ```
 
 use std::process::ExitCode;
@@ -22,6 +26,10 @@ use aprender_forecast::ForecastArgs;
 const SERVER_NAME: &str = "aprender-forecast";
 /// Default `--http` port.
 const DEFAULT_PORT: u16 = 8765;
+/// Default router-pool size, mirrored from `constants.pool_default` in
+/// `contracts/forecast-tool-boundary-v1.yaml`. Size it to the blocking-thread budget:
+/// K is the number of fits that can be in flight at once, and each one is seconds of CPU.
+const DEFAULT_POOL: usize = 8;
 
 /// A synthetic daily series with drifting slope, yearly + weekly terms and noise.
 fn synth(n: usize, seed: u64) -> (Vec<String>, Vec<f64>) {
@@ -97,11 +105,36 @@ fn build() -> Option<pmcp::Server> {
     }
 }
 
-async fn serve_http(port: u16) -> ExitCode {
-    let Some(server) = build() else {
-        return ExitCode::FAILURE;
+/// Parse the tail of `--http [PORT] [--pool K]` in either order.
+///
+/// Returns `None` for a usage error (an unparseable port, a `--pool` with no value, or a
+/// `--pool` value that is not a number) so `main` can exit 2 rather than silently
+/// defaulting — the same refuse-never-default rule the tool boundary itself follows.
+fn parse_http_args(rest: &[String]) -> Option<(u16, usize)> {
+    let mut port = DEFAULT_PORT;
+    let mut pool = DEFAULT_POOL;
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--pool" {
+            pool = rest.get(i + 1)?.parse().ok()?;
+            i += 2;
+        } else {
+            port = rest[i].parse().ok()?;
+            i += 1;
+        }
+    }
+    Some((port, pool))
+}
+
+async fn serve_http(port: u16, pool: usize) -> ExitCode {
+    let app = match aprender_mcp_forecast::pooled_app(pool, SERVER_NAME, env!("CARGO_PKG_VERSION"))
+    {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("error: server construction refused: {error}");
+            return ExitCode::FAILURE;
+        }
     };
-    let app = aprender_mcp_forecast::http_app(server);
     let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -111,7 +144,12 @@ async fn serve_http(port: u16) -> ExitCode {
     };
     eprintln!(
         "{SERVER_NAME}: demo page http://127.0.0.1:{port}/ — MCP streamable-http at \
-         http://127.0.0.1:{port}/mcp"
+         http://127.0.0.1:{port}/mcp — router pool {pool} ({})",
+        if pool <= 1 {
+            "single router: concurrent fits serialise behind pmcp's server mutex"
+        } else {
+            "K concurrent fits in flight"
+        }
     );
     if let Err(error) = axum::serve(listener, app).await {
         eprintln!("error: {error}");
@@ -149,19 +187,76 @@ async fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--http") => {
-            let port: u16 = args
-                .get(1)
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(DEFAULT_PORT);
-            serve_http(port).await
+            let Some((port, pool)) = parse_http_args(&args[1..]) else {
+                eprintln!(
+                    "error: usage: aprender-mcp-forecast --http [PORT] [--pool K] \
+                     (PORT is a number, K is a number; K <= 1 means one router)"
+                );
+                return ExitCode::from(2);
+            };
+            serve_http(port, pool).await
         }
         Some(other) if other.starts_with('-') => {
             eprintln!(
                 "error: unknown argument {other}; usage: aprender-mcp-forecast \
-                 [--http PORT] [--bench SIZES...]"
+                 [--http PORT [--pool K]] [--bench SIZES...]"
             );
             ExitCode::from(2)
         }
         _ => serve_stdio().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_http_args, DEFAULT_POOL, DEFAULT_PORT};
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn http_args_default_to_the_contract_pool_size() {
+        assert_eq!(
+            parse_http_args(&argv(&[])),
+            Some((DEFAULT_PORT, DEFAULT_POOL))
+        );
+        assert_eq!(
+            parse_http_args(&argv(&["9000"])),
+            Some((9000, DEFAULT_POOL))
+        );
+    }
+
+    #[test]
+    fn http_args_accept_pool_in_either_order() {
+        assert_eq!(
+            parse_http_args(&argv(&["9000", "--pool", "16"])),
+            Some((9000, 16))
+        );
+        assert_eq!(
+            parse_http_args(&argv(&["--pool", "16", "9000"])),
+            Some((9000, 16))
+        );
+        assert_eq!(
+            parse_http_args(&argv(&["--pool", "1"])),
+            Some((DEFAULT_PORT, 1))
+        );
+    }
+
+    #[test]
+    fn a_usage_error_refuses_rather_than_defaulting() {
+        // Refuse, never default (D-11) — the same rule the tool boundary follows.
+        assert_eq!(
+            parse_http_args(&argv(&["--pool"])),
+            None,
+            "--pool with no K"
+        );
+        assert_eq!(parse_http_args(&argv(&["--pool", "many"])), None);
+        assert_eq!(parse_http_args(&argv(&["not-a-port"])), None);
+        assert_eq!(
+            parse_http_args(&argv(&["70000"])),
+            None,
+            "port must fit u16"
+        );
     }
 }
