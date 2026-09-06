@@ -24,8 +24,12 @@ affects: [06-08, lambda-deployment, forecast-mcp-servers, chronos]
 actuals:
   tokens: 43000
   tasks: 3
-  commits: 3
+  commits: 5
 plan_head_before: f2df6f8d76527c144e0bf113927dd4d8daa70e3a
+# MEASURED, not narrated: `git rev-list --count f2df6f8d7..d7d98034a` = 5 — the three task
+# commits plus the SUMMARY and STATE/ROADMAP commits. Stated with its boundary because the
+# count necessarily moves once more when this line itself is committed.
+commits_measured_at: d7d98034a
 
 # Tech tracking
 tech-stack:
