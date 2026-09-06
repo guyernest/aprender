@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
-stopped_at: Completed 06-03-PLAN.md
-last_updated: "2026-09-06T05:37:58.336Z"
+stopped_at: Completed 06-04-PLAN.md
+last_updated: "2026-09-06T06:07:47.591Z"
 last_activity: 2026-09-05
 last_activity_desc: Phase 06 execution started
-state_head: d6b12ae1e369d9ce46088e8e89e3d94a7998fa56
+state_head: 8f56295b2689ab8882c92cf56a7a9dd3351e2eef
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 73
-  completed_plans: 64
+  completed_plans: 65
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
-Plan: 4 of 9
+Plan: 5 of 9
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -191,6 +191,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P01 | 37 min | 2 tasks | 40 files |
 | Phase 06 P02 | 20 min | 3 tasks | 4 files |
 | Phase 06 P03 | 24 min | 2 tasks | 3 files |
+| Phase 06 P04 | 23 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -247,6 +248,8 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-10: the GSD tracking handlers damaged STATE.md/ROADMAP.md a FIFTH time, and this time the damage was a FALSE COMPLETION CLAIM, not a cosmetic field: `roadmap.update-plan-progress <phase> <plan> complete` marks the WHOLE PHASE `[x] (completed <date>)` and flips the Progress table to Complete as soon as summary_count == plan_count — before the verifier runs and regardless of unmet must_haves. `state.begin-phase` separately wrote `Plan: 1 of 10` on a resume at plan 10 and put the phase percentage in a field the body renders as a plan percentage. The orchestrator MUST diff both files after every handler call and revert any completion claim the verifier has not earned; reading the handler's own JSON (`"complete": true`) is not evidence of anything
 - [Phase 02]: 02-09: the GSD state handlers corrupted STATE.md a THIRD time and in a NEW way — update-progress reported percent 100 while writing 40 into the frontmatter (and 94/20 on the earlier call: it writes the PHASE percentage into a field the body renders as a PLAN percentage), record-session silently ignored its positional stopped-at argument, record-metric REJECTS the documented positional form and needs --phase/--plan/--duration flags, and advance-plan clobbered last_activity to a bare date. Every field repaired by hand and read back
 - [Phase 06]: FALSIFY-MONO-011 treats thin MCP deployment units as a SECOND, separately-ratcheted category (human decision `deployment-unit-class`, 06-02 Task 1) — Human answered the gate="blocking-human" checkpoint with "deployment-unit-class", no wording changes. `allowed_bins` and ALLOWLIST_BASELINE = 27 stay byte-identical so "migration debt" keeps meaning migration debt; a new `deployment_unit_bins` set of six names (the four SetFit crates plus aprender-mcp-forecast and the not-yet-created aprender-mcp-chronos) gets its own DEPLOYMENT_UNIT_BASELINE = 6 shrink-only assert and its own stale-entry check. Policy sentence: "publish = false thin MCP servers whose capability IS a protocol surface; adding one requires a CONTEXT decision, never a same-PR edit." The existing ratchet's claim that every entry is a capability awaiting `apr <subcommand>` migration stays true because CONTEXT explicitly defers `apr forecast`, so these six are not awaiting migration. Rejected: single-list-33 (blurs debt with deployment unit), phase6-only-29 (leaves the gate RED, SC5 unreachable), halt (contradicts D-06 and the `apr forecast` deferral).
+- [Phase 06]: NeuralProphet-lite ships behind the one forecast tool with the D-10 training rules as invariant tests: graph-connected Huber (core's own smooth-L1 loss is detached and returns None gradients), strict mini-batches (full batch collapses the fit to MAE 2.6), clear_graph() per step, and lr selected by TRAIN loss — Selecting by test error would have reported 0.4112 instead of 0.4463 on this very dataset - a fitted curve presented as a forecast. The bars are one-sided thresholds rather than value-parity residuals because NeuralProphet's lr-finder and torch RNG are not reproducible from the committed oracle.
+- [Phase 06]: Contract bars must be read with the contract name written IN FULL at each call site, never through a Rust constant — The acceptance criterion is a STATIC link check (grep -c). A Rust constant reads the right file at runtime but makes the link invisible to the grep, so the guard silently stops guarding. Fixed at 12 call sites in 06-04.
 
 ### Pending Todos
 
@@ -343,6 +346,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-06T05:37:58.026Z
-Stopped at: Completed 06-03-PLAN.md
+Last session: 2026-09-06T06:07:23.217Z
+Stopped at: Completed 06-04-PLAN.md
 Resume file: None
