@@ -764,6 +764,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aprender-forecast"
+version = "0.63.0"
+dependencies = [
+ "aprender-compute",
+ "aprender-core",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "aprender-gemm-codegen"
 version = "0.63.0"
 dependencies = [
@@ -834,6 +846,21 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+]
+
+[[package]]
+name = "aprender-mcp-forecast"
+version = "0.63.0"
+dependencies = [
+ "aprender-forecast",
+ "axum 0.8.9",
+ "pmcp",
+ "reqwest 0.12.28",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
 ]
 
 [[package]]

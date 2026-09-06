@@ -58,6 +58,9 @@ members = [
     "crates/aprender-mcp-setfit-train",
     # Its AWS deployment: the request function and the training worker
     "crates/aprender-setfit-train-lambda",
+    # Phase 6: pure-Rust forecasting library + two thin stateless forecast MCP servers
+    "crates/aprender-forecast",
+    "crates/aprender-mcp-forecast",
     # --- APR-MONO Phase 2f: satellite repos (main crates) ---
     "crates/aprender-profile",
     "crates/aprender-profile-core",

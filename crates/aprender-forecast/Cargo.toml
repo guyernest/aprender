@@ -1,0 +1,36 @@
+[package]
+name = "aprender-forecast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust time-series forecasting: Prophet 1.4.0 and NeuralProphet-lite ports, Chronos-Bolt zero-shot forward"
+keywords = ["forecasting", "prophet", "chronos", "time-series", "aprender"]
+categories = ["science", "mathematics"]
+readme = "README.md"
+# Same reason as aprender-mcp-setfit: a deployment unit under the Phase 6 gate,
+# not a published API yet.
+publish = false
+
+[lib]
+name = "aprender_forecast"
+path = "src/lib.rs"
+
+[dependencies]
+# The MAP fit runs on core's L-BFGS (D-07: forecasting numerics live here, not
+# in realizar — this crate is training-side).
+aprender = { path = "../aprender-core", version = "0.63.0", package = "aprender-core", default-features = false }
+trueno = { path = "../aprender-compute", version = "0.63.0", package = "aprender-compute" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# JsonSchema on ForecastArgs so the MCP server advertises one strict schema.
+schemars = "1.0"
+
+[dev-dependencies]
+# Test-side reader for contracts/*.yaml equation tolerances (test_support).
+serde_yaml = { workspace = true }
+
+[lints]
+workspace = true
