@@ -655,4 +655,28 @@ debug-assertions = false
 [profile.dev.package.proptest]
 debug-assertions = false
 
+# Phase 6 / RESEARCH Pitfall 9 — the Prophet MAP fit is 35x slower unoptimised, and the
+# feedback loop is what pays. MEASURED on this branch (2026-09-05, M4 Pro, warm build,
+# `cargo test -p aprender-mcp-forecast --lib e2e` = ONE real Peyton fit, 2905 points):
+#   before (no override): 64 s wall  ->  the 06-03 seven-fixture ladder projects 448 s
+#   after  (opt-level 3): 13 s wall  ->  the same ladder projects  91 s  (4.9x faster)
+# 91 s still exceeds 60 s on this one-fit proxy, but the 06-03 ladder's six other
+# fixtures are far smaller than Peyton's 2905 points, so 7 x the LARGEST fit is a
+# deliberate upper bound, not a prediction; 06-03 Task 2 re-measures the real ladder.
+# The rule this plan applied: add the override iff 7 x single-fit wall > 60 s (the
+# VALIDATION.md feedback-latency target, and nextest's `slow-timeout` threshold).
+# 448 > 60, so it is added, here in Wave 1, so every Wave 2 plan reads a stable manifest.
+#
+# ONE table, not two, and that is evidence-backed. Both cross-AI reviewers claimed
+# `[profile.dev.package.X]` does not reach `cargo test` and demanded a
+# `[profile.test.package.aprender-forecast]` twin; the claim was REFUTED by a throwaway
+# two-crate workspace carrying only the `dev` override, where `cargo test -p outer -v`
+# still compiled the inner crate with `-C opt-level=3`. `profile.test` inherits `dev`,
+# package overrides included, so CI's nextest `--lib` leg gets the optimised fits too.
+# Proof the mechanism engaged here, not just the intent (CLAUDE.md Verification
+# Discipline #2): `cargo test -p aprender-forecast --lib -v 2>&1 | grep -o 'opt-level=[0-9]'`
+# reports opt-level=3 for the aprender-forecast unit.
+[profile.dev.package.aprender-forecast]
+opt-level = 3
+
 

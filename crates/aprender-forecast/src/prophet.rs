@@ -860,3 +860,140 @@ pub fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast {
         components,
     }
 }
+
+#[cfg(test)]
+mod parity {
+    use super::{make_design, Mode, Model, Params, Seasonality, Spec};
+    use crate::dates::parse_ymd;
+    use crate::test_support::load_json;
+
+    /// D-04 rung 2 — the one ladder rung this tracer plan hangs on.
+    ///
+    /// The bar is not self-consistency: it is that the Rust objective evaluated at PYTHON
+    /// Prophet 1.4.0's MAP reproduces Python's own `-lp` at that point. Everything about
+    /// the port — the priors, the exact L1 on `delta`, the `2σ²` term, the `n·ln σ` term,
+    /// the Fourier column order and the changepoint grid — has to be right simultaneously
+    /// for this number to land, which is why one rung is worth a whole tracer.
+    ///
+    /// The fixture stores a LOG POSTERIOR (positive) while the model computes a NEGATIVE
+    /// log posterior, so the residual is the SUM. `Model::new` scales by `1/T` (the D-09
+    /// recipe); that scale is undone here exactly as `sources/001 main.rs:146-158` does,
+    /// because the fixture number is unscaled.
+    ///
+    /// `1e-9` is the ONLY tolerance literal this plan writes; plan 06-03 replaces it with
+    /// `test_support::equation_tolerance` once `contracts/` carries the equation.
+    #[test]
+    fn peyton_objective_at_python_map_within_1e9() {
+        let fx = load_json("peyton_manning_prophet140.json");
+        assert_eq!(
+            fx["prophet_version"], "1.4.0",
+            "the bar is Python Prophet 1.4.0, not whatever regenerated the fixture"
+        );
+
+        // ---- rebuild Stan's data from the raw (ds, y), exactly as sources/001 does ----
+        let ds_days: Vec<i64> = fx["history"]["ds"]
+            .as_array()
+            .expect("history.ds")
+            .iter()
+            .map(|v| parse_ymd(v.as_str().expect("ds string")))
+            .collect();
+        let y: Vec<f64> = fx["history"]["y"]
+            .as_array()
+            .expect("history.y")
+            .iter()
+            .map(|v| v.as_f64().expect("y f64"))
+            .collect();
+
+        let seasonalities: Vec<Seasonality> = fx["seasonalities"]
+            .as_array()
+            .expect("seasonalities")
+            .iter()
+            .map(|s| {
+                assert_eq!(s["mode"], "additive", "the Peyton oracle is additive");
+                Seasonality {
+                    name: s["name"].as_str().expect("name").to_string(),
+                    period: s["period"].as_f64().expect("period"),
+                    order: usize::try_from(s["fourier_order"].as_u64().expect("fourier_order"))
+                        .expect("fourier order fits usize"),
+                    prior_scale: s["prior_scale"].as_f64().expect("prior_scale"),
+                    mode: Mode::Additive,
+                }
+            })
+            .collect();
+
+        let mut spec = Spec::default_linear(seasonalities);
+        spec.changepoint_prior_scale = fx["changepoint_prior_scale"]
+            .as_f64()
+            .expect("changepoint_prior_scale");
+        let design = make_design(&ds_days, &y, &spec);
+
+        // The design must match Stan's before the objective means anything.
+        assert_eq!(
+            design.k,
+            fx["seasonality_columns"].as_array().expect("cols").len(),
+            "column count"
+        );
+        assert!(
+            (design.y_scale - fx["y_scale"].as_f64().expect("y_scale")).abs() < 1e-12,
+            "y_scale {} vs {}",
+            design.y_scale,
+            fx["y_scale"]
+        );
+        assert!(
+            (design.t_scale_days - fx["t_scale_days"].as_f64().expect("t_scale_days")).abs() < 1e-9,
+            "t_scale_days"
+        );
+        let fx_cp = fx["changepoints_t"].as_array().expect("changepoints_t");
+        assert_eq!(
+            design.changepoints_t.len(),
+            fx_cp.len(),
+            "changepoint count"
+        );
+        let cp_diff = design
+            .changepoints_t
+            .iter()
+            .zip(fx_cp)
+            .map(|(a, b)| (a - b.as_f64().expect("cp f64")).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(cp_diff < 1e-12, "changepoints_t max abs diff {cp_diff:e}");
+
+        // ---- objective at Python's MAP ----
+        let arr = |key: &str| -> Vec<f64> {
+            fx["params"][key]
+                .as_array()
+                .unwrap_or_else(|| panic!("params.{key}"))
+                .iter()
+                .map(|v| v.as_f64().expect("param f64"))
+                .collect()
+        };
+        let py = Params {
+            k: fx["params"]["k"].as_f64().expect("params.k"),
+            m: fx["params"]["m"].as_f64().expect("params.m"),
+            delta: arr("delta"),
+            beta: arr("beta"),
+            sigma_obs: fx["params"]["sigma_obs"]
+                .as_f64()
+                .expect("params.sigma_obs"),
+        };
+        assert_eq!(py.beta.len(), design.k, "beta length vs design K");
+        assert_eq!(
+            py.delta.len(),
+            design.changepoints_t.len(),
+            "delta length vs changepoints"
+        );
+
+        let model = Model::new(&design);
+        // Model::new scales the objective by 1/T (D-09). The fixture number is unscaled,
+        // so undo the scale before comparing — sources/001 main.rs:146-158.
+        let f_rust = model.objective(&model.pack(&py)) / model.scale;
+        let lp = fx["log_posterior_at_map_unnormalized"]
+            .as_f64()
+            .expect("log_posterior_at_map_unnormalized");
+        let residual = (f_rust + lp).abs();
+        assert!(
+            residual <= 1e-9,
+            "rung 2: Rust f(θ_py) = {f_rust:.12}, Python −lp = {:.12}, abs diff {residual:e} > 1e-9",
+            -lp
+        );
+    }
+}

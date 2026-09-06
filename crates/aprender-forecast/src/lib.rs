@@ -40,6 +40,9 @@ pub mod fit;
 pub mod forecast;
 pub mod prophet;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use forecast::forecast;
 pub use types::{
     ForecastArgs, ForecastError, ForecastResponse, HolidayArg, MAX_HORIZON, MAX_POINTS, MIN_POINTS,
