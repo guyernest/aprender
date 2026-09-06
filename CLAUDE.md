@@ -162,27 +162,11 @@ than no diagnostic: it produces a confident answer about code you are not runnin
 
 All tools support GGUF, APR, and SafeTensors formats. If a tool says "format not supported", that's a BUG.
 
-### Realizar Inference Tracing
+### Realizar Inference Tracing / FFN kernel fusion
 
-**There is no `realizar` binary.** `realizar` is the *library* name of the
-`aprender-serve` package (`[lib] name = "realizar"`, `crates/aprender-serve/Cargo.toml`);
-that package ships no `[[bin]]`. Tracing is driven through `apr run`:
-
-```bash
-"$APR" run model.safetensors --prompt "2+2?" --trace
-"$APR" run model.gguf --prompt "Hi" --trace --trace-steps tokenize,sample,decode
-"$APR" run model.gguf --prompt "Hi" --trace --trace-level payload   # or --trace-payload
-```
-
-The flag is `--trace-steps <a,b,c>` (comma-delimited), not `--trace=<...>`.
-`--trace-level` accepts `none|basic|layer|payload|chrome` and defaults to `basic`.
-
-Implementation: `crates/aprender-serve/src/inference_trace/` (a DIRECTORY — `mod.rs`
-plus `save_tensor*.rs`, `gpu_stage_dump.rs`, `tracer_contracts.rs`, …).
-
-TraceSteps (`TraceStep` in `crates/aprender-serve/src/inference_trace/mod.rs`): `Tokenize`, `Embed`, `LayerNorm`,
-`Attention`, `FFN`, `TransformerBlock`, `LmHead`, `Sample`, `Decode`, `KernelLaunch`
-(PTX-level, GH-219), `BrickProfile` (trueno `BrickProfiler`).
+Both live in `crates/aprender-serve/CLAUDE.md`, which loads automatically when you
+work under that crate. **There is no `realizar` binary** — `realizar` is the [lib]
+name of the `aprender-serve` package; tracing is driven through `apr run --trace`.
 
 ## Architecture
 
@@ -214,6 +198,8 @@ the crate count run the command in the Project Overview table, don't trust a num
 | GGUF/SafeTensors Loading | Never | Primary | - |
 | CUDA/GPU Inference | Never | Primary | Kernels |
 | SetFit Classification Inference | **Primary** (aprender-core: loader + `VerifiedSetFitModel::classify`) | HTTP transport ONLY (route/`AppState`/readiness — calls core) | Compute |
+| Forecast Inference + its SafeTensors load | **Primary** (`crates/aprender-forecast/`: the Prophet/NeuralProphet/Chronos-Bolt numeric path behind one `forecast()` door) | Never | Compute (`gemm_blis`/`gemv`) |
+| Stateless Forecast Serving (MCP) | **Primary** (`crates/aprender-mcp-forecast/`: pmcp stdio + streamable-HTTP transport ONLY — calls the library door) | Never | Compute |
 
 **The SetFit row is a deliberate, documented EXCEPTION (Phase 4 D-09), not drift.**
 Realizar-first exists because core's LLM inference was ~750x slower than realizar's
@@ -223,6 +209,28 @@ evidence lives in core. `aprender-serve` owns the route, `AppState` and readines
 core's verified model; it does not reimplement the tokenizer, pooling or head. Serving a
 second, unproven port would violate OPS-03 (one implementation per operation) and re-open
 every Phase 1 conformance fixture. Schema and load rules: `contracts/setfit-apr-v1.yaml`.
+
+**The two forecast rows are the SAME exception, ratified the same way (Phase 6 D-03/D-07).**
+They follow SetFit deliberately rather than inventing a second precedent. The
+realizar-first rule is a *performance* argument — core's LLM inference was ~750x slower
+than realizar's kernels — and it does not reach here either. Prophet and NeuralProphet
+have no realizar path at all: they are MAP/L-BFGS and autograd fits, i.e. training-shaped
+work that belongs in the training crate by the table's own first row. Chronos-Bolt is a
+~9M-param T5 encoder whose ONLY parity-proven implementation is the fixture-verified port
+in `crates/aprender-forecast/src/bolt.rs`, measured against chronos-forecasting 2.3.1
+(`contracts/chronos-bolt-parity-v1.yaml`) — so, exactly as with SetFit, the evidence lives
+where the code is, and a second unproven port would violate OPS-03 and re-open every
+parity fixture.
+
+The SafeTensors carve-out is scoped to that one loader, not a general licence: it reads a
+single pinned Chronos checkpoint and nothing else. The GGUF row is untouched — forecasting
+never loads GGUF.
+
+The MCP servers are transport ONLY, and that boundary is enforced rather than asserted:
+`contracts/forecast-tool-boundary-v1.yaml` holds every bound and refusal for both servers,
+and the library door re-checks nothing the transport already validated. A server that grew
+its own numerics would be the drift this row does not licence. `crates/aprender-mcp-setfit/`
+is the template both follow.
 
 ```rust
 // WRONG - bypasses realizar, 0.3 tok/s
@@ -262,19 +270,6 @@ see `docs/BEATS.md`: GPU decode on RTX 4090 sm_89 is at **parity** (1.015–1.10
 — a no-collapse floor. The old "apr beats Ollama 1.371×" headline is **withdrawn**.
 
 Architecture: Trueno SIMD backend, realizar fused dequant+matmul kernels, PagedAttention KV cache, optional wgpu/CUDA.
-
-### FFN Gate+Up Kernel Fusion (PMAT-FFN-FUSION)
-
-The SwiGLU FFN block fuses gate and up projections into a single rayon dispatch via
-`generic_fused_gate_up_matvec_into<F>` (`crates/aprender-serve/src/quantize/fused_gate_up.rs:63`). This halves
-rayon spawn overhead (56→28 dispatches/token on 28-layer models) and improves L1/L2 cache
-reuse by loading the activation vector once per midi-tile instead of twice.
-
-- **Fused path**: Q4K, Q5K, Q6K when both gate+up weights share the same qtype and dims
-- **Fallback**: `rayon::join` with two separate `fused_matmul_into` for mixed types
-- **Q8K path**: Existing `fused_q4k_q8k_ffn_up_gate_into` still used when Q8K activations available
-- **Key files**: `crates/aprender-serve/src/quantize/fused_gate_up.rs`,
-  `crates/aprender-serve/src/gguf/inference/fused_matmul_into.rs` (`fused_gate_up_matmul_into`)
 
 ## LAYOUT-001/002: Tensor Layout Safety
 
@@ -461,21 +456,6 @@ Clippy's lint set is **not monotonic**: the #2370 tree is clean on 1.93/1.96/1.9
 1.95 *alone* reports 8 `collapsible_match` findings. A green ceiling gate means
 "clean on the pin and on current stable", never "clean on every release between".
 
-## CI/CD (`.github/workflows/`)
-
-- **ci.yml**: check, fmt, clippy, test, coverage (Codecov), mutation testing, security audit, docs, bashrs
-- **benchmark.yml**: criterion benchmarks on PR/weekly, auto PR comments
-- **security.yml**: cargo-audit, cargo-deny (license/banned crates), cargo-outdated (weekly)
-- **dependabot.yml**: weekly Rust deps, monthly GH Actions
-- **book.yml**: EXTREME TDD book to GitHub Pages
-- **release.yml**: automated releases on version tags
-
-## Modules
-
-**v0.4.0 (TOP 10 ML):** LinearRegression, LogisticRegression, DecisionTree, RandomForest, GBM, NaiveBayes, KNN, SVM, KMeans, PCA + model selection + metrics
-
-**v0.7.x (Advanced):** ARIMA time series, text processing (tokenizers, stop words, stemming, chat templates via minijinja), Bayesian inference (conjugate priors, BLR), GLMs (Poisson/Gamma/Binomial), ICA decomposition, graph algorithms (Dijkstra/A*/PageRank/community detection)
-
 ## Key Files
 
 - `crates/aprender-core/src/lib.rs` - ML library entry, module exports
@@ -619,48 +599,6 @@ verify-bindings, migrate`.
 pmat query "error handling" --limit 10
 ```
 
-### Cross-Project Search
-
-The index automatically includes sibling projects (aprender, trueno, realizar).
-Query from any project to search 60k+ functions across all three codebases.
-
-```bash
-# Build index in each project first (one-time setup)
-cd ~/src/aprender && pmat query "init" --rebuild-index --limit 1
-cd ~/src/trueno && pmat query "init" --rebuild-index --limit 1
-cd ~/src/realizar && pmat query "init" --rebuild-index --limit 1
-
-# Now query from any project - siblings auto-merge
-pmat query "matrix multiplication" --limit 5
-```
-
-### Output Formats
-
-- Default (text): Human-readable with signatures and metrics
-- `--format json`: For parsing/scripting
-- `--format markdown`: For documentation
-- `--include-source`: Include full source code in results
-
-### Quick Reference
-
-```bash
-pmat query "<intent>"                    # Basic search
-pmat query "<intent>" --rank-by pagerank # Most important functions
-pmat query "<intent>" --format json      # Machine-readable
-pmat query "<intent>" --include-source   # Include full source code
-pmat query "<intent>" --exclude-tests    # Skip test functions
-
-# Git history search (find code by commit intent via RRF fusion)
-pmat query "fix serialization" -G
-pmat query "apr format" --git-history
-
-# Enrichment flags (combine freely)
-pmat query "ml algorithm" --churn                  # git volatility (commit count, churn score)
-pmat query "tensor operation" --duplicates          # code clone detection (MinHash+LSH)
-pmat query "loss function" --entropy                # pattern diversity (repetitive vs unique)
-pmat query "model training" --churn --duplicates --entropy --faults -G  # full audit
-```
-
 ### Coverage-Guided Search (pmat 3.0.0+)
 
 **Use `pmat query --coverage` to find untested code. NEVER parse coverage JSON manually.**
@@ -702,15 +640,3 @@ batuta oracle --rag-index                   # Reindex (the command prints the do
 
 Use proactively for trueno SIMD patterns, cross-language equivalents, and stack best practices.
 
-## SSC Training Infrastructure Status (snapshot 2026-03-22 — STALE, re-verify before acting)
-
-This block has not been re-measured in ~5 months and one of its premises no longer
-holds: it points at "trueno 0.4.36" as an external crate, but since APR-MONO trueno is
-in-tree as `crates/aprender-compute` and has no independent version to wait on.
-
-- **SSC canary eval**: 90% accuracy, SHIP gate PASS — classifier ready to ship
-- **entrenar cuBLAS integration**: GEMM parity verified between CPU and GPU paths
-- **Blackwell (GB10) training**: Blocked by JIT pre-warming bug in custom PTX kernels. Must use fused NF4 kernel path (15.5 tok/s) until trueno 0.4.36 ships with pre-compiled kernels
-- **apr-cli inference NOT affected**: `apr run` / `apr serve` use cuBLAS (GPU) or trueno SIMD (CPU) — pre-compiled, no custom PTX involved
-- **Trained model (LoRA adapter)**: Architecture-independent safetensors — works on any GPU or CPU via standard PEFT loading
-- **Key tickets**: trueno#200 (Blackwell JIT), trueno#203 (pre-compiled kernels), entrenar#300 (cuBLAS backward)
