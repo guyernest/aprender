@@ -25,9 +25,12 @@ metadata:
     WHAT IS BARRED AND WHAT IS ONLY RECORDED. Data preparation is barred against NeuralProphet's own
     published numbers to 1e-9 (measured: shift/scale to 1e-16, changepoints to 1.1e-16, and the auto
     batch/epoch formulas reproduce NP's 64/80 EXACTLY as integers). The two accuracy bars are the
-    SC3 literals: 365-day-ahead holdout MAE <= 0.47 lag-free (Python NP 0.4611, Rust measured 0.4510
-    at lr 0.1, seeds 1/2/3 giving 0.4549/0.4515/0.4508), and the AR-Net with `n_lags = 30` beating
-    the oracle's own naive one-step baseline (0.3461; Rust measured 0.2509 with hidden [32]).
+    SC3 literals: 365-day-ahead holdout MAE <= 0.47 lag-free (Python NP 0.4611; Rust measured 0.4463
+    IN THIS TREE at seed 42, and 0.4510 in the spike at seed 7, with the spike's seed 1/2/3 ablation
+    giving 0.4549/0.4515/0.4508), and the AR-Net with `n_lags = 30` beating the oracle's own naive
+    one-step baseline (0.3461; Rust measured 0.2458 in this tree at seed 42, 0.2509 in the spike).
+    The in-tree numbers are the ones the ladder actually produces; the spike numbers are kept
+    beside them because the seed-to-seed spread is what sets the headroom under the bar.
     Nothing here bars Rust to Python's *value*: NeuralProphet's lr-finder, its torch RNG and its
     epoch schedule are not reproducible from the oracle, so a value-parity bar would be barring
     seed luck. What IS reproducible — the data preparation and the two auto-formulas — is barred
@@ -108,7 +111,7 @@ equations:
     float_tolerance: 0.47
     invariants:
       - 'this is the SC3 literal. It is a one-sided THRESHOLD, not a parity residual: the port is required to be at least as good as NeuralProphet was on this split, with headroom for seed variation'
-      - 'measured 0.4510 at the train-loss-selected lr 0.1 (spike seed 7); the seed ablation gives 0.4508 / 0.4515 / 0.4549 for seeds 3 / 2 / 1, so the seed-to-seed spread is ~0.004 and the bar sits ~0.015 above the worst observed value'
+      - 'measured 0.4463 IN THIS TREE at seed 42 with the train-loss-selected lr 0.1 (final train loss 0.01498); the spike measured 0.4510 at seed 7, and its seed 1/2/3 ablation gives 0.4549 / 0.4515 / 0.4508. The seed-to-seed spread is ~0.009 and the bar sits ~0.015 above the worst value ever observed'
       - 'the lr MUST be selected by train loss (D-10). On this dataset the best TEST MAE is lr 0.01 (0.4112) while the best TRAIN loss is lr 0.1 (0.4510) — selecting by test would report 0.4112 and be measuring nothing'
       - 'the model is scored on ALL 365 held-out rows while NeuralProphet covered 363 of them; the two-row difference is NP dropping rows its own windowing could not cover, and is recorded rather than corrected for'
     preconditions:
@@ -121,7 +124,7 @@ equations:
     float_tolerance: 0.0
     invariants:
       - 'the margin is 0.0: the claim is BEATING the naive baseline, not beating it by a stated amount. A margin > 0 would be an accuracy claim the spike did not measure across seeds'
-      - 'measured 0.2509 for hidden [32] and 0.3216 for the linear AR head, i.e. the hidden layer buys 0.07 MAE and both beat naive'
+      - 'measured 0.2458 IN THIS TREE at seed 42 (lr 0.1, final train loss 0.00829); the spike measured 0.2509 for hidden [32] and 0.3216 for the linear AR head at seed 7. The achieved margin over naive is ~0.10, and Python NeuralProphet own AR-Net (0.3933) does NOT beat naive on this split'
       - 'the baseline is the ORACLE own number, not a Rust-computed naive: comparing a Rust model against a Rust baseline would be a self-comparison'
       - 'one-step-ahead uses TRUE lags (predict_ar_1step), never recursively fed predictions; the recursive path (predict_ar_recursive) is what the horizon forecast uses and is NOT scored here'
     preconditions:
@@ -247,13 +250,13 @@ falsification_tests:
 
   - id: FALSIFY-NP-002
     rule: 'The lag-free model meets the SC3 holdout accuracy bar'
-    prediction: 'With seed 42 and the lr selected by lowest final TRAIN loss from {0.01, 0.03, 0.1}, the 365-day-ahead MAE on the held-out Peyton Manning rows is <= 0.47 (measured 0.4510; Python NeuralProphet 0.4611 on the same split).'
+    prediction: 'With seed 42 and the lr selected by lowest final TRAIN loss from {0.01, 0.03, 0.1}, the 365-day-ahead MAE on the held-out Peyton Manning rows is <= 0.47 (measured 0.4463 in this tree; Python NeuralProphet 0.4611 on the same split).'
     test: 'cargo test -p aprender-forecast --lib np::parity::lag_free_365_day_mae_within_contract'
     if_fails: 'Either the training recipe regressed (batch, epochs, one-cycle schedule, weight decay, sample weighting) or the trend/seasonality feature construction changed. Check FALSIFY-NP-004 first: a full-batch regression alone moves this number from 0.45 to 2.6.'
 
   - id: FALSIFY-NP-003
     rule: 'The AR-Net beats the naive one-step baseline'
-    prediction: 'With n_lags 30, ar_layers [32], seed 42 and the lr selected by train loss from {0.03, 0.1}, the one-step MAE over the held-out rows via predict_ar_1step is strictly below the oracle naive_1step_mae_test of 0.34613807677421315 (measured 0.2509).'
+    prediction: 'With n_lags 30, ar_layers [32], seed 42 and the lr selected by train loss from {0.03, 0.1}, the one-step MAE over the held-out rows via predict_ar_1step is strictly below the oracle naive_1step_mae_test of 0.34613807677421315 (measured 0.2458 in this tree).'
     test: 'cargo test -p aprender-forecast --lib np::parity::ar_net_30_lags_beats_naive_one_step'
     if_fails: 'The AR head is not learning: check the lag stationarisation (raw lags MINUS the detached trend at the lag times MINUS the seasonality at the lag times), the ReLU between AR layers, or the epoch cap. An AR-Net that cannot beat "repeat the last value" is not a nowcaster.'
 
@@ -339,14 +342,13 @@ qa_gate:
     - 'no tolerance literal inside the np parity test module — every bar is contract-read'
   pass_criteria: 'All FALSIFY-NP tests pass and each numeric one was observed RED under an induced tolerance change made in this file alone.'
   falsification: >
-    The induced negative for this contract must be a TIGHTENING that the measurement cannot meet,
-    made in this file and in no line of Rust. The bars are one-sided thresholds with known measured
-    values, so the recipe is exact: set `equations.lag_free_holdout_mae.float_tolerance` to 0.40
-    (below the measured 0.4510) and re-run `cargo test -p aprender-forecast --lib np::parity` —
-    FALSIFY-NP-002 goes red quoting the new bar, proving the ladder reads it from here rather than
-    duplicating it as a literal; a byte-identical revert restores green. For FALSIFY-NP-003 the
-    equivalent tightening is `ar_net_vs_naive_margin.float_tolerance` set to 0.20, which demands the
-    AR-Net beat naive by more than the 0.095 margin it actually achieves. Note that
+    OBSERVED, not merely prescribed. Changing ONLY this file — `lag_free_holdout_mae.float_tolerance`
+    0.47 -> 0.40 and `ar_net_vs_naive_margin.float_tolerance` 0.0 -> 0.20, with not one line of Rust
+    touched — turns exactly FALSIFY-NP-002 and FALSIFY-NP-003 red (7 passed / 2 failed), and each
+    failure QUOTES THE NEW BAR: "holdout MAE 0.4463 exceeds the contract bar 0.4" and "one-step MAE
+    0.2458 must beat the oracle's naive baseline 0.3461 by more than 0.2". A byte-identical
+    `git checkout` of this file restores 9 passed / 0 failed. That is the proof the ladder reads its
+    bars from here at test time rather than duplicating them as literals. Note that
     `huber_grad_min_abs` CANNOT be induced-RED by tightening: it is a strict `> 0.0` connectivity
     check, and raising it above zero would test gradient MAGNITUDE, which is a different and
     seed-dependent property. Its induced negative is a code mutation instead — route

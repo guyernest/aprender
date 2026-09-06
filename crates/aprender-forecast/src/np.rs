@@ -626,3 +626,538 @@ pub fn predict_ar_recursive(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
     }
     out
 }
+
+// ============================================================== parity ====
+// The SC3 correctness ladder and the D-10 training-rule invariants. Every numeric bar is
+// READ from `contracts/neuralprophet-parity-v1.yaml` at test time (D-15) — a bar that also
+// exists as a literal here could be loosened without the contract ever noticing.
+#[cfg(test)]
+mod parity {
+    use super::{
+        auto_batch, auto_epochs, fourier_feats, predict_ar_1step, predict_ts, train,
+        weighted_huber, NpData, NpModel, NpSeason, Rng, TrainConfig,
+    };
+    use crate::dates::{days_from_civil, parse_ymd};
+    use crate::test_support::{
+        constant_u64, contract_path, equation_tolerance, load_json, read_csv,
+    };
+    use aprender::autograd::{clear_graph, get_grad, graph_tape_len, Tensor};
+
+    /// The oracle holds out the last 365 daily rows (spike-002 `main.rs`: `n_train = n - H`).
+    const HOLDOUT: usize = 365;
+
+    /// Read a comma-separated `constants.<key>` learning-rate sweep from the contract.
+    ///
+    /// `test_support` carries `constant_u64` only, and a sweep is an ordered list rather than a
+    /// scalar. Kept local to this module so the plan's `files_modified` set stays honest.
+    fn constant_lr_sweep(key: &str) -> Vec<f64> {
+        let path = contract_path("neuralprophet-parity-v1");
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "contract neuralprophet-parity-v1 must exist at {}: {e}",
+                path.display()
+            )
+        });
+        let doc: serde_yaml::Value = serde_yaml::from_str(&raw)
+            .unwrap_or_else(|e| panic!("contract neuralprophet-parity-v1 is not valid YAML: {e}"));
+        let s = doc
+            .get("constants")
+            .and_then(|c| c.get(key))
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or_else(|| {
+                panic!("contract neuralprophet-parity-v1 must define constants.{key} as a string")
+            });
+        s.split(',')
+            .map(|p| {
+                p.trim()
+                    .parse::<f64>()
+                    .unwrap_or_else(|e| panic!("constants.{key}: {p:?} is not a float: {e}"))
+            })
+            .collect()
+    }
+
+    /// The oracle split: the whole Peyton Manning CSV, and the index where the 365-row holdout
+    /// begins. Read from the same de-duplicated CSV the oracle was generated from.
+    fn peyton_split() -> (Vec<i64>, Vec<f64>, usize) {
+        let (ds_s, y) = read_csv("peyton_manning.csv");
+        let ds: Vec<i64> = ds_s.iter().map(|s| parse_ymd(s)).collect();
+        let n_train = y.len() - HOLDOUT;
+        (ds, y, n_train)
+    }
+
+    fn mae(a: &[f64], b: &[f64]) -> f64 {
+        a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f64>() / a.len() as f64
+    }
+
+    /// The oracle stores `data_params` as pandas reprs, e.g. `"5.26269018890489"` and
+    /// `"2596 days 00:00:00"`. Take the leading numeric token.
+    fn leading_f64(s: &str) -> f64 {
+        let head: String = s
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+' || *c == 'e')
+            .collect();
+        head.parse().unwrap_or_else(|e| {
+            panic!("oracle data_params {s:?} does not start with a number: {e}")
+        })
+    }
+
+    fn oracle_str<'a>(v: &'a serde_json::Value, path: &[&str]) -> &'a str {
+        let mut cur = v;
+        for k in path {
+            cur = &cur[*k];
+        }
+        cur.as_str()
+            .unwrap_or_else(|| panic!("oracle key {} must be a string", path.join(".")))
+    }
+
+    fn oracle_f64(v: &serde_json::Value, path: &[&str]) -> f64 {
+        let mut cur = v;
+        for k in path {
+            cur = &cur[*k];
+        }
+        cur.as_f64()
+            .unwrap_or_else(|| panic!("oracle key {} must be a number", path.join(".")))
+    }
+
+    // ---------------------------------------------------------- rung 1 ----
+
+    #[test]
+    fn data_prep_matches_np_oracle() {
+        let (ds, y, n_train) = peyton_split();
+        let d = NpData::new(&ds, &y, n_train, 10, 0.8);
+        let ora = load_json("np_oracle_peyton.json");
+        let ts = &ora["trend_seasonality"];
+        let tol = equation_tolerance("neuralprophet-parity-v1", "data_prep_vs_oracle_abs");
+
+        let np_shift = leading_f64(oracle_str(ts, &["data_params", "y", "shift"]));
+        let np_scale = leading_f64(oracle_str(ts, &["data_params", "y", "scale"]));
+        assert!(
+            (d.shift - np_shift).abs() <= tol,
+            "soft-normalisation shift: rust {} vs NeuralProphet {np_shift} (bar {tol:e})",
+            d.shift
+        );
+        assert!(
+            (d.scale - np_scale).abs() <= tol,
+            "soft-normalisation scale (q95 - min): rust {} vs NeuralProphet {np_scale} (bar {tol:e})",
+            d.scale
+        );
+
+        let np_t0_str = oracle_str(ts, &["data_params", "ds", "shift"]);
+        let np_t0 = parse_ymd(&np_t0_str[..10]);
+        assert_eq!(
+            d.t0, np_t0,
+            "time origin: rust day {} vs NeuralProphet {np_t0_str}",
+            d.t0
+        );
+        let np_span = leading_f64(oracle_str(ts, &["data_params", "ds", "scale"]));
+        assert!(
+            (d.t_span - np_span).abs() <= tol,
+            "train span in days: rust {} vs NeuralProphet {np_span} (bar {tol:e})",
+            d.t_span
+        );
+
+        let np_cps = ts["changepoints_t"]
+            .as_array()
+            .expect("oracle trend_seasonality.changepoints_t");
+        assert_eq!(
+            d.cps.len(),
+            np_cps.len(),
+            "changepoint count: rust {} vs NeuralProphet {}",
+            d.cps.len(),
+            np_cps.len()
+        );
+        let worst = d
+            .cps
+            .iter()
+            .zip(np_cps)
+            .map(|(a, b)| (a - b.as_f64().expect("changepoint")).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            worst <= tol,
+            "changepoints_t max abs diff {worst:e} exceeds the contract bar {tol:e}"
+        );
+
+        // The two auto formulas are asserted as EXACT integers against NeuralProphet's own
+        // reported values — these are not tolerance comparisons.
+        let np_batch = constant_u64("neuralprophet-parity-v1", "np_peyton_batch") as usize;
+        let np_epochs = constant_u64("neuralprophet-parity-v1", "np_peyton_epochs") as usize;
+        assert_eq!(
+            auto_batch(n_train),
+            np_batch,
+            "auto_batch({n_train}) must reproduce NeuralProphet's own batch size"
+        );
+        assert_eq!(
+            auto_epochs(n_train),
+            np_epochs,
+            "auto_epochs({n_train}) must reproduce NeuralProphet's own epoch count"
+        );
+        assert_eq!(
+            auto_batch(n_train),
+            ts["batch"].as_u64().expect("oracle batch") as usize,
+            "the contract's np_peyton_batch and the oracle must agree"
+        );
+        assert_eq!(
+            auto_epochs(n_train),
+            ts["epochs"].as_u64().expect("oracle epochs") as usize,
+            "the contract's np_peyton_epochs and the oracle must agree"
+        );
+    }
+
+    // ---------------------------------------------------------- rung 2 ----
+
+    #[test]
+    fn lag_free_365_day_mae_within_contract() {
+        let (ds, y, n_train) = peyton_split();
+        let d = NpData::new(&ds, &y, n_train, 10, 0.8);
+        let test_days = &ds[n_train..];
+        let test_y = &y[n_train..];
+        let sweep = constant_lr_sweep("lr_sweep_lag_free");
+
+        // Selected by lowest final TRAIN loss, NEVER by test error (D-10).
+        let mut best: Option<(f64, f64, Vec<f64>)> = None;
+        for &lr in &sweep {
+            let cfg = TrainConfig {
+                n_lags: 0,
+                ar_layers: vec![],
+                max_lr: lr,
+                epochs: None,
+                batch: None,
+                weight_decay: 1e-3,
+                huber_beta: 0.3,
+                newer_w: 2.0,
+                seed: 42,
+            };
+            let (m, log) = train(&d, &cfg, false);
+            let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
+            if !fl.is_finite() {
+                continue;
+            }
+            if best.as_ref().is_none_or(|b| fl < b.0) {
+                best = Some((fl, lr, predict_ts(&d, &m, test_days)));
+            }
+        }
+        let (train_loss, selected_lr, yhat) =
+            best.expect("at least one learning rate in the sweep must produce a finite loss");
+        assert!(
+            sweep.iter().any(|c| (c - selected_lr).abs() < 1e-12),
+            "the selected lr {selected_lr} must come from the contract sweep {sweep:?}"
+        );
+
+        let e = mae(&yhat, test_y);
+        let bar = equation_tolerance("neuralprophet-parity-v1", "lag_free_holdout_mae");
+        let ora = load_json("np_oracle_peyton.json");
+        let np_mae = oracle_f64(&ora, &["trend_seasonality", "mae_365ahead_on_test_rows"]);
+        let np_rows = ora["trend_seasonality"]["n_test_rows"]
+            .as_u64()
+            .expect("oracle n_test_rows");
+        assert!(
+            e <= bar,
+            "{HOLDOUT}-day-ahead holdout MAE {e:.4} exceeds the contract bar {bar} \
+             (lr {selected_lr} selected by train loss {train_loss:.5}; \
+             Python NeuralProphet 0.9.0 scored {np_mae:.4} over {np_rows} of these rows)"
+        );
+        eprintln!(
+            "lag-free: lr {selected_lr} (train loss {train_loss:.5}) -> test MAE {e:.4} \
+             over {HOLDOUT} rows; NeuralProphet {np_mae:.4} over {np_rows}; bar {bar}"
+        );
+    }
+
+    // ---------------------------------------------------------- rung 3 ----
+
+    #[test]
+    fn ar_net_30_lags_beats_naive_one_step() {
+        let (ds, y, n_train) = peyton_split();
+        let d = NpData::new(&ds, &y, n_train, 10, 0.8);
+        let test_days = &ds[n_train..];
+        let test_y = &y[n_train..];
+        let test_idx: Vec<usize> = test_days.iter().map(|&day| (day - d.t0) as usize).collect();
+        let sweep = constant_lr_sweep("lr_sweep_with_lags");
+        let cap = constant_u64("neuralprophet-parity-v1", "auto_epochs_cap_with_lags") as usize;
+
+        let mut best: Option<(f64, f64, Vec<f64>)> = None;
+        for &lr in &sweep {
+            let cfg = TrainConfig {
+                n_lags: 30,
+                ar_layers: vec![32],
+                max_lr: lr,
+                epochs: Some(auto_epochs(n_train).min(cap)),
+                batch: None,
+                weight_decay: 1e-3,
+                huber_beta: 0.3,
+                newer_w: 2.0,
+                seed: 42,
+            };
+            let (m, log) = train(&d, &cfg, false);
+            let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
+            if !fl.is_finite() {
+                continue;
+            }
+            if best.as_ref().is_none_or(|b| fl < b.0) {
+                best = Some((fl, lr, predict_ar_1step(&d, &m, &test_idx)));
+            }
+        }
+        let (train_loss, selected_lr, yhat) =
+            best.expect("at least one learning rate in the sweep must produce a finite loss");
+
+        let e = mae(&yhat, test_y);
+        let margin = equation_tolerance("neuralprophet-parity-v1", "ar_net_vs_naive_margin");
+        let ora = load_json("np_oracle_peyton.json");
+        let naive = oracle_f64(&ora, &["naive_1step_mae_test"]);
+        let np_ar = oracle_f64(&ora, &["ar30_hidden32", "mae_1step_test"]);
+        assert!(
+            e < naive - margin,
+            "AR-Net(30 lags, hidden [32]) one-step MAE {e:.4} must beat the oracle's naive \
+             baseline {naive:.4} by more than {margin} \
+             (lr {selected_lr} selected by train loss {train_loss:.5}; \
+             Python NeuralProphet's own AR-Net scored {np_ar:.4})"
+        );
+        eprintln!(
+            "AR-Net: lr {selected_lr} (train loss {train_loss:.5}) -> 1-step test MAE {e:.4}; \
+             naive {naive:.4}; Python NP AR-Net {np_ar:.4}"
+        );
+    }
+
+    // ------------------------------------------------- D-10 invariants ----
+
+    #[test]
+    fn weighted_huber_is_graph_connected() {
+        clear_graph();
+        // A tiny NpData is enough: the property is about the LOSS reaching the parameters,
+        // not about the fit. Core's own smooth-L1 loss fails this exact check.
+        let t0 = days_from_civil(2020, 1, 1);
+        let ds: Vec<i64> = (0..40).map(|i| t0 + i).collect();
+        let y: Vec<f64> = (0..40).map(|i| 1.0 + f64::from(i) * 0.1).collect();
+        let d = NpData::new(&ds, &y, ds.len(), 3, 0.8);
+        let mut rng = Rng::new(42);
+        let mut model = NpModel::new(&d, 0, &[], &mut rng);
+
+        let b = 8usize;
+        let (mut tr, mut se) = (Vec::new(), Vec::new());
+        for &day in &ds[..b] {
+            d.row_feats(day, &mut tr, &mut se);
+        }
+        let xt = Tensor::from_vec(tr, &[b, d.trend_dim()]);
+        let xs = Tensor::from_vec(se, &[b, d.season_dim()]);
+        let yt = Tensor::from_vec(y[..b].iter().map(|v| d.norm(*v)).collect(), &[b, 1]);
+        let wt = Tensor::from_vec(vec![1.0; b], &[b, 1]);
+
+        let pred = model.forward(&xt, &xs, None);
+        let loss = weighted_huber(&pred, &yt, &wt, 0.3);
+        assert!(loss.item().is_finite(), "the loss itself must be finite");
+        loss.backward();
+
+        let floor = equation_tolerance("neuralprophet-parity-v1", "huber_grad_min_abs");
+        // Gradients live on the tape and are read through `get_grad(id)` — that is exactly
+        // what `Optimizer::step_with_params` consults, so it is the ground truth for
+        // "can this loss train anything".
+        let ids: Vec<_> = model.parameters_mut().iter().map(|p| p.id()).collect();
+        assert!(!ids.is_empty(), "the model must have parameters");
+        for (i, id) in ids.iter().enumerate() {
+            let g = get_grad(*id).unwrap_or_else(|| {
+                panic!(
+                    "parameter {i} has NO gradient after backward(): the loss is DETACHED from \
+                     the graph (D-10). This is precisely how core's own smooth-L1 loss fails."
+                )
+            });
+            assert!(
+                g.data().iter().any(|v| v.abs() > floor as f32),
+                "parameter {i}: every gradient entry is <= {floor}; the loss reaches the \
+                 parameter but carries no signal"
+            );
+        }
+        clear_graph();
+    }
+
+    #[test]
+    fn auto_batch_is_mini_batch_over_grid() {
+        let lo = constant_u64("neuralprophet-parity-v1", "min_rows_for_mini_batch") as usize;
+        let bmin = constant_u64("neuralprophet-parity-v1", "auto_batch_min") as usize;
+        let bmax = constant_u64("neuralprophet-parity-v1", "auto_batch_max") as usize;
+        let mut n = lo;
+        let mut checked = 0usize;
+        while n <= crate::types::MAX_POINTS {
+            let b = auto_batch(n);
+            assert!(
+                b < n,
+                "auto_batch({n}) = {b} is a FULL batch; full-batch training collapses this \
+                 model (measured test MAE 2.6 against 0.45)"
+            );
+            assert!(
+                (bmin..=bmax).contains(&b),
+                "auto_batch({n}) = {b} is outside the contract clamp [{bmin}, {bmax}]"
+            );
+            checked += 1;
+            n += 97;
+        }
+        assert!(
+            checked > 100,
+            "the grid must actually cover the range; only {checked} points were checked"
+        );
+    }
+
+    #[test]
+    fn train_clears_the_tape() {
+        clear_graph();
+        let t0 = days_from_civil(2020, 1, 1);
+        let ds: Vec<i64> = (0..120).map(|i| t0 + i).collect();
+        let y: Vec<f64> = (0..120)
+            .map(|i| 10.0 + f64::from(i) * 0.01 + (f64::from(i) / 7.0).sin())
+            .collect();
+        let d = NpData::new(&ds, &y, ds.len(), 10, 0.8);
+        let cfg = TrainConfig {
+            n_lags: 0,
+            ar_layers: vec![],
+            max_lr: 0.1,
+            epochs: Some(3),
+            batch: None,
+            weight_decay: 1e-3,
+            huber_beta: 0.3,
+            newer_w: 2.0,
+            seed: 42,
+        };
+        let (m, log) = train(&d, &cfg, false);
+        assert!(log.steps > 0, "the fit must have taken at least one step");
+        assert_eq!(
+            graph_tape_len(),
+            0,
+            "train() must leave the thread-local tape empty (clear_graph() after EVERY step)"
+        );
+        // The prediction helpers must clear it too: they build a no_grad forward that still
+        // allocates tape entries.
+        let _ = predict_ts(&d, &m, &ds[..5]);
+        assert_eq!(
+            graph_tape_len(),
+            0,
+            "predict_ts() must leave the thread-local tape empty"
+        );
+    }
+
+    #[test]
+    fn full_batch_is_not_what_auto_batch_returns() {
+        let (_, y, n_train) = peyton_split();
+        assert!(n_train > 0 && !y.is_empty());
+        let np_batch = constant_u64("neuralprophet-parity-v1", "np_peyton_batch") as usize;
+        assert_eq!(
+            auto_batch(n_train),
+            np_batch,
+            "auto_batch on the Peyton training split must be NeuralProphet's own value, not \
+             the full {n_train}-row batch"
+        );
+        assert!(
+            auto_batch(n_train) < n_train,
+            "a full batch here means 80 optimiser steps instead of 3200"
+        );
+    }
+
+    #[test]
+    fn fourier_features_are_phased_on_1900() {
+        let epoch_year = constant_u64("neuralprophet-parity-v1", "fourier_epoch_year") as i64;
+        let seasons = vec![NpSeason {
+            name: "weekly".into(),
+            period: 7.0,
+            order: 3,
+        }];
+        let day = parse_ymd("2020-01-01");
+        let mut out = Vec::new();
+        fourier_feats(day, &seasons, &mut out);
+        assert_eq!(out.len(), 6, "order 3 gives 3 sin terms then 3 cos terms");
+
+        let t = (day - days_from_civil(epoch_year, 1, 1)) as f64;
+        let f = 2.0 * std::f64::consts::PI / 7.0;
+        for k in 1..=3usize {
+            let want = (f * k as f64 * t).sin() as f32;
+            assert!(
+                (out[k - 1] - want).abs() < 1e-5,
+                "sin block position {}: got {} want {want} (t = day - {epoch_year}-01-01)",
+                k - 1,
+                out[k - 1]
+            );
+            let want_cos = (f * k as f64 * t).cos() as f32;
+            assert!(
+                (out[2 + k] - want_cos).abs() < 1e-5,
+                "cos block position {}: got {} want {want_cos}",
+                2 + k,
+                out[2 + k]
+            );
+        }
+        // The epoch is load-bearing: phasing on the Unix epoch instead would move the features.
+        let t_unix = day as f64;
+        let unix_first_sin = (f * t_unix).sin() as f32;
+        assert!(
+            (out[0] - unix_first_sin).abs() > 1e-3,
+            "the {epoch_year} epoch must be distinguishable from the Unix epoch, otherwise \
+             this test cannot detect the epoch moving"
+        );
+    }
+
+    #[test]
+    fn lr_selection_is_by_train_loss() {
+        // The shipped door and an independent argmin over the contract's sweep must agree.
+        let t0 = days_from_civil(2020, 1, 1);
+        let mut rng = crate::prophet::Rng::new(7);
+        let n = 120usize;
+        let ds: Vec<i64> = (0..n as i64).map(|i| t0 + i).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64;
+                10.0 + 0.01 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin() + 0.05 * rng.normal()
+            })
+            .collect();
+
+        let args = crate::types::ForecastArgs {
+            ds: ds.iter().map(|d| crate::dates::format_ymd(*d)).collect(),
+            y: y.clone(),
+            horizon: 7,
+            freq: None,
+            model: Some("neuralprophet".into()),
+            growth: None,
+            cap: None,
+            seasonality_mode: None,
+            interval_width: None,
+            holidays: None,
+            n_lags: None,
+            seed: None,
+        };
+        let r = crate::forecast::forecast(&args).expect("the neuralprophet arm must dispatch");
+        let reported_lr = r.diagnostics["selected_lr"]
+            .as_f64()
+            .expect("diagnostics.selected_lr");
+        let reported_loss = r.diagnostics["final_train_loss"]
+            .as_f64()
+            .expect("diagnostics.final_train_loss");
+
+        let d = NpData::new(&ds, &y, n, 10, 0.8);
+        let sweep = constant_lr_sweep("lr_sweep_lag_free");
+        let mut argmin: Option<(f64, f64)> = None;
+        for &lr in &sweep {
+            let cfg = TrainConfig {
+                n_lags: 0,
+                ar_layers: vec![],
+                max_lr: lr,
+                epochs: None,
+                batch: None,
+                weight_decay: 1e-3,
+                huber_beta: 0.3,
+                newer_w: 2.0,
+                seed: 42,
+            };
+            let (_, log) = train(&d, &cfg, false);
+            let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
+            if fl.is_finite() && argmin.as_ref().is_none_or(|a| fl < a.0) {
+                argmin = Some((fl, lr));
+            }
+        }
+        let (best_loss, best_lr) = argmin.expect("the sweep must produce a finite loss");
+        assert!(
+            (reported_lr - best_lr).abs() < 1e-12,
+            "the door reported lr {reported_lr} but the lowest FINAL TRAIN LOSS over the \
+             contract sweep {sweep:?} is at lr {best_lr} (loss {best_loss:.6}). Selection must \
+             be by train loss, never by test error (D-10)."
+        );
+        assert!(
+            (reported_loss - best_loss).abs() < 1e-9,
+            "the door reported final_train_loss {reported_loss:.6} but the independent argmin \
+             is {best_loss:.6}"
+        );
+    }
+}
