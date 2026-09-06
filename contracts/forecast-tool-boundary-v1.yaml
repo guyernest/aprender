@@ -207,9 +207,19 @@ equations:
     codomain: 'the JSON-RPC error object the client receives'
     invariants:
       - 'the mapping is one function, `map_error`, over the two ForecastError variants — there is no second place a refusal can be classified'
-      - 'an internal code on a caller-fixable input is a DEFECT: it tells a client to retry or page an operator when the fix is in the request'
-      - 'the e2e suite pins the numeric validation code, so a pmcp upgrade that reclassifies validation errors turns the suite red rather than silently changing what clients see'
+      - 'an internal classification on a caller-fixable input is a DEFECT: it tells a client to retry or page an operator when the fix is in the request'
+      - >
+        MEASURED, AND NOT WHAT IT LOOKS LIKE. The JSON-RPC code pmcp 2.19.3 emits for
+        `Error::validation` is -32603 — the JSON-RPC INTERNAL ERROR code. `Error::error_code()`
+        returns None for BOTH the `Validation` and `Internal` variants (only `Protocol` carries an
+        explicit code), so the transport falls back to -32603 for either. The numeric code alone
+        therefore CANNOT distinguish a caller fault from a server fault on this SDK version. The
+        discriminator pmcp actually ships is the message PREFIX thiserror renders from the variant:
+        "Validation error: " versus "Internal error: ". The e2e suite pins BOTH — the code -32603
+        and the "Validation error: " prefix — so a pmcp upgrade that changes either turns the suite
+        red instead of silently reclassifying every refusal.
       - 'ForecastError::Internal is reserved for cases like "training diverged for every learning rate" — nothing the caller could have written differently'
+      - 'the unknown-FIELD refusal is the one case that never reaches map_error: pmcp refuses it during argument deserialization and renders its own "Validation error: Invalid arguments for tool ..." message. It is still validation-class and still names the offending key.'
 
   pool_equality_under_load:
     formula: 'signature(response_under_load) == signature(response_alone) for every request in a concurrency_requests-wide burst, where signature = JSON of {ds, yhat, yhat_lower, yhat_upper, trend, components}'
@@ -376,7 +386,16 @@ falsification_tests:
 
   - id: FALSIFY-BOUNDARY-008
     rule: 'Every refusal is validation-class'
-    prediction: 'The e2e module pins the numeric JSON-RPC error code pmcp emits for `Error::validation` and asserts it on every refusal case, so no refusal reaches a client as an internal error.'
+    prediction: >
+      The e2e module pins the numeric JSON-RPC code pmcp 2.19.3 emits for a refusal (-32603, read
+      off a live reply) AND the message prefix "Validation error: ", and asserts both on every
+      refusal case. The prefix is the load-bearing half: -32603 is the JSON-RPC INTERNAL ERROR code
+      and pmcp falls back to it for `Validation` and `Internal` alike, so the code alone proves
+      nothing about the class. OBSERVED RED, not merely prescribed: rewriting `map_error` to route
+      `ForecastError::Validation` to `pmcp::Error::internal` turns 20 of the 21 refusal cases red,
+      each quoting "got: Internal error: ...". The one case that stays green is
+      `refuses_unknown_field`, which pmcp refuses during argument deserialization and never routes
+      through `map_error` at all.
     test: 'cargo test -p aprender-mcp-forecast --lib e2e::'
     if_fails: 'Clients are being told to retry or escalate for a mistake they made in the request. Check `map_error`: a caller-fixable ForecastError must never be routed to pmcp::Error::internal.'
 
