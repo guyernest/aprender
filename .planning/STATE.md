@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
-stopped_at: Completed 06-07-PLAN.md
-last_updated: "2026-09-06T22:36:56.834Z"
+stopped_at: Completed 06-08-PLAN.md
+last_updated: "2026-09-06T23:19:08.546Z"
 last_activity: 2026-09-06
-last_activity_desc: Phase 06 execution started
-state_head: 50246a3ed6fb8ebb3242c512c78b202165a26fe0
+last_activity_desc: 06-08 complete — SC1/SC4/SC5 measured on aarch64; CI decision measure-x86-first
+state_head: 298baebd9a7b14c5e39595793b3463ae428870e8
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 73
-  completed_plans: 68
+  completed_plans: 69
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
-Plan: 2 of 9
+Plan: 9 of 9
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -195,6 +195,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P05 | 46 min | 4 tasks | 13 files |
 | Phase 06 P06 | 49 min | 3 tasks | 8 files |
 | Phase 06 P07 | 1h 54m | 3 tasks | 10 files |
+| Phase 06 P08 | 32 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -261,6 +262,9 @@ Recent decisions affecting current work:
 - [Phase 06]: The router pool is evidenced by a CONTROL pair, not a single number: POOL=1 measures 1.002x and POOL=8 measures 2.070x on the same host with the same eight requests, reproducing spike-010 in-tree. — CLAUDE.md Verification Discipline #2: never label a run by intent. Without the 1.002x control, 2.070x could have come from anything; with it, the pmcp router mutex is demonstrably what the pool removes. Equality held in BOTH configurations.
 - [Phase 06]: 06-07: aprender-mcp-chronos ships WITHOUT a router pool — the D-12 pool answers a seconds-long fit holding pmcp's server mutex, and an 18 ms Chronos forward against an immutable Arc<Model> is not that — The D-12 pool is a remedy for a MEASURED serialisation (spike 010: 8 concurrent fits at 1.0x on one router). Copying it to a server whose call is 18 ms would ship K copies of a bottleneck that is not present.
 - [Phase 06]: 06-07: the four D-18 gates carry #[rustfmt::skip] so cfg_attr stays on one line, and the ignore reason was shortened to 'CHRONOS_MODEL_DIR unset; just fetch-chronos-tiny' — rustfmt's attr_fn_like_width (70) splits the attribute vertically on every fmt run, and a split gate is harder to audit than the counted-skip claim deserves. The shortened reason still names the variable and the recipe.
+- [Phase 06]: CI decision measure-x86-first: no ci.yml edit in phase 06; the gating work is one x86_64 `just chronos-gate` run that turns the PROVISIONAL quantiles_abs_f32_nonaarch64 bar into a measurement — Hunk (a) needs two unprovisioned runner prerequisites (weights mount AND a uv cache/baked packages for the network-less clean-room), so wiring it blind produces a step that dies at the weight-hash check before running a test. Collapses to `defer` with D-18 clause 2 named as an open CI gap if no x86_64 host is reachable.
+- [Phase 06]: The SC5 >= 2.0 speed-up bar is asserted by `just forecast-pool-ratio` (best-of-3, aarch64 release) and by no unit test; measured 5.146/5.150/5.162 — REVIEW-06-04, both reviewers: a wall-clock ratio inside libtest moves with CPU throttling independently of the router serialisation, so a suite that cries wolf gets its real failures ignored. pool_equality asserts bit-identical responses only and prints the ratio.
+- [Phase 06]: 06-EVIDENCE.md records the uncommitted working-tree delta's sha256 beside the commit hash, because the measurements ran on adc8a560a PLUS 18 uncommitted paths this plan did not create — A commit hash alone would have described code that was not what ran (CLAUDE.md Verification Discipline #2). 06-09 must establish that delta's provenance and then commit it, so the numbers become reproducible from a real commit.
 
 ### Pending Todos
 
@@ -359,6 +363,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-06T22:36:30.347Z
-Stopped at: Completed 06-07-PLAN.md
+Last session: 2026-09-06T23:19:00.548Z
+Stopped at: Completed 06-08-PLAN.md
 Resume file: None

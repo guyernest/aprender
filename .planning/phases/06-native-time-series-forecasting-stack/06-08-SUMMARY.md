@@ -23,12 +23,14 @@ affects: [06-09, phase-verification, release-gates]
 actuals:
   tokens: 18506
   tasks: 3
-  commits: 3
+  commits: 4
 plan_head_before: 59a65367bfb0bf74b46827bc28a0ef15a0059a73
-# MEASURED, not narrated: `git rev-list --count 59a65367b..HEAD` was 2 at SUMMARY-write time
-# (the two task commits); the third is this SUMMARY's own docs commit, which is where the
-# count lands. Stated with its boundary because the number necessarily moves once more when
-# this line itself is committed (#3968).
+# MEASURED, not narrated. `git rev-list --count 59a65367b..HEAD` = 2 at SUMMARY-write time
+# (adc8a560a, 1e2c410b9), 3 after the SUMMARY commit (298baebd9), and 4 at the boundary this
+# line is committed on — the STATE.md/ROADMAP.md commit that immediately follows. The
+# BOUNDARY is stated because a count of its own commit cannot be measured before it exists;
+# naming the measurement point is what keeps the number falsifiable (#3968). Re-derive with
+# `git rev-list --count 59a65367b..<the docs(06-08) state+roadmap commit>`.
 # `tokens` is estimateTokens scale: 74 026 chars over `git diff 59a65367b..HEAD` / 4. The plan
 # estimated 65 000 against 18 506 actual — a 3.5x over-estimate. The plan's `confidence: low`
 # was right about the uncertainty and wrong about its direction: two of the three tasks were
