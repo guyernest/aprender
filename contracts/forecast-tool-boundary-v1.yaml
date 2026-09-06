@@ -1,0 +1,490 @@
+contract: forecast-tool-boundary
+metadata:
+  version: 1.0.0
+  created: '2026-09-06'
+  author: PAIML Engineering
+  kind: kernel
+  description: >
+    THE TOOL BOUNDARY both forecasting MCP servers are held to. One `forecast` tool, stateless
+    (D-01: the request carries the series, the fit or the zero-shot forward runs inside the call,
+    there is no fit -> artifact -> forecast round-trip), and ONE response shape shared by every
+    server so a client switches models by switching ENDPOINT and nothing else (D-03: one model per
+    server). This file pins the numbers and the rules; the Rust constants are asserted equal to it
+    at test time via `test_support::constant_u64`, never duplicated as literals (D-15).
+
+    REFUSE, NEVER DEFAULT (D-11). Every knob this boundary does not understand is a refusal that
+    NAMES THE FIX, never a silent coercion: an unknown argument key, an unknown `freq`, `model`,
+    `growth` or `seasonality_mode`, a malformed date, an out-of-range `interval_width`, a logistic
+    request with no usable `cap`, a constant `y`, a horizon of 0 or past the maximum. A client that
+    passes `freq: "H"` and receives a DAILY forecast has been lied to; a client that receives
+    `unsupported freq "H": use D, W or MS` has been told exactly what to change. Every refusal is
+    `pmcp::Error::validation` — the caller's fault stays the caller's fault, and an `internal` code
+    on any of them is a defect, not a formatting preference.
+
+    THE TWO SERVERS AND WHY THEIR BOUNDS DIFFER. `aprender-mcp-forecast` FITS (Prophet 1.4.0 port /
+    NeuralProphet-lite): it needs at least 10 points to have something to fit and reaches 3 650
+    periods ahead. `aprender-mcp-chronos` is ZERO-SHOT (Chronos-Bolt T5, no fit): 4 points are
+    enough to form a context, `y` may carry nulls, and the horizon is capped at 1 024 with a gate
+    at the model's NATIVE 64 steps — past 64 the model rolls its own forecast forward, so the
+    caller must opt in with `allow_long_horizon` and the response carries a `warning` saying how
+    many autoregressive rollouts produced it (D-13). Both sets of bounds live here so a client
+    reading ONE file knows what either endpoint will accept.
+
+    THE POOL (D-12), AND WHY ITS TWO CLAIMS ARE SPLIT. pmcp 2.19.3's streamable-HTTP router holds a
+    single `Arc<tokio::sync::Mutex<Server>>` across the WHOLE tool future
+    (`streamable_http_server.rs:2094` and `:2122`), so eight concurrent fits against one router
+    measured 1.0x sequential — the fits serialise behind the router lock, not behind CPU. K
+    independent routers behind a round-robin fallback (default 8) measured 3.9x. That gives two
+    claims of DIFFERENT kinds and this contract keeps them apart: `pool_equality_under_load` is a
+    CORRECTNESS claim (a response computed under load is bit-identical to the same response
+    computed alone — falsified by a unit test, in CI, always), and `pool_speedup_host_gated` is a
+    BENCHMARK claim (a wall-clock ratio — falsified by `just forecast-pool-ratio` on a release
+    build, best-of-3, NEVER by a libtest assertion). REVIEW-06-04: with four Tokio workers, eight
+    heterogeneous `spawn_blocking` fits and BLAS work, that ratio moves with CPU throttling and
+    background load independently of router serialisation, so a hard `assert!(speedup >= 2.0)`
+    inside the correctness suite is a flake that buys nothing the host-gated recipe does not buy
+    honestly. The unit test PRINTS the ratio with its provenance and asserts only equality.
+
+    EMPIRICAL COVERAGE, NOT NOMINAL (D-16). The fit server's `interval_width` defaults to 0.8, and
+    the nominal 80% band covered 0.60 (Prophet) and 0.66 (NeuralProphet-lite) of held-out points
+    across 17 rolling-origin windows. The tool description says so. A band that advertises 80% and
+    delivers 60% is a measurement the caller is entitled to, not a footnote.
+  references:
+    - 'Model Context Protocol specification 2025-06-18, `tools/call` and `tools/list` (the JSON-RPC shapes every case in this contract is asserted through).'
+    - 'pmcp 2.19.3 `src/server/streamable_http_server.rs:2094` and `:2122` — the single `Arc<tokio::sync::Mutex<Server>>` held across the whole tool future; the lock the router pool works around.'
+    - '.claude/skills/spike-findings-aprender/references/forecast-mcp-thin-server.md (the validated thin-server blueprint: one tool, per-request seed, no shared fit state).'
+    - '.claude/skills/spike-findings-aprender/sources/010-forecast-server-concurrency/RUN-OUTPUT.md (the measured 1.0x with one router, 3.9x with eight, 8/8 and 16/16 bit-identical responses).'
+    - 'contracts/prophet-parity-v1.yaml and contracts/chronos-bolt-parity-v1.yaml — the numeric parity bars behind the two doors this boundary fronts.'
+
+# Machine-readable mirror of the boundary numbers. Not part of the `Contract` struct (the
+# parser drops unknown top-level keys), and deliberately so: these are read at test time by
+# `test_support::constant_u64("forecast-tool-boundary-v1", ...)` so `types::MIN_POINTS`,
+# `types::MAX_POINTS`, `types::MAX_HORIZON` and `chronos::CHRONOS_*` are ASSERTED EQUAL to
+# this file rather than the file merely describing them (D-15).
+constants:
+  # aprender-mcp-forecast (fits: Prophet 1.4.0 port / NeuralProphet-lite)
+  fit_min_points: 10
+  fit_max_points: 20000
+  fit_max_horizon: 3650
+  # aprender-mcp-chronos (zero-shot: Chronos-Bolt T5, no fit)
+  chronos_min_points: 4
+  chronos_max_points: 20000
+  chronos_max_horizon: 1024
+  chronos_native_horizon: 64
+  # Shared defaults
+  default_seed: 42
+  default_interval_width_x100: 80
+  # Router pool (D-12)
+  pool_default: 8
+  concurrency_requests: 8
+  # 2.0x, expressed x10 because `constant_u64` reads integers. Asserted by
+  # `just forecast-pool-ratio` on the aarch64 release host, NEVER by a unit test.
+  pool_speedup_min_x10: 20
+  pool_speedup_best_of: 3
+
+equations:
+
+  fit_server_bounds:
+    formula: 'accept(args) requires fit_min_points <= len(ds) <= fit_max_points AND len(ds) == len(y) AND 1 <= horizon <= fit_max_horizon'
+    domain: 'untrusted JSON-RPC `tools/call` arguments to `aprender-mcp-forecast`'
+    codomain: 'either a ForecastResponse or a pmcp::Error::validation naming the violated bound and the observed value'
+    invariants:
+      - 'the Rust constants are asserted EQUAL to constants.fit_min_points / fit_max_points / fit_max_horizon by types::tests::bounds_match_contract — the contract is the source, the code is the mirror'
+      - 'a length mismatch is refused with "ds has N entries but y has M" BEFORE any bound is checked, so the caller learns the shape error rather than a derived one'
+      - 'these bounds are the HARD ceiling on the work one request can buy (T-06-02); FIT_BUDGET_SECS is a cooperative round-boundary budget and is NOT a cap (REVIEW-06-U1)'
+      - 'horizon 0 and horizon fit_max_horizon+1 are both refused by the same message "horizon must be 1..=3650, got N"'
+    preconditions:
+      - 'the arguments deserialized, i.e. every key was known (see unknown_field_refused)'
+
+  chronos_server_bounds:
+    formula: 'accept(args) requires chronos_min_points <= len(ds) <= chronos_max_points AND len(ds) == len(y) AND 1 <= horizon <= chronos_max_horizon AND at least 2 non-null y'
+    domain: 'untrusted JSON-RPC `tools/call` arguments to `aprender-mcp-chronos`'
+    codomain: 'either a ChronosResponse or a pmcp::Error::validation naming the violated bound'
+    invariants:
+      - 'the Rust constants are asserted EQUAL to constants.chronos_min_points / chronos_max_points / chronos_max_horizon by types::tests::chronos_bounds_match_contract'
+      - 'the floor is 4, not 10: Chronos is ZERO-SHOT, so four points are a context, not a training set'
+      - 'y is Vec<Option<f64>> here — nulls are legal context gaps, but fewer than 2 observed values is refused with "y needs at least 2 observed (non-null) values"'
+      - 'chronos::validate is a weights-FREE seam (D-18), so every refusal above is asserted on an unarmed run with no model directory present'
+
+  date_validity:
+    formula: 'ds parses as YYYY-MM-DD, every entry is a real calendar date, and ds is strictly ascending with no duplicates'
+    domain: 'the ds array of either server'
+    codomain: 'Vec<i64> days since 1970-01-01, or a validation refusal'
+    invariants:
+      - 'an impossible date such as "2008-02-30" is refused by a civil-date ROUND TRIP (days_from_civil then civil_from_days must return the same fields), with the message "not a calendar date" — never by a hardcoded month-length table'
+      - 'unsorted and duplicate ds share one refusal, "ds must be strictly ascending with no duplicates", because both break the same downstream assumption'
+      - 'D-17: no calendar library is a dependency of any Phase 6 crate; dates are i64 day counts'
+    preconditions:
+      - 'date_shape_exactly_ten_ascii_bytes holds for every entry — the shape is checked before any field is read'
+
+  date_shape_exactly_ten_ascii_bytes:
+    formula: 'parse_date(s) requires len(s) == 10 AND s.is_ascii() AND s[4] == "-" AND s[7] == "-" AND the other eight bytes are ASCII digits'
+    domain: 'any string offered as a ds entry or a holiday date'
+    codomain: 'i64 days, or a validation refusal naming YYYY-MM-DD'
+    invariants:
+      - 'REVIEW-06-U2. The spike took a ten-byte PREFIX and never inspected what followed, so "2008-02-01garbage" and "2008-02-01T00:00:00" both parsed as 2008-02-01. That is defaulting, and D-11 forbids it at this boundary.'
+      - 'four distinct malformed shapes are each their own e2e case: trailing content, empty string, surrounding whitespace, non-ASCII — all refused with a message containing YYYY-MM-DD'
+      - 'the calendar round-trip message is UNCHANGED by this rule, so "2008-02-30" still refuses with "not a calendar date" rather than with the shape message'
+      - 'every committed fixture and CSV carries a bare YYYY-MM-DD, so tightening the shape cannot move a parity number'
+
+  freq_allowlist:
+    formula: 'freq in {D, W, MS}; anything else is refused. Default is D.'
+    domain: 'the optional freq argument of either server'
+    codomain: 'the future date grid, or a validation refusal naming the allowed set'
+    invariants:
+      - 'H is refused BY NAME with "unsupported freq \"H\": use D, W or MS" — sub-daily steps were never spiked and a silent daily fallback would be a wrong answer, not a degraded one'
+      - 'the allowlist is closed: a new frequency is a contract edit, visible to `pv diff`, never an inline match arm'
+      - 'MS lands on the first of each month; W steps 7 days; D steps 1 day'
+      - 'neuralprophet additionally supports D ONLY and refuses W/MS with "neuralprophet supports freq D only" — a narrower allowlist inside the wider one, still a refusal and still naming the fix'
+
+  interval_width_open_unit:
+    formula: '0 < interval_width < 1, default default_interval_width_x100 / 100 = 0.8'
+    domain: 'the optional interval_width argument of the fit server'
+    codomain: 'the band z-score, or a validation refusal'
+    invariants:
+      - 'the interval is OPEN at both ends: 0.0 and 1.0 are both refused with "interval_width must be in (0, 1)" — a 100% band is not a number this model can produce'
+      - 'D-16: the band is reported at its MEASURED empirical coverage (0.60 Prophet, 0.66 NeuralProphet-lite over 17 rolling-origin windows), which the tool description states; the nominal width is an input, not a guarantee'
+
+  logistic_requires_cap_above_max_y:
+    formula: 'growth == logistic implies cap is present AND cap > max(y)'
+    domain: 'the fit server growth / cap arguments'
+    codomain: 'a logistic Prophet spec, or a validation refusal'
+    invariants:
+      - 'a missing cap is refused with "logistic growth needs cap"; a cap at or below max(y) with "cap C must exceed max(y) = M" — two distinct messages because they have two distinct fixes'
+      - 'the check runs BEFORE the design is built, so a saturating logistic curve can never be fitted to data that already exceeds its own ceiling'
+
+  constant_y_refused_before_fit:
+    formula: 'min(y) != max(y), checked before any design is built or any optimiser is entered'
+    domain: 'the y array of the fit server'
+    codomain: 'a validation refusal "y is constant; nothing to fit (Prophet special-cases this too)"'
+    invariants:
+      - 'Prophet 1.4.0 special-cases this too; refusing is the honest form of the same decision'
+      - 'the refusal is BEFORE the fit: a constant series would otherwise reach L-BFGS with a degenerate scale and burn the budget producing a meaningless answer'
+      - 'non-finite y is refused by the neighbouring rule "y contains a non-finite value"'
+
+  unknown_field_refused:
+    formula: 'the advertised inputSchema carries additionalProperties == false, and deserialization refuses any key not in the schema'
+    domain: 'the arguments object of a tools/call'
+    codomain: 'a validation refusal naming the offending key'
+    invariants:
+      - 'the refusal is structural (serde deny_unknown_fields), not a hand-written key list that could drift from the struct'
+      - 'the strictness is ADVERTISED: `tools/list` reports additionalProperties == false, so a client can see the rule before sending anything'
+      - 'required is exactly {ds, y, horizon}; every other property is optional with a documented default'
+      - 'a typo such as `horizen` is therefore a refusal that names `horizen`, never a request silently missing its horizon'
+
+  unknown_enum_refused:
+    formula: 'model in {prophet, neuralprophet}, growth in {linear, logistic, flat}, seasonality_mode in {additive, multiplicative}; anything else refuses'
+    domain: 'the string-valued option arguments of the fit server'
+    codomain: 'a validation refusal listing the accepted values'
+    invariants:
+      - 'each message ENDS with the accepted set — "model \"arima\": prophet or neuralprophet" — so the fix is in the refusal'
+      - 'these are the D-11 cases most likely to be silently coerced by a permissive implementation, which is exactly why each has its own e2e case'
+      - 'the None case is the DEFAULT (prophet / linear / additive); only an explicit unknown value refuses'
+
+  horizon_gate_with_warning:
+    formula: 'chronos: horizon > chronos_native_horizon requires allow_long_horizon == true; the response then carries a non-null warning naming the rollout count'
+    domain: 'the Chronos server horizon and allow_long_horizon arguments'
+    codomain: 'a ChronosResponse with warning: Some(..), or a validation refusal'
+    invariants:
+      - 'D-13. Past the native 64 steps the model rolls its own forecast forward as context, so accuracy degrades in a way the caller must consent to — the gate is informed consent, not a bound'
+      - 'chronos_max_horizon (1024) still applies ABOVE the gate: allow_long_horizon does not unlock an unbounded horizon'
+      - 'the warning is serialized only when it is present (skip_serializing_if), so a within-native response carries no warning key at all'
+
+  shared_response_shape:
+    formula: 'every server response carries {model, freq, n_history, predict_seconds, ds, yhat, yhat_lower, yhat_upper, diagnostics}; the fit server adds {fit_seconds, trend, components}; Chronos adds {context_used, quantiles, warning?}'
+    domain: 'a successful tools/call against either server'
+    codomain: 'the JSON object the client parses'
+    invariants:
+      - 'D-03: the SHARED core is what lets a client switch models by switching endpoint; the extras are what makes each server honest about what it actually did'
+      - 'len(ds) == len(yhat) == len(yhat_lower) == len(yhat_upper) == horizon on both servers, and == len(trend) on the fit server'
+      - 'the band brackets the point forecast pointwise: yhat_lower[i] <= yhat[i] <= yhat_upper[i] for every i'
+      - 'timings are finite f64 seconds; a NaN there would make the diagnostics unusable for the sizing guidance the README gives'
+      - 'components is a named map (yearly, weekly, trend, holiday names, multiplicative_terms), never a positional array'
+
+  refusals_are_validation_errors:
+    formula: 'every refusal in this contract maps to pmcp::Error::validation; only a genuine server-side failure maps to pmcp::Error::internal'
+    domain: 'the error path of either server'
+    codomain: 'the JSON-RPC error object the client receives'
+    invariants:
+      - 'the mapping is one function, `map_error`, over the two ForecastError variants — there is no second place a refusal can be classified'
+      - 'an internal code on a caller-fixable input is a DEFECT: it tells a client to retry or page an operator when the fix is in the request'
+      - 'the e2e suite pins the numeric validation code, so a pmcp upgrade that reclassifies validation errors turns the suite red rather than silently changing what clients see'
+      - 'ForecastError::Internal is reserved for cases like "training diverged for every learning rate" — nothing the caller could have written differently'
+
+  pool_equality_under_load:
+    formula: 'signature(response_under_load) == signature(response_alone) for every request in a concurrency_requests-wide burst, where signature = JSON of {ds, yhat, yhat_lower, yhat_upper, trend, components}'
+    domain: 'concurrency_requests distinct requests issued against a pooled_app(pool_default) server, first sequentially and then all at once'
+    codomain: 'the identical-count and max_abs_diff over the two runs'
+    float_tolerance: 0.0
+    invariants:
+      - 'A CORRECTNESS CLAIM, falsified by a unit test, in CI, on every run and every host. Identical must be 8/8 in the mixed burst and 16/16 in the NeuralProphet stress, and max_abs_diff must be EXACTLY 0.0.'
+      - 'what makes it hold is that there is NEVER a shared fit across requests: every request seeds its own simulation from constants.default_seed (or its own explicit seed) and owns its own model state'
+      - 'this is the T-06-07 repudiation mitigation: a response is reproducible regardless of what else the server was doing when it was produced'
+      - 'bit-identical, not close: the bar is 0.0 because a per-request-seeded deterministic pipeline has no legitimate source of variation under concurrency'
+
+  pool_speedup_host_gated:
+    formula: 'sequential_wall / concurrent_wall >= pool_speedup_min_x10 / 10, best of pool_speedup_best_of runs, on an aarch64 release build'
+    domain: 'the same concurrency_requests-wide burst as pool_equality_under_load, timed'
+    codomain: 'a wall-clock ratio'
+    invariants:
+      - 'A BENCHMARK CLAIM, NOT A CORRECTNESS CLAIM. It is falsified by `just forecast-pool-ratio` (plan 06-08) on a release build, best-of-3, and NEVER by a libtest assertion.'
+      - >
+        REVIEW-06-04, reached independently by both cross-AI reviewers. The unit test runs four Tokio
+        workers over eight heterogeneous `spawn_blocking` fits with BLAS underneath; that ratio moves
+        with CPU throttling and unrelated background load INDEPENDENTLY of the router serialisation the
+        pool exists to remove. A hard `assert!(speedup >= 2.0)` inside the correctness suite is
+        therefore a flake that fails for reasons the pool does not control, and a suite that cries wolf
+        gets its failures ignored — including the equality failure that would actually matter.
+      - 'the unit test instead PRINTS exactly one machine-parsable line, `POOL SPEEDUP: <r>x seq=<ms>ms conc=<ms>ms arch=<arch> profile=<debug|release> workers=4 cpus=<n>`, carrying its own provenance so a later comparison means something'
+      - 'the measurement that motivates the pool: 1.0x with ONE router (the fits serialise behind pmcp streamable_http_server.rs:2094/:2122) and 3.9x with eight, on the spike-010 host'
+      - 'a debug-profile or x86_64 run of the unit test is EXPECTED to print a low ratio and is not a failure of anything'
+
+  default_seed_42:
+    formula: 'seed defaults to constants.default_seed = 42 per request; no state is carried between requests'
+    domain: 'the optional seed argument of the fit server'
+    codomain: 'the uncertainty simulation and the NeuralProphet training RNG'
+    invariants:
+      - 'PER REQUEST, never per server: the seed is read from the arguments inside the call, so two concurrent requests with the same arguments produce the same answer and a request cannot observe another request s RNG position'
+      - 'this is the mechanism behind pool_equality_under_load — remove it and the equality assertion is what goes red first'
+      - 'an explicit seed overrides the default, so a caller who wants a different simulation asks for one rather than discovering one'
+
+proof_obligations:
+
+  - type: bound
+    property: 'The fit server Rust bounds are equal to the contract constants, not merely similar to them'
+    formal: 'types::MIN_POINTS == constants.fit_min_points AND types::MAX_POINTS == constants.fit_max_points AND types::MAX_HORIZON == constants.fit_max_horizon'
+    applies_to: all
+
+  - type: bound
+    property: 'The Chronos door Rust bounds are equal to the contract constants'
+    formal: 'chronos::CHRONOS_MIN_POINTS == constants.chronos_min_points AND chronos::CHRONOS_MAX_POINTS == constants.chronos_max_points AND chronos::CHRONOS_MAX_HORIZON == constants.chronos_max_horizon'
+    applies_to: all
+
+  - type: invariant
+    property: 'A ds array that is unsorted, duplicated or contains an impossible calendar date is refused before any fit is entered'
+    formal: 'forall ds: not(strictly_ascending(ds) and all_calendar_dates(ds)) implies result is Validation'
+    applies_to: all
+
+  - type: invariant
+    property: 'A date string is accepted only at exactly ten ASCII bytes of YYYY-MM-DD shape'
+    formal: 'forall s: parse_date(s) = Ok(_) implies len(s) == 10 and s.is_ascii() and s[4] == s[7] == "-"'
+    applies_to: all
+
+  - type: completeness
+    property: 'The frequency allowlist is closed: exactly D, W and MS are accepted and every other value refuses by name'
+    formal: 'forall f: future_days(_, _, f) = Ok(_) iff f in {D, W, MS}'
+    applies_to: all
+
+  - type: bound
+    property: 'interval_width is accepted only strictly inside the open unit interval'
+    formal: 'forall w: accept(w) iff 0.0 < w and w < 1.0'
+    applies_to: all
+
+  - type: invariant
+    property: 'Logistic growth is never fitted without a cap that exceeds the observed maximum'
+    formal: 'growth == logistic and result is Ok implies cap.is_some() and cap > max(y)'
+    applies_to: all
+
+  - type: invariant
+    property: 'A constant series is refused before the optimiser is entered'
+    formal: 'min(y) == max(y) implies result is Validation and no design was built'
+    applies_to: all
+
+  - type: completeness
+    property: 'The advertised schema is strict and names exactly the three required fields'
+    formal: 'schema_for!(ForecastArgs).additionalProperties == false and required == {ds, y, horizon}'
+    applies_to: all
+
+  - type: completeness
+    property: 'Every unknown enum value for model, growth or seasonality_mode refuses with a message listing the accepted set'
+    formal: 'forall v not in accepted(field): result is Validation and message contains accepted(field)'
+    applies_to: all
+
+  - type: invariant
+    property: 'A Chronos horizon past the native window is refused without opt-in, and warned about with it'
+    formal: 'horizon > constants.chronos_native_horizon implies (allow_long_horizon or result is Validation) and (allow_long_horizon implies response.warning.is_some())'
+    applies_to: all
+
+  - type: invariant
+    property: 'Every successful response carries the shared field set with equal-length, pointwise-bracketing arrays'
+    formal: 'len(ds) == len(yhat) == len(yhat_lower) == len(yhat_upper) == horizon and forall i: yhat_lower[i] <= yhat[i] <= yhat_upper[i]'
+    applies_to: all
+
+  - type: soundness
+    property: 'Every refusal in this contract reaches the client as a validation-class JSON-RPC error, never an internal one'
+    formal: 'forall refusal r in this contract: code(r) == code(pmcp::Error::validation)'
+    applies_to: all
+
+  - type: determinism
+    property: 'A response computed under a concurrency_requests-wide burst is bit-identical to the same response computed alone'
+    formal: 'forall req: signature(concurrent(req)) == signature(sequential(req)) and max_abs_diff == 0.0'
+    applies_to: all
+
+  - type: bound
+    property: 'On the gated host, the pooled server clears the speed-up floor; the ratio is measured by a benchmark recipe and never asserted by a unit test'
+    formal: 'best_of(constants.pool_speedup_best_of, sequential_wall / concurrent_wall) >= constants.pool_speedup_min_x10 / 10 (evaluated by `just forecast-pool-ratio`, aarch64 release only)'
+    applies_to: all
+
+  - type: determinism
+    property: 'The seed is per request and defaults to 42; no RNG state is carried between requests'
+    formal: 'forall req: seed(req) == req.seed.unwrap_or(constants.default_seed) and forall req1 req2: result(req1) is independent of order(req1, req2)'
+    applies_to: all
+
+falsification_tests:
+
+  - id: FALSIFY-BOUNDARY-001
+    rule: 'The fit server bounds in Rust equal the contract constants'
+    prediction: '`types::tests::bounds_match_contract` reads constants.fit_min_points, fit_max_points and fit_max_horizon out of THIS file and finds them equal to MIN_POINTS (10), MAX_POINTS (20000) and MAX_HORIZON (3650).'
+    test: 'cargo test -p aprender-forecast --lib types::tests::bounds_match_contract'
+    if_fails: 'A bound was changed in exactly one of the two places. Whichever moved, the client-visible boundary and the document describing it now disagree, and any client written against this contract is wrong about what the endpoint accepts.'
+
+  - id: FALSIFY-BOUNDARY-002
+    rule: 'The Chronos door bounds in Rust equal the contract constants'
+    prediction: '`types::tests::chronos_bounds_match_contract` finds CHRONOS_MIN_POINTS == 4, CHRONOS_MAX_POINTS == 20000 and CHRONOS_MAX_HORIZON == 1024 equal to constants.chronos_*.'
+    test: 'cargo test -p aprender-forecast --lib types::tests::chronos_bounds_match_contract'
+    if_fails: 'The zero-shot door drifted from the boundary document. chronos_native_horizon (64) is asserted separately in 06-07 against the shipped config fixture, because it is a property of the WEIGHTS rather than of the code.'
+
+  - id: FALSIFY-BOUNDARY-003
+    rule: 'Every shape violation of the fit server is a refusal, not a coercion'
+    prediction: 'The e2e refusal suite drives a live streamable-HTTP server and observes a refusal for: fewer than 10 points ("at least"), more than 20000 ("exceeds max_points"), a ds/y length mismatch ("ds has"), horizon 0 and horizon 3651 ("horizon must be").'
+    test: 'cargo test -p aprender-mcp-forecast --lib e2e::refuses_'
+    if_fails: 'A bound is checked in the transport rather than in the door, or a bound was dropped. Either way an unbounded request can now reach the optimiser (T-06-02).'
+
+  - id: FALSIFY-BOUNDARY-004
+    rule: 'Date validity is enforced by shape AND by calendar round trip'
+    prediction: '`refuses_unsorted_ds` and `refuses_duplicate_ds` report "strictly ascending"; `refuses_impossible_date` ("2008-02-30") reports "calendar"; and the four REVIEW-06-U2 shape cases — refuses_date_with_trailing_content ("2008-02-01garbage"), refuses_empty_date, refuses_date_with_whitespace, refuses_non_ascii_date — each report YYYY-MM-DD.'
+    test: 'cargo test -p aprender-mcp-forecast --lib e2e::refuses_'
+    if_fails: 'parse_date is back to taking a ten-byte prefix (in which case "2008-02-01garbage" silently becomes 2008-02-01), or the calendar round trip was replaced by a month-length table that accepts 2008-02-30 in a leap year check.'
+
+  - id: FALSIFY-BOUNDARY-005
+    rule: 'Unknown fields and unknown enum values refuse by name'
+    prediction: '`refuses_unknown_field` (a `bogus` key merged into otherwise valid arguments), `refuses_unknown_freq` ("use D, W or MS"), `refuses_unknown_model` ("prophet or neuralprophet"), `refuses_unknown_growth` ("linear, logistic or flat") and `refuses_unknown_seasonality_mode` ("additive or multiplicative") each observe a refusal quoting the accepted set.'
+    test: 'cargo test -p aprender-mcp-forecast --lib e2e::refuses_'
+    if_fails: 'D-11 is broken: a knob the caller set is being ignored. This is the worst failure class in this contract because the caller gets a plausible answer to a question they did not ask.'
+
+  - id: FALSIFY-BOUNDARY-006
+    rule: 'The advertised tool schema is strict'
+    prediction: '`the_tool_schema_is_strict_and_requires_ds_y_horizon` finds additionalProperties == false and required exactly {ds, y, horizon} in `schema_for!(ForecastArgs)`, with freq, model, n_lags, seed and holidays present as optional properties.'
+    test: 'cargo test -p aprender-mcp-forecast --lib the_tool_schema_is_strict'
+    if_fails: 'The strictness is no longer ADVERTISED, so a client cannot discover the rule from tools/list even if the server still enforces it — or a previously required field became optional and requests are now silently under-specified.'
+
+  - id: FALSIFY-BOUNDARY-007
+    rule: 'Model-specific option refusals fire before any fit'
+    prediction: '`refuses_interval_width_out_of_range` (1.0), `refuses_logistic_without_cap`, `refuses_logistic_cap_below_max_y` and `refuses_constant_y` each observe a refusal naming the fix, with no fit_seconds in the reply.'
+    test: 'cargo test -p aprender-mcp-forecast --lib e2e::refuses_'
+    if_fails: 'An unfittable configuration now reaches L-BFGS. Best case it burns the cooperative budget; worst case it returns a saturating logistic curve fitted below data that already exceeds the cap.'
+
+  - id: FALSIFY-BOUNDARY-008
+    rule: 'Every refusal is validation-class'
+    prediction: 'The e2e module pins the numeric JSON-RPC error code pmcp emits for `Error::validation` and asserts it on every refusal case, so no refusal reaches a client as an internal error.'
+    test: 'cargo test -p aprender-mcp-forecast --lib e2e::'
+    if_fails: 'Clients are being told to retry or escalate for a mistake they made in the request. Check `map_error`: a caller-fixable ForecastError must never be routed to pmcp::Error::internal.'
+
+  - id: FALSIFY-BOUNDARY-009
+    rule: 'The shared response shape holds on the fit server happy paths'
+    prediction: '`neuralprophet_lag_free_happy_path`, `prophet_ms_multiplicative_happy_path` and `prophet_logistic_with_holidays_happy_path` each observe horizon-length ds/yhat/bands/trend, a pointwise-bracketing band, the named components the configuration implies (multiplicative_terms, the holiday name) and finite timings.'
+    test: 'cargo test -p aprender-mcp-forecast --lib e2e::happy_path'
+    if_fails: 'The shared shape D-03 promises is not shared: a client that switches models by switching endpoint would have to switch parsers too.'
+
+  - id: FALSIFY-BOUNDARY-010
+    rule: 'Responses under load are bit-identical to responses computed alone'
+    prediction: '`pool_equality::eight_concurrent_requests_are_bit_identical_to_sequential` reports 8/8 identical signatures with max_abs_diff exactly 0.0, and `pool_equality::sixteen_concurrent_neuralprophet_fits_stay_identical` reports 16/16 with zero errors.'
+    test: 'cargo test -p aprender-mcp-forecast --lib pool_equality'
+    if_fails: 'Fit state is shared across requests, or an RNG is seeded from something other than the per-request seed. A response that depends on what else the server was doing cannot be reproduced from its request, which is exactly the repudiation T-06-07 registers.'
+
+  - id: FALSIFY-BOUNDARY-011
+    rule: 'The pooled server clears the speed-up floor on the gated host'
+    prediction: '`just forecast-pool-ratio` builds in release on aarch64, runs the pool_equality burst three times, parses the single `POOL SPEEDUP:` line from each and asserts the BEST ratio >= 2.0.'
+    test: 'just forecast-pool-ratio'
+    if_fails: 'Either the router pool is not engaged (check that pooled_app is dispatching round-robin across K routers rather than returning a single http_app), or the host is throttled and the run is not evidence. NOTE (REVIEW-06-04): this bar is deliberately NOT a cargo test filter. The unit test prints the ratio and asserts only equality; a wall-clock ratio measured under four Tokio workers and eight heterogeneous blocking fits is a benchmark claim, and putting it in the correctness suite makes the suite flaky without making the pool faster.'
+
+  - id: FALSIFY-BOUNDARY-012
+    rule: 'The POOL SPEEDUP line carries its own provenance'
+    prediction: 'Exactly one line matching `^POOL SPEEDUP: [0-9]+\.[0-9]{3}x seq=[0-9]+ms conc=[0-9]+ms arch=[a-z0-9_]+ profile=(debug|release) workers=4 cpus=[0-9]+$` is printed by the pool_equality module.'
+    test: 'cargo test -p aprender-mcp-forecast --lib pool_equality -- --nocapture'
+    if_fails: 'The format drifted and `just forecast-pool-ratio` silently parses nothing, disarming the phase only speed-up gate while still reporting green. The arch/profile/cpus fields exist so a recorded ratio can be compared to a later one; a ratio without them is not a measurement, it is a number.'
+
+  - id: FALSIFY-BOUNDARY-013
+    rule: 'The same one tool answers over stdio, from a spawned binary'
+    prediction: '`tests/e2e_stdio.rs` spawns the built binary with no arguments, completes initialize -> notifications/initialized -> tools/list (exactly one tool named forecast, inputSchema.additionalProperties == false) -> tools/call (60 daily points, horizon 7 -> seven ds and finite yhat) -> tools/call with an unknown key -> error.'
+    test: 'cargo test -p aprender-mcp-forecast --test e2e_stdio'
+    if_fails: 'The transport MCP clients actually spawn (stdio) diverged from the one the in-process suite drives (streamable-HTTP), or something is writing to stdout that is not protocol. This target is DARK IN CI until .github/workflows/ci.yml lists it, which is plan 06-08 human check-in.'
+
+  - id: FALSIFY-BOUNDARY-014
+    rule: 'The Chronos door refuses without weights, and gates the long horizon'
+    prediction: '`chronos::tests` drives `validate` with no model directory present and observes: fewer than 4 points ("at least"), horizon 0 ("horizon must be at least 1"), horizon 1025 ("exceeds the maximum 1024"), horizon 65 without allow_long_horizon ("exceeds the model native 64 steps ... pass allow_long_horizon: true") and the same horizon ACCEPTED with the flag, an all-null y ("at least 2 observed"), an impossible date, an unsorted ds, freq H, and trailing content in a ds entry.'
+    test: 'cargo test -p aprender-forecast --lib chronos::tests'
+    if_fails: 'Either a Chronos bound moved, or the D-18 weights-free `validate` seam was folded back into `forecast` — in which case the refusal behaviour can only be tested on an armed host and an unarmed CI run proves nothing while reporting green. The `warning` half of horizon_gate_with_warning is asserted by 06-07 server e2e, which needs weights.'
+
+  - id: FALSIFY-BOUNDARY-015
+    rule: 'A model narrower allowlist is still a refusal that names the fix'
+    prediction: '`forecast::tests::neuralprophet_refuses_non_daily_freq` observes a Validation refusal containing "supports freq D only" for `model: neuralprophet, freq: W`, and `neuralprophet_refuses_n_lags_above_365` / `neuralprophet_refuses_n_lags_at_or_above_span` observe refusals naming their own bounds.'
+    test: 'cargo test -p aprender-forecast --lib forecast::tests'
+    if_fails: 'The narrower allowlist inside the wider one silently coerced instead of refusing — a NeuralProphet request with freq W would be answered with a DAILY forecast the caller never asked for, the D-11 failure mode this contract exists to prevent.'
+
+  - id: FALSIFY-BOUNDARY-016
+    rule: 'The seed is per request and the default reproduces'
+    prediction: 'Every request in the pool_equality burst is issued twice — once alone, once inside the burst — and both runs produce the identical signature, including the requests that carry no explicit seed and therefore ran at the default 42.'
+    test: 'cargo test -p aprender-mcp-forecast --lib pool_equality::eight_concurrent_requests_are_bit_identical_to_sequential'
+    if_fails: 'The RNG is seeded from something outside the request (a clock, a server-lifetime counter, a thread id), so the same arguments no longer produce the same answer. That breaks reproducibility for a single client before it breaks anything about concurrency.'
+
+kani_harnesses:
+
+  # DECLARED, NOT EXECUTED. cargo-kani is not installed in this repository and no
+  # #[kani::proof] harness exists anywhere under crates/. Each entry names the
+  # runnable, identically bounded test that is the ACTUAL evidence.
+  - id: KANI-BOUNDARY-001
+    obligation: 'The future date grid this boundary produces is strictly increasing for every allowed frequency, up to the maximum horizon'
+    property: 'forall freq in {D, W, MS}, forall start day, forall horizon <= constants.fit_max_horizon: future_days(start, horizon, freq) is strictly increasing, and for MS every element is the 1st of some month'
+    bound: 3650
+    strategy: bounded_int
+    harness: 'NOT EXECUTED — the evidence is the runnable, identically bounded grid test `prophet::parity::future_days_strictly_increasing_bounded` in crates/aprender-forecast/src/prophet.rs, which enumerates 3 frequencies x 20 start days spanning leap years and month ends x horizons {1, 28, 365, 3650}'
+
+  - id: KANI-BOUNDARY-002
+    obligation: 'Only a ten-ASCII-byte YYYY-MM-DD string is accepted as a date'
+    property: 'forall s: parse_date(s) = Ok(_) implies len(s) == 10 and s.is_ascii() and s[4] == "-" and s[7] == "-" and the other eight bytes are ASCII digits'
+    bound: 10
+    strategy: bounded_int
+    harness: 'NOT EXECUTED — a model checker over arbitrary UTF-8 strings would need a string theory the harness cannot bound usefully; the evidence is the nine `dates::tests` refusal cases (trailing content, T-suffix, leading and trailing whitespace, empty, non-ASCII prefix, nine-byte, impossible calendar date, out-of-range month) plus the four e2e shape cases driven through a live server'
+
+  - id: KANI-BOUNDARY-003
+    obligation: 'A response under concurrency equals the response computed alone'
+    property: 'forall req: signature(concurrent(req)) == signature(sequential(req))'
+    bound: 16
+    strategy: bounded_int
+    harness: 'NOT EXECUTED — the property is about a Tokio runtime, a router pool and a blocking thread pool; a bounded checker would have to stub all three and would then prove a property about the stubs. The evidence is `pool_equality::eight_concurrent_requests_are_bit_identical_to_sequential` (8/8, max_abs_diff 0.0) and `pool_equality::sixteen_concurrent_neuralprophet_fits_stay_identical` (16/16)'
+
+qa_gate:
+  id: F-FORECAST-BOUNDARY-001
+  name: 'Forecast tool boundary gate'
+  description: >
+    The blocking gate for the tool-boundary claims (SC1 refusals, SC5 equality under load). Every
+    check below is a runnable test named in the FALSIFY-BOUNDARY entries above, and every bound it
+    asserts is READ from this file at test time rather than duplicated as a Rust literal. The gate
+    is deliberately split by claim KIND: the correctness checks are unit-falsifiable and run in CI
+    on every host, while the single benchmark check is host-gated and runs under
+    `just forecast-pool-ratio` (REVIEW-06-04). Mixing them would put a wall-clock ratio measured
+    under four Tokio workers into the suite that has to be trusted when it goes red.
+  checks:
+    - 'contract schema validity (pv validate, zero errors) and non-zero pv status counts'
+    - 'the fit server and Chronos door Rust bounds are asserted EQUAL to the contract constants'
+    - 'every SC1 malformed input is refused through a live streamable-HTTP server, each with its own e2e case (>= 18 refusal cases)'
+    - 'the four REVIEW-06-U2 malformed-date shapes are refused: trailing content, empty, whitespace, non-ASCII'
+    - 'every refusal is validation-class, with the numeric code pinned'
+    - 'the advertised inputSchema has additionalProperties false and requires exactly ds, y, horizon'
+    - 'the shared response shape holds on four happy paths spanning both models, MS + multiplicative, and logistic + holidays'
+    - 'responses under an 8-wide and a 16-wide burst are bit-identical to their sequential twins (max_abs_diff 0.0)'
+    - 'exactly one well-formed POOL SPEEDUP line is printed, carrying ratio, both walls, arch, profile, workers and cpus'
+    - 'the spawned binary answers the same one tool over stdio and refuses an unknown key (local; dark in CI pending 06-08)'
+    - 'HOST-GATED, NOT IN CI: best-of-3 pool speed-up >= 2.0 on an aarch64 release build, via `just forecast-pool-ratio`'
+  pass_criteria: >
+    All FALSIFY-BOUNDARY correctness tests pass on every host, and FALSIFY-BOUNDARY-011 passes on
+    the gated aarch64 release host. A refusal case that has only ever been observed passing is not
+    evidence: each refusal message asserted here must have been seen RED under an induced change
+    (edit the needle, observe the named case fail, restore).
+  falsification: >
+    The bound checks are induced-RED from THIS FILE alone: change `constants.fit_max_horizon` from
+    3650 to 3651 — touching no Rust — and `types::tests::bounds_match_contract` goes red naming the
+    contract value it read, proving the assertion reads its bar from here at test time rather than
+    duplicating it. A byte-identical revert restores green. The same holds for every
+    `constants.chronos_*` value against `chronos_bounds_match_contract`.

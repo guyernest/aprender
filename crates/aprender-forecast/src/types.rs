@@ -109,7 +109,56 @@ impl std::error::Error for ForecastError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ForecastArgs, ForecastError};
+    use super::{ForecastArgs, ForecastError, MAX_HORIZON, MAX_POINTS, MIN_POINTS};
+    use crate::test_support::constant_u64;
+
+    /// The fit server's three bounds are EQUAL to the contract, not merely similar.
+    ///
+    /// D-15: a bound written twice can be loosened in one place. The contract is the
+    /// source and this test is what makes the Rust constant a mirror of it —
+    /// `constants.fit_max_horizon: 3651` in the YAML alone turns this red.
+    #[test]
+    fn bounds_match_contract() {
+        assert_eq!(
+            MIN_POINTS as u64,
+            constant_u64("forecast-tool-boundary-v1", "fit_min_points"),
+            "types::MIN_POINTS must equal constants.fit_min_points in forecast-tool-boundary-v1"
+        );
+        assert_eq!(
+            MAX_POINTS as u64,
+            constant_u64("forecast-tool-boundary-v1", "fit_max_points"),
+            "types::MAX_POINTS must equal constants.fit_max_points in forecast-tool-boundary-v1"
+        );
+        assert_eq!(
+            MAX_HORIZON as u64,
+            constant_u64("forecast-tool-boundary-v1", "fit_max_horizon"),
+            "types::MAX_HORIZON must equal constants.fit_max_horizon in forecast-tool-boundary-v1"
+        );
+    }
+
+    /// The Chronos door's three bounds against the SAME contract.
+    ///
+    /// Unconditional: plan 06-05 is a declared dependency of 06-06, so `crate::chronos`
+    /// exists. `chronos_native_horizon` (64) is a property of the WEIGHTS, not of this
+    /// crate, and is asserted by 06-07 against the shipped config fixture.
+    #[test]
+    fn chronos_bounds_match_contract() {
+        assert_eq!(
+            crate::chronos::CHRONOS_MIN_POINTS as u64,
+            constant_u64("forecast-tool-boundary-v1", "chronos_min_points"),
+            "chronos::CHRONOS_MIN_POINTS must equal constants.chronos_min_points in forecast-tool-boundary-v1"
+        );
+        assert_eq!(
+            crate::chronos::CHRONOS_MAX_POINTS as u64,
+            constant_u64("forecast-tool-boundary-v1", "chronos_max_points"),
+            "chronos::CHRONOS_MAX_POINTS must equal constants.chronos_max_points in forecast-tool-boundary-v1"
+        );
+        assert_eq!(
+            crate::chronos::CHRONOS_MAX_HORIZON as u64,
+            constant_u64("forecast-tool-boundary-v1", "chronos_max_horizon"),
+            "chronos::CHRONOS_MAX_HORIZON must equal constants.chronos_max_horizon in forecast-tool-boundary-v1"
+        );
+    }
 
     #[test]
     fn an_unknown_argument_key_is_refused_not_ignored() {
