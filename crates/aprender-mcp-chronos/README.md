@@ -94,6 +94,23 @@ halves the binary. That is why the default embedded build is f16.
 weight-dependent tests) are independent: embedding a model does not arm the parity suite,
 because the oracle comparison needs the f32 weights **directory**.
 
+### What the embedded path was measured doing (plan 06-07, debug build)
+
+The table above is the **release** shape, which plan 06-08 measures. What is proven here is
+the **mechanism**, on a debug build:
+
+- `build.rs` staged `17 316 992` weight bytes + `1 120` config bytes into `OUT_DIR` —
+  byte-for-byte the f16 directory it was pointed at.
+- With `CHRONOS_EMBED_DIR` set and **`CHRONOS_MODEL_DIR` unset**, the server answered a
+  64-step `forecast` over stdio from `include_bytes!` alone: `resolve_model` reported
+  `source = embedded`, `dtype = F16`, 8 652 672 params. Cold start, median of 3:
+  **32 ms to `initialize`, 1 402 ms to the first forecast** — debug, so read it as a
+  mechanism check, not a latency claim.
+- With `CHRONOS_EMBED_DIR` set and `CHRONOS_MODEL_DIR` **also** set, the embedded bytes
+  still won (`source = embedded`) *and* the four parity tests ran (`0 ignored`). With the
+  embed alone they went back to being counted skips. That is the independence D-13/D-18
+  intend, demonstrated rather than asserted.
+
 ## Tests
 
 ```bash
