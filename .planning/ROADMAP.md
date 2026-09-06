@@ -348,35 +348,40 @@ kernel (spike 008) is already in this tree and on `perf/neon-gemm-8x6-microkerne
 `aprender-neon-upstream` worktree; opening that upstream PR is a human checkpoint, not a Phase 6
 task.
 
-**Plans**: 9 plans in 6 waves (planned 2026-09-05, revised 2026-09-05 after plan-check — 06-06 declares its `crate::chronos` dependency on 06-05 and moves to wave 3, and the root-manifest profile decision moves into 06-01 so no wave-2 plan edits the `Cargo.toml` its siblings read; tracer-first — 06-01 proves one Prophet path end-to-end before any expansion; two `autonomous: false` plans carry the phase's human decisions: the FALSIFY-MONO-011 `[[bin]]` allowlist treatment (06-02, wave 1) and the `.github/workflows/ci.yml` embedded-weights leg (06-08, wave 5). Four contracts, not three: `forecast-tool-boundary`, `prophet-parity`, `neuralprophet-parity`, `chronos-bolt-parity` — NeuralProphet's SC3 bars get their own file rather than riding in the Prophet contract. Fixtures are copied in-crate; Lambda wrappers deferred; `SmoothL1Loss` filed as a core ticket.)
+**Plans**: 9 plans in 7 waves (planned 2026-09-05, revised twice after plan-check, then revised again 2026-09-05 after cross-AI review — 06-06 declares its `crate::chronos` dependency on 06-05 and moves to wave 3, and the root-manifest profile decision moves into 06-01 so no wave-2 plan edits the `Cargo.toml` its siblings read; tracer-first — 06-01 proves one Prophet path end-to-end before any expansion; two `autonomous: false` plans carry the phase's human decisions: the FALSIFY-MONO-011 `[[bin]]` allowlist treatment (06-02, wave 1) and the `.github/workflows/ci.yml` embedded-weights leg (06-08, wave 5). Four contracts, not three: `forecast-tool-boundary`, `prophet-parity`, `neuralprophet-parity`, `chronos-bolt-parity` — NeuralProphet's SC3 bars get their own file rather than riding in the Prophet contract. Fixtures are copied in-crate; Lambda wrappers deferred; `SmoothL1Loss` filed as a core ticket.
+
+**Cross-AI review pass (codex + gemini, 06-REVIEWS.md at plans commit `88da44dcd`)**: six findings incorporated — the NeuralProphet port moved out of the tracer into 06-04 (the one structural change; 06-06 gains it as a dependency); the Chronos "only transposed weights" truth restated to match the code being ported, with a test that proves single rows actually reach `dot8`; an architecture-keyed provisional f32 bar plus a `measure-x86-first` checkpoint option, because every CI job is x86_64 and the 1e-6 bar was measured on aarch64 with 4.6 % margin; `just fetch-chronos-tiny` made verify-always with a tamper control, and `chronos-gate` now calls it unconditionally; the pool speed-up assertion moved out of the unit test into the host-gated `forecast-pool-ratio` benchmark; Wave 2 sequential execution made an enforced precondition. Two of the reviewers' most emphatic findings — `[profile.dev.package.X]` not reaching test builds, and `cargo test -- a b` dropping the second filter — were REFUTED by experiment and are recorded as rejected in the affected plans so they cannot be re-raised as new.)
 
 Plans:
-**Wave 1** *(no file overlap; sequential execution is the recommended default on this shared branch — export `CARGO_INCREMENTAL=0`, the disk is at 94 %)*
+**Wave 1** *(no file overlap; run one at a time on this shared branch — export `CARGO_INCREMENTAL=0`, the disk is at 94 %)*
 
-- [ ] 06-01-PLAN.md — TRACER (T1): `aprender-forecast` (dates, types, fit, forecast door, Prophet port) + `aprender-mcp-forecast` (pmcp server, stdio + streamable-HTTP, one e2e happy path) + root members; T2: 17 fixtures copied byte-verified, Peyton rung-2 parity test, both crate READMEs, the MEASURED `[profile.dev.package.aprender-forecast]` decision (taken in wave 1 so wave 2 reads a stable root manifest); T3: the np.rs port completing `model: neuralprophet` (wave 1)
+- [ ] 06-01-PLAN.md — TRACER (T1): `aprender-forecast` (dates with a strict `parse_date`, types, fit, forecast door, Prophet port) + `aprender-mcp-forecast` (pmcp server, stdio + streamable-HTTP, one e2e happy path) + root members; T2: 17 fixtures copied byte-verified, Peyton rung-2 parity test, both crate READMEs, the MEASURED `[profile.dev.package.aprender-forecast]` decision (taken in wave 1 so wave 2 reads a stable root manifest). `model: neuralprophet` is a declared refusing stub filled by 06-04 — the np.rs port left the tracer in the `--reviews` replan so the tracer is one honest end-to-end slice (wave 1)
 - [ ] 06-02-PLAN.md — HUMAN DECISION (blocking): FALSIFY-MONO-011 `[[bin]]` allowlist treatment for the six thin MCP deployment units, applied with a two-sided control; the three README drift fixes (two missing READMEs, the setfit monorepo link) (wave 1, NOT autonomous)
 
-**Wave 2** *(blocked on 06-01; three parallel plans, zero `files_modified` overlap — none edits the root `Cargo.toml`)*
+**Wave 2** *(blocked on 06-01; two plans with zero `files_modified` overlap that MUST be RUN ONE AT A TIME, not concurrently — they share one Cargo target directory, one `target/.package-cache` build lock and one disk at 94 % after three ENOSPC halts; each carries a Task-1 precondition that halts if another cargo build is running. Sequential execution is the instruction, not a recommendation — both cross-AI reviewers, 2026-09-05. 06-05 left this wave entirely: it is Wave 3 on a declared 06-04 dependency, because both plans append to the same `pub mod` block in `crates/aprender-forecast/src/lib.rs`)*
 
 - [ ] 06-03-PLAN.md — `contracts/prophet-parity-v1.yaml` + the full seven-fixture Prophet ladder as `--lib` tests reading the contract + the warm debug ladder wall recorded under the profile 06-01 decided — no manifest edit (wave 2)
-- [ ] 06-04-PLAN.md — `contracts/neuralprophet-parity-v1.yaml` + NP parity (oracle data prep, lag-free MAE ≤ 0.47, AR-Net beats naive, Huber connectivity, mini-batch/tape invariants) + NP door refusals (wave 2)
-- [ ] 06-05-PLAN.md — `just fetch-chronos-tiny` (pinned revision + sha256, f16 derived) + `build.rs` cfg(chronos_weights) + bolt/safetensors/chronos-door ports + `contracts/chronos-bolt-parity-v1.yaml` + gated Bolt ladder with the two-sided counted-skip proof (wave 2)
+- [ ] 06-04-PLAN.md — the np.rs port + the real `model: neuralprophet` arm and its refusals (moved here from 06-01) + `contracts/neuralprophet-parity-v1.yaml` + NP parity (oracle data prep, lag-free MAE ≤ 0.47, AR-Net beats naive, Huber connectivity, mini-batch/tape invariants) (wave 2)
 
-**Wave 3** *(blocked on 06-01 and 06-05 — `types::tests::chronos_bounds_match_contract` reads `crate::chronos`)*
+**Wave 3** *(blocked on 06-01 and 06-04 — 06-05 appends `bolt`/`safetensors`/`chronos` to the same `pub mod` block in `crates/aprender-forecast/src/lib.rs` that 06-04 adds `np` to, and a shared file is a real dependency, not a scheduling preference)*
 
-- [ ] 06-06-PLAN.md — `contracts/forecast-tool-boundary-v1.yaml` + the complete D-11 refusal e2e set + strict schema + router pool (`pooled_app`, `--pool 8`) + equality-under-load + spawned-binary stdio e2e (wave 3)
+- [ ] 06-05-PLAN.md — `just fetch-chronos-tiny` (pinned revision + sha256 verified on EVERY run, with a tamper control; f16 derived and hashed) + `build.rs` cfg(chronos_weights) + bolt/safetensors/chronos-door ports (both weight layouts, with the single-row `dot8` routing proven) + `contracts/chronos-bolt-parity-v1.yaml` (arch-keyed f32 bar) + gated Bolt ladder with the two-sided counted-skip proof (wave 3)
 
-**Wave 4** *(blocked on 06-05 and 06-06)*
+**Wave 4** *(blocked on 06-01, 06-04 and 06-05 — `types::tests::chronos_bounds_match_contract` reads `crate::chronos`, and the NP happy-path e2e needs the `neuralprophet` arm 06-04 now lands)*
 
-- [ ] 06-07-PLAN.md — `aprender-mcp-chronos`: embedded-weights build.rs, resolve_model, server, page, `--coldstart`/`--bench`, gated e2e through the server (1e-6 f32 / 2 % f16, `allow_long_horizon` + warning, forwards 46), shared-shape invariant, embedded-build proof (wave 4)
+- [ ] 06-06-PLAN.md — `contracts/forecast-tool-boundary-v1.yaml` + the complete D-11 refusal e2e set + strict schema + router pool (`pooled_app`, `--pool 8`) + equality-under-load + spawned-binary stdio e2e (wave 4)
 
-**Wave 5** *(blocked on 06-06 and 06-07; NOT autonomous — human checkpoint on ci.yml)*
+**Wave 5** *(blocked on 06-05 and 06-06)*
 
-- [ ] 06-08-PLAN.md — host-gated `just` recipes (chronos-gate, embed-build, bench, coldstart, forecast-bench, pool-ratio, mase-rolling-origin) + the spike-006 MASE example + `06-EVIDENCE.md` measured on aarch64 release + the ci.yml proposal as a patch → blocking human decision (wave 5, NOT autonomous)
+- [ ] 06-07-PLAN.md — `aprender-mcp-chronos`: embedded-weights build.rs, resolve_model, server, page, `--coldstart`/`--bench`, gated e2e through the server (1e-6 f32 / 2 % f16, `allow_long_horizon` + warning, forwards 46), shared-shape invariant, embedded-build proof (wave 5)
 
-**Wave 6** *(blocked on everything)*
+**Wave 6** *(blocked on 06-06 and 06-07; NOT autonomous — human checkpoint on ci.yml)*
 
-- [ ] 06-09-PLAN.md — Makefile `$(CONTRACTS)`/`PHASE6_CONTRACTS`/`contract-audit-phase6` (tier3) + binding rows (zero BIND-) + README counts re-derived + CLAUDE.md Realizar-first exception row (D-07) + both drift gates green + the CI decision applied + `deferred-items.md` + SmoothL1Loss ticket + closing clippy/fmt/check/nextest sweep (wave 6)
+- [ ] 06-08-PLAN.md — host-gated `just` recipes (chronos-gate, embed-build, bench, coldstart, forecast-bench, pool-ratio, mase-rolling-origin) + the spike-006 MASE example + `06-EVIDENCE.md` measured on aarch64 release + the ci.yml proposal as a patch → blocking human decision (wave 6, NOT autonomous)
+
+**Wave 7** *(blocked on everything)*
+
+- [ ] 06-09-PLAN.md — Makefile `$(CONTRACTS)`/`PHASE6_CONTRACTS`/`contract-audit-phase6` (tier3) + binding rows (zero BIND-) + README counts re-derived + CLAUDE.md Realizar-first exception row (D-07) + both drift gates green + the CI decision applied + `deferred-items.md` + SmoothL1Loss ticket + closing clippy/fmt/check/nextest sweep (wave 7)
 
 
 ## Progress
@@ -391,4 +396,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5; Phase 6 is an independen
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | Complete   | 2026-08-14 |
 | 4. APR Artifact and Production Parity | 22/22 | UAT passed, awaiting secure-phase |  |
 | 5. Benchmark and Claims Gate | 11/14 | In Progress|  |
-| 6. Native Time-Series Forecasting Stack | 0/9 | Planned (9 plans, 6 waves; 2026-09-05) |  |
+| 6. Native Time-Series Forecasting Stack | 0/9 | Planned (9 plans, 7 waves; replanned after cross-AI review 2026-09-05) |  |
