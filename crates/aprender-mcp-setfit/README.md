@@ -6,6 +6,8 @@ pmcp.run. This crate is the template for wrapping an aprender model as a
 business-process-curated MCP connector — deliberately NOT a general-purpose ML
 server (that's `crates/aprender-mcp`, the developer toolchain surface).
 
+Part of the [aprender](https://github.com/paiml/aprender) monorepo.
+
 ## Run locally (stdio)
 
 ```bash
