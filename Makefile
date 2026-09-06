@@ -57,7 +57,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests lint-current check-wasm32
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 contract-audit-phase6 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests lint-current check-wasm32
 
 # Default target
 all: tier2
@@ -373,6 +373,11 @@ tier3:
 # measured with the status captured directly, never through a pipe. See the target's own
 # comment block.
 	@$(MAKE) contract-audit-phase5
+# Phase 6's equivalent, wired here for the reason the four lines above exist: a target
+# outside the tiers is a target that stops being run. Scoped to $(PHASE6_CONTRACTS), refuses
+# ANY BIND- line as Phase 5's does, and ALSO resolves every row to a real definition site —
+# see the target's comment block for why zero BIND- findings is not that proof.
+	@$(MAKE) contract-audit-phase6
 # TRN-06's AUTHORITATIVE reproducibility claim (D-16) and D-13's GEMM control, wired
 # here for the reason the three lines above exist: a target outside the tiers is a
 # target that stops being run. Both were run STANDALONE first with the status captured
@@ -1862,7 +1867,11 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/setfit-train-lifecycle-v1.yaml \
              contracts/linear-probe-classifier-v1.yaml \
              contracts/setfit-apr-v1.yaml \
-             contracts/setfit-benchmark-claims-v1.yaml
+             contracts/setfit-benchmark-claims-v1.yaml \
+             contracts/prophet-parity-v1.yaml \
+             contracts/neuralprophet-parity-v1.yaml \
+             contracts/chronos-bolt-parity-v1.yaml \
+             contracts/forecast-tool-boundary-v1.yaml
 
 # The two Phase 2 contracts, audited as a BLOCKING tier3 gate by
 # `contract-audit-phase2` below. Deliberately a separate, narrower list than
@@ -1916,6 +1925,25 @@ PHASE4_CONTRACTS := contracts/setfit-apr-v1.yaml
 # contrastive-pair-protocol-v1 (the manifest whose hash is the pairing key) and
 # calibration-v1 (the metrics and the frozen t), and edits none of them.
 PHASE5_CONTRACTS := contracts/setfit-benchmark-claims-v1.yaml
+
+# The Phase 6 contracts, audited as a BLOCKING tier3 gate by `contract-audit-phase6`
+# below. Same narrowing rationale as PHASE2/3/4/5_CONTRACTS: scoped to what this phase
+# OWNS, because the repo-wide `contract-audit` is vacuous (see that target's comment
+# block — it prints 132 BIND-001 errors and exits 0 anyway).
+#
+# FOUR ENTRIES, WHERE PHASES 4 AND 5 HAVE ONE, AND THAT IS NOT A DEPARTURE FROM Ph1 D-23.
+# D-23 is "one NEW contract per phase, REFERENCING the existing ones rather than editing
+# them"; the count that matters is contracts EDITED, which is zero here. This phase ships
+# three independent ports with three DIFFERENT oracles — Prophet 1.1.7 (a Stan-shaped MAP
+# objective), NeuralProphet 0.9.0 (an autograd fit), and chronos-forecasting 2.3.1 (a
+# zero-shot T5) — plus one tool boundary shared by the two thin MCP servers. Folding four
+# unrelated oracles into one contract would make a single equation set that no single
+# falsification run can evaluate; folding the boundary into any one port would leave the
+# other server's refusals unowned.
+PHASE6_CONTRACTS := contracts/forecast-tool-boundary-v1.yaml \
+                    contracts/prophet-parity-v1.yaml \
+                    contracts/neuralprophet-parity-v1.yaml \
+                    contracts/chronos-bolt-parity-v1.yaml
 
 # NOTE (plan 02-01, D-24): $(CONTRACTS) is an EXPLICIT HARDCODED LIST, not a glob
 # over contracts/*.yaml. A contract file that merely EXISTS in contracts/ is
@@ -2235,6 +2263,153 @@ contract-audit-phase5: ## Audit Phase 5 binding coverage (BLOCKING, wired into t
 		exit 1; \
 	fi; \
 	echo "Phase 5 binding audit: $$audited contract(s) audited, zero BIND- findings"
+
+# Phase 6's twin of contract-audit-phase2/3/4/5, plus ONE THING NONE OF THEM DO.
+#
+# WHY THE EXTRA STEP EXISTS (REVIEW-06-U3, codex MEDIUM). `pv audit` matches a binding row
+# by contract FILENAME and EQUATION and then trusts the `status` field. It does not open the
+# file `module_path` names, and it does not look for `function` anywhere. contract-audit-phase5's
+# own comment block records the measurement that proves it: plan 05-10 set
+# `function: this_symbol_does_not_exist_anywhere` on a real row and `pv audit` reported rc=0,
+# "Implemented: 10", zero BIND- lines. So "zero BIND- findings" is evidence of REGISTRY
+# COMPLETENESS — every equation has a row — and is NOT evidence that any row names real code.
+# This target therefore runs the audits AND THEN RESOLVES every Phase 6 row to a definition
+# site, and fails on either.
+#
+# WHICH ROUTE, AND WHY NOT THE EXISTING RESOLVER. `verify_source_functions`
+# (crates/aprender-contracts/src/build_helper.rs:183-258) is `pub`, but it is the wrong
+# instrument here on three counts, each checked by reading it rather than assumed:
+#   1. It matches on the BARE, lowercased function name against every `pub fn` found anywhere
+#      under `crates/` — 77 crates. Phase 6 binds `predict`, `forecast`, `validate`, `new`,
+#      `load` and `main`; every one of those exists in some unrelated crate, so a row pointing
+#      at the wrong FILE would resolve. The defect REVIEW-06-U3 names is precisely a row that
+#      names nothing in the module it claims, and this would not see it.
+#   2. It has no caller: no binary and no example in the workspace invokes it, so wiring it
+#      would mean adding one purely to be invoked by a Makefile.
+#   3. It cannot express a `justfile` row, and two Phase 6 equations bind to recipes
+#      (REVIEW-06-03 / REVIEW-06-04) because a working-tree ignore claim and a wall-clock
+#      ratio are not functions.
+# The equivalent is therefore implemented below, FILE-SCOPED rather than name-scoped, which is
+# strictly stronger than the existing helper for this phase's purpose.
+#
+# THE NEGATIVE CONTROL WAS OBSERVED, NOT ASSUMED (CLAUDE.md Verification rule 4 and 7 — a
+# guard extended to a new scope must be re-mutated in that scope). Plan 06-09 rewrote the
+# `single_row_routing_dot8` row's function to `this_function_does_not_exist`, ran this target,
+# and observed rc=1 with exactly one line:
+#   RESOLVE- chronos-bolt-parity-v1.yaml single_row_routing_dot8 aprender_forecast::bolt::this_function_does_not_exist
+# then reverted and observed rc=0 with "resolved 55 Phase 6 binding rows". Without that
+# observation the resolver is itself unproven. Its rc values are in 06-09-SUMMARY.md.
+#
+# THE `set +e`, THE `status=$$?` ON ITS OWN LINE, AND THE `audited` COUNTER are copied from
+# contract-audit-phase5 and are load-bearing for the same reasons: this Makefile sets
+# `.SHELLFLAGS := -e -c`, so a failing `$(PV_BIN) audit` would abort the recipe before the
+# status could be read, and a status must never be read through a pipe (CLAUDE.md rule 1).
+# Every non-vacuity guard is copied too — an empty $(PHASE6_CONTRACTS), a log with no
+# `Total equations:` summary, and a resolver that resolved ZERO rows all FAIL rather than
+# report success over nothing.
+#
+# LIKE PHASE 5 AND UNLIKE PHASES 2/3/4, this refuses ANY BIND- line rather than only a nonzero
+# status. All 55 Phase 6 equations are `implemented`: nothing in this phase was committed ahead
+# of its code, so a BIND-004 "pending" here means a REGRESSION or an untracked new equation.
+contract-audit-phase6: ## Audit Phase 6 binding coverage + source resolution (BLOCKING, wired into tier3)
+	@echo "Auditing binding coverage for the Phase 6 contracts..."
+	@mkdir -p target
+	@unbound=""; \
+	warned=""; \
+	audited=0; \
+	for contract in $(PHASE6_CONTRACTS); do \
+		echo "  $$contract"; \
+		audited=$$((audited + 1)); \
+		log="target/contract-audit-phase6-$$audited.log"; \
+		set +e; \
+		$(PV_BIN) audit "$$contract" --binding $(BINDING) > "$$log" 2>&1; \
+		status=$$?; \
+		set -e; \
+		cat "$$log"; \
+		if [ "$$status" -ne 0 ]; then \
+			unbound="$$unbound $$contract"; \
+		fi; \
+		if ! grep -q 'Total equations:' "$$log"; then \
+			echo "FAIL: $$log carries no 'Total equations:' summary, so its BIND- count is not"; \
+			echo "evidence of anything. The audit did not run, or its output format moved."; \
+			exit 1; \
+		fi; \
+		found=$$(grep -c 'BIND-' "$$log" || true); \
+		if [ "$$found" -ne 0 ]; then \
+			warned="$$warned $$contract($$found)"; \
+		fi; \
+	done; \
+	if [ "$$audited" -eq 0 ]; then \
+		echo "FAIL: PHASE6_CONTRACTS is empty — this gate audited nothing and would have reported success."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$unbound" ]; then \
+		echo "FAIL: unbound equations remain in:$$unbound"; \
+		echo "Every equation of a Phase 6 contract needs an entry in $(BINDING)."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$warned" ]; then \
+		echo "FAIL: BIND- findings remain in:$$warned"; \
+		echo "Every Phase 6 equation is implemented, so a BIND- line here means one has"; \
+		echo "REGRESSED to pending, or a new equation was added without a binding entry."; \
+		exit 1; \
+	fi; \
+	echo "Resolving every Phase 6 binding row to a definition site..."; \
+	rows="target/contract-audit-phase6-rows.txt"; \
+	awk -v want=" $(notdir $(PHASE6_CONTRACTS)) " ' \
+		/^- contract:/ { c=$$3; e=""; m=""; f=""; next } \
+		/^  equation:/ { e=$$2; next } \
+		/^  module_path:/ { m=$$2; next } \
+		/^  function:/ { f=$$2; \
+			if (c != "" && index(want, " " c " ") > 0) print c, e, m, f; \
+			next } \
+	' $(BINDING) > "$$rows"; \
+	resolved=0; \
+	unresolvable=0; \
+	while read -r c e m f; do \
+		name="$${f##*::}"; \
+		case "$$m" in \
+			justfile) file="justfile" ;; \
+			aprender_mcp_forecast) file="crates/aprender-mcp-forecast/src/lib.rs" ;; \
+			aprender_mcp_chronos) file="crates/aprender-mcp-chronos/src/lib.rs" ;; \
+			aprender_forecast::build) file="crates/aprender-forecast/build.rs" ;; \
+			aprender_forecast::*) file="crates/aprender-forecast/src/$${m#aprender_forecast::}.rs" ;; \
+			aprender_forecast) file="crates/aprender-forecast/src/lib.rs" ;; \
+			*) file="" ;; \
+		esac; \
+		if [ -z "$$file" ] || [ ! -f "$$file" ]; then \
+			echo "RESOLVE- $$c $$e $$m::$$f (module_path maps to no file)"; \
+			unresolvable=$$((unresolvable + 1)); \
+			continue; \
+		fi; \
+		if [ "$$file" = "justfile" ]; then \
+			pattern="^$$name[[:space:]]*:"; \
+		else \
+			pattern="(^|[^[:alnum:]_])fn[[:space:]]+$$name[[:space:]]*[(<]"; \
+		fi; \
+		if grep -Eq "$$pattern" "$$file"; then \
+			resolved=$$((resolved + 1)); \
+		else \
+			echo "RESOLVE- $$c $$e $$m::$$f (no definition site in $$file)"; \
+			unresolvable=$$((unresolvable + 1)); \
+		fi; \
+	done < "$$rows"; \
+	if [ "$$unresolvable" -ne 0 ]; then \
+		echo "FAIL: $$unresolvable Phase 6 binding row(s) name a function with no definition site"; \
+		echo "in the file their module_path names. pv audit CANNOT see this — it matches"; \
+		echo "filename and equation and trusts 'status', so those rows passed the audit above."; \
+		echo "Fix the ROW (module_path / function), never the contract."; \
+		exit 1; \
+	fi; \
+	if [ "$$resolved" -eq 0 ]; then \
+		echo "FAIL: the resolver resolved ZERO Phase 6 binding rows, so it proved nothing."; \
+		echo "Either $(BINDING) carries no Phase 6 rows, or the awk extraction stopped matching"; \
+		echo "the file's shape. A resolver that resolves nothing must not pass vacuously."; \
+		exit 1; \
+	fi; \
+	echo "Phase 6 source resolution: resolved $$resolved Phase 6 binding rows to definition sites"; \
+	echo "Phase 6 binding audit: $$audited contract(s) audited, zero BIND- findings"
+
 
 # ============================================================================
 # PHASE 3 REPRODUCIBILITY GATES (TRN-06 / D-16 / D-13)

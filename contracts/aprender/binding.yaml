@@ -1606,6 +1606,406 @@ bindings:
   function: render_human
   status: implemented
   notes: 'Landed with plan 05-10. DECLARATIVE equation: it maps PF-007 and PF-008 onto the mechanisms that answer them, and the RENDERER is where a violation would surface (a best-seed headline, an unlabelled F1, an adapter-only size comparison, a verdict word). render_human composes every table, and its tests scan the whole output for verdict vocabulary and pair every absence assertion with a non-vacuity one. Row corrected from the non-existent `bench_report`.'
+# ---------------------------------------------------------------------------
+# Phase 6 (native time-series forecasting stack). 55 rows, one per equation of
+# the four Phase 6 contracts, audited as a BLOCKING tier3 gate by the Makefile's
+# `contract-audit-phase6`. That target does MORE than `pv audit`: it also resolves
+# every row below to a definition site in the file its `module_path` names, because
+# `pv audit` matches filename + equation and trusts `status`, so zero BIND- findings
+# proves REGISTRY completeness and not implementation linkage (REVIEW-06-U3; the
+# measurement is in contract-audit-phase5's own comment block).
+#
+# `module_path` here is a CRATE path, not an `aprender::` path: these three crates
+# are workspace members outside the `aprender` facade, following the Phase 2
+# `aprender_contrastive_data` precedent. Two rows bind to `justfile` recipes rather
+# than to Rust — a benchmark ratio and a working-tree ignore claim are falsified by
+# recipes, and no function can be either claim (REVIEW-06-03 / REVIEW-06-04).
+# ---------------------------------------------------------------------------
+- contract: prophet-parity-v1.yaml
+  equation: data_prep_exact
+  module_path: aprender_forecast::prophet
+  function: make_design
+  signature: 'fn make_design(ds_days: &[i64], y: &[f64], spec: &Spec) -> Design'
+  status: implemented
+  notes: 'Rung 1 of the ladder: t, y_scaled, changepoints and the seasonality design matrix are built here, and the fixture compares this output column for column against Prophet 1.1.7.'
+- contract: prophet-parity-v1.yaml
+  equation: objective_at_python_map_abs
+  module_path: aprender_forecast::prophet
+  function: Model::value_and_grad
+  signature: 'fn value_and_grad(&self, th: &[f64]) -> (f64, Vec<f64>)'
+  status: implemented
+  notes: 'Rung 2: the unnormalised log posterior evaluated AT Python MAP. value_and_grad is the single evaluator both objective() and gradient() delegate to, so binding the pair here is binding the thing the fixture measures.'
+- contract: prophet-parity-v1.yaml
+  equation: predict_path_abs_peyton
+  module_path: aprender_forecast::prophet
+  function: predict
+  signature: 'fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast'
+  status: implemented
+  notes: 'Rung 4: yhat over the in-sample path.'
+- contract: prophet-parity-v1.yaml
+  equation: predict_path_rel_yscale
+  module_path: aprender_forecast::prophet
+  function: predict
+  signature: 'fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast'
+  status: implemented
+  notes: 'Same function as predict_path_abs_peyton, different tolerance form (relative to y-scale) for the fixtures whose series are not on Peytons scale.'
+- contract: prophet-parity-v1.yaml
+  equation: fitted_objective_slack
+  module_path: aprender_forecast::fit
+  function: fit_prophet
+  signature: 'fn fit_prophet(design: &Design, max_rounds: usize) -> (Params, FitInfo)'
+  status: implemented
+  notes: 'Rung 3: the L-BFGS fit is allowed to land at a SLIGHTLY better objective than Pythons MAP, never a worse one. The slack is a property of the optimiser, so it binds to the fit, not to the evaluator.'
+- contract: prophet-parity-v1.yaml
+  equation: future_yhat_band_peyton_abs
+  module_path: aprender_forecast::prophet
+  function: predict
+  signature: 'fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast'
+  status: implemented
+  notes: 'Rung 5: the out-of-sample path and its uncertainty band, both produced by predict from the same seeded Rng.'
+- contract: prophet-parity-v1.yaml
+  equation: components_via_python_params_abs
+  module_path: aprender_forecast::prophet
+  function: predict
+  signature: 'fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast'
+  status: implemented
+  notes: 'Rung 6: trend / weekly / yearly / holidays components, emitted by predict alongside yhat.'
+- contract: prophet-parity-v1.yaml
+  equation: components_rebuild_yhat_abs
+  module_path: aprender_forecast::prophet
+  function: predict
+  signature: 'fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast'
+  status: implemented
+  notes: 'Rung 7: the components must SUM back to yhat, which is a self-consistency property of the one function that emits both.'
+- contract: prophet-parity-v1.yaml
+  equation: band_width_rel
+  module_path: aprender_forecast::prophet
+  function: percentile
+  signature: 'fn percentile(sorted: &[f64], q: f64) -> f64'
+  status: implemented
+  notes: 'The band edges are order statistics of the posterior-predictive draws; percentile is the estimator whose interpolation convention has to match Pythons.'
+- contract: prophet-parity-v1.yaml
+  equation: band_width_last30_rel
+  module_path: aprender_forecast::prophet
+  function: percentile
+  signature: 'fn percentile(sorted: &[f64], q: f64) -> f64'
+  status: implemented
+  notes: 'Same estimator, restricted to the final 30 points where the band is widest and a convention mismatch shows first.'
+- contract: prophet-parity-v1.yaml
+  equation: trend_band_width_rel
+  module_path: aprender_forecast::prophet
+  function: Model::trend
+  signature: 'fn trend(&self, p: &Params, t: &[f64], cap: Option<&[f64]>) -> Vec<f64>'
+  status: implemented
+  notes: 'The trend band is the piecewise trend evaluated over sampled deltas; Model::trend is that evaluation.'
+- contract: prophet-parity-v1.yaml
+  equation: fit_recipe
+  module_path: aprender_forecast::fit
+  function: fit_prophet
+  signature: 'fn fit_prophet(design: &Design, max_rounds: usize) -> (Params, FitInfo)'
+  status: implemented
+  notes: 'The recipe IS this function: init, L-BFGS rounds, and the restart schedule.'
+- contract: neuralprophet-parity-v1.yaml
+  equation: data_prep_vs_oracle_abs
+  module_path: aprender_forecast::np
+  function: NpData::new
+  signature: 'fn new(seed: u64) -> Self'
+  status: implemented
+  notes: 'NpData::new imputes the daily grid, normalises y and selects the auto seasonalities; the oracle compares that whole product.'
+- contract: neuralprophet-parity-v1.yaml
+  equation: lag_free_holdout_mae
+  module_path: aprender_forecast::np
+  function: train
+  signature: 'fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog)'
+  status: implemented
+  notes: 'The lag-free (n_lags = 0) holdout MAE is a property of the trained model, so it binds to the training loop.'
+- contract: neuralprophet-parity-v1.yaml
+  equation: ar_net_vs_naive_margin
+  module_path: aprender_forecast::np
+  function: predict_ar_recursive
+  signature: 'fn predict_ar_recursive(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64>'
+  status: implemented
+  notes: 'The AR-Net margin over seasonal-naive is measured on the recursive multi-step path, which is the path a horizon > 1 request actually takes.'
+- contract: neuralprophet-parity-v1.yaml
+  equation: huber_grad_min_abs
+  module_path: aprender_forecast::np
+  function: weighted_huber
+  signature: 'fn weighted_huber(pred: &Tensor, target: &Tensor, w: &Tensor, beta: f32) -> Tensor'
+  status: implemented
+  notes: 'The gradient minimum of the weighted Huber against NeuralProphets own.'
+- contract: neuralprophet-parity-v1.yaml
+  equation: fourier_epoch_1900
+  module_path: aprender_forecast::np
+  function: fourier_feats
+  signature: 'fn fourier_feats(day: i64, seasons: &[NpSeason], out: &mut Vec<f32>)'
+  status: implemented
+  notes: 'NP phases its Fourier terms on the 1900 epoch, not on the series start; fourier_feats is where that constant lives.'
+- contract: neuralprophet-parity-v1.yaml
+  equation: mini_batch_never_full
+  module_path: aprender_forecast::np
+  function: auto_batch
+  signature: 'fn auto_batch(n: usize) -> usize'
+  status: implemented
+  notes: 'The batch-size rule that must never degenerate to full-batch.'
+- contract: neuralprophet-parity-v1.yaml
+  equation: lr_selected_by_train_loss
+  module_path: aprender_forecast::np
+  function: one_cycle_lr
+  signature: 'fn one_cycle_lr(p: f64, max_lr: f64) -> f64'
+  status: implemented
+  notes: 'The one-cycle schedule the selected lr feeds; selection is by TRAIN loss, never by the holdout the margin is later measured on.'
+- contract: neuralprophet-parity-v1.yaml
+  equation: tape_cleared_per_step
+  module_path: aprender_forecast::np
+  function: train
+  signature: 'fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog)'
+  status: implemented
+  notes: 'An autograd-hygiene property of the training loop: the tape is cleared every step, so a long fit does not accumulate a graph.'
+- contract: neuralprophet-parity-v1.yaml
+  equation: huber_built_from_ops
+  module_path: aprender_forecast::np
+  function: weighted_huber
+  signature: 'fn weighted_huber(pred: &Tensor, target: &Tensor, w: &Tensor, beta: f32) -> Tensor'
+  status: implemented
+  notes: 'Composed from differentiable ops so it stays CONNECTED to the graph — the defect cores nn::loss::SmoothL1Loss still has (D-ITEM-06-02).'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: quantiles_abs_f32
+  module_path: aprender_forecast::bolt
+  function: Bolt::predict
+  signature: 'fn predict(&self, context: &[f32], prediction_length: usize) -> (Vec<Vec<f32>>, usize)'
+  status: implemented
+  notes: 'The headline parity claim: quantile outputs against chronos-forecasting 2.3.1, f32 weights. Bar frozen on aarch64 + NEON.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: quantiles_abs_f32_nonaarch64
+  module_path: aprender_forecast::bolt
+  function: Bolt::predict
+  signature: 'fn predict(&self, context: &[f32], prediction_length: usize) -> (Vec<Vec<f32>>, usize)'
+  status: implemented
+  notes: 'Same function, the arch-keyed bar for every non-aarch64 host. PROVISIONAL and UNMEASURED at 5.0e-6 — see D-ITEM-06-04 for the one command that turns it into a measurement.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: quantiles_rel_scale
+  module_path: aprender_forecast::bolt
+  function: Bolt::predict
+  signature: 'fn predict(&self, context: &[f32], prediction_length: usize) -> (Vec<Vec<f32>>, usize)'
+  status: implemented
+  notes: 'The scale-relative form of the same comparison, for series whose magnitude makes an absolute bar meaningless.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: loc_scale_rel
+  module_path: aprender_forecast::bolt
+  function: Bolt::forward_ladder
+  signature: 'fn forward_ladder(&self, context: &[f32]) -> Forward'
+  status: implemented
+  notes: 'Instance normalisations loc/scale, exposed as a ladder rung so a parity break can be localised before the quantile head.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: hidden_states_abs
+  module_path: aprender_forecast::bolt
+  function: Bolt::forward
+  signature: 'fn forward(&self, x: &[f32], rows: usize, fast: bool, row1_gemv: bool) -> Vec<f32>'
+  status: implemented
+  notes: 'Encoder hidden states — the rung between loc/scale and the head.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: probe_quantiles_rel_scale
+  module_path: aprender_forecast::bolt
+  function: Bolt::predict
+  signature: 'fn predict(&self, context: &[f32], prediction_length: usize) -> (Vec<Vec<f32>>, usize)'
+  status: implemented
+  notes: 'The synthetic probe series, which exercises the same path without the pinned fixture.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: probe_constant_abs
+  module_path: aprender_forecast::bolt
+  function: Bolt::predict
+  signature: 'fn predict(&self, context: &[f32], prediction_length: usize) -> (Vec<Vec<f32>>, usize)'
+  status: implemented
+  notes: 'A constant series: scale is degenerate, so this is the case where an instance-norm epsilon convention shows.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: rollout_365_abs
+  module_path: aprender_forecast::chronos
+  function: forecast
+  signature: 'fn forecast(model: &Model, args: &ChronosArgs) -> Result<ChronosResponse, ForecastError>'
+  status: implemented
+  notes: 'Horizons past the native 64 are produced by rollout, which is the doors job, not the models.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: f16_rel_std
+  module_path: aprender_forecast::safetensors
+  function: load_bytes
+  signature: 'fn load_bytes(bytes: &[u8]) -> Result<(Weights, String), String>'
+  status: implemented
+  notes: 'The f16 checkpoint differs from f32 only in the loaders dtype branch, so the widened bar binds to the loader.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: horizon_gate_native_64
+  module_path: aprender_forecast::chronos
+  function: validate
+  signature: 'fn validate(cfg: &Config, args: &ChronosArgs) -> Result<Validated, ForecastError>'
+  status: implemented
+  notes: 'The refusal/gate decision, taken before any compute.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: warning_beyond_native
+  module_path: aprender_forecast::chronos
+  function: forecast
+  signature: 'fn forecast(model: &Model, args: &ChronosArgs) -> Result<ChronosResponse, ForecastError>'
+  status: implemented
+  notes: 'The response carries a WARNING rather than a refusal past the native length; the warning is attached here.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: rollout_scheme_nine_path_requantiled
+  module_path: aprender_forecast::bolt
+  function: torch_quantile
+  signature: 'fn torch_quantile(sorted: &[f32], q: f32) -> f32'
+  status: implemented
+  notes: 'The nine-path rollout is re-quantiled with torchs interpolation convention; that convention is this function.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: weights_dual_layout_documented
+  module_path: aprender_forecast::bolt
+  function: Bolt::load
+  signature: 'fn load(w: &Weights, cfg: Config) -> Bolt'
+  status: implemented
+  notes: 'REPLACES weights_transposed_only (REVIEW-06-01). D-13s memory clause was AMENDED (D-ITEM-06-08): both layouts stay resident because dot8 reads contiguous [out, in] rows.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: gemm_routing_blis
+  module_path: aprender_forecast::bolt
+  function: linear_fast
+  signature: 'fn linear_fast(..)'
+  status: implemented
+  notes: 'D-14 clause 1: every product with rows > 1 goes through trueno::blis::gemm_blis, which is what linear_fast calls.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: single_row_routing_dot8
+  module_path: aprender_forecast::bolt
+  function: proj
+  signature: 'fn proj(..)'
+  status: implemented
+  notes: 'D-14 clause 2 (REVIEW-06-01): proj is the router — single rows take the 8-accumulator dot, rows > 1 take gemm_blis.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: weights_never_committed
+  module_path: justfile
+  function: fetch-chronos-tiny
+  signature: 'just recipe: fetch-chronos-tiny'
+  status: implemented
+  notes: 'D-18 clause 1. Binds to the RECIPE, not to Rust: the claim is about the repository working tree after a fetch (git check-ignore on the .safetensors, an empty `git status --porcelain -- models/`), and no function can be that claim.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: weights_verified_on_every_gate_run
+  module_path: justfile
+  function: fetch-chronos-tiny
+  signature: 'just recipe: fetch-chronos-tiny'
+  status: implemented
+  notes: 'REVIEW-06-03. The recipe re-verifies the pinned sha256 on EVERY run, including when the file is already present, so a corrupted or swapped checkpoint cannot ride a cache into a green gate.'
+- contract: chronos-bolt-parity-v1.yaml
+  equation: counted_skip_when_unarmed
+  module_path: aprender_forecast::build
+  function: main
+  signature: 'fn main()'
+  status: implemented
+  notes: 'D-18 clause 2. Bound to build.rss main, which is the mechanism: it emits cargo:rustc-cfg=chronos_weights only when CHRONOS_MODEL_DIR holds a model.safetensors, and the cfg_attr(not(chronos_weights), ignore) on the parity tests is what makes an unarmed run report COUNTED skips instead of a silent green. DEVIATION from 06-09s plan text, which proposed function `build_rs_cfg_emission`: no such function exists, so that row would have tripped this phases own RESOLVE- gate.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: fit_server_bounds
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'The fit doors bounds — min/max points, max horizon, and the four cost bounds (span, holiday window/columns/dates) — all enforced here and pinned to constants: by types.rss tests.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: chronos_server_bounds
+  module_path: aprender_forecast::chronos
+  function: validate
+  signature: 'fn validate(cfg: &Config, args: &ChronosArgs) -> Result<Validated, ForecastError>'
+  status: implemented
+  notes: 'The zero-shot doors bounds, enforced before any tensor is touched.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: date_validity
+  module_path: aprender_forecast::dates
+  function: parse_date
+  signature: 'fn parse_date(s: &str) -> Result<i64, ForecastError>'
+  status: implemented
+  notes: 'Calendar validity, not just shape: 2021-02-30 is refused.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: date_shape_exactly_ten_ascii_bytes
+  module_path: aprender_forecast::dates
+  function: parse_date
+  signature: 'fn parse_date(s: &str) -> Result<i64, ForecastError>'
+  status: implemented
+  notes: 'REVIEW-06-U2. The shape check is byte-exact, so a multi-byte character cannot slip through a char-count check.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: freq_allowlist
+  module_path: aprender_forecast::dates
+  function: future_days
+  signature: 'fn future_days(last: i64, horizon: usize, freq: &str) -> Result<Vec<i64>, ForecastError>'
+  status: implemented
+  notes: 'The future grid is the only consumer of freq, so the allowlist is enforced where it is used rather than in a separate validator that could drift from it.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: interval_width_open_unit
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'The OPEN interval (0, 1): 1.0 is refused, and the largest accepted value still yields a finite band z after normal_quantiles tail clamp.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: logistic_requires_cap_above_max_y
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'Also refuses a non-finite cap: JSON 1e400 parses to f64::INFINITY, for which `cap <= y_max` is false.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: constant_y_refused_before_fit
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'Refused BEFORE the fit, so a degenerate series costs a validation error rather than an L-BFGS run.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: unknown_field_refused
+  module_path: aprender_mcp_forecast
+  function: build_server
+  signature: 'fn build_server(name: &str, version: &str) -> pmcp::Result<Server>'
+  status: implemented
+  notes: 'serde deny_unknown_fields on the typed tool argument; build_server is where that type becomes the tool schema, so this is the transport-side half of D-11.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: unknown_enum_refused
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'The match arms on model / growth / seasonality_mode refuse rather than default — and an option belonging to the OTHER model is refused, never silently dropped.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: horizon_gate_with_warning
+  module_path: aprender_forecast::chronos
+  function: forecast
+  signature: 'fn forecast(model: &Model, args: &ChronosArgs) -> Result<ChronosResponse, ForecastError>'
+  status: implemented
+  notes: 'The shared gate-and-warn shape, seen from the boundary contract rather than from the parity contract.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: shared_response_shape
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'Both doors return the same envelope; forecast() defines it and chronos::forecast mirrors it.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: refusals_are_validation_errors
+  module_path: aprender_mcp_forecast
+  function: map_error
+  signature: 'fn map_error(e: ForecastError) -> pmcp::Error'
+  status: implemented
+  notes: 'Every caller-fixable refusal maps to a protocol validation error, never to Internal — an Internal for a caller-fixable input is the failure this equation exists to prevent.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: pool_equality_under_load
+  module_path: aprender_mcp_forecast
+  function: pooled_app
+  signature: 'fn pooled_app(pool: usize, name: &str, version: &str) -> pmcp::Result<axum::Router>'
+  status: implemented
+  notes: 'Determinism under concurrent load. NOTE, recorded rather than glossed: this asserts equality, NOT engagement — a pool collapsed to one router is trivially deterministic (D-ITEM-06-07-a).'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: pool_speedup_host_gated
+  module_path: justfile
+  function: forecast-pool-ratio
+  signature: 'just recipe: forecast-pool-ratio'
+  status: implemented
+  notes: 'REVIEW-06-04. Binds to the RECIPE, not to a unit test: a wall-clock ratio is a benchmark claim, and putting it in the correctness suite makes the suite flaky without making the pool faster. Host-gated (aarch64 release); measured 5.162x against a 2.0 bar in 06-EVIDENCE.md §3.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: default_seed_42
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'The default seed is a CONTRACT value, so an unseeded request is still reproducible.'
 critical_path:
 - softmax
 - rmsnorm
