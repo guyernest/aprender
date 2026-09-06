@@ -1,19 +1,19 @@
 ---
-gsd_state_version: 1.0
+gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
-stopped_at: Completed 06-06-PLAN.md
-last_updated: "2026-09-06T14:39:32.830Z"
-last_activity: 2026-09-05
+stopped_at: Completed 06-07-PLAN.md
+last_updated: "2026-09-06T22:36:56.834Z"
+last_activity: 2026-09-06
 last_activity_desc: Phase 06 execution started
-state_head: 6afdcdeba39c208aae214b8ba77cb9cd5270f402
+state_head: 50246a3ed6fb8ebb3242c512c78b202165a26fe0
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 73
-  completed_plans: 67
+  completed_plans: 68
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
-Plan: 7 of 9
+Plan: 2 of 9
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-05 — Phase 06 execution started
+Last activity: 2026-09-06 — Phase 06 execution started
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -194,6 +194,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P04 | 23 min | 3 tasks | 4 files |
 | Phase 06 P05 | 46 min | 4 tasks | 13 files |
 | Phase 06 P06 | 49 min | 3 tasks | 8 files |
+| Phase 06 P07 | 1h 54m | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -258,6 +259,8 @@ Recent decisions affecting current work:
 - [Phase 06]: pmcp 2.19.3 emits JSON-RPC -32603 (the INTERNAL error code) for Error::validation, so a refusal test pins BOTH the code and the "Validation error: " message prefix. — error_code() returns None for both the Validation and Internal variants, so the numeric code cannot distinguish a caller fault from a server fault. The thiserror-rendered prefix is the only discriminator the SDK ships. Read off a live reply, not assumed; breaking map_error turns 20 of 21 refusal cases red.
 - [Phase 06]: REVIEW-06-04: the pool claim is split by instrument. Equality under load is a unit-test correctness claim in CI; the >= 2.0 speed-up is a benchmark claim owned by just forecast-pool-ratio (06-08). mod pool_equality contains ZERO timing assertions. — A wall-clock ratio under four Tokio workers and eight heterogeneous blocking fits moves with CPU throttling independently of the router serialisation the pool removes. A flaky bar in the correctness suite trains readers to ignore the suite, including the equality failure that would matter.
 - [Phase 06]: The router pool is evidenced by a CONTROL pair, not a single number: POOL=1 measures 1.002x and POOL=8 measures 2.070x on the same host with the same eight requests, reproducing spike-010 in-tree. — CLAUDE.md Verification Discipline #2: never label a run by intent. Without the 1.002x control, 2.070x could have come from anything; with it, the pmcp router mutex is demonstrably what the pool removes. Equality held in BOTH configurations.
+- [Phase 06]: 06-07: aprender-mcp-chronos ships WITHOUT a router pool — the D-12 pool answers a seconds-long fit holding pmcp's server mutex, and an 18 ms Chronos forward against an immutable Arc<Model> is not that — The D-12 pool is a remedy for a MEASURED serialisation (spike 010: 8 concurrent fits at 1.0x on one router). Copying it to a server whose call is 18 ms would ship K copies of a bottleneck that is not present.
+- [Phase 06]: 06-07: the four D-18 gates carry #[rustfmt::skip] so cfg_attr stays on one line, and the ignore reason was shortened to 'CHRONOS_MODEL_DIR unset; just fetch-chronos-tiny' — rustfmt's attr_fn_like_width (70) splits the attribute vertically on every fmt run, and a split gate is harder to audit than the counted-skip claim deserves. The shortened reason still names the variable and the recipe.
 
 ### Pending Todos
 
@@ -342,6 +345,7 @@ Recent decisions affecting current work:
 - [Cross-cutting]: Preserve CPU-only package/MSRV/feature combinations and executable contract conventions from the repository's pre-release and APR dogfood skills.
 - make tier2 is RED on arm64: pre-existing clippy errors across 5 crates untouched by phase 2. Re-measured at 02-08: **24 errors, 44 locations** — aprender-compute 38, zram-core 3, present-terminal 1, core 1, serve 1; **zero in aprender-contrastive-data**, whose only appearance in the tier2 log is its `Checking` line. All arch-gated SIMD; CI runs X64-Linux-only so these aarch64-live arms are never linted. Proven independent of 02-03. See deferred-items D-ITEM-02.
 - contracts/chronos-bolt-parity-v1.yaml quantiles_abs_f32_nonaarch64 = 5.0e-6 is PROVISIONAL AND UNMEASURED: no x86_64 run has happened, and every CI job here is [self-hosted, X64]. FALSIFY-CHRONOS-002 obliges the first x86_64 run to record its measured max|delta| and tighten the bar in a pv diff-visible edit.
+- 06-07: REVIEW-06-02's provisional non-aarch64 f32 bar (5.0e-6) is STILL unmeasured — this host is aarch64, so quantiles_abs_f32 (1e-6, measured 9.5367e-7) is what ran. The server test now prints what a first x86_64 run needs.
 
 ## Deferred Items
 
@@ -355,6 +359,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-06T14:39:32.484Z
-Stopped at: Completed 06-06-PLAN.md
+Last session: 2026-09-06T22:36:30.347Z
+Stopped at: Completed 06-07-PLAN.md
 Resume file: None
