@@ -769,6 +769,7 @@ version = "0.63.0"
 dependencies = [
  "aprender-compute",
  "aprender-core",
+ "half",
  "schemars 1.2.1",
  "serde",
  "serde_json",

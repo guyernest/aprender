@@ -1,6 +1,6 @@
 # Oracle fixtures for `aprender-forecast`
 
-These 17 files are the phase's **correctness bar**. The parity ladder does not check that
+These 18 files are the phase's **correctness bar**. The parity ladder does not check that
 the Rust port is self-consistent; it checks that the port reproduces a specific number
 produced by a specific version of a specific Python library on a specific dataset. That is
 what makes a green ladder evidence.
@@ -36,6 +36,7 @@ the copies were verified identical to each other before ONE was taken.
 | `air_passengers.csv` | `004` (6 identical copies) | raw dataset | — |
 | `wp_log_R.csv` | `003` (2 identical copies) | raw dataset (Prophet's logistic example) | — |
 | `retail_sales.csv` | `006` | raw dataset | — |
+| `chronos_bolt_tiny_config.json` | not a spike copy — see below | `amazon/chronos-bolt-tiny` @ `a0e552de8349…` | `just fetch-chronos-tiny`, then copy `models/chronos-bolt-tiny/f32/config.json` |
 
 ## Gotchas the readers must handle (`src/test_support.rs`)
 
@@ -57,3 +58,18 @@ the copies were verified identical to each other before ONE was taken.
 | the four remaining `*_prophet140` | `06-03` (the seven-fixture ladder) |
 | `np_oracle_peyton` | `06-04` (NeuralProphet-lite) |
 | `chronos_*`, `weights_index`, `peyton_tiny_oracle` | `06-05` / `06-07` (Chronos) |
+
+## `chronos_bolt_tiny_config.json` — the one fixture that is not a spike copy
+
+Every other file here is byte-identical to a `.planning/spikes/NNN-*/fixtures/` original.
+This one is the 1.1 KB `config.json` that `amazon/chronos-bolt-tiny` serves at revision
+`a0e552de83495b5c28c14c71c374f3e33280b340`, copied out of `models/chronos-bolt-tiny/f32/`
+after `just fetch-chronos-tiny` verified it. Its sha256 is
+`278f0086733031635fb1c861cb01c1bad6477420c7fcb19381a2993e335785e0` — the same pin the recipe
+enforces, so a test can assert it and catch a swapped file.
+
+It is committed because it is **hyper-parameters, not weights** (D-18 forbids the latter and
+permits the former): `d_model`, `num_layers`, `chronos_config.quantiles`, `context_length`,
+`prediction_length`. That is what lets the validation and shape tests build a real `Config`
+and run with no weights on disk at all — the weight-*dependent* tests stay gated behind
+`cfg(chronos_weights)` and report as counted skips instead.

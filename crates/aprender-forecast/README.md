@@ -60,3 +60,38 @@ wall-clock cap.
 
 Dates are `i64` days since the epoch via civil-date arithmetic — no calendar-library
 dependency anywhere in the Phase 6 crates.
+
+## Chronos-Bolt weights
+
+Weights are **never committed** (D-18). The Chronos-Bolt zero-shot path reads
+[`amazon/chronos-bolt-tiny`](https://huggingface.co/amazon/chronos-bolt-tiny) — **Apache-2.0**,
+8.65 M parameters — at one pinned revision:
+
+```
+just fetch-chronos-tiny
+```
+
+| What | Value |
+|---|---|
+| Repo | `amazon/chronos-bolt-tiny` |
+| Revision | `a0e552de83495b5c28c14c71c374f3e33280b340` |
+| `f32/model.safetensors` sha256 | `75068728d376d2bec670379eeef4bfb4d24c0cfe24d957451f8d19b447030a32` (33.0 MB, upstream pin) |
+| `f32/config.json` sha256 | `278f0086733031635fb1c861cb01c1bad6477420c7fcb19381a2993e335785e0` (1.1 KB, upstream pin) |
+| `f16/model.safetensors` sha256 | `f5dc2ef53533c8896bcb120a754c52c39d8917c15750a9e845192014dfa74a67` (16.5 MB, **derived locally**) |
+
+The recipe writes into `/models/chronos-bolt-tiny/`, which is root-anchored gitignored
+(CB-510), and it **verifies on every run, not only on download** — a file that is already
+present, cached, or mounted is re-hashed, and a mismatch exits non-zero naming the file.
+The f32 shas pin *upstream provenance*; the f16 sha is re-derived from the verified f32 and
+so pins *local derivation integrity* only. Spike 007 recorded
+`f9a033b42bc516e17ae5756317cb946121afdb59c94b4acfcd30fef93317cd4c` for the same weights: the
+two f16 files differ in exactly six bytes — the key order inside the `__metadata__` object —
+and their tensor bodies are byte-identical. Newer `safetensors` writes those two keys in the
+other order.
+
+Two environment variables, two different jobs:
+
+| Variable | Read at | Does |
+|---|---|---|
+| `CHRONOS_MODEL_DIR` | runtime **and** build time | The directory the model is loaded from. At build time its presence is what arms the weight-dependent tests: `build.rs` emits `cfg(chronos_weights)` only when `$CHRONOS_MODEL_DIR/model.safetensors` is a file, so without weights those tests are **counted, reasoned skips** (`N ignored`), never a silent green. |
+| `CHRONOS_EMBED_DIR` | build time, in the server crate | Stages `model.safetensors` + `config.json` into `OUT_DIR` for `include_bytes!`, so the deployed binary carries its own weights (D-13). |

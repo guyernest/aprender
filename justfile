@@ -27,6 +27,16 @@ minilm_dir := env_var_or_default("APRENDER_MINILM_DIR", env_var("HOME") + "/.cac
 target := "aarch64-unknown-linux-gnu"
 asset := "deploy-extensions/assets/trainer"
 
+# Chronos-Bolt weights (Phase 6 / D-18). `chronos_dir` is REPO-RELATIVE on
+# purpose: `git check-ignore` and `git status -- models/` need the relative
+# form, and overriding it (`just chronos_dir=/tmp/x fetch-chronos-tiny`) is how
+# the tamper control runs against a copy. `chronos_abs` is the absolute form for
+# the env-var hints — `justfile_directory()` is fixed at the workspace root,
+# while `$PWD` follows any `cd` inside a recipe body.
+chronos_rev := "a0e552de83495b5c28c14c71c374f3e33280b340"
+chronos_dir := "models/chronos-bolt-tiny"
+chronos_abs := justfile_directory() / chronos_dir
+
 _default:
     @just --list
 
@@ -308,3 +318,115 @@ dataset-pack dir="data/tweet-eval-stance" out="/tmp/setfit-dataset.tar.gz":
     tar -czf "{{out}}" -C "{{dir}}" .
     ls -lh "{{out}}" | awk '{print "  packed: " $9 " (" $5 ")"}'
     tar -tzf "{{out}}" | sed 's|^\./||' | grep -v '^$' | sort | sed 's/^/    /'
+
+# Fetch amazon/chronos-bolt-tiny at the PINNED revision, verify it, derive f16.
+#
+# NEVER run from CI's default gate — this reaches the network on a cold box and
+# writes ~50 MB into `/models/`, which is root-anchored gitignored (CB-510), so
+# no weight ever becomes committable. Weights are Apache-2.0 (amazon/chronos-bolt-tiny).
+#
+# VERIFY-ALWAYS, not fetch-if-missing (REVIEW-06-03). The download is conditional
+# on the file being ABSENT; the hashing is not. A file that is already present —
+# cached, mounted, restored by a CI cache action, or edited — is re-hashed on every
+# run and the recipe exits non-zero naming it. A pre-existing weight file can
+# therefore never be used unverified, which is the whole point: the caller
+# (`just chronos-gate`, plan 06-08) invokes this unconditionally.
+#
+# WHAT EACH PIN PROVES. The f32 `model.safetensors` and `config.json` sha256s are
+# the UPSTREAM pins — they are what the Hub served at revision {{chronos_rev}}.
+# The f16 sha is a LOCAL-INTEGRITY pin: that file is re-derived here from the
+# already-verified f32, never downloaded, so it proves the derivation was not
+# tampered with, NOT provenance.
+#
+# The enforced f16 value (f5dc2ef5…) is what safetensors 0.8.x reproduces on this
+# toolchain. Spike 007 recorded f9a033b42bc516e17ae5756317cb946121afdb59c94b4acfcd30fef93317cd4c
+# for the same weights; the two files differ in exactly 6 bytes — the ORDER of the
+# two keys inside the `__metadata__` JSON object — and are otherwise byte-identical
+# (same 11 640-byte header length, same tensor entries in the same order, and a
+# byte-identical 17 305 344-byte body). Newer safetensors emits `format` before
+# `converted` regardless of the dict order passed in. RESEARCH A3 flagged exactly
+# this risk and called the f16 sha advisory; it is pinned here anyway so the check
+# is real, and re-pinned to the value this toolchain actually produces.
+#
+#   just fetch-chronos-tiny
+#   CHRONOS_MODEL_DIR=<abs>/f16 cargo test -p aprender-forecast --lib   # arms the gated tests
+#
+# Fetch + verify the pinned Chronos-Bolt-tiny weights into /models/ (not for CI's gate).
+fetch-chronos-tiny:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv run --quiet --python 3.12 --with huggingface_hub --with safetensors --with numpy \
+        python - "{{chronos_rev}}" "{{chronos_dir}}" <<'PY'
+    import hashlib, os, shutil, sys
+    from huggingface_hub import hf_hub_download
+    import numpy as np
+    from safetensors.numpy import load_file, save_file
+
+    REPO = "amazon/chronos-bolt-tiny"
+    rev, root = sys.argv[1], sys.argv[2]
+
+    # UPSTREAM pins: what the Hub served at `rev`.
+    F32_PINS = {
+        "model.safetensors": "75068728d376d2bec670379eeef4bfb4d24c0cfe24d957451f8d19b447030a32",
+        "config.json": "278f0086733031635fb1c861cb01c1bad6477420c7fcb19381a2993e335785e0",
+    }
+    # LOCAL-INTEGRITY pin: re-derived here, never downloaded. See the header comment
+    # for why this differs from spike 007's advisory value in 6 metadata bytes.
+    F16_PIN = "f5dc2ef53533c8896bcb120a754c52c39d8917c15750a9e845192014dfa74a67"
+    F16_ADVISORY = "f9a033b42bc516e17ae5756317cb946121afdb59c94b4acfcd30fef93317cd4c"
+    F16_META = {"format": "pt", "converted": "f32->f16 by spike 007 tools/to_f16.py"}
+
+    def sha256(path):
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    f32 = os.path.join(root, "f32")
+    f16 = os.path.join(root, "f16")
+    os.makedirs(f32, exist_ok=True)
+
+    # (1) Fetch ONLY what is absent. A present file is never overwritten: a bad hash
+    # on a present file is a supply-chain event, not a cache miss, and re-fetching
+    # over it would erase the evidence.
+    for name in F32_PINS:
+        if not os.path.isfile(os.path.join(f32, name)):
+            print(f"  download {name} from {REPO} @ {rev}")
+            hf_hub_download(REPO, name, revision=rev, local_dir=f32)
+
+    # (2) Verify ALWAYS — download or not.
+    bad = []
+    for name, want in sorted(F32_PINS.items()):
+        p = os.path.join(f32, name)
+        if not os.path.isfile(p):
+            sys.exit(f"FAIL: {p} is still missing after fetch")
+        got = sha256(p)
+        print(f"  f32/{name:<18} {got}  pin {want}")
+        if got != want:
+            bad.append(f"{p}\n      computed sha256 {got}\n      pinned   sha256 {want}")
+    if bad:
+        sys.exit("FAIL: sha256 mismatch — a supply-chain event, not a cache miss:\n    "
+                 + "\n    ".join(bad))
+
+    # (3) f16 is DERIVED from the already-verified f32. Absent or mismatching -> drop
+    # the whole directory and re-derive deterministically, then re-hash.
+    p16 = os.path.join(f16, "model.safetensors")
+    got16 = sha256(p16) if os.path.isfile(p16) else None
+    if got16 != F16_PIN or not os.path.isfile(os.path.join(f16, "config.json")):
+        shutil.rmtree(f16, ignore_errors=True)
+        os.makedirs(f16, exist_ok=True)
+        tensors = load_file(os.path.join(f32, "model.safetensors"))
+        save_file({k: v.astype(np.float16) for k, v in tensors.items()}, p16, metadata=F16_META)
+        shutil.copy(os.path.join(f32, "config.json"), os.path.join(f16, "config.json"))
+        got16 = sha256(p16)
+    print(f"  f16/{'model.safetensors':<18} {got16}  pin {F16_PIN}")
+    print(f"      (spike 007 recorded {F16_ADVISORY} — same tensors, __metadata__ key order differs)")
+    if got16 != F16_PIN:
+        sys.exit(f"FAIL: sha256 mismatch for {p16} after a clean re-derivation:\n"
+                 f"      computed sha256 {got16}\n      pinned   sha256 {F16_PIN}\n"
+                 "      The f32 source verified, so this is a local derivation change — most\n"
+                 "      likely a safetensors/numpy version that orders the header differently.\n"
+                 "      Re-measure and re-pin F16_PIN in the justfile; do not loosen the check.")
+    PY
+    echo "  CHRONOS_MODEL_DIR={{chronos_abs}}/f16   CHRONOS_EMBED_DIR={{chronos_abs}}/f16"

@@ -27,6 +27,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # JsonSchema on ForecastArgs so the MCP server advertises one strict schema.
 schemars = "1.0"
+# F16/BF16 decode in the safetensors reader (Chronos-Bolt ships f32; the default
+# embedded build is the derived f16).
+half = { workspace = true }
 
 [dev-dependencies]
 # Test-side reader for contracts/*.yaml equation tolerances (test_support).
