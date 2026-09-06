@@ -229,3 +229,52 @@ has no `MAX_SPAN_DAYS`.
 them, which is why that file records the delta's sha256 beside the commit hash. **Someone
 should decide whether that work lands or reverts before the phase closes** — right now the
 branch's committed state and its tested state are different things.
+
+### 4. OPEN ITEM for 06-09 — D-18 clause 2 in CI, gated on one x86_64 measurement
+
+Decision at plan 06-08 Task 3's blocking-human checkpoint: **`measure-x86-first`**. Neither
+hunk of `06-ci-chronos-step.patch` is applied in this phase by default. The patch is
+preserved, verified to apply cleanly against ci.yml as of `adc8a560a`, and `.github/` is
+untouched in the working tree and in every commit of plan 06-08.
+
+**Why not `apply-now`.** Hunk (a) has two prerequisites nobody has provisioned, and a step
+that dies at the weight-hash check before running a single test is a red run that proves
+nothing:
+
+1. a runner-local weights mount (`/srv/models` in the diff is a PLACEHOLDER), and
+2. a way for `uv run --with huggingface_hub --with safetensors --with numpy` to resolve
+   inside the network-less `sovereign-ci:stable` clean-room — a warm uv-cache mount
+   (`/srv/uv-cache` is proposed) or those three packages baked into the image.
+
+**The gating work, which is this phase's own open item and not new scope.** Run
+`just chronos-gate` ONCE on an x86_64 Linux host with the weights (lambda-vector qualifies
+and is pre-authorized compute per CLAUDE.md). Read two things off it: the printed
+`f32_quantile_bar` line, and the measured max|delta| from
+`peyton_ladder_matches_oracle_f32`. Then tighten `quantiles_abs_f32_nonaarch64` in
+`contracts/chronos-bolt-parity-v1.yaml` from the PROVISIONAL-UNMEASURED `5.0e-6` to
+measurement + margin, as a `pv diff`-visible contract edit. That single run discharges
+REVIEW-06-02 and windows-ledger entry #4 together, and only then is there evidence to wire
+a CI leg onto. The aarch64 evidence in `06-EVIDENCE.md` is unaffected either way.
+
+**If no x86_64 host is reachable within this phase, this collapses to `defer`** — by plan
+06-08's own option table. Record it that way explicitly: both hunks stay in the patch file,
+and **D-18 clause 2 is a named CI gap**, evidenced locally by `just chronos-gate` and
+`06-EVIDENCE.md` §4 only. It must not become a silent drop.
+
+Hunk (b) (`cargo test -p aprender-mcp-forecast --test e2e_stdio` on the single
+Integration-tests line) needs no runner provisioning and can be taken independently at any
+time; it was not split out here because the decision was to gate on the measurement first.
+
+### 5. OPEN ITEM for 06-09 — account for the uncommitted delta BEFORE committing it
+
+Follow-on to item 3 above. Decision: **investigate, then commit** — not commit blind. The 18
+uncommitted paths (14 source/doc + 3 `.pv/` artifacts, 510 insertions / 164 deletions) were
+present in the session-start `git status` for plan 06-08, so they are neither 06-08's nor
+06-07's. They are concentrated in exactly the crates 06-08 measured.
+
+06-09 must establish their provenance and intent first, then commit them with a message that
+says where they came from. Until that lands, `06-EVIDENCE.md`'s numbers are reproducible only
+from `adc8a560a` **plus** a recorded sha256 delta
+(`bd42a46dda0f0c660cc450b1c97d50f2c017d9111a6164a73272793b7dbcb2b6`, source-only) rather than
+from a real commit. The delta digest stays as the honest record until then; it is not a
+substitute for landing the work.
