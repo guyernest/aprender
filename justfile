@@ -349,7 +349,16 @@ dataset-pack dir="data/tweet-eval-stance" out="/tmp/setfit-dataset.tar.gz":
 # is real, and re-pinned to the value this toolchain actually produces.
 #
 #   just fetch-chronos-tiny
-#   CHRONOS_MODEL_DIR=<abs>/f16 cargo test -p aprender-forecast --lib   # arms the gated tests
+#   CHRONOS_MODEL_DIR=<abs>/f32 cargo test -p aprender-forecast --lib   # arms the gated tests
+#
+#   f32, NOT f16. `armed_dir()` (chronos.rs) returns CHRONOS_MODEL_DIR verbatim and the
+#   bolt::parity ladders load from it to compare against the PYTHON oracle on an ABSOLUTE
+#   bar; f16 weights there miss `input_embeds` by ~4e-4 against a 2e-5 bar — quantization
+#   error, not a regression, and not a reason to loosen an f32 bar SC4 names.
+#   The f16 path is already covered by its own test on its own relative bar
+#   (chronos::tests::f16_weights_within_two_percent_of_std, equations.f16_rel_std = 2 % of
+#   series std); it finds the f16 directory itself via `.parent().join("f16")`, so pointing
+#   this variable at f32 arms BOTH.
 #
 # Fetch + verify the pinned Chronos-Bolt-tiny weights into /models/ (not for CI's gate).
 fetch-chronos-tiny:
@@ -429,4 +438,329 @@ fetch-chronos-tiny:
                  "      likely a safetensors/numpy version that orders the header differently.\n"
                  "      Re-measure and re-pin F16_PIN in the justfile; do not loosen the check.")
     PY
-    echo "  CHRONOS_MODEL_DIR={{chronos_abs}}/f16   CHRONOS_EMBED_DIR={{chronos_abs}}/f16"
+    echo "  CHRONOS_MODEL_DIR={{chronos_abs}}/f32   # f32: the ladders compare to the Python oracle; the f16 test finds ../f16 itself"
+
+# ── Phase 6 host-gated evidence recipes ──────────────────────────────────────
+#
+# The timing, size and concurrency bars SC1/SC4/SC5 name hold on an AARCH64
+# RELEASE build with the spike-008 NEON microkernel behind `trueno::gemm_blis`.
+# CI is `[self-hosted, X64, Linux, clean-room]` and builds debug for the lib
+# leg, so it asserts PARITY and REFUSALS instead and never these numbers
+# (06-RESEARCH Open Question 5). Every recipe below therefore states the bar it
+# enforces, writes its raw output to `target/p06-*.log`, and the measured values
+# are recorded with host, profile and commit in
+# `.planning/phases/06-native-time-series-forecasting-stack/06-EVIDENCE.md`.
+#
+# SHELL DISCIPLINE (CLAUDE.md "Verification Discipline" #1). Every recipe is a
+# `#!/usr/bin/env bash` body with `set -euo pipefail`, and every exit status is
+# captured with `rc=$?` on ITS OWN LINE, before any `grep`/`tail`/`awk` touches
+# the log. A pipeline's `$?` is the LAST command's status, so capturing it after
+# a pipe into grep reports GREP — which is how a gate ends up unable to fail.
+# `set +e` brackets each measured command so `set -e` cannot abort before the
+# capture. (The guard for this rule greps the justfile itself, so this comment
+# deliberately describes the anti-pattern rather than spelling it.)
+#
+#   just chronos-gate          # D-18 clause 2, local form: weights + armed tests
+#   just chronos-embed-build   # SC4: embedded release binary < 30 MB
+#   just chronos-bench         # SC4: tiny-f16 forward at 2048 context < 100 ms
+#   just chronos-coldstart 5   # SC4: exec -> first forecast < 150 ms (median)
+#   just forecast-bench        # SC1: 3 000-point Prophet round trip < 2 s
+#   just forecast-pool-ratio   # SC5: best-of-3 sequential/concurrent >= 2.0
+#   just mase-rolling-origin   # D-16: the rolling-origin accuracy table
+
+# SC4 binary-size bar: the embedded tiny-f16 release binary must stay under 30 MB.
+#
+# `contracts/chronos-bolt-parity-v1.yaml` (line ~220) is explicit that SC4's
+# "< 30 MB" is a BINARY-SIZE bar, not a resident-memory one, which is why this
+# measures the linked artifact and not RSS. `wc -c` rather than `stat`: `stat`
+# takes `-c%s` on GNU and `-f%z` on BSD, and this box is BSD.
+# Build the embedded tiny-f16 release binary and enforce the < 30 MB SC4 bar.
+chronos-embed-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    LOG=target/p06-chronos-embed-build.log
+    set +e
+    CHRONOS_EMBED_DIR={{chronos_abs}}/f16 CARGO_INCREMENTAL=0 \
+        cargo build --release -p aprender-mcp-chronos > "$LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        tail -30 "$LOG"
+        echo "FAIL: embedded release build exited $rc - full log $LOG" >&2
+        exit "$rc"
+    fi
+    # `$(( ... ))` both strips BSD wc's leading padding and proves the value is
+    # an integer; `${bytes//[[:space:]]/}` did the same but bashrs mis-parses the
+    # character class as an unterminated `[` test.
+    bytes=$(( $(wc -c < target/release/aprender-mcp-chronos) ))
+    echo "  binary: target/release/aprender-mcp-chronos ($bytes bytes, CHRONOS_EMBED_DIR={{chronos_abs}}/f16)"
+    if [ "$bytes" -ge 30000000 ]; then
+        echo "FAIL: $bytes bytes is at or above the 30000000-byte SC4 bar" >&2
+        exit 1
+    fi
+    echo "  SIZE OK: $bytes < 30000000 bytes (SC4)"
+
+# The phase's embedded-weights gate (D-18 clause 2, local form).
+#
+# REVIEW-06-03, verified MEDIUM-HIGH. `just fetch-chronos-tiny` runs
+# UNCONDITIONALLY and is never guarded on the weights being absent. That recipe
+# is verify-always: present files are re-hashed against their pins on every run
+# and it exits non-zero naming any mismatch. Gating the call on file absence is
+# precisely what let a cached, pre-mounted or tampered weights directory reach
+# the parity tests with its sha256 never checked — and the CI leg this phase
+# proposes would mount weights across a trust boundary. Its output is echoed
+# into this gate's own stdout so the pins it verified are part of the evidence.
+#
+# The two positional filters on the aprender-forecast command are deliberate:
+# modern libtest unions positional filters (verified on cargo 1.98.0:
+# `--lib -- alpha:: beta::` reported `2 passed; 2 filtered out`). Non-vacuity
+# does not rest on that anyway — the gate requires `0 ignored` AND at least one
+# passing test in BOTH summaries, so a filter that matched nothing would fail.
+# THE embedded-weights gate: verify the pinned weights, then run both armed suites.
+chronos-gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    LOG0=target/p06-chronos-gate-weights.log
+    LOG1=target/p06-chronos-gate-forecast.log
+    LOG2=target/p06-chronos-gate-server.log
+    set +e
+    just fetch-chronos-tiny > "$LOG0" 2>&1
+    rc=$?
+    set -e
+    rc0="$rc"
+    cat "$LOG0"
+    if [ "$rc0" -ne 0 ]; then
+        echo "FAIL: weight verification exited $rc0 - no test was run" >&2
+        exit "$rc0"
+    fi
+    set +e
+    CHRONOS_MODEL_DIR={{chronos_abs}}/f32 CARGO_INCREMENTAL=0 \
+        cargo test -p aprender-forecast --lib -- bolt::parity chronos::parity > "$LOG1" 2>&1
+    rc=$?
+    set -e
+    rc1="$rc"
+    set +e
+    CHRONOS_EMBED_DIR={{chronos_abs}}/f16 CHRONOS_MODEL_DIR={{chronos_abs}}/f32 CARGO_INCREMENTAL=0 \
+        cargo test -p aprender-mcp-chronos --lib > "$LOG2" 2>&1
+    rc=$?
+    set -e
+    rc2="$rc"
+    fail=0
+    if [ "$rc1" -ne 0 ]; then
+        tail -30 "$LOG1"
+        echo "FAIL: aprender-forecast parity tests exited $rc1 - log $LOG1" >&2
+        fail=1
+    fi
+    if [ "$rc2" -ne 0 ]; then
+        tail -30 "$LOG2"
+        echo "FAIL: aprender-mcp-chronos tests exited $rc2 - log $LOG2" >&2
+        fail=1
+    fi
+    # An ARMED suite that reports `1 ignored` is a weights test that skipped
+    # itself, which is exactly the failure this gate exists to catch.
+    check_summary() {
+        label=$1
+        log=$2
+        summary=$(grep -E '^test result:' "$log" | tail -1)
+        if [ -z "$summary" ]; then
+            echo "FAIL: $label produced no 'test result:' summary - log $log" >&2
+            return 1
+        fi
+        echo "  $label: $summary"
+        case "$summary" in
+            *"0 ignored"*) ;;
+            *)
+                echo "FAIL: $label did not report 0 ignored - the weights tests were not armed" >&2
+                return 1
+                ;;
+        esac
+        passed=$(printf '%s\n' "$summary" | sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p')
+        if [ -z "$passed" ] || [ "$passed" -lt 1 ]; then
+            echo "FAIL: $label reported fewer than 1 passing test - a vacuous green" >&2
+            return 1
+        fi
+        return 0
+    }
+    check_summary "aprender-forecast (bolt::parity + chronos::parity)" "$LOG1" || fail=1
+    check_summary "aprender-mcp-chronos (--lib)" "$LOG2" || fail=1
+    if [ "$fail" -ne 0 ]; then
+        exit 1
+    fi
+    echo "CHRONOS GATE: PASS"
+
+# SC4 latency bar: the tiny-f16 forward at 2 048 context must stay under 100 ms.
+#
+# Reads the D-14 PRODUCTION row (`fast + attn_gemm + dot8`) of the f16 section,
+# because that is the routing the server actually takes; the other rows in the
+# table are the variants it is measured against, not what ships.
+# Kernel/latency tables, and the < 100 ms SC4 bar on the tiny-f16 2 048-context forward.
+chronos-bench: chronos-embed-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    LOG=target/p06-chronos-bench.log
+    set +e
+    target/release/aprender-mcp-chronos --bench {{chronos_abs}}/f32 {{chronos_abs}}/f16 > "$LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        tail -20 "$LOG"
+        echo "FAIL: --bench exited $rc - log $LOG" >&2
+        exit "$rc"
+    fi
+    cat "$LOG"
+    ms=$(awk -F'|' '/^### /{f16 = ($0 ~ /weights F16/); next} f16 && /D-14 production/ {gsub(/[^0-9.]/, "", $3); print $3; exit}' "$LOG")
+    if [ -z "$ms" ]; then
+        echo "FAIL: no f16 D-14-production row in $LOG - the bar was never measured" >&2
+        exit 1
+    fi
+    echo "  tiny-f16 forward at 2048 context (D-14 production routing): $ms ms"
+    if awk -v v="$ms" 'BEGIN { exit (v + 0 < 100) ? 0 : 1 }'; then
+        echo "  FORWARD OK: $ms ms < 100 ms (SC4)"
+    else
+        echo "FAIL: $ms ms is at or above the 100 ms SC4 bar" >&2
+        exit 1
+    fi
+
+# SC4 cold-start bar: median exec -> first forecast reply under 150 ms.
+#
+# `--coldstart` spawns THIS binary as a stdio MCP server, so the embedded build
+# is what is timed: process exec + weight decode + initialize + one forecast.
+# Time exec -> first forecast over stdio N times; enforce the < 150 ms SC4 median bar.
+chronos-coldstart N="3": chronos-embed-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    LOG=target/p06-chronos-coldstart.log
+    set +e
+    target/release/aprender-mcp-chronos --coldstart {{N}} > "$LOG" 2>&1
+    rc=$?
+    set -e
+    cat "$LOG"
+    if [ "$rc" -ne 0 ]; then
+        echo "FAIL: --coldstart exited $rc - log $LOG" >&2
+        exit "$rc"
+    fi
+    med=$(sed -n 's/^median: initialize [0-9][0-9]* ms, forecast \([0-9][0-9]*\) ms.*/\1/p' "$LOG")
+    if [ -z "$med" ]; then
+        echo "FAIL: no median line in $LOG - the bar was never measured" >&2
+        exit 1
+    fi
+    echo "  median: exec to first forecast reply $med ms over {{N}} runs"
+    if [ "$med" -ge 150 ]; then
+        echo "FAIL: $med ms is at or above the 150 ms SC4 bar" >&2
+        exit 1
+    fi
+    echo "  COLD START OK: $med ms < 150 ms (SC4)"
+
+# SC1 bar: a 3 000-point daily Prophet fit + 365-step predict under 2 s total.
+forecast-bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    LOG=target/p06-forecast-bench.log
+    set +e
+    CARGO_INCREMENTAL=0 cargo run --release -p aprender-mcp-forecast -- --bench 1000 3000 > "$LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        tail -20 "$LOG"
+        echo "FAIL: --bench exited $rc - log $LOG" >&2
+        exit "$rc"
+    fi
+    grep -E '^\| ' "$LOG" || true
+    total=$(awk -F'|' '$2 + 0 == 3000 && $3 ~ /prophet/ {gsub(/[^0-9.]/, "", $6); print $6; exit}' "$LOG")
+    if [ -z "$total" ]; then
+        echo "FAIL: no 3000-point prophet row in $LOG - the bar was never measured" >&2
+        exit 1
+    fi
+    echo "  3000-point prophet fit + 365-step predict: $total s total"
+    if awk -v v="$total" 'BEGIN { exit (v + 0 < 2.0) ? 0 : 1 }'; then
+        echo "  ROUND TRIP OK: $total s < 2.0 s (SC1)"
+    else
+        echo "FAIL: $total s is at or above the 2.0 s SC1 bar" >&2
+        exit 1
+    fi
+
+# SC5 bar: sequential wall / concurrent wall >= 2.0, BEST OF THREE.
+#
+# REVIEW-06-04, both reviewers independently. THIS RECIPE owns the ratio bar —
+# `pool_equality` asserts only bit-identical responses under load and PRINTS the
+# ratio on one machine-parsable line. A wall-clock ratio inside libtest moves
+# with CPU throttling and background load independently of the router
+# serialisation the pool removes, so a hard `assert!(speedup >= 2.0)` there
+# fails for reasons the pool does not control, and a suite that cries wolf gets
+# its real failures ignored.
+#
+# THE RETRIES ARE FOR THROTTLING, NOT FOR ASSERTIONS. A non-zero cargo exit is a
+# CORRECTNESS failure — a response differed under load — and fails the whole
+# recipe on the spot. Only the ratio, a wall-clock measurement, is taken
+# best-of-3; three low ratios are reported as a real SC5 failure with all three
+# numbers.
+# Run pool_equality up to 3x on release and enforce the >= 2.0 SC5 speed-up, best of three.
+forecast-pool-ratio:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    best=0
+    best_line=""
+    ratios=""
+    for i in 1 2 3; do
+        LOG="target/p06-forecast-pool-ratio-$i.log"
+        set +e
+        FORECAST_POOL_SERIES=peyton CARGO_INCREMENTAL=0 \
+            cargo test --release -p aprender-mcp-forecast --lib pool_equality -- --nocapture > "$LOG" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+            tail -40 "$LOG"
+            echo "FAIL: attempt $i exited $rc. A pool_equality failure is a CORRECTNESS failure" >&2
+            echo "      (a response was not bit-identical under load) and is NEVER retried away." >&2
+            exit "$rc"
+        fi
+        line=$(grep -m1 '^POOL SPEEDUP: ' "$LOG" || true)
+        if [ -z "$line" ]; then
+            echo "FAIL: attempt $i printed no 'POOL SPEEDUP: ' line - log $LOG" >&2
+            exit 1
+        fi
+        ratio=$(printf '%s\n' "$line" | sed -n 's/^POOL SPEEDUP: \([0-9][0-9.]*\)x .*/\1/p')
+        if [ -z "$ratio" ]; then
+            echo "FAIL: attempt $i printed an unparseable ratio: $line" >&2
+            exit 1
+        fi
+        echo "  attempt $i: ${ratio}x   ($LOG)"
+        ratios="$ratios $ratio"
+        if awk -v a="$ratio" -v b="$best" 'BEGIN { exit (a + 0 > b + 0) ? 0 : 1 }'; then
+            best="$ratio"
+            best_line="$line"
+        fi
+    done
+    echo "  ratios:$ratios   best: ${best}x"
+    echo "$best_line"
+    if awk -v v="$best" 'BEGIN { exit (v + 0 >= 2.0) ? 0 : 1 }'; then
+        echo "  POOL SPEEDUP OK: best ${best}x >= 2.0 (SC5)"
+    else
+        echo "FAIL: the best of three ratios ($ratios) is below the 2.0 SC5 bar" >&2
+        exit 1
+    fi
+
+# D-16: the rolling-origin MASE/coverage/WQL3 table. Informational, not a bar —
+# it ships as a compiled EXAMPLE, never as a per-commit test.
+# The D-16 rolling-origin accuracy table (Prophet / NP-lite / Chronos vs naive baselines).
+mase-rolling-origin:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    LOG=target/p06-mase-rolling-origin.log
+    set +e
+    CHRONOS_MODEL_DIR={{chronos_abs}}/f32 CARGO_INCREMENTAL=0 \
+        cargo run --release -p aprender-forecast --example mase_rolling_origin > "$LOG" 2>&1
+    rc=$?
+    set -e
+    cat "$LOG"
+    if [ "$rc" -ne 0 ]; then
+        echo "FAIL: the mase_rolling_origin example exited $rc - log $LOG" >&2
+        exit "$rc"
+    fi
