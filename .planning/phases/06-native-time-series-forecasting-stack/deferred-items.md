@@ -46,3 +46,29 @@ Not fixed here because the 18 findings are in a crate this phase does not touch,
 because clearing them is a real piece of work with its own blast radius
 (`aprender-compute` is depended on by most of the workspace). Worth a dedicated ticket:
 either clean the crate or record why those lints are allowed there.
+
+### D-ITEM-06-02-a — `aprender-core`'s own lib has a pre-existing `unreachable_code` error under `-D warnings`
+
+Found while checking that plan 06-02's one-file test edit would not fail a lint gate.
+`cargo clippy -p aprender-core --test monorepo_invariants --no-deps -- -D warnings` exits
+101 on:
+
+```
+error: unreachable expression
+   --> crates/aprender-core/src/demo/reliable/performance.rs:126:5
+124 |         return "NEON".to_string();
+126 |     "Scalar".to_string()
+```
+
+`--no-deps` does NOT rescue this one, because the failing code is in the primary package's
+own lib, which the test target links against.
+
+Measured control rather than assumed: the identical command against the **untouched**
+sibling target `--test readme_contract` fails with the same single error (`rc=101`), and
+06-02 modified no file under `crates/aprender-core/src/`. The finding predates this plan.
+
+Not fixed here: it is a `cfg`-shaped early return in a demo module that no Phase 6 task
+touches, and the fix (an `#[allow]`, a `cfg` restructure, or deleting the dead branch) is a
+judgement call belonging to whoever owns `src/demo/`. Note that the 06-01 wording of
+D-ITEM-06-01-b — "cannot pass for ANY crate in this tree" — has a second cause: not just
+`-D warnings` reaching path dependencies, but `aprender-core`'s own lib.
