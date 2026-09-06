@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 0
+open_count: 1
 waived_count: 2
 fixed_count: 0
-total_count: 2
-last_updated: 2026-08-17T04:44:14.174Z
+total_count: 3
+last_updated: 2026-09-06T05:38:09.726Z
 ---
 
 # Broken Windows Ledger
@@ -17,6 +17,7 @@ last_updated: 2026-08-17T04:44:14.174Z
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
 | 1 | 05 | deviation | crates/aprender-core/src/calibration_tests.rs |  | 05-04 T2: the plan's named RED mutation (bin by predicted-class probability) is a no-op since pred IS the argmax; substituted true-label-confidence and unweighted-bins mutations | waived | Not a defect: the plan's named RED mutation is provably a no-op (predicted class IS the argmax), and 05-04 shipped two mutations that DO discriminate, with recorded values. Documented in 05-04-SUMMARY.md Deviations. Nothing is left open in the code. | 2026-08-17T04:43:03.419Z | 2026-08-17T04:44:08.106Z |
 | 2 | 05 | deviation | crates/aprender-core/src/stats/tests_claims_stats.rs |  | 05-04 T3: the plan's RNG-guard criterion lists 'sample' as an RNG symbol; it is the statistical noun and the pre-existing f32 API's parameter name, so the guard bans real RNG symbols instead | waived | Not a defect: banning the token 'sample' would ban the pre-existing f32 ttest_1samp(sample: &[f32]) API and catch no RNG. The shipped guard bans rand::/thread_rng/SeedableRng/StdRng/gen_range/bootstrap/resample/shuffle/random( and passes. Documented in 05-04-SUMMARY.md Deviations. | 2026-08-17T04:43:13.479Z | 2026-08-17T04:44:14.174Z |
+| 3 | 06 | deviation | crates/aprender-forecast/src/prophet.rs |  | objective_at_python_map binds 3 of 7 fixtures: the four spike-003 oracles publish no log_posterior_at_map_unnormalized, so no rung-2 test exists for them (06-03 Deviation 1; stated in contracts/prophet-parity-v1.yaml) | open |  | 2026-09-06T05:38:09.726Z |  |
 
 ````json
 [
@@ -43,6 +44,18 @@ last_updated: 2026-08-17T04:44:14.174Z
     "reason": "Not a defect: banning the token 'sample' would ban the pre-existing f32 ttest_1samp(sample: &[f32]) API and catch no RNG. The shipped guard bans rand::/thread_rng/SeedableRng/StdRng/gen_range/bootstrap/resample/shuffle/random( and passes. Documented in 05-04-SUMMARY.md Deviations.",
     "recorded_at": "2026-08-17T04:43:13.479Z",
     "resolved_at": "2026-08-17T04:44:14.174Z"
+  },
+  {
+    "id": 3,
+    "kind": "deviation",
+    "phase": "06",
+    "file": "crates/aprender-forecast/src/prophet.rs",
+    "line": null,
+    "description": "objective_at_python_map binds 3 of 7 fixtures: the four spike-003 oracles publish no log_posterior_at_map_unnormalized, so no rung-2 test exists for them (06-03 Deviation 1; stated in contracts/prophet-parity-v1.yaml)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-06T05:38:09.726Z",
+    "resolved_at": null
   }
 ]
 ````
