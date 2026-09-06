@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
-stopped_at: Completed 06-05-PLAN.md
-last_updated: "2026-09-06T13:46:03.733Z"
+stopped_at: Completed 06-06-PLAN.md
+last_updated: "2026-09-06T14:39:32.830Z"
 last_activity: 2026-09-05
 last_activity_desc: Phase 06 execution started
-state_head: 92584e90200d8a3711537cb7ef7c44db2bc49ea8
+state_head: 6afdcdeba39c208aae214b8ba77cb9cd5270f402
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 73
-  completed_plans: 66
+  completed_plans: 67
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
-Plan: 6 of 9
+Plan: 7 of 9
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -193,6 +193,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P03 | 24 min | 2 tasks | 3 files |
 | Phase 06 P04 | 23 min | 3 tasks | 4 files |
 | Phase 06 P05 | 46 min | 4 tasks | 13 files |
+| Phase 06 P06 | 49 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -253,6 +254,10 @@ Recent decisions affecting current work:
 - [Phase 06]: Contract bars must be read with the contract name written IN FULL at each call site, never through a Rust constant — The acceptance criterion is a STATIC link check (grep -c). A Rust constant reads the right file at runtime but makes the link invisible to the grep, so the guard silently stops guarding. Fixed at 12 call sites in 06-04.
 - [Phase 06]: D-13 memory clause AMENDED (blocking human decision `amend-memory-clause`): the shipped Bolt keeps BOTH weight layouts — dot8 needs contiguous [out, in] rows for D-14 single rows, gemm_blis needs the [in, out] transpose for multi-row. Cost asserted and printed: 69.18 MB resident vs 34.61 MB, exactly 2.00x. NOT the SC4 < 30 MB binary bar. — The frozen quantiles_abs_f32 = 1.0e-6 was measured under this routing; deleting the untransposed copies would move every single-row product onto gemv and change the float accumulation order, so the bar would stop being evidence. Re-confirmed in-tree at 9.5367e-7.
 - [Phase 06]: The enforced Chronos f16 sha256 is f5dc2ef53533c8896bcb120a754c52c39d8917c15750a9e845192014dfa74a67, NOT the f9a033b4... RESEARCH A3 predicted: safetensors 0.8.0 orders the two __metadata__ keys differently than the spike-007 writer did. Same 101 tensors, byte-identical 17,305,344-byte body; only the header differs. — Re-pinning to the value this toolchain reproduces keeps the check fail-closed; loosening it to a warning would have deleted the property REVIEW-06-03 asked for. Both values are documented in the justfile, the crate README and contracts/chronos-bolt-parity-v1.yaml.
+- [Phase 06]: The forecast tool boundary is pinned in ONE contract (contracts/forecast-tool-boundary-v1.yaml) that BOTH servers are held to; the six Rust bounds are asserted EQUAL to it at test time, proven by inducing RED from the YAML alone. — D-03/D-15: a bound written twice can be loosened in one place. Reading it from the contract makes the YAML the source and the constant the mirror, and a bound edit becomes a pv diff-visible change rather than an inline relaxation.
+- [Phase 06]: pmcp 2.19.3 emits JSON-RPC -32603 (the INTERNAL error code) for Error::validation, so a refusal test pins BOTH the code and the "Validation error: " message prefix. — error_code() returns None for both the Validation and Internal variants, so the numeric code cannot distinguish a caller fault from a server fault. The thiserror-rendered prefix is the only discriminator the SDK ships. Read off a live reply, not assumed; breaking map_error turns 20 of 21 refusal cases red.
+- [Phase 06]: REVIEW-06-04: the pool claim is split by instrument. Equality under load is a unit-test correctness claim in CI; the >= 2.0 speed-up is a benchmark claim owned by just forecast-pool-ratio (06-08). mod pool_equality contains ZERO timing assertions. — A wall-clock ratio under four Tokio workers and eight heterogeneous blocking fits moves with CPU throttling independently of the router serialisation the pool removes. A flaky bar in the correctness suite trains readers to ignore the suite, including the equality failure that would matter.
+- [Phase 06]: The router pool is evidenced by a CONTROL pair, not a single number: POOL=1 measures 1.002x and POOL=8 measures 2.070x on the same host with the same eight requests, reproducing spike-010 in-tree. — CLAUDE.md Verification Discipline #2: never label a run by intent. Without the 1.002x control, 2.070x could have come from anything; with it, the pmcp router mutex is demonstrably what the pool removes. Equality held in BOTH configurations.
 
 ### Pending Todos
 
@@ -350,6 +355,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-06T13:45:31.180Z
-Stopped at: Completed 06-05-PLAN.md
+Last session: 2026-09-06T14:39:32.484Z
+Stopped at: Completed 06-06-PLAN.md
 Resume file: None
