@@ -25,7 +25,7 @@ affects: [phase-6-verification, ship]
 actuals:
   tokens: 14434
   tasks: 3
-  commits: 5
+  commits: 7
 plan_head_before: 4ef2b5e5b747c01338e126a98e05fdeabaf172cd
 
 tech-stack:
@@ -687,6 +687,6 @@ None. This plan adds no request-handling code and no network, auth, file-access 
 
 - All six files in `key-files.modified` exist on disk, as does `.tdd-evidence/06-17-t1-red.json` and this SUMMARY.
 - All four production commits resolve in `git log --all`: `0222fe60d`, `93b019ef8`, `65364694e`, `b27f66330`.
-- `commits: 5` is **MEASURED**, not narrated: `git rev-list --count 4ef2b5e5b747c01338e126a98e05fdeabaf172cd..HEAD` was **4** at the four production commits, and this SUMMARY commit (which also carries STATE.md and ROADMAP.md) is the fifth. `plan_head_before` is recorded so the count is checkable with the same instrument.
+- `commits: 7` is **MEASURED**, not narrated, and was **reconciled in place** rather than left stale (06-15/06-16 precedent): `git rev-list --count 4ef2b5e5b747c01338e126a98e05fdeabaf172cd..HEAD` was **4** at the four production commits, **5** at the SUMMARY commit `93064ac92` (which also carries STATE.md and ROADMAP.md), **6** after the `WINDOWS.md` ledger commit `53801f380`, and **7** counting this reconciliation commit itself — which is what makes the number terminal and checkable. A frontmatter count that disagrees with the ledger is exactly the narrated-vs-measured failure this field exists to prevent, so it was corrected rather than rounded to the first value written. `plan_head_before` is recorded so the count is checkable with the same instrument.
 - `actuals.tokens: 14434` is chars/4 over the realized diff (57 735 chars) against the plan's estimate of 70 000 — a **4.85x over-estimate**, recorded unrounded rather than flattered, so it calibrates future estimates honestly.
 - Every plan-level `<verification>` command was re-run on the final tree and is recorded in the twelve-row gate table above.
