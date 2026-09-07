@@ -208,9 +208,21 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                         h.dates.len()
                     )));
                 }
-                // Each term is now <= MAX_HOLIDAY_DATES, and the running sum is refused
-                // below the moment the aggregate ceiling is passed.
+                // Each term is now <= MAX_HOLIDAY_DATES; the running sum is refused HERE,
+                // the moment the aggregate ceiling is passed, so the remaining holidays'
+                // dates are never parsed and never allocated (WR-03). The post-loop check
+                // below is KEPT: this one can only report a PARTIAL sum, and a partial sum
+                // reported as "the total" would be a false statement in an error message.
                 holiday_dates_total += h.dates.len();
+                if holiday_dates_total > MAX_HOLIDAY_DATES_TOTAL {
+                    return Err(ForecastError::Validation(format!(
+                        "holidays carry {holiday_dates_total} dates in the first {} holidays \
+                         alone (a running total, not the request's total), which already \
+                         exceeds max_holiday_dates_total {MAX_HOLIDAY_DATES_TOTAL}; send \
+                         fewer holidays or fewer dates per holiday",
+                        holidays.len() + 1
+                    )));
+                }
                 // Both windows are now within ±MAX_HOLIDAY_WINDOW, so the width is small
                 // enough that this sum cannot overflow before the ceiling refuses it.
                 holiday_columns += (h.upper_window - h.lower_window + 1) as usize;
@@ -243,6 +255,12 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             // before `fit_prophet` is entered) and it overshoots by a whole round inside
             // the fit — a 20 000-point, 1 000-column request measured 70.089 s against a
             // 15 s budget. The refusal has to be HERE.
+            // KEPT alongside the in-loop refusal above (WR-03). The in-loop one fires
+            // early and therefore knows only a RUNNING total; this one has seen every
+            // holiday, so it is the only one that can honestly report the request's EXACT
+            // total. Both are O(1) and they say different true things. Unreachable for a
+            // request whose sum crosses the ceiling mid-loop — which is exactly why the
+            // position test asserts on the MESSAGE and not on the constant's presence.
             if holiday_dates_total > MAX_HOLIDAY_DATES_TOTAL {
                 return Err(ForecastError::Validation(format!(
                     "holidays carry {holiday_dates_total} dates in total, which exceeds \
