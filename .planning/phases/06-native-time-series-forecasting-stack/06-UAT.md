@@ -3,22 +3,31 @@ status: testing
 phase: 06-native-time-series-forecasting-stack
 source: [06-VERIFICATION.md]
 started: 2026-09-07T20:16:59Z
-updated: 2026-09-07T20:31:41Z
+updated: 2026-09-07T22:19:20Z
 ---
 
 ## Current Test
 
-number: 1
-name: Both MCP demo pages complete the handshake and chart a forecast
+number: 2
+name: Chronos x86_64 parity measurement replaces the PROVISIONAL tolerance
 expected: |
-  Both pages complete the MCP handshake same-origin under /mcp and render a band chart.
+  A measured max|delta| replaces the PROVISIONAL 5.0e-6 headroom value.
 awaiting: user response
 
 ## Tests
 
 ### 1. Demo pages: MCP handshake + chart rendering
 expected: Both pages complete the MCP handshake same-origin under /mcp and render a band chart.
-how: `cargo run -p aprender-mcp-forecast -- --http 8080` and `cargo run -p aprender-mcp-chronos -- --http 8081`, open each demo page, drive initialize -> tools/list -> tools/call.
+result: issue
+reported: |
+  "Validation error: n_lags is neuralprophet-only; set model to \"neuralprophet\""
+  "Validation error: growth is prophet-only; set model to \"prophet\""
+severity: blocker
+tested_on: http://localhost:8770 (built from HEAD 22e85dd3f; the servers already running on
+  8765/8766 were v0.0.0 spike binaries from Sep 4-5 and 8787/8788 were pre-round-3 Sep 6
+  builds — 8787 ACCEPTED a 201-byte holiday name that HEAD refuses, so none of them was
+  testing phase-06 code)
+how: `cargo run -p aprender-mcp-forecast -- --http 8770` and `cargo run -p aprender-mcp-chronos -- --http 8771`, open each demo page, drive initialize -> tools/list -> tools/call. CHECK FOR STALE LISTENERS FIRST (`lsof -nP -iTCP:PORT -sTCP:LISTEN`) — four stale servers were occupying the documented ports and answered `initialize` with HTTP 200.
 why_human: CARRIED FORWARD, still open. 06-08 declared this a human end-of-phase check (visual rendering + a real browser MCP client). No automated test covers the pages; re-confirmed at HEAD.
 result: [pending]
 
@@ -86,9 +95,49 @@ result: [pending]
 total: 5
 passed: 0
 decided: 1
-issues: 0
-pending: 4
+issues: 1
+pending: 3
 skipped: 0
 blocked: 0
 
 ## Gaps
+
+- truth: "The forecast demo page completes initialize -> tools/list -> tools/call and renders a band chart"
+  status: failed
+  reason: |
+    User reported: 'Validation error: n_lags is neuralprophet-only; set model to "neuralprophet"'
+    and 'Validation error: growth is prophet-only; set model to "prophet"'. Reproduced by curl
+    against a HEAD build on :8770 for BOTH model values — the page cannot complete a single
+    tools/call for either model.
+  severity: blocker
+  test: 1
+  root_cause: |
+    The page and the door disagree, and the disagreement is total rather than partial.
+    `crates/aprender-mcp-forecast/static/index.html:49` builds `args` UNCONDITIONALLY, always
+    including both `growth` (prophet-only) and `n_lags` (neuralprophet-only). The door
+    (`crates/aprender-forecast/src/forecast.rs:112-129`) refuses an off-arm option on PRESENCE
+    (`is_some()`), by design (D-11: never give the caller a plausible answer to a question they
+    did not ask). So model=prophet is refused for carrying `n_lags`, and model=neuralprophet is
+    refused for carrying `growth`. There is no selection that works.
+    TIMELINE: the page was written 2026-09-05 in 06-01 (725d5c7b2) and has NEVER been modified
+    since; the arm-scoping refusals landed 2026-09-06 in 06-09 (1d170f383) and were extended in
+    06-10 (9d6eb639e). The page has therefore been broken for four plans and three gap-closure
+    rounds, undetected because no automated test drives it — which 06-VERIFICATION.md states
+    explicitly ("No automated test covers the pages").
+    OPEN DESIGN QUESTION, not a settled page bug: the door refuses `n_lags: 0` and
+    `growth: "linear"` — each field's NEUTRAL value, which is what the page's untouched form
+    controls emit. Refusing a field carrying its own default is the same over-refusal class as
+    CR-01 (a bound whose ACCEPTED region was never exercised). Fixing only the page leaves every
+    other client that sends a fully-populated payload with defaults hitting the same wall.
+  artifacts:
+    - path: "crates/aprender-mcp-forecast/static/index.html"
+      issue: "line 49 sends both growth and n_lags regardless of the selected model"
+    - path: "crates/aprender-forecast/src/forecast.rs"
+      issue: "lines 112-129 refuse an off-arm option on presence, including at its default value"
+    - path: "crates/aprender-mcp-chronos/static/index.html"
+      issue: "not yet tested — chronos server still building at time of report"
+  missing:
+    - "Decide door policy: refuse on presence (status quo), or refuse only when the off-arm option is set to a NON-default value"
+    - "Send only the selected model's applicable knobs from the demo page"
+    - "An automated test that drives each demo page's tools/call payload, so this cannot regress silently again"
+  debug_session: ""
