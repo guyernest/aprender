@@ -617,12 +617,16 @@ chronos-bench: chronos-embed-build
         exit 1
     fi
     echo "  tiny-f16 forward at 2048 context (D-14 production routing): $ms ms"
-    if awk -v v="$ms" 'BEGIN { exit (v + 0 < 100) ? 0 : 1 }'; then
-        echo "  FORWARD OK: $ms ms < 100 ms (SC4)"
-    else
+    # IN-01: the bar goes through the shared shape-checking validator, never
+    # through `awk -v v="$ms" '{ exit (v + 0 < 100) }'` — that coerced a
+    # non-numeric token to 0, and 0 is under a 100 ms bar. Note the UNITS here
+    # are milliseconds, not seconds: this site and the 2 s SC1 sites share one
+    # validator and NOT one bar.
+    if ! bash scripts/assert_measurement_under.sh under "$ms" 100 "tiny-f16 forward (SC4)"; then
         echo "FAIL: $ms ms is at or above the 100 ms SC4 bar" >&2
         exit 1
     fi
+    echo "  FORWARD OK: $ms ms < 100 ms (SC4)"
 
 # SC4 cold-start bar: median exec -> first forecast reply under 150 ms.
 #
@@ -677,12 +681,13 @@ forecast-bench:
         exit 1
     fi
     echo "  3000-point prophet fit + 365-step predict: $total s total"
-    if awk -v v="$total" 'BEGIN { exit (v + 0 < 2.0) ? 0 : 1 }'; then
-        echo "  ROUND TRIP OK: $total s < 2.0 s (SC1)"
-    else
+    # IN-01: shared validator, not the inline awk coercion. See
+    # scripts/assert_measurement_under.sh and its 23-row case table.
+    if ! bash scripts/assert_measurement_under.sh under "$total" 2.0 "ROUND TRIP (SC1)"; then
         echo "FAIL: $total s is at or above the 2.0 s SC1 bar" >&2
         exit 1
     fi
+    echo "  ROUND TRIP OK: $total s < 2.0 s (SC1)"
 
 # SC5 bar: sequential wall / concurrent wall >= 2.0, BEST OF THREE.
 #
@@ -739,12 +744,15 @@ forecast-pool-ratio:
     done
     echo "  ratios:$ratios   best: ${best}x"
     echo "$best_line"
-    if awk -v v="$best" 'BEGIN { exit (v + 0 >= 2.0) ? 0 : 1 }'; then
-        echo "  POOL SPEEDUP OK: best ${best}x >= 2.0 (SC5)"
-    else
+    # IN-01, and note the DIRECTION: this bar is `best >= 2.0`, not `< 2.0`.
+    # Passing `under` here would invert the gate, which is exactly why the shared
+    # validator makes the mode a required argument and refuses an unknown one
+    # rather than defaulting to a direction.
+    if ! bash scripts/assert_measurement_under.sh atleast "$best" 2.0 "POOL SPEEDUP (SC5)"; then
         echo "FAIL: the best of three ratios ($ratios) is below the 2.0 SC5 bar" >&2
         exit 1
     fi
+    echo "  POOL SPEEDUP OK: best ${best}x >= 2.0 (SC5)"
 
 # D-16: the rolling-origin MASE/coverage/WQL3 table. Informational, not a bar —
 # it ships as a compiled EXAMPLE, never as a per-commit test.
@@ -841,11 +849,106 @@ forecast-holiday-bench points="800" columns="50" dates="84" horizon="200":
             exit 1
             ;;
     esac
-    if awk -v v="$total" 'BEGIN { exit (v + 0 < 2.0) ? 0 : 1 }'; then
-        echo "  HOLIDAY DESIGN OK: $total s < 2.0 s (SC1)"
-    else
+    # IN-01, the instance the review named (this was justfile:844). The inline
+    # `awk -v v="$total" '{ exit (v + 0 < 2.0) }'` read a non-numeric total_s as
+    # 0 and printed OK, so a renamed field or a truncated log made this gate
+    # green without measuring anything.
+    if ! bash scripts/assert_measurement_under.sh under "$total" 2.0 "HOLIDAY DESIGN (SC1)"; then
         echo "FAIL: $total s is at or above the 2.0 s SC1 bar, measured on the" >&2
         echo "      at-the-bound geometry points={{points}} columns={{columns}}" >&2
         echo "      dates={{dates}} horizon={{horizon}}. line: $line" >&2
         exit 1
     fi
+    echo "  HOLIDAY DESIGN OK: $total s < 2.0 s (SC1)"
+
+# THE SC1 GATE, SWEPT (06-REVIEW.md WR-04).
+#
+# `forecast-bench` walls the no-holiday shape, `forecast-holiday-bench` walls the
+# holiday axis, and `logistic_band_wall` walled the logistic band. Three benches,
+# three hard-coded geometries, and the axis CR-01 actually lived on — `freq` —
+# covered by NONE of them: at 33 points and horizon 3650, `"D"` measures 0.231 s
+# and `"MS"` measures 2.334 s. Nothing in the phase could have caught that.
+#
+# THIS recipe is the gate. It runs `sc1_wall::sc1_wall_sweep` over the full cross
+# product freq {D,W,MS} x growth {linear,logistic,flat} x holiday {none,
+# at-the-design-cost-bound} at the tightest legal history span, plus the
+# NeuralProphet row widened to its own at-the-bound geometry, on a RELEASE build,
+# and asserts SC1's 2 s bar over every printed line.
+#
+# The bar is asserted TWICE and neither is redundant: once inside the harness,
+# where the message names the failing composition, and once here over the
+# re-parsed log, which is what catches a harness that silently stopped emitting
+# lines. `SC1 SWEEP OK` reports the count it checked, so a run that checked zero
+# lines cannot report success.
+#
+# OBSERVED FAILING on the defect it exists for (CLAUDE.md rule 5): with
+# `MAX_LOGISTIC_CHANGEPOINT_LAMBDA` and its contract mirror raised past the
+# structural maximum, `freq=MS growth=logistic` walls at 2.443 s and this gate
+# goes red naming it, while `freq=D` passes at 0.219 s.
+#
+# Release-only ON PURPOSE: this crate carries `[profile.dev.package.aprender-forecast]
+# opt-level = 3`, which covers the crate and not its dependencies, so a dev-profile
+# number looks plausible and still is not the SC1 bar (CLAUDE.md rule 2) — hence the
+# `profile=` token on every line and the hard guard on it below.
+# Sweep freq x growth x holiday shape on release and enforce the 2 s SC1 bar.
+forecast-sc1-sweep points="33" horizon="3650" np_points="2000" np_lags="41" np_horizon="365":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    # The validator's OWN guard runs first, on every gate invocation — not only
+    # when somebody remembers. A bar whose parser was never exercised is the
+    # IN-01 defect waiting to come back.
+    bash scripts/check_assert_measurement_under_cases.sh
+    LOG=target/p06-forecast-sc1-sweep.log
+    set +e
+    SC1_SWEEP_POINTS={{points}} SC1_SWEEP_HORIZON={{horizon}} \
+    SC1_SWEEP_NP_POINTS={{np_points}} SC1_SWEEP_NP_LAGS={{np_lags}} \
+    SC1_SWEEP_NP_HORIZON={{np_horizon}} \
+    CARGO_INCREMENTAL=0 cargo test --release -p aprender-forecast --lib \
+        sc1_wall:: -- --nocapture > "$LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        grep -E '^SC1 (WALL|SWEEP)' "$LOG" || true
+        tail -30 "$LOG"
+        echo "FAIL: the SC1 sweep exited $rc - log $LOG" >&2
+        exit "$rc"
+    fi
+    if ! grep -q '^SC1 WALL: ' "$LOG"; then
+        tail -30 "$LOG"
+        echo "FAIL: no 'SC1 WALL:' line in $LOG - nothing was measured. A gate that" >&2
+        echo "      checked zero compositions must never report success." >&2
+        exit 1
+    fi
+    checked=0
+    while IFS= read -r line; do
+        echo "$line"
+        # CLAUDE.md rule 2 - prove the mechanism engaged, never label a run by
+        # intent. A debug wall on this crate looks plausible and is not the bar.
+        case "$line" in
+            *profile=release*) ;;
+            *)
+                echo "FAIL: a composition was not measured on a release build" >&2
+                echo "      (profile= is not release), so it is not the SC1 bar." >&2
+                echo "      line: $line" >&2
+                exit 1
+                ;;
+        esac
+        # Parse total_s BY TOKEN, never by column position: the printed field
+        # order must not become load-bearing.
+        total=$(printf '%s\n' "$line" \
+            | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^total_s=/) { sub(/^total_s=/, "", $i); print $i; exit } }')
+        if [ -z "$total" ]; then
+            echo "FAIL: an SC1 WALL line carries no total_s= token - that" >&2
+            echo "      composition was never measured. line: $line" >&2
+            exit 1
+        fi
+        label=$(printf '%s\n' "$line" | sed -n 's/^SC1 WALL: \(.*\) points=.*/\1/p')
+        bash scripts/assert_measurement_under.sh under "$total" 2.0 "SC1 $label"
+        checked=$((checked + 1))
+    done < <(grep '^SC1 WALL: ' "$LOG")
+    if [ "$checked" -eq 0 ]; then
+        echo "FAIL: the loop checked zero compositions." >&2
+        exit 1
+    fi
+    echo "  SC1 SWEEP OK: $checked compositions, every one under the 2.0 s SC1 bar"

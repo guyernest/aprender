@@ -59,11 +59,11 @@ run_row() {
     checked=$((checked+1))
     if [[ "$row_got" == "$row_want" ]]; then
         printf '  ok    %-8s %-14s bar=%-6s %s\n' \
-            "$row_mode" "[$row_value]" "$row_bar" "$row_want"
+            "$row_mode" "<$row_value>" "$row_bar" "$row_want"
     else
         bad=$((bad+1))
         printf '  BAD   %-8s %-14s bar=%-6s wanted %s, got %s (rc=%s): %s\n' \
-            "$row_mode" "[$row_value]" "$row_bar" "$row_want" "$row_got" \
+            "$row_mode" "<$row_value>" "$row_bar" "$row_want" "$row_got" \
             "$row_rc" "$row_out"
     fi
 }
