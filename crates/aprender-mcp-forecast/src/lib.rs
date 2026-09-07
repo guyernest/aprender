@@ -870,6 +870,113 @@ mod e2e {
         );
     }
 
+    // ------------------------------ the logistic changepoint lambda bound, over the wire ---
+    //
+    // 06-REVIEW.md CR-01. The `arguments` object below measures **1 138 bytes** of JSON on
+    // this synth series (the review's own probe was 1 132 bytes — the same shape with
+    // slightly different y values; both are ~1.1 KB and the point is the ORDER, not the
+    // digit). It is accepted by
+    // every other bound this door has: 33 points <= fit_max_points, a 32-day span <=
+    // fit_max_span_days, horizon 3650 <= fit_max_horizon, a cap above max(y), no holidays at
+    // all. It bought 2.334 s of CPU against a default pool of K=8. The cost is the Poisson
+    // mean of predict's logistic uncertainty arm — `changepoint_count(len(ds)) * (t_max - 1)`
+    // — and nothing bounded it, because fit_max_horizon bounds the COUNT of future steps
+    // while dates::future_days multiplies that count by ~30.44 for "MS".
+
+    /// The tightest legal history that still earns all 25 changepoints: 33 daily points.
+    /// Below 33, `floor(n * 0.8) - 1 < 25` and the count — hence lambda — drops.
+    const LAMBDA_POINTS: usize = 33;
+
+    /// The lambda a `(points, horizon, freq)` request makes `predict` draw, computed through
+    /// `aprender_forecast::prophet::changepoint_count` — the SAME function the door uses — so
+    /// a test named "over" cannot quietly become a test of something under the bound.
+    fn lambda_for(ds: &[String], horizon: usize, freq: &str) -> f64 {
+        use aprender_forecast::prophet::{auto_seasonalities, changepoint_count, Mode, Spec};
+        let days: Vec<i64> = ds
+            .iter()
+            .map(|s| {
+                aprender_forecast::dates::parse_date(s).expect("the helper builds valid dates")
+            })
+            .collect();
+        let fut = aprender_forecast::dates::future_days(days[days.len() - 1], horizon, freq)
+            .expect("the helper builds a valid freq");
+        let t_scale = (days[days.len() - 1] - days[0]) as f64;
+        let t_max = (fut[fut.len() - 1] - days[0]) as f64 / t_scale;
+        let spec = Spec::default_linear(auto_seasonalities(&days, 10.0, Mode::Additive));
+        changepoint_count(days.len(), &spec) as f64 * (t_max - 1.0)
+    }
+
+    #[tokio::test]
+    async fn refuses_logistic_changepoint_lambda_over_bound() {
+        // The review's measured request, verbatim in shape: 33 points at 1-day spacing,
+        // horizon 3650, freq MS, growth logistic, cap 50. lambda = 25 x (3472.594 - 1)
+        // = 86 789.8, which is also the STRUCTURAL MAXIMUM of this axis.
+        let (ds, y) = synth(LAMBDA_POINTS);
+        let lambda = lambda_for(&ds, 3650, "MS");
+        assert!(
+            lambda > aprender_forecast::types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA,
+            "the OVER geometry must exceed the bound it is testing: lambda={lambda:.1} vs {}",
+            aprender_forecast::types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA
+        );
+        refused(
+            &mut serve().await,
+            serde_json::json!({
+                "ds": ds, "y": y, "horizon": 3650, "freq": "MS",
+                "growth": "logistic", "cap": 50.0
+            }),
+            "max_logistic_changepoint_lambda",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accepts_logistic_changepoint_lambda_just_under_bound() {
+        // The SAME request with ONE field changed — the horizon, which is the review's own
+        // control axis (its four measured rows differ in horizon span and nothing else). At
+        // 840 MS steps lambda is 19 974.2, inside the bound and within 0.2% of it, so this
+        // pair straddles the bound rather than sitting an order of magnitude away from it.
+        let horizon = 840usize;
+        let (ds, y) = synth(LAMBDA_POINTS);
+        let lambda = lambda_for(&ds, horizon, "MS");
+        let bound = aprender_forecast::types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA;
+        assert!(
+            lambda <= bound,
+            "the UNDER geometry must sit under the bound: lambda={lambda:.1} vs {bound}"
+        );
+        assert!(
+            lambda > 0.9 * bound,
+            "the near miss must be NEAR: lambda={lambda:.1} is not within 10% of {bound}, so \
+             this control would pass for a bound an order of magnitude away"
+        );
+        let mut c = serve().await;
+        let r = c
+            .call(
+                "tools/call",
+                serde_json::json!({
+                    "name": "forecast",
+                    "arguments": {
+                        "ds": ds, "y": y, "horizon": horizon, "freq": "MS",
+                        "growth": "logistic", "cap": 50.0
+                    }
+                }),
+            )
+            .await;
+        assert!(
+            r.get("error").is_none() && r["result"]["isError"] != true,
+            "a request just under the changepoint-lambda bound must be accepted: {r}"
+        );
+        let out = tool_output(&r);
+        assert_shared_shape(&out, horizon);
+        assert!(
+            out.get("components").is_some_and(|c| c.is_object()),
+            "the accepted near-miss must carry components: {out}"
+        );
+        assert!(
+            out.get("diagnostics").is_some_and(|d| d.is_object()),
+            "the accepted near-miss must carry diagnostics: {out}"
+        );
+    }
+
     #[tokio::test]
     async fn refuses_holiday_dates_total_over_bound() {
         // The third factor, which no e2e case reached before: eleven holidays of 1 000

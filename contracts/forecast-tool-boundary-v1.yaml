@@ -1,6 +1,6 @@
 contract: forecast-tool-boundary
 metadata:
-  version: 1.2.0
+  version: 1.3.0
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
@@ -356,6 +356,24 @@ equations:
       - 'this bounds WORK, not WALL, and says so: the L-BFGS iteration count is data-dependent, so a 25 000-cell request (half the bound) reproducibly walls at 4.2 s. The arithmetic ceiling per iteration is what is guaranteed; the residual wall-clock exposure is FIT_BUDGET_SECS, a separate knob'
     preconditions:
       - 'every per-holiday bound has already fired with its own message, so holiday_columns <= fit_max_holiday_columns and each len(h.dates) <= fit_max_holiday_dates — what remains unchecked is only what they multiply and sum to'
+
+  # The second completion of fit_server_bounds' third invariant, and the FIRST instance of
+  # door_surface_is_complete below: the bound's existence is derivable from the door_surface
+  # entry for cost axis C-06 rather than being a standalone patch.
+  logistic_changepoint_cost_bounded:
+    formula: 'accept(args) requires args.growth != logistic OR changepoint_count(len(args.ds)) * (t_max(args) - 1) <= fit_max_logistic_changepoint_lambda, where t_max(args) = (last(future_days(freq, horizon, last(ds))) - first(ds)) / (last(ds) - first(ds))'
+    domain: 'the growth / freq / horizon arguments of the fit server together with the SPACING of ds — untrusted, unauthenticated JSON-RPC `tools/call` input'
+    codomain: 'either a forecast, or a validation refusal naming the OBSERVED Poisson mean, BOTH factors that produced it (the changepoint count and t_max, with the two spans t_max is a ratio of), the bound key max_logistic_changepoint_lambda and its value, and three concrete fixes — shorten the horizon, use freq "D" instead of "W" or "MS", or send a longer history'
+    invariants:
+      - 'the Rust constant is asserted EQUAL to constants.fit_max_logistic_changepoint_lambda by types::tests::cost_bounds_match_contract through test_support::constant_f64 — the contract is the source, the code the mirror (D-15). It is an f64 because lambda is one, which is why constant_f64 exists'
+      - 'the check runs BEFORE make_design, and it could NOT have been a FIT_BUDGET_SECS setting: that budget is entered inside fit::fit_prophet, and this cost is spent in prophet::predict, which forecast::forecast calls AFTER the fit returns with no budget of any kind. 13 of the 14 axes enumerated in door_surface.cost_axes are outside that budget, which is the structural fact behind every door bound this phase has added'
+      - 'fit_max_horizon bounds the COUNT of future steps while dates::future_days multiplies that count by 7 for "W" and ~30.44 for "MS", and fit_max_points / fit_max_span_days bound the HISTORY independently — so three isolated bounds left this RATIO open. A high-lambda request is necessarily a SHORT-history request, which is exactly why every headline bound is satisfied while the product is not'
+      - 'the pre-06-13 saturation near 745.13 was an ACCIDENTAL cap, not a bound: Knuth''s product method compares against exp(-lambda), which is exactly 0.0 above lambda 745.13, so the loop could only end on subnormal underflow. Removing it was CORRECT (the sampler now tracks lambda across its whole domain) and this bound is its REPLACEMENT — not a re-clamp. Clamping inside prophet::poisson is prohibited: it would remove the wall and silently reintroduce the truncation 06-13 exists to delete'
+      - 'the door and the sampler cannot disagree about the changepoint count: prophet::changepoint_count is the single implementation, make_design is tied to it by a debug_assert and by prophet::changepoints::changepoint_count_equals_the_design_it_describes (a sweep over n and n_changepoints), and the door calls the same function. A bound computed from a second inline copy of that arithmetic would be evadable at any point count where the two drifted'
+      - 'the VALUE is derived from measurement, not chosen: three at-the-bound compositions at the tightest legal history span (33 daily points) on a release build — freq D horizon 3650 (lambda 2 851.6) 0.244 s, freq W horizon 3650 (lambda 19 960.9) 0.711 s, freq MS horizon 840 (lambda 19 974.2) 0.582 s — all under SC1''s 2 s bar, worst case 2.8x headroom. freq D cannot reach this bound at all: 2 851.6 is its OWN structural maximum at 33 points'
+      - 'the structural maximum of the axis is 86 790 (33 daily points, horizon 3650, freq MS) and it is EXACTLY the review''s measured request. OBSERVED RED through the live streamable-HTTP router: with the constant and the contract key raised to 200 000, the server ACCEPTED that request and returned a full-shape forecast, walling at 2.579 s; restored to 20 000, the same request is refused'
+    preconditions:
+      - 'the growth enum has been parsed and the logistic cap rules have already fired with their own messages, and ds is strictly ascending with len >= fit_min_points — so the history span is strictly positive and t_max needs no division guard'
 
   # The equation the OTHER equations in this file are instances of. Every bound above closes
   # one axis; this one says the SET of axes and the SET of knobs are both accounted for.

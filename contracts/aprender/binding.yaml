@@ -1607,7 +1607,7 @@ bindings:
   status: implemented
   notes: 'Landed with plan 05-10. DECLARATIVE equation: it maps PF-007 and PF-008 onto the mechanisms that answer them, and the RENDERER is where a violation would surface (a best-seed headline, an unlabelled F1, an adapter-only size comparison, a verdict word). render_human composes every table, and its tests scan the whole output for verdict vocabulary and pair every absence assertion with a non-vacuity one. Row corrected from the non-existent `bench_report`.'
 # ---------------------------------------------------------------------------
-# Phase 6 (native time-series forecasting stack). 55 rows, one per equation of
+# Phase 6 (native time-series forecasting stack). 60 rows, one per equation of
 # the four Phase 6 contracts, audited as a BLOCKING tier3 gate by the Makefile's
 # `contract-audit-phase6`. That target does MORE than `pv audit`: it also resolves
 # every row below to a definition site in the file its `module_path` names, because
@@ -2020,6 +2020,20 @@ bindings:
   signature: 'just recipe: forecast-pool-ratio'
   status: implemented
   notes: 'REVIEW-06-04. Binds to the RECIPE, not to a unit test: a wall-clock ratio is a benchmark claim, and putting it in the correctness suite makes the suite flaky without making the pool faster. Host-gated (aarch64 release); measured 5.162x against a 2.0 bar in 06-EVIDENCE.md §3.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: logistic_changepoint_cost_bounded
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'The refusal is IN the door, in the prophet arm, after Spec assembly and before make_design — the only place it can be, because the cost is spent in predict, which runs after the fit returns with no budget. It computes its lambda through prophet::changepoint_count, the same function make_design is tied to, so the door cannot disagree with the sampler about the count. Landed with plan 06-14 (06-REVIEW.md CR-01).'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: door_surface_is_complete
+  module_path: aprender_forecast::types
+  function: every_request_knob_is_enumerated
+  signature: 'fn every_request_knob_is_enumerated()'
+  status: implemented
+  notes: 'A COMPLETENESS equation, so its definition site is the assertion rather than a production function: the claim is about the enumeration in door_surface: matching the structs, and the thing that can be violated is the test. Binds to the knobs half (set equality against schemars::schema_for! in both directions, both mutated); the cost-axis half is every_cost_axis_names_a_real_bound and the known-open axes are held by the declared-red no_cost_axis_is_pending, both in the same file. Landed with plan 06-14.'
 - contract: forecast-tool-boundary-v1.yaml
   equation: default_seed_42
   module_path: aprender_forecast::forecast
