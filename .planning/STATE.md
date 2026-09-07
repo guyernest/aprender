@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
-stopped_at: Planned 06-14..06-17 (gap-closure round 3)
-last_updated: "2026-09-07T06:16:24.000Z"
-last_activity: 2026-09-06
+stopped_at: Completed 06-14-PLAN.md (wave 12) — DECLARED-RED window open, 06-15 must land before push
+last_updated: "2026-09-07T16:02:08.187Z"
+last_activity: 2026-09-07
 last_activity_desc: 06-14..06-17 planned — gap-closure round 3, scoped to the door-bound CLASS
-state_head: bb5275d03fb6a185e4140a90610c4b796c23fbb9
+state_head: 0433c4502da83663ecd4dfaf0aa3629387803116
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 81
-  completed_plans: 74
+  completed_plans: 75
 milestone_name: milestone
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 06 (Native Time-Series Forecasting Stack) — READY TO EXECUTE
-Plan: 14 of 17
-Status: Ready to execute (gap-closure round 3)
+Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
+Plan: 2 of 17
+Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-06 — Phase 06 execution started
+Last activity: 2026-09-07 — Phase 06 execution started
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -201,6 +201,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P11 | 1h 21m | 2 tasks | 5 files |
 | Phase 06 P12 | 18 min | 3 tasks | 4 files |
 | Phase 06 P13 | 20 min | 3 tasks | 3 files |
+| Phase 06 P14 | 2h 5m | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -254,7 +255,6 @@ gap plans execute. Phase 6's was dated 2026-09-07T00:26Z, predating all four of 
 so a straight `--gaps` run would have replanned closed work and missed the live Critical.
 Check the VERIFICATION timestamp against the newest executed gap-plan SUMMARY before trusting
 it.
-
 
 ### Decisions
 
@@ -334,6 +334,8 @@ Recent decisions affecting current work:
 - [Phase 06]: Threshold 30.0 KEPT because the measurement allowed it: the only logistic parity fixture reaches lambda 3.1239, ~1/10 of the threshold, so no parity rung can take the new branch
 - [Phase 06]: Outcome taken for the out-of-domain changepoint sampler: the VALID BRANCH (normal approximation above lambda 30), not a refusal and not a reported clamp - the regime is legal input inside every door bound
 - [Phase 06]: poisson_sampler_domain float_tolerance = 0.01: 3.16 sigma at the noisiest sweep point (lambda 5), >= 7.62 sigma elsewhere, against a 17.2% pre-fix failure at lambda 900
+- [Phase 06]: Cost axis C-07 (holidays[].name) can be closed ONLY by a bound, never by a measurement: the field is an unbounded String and the router construction applies no DefaultBodyLimit / max_body / content-length layer, with no stdio framing cap — so it has no structural maximum to measure against.
+- [Phase 06]: A plan whose thesis is that a guard which cannot fail is theater must not reduce its own open items to a note. types::tests::no_cost_axis_is_pending SHIPS RED naming C-07 and C-08 instead of giving C-07 a measured disposition it cannot honestly carry.
 
 ### Pending Todos
 
@@ -419,6 +421,7 @@ Recent decisions affecting current work:
 - make tier2 is RED on arm64: pre-existing clippy errors across 5 crates untouched by phase 2. Re-measured at 02-08: **24 errors, 44 locations** — aprender-compute 38, zram-core 3, present-terminal 1, core 1, serve 1; **zero in aprender-contrastive-data**, whose only appearance in the tier2 log is its `Checking` line. All arch-gated SIMD; CI runs X64-Linux-only so these aarch64-live arms are never linted. Proven independent of 02-03. See deferred-items D-ITEM-02.
 - contracts/chronos-bolt-parity-v1.yaml quantiles_abs_f32_nonaarch64 = 5.0e-6 is PROVISIONAL AND UNMEASURED: no x86_64 run has happened, and every CI job here is [self-hosted, X64]. FALSIFY-CHRONOS-002 obliges the first x86_64 run to record its measured max|delta| and tighten the bar in a pv diff-visible edit.
 - 06-07: REVIEW-06-02's provisional non-aarch64 f32 bar (5.0e-6) is STILL unmeasured — this host is aarch64, so quantiles_abs_f32 (1e-6, measured 9.5367e-7) is what ran. The server test now prints what a first x86_64 run needs.
+- DECLARED-RED WINDOW OPEN (06-14 -> 06-15): types::tests::no_cost_axis_is_pending fails on purpose, turning `make tier3` and CI `workspace-test` red. `workspace-test` is a REQUIRED check on protected `main`. Mitigation is push sequencing — land waves 12 and 13 in ONE push. Do NOT delete/weaken/ignore/CI-filter the test.
 
 ## Deferred Items
 
@@ -432,6 +435,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-07T04:25:35.541Z
-Stopped at: Completed 06-13-PLAN.md
+Last session: 2026-09-07T16:01:46.441Z
+Stopped at: Completed 06-14-PLAN.md (wave 12) — DECLARED-RED window open, 06-15 must land before push
 Resume file: None

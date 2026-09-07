@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 6
+open_count: 8
 waived_count: 2
 fixed_count: 0
-total_count: 8
-last_updated: 2026-09-07T03:57:44.081Z
+total_count: 10
+last_updated: 2026-09-07T15:58:32.289Z
 ---
 
 # Broken Windows Ledger
@@ -23,6 +23,8 @@ last_updated: 2026-09-07T03:57:44.081Z
 | 6 | 06 | deviation | crates/aprender-mcp-forecast/src/lib.rs |  | Plan 06-10 stated 22 existing e2e::refuses_ cases; measured baseline was 21, so post-change is 23 not the plan's >=24 bar. Intent (2 cases added) met; number in plan text was stale. | open |  | 2026-09-07T02:44:08.056Z |  |
 | 7 | 06 | unmet-truth | crates/aprender-forecast/src/types.rs |  | SC1's 2 s bar is not guaranteed for holiday-carrying requests: no payload statistic bounds the wall (a 25 000-cell request walls at 4.2 s reproducibly). MAX_HOLIDAY_DESIGN_COST caps WORK; residual wall-clock exposure is FIT_BUDGET_SECS (15 s). Human decision required — see 06-11-SUMMARY coverage D7. | open |  | 2026-09-07T03:31:33.474Z |  |
 | 8 | 06 | deviation | justfile |  | 06-12 T3 asked to change forecast-holiday-bench's defaults to the at-the-bound geometry; 06-11 deviation 2 had already done so ((800+200)x50 = 50 000 cells = MAX_HOLIDAY_DESIGN_COST). No change made; plan text was stale. | open |  | 2026-09-07T03:57:44.081Z |  |
+| 9 | 06 | unmet-truth | contracts/forecast-tool-boundary-v1.yaml |  | Cost axis C-07 (holidays[].name byte amplification) carries unbounded_pending_06_15; held open by the DECLARED-RED types::tests::no_cost_axis_is_pending. Owed by 06-15 T2. | open |  | 2026-09-07T15:58:32.207Z |  |
+| 10 | 06 | unmet-truth | contracts/forecast-tool-boundary-v1.yaml |  | Cost axis C-08 (unbudgeted NeuralProphet training work) carries unbounded_pending_06_15; held open by the DECLARED-RED types::tests::no_cost_axis_is_pending. Owed by 06-15 T3. | open |  | 2026-09-07T15:58:32.289Z |  |
 
 ````json
 [
@@ -120,6 +122,30 @@ last_updated: 2026-09-07T03:57:44.081Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-07T03:57:44.081Z",
+    "resolved_at": null
+  },
+  {
+    "id": 9,
+    "kind": "unmet-truth",
+    "phase": "06",
+    "file": "contracts/forecast-tool-boundary-v1.yaml",
+    "line": null,
+    "description": "Cost axis C-07 (holidays[].name byte amplification) carries unbounded_pending_06_15; held open by the DECLARED-RED types::tests::no_cost_axis_is_pending. Owed by 06-15 T2.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T15:58:32.207Z",
+    "resolved_at": null
+  },
+  {
+    "id": 10,
+    "kind": "unmet-truth",
+    "phase": "06",
+    "file": "contracts/forecast-tool-boundary-v1.yaml",
+    "line": null,
+    "description": "Cost axis C-08 (unbudgeted NeuralProphet training work) carries unbounded_pending_06_15; held open by the DECLARED-RED types::tests::no_cost_axis_is_pending. Owed by 06-15 T3.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T15:58:32.289Z",
     "resolved_at": null
   }
 ]
