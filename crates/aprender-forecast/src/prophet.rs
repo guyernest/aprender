@@ -676,11 +676,46 @@ impl Rng {
     }
 }
 
+/// Above this mean the draw switches from Knuth's product method to a normal approximation.
+///
+/// The value the `06-VERIFICATION.md` gap-3 report named, and it is far above the regime the
+/// parity ladder reaches: `wp_log_R_logistic` is the ONLY logistic fixture and its lambda is
+/// **3.1239** (25 changepoints x (t_max 1.124957 - 1), measured by
+/// `sampler::wp_log_r_logistic_fixture_lambda_is_far_below_the_branch_threshold`), so every parity
+/// rung takes the unchanged Knuth path and no rung can move because of this branch.
+pub const POISSON_NORMAL_BRANCH_LAMBDA: f64 = 30.0;
+
 /// Draw a Poisson count with mean `lambda`.
 ///
-/// Extracted verbatim from `predict`'s `Growth::Logistic` uncertainty arm so its numerical
-/// domain can be asserted directly — the only path to it before was a full logistic forecast.
+/// Extracted from `predict`'s `Growth::Logistic` uncertainty arm so its numerical domain can be
+/// asserted directly — the only path to it before was a full logistic forecast.
+///
+/// # Why two branches
+///
+/// Knuth's product method compares a running product of uniforms against `l = (-lambda).exp()`,
+/// and that is **exactly 0.0 for lambda > 745.13**. Past that point the loop can only end when the
+/// product itself underflows through f64's subnormals, which takes ~745 steps on average
+/// (E[-ln U] = 1, and the smallest positive subnormal is near e^-744) — so the count SATURATES
+/// near 745 whatever lambda is. That regime is reachable through the door: 100 daily points with
+/// `horizon: 3650, growth: "logistic"` gives lambda ~= 922, and the 10-point `MIN_POINTS` floor
+/// with the same horizon gives ~2839. Measured pre-fix means: 745.13 at lambda 900 and 745.45 at
+/// lambda 2839.
+///
+/// # Why a normal approximation and not a PTRS port
+///
+/// A transformed-rejection port of numpy's `np.random.poisson` would buy a draw-for-draw match
+/// this sampler never had: the stream here is this file's own seeded xorshift `Rng`, not MT19937.
+/// The bar this draw feeds is `band_width_rel` — a RELATIVE bar on mean band width, stated in
+/// `contracts/prophet-parity-v1.yaml` as a Monte-Carlo estimate — and a band-width estimate
+/// depends on the count's MEAN and VARIANCE, both of which are exactly lambda for
+/// `lambda + sqrt(lambda) * N(0, 1)`. The approximation is standard above lambda ~= 30, where the
+/// Poisson's skew (1/sqrt(lambda) <= 0.18) is already small.
 pub fn poisson(rng: &mut Rng, lambda: f64) -> usize {
+    if lambda > POISSON_NORMAL_BRANCH_LAMBDA {
+        // Mean and variance are both exactly lambda; clamped at zero because a normal draw is
+        // unbounded below while a count is not (at the threshold that is a 5.5-sigma event).
+        return (lambda + lambda.sqrt() * rng.normal()).round().max(0.0) as usize;
+    }
     // Poisson via Knuth
     let mut n_changes = 0usize;
     let mut pp = 1.0;
@@ -909,7 +944,7 @@ mod sampler {
     //! is an anecdote (CLAUDE.md Verification Discipline rule 6); six points make the shape of
     //! the failure visible — the pre-fix implementation tracks lambda up to ~745 and saturates
     //! there for anything larger, which is a different claim from "it is wrong at 900".
-    use super::{poisson, Rng};
+    use super::{poisson, Rng, POISSON_NORMAL_BRANCH_LAMBDA};
     use crate::dates::parse_ymd;
     use crate::test_support::load_json;
 
@@ -996,13 +1031,88 @@ mod sampler {
             "FIXTURE LAMBDA: fixture=wp_log_R_logistic n_changepoints={n_cp} \
              t_max={t_max:.6} lambda={lambda:.4}"
         );
-        // 30.0 is the threshold plan 06-13 Task 2 installs. If this ever goes red the parity
-        // ladder has started exercising the normal-approximation branch, and the claim that no
-        // rung moved would no longer be a measurement.
+        // If this ever goes red the parity ladder has started exercising the
+        // normal-approximation branch, and the claim that no rung moved because of it would no
+        // longer be a measurement.
         assert!(
-            lambda < 30.0,
+            lambda < POISSON_NORMAL_BRANCH_LAMBDA,
             "the only logistic parity fixture now reaches lambda={lambda:.4}, \
-             at or above the sampler's branch threshold"
+             at or above the sampler's branch threshold {POISSON_NORMAL_BRANCH_LAMBDA}"
+        );
+    }
+
+    /// The worst IN-BOUNDS logistic request, walled on a release build.
+    ///
+    /// This is the configuration the verifier named as reachable: 100 consecutive daily points
+    /// with `horizon: 3650, growth: "logistic"`, every factor inside every door bound. Correcting
+    /// the sampler makes `n_changes` grow from the ~745 the underflow imposed to ~lambda, and the
+    /// per-row work (`logistic_gammas` + a sort + `piecewise_logistic`) is LINEAR in that count —
+    /// so the cost increase is a bounded multiple, and this harness is what turns that argument
+    /// into two numbers against SC1's 2 s bar.
+    ///
+    /// `#[ignore]` for the same reason `design_cost::holiday_design_wall` is: a wall-clock number
+    /// from a debug build measures the profile, not the code.
+    #[test]
+    #[ignore = "release-profile wall-clock measurement; run with --release --ignored"]
+    fn logistic_band_wall() {
+        use crate::dates::{days_from_civil, format_ymd};
+        use crate::types::ForecastArgs;
+
+        // Selectable so the OTHER reachable extreme can be walled with the same harness: the
+        // 10-point `MIN_POINTS` floor at the same horizon is the lambda ~= 2839 case, where the
+        // pre-fix truncation was ~3.8x rather than ~1.24x. `.unwrap()` is banned by
+        // `.clippy.toml`; an unparseable selector falls back to the default rather than aborting
+        // the run with a panic that would look like a measurement.
+        let env_usize = |key: &str, default: usize| -> usize {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(default)
+        };
+        let points = env_usize("LOGISTIC_BENCH_POINTS", 100);
+        let horizon = env_usize("LOGISTIC_BENCH_HORIZON", 3650);
+        let t0 = days_from_civil(2015, 1, 1);
+        let ds: Vec<String> = (0..points).map(|i| format_ymd(t0 + i as i64)).collect();
+        let y: Vec<f64> = (0..points)
+            .map(|i| {
+                let t = i as f64;
+                10.0 + 0.01 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin()
+            })
+            .collect();
+        let args = ForecastArgs {
+            ds,
+            y,
+            horizon,
+            growth: Some("logistic".into()),
+            cap: Some(50.0),
+            ..ForecastArgs::default()
+        };
+
+        let t = std::time::Instant::now();
+        let r = crate::forecast::forecast(&args).expect("the bench configuration must be accepted");
+        let total = t.elapsed().as_secs_f64();
+        assert_eq!(r.yhat.len(), horizon, "one row per horizon step");
+
+        // The mean band width is the OUTPUT this plan is about: a sampler stuck at ~745 draws
+        // fewer changepoints than the law asks for, so the simulated trends spread less and the
+        // interval comes back narrower than the `interval_width` it advertises.
+        let width: f64 = r
+            .yhat_upper
+            .iter()
+            .zip(r.yhat_lower.iter())
+            .map(|(u, l)| u - l)
+            .sum::<f64>()
+            / horizon as f64;
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        println!(
+            "LOGISTIC BAND WALL: points={points} horizon={horizon} growth=logistic \
+             total_s={total:.3} fit_s={:.3} predict_s={:.3} mean_band_width={width:.4} \
+             profile={profile}",
+            r.fit_seconds, r.predict_seconds
         );
     }
 }
