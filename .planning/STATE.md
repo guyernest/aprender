@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
-stopped_at: Completed 06-09-PLAN.md
-last_updated: "2026-09-07T02:04:54.006Z"
+stopped_at: Completed 06-10-PLAN.md
+last_updated: "2026-09-07T02:44:07.959Z"
 last_activity: 2026-09-06
 last_activity_desc: 06-08 complete — SC1/SC4/SC5 measured on aarch64; CI decision measure-x86-first
-state_head: 2d79d8e2f7d088b621c673e4c0fbdcac0d1f9d59
+state_head: 13a28be7907fa175e31ab2d75bdea8612559abed
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 77
-  completed_plans: 70
+  completed_plans: 71
 milestone_name: milestone
 ---
 
@@ -28,8 +28,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 06 (Native Time-Series Forecasting Stack) — READY TO EXECUTE
-Plan: 9 of 9
+Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
+Plan: 2 of 13
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -197,6 +197,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P07 | 1h 54m | 3 tasks | 10 files |
 | Phase 06 P08 | 32 min | 3 tasks | 5 files |
 | Phase 06 P09 | 25 min | 3 tasks | 20 files |
+| Phase 06 P10 | 23 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -266,6 +267,9 @@ Recent decisions affecting current work:
 - [Phase 06]: CI decision measure-x86-first: no ci.yml edit in phase 06; the gating work is one x86_64 `just chronos-gate` run that turns the PROVISIONAL quantiles_abs_f32_nonaarch64 bar into a measurement — Hunk (a) needs two unprovisioned runner prerequisites (weights mount AND a uv cache/baked packages for the network-less clean-room), so wiring it blind produces a step that dies at the weight-hash check before running a test. Collapses to `defer` with D-18 clause 2 named as an open CI gap if no x86_64 host is reachable.
 - [Phase 06]: The SC5 >= 2.0 speed-up bar is asserted by `just forecast-pool-ratio` (best-of-3, aarch64 release) and by no unit test; measured 5.146/5.150/5.162 — REVIEW-06-04, both reviewers: a wall-clock ratio inside libtest moves with CPU throttling independently of the router serialisation, so a suite that cries wolf gets its real failures ignored. pool_equality asserts bit-identical responses only and prints the ratio.
 - [Phase 06]: 06-EVIDENCE.md records the uncommitted working-tree delta's sha256 beside the commit hash, because the measurements ran on adc8a560a PLUS 18 uncommitted paths this plan did not create — A commit hash alone would have described code that was not what ran (CLAUDE.md Verification Discipline #2). 06-09 must establish that delta's provenance and then commit it, so the numbers become reproducible from a real commit.
+- [Phase 06]: Applied the pv-suggested MINOR bump (forecast-tool-boundary 1.0.0 -> 1.1.0) rather than hand-choosing MAJOR; recorded that pv diff sees only structural additions and cannot see the door narrowing its accepted-input surface
+- [Phase 06]: Asserted four cap-off-logistic refusal shapes plus a positive control, not the two the verifier named — one failing input is an anecdote (CLAUDE.md rule 6)
+- [Phase 06]: Every GSD verification command in this repo must run through 'rtk proxy': the rtk hook replaces libtest's 'test result:' line with a summary, which makes plan <verify> greps fail vacuously
 
 ### Pending Todos
 
@@ -364,6 +368,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-06T23:51:12.689Z
-Stopped at: Completed 06-09-PLAN.md
+Last session: 2026-09-07T02:43:56.208Z
+Stopped at: Completed 06-10-PLAN.md
 Resume file: None

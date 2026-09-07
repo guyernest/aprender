@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 3
+open_count: 4
 waived_count: 2
 fixed_count: 0
-total_count: 5
-last_updated: 2026-09-06T23:48:33.107Z
+total_count: 6
+last_updated: 2026-09-07T02:44:08.056Z
 ---
 
 # Broken Windows Ledger
@@ -20,6 +20,7 @@ last_updated: 2026-09-06T23:48:33.107Z
 | 3 | 06 | deviation | crates/aprender-forecast/src/prophet.rs |  | objective_at_python_map binds 3 of 7 fixtures: the four spike-003 oracles publish no log_posterior_at_map_unnormalized, so no rung-2 test exists for them (06-03 Deviation 1; stated in contracts/prophet-parity-v1.yaml) | open |  | 2026-09-06T05:38:09.726Z |  |
 | 4 | 06 | unrun-verify | contracts/chronos-bolt-parity-v1.yaml |  | quantiles_abs_f32_nonaarch64 = 5.0e-6 is PROVISIONAL and UNMEASURED; the first x86_64 run must record its max\|delta\| and tighten the bar (FALSIFY-CHRONOS-002) | open |  | 2026-09-06T13:46:12.140Z |  |
 | 5 | 06 | unrun-verify | .planning/phases/06-native-time-series-forecasting-stack/deferred-items.md |  | D-18 clause 2: no CI leg exercises the embedded-weights build; quantiles_abs_f32_nonaarch64 stays PROVISIONAL 5.0e-6 pending one x86_64 just chronos-gate run (same obligation as REVIEW-06-02 and ledger entry #4) | open |  | 2026-09-06T23:48:33.107Z |  |
+| 6 | 06 | deviation | crates/aprender-mcp-forecast/src/lib.rs |  | Plan 06-10 stated 22 existing e2e::refuses_ cases; measured baseline was 21, so post-change is 23 not the plan's >=24 bar. Intent (2 cases added) met; number in plan text was stale. | open |  | 2026-09-07T02:44:08.056Z |  |
 
 ````json
 [
@@ -81,6 +82,18 @@ last_updated: 2026-09-06T23:48:33.107Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-06T23:48:33.107Z",
+    "resolved_at": null
+  },
+  {
+    "id": 6,
+    "kind": "deviation",
+    "phase": "06",
+    "file": "crates/aprender-mcp-forecast/src/lib.rs",
+    "line": null,
+    "description": "Plan 06-10 stated 22 existing e2e::refuses_ cases; measured baseline was 21, so post-change is 23 not the plan's >=24 bar. Intent (2 cases added) met; number in plan text was stale.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T02:44:08.056Z",
     "resolved_at": null
   }
 ]
