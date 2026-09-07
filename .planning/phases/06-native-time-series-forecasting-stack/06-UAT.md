@@ -3,7 +3,7 @@ status: testing
 phase: 06-native-time-series-forecasting-stack
 source: [06-VERIFICATION.md]
 started: 2026-09-07T20:16:59Z
-updated: 2026-09-07T20:16:59Z
+updated: 2026-09-07T20:31:41Z
 ---
 
 ## Current Test
@@ -35,21 +35,34 @@ why_human: CARRIED FORWARD, still open. `.github/workflows/ci.yml` contains ZERO
 result: [pending]
 
 ### 4. Decide the disposition of CR-01 (MAX_NP_TRAIN_COST over-refuses in-spec requests)
-expected: One of the two options below, with the ACCEPTED region written down and asserted — today only the refused region has evidence.
-how: |
-  (a) Raise MAX_NP_TRAIN_COST toward the measured 2 s crossing (~18 000 000, the largest round
-      value under the rejected-candidate wall of 2.089 s at 19 991 000) and ship an
-      accepted-region test; OR
-  (b) Keep 15 000 000 and narrow the advertised contract: change ForecastArgs.n_lags's doc and
-      door_surface.knobs.n_lags.enforced_by to state the reachable range depends on history
-      length, and make the refusal message name the reachable n_lags for the history sent.
-why_human: |
-  Choosing a bound VALUE is a design decision with a measured trade-off, and this phase's own
-  prohibition says "never add a NeuralProphet cost bound without measuring first". The
-  arithmetic is reproduced (2 x 50 x 19 993 x 8 = 15 994 400 at 20 000 points x n_lags=7,
-  6.63% over the bound) but that request's WALL was not measured. The advertised n_lags <= 365
-  versus the reachable 0..=6 at maximum history is the part that reads as a mis-advertised knob.
-result: [pending]
+expected: A bound whose VALUE is resolved per deployment envelope, with the accepted region written down and asserted.
+result: DECIDED 2026-09-07 by Guy — option (c), neither (a) nor (b).
+decision: |
+  "Make the limits such as CR-01 more flexible as some algorithms might have bigger
+  requirements."
+
+  This supersedes the two options previously offered (raise to ~18M, or narrow the
+  advertised n_lags). Both assumed one hard constant was correct and only its value was
+  in question. The correct frame is that there is no single right number, because the
+  product ships four deployment envelopes that differ by orders of magnitude:
+  CloudFlare Workers WASM (tightest, possibly below our requirements), AWS Lambda,
+  Docker on GCP/Azure, and customer-hosted pmcp.run.
+
+  FLEXIBLE IS NOT UNBOUNDED. Round 3's whole thesis — every cost axis enumerated, every
+  bound enforced at the door, no axis pending — is preserved. What changes is only where
+  the VALUE comes from: from a hard `pub const` to a resolved limits profile with today's
+  constants as the default. The invariant strengthens rather than weakens:
+    before: "cost axis C-08 is bounded at 15_000_000"
+    after:  "cost axis C-08 is always bounded; its value comes from the resolved profile;
+             no profile can disable a bound or set it above the tier's structural maximum"
+follow_on: |
+  Converts into a gap-closure/next-phase plan, not a one-line constant edit:
+    - the 13 `pub const MAX_*` in types.rs become a `DoorLimits` policy struct with a
+      `Default` equal to today's values
+    - contracts/forecast-tool-boundary-v1.yaml `constants:` becomes the DEFAULT profile;
+      `types::tests::cost_bounds_match_contract` keeps pinning the default
+    - named tier profiles whose ceilings come from each envelope's real structural maximum
+    - the accepted region gains a test at every profile — the gap CR-01 actually exposed
 
 ### 5. Decide whether the forecast/chronos gates get an automatic surface
 expected: Either the wiring lands, or the recipe headers and binding.yaml's `sc1_wall_swept ... status: implemented` note say explicitly that the gate is MANUAL, so `implemented` is not read as `running`.
@@ -61,8 +74,9 @@ result: [pending]
 
 total: 5
 passed: 0
+decided: 1
 issues: 0
-pending: 5
+pending: 4
 skipped: 0
 blocked: 0
 
