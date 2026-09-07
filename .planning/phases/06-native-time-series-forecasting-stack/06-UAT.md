@@ -24,7 +24,18 @@ result: [pending]
 
 ### 2. Chronos x86_64 parity measurement replaces the PROVISIONAL tolerance
 expected: A measured max|delta| replaces the PROVISIONAL 5.0e-6 headroom value in contracts/chronos-bolt-parity-v1.yaml.
-how: On an x86_64 host, `CHRONOS_MODEL_DIR=... cargo test -p aprender-forecast --lib bolt::parity chronos::parity -- --nocapture`, read the printed max|delta|, tighten `quantiles_abs_f32_nonaarch64` in a `pv diff`-visible edit.
+how: |
+  On an x86_64 host, from the repo root:
+    just chronos-gate            # fetches+verifies pinned weights, then runs BOTH armed suites
+  or, to see the printed deltas directly:
+    just fetch-chronos-tiny
+    CHRONOS_MODEL_DIR="$PWD/models/chronos-bolt-tiny/f32" \
+      cargo test -p aprender-forecast --lib -- --nocapture bolt::parity chronos::parity
+  Then read the printed max|delta| and tighten `quantiles_abs_f32_nonaarch64` in
+  contracts/chronos-bolt-parity-v1.yaml in a `pv diff`-visible edit.
+  CORRECTED 2026-09-07: the command originally written here passed TWO positional filters
+  before `--` and fails with `error: unexpected argument 'chronos::parity' found` (verified).
+  cargo test takes ONE positional; both filters must follow `--`. The justfile had it right.
 why_human: CARRIED FORWARD, still open. This box is aarch64 (arm64); every CI runner is X64 with no Chronos leg. D-ITEM-06-04 / REVIEW-06-02.
 result: [pending]
 
