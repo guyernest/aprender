@@ -2111,48 +2111,11 @@ mod parity {
 #[cfg(test)]
 mod design_cost {
     use crate::dates::{days_from_civil, format_ymd};
-    use crate::types::{ForecastArgs, HolidayArg, MAX_HOLIDAY_WINDOW};
-
-    /// `.unwrap()` is banned by `.clippy.toml`; an unparseable selector falls back to the
-    /// default rather than aborting the run with a panic that looks like a measurement.
-    fn env_usize(key: &str, default: usize) -> usize {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(default)
-    }
-
-    /// Build holidays whose windows sum to exactly `columns` design columns.
-    ///
-    /// One holiday cannot exceed `2 * MAX_HOLIDAY_WINDOW + 1` = 731 columns, so a wider
-    /// request is split across as few holidays as that ceiling allows. Each carries
-    /// `dates_per_holiday` occurrences spread across the series span.
-    fn holidays_for(
-        columns: usize,
-        dates_per_holiday: usize,
-        t0: i64,
-        points: usize,
-    ) -> Vec<HolidayArg> {
-        let max_width = (2 * MAX_HOLIDAY_WINDOW + 1) as usize;
-        let step = (points / dates_per_holiday.max(1)).max(1) as i64;
-        let mut remaining = columns;
-        let mut out: Vec<HolidayArg> = Vec::new();
-        while remaining > 0 {
-            let width = remaining.min(max_width);
-            remaining -= width;
-            let lower = -(((width - 1) / 2) as i64);
-            let upper = (width - 1) as i64 + lower;
-            out.push(HolidayArg {
-                name: format!("h{}", out.len()),
-                dates: (0..dates_per_holiday)
-                    .map(|k| format_ymd(t0 + k as i64 * step))
-                    .collect(),
-                lower_window: lower,
-                upper_window: upper,
-            });
-        }
-        out
-    }
+    // ONE splitter, ONE env reader (WR-04): both used to be defined here, where only this
+    // bench could reach them. They now live in `crate::sc1_wall` beside the composition
+    // builder the sweep and every single-composition entry point share.
+    use crate::sc1_wall::{env_usize, holidays_for};
+    use crate::types::ForecastArgs;
 
     #[test]
     #[ignore = "release-profile wall-clock measurement; run via just forecast-holiday-bench"]

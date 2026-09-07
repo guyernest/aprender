@@ -49,6 +49,12 @@ pub mod np;
 pub mod prophet;
 pub mod safetensors;
 
+/// The SC1 wall swept over freq x growth x holiday shape (WR-04). Test-only, so it stays in
+/// `--lib` reach without entering the public surface — and NOT `#[ignore]`d: the whole
+/// finding is that the one harness watching the axis CR-01 lived on could only be reached
+/// with an explicit flag.
+#[cfg(test)]
+mod sc1_wall;
 #[cfg(test)]
 pub(crate) mod test_support;
 
