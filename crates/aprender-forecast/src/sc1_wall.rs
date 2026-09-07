@@ -5,14 +5,36 @@
 //! There are TWO runs of this harness and they claim different things.
 //!
 //! * The **in-suite run** — a plain `cargo test -p aprender-forecast --lib` — is a **SHAPE
-//!   CHECK**. It proves every composition in the matrix is still ACCEPTED by the door, still
-//!   emits one parsable `SC1 WALL:` line, and has not rotted. It runs at a REDUCED
-//!   points/horizon geometry, on whatever profile the caller used, and it asserts **NO** SC1
-//!   bar. A green `--lib` run is NOT an SC1 guarantee, and reading it as one is the exact
+//!   CHECK**. It proves every composition is still ACCEPTED by the door, that
+//!   [`max_legal_horizon`] still derives a legal horizon for the frequency the door refuses
+//!   at the cap, that each still emits one parsable `SC1 WALL:` line, and that none has
+//!   rotted. It runs on whatever profile the caller used and it asserts **NO** SC1 bar. A
+//!   green `--lib` run is therefore NOT an SC1 guarantee, and reading it as one is the exact
 //!   posture WR-04 describes.
-//! * The **gate** is `just forecast-sc1-sweep`. It widens the matrix by environment to the
-//!   AT-THE-BOUND geometry, forces `--release`, and asserts the 2 s SC1 bar — in the harness
-//!   AND again in the recipe, over the printed lines, so neither can pass vacuously.
+//! * The **gate** is `just forecast-sc1-sweep`. It forces `--release` — the only profile on
+//!   which a wall-clock number is the SC1 bar — widens the NeuralProphet row to its
+//!   at-the-bound geometry, and asserts the 2 s bar in the harness AND again in the recipe
+//!   over the printed lines, so neither can pass vacuously.
+//!
+//! **The Prophet half of the DEFAULT matrix is already at the bound, and that is a measured
+//! choice, not an oversight.** The plan budgeted for a reduced default; the measurement did
+//! not require one. The full 18-composition Prophet cross product at the tightest legal
+//! history span costs **7.19 s of test time (21 s including the compile) on a debug build**,
+//! against a 60 s in-suite budget — so shrinking the horizon would have bought CI headroom
+//! nothing needed AND would have stopped exercising `max_legal_horizon` altogether: `"MS"`
+//! only clamps when the requested cap exceeds ~841, so a default below that leaves the CR-01
+//! axis derivation unrun in the suite. The one row that genuinely cannot be at its bound
+//! in-suite is NeuralProphet: 06-15 measured its at-the-bound composition at **45.6 s on a
+//! debug profile**, which alone would blow the budget, so it defaults small and the gate
+//! widens it by environment.
+//!
+//! # Why the bar is asserted twice
+//!
+//! Once here, per composition, on release only; and again in `just forecast-sc1-sweep`, over
+//! the `SC1 WALL:` lines it re-parses out of the log. Neither is redundant: the in-harness
+//! assertion names the composition, and the recipe's re-check is what catches a harness that
+//! silently stopped emitting lines (`SC1 SWEEP OK` reports the count it checked, so a gate
+//! that checked zero lines cannot report success).
 //!
 //! # Why a sweep and not a third bench (WR-04)
 //!
@@ -381,12 +403,15 @@ fn sc1_wall_sweep() {
 
     // NOT an SC1 bar, and deliberately not throttling-sensitive the way a 2 s bar is: this
     // module joins a `workspace-test` job already running 80 604 tests, so a runaway matrix
-    // is a real CI regression. Twice the 60 s in-suite target.
+    // is a real CI regression. Twice the 60 s in-suite target, which the default matrix
+    // MEASURES at 7.19 s of test time on a debug build (aarch64, plan 06-16).
     assert!(
         elapsed < budget_secs as f64,
-        "the sweep took {elapsed:.1} s, over its {budget_secs} s CI BUDGET (not the SC1 bar — \
-         the SC1 bar is 2 s per composition and is asserted on release only). Shrink \
-         SC1_SWEEP_POINTS / SC1_SWEEP_HORIZON, never an axis."
+        "the sweep took {elapsed:.1} s, over its {budget_secs} s CI BUDGET. This is NOT the \
+         SC1 bar — the SC1 bar is 2 s per composition and is asserted on release only; this \
+         guard exists so an 18-composition matrix cannot quietly become a CI regression. \
+         Shrink SC1_SWEEP_POINTS / SC1_SWEEP_HORIZON / the NeuralProphet row, never an axis: \
+         dropping an axis is the WR-04 defect this harness replaced."
     );
 
     if cfg!(debug_assertions) {
