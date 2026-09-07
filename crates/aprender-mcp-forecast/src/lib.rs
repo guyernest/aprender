@@ -1052,6 +1052,66 @@ mod e2e {
         );
     }
 
+    /// C-07 through the transport: one byte over the byte bound is refused.
+    #[tokio::test]
+    async fn refuses_holiday_name_over_length_bound() {
+        let (ds, y) = synth(60);
+        let name = "n".repeat(aprender_forecast::types::MAX_HOLIDAY_NAME_LEN + 1);
+        refused(
+            &mut serve().await,
+            serde_json::json!({
+                "ds": ds, "y": y, "horizon": 7,
+                "holidays": [{
+                    "name": name, "dates": ["2020-02-01"],
+                    "lower_window": 0, "upper_window": 0
+                }]
+            }),
+            "max_holiday_name_len",
+        )
+        .await;
+    }
+
+    /// The straddling partner: exactly AT the bound, accepted through the same transport,
+    /// returning the full shared response shape. A pair that only ever refuses proves the
+    /// door is closed, never that it is closed on the right side.
+    #[tokio::test]
+    async fn accepts_holiday_name_at_length_bound() {
+        let horizon = 7usize;
+        let (ds, y) = synth(60);
+        let name = "n".repeat(aprender_forecast::types::MAX_HOLIDAY_NAME_LEN);
+        assert_eq!(
+            name.len(),
+            aprender_forecast::types::MAX_HOLIDAY_NAME_LEN,
+            "the near miss must sit exactly ON the bound"
+        );
+        let mut c = serve().await;
+        let r = c
+            .call(
+                "tools/call",
+                serde_json::json!({
+                    "name": "forecast",
+                    "arguments": {
+                        "ds": ds, "y": y, "horizon": horizon,
+                        "holidays": [{
+                            "name": name, "dates": ["2020-02-01"],
+                            "lower_window": 0, "upper_window": 0
+                        }]
+                    }
+                }),
+            )
+            .await;
+        assert!(
+            r.get("error").is_none() && r["result"]["isError"] != true,
+            "a holiday name exactly at the bound must be accepted: {r}"
+        );
+        let out = tool_output(&r);
+        assert_shared_shape(&out, horizon);
+        assert!(
+            out.get("components").is_some_and(|c| c.is_object()),
+            "the accepted near-miss must carry components: {out}"
+        );
+    }
+
     // ---------------------------------------------------------------------------------
     // Happy paths: the SHARED response shape (D-03) across both models and across the
     // option combinations the refusal cases only ever exercise negatively.

@@ -156,6 +156,46 @@ pub const MAX_HOLIDAY_DATES_TOTAL: usize = 10_000;
 /// horizon, which is why the bound has to be on the PRODUCT and not on the horizon.
 pub const MAX_LOGISTIC_CHANGEPOINT_LAMBDA: f64 = 20_000.0;
 
+/// Hard upper bound on `len(holidays[].name)` in BYTES.
+///
+/// **Why the existing bounds did not cover this.** They did not cover it at all: at the close
+/// of plan 06-14 this was the ONE caller-settable field on the whole door surface with
+/// literally NO enforcement (`door_surface.knobs`, `field: name`, `enforced_by: NOTHING`). It
+/// was found by 06-14's enumeration, not by any review finding.
+///
+/// **The amplification.** `prophet::columns` turns ONE payload occurrence of the name into
+/// TWO owned `String`s per design column — the column `name`
+/// (`format!("{}_delim_{}{}", h.name, sign, off)`) and the `component`
+/// (`h.name.clone()`) — and then makes it the key of `hcols.sort_by(|a, b|
+/// a.name.cmp(&b.name))`, an `O(C log C)` comparison sort whose comparisons are byte-wise
+/// over those names. `prophet::predict`'s component-name dedup compares them again,
+/// `O(C * distinct_components)` times. At [`MAX_HOLIDAY_COLUMNS`] (1 000) that is 2 000
+/// copies plus roughly 10 000 byte-wise comparisons per request, each LINEAR in the name
+/// length — a ~2 000:1 amplification off a single occurrence in the payload. The name also
+/// reaches the serialized reply as a key of the `components` map.
+///
+/// **Why a bound and not a measurement.** This axis has no structural maximum to measure
+/// against, so no `measured_at_structural_maximum` disposition was ever available for it:
+/// `crates/aprender-mcp-forecast`'s router construction (`http_app` / `pooled_app`) applies
+/// no `DefaultBodyLimit`, no `max_body` and no content-length layer, and the stdio transport
+/// has no framing cap, so any wall written here would describe an arbitrarily CHOSEN name
+/// length rather than a maximum. That is why 06-14 shipped C-07 with
+/// `no_structural_maximum: true` and held it open with a red test instead of measuring it.
+///
+/// **The derivation.** The longest holiday name in ANY committed fixture, example or test is
+/// **9 bytes** — `superbowl`, from Prophet 1.4.0's own canonical `peyton_holidays` frame
+/// (whose other label is `playoff`, 7 bytes). 200 is 22x that, two orders of magnitude past
+/// any human label, and it bounds the worst case at 1 000 x 2 x 200 = ~400 KB of `String`
+/// plus ~10 000 comparisons of <= 200 bytes. The same arithmetic on the UNBOUNDED field with
+/// a 1 MB name — which nothing at HEAD refused — is ~2 GB of `String` from a single request.
+///
+/// **BYTES, not characters.** `String::len` is bytes, and bytes are what the clone and the
+/// comparison actually cost. A rewrite to `chars().count()` would let a 3-byte-per-char UTF-8
+/// name buy 3x the bounded work; [`crate::forecast`]'s test
+/// `a_holiday_name_whose_char_count_fits_but_whose_byte_length_does_not_is_refused` is the
+/// case that catches exactly that rewrite.
+pub const MAX_HOLIDAY_NAME_LEN: usize = 200;
+
 /// Default router-pool size for the streamable-HTTP server (`constants.pool_default`).
 ///
 /// Lives here, beside the other contract-mirrored bounds, because this is the crate that
@@ -168,7 +208,7 @@ pub const DEFAULT_POOL: usize = 8;
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HolidayArg {
-    /// Holiday name (becomes a component).
+    /// Holiday name (becomes a component). At most 200 bytes.
     pub name: String,
     /// Dates the holiday occurs on, YYYY-MM-DD (past AND future occurrences).
     pub dates: Vec<String>,
@@ -256,8 +296,8 @@ impl std::error::Error for ForecastError {}
 mod tests {
     use super::{
         ForecastArgs, ForecastError, DEFAULT_POOL, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
-        MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_WINDOW, MAX_HORIZON,
-        MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
+        MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
+        MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
     };
     use crate::test_support::{constant_f64, constant_u64};
 
@@ -348,6 +388,11 @@ mod tests {
                 "MAX_HOLIDAY_DATES_TOTAL",
                 "fit_max_holiday_dates_total",
                 MAX_HOLIDAY_DATES_TOTAL as u64,
+            ),
+            (
+                "MAX_HOLIDAY_NAME_LEN",
+                "fit_max_holiday_name_len",
+                MAX_HOLIDAY_NAME_LEN as u64,
             ),
         ] {
             assert_eq!(

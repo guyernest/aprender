@@ -818,6 +818,84 @@ mod tests {
         }
     }
 
+    /// C-07 — `holidays[].name` had NO enforcement of any kind at the close of 06-14.
+    ///
+    /// One payload occurrence becomes TWO owned `String`s per design column in
+    /// `prophet::columns` and then the sort key of an `O(C log C)` byte-wise comparison
+    /// sort, so at `MAX_HOLIDAY_COLUMNS` a single name is amplified ~2 000:1. The refusal
+    /// names the holiday's POSITION and the observed LENGTH and never the name itself —
+    /// echoing an oversized string back re-materialises the very bytes the bound refuses
+    /// (T-06-38).
+    #[test]
+    fn a_holiday_name_over_the_length_bound_is_refused() {
+        let args = named_holiday_args("n".repeat(crate::types::MAX_HOLIDAY_NAME_LEN + 1));
+        refusal(&args, "max_holiday_name_len");
+    }
+
+    /// The NEAR MISS: exactly at the bound, which must still be accepted and must still
+    /// return the full response. A comparison written as `>=` fails here and nowhere else.
+    #[test]
+    fn a_holiday_name_at_the_length_bound_is_accepted() {
+        let name = "n".repeat(crate::types::MAX_HOLIDAY_NAME_LEN);
+        assert_eq!(
+            name.len(),
+            crate::types::MAX_HOLIDAY_NAME_LEN,
+            "this control is only a NEAR MISS if it sits exactly ON the bound"
+        );
+        let args = named_holiday_args(name);
+        let r = forecast(&args).expect("a holiday name exactly at the bound must fit");
+        assert_eq!(r.yhat.len(), 7, "one row per horizon step");
+    }
+
+    /// The bound is on BYTES, and this is the case that says so. `é` is two UTF-8 bytes, so
+    /// this name's CHARACTER count is comfortably under the bound while its BYTE length is
+    /// over it — and bytes are what the clone and the byte-wise comparison actually cost.
+    /// A rewrite of `h.name.len()` to `h.name.chars().count()` turns this test red and
+    /// nothing else in the suite.
+    #[test]
+    fn a_holiday_name_whose_char_count_fits_but_whose_byte_length_does_not_is_refused() {
+        let chars = crate::types::MAX_HOLIDAY_NAME_LEN / 2 + 1;
+        let name = "é".repeat(chars);
+        assert!(
+            name.chars().count() <= crate::types::MAX_HOLIDAY_NAME_LEN,
+            "the CHAR count must sit under the bound, or this case proves nothing about \
+             which quantity is measured"
+        );
+        assert!(
+            name.len() > crate::types::MAX_HOLIDAY_NAME_LEN,
+            "the BYTE length must sit over the bound"
+        );
+        let args = named_holiday_args(name);
+        refusal(&args, "max_holiday_name_len");
+    }
+
+    /// The bound is ONE-SIDED by design. An empty name is a separate question (does a
+    /// component need a label at all?) that this plan does not open, and a length bound
+    /// that quietly grew a lower side would be answering it by accident.
+    #[test]
+    fn an_empty_holiday_name_is_not_refused_by_the_length_bound() {
+        let args = named_holiday_args(String::new());
+        let r = forecast(&args).expect("the length bound is one-sided: it must not refuse 0");
+        assert_eq!(r.yhat.len(), 7);
+    }
+
+    /// A prophet request carrying exactly one holiday whose NAME is the variable under test.
+    /// Every other knob is comfortably inside its own bound, so only the name can refuse.
+    fn named_holiday_args(name: String) -> ForecastArgs {
+        let (ds, y) = synthetic_daily(60);
+        let mut args = np_args(60, 7);
+        args.model = None;
+        args.ds = ds;
+        args.y = y;
+        args.holidays = Some(vec![crate::types::HolidayArg {
+            name,
+            dates: vec![format_ymd(days_from_civil(2020, 2, 1))],
+            lower_window: 0,
+            upper_window: 0,
+        }]);
+        args
+    }
+
     /// The two-sided control for WR-03's move: a request whose aggregate is EXACTLY at
     /// `MAX_HOLIDAY_DATES_TOTAL` is still accepted. The in-loop comparison must be the same
     /// `>` the post-loop one uses; written as `>=` it would over-refuse by one date.

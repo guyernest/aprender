@@ -82,6 +82,18 @@ constants:
   fit_max_holiday_dates: 1000
   fit_max_holiday_design_cost: 50000
   fit_max_holiday_dates_total: 10000
+  # The ONE caller-settable field that had NO enforcement of any kind at the close of
+  # 06-14 (door_surface.knobs, field: name, enforced_by: NOTHING) — found by that plan's
+  # enumeration and by no review finding. prophet::columns turns ONE payload occurrence of
+  # holidays[].name into TWO owned Strings per design column (the column name and the
+  # component), then makes it the sort key of an O(C log C) byte-wise comparison sort, and
+  # predict's component-name dedup compares it again. At fit_max_holiday_columns (1 000)
+  # that is ~2 000 derived copies plus ~10 000 comparisons from a single occurrence — a
+  # ~2 000:1 amplification. BYTES, because bytes are what the clone and the comparison cost.
+  # 200 against a committed maximum of 9 ("superbowl", Prophet 1.4.0's own peyton_holidays).
+  # There is no structural maximum to measure instead: neither transport caps the body.
+  # Mirrored by types::MAX_HOLIDAY_NAME_LEN via types::tests::cost_bounds_match_contract.
+  fit_max_holiday_name_len: 200
   # The Poisson mean the LOGISTIC uncertainty simulation draws on each of its 1 000 rows:
   # lambda = changepoint_count(len(ds)) x (t_max - 1), t_max = future_span_days /
   # history_span_days. fit_max_points, fit_max_span_days and fit_max_horizon are each
