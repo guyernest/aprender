@@ -1607,7 +1607,7 @@ bindings:
   status: implemented
   notes: 'Landed with plan 05-10. DECLARATIVE equation: it maps PF-007 and PF-008 onto the mechanisms that answer them, and the RENDERER is where a violation would surface (a best-seed headline, an unlabelled F1, an adapter-only size comparison, a verdict word). render_human composes every table, and its tests scan the whole output for verdict vocabulary and pair every absence assertion with a non-vacuity one. Row corrected from the non-existent `bench_report`.'
 # ---------------------------------------------------------------------------
-# Phase 6 (native time-series forecasting stack). 61 rows, one per equation of
+# Phase 6 (native time-series forecasting stack). 62 rows, one per equation of
 # the four Phase 6 contracts, audited as a BLOCKING tier3 gate by the Makefile's
 # `contract-audit-phase6`. That target does MORE than `pv audit`: it also resolves
 # every row below to a definition site in the file its `module_path` names, because
@@ -2041,6 +2041,13 @@ bindings:
   signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
   status: implemented
   notes: 'The refusal is FIRST in the holiday loop, before the name is cloned into any Column — which also bounds every other refusal message in that loop, each of which formats h.name back to the caller. On BYTES, because String::len is bytes and bytes are what the two clones per column and the byte-wise sort comparison cost. Landed with plan 06-15 (cost axis C-07, found by 06-14''s enumeration and by no review finding — the one caller-settable field whose knobs entry read enforced_by: NOTHING).'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: np_train_cost_bounded
+  module_path: aprender_forecast::np
+  function: request_train_cost
+  signature: 'fn request_train_cost(d: &NpData, n_points: usize, n_lags: usize) -> u64'
+  status: implemented
+  notes: 'Binds to the PRICING function rather than to the door, because the equation''s content is that the door prices a request at exactly the work it then configures: request_train_cost is built from door_lr_sweep, door_epochs and n_training_samples, the same three the door uses to build its TrainConfig, and np::train debug_asserts its own sample count against n_training_samples. forecast::forecast calls it after NpData::new and the n_lags range checks and before the first np::train. Landed with plan 06-15 (cost axis C-08 — the only axis in this door with no budget of any kind on its path; the structural maximum measured 47.924 s on release against SC1''s 2 s bar, which is what forced a bound rather than a measured_at_structural_maximum record).'
 - contract: forecast-tool-boundary-v1.yaml
   equation: default_seed_42
   module_path: aprender_forecast::forecast

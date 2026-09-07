@@ -196,6 +196,56 @@ pub const MAX_LOGISTIC_CHANGEPOINT_LAMBDA: f64 = 20_000.0;
 /// case that catches exactly that rewrite.
 pub const MAX_HOLIDAY_NAME_LEN: usize = 200;
 
+/// Hard upper bound on the NeuralProphet TRAINING work one request may buy, as the
+/// door-computable proxy `lr_sweep_width * epochs * n_samples * (n_lags + 1)`
+/// ([`crate::np::request_train_cost`]).
+///
+/// **Why the existing bounds did not cover this.** Nothing did. This path has no budget of
+/// ANY kind: `fit::FIT_BUDGET_SECS` is read at exactly one place, inside `fit::fit_prophet`,
+/// and the `"neuralprophet"` arm never enters that function. Every factor is individually
+/// bounded — `n_lags <= 365`, `n_samples <= n_train_grid <= [`MAX_SPAN_DAYS`]`,
+/// `epochs <= 500` — and their PRODUCT was not, with the door's learning-rate sweep
+/// multiplying the whole thing by 2 (lags on) or 3 (lag-free). Note it is NOT that
+/// `n_train_grid` is bounded by a larger constant than [`MAX_POINTS`]: `MAX_SPAN_DAYS ==
+/// MAX_POINTS as i64`, so the two are numerically identical. The drivers are the missing
+/// budget, the 2-3x sweep and `n_lags`.
+///
+/// **The measured breach.** The worst LEGAL request — 20 000 contiguous daily points (so the
+/// span is also at `MAX_SPAN_DAYS` and `n_train_grid` is at its ceiling), `n_lags: 365`,
+/// `horizon: 3650`, `freq: "D"` — prices at 718 641 000 and walls at **47.924 s** on a
+/// release build, 24x over SC1's 2 s bar. Measured by `np::wall::np_train_wall` under
+/// `NP_WALL_MODE=structural_max`.
+///
+/// **15 000 000 is the value, and the measurement chose it.** A first candidate of
+/// 20 000 000 was REJECTED by its own wall: the long-history composition at 19 991 000
+/// measured **2.089 s**, over the bar. At 15 000 000 three compositions differing in every
+/// factor the proxy multiplies all clear it, on a release build, via `NP_WALL_MODE=at_bound_*`:
+///
+/// | composition | points | n_lags | horizon | train_cost | total_s |
+/// |---|---|---|---|---|---|
+/// | long history  | 20 000 |  6 | 3 650 | 13 995 800 | **1.642 s** |
+/// | mid history   | 10 000 | 11 | 3 650 | 14 384 160 | **1.541 s** |
+/// | short history |  2 000 | 41 |   365 | 14 810 040 | **1.402 s** |
+///
+/// **It is also the smallest round value that does not refuse the parity ladder's own
+/// geometry.** `np::parity` validates correctness on Peyton Manning with `n_lags` 0 and 30;
+/// through the door that geometry prices at 697 200 and **14 552 640** respectively, so
+/// 14 000 000 would refuse the very request the ladder proves the model correct on.
+/// `forecast::tests::the_np_parity_ladder_geometry_prices_under_the_train_cost_bound` pins that.
+///
+/// **The lag-free arm can never reach this bound.** Its structural maximum is
+/// `3 * auto_epochs(20 000) * 20 000 * 1` = 3 000 000, measured at **0.508 s**. C-08 is
+/// entirely about the lagged arm.
+///
+/// **Why the at-the-bound positive control lives in the `#[ignore]`d release harness rather
+/// than in the always-run suite:** at the bound one request costs **45.619 s on a debug
+/// profile** (measured, `at_bound_short_history`). Paying that in every `cargo test` run
+/// would be a 60x regression on this crate's suite. The always-run controls are the
+/// parity-geometry arithmetic above, a cheap accepted request through the door, and
+/// `the_np_train_cost_bound_is_exclusive_not_inclusive`, which pins the comparison at the
+/// boundary without paying for it.
+pub const MAX_NP_TRAIN_COST: u64 = 15_000_000;
+
 /// Default router-pool size for the streamable-HTTP server (`constants.pool_default`).
 ///
 /// Lives here, beside the other contract-mirrored bounds, because this is the crate that
@@ -297,7 +347,8 @@ mod tests {
     use super::{
         ForecastArgs, ForecastError, DEFAULT_POOL, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
         MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
-        MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
+        MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS, MAX_SPAN_DAYS,
+        MIN_POINTS,
     };
     use crate::test_support::{constant_f64, constant_u64};
 
@@ -393,6 +444,11 @@ mod tests {
                 "MAX_HOLIDAY_NAME_LEN",
                 "fit_max_holiday_name_len",
                 MAX_HOLIDAY_NAME_LEN as u64,
+            ),
+            (
+                "MAX_NP_TRAIN_COST",
+                "fit_max_np_train_cost",
+                MAX_NP_TRAIN_COST,
             ),
         ] {
             assert_eq!(
@@ -600,38 +656,39 @@ mod tests {
         }
     }
 
-    /// **THIS TEST IS RED ON PURPOSE, FROM THE CLOSE OF PLAN 06-14 UNTIL 06-15 LANDS.**
+    /// Every enumerated cost axis carries a real disposition — no axis is still pending.
     ///
-    /// It is not `#[ignore]`d, not `#[should_panic]`, not commented out and not deleted. It
-    /// is a real failing assertion naming the two cost axes plan 06-14 enumerated and did NOT
-    /// close: **C-07** (`holidays[].name` byte amplification, owed by 06-15 T2) and **C-08**
-    /// (unbudgeted NeuralProphet training work, owed by 06-15 T3).
+    /// # This test SHIPPED RED, on purpose, and plan 06-15 is what turned it green
     ///
-    /// # Why it ships red
+    /// Plan 06-14 landed this assertion FAILING, naming the two cost axes its enumeration
+    /// found and did not close: **C-07** (`holidays[].name` byte amplification) and **C-08**
+    /// (unbudgeted NeuralProphet training work). It was not `#[ignore]`d, not
+    /// `#[should_panic]`, not commented out and not deleted, because 06-14's whole thesis is
+    /// that a guard which cannot fail is theater — and a plan arguing that while reducing its
+    /// OWN two open items to a prose note would be making exactly the mistake it exists to
+    /// end. The verbatim failing output was:
     ///
-    /// 06-14's whole thesis is that a guard which cannot fail is theater. A plan that argued
-    /// that while reducing its OWN two open items to a prose note would be making exactly the
-    /// mistake it exists to end. The alternative was to give C-07 a
-    /// `measured_at_structural_maximum` disposition, and C-07 has no structural maximum to
-    /// measure — `holidays[].name` is an unbounded `String` with no body-size or framing cap
-    /// on either transport, so any number written there would measure an arbitrarily chosen
-    /// length. A marker that says "open" is true; a measurement of an unbounded input is not.
+    /// ```text
+    /// 2 cost axis/axes are still UNBOUNDED and are held open by this assertion: C-07
+    /// (marker unbounded_pending_06_15, owed by plan 06-15); C-08 (marker
+    /// unbounded_pending_06_15, owed by plan 06-15).
+    /// test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 108 filtered out
+    /// ```
     ///
-    /// # What it turns red, and for how long
+    /// Plan 06-15 closed it the only legitimate way: by REPLACING both markers with real
+    /// bounds — [`MAX_HOLIDAY_NAME_LEN`] for C-07 (a bound, never a measurement: that axis
+    /// has no structural maximum, since `holidays[].name` is an unbounded `String` with no
+    /// body-size or framing cap on either transport, so any number written there would
+    /// measure an arbitrarily CHOSEN length) and [`MAX_NP_TRAIN_COST`] for C-08 (a bound
+    /// because the MEASUREMENT forced one: the structural maximum walled at 47.924 s on
+    /// release against SC1's 2 s bar).
     ///
-    /// `make tier3` (`cargo test --all`) and CI's `workspace-test` (`cargo nextest …
-    /// --workspace --lib`, which does NOT exclude `aprender-forecast`) both go red for the
-    /// window — and `workspace-test` is a REQUIRED status check on a protected `main`. The
-    /// mitigation is PUSH SEQUENCING: land waves 12 and 13 in ONE push, so the window never
-    /// reaches a CI runner while the LOCAL red still does its whole job.
+    /// # It stays a live guard, and the forbidden repair is still forbidden
     ///
-    /// # The forbidden repair
-    ///
-    /// Deleting, weakening, `#[ignore]`-ing or CI-filtering this assertion restores precisely
-    /// the guard-that-cannot-fail contradiction it exists to remove. **The only legitimate
-    /// repair is 06-15 replacing both pending markers with real bounds.** Closing the window
-    /// sooner for an unrelated reason is a human decision to re-sequence the round, not a
-    /// licence to edit this test.
+    /// The assertion is unchanged; only this comment moved from "why it is red" to "what
+    /// closed it". Deleting, weakening, `#[ignore]`-ing or CI-filtering it restores precisely
+    /// the guard-that-cannot-fail contradiction it exists to remove. A NEW pending axis is
+    /// supposed to turn this red again — that is the mechanism, not a defect.
     #[test]
     fn no_cost_axis_is_pending() {
         let pending: Vec<String> = enumerated_axes()

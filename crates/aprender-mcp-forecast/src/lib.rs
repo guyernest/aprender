@@ -1112,6 +1112,59 @@ mod e2e {
         );
     }
 
+    /// C-08 through the transport: a NeuralProphet request whose training work exceeds
+    /// `max_np_train_cost` is refused at the door, before any training runs.
+    #[tokio::test]
+    async fn refuses_np_train_cost_over_bound() {
+        // 2 000 contiguous daily points with n_lags at its own ceiling of 365 prices far
+        // over the bound. The refusal fires before np::train, so this case is instant even
+        // though the request it refuses would not be.
+        let (ds, y) = synth(2_000);
+        refused(
+            &mut serve().await,
+            serde_json::json!({
+                "ds": ds, "y": y, "horizon": 7,
+                "model": "neuralprophet", "freq": "D", "n_lags": 365
+            }),
+            "max_np_train_cost",
+        )
+        .await;
+    }
+
+    /// The straddling partner, on the SAME arm with lags on: a request priced under the
+    /// bound is accepted and returns the full shared response shape.
+    ///
+    /// It is not AT the bound, deliberately and with a measured reason: at the bound one
+    /// request costs 45.619 s on a debug profile, and this suite runs in debug. The
+    /// at-the-bound positive controls are `np::wall::np_train_wall` under
+    /// `NP_WALL_MODE=at_bound_*` — three release compositions at 93-99% of the bound,
+    /// measured at 1.402-1.642 s.
+    #[tokio::test]
+    async fn accepts_np_train_cost_under_bound() {
+        let horizon = 7usize;
+        let (ds, y) = synth(120);
+        let mut c = serve().await;
+        let r = c
+            .call(
+                "tools/call",
+                serde_json::json!({
+                    "name": "forecast",
+                    "arguments": {
+                        "ds": ds, "y": y, "horizon": horizon,
+                        "model": "neuralprophet", "freq": "D", "n_lags": 7
+                    }
+                }),
+            )
+            .await;
+        assert!(
+            r.get("error").is_none() && r["result"]["isError"] != true,
+            "a neuralprophet request under the training-cost bound must be accepted: {r}"
+        );
+        let out = tool_output(&r);
+        assert_shared_shape(&out, horizon);
+        assert_eq!(out["model"], serde_json::json!("neuralprophet"));
+    }
+
     // ---------------------------------------------------------------------------------
     // Happy paths: the SHARED response shape (D-03) across both models and across the
     // option combinations the refusal cases only ever exercise negatively.

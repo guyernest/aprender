@@ -22,7 +22,8 @@ use crate::prophet::{
 use crate::types::{
     ForecastArgs, ForecastError, ForecastResponse, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
     MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
-    MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
+    MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS, MAX_SPAN_DAYS,
+    MIN_POINTS,
 };
 
 /// Fit and forecast in ONE stateless call (D-01: no fit -> artifact -> forecast round-trip).
@@ -433,26 +434,49 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     "n_lags must be smaller than the series span in days".into(),
                 ));
             }
+            // ---- the NEURALPROPHET TRAINING COST bound, at THE door and BEFORE np::train ----
+            //
+            // Cost axis C-08, and the ONLY axis in this door that had no budget of any kind
+            // on its path: `fit::FIT_BUDGET_SECS` is read at exactly one place, inside
+            // `fit::fit_prophet`, and this arm never enters that function. `n_lags <= 365`,
+            // `n_samples <= n_train_grid <= MAX_SPAN_DAYS` and `epochs <= 500` are each
+            // enforced on their own; what was never checked is their PRODUCT, times the 2-or-3
+            // learning-rate sweep run below. MEASURED: the worst legal request (20 000
+            // contiguous daily points, n_lags 365, horizon 3650) walls at 47.924 s on release,
+            // 24x over SC1's 2 s bar.
+            //
+            // The price is computed by `np::request_train_cost`, built out of the SAME three
+            // functions used to configure the sweep below (`door_lr_sweep`, `door_epochs`,
+            // `n_training_samples`), so the door cannot price a request differently from the
+            // work it then spends.
+            let np_cost = np::request_train_cost(&d, n_train, n_lags);
+            if np_train_cost_is_over(np_cost) {
+                let n_samples = np::n_training_samples(&d, n_lags);
+                let epochs = np::door_epochs(n_train, n_samples, n_lags);
+                let sweep = np::door_lr_sweep(n_lags).len();
+                return Err(ForecastError::Validation(format!(
+                    "this neuralprophet request buys {np_cost} units of training work \
+                     (learning-rate sweep {sweep} x epochs {epochs} x samples {n_samples} x \
+                     (n_lags + 1) {}), which exceeds max_np_train_cost {MAX_NP_TRAIN_COST}; \
+                     reduce n_lags, shorten the history, or narrow the series span",
+                    n_lags + 1
+                )));
+            }
             let t0 = Instant::now();
             // spike-002 lesson: a short lr sweep selected by TRAIN loss stands in for NP's
             // range test (D-10 — never select by test error); 4x the auto epochs when lags
             // are on (the linear AR case needs the budget), capped at 320.
             let mut best: Option<(f64, f64, np::NpModel, np::TrainLog)> = None;
-            let lrs: &[f64] = if n_lags > 0 {
-                &[0.03, 0.1]
-            } else {
-                &[0.01, 0.03, 0.1]
-            };
+            // The sweep and the epoch rule come from `np`, not from literals here, so the
+            // cost priced above is the cost this loop actually spends (C-08).
+            let lrs: &[f64] = np::door_lr_sweep(n_lags);
+            let n_samples = np::n_training_samples(&d, n_lags);
             for &lr in lrs {
                 let cfg = np::TrainConfig {
                     n_lags,
                     ar_layers: if n_lags > 0 { vec![32] } else { vec![] },
                     max_lr: lr,
-                    epochs: if n_lags > 0 {
-                        Some(np::auto_epochs(n_train).min(320))
-                    } else {
-                        None
-                    },
+                    epochs: Some(np::door_epochs(n_train, n_samples, n_lags)),
                     batch: None,
                     weight_decay: 1e-3,
                     huber_beta: 0.3,
@@ -559,6 +583,17 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
 /// and the returned z is `NaN` — which `serde_json` then writes as JSON `null` for every
 /// `yhat_lower`/`yhat_upper` in an otherwise successful response.
 #[must_use]
+/// The door's C-08 comparison, named ONCE so the boundary can be tested without paying it.
+///
+/// It is `>`, not `>=`: a request pricing EXACTLY at the bound is accepted. That one-off is
+/// invisible to any near-miss control this crate can afford to run — at the bound a single
+/// request costs 45.619 s on a debug profile — so
+/// [`tests::the_np_train_cost_bound_is_exclusive_not_inclusive`] pins the comparison here
+/// instead.
+fn np_train_cost_is_over(cost: u64) -> bool {
+    cost > MAX_NP_TRAIN_COST
+}
+
 pub fn normal_quantile(p: f64) -> f64 {
     // Delegates rather than transcribes: proven bit-identical to core over a
     // 100k-point grid plus both clamp shoulders and both branch boundaries.
@@ -570,7 +605,7 @@ mod tests {
     use super::{forecast, normal_quantile};
     use crate::dates::{days_from_civil, format_ymd};
     use crate::prophet::Rng;
-    use crate::types::{ForecastArgs, ForecastError};
+    use crate::types::{ForecastArgs, ForecastError, MAX_NP_TRAIN_COST};
     use aprender::autograd::{clear_graph, graph_tape_len};
 
     /// A 120-point synthetic DAILY series: linear trend + a weekly sine + a little noise.
@@ -839,6 +874,109 @@ mod tests {
                 "expected a Validation refusal, got {:?}",
                 other.map(|r| r.model)
             ),
+        }
+    }
+
+    /// C-08 — the NeuralProphet training path had NO budget of any kind.
+    ///
+    /// The worst LEGAL request (20 000 contiguous daily points, `n_lags` 365, horizon 3650)
+    /// prices at 718 641 000 and walled at **47.924 s** on a release build — 24x SC1's 2 s
+    /// bar — because `fit::FIT_BUDGET_SECS` is read only inside `fit::fit_prophet`, which
+    /// this arm never enters. The refusal names the observed cost, all four factors, the
+    /// bound key and what to reduce.
+    #[test]
+    fn a_neuralprophet_request_over_the_train_cost_bound_is_refused() {
+        // Same shape as the structural maximum, at a history short enough that the REFUSAL
+        // (which fires before any training) stays instant.
+        let mut args = np_args(2_000, 365);
+        args.n_lags = Some(365);
+        refusal(&args, "max_np_train_cost");
+    }
+
+    /// The positive control the always-run suite CAN afford: a real NeuralProphet request
+    /// with lags on, priced under the bound, accepted through the door and returning the
+    /// full response shape. The at-the-bound near miss is in `np::wall::np_train_wall`
+    /// (`NP_WALL_MODE=at_bound_*`, three compositions at 93-99% of the bound, 1.402-1.642 s
+    /// on release) because at the bound ONE request costs 45.619 s on a debug profile.
+    #[test]
+    fn a_neuralprophet_request_under_the_train_cost_bound_is_accepted() {
+        let mut args = np_args(120, 7);
+        args.n_lags = Some(7);
+        let r = forecast(&args).expect("a request under the training-cost bound must fit");
+        assert_eq!(r.model, "neuralprophet");
+        assert_eq!(r.yhat.len(), 7, "one row per horizon step");
+        assert_eq!(r.yhat_lower.len(), 7);
+        assert_eq!(r.yhat_upper.len(), 7);
+    }
+
+    /// The bound must not refuse the geometry the NeuralProphet parity ladder proves the
+    /// model CORRECT on.
+    ///
+    /// `np::parity` runs Peyton Manning (2 905 rows over a 2 964-day span) at `n_lags` 0 and
+    /// 30. Through the door those price at 697 200 and 14 552 640, and the second is 97% of
+    /// the bound — so a value of 14 000 000, which the wall measurements would also have
+    /// allowed, would refuse the ladder's own request. This is arithmetic on the door's own
+    /// pricing functions, so it costs nothing to run and turns red the moment the bound is
+    /// lowered past the ladder.
+    #[test]
+    fn the_np_parity_ladder_geometry_prices_under_the_train_cost_bound() {
+        const PEYTON_ROWS: usize = 2_905;
+        const PEYTON_SPAN_DAYS: usize = 2_964;
+        for n_lags in [0usize, 30] {
+            let n_samples = if n_lags == 0 {
+                PEYTON_ROWS
+            } else {
+                PEYTON_SPAN_DAYS - n_lags
+            };
+            let epochs = crate::np::door_epochs(PEYTON_ROWS, n_samples, n_lags);
+            let sweep = crate::np::door_lr_sweep(n_lags).len() as u64;
+            let cost = crate::np::train_cost(n_samples, epochs, n_lags) * sweep;
+            assert!(
+                cost <= MAX_NP_TRAIN_COST,
+                "np::parity's own Peyton rung at n_lags={n_lags} prices at {cost}, which the \
+                 bound {MAX_NP_TRAIN_COST} would REFUSE — a bound below the geometry the \
+                 ladder proves correctness on is wrong"
+            );
+        }
+    }
+
+    /// The comparison is `>`, not `>=`: a request pricing EXACTLY at the bound is accepted.
+    ///
+    /// No near-miss this crate can afford to run reaches the boundary itself — at the bound
+    /// one request costs 45.619 s on a debug profile — so the off-by-one is pinned on the
+    /// door's own comparison instead of on a request nobody will pay for.
+    #[test]
+    fn the_np_train_cost_bound_is_exclusive_not_inclusive() {
+        assert!(
+            !super::np_train_cost_is_over(MAX_NP_TRAIN_COST),
+            "a request pricing EXACTLY at max_np_train_cost must be accepted"
+        );
+        assert!(
+            super::np_train_cost_is_over(MAX_NP_TRAIN_COST + 1),
+            "one unit over the bound must be refused"
+        );
+    }
+
+    /// The door prices a request with the SAME functions it then uses to configure the
+    /// sweep, so the bound cannot be evaded by the two disagreeing — the drift hazard
+    /// `prophet::changepoint_count` was extracted to avoid in 06-14.
+    #[test]
+    fn the_door_prices_a_request_at_exactly_the_work_it_configures() {
+        let (ds, y) = synthetic_daily(120);
+        let days: Vec<i64> = ds
+            .iter()
+            .map(|s| crate::dates::parse_date(s).expect("valid"))
+            .collect();
+        for n_lags in [0usize, 7, 30] {
+            let d = crate::np::NpData::new(&days, &y, days.len(), 10, 0.8);
+            let n_samples = crate::np::n_training_samples(&d, n_lags);
+            let epochs = crate::np::door_epochs(days.len(), n_samples, n_lags);
+            let sweep = crate::np::door_lr_sweep(n_lags).len() as u64;
+            assert_eq!(
+                crate::np::request_train_cost(&d, days.len(), n_lags),
+                crate::np::train_cost(n_samples, epochs, n_lags) * sweep,
+                "request_train_cost must be exactly sweep x train_cost at n_lags={n_lags}"
+            );
         }
     }
 

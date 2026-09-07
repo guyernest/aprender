@@ -420,6 +420,97 @@ pub fn auto_epochs(n: usize) -> usize {
         .clamp(20.0, 500.0) as usize
 }
 
+/// The number of grid rows [`train`] will actually step over for this `n_lags`.
+///
+/// The DOOR needs this BEFORE it decides whether to train at all (cost axis C-08), and
+/// [`train`] derives its own `n` from the same rule — a `debug_assert` inside `train` pins
+/// the two together. A second inline copy of this rule in `forecast.rs` is exactly the drift
+/// hazard `prophet::changepoint_count` was extracted to avoid in plan 06-14: a bound the
+/// door computes differently from the work that is spent is a bound that can be evaded
+/// wherever the two disagree.
+#[must_use]
+pub fn n_training_samples(d: &NpData, n_lags: usize) -> usize {
+    if n_lags == 0 {
+        // NP trains the lag-free model on the OBSERVED rows only.
+        d.grid_observed[..d.n_train_grid]
+            .iter()
+            .filter(|o| **o)
+            .count()
+    } else {
+        // With lags it trains on `(n_lags..n_train_grid)` of the imputed daily grid.
+        d.n_train_grid.saturating_sub(n_lags)
+    }
+}
+
+/// A door-computable PROXY for the multiply-accumulates ONE [`train`] call spends:
+/// `epochs * n_samples * (n_lags + 1)`.
+///
+/// **It is a proxy, not a wall-clock prediction.** It counts the per-sample feature width
+/// the optimiser sweeps (`n_lags` AR inputs plus the trend/seasonality block, collapsed to
+/// `+ 1`) times the number of samples times the number of epochs — deliberately ignoring
+/// the AR head width, the batch size and the autograd tape, none of which the door can
+/// price and none of which change the SHAPE of the growth. Its only job is to be the SAME
+/// number the door checks and the trainer spends, so a request cannot buy work the door
+/// did not price.
+///
+/// The door multiplies this by the learning-rate SWEEP width (2 with lags, 3 without),
+/// because the sweep is run by `forecast::forecast` and not by `train`.
+///
+/// Saturating throughout: at the structural maximum the product is ~3.6e8 per training,
+/// nine orders of magnitude below `u64::MAX`, so saturation is unreachable — it is here so
+/// that a future bound change cannot turn an overflow into a silently SMALL cost that
+/// passes the door.
+#[must_use]
+pub fn train_cost(n_samples: usize, epochs: usize, n_lags: usize) -> u64 {
+    (epochs as u64)
+        .saturating_mul(n_samples as u64)
+        .saturating_mul(n_lags as u64 + 1)
+}
+
+/// The learning-rate sweep the DOOR runs for this `n_lags`.
+///
+/// spike-002's stand-in for NeuralProphet's range test (D-10: selected by TRAIN loss, never
+/// by test error). It lives here, not inlined in `forecast.rs`, so the door's COST estimate
+/// multiplies by the same width the door actually runs — a second inline copy is precisely
+/// the drift hazard `prophet::changepoint_count` was extracted to avoid in plan 06-14.
+#[must_use]
+pub fn door_lr_sweep(n_lags: usize) -> &'static [f64] {
+    if n_lags > 0 {
+        &[0.03, 0.1]
+    } else {
+        &[0.01, 0.03, 0.1]
+    }
+}
+
+/// The epoch count the DOOR configures for one [`train`] call.
+///
+/// With lags on, spike-002 gives the linear AR case 4x the auto epochs of the POINT count,
+/// capped at 320; without lags the door passes `epochs: None` and `train` falls back to
+/// `auto_epochs(n_samples)` — which is exactly what this returns, so the door can price the
+/// lag-free arm without changing its behaviour.
+#[must_use]
+pub fn door_epochs(n_points: usize, n_samples: usize, n_lags: usize) -> usize {
+    if n_lags > 0 {
+        auto_epochs(n_points).min(320)
+    } else {
+        auto_epochs(n_samples)
+    }
+}
+
+/// The TOTAL priced work of ONE `forecast` request on the neuralprophet arm: [`train_cost`]
+/// for a single training, times the width of the learning-rate sweep the door runs.
+///
+/// This is the number cost axis **C-08** is bounded on. It is computable at the door — every
+/// factor is known once [`NpData::new`] has run and the `n_lags` range checks have fired —
+/// and it is built out of the same three functions the door then uses to CONFIGURE the
+/// sweep, so a request cannot buy work the door did not price.
+#[must_use]
+pub fn request_train_cost(d: &NpData, n_points: usize, n_lags: usize) -> u64 {
+    let n_samples = n_training_samples(d, n_lags);
+    train_cost(n_samples, door_epochs(n_points, n_samples, n_lags), n_lags)
+        .saturating_mul(door_lr_sweep(n_lags).len() as u64)
+}
+
 // -------------------------------------------------------------- training ----
 pub struct TrainConfig {
     pub n_lags: usize,
@@ -442,6 +533,9 @@ pub struct TrainLog {
     pub seconds: f64,
     pub tape_len_per_step: usize,
     pub steps: usize,
+    /// [`train_cost`] evaluated on the `n_samples` / `epochs` / `n_lags` this call actually
+    /// used — the same number the door priced the request at before calling in.
+    pub train_cost: u64,
 }
 
 /// Precomputed per-grid-row features.
@@ -510,6 +604,15 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     let epochs = cfg.epochs.unwrap_or_else(|| auto_epochs(n));
     let n_batches = n.div_ceil(batch);
     let total_steps = epochs * n_batches;
+    // The door priced this request with `train_cost(n_training_samples(d, l), epochs, l)`
+    // BEFORE calling in (cost axis C-08). If the two ever derived a different `n` the bound
+    // would be evadable wherever they disagreed, so the sample rule is pinned here rather
+    // than argued. `debug_assert` because this is the hot path and the rule is one branch.
+    debug_assert_eq!(
+        n,
+        n_training_samples(d, l),
+        "np::train and np::n_training_samples must agree about how many rows a request buys"
+    );
     let mut opt = {
         let params = model.parameters_mut();
         AdamW::new(params, cfg.max_lr as f32).weight_decay(cfg.weight_decay)
@@ -523,6 +626,7 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
         seconds: 0.0,
         tape_len_per_step: 0,
         steps: 0,
+        train_cost: train_cost(n, epochs, l),
     };
     let t0 = Instant::now();
     let mut order = samples.clone();
@@ -1185,5 +1289,145 @@ mod parity {
             "the door reported final_train_loss {reported_loss:.6} but the independent argmin \
              is {best_loss:.6}"
         );
+    }
+}
+
+// ------------------------------------------- the C-08 wall harness (ignored) ----
+
+/// Wall-clock harness for cost axis **C-08**, the NeuralProphet training path — the one
+/// axis in this door with no budget of ANY kind on it. `fit::FIT_BUDGET_SECS` is read at
+/// exactly one place, inside `fit::fit_prophet`, and the `"neuralprophet"` arm never enters
+/// it; the door then drives 2 or 3 full [`train`] calls per request through its
+/// learning-rate sweep.
+///
+/// `#[ignore]`d, because it is a MEASUREMENT and not an assertion about correctness. Run it
+/// deliberately, on a RELEASE build, one mode per invocation:
+///
+/// ```text
+/// NP_WALL_MODE=structural_max cargo test --release -p aprender-forecast --lib \
+///     np_train_wall -- --ignored --nocapture
+/// ```
+///
+/// It drives the DOOR (`crate::forecast::forecast`), not [`train`] directly, so its
+/// `outcome=` field can report `refused` once a bound exists. That field is load-bearing:
+/// after a bound is added the worst legal request is REFUSED rather than slow, and the
+/// post-condition gate has to be able to tell those two apart from the same line.
+#[cfg(test)]
+mod wall {
+    use crate::types::{ForecastArgs, MAX_HORIZON, MAX_POINTS};
+
+    /// One machine-parsable line per run. `profile=` is derived from `cfg!(debug_assertions)`
+    /// rather than from intent (CLAUDE.md rule 2): a debug wall labelled `release` is exactly
+    /// the class of error that turns a measurement into a confident wrong answer.
+    fn emit(mode: &str, args: &ForecastArgs, span_days: i64, cost: u64, outcome: &str, secs: f64) {
+        println!(
+            "NP TRAIN WALL: mode={mode} points={} span_days={span_days} n_lags={} horizon={} \
+             train_cost={cost} outcome={outcome} total_s={secs:.3} profile={}",
+            args.ds.len(),
+            args.n_lags.unwrap_or(0),
+            args.horizon,
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        );
+    }
+
+    /// A daily series with a trend and a weekly term, one point per day from 2020-01-01, so
+    /// `span_days == points` and `n_train_grid` is at its ceiling when `points == MAX_POINTS`.
+    fn contiguous_daily(n: usize) -> (Vec<String>, Vec<f64>) {
+        let t0 = crate::dates::days_from_civil(2020, 1, 1);
+        let mut ds = Vec::with_capacity(n);
+        let mut y = Vec::with_capacity(n);
+        for i in 0..n {
+            ds.push(crate::dates::format_ymd(t0 + i as i64));
+            let t = i as f64;
+            y.push(10.0 + 0.001 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin());
+        }
+        (ds, y)
+    }
+
+    #[test]
+    #[ignore = "wall-clock measurement; run with NP_WALL_MODE=... --release -- --ignored"]
+    fn np_train_wall() {
+        let mode = std::env::var("NP_WALL_MODE").unwrap_or_else(|_| "mid_range".into());
+        // freq "D" is the ONLY frequency this arm accepts, so every mode uses it.
+        let (points, n_lags, horizon) = match mode.as_str() {
+            // The worst LEGAL request: MAX_POINTS contiguous daily points (so span_days is
+            // also at MAX_SPAN_DAYS and n_train_grid is at its ceiling), n_lags at its own
+            // ceiling of 365, horizon at MAX_HORIZON.
+            "structural_max" => (MAX_POINTS, 365usize, MAX_HORIZON),
+            // A point in the middle of the legal range, so a single number is not the whole
+            // basis (CLAUDE.md rule 6 — one input is an anecdote).
+            "mid_range" => (2_000usize, 30usize, 365usize),
+            // The OTHER arm: n_lags == 0 takes a THREE-point learning-rate sweep instead of
+            // two, trains on the observed rows only, and lets `train` pick the epochs.
+            "lag_free" => (MAX_POINTS, 0usize, MAX_HORIZON),
+            // THREE compositions sitting just under `MAX_NP_TRAIN_COST`, used to DERIVE that
+            // value rather than to assert it. They differ in every factor the proxy
+            // multiplies — history length, n_lags and horizon — so a value that clears the
+            // 2 s bar on all three is not clearing it on one shape (CLAUDE.md rule 6).
+            // A first pass at a candidate of 20 000 000 measured 2.089 s on the long-history
+            // composition — OVER the bar — which is what moved the value down to 15 000 000.
+            // The REJECTED candidate, kept as a named mode so its rejection is reproducible
+            // rather than only quoted: at a bound of 20 000 000 this composition prices at
+            // 19 991 000 and measured 2.089 s — OVER SC1's 2 s bar. At the SHIPPED bound of
+            // 15 000 000 it is refused, so reproducing the 2.089 s means raising
+            // `MAX_NP_TRAIN_COST` and `constants.fit_max_np_train_cost` to 20 000 000 first.
+            "rejected_candidate_20m" => (MAX_POINTS, 9usize, MAX_HORIZON),
+            "at_bound_long_history" => (MAX_POINTS, 6usize, MAX_HORIZON),
+            "at_bound_mid_history" => (10_000usize, 11usize, MAX_HORIZON),
+            "at_bound_short_history" => (2_000usize, 41usize, 365usize),
+            other => panic!(
+                "NP_WALL_MODE={other:?}: want structural_max, mid_range, lag_free, \
+                 at_bound_long_history, at_bound_mid_history, at_bound_short_history or \
+                 rejected_candidate_20m"
+            ),
+        };
+        let (ds, y) = contiguous_daily(points);
+        let span_days = points as i64;
+        let mut args = ForecastArgs {
+            ds,
+            y,
+            horizon,
+            ..ForecastArgs::default()
+        };
+        args.model = Some("neuralprophet".into());
+        args.freq = Some("D".into());
+        if n_lags > 0 {
+            args.n_lags = Some(n_lags);
+        }
+
+        // The door's own pricing of this request, computed the way the door computes it, so
+        // the line reports the number the bound is (or would be) compared against.
+        let d = super::NpData::new(
+            &args
+                .ds
+                .iter()
+                .map(|s| crate::dates::parse_date(s).expect("harness dates are well formed"))
+                .collect::<Vec<_>>(),
+            &args.y,
+            points,
+            10,
+            0.8,
+        );
+        // The door's OWN pricing function, so this line reports the number the bound is
+        // compared against rather than a second arithmetic that could drift from it.
+        let cost = super::request_train_cost(&d, points, n_lags);
+        drop(d);
+
+        let t0 = std::time::Instant::now();
+        let result = crate::forecast::forecast(&args);
+        let secs = t0.elapsed().as_secs_f64();
+        let outcome = match &result {
+            Ok(_) => "accepted",
+            Err(crate::types::ForecastError::Validation(_)) => "refused",
+            Err(e) => panic!("the harness must produce an accept or a refusal, got {e:?}"),
+        };
+        emit(&mode, &args, span_days, cost, outcome, secs);
+        if let Err(crate::types::ForecastError::Validation(m)) = &result {
+            println!("NP TRAIN WALL REFUSAL: {m}");
+        }
     }
 }
