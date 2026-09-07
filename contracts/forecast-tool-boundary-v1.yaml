@@ -208,11 +208,11 @@ door_surface:
     - field: name
       owner: HolidayArg
       arms: 'prophet only'
-      enforced_by: 'NOTHING. An arbitrary-length String, cloned TWICE per design column by prophet::columns (as `name` and as `component`), used as the sort key of hcols.sort_by, and compared again per column by predict''s component-name dedup. Cost axis C-07, closed by 06-15 T2'
+      enforced_by: 'len(name) in BYTES <= fit_max_holiday_name_len, refused FIRST in the holiday loop (06-15 T2). Before that it was enforced by NOTHING: an arbitrary-length String, cloned TWICE per design column by prophet::columns (as `name` and as `component`), used as the sort key of hcols.sort_by, and compared again per column by predict''s component-name dedup. Cost axis C-07'
     - field: dates
       owner: HolidayArg
       arms: 'prophet only'
-      enforced_by: 'len(dates) <= fit_max_holiday_dates per holiday; sum over holidays <= fit_max_holiday_dates_total; parse_date per entry. The aggregate check fires after the loop rather than inside it (WR-03, 06-15 T1)'
+      enforced_by: 'len(dates) <= fit_max_holiday_dates per holiday; the running sum is refused against fit_max_holiday_dates_total INSIDE the loop (WR-03 closed by 06-15 T1), with the post-loop check kept because only it has seen every holiday and can report the request''s EXACT total; parse_date per entry, now only for holidays the door has not already refused'
     - field: lower_window
       owner: HolidayArg
       arms: 'prophet only'
@@ -248,7 +248,7 @@ door_surface:
       spent_in: 'forecast::forecast holiday loop, then prophet::holiday_day_sets'
       spent_outside_fit_budget: true
       bound: fit_max_holiday_dates_total
-      checked_at: 'the door, after the holiday loop (WR-03: the aggregate fires late — moved into the loop by 06-15 T1)'
+      checked_at: 'the door, INSIDE the holiday loop the moment the running sum passes the ceiling (WR-03 closed by 06-15 T1), with the post-loop exact-total refusal retained'
     - axis: C-04
       name: 'holiday design feature cells'
       formula: '(len(ds) + horizon) * holiday_columns'
@@ -278,11 +278,9 @@ door_surface:
       formula: 'holiday_columns * 2 * len(name), plus an O(C log C) string sort and predict''s O(C * distinct_components) name dedup'
       spent_in: 'prophet::columns and prophet::predict''s component-name dedup'
       spent_outside_fit_budget: true
-      bound: unbounded_pending_06_15
-      no_structural_maximum: true
-      checked_at: 'NOWHERE — this axis is OPEN'
-      note: 'holidays[].name is an unbounded String and there is NO structural maximum to measure against. Read at 06-14: crates/aprender-mcp-forecast/src/lib.rs''s router construction (http_app / pooled_app) applies no DefaultBodyLimit, no max_body and no content-length layer, and the stdio transport has no framing cap at all — so a measured_seconds for this axis would measure an arbitrarily CHOSEN name length rather than a maximum. That is why measured_at_structural_maximum is not an available disposition for it and only a real bound can close it. 1 000 columns x an N-byte name is a ~2 000:1 amplification off one payload occurrence.'
-      owed_by: '06-15 T2'
+      bound: fit_max_holiday_name_len
+      checked_at: 'the door, FIRST in the holiday loop, before the name is cloned into any Column (06-15)'
+      note: 'CLOSED BY A BOUND, never by a measurement. 06-14 shipped this axis with no_structural_maximum: true because holidays[].name is an unbounded String with no structural maximum to measure: crates/aprender-mcp-forecast/src/lib.rs''s router construction (http_app / pooled_app) applies no DefaultBodyLimit, no max_body and no content-length layer, and the stdio transport has no framing cap at all — so any measured_seconds would have described an arbitrarily CHOSEN name length rather than a maximum. 1 000 columns x an N-byte name is a ~2 000:1 amplification off one payload occurrence; at the bound that is ~400 KB of String and ~10 000 comparisons of <= 200 bytes. The bound is on BYTES because bytes are what the clone and the byte-wise comparison cost. The check is FIRST in the loop, which also bounds every other refusal message in that loop — each formats h.name back to the caller.'
     - axis: C-08
       name: 'NeuralProphet training work'
       formula: 'n_lrs * epochs * n_samples * (n_lags + 1), with n_lrs in {2, 3}, epochs = auto_epochs(n) <= 500 (or <= 320 with lags) and n_samples <= n_train_grid'
@@ -368,6 +366,25 @@ equations:
       - 'this bounds WORK, not WALL, and says so: the L-BFGS iteration count is data-dependent, so a 25 000-cell request (half the bound) reproducibly walls at 4.2 s. The arithmetic ceiling per iteration is what is guaranteed; the residual wall-clock exposure is FIT_BUDGET_SECS, a separate knob'
     preconditions:
       - 'every per-holiday bound has already fired with its own message, so holiday_columns <= fit_max_holiday_columns and each len(h.dates) <= fit_max_holiday_dates — what remains unchecked is only what they multiply and sum to'
+
+  # The THIRD instance of door_surface_is_complete, and the only bound in this file whose
+  # subject is a STRING rather than a count: the one caller-settable field the enumeration
+  # found with `enforced_by: NOTHING`, which no review finding had pointed at.
+  holiday_name_cost_bounded:
+    formula: 'accept(args) requires forall h in args.holidays: len_bytes(h.name) <= fit_max_holiday_name_len'
+    domain: 'the name field of every element of the holidays argument of the fit server — untrusted, unauthenticated JSON-RPC `tools/call` input, an arbitrary-length String on both transports'
+    codomain: 'either a design build, or a validation refusal naming the holiday''s INDEX, the OBSERVED byte length, the bound key max_holiday_name_len and its value — and never the name itself'
+    invariants:
+      - 'the Rust constant is asserted EQUAL to constants.fit_max_holiday_name_len by types::tests::cost_bounds_match_contract — the contract is the source, the code is the mirror (D-15). OBSERVED RED by changing the YAML value ALONE and observing the test fail naming the key'
+      - 'the bound is on BYTES, and that is load-bearing rather than incidental: String::len is bytes, and bytes are exactly what the two clones per column and the byte-wise sort comparison cost. forecast::tests::a_holiday_name_whose_char_count_fits_but_whose_byte_length_does_not_is_refused sends 101 multi-byte characters (101 chars, under the bound; 202 bytes, over it) and is the ONLY test in the suite that a rewrite to chars().count() turns red'
+      - 'the AMPLIFICATION this bounds: prophet::columns turns ONE payload occurrence of the name into TWO owned Strings per design column — the column name (format!("{}_delim_{}{}", h.name, sign, off)) and the component (h.name.clone()) — then makes it the key of hcols.sort_by, an O(C log C) byte-wise comparison sort; prophet::predict''s component-name dedup compares it again O(C * distinct_components) times; and it reaches the serialized reply as a key of the components map. At fit_max_holiday_columns (1 000) that is ~2 000 copies plus ~10 000 comparisons, each LINEAR in the length — ~2 000:1'
+      - 'this axis had NO structural maximum, so measured_at_structural_maximum was never an available disposition and only a bound could close it: neither transport caps the request body (no DefaultBodyLimit, no max_body, no content-length layer on http_app / pooled_app; no framing cap on stdio). Any wall written for it would have measured an arbitrarily CHOSEN length. That is why 06-14 held it open with a red test rather than measuring it'
+      - 'the VALUE is derived from what is COMMITTED: the longest holiday name in any fixture, example or test in this repository is 9 bytes — "superbowl", from Prophet 1.4.0''s own canonical peyton_holidays frame, whose other label is "playoff" (7 bytes). 200 is 22x that and two orders of magnitude past any human label, bounding the worst case at 1 000 x 2 x 200 = ~400 KB of String. The same arithmetic on the UNBOUNDED field with a 1 MB name — which nothing at HEAD refused — is ~2 GB from a single request'
+      - 'the refusal names the POSITION and the LENGTH and NEVER the name (T-06-38): echoing an oversized string back re-materialises the very bytes the bound refuses and reflects attacker-controlled content into logs. OBSERVED RED through the live streamable-HTTP router: with the constant and the contract key raised, the server ACCEPTED a 201-byte name and returned a full-shape forecast whose components map carried that name as a key; restored, the same request is refused'
+      - 'the check is FIRST in the holiday loop, before the name is cloned into any Column — which additionally bounds every OTHER refusal message in that loop, each of which formats h.name back to the caller'
+      - 'the bound is ONE-SIDED by design. An empty name is a separate question this plan does not open, and forecast::tests::an_empty_holiday_name_is_not_refused_by_the_length_bound pins that so a later "tidy-up" cannot answer it by accident'
+    preconditions:
+      - 'args deserialized under deny_unknown_fields, so holidays is a well-formed array of HolidayArg; nothing about the name has been read yet, which is why this check can be first'
 
   # The second completion of fit_server_bounds' third invariant, and the FIRST instance of
   # door_surface_is_complete below: the bound's existence is derivable from the door_surface
@@ -637,6 +654,21 @@ proof_obligations:
     formal: 'forall v not in accepted(field): result is Validation and message contains accepted(field)'
     applies_to: all
 
+  - type: bound
+    property: 'Every holiday name is bounded in BYTES at the door, before it is cloned into any design column'
+    formal: 'forall args, forall h in args.holidays: result is Ok implies len_bytes(h.name) <= constants.fit_max_holiday_name_len'
+    applies_to: fit
+
+  - type: invariant
+    property: 'The refusal for an oversized holiday name names the holiday index and the observed byte length and never the name itself'
+    formal: 'forall h with len_bytes(h.name) > constants.fit_max_holiday_name_len: result is Validation and message contains index(h) and len_bytes(h.name) and not contains h.name'
+    applies_to: fit
+
+  - type: invariant
+    property: 'The aggregate holiday-date ceiling is enforced INSIDE the loop, so a request already known to be over it never parses the remaining holidays'
+    formal: 'forall args: running_sum(k) > constants.fit_max_holiday_dates_total implies result is Validation and forall j > k: h_j.dates were never parsed'
+    applies_to: fit
+
   - type: invariant
     property: 'A Chronos horizon past the native window is refused without opt-in, and warned about with it'
     formal: 'horizon > constants.chronos_native_horizon implies (allow_long_horizon or result is Validation) and (allow_long_horizon implies response.warning.is_some())'
@@ -889,6 +921,78 @@ falsification_tests:
       no budget at all. NOTE: do not "fix" this by clamping inside prophet::poisson — that
       removes the wall and silently reintroduces the truncation 06-13 exists to delete. The
       refusal belongs at the door (D-11).
+
+  - id: FALSIFY-BOUNDARY-021
+    rule: 'holidays[].name is bounded in BYTES at the door, first in the holiday loop, on a contract-owned value'
+    prediction: >
+      Assertions at three layers falsify this rule. The CONSTANTS layer:
+      `types::tests::cost_bounds_match_contract` asserts
+      `types::MAX_HOLIDAY_NAME_LEN == constants.fit_max_holiday_name_len`, so perturbing the
+      value HERE — touching no Rust — turns it red naming the key it read (OBSERVED). The
+      LIBRARY door, four-sided:
+      `forecast::tests::a_holiday_name_over_the_length_bound_is_refused` (one byte over),
+      `..._at_the_length_bound_is_accepted` (exactly at the bound, full response),
+      `a_holiday_name_whose_char_count_fits_but_whose_byte_length_does_not_is_refused`
+      (101 multi-byte characters — 101 chars UNDER the bound, 202 bytes OVER it, the case a
+      `chars().count()` rewrite silently breaks, and the only test in the suite that such a
+      rewrite turns red), and
+      `an_empty_holiday_name_is_not_refused_by_the_length_bound` (the bound is one-sided by
+      design, so a later tidy-up cannot answer the empty-name question by accident). The
+      SERVER, both sides through a live streamable-HTTP router:
+      `e2e::refuses_holiday_name_over_length_bound` and
+      `e2e::accepts_holiday_name_at_length_bound`. The server refusal was OBSERVED RED:
+      before the door check existed, the server ACCEPTED a 201-byte name and returned a
+      full-shape forecast whose `components` map carried that name as a key.
+    test: 'cargo test -p aprender-forecast --lib -- types::tests::cost_bounds_match_contract forecast::tests AND cargo test -p aprender-mcp-forecast --lib e2e::'
+    if_fails: >
+      An unauthenticated request turns ONE occurrence of an arbitrary-length string into
+      ~2 000 owned copies plus ~10 000 byte-wise sort comparisons — a ~2 000:1 amplification
+      off a field that, at the close of plan 06-14, was enforced by NOTHING. Do not "fix" it
+      by measuring instead: this axis has NO structural maximum (neither transport caps the
+      body), so a wall written for an arbitrarily chosen length would look like evidence and
+      be none. That is why 06-14 held it open with a red test rather than a measurement.
+
+  - id: FALSIFY-BOUNDARY-022
+    rule: 'The refusal for an oversized holiday name names the index and the observed byte length and never the name itself'
+    prediction: >
+      `forecast::tests::the_oversized_name_refusal_names_the_length_and_not_the_name` sends a
+      holiday whose name is a distinctive repeated token one byte over the bound and asserts
+      the refusal message contains the holiday's INDEX and the observed BYTE LENGTH and does
+      NOT contain the oversized name. The assertion is non-vacuous by construction: the token
+      is a string the message would contain if `h.name` were interpolated, and every OTHER
+      refusal in the same loop does interpolate `h.name` — which is precisely why the length
+      check is FIRST in the loop, so those messages can only ever carry a bounded name.
+    test: 'cargo test -p aprender-forecast --lib -- forecast::tests::the_oversized_name_refusal_names_the_length_and_not_the_name'
+    if_fails: >
+      T-06-38. Echoing an oversized attacker-controlled string back into an error message
+      re-materialises the very bytes the bound refuses, and reflects that content into every
+      log and trace the refusal reaches. The caller needs to know WHICH holiday and HOW LONG;
+      they already have the name.
+
+  - id: FALSIFY-BOUNDARY-023
+    rule: 'The aggregate holiday-date ceiling is enforced INSIDE the holiday loop, so a request already known to be over it never parses the remaining holidays'
+    prediction: >
+      `forecast::tests::the_aggregate_dates_refusal_fires_inside_the_holiday_loop` and
+      `e2e::refuses_holiday_dates_total_before_parsing_the_rest` cross the aggregate ceiling
+      at the ELEVENTH holiday while every LATER holiday carries `"2020-1-01"` — nine bytes,
+      which `parse_date`'s SHAPE gate rejects. If the check moved back after the loop the
+      caller would receive the DATE-SHAPE refusal instead of the aggregate one, so these
+      discriminate POSITION and not merely presence; a grep for the constant cannot make that
+      claim. Both were OBSERVED RED against the unmoved check, reporting
+      `bad date "2020-1-01": want YYYY-MM-DD`.
+      `holidays_carrying_exactly_the_total_bound_are_accepted` is the two-sided control that
+      catches an in-loop comparison written as `>=` instead of `>`, and
+      `refuses_holiday_dates_total_over_bound` still pins the post-loop refusal, which is
+      KEPT because only it has seen every holiday and can report the request's EXACT total.
+    test: 'cargo test -p aprender-forecast --lib -- forecast::tests AND cargo test -p aprender-mcp-forecast --lib e2e::'
+    if_fails: >
+      1 000 holidays of 1 000 dates run ~1 000 000 `parse_date` calls and allocate ~8 MB of
+      `Vec<i64>` AFTER the door already has the information to refuse the request (WR-03).
+      The amplification is roughly 1:1 with the payload, so this is a hygiene defect rather
+      than a second CR-01 — but it is unbounded work performed on a request already known to
+      be bad, on exactly the surface this phase exists to bound, and the comment above the
+      accumulation claimed the property the code lacked.
+
 
 kani_harnesses:
 

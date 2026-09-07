@@ -21,8 +21,8 @@ use crate::prophet::{
 };
 use crate::types::{
     ForecastArgs, ForecastError, ForecastResponse, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
-    MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_WINDOW, MAX_HORIZON,
-    MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
+    MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
+    MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
 };
 
 /// Fit and forecast in ONE stateless call (D-01: no fit -> artifact -> forecast round-trip).
@@ -189,6 +189,30 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             let mut holiday_columns = 0usize;
             let mut holiday_dates_total = 0usize;
             for h in args.holidays.as_deref().unwrap_or(&[]) {
+                // FIRST in the loop, deliberately (C-07). `prophet::columns` clones this
+                // name TWICE per design column and then makes it the key of an O(C log C)
+                // byte-wise comparison sort, so at MAX_HOLIDAY_COLUMNS one payload
+                // occurrence is amplified ~2 000:1 — and nothing bounded it at HEAD. Being
+                // first also bounds every OTHER refusal message in this loop, each of which
+                // formats `h.name` back to the caller.
+                //
+                // BYTES, not chars: `String::len` is bytes, and bytes are exactly what the
+                // clone and the comparison cost. Do NOT "fix" this to `chars().count()` —
+                // `a_holiday_name_whose_char_count_fits_but_whose_byte_length_does_not_is_refused`
+                // is the test that catches that rewrite.
+                //
+                // The message names the POSITION and the LENGTH and never the name itself:
+                // echoing an oversized string back re-materialises the very bytes the bound
+                // refuses and reflects attacker-controlled content into logs (T-06-38).
+                if h.name.len() > MAX_HOLIDAY_NAME_LEN {
+                    return Err(ForecastError::Validation(format!(
+                        "holiday at index {}: name is {} bytes, which exceeds \
+                         max_holiday_name_len {MAX_HOLIDAY_NAME_LEN}; use a shorter label \
+                         (the name is not echoed back — its LENGTH is what is at issue)",
+                        holidays.len(),
+                        h.name.len()
+                    )));
+                }
                 if h.lower_window > 0 || h.upper_window < 0 {
                     return Err(ForecastError::Validation(format!(
                         "holiday {:?}: lower_window ≤ 0 ≤ upper_window",
@@ -867,6 +891,49 @@ mod tests {
         );
         let args = named_holiday_args(name);
         refusal(&args, "max_holiday_name_len");
+    }
+
+    /// T-06-38 — the refusal names the LENGTH, never the name.
+    ///
+    /// Echoing an oversized attacker-controlled string back re-materialises the very bytes
+    /// the bound refuses and reflects that content into every log the refusal reaches. The
+    /// assertion is non-vacuous by construction: `TOKEN` is what the message WOULD contain
+    /// if `h.name` were interpolated, and every OTHER refusal in the same loop does
+    /// interpolate `h.name` — which is exactly why this check is FIRST in the loop.
+    #[test]
+    fn the_oversized_name_refusal_names_the_length_and_not_the_name() {
+        const TOKEN: &str = "SECRETHOLIDAYLABEL";
+        let over = crate::types::MAX_HOLIDAY_NAME_LEN + 1;
+        let name = TOKEN.repeat(over.div_ceil(TOKEN.len()))[..over].to_string();
+        assert!(
+            name.contains(TOKEN),
+            "the probe token must survive truncation"
+        );
+        let args = named_holiday_args(name.clone());
+        match forecast(&args) {
+            Err(ForecastError::Validation(m)) => {
+                assert!(
+                    m.contains("max_holiday_name_len"),
+                    "the refusal must name the bound key; got {m:?}"
+                );
+                assert!(
+                    m.contains(&over.to_string()),
+                    "the refusal must report the OBSERVED byte length ({over}); got {m:?}"
+                );
+                assert!(
+                    m.contains("index 0"),
+                    "the refusal must name WHICH holiday; got {m:?}"
+                );
+                assert!(
+                    !m.contains(TOKEN),
+                    "the refusal must NOT echo the oversized name back (T-06-38); got {m:?}"
+                );
+            }
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
     }
 
     /// The bound is ONE-SIDED by design. An empty name is a separate question (does a

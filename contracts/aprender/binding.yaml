@@ -1607,7 +1607,7 @@ bindings:
   status: implemented
   notes: 'Landed with plan 05-10. DECLARATIVE equation: it maps PF-007 and PF-008 onto the mechanisms that answer them, and the RENDERER is where a violation would surface (a best-seed headline, an unlabelled F1, an adapter-only size comparison, a verdict word). render_human composes every table, and its tests scan the whole output for verdict vocabulary and pair every absence assertion with a non-vacuity one. Row corrected from the non-existent `bench_report`.'
 # ---------------------------------------------------------------------------
-# Phase 6 (native time-series forecasting stack). 60 rows, one per equation of
+# Phase 6 (native time-series forecasting stack). 61 rows, one per equation of
 # the four Phase 6 contracts, audited as a BLOCKING tier3 gate by the Makefile's
 # `contract-audit-phase6`. That target does MORE than `pv audit`: it also resolves
 # every row below to a definition site in the file its `module_path` names, because
@@ -2034,6 +2034,13 @@ bindings:
   signature: 'fn every_request_knob_is_enumerated()'
   status: implemented
   notes: 'A COMPLETENESS equation, so its definition site is the assertion rather than a production function: the claim is about the enumeration in door_surface: matching the structs, and the thing that can be violated is the test. Binds to the knobs half (set equality against schemars::schema_for! in both directions, both mutated); the cost-axis half is every_cost_axis_names_a_real_bound and the known-open axes are held by the declared-red no_cost_axis_is_pending, both in the same file. Landed with plan 06-14.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: holiday_name_cost_bounded
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'The refusal is FIRST in the holiday loop, before the name is cloned into any Column — which also bounds every other refusal message in that loop, each of which formats h.name back to the caller. On BYTES, because String::len is bytes and bytes are what the two clones per column and the byte-wise sort comparison cost. Landed with plan 06-15 (cost axis C-07, found by 06-14''s enumeration and by no review finding — the one caller-settable field whose knobs entry read enforced_by: NOTHING).'
 - contract: forecast-tool-boundary-v1.yaml
   equation: default_seed_42
   module_path: aprender_forecast::forecast
