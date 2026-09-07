@@ -767,19 +767,26 @@ mase-rolling-origin:
 
 # The holiday design-build wall, MEASURED and PRINTED — no bar (06-11).
 #
-# `forecast-bench` measures the NO-HOLIDAY SC1 shape. This one measures the shape
-# that shares its point count and still missed the bar by 8x: holiday windows are a
-# per-request design-column multiplier and `make_design` runs BEFORE the fit budget
-# is entered, so nothing downstream can see the cost.
+# `forecast-bench` measures the NO-HOLIDAY SC1 shape (0.214 s). This one measures the
+# holiday-carrying shape, which shares its point count and missed the bar by 8x:
+# 3000 x 181 x 84 walled at 16.081 s inside every bound the door checked.
 #
-# The ignored test PRINTS one machine-parsable `HOLIDAY DESIGN WALL:` line and
-# asserts NO wall (REVIEW-06-04: a wall-clock assertion inside libtest moves with
-# CPU throttling). This recipe only re-prints it. The 2 s bar lands here in 06-12.
+# THE DEFAULTS ARE THE WORST SHAPE THE DOOR STILL ACCEPTS, deliberately.
+# 800 points + a 200-step horizon x 50 holiday columns = 50 000 design feature cells,
+# exactly `constants.fit_max_holiday_design_cost`, and the slowest of the three
+# at-the-bound compositions measured on the aarch64 release host (1.692 s, vs 1.174 s
+# many-rows and 0.106 s many-columns). That is the configuration a 2 s bar has to be
+# asserted against, and 06-12 adds the bar here. The verifier's original 3000/181/84
+# is now REFUSED at the door and can only be run against a build without the bound.
+#
+# The ignored test PRINTS one machine-parsable measurement line and asserts NO wall
+# (REVIEW-06-04: a wall-clock assertion inside libtest moves with CPU throttling).
+# This recipe only re-prints it.
 #
 # Release-only ON PURPOSE: this crate carries `[profile.dev.package.aprender-forecast]
 # opt-level = 3`, which makes a dev-profile number look plausible and still not be the
 # SC1 bar — hence `profile=` on the printed line (CLAUDE.md rule 2).
-forecast-holiday-bench points="3000" columns="181" dates="84" horizon="365":
+forecast-holiday-bench points="800" columns="50" dates="84" horizon="200":
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target
