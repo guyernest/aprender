@@ -22,7 +22,7 @@ affects: [06-17, phase-6-verification, ship]
 actuals:
   tokens: 20460
   tasks: 3
-  commits: 7
+  commits: 9
 plan_head_before: bfc3aeb4f91d24e2dd9c34a5a133fd1c4a458827
 
 tech-stack:
@@ -417,5 +417,5 @@ None. This plan adds no request-handling code and no network, auth, file-access 
 
 - All four created files exist on disk (`sc1_wall.rs`, both scripts, this SUMMARY).
 - All seven commits resolve in `git log --all`: `255c6c143`, `ef24b0d5a`, `774b4e57e`, `ed98296a8`, `0aff470a6`, `a347d61e2`, `2807dcb12`.
-- `commits: 7` in the frontmatter is MEASURED — `git rev-list --count bfc3aeb4f..HEAD` = 7, taken from the on-disk plan ledger, not narrated. The count includes this SUMMARY's own `docs(06-16)` commit.
+- `commits: 9` in the frontmatter is MEASURED from the on-disk plan ledger, not narrated. It was 7 when this SUMMARY was first written, then 8 once `497a9d141` (`docs(06-16)`: STATE + ROADMAP) landed, and 9 counting this reconciliation commit itself — which is what makes the number terminal and checkable: `git rev-list --count bfc3aeb4f..<this commit>` = 9. Reconciled in place rather than left stale, following 06-15's `reconcile actuals.commits` precedent; a frontmatter count that disagrees with the ledger is exactly the narrated-vs-measured failure this field exists to prevent.
 - Every plan-level `<verification>` command re-run and logged in the sections above.
