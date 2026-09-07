@@ -1102,6 +1102,14 @@ mod sampler {
         };
         let points = env_usize("LOGISTIC_BENCH_POINTS", 100);
         let horizon = env_usize("LOGISTIC_BENCH_HORIZON", 3650);
+        // `dates::future_days` multiplies the horizon COUNT by 1 / 7 / ~30.44 for D / W /
+        // MS, so the frequency is a 30x multiplier on the future span and therefore on
+        // `t_max` and on the Poisson mean `MAX_LOGISTIC_CHANGEPOINT_LAMBDA` bounds. A wall
+        // measured on one frequency is not a wall for the others, which is exactly why this
+        // knob exists: the bound's value rests on three compositions, not one. An
+        // unrecognised value falls through to `future_days`' own refusal rather than being
+        // silently coerced to "D".
+        let freq = std::env::var("LOGISTIC_BENCH_FREQ").unwrap_or_else(|_| "D".into());
         let t0 = days_from_civil(2015, 1, 1);
         let ds: Vec<String> = (0..points).map(|i| format_ymd(t0 + i as i64)).collect();
         let y: Vec<f64> = (0..points)
@@ -1114,9 +1122,29 @@ mod sampler {
             ds,
             y,
             horizon,
+            freq: Some(freq.clone()),
             growth: Some("logistic".into()),
             cap: Some(50.0),
             ..ForecastArgs::default()
+        };
+        // The quantity the bound is ON, printed with the wall so a recorded measurement can
+        // be checked against the constant it justifies rather than merely believed.
+        let lambda = {
+            let ds_days: Vec<i64> = args
+                .ds
+                .iter()
+                .map(|s| crate::dates::parse_date(s).expect("the bench builds valid dates"))
+                .collect();
+            let fut = crate::dates::future_days(ds_days[ds_days.len() - 1], horizon, &freq)
+                .expect("the bench builds a valid freq");
+            let t_scale = (ds_days[ds_days.len() - 1] - ds_days[0]) as f64;
+            let t_max = (fut[fut.len() - 1] - ds_days[0]) as f64 / t_scale;
+            let spec = super::Spec::default_linear(super::auto_seasonalities(
+                &ds_days,
+                10.0,
+                super::Mode::Additive,
+            ));
+            super::changepoint_count(ds_days.len(), &spec) as f64 * (t_max - 1.0)
         };
 
         let t = std::time::Instant::now();
@@ -1140,9 +1168,9 @@ mod sampler {
             "release"
         };
         println!(
-            "LOGISTIC BAND WALL: points={points} horizon={horizon} growth=logistic \
-             total_s={total:.3} fit_s={:.3} predict_s={:.3} mean_band_width={width:.4} \
-             profile={profile}",
+            "LOGISTIC BAND WALL: points={points} horizon={horizon} freq={freq} \
+             growth=logistic lambda={lambda:.1} total_s={total:.3} fit_s={:.3} \
+             predict_s={:.3} mean_band_width={width:.4} profile={profile}",
             r.fit_seconds, r.predict_seconds
         );
     }

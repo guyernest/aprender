@@ -16,12 +16,13 @@ use crate::dates::{format_ymd, future_days, parse_date};
 use crate::fit::{fit_prophet, FIT_BUDGET_SECS, MAX_ITERS_PER_ROUND};
 use crate::np;
 use crate::prophet::{
-    auto_seasonalities, make_design, predict, Growth, Holiday, Mode, Seasonality, Spec,
+    auto_seasonalities, changepoint_count, make_design, predict, Growth, Holiday, Mode,
+    Seasonality, Spec,
 };
 use crate::types::{
     ForecastArgs, ForecastError, ForecastResponse, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
-    MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_WINDOW, MAX_HORIZON, MAX_POINTS,
-    MAX_SPAN_DAYS, MIN_POINTS,
+    MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_WINDOW, MAX_HORIZON,
+    MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
 };
 
 /// Fit and forecast in ONE stateless call (D-01: no fit -> artifact -> forecast round-trip).
@@ -285,6 +286,45 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     prior_scale: 1e-3,
                     mode,
                 });
+            }
+            // ---- the LOGISTIC CHANGEPOINT LAMBDA bound, at THE door and BEFORE make_design ----
+            //
+            // `predict`'s `Growth::Logistic` arm draws `poisson(lambda)` NEW changepoints on
+            // every one of the 1 000 simulation rows, with
+            // `lambda = changepoints_t.len() * (t_max - 1)`, and the per-row work
+            // (`logistic_gammas` + a sort + a full `piecewise_logistic`) is LINEAR in that
+            // count. Nothing bounded lambda: `MAX_POINTS`, `MAX_SPAN_DAYS` and `MAX_HORIZON`
+            // are checked in isolation and it is their RATIO that sizes this, with
+            // `dates::future_days` multiplying the horizon COUNT by 7 for "W" and ~30.44 for
+            // "MS". `FIT_BUDGET_SECS` cannot cover it either — that budget is entered inside
+            // `fit_prophet`, and this cost is spent in `predict`, which runs after the fit
+            // returns with no budget at all. A 1 132-byte accepted request walled at 2.334 s
+            // against SC1's 2 s bar (06-REVIEW.md CR-01).
+            //
+            // The count comes from `prophet::changepoint_count`, the SAME function
+            // `make_design` is tied to, so the door's lambda IS the lambda `predict` draws
+            // rather than a second inline copy of the arithmetic that could drift from it.
+            if growth == Growth::Logistic {
+                // `ds` is strictly ascending and `ds.len() >= MIN_POINTS` (10), both already
+                // refused above, so `t_scale_days` is strictly positive and no division
+                // guard is needed — adding one would imply a case that cannot occur.
+                let t_scale_days = (ds[ds.len() - 1] - ds[0]) as f64;
+                let future_span_days = fut[fut.len() - 1] - ds[0];
+                let t_max = future_span_days as f64 / t_scale_days;
+                let n_changepoints = changepoint_count(ds.len(), &spec);
+                let lambda = n_changepoints as f64 * (t_max - 1.0);
+                if lambda > MAX_LOGISTIC_CHANGEPOINT_LAMBDA {
+                    return Err(ForecastError::Validation(format!(
+                        "the logistic uncertainty simulation would draw a Poisson mean of \
+                         {lambda:.1} new changepoints per sample \
+                         (changepoints x (t_max - 1) = {n_changepoints} x ({t_max:.3} - 1), \
+                         where t_max is the {future_span_days}-day future span over the \
+                         {t_scale_days}-day history span), which exceeds \
+                         max_logistic_changepoint_lambda {MAX_LOGISTIC_CHANGEPOINT_LAMBDA}; \
+                         shorten the horizon, use freq \"D\" instead of \"W\" or \"MS\", or \
+                         send a longer history"
+                    )));
+                }
             }
             let design = make_design(&ds, &args.y, &spec);
             let t0 = Instant::now();
@@ -766,6 +806,117 @@ mod tests {
         let r = forecast(&logistic_ok)
             .expect("logistic growth with a cap above max(y) is a legal request");
         assert_eq!(r.yhat.len(), 7, "the logistic arm must still return a band");
+    }
+
+    // ------------------------------------------ the logistic changepoint lambda bound ---
+    // `06-REVIEW.md` CR-01. A 1 132-byte request, inside every door bound, buys a Poisson
+    // mean of ~86 790 new changepoints on each of 1 000 simulation rows and walls at
+    // 2.334 s against SC1's 2 s bar. Three cases, because a one-sided assertion would pass
+    // for a bound that refuses everything and for a bound keyed on the wrong arm.
+
+    /// The review's exact geometry, as a library request: 33 daily points (the tightest
+    /// history that still earns all 25 changepoints), `horizon: 3650`, `freq: "MS"`.
+    fn logistic_lambda_args(points: usize, horizon: usize, freq: &str) -> ForecastArgs {
+        let t0 = days_from_civil(2015, 1, 1);
+        let ds: Vec<String> = (0..points as i64).map(|i| format_ymd(t0 + i)).collect();
+        let y: Vec<f64> = (0..points)
+            .map(|i| {
+                let t = i as f64;
+                10.0 + 0.01 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin()
+            })
+            .collect();
+        ForecastArgs {
+            ds,
+            y,
+            horizon,
+            freq: Some(freq.into()),
+            growth: Some("logistic".into()),
+            cap: Some(50.0),
+            ..ForecastArgs::default()
+        }
+    }
+
+    /// The lambda a given request will actually make `predict` draw, computed the way the
+    /// door computes it — through `prophet::changepoint_count`, so a test named "over"
+    /// cannot quietly become a test of something under the bound if the constant moves.
+    fn lambda_of(args: &ForecastArgs) -> f64 {
+        use crate::dates::parse_date;
+        use crate::prophet::{auto_seasonalities, changepoint_count, Mode, Spec};
+        let ds: Vec<i64> = args
+            .ds
+            .iter()
+            .map(|s| parse_date(s).expect("the helper builds valid dates"))
+            .collect();
+        let fut = crate::dates::future_days(
+            ds[ds.len() - 1],
+            args.horizon,
+            args.freq.as_deref().unwrap_or("D"),
+        )
+        .expect("the helper builds a valid freq");
+        let t_scale = (ds[ds.len() - 1] - ds[0]) as f64;
+        let t_max = (fut[fut.len() - 1] - ds[0]) as f64 / t_scale;
+        let spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, Mode::Additive));
+        changepoint_count(ds.len(), &spec) as f64 * (t_max - 1.0)
+    }
+
+    /// The measured CR-01 request is refused, and the refusal names the bound key.
+    #[test]
+    fn a_logistic_request_over_the_changepoint_lambda_bound_is_refused() {
+        let args = logistic_lambda_args(33, 3650, "MS");
+        let lambda = lambda_of(&args);
+        assert!(
+            lambda > crate::types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA,
+            "the OVER geometry must actually be over the bound it is testing: \
+             lambda={lambda:.1} vs {}",
+            crate::types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA
+        );
+        refusal(&args, "max_logistic_changepoint_lambda");
+    }
+
+    /// The NEAR MISS, on the review's own control axis. Same 33 points, same `MS`
+    /// frequency, a horizon that pulls lambda just under the bound — and it must still
+    /// FIT and still return a full-length band. A bound proven only to refuse is not
+    /// proven to refuse just what it claims.
+    #[test]
+    fn a_logistic_request_just_under_the_changepoint_lambda_bound_is_accepted() {
+        let horizon = 840usize;
+        let args = logistic_lambda_args(33, horizon, "MS");
+        let lambda = lambda_of(&args);
+        assert!(
+            lambda <= crate::types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA,
+            "the UNDER geometry must actually sit under the bound: lambda={lambda:.1}"
+        );
+        assert!(
+            lambda > 0.9 * crate::types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA,
+            "the near miss must be NEAR: lambda={lambda:.1} is not within 10% of the bound, \
+             so this control would pass for a bound an order of magnitude away"
+        );
+        let r = forecast(&args).expect("a request just under the bound must fit, not refuse");
+        assert_eq!(r.yhat.len(), horizon, "one row per horizon step");
+        assert_eq!(r.yhat_lower.len(), horizon);
+        assert_eq!(r.yhat_upper.len(), horizon);
+        assert_eq!(r.trend.len(), horizon);
+        assert!(r.yhat.iter().all(|v| v.is_finite()));
+    }
+
+    /// The SAME geometry on the LINEAR arm is still accepted.
+    ///
+    /// `predict`'s linear arm never calls `poisson` — the review measured it flat at
+    /// 0.149 s while the logistic arm went to 2.334 s — so the bound must be keyed on
+    /// `Growth::Logistic`. Without this case, a refusal that fired for every growth arm
+    /// would pass both cases above while silently refusing the majority of real requests.
+    #[test]
+    fn the_linear_arm_at_the_same_geometry_is_still_accepted() {
+        let mut args = logistic_lambda_args(33, 3650, "MS");
+        assert!(
+            lambda_of(&args) > crate::types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA,
+            "the geometry must be one the LOGISTIC arm would refuse, or this proves nothing"
+        );
+        args.growth = Some("linear".into());
+        // `cap` is logistic-only (06-10), so the linear request drops it.
+        args.cap = None;
+        let r = forecast(&args).expect("the linear arm has no changepoint-lambda cost to bound");
+        assert_eq!(r.yhat.len(), 3650, "one row per horizon step");
     }
 
     /// JSON `1e400` parses to `f64::INFINITY`, for which `cap <= y_max` is false.

@@ -96,6 +96,66 @@ pub const MAX_HOLIDAY_DESIGN_COST: usize = 50_000;
 /// derived against (the structural maximum of 1 000 000 measures 18.049 ms).
 pub const MAX_HOLIDAY_DATES_TOTAL: usize = 10_000;
 
+/// Hard upper bound on the logistic uncertainty simulation's Poisson mean
+/// `lambda = changepoint_count(len(ds)) * (t_max - 1)` — the count of NEW changepoints
+/// each of the 1 000 simulation rows draws in `prophet::predict`'s `Growth::Logistic` arm.
+///
+/// **Why the existing bounds did not cover this.** [`MAX_POINTS`], [`MAX_SPAN_DAYS`] and
+/// [`MAX_HORIZON`] are each checked in ISOLATION and it is their RATIO that sizes this
+/// cost: `t_max = (future_span_days) / (history_span_days)`. Worse, [`MAX_HORIZON`] bounds
+/// the COUNT of future steps while `dates::future_days` multiplies that count by 7 for
+/// `"W"` and by ~30.44 for `"MS"`, so the same legal horizon buys a 30x longer span on one
+/// frequency than on another. A high-lambda request is therefore necessarily a SHORT-history
+/// request, which is precisely why every point-count bound is satisfied while the product is
+/// not — the same shape as [`MAX_HOLIDAY_DESIGN_COST`].
+///
+/// **Why `fit::FIT_BUDGET_SECS` cannot substitute.** That budget is entered inside
+/// `fit::fit_prophet`. This cost is spent in `prophet::predict`, which `forecast::forecast`
+/// calls AFTER the fit returns, with no budget of any kind. No setting of `FIT_BUDGET_SECS`
+/// could ever have seen it.
+///
+/// **The measured breach (`06-REVIEW.md` CR-01, reproduced three times).** Release build,
+/// `--http --pool 1`, min of 2 runs, same host. A **1 132-byte** accepted request — 33 daily
+/// points, `horizon: 3650`, `freq: "MS"`, `growth: "logistic"`, `cap: 50`, inside every door
+/// bound — went from **0.157 s** before 06-13 to **2.334 s** at HEAD (14.8x), over SC1's 2 s
+/// bar. Its controls pin the mechanism rather than argue it: the same request at 30-day point
+/// spacing (lambda / 30) is 0.209 s, at `freq: "W"` 0.634 s, at `freq: "D"` 0.231 s, and on
+/// the `"linear"` arm — the one that never calls `poisson` — flat at 0.149 s. The two logistic
+/// rows differ ONLY in history spacing, so the 11x spread between them is lambda and nothing
+/// else. 06-13 did not cause this by being wrong: it correctly deleted Knuth's accidental
+/// saturation near 745, after which the drawn count tracks lambda — which nothing bounded.
+///
+/// **The structural maximum is 86 789.8**, and it is exactly the review's configuration:
+/// `changepoint_count` peaks at 25 (`Spec::default_linear`) and needs
+/// `floor(n * 0.8) - 1 >= 25`, i.e. `n >= 33` points; the tightest legal span for 33 daily
+/// points is 32 days; and the widest legal future span is 3 650 `MS` steps = 111 123 days.
+/// `25 * (111123 / 32 - 1)` = 86 789.8.
+///
+/// **20 000 is the value, and it is derived from measurement.** Interpolating the review's
+/// four points (lambda 2 852 -> 0.231 s, 2 866 -> 0.209 s, 19 925 -> 0.634 s, 86 790 ->
+/// 2.334 s) puts the 2 s bar near lambda 74 000; 20 000 is the largest round value with
+/// roughly 3x measured headroom. Walled at three compositions on a release build, at the
+/// tightest legal history span (33 daily points), by
+/// `prophet::sampler::logistic_band_wall` under `LOGISTIC_BENCH_FREQ`:
+///
+/// | freq | points | horizon | lambda | total_s | predict_s |
+/// |------|--------|---------|--------|---------|-----------|
+/// | `D`  | 33 | 3 650 | 2 851.6 (freq `D`'s OWN structural maximum) | **0.244 s** | 0.215 s |
+/// | `W`  | 33 | 3 650 | 19 960.9 | **0.711 s** | 0.680 s |
+/// | `MS` | 33 |   840 | 19 974.2 | **0.582 s** | 0.552 s |
+///
+/// The worst of the three is 0.711 s against the 2 s bar — roughly 2.8x headroom — and the
+/// cost is almost entirely in `predict_s`, which is the half `FIT_BUDGET_SECS` does not
+/// cover. `mean_band_width` is 49.37 / 49.39 on the two at-the-bound rows against 45.51 on
+/// the `D` row, so the accepted band still widens with lambda: the bound refuses cost, it
+/// does not quietly truncate the simulation the way the pre-06-13 saturation did.
+///
+/// `freq: "D"` cannot reach this bound at all: at 33 points its largest attainable lambda is
+/// 2 851.6, so its row is that maximum rather than an at-the-bound point. That is a fact about
+/// the frequency multiplier, not a gap in the measurement — `MS` is 30.44x `D` on the same
+/// horizon, which is why the bound has to be on the PRODUCT and not on the horizon.
+pub const MAX_LOGISTIC_CHANGEPOINT_LAMBDA: f64 = 20_000.0;
+
 /// Default router-pool size for the streamable-HTTP server (`constants.pool_default`).
 ///
 /// Lives here, beside the other contract-mirrored bounds, because this is the crate that

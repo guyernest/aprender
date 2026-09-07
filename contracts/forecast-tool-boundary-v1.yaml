@@ -82,6 +82,16 @@ constants:
   fit_max_holiday_dates: 1000
   fit_max_holiday_design_cost: 50000
   fit_max_holiday_dates_total: 10000
+  # The Poisson mean the LOGISTIC uncertainty simulation draws on each of its 1 000 rows:
+  # lambda = changepoint_count(len(ds)) x (t_max - 1), t_max = future_span_days /
+  # history_span_days. fit_max_points, fit_max_span_days and fit_max_horizon are each
+  # satisfied by a request whose RATIO is not, and fit_max_horizon bounds the COUNT of
+  # future steps while dates::future_days multiplies that count by 7 for "W" and ~30.44 for
+  # "MS" — so three isolated bounds left this product open. The structural maximum is
+  # 86 789.8 (33 daily points, horizon 3650, freq MS), which is exactly the 1 132-byte
+  # request 06-REVIEW.md CR-01 measured at 2.334 s against SC1's 2 s bar. Mirrored by
+  # types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA via test_support::constant_f64.
+  fit_max_logistic_changepoint_lambda: 20000
   # aprender-mcp-chronos (zero-shot: Chronos-Bolt T5, no fit)
   chronos_min_points: 4
   chronos_max_points: 20000
@@ -97,6 +107,217 @@ constants:
   # `just forecast-pool-ratio` on the aarch64 release host, NEVER by a unit test.
   pool_speedup_min_x10: 20
   pool_speedup_best_of: 3
+
+# THE DOOR'S WHOLE SURFACE, ENUMERATED BY INSPECTION AND CHECKED BY TEST.
+#
+# Same shape and same reason as `constants:` above — not part of the `Contract` struct (the
+# parser drops unknown top-level keys), and deliberately so: this block is READ AT TEST TIME
+# by `types::tests::every_request_knob_is_enumerated` and
+# `types::tests::every_cost_axis_names_a_real_bound`, so it is a CHECKED claim about the code
+# rather than a document that describes it.
+#
+# WHY IT EXISTS. Three consecutive gap-closure rounds each closed exactly the ONE measured
+# probe an adversarial pass had found, and each time the next pass found the next instance of
+# the same class: "the door accepts a request whose cost or whose semantics it never checks".
+# 06-11 closed the holiday design PRODUCT, 06-12 proved it through the transport, 06-13 fixed
+# the sampler — and 06-13's own correct fix un-bounded the simulated changepoint count, which
+# is CR-01. A fourth point fix would be a fourth round of the same mistake. The enumeration is
+# the structural answer: `knobs:` is checked against `schemars::schema_for!` output in BOTH
+# directions, so a field added to `ForecastArgs` or `HolidayArg` with no entry here turns a
+# test red, and an entry here for a field that no longer exists turns the same test red.
+#
+# `cost_axes[].bound` must be one of: a key that exists in `constants:` above; the literal
+# `measured_at_structural_maximum`, which additionally requires a `measured_seconds` strictly
+# below 2.0 (SC1's bar); or the pending marker `unbounded_pending_06_15`. Pending entries are
+# OUT OF SCOPE for `every_cost_axis_names_a_real_bound` and are the thing
+# `types::tests::no_cost_axis_is_pending` fails on — see that test's doc comment.
+door_surface:
+
+  # ---- (a) every caller-settable field reachable through `aprender_forecast::forecast` ----
+  # 12 `ForecastArgs` fields + 4 `HolidayArg` fields = 16. Derived from
+  # `schemars::schema_for!`, never hand-kept: the test walks `schema["properties"]` for both
+  # structs and asserts SET EQUALITY against the `field` + `owner` pairs below.
+  knobs:
+    - field: ds
+      owner: ForecastArgs
+      arms: 'both models, all three growth arms'
+      enforced_by: 'len(ds) == len(y); fit_min_points <= len(ds) <= fit_max_points; parse_date per entry (ten ASCII bytes + calendar round trip); strictly ascending with no duplicates; (last - first + 1) <= fit_max_span_days'
+    - field: y
+      owner: ForecastArgs
+      arms: 'both models'
+      enforced_by: 'length tied to ds; every value finite; min(y) != max(y) (a constant series is refused before any design is built)'
+    - field: horizon
+      owner: ForecastArgs
+      arms: 'both models'
+      enforced_by: '1 <= horizon <= fit_max_horizon. This bounds the COUNT of future steps ONLY; the SPAN those steps cover is cost axis C-05 and is a function of freq'
+    - field: freq
+      owner: ForecastArgs
+      arms: 'prophet (via dates::future_days); neuralprophet refuses anything but "D"'
+      enforced_by: 'closed allowlist {D, W, MS}, refused by name otherwise; neuralprophet narrows it to {D}. Enforced as an ENUM — its COST effect is the 1 / 7 / ~30.44 day-span multiplier of C-05, which feeds C-06'
+    - field: model
+      owner: ForecastArgs
+      arms: 'dispatch'
+      enforced_by: 'closed allowlist {prophet, neuralprophet}, refused by name otherwise; default prophet'
+    - field: growth
+      owner: ForecastArgs
+      arms: 'prophet only (refused on the neuralprophet arm)'
+      enforced_by: 'closed allowlist {linear, logistic, flat}, refused by name otherwise; default linear. Selects which of C-06 / C-09 the request pays'
+    - field: cap
+      owner: ForecastArgs
+      arms: 'prophet, logistic growth only'
+      enforced_by: 'logistic-only (06-10: refused on linear, flat AND the defaulted arm); must be finite; must exceed max(y). The Spec-borne value is bound inside the logistic branch (checked_cap), so a Spec carrying an unvalidated cap is unreachable'
+    - field: seasonality_mode
+      owner: ForecastArgs
+      arms: 'prophet only'
+      enforced_by: 'closed allowlist {additive, multiplicative}, refused by name otherwise; default additive'
+    - field: interval_width
+      owner: ForecastArgs
+      arms: 'both models'
+      enforced_by: 'strictly inside the open interval (0, 1); default default_interval_width_x100 / 100. No cost axis — it selects two percentiles from a simulation whose size it does not change'
+    - field: holidays
+      owner: ForecastArgs
+      arms: 'prophet only (refused on the neuralprophet arm)'
+      enforced_by: 'per-holiday windows, dates and column count (see the HolidayArg entries below), then the aggregate fit_max_holiday_columns, fit_max_holiday_dates_total and fit_max_holiday_design_cost product bounds'
+    - field: n_lags
+      owner: ForecastArgs
+      arms: 'neuralprophet only (refused on the prophet arm)'
+      enforced_by: 'n_lags <= 365 and n_lags < n_train_grid. Enforced as a RANGE — its COST effect is C-08, which has no budget of any kind on its path'
+    - field: seed
+      owner: ForecastArgs
+      arms: 'both models'
+      enforced_by: 'any u64 is legal by construction; default default_seed. No cost axis — the seed selects an RNG stream, not an amount of work. It is the mechanism behind pool_equality_under_load'
+    - field: name
+      owner: HolidayArg
+      arms: 'prophet only'
+      enforced_by: 'NOTHING. An arbitrary-length String, cloned TWICE per design column by prophet::columns (as `name` and as `component`), used as the sort key of hcols.sort_by, and compared again per column by predict''s component-name dedup. Cost axis C-07, closed by 06-15 T2'
+    - field: dates
+      owner: HolidayArg
+      arms: 'prophet only'
+      enforced_by: 'len(dates) <= fit_max_holiday_dates per holiday; sum over holidays <= fit_max_holiday_dates_total; parse_date per entry. The aggregate check fires after the loop rather than inside it (WR-03, 06-15 T1)'
+    - field: lower_window
+      owner: HolidayArg
+      arms: 'prophet only'
+      enforced_by: 'must be <= 0 and >= -fit_max_holiday_window; contributes (upper - lower + 1) to the running column count, refused past fit_max_holiday_columns'
+    - field: upper_window
+      owner: HolidayArg
+      arms: 'prophet only'
+      enforced_by: 'must be >= 0 and <= fit_max_holiday_window; contributes (upper - lower + 1) to the running column count, refused past fit_max_holiday_columns'
+
+  # ---- (b) every cost axis whose magnitude is a function of caller input ----
+  # `spent_outside_fit_budget` is the column that matters. `fit::FIT_BUDGET_SECS` is entered
+  # INSIDE `fit::fit_prophet`; `make_design` runs before it and `predict` runs after it, which
+  # is the STRUCTURAL reason 13 of these 14 axes are outside it and why every bound this phase
+  # has added had to go at the door. Exactly ONE axis is inside.
+  cost_axes:
+    - axis: C-01
+      name: 'history date parse'
+      formula: 'len(ds)'
+      spent_in: 'forecast::forecast, the parse_date loop'
+      spent_outside_fit_budget: true
+      bound: fit_max_points
+      checked_at: 'the door, before any date is parsed'
+    - axis: C-02
+      name: 'NeuralProphet imputed daily grid'
+      formula: 'span_days = ds.last - ds.first + 1'
+      spent_in: 'np::NpData::new'
+      spent_outside_fit_budget: true
+      bound: fit_max_span_days
+      checked_at: 'the door, before the model arms are entered'
+    - axis: C-03
+      name: 'holiday date parse and membership sets'
+      formula: 'sum(len(h.dates))'
+      spent_in: 'forecast::forecast holiday loop, then prophet::holiday_day_sets'
+      spent_outside_fit_budget: true
+      bound: fit_max_holiday_dates_total
+      checked_at: 'the door, after the holiday loop (WR-03: the aggregate fires late — moved into the loop by 06-15 T1)'
+    - axis: C-04
+      name: 'holiday design feature cells'
+      formula: '(len(ds) + horizon) * holiday_columns'
+      spent_in: 'prophet::make_design (points rows) and prophet::predict (horizon rows)'
+      spent_outside_fit_budget: true
+      bound: fit_max_holiday_design_cost
+      checked_at: 'the door, before make_design (06-11)'
+      note: 'predict additionally runs comp_of ONCE PER DISTINCT COMPONENT NAME, so the cells are re-swept (1 + distinct_components) times. distinct_components <= fit_max_holiday_columns, so the product stays bounded (<= 5e7 float ops at the ceiling) — but the multiplier was not part of this bound''s original derivation and is recorded here rather than left implicit.'
+    - axis: C-05
+      name: 'future grid span in days'
+      formula: 'horizon * freq_step, where freq_step is 1 (D), 7 (W) or ~30.44 (MS)'
+      spent_in: 'dates::future_days, then as t_max in prophet::predict'
+      spent_outside_fit_budget: true
+      bound: fit_max_horizon
+      checked_at: 'the door, as a COUNT only'
+      note: 'The allocation itself is len(fut) == horizon and is bounded by fit_max_horizon. What fit_max_horizon does NOT bound is the SPAN that count buys — 30.44x more days on "MS" than on "D" for the same legal horizon. That span is t_max, and its only cost consumer is C-06, bounded by fit_max_logistic_changepoint_lambda since 06-14. This axis is the reason that bound is on the PRODUCT and not on the horizon.'
+    - axis: C-06
+      name: 'logistic simulated changepoints'
+      formula: 'uncertainty_samples * changepoint_count(len(ds)) * (t_max - 1)'
+      spent_in: 'prophet::predict, the Growth::Logistic uncertainty arm'
+      spent_outside_fit_budget: true
+      bound: fit_max_logistic_changepoint_lambda
+      checked_at: 'the door, after Spec assembly and before make_design (06-14)'
+      note: '06-REVIEW.md CR-01. uncertainty_samples (1 000) is a Spec field, NOT a ForecastArgs field — it is a fixed multiplier here, not a knob.'
+    - axis: C-07
+      name: 'holiday column name bytes'
+      formula: 'holiday_columns * 2 * len(name), plus an O(C log C) string sort and predict''s O(C * distinct_components) name dedup'
+      spent_in: 'prophet::columns and prophet::predict''s component-name dedup'
+      spent_outside_fit_budget: true
+      bound: unbounded_pending_06_15
+      no_structural_maximum: true
+      checked_at: 'NOWHERE — this axis is OPEN'
+      note: 'holidays[].name is an unbounded String and there is NO structural maximum to measure against. Read at 06-14: crates/aprender-mcp-forecast/src/lib.rs''s router construction (http_app / pooled_app) applies no DefaultBodyLimit, no max_body and no content-length layer, and the stdio transport has no framing cap at all — so a measured_seconds for this axis would measure an arbitrarily CHOSEN name length rather than a maximum. That is why measured_at_structural_maximum is not an available disposition for it and only a real bound can close it. 1 000 columns x an N-byte name is a ~2 000:1 amplification off one payload occurrence.'
+      owed_by: '06-15 T2'
+    - axis: C-08
+      name: 'NeuralProphet training work'
+      formula: 'n_lrs * epochs * n_samples * (n_lags + 1), with n_lrs in {2, 3}, epochs = auto_epochs(n) <= 500 (or <= 320 with lags) and n_samples <= n_train_grid'
+      spent_in: 'np::train'
+      spent_outside_fit_budget: true
+      bound: unbounded_pending_06_15
+      checked_at: 'NOWHERE — this axis is OPEN'
+      note: 'There is no budget of ANY kind on this path: FIT_BUDGET_SECS lives in fit::fit_prophet, which the neuralprophet arm never enters. Every factor is individually bounded (n_lags <= 365, n_samples <= fit_max_span_days, epochs <= 500) but their product is not, and the lr sweep multiplies the whole thing by 2 or 3.'
+      owed_by: '06-15 T3'
+    - axis: C-09
+      name: 'linear / flat uncertainty simulation'
+      formula: 'uncertainty_samples * n_future'
+      spent_in: 'prophet::predict, the Growth::Linear arm'
+      spent_outside_fit_budget: true
+      bound: fit_max_horizon
+      checked_at: 'the door, as the horizon count'
+      note: 'Linear in n_future with no t_max amplification, which is why 06-REVIEW.md measured this arm FLAT at 0.149 s across the same geometries where the logistic arm went to 2.334 s.'
+    - axis: C-10
+      name: 'percentile sorts over the simulation'
+      formula: 'n_rows * uncertainty_samples * log(uncertainty_samples)'
+      spent_in: 'prophet::predict, the band assembly'
+      spent_outside_fit_budget: true
+      bound: fit_max_horizon
+      checked_at: 'the door, as the horizon count'
+    - axis: C-11
+      name: 'seasonality design cells'
+      formula: '(len(ds) + horizon) * seasonality_columns, seasonality_columns <= 34'
+      spent_in: 'prophet::make_design and prophet::predict'
+      spent_outside_fit_budget: true
+      bound: fit_max_points
+      checked_at: 'the door, as the point count'
+      note: 'auto_seasonalities is NOT caller-settable: the ceiling of 34 columns (yearly order 10, weekly 3, daily 4, x2 for the sin/cos pair) is a property of the code, not of the request. Recorded as a fixed multiplier rather than as a knob.'
+    - axis: C-12
+      name: 'NeuralProphet recursive AR predict'
+      formula: 'horizon * n_lags'
+      spent_in: 'np::predict_ar_recursive'
+      spent_outside_fit_budget: true
+      bound: fit_max_horizon
+      checked_at: 'the door (horizon), plus n_lags <= 365'
+    - axis: C-13
+      name: 'response serialization'
+      formula: 'horizon * (5 + n_components)'
+      spent_in: 'forecast::forecast, building the ForecastResponse'
+      spent_outside_fit_budget: true
+      bound: fit_max_horizon
+      checked_at: 'the door, as the horizon count'
+    - axis: C-14
+      name: 'L-BFGS MAP fit'
+      formula: 'iterations * rows * K'
+      spent_in: 'fit::fit_prophet'
+      spent_outside_fit_budget: false
+      bound: fit_max_points
+      checked_at: 'inside the fit, by MAX_ITERS_PER_ROUND and the cooperative FIT_BUDGET_SECS round-boundary budget'
+      note: 'The ONLY axis inside the budget. It is also the only one FIT_BUDGET_SECS could ever have covered, which is the structural fact behind every door bound this phase has added — and the budget is COOPERATIVE, so it overshoots by up to one full round (a 20 000-point / 1 000-column request measured 70.089 s against a 15 s budget).'
 
 equations:
 
