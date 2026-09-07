@@ -778,6 +778,128 @@ mod e2e {
     }
 
     // ---------------------------------------------------------------------------------
+    // The PRODUCT bound (06-11 / 06-12), driven through the SAME live server.
+    //
+    // Every bound above is a single factor. These two cases are the pair that proves the
+    // door bounds their PRODUCT: they differ by ONE history point and straddle
+    // `MAX_HOLIDAY_DESIGN_COST` (50 000) — 50 439 cells versus 49 708 — while EVERY
+    // individual bound stays satisfied in both. A control an order of magnitude away from
+    // the bound would prove only that a huge request is refused; this pair proves the bound
+    // is where the contract says it is.
+    // ---------------------------------------------------------------------------------
+
+    /// One holiday spanning the widest legal window: `±MAX_HOLIDAY_WINDOW` (365) is
+    /// `365 - (-365) + 1` = **731** design columns, from a single date and a ~200-byte
+    /// request. That is the multiplier `MAX_HOLIDAY_DESIGN_COST` exists to bound.
+    const WIDE_HOLIDAY_COLUMNS: usize = 731;
+
+    /// A single holiday, one date, windows at exactly `±MAX_HOLIDAY_WINDOW`.
+    fn wide_holiday() -> serde_json::Value {
+        serde_json::json!([{
+            "name": "anchor",
+            "dates": ["2020-01-15"],
+            "lower_window": -365,
+            "upper_window": 365
+        }])
+    }
+
+    #[tokio::test]
+    async fn refuses_holiday_design_cost_over_bound() {
+        // 62 points + horizon 7 = 69 rows x 731 columns = 50 439 > 50 000.
+        // Individually in bounds on EVERY factor: 62 <= MAX_POINTS (20 000), 7 <=
+        // MAX_HORIZON (3 650), a 61-day span <= MAX_SPAN_DAYS (20 000), |±365| <=
+        // MAX_HOLIDAY_WINDOW, 731 <= MAX_HOLIDAY_COLUMNS (1 000), 1 date <=
+        // MAX_HOLIDAY_DATES (1 000) and <= MAX_HOLIDAY_DATES_TOTAL (10 000). Only the
+        // PRODUCT is over — which is the whole point: a case that trips a neighbouring
+        // bound would prove nothing about this one.
+        let (ds, y) = synth(62);
+        assert!(
+            (ds.len() + 7) * WIDE_HOLIDAY_COLUMNS
+                > aprender_forecast::types::MAX_HOLIDAY_DESIGN_COST,
+            "the OVER geometry must exceed the bound it is testing"
+        );
+        refused(
+            &mut serve().await,
+            serde_json::json!({
+                "ds": ds, "y": y, "horizon": 7, "holidays": wide_holiday()
+            }),
+            "max_holiday_design_cost",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accepts_holiday_design_cost_just_under_bound() {
+        // ONE point fewer: 61 + 7 = 68 rows x 731 columns = 49 708 <= 50 000. The two-sided
+        // control at the boundary — the bound must refuse only what it claims to refuse,
+        // and a near-miss that merely "does not error" is not a control, so the full
+        // promised response shape is asserted here.
+        let (ds, y) = synth(61);
+        let horizon = 7usize;
+        assert!(
+            (ds.len() + horizon) * WIDE_HOLIDAY_COLUMNS
+                <= aprender_forecast::types::MAX_HOLIDAY_DESIGN_COST,
+            "the UNDER geometry must sit under the bound it is testing"
+        );
+        let mut c = serve().await;
+        let r = c
+            .call(
+                "tools/call",
+                serde_json::json!({
+                    "name": "forecast",
+                    "arguments": {
+                        "ds": ds, "y": y, "horizon": horizon, "holidays": wide_holiday()
+                    }
+                }),
+            )
+            .await;
+        assert!(
+            r.get("error").is_none() && r["result"]["isError"] != true,
+            "a request one step UNDER the design-cost bound must be accepted: {r}"
+        );
+        let out = tool_output(&r);
+        // ds / yhat / yhat_lower / yhat_upper / trend all present, horizon-length, banded.
+        assert_shared_shape(&out, horizon);
+        assert!(
+            out.get("components").is_some_and(|c| c.is_object()),
+            "the accepted near-miss must carry components: {out}"
+        );
+        assert!(
+            out.get("diagnostics").is_some_and(|d| d.is_object()),
+            "the accepted near-miss must carry diagnostics: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_holiday_dates_total_over_bound() {
+        // The third factor, which no e2e case reached before: eleven holidays of 1 000
+        // dates each. Every holiday is individually legal (1 000 == MAX_HOLIDAY_DATES) and
+        // the columns sum to 11 (<= 1 000), so only the AGGREGATE 11 000 > 10 000 is over.
+        let (ds, y) = synth(60);
+        let base = days_from_civil(1990, 1, 1);
+        let mut holidays = Vec::new();
+        for h in 0..11i64 {
+            let dates: Vec<String> = (0..1000i64)
+                .map(|d| format_ymd(base + h * 1000 + d))
+                .collect();
+            holidays.push(serde_json::json!({
+                "name": format!("h{h}"),
+                "dates": dates,
+                "lower_window": 0,
+                "upper_window": 0
+            }));
+        }
+        refused(
+            &mut serve().await,
+            serde_json::json!({
+                "ds": ds, "y": y, "horizon": 7, "holidays": holidays
+            }),
+            "max_holiday_dates_total",
+        )
+        .await;
+    }
+
+    // ---------------------------------------------------------------------------------
     // Happy paths: the SHARED response shape (D-03) across both models and across the
     // option combinations the refusal cases only ever exercise negatively.
     // ---------------------------------------------------------------------------------
