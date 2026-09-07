@@ -39,6 +39,7 @@ use crate::dates::{days_from_civil, format_ymd, future_days, parse_date};
 use crate::prophet::{auto_seasonalities, changepoint_count, Mode, Spec};
 use crate::types::{
     ForecastArgs, HolidayArg, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_WINDOW, MAX_HORIZON,
+    MAX_LOGISTIC_CHANGEPOINT_LAMBDA,
 };
 
 /// `.unwrap()` is banned by `.clippy.toml`; an unparseable selector falls back to the
@@ -118,6 +119,45 @@ fn lambda_for(ds: &[String], horizon: usize, freq: &str) -> f64 {
     changepoint_count(days.len(), &spec) as f64 * (t_max - 1.0)
 }
 
+/// The largest horizon this composition can legally ask for, at or below `cap`.
+///
+/// The door bounds the PRODUCT `changepoint_count * (t_max - 1)`, and `dates::future_days`
+/// multiplies the horizon COUNT by 1 / 7 / ~30.44 for `D` / `W` / `MS` — so the same legal
+/// horizon buys a 30x longer future span on one frequency than on another, and "the widest
+/// legal horizon" is a different number per frequency. That is the CR-01 axis.
+///
+/// Searched through [`lambda_for`], which computes the mean through
+/// [`changepoint_count`] and [`future_days`] exactly as the door does, rather than through a
+/// second copy of the 1 / 7 / 30.44 multipliers — a second copy is the drift this phase has
+/// spent three plans closing. `lambda_for` is monotonic non-decreasing in the horizon for
+/// every accepted frequency, which is what makes the bisection well-defined.
+fn max_legal_horizon(ds: &[String], freq: &str, growth: &str, cap: usize) -> usize {
+    let cap = cap.clamp(1, MAX_HORIZON);
+    // The lambda bound is LOGISTIC-ONLY at the door: the linear and flat arms never enter
+    // `predict`'s simulation, so nothing there is bounded by it.
+    if growth != "logistic" || lambda_for(ds, cap, freq) <= MAX_LOGISTIC_CHANGEPOINT_LAMBDA {
+        return cap;
+    }
+    // Invariant: `lo` is legal, `hi` is not. `lo = 1` is legal for every frequency at every
+    // point count this sweep builds (one future step over a >= 9-day history keeps t_max
+    // near 1), and it is asserted rather than assumed below.
+    assert!(
+        lambda_for(ds, 1, freq) <= MAX_LOGISTIC_CHANGEPOINT_LAMBDA,
+        "freq={freq}: even a horizon of 1 is refused, so this composition has no legal \
+         horizon and the sweep would be measuring a refusal"
+    );
+    let (mut lo, mut hi) = (1usize, cap + 1);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if lambda_for(ds, mid, freq) <= MAX_LOGISTIC_CHANGEPOINT_LAMBDA {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 /// One composition of the matrix.
 #[derive(Clone, Copy)]
 struct Case {
@@ -135,15 +175,16 @@ struct Built {
     cells: usize,
 }
 
-/// Build an ACCEPTED request for any point of the matrix.
+/// Build an ACCEPTED request for any point of the matrix, at the TIGHTEST LEGAL HISTORY SPAN
+/// and the WIDEST HORIZON that composition can legally ask for.
 ///
-/// NAIVE FIRST CUT: every composition takes the widest horizon the caller asked for, capped
-/// only at [`MAX_HORIZON`]. That is wrong for the logistic arm on `"W"` and `"MS"`, because
-/// `future_days` multiplies the horizon COUNT by 7 and ~30.44 and the door bounds the
-/// PRODUCT — which is precisely the CR-01 axis this sweep exists to cover.
+/// The horizon is DERIVED per composition ([`max_legal_horizon`]), never taken as given: the
+/// door's lambda bound is on a product the frequency multiplies, so a single horizon cap is
+/// legal on `"D"`, legal on `"W"` and refused on `"MS"` — which is exactly the failure this
+/// function's first cut was observed making (the RED of plan 06-16 Task 1).
 fn build(case: Case, points: usize, horizon_cap: usize) -> Built {
     let (ds, y, t0) = tight_daily_series(points);
-    let horizon = horizon_cap.min(MAX_HORIZON).max(1);
+    let horizon = max_legal_horizon(&ds, case.freq, case.growth, horizon_cap);
     let lambda = lambda_for(&ds, horizon, case.freq);
 
     let mut args = ForecastArgs {
