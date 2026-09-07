@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 5
+open_count: 6
 waived_count: 2
 fixed_count: 0
-total_count: 7
-last_updated: 2026-09-07T03:31:33.474Z
+total_count: 8
+last_updated: 2026-09-07T03:57:44.081Z
 ---
 
 # Broken Windows Ledger
@@ -22,6 +22,7 @@ last_updated: 2026-09-07T03:31:33.474Z
 | 5 | 06 | unrun-verify | .planning/phases/06-native-time-series-forecasting-stack/deferred-items.md |  | D-18 clause 2: no CI leg exercises the embedded-weights build; quantiles_abs_f32_nonaarch64 stays PROVISIONAL 5.0e-6 pending one x86_64 just chronos-gate run (same obligation as REVIEW-06-02 and ledger entry #4) | open |  | 2026-09-06T23:48:33.107Z |  |
 | 6 | 06 | deviation | crates/aprender-mcp-forecast/src/lib.rs |  | Plan 06-10 stated 22 existing e2e::refuses_ cases; measured baseline was 21, so post-change is 23 not the plan's >=24 bar. Intent (2 cases added) met; number in plan text was stale. | open |  | 2026-09-07T02:44:08.056Z |  |
 | 7 | 06 | unmet-truth | crates/aprender-forecast/src/types.rs |  | SC1's 2 s bar is not guaranteed for holiday-carrying requests: no payload statistic bounds the wall (a 25 000-cell request walls at 4.2 s reproducibly). MAX_HOLIDAY_DESIGN_COST caps WORK; residual wall-clock exposure is FIT_BUDGET_SECS (15 s). Human decision required — see 06-11-SUMMARY coverage D7. | open |  | 2026-09-07T03:31:33.474Z |  |
+| 8 | 06 | deviation | justfile |  | 06-12 T3 asked to change forecast-holiday-bench's defaults to the at-the-bound geometry; 06-11 deviation 2 had already done so ((800+200)x50 = 50 000 cells = MAX_HOLIDAY_DESIGN_COST). No change made; plan text was stale. | open |  | 2026-09-07T03:57:44.081Z |  |
 
 ````json
 [
@@ -107,6 +108,18 @@ last_updated: 2026-09-07T03:31:33.474Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-07T03:31:33.474Z",
+    "resolved_at": null
+  },
+  {
+    "id": 8,
+    "kind": "deviation",
+    "phase": "06",
+    "file": "justfile",
+    "line": null,
+    "description": "06-12 T3 asked to change forecast-holiday-bench's defaults to the at-the-bound geometry; 06-11 deviation 2 had already done so ((800+200)x50 = 50 000 cells = MAX_HOLIDAY_DESIGN_COST). No change made; plan text was stale.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T03:57:44.081Z",
     "resolved_at": null
   }
 ]
