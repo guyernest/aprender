@@ -713,6 +713,15 @@ impl Rng {
 
 /// Above this mean the draw switches from Knuth's product method to a normal approximation.
 ///
+/// **CONTRACT-OWNED (WR-01).** The value lives in
+/// `contracts/forecast-tool-boundary-v1.yaml` as `constants.poisson_normal_branch_lambda`,
+/// and `types::tests::cost_bounds_match_contract` asserts this constant EQUAL to it through
+/// `test_support::constant_f64`. D-15: the contract is the source and this is the mirror.
+/// It was the one new behavioural constant with no contract mirror — it decides which
+/// ALGORITHM a caller's request gets, so moving it in Rust alone changed shipped behaviour
+/// with nothing to notice. Changing the YAML value alone now turns that test red naming the
+/// key (observed, then restored).
+///
 /// The value the `06-VERIFICATION.md` gap-3 report named, and it is far above the regime the
 /// parity ladder reaches: `wp_log_R_logistic` is the ONLY logistic fixture and its lambda is
 /// **3.1239** (25 changepoints x (t_max 1.124957 - 1), measured by

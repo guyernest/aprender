@@ -92,6 +92,13 @@ constants:
   # request 06-REVIEW.md CR-01 measured at 2.334 s against SC1's 2 s bar. Mirrored by
   # types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA via test_support::constant_f64.
   fit_max_logistic_changepoint_lambda: 20000
+  # The EXACT/APPROXIMATE branch point of prophet::poisson: at or below this mean the draw
+  # takes Knuth's product method, above it a normal approximation with mean and variance both
+  # exactly lambda. It decides which algorithm a caller's request gets, so it is behavioural
+  # and belongs here rather than only in Rust (WR-01) — prophet::POISSON_NORMAL_BRANCH_LAMBDA
+  # is its mirror, asserted by types::tests::cost_bounds_match_contract via constant_f64.
+  # Not a COST ceiling: it selects an algorithm, it does not bound an amount of work.
+  poisson_normal_branch_lambda: 30
   # aprender-mcp-chronos (zero-shot: Chronos-Bolt T5, no fit)
   chronos_min_points: 4
   chronos_max_points: 20000
@@ -349,6 +356,22 @@ equations:
       - 'this bounds WORK, not WALL, and says so: the L-BFGS iteration count is data-dependent, so a 25 000-cell request (half the bound) reproducibly walls at 4.2 s. The arithmetic ceiling per iteration is what is guaranteed; the residual wall-clock exposure is FIT_BUDGET_SECS, a separate knob'
     preconditions:
       - 'every per-holiday bound has already fired with its own message, so holiday_columns <= fit_max_holiday_columns and each len(h.dates) <= fit_max_holiday_dates — what remains unchecked is only what they multiply and sum to'
+
+  # The equation the OTHER equations in this file are instances of. Every bound above closes
+  # one axis; this one says the SET of axes and the SET of knobs are both accounted for.
+  door_surface_is_complete:
+    formula: 'knobs(door_surface) == properties(schema_for!(ForecastArgs)) union properties(schema_for!(HolidayArg)) AND forall a in cost_axes(door_surface): a.bound in keys(constants) or (a.bound == measured_at_structural_maximum and a.measured_seconds < 2.0) or a.bound matches unbounded_pending_*'
+    domain: 'the enumeration in this file''s door_surface block, against the Rust structs and constants it claims to describe'
+    codomain: 'green, or a named field / named axis on one side of a symmetric difference'
+    invariants:
+      - 'WHY THIS EXISTS, and it is a measured history rather than a principle: three consecutive gap-closure rounds each closed exactly the ONE probe an adversarial pass had measured, and each time the next pass found the next instance of the same class — "the door accepts a request whose cost or whose semantics it never checks". 06-11 closed the holiday design PRODUCT, 06-12 proved it through the transport, 06-13 corrected the Poisson sampler, and 06-13''s own correct fix un-bounded the simulated changepoint count (CR-01). A fourth point fix would be a fourth round of the same mistake, so the door''s WHOLE surface is enumerated and the enumeration is machine-checked.'
+      - 'the knob list is derived from schemars::schema_for! — the SAME generator that produces the advertised MCP tool schema — never from a hand-kept copy, so it cannot silently fall behind the struct. A hand-kept list is exactly the aspirational invariant this equation replaces'
+      - 'BOTH directions are checked, because a one-directional check lets the list rot in the other one. MISSING (a field exists with no entry) is how CR-01''s cost axis got in; PHANTOM (an entry for a field that exists on neither struct) is how an enumeration silently stops describing the code while still looking complete. Both were OBSERVED RED by mutation, not merely asserted'
+      - 'the cost-axis check is SPLIT IN TWO on purpose. every_cost_axis_names_a_real_bound validates only the NON-pending entries and is GREEN, so a regression toward a phantom bound key is visible; no_cost_axis_is_pending asserts the pending set is empty and SHIPS RED from the close of plan 06-14 until 06-15 replaces C-07''s and C-08''s markers with real bounds. A plan whose thesis is that a guard which cannot fail is theater must not make its own open items invisible'
+      - 'C-07 (holidays[].name byte amplification) can be closed ONLY by a bound, never by a measurement: the field is an unbounded String, the router construction in crates/aprender-mcp-forecast/src/lib.rs applies no DefaultBodyLimit / max_body / content-length layer, and the stdio transport has no framing cap — so it has NO structural maximum and any measured_seconds for it would measure an arbitrarily CHOSEN length. Its entry carries no_structural_maximum: true recording that measured_at_structural_maximum is not an available disposition for it'
+      - '13 of the 14 enumerated cost axes are spent OUTSIDE fit::FIT_BUDGET_SECS. That is the structural fact behind every door bound this phase has added: the budget is entered inside fit::fit_prophet, make_design runs before it and predict runs after it, so no setting of it could ever have seen those costs'
+    preconditions:
+      - 'the door_surface block is present and parseable; pv drops it as an unknown top-level key exactly as it drops constants:, so it is read at TEST time rather than by the contract engine'
 
   chronos_server_bounds:
     formula: 'accept(args) requires chronos_min_points <= len(ds) <= chronos_max_points AND len(ds) == len(y) AND 1 <= horizon <= chronos_max_horizon AND at least 2 non-null y'
@@ -619,6 +642,16 @@ proof_obligations:
     formal: 'forall args: accept(args) implies (len(args.ds) + args.horizon) * holiday_columns(args) <= constants.fit_max_holiday_design_cost'
     applies_to: all
 
+  - type: completeness
+    property: 'The door surface is fully enumerated: every caller-settable field has a knobs entry and every knobs entry names a field that exists, and every non-pending cost axis names a bound that exists'
+    formal: 'knobs(door_surface) == properties(schema_for!(ForecastArgs)) union properties(schema_for!(HolidayArg)) and forall a in cost_axes: a.bound in keys(constants) or (a.bound == measured_at_structural_maximum and a.measured_seconds < 2.0) or a.bound matches unbounded_pending_*'
+    applies_to: all
+
+  - type: bound
+    property: 'The Poisson mean the logistic uncertainty simulation draws is bounded at the door, before the design is built'
+    formal: 'forall args: accept(args) and args.growth == logistic implies changepoint_count(len(args.ds)) * (t_max(args) - 1) <= constants.fit_max_logistic_changepoint_lambda'
+    applies_to: all
+
 falsification_tests:
 
   - id: FALSIFY-BOUNDARY-001
@@ -765,6 +798,67 @@ falsification_tests:
       server ACCEPTED the request and returned a forecast.
     test: 'cargo test -p aprender-forecast --lib types::tests::cost_bounds_match_contract forecast::tests AND cargo test -p aprender-mcp-forecast --lib e2e::'
     if_fails: 'The boundary is back to checking three factors in isolation while their PRODUCT buys unbounded CPU from an unauthenticated caller — (20 000 + 3 650) x 1 000 = 23 650 000 design feature cells and 1 000 000 holiday dates from one ~200-byte request, roughly 85 minutes of fit against a K=8 pool. The HARD-ceiling claim in fit_server_bounds third invariant is false again, and the SC1 2 s bar is unreachable for any holiday-carrying request.'
+
+  - id: FALSIFY-BOUNDARY-019
+    rule: 'The door''s caller-settable surface and its cost surface are both ENUMERATED, and the enumeration is checked in both directions rather than believed'
+    prediction: >
+      Three assertions falsify this rule. `types::tests::every_request_knob_is_enumerated`
+      derives the field list from `schemars::schema_for!(ForecastArgs)` and
+      `schema_for!(HolidayArg)` — the same generator that produces the advertised MCP tool
+      schema — and asserts SET EQUALITY against the `field` + `owner` pairs in
+      `door_surface.knobs` (16 entries: 12 + 4), printing the symmetric difference in BOTH
+      directions. OBSERVED RED IN BOTH: deleting the `cap` entry from the YAML alone turns it
+      red naming `cap` as MISSING, and adding an entry for a field on neither struct turns it
+      red naming that field as PHANTOM; a byte-identical revert restores green each time.
+      `types::tests::every_cost_axis_names_a_real_bound` requires every NON-pending
+      `cost_axes[].bound` to be a key present in `constants:`, or
+      `measured_at_structural_maximum` with a numeric `measured_seconds` under 2.0.
+      `types::tests::no_cost_axis_is_pending` asserts the pending set is EMPTY and is
+      DECLARED RED from the close of plan 06-14 until 06-15, naming C-07 and C-08.
+    test: 'cargo test -p aprender-forecast --lib types::tests::every_request_knob_is_enumerated types::tests::every_cost_axis_names_a_real_bound'
+    if_fails: >
+      The door surface has grown a knob or a cost axis that nothing enumerates, or has kept an
+      entry for a field that no longer exists. That is the state that produced CR-01: 06-13
+      correctly removed an accidental saturation, the simulated changepoint count began
+      tracking lambda, and no enumeration existed that would have flagged the newly unbounded
+      axis. A phantom bound key is the worse direction — the axis LOOKS closed and is not.
+
+  - id: FALSIFY-BOUNDARY-020
+    rule: 'The Poisson mean of the logistic uncertainty simulation is bounded at the door, before make_design, on a contract-owned value'
+    prediction: >
+      Assertions at three layers falsify this rule. The CONSTANTS layer:
+      `types::tests::cost_bounds_match_contract` asserts
+      `types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA == constants.fit_max_logistic_changepoint_lambda`
+      through `test_support::constant_f64`, so perturbing the value HERE — touching no Rust —
+      turns it red naming the key it read. The LIBRARY door, three-sided:
+      `forecast::tests::a_logistic_request_over_the_changepoint_lambda_bound_is_refused` sends
+      the review's exact geometry (33 daily points, horizon 3650, freq MS, growth logistic,
+      cap 50 — lambda 86 789.8) and observes a Validation refusal quoting
+      `max_logistic_changepoint_lambda`;
+      `..._just_under_the_changepoint_lambda_bound_is_accepted` sends horizon 840 (lambda
+      19 974.2, asserted within 10% of the bound) and observes a full-length band; and
+      `the_linear_arm_at_the_same_geometry_is_still_accepted` proves the refusal is keyed on
+      `Growth::Logistic` rather than firing for everyone. Each computes its own lambda from
+      `prophet::changepoint_count` and asserts its geometry is on the side its name claims.
+      The SERVER, the same two sides through a live streamable-HTTP router:
+      `e2e::refuses_logistic_changepoint_lambda_over_bound` and
+      `e2e::accepts_logistic_changepoint_lambda_just_under_bound`. The server refusal was
+      OBSERVED RED: with `fit_max_logistic_changepoint_lambda` and the Rust constant raised
+      past the structural maximum, the server ACCEPTED the same request and returned a
+      forecast. Finally `prophet::changepoints::changepoint_count_equals_the_design_it_describes`
+      sweeps the point count and pins the door's changepoint count to `make_design`'s, so the
+      bound cannot be evaded by the door and the sampler disagreeing.
+    test: 'cargo test -p aprender-forecast --lib types::tests::cost_bounds_match_contract forecast::tests changepoint_count_equals AND cargo test -p aprender-mcp-forecast --lib e2e::'
+    if_fails: >
+      A 1 132-byte unauthenticated request that satisfies every existing bound
+      (fit_max_points, fit_max_span_days, fit_max_horizon) buys 2.334 s of CPU against a
+      default pool of K=8 — eight such requests saturate it — because those three bounds are
+      checked in ISOLATION and it is their RATIO that sizes this cost, with
+      dates::future_days multiplying the horizon COUNT by ~30.44 for "MS". FIT_BUDGET_SECS
+      cannot substitute: this cost is spent in predict, which runs AFTER the fit returns with
+      no budget at all. NOTE: do not "fix" this by clamping inside prophet::poisson — that
+      removes the wall and silently reintroduces the truncation 06-13 exists to delete. The
+      refusal belongs at the door (D-11).
 
 kani_harnesses:
 
