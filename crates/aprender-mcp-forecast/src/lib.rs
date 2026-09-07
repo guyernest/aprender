@@ -1006,6 +1006,52 @@ mod e2e {
         .await;
     }
 
+    #[tokio::test]
+    async fn refuses_holiday_dates_total_before_parsing_the_rest() {
+        // WR-03 through the transport. The running sum crosses the aggregate ceiling at the
+        // eleventh holiday; four LATER holidays each carry `"2020-1-01"` — nine bytes, which
+        // `parse_date`'s SHAPE gate rejects. A date-shape refusal here would prove the door
+        // kept parsing work it had already decided to discard.
+        let (ds, y) = synth(60);
+        let base = days_from_civil(1990, 1, 1);
+        let mut holidays = Vec::new();
+        for h in 0..11i64 {
+            let dates: Vec<String> = (0..1000i64)
+                .map(|d| format_ymd(base + h * 1000 + d))
+                .collect();
+            holidays.push(serde_json::json!({
+                "name": format!("h{h}"),
+                "dates": dates,
+                "lower_window": 0,
+                "upper_window": 0
+            }));
+        }
+        for h in 11..15i64 {
+            holidays.push(serde_json::json!({
+                "name": format!("late{h}"),
+                "dates": ["2020-1-01"],
+                "lower_window": 0,
+                "upper_window": 0
+            }));
+        }
+        let args = serde_json::json!({
+            "ds": ds, "y": y, "horizon": 7, "holidays": holidays
+        });
+        let mut c = serve().await;
+        refused(&mut c, args.clone(), "max_holiday_dates_total").await;
+        let reply = c
+            .call(
+                "tools/call",
+                serde_json::json!({"name": "forecast", "arguments": args}),
+            )
+            .await;
+        assert!(
+            !reply.to_string().contains("want YYYY-MM-DD"),
+            "the aggregate refusal must fire BEFORE the later holidays are parsed; the \
+             date-shape message means it still fires after the loop: {reply}"
+        );
+    }
+
     // ---------------------------------------------------------------------------------
     // Happy paths: the SHARED response shape (D-03) across both models and across the
     // option combinations the refusal cases only ever exercise negatively.

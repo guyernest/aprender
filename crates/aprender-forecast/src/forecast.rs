@@ -741,6 +741,106 @@ mod tests {
         refusal(&args, "max_holiday_dates_total");
     }
 
+    /// WR-03 — the aggregate ceiling is enforced INSIDE the loop, not after it.
+    ///
+    /// This test discriminates POSITION, not presence. The running sum crosses
+    /// [`MAX_HOLIDAY_DATES_TOTAL`](crate::types::MAX_HOLIDAY_DATES_TOTAL) at the ELEVENTH
+    /// holiday, and every LATER holiday carries a date string `parse_date`'s SHAPE gate
+    /// rejects (`"2020-1-01"` — nine bytes, so it is refused for its shape and not for an
+    /// out-of-range calendar field, which is a different message). If the aggregate refusal
+    /// fired after the loop, those later holidays would be parsed first and the caller would
+    /// receive the DATE-SHAPE refusal instead. The message that comes back therefore names
+    /// which check ran first — something no grep for the constant could establish.
+    #[test]
+    fn the_aggregate_dates_refusal_fires_inside_the_holiday_loop() {
+        let (ds, y) = synthetic_daily(60);
+        let mut args = np_args(60, 7);
+        args.model = None;
+        args.ds = ds;
+        args.y = y;
+        let base = days_from_civil(1990, 1, 1);
+        // 11 x 1 000 = 11 000 > MAX_HOLIDAY_DATES_TOTAL (10 000): the running sum crosses at
+        // the eleventh holiday, with four holidays still unparsed behind it.
+        let mut holidays: Vec<crate::types::HolidayArg> = (0..11i64)
+            .map(|h| crate::types::HolidayArg {
+                name: format!("h{h}"),
+                dates: (0..1_000i64)
+                    .map(|d| format_ymd(base + h * 1_000 + d))
+                    .collect(),
+                lower_window: 0,
+                upper_window: 0,
+            })
+            .collect();
+        for h in 11..15i64 {
+            holidays.push(crate::types::HolidayArg {
+                name: format!("late{h}"),
+                dates: vec!["2020-1-01".into()],
+                lower_window: 0,
+                upper_window: 0,
+            });
+        }
+        args.holidays = Some(holidays);
+        match forecast(&args) {
+            Err(ForecastError::Validation(m)) => {
+                assert!(
+                    !m.contains("want YYYY-MM-DD"),
+                    "a DATE-SHAPE refusal means the loop kept parsing holidays after the door \
+                     already had the information to refuse — the aggregate check is still \
+                     AFTER the loop; got {m:?}"
+                );
+                assert!(
+                    m.contains("max_holiday_dates_total"),
+                    "the aggregate ceiling must refuse, naming its own key; got {m:?}"
+                );
+            }
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+    }
+
+    /// The two-sided control for WR-03's move: a request whose aggregate is EXACTLY at
+    /// `MAX_HOLIDAY_DATES_TOTAL` is still accepted. The in-loop comparison must be the same
+    /// `>` the post-loop one uses; written as `>=` it would over-refuse by one date.
+    #[test]
+    fn holidays_carrying_exactly_the_total_bound_are_accepted() {
+        let (ds, y) = synthetic_daily(60);
+        let mut args = np_args(60, 7);
+        args.model = None;
+        args.ds = ds;
+        args.y = y;
+        let base = days_from_civil(1990, 1, 1);
+        // 10 x 1 000 == MAX_HOLIDAY_DATES_TOTAL exactly; 10 columns and (60 + 7) x 10 = 670
+        // design cells, both far inside their own bounds, so only the aggregate is at issue.
+        args.holidays = Some(
+            (0..10i64)
+                .map(|h| crate::types::HolidayArg {
+                    name: format!("h{h}"),
+                    dates: (0..1_000i64)
+                        .map(|d| format_ymd(base + h * 1_000 + d))
+                        .collect(),
+                    lower_window: 0,
+                    upper_window: 0,
+                })
+                .collect(),
+        );
+        let total: usize = args
+            .holidays
+            .as_deref()
+            .expect("holidays")
+            .iter()
+            .map(|h| h.dates.len())
+            .sum();
+        assert_eq!(
+            total,
+            crate::types::MAX_HOLIDAY_DATES_TOTAL,
+            "this control is only a NEAR MISS if it sits exactly ON the bound"
+        );
+        let r = forecast(&args).expect("a request exactly at the aggregate bound must fit");
+        assert_eq!(r.yhat.len(), 7, "one row per horizon step");
+    }
+
     /// A well-formed option aimed at the wrong arm was silently DROPPED: the caller got a
     /// plausible answer to a question they did not ask.
     #[test]
