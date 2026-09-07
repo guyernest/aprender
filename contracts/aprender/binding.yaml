@@ -1944,6 +1944,13 @@ bindings:
   status: implemented
   notes: 'Also refuses a non-finite cap: JSON 1e400 parses to f64::INFINITY, for which `cap <= y_max` is false.'
 - contract: forecast-tool-boundary-v1.yaml
+  equation: cap_is_logistic_only
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'The refusal is at THE door, before make_design, so no parity rung can move: a cap on the linear, flat or DEFAULTED growth arm is refused rather than accepted and dropped, and the validated cap is bound inside the logistic branch so Spec cannot carry one the door did not check.'
+- contract: forecast-tool-boundary-v1.yaml
   equation: constant_y_refused_before_fit
   module_path: aprender_forecast::forecast
   function: forecast

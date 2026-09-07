@@ -1,6 +1,6 @@
 contract: forecast-tool-boundary
 metadata:
-  version: 1.0.0
+  version: 1.1.0
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
@@ -161,6 +161,21 @@ equations:
       - 'a missing cap is refused with "logistic growth needs cap"; a cap at or below max(y) with "cap C must exceed max(y) = M" — two distinct messages because they have two distinct fixes'
       - 'the check runs BEFORE the design is built, so a saturating logistic curve can never be fitted to data that already exceeds its own ceiling'
 
+  cap_is_logistic_only:
+    formula: 'cap is present implies growth == logistic; on any other growth arm the request is refused'
+    domain: 'the fit server growth / cap arguments, including the DEFAULTED growth arm where no growth key is sent at all'
+    codomain: 'a validation refusal "cap is logistic-only; set growth to \"logistic\""'
+    preconditions:
+      - 'model resolves to prophet — a cap aimed at the neuralprophet arm is already refused earlier with the cross-MODEL message "cap is prophet-only; set model to \"prophet\"", which this rule does not touch'
+    invariants:
+      - 'the message NAMES THE FIX ("set growth to \"logistic\"") rather than merely reporting that the input was wrong, which is the D-11 shape every refusal at this door takes'
+      - 'the DEFAULTED arm is covered, not only the explicitly-linear one: a request carrying `cap` and no `growth` key is the shape a real caller hits, and a check keyed on the PRESENCE of `growth` would miss it — asserted by a separate case for exactly that reason'
+      - 'the check runs AFTER the growth enum is parsed, so an unknown growth string still refuses first with its own message "growth \"exponential\": linear, logistic or flat"; the three logistic-arm messages ("logistic growth needs cap", "cap must be a finite number", "cap C must exceed max(y) = M") also keep their own distinct texts — four fixes, four messages, never one merged refusal'
+      - 'it does not OVER-refuse: growth == logistic with a finite cap above max(y) still fits and returns a band, pinned by a positive control in the same unit test and by the e2e case prophet_logistic_with_holidays_happy_path'
+      - 'STRUCTURAL, not merely guarded: the cap that reaches Spec is bound inside the logistic branch (`checked_cap`, set only after the finiteness and cap > max(y) checks pass), so a Spec carrying a cap the door did not validate is unreachable rather than merely unreached'
+      - 'the MEASURED breach this closes, at HEAD ce3e5a8ea on gsd/phase-2-contract-gate: five probes — baseline-no-cap, linear+cap100, bare-cap100, linear+cap0.5 (BELOW max(y) = 28.9) and flat+cap100 — all returned yhat_max 35.8994 with a BYTE-IDENTICAL diagnostics object, while the two logistic controls refused; that is the refusal machinery existing and simply never being reached, and the caller had no way to discover their cap was dropped'
+      - 'prophet::make_design matches only (Growth::Logistic, Some(c)) and falls to `_ => None` for every other pair, which is why a cap off the logistic arm was provably INERT rather than approximately honoured'
+
   constant_y_refused_before_fit:
     formula: 'min(y) != max(y), checked before any design is built or any optimiser is entered'
     domain: 'the y array of the fit server'
@@ -296,6 +311,11 @@ proof_obligations:
   - type: bound
     property: 'interval_width is accepted only strictly inside the open unit interval'
     formal: 'forall w: accept(w) iff 0.0 < w and w < 1.0'
+    applies_to: all
+
+  - type: invariant
+    property: 'A cap is accepted only on the logistic growth arm; on every other arm — explicit linear, explicit flat, or the defaulted arm carrying no growth key — it is a validation refusal, never an accepted-and-dropped knob'
+    formal: 'forall args: args.cap is Some and args.growth != logistic implies result is Validation'
     applies_to: all
 
   - type: invariant
@@ -455,6 +475,21 @@ falsification_tests:
     prediction: 'Every request in the pool_equality burst is issued twice — once alone, once inside the burst — and both runs produce the identical signature, including the requests that carry no explicit seed and therefore ran at the default 42.'
     test: 'cargo test -p aprender-mcp-forecast --lib pool_equality::eight_concurrent_requests_are_bit_identical_to_sequential'
     if_fails: 'The RNG is seeded from something outside the request (a clock, a server-lifetime counter, a thread id), so the same arguments no longer produce the same answer. That breaks reproducibility for a single client before it breaks anything about concurrency.'
+
+  - id: FALSIFY-BOUNDARY-017
+    rule: 'A cap off the logistic growth arm is refused, never accepted and dropped'
+    prediction: >
+      Four assertions falsify this rule. In the library, `forecast::tests::an_option_belonging_to_the_other_model_is_refused_not_dropped`
+      carries the explicit-linear case ({growth: "linear", cap: 100.0}), the bare-cap case on the
+      DEFAULTED arm ({cap: 100.0} with no growth key), the explicit-flat case, a linear case whose
+      cap sits BELOW max(y), and the logistic POSITIVE CONTROL (cap = max(y) + 1.0) which must still
+      fit and return a 7-point band — plus a case pinning the older cross-MODEL message `cap is
+      prophet-only` as unchanged. Through the server, `refuses_cap_without_logistic_growth` and
+      `refuses_cap_with_explicit_linear_growth` each drive a live streamable-HTTP router and observe
+      a validation-class refusal quoting `logistic-only`; two cases, not one, because the first
+      alone would still pass if the check were keyed on the ABSENCE of a growth key.
+    test: 'cargo test -p aprender-forecast --lib forecast::tests::an_option_belonging AND cargo test -p aprender-mcp-forecast --lib e2e::refuses_cap_'
+    if_fails: 'The door is back to accepting a knob it does not use — the class FALSIFY-BOUNDARY-005 already calls the worst failure class in this contract. `make_design` matches only (Growth::Logistic, Some(c)), so the cap is silently dropped and the caller receives a plausible linear forecast in answer to a saturating-growth question they did believe they asked.'
 
 kani_harnesses:
 
