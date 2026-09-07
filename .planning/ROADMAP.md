@@ -441,3 +441,54 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5; Phase 6 is an independen
 | 4. APR Artifact and Production Parity | 22/22 | UAT passed, awaiting secure-phase |  |
 | 5. Benchmark and Claims Gate | 11/14 | In Progress|  |
 | 6. Native Time-Series Forecasting Stack | 17/17 | In Progress|  |
+
+### Phase 7: Tier-Resolved Door Limits
+
+**Goal**: Every forecast door bound keeps its enforcement but loses its hard-coded value:
+the 13 `pub const MAX_*` in `crates/aprender-forecast/src/types.rs` become a resolved
+`DoorLimits` profile whose `Default` is today's numbers, so one server binary can serve
+four deployment envelopes that differ by orders of magnitude without mis-refusing legal
+requests on any of them.
+**Depends on:** Phase 6
+**Requirements**: TBD — the binding inputs are `06-UAT.md` item 4 (DECIDED 2026-09-07) and
+`06-REVIEW.md` CR-01 / WR-02.
+
+**Why this is a phase and not a constant edit.** CR-01: `MAX_NP_TRAIN_COST = 15_000_000`
+refuses `20 000 points x n_lags=7` — the canonical NeuralProphet setting, inside every
+advertised bound — at `2 x 50 x 19 993 x 8 = 15 994 400`, 6.63% over, while its
+10 000-point neighbour completes in ~1.3 s. The bound was fitted from BELOW by one parity
+fixture (~95-97% of it) and validated from ABOVE by the 47.9 s structural worst case;
+the region between was never priced. That generalizes: **a guard whose ACCEPTED region is
+unmeasured is the same class of unfalsified claim as a bar that cannot fail** — the defect
+class gap-closure round 3 existed to end, recurring one level up.
+
+**Flexible is NOT unbounded.** Round 3's enumeration, completeness tests and contract
+ownership all stand. The invariant strengthens:
+- before — "cost axis C-08 is bounded at 15 000 000"
+- after — "C-08 is ALWAYS bounded; its value comes from the resolved profile; no profile
+  can disable a bound or set it above its tier's structural maximum"
+
+**Success Criteria (draft — to be firmed at plan time):**
+1. `DoorLimits` struct with `Default` byte-equal to today's 13 constants; every door check
+   reads the resolved profile, no call site reads a bare `const`.
+2. `contracts/forecast-tool-boundary-v1.yaml` `constants:` becomes the DEFAULT profile and
+   `types::tests::cost_bounds_match_contract` keeps pinning it; a new test proves no profile
+   can disable a bound or exceed its tier ceiling.
+3. Named tier profiles whose ceilings derive from each envelope's REAL structural maximum
+   (AWS Lambda, Docker on GCP/Azure, CloudFlare WASM, customer-hosted pmcp.run).
+4. Every bound gains an ACCEPTED-region test at every profile — the gap CR-01 exposed.
+   CR-01's own case (20 000 x n_lags=7) is accepted under the tier that can afford it and
+   still refused under the tier that cannot, both observed.
+5. WR-02 corrected wherever it is repeated (`types.rs:188-194`, three places in
+   `forecast-tool-boundary-v1.yaml`, `binding.yaml`): pmcp 2.19.3
+   `StreamableHttpServerConfig::stateless()` sets `max_request_bytes` = 4 MiB
+   (`limits.rs:46`), enforced with a 413 at `streamable_http_server.rs:4571`, so C-07's
+   `no_structural_maximum: true` is false for HTTP and the structural maximum is itself
+   tier-dependent. The stdio transport genuinely has no framing cap — say so precisely.
+
+**UI hint**: no
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 7 to break down)

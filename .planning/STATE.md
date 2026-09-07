@@ -441,3 +441,9 @@ Items acknowledged and carried forward from project scope:
 Last session: 2026-09-07T18:39:26.092Z
 Stopped at: Completed 06-17-PLAN.md
 Resume file: None
+
+## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 7 added: Tier-Resolved Door Limits — CR-01 disposition (UAT item 4, decided 2026-09-07): door bounds become a resolved profile, not hard constants, so one binary serves four deployment envelopes
