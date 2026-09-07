@@ -1691,7 +1691,7 @@ bindings:
   function: poisson
   signature: 'fn poisson(rng: &mut Rng, lambda: f64) -> usize'
   status: implemented
-  notes: 'The sampler was EXTRACTED from predicts logistic uncertainty arm precisely so its domain could be asserted directly - before the extraction the only path to it was a full logistic forecast, which is why the 32-rung ladder never saw it saturate.'
+  notes: 'The sampler was EXTRACTED from predicts logistic uncertainty arm precisely so its domain could be asserted directly - before the extraction the only path to it was a full logistic forecast, which is why the 32-rung ladder never saw it saturate. STRENGTHENED by plan 06-17 (WR-02 and WR-01 second half): the equation now carries variance_tolerance (0.05) and zero_mass_tolerance (0.22) beside its original float_tolerance (0.01), and FALSIFY-PROPHET-014 falsifies the SPREAD and the LOW TAIL that FALSIFY-PROPHET-013 left unbarred. `poisson` is still the ONE definition site this row binds to; what changed is how much of its codomain the falsification test can actually see. Two implementations that passed the mean-only bar - a zero-variance stub and a branch threshold lowered to 3.2 - were each observed turning the strengthened sweep red and then restored.'
 - contract: prophet-parity-v1.yaml
   equation: band_width_last30_rel
   module_path: aprender_forecast::prophet
