@@ -669,6 +669,32 @@ mod e2e {
     }
 
     #[tokio::test]
+    async fn refuses_cap_without_logistic_growth() {
+        // The BARE cap on the DEFAULTED growth arm — the shape 06-VERIFICATION gap 1
+        // probed, where the server accepted `cap` and returned a byte-identical forecast.
+        // synth(60) reaches ~13, so 100.0 is a cap a caller might believe is honoured.
+        refused(
+            &mut serve().await,
+            with(serde_json::json!({"cap": 100.0})),
+            "logistic-only",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn refuses_cap_with_explicit_linear_growth() {
+        // The EXPLICIT arm. Two cases, not one: `refuses_cap_without_logistic_growth`
+        // alone would still pass if the check were keyed on the ABSENCE of a `growth`
+        // key, and one failing input is an anecdote (CLAUDE.md rule 6).
+        refused(
+            &mut serve().await,
+            with(serde_json::json!({"growth": "linear", "cap": 100.0})),
+            "logistic-only",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn refuses_unknown_model() {
         refused(
             &mut serve().await,
