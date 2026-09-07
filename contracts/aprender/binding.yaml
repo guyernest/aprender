@@ -1608,7 +1608,17 @@ bindings:
   notes: 'Landed with plan 05-10. DECLARATIVE equation: it maps PF-007 and PF-008 onto the mechanisms that answer them, and the RENDERER is where a violation would surface (a best-seed headline, an unlabelled F1, an adapter-only size comparison, a verdict word). render_human composes every table, and its tests scan the whole output for verdict vocabulary and pair every absence assertion with a non-vacuity one. Row corrected from the non-existent `bench_report`.'
 # ---------------------------------------------------------------------------
 # Phase 6 (native time-series forecasting stack). 63 rows, one per equation of
-# the four Phase 6 contracts, audited as a BLOCKING tier3 gate by the Makefile's
+# the four Phase 6 contracts — COUNTED, not incremented. Four plans in gap-closure
+# round 3 each added rows and each bumped this number by hand, which is how the
+# Phase 5 header drifted by 3 without anything noticing (06-14 deviation 5). Plan
+# 06-17 re-counted the block for real at close of round: 63 rows, split 23
+# forecast-tool-boundary-v1 / 18 chronos-bolt-parity-v1 / 13 prophet-parity-v1 /
+# 9 neuralprophet-parity-v1. Reproduce with:
+#   awk 'NR>1610' contracts/aprender/binding.yaml | grep -c '^- contract:'
+# 06-17 itself added NO row: it strengthened the existing poisson_sampler_domain
+# equation (two tolerance keys, a widened obligation, FALSIFY-PROPHET-014) rather
+# than declaring a new one, and rows here are per EQUATION.
+# Audited as a BLOCKING tier3 gate by the Makefile's
 # `contract-audit-phase6`. That target does MORE than `pv audit`: it also resolves
 # every row below to a definition site in the file its `module_path` names, because
 # `pv audit` matches filename + equation and trusts `status`, so zero BIND- findings
