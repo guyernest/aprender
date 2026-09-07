@@ -20,7 +20,7 @@ affects: [06-16, 06-17]
 actuals:
   tokens: 26600
   tasks: 3
-  commits: 6
+  commits: 8
 plan_head_before: 73ca9cb32250196fb83f56700070a91f6344f7a1
 
 tech-stack:
@@ -184,7 +184,7 @@ status: complete
 
 - **Duration:** ~3h 5m
 - **Tasks:** 3 (two TDD, one auto)
-- **Commits:** 6 (measured: `git rev-list --count 73ca9cb32..HEAD`)
+- **Commits:** 8 (measured: `git rev-list --count 73ca9cb32..HEAD` at this SUMMARY's own commit) — 6 production commits plus the SUMMARY commit and this finalising amend
 - **Files modified:** 6
 
 ## Accomplishments
@@ -606,3 +606,11 @@ None. The three DoS threats this plan owns (T-06-35 `holidays[].name`, T-06-36 `
 ---
 *Phase: 06-native-time-series-forecasting-stack*
 *Completed: 2026-09-07*
+
+## Self-Check: PASSED
+
+- All 7 files named in `key-files.modified` plus this SUMMARY exist on disk.
+- All 6 production commit hashes (`3d0235850`, `d5ea9758c`, `b7cbe0e64`, `170053b9f`, `8a9d9232f`, `8ab2faf86`) and the SUMMARY commit (`23fe8ab0f`) resolve in `git log --oneline --all`; the eighth is this finalising commit, which cannot cite its own hash.
+- `MAX_HOLIDAY_NAME_LEN` and `MAX_NP_TRAIN_COST` are declared in `types.rs`; `fit_max_holiday_name_len` and `fit_max_np_train_cost` are present in the contract; `grep -c 'fn train_cost'` in `np.rs` is exactly **1**.
+- `grep -n 'bound: unbounded_pending' contracts/forecast-tool-boundary-v1.yaml` returns **nothing** — no `cost_axes` entry carries a pending marker. The four remaining `unbounded_pending` hits are prose describing the marker vocabulary and the closed window, in the `door_surface:` header comment, `door_surface_is_complete`'s formula and invariant, and `FALSIFY-BOUNDARY-019`.
+- Every plan-level `<verification>` gate was re-run at `8ab2faf86` and is recorded in the Verification table above.
