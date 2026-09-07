@@ -1358,3 +1358,73 @@ mod tests {
         assert!(r.yhat.iter().all(|v| v.is_finite()));
     }
 }
+
+// ------------------------------------------- the WR-03 wall harness (ignored) ----
+
+/// Wall-clock harness for **WR-03**: the work the in-loop aggregate-dates refusal avoids.
+///
+/// `#[ignore]`d, because it is a MEASUREMENT and not an assertion about correctness. Run it
+/// deliberately, on a RELEASE build:
+///
+/// ```text
+/// cargo test --release -p aprender-forecast --lib wr03_aggregate_dates_wall \
+///     -- --ignored --nocapture
+/// ```
+///
+/// It drives the review's exact trigger — 1 000 holidays, each with `lower_window: 0,
+/// upper_window: 0` (so `holiday_columns` reaches only 1 000 and never trips) and each
+/// carrying 1 000 dates. To reproduce the BEFORE side, delete the in-loop refusal in
+/// `forecast` and re-run: the same payload then parses ~1 000 000 dates and allocates
+/// ~8 MB of `Vec<i64>` before the post-loop check discards all of it.
+#[cfg(test)]
+mod wr03_wall {
+    /// One machine-parsable line. `profile=` is derived, never asserted (CLAUDE.md rule 2).
+    #[test]
+    #[ignore = "wall-clock measurement; run with --release -- --ignored --nocapture"]
+    fn wr03_aggregate_dates_wall() {
+        // A short valid series; the refusal fires at the door, so the history is only
+        // required to be legal in the dimension this payload is not perturbing.
+        let t0d = crate::dates::days_from_civil(2020, 1, 1);
+        let ds: Vec<String> = (0..60i64)
+            .map(|i| crate::dates::format_ymd(t0d + i))
+            .collect();
+        let y: Vec<f64> = (0..60)
+            .map(|i| 10.0 + 0.05 * f64::from(i) + f64::from(i % 7))
+            .collect();
+        let base = crate::dates::days_from_civil(1990, 1, 1);
+        let holidays: Vec<crate::types::HolidayArg> = (0..1_000i64)
+            .map(|h| crate::types::HolidayArg {
+                name: format!("h{h}"),
+                dates: (0..1_000i64)
+                    .map(|d| crate::dates::format_ymd(base + h * 1_000 + d))
+                    .collect(),
+                lower_window: 0,
+                upper_window: 0,
+            })
+            .collect();
+        let dates_sent: usize = holidays.iter().map(|h| h.dates.len()).sum();
+        let args = crate::types::ForecastArgs {
+            ds,
+            y,
+            horizon: 7,
+            holidays: Some(holidays),
+            ..crate::types::ForecastArgs::default()
+        };
+        let t0 = std::time::Instant::now();
+        let outcome = match super::forecast(&args) {
+            Err(crate::types::ForecastError::Validation(_)) => "refused",
+            Ok(_) => "accepted",
+            Err(e) => panic!("unexpected {e:?}"),
+        };
+        println!(
+            "WR03 AGGREGATE DATES WALL: holidays=1000 dates_per_holiday=1000 \
+             dates_sent={dates_sent} outcome={outcome} total_s={:.6} profile={}",
+            t0.elapsed().as_secs_f64(),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        );
+    }
+}
