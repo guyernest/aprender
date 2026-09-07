@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 9
+open_count: 11
 waived_count: 2
 fixed_count: 0
-total_count: 11
-last_updated: 2026-09-07T17:54:46.394Z
+total_count: 13
+last_updated: 2026-09-07T18:40:10.438Z
 ---
 
 # Broken Windows Ledger
@@ -26,6 +26,8 @@ last_updated: 2026-09-07T17:54:46.394Z
 | 9 | 06 | unmet-truth | contracts/forecast-tool-boundary-v1.yaml |  | Cost axis C-07 (holidays[].name byte amplification) carries unbounded_pending_06_15; held open by the DECLARED-RED types::tests::no_cost_axis_is_pending. Owed by 06-15 T2. | open |  | 2026-09-07T15:58:32.207Z |  |
 | 10 | 06 | unmet-truth | contracts/forecast-tool-boundary-v1.yaml |  | Cost axis C-08 (unbudgeted NeuralProphet training work) carries unbounded_pending_06_15; held open by the DECLARED-RED types::tests::no_cost_axis_is_pending. Owed by 06-15 T3. | open |  | 2026-09-07T15:58:32.289Z |  |
 | 11 | 06 | unrun-verify | justfile | 656 | chronos-coldstart's 150 ms SC4 bar uses [ $med -ge 150 ]; an erroring token takes the not-taken branch and prints COLD START OK. Closed today only by the upstream sed digits-only parse, not by the bar (D-ITEM-06-16). | open |  | 2026-09-07T17:54:46.394Z |  |
+| 12 | 06 | deviation | Makefile |  | make contract-audit-phase6's success line contains the literal BIND-, so grep -c 'BIND-' == 0 is unsatisfiable; four consecutive plans each fixed it locally. Needs a shared scripts/assert_no_audit_findings.sh with a case table. | open |  | 2026-09-07T18:40:10.361Z |  |
+| 13 | 06 | deviation | CHANGELOG.md |  | The two breaking 0.63.0 surface changes (prophet::feature_row's fourth parameter, safetensors::load removal) are documented in the crate README but not yet in the root CHANGELOG; release-time follow-up. | open |  | 2026-09-07T18:40:10.438Z |  |
 
 ````json
 [
@@ -159,6 +161,30 @@ last_updated: 2026-09-07T17:54:46.394Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-07T17:54:46.394Z",
+    "resolved_at": null
+  },
+  {
+    "id": 12,
+    "kind": "deviation",
+    "phase": "06",
+    "file": "Makefile",
+    "line": null,
+    "description": "make contract-audit-phase6's success line contains the literal BIND-, so grep -c 'BIND-' == 0 is unsatisfiable; four consecutive plans each fixed it locally. Needs a shared scripts/assert_no_audit_findings.sh with a case table.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T18:40:10.361Z",
+    "resolved_at": null
+  },
+  {
+    "id": 13,
+    "kind": "deviation",
+    "phase": "06",
+    "file": "CHANGELOG.md",
+    "line": null,
+    "description": "The two breaking 0.63.0 surface changes (prophet::feature_row's fourth parameter, safetensors::load removal) are documented in the crate README but not yet in the root CHANGELOG; release-time follow-up.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T18:40:10.438Z",
     "resolved_at": null
   }
 ]
