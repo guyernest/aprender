@@ -272,6 +272,24 @@ pub const SCALE_FLOOR: f32 = 1e-5;
 #[must_use]
 pub fn transpose(w: &[f32], out: usize, inp: usize) -> Vec<f32> {
     let mut t = vec![0.0f32; w.len()];
+    // IN-04: the `expect` below states its safety argument — `w.len() == out * inp` — in
+    // PROSE, and prose is enforced by no type and checked at no call site. This is the
+    // CHECKABLE FORM OF THAT CLAIM, not a substitute for it: it runs in every debug and
+    // test build (which is where all thirteen in-crate call sites are exercised), so a
+    // caller that violates the invariant is named at ITS OWN call site with both numbers
+    // rather than surfacing as a length mismatch deep inside a third-party kernel.
+    //
+    // The `expect` is KEPT — the `debug_assert` is the check, the `expect` is the message
+    // if a release build is wrong anyway. The return type is deliberately NOT widened to
+    // `Result`: the review offers that as an alternative, but it is a breaking public-API
+    // change to a published crate for a condition every in-crate caller already satisfies,
+    // and this plan is closing an unchecked claim, not opening a new surface.
+    debug_assert_eq!(
+        w.len(),
+        out * inp,
+        "transpose: w.len() must equal out * inp (out={out}, inp={inp}); this is the claim \
+         the expect below states in prose, checked"
+    );
     // trueno's blocked kernel writes b[c * rows + r] = a[r * cols + c]; with
     // rows = out, cols = inp that is exactly t[i * out + o] = w[o * inp + i].
     // A transpose is a permutation, so the blocking cannot change a single bit —

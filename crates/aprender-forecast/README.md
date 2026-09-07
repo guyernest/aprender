@@ -95,3 +95,25 @@ Two environment variables, two different jobs:
 |---|---|---|
 | `CHRONOS_MODEL_DIR` | runtime **and** build time | The directory the model is loaded from. At build time its presence is what arms the weight-dependent tests: `build.rs` emits `cfg(chronos_weights)` only when `$CHRONOS_MODEL_DIR/model.safetensors` is a file, so without weights those tests are **counted, reasoned skips** (`N ignored`), never a silent green. |
 | `CHRONOS_EMBED_DIR` | build time, in the server crate | Stages `model.safetensors` + `config.json` into `OUT_DIR` for `include_bytes!`, so the deployed binary carries its own weights (D-13). |
+
+## Public API changes
+
+Two items in the 0.63.0 line are **breaking for external callers** of this crate. Both were
+raised by the Phase 6 incremental code review (`IN-02`, `IN-04`) and are recorded here
+because a consumer reads the crate README, not a plan. The release-time capture belongs in
+the repository-root `CHANGELOG.md`.
+
+| Symbol | Change | Breaking? | Why |
+|---|---|---|---|
+| `prophet::feature_row` | Gained a fourth parameter, `hol_sets: &[HashSet<i64>]`, before `out` | **Yes** — the signature changed | The function used to answer "is `day` in this holiday's window at offset `off`?" with a linear `.any()` over `days`, i.e. `rows x holiday_columns x dates` comparisons per design build. The caller now hoists the membership-set construction out of the row loop and passes it in — `prophet::holiday_day_sets(spec)` builds exactly what the parameter wants. This is a measured design-build improvement (plan 06-11) and is deliberately **not** being reverted. |
+| `safetensors::load` | **Removed** (`pub fn load(path: &str) -> Result<(Weights, String), String>`) | **Yes** — the item is gone | It had no remaining caller in `crates/` or `src/` and was deleted as dead code. `safetensors::load_bytes` remains and is what the Chronos path actually uses (`chronos::load_model_from_dir` reads the file and hands over bytes), so a caller that needs the old behaviour composes `std::fs::read` with `load_bytes`. |
+
+**On `feature_row`'s index safety.** `hi` comes from `Column.holiday`, i.e. from the `cols`
+argument, and it looks up `hol_sets`, a *different* argument that no type ties to it. Since
+every `Design` field is `pub`, a caller can construct one whose `cols` and `spec.holidays`
+disagree. That lookup is now **total** (`hol_sets.get(hi)`), so a mismatched slice yields a
+zero column instead of an out-of-bounds panic raised inside this library. Note what that
+does and does not buy: neither a panic nor a zero column is *correct output* for a caller
+who built the slice wrong — the point is only that a library should not abort your process
+over it. Build `hol_sets` with `holiday_day_sets` from the same `Spec` you pass in, which is
+what both in-crate callers do.

@@ -202,7 +202,20 @@ pub fn feature_row(
     for c in cols.iter().filter(|c| c.holiday.is_some()) {
         let (hi, off) = c.holiday.expect("holiday col");
         // Same predicate as the former `days.iter().any(|&d| d + off == day)`, rearranged.
-        let hit = hol_sets[hi].contains(&(day - off));
+        //
+        // TOTAL LOOKUP (IN-02): `hi` is derived from `cols`, and it subscripts `hol_sets` —
+        // a DIFFERENT argument that no type ties to it. Every `Design` field is `pub`, so
+        // `d.spec.holidays.clear()` followed by `predict(&d, ..)` reaches here with a slice
+        // that does not line up, and `hol_sets[hi]` made that an out-of-bounds panic raised
+        // inside a library.
+        //
+        // WHAT THIS BUYS AND WHAT IT DOES NOT: both in-crate callers (`make_design` and
+        // `predict`) build `hol_sets` from the same `spec` immediately before the row loop,
+        // so this CANNOT change any shipped result — `prophet::parity` is the measurement,
+        // 32 passed / 0 failed before and after. A mismatch was a panic and is now a zero
+        // column, and NEITHER is correct output for a caller who built the slice wrong. What
+        // it buys is that a library does not abort the caller's process over it.
+        let hit = hol_sets.get(hi).is_some_and(|s| s.contains(&(day - off)));
         out.push(if hit { 1.0 } else { 0.0 });
     }
 }
@@ -2326,6 +2339,136 @@ mod changepoints {
                 changepoint_count(n, &spec) >= 1,
                 "n={n}: the effective count must be at least 1"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod feature_row_totality {
+    //! IN-02, NARROWED: `feature_row`'s holiday lookup must be TOTAL.
+    //!
+    //! The index `hi` comes from `Column.holiday`, i.e. from the `cols` argument, and it is
+    //! used to subscript `hol_sets`, a DIFFERENT argument. Nothing in the type system ties
+    //! the two together, and every field of [`super::Design`] is `pub`, so
+    //! `d.spec.holidays.clear()` followed by `predict(&d, ...)` reaches the lookup with a
+    //! slice that does not line up — an out-of-bounds panic raised inside library code.
+    //!
+    //! The fix is to make the LOOKUP total, not to make the signature old. The `hol_sets`
+    //! parameter is plan 06-11's measured design-build improvement (the caller hoists the
+    //! membership-set construction out of the row loop); reverting it would re-open that
+    //! cost, and `06-REVIEW.md` records the same indexing hazard as PRE-EXISTING in the
+    //! `spec.holidays[hi]` form the parameter replaced. So this is not a regression being
+    //! backed out — it is a long-standing sharp edge being filed down.
+    //!
+    //! What the change buys and what it does NOT: a mismatched slice was a panic and is now
+    //! a zero column. NEITHER is correct output for a caller who built the slice wrong. What
+    //! it buys is that a library does not abort the caller's process over it.
+    use super::{columns, feature_row, holiday_day_sets, Growth, Holiday, Mode, Seasonality, Spec};
+    use crate::dates::days_from_civil;
+
+    /// A spec with one seasonality (so `columns` has a non-holiday prefix to get right too)
+    /// and two holidays, each contributing one column at offset 0.
+    fn spec_with_holidays() -> Spec {
+        Spec {
+            growth: Growth::Linear,
+            cap: None,
+            seasonalities: vec![Seasonality {
+                name: "weekly".into(),
+                period: 7.0,
+                order: 1,
+                prior_scale: 1e-3,
+                mode: Mode::Additive,
+            }],
+            holidays: vec![
+                Holiday {
+                    name: "alpha".into(),
+                    days: vec![days_from_civil(2020, 1, 5)],
+                    lower_window: 0,
+                    upper_window: 0,
+                    prior_scale: 10.0,
+                },
+                Holiday {
+                    name: "beta".into(),
+                    days: vec![days_from_civil(2020, 1, 9)],
+                    lower_window: 0,
+                    upper_window: 0,
+                    prior_scale: 10.0,
+                },
+            ],
+            holidays_mode: Mode::Additive,
+            n_changepoints: 25,
+            changepoint_range: 0.8,
+            changepoint_prior_scale: 0.05,
+            interval_width: 0.8,
+            uncertainty_samples: 1000,
+        }
+    }
+
+    /// A `hol_sets` that does not line up with `cols` RETURNS, with the holiday entries
+    /// zero, instead of panicking inside a library.
+    ///
+    /// The empty slice is the extreme of the reachable case (`d.spec.holidays.clear()`), and
+    /// the one-element slice is the off-by-one that a partially-rebuilt design produces —
+    /// the second is the more likely accident and the one a `get` must also survive.
+    #[test]
+    fn a_short_hol_sets_is_a_miss_and_never_an_out_of_bounds_panic() {
+        let spec = spec_with_holidays();
+        let cols = columns(&spec);
+        let n_holiday_cols = cols.iter().filter(|c| c.holiday.is_some()).count();
+        assert_eq!(
+            n_holiday_cols, 2,
+            "the fixture must actually produce holiday columns, or this test proves nothing"
+        );
+        let day = days_from_civil(2020, 1, 5);
+        for short in [0usize, 1] {
+            let full = holiday_day_sets(&spec);
+            let truncated = &full[..short];
+            let mut out = Vec::new();
+            feature_row(day, &spec, &cols, truncated, &mut out);
+            assert_eq!(
+                out.len(),
+                2 + n_holiday_cols,
+                "short={short}: the row must still have one entry per column"
+            );
+            // Every column whose set was truncated away must read as a MISS.
+            for (i, v) in out.iter().skip(2).enumerate().skip(short) {
+                assert!(
+                    (*v - 0.0).abs() < f64::EPSILON,
+                    "short={short}: holiday column {i} has no set, so it must be 0.0, got {v}"
+                );
+            }
+        }
+    }
+
+    /// The shipped path is UNCHANGED: with a correctly-built `hol_sets`, the row is exactly
+    /// what the indexing form produced.
+    ///
+    /// The parity ladder already covers this at the fixture level; this pins it directly at
+    /// the row level so a `get`-returned miss where the index returned a HIT would be caught
+    /// here rather than only as a moved parity rung.
+    #[test]
+    fn a_correctly_built_hol_sets_still_hits_exactly_the_same_days() {
+        let spec = spec_with_holidays();
+        let cols = columns(&spec);
+        let hol_sets = holiday_day_sets(&spec);
+        // alpha is 2020-01-05, beta is 2020-01-09; both windows are [0, 0].
+        for (day, want) in [
+            (days_from_civil(2020, 1, 5), [1.0, 0.0]),
+            (days_from_civil(2020, 1, 9), [0.0, 1.0]),
+            (days_from_civil(2020, 1, 7), [0.0, 0.0]),
+        ] {
+            let mut out = Vec::new();
+            feature_row(day, &spec, &cols, &hol_sets, &mut out);
+            let got: Vec<f64> = out[2..].to_vec();
+            assert_eq!(got.len(), 2, "two holiday columns");
+            // `columns` sorts holiday columns by name, and "alpha_delim_+0" precedes
+            // "beta_delim_+0", so index 0 is alpha and index 1 is beta.
+            for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+                assert!(
+                    (g - w).abs() < f64::EPSILON,
+                    "day={day} column {i}: want {w}, got {g}"
+                );
+            }
         }
     }
 }
