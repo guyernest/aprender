@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
-stopped_at: Completed 06-12-PLAN.md
-last_updated: "2026-09-07T03:57:35.162Z"
+stopped_at: Completed 06-13-PLAN.md
+last_updated: "2026-09-07T04:26:09.316Z"
 last_activity: 2026-09-06
 last_activity_desc: 06-08 complete — SC1/SC4/SC5 measured on aarch64; CI decision measure-x86-first
-state_head: 1632f8a7885c383db411b7d33d59e52073bd219f
+state_head: 5cd9571846458d65b75d48bc12d8ba5442ae4ff4
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 77
-  completed_plans: 73
+  completed_plans: 74
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
-Plan: 4 of 13
+Plan: 5 of 13
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -200,6 +200,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P10 | 23 min | 3 tasks | 5 files |
 | Phase 06 P11 | 1h 21m | 2 tasks | 5 files |
 | Phase 06 P12 | 18 min | 3 tasks | 4 files |
+| Phase 06 P13 | 20 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -278,6 +279,9 @@ Recent decisions affecting current work:
 - [Phase 06]: The RED observation needed two temporary perturbations (the constant AND the test's own geometry pre-assert); both are reported rather than only the second
 - [Phase 06]: forecast-tool-boundary-v1.yaml bumped 1.1.0 -> 1.2.0 on pv diff's own 'minor' suggestion; the equation is what finally made 06-11's behavioural narrowing visible to pv diff
 - [Phase 06]: The 2 s bar is scoped in the recipe header to the worst ACCEPTED shape and is NOT a general SC1 guarantee; WINDOWS.md entry 7 / 06-11 D7 stays OPEN and this plan picked none of its options
+- [Phase 06]: Threshold 30.0 KEPT because the measurement allowed it: the only logistic parity fixture reaches lambda 3.1239, ~1/10 of the threshold, so no parity rung can take the new branch
+- [Phase 06]: Outcome taken for the out-of-domain changepoint sampler: the VALID BRANCH (normal approximation above lambda 30), not a refusal and not a reported clamp - the regime is legal input inside every door bound
+- [Phase 06]: poisson_sampler_domain float_tolerance = 0.01: 3.16 sigma at the noisiest sweep point (lambda 5), >= 7.62 sigma elsewhere, against a 17.2% pre-fix failure at lambda 900
 
 ### Pending Todos
 
@@ -376,6 +380,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-07T03:57:24.337Z
-Stopped at: Completed 06-12-PLAN.md
+Last session: 2026-09-07T04:25:35.541Z
+Stopped at: Completed 06-13-PLAN.md
 Resume file: None
