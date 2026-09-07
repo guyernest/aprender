@@ -1,382 +1,608 @@
 ---
 phase: 06
 phase_name: native-time-series-forecasting-stack
-reviewed: 2026-09-06T00:00:00Z
+reviewed: 2026-09-07T19:10:00Z
 depth: standard
 scope: incremental
-diff_base: ce3e5a8ea1ecbb3d873ce81972e099f8b4391758
-reviewed_files: 9
+diff_base: e1b441944
+supersedes: 06-REVIEW.md @ ba383f6c1 (CR-01, WR-01..WR-04, IN-01..IN-04)
+files_reviewed: 17
 files_reviewed_list:
-  - crates/aprender-forecast/src/forecast.rs
-  - crates/aprender-forecast/src/prophet.rs
-  - crates/aprender-forecast/src/types.rs
-  - crates/aprender-mcp-forecast/src/lib.rs
+  - contracts/aprender/binding.yaml
   - contracts/forecast-tool-boundary-v1.yaml
   - contracts/prophet-parity-v1.yaml
-  - contracts/aprender/binding.yaml
+  - crates/aprender-forecast/README.md
+  - crates/aprender-forecast/src/bolt.rs
+  - crates/aprender-forecast/src/forecast.rs
+  - crates/aprender-forecast/src/lib.rs
+  - crates/aprender-forecast/src/np.rs
+  - crates/aprender-forecast/src/prophet.rs
+  - crates/aprender-forecast/src/sc1_wall.rs
+  - crates/aprender-forecast/src/test_support.rs
+  - crates/aprender-forecast/src/types.rs
+  - crates/aprender-mcp-forecast/src/lib.rs
   - justfile
-  - .planning/phases/06-native-time-series-forecasting-stack/COVERAGE.md
+  - Makefile
+  - scripts/assert_measurement_under.sh
+  - scripts/check_assert_measurement_under_cases.sh
 findings:
   critical: 1
-  warning: 4
+  warning: 9
   info: 4
-  total: 9
+  total: 14
 critical: 1
-warning: 4
+warning: 9
 info: 4
-status: issues-found
+status: issues_found
 ---
 
-# Phase 06 — Incremental Code Review (gap-closure plans 06-10 … 06-13)
+# Phase 06 — Incremental Code Review (gap-closure round 3: plans 06-14 … 06-17)
 
-**Reviewed:** 2026-09-06
-**Depth:** standard (per-file, with targeted A/B measurement)
-**Diff:** `ce3e5a8ea1ecbb3d873ce81972e099f8b4391758..HEAD`, +1016 / −103 across 9 files
-**Status:** issues-found — **1 Critical, 4 Warning, 4 Info**
+**Reviewed:** 2026-09-07
+**Depth:** standard, incremental over `e1b441944^..f1cb0dc13` (30 commits, +3 790 / −233 across 17 files)
+**Status:** issues_found — **1 Critical, 9 Warning, 4 Info**
 
 ## Summary
 
-Three of the four claimed gap closures hold up under adversarial inspection. The two
-items the brief flagged as most likely to be defective are **not** defective, and I
-checked them rather than accepting the summaries:
+The four things the brief asked me to attack hardest hold up in three cases out of four, and
+I checked them by running the code rather than by reading the summaries:
 
-- **Integer overflow in the new cost arithmetic — not reachable.** `design_cells =
-  (ds.len() + args.horizon) * holiday_columns` (`forecast.rs:258`) is guarded by three
-  refusals that all execute earlier in the same function: `ds.len() > MAX_POINTS`
-  (line 48), `horizon > MAX_HORIZON` (line 54) and the in-loop
-  `holiday_columns > MAX_HOLIDAY_COLUMNS` (line 216). Maximum product 23 650 000. The
-  accumulator `holiday_dates_total` is likewise bounded: the loop cannot run more than
-  1001 iterations (each iteration adds ≥ 1 to `holiday_columns`, which is refused at
-  1001) and each term is ≤ 1000, so the sum is ≤ 1.001e6. No wrap, no bypass.
-- **The `HashSet` rewrite is an exact membership rewrite.** `d + off == day` ⟺
-  `d == day - off` holds in ℤ, and both sides are bounded far from i64 overflow:
-  `parse_date` (`dates.rs:78-112`) admits only 4-digit years, so `day ∈ [-719528, 2932896]`,
-  and `off` is bounded to ±365 by the window check at `forecast.rs:191`. Negative offsets
-  are handled correctly by the subtraction. The sets are built once per call —
-  `make_design` at `prophet.rs:272` and `predict` at `prophet.rs:766` — outside the row
-  loop, and `feature_row` has no other caller in the workspace.
-- **The cap refusal does not over-refuse and the three messages stay distinct.** The
-  refusal at `forecast.rs:159` runs after the `growth` enum is parsed (so an unknown
-  growth string still wins), before the logistic branch (so `logistic growth needs cap`
-  and `cap C must exceed max(y)` keep their own text), and before `make_design`
-  (line 289). The positive control in
-  `forecast::tests::an_option_belonging_to_the_other_model_is_refused_not_dropped`
-  proves `growth: "logistic"` with a valid cap still fits. I ran the suite: 16 passed,
-  0 failed.
-- **`justfile` discipline is correct.** `rc=$?` at line 811 is read from a redirect, not
-  a pipe; a missing `HOLIDAY DESIGN WALL:` line fails hard; the `total_s` parse is by
-  token, not column; the `profile=release` `case` guard is real.
-- **No `unwrap()` introduced**, and no `expect()` on request-derived input in the door or
-  server path. `MAX_HOLIDAY_DESIGN_COST`, `MAX_HOLIDAY_DATES_TOTAL` and `DEFAULT_POOL`
-  are each genuinely covered by `types::tests::cost_bounds_match_contract`.
+- **The five bar sites really are converted, and `assert_measurement_under.sh` really does
+  reject what `v + 0` let through.** I drove it with twelve probes outside its own table
+  (`nan`, a trailing space, an embedded newline, `1.2.3` in the BAR slot, `0000000`,
+  `999999999999999999999999999`): every malformed token is refused with a distinct message,
+  and the 23-row table runs 23/23. `bashrs lint` is clean on both scripts (0 errors,
+  0 warnings). Neither script is sourced, so the option-neutrality rule does not apply.
+- **The door bounds agree in all three places.** `cost_bounds_match_contract`,
+  `bounds_match_contract`, `pool_default_matches_contract` and `chronos_bounds_match_contract`
+  pass; `forecast.rs` imports the constants from `types.rs` rather than re-declaring them, so
+  there is no third copy to drift.
+- **The lambda bound is computed the way `predict` computes it.** The door's
+  `t_scale_days` / `future_span_days` / `changepoint_count(ds.len(), &spec)` reproduce
+  `d.t_scale_days`, `t[n-1]` and `d.changepoints_t.len()` exactly; `changepoint_geometry` is
+  the single arithmetic site and `changepoint_count` returns the LENGTH (`n_cp.max(1)`), which
+  is what `make_design`'s `vec![0.0]` branch actually produces. I ran the accepted near-miss
+  geometry across 300 seeds: no panic, no non-finite band value.
+- **The sampler's three bars are real bars.** I re-derived the sigma arithmetic in the
+  contract independently: relative SE of the sample variance is `sqrt(1/λ + 2)/sqrt(N)`
+  (0.624 % at λ=3, N=60 000 → 8.02σ at the 0.05 bar), and the zero-mass window
+  `[0.1983, 0.2478]` at N=60 000 is correct, as is the claim that it is empty at N=20 000.
+  `checked_zero_mass == 2` is a genuine non-vacuity assertion.
+- **`every_request_knob_is_enumerated` is genuinely two-directional** for the structs it is
+  given, and `no_cost_axis_is_pending` went red-then-green across 06-14/06-15 as claimed.
 
-What is wrong is the fourth item. **06-13's Poisson fix removes an accidental cap on an
-unbounded, attacker-controlled quantity and adds no door bound to replace it.** I
-measured it A/B against the pre-fix binary: an accepted 1 132-byte request now costs
-**14.8× more wall** and crosses the same 2 s SC1 bar that 06-11/06-12 were created to
-defend. Every bound this phase added is on the *holiday* axis; the logistic-uncertainty
-axis is unbounded, and the harness 06-13 added to watch it can only see the one `freq`
-value that does not exhibit the problem.
+What is wrong is the fourth item and the shape of the class closure.
+
+**06-15's `MAX_NP_TRAIN_COST` shipped without anyone computing what it refuses.** Every number
+in its derivation is at or above the bound — the structural maximum (718 M), a rejected 20 M
+candidate, three at-the-bound compositions, and one parity geometry at 97 % of it. Nobody asked
+what an ordinary request costs. I asked, through the door, on release: **20 000 daily points
+with `n_lags: 7` is refused** (CR-01), as is 10 000 × 14 and 5 000 × 30 — while 2 905 × 30 is
+accepted and completes in 1.3 s, well under the 2 s bar the bound cites as its derivation.
+
+And the class closure is half a closure. `door_surface.knobs` is derived from
+`schemars::schema_for!` and checked in both directions — that half is real. `cost_axes` is
+hand-kept, and **nothing derives it from code**: `every_cost_axis_names_a_real_bound` and
+`no_cost_axis_is_pending` both read only the contract, so a new cost axis is exactly as
+invisible as C-06 was (WR-03). CR-01 from the previous round would not have been caught by
+either test — `growth`, `freq`, `horizon` and `ds` all had knobs entries the whole time. The
+contract's own claim that "MISSING (a field exists with no entry) is how CR-01's cost axis got
+in" is not what happened.
+
+Two other things this round asserts are checkably false: that neither transport caps the
+request body (WR-02 — pmcp 2.19.3 enforces 4 MiB and I read the enforcement), and that the
+`feature_row` / `safetensors::load` changes are "breaking for external callers" of a crate
+whose manifest says `publish = false` (WR-09).
 
 ---
 
 ## Critical Issues
 
-### CR-01: 06-13 unbounded the simulated changepoint count; a 1.1 KB accepted request now walls at 2.33 s (14.8× regression, over the SC1 bar)
+### CR-01: `MAX_NP_TRAIN_COST` refuses in-spec NeuralProphet requests that clear the 2 s bar it was derived from — including 20 000 points at `n_lags: 7`
 
-**File:** `crates/aprender-forecast/src/prophet.rs:713-729` (`poisson`), reached from
-`prophet.rs:875-876`; no corresponding bound anywhere in
-`crates/aprender-forecast/src/forecast.rs`.
+**File:** `crates/aprender-forecast/src/types.rs:258` (`MAX_NP_TRAIN_COST = 15_000_000`),
+enforced at `crates/aprender-forecast/src/forecast.rs:452-464`;
+`contracts/forecast-tool-boundary-v1.yaml:170` (`fit_max_np_train_cost`)
 
 **Issue.**
-`predict`'s logistic arm draws `lambda = d.changepoints_t.len() * (t_max - 1.0)`
-(`prophet.rs:874-876`) once per uncertainty sample (`uncertainty_samples = 1000`,
-`prophet.rs:71`) and then builds, sorts and re-evaluates `n_changes` synthetic
-changepoints per sample. `t_max` is `(last_future_day - start_days) / t_scale_days`
-(`prophet.rs:759-761`), where `t_scale_days` is the **history span** and the future span
-is set by `horizon × freq step`. Nothing at the door bounds that ratio:
-`MAX_SPAN_DAYS` bounds the history span, `MAX_HORIZON` bounds the *count* of future
-steps, and `future_days` (`dates.rs:120-139`) multiplies that count by 7 for `"W"` and
-by ~30.4 for `"MS"`. For 33 daily points (span 32 d) with `horizon: 3650, freq: "MS"`,
-λ ≈ 25 × 3469 ≈ **86 700** simulated changepoints per sample, 1000 samples.
+The bound was derived from four kinds of evidence and every one of them sits **at or above**
+the bound: the structural maximum (718 641 000 → 47.924 s), a rejected 20 000 000 candidate
+(19 991 000 → 2.089 s), three `at_bound_*` compositions (13.9 M–14.8 M → 1.402–1.642 s), and
+`np::parity`'s Peyton geometry at 14 552 640 — **97.0 % of the bound**. No evidence was
+gathered below the bound, so the *accepted region* was never characterised, and it is not
+recorded in `MAX_NP_TRAIN_COST`'s doc, in `np_train_cost_bounded`'s invariants, or in any test.
+The always-run positive control is `np_args(120, 7)` with `n_lags = 7` — 120 points, which
+prices at 0.06 M, four hundred times inside the bound.
 
-Before 06-13 this was harmless *by accident*: Knuth's product method saturated near 745
-for any λ > 745.13, which acted as an unintended hard cap. 06-13 correctly identified
-that as a numerical defect and fixed it — but the fix makes the count track λ, and λ is
-unbounded from the door. `FIT_BUDGET_SECS` cannot help: it is entered inside
-`fit_prophet`, and this cost is in `predict`, which `forecast.rs:290-293` calls with no
-budget at all.
+Measured through the door (`aprender_forecast::forecast`), release build, `freq: "D"`,
+contiguous daily history from 2000-01-01. Accepted rows report their wall; refused rows report
+the cost the door printed:
 
-**Concrete trigger (measured, not argued).** Release build, `--http --pool 1`, min of 2
-runs each, same host, same requests, pre-fix binary built from the review base commit
-`ce3e5a8ea`:
+| points | `n_lags` 0 | 1 | 7 | 14 | 30 | 60 |
+|---|---|---|---|---|---|---|
+| 365 | ok 0.1 s | ok | ok | ok | ok | ok 0.5 s |
+| 1 095 | ok | ok | ok | ok | ok | ok 1.3 s |
+| 2 905 | ok | ok | ok | ok | **ok 1.3 s** (14 552 640) | **REFUSED** 27 767 200 |
+| 5 000 | ok | ok | ok 0.7 s | ok 1.1 s | **REFUSED** 21 569 800 | REFUSED 42 187 600 |
+| 10 000 | ok | ok | ok 1.3 s | **REFUSED** 17 974 800 | REFUSED 37 088 400 | REFUSED 72 760 800 |
+| 20 000 | ok 0.5 s | ok 1.0 s | **REFUSED** 15 994 400 | REFUSED 29 979 000 | REFUSED 61 907 000 | REFUSED 121 634 000 |
 
-| request (all accepted, all inside every door bound) | pre-06-13 | HEAD | factor |
-|---|---|---|---|
-| 33 pts / 1 d spacing, `horizon: 3650`, `freq: "MS"`, `growth: "logistic"`, `cap: 50` | 0.157 s | **2.334 s** | **14.8×** |
-| same but 30 d point spacing (λ ÷ 30) — *control* | 0.152 s | 0.209 s | 1.38× |
-| same but `freq: "W"` | 0.164 s | 0.634 s | 3.87× |
-| same but `freq: "D"` | 0.173 s | 0.231 s | 1.34× |
+Three things this makes concrete:
 
-Request payload: **1 132 bytes**. Reproduced three times at 2.375 / 2.351 / 2.316 s.
-The mechanism is pinned by the control pair, not asserted: the two logistic rows differ
-*only* in history spacing — identical point count, identical horizon, identical row
-count — so the 11× spread between them is attributable to λ and nothing else, and the
-matching `growth: "linear"` pair is flat (0.147 s / 0.149 s), which is the arm that does
-not call `poisson`.
+1. **The advertised knob is unreachable.** `ForecastArgs.n_lags` is documented as
+   "NeuralProphet only: number of autoregressive lags" and range-checked at `n_lags <= 365`
+   (`forecast.rs:427-429`); `door_surface.knobs` records that range. At the advertised maximum
+   history (`fit_max_points: 20000`) the reachable range is `n_lags <= 6`. A week of AR lags on
+   a long daily series is the single most idiomatic NeuralProphet configuration and it is
+   refused by **6.6 %** (15 994 400 against 15 000 000).
+2. **The refusals are not required by the bar the bound cites.** The refused 20 000 × 7 request
+   is 10 % cheaper by the proxy than the 17.97 M 10 000 × 14 request, and the nearest measured
+   neighbours below it complete in 1.0–1.3 s. The plan's own rejected candidate puts the 2 s
+   crossing near 19 M–20 M, so 15 M discards roughly a quarter of the region the SC1 bar would
+   have allowed, and the discarded band is exactly where real requests live.
+3. **The value was chosen to keep one geometry green, not to admit a region.**
+   `the_np_parity_ladder_geometry_prices_under_the_train_cost_bound` pins the ladder at 97 % of
+   the bound. That test proves the bound does not refuse the ladder; it says nothing about the
+   3 % of headroom above it, and 3 % is all there is.
 
-2.334 s is over SC1's 2 s bar, from an unauthenticated request smaller than this
-paragraph, against a default pool of K = 8.
+The proxy is also not monotone in wall: `n_lags + 1` multiplies the cost linearly while the
+per-sample work at `n_lags = 7` with `ar_layers: vec![32]` is dominated by the 32-wide AR head,
+not by the lag count — which is why 20 000 × 1 (4.0 M) walls at 1.0 s while 20 000 × 7 (16.0 M,
+4× the proxy) is refused rather than measured.
 
-**Fix.** Bound λ at the door, the same way 06-11/06-12 bounded the holiday product, and
-own the constant in `contracts/forecast-tool-boundary-v1.yaml` so
-`types::tests::cost_bounds_match_contract` mirrors it:
+**Fix.** Two changes, and the first is the one that must land:
 
 ```rust
-// forecast.rs, in the prophet arm, BEFORE make_design — the future span is already
-// known from `fut`, and n_changepoints is bounded by Spec::default_linear.
-if growth == Growth::Logistic {
-    let t_scale = (ds[ds.len() - 1] - ds[0]) as f64;      // > 0: ds is strictly ascending
-    let t_max = (fut[fut.len() - 1] - ds[0]) as f64 / t_scale;
-    let lambda = f64::from(u32::try_from(spec_n_changepoints)?) * (t_max - 1.0);
-    if lambda > MAX_LOGISTIC_CHANGEPOINT_LAMBDA {
-        return Err(ForecastError::Validation(format!(
-            "logistic uncertainty draws {lambda:.0} simulated changepoints per sample \
-             (n_changepoints x (t_max - 1)), which exceeds \
-             max_logistic_changepoint_lambda {MAX_LOGISTIC_CHANGEPOINT_LAMBDA}; \
-             shorten the horizon, use freq D, or send a longer history"
-        )));
+// forecast.rs / np.rs — characterise the ACCEPTED region and pin it, the way
+// the_np_parity_ladder_geometry_prices_under_the_train_cost_bound pins the ladder.
+#[test]
+fn the_advertised_np_geometry_is_accepted_by_the_train_cost_bound() {
+    // Pure arithmetic on the door's own pricing functions — costs nothing to run.
+    for (points, span, n_lags) in [
+        (20_000usize, 20_000usize, 7usize),   // the advertised maximum history, a week of lags
+        (10_000, 10_000, 14),
+        (5_000, 5_000, 30),
+    ] {
+        let n_samples = span - n_lags;
+        let epochs = np::door_epochs(points, n_samples, n_lags);
+        let cost = np::train_cost(n_samples, epochs, n_lags)
+            * np::door_lr_sweep(n_lags).len() as u64;
+        assert!(
+            cost <= MAX_NP_TRAIN_COST,
+            "{points} points at n_lags={n_lags} prices at {cost}, which the bound \
+             {MAX_NP_TRAIN_COST} REFUSES — the advertised n_lags range is unreachable there"
+        );
     }
 }
 ```
 
-A clamp inside `poisson` (`n_changes.min(CAP)`) would also remove the wall but silently
-reintroduces the truncation 06-13 exists to remove — refuse at the door instead, which
-is this phase's own stated discipline (D-11). Either way, add `freq` to the
-`logistic_band_wall` harness and give it a `just` recipe with a bar (see WR-04).
+Then raise the bound to the value that test and the measured 2 s crossing jointly permit
+(the `rejected_candidate_20m` mode measured 2.089 s at 19 991 000, so ~18 000 000 is the
+largest round value with measured headroom), **or** narrow the advertised range: if
+`n_lags <= 6` at 20 000 points is the intended contract, `knobs.n_lags.enforced_by` and the
+`ForecastArgs.n_lags` doc comment must say so, and the refusal message must name the reachable
+`n_lags` for the history the caller sent rather than only the four factors. Either way the
+accepted region has to be written down and asserted; today it is neither.
 
 ---
 
 ## Warnings
 
-### WR-01: `POISSON_NORMAL_BRANCH_LAMBDA` is the one new behavioural constant with no contract mirror — and the new test cannot detect a change to it
+### WR-01: the post-loop aggregate-dates refusal is unreachable dead code, and three artifacts state that it fires
 
-**File:** `crates/aprender-forecast/src/prophet.rs:686`
+**File:** `crates/aprender-forecast/src/forecast.rs:283-295`; the in-loop refusal it is dead
+behind is at `forecast.rs:236-250`
 
-**Issue.** Every other bound this phase added is contract-owned and asserted equal to the
-YAML (`types.rs:249-266`). The branch threshold that decides whether a request gets an
-*exact* Poisson or a *normal approximation* is a bare Rust literal. The contract mentions
-"the 30.0 branch threshold" only in prose
-(`contracts/prophet-parity-v1.yaml`, `poisson_sampler_domain` invariants), so the value is
-written twice with nothing asserting the two agree — exactly the D-15 failure mode the
-rest of the diff is careful about.
+**Issue.** `holiday_dates_total` is written in exactly one place — `forecast.rs:241`, inside
+the holiday loop — and the very next statement (line 242) returns `Err` if the running sum
+exceeds `MAX_HOLIDAY_DATES_TOTAL`. There is no `continue` in the loop body. Therefore, on every
+path that reaches line 289, `holiday_dates_total <= MAX_HOLIDAY_DATES_TOTAL` holds, and the
+post-loop `if holiday_dates_total > MAX_HOLIDAY_DATES_TOTAL` is **never true for any input**.
 
-**Concrete trigger (measured).** I re-ran the sweep's arithmetic with the threshold
-effectively lowered below 5.0, so every lambda in `LAMBDAS`
-(`prophet.rs:966`) takes the normal branch, using the same `Rng`, the same
-N = 20 000 and the same seed:
+Its own comment (lines 284-288) concedes only partial unreachability — "Unreachable for a
+request whose sum crosses the ceiling mid-loop" — but *every* request whose total crosses the
+ceiling crosses it mid-loop, because the loop visits every holiday. The comment then makes a
+claim that cannot be exercised: "this one has seen every holiday, so it is the only one that
+can honestly report the request's EXACT total." That message is unreachable, and so is the only
+justification for keeping the block. `contracts/forecast-tool-boundary-v1.yaml:235`
+(`knobs.dates.enforced_by`) and `cost_axes` C-03 repeat the claim, so the contract describes a
+refusal the code cannot produce.
 
-```
-lambda=     5.0 mean=    4.9985 rel=0.000310
-lambda=    29.0 mean=   29.0210 rel=0.000726
-lambda=    31.0 mean=   31.0664 rel=0.002144
-lambda=   100.0 mean=  100.0811 rel=0.000811
-lambda=   900.0 mean=  900.0384 rel=0.000043
-lambda=  2839.0 mean= 2839.5755 rel=0.000203
-```
+The WR-03 position test (`the_aggregate_dates_refusal_fires_inside_the_holiday_loop`,
+`forecast.rs:831-878`) is correct and does discriminate position — it asserts on the message,
+not on the constant. It simply cannot see that the second block is dead, because the message it
+requires (`max_holiday_dates_total`) is present in both.
 
-Every point is under the 0.01 bar. And
-`wp_log_r_logistic_fixture_lambda_is_far_below_the_branch_threshold`
-(`prophet.rs:1005-1038`) only asserts `3.1239 < THRESHOLD`, which passes for any
-threshold above 3.13. So lowering the constant to 3.2 — replacing the exact sampler with
-a normal approximation for *every* real logistic request, in the λ < 30 regime where the
-contract itself says the approximation is not standard — leaves the entire suite green.
-The guard catches loosening in the "make it Knuth again" direction only.
-
-**Fix.** Add `poisson_normal_branch_lambda: 30` to
-`contracts/forecast-tool-boundary-v1.yaml` (or a numeric key on the
-`poisson_sampler_domain` equation) and assert it in
-`types::tests::cost_bounds_match_contract` alongside the others; add one sweep point
-*below* the threshold whose bar is tight enough that the normal branch fails it (e.g. a
-χ² or variance check at λ = 5).
-
-### WR-02: the new falsification test asserts only the first moment; a zero-variance stub passes it
-
-**File:** `crates/aprender-forecast/src/prophet.rs:969-995`
-(`poisson_mean_tracks_lambda_across_its_whole_domain`);
-`contracts/prophet-parity-v1.yaml`, `poisson_sampler_domain`.
-
-**Issue.** The contract's `codomain` states "a non-negative count whose mean **and
-variance** are both lambda", and `FALSIFY-PROPHET-013`'s `if_fails` describes the failure
-in variance terms ("the simulated trends spread less than the Poisson law asks for,
-and `yhat_lower` / `yhat_upper` come back NARROWER"). But the test — and the proof
-obligation at `prophet-parity-v1.yaml` `poisson_sampler_domain` — bar only
-`|mean − λ| ≤ 0.01·λ`.
-
-**Concrete trigger.** `fn poisson(_rng: &mut Rng, lambda: f64) -> usize {
-lambda.round() as usize }` — a sampler with *zero* variance, which would collapse every
-logistic band to the deterministic trend — yields `rel = 0.0` at all six sweep points
-and passes `poisson_mean_tracks_lambda_across_its_whole_domain` outright. It also passes
-`wp_log_r_logistic_fixture_lambda_is_far_below_the_branch_threshold`, which touches the
-fixture only. Whether the 32-rung parity ladder's `band_width_last30_rel` rung would
-catch it at the fixture's λ = 3.12 is not established by anything in this diff; the test
-that names itself the sampler's domain check does not.
-
-**Fix.** Add a second assertion to the same sweep — the sample variance against λ, with
-its own contract-owned tolerance:
+**Fix.** Delete lines 283-295 and correct the two contract claims, **or** — if an exact-total
+message is genuinely wanted — make it reachable by hoisting the sum out of the loop:
 
 ```rust
-let var = draws.iter().map(|&k| (k as f64 - mean).powi(2)).sum::<f64>() / (N_F - 1.0);
-assert!((var - lambda).abs() / lambda <= var_bar,
-        "poisson variance outside its domain at lambda={lambda:.1}: var={var:.4}");
+// before the loop, so the exact total is known and the partial-sum caveat disappears
+let holiday_dates_total: usize = args
+    .holidays
+    .as_deref()
+    .unwrap_or(&[])
+    .iter()
+    .map(|h| h.dates.len())
+    .sum();
+if holiday_dates_total > MAX_HOLIDAY_DATES_TOTAL { /* the exact-total refusal, reachable */ }
 ```
+`h.dates.len()` is O(1) per holiday and reads no string, so this is cheaper than the in-loop
+accumulation it replaces and preserves WR-03's "refuse before parsing anything" property.
 
-`round()` inflates the variance by ≈ 1/12, negligible at every λ in the sweep, so a
-1–2 % bar is real rather than a fudge.
+### WR-02: "neither transport caps the request body" is false — pmcp 2.19.3 enforces a 4 MiB limit, and that claim is load-bearing for C-07's disposition
 
-### WR-03: the aggregate-dates refusal fires after the whole holiday loop, contradicting its own comment
+**Files:** `crates/aprender-forecast/src/types.rs:188-194`;
+`contracts/forecast-tool-boundary-v1.yaml:303` (C-07 `note`), `:401`
+(`holiday_name_cost_bounded` invariant), `:457` (`door_surface_is_complete` invariant);
+`contracts/aprender/binding.yaml` (`holiday_name_cost_bounded` notes)
 
-**File:** `crates/aprender-forecast/src/forecast.rs:210-212` and `245-252`
+**Issue.** All four places state, as the reason C-07 has *no structural maximum* and could only
+be closed by a chosen bound:
 
-**Issue.** The comment at line 210-211 says the running sum "is refused below the moment
-the aggregate ceiling is passed". It is not: `holiday_dates_total` is only compared to
-`MAX_HOLIDAY_DATES_TOTAL` at line 245, *after* the loop has finished parsing every date
-of every holiday. The `holiday_columns` check two lines below the accumulation
-(line 216) does exactly what this comment claims, which makes the inconsistency
-deliberate-looking rather than obviously accidental.
+> `crates/aprender-mcp-forecast/src/lib.rs`'s router construction (`http_app` / `pooled_app`)
+> applies no `DefaultBodyLimit`, no `max_body` and no content-length layer, and the stdio
+> transport has no framing cap, so any wall written here would describe an arbitrarily CHOSEN
+> name length rather than a maximum.
 
-**Concrete trigger.** 1 000 holidays, each `lower_window: 0, upper_window: 0` (so
-`holiday_columns` reaches only 1 000 and never trips) and each carrying 1 000 dates:
-`parse_date` runs ~1 000 000 times and ~1 000 `Vec<i64>` totalling ~8 MB are allocated
-and pushed into `holidays` before the refusal at line 245 discards all of it. The
-contract's own measurement puts the set-construction half of that at 18.049 ms; the
-parse half is comparable. Amplification is roughly 1:1 with the (≈ 11 MB) payload, so
-this is a hygiene defect rather than a second CR-01 — but it is unbounded work performed
-after the door already knows the request will be refused, on the exact surface this
-phase exists to bound.
+The first half is wrong, and the mechanism is in the dependency the code configures rather than
+in the file that was read. `http_app` (`aprender-mcp-forecast/src/lib.rs:83-88`) builds
+`RouterConfig { server_config: StreamableHttpServerConfig::stateless(), .. }`, and in
+pmcp 2.19.3 `stateless()` sets `max_request_bytes: DEFAULT_MAX_REQUEST_BYTES` = **4 MiB**
+(`pmcp-2.19.3/src/server/streamable_http_server.rs:471`,
+`pmcp-2.19.3/src/server/limits.rs:46`). The streamable-HTTP handler enforces it before any JSON
+parsing: `read_body_with_limit(body, state.config.max_request_bytes)` →
+`axum::body::to_bytes(body, max_bytes)` → HTTP 413
+(`streamable_http_server.rs:3565-3577`, `:4571`). pmcp additionally ships
+`max_tool_args_bytes` (1 MiB default).
 
-**Fix.** Move the check into the loop, immediately after the accumulation, mirroring
-`holiday_columns`:
+So on the shipped HTTP transport there **is** a structural maximum for `holidays[].name`
+(~4 MiB), `measured_at_structural_maximum` **was** an available disposition, and the sentence
+"any wall written here would describe an arbitrarily CHOSEN name length" is false. This does not
+make the 200-byte bound wrong — it is well derived from the 9-byte committed maximum — but it
+does mean a load-bearing justification, recorded in the D-15 source-of-truth contract and
+repeated in two Rust doc comments and a binding note, was argued from the absence of a
+mechanism in one file rather than proved against the transport (CLAUDE.md rule 2).
+
+**Fix.** Correct all four sites to say what is true: the HTTP transport caps the body at
+pmcp's 4 MiB `max_request_bytes` (and tool args at 1 MiB), the stdio transport does not, and
+`fit_max_holiday_name_len` is a bound rather than a measurement because the 4 MiB structural
+maximum is three orders of magnitude past anything a holiday label needs — not because no
+maximum exists. While there, consider asserting the pmcp limit rather than inheriting it:
+`constants.max_request_bytes` + `StreamableHttpServerConfig { max_request_bytes: .., .. }`
+makes it a value this repository owns instead of a dependency default that can move under it.
+
+### WR-03: `cost_axes` completeness is not machine-checked — the half of the class invariant that would have caught CR-01 is the hand-kept half
+
+**Files:** `crates/aprender-forecast/src/types.rs:596-618` (`enumerated_axes`), `:635-668`
+(`every_cost_axis_names_a_real_bound`), `:703-726` (`no_cost_axis_is_pending`);
+`contracts/forecast-tool-boundary-v1.yaml:449` (`door_surface_is_complete.formula`)
+
+**Issue.** The knobs half is genuinely structural: `schema_knobs()` derives the field set from
+`schemars::schema_for!` — the same generator that produces the advertised tool schema — and
+`every_request_knob_is_enumerated` asserts set equality, so neither MISSING nor PHANTOM can
+survive. That is real and it is the good half.
+
+The cost-axis half has no such derivation. `enumerated_axes()` reads
+`door_surface.cost_axes` out of the YAML and nothing else. Both axis tests iterate that list:
+
+- `every_cost_axis_names_a_real_bound` checks that each listed axis names a key that exists in
+  `constants:`.
+- `no_cost_axis_is_pending` checks that no listed axis carries an `unbounded_pending_*` marker.
+
+Neither can observe an axis that **is not listed**. There is no `schema_for!` analogue for
+"cost axes present in `prophet.rs` / `np.rs` / `forecast.rs`", so a new cost axis is exactly as
+invisible today as C-06 was before the previous round. The formula in the contract confirms this
+by omission: it states `knobs(door_surface) == properties(...)` — an equality — but only
+`forall a in cost_axes(door_surface): a.bound in keys(constants) or ...` — a per-entry
+predicate, never a completeness claim.
+
+This is checkable against the round's own motivating example. The contract asserts (`:457`):
+
+> MISSING (a field exists with no entry) is how CR-01's cost axis got in
+
+That is not what happened. CR-01's axis (C-06, `changepoint_count(len(ds)) * (t_max - 1)`) is a
+function of `growth`, `freq`, `horizon` and the *spacing* of `ds` — four knobs that all existed
+and would all have carried entries. `every_request_knob_is_enumerated` would have been green
+before CR-01 and is green after. The test that would have had to catch it is a cost-axis
+completeness check, and that is the one test the round did not build.
+
+**Fix.** The honest short-term move is to stop claiming what is not checked: change
+`door_surface_is_complete`'s invariant text and `types.rs:513-519`'s module comment to say the
+knobs half is derived and the axes half is an inspected list, and record what would make the
+axes half structural. Candidates that are actually derivable and worth costing:
+
+- assert that every `cost_axes[].spent_in` names a symbol that exists (the Makefile's
+  `contract-audit-phase6` resolver already does file-scoped symbol resolution for
+  `binding.yaml`; the same walk over `spent_in` is a small extension), which at least makes an
+  axis pointing at deleted code turn red;
+- pin the axis **count** with an assertion carrying a written rationale, so adding a bound
+  without adding its axis is a deliberate edit rather than an omission;
+- require every `constants.fit_max_*` key to be named by at least one `cost_axes[].bound` — the
+  inverse direction, which is derivable today and would catch "a bound landed with no axis".
+
+### WR-04: `door_surface` describes one of the two doors this contract bounds; the Chronos door has zero knobs and zero cost axes
+
+**Files:** `crates/aprender-forecast/src/types.rs:542-563` (`schema_knobs`);
+`contracts/forecast-tool-boundary-v1.yaml:145` ("THE DOOR'S WHOLE SURFACE"), `:179-243`
+(16 knobs, all `owner: ForecastArgs` or `owner: HolidayArg`), `:265-357` (C-01…C-14, all
+Prophet/NeuralProphet); `crates/aprender-forecast/src/chronos.rs:127-143` (`ChronosArgs`)
+
+**Issue.** `forecast-tool-boundary-v1.yaml` is the boundary contract for **both** thin servers.
+Its `constants:` block carries an `aprender-mcp-chronos` section (`chronos_min_points`,
+`chronos_max_points`, `chronos_max_horizon`, `chronos_native_horizon`), it defines
+`chronos_server_bounds` (`:462`) and the `allow_long_horizon` gate (`:563`), and
+`types::tests::chronos_bounds_match_contract` mirrors three of those constants.
+
+`door_surface` covers none of it. `schema_knobs()` feeds exactly two structs into the set
+equality — `ForecastArgs` and `HolidayArg` — so `ChronosArgs`'s five caller-settable fields
+(`ds`, `y`, `horizon`, `freq`, `allow_long_horizon`) have no knobs entries and no
+`enforced_by` prose, and `cost_axes` has no Chronos axis at all. Nothing in the file scopes
+`door_surface` to one server; the header says "THE DOOR'S WHOLE SURFACE" directly under a
+`constants:` block containing four `chronos_*` keys, and the axis IDs run C-01…C-14 with no gap
+or note marking the Chronos door as out of scope.
+
+The consequence is the same shape as WR-03, one level up: a new `ChronosArgs` field with
+`enforced_by: NOTHING` — the exact condition 06-14's enumeration was built to surface, and the
+one that found C-07 — is invisible to all three completeness tests.
+
+**Fix.** Either extend `schema_knobs()` with `("ChronosArgs", schema_for!(ChronosArgs))` and add
+the five knobs entries plus the Chronos cost axes (the rolling long-horizon path at
+`ceil(horizon / chronos_native_horizon)` forward passes is the obvious one), or add an explicit,
+tested scoping key — e.g. `door_surface.owner: aprender_forecast::forecast` — and a matching
+`chronos_door_surface` block, so the omission is a stated boundary rather than a silent one.
+
+### WR-05: `normal_quantile`'s doc comment and `#[must_use]` were orphaned onto `np_train_cost_is_over`
+
+**File:** `crates/aprender-forecast/src/forecast.rs:576-597`
+
+**Issue.** Plan 06-15 (commit `8a9d9232f`) inserted `np_train_cost_is_over` **between**
+`normal_quantile`'s doc block and `normal_quantile` itself. The result compiles, and it is
+wrong in three ways:
 
 ```rust
-holiday_dates_total += h.dates.len();
-if holiday_dates_total > MAX_HOLIDAY_DATES_TOTAL {
-    return Err(ForecastError::Validation(format!(
-        "holidays carry more than max_holiday_dates_total {MAX_HOLIDAY_DATES_TOTAL} \
-         dates in total; send fewer holidays or fewer dates per holiday"
-    )));
-}
+/// Acklam's inverse normal CDF (enough for band z-scores).     // 576  ← meant for
+/// ... the clamp / interval_width = 0.9999999999999999 story ...//        normal_quantile
+#[must_use]                                                      // 584  ← meant for
+/// The door's C-08 comparison, named ONCE ...                   // 585     normal_quantile
+fn np_train_cost_is_over(cost: u64) -> bool { ... }              // 593  ← receives all three
+pub fn normal_quantile(p: f64) -> f64 { ... }                    // 597  ← now undocumented
 ```
 
-(The message must drop the observed total, or keep the post-loop check as well, since
-the in-loop count is a partial sum. Both refusals are cheap.)
+- `np_train_cost_is_over`'s rustdoc now opens with "Acklam's inverse normal CDF (enough for
+  band z-scores)" followed by the entire NaN-band explanation, which has nothing to do with it.
+- `pub fn normal_quantile` — a public item — has no doc comment at all, and the clamp rationale
+  that `the_widest_accepted_interval_still_yields_a_finite_z` exists to protect is no longer
+  attached to the function it protects.
+- `#[must_use]` moved to the private predicate. (Harmless there; absent where it was intended.)
 
-### WR-04: the SC1 gate surface covers only the two shapes the phase chose; the harness 06-13 added for the third is `#[ignore]`d, has no recipe, no bar, and no `freq` knob
+The doc block also contains `[tests::the_np_train_cost_bound_is_exclusive_not_inclusive]`, an
+intra-doc link into a `#[cfg(test)]` module, which does not resolve under `cargo doc`.
 
-**File:** `justfile:799-847` (`forecast-holiday-bench`);
-`crates/aprender-forecast/src/prophet.rs:1051-1113` (`logistic_band_wall`)
+**Fix.** Move `np_train_cost_is_over` (and its own doc) above line 576 or below
+`normal_quantile`, so each doc block and `#[must_use]` sits on its intended item; change the
+intra-doc link to plain backticks since the target is test-only.
 
-**Issue.** Two things in this diff assert an SC1 wall — `forecast-bench` (no-holiday) and
-the new `forecast-holiday-bench` (holiday) — and both hard-code the geometry axis they
-sweep. `logistic_band_wall`, the harness 06-13 added precisely because the fix increases
-per-sample work, is `#[ignore]`d with no `just` recipe and no assertion, and it reads
-only `LOGISTIC_BENCH_POINTS` / `LOGISTIC_BENCH_HORIZON` — never `freq`. Its four recorded
-lines are all `freq: "D"`, the one value that does not exhibit CR-01 (measured 0.231 s
-vs 2.334 s for `"MS"` at the same points and horizon). This is CLAUDE.md Verification
-Discipline rule 5 in the concrete: the guard does not scan the surface where the cost is
-decided, so nothing in the phase could have caught CR-01.
+### WR-06: the "ONE numeric bar check every wall-clock gate calls" is not on every wall-clock gate, and one comparison is still on the old coercion
 
-Separately, the recipe's own comment block asserts "**THE DEFAULTS ARE THE WORST SHAPE
-THE DOOR STILL ACCEPTS, deliberately**" nine lines after stating that a 4 700-point /
-5-column request — accepted, half the design-cost bound — "reproducibly walls at ~4.2 s".
-Both cannot be true. The disclaimer above it ("NOT a general SC1 guarantee") is honest,
-but the superlative is the sentence a future reader will quote.
+**Files:** `scripts/assert_measurement_under.sh:2-3` and `:15`;
+`justfile:656` (`chronos-coldstart`), `justfile:740` (`forecast-pool-ratio`)
 
-**Fix.** Give `logistic_band_wall` a `LOGISTIC_BENCH_FREQ` knob and a
-`just forecast-logistic-bench` recipe with the same 2 s bar and `profile=release` guard
-as its holiday sibling; sweep `D`, `W` and `MS` at the tightest legal history span.
-Reword the defaults claim to "the worst shape at the design-cost bound" — which is what
-the three measured compositions actually support.
+**Issue.** Three things, and the first is the CLAUDE.md rule 5 one:
+
+1. **`chronos-coldstart` is a wall-clock SC4 gate with a 150 ms bar and it does not use the
+   validator.** `justfile:656` is `if [ "$med" -ge 150 ]`. It happens to fail closed today
+   because the `sed` at line 651 only emits digits and `[ -ge ]` errors on anything else — but
+   that is the accident the validator exists to replace, and it is a fifth wall-clock decision
+   surface the round enumerated as four converted plus one new. The script's own header says it
+   is "the ONE numeric bar check every wall-clock gate in this repository calls"; that sentence
+   is false as written.
+2. **`justfile:740` still runs the old coercion.**
+   `awk -v a="$ratio" -v b="$best" 'BEGIN { exit (a + 0 > b + 0) ? 0 : 1 }'` is the best-of-three
+   *selector*. The `sed` above it accepts `[0-9][0-9.]*`, so `1.2.3` survives extraction, is
+   compared as `1.2`, and is then handed to the validator (which correctly refuses it). The gate
+   fails closed, but the class the round set out to remove is still present in the file, three
+   lines above a comment explaining why it was removed everywhere else.
+3. **The header's count is off.** "Five bar sites read a measurement through `awk -v v=...`" —
+   four did (`chronos-bench`, `forecast-bench`, `forecast-pool-ratio`,
+   `forecast-holiday-bench`); the fifth (`forecast-sc1-sweep`) is new in this round and never
+   carried the old form. `check_assert_measurement_under_cases.sh:22` says "the four
+   pre-existing bar sites" and is correct, so the two scripts disagree.
+
+**Fix.** Route `chronos-coldstart` through
+`bash scripts/assert_measurement_under.sh under "$med" 150 "COLD START (SC4)"` and re-mutate it
+*there* (CLAUDE.md rule 4 — the old proof does not transfer); replace the `justfile:740`
+selector with a `max` helper that shape-checks both operands, or extract the ratio with a regex
+that cannot admit `1.2.3`; correct the two counts in the script header.
+
+### WR-07: `just forecast-sc1-sweep` is called "THE SC1 GATE" but runs on no automatic surface, and the in-suite run it ships asserts no bar
+
+**Files:** `justfile:907`; `crates/aprender-forecast/src/sc1_wall.rs:407-463`; `Makefile`
+(no target references it); `.github/workflows/ci.yml:289`
+
+**Issue.** `grep` over `.github/`, `Makefile` and `scripts/` finds **no** reference to
+`forecast-sc1-sweep`, `forecast-holiday-bench`, `forecast-bench`, `forecast-pool-ratio` or
+`chronos-bench`. `make tier3` gained `contract-audit-phase6` this round but no wall-clock gate.
+So the only path that ever executes `assert_measurement_under.sh` — and therefore the only path
+that ever runs `check_assert_measurement_under_cases.sh`, whose whole point is that it runs
+"on every gate invocation and not only when somebody remembers" — is a human typing
+`just forecast-sc1-sweep`.
+
+What *does* run automatically is `sc1_wall::sc1_wall_sweep`, which CI reaches through
+`cargo nextest run --profile ci --workspace --lib`. That run is a debug build, so
+`sc1_wall.rs:446-450` returns before the 2 s assertion. Its only live assertion is the 120 s CI
+budget — explicitly "NOT the SC1 bar" — and `.config/nextest.toml` sets `retries = 2`, so even
+that is retried away. Net effect: the SC1 bar this round built a swept gate for is asserted by
+nothing that runs without a human.
+
+This is not new to this round — the other four recipes were already manual — but the round
+promotes one of them to "THE SC1 GATE" and binds it in `contracts/aprender/binding.yaml` as
+`sc1_wall_swept … status: implemented`, which reads as coverage.
+
+**Fix.** Wire `forecast-sc1-sweep` (and `chronos-bench`) into a tier or a scheduled workflow, the
+way `toolchain-ceiling.yml` runs the clippy ceiling daily — a release-profile wall-clock sweep
+is too slow for per-PR CI but is exactly a nightly job. If it stays manual, say so in the recipe
+header and in the binding `notes`, so `status: implemented` is not read as `status: running`.
+
+### WR-08: the swept matrix still hard-codes the points axis; the slowest compositions anyone has measured are outside it
+
+**Files:** `crates/aprender-forecast/src/sc1_wall.rs:409` (`SC1_SWEEP_POINTS`, default 33),
+`justfile:907` (`points="33"`); `crates/aprender-forecast/src/sc1_wall.rs:39-51`
+
+**Issue.** WR-04 of the previous round diagnosed three benches each "hard-coded to the geometry
+it was born from". The replacement sweeps `freq × growth × holidays` — three axes — and pins
+`points` at 33 in both the harness default and the recipe default. The recipe's own header says
+"shrinking it for the in-suite run shrinks the POINTS and the HORIZON, never an axis", which is
+true of the in-suite run and equally true of the **gate**: the gate ships the same 33.
+
+I ran the sweep. Every Prophet composition is a 33-point history, and the worst is 0.890 s:
+
+```
+SC1 WALL: model=prophet freq=W growth=logistic holidays=at_bound points=33 horizon=3650 ... total_s=0.890
+SC1 WALL: model=prophet freq=MS growth=logistic holidays=at_bound points=33 horizon=841  ... total_s=0.703
+SC1 SWEEP: compositions=19 elapsed_s=7.252 profile=debug
+```
+
+The two slowest holiday compositions on record are outside this matrix: the
+`forecast-holiday-bench` default (800 points × 50 columns, **1.692 s**) and the accepted
+4 700-point / 5-column request that `types.rs:79` records at **4.2 s**. At `points = 33` the
+holiday rows resolve to `columns = 50000/3683 = 13`, i.e. a many-horizon-rows / few-columns
+shape; the many-history-rows shape — the one that produced both slow numbers — is never swept.
+
+`forecast-holiday-bench` still covers 800 points and `forecast-bench` covers 3 000, so the
+coverage exists across three recipes. But the sweep is the one billed as the gate and the one
+bound in the contract, and its shipped defaults do not reach the region where the wall is known
+to be worst.
+
+**Fix.** Make `points` an axis of the gate: sweep `{33, 800, 3000}` in the recipe (the in-suite
+run can keep 33 for the budget), or set the recipe default to the composition
+`forecast-holiday-bench` measured slowest and keep 33 only as the in-suite shape check. Update
+the module header, which currently argues the default matrix "is already at the bound" on the
+strength of the design-cost bound alone — the design-cost bound is on *cells*, and cells are the
+statistic `types.rs:76-81` says does not predict wall.
+
+### WR-09: the new README "Public API changes" section describes breakage that cannot exist — the crate is `publish = false`
+
+**Files:** `crates/aprender-forecast/README.md:99-113`;
+`crates/aprender-forecast/Cargo.toml:14-15`
+
+**Issue.** The section states that `prophet::feature_row`'s signature change and
+`safetensors::load`'s removal are "**breaking for external callers** of this crate" in "the
+0.63.0 line", and defers the record to "the repository-root `CHANGELOG.md`".
+
+`crates/aprender-forecast/Cargo.toml:15` is `publish = false`, with the comment "not a published
+API yet". `git show v0.63.0:crates/aprender-forecast/Cargo.toml` does not exist — the crate was
+created in this phase and has never been released. There are no external callers, `feature_row`
+and `safetensors::load` have never been public outside this workspace, and no CHANGELOG entry
+was added.
+
+This originates in the previous review's IN-02/IN-04, which asserted "breaking for external
+callers of this 0.63.0 crate" without checking the manifest. 06-17 escalated the unverified
+claim into a shipped README section instead of refuting it — the failure mode
+`superpowers:receiving-code-review` exists to prevent. The cost is not cosmetic: a future
+maintainer reading this table will treat `feature_row`'s shape as frozen and route around it.
+The same claim is repeated in `bolt.rs:284-285` ("a breaking public-API change to a published
+crate") as the reason `transpose` was not widened to `Result` (IN-03).
+
+**Fix.** Replace the section with an accurate one: the crate is unpublished (`publish = false`),
+both changes are internal, and the note that matters is the *design* one — build `hol_sets` with
+`holiday_day_sets` from the same `Spec`. Keep the index-safety paragraph, which is correct and
+useful. Re-open `transpose`'s `Result` question on its merits rather than on a semver constraint
+that does not apply.
 
 ---
 
 ## Info
 
-### IN-01: the `just` wall bar reads a non-numeric measurement as 0 and passes
+### IN-01: `holiday_design_wall`'s in-code defaults are a geometry the door refuses, so running it without the recipe panics
 
-**File:** `justfile:844`
+**File:** `crates/aprender-forecast/src/prophet.rs:2219-2222`
 
-`awk -v v="$total" 'BEGIN { exit (v + 0 < 2.0) ? 0 : 1 }'` — awk coerces a non-numeric
-`v` to 0, so a token like `total_s=abc` prints `HOLIDAY DESIGN OK: abc s < 2.0 s (SC1)`.
-The `-z "$total"` check above catches only an absent token, not a garbage one. The same
-pattern is pre-existing at lines 620, 680 and 742, so this is consistency rather than a
-new class — but the new recipe adds a fourth instance. Fix: validate the shape first,
-e.g. `case "$total" in ''|*[!0-9.]*|*.*.*) echo "FAIL: total_s=$total is not a number"
->&2; exit 1;; esac`.
+The harness defaults are `points=3000, columns=181, dates=84, horizon=365` — the verifier's
+original geometry, which `justfile:816-818` correctly notes "is now REFUSED at the door". It
+prices at `(3000 + 365) × 181 = 609 065` design cells against `MAX_HOLIDAY_DESIGN_COST =
+50 000`, so `time_accepted` (`sc1_wall.rs:135-140`) panics with "the composition must be
+ACCEPTED by the door". The only non-panicking entry point is `just forecast-holiday-bench`,
+whose own defaults (`800/50/84/200`) differ from the code's. Point the code defaults at the
+recipe's values so the two cannot drift and the documented `cargo test --release --ignored`
+invocation works.
 
-### IN-02: `feature_row`'s new `hol_sets` parameter is a breaking public-API change that trades a compile-time invariant for a runtime panic
+### IN-02: two of the three dispositions `every_cost_axis_names_a_real_bound` validates are reached by no row
 
-**File:** `crates/aprender-forecast/src/prophet.rs:187-207`
+**File:** `crates/aprender-forecast/src/types.rs:643-659`
 
-`pub fn feature_row` gained a fourth parameter and now indexes `hol_sets[hi]`
-(line 205) with an index derived from `Column.holiday`, i.e. from a *different*
-argument. Passing `&[]`, or a set list built from a different `Spec`, is an
-out-of-bounds panic in library code rather than a type error. `Design`'s fields are all
-`pub`, so `d.spec.holidays.clear()` followed by `predict(&d, …)` reaches it. The
-pre-change form indexed `spec.holidays[hi]` and had the same hazard, so this is not a
-regression — but the change was an opportunity to close it. Consider returning
-`(cols, hol_sets)` from one constructor, or `hol_sets.get(hi).is_some_and(|s| s.contains(…))`.
-The signature change is also breaking for external callers of this 0.63.0 crate.
+No `cost_axes` entry currently carries `bound: measured_at_structural_maximum` or a
+`bound: unbounded_pending_*` marker (C-08 carries `measured_seconds: 47.924` but its `bound:` is
+`fit_max_np_train_cost`, so the `measured_seconds < 2.0` branch does not run for it). Both
+branches are therefore dead in the shipped tree: the `measured_seconds`-under-2.0 check and the
+pending skip have never executed against real data and will first run on whatever future axis
+uses them. Worth one synthetic row in a `#[test]` that drives `enumerated_axes`-shaped input
+through the same predicate, so the dispositions the contract advertises are exercised before
+someone relies on them.
 
-### IN-03: `cost_bounds_match_contract`'s doc says "four cost bounds"; the table has seven entries, one of which is not a cost bound
+### IN-03: three checkable claims in `bolt::transpose`'s new comment are off
 
-**File:** `crates/aprender-forecast/src/types.rs:228-266`
+**File:** `crates/aprender-forecast/src/bolt.rs:275-291`
 
-The doc comment ("The four cost bounds against the SAME contract") predates two
-additions, and `DEFAULT_POOL` — a router-pool size, not a per-request cost ceiling — now
-rides in the same table. The assertion itself is correct and all three new constants
-*are* covered; only the narration drifted. Update the count and either split
-`DEFAULT_POOL` into its own assertion or widen the doc to "contract-mirrored constants".
+The `debug_assert_eq!` itself is a real improvement over the prose-only `expect`. Its comment
+says: (a) "all thirteen in-crate call sites" — `grep` finds **11** (`bolt.rs` only; nothing in
+`chronos.rs` or `aprender-mcp-chronos`); (b) "a breaking public-API change to a **published**
+crate" — `publish = false`, see WR-09; (c) "a caller that violates the invariant is named at
+ITS OWN call site with both numbers" — `debug_assert_eq!` panics *inside* `transpose` and the
+panic location is `bolt.rs:287`; only a backtrace names the caller. Also note the assert sits
+after `let mut t = vec![0.0f32; w.len()]`, so the allocation happens first. Trim the claims to
+what the code does.
 
-### IN-04: five source files changed in the reviewed range fall outside the stated 9-file scope
+### IN-04: the sweep prints a lambda on rows that never pay it, 4.3× over the door's own bound
 
-**Files:** `crates/aprender-forecast/src/bolt.rs`, `crates/aprender-forecast/src/dates.rs`,
-`crates/aprender-forecast/src/safetensors.rs`, `crates/aprender-mcp-chronos/src/lib.rs`,
-`crates/aprender-mcp-forecast/src/main.rs`
+**File:** `crates/aprender-forecast/src/sc1_wall.rs:212-216`, `:342-353`
 
-`git diff ce3e5a8ea..HEAD` touches 14 source files, not 9. I read the extra five; two
-are worth recording rather than dropping:
+`max_legal_horizon` clamps the horizon only when `growth == "logistic"`, but `measure` prints
+`lambda=` unconditionally. The gate's primary artifact therefore contains lines like:
 
-- `bolt.rs:275-276` replaces a hand-written transpose loop with
-  `trueno::blis::transpose(out, inp, w, &mut t).expect("… guaranteed by every caller")`.
-  The safety argument (`w.len() == out * inp`) is enforced by no type and by no
-  assertion at the call sites; a caller that violates it now panics in a library instead
-  of writing a partial result. A `Result` return, or a `debug_assert_eq!(w.len(), out * inp)`,
-  would make the claim checkable.
-- `safetensors.rs` deletes `pub fn load(path: &str)`. I found no remaining callers in
-  `crates/` or `src/`, so the deletion is correct as dead code — but it is a breaking
-  removal from a published crate's public surface and belongs in a semver note.
+```
+SC1 WALL: model=prophet freq=MS growth=linear holidays=none points=33 horizon=3650 lambda=86789.8 ... total_s=0.187
+```
 
-`dates.rs`'s `parse_date` rewrite (byte fold in place of `split('-').parse()`) is
-sound: the shape gate at lines 79-91 proves ten ASCII bytes, `-` at 4 and 7, and digits
-elsewhere before the fold runs, so the removed error arm really was unreachable, and the
-4-digit year keeps the day count far from any i64 edge.
+86 789.8 is the structural maximum of the axis and 4.3× `MAX_LOGISTIC_CHANGEPOINT_LAMBDA`, on a
+line the gate reports as passing. It is correct — the linear arm never calls `poisson` — but a
+number that large next to `OK` on the gate's own log is the sentence a future reader will quote
+out of context. Print `lambda=n_a` on the non-logistic rows, or suffix it `lambda=86789.8(unpaid)`.
 
 ---
 
 ## Verification notes
 
-- `cargo test -p aprender-forecast --lib -- types::tests::cost_bounds_match_contract
-  prophet::sampler forecast::tests` → **16 passed, 0 failed, 1 ignored**.
-- CR-01's A/B used two release binaries of `aprender-mcp-forecast`: HEAD, and one built
-  from a detached worktree at `ce3e5a8ea` (removed afterwards; no repo source was
-  modified). Both were driven over the shipped streamable-HTTP `/mcp` route with
-  `--pool 1`, so the numbers are the served surface, not a libtest harness.
-- WR-01's sweep was reproduced in a standalone scratch binary that replicates
-  `prophet::Rng` and the normal branch verbatim, not by editing the crate.
+Everything below was run against this working tree; no repository source was modified.
+
+- `cargo test -p aprender-forecast --lib -- types:: forecast::tests sampler::` →
+  **40 passed, 0 failed**.
+- `cargo test -p aprender-forecast --lib -- sc1_wall:: --nocapture` → 19 compositions,
+  `elapsed_s=7.252`, `profile=debug` (the module header's 7.19 s reproduces).
+- `bash scripts/check_assert_measurement_under_cases.sh` → `TABLE OK: 23/23`.
+- `bashrs lint` on both new scripts → **0 errors, 0 warnings** (3 and 7 info respectively).
+- `pv validate` on `contracts/forecast-tool-boundary-v1.yaml` and
+  `contracts/prophet-parity-v1.yaml` → `0 error(s), 0 warning(s)` each.
+- `awk 'NR>1610' contracts/aprender/binding.yaml | grep -c '^- contract:'` → **63**, split
+  23 / 18 / 13 / 9 exactly as the header claims.
+- **CR-01** was measured through `aprender_forecast::forecast` on a release build from a
+  throwaway crate outside the repository that depends on `crates/aprender-forecast` by path,
+  driving the (points × n_lags) grid in the table. Refusal costs are the door's own printed
+  numbers; accepted walls are `Instant::now()` around the call at `horizon: 1`.
+- **WR-02** was verified by reading pmcp 2.19.3 in the cargo registry:
+  `src/server/limits.rs:46` (`DEFAULT_MAX_REQUEST_BYTES = 4 * 1024 * 1024`),
+  `src/server/streamable_http_server.rs:471` (`stateless()` sets it) and `:3565-3577`, `:4571`
+  (`read_body_with_limit` → `axum::body::to_bytes` → 413).
+- **WR-01**'s unreachability is by inspection and is total: `holiday_dates_total` has exactly
+  one write site (`forecast.rs:241`) and is compared to the ceiling on the next statement, with
+  no `continue` in the loop.
+- I probed the accepted logistic near-miss geometry (33 points, `freq: "MS"`, `horizon: 840`,
+  `growth: "logistic"`) across 300 seeds looking for a `partial_cmp(...).expect("f")` panic or a
+  non-finite band from `logistic_gammas` at the now-27×-larger simulated changepoint count:
+  **0 panics, 0 non-finite values**. Recording the negative so it is not re-litigated.
 
 ---
 
-_Reviewed: 2026-09-06_
+_Reviewed: 2026-09-07_
 _Reviewer: Claude (gsd-code-reviewer)_
-_Depth: standard, incremental over `ce3e5a8ea1ecbb3d873ce81972e099f8b4391758`_
+_Depth: standard, incremental over `e1b441944^..f1cb0dc13`_
