@@ -237,6 +237,39 @@ fn linspace_round(stop: f64, num: usize) -> Vec<usize> {
         .collect()
 }
 
+/// The ONE arithmetic site for the effective changepoint geometry: `(hist_size, n_cp)`.
+///
+/// Private on purpose. [`changepoint_count`] is the public reading of it and
+/// [`make_design`] is the only other caller, so the rule "how many changepoints does a
+/// series of `n` points get?" is written exactly once. A door that recomputed
+/// `min(spec.n_changepoints, floor(n * changepoint_range) - 1)` inline could drift from
+/// the design it is trying to bound, and a bound the sampler disagrees with is evadable.
+fn changepoint_geometry(n: usize, spec: &Spec) -> (usize, usize) {
+    let hist_size = (n as f64 * spec.changepoint_range).floor() as usize;
+    let mut n_cp = spec.n_changepoints;
+    if n_cp + 1 > hist_size {
+        n_cp = hist_size.saturating_sub(1);
+    }
+    (hist_size, n_cp)
+}
+
+/// How many entries [`make_design`] will put in `Design::changepoints_t` for `n` points.
+///
+/// Returns the LENGTH, not the raw count: `make_design`'s `n_cp == 0` branch is
+/// `vec![0.0]`, i.e. length **one**, not zero — so the effective count is `max(n_cp, 1)`.
+/// That distinction is load-bearing, because this length is the `s_cnt` factor of the
+/// logistic uncertainty simulation's Poisson mean
+/// `lambda = changepoints_t.len() * (t_max - 1)`, which
+/// [`crate::types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA`] bounds at the door.
+///
+/// `forecast::forecast` calls THIS function to compute the lambda it refuses on, so the
+/// door's lambda is `predict`'s lambda by construction rather than by agreement.
+#[must_use]
+pub fn changepoint_count(n: usize, spec: &Spec) -> usize {
+    let (_, n_cp) = changepoint_geometry(n, spec);
+    n_cp.max(1)
+}
+
 pub fn make_design(ds_days: &[i64], y: &[f64], spec: &Spec) -> Design {
     let n = y.len();
     assert!(n >= 2 && ds_days.windows(2).all(|w| w[0] < w[1]));
@@ -256,17 +289,19 @@ pub fn make_design(ds_days: &[i64], y: &[f64], spec: &Spec) -> Design {
         (Growth::Logistic, None) => panic!("logistic growth needs cap"),
         _ => None,
     };
-    let hist_size = (n as f64 * spec.changepoint_range).floor() as usize;
-    let mut n_cp = spec.n_changepoints;
-    if n_cp + 1 > hist_size {
-        n_cp = hist_size.saturating_sub(1);
-    }
+    let (hist_size, n_cp) = changepoint_geometry(n, spec);
     let changepoints_t: Vec<f64> = if n_cp > 0 {
         let idx = linspace_round((hist_size - 1) as f64, n_cp + 1);
         idx[1..].iter().map(|&i| t[i]).collect()
     } else {
         vec![0.0]
     };
+    // The tie the door's bound rests on, asserted where the design is actually built.
+    debug_assert_eq!(
+        changepoints_t.len(),
+        changepoint_count(n, spec),
+        "changepoint_count must report the length make_design produces"
+    );
     let cols = columns(spec);
     let k = cols.len();
     let mut x = Vec::with_capacity(n * k);
@@ -2130,5 +2165,90 @@ mod design_cost {
             total - r.fit_seconds - r.predict_seconds,
             std::env::consts::ARCH
         );
+    }
+}
+
+#[cfg(test)]
+mod changepoints {
+    //! `changepoint_count` is the SINGLE implementation of the effective changepoint count,
+    //! and this module is what makes that a measurement rather than a comment.
+    //!
+    //! The door refuses a logistic request whose Poisson mean
+    //! `lambda = changepoints_t.len() * (t_max - 1)` exceeds
+    //! [`crate::types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA`], and it computes that length with
+    //! [`super::changepoint_count`]. If the door and [`super::make_design`] could disagree
+    //! about the count, the bound would be evadable by picking a point count where they
+    //! differ — so the tie is swept, not assumed.
+    use super::{auto_seasonalities, changepoint_count, make_design, Mode, Spec};
+    use crate::dates::days_from_civil;
+
+    /// A strictly-ascending daily series of `n` points with a non-degenerate `y`.
+    fn series(n: usize) -> (Vec<i64>, Vec<f64>) {
+        let t0 = days_from_civil(2020, 1, 1);
+        let ds: Vec<i64> = (0..n as i64).map(|i| t0 + i).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64;
+                10.0 + 0.01 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin()
+            })
+            .collect();
+        (ds, y)
+    }
+
+    /// The count the door reads IS the length the design produces, across the whole
+    /// reachable range of point counts and across both branches of the `n_cp` decision.
+    ///
+    /// `n = 2` and `n = 3` are in the sweep because they are the ONLY way to reach
+    /// `make_design`'s `vec![0.0]` branch with the default 25 changepoints, and that branch
+    /// is exactly why `changepoint_count` returns the LENGTH (1) rather than the raw count
+    /// (0). A sweep that started at 10 would never exercise the distinction it exists for.
+    /// The `n_changepoints = 0` spec reaches the same branch from the other direction, at
+    /// every point count.
+    #[test]
+    fn changepoint_count_equals_the_design_it_describes() {
+        for n in [2usize, 3, 10, 12, 20, 32, 33, 34, 100, 3000] {
+            let (ds, y) = series(n);
+            for n_changepoints in [0usize, 1, 25] {
+                let mut spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, Mode::Additive));
+                spec.n_changepoints = n_changepoints;
+                if spec.seasonalities.is_empty() {
+                    // `make_design` needs K >= 1, the same way the door does.
+                    spec.seasonalities.push(super::Seasonality {
+                        name: "weekly".into(),
+                        period: 7.0,
+                        order: 1,
+                        prior_scale: 1e-3,
+                        mode: Mode::Additive,
+                    });
+                }
+                let design = make_design(&ds, &y, &spec);
+                assert_eq!(
+                    design.changepoints_t.len(),
+                    changepoint_count(n, &spec),
+                    "n={n} n_changepoints={n_changepoints}: the door's count and the design \
+                     it describes must be the same number — a disagreement here makes \
+                     MAX_LOGISTIC_CHANGEPOINT_LAMBDA evadable"
+                );
+            }
+        }
+    }
+
+    /// The count is never zero, because the design it describes is never empty.
+    ///
+    /// The lambda the door bounds is `count * (t_max - 1)`; a count of 0 would report
+    /// lambda 0 for a request whose design still carries one changepoint and still runs the
+    /// simulation, which is the exact shape of a bound that reads a different number from
+    /// the one that is spent.
+    #[test]
+    fn the_effective_changepoint_count_is_never_zero() {
+        let (ds, _) = series(2);
+        let mut spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, Mode::Additive));
+        spec.n_changepoints = 0;
+        for n in [2usize, 3, 10, 33, 3000] {
+            assert!(
+                changepoint_count(n, &spec) >= 1,
+                "n={n}: the effective count must be at least 1"
+            );
+        }
     }
 }
