@@ -676,6 +676,25 @@ impl Rng {
     }
 }
 
+/// Draw a Poisson count with mean `lambda`.
+///
+/// Extracted verbatim from `predict`'s `Growth::Logistic` uncertainty arm so its numerical
+/// domain can be asserted directly — the only path to it before was a full logistic forecast.
+pub fn poisson(rng: &mut Rng, lambda: f64) -> usize {
+    // Poisson via Knuth
+    let mut n_changes = 0usize;
+    let mut pp = 1.0;
+    let l = (-lambda).exp();
+    loop {
+        pp *= rng.uniform();
+        if pp <= l {
+            break;
+        }
+        n_changes += 1;
+    }
+    n_changes
+}
+
 /// numpy's default (linear) percentile.
 pub fn percentile(sorted: &[f64], q: f64) -> f64 {
     let n = sorted.len();
@@ -819,17 +838,7 @@ pub fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast {
                 let mean_trend = &trend_s;
                 for row in unc.iter_mut() {
                     let lambda = s_cnt * (t_max - 1.0);
-                    // Poisson via Knuth
-                    let mut n_changes = 0usize;
-                    let mut pp = 1.0;
-                    let l = (-lambda).exp();
-                    loop {
-                        pp *= rng.uniform();
-                        if pp <= l {
-                            break;
-                        }
-                        n_changes += 1;
-                    }
+                    let n_changes = poisson(&mut rng, lambda);
                     let mut cps: Vec<f64> = d.changepoints_t.clone();
                     let mut deltas: Vec<f64> = p.delta.clone();
                     let mut new: Vec<(f64, f64)> = (0..n_changes)
@@ -884,6 +893,117 @@ pub fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast {
         trend_lower: tl,
         trend_upper: tu,
         components,
+    }
+}
+
+#[cfg(test)]
+mod sampler {
+    //! FALSIFICATION of the changepoint-count sampler's numerical DOMAIN (VERIFICATION gap 3).
+    //!
+    //! Deliberately NOT in [`super::parity`]: `prophet::parity` means "the Prophet 1.4.0 ladder"
+    //! and its count (32) is asserted by this plan's own verification, so a sampler test living
+    //! there would change what that number means.
+    //!
+    //! What is barred here is the sampler's MEAN against its own lambda, at six lambdas that
+    //! straddle both the branch threshold and Knuth's 745.13 underflow point. One failing input
+    //! is an anecdote (CLAUDE.md Verification Discipline rule 6); six points make the shape of
+    //! the failure visible — the pre-fix implementation tracks lambda up to ~745 and saturates
+    //! there for anything larger, which is a different claim from "it is wrong at 900".
+    use super::{poisson, Rng};
+    use crate::dates::parse_ymd;
+    use crate::test_support::load_json;
+
+    /// Draws per lambda.
+    ///
+    /// Chosen so sampling error cannot be mistaken for the defect: at lambda = 900 the standard
+    /// error of the mean is sqrt(900 / 20 000) ~= 0.212, i.e. ~0.024 % of lambda — three orders
+    /// of magnitude below the ~17 % shortfall the saturation produces.
+    const N: usize = 20_000;
+    const N_F: f64 = 20_000.0;
+
+    /// Fixed so the sweep is reproducible. The bar is on the DISTRIBUTION's mean, never on a
+    /// draw-for-draw match with numpy — this file's `Rng` is a xorshift, not MT19937.
+    const SEED: u64 = 20_260_907;
+
+    /// Six lambdas: two below the branch threshold (Knuth must stay untouched), two above it but
+    /// below Knuth's underflow point, and the two the verifier measured as reachable IN BOUNDS
+    /// (100 daily points + horizon 3650 gives ~922; the 10-point floor gives ~2839).
+    const LAMBDAS: [f64; 6] = [5.0, 29.0, 31.0, 100.0, 900.0, 2839.0];
+
+    /// TRANSIENT — read by Tasks 1 and 2 of plan 06-13 ONLY, because
+    /// `equations.poisson_sampler_domain.float_tolerance` does not exist in
+    /// `contracts/prophet-parity-v1.yaml` until Task 3. Task 3 DELETES this const in the same
+    /// edit that adds the key, and proves the swap by mutating the contract value (D-15).
+    const REL_TOLERANCE: f64 = 0.02;
+
+    #[test]
+    fn poisson_mean_tracks_lambda_across_its_whole_domain() {
+        let bar = REL_TOLERANCE;
+        // Measure and PRINT all six first, then assert: a print-and-assert loop would abort at
+        // the first out-of-domain lambda and hide the shape of the failure at the larger ones.
+        let mut observed: Vec<(f64, f64, f64)> = Vec::with_capacity(LAMBDAS.len());
+        for (i, &lambda) in LAMBDAS.iter().enumerate() {
+            let mut rng = Rng::new(SEED + u64::try_from(i).expect("index fits u64"));
+            let mut sum = 0.0_f64;
+            for _ in 0..N {
+                let k = poisson(&mut rng, lambda);
+                sum += f64::from(u32::try_from(k).expect("a Poisson count fits u32"));
+            }
+            let mean = sum / N_F;
+            let rel = (mean - lambda).abs() / lambda;
+            println!("POISSON MEAN: lambda={lambda:.1} n={N} mean={mean:.4} rel={rel:.6}");
+            observed.push((lambda, mean, rel));
+        }
+        for (lambda, mean, rel) in observed {
+            assert!(
+                rel <= bar,
+                "poisson sampler outside its domain at lambda={lambda:.1}: \
+                 mean={mean:.4} rel={rel:.6} > bar={bar:e}"
+            );
+        }
+    }
+
+    /// The parity argument, as a MEASUREMENT rather than a claim.
+    ///
+    /// `wp_log_R_logistic` is the only logistic fixture, so it is the only parity rung that can
+    /// reach this sampler at all. Its lambda is `changepoints_t.len() * (t_max - 1)`, and both
+    /// factors are published by the fixture — the `..._data_prep_exact` rung already asserts that
+    /// Rust's `make_design` reproduces `changepoints_t` exactly, so reading them here measures the
+    /// same quantity the ladder runs on.
+    #[test]
+    fn wp_log_r_logistic_fixture_lambda_is_far_below_the_branch_threshold() {
+        let fx = load_json("wp_log_R_logistic_prophet140.json");
+        let n_cp = fx["changepoints_t"]
+            .as_array()
+            .expect("fixture publishes changepoints_t")
+            .len();
+        let start = parse_ymd(fx["start"].as_str().expect("fixture publishes start"));
+        let t_scale = fx["t_scale_days"]
+            .as_f64()
+            .expect("fixture publishes t_scale_days");
+        let last_ds = fx["forecast"]["ds"]
+            .as_array()
+            .expect("fixture publishes forecast.ds")
+            .last()
+            .and_then(serde_json::Value::as_str)
+            .expect("forecast.ds is non-empty");
+        let t_max = f64::from(
+            i32::try_from(parse_ymd(last_ds) - start).expect("a forecast span fits i32 days"),
+        ) / t_scale;
+        let lambda =
+            f64::from(u32::try_from(n_cp).expect("a changepoint count fits u32")) * (t_max - 1.0);
+        println!(
+            "FIXTURE LAMBDA: fixture=wp_log_R_logistic n_changepoints={n_cp} \
+             t_max={t_max:.6} lambda={lambda:.4}"
+        );
+        // 30.0 is the threshold plan 06-13 Task 2 installs. If this ever goes red the parity
+        // ladder has started exercising the normal-approximation branch, and the claim that no
+        // rung moved would no longer be a measurement.
+        assert!(
+            lambda < 30.0,
+            "the only logistic parity fixture now reaches lambda={lambda:.4}, \
+             at or above the sampler's branch threshold"
+        );
     }
 }
 
