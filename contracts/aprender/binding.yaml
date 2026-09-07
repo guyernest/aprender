@@ -1902,6 +1902,13 @@ bindings:
   status: implemented
   notes: 'The fit doors bounds — min/max points, max horizon, and the four cost bounds (span, holiday window/columns/dates) — all enforced here and pinned to constants: by types.rss tests.'
 - contract: forecast-tool-boundary-v1.yaml
+  equation: holiday_design_cost_bounded
+  module_path: aprender_forecast::forecast
+  function: forecast
+  signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
+  status: implemented
+  notes: 'The PRODUCT bound the four isolated factors above leave open. Refused AT THE DOOR, after the holiday loop and BEFORE make_design — which is the only place it can be: FIT_BUDGET_SECS is a cooperative round-boundary budget entered inside fit_prophet, so it is structurally blind to the design build and it overshoots inside the fit besides (70.089 s measured against a 15 s budget). Two-sided at both layers: refused / accepted in forecast::tests, and the same pair through a live server in aprender-mcp-forecast e2e.'
+- contract: forecast-tool-boundary-v1.yaml
   equation: chronos_server_bounds
   module_path: aprender_forecast::chronos
   function: validate

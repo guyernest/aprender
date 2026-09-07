@@ -1,6 +1,6 @@
 contract: forecast-tool-boundary
 metadata:
-  version: 1.1.0
+  version: 1.2.0
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
@@ -111,6 +111,23 @@ equations:
       - 'horizon 0 and horizon fit_max_horizon+1 are both refused by the same message "horizon must be 1..=3650, got N"'
     preconditions:
       - 'the arguments deserialized, i.e. every key was known (see unknown_field_refused)'
+
+  # The completion of fit_server_bounds' third invariant: that entry CLAIMS a HARD
+  # ceiling on the work one request can buy, and until this equation existed the claim
+  # rested on four bounds checked in ISOLATION whose PRODUCT was unbounded.
+  holiday_design_cost_bounded:
+    formula: 'accept(args) requires (len(ds) + horizon) * holiday_columns(args) <= fit_max_holiday_design_cost AND sum(len(h.dates) for h in args.holidays) <= fit_max_holiday_dates_total, where holiday_columns(args) = sum(h.upper_window - h.lower_window + 1)'
+    domain: 'the holidays argument of the fit server together with len(ds) and horizon — untrusted, unauthenticated JSON-RPC `tools/call` input'
+    codomain: 'either a design build (make_design, then the L-BFGS fit) or a validation refusal naming the OBSERVED cost, how it was computed, the bound it exceeded, and which of the holiday windows / holiday count / history length / horizon to reduce'
+    invariants:
+      - 'the Rust constants are asserted EQUAL to constants.fit_max_holiday_design_cost and constants.fit_max_holiday_dates_total by types::tests::cost_bounds_match_contract — the contract is the source, the code is the mirror'
+      - 'the check runs BEFORE make_design, which is the only place it CAN run: FIT_BUDGET_SECS is a cooperative ROUND-BOUNDARY budget entered inside fit_prophet, and the design build happens before that — so no setting of FIT_BUDGET_SECS could ever have seen this cost. It also overshoots inside the fit: a 20 000-point / 1 000-column request measured 70.089 s against a 15 s budget'
+      - 'the MEASURED breach this closes: 3 000 points x 181 holiday columns x 84 holiday dates walled at 16.113 s against SC1 s 2 s bar (reproduced at 16.081 s on the aarch64 release host at HEAD ce3e5a8ea), with 2 000 x 121 x 84 at 8.926 s and 1 000 x 61 x 84 at 2.664 s; the in-bounds maximum extrapolates to roughly 85 minutes for ONE request against a default pool of K=8 (constants.pool_default)'
+      - 'fit_max_points, fit_max_holiday_columns and fit_max_holiday_dates each remain enforced ON THEIR OWN — this equation bounds their COMPOSITION, so an accepted request satisfies all of them AND this'
+      - 'the bounded statistic is (points + horizon) x holiday_columns — the DESIGN CELL COUNT, not the literal points x columns x dates triple — because the triple cannot separate the shapes: 20 000 x 1 000 x 2 (triple 4.00e7, cells 2.04e7) walls at 70.089 s while 3 000 x 181 x 84 (triple 4.56e7, the LARGER, cells 6.09e5) walls at 16.216 s, so no single threshold on the triple both refuses the 70 s request and accepts the cheap ones. The wall is monotone in cells, not in the triple. The third factor is closed additively by fit_max_holiday_dates_total instead'
+      - 'this bounds WORK, not WALL, and says so: the L-BFGS iteration count is data-dependent, so a 25 000-cell request (half the bound) reproducibly walls at 4.2 s. The arithmetic ceiling per iteration is what is guaranteed; the residual wall-clock exposure is FIT_BUDGET_SECS, a separate knob'
+    preconditions:
+      - 'every per-holiday bound has already fired with its own message, so holiday_columns <= fit_max_holiday_columns and each len(h.dates) <= fit_max_holiday_dates — what remains unchecked is only what they multiply and sum to'
 
   chronos_server_bounds:
     formula: 'accept(args) requires chronos_min_points <= len(ds) <= chronos_max_points AND len(ds) == len(y) AND 1 <= horizon <= chronos_max_horizon AND at least 2 non-null y'
@@ -376,6 +393,11 @@ proof_obligations:
     formal: 'forall req: seed(req) == req.seed.unwrap_or(constants.default_seed) and forall req1 req2: result(req1) is independent of order(req1, req2)'
     applies_to: all
 
+  - type: bound
+    property: 'The work one holiday-carrying request can buy is bounded by a constant this file names, not merely by four factors checked in isolation'
+    formal: 'forall args: accept(args) implies (len(args.ds) + args.horizon) * holiday_columns(args) <= constants.fit_max_holiday_design_cost'
+    applies_to: all
+
 falsification_tests:
 
   - id: FALSIFY-BOUNDARY-001
@@ -498,6 +520,30 @@ falsification_tests:
       alone would still pass if the check were keyed on the ABSENCE of a growth key.
     test: 'cargo test -p aprender-forecast --lib forecast::tests::an_option_belonging AND cargo test -p aprender-mcp-forecast --lib e2e::refuses_cap_'
     if_fails: 'The door is back to accepting a knob it does not use — the class FALSIFY-BOUNDARY-005 already calls the worst failure class in this contract. `make_design` matches only (Growth::Logistic, Some(c)), so the cap is silently dropped and the caller receives a plausible linear forecast in answer to a saturating-growth question they did believe they asked.'
+
+  - id: FALSIFY-BOUNDARY-018
+    rule: 'The PRODUCT of the separately-bounded holiday factors is itself bounded, at the door and before make_design'
+    prediction: >
+      Five assertions falsify this rule, at three layers. The CONSTANTS layer:
+      `types::tests::cost_bounds_match_contract` asserts types::MAX_HOLIDAY_DESIGN_COST ==
+      constants.fit_max_holiday_design_cost and types::MAX_HOLIDAY_DATES_TOTAL ==
+      constants.fit_max_holiday_dates_total, so perturbing either value HERE — touching no Rust —
+      turns it red naming the key it read. The LIBRARY door, two-sided:
+      `forecast::tests::an_in_bounds_holiday_spec_whose_product_is_not_is_refused` observes a
+      Validation refusal for a spec inside every individual bound whose product is not, and
+      `forecast::tests::a_holiday_spec_just_under_the_design_cost_bound_is_accepted` observes the
+      near-miss still fitting — the positive control that keeps the bound from over-refusing. The
+      SERVER, the same two sides through a live streamable-HTTP router:
+      `e2e::refuses_holiday_design_cost_over_bound` sends 62 points + horizon 7 with one holiday at
+      the widest legal window (731 columns) = 50 439 design cells and observes a validation-class
+      refusal quoting `max_holiday_design_cost`, while
+      `e2e::accepts_holiday_design_cost_just_under_bound` sends ONE point fewer — 49 708 cells — and
+      observes a full response shape. The pair differs by a single history point and straddles the
+      bound, so it proves the bound is where this file says it is rather than somewhere an order of
+      magnitude away. The e2e refusal was OBSERVED RED: with fit_max_holiday_design_cost raised, the
+      server ACCEPTED the request and returned a forecast.
+    test: 'cargo test -p aprender-forecast --lib types::tests::cost_bounds_match_contract forecast::tests AND cargo test -p aprender-mcp-forecast --lib e2e::'
+    if_fails: 'The boundary is back to checking three factors in isolation while their PRODUCT buys unbounded CPU from an unauthenticated caller — (20 000 + 3 650) x 1 000 = 23 650 000 design feature cells and 1 000 000 holiday dates from one ~200-byte request, roughly 85 minutes of fit against a K=8 pool. The HARD-ceiling claim in fit_server_bounds third invariant is false again, and the SC1 2 s bar is unreachable for any holiday-carrying request.'
 
 kani_harnesses:
 
