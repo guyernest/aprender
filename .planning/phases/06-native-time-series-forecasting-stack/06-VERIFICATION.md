@@ -1,8 +1,8 @@
 ---
 phase: 06-native-time-series-forecasting-stack
-verified: 2026-09-07T00:26:24Z
-status: gaps_found
-score: 4/5 must-haves verified
+verified: 2026-09-07T20:12:35Z
+status: human_needed
+score: 5/5 must-haves verified
 covered_files:
   - .planning/phases/06-native-time-series-forecasting-stack/06-01-PLAN.md
   - .planning/phases/06-native-time-series-forecasting-stack/06-01-SUMMARY.md
@@ -22,9 +22,27 @@ covered_files:
   - .planning/phases/06-native-time-series-forecasting-stack/06-08-SUMMARY.md
   - .planning/phases/06-native-time-series-forecasting-stack/06-09-PLAN.md
   - .planning/phases/06-native-time-series-forecasting-stack/06-09-SUMMARY.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-10-PLAN.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-10-SUMMARY.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-11-PLAN.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-11-SUMMARY.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-12-PLAN.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-12-SUMMARY.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-13-PLAN.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-13-SUMMARY.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-14-PLAN.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-14-SUMMARY.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-15-PLAN.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-15-SUMMARY.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-16-PLAN.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-16-SUMMARY.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-17-PLAN.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-17-SUMMARY.md
   - .planning/phases/06-native-time-series-forecasting-stack/06-CONTEXT.md
   - .planning/phases/06-native-time-series-forecasting-stack/06-EVIDENCE.md
   - .planning/phases/06-native-time-series-forecasting-stack/06-REVIEW.md
+  - .planning/phases/06-native-time-series-forecasting-stack/06-REVIEWS.md
+  - .planning/phases/06-native-time-series-forecasting-stack/COVERAGE.md
   - .planning/phases/06-native-time-series-forecasting-stack/deferred-items.md
   - CLAUDE.md
   - Cargo.toml
@@ -36,6 +54,7 @@ covered_files:
   - contracts/neuralprophet-parity-v1.yaml
   - contracts/prophet-parity-v1.yaml
   - crates/aprender-core/tests/monorepo_invariants.rs
+  - crates/aprender-forecast/README.md
   - crates/aprender-forecast/build.rs
   - crates/aprender-forecast/examples/mase_rolling_origin.rs
   - crates/aprender-forecast/src/bolt.rs
@@ -43,9 +62,11 @@ covered_files:
   - crates/aprender-forecast/src/dates.rs
   - crates/aprender-forecast/src/fit.rs
   - crates/aprender-forecast/src/forecast.rs
+  - crates/aprender-forecast/src/lib.rs
   - crates/aprender-forecast/src/np.rs
   - crates/aprender-forecast/src/prophet.rs
   - crates/aprender-forecast/src/safetensors.rs
+  - crates/aprender-forecast/src/sc1_wall.rs
   - crates/aprender-forecast/src/test_support.rs
   - crates/aprender-forecast/src/types.rs
   - crates/aprender-mcp-chronos/build.rs
@@ -55,296 +76,288 @@ covered_files:
   - crates/aprender-mcp-forecast/src/main.rs
   - crates/aprender-mcp-forecast/tests/e2e_stdio.rs
   - justfile
-covered_digest: "v1:sha256:6abb4e3fb3323ebc20f781a296906f509322064b5c64fbf024579f91eae0cece"
+  - scripts/assert_measurement_under.sh
+  - scripts/check_assert_measurement_under_cases.sh
+covered_digest: "v1:sha256:cda6709ca3d127e040555b5035f029fa808190ad3062d03fcb89be717fedd933"
 behavior_unverified: 0
 overrides_applied: 0
-gaps:
-  - truth: "SC1 — the forecast door refuses every malformed input, never a silent default"
-    status: failed
-    reason: >-
-      MEASURED, not read off the review. `cap` is accepted and completely inert on
-      every non-logistic growth arm, and the logistic controls prove the refusal
-      machinery exists and is simply never reached. Seven varied probes through
-      `aprender_forecast::forecast` at HEAD, printed side by side: baseline-no-cap,
-      linear+cap100, bare-cap100 and linear+cap0.5 (BELOW max(y)=28.9) all returned
-      yhat_max=35.8994 with a byte-identical `diagnostics` object — the cap changes
-      nothing and is not echoed anywhere in the response; flat+cap100 likewise
-      accepted; while logistic-no-cap refused with "logistic growth needs cap" and
-      logistic+cap0.5 refused with "cap 0.5 must exceed max(y) = 28.9". Even the
-      cap-sanity check is skipped, not merely the cap itself. `contracts/forecast-tool-boundary-v1.yaml`
-      FALSIFY-BOUNDARY-005 `if_fails` names this exact class in its own words:
-      "D-11 is broken: a knob the caller set is being ignored. This is the worst
-      failure class in this contract."
-    artifacts:
-      - path: "crates/aprender-forecast/src/forecast.rs"
-        issue: "lines 150-167 read `cap` only under `Growth::Logistic`; line 216 assigns `spec.cap = args.cap` unconditionally; the cross-model refusal loop at 113-127 covers `cap` for the neuralprophet arm only, so no cross-GROWTH check exists"
-      - path: "crates/aprender-forecast/src/prophet.rs"
-        issue: "make_design lines 229-233 match `(Growth::Logistic, Some(c))` and fall to `_ => None`; `spec.cap` reaches the numerics only through `cap_scaled`, so it is provably inert elsewhere"
-      - path: "crates/aprender-mcp-forecast/src/lib.rs"
-        issue: "the 16-case e2e refusal suite has no cross-growth cap case (`refuses_logistic_without_cap` and `refuses_logistic_cap_below_max_y` cover only the logistic direction)"
-    missing:
-      - "Refuse `cap` when growth != logistic, in the same shape as the neighbouring cross-model refusals: `cap is logistic-only; set growth to \"logistic\"`"
-      - "Extend `forecast::tests::an_option_belonging_to_the_other_model_is_refused_not_dropped` with `{growth: linear, cap: N}` and a bare `{cap: N}`"
-      - "Add one e2e refusal case in `crates/aprender-mcp-forecast/src/lib.rs` so the bar is asserted through the server, as every other SC1 refusal is"
-
-  - truth: "SC1 — a 3 000-point daily series answers in under 2 s, and the tool-boundary constants are the HARD ceiling on the work one request can buy (contract T-06-02)"
-    status: failed
-    reason: >-
-      MEASURED on this host at HEAD, three points, monotone in the cell count:
-      a 3 000-point daily series carrying an IN-BOUNDS holiday spec (181 columns,
-      84 dates = 4.56e7 design cells) took **16.113 s** — 8x SC1's 2 s bar. The
-      same shape at 2 000x121x84 took 8.926 s and at 1 000x61x84 took 2.664 s, so
-      the cost is linear in rows x holiday_columns x holiday_dates, exactly as
-      `prophet::feature_row` (lines 178-182, a linear `.any()` scan of every
-      holiday date per column per row) implies. `MAX_POINTS` (20 000),
-      `MAX_HOLIDAY_COLUMNS` (1 000 -> 731 from a single +-365 window) and
-      `MAX_HOLIDAY_DATES` (1 000) are each checked in isolation and their PRODUCT
-      is not: `types::tests::cost_bounds_match_contract` mirrors the four factors
-      to the contract one at a time and asserts nothing about the product; a repo-wide
-      grep for `DESIGN_COST|design_cost|holiday_design` finds nothing in either the
-      source or the contract. Extrapolating the measured ~0.35 us/cell to the
-      in-bounds maximum (1.46e10 cells) gives ~85 minutes for ONE request, before
-      `pooled_app`'s default K=8 multiplies it. `FIT_BUDGET_SECS` cannot see any of
-      this: `make_design` runs before `fit_prophet` is entered. The contract line
-      "these bounds are the HARD ceiling on the work one request can buy (T-06-02)"
-      (forecast-tool-boundary-v1.yaml:102) is therefore false as shipped.
-    artifacts:
-      - path: "crates/aprender-forecast/src/prophet.rs"
-        issue: "feature_row lines 178-182 scan every date of every holiday for every column on every row; make_design (247-249) and predict (686-689) both call it per row"
-      - path: "crates/aprender-forecast/src/types.rs"
-        issue: "lines 17-49 bound each factor; the comment at :45-49 states the multiplier risk in words and then bounds only the multiplicand"
-      - path: "contracts/forecast-tool-boundary-v1.yaml"
-        issue: "line 102 asserts a HARD work ceiling that no constant enforces"
-    missing:
-      - "A `MAX_HOLIDAY_DESIGN_COST` bound on rows x holiday_columns x total_holiday_dates, added to `constants:` in the contract and asserted equal by `cost_bounds_match_contract` as the other four bounds are"
-      - "Replace the per-row linear `.any()` with a prebuilt `HashSet<i64>` per holiday in `make_design`/`predict` — membership is membership, so no parity rung moves"
-      - "One e2e case proving an over-cost request is refused (the bar must be shown to turn RED, not just added)"
-
-  - truth: "SC1 — the response's yhat_lower / yhat_upper are the bands they claim to be"
-    status: failed
-    reason: >-
-      Confirmed by reading `prophet.rs:794-805` directly. The logistic uncertainty
-      path draws its simulated changepoint count with Knuth's product method, whose
-      `l = (-lambda).exp()` is exactly 0.0 for lambda > 745.13. Past that the loop
-      exits only when `pp` itself underflows, so `n_changes` becomes a function of
-      f64 subnormal exhaustion rather than of the Poisson law. The regime is reachable
-      in-bounds: 100 consecutive daily points (span 99, n_changepoints 25) with
-      `horizon: 3650, growth: "logistic"` gives t_max ~= 37.9 and lambda ~= 922; the
-      10-point minimum with the same horizon gives lambda ~= 2 839. Python Prophet
-      calls `np.random.poisson`, which is correct at any lambda. `wp_log_R_logistic`
-      is the only logistic fixture and exercises no such horizon ratio, so no parity
-      rung sees it — I confirmed the parity ladder passes (32 tests) while this path
-      is wrong. Bands come back too narrow, with no warning and nothing in `diagnostics`.
-    artifacts:
-      - path: "crates/aprender-forecast/src/prophet.rs"
-        issue: "lines 794-805: Knuth Poisson with no branch for lambda above the exp-underflow threshold"
-    missing:
-      - "A normal-approximation (or transformed-rejection) branch above lambda ~= 30, or an explicit refusal/clamp rather than silent degradation"
-      - "A falsification test asserting the sampler's mean at lambda = 900 is within a few percent of 900 — today the equivalent saturates near 745 regardless of lambda"
+re_verification:
+  previous_status: gaps_found
+  previous_score: 4/5
+  gaps_closed:
+    - "SC1 — the forecast door refuses every malformed input, never a silent default (`cap` inert off the logistic arm)"
+    - "SC1 — a 3 000-point daily series answers in under 2 s, and the tool-boundary constants are the HARD ceiling on the work one request can buy"
+    - "SC1 — the response's yhat_lower / yhat_upper are the bands they claim to be (Poisson sampler outside its numerical domain)"
+  gaps_remaining: []
+  regressions: []
+gaps: []
 deferred: []
+advisory:
+  - finding: "WR-01 — the post-loop `holiday_dates_total` refusal (forecast.rs:289-295) is unreachable dead code. The in-loop check at :242 returns Err the instant the running sum crosses, and the loop body has no `continue`, so no caller ever receives the EXACT-total message. Three artifacts state that it fires: the code comment at :283-288, `door_surface.knobs.dates.enforced_by` and `cost_axes` C-03. 06-15's own truth 'the caller still learns the exact total' is false as shipped."
+    category: architectural
+    reason: "Independently reproduced by reading forecast.rs:225-296 — the control flow is unambiguous. Not a correctness hole (the in-loop refusal fires and its message honestly says 'a running total, not the request's total'), so it does not block SC1. Resolved by deleting the dead block and correcting the two contract claims, or by hoisting the O(1) `dates.len()` sum above the loop so the exact-total message becomes reachable."
+    evidence_status: "reproduced by verifier (source read)"
+  - finding: "WR-02 — C-07's `no_structural_maximum: true` disposition rests on a false premise. Four artifacts (types.rs:188-194, forecast-tool-boundary-v1.yaml:303/:401/:457, binding.yaml notes) state that neither transport caps the request body. `http_app` (aprender-mcp-forecast/src/lib.rs:84) builds `StreamableHttpServerConfig::stateless()`, which in the LOCKED pmcp 2.19.3 sets `max_request_bytes: DEFAULT_MAX_REQUEST_BYTES` = 4 MiB, enforced before JSON parsing by `read_body_with_limit(body, state.config.max_request_bytes)`."
+    category: architectural
+    reason: "Independently reproduced: Cargo.lock pins pmcp 2.19.3; pmcp-2.19.3/src/server/streamable_http_server.rs:471 sets the field in `stateless()`, limits.rs:46 defines the 4 MiB default, and :4571 enforces it. The HTTP transport therefore DOES have a structural maximum. Enforcement is unaffected — C-07 was closed with MAX_HOLIDAY_NAME_LEN = 200, the more conservative of the two dispositions — so this is a false justification, not a missing bound. The stdio half of the claim is unchecked by me."
+    evidence_status: "reproduced by verifier (dependency source read)"
+  - finding: "CR-01 — `MAX_NP_TRAIN_COST = 15_000_000` refuses well-formed in-spec NeuralProphet requests. At the advertised maximum history (`fit_max_points` = 20 000 daily points) the reachable `n_lags` range is 0..=6, against an advertised and range-checked `n_lags <= 365`."
+    category: other
+    reason: "Arithmetic independently reproduced from the shipped pricing functions, not taken from the review: auto_epochs(20 000) = 50, n_samples = 20 000 - 7 = 19 993, sweep width 2 → 2 x 50 x 19 993 x 8 = 15 994 400, which is 6.63 % over the bound — the review's figure to the digit. The nearest measured neighbour recorded in MAX_NP_TRAIN_COST's own doc (20 000 points, n_lags 6, cost 13 995 800) walls at 1.642 s, and the rejected 20 M candidate measured 2.089 s, so the 2 s crossing sits near 19-20 M and the shipped bound discards roughly a quarter of the region SC1's bar would allow. It does NOT falsify an SC: SC1's timing bar is a 3 000-point daily series (measured 0.212 s here) and SC3's stated `n_lags = 30` Peyton geometry prices at 14 552 640 and is accepted — but only by 3.0 %. Resolution is a human decision (raise to ~18 M with a measured wall, or narrow the advertised range and make the refusal message name the reachable n_lags for the history sent); see human_verification."
+    evidence_status: "arithmetic reproduced by verifier; the 2 s wall at the refused point NOT independently measured"
+  - finding: "WR-03/WR-04 — the class invariant's two halves are not equally strong, and the contract prose does not say so. The KNOBS half is structural (`schema_knobs()` derives from `schemars::schema_for!` and `every_request_knob_is_enumerated` asserts set equality in both directions). The COST-AXES half is not: `enumerated_axes()` reads `door_surface.cost_axes` out of the YAML and nothing else, so an axis that is NOT LISTED is invisible to both axis tests. Separately, `schema_knobs()` feeds only `ForecastArgs` and `HolidayArg`, so the Chronos door (`ChronosArgs`, five caller-settable fields, four `chronos_*` constants in the same file) is outside the enumeration while the block header reads 'THE DOOR'S WHOLE SURFACE'."
+    category: architectural
+    reason: "Reproduced by reading types.rs:520-726 and the contract's `door_surface_is_complete.formula`, which is honest (`forall a in cost_axes: ...`, a per-entry predicate, never a completeness claim). Both plans' must_have truths are met AS WRITTEN — 06-14 says the enumeration is 'by INSPECTION' and scopes the knobs to ForecastArgs + HolidayArg. What overclaims is the surrounding prose. Also confirmed: the contract's line that MISSING 'is how CR-01's cost axis got in' is wrong — C-06 is a function of `growth`, `freq`, `horizon` and ds spacing, four knobs that all had entries."
+    evidence_status: "reproduced by verifier (source + contract read)"
+  - finding: "WR-06 — `scripts/assert_measurement_under.sh`'s header calls itself 'the ONE numeric bar check every wall-clock gate in this repository calls'; `just chronos-coldstart` (justfile:656) asserts its 150 ms SC4 bar with `[ \"$med\" -ge 150 ]` and does not call it. `justfile:740` still runs `awk -v a=... 'BEGIN { exit (a + 0 > b + 0) ? 0 : 1 }'` as the best-of-three selector."
+    category: other
+    reason: "Reproduced by reading the justfile. 06-16's must_have is met as written (no SC1/SC4/SC5 BAR reads a measurement through the `awk -v v=... < BAR` coercion — the pool bar at :751 goes through the validator; :740 is a selector). Both remaining sites fail closed today (`chronos-coldstart`'s sed emits digits only and `[ -ge ]` errors otherwise; the validator refuses `1.2.3` downstream of :740). The defect is the script header's claim, which is false as written."
+    evidence_status: "reproduced by verifier (justfile read); case table re-run green, 23/23"
+  - finding: "WR-08 — `just forecast-sc1-sweep` pins `points = 33` in both the harness default and the recipe, so the gate sweeps freq x growth x holiday-shape at one history size. The two slowest holiday compositions on record (the 800 x 50 `forecast-holiday-bench` default at 1.692 s, and the accepted 4 700-point / 5-column request `types.rs:79` records at 4.2 s) are outside the swept matrix."
+    category: other
+    reason: "Reproduced: I ran the gate and every Prophet row printed `points=33`; the slowest was 0.713 s. 06-16's must_have specifies 'at the tightest legal history span', so the matrix is what was planned — the tightest span maximises the lambda axis and does not maximise the design-cost axis. Adding `points` as a gate axis is the fix the review proposes and it is not this round's stated scope."
+    evidence_status: "reproduced by verifier (gate run, 19 compositions, /tmp/sc1sweep.log)"
+  - finding: "WR-09 — `crates/aprender-forecast/README.md:99-113` describes `prophet::feature_row`'s signature change and `safetensors::load`'s removal as 'breaking for external callers of this crate' in 'the 0.63.0 line'. `crates/aprender-forecast/Cargo.toml:15` is `publish = false` ('not a published API yet') and the crate was created in this phase. The same premise appears in `bolt.rs`'s `transpose` comment as the reason it was not widened to `Result`."
+    category: other
+    reason: "Reproduced by reading the manifest and the README. 06-17's must_have IN-04 truth ('the removal of safetensors::load from a PUBLISHED crate's public surface') rests on a false premise; the note artifact exists but describes a semver relationship that cannot exist. Cosmetic in effect, misleading for a future maintainer."
+    evidence_status: "reproduced by verifier (manifest + README read)"
+  - finding: "IN-01 — `prophet::design_cost::holiday_design_wall`'s in-code defaults (3000/181/84/365) price at 609 065 design cells against `MAX_HOLIDAY_DESIGN_COST` = 50 000, so the door refuses them and `sc1_wall::time_accepted` panics. Only `just forecast-holiday-bench` (defaults 800/50/84/200) is a working entry point, and the justfile says so at :810-811."
+    category: other
+    reason: "Reproduced by reading prophet.rs:2216-2222 and justfile:808-820. 06-16's must_have — '`forecast-holiday-bench` keeps working as a single-composition entry point onto the same code' — is TRUE; the documented `cargo test --release --ignored` invocation is what breaks. Point the code defaults at the recipe's values."
+    evidence_status: "reproduced by verifier (source read)"
+  - finding: "IN-02 — two of the three dispositions `every_cost_axis_names_a_real_bound` validates are reached by no shipped row. All 14 `cost_axes` entries name a real `constants:` key; none carries `bound: measured_at_structural_maximum` (C-08 carries `measured_seconds: 47.924` but its `bound:` is `fit_max_np_train_cost`) and none carries an `unbounded_pending_*` marker. IN-04 — the sweep prints `lambda=86789.8` on `growth=linear` rows that never call `poisson`, 4.3x `MAX_LOGISTIC_CHANGEPOINT_LAMBDA`, on lines the gate reports as OK."
+    category: other
+    reason: "Both reproduced — the axis dispositions by reading the 14 entries at contracts/forecast-tool-boundary-v1.yaml:251-355, the lambda print by reading the gate's own output. Neither affects enforcement."
+    evidence_status: "reproduced by verifier (contract read; gate run)"
+  - finding: "PRE-EXISTING AND SELF-RECORDED — the 2 s bar holds for SC1's stated shape and for every swept composition, not for every accepted request. `types.rs:76-81` records, in the phase's own words, that 'a 4 700-point, 5-column request is only 25 000 cells — half this bound — and still walls at 4.2 s, reproducibly', because the fit's iteration count is data-dependent and no payload statistic predicts it."
+    category: architectural
+    reason: "Not a new finding and not hidden: the phase wrote it into the constant's doc comment. SC1's literal criterion is a 3 000-point daily series, measured here at 0.212 s, and `MAX_HOLIDAY_DESIGN_COST` bounds the per-iteration arithmetic rather than the wall. Recorded so a later reader does not read '19/19 under 2 s' as a universal guarantee."
+    evidence_status: "self-recorded in the tree; the 4.2 s wall NOT independently reproduced by verifier"
+behavior_unverified_items: []
+coincidental_reliance_items: []
 human_verification:
   - test: "Start both servers (`cargo run -p aprender-mcp-forecast -- --http 8080`, `cargo run -p aprender-mcp-chronos -- --http 8081`) and open each demo page; drive initialize -> tools/list -> tools/call and confirm a forecast is charted."
     expected: "Both pages complete the MCP handshake same-origin under /mcp and render a band chart."
-    why_human: "06-08 declared this a human end-of-phase check (visual rendering + a real browser MCP client). No automated test covers the pages."
+    why_human: "CARRIED FORWARD, still open. 06-08 declared this a human end-of-phase check (visual rendering + a real browser MCP client). No automated test covers the pages; confirmed again at HEAD."
   - test: "Run the Chronos parity ladder on an x86_64 host: `CHRONOS_MODEL_DIR=... cargo test -p aprender-forecast --lib bolt::parity chronos::parity -- --nocapture`, read the printed max|delta|, and tighten `quantiles_abs_f32_nonaarch64` in contracts/chronos-bolt-parity-v1.yaml to that measurement in a `pv diff`-visible edit."
     expected: "A measured max|delta| replaces the PROVISIONAL 5.0e-6 headroom value."
-    why_human: "The bar is unmeasured by construction — this box is aarch64 and every CI runner is X64 with no Chronos leg (measure-x86-first). Recorded as D-ITEM-06-04 / REVIEW-06-02, and confirmed still provisional at HEAD; it is carried openly, not silently."
+    why_human: "CARRIED FORWARD, still open — re-confirmed at HEAD: contracts/chronos-bolt-parity-v1.yaml:58-60 and :100-103 still describe the value as PROVISIONAL headroom, not evidence. This box is aarch64 (uname -m = arm64) and every CI runner is X64 with no Chronos leg. D-ITEM-06-04 / REVIEW-06-02."
   - test: "Decide whether SC4's Chronos parity ladder staying DARK in CI is acceptable for the milestone, or whether the ci.yml embedded-weights leg should now be applied."
     expected: "An explicit decision recorded against D-ITEM-06-03."
-    why_human: "The `measure-x86-first` CI decision is correctly applied (ci.yml carries zero `chronos`/`forecast` mentions, verified) and the gap is named as an open item, but it means every SC4 parity claim rests on a manual local gate."
+    why_human: "CARRIED FORWARD, still open — re-confirmed at HEAD: `.github/workflows/ci.yml` contains ZERO `chronos` or `forecast` matches. Every SC4 parity claim rests on a manual local gate (which I ran green this session: 24 + 9 tests armed)."
+  - test: "Decide the disposition of CR-01. Either (a) raise `MAX_NP_TRAIN_COST` toward the measured 2 s crossing (~18 000 000, the largest round value under the rejected-candidate wall of 2.089 s at 19 991 000) and ship the accepted-region test the review drafts, or (b) keep 15 000 000 and narrow the advertised contract: change `ForecastArgs.n_lags`'s doc and `door_surface.knobs.n_lags.enforced_by` to state that the reachable range depends on history length, and make the refusal message name the reachable `n_lags` for the history the caller sent."
+    expected: "One of the two, with the accepted region written down and asserted — today only the refused region has evidence."
+    why_human: "Choosing a bound VALUE is a design decision with a measured trade-off (refusing legal requests versus admitting requests that may exceed the 2 s bar), and this phase's own prohibition says 'never add a NeuralProphet cost bound without measuring first'. I reproduced the arithmetic (15 994 400 at 20 000 x n_lags=7, 6.63 % over) but did not measure that request's wall, so I cannot decide it for you. The advertised `n_lags <= 365` versus the reachable 0..=6 at maximum history is the part that reads as a mis-advertised knob."
+  - test: "Decide whether `just forecast-sc1-sweep` (and `chronos-bench` / `chronos-coldstart` / `forecast-pool-ratio` / `forecast-holiday-bench`) should be wired to an automatic surface — a `make` tier or a scheduled workflow in the shape of `toolchain-ceiling.yml` — or whether they stay manual."
+    expected: "Either the wiring lands, or the recipe headers and `binding.yaml`'s `sc1_wall_swept … status: implemented` note say explicitly that the gate is manual, so `implemented` is not read as `running`."
+    why_human: "Every round-3 plan fences off `.github/workflows/*.yml` and states that wiring the gate into CI is a human decision. Confirmed at HEAD: no reference to `forecast-sc1-sweep` exists in `.github/`, `Makefile` or `scripts/`. The in-suite `sc1_wall::sc1_wall_sweep` that CI does run is a debug build and returns before the 2 s assertion by design (06-16 states this openly)."
 ---
 
 # Phase 6: Native Time-Series Forecasting Stack — Verification Report
 
 **Phase Goal:** Users can forecast a time series in one stateless MCP call — `ds[]`, `y[]`, horizon in; forecast with bands and components out — from pure-Rust Prophet and NeuralProphet ports and an embedded zero-shot Chronos-Bolt, each proven to parity with its Python original and served the way SetFit is served (thin pmcp servers, stdio + streamable-HTTP, Lambda-shaped).
-**Verified:** 2026-09-07T00:26:24Z (HEAD `ce3e5a8ea`, branch `gsd/phase-2-contract-gate`, host `aarch64-apple-darwin`)
-**Status:** gaps_found
-**Re-verification:** No — initial verification
+**Verified:** 2026-09-07T20:12:35Z (HEAD `86e485e4f`, branch `gsd/phase-2-contract-gate`, host `aarch64-apple-darwin`)
+**Status:** human_needed
+**Re-verification:** Yes — after gap-closure round 3 (plans 06-14..06-17, waves 12-15, commits `e1b441944..f1cb0dc13`)
+
+## Headline
+
+**The three gaps this round targeted are closed, and I confirmed each one against the tree
+rather than against a SUMMARY.** All five ROADMAP Success Criteria now hold on evidence I
+generated in this session, including a release-profile SC1 sweep, an armed Chronos ladder, a
+re-measured embedded binary and a re-measured pool ratio.
+
+**The phase goal is met; the phase's paperwork is not yet accurate.** The fresh review
+(`06-REVIEW.md`, commit `86e485e4f`) is largely correct, and I reproduced eight of its findings
+independently. None of them falsifies a Success Criterion. Two of them do falsify a *plan-level*
+must_have truth as written — 06-15's "the caller still learns the exact total" (the block that
+would say so is unreachable) and 06-17's "a published crate's public surface" (the crate is
+`publish = false`). One of them, CR-01, is a real over-refusal that I reproduced arithmetically
+and that needs a human decision on a bound value.
+
+So: **the gaps this round targeted are closed. The phase goal is met. Five items need a human**
+— three carried forward unchanged from the previous verification, two new.
 
 ## Goal Achievement
 
-The engineering here is unusually solid and the phase's own honesty machinery is real, not
-decorative: I re-ran four of its two-sided controls myself and every one turned RED on demand.
-The goal fails on one Success Criterion — SC1's door — and it fails on two independently
-measured grounds, not on a reviewer's opinion.
+### Observable Truths (ROADMAP Success Criteria)
 
-### Observable Truths
-
-| # | Truth (ROADMAP Success Criterion) | Status | Evidence |
+| # | Truth | Status | Evidence generated this session |
 |---|---|---|---|
-| SC1 | One stateless `forecast` tool over stdio + streamable-HTTP; full response shape; **under 2 s** for a 3 000-point daily series; **every malformed input a validation error, never a silent default** | ✗ FAILED | Transport, shape and the 16 enumerated refusals all VERIFIED by run. But two measured falsifications: (a) `cap` is accepted and provably inert on every non-logistic arm — 5 accept probes vs 2 refusing logistic controls, byte-identical diagnostics; (b) an in-bounds 3 000-point daily request with an in-bounds holiday spec took **16.113 s**, 8x the bar, because the design cost is unbounded in the product of three separately-bounded factors |
-| SC2 | Prophet port reproduces Python Prophet 1.4.0 on 4 named fixtures, seven rungs, as tests that run in CI | ✓ VERIFIED | `cargo test -p aprender-forecast --lib` → **86 passed, 0 failed**; 32 `prophet::parity` tests across 7 fixtures covering all seven rung types; every tolerance read from `contracts/prophet-parity-v1.yaml` via `equation_tolerance` (11 call sites, no literals). One documented deviation, below |
-| SC3 | NeuralProphet lag-free 365-day holdout MAE ≤ 0.47; AR-Net (`n_lags=30`) beats naive one-step; graph-connected Huber; data prep matches the oracle | ✓ VERIFIED | Same run: `np::parity::lag_free_365_day_mae_within_contract`, `ar_net_30_lags_beats_naive_one_step`, `weighted_huber_is_graph_connected`, `data_prep_matches_np_oracle`, `train_clears_the_tape`, `full_batch_is_not_what_auto_batch_returns` — 9/9 pass, bars read from `neuralprophet-parity-v1.yaml` |
-| SC4 | Chronos-Bolt-tiny f16 embedded; 9 quantiles match the 2.3.1 oracle (1e-6 f32 / 2 % f16) **through the server**; 2 048-ctx < 100 ms; `horizon > 64` gated + warned; binary < 30 MB; cold start < 150 ms | ✓ VERIFIED | Armed with real weights: `aprender-forecast --lib bolt:: chronos::` → **24 passed, 0 failed, 0 ignored**; `aprender-mcp-chronos --lib` → **9 passed, 0 failed** incl. `forecast_tool_over_streamable_http_matches_oracle` and `f16_weights_within_two_percent_of_std_through_the_server`. Binary size **independently re-measured at HEAD: 24 671 472 bytes**, byte-identical to 06-EVIDENCE.md. Bench 18.0 ms and cold start 53 ms accepted from EVIDENCE's recorded commands + logs |
-| SC5 | 8 concurrent requests bit-identical to sequential in < half the wall; every gate green | ✓ VERIFIED | `aprender-mcp-forecast --lib` → **28 passed, 0 failed** incl. `eight_concurrent_requests_are_bit_identical_to_sequential` and `sixteen_concurrent_neuralprophet_fits_stay_identical`; stdio integration target passes; `cargo fmt --all -- --check` rc=0; `pv validate` rc=0 on all four contracts; clippy green on the three new crates; ratio 5.146/5.150/5.162 (≥ 2.0 bar) from `forecast-pool-ratio`, whose recipe I read and which asserts hard and captures `rc=$?` without a pipe |
+| SC1 | One stateless `forecast` tool over stdio + streamable-HTTP; full response shape; under 2 s for a 3 000-point daily series; every malformed input a validation error, never a silent default | ✓ VERIFIED | `just forecast-bench` → **0.212 s** for the 3 000-point daily fit + 365-step predict (`ROUND TRIP (SC1) OK: 0.212 < 2.0`, rc=0). `just forecast-sc1-sweep` → **19 compositions, every one under 2.0 s** on release/aarch64, worst 0.713 s. Spawned-binary stdio round trip → 1 passed, rc=0. All three previously-failing refusal classes now refused at the door (below) |
+| SC2 | Prophet port reproduces Python Prophet 1.4.0 on the four named fixtures, seven rungs, as tests that run in CI | ✓ VERIFIED | `prophet::parity` enumerates **32 tests** — unmoved across the whole round, exactly as every round-3 prohibition requires. Green in the 155-test run for the two crates (0 failed, no `--skip`). `pv validate contracts/prophet-parity-v1.yaml` rc=0 |
+| SC3 | NeuralProphet lag-free 365-day holdout MAE ≤ 0.47; AR-Net (`n_lags=30`) beats naive one-step; graph-connected Huber; data prep matches the oracle | ✓ VERIFIED | `np::parity` enumerates **9 tests**, green in the same run; bars read from `neuralprophet-parity-v1.yaml`, which `pv validate` passes rc=0. See the margin note below |
+| SC4 | Chronos-Bolt-tiny f16 embedded; 9 quantiles match the 2.3.1 oracle through the server; 2 048-ctx < 100 ms; `horizon > 64` gated + warned; binary < 30 MB; cold start < 150 ms | ✓ VERIFIED | **Fully re-measured at HEAD**, because round 3 edited `bolt.rs` and `aprender-mcp-chronos/src/lib.rs`. Armed ladder `bolt:: chronos::` → **24 passed, 0 failed**. `aprender-mcp-chronos --lib` armed → **9 passed, 0 failed** incl. `long_horizon_refused_without_flag_and_warned_with_it`. `just chronos-embed-build` → **24 673 632 bytes < 30 000 000**. `just chronos-coldstart` → **34 ms < 150 ms**. `just chronos-bench` → **18.0 ms < 100 ms** at 2 048 context |
+| SC5 | 8 concurrent requests bit-identical to sequential in < half the wall; every gate green | ✓ VERIFIED | `just forecast-pool-ratio` → **5.125x / 5.085x / 5.110x, best 5.125 ≥ 2.0**, rc=0. Bit-identity by `eight_concurrent_requests_are_bit_identical_to_sequential` + `sixteen_concurrent_neuralprophet_fits_stay_identical` in the green 155-test run. `cargo fmt --all -- --check` rc=0. `clippy -p {aprender-forecast, aprender-mcp-forecast, aprender-mcp-chronos} --all-targets --no-deps -- -D warnings` rc=0, 0 errors each. `pv validate` rc=0 on all four contracts. `make contract-audit-phase6` rc=0, **63 Phase 6 binding rows resolved, zero BIND-** |
 
-**Score:** 4/5 truths verified (0 present, behavior-unverified)
+**Score:** 5/5 truths verified (0 present, behavior-unverified)
 
-### Two-sided controls I re-ran myself (not taken from any SUMMARY)
+Every SC here is behavior-dependent — state transitions and refusal/cleanup invariants — and
+every one is carried by a behavioral test or a measured gate I ran myself, not by symbol
+presence. That is why the score is a clean 5/5 rather than a presence count.
 
-The phase repeatedly claims a gate "can turn RED". Four of those claims were re-tested here.
-All four held.
+### Gap closure: the three previous gaps, checked against the tree
 
-| Control | Green side | Red side |
+| Previous gap | Closed by | Verified how |
 |---|---|---|
-| `just fetch-chronos-tiny` verify-always (REVIEW-06-03) | rc=0 with all files already present; re-hashed f32 model, config AND derived f16 against their pins without downloading | Copied the dir, flipped the last byte of `model.safetensors`, ran `just chronos_dir=<copy> fetch-chronos-tiny` → **rc=1**, `FAIL: sha256 mismatch — a supply-chain event, not a cache miss`, naming the file and both hashes |
-| D-18 counted-skip discipline | Armed (`CHRONOS_MODEL_DIR` set): the same 7 tests run and pass, **0 ignored** | Unarmed: `7 ignored`, each printing `CHRONOS_MODEL_DIR unset or has no model.safetensors` — a counted skip, never a println-and-return |
-| `make contract-audit-phase6` source resolution (REVIEW-06-U3) | rc=0; 55 Phase 6 binding rows resolved to definition sites; 0 BIND- findings across all four contracts | Pointed one row's `function:` at `totally_invented_function_xyz` → **rc=2**, `RESOLVE- prophet-parity-v1.yaml data_prep_exact ... (no definition site in .../prophet.rs)`, `FAIL: 1 Phase 6 binding row(s) name a function with no definition site`. Reverted; tree clean |
-| SC5 clippy scoping (D-ITEM-06-01-b) | `clippy -p <crate> --all-targets --no-deps -- -D warnings` → rc=0, 0 errors, on all three new crates | Untouched sibling control `clippy -p aprender-mcp-setfit --all-targets -- -D warnings` → rc=101, the same 19 errors, **all in `crates/aprender-compute`**. The workspace-wide redness is pre-existing and crate-external, exactly as D-ITEM-06-09 states |
+| **Gap 1** — `cap` accepted and provably inert on every non-logistic growth arm | 06-10 | `forecast.rs:162` returns `"cap is logistic-only; set growth to \"logistic\""`. Four library refusal cases at `:1173/:1180/:1186/:1194` (linear+cap, bare cap, flat+cap, linear+below-max-y cap) plus a logistic positive control; two e2e refusals through a live server at `mcp-forecast/lib.rs:679/:692`. Contract equation at `forecast-tool-boundary-v1.yaml:522` and the knob's `enforced_by` at `:207`. All green in the 155-test run |
+| **Gap 2** — an in-bounds 3 000-point daily request with in-bounds holidays walled at 16.113 s | 06-11 / 06-12 | `MAX_HOLIDAY_DESIGN_COST = 50_000` (`types.rs:82`) on `(points + horizon) x holiday_columns`, `MAX_HOLIDAY_DATES_TOTAL = 10_000` (`:97`), both mirrored to `constants:` by `cost_bounds_match_contract`. The verifier's original 3000/181/84 geometry prices at 609 065 cells and is now **refused** — the justfile says so at `:810-811`. The measured replacement: `just forecast-bench` at 0.212 s and `just forecast-sc1-sweep` at 19/19 under 2 s |
+| **Gap 3** — Knuth Poisson outside its numerical domain, bands silently too narrow | 06-13 / 06-17 | `POISSON_NORMAL_BRANCH_LAMBDA = 30.0` (`prophet.rs:743`) with the normal branch at `:771`, contract-owned via `constants.poisson_normal_branch_lambda` and asserted by `cost_bounds_match_contract`. 06-17 then added **variance** and **zero-mass** bars beside the mean bar, all three contract-owned (`prophet-parity-v1.yaml:186-188`) with written sigma arithmetic at every sweep point — the weakest shipped bar is the MEAN at lambda = 3, 4.24 sigma at N = 60 000. `poisson_mean_and_variance_track_lambda_across_its_whole_domain` is in the run set and green |
+
+The CR-01 instance the round was shaped around — round 2's own fix walking into round 3 — is
+closed at the door by `MAX_LOGISTIC_CHANGEPOINT_LAMBDA = 20_000.0` (`types.rs:168`), computed
+through the single `prophet::changepoint_count` the design build also uses, with the review's
+exact payload as an e2e refusal (`refuses_logistic_changepoint_lambda_over_bound`) and a
+near-miss acceptance beside it. The gate output shows it working: the `freq=MS growth=logistic`
+composition now runs at `horizon=841` (clamped by `max_legal_horizon` from the door's own bound)
+rather than the 3 650 that produced the review's 2.334 s.
+
+### The class invariant, checked rather than narrated
+
+| Half | Mechanism | Status |
+|---|---|---|
+| KNOBS | `schema_knobs()` derives the field set from `schemars::schema_for!(ForecastArgs)` ∪ `schema_for!(HolidayArg)` — the same generator that produces the advertised tool schema — and `every_request_knob_is_enumerated` asserts **set equality**, so both MISSING and PHANTOM are structural | ✓ genuinely derived |
+| COST AXES | `enumerated_axes()` reads `door_surface.cost_axes` out of the YAML and nothing else. `every_cost_axis_names_a_real_bound` checks each listed axis names a real `constants:` key; `no_cost_axis_is_pending` checks no listed axis carries an `unbounded_pending_*` marker | ⚠️ per-entry predicates on a hand-kept list — an unlisted axis is invisible (see advisory WR-03) |
+
+Both tests are in the run set and green. All 14 axes (C-01..C-14) name a real `constants:` key;
+**no pending marker survives**, which is the observable event 06-14 shipped red and 06-15 turned
+green. The contract's own `door_surface_is_complete.formula` is honest about the asymmetry
+(`knobs(...) ==` an equality, `forall a in cost_axes:` a per-entry predicate); the surrounding
+prose is not, and that is what the advisory records.
 
 ### Required Artifacts
 
-All 29 declared artifacts exist and are substantive (no stub is anywhere near the
-`min_lines` floors). Line counts: `prophet.rs` 1774, `bolt.rs` 1642, `mcp-forecast/lib.rs` 1235,
-`np.rs` 1189, `mcp-chronos/lib.rs` 938, `chronos.rs` 727, `forecast.rs` 704, `mase_rolling_origin.rs` 541,
-plus the four contracts (399/355/536/523), both `static/index.html` pages (65/59), all three
-READMEs added by 06-02, `e2e_stdio.rs` (229), both `build.rs` files, `dates.rs`, `fit.rs`,
-`safetensors.rs`, `test_support.rs`, `types.rs`, the committed `chronos_bolt_tiny_config.json`.
+Every artifact declared by 06-14..06-17 exists and is substantive:
+
+| Artifact | Expected | Status |
+|---|---|---|
+| `contracts/forecast-tool-boundary-v1.yaml` | `door_surface:` (16 knobs + 14 cost axes), the new constants and equations | ✓ present, `pv validate` rc=0 |
+| `crates/aprender-forecast/src/types.rs` (39.0 K) | `MAX_LOGISTIC_CHANGEPOINT_LAMBDA`, `MAX_HOLIDAY_NAME_LEN`, `MAX_NP_TRAIN_COST`, the three completeness tests, `pool_default_matches_contract` split out | ✓ all present at :168 / :208 / :258 / :580 / :636 / :704 / :481 |
+| `crates/aprender-forecast/src/forecast.rs` (66.9 K) | lambda refusal before `make_design`, in-loop aggregate refusal, holiday-name refusal, NP train-cost check | ✓ present |
+| `crates/aprender-forecast/src/np.rs` (57.9 K) | `train_cost` / `door_lr_sweep` / `door_epochs` / `request_train_cost` as the door's single pricing path | ✓ present at :464-:511 |
+| `crates/aprender-forecast/src/sc1_wall.rs` (19.7 K, new) | the parameterized sweep, one composition builder, no `#[ignore]` | ✓ present; `sc1_wall::sc1_wall_sweep` is in the `--lib` run set |
+| `scripts/assert_measurement_under.sh` (6.4 K, new) | the shared numeric-shape validator | ✓ present |
+| `scripts/check_assert_measurement_under_cases.sh` (5.2 K, new) | the must-match / must-not-match table | ✓ present, **run: 23/23 rows behaved as tabled**, rc=0 |
+| `contracts/prophet-parity-v1.yaml` | `variance_tolerance: 0.05`, `zero_mass_tolerance: 0.22` beside an untouched `float_tolerance: 0.01` | ✓ present at :186-188 |
+| `crates/aprender-forecast/README.md` | the 0.63.0 public-API notes | ✓ present — and factually wrong, see advisory WR-09 |
+| `contracts/aprender/binding.yaml` | binding rows for the new equations | ✓ 63 Phase 6 rows resolved to definition sites, zero BIND-, zero RESOLVE- |
 
 ### Key Link Verification
 
-All 33 declared key links verified by their own declared patterns. Highlights:
-
 | From | To | Via | Status |
 |---|---|---|---|
-| `aprender-mcp-forecast/src/lib.rs` | `aprender-forecast/src/forecast.rs` | `spawn_blocking(move \|\| aprender_forecast::forecast` | ✓ WIRED |
-| `aprender-mcp-chronos/src/lib.rs` | `aprender-forecast/src/chronos.rs` | `chronos::forecast(&model, &args)` | ✓ WIRED |
-| `forecast.rs` | `fit.rs` | `fit_prophet(&design, 8)` | ✓ WIRED |
-| `fit.rs` | core L-BFGS | `LbfgsF64::new(MAX_ITERS_PER_ROUND, 1e-7, 20)` | ✓ WIRED |
-| `bolt.rs` | `aprender-compute` BLIS | `gemm_blis(` ×3, with `single_row_routing_is_dot8_at_production_defaults` and `multi_row_routing_is_gemm_blis_at_production_defaults` both PASSING armed — D-14 exclusive routing is proven, not grepped | ✓ WIRED |
-| `types.rs` | `forecast-tool-boundary-v1.yaml` | `constant_u64("forecast-tool-boundary-v1"` ×7 | ✓ WIRED |
-| `prophet.rs` / `np.rs` | their parity contracts | `equation_tolerance(...)` ×11 / ×4 — no duplicated literals | ✓ WIRED |
-| `mcp-chronos/build.rs` | `mcp-chronos/src/lib.rs` | `include_bytes!(concat!(env!("OUT_DIR")` ×2 | ✓ WIRED |
-| `justfile` | `models/chronos-bolt-tiny/` | `hf_hub_download` at the pinned rev + sha256 | ✓ WIRED (and proven red) |
-| `Makefile` | all four contracts | `PHASE6_CONTRACTS` ×6 + `$(CONTRACTS)` | ✓ WIRED |
-| `Cargo.toml` | `aprender-forecast` | `[profile.dev.package.aprender-forecast] opt-level = 3` | ✓ WIRED |
-| `monorepo_invariants.rs` | both server crates | `deployment_unit_bins` allowlist names both by name with the D-06 reason | ✓ WIRED |
+| `forecast.rs` | `forecast-tool-boundary-v1.yaml` | seven `constant_u64` + `constant_f64` mirrors asserted by `cost_bounds_match_contract` (D-15: contract is the source, code the mirror) | ✓ WIRED |
+| `forecast.rs` (door) | `prophet::changepoint_count` | the ONE effective-count implementation, called by the door and by `make_design`, so the bound cannot be evaded by disagreement | ✓ WIRED |
+| `forecast.rs` (door) | `np::request_train_cost` | the door prices with the same three functions it then uses to configure the sweep | ✓ WIRED |
+| `types.rs` | `schemars::schema_for!` | `every_request_knob_is_enumerated` walks the generated schema, not a hand-kept list | ✓ WIRED (derived) |
+| `types.rs` | `door_surface.cost_axes` | `every_cost_axis_names_a_real_bound` / `no_cost_axis_is_pending` iterate the YAML list | ⚠️ PARTIAL — per-entry only, not a completeness check |
+| `justfile` | `scripts/assert_measurement_under.sh` | four SC bar sites at :625 / :686 / :751 / :869 plus the new sweep at :960 | ⚠️ PARTIAL — `chronos-coldstart` at :656 still uses `[ -ge ]` (fails closed) |
+| `justfile forecast-sc1-sweep` | `sc1_wall.rs` | runs the sweep under `--release` and re-checks each `SC1 WALL:` line's `total_s` through the validator, so the bar is asserted in two places | ✓ WIRED — observed, 19/19 |
+| `prophet.rs` | `prophet-parity-v1.yaml` | `equation_float(..., "variance_tolerance")` / `"zero_mass_tolerance"` read at test time | ✓ WIRED |
+| `.github/workflows/ci.yml` | any Phase 6 gate | — | ✗ NOT WIRED, and deliberately so — zero `chronos`/`forecast` matches; routed to human decision |
 
 ### Data-Flow Trace (Level 4)
 
 | Artifact | Value | Source | Real data | Status |
 |---|---|---|---|---|
-| `mcp-forecast` `forecast` tool | `yhat/lower/upper/trend/components` | `aprender_forecast::forecast` → `make_design` → `fit_prophet` (L-BFGS) → `predict` | Yes — the e2e happy paths assert real numbers, and the pool-equality test compares two independently computed responses | ✓ FLOWING |
-| `mcp-chronos` `forecast` tool | 9 quantiles | `chronos::forecast` → `Bolt::predict` over `EMBEDDED_WEIGHTS`/`CHRONOS_MODEL_DIR` | Yes — matched against the Python 2.3.1 oracle through the HTTP server | ✓ FLOWING |
-| Prophet/NP/Chronos tolerances | every assertion bar | `test_support::equation_tolerance` / `constant_u64` reading the YAML at test time | Yes — 22 call sites; the audit resolves all 55 binding rows to real definition sites | ✓ FLOWING |
-| `README.md` counts | 86 crates / 1790 contracts | `cargo metadata` / `find contracts -name '*.yaml'` | Yes — I re-derived both **right now** and got exactly 86 and 1790 | ✓ FLOWING |
+| `mcp-forecast` `forecast` tool | `yhat/lower/upper/trend/components` | `aprender_forecast::forecast` → `make_design` → `fit_prophet` (L-BFGS) → `predict` | Yes — `just forecast-bench` reports real L-BFGS round/iter/eval counts (4/794/1530 at 3 000 points) | ✓ FLOWING |
+| `mcp-chronos` `forecast` tool | 9 quantiles | `chronos::forecast` → `Bolt::predict` over `EMBEDDED_WEIGHTS` | Yes — matched against the Python 2.3.1 oracle through the HTTP server, armed, 9/9 | ✓ FLOWING |
+| SC1 sweep `total_s` | per-composition wall | `sc1_wall::time_accepted` around a real `forecast` call | Yes — the gate prints `fit_s` / `predict_s` / `band_width` / `cells` and they vary sensibly per composition | ✓ FLOWING |
+| every assertion bar | tolerances + constants | `test_support::{constant_u64, constant_f64, equation_tolerance, equation_float}` reading the YAML at test time | Yes — the audit resolves all 63 Phase 6 binding rows to definition sites | ✓ FLOWING |
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |---|---|---|---|
-| Prophet + NP parity ladders (SC2, SC3) | `cargo test -p aprender-forecast --lib` | 86 passed, 0 failed, 7 ignored (unarmed Chronos), rc=0 | ✓ PASS |
-| Chronos parity, armed (SC4) | `CHRONOS_MODEL_DIR=.../f32 cargo test -p aprender-forecast --lib -- bolt:: chronos::` | 24 passed, 0 failed, **0 ignored**, rc=0 | ✓ PASS |
-| Fit-server e2e + pool equality (SC1, SC5) | `cargo test -p aprender-mcp-forecast --lib` | 28 passed, 0 failed, rc=0 | ✓ PASS |
-| Chronos server e2e, armed (SC4) | `CHRONOS_MODEL_DIR=.../f32 cargo test -p aprender-mcp-chronos --lib` | 9 passed, 0 failed, rc=0 | ✓ PASS |
-| Spawned-binary stdio round trip (SC1 stdio) | `cargo test -p aprender-mcp-forecast --test e2e_stdio` | 1 passed, rc=0 | ✓ PASS |
-| `cap` on non-logistic growth (SC1) | 7-variant probe through `aprender_forecast::forecast` | 5 ACCEPTED with identical output, 2 logistic controls REFUSED | ✗ **FAIL** |
-| Holiday design cost (SC1 2 s bar / T-06-02) | 3-point scaling probe through the same door | 2.664 s / 8.926 s / **16.113 s** at 5.1e6 / 2.0e7 / 4.6e7 cells | ✗ **FAIL** |
-| `cargo fmt --all -- --check` (SC5) | as written | rc=0 | ✓ PASS |
-| clippy on the three new crates (SC5) | `--all-targets --no-deps -- -D warnings` | rc=0, 0 errors, each crate | ✓ PASS |
-| SC4 binary size, re-measured at HEAD | `just chronos-embed-build` | 24 671 472 bytes < 30 000 000, rc=0 | ✓ PASS |
+| Round-3 tests are in the run set, unfiltered | `cargo nextest list -p aprender-forecast -p aprender-mcp-forecast --lib` | `no_cost_axis_is_pending`, `every_cost_axis_names_a_real_bound`, `every_request_knob_is_enumerated`, `cost_bounds_match_contract`, `poisson_mean_and_variance_track_lambda_across_its_whole_domain`, `sc1_wall::sc1_wall_sweep`, `refuses_logistic_changepoint_lambda_over_bound`, `refuses_holiday_name_over_length_bound` — all listed | ✓ PASS |
+| Both crates' lib suites | `cargo nextest run -p aprender-forecast -p aprender-mcp-forecast --lib` (from the run brief) | 155 passed / 0 failed, rc=0, no `--skip` | ✓ PASS |
+| SC1 stated bar | `just forecast-bench` | `ROUND TRIP (SC1) OK: 0.212 < 2.0`, rc=0 | ✓ PASS |
+| SC1 swept gate (the round's headline) | `just forecast-sc1-sweep` | `SC1 SWEEP OK: 19 compositions, every one under the 2.0 s SC1 bar`, rc=0, `profile=release arch=aarch64` | ✓ PASS |
+| SC1 stdio transport | `cargo nextest run -p aprender-mcp-forecast --test e2e_stdio` | 1 passed, rc=0 | ✓ PASS |
+| SC4 armed parity ladder | `CHRONOS_MODEL_DIR=.../f32 cargo nextest run -p aprender-forecast --lib -E 'test(bolt::) or test(chronos::)'` | 24 passed, 0 failed, rc=0 | ✓ PASS |
+| SC4 through the server | `CHRONOS_MODEL_DIR=.../f32 cargo nextest run -p aprender-mcp-chronos --lib` | 9 passed, 0 failed, rc=0 | ✓ PASS |
+| SC4 binary size, re-measured at HEAD | `just chronos-embed-build` | 24 673 632 < 30 000 000, rc=0 | ✓ PASS |
+| SC4 cold start, re-measured | `just chronos-coldstart` | median 34 ms < 150 ms, rc=0 | ✓ PASS |
+| SC4 forward bench, re-measured | `just chronos-bench` | 18.0 ms < 100 ms at 2 048 ctx, rc=0 | ✓ PASS |
+| SC5 pool ratio | `just forecast-pool-ratio` | best 5.125x ≥ 2.0, rc=0, `workers=4 cpus=14` | ✓ PASS |
+| SC5 formatting | `cargo fmt --all -- --check` | rc=0 | ✓ PASS |
+| SC5 clippy on the three new crates | `cargo clippy -p <crate> --all-targets --no-deps -- -D warnings` | rc=0, 0 errors, each | ✓ PASS |
+| pmcp body-cap claim (WR-02) | read `Cargo.lock` + `pmcp-2.19.3/src/server/{streamable_http_server.rs,limits.rs}` | `stateless()` sets `max_request_bytes = 4 MiB`; enforced at `:4571` | ✗ the CONTRACT's claim is FALSE (enforcement unaffected) |
+| CR-01 arithmetic | derived from `auto_epochs`, `n_training_samples`, `train_cost`, `door_lr_sweep` | 20 000 points, `n_lags=7` → 15 994 400 > 15 000 000, refused by 6.63 % | ✗ over-refusal reproduced |
+| WR-01 reachability | read `forecast.rs:225-296` | in-loop check returns Err; no `continue`; post-loop block unreachable | ✗ dead code reproduced |
 
 ### Probe Execution
 
 | Probe | Command | Result | Status |
 |---|---|---|---|
-| Weight integrity, verify-always | `just fetch-chronos-tiny` | rc=0, three pins re-hashed without download | PASS |
-| Weight integrity, tamper control | `just chronos_dir=<flipped copy> fetch-chronos-tiny` | rc=1, sha256 mismatch named | PASS (red side proven) |
-| Contract validation ×4 | `pv validate contracts/{forecast-tool-boundary,prophet-parity,neuralprophet-parity,chronos-bolt-parity}-v1.yaml` | rc=0, `0 error(s), 0 warning(s)` each | PASS |
-| Contract counts | `pv status` ×4 | 16/16/16, 12/12/12, 9/10/10, 18/18/18 equations/obligations/falsification tests — all non-zero | PASS |
-| Phase 6 binding audit | `make contract-audit-phase6` | rc=0, 55 rows resolved, 0 BIND- | PASS |
-| Binding audit, negative control | one row → invented function | rc=2, `RESOLVE-` finding, reverted | PASS (red side proven) |
+| Validator case table | `bash scripts/check_assert_measurement_under_cases.sh` | rc=0, `TABLE OK: 23/23 rows behaved as tabled` — including `abc`, empty, `1.2.3` and an unknown mode all MUST_FAIL | PASS |
+| Contract validation ×4 | `target/release/pv validate contracts/{forecast-tool-boundary,prophet-parity,neuralprophet-parity,chronos-bolt-parity}-v1.yaml` (pv 0.63.0) | rc=0, `0 error(s), 0 warning(s)` each | PASS |
+| Phase 6 binding audit | `make contract-audit-phase6` | rc=0, 18/18 equations implemented, 324 obligations covered, **63 Phase 6 rows resolved**, zero BIND- | PASS |
 
 ### Requirements Coverage
 
-Confirmed as instructed: `.planning/REQUIREMENTS.md` carries **no forecasting REQ-IDs** — the
-document is the SetFit milestone's. ROADMAP.md's Phase 6 section says so in a
-`**Requirements note**` and points at the five `prophet-forecast-mcp` decisions in
-`.planning/spikes/MANIFEST.md`, transcribed as D-01..D-18 in `06-CONTEXT.md`. **This is not a
-traceability gap** and is not reported as one. Verification ran against SC1..SC5 and the
-D-numbered decisions. No orphaned requirement IDs map to Phase 6.
-
-### D-numbered decision spot-checks
-
-| Decision | Status | Evidence |
-|---|---|---|
-| D-01 stateless, no fit→artifact→forecast round-trip | ✓ | The tool closure calls `forecast` directly inside `spawn_blocking`; no artifact type exists |
-| D-06 thin-server template, stdio + HTTP | ✓ | `run_stdio` in both `main.rs`; `monorepo_invariants` allowlist names both crates with the D-06 reason |
-| D-07 Realizar-first exception row | ✓ | CLAUDE.md:201 carries the Forecasting row and :221 the Chronos paragraph; `readme_contract` (path gate) green per the pre-established run |
-| D-11 the door refuses, never defaults | ✗ | See gap 1 — `cap` is the exception the contract's own `if_fails` text calls the worst failure class |
-| D-12 router pool | ✓ | `pooled_app` + round-robin `fetch_add(1, Ordering::Relaxed) % routers.len()`; `--pool` default 8 with a MAX_POOL ceiling; equality asserted, ratio host-gated |
-| D-13 memory clause, AMENDED | ✓ | Both layouts ship; `weight_layout_is_dual_and_its_cost_is_stated` passes armed; the amendment is recorded as D-ITEM-06-08 with its D-13/D-14 conflict and the ratifying human checkpoint |
-| D-14 `gemm_blis` multi-row / `dot8` single-row | ✓ | Both routing tests pass armed at production defaults — exclusive routing proven, not grepped |
-| D-15 tolerances live in contracts | ✓ | 22 `equation_tolerance`/`constant_u64` call sites; the audit resolves every binding row |
-| D-16 EMPIRICAL coverage, never nominal 80 % | ✓ | Stated in both tool descriptions and READMEs; the MASE harness ships as a compiled example |
-| D-17 no calendar dependency | ✓ | `dates.rs` civil-date arithmetic only; `future_days` covers D/W/MS and refuses H |
-| D-18 counted skips + never-committed weights | ✓ | Two-sided skip proof above; `just fetch-chronos-tiny` verify-always proven red; only the 1.1 KB config.json is committed |
-| CI decision `measure-x86-first` | ✓ | `.github/workflows/ci.yml` carries **zero** `chronos`/`forecast` mentions; last commit touching it (`2196de281`) predates the phase; the gap is named as D-ITEM-06-03 and the stdio target's darkness as D-ITEM-06-06 |
+As instructed and re-confirmed: `.planning/REQUIREMENTS.md` carries **no forecasting REQ-IDs** —
+it is the SetFit milestone's document. ROADMAP.md's Phase 6 section says so in a
+`**Requirements note**` and binds the phase to the five `prophet-forecast-mcp` decisions
+(transcribed as D-01..D-18 in `06-CONTEXT.md`) plus SC1..SC5. Verification ran against those.
+**This is not a traceability gap and is not reported as one.** No orphaned REQ-ID maps to Phase 6.
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 |---|---|---|---|---|
-| — | — | `TBD` / `FIXME` / `XXX` / `TODO` / `HACK` across all Phase 6 source | none found | Debt-marker gate clean |
-| `crates/aprender-forecast/src/forecast.rs` | 150-167, 216 | Accepted-but-inert option (`cap` off the logistic arm) | 🛑 Blocker | Gap 1 |
-| `crates/aprender-forecast/src/prophet.rs` | 178-182, 247-249 | Unbounded product of separately-bounded factors + per-row linear scan | 🛑 Blocker | Gap 2 |
-| `crates/aprender-forecast/src/prophet.rs` | 794-805 | Numerically invalid sampler outside its domain, degrading silently | 🛑 Blocker | Gap 3 |
+| all Phase 6 source + the two new scripts + the four contracts | — | `TBD` / `FIXME` / `XXX` | **none found** | Debt-marker gate clean |
+| all Phase 6 source | — | `TODO` / `HACK` / `PLACEHOLDER` | **none found** | Clean |
+| `crates/aprender-forecast/src/forecast.rs` | 283-295 | unreachable branch that three artifacts describe as firing | ⚠️ Warning | Advisory WR-01 |
+| `contracts/forecast-tool-boundary-v1.yaml` | 303, 401, 457 | a disposition justified by a premise that the locked dependency falsifies | ⚠️ Warning | Advisory WR-02 |
+| `crates/aprender-forecast/README.md` | 99-113 | semver breakage claimed on a `publish = false` crate | ⚠️ Warning | Advisory WR-09 |
+| `crates/aprender-forecast/src/types.rs` | 258 | a bound whose accepted region has no evidence, only its refused region | ⚠️ Warning | Advisory CR-01 → human decision |
+| `crates/aprender-forecast/src/prophet.rs` | 2216-2222 | in-code defaults the door refuses | ℹ️ Info | Advisory IN-01 |
 
-### Documented deviations accepted (not gaps)
+No 🛑 Blocker was found. Per the re-verification evidence gate this matters: every flagged file
+WAS git-modified since the previous `verified:` timestamp, so a Blocker classification here would
+block unconditionally. I considered CR-01 for that classification and rejected it — it restricts
+a corner of the parameter space rather than preventing the goal, SC1's stated timing shape
+measures 0.212 s, and SC3's stated `n_lags = 30` geometry is accepted.
 
-1. **SC2's `objective at Python's MAP` rung binds 3 of 7 fixtures, not 4 of 4.** I checked the
-   fixture keys myself: `wp_log_R_logistic_prophet140.json`, `peyton_default`, `peyton_holidays`
-   and `air_multiplicative` publish no `log_posterior_at_map_unnormalized`; only the three
-   spike-001 fixtures do. A seventh test would have compared Rust to Rust. The asymmetry is
-   stated in three places — `06-03-SUMMARY.md` Deviation 1, the contract's top description
-   (lines 21-27) and `objective_at_python_map_abs.invariants` — and those fixtures are held by
-   `fitted_objective_slack` plus the full `predict_path_rel_yscale` chain, which DOES bind all
-   seven. Judged sound; the SC2 wording is what should move, not the tests. Consider an override.
-2. **SC5's clippy clause is met at `--no-deps`.** With deps, `-D warnings` reaches
-   `crates/aprender-compute` and fails — I confirmed by running the untouched-sibling control,
-   which fails identically. SC5's text is already scoped ("on the new crates") and D-ITEM-06-09
-   restates the boundary. Not a gap; the `aprender-compute` cleanup is a real ticket for someone.
-3. **06-EVIDENCE.md's commit provenance is honest about a dirty tree.** It records that the
-   measurements ran at `adc8a560a` **plus** an uncommitted 59 848-byte delta, with the delta's
-   sha256 — and that delta was later committed as `1d170f383` with per-file attribution. The only
-   Phase 6 source change after it is `mase_rolling_origin.rs`, which is not in any measured
-   binary. I re-measured the binary-size bar at HEAD and got the identical 24 671 472 bytes,
-   which independently corroborates the table.
-4. **`quantiles_abs_f32_nonaarch64 = 5.0e-6` is PROVISIONAL and unmeasured** — carried openly in
-   the contract description, `FALSIFY-CHRONOS-002`, D-ITEM-06-04 and the 06-05/06-07 truths.
-   Recorded, not silently carried. Routed to human verification.
-5. **`cargo test -p apr-cli --test cli_commands` FALSIFY-CLI-006 failure is pre-existing phase-02
-   work** and is explicitly NOT attributed to Phase 6, per the established finding.
+### Margin notes (recorded, not gaps)
+
+1. **SC3 is accepted through the door by 3.0 %.** `np::parity`'s Peyton geometry prices at
+   14 552 640 against `MAX_NP_TRAIN_COST = 15 000 000` — 97.0 % of the bound. It is not
+   coincidental: `the_np_parity_ladder_geometry_prices_under_the_train_cost_bound` pins the
+   relationship in a test, so the code establishes the precondition rather than relying on it
+   incidentally. But the headroom is thin enough to state.
+2. **SC2's `objective at Python's MAP` rung binds 3 of 7 fixtures.** Unchanged from the previous
+   verification and unchanged by this round; the asymmetry is stated in three places and those
+   fixtures are held by `fitted_objective_slack` plus the `predict_path_rel_yscale` chain, which
+   does bind all seven. Judged sound. Consider an override on the SC2 wording.
+3. **SC5's clippy clause is met at `--no-deps`.** With deps, `-D warnings` reaches
+   `crates/aprender-compute` and fails identically for an untouched sibling crate. SC5's text is
+   already scoped "on the new crates"; D-ITEM-06-09 restates the boundary.
+4. **`make test` cannot pass on macOS at all** (`crates/aprender-profile/examples/validate_golden_trace.rs`
+   imports a `#[cfg(target_os = "linux")]` module), and the full-workspace `--lib` run has 83
+   pre-existing failures in 10 crates, none of which depends on `aprender-forecast`
+   (`cargo tree -i` returns no match for all ten). Both are out of this phase's scope and are not
+   attributed to it.
 
 ### Gaps Summary
 
-Nine plans, 29 artifacts, 33 key links, four contracts and 55 binding rows: everything the
-phase said it built, it built, and the parts that can be proven mechanically are proven with
-controls that I confirmed fire in both directions. SC2, SC3, SC4 and SC5 hold on evidence I
-generated in this session, including a byte-exact reproduction of the SC4 binary-size bar.
+**There are no gaps.** All three previous gaps are closed with mechanisms I verified in the
+source and exercised through gates I ran. All five Success Criteria hold on measurements taken
+this session at HEAD `86e485e4f`.
 
-SC1 does not hold, and the failure is not marginal. The validation door — the single surface
-this phase's own contract calls the place where "the worst failure class" lives — has two
-measured holes and one confirmed numerical hole:
-
-- A caller who sets `cap` on the default (linear) arm gets a straight-line forecast, no
-  saturating curve, and a response whose diagnostics do not mention `cap` at all. The same
-  request on the logistic arm is refused twice over, which proves the refusal machinery is
-  present and simply not reached. Five accepting probes returned output byte-identical to the
-  no-cap baseline.
-- A 3 000-point daily request carrying an in-bounds holiday spec takes 16 s against a 2 s bar,
-  because three bounds are checked one at a time and their product — the actual work — is not.
-  At the in-bounds maximum the same arithmetic gives ~85 minutes for one request, times the
-  default pool of 8. `FIT_BUDGET_SECS` is structurally blind to it: the cost is spent before
-  `fit_prophet` is entered. The contract line claiming a HARD ceiling is false as shipped.
-- Long-horizon logistic requests get bands computed from a Poisson sampler operating outside
-  its numerical domain, so they come back too narrow with no warning.
-
-All three are small, local, well-understood fixes with a clear place to assert them (the
-existing refusal e2e suite and the existing `constants:` block), and none of them touch a
-parity rung. Fix the door, add the two red-side cases, and this phase is done.
+What is left is one design decision and a paperwork debt. The design decision is CR-01: a bound
+whose refused region has four kinds of evidence and whose accepted region has none, which today
+makes the advertised `n_lags <= 365` reachable only up to 6 at the advertised maximum history.
+The paperwork debt is that four artifacts describe behavior the tree does not have — an
+unreachable exact-total refusal, a "no transport caps the body" premise the locked pmcp 2.19.3
+falsifies, a `publish = false` crate's semver breakage, and a cost-axis enumeration whose
+completeness is inspected rather than derived while the prose calls it "THE DOOR'S WHOLE
+SURFACE". None of it changes what the code does; all of it changes what the next reader will
+believe the code does, which for a phase whose entire thesis is "a guard that cannot fail is
+theater" is the failure mode worth naming.
 
 ---
 
-_Verified: 2026-09-07T00:26:24Z_
+_Verified: 2026-09-07T20:12:35Z_
 _Verifier: Claude (gsd-verifier)_
