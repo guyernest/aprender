@@ -983,59 +983,218 @@ mod sampler {
     //! and its count (32) is asserted by this plan's own verification, so a sampler test living
     //! there would change what that number means.
     //!
-    //! What is barred here is the sampler's MEAN against its own lambda, at six lambdas that
-    //! straddle both the branch threshold and Knuth's 745.13 underflow point. One failing input
-    //! is an anecdote (CLAUDE.md Verification Discipline rule 6); six points make the shape of
-    //! the failure visible — the pre-fix implementation tracks lambda up to ~745 and saturates
-    //! there for anything larger, which is a different claim from "it is wrong at 900".
+    //! What is barred here is the sampler's MEAN, its VARIANCE and its ZERO MASS against its own
+    //! lambda, at seven lambdas that straddle both the branch threshold and Knuth's 745.13
+    //! underflow point. One failing input is an anecdote (CLAUDE.md Verification Discipline rule
+    //! 6); seven points make the shape of the failure visible — the pre-fix implementation tracks
+    //! lambda up to ~745 and saturates there for anything larger, which is a different claim from
+    //! "it is wrong at 900".
+    //!
+    //! # Why THREE statistics and not one (WR-02, and WR-01's second half)
+    //!
+    //! Until plan 06-17 this module barred the MEAN alone, and one statistic is not a domain
+    //! check. Two implementations that are plainly wrong passed it:
+    //!
+    //! - `fn poisson(_rng, lambda) -> lambda.round() as usize` — a ZERO-VARIANCE stub, which would
+    //!   collapse every logistic band to the deterministic trend while the caller is still told
+    //!   the interval has the `interval_width` it asked for — reported `rel = 0.000000` at every
+    //!   sweep point and passed outright. The VARIANCE bar is what refuses it.
+    //! - `POISSON_NORMAL_BRANCH_LAMBDA` lowered to 3.2 — replacing the exact sampler with a normal
+    //!   approximation for every real logistic request, in the regime the contract itself says the
+    //!   approximation is not standard for — left every mean inside the 0.01 bar, because the mean
+    //!   is exactly the statistic the normal approximation gets right. The ZERO-MASS bar is what
+    //!   refuses it: the clamped normal's low tail draws 3.28x too many zeros at lambda = 5.
+    //!
+    //! Both were OBSERVED red before these bars were accepted as green (06-17 SUMMARY).
     use super::{poisson, Rng, POISSON_NORMAL_BRANCH_LAMBDA};
     use crate::dates::parse_ymd;
-    use crate::test_support::{equation_tolerance, load_json};
+    use crate::test_support::{equation_float, equation_tolerance, load_json};
 
     /// Draws per lambda.
     ///
-    /// Chosen so sampling error cannot be mistaken for the defect: at lambda = 900 the standard
-    /// error of the mean is sqrt(900 / 20 000) ~= 0.212, i.e. ~0.024 % of lambda — three orders
-    /// of magnitude below the ~17 % shortfall the saturation produces.
-    const N: usize = 20_000;
-    const N_F: f64 = 20_000.0;
+    /// **60 000, raised from 20 000 by plan 06-17, because the sample size is what makes all
+    /// three bars feasible at every point.** The two new statistics cannot BOTH clear 4 sigma at
+    /// N = 20 000: one shared `zero_mass_tolerance` must be at least 4 sigma above the noise at
+    /// lambda = 5 (>= 0.3434 at N = 20 000) and at most half the smaller defect gap so it still
+    /// discriminates at lambda = 3 (<= 0.2478), and those two do not overlap. At N = 60 000 the
+    /// window is [0.1983, 0.2478] and 0.22 sits inside it. Raising N also strengthens the
+    /// EXISTING mean bar, which the lambda = 3 point this plan adds needed: 2.45 sigma there at
+    /// N = 20 000, 4.24 sigma at N = 60 000.
+    ///
+    /// The Knuth branch runs ~lambda iterations and the normal branch is O(1), so seven lambdas x
+    /// 60 000 draws is a few million uniforms — measured well under a second.
+    const N: usize = 60_000;
+    const N_F: f64 = 60_000.0;
 
-    /// Fixed so the sweep is reproducible. The bar is on the DISTRIBUTION's mean, never on a
+    /// Fixed so the sweep is reproducible. The bars are on the DISTRIBUTION, never on a
     /// draw-for-draw match with numpy — this file's `Rng` is a xorshift, not MT19937.
     const SEED: u64 = 20_260_907;
 
-    /// Six lambdas: two below the branch threshold (Knuth must stay untouched), two above it but
-    /// below Knuth's underflow point, and the two the verifier measured as reachable IN BOUNDS
-    /// (100 daily points + horizon 3650 gives ~922; the 10-point floor gives ~2839).
-    const LAMBDAS: [f64; 6] = [5.0, 29.0, 31.0, 100.0, 900.0, 2839.0];
+    /// Seven lambdas: three below the branch threshold (Knuth must stay untouched), two above it
+    /// but below Knuth's underflow point, and the two the verifier measured as reachable IN
+    /// BOUNDS (100 daily points + horizon 3650 gives ~922; the 10-point floor gives ~2839).
+    ///
+    /// `3.0` was added by 06-17: the only logistic parity fixture's own measured lambda is
+    /// 3.1239, so 3.0 is the regime the ladder actually runs in, and it is the point at which a
+    /// lowered branch threshold does its damage.
+    const LAMBDAS: [f64; 7] = [3.0, 5.0, 29.0, 31.0, 100.0, 900.0, 2839.0];
+
+    /// A zero-mass bar is only applied where the expected zero COUNT is large enough to measure.
+    ///
+    /// At N = 60 000 this selects lambda = 3.0 (2 987 expected zeros) and lambda = 5.0 (404), and
+    /// skips everything above — `exp(-29)` is ~2.5e-13, so a zero at lambda = 29 is not an
+    /// observation, it is a rounding artefact. The skipped points are PRINTED with their expected
+    /// count and this reason, because a silently-skipped assertion is exactly the vacuous case
+    /// this module exists to refuse.
+    const MIN_EXPECTED_ZEROS: f64 = 30.0;
+
+    /// One lambda's measured moments. Every field is measured in the first pass and asserted in
+    /// the second, so no bar can abort the sweep before the rest have been measured.
+    struct Point {
+        lambda: f64,
+        mean: f64,
+        rel: f64,
+        var: f64,
+        var_rel: f64,
+        expected_zeros: f64,
+        p_zero: f64,
+        exact_p_zero: f64,
+        zero_rel: f64,
+        zero_checked: bool,
+    }
 
     #[test]
-    fn poisson_mean_tracks_lambda_across_its_whole_domain() {
-        // D-15: the bar lives in the contract, never in a literal here. A test that hardcodes a
-        // tolerance can be loosened without the contract ever noticing.
-        let bar = equation_tolerance("prophet-parity-v1", "poisson_sampler_domain");
-        // Measure and PRINT all six first, then assert: a print-and-assert loop would abort at
+    fn poisson_mean_and_variance_track_lambda_across_its_whole_domain() {
+        // D-15: every bar lives in the contract, never in a literal here. A test that hardcodes a
+        // tolerance can be loosened without the contract ever noticing. `float_tolerance` is the
+        // mean bar 06-13 shipped and is READ THROUGH THE SAME READER it always was; the two new
+        // bars need a reader keyed on the KEY as well, because one equation now carries three.
+        let mean_bar = equation_tolerance("prophet-parity-v1", "poisson_sampler_domain");
+        let var_bar = equation_float(
+            "prophet-parity-v1",
+            "poisson_sampler_domain",
+            "variance_tolerance",
+        );
+        let zero_bar = equation_float(
+            "prophet-parity-v1",
+            "poisson_sampler_domain",
+            "zero_mass_tolerance",
+        );
+        // Measure and PRINT all seven first, then assert: a print-and-assert loop would abort at
         // the first out-of-domain lambda and hide the shape of the failure at the larger ones.
-        let mut observed: Vec<(f64, f64, f64)> = Vec::with_capacity(LAMBDAS.len());
+        let mut observed: Vec<Point> = Vec::with_capacity(LAMBDAS.len());
         for (i, &lambda) in LAMBDAS.iter().enumerate() {
             let mut rng = Rng::new(SEED + u64::try_from(i).expect("index fits u64"));
-            let mut sum = 0.0_f64;
+            // The draws are KEPT rather than only summed: a variance and a zero count cannot be
+            // read off a running sum, and the whole point of this plan is that one statistic was
+            // not enough.
+            let mut draws: Vec<f64> = Vec::with_capacity(N);
+            let mut zeros = 0_usize;
             for _ in 0..N {
                 let k = poisson(&mut rng, lambda);
-                sum += f64::from(u32::try_from(k).expect("a Poisson count fits u32"));
+                if k == 0 {
+                    zeros += 1;
+                }
+                draws.push(f64::from(
+                    u32::try_from(k).expect("a Poisson count fits u32"),
+                ));
             }
-            let mean = sum / N_F;
+            let mean = draws.iter().sum::<f64>() / N_F;
             let rel = (mean - lambda).abs() / lambda;
-            println!("POISSON MEAN: lambda={lambda:.1} n={N} mean={mean:.4} rel={rel:.6}");
-            observed.push((lambda, mean, rel));
+            let var = draws.iter().map(|&k| (k - mean).powi(2)).sum::<f64>() / (N_F - 1.0);
+            let var_rel = (var - lambda).abs() / lambda;
+            let exact_p_zero = (-lambda).exp();
+            let expected_zeros = N_F * exact_p_zero;
+            let p_zero = f64::from(u32::try_from(zeros).expect("a zero count fits u32")) / N_F;
+            let zero_rel = (p_zero - exact_p_zero).abs() / exact_p_zero;
+            let zero_checked = expected_zeros >= MIN_EXPECTED_ZEROS;
+            println!("POISSON MEAN: lambda={lambda:.1} n={N} mean={mean:.4} rel={rel:.6} (bar {mean_bar:e})");
+            println!(
+                "POISSON VAR:  lambda={lambda:.1} n={N} var={var:.4} rel={var_rel:.6} (bar {var_bar:e})"
+            );
+            if zero_checked {
+                println!(
+                    "POISSON ZERO: lambda={lambda:.1} CHECKED expected_zeros={expected_zeros:.1} \
+                     (>= {MIN_EXPECTED_ZEROS:.0}) observed={zeros} p_zero={p_zero:.6} \
+                     exact={exact_p_zero:.6} rel={zero_rel:.6} (bar {zero_bar:e})"
+                );
+            } else {
+                println!(
+                    "POISSON ZERO: lambda={lambda:.1} SKIPPED expected_zeros={expected_zeros:.3e} \
+                     (< {MIN_EXPECTED_ZEROS:.0}, too few to measure) observed={zeros} \
+                     exact={exact_p_zero:.3e}"
+                );
+            }
+            observed.push(Point {
+                lambda,
+                mean,
+                rel,
+                var,
+                var_rel,
+                expected_zeros,
+                p_zero,
+                exact_p_zero,
+                zero_rel,
+                zero_checked,
+            });
         }
-        for (lambda, mean, rel) in observed {
+        // Three assertion passes, not one interleaved pass, for the same reason the measurement
+        // is separated from the assertion: a variance failure at lambda = 3 must not hide the
+        // mean's verdict at lambda = 2839.
+        for p in &observed {
             assert!(
-                rel <= bar,
-                "poisson sampler outside its domain at lambda={lambda:.1}: \
-                 mean={mean:.4} rel={rel:.6} > bar={bar:e}"
+                p.rel <= mean_bar,
+                "poisson sampler MEAN outside its domain at lambda={:.1}: \
+                 mean={:.4} rel={:.6} > bar={:e}",
+                p.lambda,
+                p.mean,
+                p.rel,
+                mean_bar
             );
         }
+        for p in &observed {
+            assert!(
+                p.var_rel <= var_bar,
+                "poisson sampler VARIANCE outside its domain at lambda={:.1}: \
+                 var={:.4} rel={:.6} > bar={:e}. The codomain is a count whose mean AND VARIANCE \
+                 are both lambda; a sampler with the right centre and the wrong spread returns \
+                 yhat_lower / yhat_upper narrower than the interval_width it advertises",
+                p.lambda,
+                p.var,
+                p.var_rel,
+                var_bar
+            );
+        }
+        let mut checked_zero_mass = 0_usize;
+        for p in &observed {
+            if !p.zero_checked {
+                continue;
+            }
+            checked_zero_mass += 1;
+            assert!(
+                p.zero_rel <= zero_bar,
+                "poisson sampler ZERO MASS outside its domain at lambda={:.1}: \
+                 p_zero={:.6} against an exact exp(-lambda)={:.6} (rel={:.6} > bar={:e}, \
+                 expected_zeros={:.1}). The low tail is where the clamped normal approximation \
+                 is visibly wrong and the exact sampler is not, so this is the bar that notices \
+                 POISSON_NORMAL_BRANCH_LAMBDA being lowered",
+                p.lambda,
+                p.p_zero,
+                p.exact_p_zero,
+                p.zero_rel,
+                zero_bar,
+                p.expected_zeros
+            );
+        }
+        // NON-VACUITY: a zero-mass bar that checked nothing would be a green that means nothing,
+        // which is the whole class this round is closing. Two points clear MIN_EXPECTED_ZEROS at
+        // N = 60 000 (lambda 3.0 and 5.0) and the assertion says so by number.
+        assert_eq!(
+            checked_zero_mass, 2,
+            "the zero-mass bar must actually run at lambda 3.0 and 5.0; it ran at \
+             {checked_zero_mass} point(s), so either N, LAMBDAS or MIN_EXPECTED_ZEROS moved and \
+             the bar that detects a lowered branch threshold is no longer being applied"
+        );
     }
 
     /// The parity argument, as a MEASUREMENT rather than a claim.

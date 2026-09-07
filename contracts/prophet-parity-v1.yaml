@@ -184,6 +184,8 @@ equations:
       happens to exercise.
     codomain: 'a non-negative count whose mean and variance are both lambda'
     float_tolerance: 0.01
+    variance_tolerance: 0.05
+    zero_mass_tolerance: 0.22
     invariants:
       - 'THE NUMERICAL FACT: Knuths product method compares a running product of uniforms against `l = (-lambda).exp()`, and that is EXACTLY 0.0 for lambda > 745.13. Past that point the loop can only end when the product itself underflows through f64s subnormals — roughly 745 steps on average, since E[-ln U] = 1 and the smallest positive subnormal is near e^-744 — so the count SATURATES near 745 regardless of lambda. Measured pre-fix means at N = 20 000: 745.13 at lambda 900 and 745.45 at lambda 2839'
       - 'REACHABILITY, IN BOUNDS — every factor inside every door bound: 100 consecutive daily points (span 99, n_changepoints 25) with `horizon: 3650, growth: "logistic"` gives t_max ~= 37.9 and lambda ~= 922; the 10-point `fit_min_points` floor with the same horizon gives lambda ~= 2839. This is not a theoretical regime'

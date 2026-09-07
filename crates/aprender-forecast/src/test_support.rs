@@ -137,6 +137,33 @@ pub(crate) fn equation_tolerance(contract: &str, equation: &str) -> f64 {
         })
 }
 
+/// Read a NAMED real-valued key off an equation, e.g. `equations.<equation>.<key>`.
+///
+/// [`equation_tolerance`] answers "what is this equation's `float_tolerance`?" and is keyed
+/// on the equation alone. An equation that bars more than one statistic needs more than one
+/// number — `poisson_sampler_domain` bars a mean (`float_tolerance`), a variance
+/// (`variance_tolerance`) and a low-tail mass (`zero_mass_tolerance`) — and there is no way
+/// to name the second and third through a reader keyed only on the equation.
+///
+/// [`equation_tolerance`] is deliberately NOT re-expressed in terms of this function: it has
+/// eleven call sites across the parity ladder, and churning them would put a diff across the
+/// whole ladder for no behavioural gain.
+///
+/// # Panics
+///
+/// Panics NAMING BOTH the equation and the key if the contract is missing, unparseable, or
+/// does not carry that key — the same failure shape [`equation_tolerance`] has. A bar that
+/// silently defaulted to something plausible is the vacuous-guard class this crate's tests
+/// exist to refuse.
+pub(crate) fn equation_float(contract: &str, equation: &str, key: &str) -> f64 {
+    let doc = contract_doc(contract);
+    doc.get("equations")
+        .and_then(|e| e.get(equation))
+        .and_then(|e| e.get(key))
+        .and_then(serde_yaml::Value::as_f64)
+        .unwrap_or_else(|| panic!("contract {contract} must define equations.{equation}.{key}"))
+}
+
 /// The whole parsed contract tree, for a test that must walk arbitrary structure.
 ///
 /// [`constant_u64`] and [`constant_f64`] answer "what is the value of ONE named scalar?".
