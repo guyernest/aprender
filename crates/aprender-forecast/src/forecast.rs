@@ -147,6 +147,21 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     )))
                 }
             };
+            // `cap` belongs to the LOGISTIC growth arm, not merely to the prophet MODEL:
+            // `make_design` matches only `(Growth::Logistic, Some(c))` and falls to
+            // `_ => None` for every other pair, so a cap sent on the linear, flat or
+            // DEFAULTED arm was accepted and provably inert — the caller got a plausible
+            // answer to a question they did not ask (D-11, FALSIFY-BOUNDARY-005). This
+            // runs AFTER the `growth` enum is parsed, so an unknown growth string still
+            // refuses with its own message first.
+            if growth != Growth::Logistic && args.cap.is_some() {
+                return Err(ForecastError::Validation(
+                    "cap is logistic-only; set growth to \"logistic\"".into(),
+                ));
+            }
+            // The ONLY path that puts a `Some` here is the one below that validated it,
+            // so `Spec` structurally cannot carry a cap the door did not check.
+            let mut checked_cap: Option<f64> = None;
             if growth == Growth::Logistic {
                 let cap = args
                     .cap
@@ -164,6 +179,7 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                         "cap {cap} must exceed max(y) = {y_max}"
                     )));
                 }
+                checked_cap = Some(cap);
             }
             let mut holidays = Vec::new();
             // `prophet::columns` emits one design column per offset in the window, so an
@@ -213,7 +229,7 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             }
             let mut spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, mode));
             spec.growth = growth;
-            spec.cap = args.cap;
+            spec.cap = checked_cap;
             spec.holidays = holidays;
             spec.holidays_mode = mode;
             spec.interval_width = interval_width;
@@ -594,6 +610,59 @@ mod tests {
         let mut np = np_args(60, 7);
         np.growth = Some("logistic".into());
         refusal(&np, "prophet-only");
+
+        // The cross-MODEL refusal keeps its OWN older message: a cap aimed at the
+        // neuralprophet arm still says `cap is prophet-only`, never the new growth-arm one.
+        let mut np_cap = np_args(60, 7);
+        np_cap.cap = Some(100.0);
+        refusal(&np_cap, "cap is prophet-only");
+
+        // `cap` belongs to the LOGISTIC growth arm, not merely to the prophet MODEL. It
+        // was accepted and provably dropped on every other growth arm: `make_design`
+        // matches only `(Growth::Logistic, Some(c))`, so a cap sent with linear or flat
+        // growth fell to `_ => None` and the caller got a plausible answer to a question
+        // they did not ask. Four shapes, because one failing input is an anecdote.
+        let mut linear_cap = np_args(60, 7);
+        linear_cap.model = None;
+        linear_cap.growth = Some("linear".into());
+        linear_cap.cap = Some(100.0);
+        refusal(&linear_cap, "logistic-only");
+
+        // The DEFAULTED arm — no `growth` key at all — is the one a real caller hits, and
+        // only this case proves the check is not keyed on the PRESENCE of `growth`.
+        let mut bare_cap = np_args(60, 7);
+        bare_cap.model = None;
+        bare_cap.cap = Some(100.0);
+        refusal(&bare_cap, "logistic-only");
+
+        let mut flat_cap = np_args(60, 7);
+        flat_cap.model = None;
+        flat_cap.growth = Some("flat".into());
+        flat_cap.cap = Some(100.0);
+        refusal(&flat_cap, "logistic-only");
+
+        // A cap BELOW max(y) off the logistic arm must refuse for being off-arm, not
+        // sneak through the `cap <= y_max` rule that only guards the logistic branch.
+        let mut linear_low_cap = np_args(60, 7);
+        linear_low_cap.model = None;
+        linear_low_cap.growth = Some("linear".into());
+        linear_low_cap.cap = Some(0.5);
+        refusal(&linear_low_cap, "logistic-only");
+
+        // POSITIVE CONTROL: the refusal must not swallow the logistic happy path. A cap
+        // strictly above the series maximum, computed from the args themselves so the
+        // helper series may change without silently disarming this assertion.
+        let mut logistic_ok = np_args(60, 7);
+        logistic_ok.model = None;
+        logistic_ok.growth = Some("logistic".into());
+        let y_max = logistic_ok
+            .y
+            .iter()
+            .fold(f64::NEG_INFINITY, |a, v| a.max(*v));
+        logistic_ok.cap = Some(y_max + 1.0);
+        let r = forecast(&logistic_ok)
+            .expect("logistic growth with a cap above max(y) is a legal request");
+        assert_eq!(r.yhat.len(), 7, "the logistic arm must still return a band");
     }
 
     /// JSON `1e400` parses to `f64::INFINITY`, for which `cap <= y_max` is false.
