@@ -765,7 +765,17 @@ mase-rolling-origin:
         exit "$rc"
     fi
 
-# The holiday design-build wall, MEASURED and PRINTED — no bar (06-11).
+# The holiday design-build wall, MEASURED and ASSERTED against SC1's 2 s bar (06-12).
+#
+# WHAT THIS BAR CLAIMS, AND WHAT IT DOES NOT. It asserts that the WORST holiday-carrying
+# request the door still accepts — the at-the-bound default geometry below — walls under
+# 2 s on this release host. It is NOT a general SC1 guarantee for every accepted holiday
+# request: 06-11 measured that NO payload statistic bounds the wall, because the L-BFGS
+# iteration count is data-dependent (a 4 700-point / 5-column request is 25 000 cells,
+# half the bound, and reproducibly walls at ~4.2 s). `MAX_HOLIDAY_DESIGN_COST` caps WORK,
+# not WALL; the residual wall-clock exposure is FIT_BUDGET_SECS. Whether SC1's 2 s bar
+# should apply to holiday-carrying requests at all is an OPEN human decision
+# (06-11-SUMMARY coverage D7, WINDOWS.md entry 7) and this recipe does not close it.
 #
 # `forecast-bench` measures the NO-HOLIDAY SC1 shape (0.214 s). This one measures the
 # holiday-carrying shape, which shares its point count and missed the bar by 8x:
@@ -810,3 +820,32 @@ forecast-holiday-bench points="800" columns="50" dates="84" horizon="200":
         exit 1
     fi
     echo "$line"
+    # Parse total_s BY TOKEN, never by column position: the printed field order must
+    # not become load-bearing, or a reordering of the measurement line silently moves
+    # what this bar reads.
+    total=$(printf '%s\n' "$line" \
+        | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^total_s=/) { sub(/^total_s=/, "", $i); print $i; exit } }')
+    if [ -z "$total" ]; then
+        echo "FAIL: the HOLIDAY DESIGN WALL line carries no total_s= token - the wall" >&2
+        echo "      was never measured. line: $line" >&2
+        exit 1
+    fi
+    # CLAUDE.md rule 2 - prove the mechanism engaged, never label a run by intent. This
+    # crate carries [profile.dev.package.aprender-forecast] opt-level = 3, so a debug
+    # wall looks plausible and still is not the SC1 bar.
+    case "$line" in
+        *profile=release*) ;;
+        *)
+            echo "FAIL: the wall was not measured on a release build (profile= is not" >&2
+            echo "      release), so it is not the SC1 bar. line: $line" >&2
+            exit 1
+            ;;
+    esac
+    if awk -v v="$total" 'BEGIN { exit (v + 0 < 2.0) ? 0 : 1 }'; then
+        echo "  HOLIDAY DESIGN OK: $total s < 2.0 s (SC1)"
+    else
+        echo "FAIL: $total s is at or above the 2.0 s SC1 bar, measured on the" >&2
+        echo "      at-the-bound geometry points={{points}} columns={{columns}}" >&2
+        echo "      dates={{dates}} horizon={{horizon}}. line: $line" >&2
+        exit 1
+    fi
