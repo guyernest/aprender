@@ -4,15 +4,15 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
-stopped_at: Completed 06-13-PLAN.md
-last_updated: "2026-09-07T04:26:09.316Z"
+stopped_at: Planned 06-14..06-17 (gap-closure round 3)
+last_updated: "2026-09-07T06:16:24.000Z"
 last_activity: 2026-09-06
-last_activity_desc: 06-08 complete — SC1/SC4/SC5 measured on aarch64; CI decision measure-x86-first
-state_head: 5cd9571846458d65b75d48bc12d8ba5442ae4ff4
+last_activity_desc: 06-14..06-17 planned — gap-closure round 3, scoped to the door-bound CLASS
+state_head: bb5275d03fb6a185e4140a90610c4b796c23fbb9
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 77
+  total_plans: 81
   completed_plans: 74
 milestone_name: milestone
 ---
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
-Plan: 5 of 13
-Status: Ready to execute
+Phase: 06 (Native Time-Series Forecasting Stack) — READY TO EXECUTE
+Plan: 14 of 17
+Status: Ready to execute (gap-closure round 3)
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -203,6 +203,58 @@ pending F-10 in Phase 5.)
 | Phase 06 P13 | 20 min | 3 tasks | 3 files |
 
 ## Accumulated Context
+
+### Phase 06 gap-closure round 3 (06-14..06-17) — planned 2026-09-06, scoped to the CLASS
+
+Three `--gaps` rounds on one phase is a symptom, not bad luck. Every Phase 6 gap is one
+instance of a single class: **the forecast door accepts a request whose cost or whose
+semantics it never checks.** Rounds 1 and 2 each fixed exactly the probe the verifier
+measured (06-10 the `cap` knob, 06-11/12 the holiday design-cost product, 06-13 the Poisson
+sampler's domain), and the next adversarial pass found the next instance. `06-REVIEW.md`'s
+CR-01 is *caused by* round 2's own fix: 06-13 correctly removed Knuth's saturation near
+lambda=745, which had been an accidental hard cap, so the simulated changepoint count now
+tracks an unbounded lambda — 0.157 s -> 2.334 s (14.8x) on a 1 132-byte accepted request,
+over the same 2 s SC1 bar 06-11/06-12 were built to defend.
+
+Round 3 closes the class instead. `contracts/forecast-tool-boundary-v1.yaml` gains a
+`door_surface:` block enumerating every caller-settable knob and every cost axis, checked in
+BOTH directions by `types::tests::every_request_knob_is_enumerated` (derived from
+`schemars::schema_for!`, so a new struct field with no entry AND a phantom entry both go red)
+and `every_cost_axis_names_a_real_bound`. Doing the enumeration by inspection rather than by
+symptom found two axes no review finding pointed at: **C-07** `holidays[].name`, unenforced
+anywhere, ~2 000 owned clones plus a byte-wise `sort_by` at `MAX_HOLIDAY_COLUMNS`; and
+**C-08** the NeuralProphet path, which reads no budget at all (`FIT_BUDGET_SECS` is read at
+exactly one site, `fit.rs:112`, inside `fit_prophet`) while `forecast.rs:359-362` runs 2-3
+full `np::train` calls per request.
+
+**C-07 has no structural maximum to measure** — `holidays[].name` is an unbounded `String`
+and there is no `DefaultBodyLimit`/`max_body`/`content_length` in either crate, nor any
+framing cap on stdio. It is closable only by a bound, never by a measurement.
+
+**A declared-red gate spans waves 12-13, deliberately.** `no_cost_axis_is_pending` ships
+FAILING at the close of 06-14, naming C-07 and C-08, and only 06-15 turns it green. Blast
+radius, verified against the files: no git hooks exist and `make tier1/tier2` touch only the
+root facade, but `make tier3` (`cargo test --all`, Makefile:313) and CI's `workspace-test`
+(`.github/workflows/ci.yml:289`, which does NOT exclude `aprender-forecast`) both go red —
+and `workspace-test` is a required check on protected `main`, so the window blocks the PR.
+`-- --skip` is a libtest idiom with no nextest equivalent short of a filterset. **The
+forbidden repair is deleting the assertion** — autonomous mode's re-run-CI licence and the
+"repair, don't bypass" rule both point at it, and taking it restores the guard-that-cannot-
+fail contradiction. The only legitimate repair is landing 06-15.
+
+Statistical bars were re-derived, not inherited: adding lambda=3.0 weakened the pre-existing
+mean bar to 2.45 sigma at N=20 000, so N moved to 60 000 (mean 4.24, variance 8.02, zero-mass
+4.44 sigma at their weakest points). The review's suggested 1-2 % variance bar was REFUSED as
+a 1.9-sigma flake, and the refusal survived two revision passes.
+
+**This is the second phase to hit the stale-VERIFICATION trap** (see Phase 4's reconciliation
+note above). `--gaps` feeds the planner `VERIFICATION.md` + UAT only — `NN-REVIEW.md` from
+`/gsd-code-review` is not in its reading list — and nothing invalidates `VERIFICATION.md` when
+gap plans execute. Phase 6's was dated 2026-09-07T00:26Z, predating all four of 06-10..06-13,
+so a straight `--gaps` run would have replanned closed work and missed the live Critical.
+Check the VERIFICATION timestamp against the newest executed gap-plan SUMMARY before trusting
+it.
+
 
 ### Decisions
 
