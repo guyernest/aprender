@@ -137,6 +137,47 @@ pub(crate) fn equation_tolerance(contract: &str, equation: &str) -> f64 {
         })
 }
 
+/// The whole parsed contract tree, for a test that must walk arbitrary structure.
+///
+/// [`constant_u64`] and [`constant_f64`] answer "what is the value of ONE named scalar?".
+/// The `door_surface` completeness tests ask a different question — "does this LIST agree
+/// with what the code actually declares?" — and there is no scalar path that expresses it.
+/// Handing out the memoized `Arc` keeps those tests on the same single parse as every other
+/// contract reader here rather than opening the file a second time.
+pub(crate) fn contract_value(contract: &str) -> std::sync::Arc<serde_yaml::Value> {
+    contract_doc(contract)
+}
+
+/// Read a top-level `constants.<key>` REAL from a contract.
+///
+/// [`constant_u64`] cannot express a threshold that is conceptually a real number, and
+/// rounding one to fit it would make the mirror assert something weaker than the constant
+/// it mirrors. YAML writes `30` and `20000` as integers, so this falls back to the integer
+/// accessors and casts — the contract stays readable without forcing `30.0` on every value.
+///
+/// # Panics
+///
+/// Panics NAMING THE KEY if the contract is missing, unparseable, or does not carry it —
+/// the same failure shape [`constant_u64`] has, because an absent bound must fail loudly
+/// rather than default to something plausible.
+pub(crate) fn constant_f64(contract: &str, key: &str) -> f64 {
+    let doc = contract_doc(contract);
+    let v = doc
+        .get("constants")
+        .and_then(|c| c.get(key))
+        .unwrap_or_else(|| panic!("contract {contract} must define constants.{key}"));
+    v.as_f64()
+        .or_else(|| {
+            #[allow(clippy::cast_precision_loss)]
+            v.as_u64().map(|n| n as f64)
+        })
+        .or_else(|| {
+            #[allow(clippy::cast_precision_loss)]
+            v.as_i64().map(|n| n as f64)
+        })
+        .unwrap_or_else(|| panic!("contract {contract} constants.{key} must be a number"))
+}
+
 /// Read a top-level `constants.<key>` integer from a contract.
 ///
 /// # Panics

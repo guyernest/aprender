@@ -257,9 +257,9 @@ mod tests {
     use super::{
         ForecastArgs, ForecastError, DEFAULT_POOL, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
         MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_WINDOW, MAX_HORIZON,
-        MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
+        MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
     };
-    use crate::test_support::constant_u64;
+    use crate::test_support::{constant_f64, constant_u64};
 
     /// The fit server's three bounds are EQUAL to the contract, not merely similar.
     ///
@@ -285,14 +285,43 @@ mod tests {
         );
     }
 
-    /// The four cost bounds against the SAME contract, for the SAME reason.
+    /// The PER-REQUEST COST CEILINGS against the SAME contract, for the SAME reason.
     ///
-    /// `fit_max_points` bounds how many points arrive; these bound the work each one can
-    /// buy. They are the bounds a request can be inside all three headline limits and
-    /// still blow past — a span-based daily grid, and a holiday window that is a design
-    /// column multiplier — so they are contract-owned exactly like the headline three.
+    /// `fit_max_points` bounds how many points arrive; every bound in this table bounds the
+    /// WORK each one can buy. They are the bounds a request can be inside all three headline
+    /// limits and still blow past — a span-based daily grid, a holiday window that is a
+    /// design-column multiplier, and a future-span-over-history-span ratio that sizes the
+    /// logistic uncertainty simulation — so they are contract-owned exactly like the headline
+    /// three.
+    ///
+    /// IN-03: this doc used to state a COUNT of rows, which drifted the moment a row was
+    /// added, and the table used to carry `DEFAULT_POOL` — a router-pool size, which is a
+    /// deployment default and not a per-request cost ceiling at all. That assertion now lives
+    /// in [`pool_default_matches_contract`], so this table describes one kind of thing.
     #[test]
     fn cost_bounds_match_contract() {
+        // The REAL-valued ceilings. `constant_u64` cannot express a threshold that is
+        // conceptually a real number, and rounding one to fit would make the mirror assert
+        // something weaker than the constant it mirrors.
+        for (name, key, value) in [
+            (
+                "MAX_LOGISTIC_CHANGEPOINT_LAMBDA",
+                "fit_max_logistic_changepoint_lambda",
+                MAX_LOGISTIC_CHANGEPOINT_LAMBDA,
+            ),
+            (
+                "prophet::POISSON_NORMAL_BRANCH_LAMBDA",
+                "poisson_normal_branch_lambda",
+                crate::prophet::POISSON_NORMAL_BRANCH_LAMBDA,
+            ),
+        ] {
+            let from_contract = constant_f64("forecast-tool-boundary-v1", key);
+            assert!(
+                (value - from_contract).abs() < f64::EPSILON,
+                "types::{name} ({value}) must equal constants.{key} ({from_contract}) in \
+                 forecast-tool-boundary-v1"
+            );
+        }
         for (name, key, value) in [
             ("MAX_SPAN_DAYS", "fit_max_span_days", MAX_SPAN_DAYS as u64),
             (
@@ -320,7 +349,6 @@ mod tests {
                 "fit_max_holiday_dates_total",
                 MAX_HOLIDAY_DATES_TOTAL as u64,
             ),
-            ("DEFAULT_POOL", "pool_default", DEFAULT_POOL as u64),
         ] {
             assert_eq!(
                 value,
@@ -328,6 +356,22 @@ mod tests {
                 "types::{name} must equal constants.{key} in forecast-tool-boundary-v1"
             );
         }
+    }
+
+    /// The router-pool DEFAULT against the contract — deliberately its own test (IN-03).
+    ///
+    /// A router-pool size is a DEPLOYMENT default: it says how many independent pmcp routers
+    /// the streamable-HTTP server stands up, which is a throughput decision. It is not a
+    /// per-request cost ceiling, and riding along in [`cost_bounds_match_contract`]'s table
+    /// made that table's own doc comment wrong about what it contained. It lives in this
+    /// crate only because this crate owns the memoized contract reader.
+    #[test]
+    fn pool_default_matches_contract() {
+        assert_eq!(
+            DEFAULT_POOL as u64,
+            constant_u64("forecast-tool-boundary-v1", "pool_default"),
+            "types::DEFAULT_POOL must equal constants.pool_default in forecast-tool-boundary-v1"
+        );
     }
 
     /// The Chronos door's three bounds against the SAME contract.
@@ -351,6 +395,220 @@ mod tests {
             crate::chronos::CHRONOS_MAX_HORIZON as u64,
             constant_u64("forecast-tool-boundary-v1", "chronos_max_horizon"),
             "chronos::CHRONOS_MAX_HORIZON must equal constants.chronos_max_horizon in forecast-tool-boundary-v1"
+        );
+    }
+
+    // ------------------------------------------------- the door-surface class invariant ---
+    //
+    // Three rounds of gap closure each fixed exactly the ONE measured probe and the next
+    // adversarial pass found the next instance of the same class. `door_surface:` in
+    // forecast-tool-boundary-v1.yaml is the structural answer, and these three tests are what
+    // make it a CHECKED claim rather than a document that goes stale. An enumeration nobody
+    // verifies is the aspirational invariant this round exists to replace.
+
+    /// The `field` + `owner` pairs of every `door_surface.knobs` entry.
+    fn enumerated_knobs() -> std::collections::BTreeSet<(String, String)> {
+        let doc = crate::test_support::contract_value("forecast-tool-boundary-v1");
+        doc.get("door_surface")
+            .and_then(|d| d.get("knobs"))
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("forecast-tool-boundary-v1 must carry door_surface.knobs")
+            .iter()
+            .map(|k| {
+                let get = |key: &str| {
+                    k.get(key)
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_else(|| panic!("every door_surface.knobs entry needs {key}"))
+                        .to_string()
+                };
+                (get("owner"), get("field"))
+            })
+            .collect()
+    }
+
+    /// The `(owner, field)` pairs the ADVERTISED schema actually exposes.
+    fn schema_knobs() -> std::collections::BTreeSet<(String, String)> {
+        let mut out = std::collections::BTreeSet::new();
+        for (owner, schema) in [
+            (
+                "ForecastArgs",
+                serde_json::to_value(schemars::schema_for!(ForecastArgs)),
+            ),
+            (
+                "HolidayArg",
+                serde_json::to_value(schemars::schema_for!(super::HolidayArg)),
+            ),
+        ] {
+            let schema = schema.expect("schema serializes");
+            let props = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{owner} schema must publish properties"));
+            for field in props.keys() {
+                out.insert((owner.to_string(), field.clone()));
+            }
+        }
+        out
+    }
+
+    /// Every caller-settable field reachable through `forecast` is enumerated, and every
+    /// enumerated field still exists — BOTH directions.
+    ///
+    /// The field list is derived from `schemars::schema_for!`, the same generator that
+    /// produces the advertised MCP tool schema, so it CANNOT fall behind the struct the way a
+    /// hand-kept copy would. Set equality gives both directions structurally:
+    ///
+    /// - MISSING: a field added to `ForecastArgs` or `HolidayArg` with no `knobs` entry is a
+    ///   knob nothing has reasoned about — which is how CR-01's cost axis got in.
+    /// - PHANTOM: an entry for a field that no longer exists on either struct is how an
+    ///   enumeration silently stops describing the code while still looking complete.
+    ///
+    /// Both directions were OBSERVED RED by mutation before this test was trusted; see the
+    /// 06-14 SUMMARY for the recorded output.
+    #[test]
+    fn every_request_knob_is_enumerated() {
+        let enumerated = enumerated_knobs();
+        let actual = schema_knobs();
+        let missing: Vec<_> = actual.difference(&enumerated).collect();
+        let phantom: Vec<_> = enumerated.difference(&actual).collect();
+        assert!(
+            missing.is_empty() && phantom.is_empty(),
+            "door_surface.knobs must describe exactly the caller-settable surface.\n  \
+             MISSING from the contract (a field exists with no entry — nothing has reasoned \
+             about its cost or its enforcement): {missing:?}\n  \
+             PHANTOM in the contract (an entry names a field that exists on neither struct — \
+             the enumeration has stopped describing the code): {phantom:?}"
+        );
+    }
+
+    /// The `cost_axes` sequence, as `(axis, bound, measured_seconds)`.
+    fn enumerated_axes() -> Vec<(String, String, Option<f64>)> {
+        let doc = crate::test_support::contract_value("forecast-tool-boundary-v1");
+        doc.get("door_surface")
+            .and_then(|d| d.get("cost_axes"))
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("forecast-tool-boundary-v1 must carry door_surface.cost_axes")
+            .iter()
+            .map(|a| {
+                let get = |key: &str| {
+                    a.get(key)
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_else(|| panic!("every door_surface.cost_axes entry needs {key}"))
+                        .to_string()
+                };
+                (
+                    get("axis"),
+                    get("bound"),
+                    a.get("measured_seconds")
+                        .and_then(serde_yaml::Value::as_f64),
+                )
+            })
+            .collect()
+    }
+
+    /// The pending marker prefix. An axis carrying it is a KNOWN-OPEN axis, held open by
+    /// [`no_cost_axis_is_pending`] rather than by a note nobody runs.
+    const PENDING_MARKER_PREFIX: &str = "unbounded_pending_";
+
+    /// Every NON-pending cost axis names a bound that actually exists.
+    ///
+    /// An axis whose `bound:` names a `constants:` key that is not there is worse than an
+    /// unbounded axis: it LOOKS closed. The alternative disposition,
+    /// `measured_at_structural_maximum`, is accepted only with a `measured_seconds` strictly
+    /// under SC1's 2 s bar — a claim that an axis is safe at its maximum has to carry the
+    /// measurement that says so.
+    ///
+    /// Pending entries are OUT OF SCOPE here on purpose: this test is the one that catches a
+    /// phantom bound key, and it must stay GREEN so a real regression in that direction is
+    /// visible. The known-open axes are a separate, single-purpose test.
+    #[test]
+    fn every_cost_axis_names_a_real_bound() {
+        let doc = crate::test_support::contract_value("forecast-tool-boundary-v1");
+        let constants = doc
+            .get("constants")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("forecast-tool-boundary-v1 must carry constants");
+        for (axis, bound, measured) in enumerated_axes() {
+            if bound.starts_with(PENDING_MARKER_PREFIX) {
+                continue;
+            }
+            if bound == "measured_at_structural_maximum" {
+                let seconds = measured.unwrap_or_else(|| {
+                    panic!(
+                        "cost axis {axis} claims measured_at_structural_maximum but carries no \
+                         numeric measured_seconds — an unmeasured measurement is not a bound"
+                    )
+                });
+                assert!(
+                    seconds < 2.0,
+                    "cost axis {axis} is measured at {seconds} s at its structural maximum, \
+                     which is at or over SC1's 2 s bar — that is not a closed axis"
+                );
+                continue;
+            }
+            assert!(
+                constants.contains_key(serde_yaml::Value::String(bound.clone())),
+                "cost axis {axis} names bound {bound:?}, which is not a key in constants: — \
+                 the axis LOOKS closed and is not. Valid dispositions are a real constants \
+                 key, measured_at_structural_maximum with measured_seconds under 2.0, or the \
+                 {PENDING_MARKER_PREFIX}* marker"
+            );
+        }
+    }
+
+    /// **THIS TEST IS RED ON PURPOSE, FROM THE CLOSE OF PLAN 06-14 UNTIL 06-15 LANDS.**
+    ///
+    /// It is not `#[ignore]`d, not `#[should_panic]`, not commented out and not deleted. It
+    /// is a real failing assertion naming the two cost axes plan 06-14 enumerated and did NOT
+    /// close: **C-07** (`holidays[].name` byte amplification, owed by 06-15 T2) and **C-08**
+    /// (unbudgeted NeuralProphet training work, owed by 06-15 T3).
+    ///
+    /// # Why it ships red
+    ///
+    /// 06-14's whole thesis is that a guard which cannot fail is theater. A plan that argued
+    /// that while reducing its OWN two open items to a prose note would be making exactly the
+    /// mistake it exists to end. The alternative was to give C-07 a
+    /// `measured_at_structural_maximum` disposition, and C-07 has no structural maximum to
+    /// measure — `holidays[].name` is an unbounded `String` with no body-size or framing cap
+    /// on either transport, so any number written there would measure an arbitrarily chosen
+    /// length. A marker that says "open" is true; a measurement of an unbounded input is not.
+    ///
+    /// # What it turns red, and for how long
+    ///
+    /// `make tier3` (`cargo test --all`) and CI's `workspace-test` (`cargo nextest …
+    /// --workspace --lib`, which does NOT exclude `aprender-forecast`) both go red for the
+    /// window — and `workspace-test` is a REQUIRED status check on a protected `main`. The
+    /// mitigation is PUSH SEQUENCING: land waves 12 and 13 in ONE push, so the window never
+    /// reaches a CI runner while the LOCAL red still does its whole job.
+    ///
+    /// # The forbidden repair
+    ///
+    /// Deleting, weakening, `#[ignore]`-ing or CI-filtering this assertion restores precisely
+    /// the guard-that-cannot-fail contradiction it exists to remove. **The only legitimate
+    /// repair is 06-15 replacing both pending markers with real bounds.** Closing the window
+    /// sooner for an unrelated reason is a human decision to re-sequence the round, not a
+    /// licence to edit this test.
+    #[test]
+    fn no_cost_axis_is_pending() {
+        let pending: Vec<String> = enumerated_axes()
+            .into_iter()
+            .filter(|(_, bound, _)| bound.starts_with(PENDING_MARKER_PREFIX))
+            .map(|(axis, bound, _)| {
+                let owed = bound
+                    .strip_prefix(PENDING_MARKER_PREFIX)
+                    .unwrap_or(&bound)
+                    .replace('_', "-");
+                format!("{axis} (marker {bound}, owed by plan {owed})")
+            })
+            .collect();
+        assert!(
+            pending.is_empty(),
+            "{} cost axis/axes are still UNBOUNDED and are held open by this assertion: {}. \
+             This test is RED ON PURPOSE from the close of wave 12 (plan 06-14) until wave 13 \
+             (plan 06-15) replaces both pending markers with real bounds. Do NOT repair it by \
+             deleting, weakening, ignoring or CI-filtering it — that reintroduces the \
+             guard-that-cannot-fail class this round exists to end. Land 06-15.",
+            pending.len(),
+            pending.join("; ")
         );
     }
 
