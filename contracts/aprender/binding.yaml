@@ -1685,6 +1685,13 @@ bindings:
   status: implemented
   notes: 'The band edges are order statistics of the posterior-predictive draws; percentile is the estimator whose interpolation convention has to match Pythons.'
 - contract: prophet-parity-v1.yaml
+  equation: poisson_sampler_domain
+  module_path: aprender_forecast::prophet
+  function: poisson
+  signature: 'fn poisson(rng: &mut Rng, lambda: f64) -> usize'
+  status: implemented
+  notes: 'The sampler was EXTRACTED from predicts logistic uncertainty arm precisely so its domain could be asserted directly - before the extraction the only path to it was a full logistic forecast, which is why the 32-rung ladder never saw it saturate.'
+- contract: prophet-parity-v1.yaml
   equation: band_width_last30_rel
   module_path: aprender_forecast::prophet
   function: percentile

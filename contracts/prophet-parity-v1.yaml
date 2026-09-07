@@ -1,6 +1,6 @@
 contract: prophet-parity
 metadata:
-  version: 1.0.0
+  version: 1.1.0
   created: '2026-09-05'
   author: PAIML Engineering
   kind: kernel
@@ -175,6 +175,23 @@ equations:
       - 'measured 0.02%-0.4% on the spike-003 fixtures; the seed-to-seed variance of the Rust band alone is ~1.2%, which is why the bar is 2% and not tighter'
       - 'SC2 names all four datasets: all seven fixtures sit under this one bar'
 
+  poisson_sampler_domain:
+    formula: 'for every reachable lambda: |E[poisson(rng, lambda)] - lambda| <= float_tolerance * lambda, estimated as the mean of 20 000 draws at a fixed seed'
+    domain: >
+      the changepoint-count draw of the logistic uncertainty path — `prophet::poisson(&mut rng, lambda)`
+      with `lambda = changepoints_t.len() * (t_max - 1)`, called once per simulation row from `predict`s
+      `Growth::Logistic` arm. "Reachable" is what the forecast door admits, not what the parity ladder
+      happens to exercise.
+    codomain: 'a non-negative count whose mean and variance are both lambda'
+    float_tolerance: 0.01
+    invariants:
+      - 'THE NUMERICAL FACT: Knuths product method compares a running product of uniforms against `l = (-lambda).exp()`, and that is EXACTLY 0.0 for lambda > 745.13. Past that point the loop can only end when the product itself underflows through f64s subnormals — roughly 745 steps on average, since E[-ln U] = 1 and the smallest positive subnormal is near e^-744 — so the count SATURATES near 745 regardless of lambda. Measured pre-fix means at N = 20 000: 745.13 at lambda 900 and 745.45 at lambda 2839'
+      - 'REACHABILITY, IN BOUNDS — every factor inside every door bound: 100 consecutive daily points (span 99, n_changepoints 25) with `horizon: 3650, growth: "logistic"` gives t_max ~= 37.9 and lambda ~= 922; the 10-point `fit_min_points` floor with the same horizon gives lambda ~= 2839. This is not a theoretical regime'
+      - 'PARITY, NOT PREFERENCE: Python Prophet draws this count with `np.random.poisson`, which is correct at any lambda. A sampler that saturates is a divergence from the oracle this contract is written against, not a documented design difference'
+      - 'WHY THE LADDER WAS SILENT: `wp_log_R_logistic` is the ONLY logistic fixture, and its measured lambda is 3.1239 (25 changepoints x (t_max 1.124957 - 1)) — about a tenth of the 30.0 branch threshold — so all 32 parity rungs take the unchanged Knuth path. The ladders green here is a COVERAGE fact, recorded so it is not mistaken for evidence'
+      - 'THE BAR IS ON THE DISTRIBUTION, NEVER ON THE STREAM: the sampler draws from `prophet::Rng`, this crates own seeded xorshift, never MT19937, so a draw-for-draw match with numpy was never available and is not what is asserted. Mean and variance are what a band-width estimate depends on, and both are exactly lambda for `lambda + sqrt(lambda) * N(0, 1)`'
+      - 'THE TOLERANCE IS A REAL BAR, NOT A FUDGE: the largest sampling error in the sweep is at lambda = 5, where sqrt(5 / 20 000) / 5 = 0.316 %, so 1 % is ~3.2 sigma there and >= 46 sigma at every other point; at lambda = 900 the standard error is 0.024 % of lambda. The measured post-fix maximum is 0.214 % and the pre-fix failure at lambda 900 is 17.2 % — 17x the bar'
+
   band_width_last30_rel:
     formula: '|mean_width_rust(last 30 rows) - uncertainty.future_band_last30_mean_width| <= 0.02 * uncertainty.future_band_last30_mean_width'
     domain: 'the last 30 forecast rows of the four spike-003 fixtures, Rust fit parameters, 1000 draws at seed 42'
@@ -231,6 +248,11 @@ proof_obligations:
   - type: bound
     property: 'On every committed fixture, Python parameters through Rust predict reproduce Python yhat and trend to 1e-14 relative to y_scale'
     formal: 'forall fixture: max|yhat_rust(theta_py) - yhat_py| <= equations.predict_path_rel_yscale.float_tolerance * y_scale'
+    applies_to: all
+
+  - type: invariant
+    property: 'The changepoint-count sampler operates INSIDE its numerical domain for every lambda the forecast door can produce, not merely for the lambdas the parity ladder happens to reach'
+    formal: 'forall lambda in (0, s_max * (max_horizon_ratio - 1)]: |E[poisson(lambda)] - lambda| <= equations.poisson_sampler_domain.float_tolerance * lambda'
     applies_to: all
 
   - type: bound
@@ -346,6 +368,12 @@ falsification_tests:
     prediction: 'Every <fixture>_fit_objective_and_forecast test observes info.rounds <= constants.max_rounds (8), info.status in {Stalled, Converged}, and info.budget_hit == false.'
     test: 'cargo test -p aprender-forecast --lib prophet::parity::fit_objective_and_forecast'
     if_fails: 'Either the restart loop is spinning (rounds at the cap), the optimiser is reporting a failure status the recipe does not accept, or a fixture-sized fit is now crossing the 15 s cooperative budget — a performance regression that also invalidates the recorded ladder wall.'
+
+  - id: FALSIFY-PROPHET-013
+    rule: 'The changepoint-count sampler stays inside its numerical domain'
+    prediction: 'prophet::sampler::poisson_mean_tracks_lambda_across_its_whole_domain draws 20 000 samples at each of lambda = 5, 29, 31, 100, 900 and 2839 and reports |mean - lambda| / lambda <= equations.poisson_sampler_domain.float_tolerance (0.01) at every one. THE PRE-FIX IMPLEMENTATION FAILS THIS: with Knuths product method used at every lambda the measured means are 745.13 at lambda 900 (rel 0.172) and 745.45 at lambda 2839 (rel 0.737), while 5 / 29 / 31 / 100 track. `prophet::sampler::wp_log_r_logistic_fixture_lambda_is_far_below_the_branch_threshold` measures the only logistic fixtures lambda at 3.1239, which is why all 32 parity rungs pass either way.'
+    test: 'cargo test -p aprender-forecast --lib prophet::sampler'
+    if_fails: 'The logistic bands are again being computed by a sampler running outside its domain: the simulated changepoint count saturates near 745 instead of tracking lambda, the simulated trends spread less than the Poisson law asks for, and `yhat_lower` / `yhat_upper` come back NARROWER than the `interval_width` the response advertises — with nothing in `diagnostics` to say so. That is a silent change in the meaning of an output the caller is told to trust.'
 
 kani_harnesses:
 

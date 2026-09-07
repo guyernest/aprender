@@ -946,7 +946,7 @@ mod sampler {
     //! there for anything larger, which is a different claim from "it is wrong at 900".
     use super::{poisson, Rng, POISSON_NORMAL_BRANCH_LAMBDA};
     use crate::dates::parse_ymd;
-    use crate::test_support::load_json;
+    use crate::test_support::{equation_tolerance, load_json};
 
     /// Draws per lambda.
     ///
@@ -965,15 +965,11 @@ mod sampler {
     /// (100 daily points + horizon 3650 gives ~922; the 10-point floor gives ~2839).
     const LAMBDAS: [f64; 6] = [5.0, 29.0, 31.0, 100.0, 900.0, 2839.0];
 
-    /// TRANSIENT — read by Tasks 1 and 2 of plan 06-13 ONLY, because
-    /// `equations.poisson_sampler_domain.float_tolerance` does not exist in
-    /// `contracts/prophet-parity-v1.yaml` until Task 3. Task 3 DELETES this const in the same
-    /// edit that adds the key, and proves the swap by mutating the contract value (D-15).
-    const REL_TOLERANCE: f64 = 0.02;
-
     #[test]
     fn poisson_mean_tracks_lambda_across_its_whole_domain() {
-        let bar = REL_TOLERANCE;
+        // D-15: the bar lives in the contract, never in a literal here. A test that hardcodes a
+        // tolerance can be loosened without the contract ever noticing.
+        let bar = equation_tolerance("prophet-parity-v1", "poisson_sampler_domain");
         // Measure and PRINT all six first, then assert: a print-and-assert loop would abort at
         // the first out-of-domain lambda and hide the shape of the failure at the larger ones.
         let mut observed: Vec<(f64, f64, f64)> = Vec::with_capacity(LAMBDAS.len());
