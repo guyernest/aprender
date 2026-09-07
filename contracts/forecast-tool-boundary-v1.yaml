@@ -70,10 +70,18 @@ constants:
   # BUY. Every entry below closed a request whose payload was inside the three bounds
   # above and whose cost was not: a span-based daily grid, and holiday windows that are
   # a per-request design-column multiplier.
+  # The last two close the PRODUCT the four before them leave open: each of
+  # fit_max_points, fit_max_horizon, fit_max_holiday_columns and fit_max_holiday_dates
+  # is checked in isolation, so a request inside all four still bought
+  # (20000 + 3650) x 1000 = 23 650 000 design feature cells and 1 000 000 holiday dates.
+  # fit_max_holiday_design_cost bounds (points + horizon) x holiday_columns across
+  # make_design AND predict; fit_max_holiday_dates_total bounds sum(len(dates)).
   fit_max_span_days: 20000
   fit_max_holiday_window: 365
   fit_max_holiday_columns: 1000
   fit_max_holiday_dates: 1000
+  fit_max_holiday_design_cost: 50000
+  fit_max_holiday_dates_total: 10000
   # aprender-mcp-chronos (zero-shot: Chronos-Bolt T5, no fit)
   chronos_min_points: 4
   chronos_max_points: 20000

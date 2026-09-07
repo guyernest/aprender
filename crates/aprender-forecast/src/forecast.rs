@@ -20,7 +20,8 @@ use crate::prophet::{
 };
 use crate::types::{
     ForecastArgs, ForecastError, ForecastResponse, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
-    MAX_HOLIDAY_WINDOW, MAX_HORIZON, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
+    MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_WINDOW, MAX_HORIZON, MAX_POINTS,
+    MAX_SPAN_DAYS, MIN_POINTS,
 };
 
 /// Fit and forecast in ONE stateless call (D-01: no fit -> artifact -> forecast round-trip).
@@ -185,6 +186,7 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             // `prophet::columns` emits one design column per offset in the window, so an
             // unbounded window is an unbounded column count from a ~200-byte request.
             let mut holiday_columns = 0usize;
+            let mut holiday_dates_total = 0usize;
             for h in args.holidays.as_deref().unwrap_or(&[]) {
                 if h.lower_window > 0 || h.upper_window < 0 {
                     return Err(ForecastError::Validation(format!(
@@ -205,6 +207,9 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                         h.dates.len()
                     )));
                 }
+                // Each term is now <= MAX_HOLIDAY_DATES, and the running sum is refused
+                // below the moment the aggregate ceiling is passed.
+                holiday_dates_total += h.dates.len();
                 // Both windows are now within ±MAX_HOLIDAY_WINDOW, so the width is small
                 // enough that this sum cannot overflow before the ceiling refuses it.
                 holiday_columns += (h.upper_window - h.lower_window + 1) as usize;
@@ -227,6 +232,43 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     prior_scale: 10.0,
                 });
             }
+            // ---- the PRODUCT bounds, at THE door and BEFORE make_design ----
+            //
+            // Every per-holiday bound above has now fired with its own message, so
+            // `holiday_columns <= MAX_HOLIDAY_COLUMNS` and each `dates.len() <=
+            // MAX_HOLIDAY_DATES`. What was never checked is what they multiply to.
+            // `FIT_BUDGET_SECS` cannot cover it: it is a COOPERATIVE ROUND-BOUNDARY
+            // budget, so it is structurally blind to `make_design` (which runs below,
+            // before `fit_prophet` is entered) and it overshoots by a whole round inside
+            // the fit — a 20 000-point, 1 000-column request measured 70.089 s against a
+            // 15 s budget. The refusal has to be HERE.
+            if holiday_dates_total > MAX_HOLIDAY_DATES_TOTAL {
+                return Err(ForecastError::Validation(format!(
+                    "holidays carry {holiday_dates_total} dates in total, which exceeds \
+                     max_holiday_dates_total {MAX_HOLIDAY_DATES_TOTAL}; send fewer holidays \
+                     or fewer dates per holiday"
+                )));
+            }
+            // `ds.len() <= MAX_POINTS` (20 000), `args.horizon <= MAX_HORIZON` (3 650) and
+            // `holiday_columns <= MAX_HOLIDAY_COLUMNS` (1 000) are all already refused
+            // above, so this product is at most 23 650 000 — six orders of magnitude below
+            // `usize::MAX` on every supported target. A plain multiply therefore cannot
+            // overflow here, and `saturating_mul` would only obscure that the factors are
+            // bounded rather than add safety.
+            let design_cells = (ds.len() + args.horizon) * holiday_columns;
+            if design_cells > MAX_HOLIDAY_DESIGN_COST {
+                return Err(ForecastError::Validation(format!(
+                    "holidays expand to {design_cells} design feature cells \
+                     ((points + horizon) x holiday_columns = ({} + {}) x {holiday_columns}), \
+                     which exceeds max_holiday_design_cost {MAX_HOLIDAY_DESIGN_COST}; reduce \
+                     the holiday windows, the number of holidays, the history length or the \
+                     horizon",
+                    ds.len(),
+                    args.horizon
+                )));
+            }
+            // With no holidays `holiday_columns` and `holiday_dates_total` are both 0, so
+            // neither refusal above can fire and the no-holiday SC1 path is untouched.
             let mut spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, mode));
             spec.growth = growth;
             spec.cap = checked_cap;
@@ -596,6 +638,67 @@ mod tests {
             upper_window: 0,
         }]);
         refusal(&args, "365");
+    }
+
+    /// A prophet request carrying `n_holidays` holidays, each `width` design columns wide
+    /// and each carrying `dates` occurrences. Every knob here is INSIDE its own bound; the
+    /// tests below vary only which PRODUCT goes over.
+    fn holiday_args(
+        points: usize,
+        horizon: usize,
+        n_holidays: usize,
+        width: i64,
+        dates: usize,
+    ) -> ForecastArgs {
+        let (ds, y) = synthetic_daily(points);
+        let mut args = np_args(points, horizon);
+        args.model = None;
+        args.ds = ds;
+        args.y = y;
+        let t0 = days_from_civil(2020, 1, 1);
+        let lower = -((width - 1) / 2);
+        args.holidays = Some(
+            (0..n_holidays)
+                .map(|h| crate::types::HolidayArg {
+                    name: format!("h{h}"),
+                    dates: (0..dates).map(|k| format_ymd(t0 + k as i64)).collect(),
+                    lower_window: lower,
+                    upper_window: width - 1 + lower,
+                })
+                .collect(),
+        );
+        args
+    }
+
+    /// MAX_POINTS, MAX_HORIZON, MAX_HOLIDAY_COLUMNS and MAX_HOLIDAY_DATES are each checked
+    /// in ISOLATION; their product was not. 200 points, a 100-step horizon and one
+    /// 400-column holiday are all comfortably legal and together buy 120 000 design
+    /// feature cells — and every fit iteration is `O(rows * K)` over exactly that matrix.
+    #[test]
+    fn an_in_bounds_holiday_spec_whose_product_is_not_is_refused() {
+        let args = holiday_args(200, 100, 1, 400, 5);
+        refusal(&args, "max_holiday_design_cost");
+    }
+
+    /// The NEAR MISS. Exactly at the bound — (50 + 50) x 500 = 50 000 — which the door
+    /// must ACCEPT, because a bound proven only to refuse is not proven to refuse just
+    /// what it claims.
+    #[test]
+    fn a_holiday_spec_just_under_the_design_cost_bound_is_accepted() {
+        let args = holiday_args(50, 50, 1, 500, 5);
+        let r = forecast(&args).expect("a request exactly at the bound must fit, not refuse");
+        assert_eq!(r.yhat.len(), 50, "one row per horizon step");
+        assert_eq!(r.yhat_lower.len(), 50);
+        assert_eq!(r.yhat_upper.len(), 50);
+    }
+
+    /// MAX_HOLIDAY_DATES bounds ONE holiday's list; nothing bounded the SUM. Eleven
+    /// holidays at the per-holiday ceiling are 11 000 dates from one request — and only
+    /// 11 design columns, so the design-cost bound cannot see them.
+    #[test]
+    fn holidays_carrying_more_dates_than_the_total_bound_are_refused() {
+        let args = holiday_args(60, 7, 11, 1, 1_000);
+        refusal(&args, "max_holiday_dates_total");
     }
 
     /// A well-formed option aimed at the wrong arm was silently DROPPED: the caller got a

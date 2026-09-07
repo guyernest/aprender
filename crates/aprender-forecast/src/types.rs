@@ -44,9 +44,57 @@ pub const MAX_HOLIDAY_COLUMNS: usize = 1_000;
 
 /// Hard upper bound on the number of dates one holiday may carry.
 ///
-/// `prophet::feature_row` scans this list per row per holiday column, so it is a second
-/// multiplier on the design build.
+/// `prophet::feature_row` used to SCAN this list per row per holiday column, which made it
+/// a second multiplier on the design build. Since 06-11 membership is a prebuilt
+/// `HashSet` lookup (`prophet::holiday_day_sets`), so the list is an additive
+/// set-construction cost rather than a multiplier — but it is still per-holiday only, and
+/// [`MAX_HOLIDAY_DATES_TOTAL`] is what bounds the aggregate.
 pub const MAX_HOLIDAY_DATES: usize = 1_000;
+
+/// Hard upper bound on `(points + horizon) * holiday_columns` — the design feature cells
+/// ONE request buys across `prophet::make_design` (points rows) AND `prophet::predict`
+/// (horizon rows).
+///
+/// **Why the existing bounds did not cover this.** [`MAX_POINTS`], [`MAX_HORIZON`] and
+/// [`MAX_HOLIDAY_COLUMNS`] are each checked in ISOLATION and their product is not, so a
+/// request inside all three bought `(20_000 + 3_650) * 1_000` = 23 650 000 feature cells —
+/// and every fit iteration is `O(rows * K)` over exactly that matrix.
+/// `fit::FIT_BUDGET_SECS` cannot substitute: it is a COOPERATIVE ROUND-BOUNDARY budget, so
+/// it is blind to `make_design` (which runs before `fit_prophet` is entered) and it
+/// overshoots by a whole round inside the fit. That overshoot is measured, not argued — a
+/// 20 000-point, 1 000-column request walled at **70.089 s** against a 15 s budget.
+///
+/// **The measured number that motivated the value.** A 3 000-point daily series with 181
+/// holiday columns and 84 dates — inside every bound above — walled at **16.081 s**
+/// against SC1's 2 s bar (`just forecast-holiday-bench 3000 181 84 365`, release,
+/// aarch64). The same series with no holidays walls at 0.212 s.
+///
+/// **50 000 is the largest round value whose at-the-bound walls all clear 2 s** on that
+/// host, measured at three compositions of the SAME product: many rows / few columns
+/// (9 500 x 5) 1.174 s, balanced (800 x 50) 1.692 s, few rows / many columns (50 x 500)
+/// 0.106 s. At 100 000 two of the three compositions exceed the bar (2.771 s, 2.305 s).
+///
+/// **This bounds WORK, not WALL, and the distinction is measured.** The fit's iteration
+/// count is data-dependent and no payload statistic predicts it: a 4 700-point, 5-column
+/// request is only 25 000 cells — half this bound — and still walls at 4.2 s, reproducibly.
+/// What this constant guarantees is the arithmetic ceiling per iteration, which is what
+/// turns the ~85-minute in-bounds request the verifier extrapolated into a refusal.
+pub const MAX_HOLIDAY_DESIGN_COST: usize = 50_000;
+
+/// Hard upper bound on `sum(len(dates))` across ALL holidays in one request.
+///
+/// **Why the existing bounds did not cover this.** [`MAX_HOLIDAY_DATES`] bounds ONE
+/// holiday's list; nothing bounded the sum, so 1 000 holidays each carrying 1 000 dates
+/// put 1 000 000 dates through `parse_date` and into the membership sets from a single
+/// request. This is the third factor of the product [`MAX_HOLIDAY_DESIGN_COST`] closes
+/// the first two of.
+///
+/// **The derivation.** The largest total any committed fixture, example or test sends is
+/// **17** — Prophet 1.4.0's own canonical `peyton_holidays` frame (14 `playoff` + 3
+/// `superbowl`). 10 000 is 588x that, and building the two membership sets for 10 000
+/// dates measures **0.115 ms**, three orders of magnitude under the 50 ms this bound was
+/// derived against (the structural maximum of 1 000 000 measures 18.049 ms).
+pub const MAX_HOLIDAY_DATES_TOTAL: usize = 10_000;
 
 /// Default router-pool size for the streamable-HTTP server (`constants.pool_default`).
 ///
@@ -148,7 +196,8 @@ impl std::error::Error for ForecastError {}
 mod tests {
     use super::{
         ForecastArgs, ForecastError, DEFAULT_POOL, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
-        MAX_HOLIDAY_WINDOW, MAX_HORIZON, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
+        MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_WINDOW, MAX_HORIZON,
+        MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
     };
     use crate::test_support::constant_u64;
 
@@ -200,6 +249,16 @@ mod tests {
                 "MAX_HOLIDAY_DATES",
                 "fit_max_holiday_dates",
                 MAX_HOLIDAY_DATES as u64,
+            ),
+            (
+                "MAX_HOLIDAY_DESIGN_COST",
+                "fit_max_holiday_design_cost",
+                MAX_HOLIDAY_DESIGN_COST as u64,
+            ),
+            (
+                "MAX_HOLIDAY_DATES_TOTAL",
+                "fit_max_holiday_dates_total",
+                MAX_HOLIDAY_DATES_TOTAL as u64,
             ),
             ("DEFAULT_POOL", "pool_default", DEFAULT_POOL as u64),
         ] {
