@@ -48,6 +48,15 @@ pub const MAX_HOLIDAY_COLUMNS: usize = 1_000;
 /// multiplier on the design build.
 pub const MAX_HOLIDAY_DATES: usize = 1_000;
 
+/// Default router-pool size for the streamable-HTTP server (`constants.pool_default`).
+///
+/// Lives here, beside the other contract-mirrored bounds, because this is the crate that
+/// owns the memoized contract reader — so the value is ASSERTED equal to the YAML by
+/// `cost_bounds_match_contract` below. It previously sat in `aprender-mcp-forecast` as two
+/// separate literal `8`s whose only "mirrors the contract" evidence was a doc comment and
+/// a test that compared the constant to ITSELF.
+pub const DEFAULT_POOL: usize = 8;
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HolidayArg {
@@ -63,7 +72,7 @@ pub struct HolidayArg {
     pub upper_window: i64,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ForecastArgs {
     /// Timestamps, YYYY-MM-DD (a time part is ignored), ascending, unique.
@@ -138,8 +147,8 @@ impl std::error::Error for ForecastError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        ForecastArgs, ForecastError, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES, MAX_HOLIDAY_WINDOW,
-        MAX_HORIZON, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
+        ForecastArgs, ForecastError, DEFAULT_POOL, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
+        MAX_HOLIDAY_WINDOW, MAX_HORIZON, MAX_POINTS, MAX_SPAN_DAYS, MIN_POINTS,
     };
     use crate::test_support::constant_u64;
 
@@ -192,6 +201,7 @@ mod tests {
                 "fit_max_holiday_dates",
                 MAX_HOLIDAY_DATES as u64,
             ),
+            ("DEFAULT_POOL", "pool_default", DEFAULT_POOL as u64),
         ] {
             assert_eq!(
                 value,

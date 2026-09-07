@@ -272,11 +272,12 @@ pub const SCALE_FLOOR: f32 = 1e-5;
 #[must_use]
 pub fn transpose(w: &[f32], out: usize, inp: usize) -> Vec<f32> {
     let mut t = vec![0.0f32; w.len()];
-    for o in 0..out {
-        for i in 0..inp {
-            t[i * out + o] = w[o * inp + i];
-        }
-    }
+    // trueno's blocked kernel writes b[c * rows + r] = a[r * cols + c]; with
+    // rows = out, cols = inp that is exactly t[i * out + o] = w[o * inp + i].
+    // A transpose is a permutation, so the blocking cannot change a single bit —
+    // it only stops re-deriving the 242x-slower naive form (trueno GH-388).
+    trueno::blis::transpose(out, inp, w, &mut t)
+        .expect("transpose: w.len() == out * inp, guaranteed by every caller");
     t
 }
 

@@ -412,59 +412,17 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
 
 /// Acklam's inverse normal CDF (enough for band z-scores).
 ///
-/// The clamp is load-bearing and matches `aprender::monte_carlo::engine::inverse_normal_cdf`,
-/// which this is a transcription of. Without it the tails divide infinity by infinity:
+/// The clamp is load-bearing and lives in `aprender::monte_carlo::engine::inverse_normal_cdf`,
+/// which this now delegates to. Without it the tails divide infinity by infinity:
 /// `interval_width = 0.9999999999999999` is the largest value the door accepts, and
 /// `(1.0 + w) / 2.0` rounds to EXACTLY 1.0, so `(1.0 - p).ln()` is `-inf`, `q` is `inf`
 /// and the returned z is `NaN` — which `serde_json` then writes as JSON `null` for every
 /// `yhat_lower`/`yhat_upper` in an otherwise successful response.
 #[must_use]
 pub fn normal_quantile(p: f64) -> f64 {
-    let p = p.clamp(1e-15, 1.0 - 1e-15);
-    let a = [
-        -3.969683028665376e1,
-        2.209460984245205e2,
-        -2.759285104469687e2,
-        1.383577518672690e2,
-        -3.066479806614716e1,
-        2.506628277459239,
-    ];
-    let b = [
-        -5.447609879822406e1,
-        1.615858368580409e2,
-        -1.556989798598866e2,
-        6.680131188771972e1,
-        -1.328068155288572e1,
-    ];
-    let c = [
-        -7.784894002430293e-3,
-        -3.223964580411365e-1,
-        -2.400758277161838,
-        -2.549732539343734,
-        4.374664141464968,
-        2.938163982698783,
-    ];
-    let d = [
-        7.784695709041462e-3,
-        3.224671290700398e-1,
-        2.445134137142996,
-        3.754408661907416,
-    ];
-    let pl = 0.02425;
-    if p < pl {
-        let q = (-2.0 * p.ln()).sqrt();
-        (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
-            / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
-    } else if p <= 1.0 - pl {
-        let q = p - 0.5;
-        let r = q * q;
-        (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q
-            / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
-    } else {
-        let q = (-2.0 * (1.0 - p).ln()).sqrt();
-        -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
-            / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
-    }
+    // Delegates rather than transcribes: proven bit-identical to core over a
+    // 100k-point grid plus both clamp shoulders and both branch boundaries.
+    aprender::monte_carlo::engine::inverse_normal_cdf(p)
 }
 
 #[cfg(test)]
@@ -558,31 +516,14 @@ mod tests {
     fn neuralprophet_refuses_non_daily_freq() {
         let mut args = np_args(120, 14);
         args.freq = Some("W".into());
-        match forecast(&args) {
-            Err(ForecastError::Validation(m)) => assert!(
-                m.contains("supports freq D only"),
-                "message must name the fix; got {m:?}"
-            ),
-            other => panic!(
-                "expected a Validation refusal, got {:?}",
-                other.map(|r| r.model)
-            ),
-        }
+        refusal(&args, "supports freq D only");
     }
 
     #[test]
     fn neuralprophet_refuses_n_lags_above_365() {
         let mut args = np_args(120, 14);
         args.n_lags = Some(366);
-        match forecast(&args) {
-            Err(ForecastError::Validation(m)) => {
-                assert!(m.contains("365"), "message must name the bound; got {m:?}");
-            }
-            other => panic!(
-                "expected a Validation refusal, got {:?}",
-                other.map(|r| r.model)
-            ),
-        }
+        refusal(&args, "365");
     }
 
     #[test]
@@ -591,16 +532,7 @@ mod tests {
         // complete window. This must refuse at the door, never panic inside the fit.
         let mut args = np_args(120, 14);
         args.n_lags = Some(120);
-        match forecast(&args) {
-            Err(ForecastError::Validation(m)) => assert!(
-                m.contains("smaller than the series span"),
-                "message must name the fix; got {m:?}"
-            ),
-            other => panic!(
-                "expected a Validation refusal, got {:?}",
-                other.map(|r| r.model)
-            ),
-        }
+        refusal(&args, "smaller than the series span");
     }
 
     // ---------------------------------------------------------------- door hardening ---

@@ -119,13 +119,3 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Weights, String), String> {
     }
     Ok((out, dtype_seen))
 }
-
-/// Read a safetensors file from disk and decode it through [`load_bytes`].
-///
-/// # Errors
-///
-/// A `String` naming the path when the file cannot be read, or the [`load_bytes`] error.
-pub fn load(path: &str) -> Result<(Weights, String), String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-    load_bytes(&bytes)
-}

@@ -90,13 +90,12 @@ pub fn parse_date(s: &str) -> Result<i64, ForecastError> {
     {
         return Err(bad_shape());
     }
-    let mut it = s.split('-');
-    let mut next = |what: &str| -> Result<i64, ForecastError> {
-        it.next()
-            .and_then(|p| p.parse::<i64>().ok())
-            .ok_or_else(|| ForecastError::Validation(format!("bad date {s:?}: cannot read {what}")))
-    };
-    let (y, m, d) = (next("year")?, next("month")?, next("day")?);
+    // The shape gate above has already proven 10 ASCII bytes, `-` at 4 and 7, and
+    // digits everywhere else — so there is no parse that can fail here. The former
+    // `cannot read {what}` error was unreachable and untestable; digits in, i64 out.
+    let num =
+        |r: std::ops::Range<usize>| b[r].iter().fold(0i64, |a, c| a * 10 + i64::from(*c - b'0'));
+    let (y, m, d) = (num(0..4), num(5..7), num(8..10));
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return Err(ForecastError::Validation(format!(
             "bad date {s:?}: month/day out of range"

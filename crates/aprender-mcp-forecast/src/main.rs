@@ -26,10 +26,12 @@ use aprender_forecast::ForecastArgs;
 const SERVER_NAME: &str = "aprender-forecast";
 /// Default `--http` port.
 const DEFAULT_PORT: u16 = 8765;
-/// Default router-pool size, mirrored from `constants.pool_default` in
-/// `contracts/forecast-tool-boundary-v1.yaml`. Size it to the blocking-thread budget:
-/// K is the number of fits that can be in flight at once, and each one is seconds of CPU.
-const DEFAULT_POOL: usize = 8;
+/// Default router-pool size. Re-exported from the library, where it is ASSERTED equal to
+/// `constants.pool_default` by `types::tests::cost_bounds_match_contract` — this crate has
+/// no contract reader, so a literal here could only ever CLAIM to mirror the YAML.
+/// Size it to the blocking-thread budget: K is the number of fits that can be in flight at
+/// once, and each one is seconds of CPU.
+use aprender_forecast::types::DEFAULT_POOL;
 /// Ceiling on `--pool`. Each router is a whole `pmcp::Server` plus a spawned outbound-drain
 /// task, and the useful range is the blocking-thread budget (tokio's default is 512), so
 /// anything past this is a resource mistake rather than a configuration.

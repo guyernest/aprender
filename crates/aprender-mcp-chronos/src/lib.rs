@@ -180,7 +180,6 @@ pub fn http_app(server: Server) -> axum::Router {
 /// vars on purpose: embedding f16 weights into the binary does not arm the parity suite,
 /// because the oracle comparison needs the f32 weights DIRECTORY.
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)]
 mod e2e {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;

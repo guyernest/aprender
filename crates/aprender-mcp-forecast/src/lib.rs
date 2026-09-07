@@ -983,9 +983,9 @@ mod pool_equality {
     use super::e2e::{client_for, csv, tool_output};
     use super::pooled_app;
 
-    /// The default pool size, mirrored from `constants.pool_default` in
-    /// `contracts/forecast-tool-boundary-v1.yaml`.
-    const POOL: usize = 8;
+    /// The default pool size, ASSERTED equal to `constants.pool_default` by
+    /// `aprender_forecast::types::tests::cost_bounds_match_contract`.
+    use aprender_forecast::types::DEFAULT_POOL as POOL;
 
     /// The fields whose bits must not depend on what else the server was doing.
     fn signature(out: &serde_json::Value) -> String {
