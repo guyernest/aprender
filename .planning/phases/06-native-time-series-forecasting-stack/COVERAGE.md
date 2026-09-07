@@ -1,6 +1,8 @@
 # API Coverage — Phase 6
 
-No external API integration: Phase 6 ports Prophet 1.4.0, NeuralProphet 0.9.0 and Chronos-Bolt natively into pure Rust in `crates/aprender-forecast` and serves them through this project's own thin pmcp servers, so there is no third-party API, SDK or hosted service whose surface could be partially covered.
+No external API integration: Phase 6 ports Prophet, NeuralProphet and Chronos-Bolt natively into pure Rust and serves them through this project's own thin pmcp servers.
+
+The ports live in `crates/aprender-forecast` (Prophet 1.4.0, NeuralProphet 0.9.0, Chronos-Bolt). There is no third-party API, SDK or hosted service whose surface could be partially covered.
 
 The `api_coverage_gate` detector fired on a single signal: the noun `api` inside a source comment in an existing Phase 6 plan (`<!-- Core API the np.rs port calls ... -->`). That comment names an INTERNAL Rust API — the `aprender` autograd and tensor surface the `np.rs` port calls — not an external one, so the signal was a false positive rather than an uncovered integration.
 
