@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Native Time-Series Forecasting Stack
 status: executing
-stopped_at: Completed 06-10-PLAN.md
-last_updated: "2026-09-07T02:44:07.959Z"
+stopped_at: Completed 06-11-PLAN.md
+last_updated: "2026-09-07T03:32:01.633Z"
 last_activity: 2026-09-06
 last_activity_desc: 06-08 complete — SC1/SC4/SC5 measured on aarch64; CI decision measure-x86-first
-state_head: 13a28be7907fa175e31ab2d75bdea8612559abed
+state_head: aa68e0a16739a1fda56626d77b74b75cb016bbb5
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 77
-  completed_plans: 71
+  completed_plans: 72
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
-Plan: 2 of 13
+Plan: 3 of 13
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -198,6 +198,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P08 | 32 min | 3 tasks | 5 files |
 | Phase 06 P09 | 25 min | 3 tasks | 20 files |
 | Phase 06 P10 | 23 min | 3 tasks | 5 files |
+| Phase 06 P11 | 1h 21m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -270,6 +271,8 @@ Recent decisions affecting current work:
 - [Phase 06]: Applied the pv-suggested MINOR bump (forecast-tool-boundary 1.0.0 -> 1.1.0) rather than hand-choosing MAJOR; recorded that pv diff sees only structural additions and cannot see the door narrowing its accepted-input surface
 - [Phase 06]: Asserted four cap-off-logistic refusal shapes plus a positive control, not the two the verifier named — one failing input is an anecdote (CLAUDE.md rule 6)
 - [Phase 06]: Every GSD verification command in this repo must run through 'rtk proxy': the rtk hook replaces libtest's 'test result:' line with a summary, which makes plan <verify> greps fail vacuously
+- [Phase 06]: 06-11: the 16.113 s in-bounds forecast wall is attributed to the FIT (99.8 percent), not to prophet::feature_row — the design build is 13 ms of it — Measured with an ignored release-profile harness splitting total wall by the response own fit_seconds/predict_seconds at five configurations plus a no-holiday control. The verifier attributed it from a code reading; removing the linear scan entirely moved the wall not at all.
+- [Phase 06]: 06-11: MAX_HOLIDAY_DESIGN_COST=50000 bounds (points+horizon) x holiday_columns at the door — it caps WORK, not WALL — Largest round value whose three at-the-bound compositions all clear 2 s (1.174 / 1.692 / 0.106 s); 100000 fails two of three. A 25000-cell request still walls at 4.2 s reproducibly because the L-BFGS iteration count is data-dependent, so no payload statistic can guarantee a wall. SC1 for holiday-carrying requests stays open.
 
 ### Pending Todos
 
@@ -368,6 +371,6 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-07T02:43:56.208Z
-Stopped at: Completed 06-10-PLAN.md
+Last session: 2026-09-07T03:31:40.498Z
+Stopped at: Completed 06-11-PLAN.md
 Resume file: None
