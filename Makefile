@@ -485,7 +485,60 @@ tier3:
 			echo "Skipping probar golden regression: no apr built from HEAD (scripts/apr_bin.sh)"; \
 		fi; \
 	fi
+# ─── Phase 6 (UAT item 5, decided 2026-09-07). D-26's lesson, one milestone later ──
+#
+# `just forecast-sc1-sweep` is the SC1 gate — 19 compositions of freq x growth x
+# holiday shape on a release build, each asserted under 2.0 s. Until this line it ran
+# in NO tier and NO CI job: `grep -rn forecast-sc1-sweep .github/ Makefile scripts/`
+# returned nothing. That is the D-26 shape exactly — a gate outside the tiers is a
+# gate that stops being run — and it matters more here than usual, because the sweep
+# is the ONLY detector for a new cost axis entering through prophet.rs/np.rs that no
+# `ForecastArgs` field names. Both `door_surface` completeness tests are blind to that
+# path: the knobs half derives from `schemars::schema_for!` and so sees only struct
+# fields, and the cost_axes half reads a hand-kept YAML list (06-REVIEW.md WR-03).
+#
+# RUN STANDALONE FIRST, status captured directly off the command and never through a
+# pipe (CLAUDE.md rule 1): `just forecast-sc1-sweep > log 2>&1; rc=$$?` -> rc=0,
+# 25 s wall warm, 19 `SC1 WALL:` lines. 25 s is comfortably inside tier3's 1-5 minute
+# budget. Re-run green through THIS target (`make forecast-sc1-gate`): rc=0.
+#
+# FAILURE INDUCED, OBSERVED AND REVERTED rather than assumed. The bar was temporarily
+# lowered 2.0 -> 1.0 in the recipe; `make forecast-sc1-gate` exited 2 with
+#   FAIL "SC1 model=neuralprophet freq=D ... n_lags=41": 1.579 is at or above the 1.0 bar
+# and — the half that makes it an observation rather than a crash — every prophet
+# composition (0.156 s .. 0.843 s) still PASSED under the lowered bar, so the gate fired
+# on the one composition over the bar and on nothing else. Bar restored, gate re-run green.
+#
+# THE MARGIN IS THINNER THAN IT LOOKS, recorded here because a reader of this line is who
+# needs it. The worst composition measured 1.420 s on one run and 1.579 s on the next —
+# the SAME composition, an 11.2 % run-to-run spread, leaving 21-29 % headroom under the
+# 2.0 s bar. This is the neuralprophet row (n_lags=41, cells=14 810 040). If tier3 ever
+# goes flaky here, that row is why, and the fix is a quieter machine or a narrower default
+# geometry — NOT a raised bar, which is the SC1 literal.
+#
+# WHY THE GEOMETRY COULD NOT BE USED TO INDUCE IT, which is itself a finding: the
+# default NP composition already prices at cells=14 810 040, i.e. 98.7% of
+# `MAX_NP_TRAIN_COST` (15 000 000). Raising points or lags to make it slow trips
+# CR-01's door refusal instead of a slow wall — independent confirmation that the
+# bound is too tight, and the reason Phase 7 exists.
+#
+# NOT WIRED INTO CI. UAT item 3 decided that Phase 6's release-profile gates stay
+# MANUAL; this is the tier3 half, which needs no workflow edit and no approval.
+	@$(MAKE) forecast-sc1-gate
 	@echo "Tier 3: PASSED"
+
+forecast-sc1-gate: ## SC1 sweep (19 compositions, release, 2 s bar) - the tier3 half of UAT item 5
+# Requires `just`. FAILS LOUDLY when it is absent rather than skipping: a gate that
+# silently no-ops when a tool is missing is the theater this phase spent three rounds
+# removing. The Makefile invokes `just` nowhere else, so the dependency is stated here.
+	@command -v just >/dev/null 2>&1 || { \
+		echo "FAIL: forecast-sc1-gate needs \`just\` and it is not on PATH."; \
+		echo "      Install with: cargo install just"; \
+		echo "      This gate is NOT skippable - it is the only detector for a cost axis"; \
+		echo "      added inside prophet.rs/np.rs that no ForecastArgs field names."; \
+		exit 1; \
+	}
+	@just forecast-sc1-sweep
 
 # D-06: the setfit feature must be dependency-CLOSED and must not leak into a
 # minimal build. Wired into tier3 above.
