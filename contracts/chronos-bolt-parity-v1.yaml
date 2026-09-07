@@ -1,6 +1,6 @@
 contract: chronos-bolt-parity
 metadata:
-  version: 1.0.0
+  version: 2.0.0
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
@@ -98,12 +98,15 @@ equations:
       - 'on any non-aarch64 target the tests select `quantiles_abs_f32_nonaarch64` instead — this equation is never silently applied to a machine it was not measured on'
 
   quantiles_abs_f32_nonaarch64:
-    formula: 'max_{q,t} |quantiles_rust[q][t] - quantiles_py[q][t]| <= 5.0e-6 on the Peyton Manning 64-step direct forecast, on any target_arch other than aarch64'
+    formula: 'max_{q,t} |quantiles_rust[q][t] - quantiles_py[q][t]| <= 2.0e-6 on the Peyton Manning 64-step direct forecast, on any target_arch other than aarch64'
     domain: 'the same Peyton Manning forward, on a target where `trueno::blis::gemm_blis` does NOT dispatch the spike-008 NEON microkernel (x86_64 scalar/AVX2 paths in particular)'
     codomain: 'the same chronos-forecasting 2.3.1 fixture quantiles'
-    float_tolerance: 5.0e-6
+    float_tolerance: 2.0e-6
     invariants:
-      - 'PROVISIONAL AND UNMEASURED. This value is HEADROOM for a different GEMM accumulation order on x86_64, where `gemm_blis` does not dispatch the spike-008 NEON microkernel. IT IS NOT EVIDENCE OF ANYTHING. No x86_64 run has been observed; 5.0e-6 is 5x the aarch64 bar chosen so a first CI run reports a NUMBER rather than a failure of unknown size'
+      - 'MEASURED 2026-09-07 on x86_64 (AWS EC2, Amazon Linux 2023, rustc 1.93.0), discharging the first-x86_64-run obligation below. `peyton_ladder_matches_oracle_f32` printed `quantiles_abs_f32_nonaarch64 = 5e-6 (ARCH=x86_64)` and `max|delta| 9.5367e-7`, so the arch branch is PROVEN to have engaged rather than assumed (CLAUDE.md rule 2). The bar is tightened 5.0e-6 -> 2.0e-6, which is 2.1x the measurement'
+      - 'THE PREMISE FOR 5.0e-6 WAS FALSIFIED, and that is why this tightening is well-founded rather than a lucky sample. The headroom existed for a DIFFERENT GEMM ACCUMULATION ORDER on x86_64, where gemm_blis does not dispatch the spike-008 NEON microkernel. The x86_64 delta is not larger — it is IDENTICAL to the aarch64 value spike 005 measured WITH that microkernel live (9.54e-7), and identical again to spike 007 through the server. 9.5367431640625e-7 is exactly 2^-20: a QUANTIZATION QUANTUM of the f32 output representation, not accumulated arithmetic error. A quantum does not vary with accumulation order, which is why the two architectures agree exactly'
+      - 'WHY 2.0e-6 AND NOT 1.0e-6 (the aarch64 bar, which the measurement also clears at 95.4%): one run on one instance type is one sample. Narrowing to the measured value would repeat the CR-01 error in this milestone — a bound fitted from one side whose ACCEPTED region was never explored. 2.0e-6 removes the 5.24x unstated slack the previous invariant warned about while leaving room for AVX2-vs-AVX-512 codegen differences no run has yet covered. It also declines to assert that x86_64 is better-validated than aarch64 on a single observation'
+      - 'NOT THE TIGHTEST THING IN THIS LADDER. The same x86_64 run put `probe five_points` at 3.815e-6 against its 4.0258e-6 bar — 94.8% — and `probe tiny_len_130_rollout` at 80.6%. The peyton quantile bar this equation governs ran at 19.1% of 5.0e-6. If an x86_64 microarchitecture ever moves these numbers, five_points fails first and this equation fails last'
       - 'every CI job in this repository is `[self-hosted, X64, Linux, clean-room]` (.github/workflows/ci.yml:96, 516, 988, 1039), so this is the bar CI will actually select once the ladder is armed there'
       - 'the aarch64 bar `quantiles_abs_f32` is NOT loosened by this equation existing. SC4 names 1e-6 and 1e-6 is what aarch64 asserts'
       - 'OBLIGATION ON THE FIRST X86_64 RUN: record the measured max|delta| the test prints and TIGHTEN this bar to that measurement plus margin, in a `pv diff`-visible edit to this file. Leaving 5.0e-6 in place after a measurement exists converts a stated unknown into an unstated slack'

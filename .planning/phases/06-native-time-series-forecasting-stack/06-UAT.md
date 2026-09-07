@@ -3,7 +3,7 @@ status: testing
 phase: 06-native-time-series-forecasting-stack
 source: [06-VERIFICATION.md]
 started: 2026-09-07T20:16:59Z
-updated: 2026-09-07T22:19:20Z
+updated: 2026-09-07T23:22:06Z
 ---
 
 ## Current Test
@@ -33,6 +33,28 @@ result: [pending]
 
 ### 2. Chronos x86_64 parity measurement replaces the PROVISIONAL tolerance
 expected: A measured max|delta| replaces the PROVISIONAL 5.0e-6 headroom value in contracts/chronos-bolt-parity-v1.yaml.
+result: pass
+measured: |
+  Run on AWS EC2 x86_64, Amazon Linux 2023, 2026-09-07. All 8 tests passed.
+    f32 quantile bar: chronos-bolt-parity-v1.quantiles_abs_f32_nonaarch64 = 5e-6 (ARCH=x86_64)
+    peyton: quantiles_64 max|delta| 9.5367e-7 against bar 5e-6
+  The printed ARCH=x86_64 proves the non-aarch64 branch ENGAGED rather than was assumed
+  (CLAUDE.md rule 2).
+outcome: |
+  Bar tightened 5.0e-6 -> 2.0e-6, version 1.0.0 -> 2.0.0 on `pv diff`'s MAJOR verdict.
+  `pv validate` rc=0; local aarch64 ladder re-run 8/8 (its own 1.0e-6 bar untouched);
+  `make contract-audit-phase6` rc=0, 63 rows, zero BIND-.
+  THE 5.0e-6 PREMISE WAS FALSIFIED: the headroom existed for a different GEMM accumulation
+  order on x86_64, but the delta is IDENTICAL to aarch64's spike-005/007 value (9.54e-7)
+  because 9.5367431640625e-7 is exactly 2^-20 — a quantization quantum of the f32 output,
+  not accumulated error. A quantum does not vary with accumulation order.
+  NOT NARROWED TO THE MEASUREMENT (1.0e-6 would also have passed at 95.4%): one run on one
+  instance type is one sample, and fitting a bound from one side is the CR-01 error.
+incidental_finding: |
+  The same run put `probe five_points` at 3.815e-6 against its 4.0258e-6 bar — 94.8% — and
+  `probe tiny_len_130_rollout` at 80.6%, while the peyton bar this item is about ran at 19.1%.
+  If an x86_64 microarchitecture ever moves these numbers, five_points fails FIRST and this
+  equation fails LAST. Nobody asked about five_points; it is the real margin risk in the ladder.
 how: |
   On an x86_64 host, from the repo root:
     just chronos-gate            # fetches+verifies pinned weights, then runs BOTH armed suites
@@ -50,6 +72,20 @@ result: [pending]
 
 ### 3. Decide whether SC4's Chronos ladder staying DARK in CI is acceptable
 expected: An explicit decision recorded against D-ITEM-06-03.
+result: DECIDED 2026-09-07 by Guy — ACCEPT DARK, and say so explicitly.
+decision: |
+  SC4's Chronos parity ladder stays a MANUAL local gate (`just chronos-gate`). It is not
+  wired into `.github/workflows/ci.yml` and is not expected to be.
+
+  The obligation that comes with accepting this: the wording everywhere must say MANUAL out
+  loud, so a reader never mistakes a recorded green for a running gate. `status: implemented`
+  in binding.yaml means "the gate exists and passes when run", NOT "the gate runs on every
+  push". That distinction is the whole content of this decision — an unstated dark gate is
+  indistinguishable from a gate nobody noticed stopped running.
+follow_on: |
+  - Record against D-ITEM-06-03.
+  - Amend the `chronos-gate` recipe header and the binding.yaml row wording to state MANUAL.
+  - Any future claim that SC4 is "enforced" must name the manual command, not CI.
 how: Decide whether the ci.yml embedded-weights leg should now be applied, or the ladder stays a manual local gate.
 why_human: CARRIED FORWARD, still open. `.github/workflows/ci.yml` contains ZERO `chronos` or `forecast` matches; every SC4 parity claim rests on a manual local gate.
 result: [pending]
@@ -93,10 +129,10 @@ result: [pending]
 ## Summary
 
 total: 5
-passed: 0
-decided: 1
+passed: 1
+decided: 2
 issues: 1
-pending: 3
+pending: 1
 skipped: 0
 blocked: 0
 
