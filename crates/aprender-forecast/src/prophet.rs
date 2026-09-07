@@ -166,7 +166,31 @@ pub fn columns(spec: &Spec) -> Vec<Column> {
     cols
 }
 
-pub fn feature_row(day: i64, spec: &Spec, cols: &[Column], out: &mut Vec<f64>) {
+/// One membership set per holiday, in `spec.holidays` order, built ONCE per design or
+/// prediction rather than rescanned per row per column.
+///
+/// `feature_row` used to answer "is `day` in this holiday's window offset `off`?" with a
+/// linear `.any()` over `days`, i.e. `rows x holiday_columns x dates` comparisons per
+/// design build. The set answers the IDENTICAL predicate in O(1): `d + off == day` iff
+/// `d == day - off`.
+#[must_use]
+pub fn holiday_day_sets(spec: &Spec) -> Vec<std::collections::HashSet<i64>> {
+    spec.holidays
+        .iter()
+        .map(|h| h.days.iter().copied().collect())
+        .collect()
+}
+
+/// `hol_sets` must be the [`holiday_day_sets`] `HashSet` slice for the same `spec` — one
+/// set per holiday, in order. Passing it in rather than rebuilding it is the whole point:
+/// the caller hoists the construction out of the row loop.
+pub fn feature_row(
+    day: i64,
+    spec: &Spec,
+    cols: &[Column],
+    hol_sets: &[std::collections::HashSet<i64>],
+    out: &mut Vec<f64>,
+) {
     let x_t = std::f64::consts::PI * 2.0 * day as f64;
     for s in &spec.seasonalities {
         for i in 0..s.order {
@@ -177,7 +201,8 @@ pub fn feature_row(day: i64, spec: &Spec, cols: &[Column], out: &mut Vec<f64>) {
     }
     for c in cols.iter().filter(|c| c.holiday.is_some()) {
         let (hi, off) = c.holiday.expect("holiday col");
-        let hit = spec.holidays[hi].days.iter().any(|&d| d + off == day);
+        // Same predicate as the former `days.iter().any(|&d| d + off == day)`, rearranged.
+        let hit = hol_sets[hi].contains(&(day - off));
         out.push(if hit { 1.0 } else { 0.0 });
     }
 }
@@ -245,8 +270,9 @@ pub fn make_design(ds_days: &[i64], y: &[f64], spec: &Spec) -> Design {
     let cols = columns(spec);
     let k = cols.len();
     let mut x = Vec::with_capacity(n * k);
+    let hol_sets = holiday_day_sets(spec);
     for &d in ds_days {
-        feature_row(d, spec, &cols, &mut x);
+        feature_row(d, spec, &cols, &hol_sets, &mut x);
     }
     let s_a: Vec<f64> = cols
         .iter()
@@ -684,8 +710,9 @@ pub fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast {
     let model = Model::new(d);
     let trend_s = model.trend(p, &t, cap.as_deref());
     let mut x = Vec::with_capacity(n * d.k);
+    let hol_sets = holiday_day_sets(spec);
     for &day in ds_days {
-        feature_row(day, spec, &d.cols, &mut x);
+        feature_row(day, spec, &d.cols, &hol_sets, &mut x);
     }
     // components
     let mut names: Vec<String> = Vec::new();
@@ -1770,5 +1797,112 @@ mod parity {
             }
         }
         assert_eq!(cases, 20 * 3 * 4, "the whole bounded grid was enumerated");
+    }
+}
+
+// ------------------------------------------------------- design-cost bench ----
+/// The release-profile wall-clock harness behind `just forecast-holiday-bench`.
+///
+/// It ATTRIBUTES a holiday-carrying request's wall rather than asserting a bar: the body
+/// emits exactly one machine-parsable measurement line (the token is written in exactly
+/// one place below, so the recipe's parse is unambiguous) and asserts only that the call
+/// succeeded and returned one row per horizon step. REVIEW-06-04 removed a
+/// wall-clock ratio assertion from `pool_equality` for the reason that binds here too — a
+/// wall inside libtest moves with CPU throttling independently of what is being measured,
+/// so the BAR lives in the host-gated `just` recipe and the TEST only measures.
+#[cfg(test)]
+mod design_cost {
+    use crate::dates::{days_from_civil, format_ymd};
+    use crate::types::{ForecastArgs, HolidayArg, MAX_HOLIDAY_WINDOW};
+
+    /// `.unwrap()` is banned by `.clippy.toml`; an unparseable selector falls back to the
+    /// default rather than aborting the run with a panic that looks like a measurement.
+    fn env_usize(key: &str, default: usize) -> usize {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(default)
+    }
+
+    /// Build holidays whose windows sum to exactly `columns` design columns.
+    ///
+    /// One holiday cannot exceed `2 * MAX_HOLIDAY_WINDOW + 1` = 731 columns, so a wider
+    /// request is split across as few holidays as that ceiling allows. Each carries
+    /// `dates_per_holiday` occurrences spread across the series span.
+    fn holidays_for(
+        columns: usize,
+        dates_per_holiday: usize,
+        t0: i64,
+        points: usize,
+    ) -> Vec<HolidayArg> {
+        let max_width = (2 * MAX_HOLIDAY_WINDOW + 1) as usize;
+        let step = (points / dates_per_holiday.max(1)).max(1) as i64;
+        let mut remaining = columns;
+        let mut out: Vec<HolidayArg> = Vec::new();
+        while remaining > 0 {
+            let width = remaining.min(max_width);
+            remaining -= width;
+            let lower = -(((width - 1) / 2) as i64);
+            let upper = (width - 1) as i64 + lower;
+            out.push(HolidayArg {
+                name: format!("h{}", out.len()),
+                dates: (0..dates_per_holiday)
+                    .map(|k| format_ymd(t0 + k as i64 * step))
+                    .collect(),
+                lower_window: lower,
+                upper_window: upper,
+            });
+        }
+        out
+    }
+
+    #[test]
+    #[ignore = "release-profile wall-clock measurement; run via just forecast-holiday-bench"]
+    fn holiday_design_wall() {
+        let points = env_usize("HOLIDAY_BENCH_POINTS", 3000);
+        let columns = env_usize("HOLIDAY_BENCH_COLUMNS", 181);
+        let dates = env_usize("HOLIDAY_BENCH_DATES", 84);
+        let horizon = env_usize("HOLIDAY_BENCH_HORIZON", 365);
+
+        let t0 = days_from_civil(2015, 1, 1);
+        let ds: Vec<String> = (0..points).map(|i| format_ymd(t0 + i as i64)).collect();
+        let y: Vec<f64> = (0..points)
+            .map(|i| {
+                let t = i as f64;
+                10.0 + 0.01 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin()
+            })
+            .collect();
+        let holidays = holidays_for(columns, dates, t0, points);
+        let n_holidays = holidays.len();
+        let dates_total: usize = holidays.iter().map(|h| h.dates.len()).sum();
+        let args = ForecastArgs {
+            ds,
+            y,
+            horizon,
+            holidays: Some(holidays),
+            ..ForecastArgs::default()
+        };
+
+        let t = std::time::Instant::now();
+        let r = crate::forecast::forecast(&args).expect("the bench configuration must be accepted");
+        let total = t.elapsed().as_secs_f64();
+        assert_eq!(r.yhat.len(), horizon, "one row per horizon step");
+
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        println!(
+            "HOLIDAY DESIGN WALL: points={points} columns={columns} dates={dates_total} \
+             holidays={n_holidays} horizon={horizon} cells={} triple={} total_s={total:.3} \
+             fit_s={:.3} predict_s={:.3} other_s={:.3} arch={} profile={profile}",
+            (points + horizon) * columns,
+            points * columns * dates_total,
+            r.fit_seconds,
+            r.predict_seconds,
+            total - r.fit_seconds - r.predict_seconds,
+            std::env::consts::ARCH
+        );
     }
 }

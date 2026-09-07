@@ -764,3 +764,42 @@ mase-rolling-origin:
         echo "FAIL: the mase_rolling_origin example exited $rc - log $LOG" >&2
         exit "$rc"
     fi
+
+# The holiday design-build wall, MEASURED and PRINTED — no bar (06-11).
+#
+# `forecast-bench` measures the NO-HOLIDAY SC1 shape. This one measures the shape
+# that shares its point count and still missed the bar by 8x: holiday windows are a
+# per-request design-column multiplier and `make_design` runs BEFORE the fit budget
+# is entered, so nothing downstream can see the cost.
+#
+# The ignored test PRINTS one machine-parsable `HOLIDAY DESIGN WALL:` line and
+# asserts NO wall (REVIEW-06-04: a wall-clock assertion inside libtest moves with
+# CPU throttling). This recipe only re-prints it. The 2 s bar lands here in 06-12.
+#
+# Release-only ON PURPOSE: this crate carries `[profile.dev.package.aprender-forecast]
+# opt-level = 3`, which makes a dev-profile number look plausible and still not be the
+# SC1 bar — hence `profile=` on the printed line (CLAUDE.md rule 2).
+forecast-holiday-bench points="3000" columns="181" dates="84" horizon="365":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    LOG=target/p06-forecast-holiday-bench.log
+    set +e
+    HOLIDAY_BENCH_POINTS={{points}} HOLIDAY_BENCH_COLUMNS={{columns}} \
+    HOLIDAY_BENCH_DATES={{dates}} HOLIDAY_BENCH_HORIZON={{horizon}} \
+    CARGO_INCREMENTAL=0 cargo test --release -p aprender-forecast --lib \
+        prophet::design_cost::holiday_design_wall -- --ignored --nocapture > "$LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        tail -30 "$LOG"
+        echo "FAIL: the holiday design bench exited $rc - log $LOG" >&2
+        exit "$rc"
+    fi
+    line=$(grep -m1 '^HOLIDAY DESIGN WALL: ' "$LOG" || true)
+    if [ -z "$line" ]; then
+        tail -30 "$LOG"
+        echo "FAIL: no 'HOLIDAY DESIGN WALL:' line in $LOG - the wall was never measured" >&2
+        exit 1
+    fi
+    echo "$line"
