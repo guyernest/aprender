@@ -45,9 +45,21 @@ async function rpc(method,params){const id=++rpcId;const t0=performance.now();co
 async function ensureInit(){if(initialized)return;const res=await rpc('initialize',{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'forecast-demo-page',version:'0.0.0'}});log('mcp','initialized',{server:res&&res.serverInfo});await fetch('/mcp',{method:'POST',headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'})});const tools=await rpc('tools/list',{});log('mcp','tools/list',{tools:(tools.tools||[]).map(t=>t.name)});initialized=true;}
 async function loadSample(n){const r=await fetch('/sample/'+n);document.getElementById('csv').value=await r.text();log('ui','loaded sample '+n);if(n==='air'){document.getElementById('freq').value='MS';document.getElementById('horizon').value='24';document.getElementById('mode').value='multiplicative';}else{document.getElementById('freq').value='D';document.getElementById('horizon').value='365';document.getElementById('mode').value='additive';}}
 function parseCsv(t){const ds=[],y=[];for(const line of t.split(/\r?\n/)){const p=line.split(',');if(p.length<2)continue;const v=parseFloat(p[1].replace(/"/g,''));const d=p[0].replace(/"/g,'').trim();if(!/^\d{4}-\d{2}-\d{2}/.test(d)||isNaN(v))continue;ds.push(d.slice(0,10));y.push(v);}return{ds,y};}
+// Keep the form honest: a control the selected model's arm never reads is disabled, so the
+// page cannot imply an effect the door would refuse. Mirrors the arm split in `run()`.
+function syncModelKnobs(){const np=document.getElementById('model').value==='neuralprophet';
+ for(const id of ['growth','cap','mode','hol'])document.getElementById(id).disabled=np;
+ document.getElementById('nlags').disabled=!np;}
+document.addEventListener('DOMContentLoaded',()=>{document.getElementById('model').addEventListener('change',syncModelKnobs);syncModelKnobs();});
 async function run(){const err=document.getElementById('error');err.textContent='';try{await ensureInit();const {ds,y}=parseCsv(document.getElementById('csv').value);if(ds.length<10)throw new Error('need at least 10 rows of ds,y');
- const args={ds,y,horizon:+document.getElementById('horizon').value,freq:document.getElementById('freq').value,model:document.getElementById('model').value,growth:document.getElementById('growth').value,seasonality_mode:document.getElementById('mode').value,interval_width:+document.getElementById('iw').value,n_lags:+document.getElementById('nlags').value};
- const cap=document.getElementById('cap').value;if(cap!=='')args.cap=+cap;const hol=document.getElementById('hol').value.trim();if(hol)args.holidays=JSON.parse(hol);
+ const model=document.getElementById('model').value;
+ // Send ONLY the knobs the selected model's arm actually reads. The door refuses an off-arm
+ // option on PRESENCE (forecast.rs `n_lags is neuralprophet-only` / `<k> is prophet-only`), so a
+ // field carrying its own DEFAULT is still a refusal — `n_lags:0` and `growth:"linear"` were both
+ // rejected. Sending everything unconditionally made every request fail for BOTH models.
+ const args={ds,y,horizon:+document.getElementById('horizon').value,freq:document.getElementById('freq').value,model,interval_width:+document.getElementById('iw').value};
+ if(model==='neuralprophet'){args.n_lags=+document.getElementById('nlags').value;}
+ else{args.growth=document.getElementById('growth').value;args.seasonality_mode=document.getElementById('mode').value;const cap=document.getElementById('cap').value;if(cap!=='')args.cap=+cap;const hol=document.getElementById('hol').value.trim();if(hol)args.holidays=JSON.parse(hol);}
  log('ui','forecast requested',{points:ds.length,horizon:args.horizon,model:args.model,freq:args.freq});
  const t0=performance.now();const res=await rpc('tools/call',{name:'forecast',arguments:args});const ms=Math.round(performance.now()-t0);
  let out=res.structuredContent;if(!out){const c=(res.content||[]).find(x=>x.type==='text');out=JSON.parse(c.text);}if(res.isError)throw new Error(out.error||JSON.stringify(out));

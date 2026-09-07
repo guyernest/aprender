@@ -1,28 +1,27 @@
 ---
-status: testing
+status: complete
 phase: 06-native-time-series-forecasting-stack
 source: [06-VERIFICATION.md]
 started: 2026-09-07T20:16:59Z
-updated: 2026-09-07T23:22:06Z
+updated: 2026-09-07T23:37:23Z
 ---
 
 ## Current Test
 
-number: 2
-name: Chronos x86_64 parity measurement replaces the PROVISIONAL tolerance
-expected: |
-  A measured max|delta| replaces the PROVISIONAL 5.0e-6 headroom value.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
 ### 1. Demo pages: MCP handshake + chart rendering
 expected: Both pages complete the MCP handshake same-origin under /mcp and render a band chart.
-result: issue
+result: pass
+first_result: issue (FIXED AND RE-CONFIRMED IN THE SAME SESSION)
 reported: |
   "Validation error: n_lags is neuralprophet-only; set model to \"neuralprophet\""
   "Validation error: growth is prophet-only; set model to \"prophet\""
 severity: blocker
+resolved_by: "demo-page arm-scoped args fix (this session); user confirmed both models render"
+resolved_at: "2026-09-07"
 tested_on: http://localhost:8770 (built from HEAD 22e85dd3f; the servers already running on
   8765/8766 were v0.0.0 spike binaries from Sep 4-5 and 8787/8788 were pre-round-3 Sep 6
   builds — 8787 ACCEPTED a 201-byte holiday name that HEAD refuses, so none of them was
@@ -129,17 +128,22 @@ result: [pending]
 ## Summary
 
 total: 5
-passed: 1
+passed: 2
 decided: 2
-issues: 1
-pending: 1
+issues: 0
+pending: 0
 skipped: 0
 blocked: 0
 
 ## Gaps
 
 - truth: "The forecast demo page completes initialize -> tools/list -> tools/call and renders a band chart"
-  status: failed
+  status: resolved
+  resolved_by: "crates/aprender-mcp-forecast/static/index.html — run() builds args per arm; syncModelKnobs() disables off-arm controls"
+  resolved_at: "2026-09-07"
+  verified: "curl on :8770 (HEAD build) returns a banded forecast for BOTH prophet and neuralprophet; user confirmed the page renders"
+  correction: "The original diagnosis named only `growth` for the neuralprophet arm. TWO prophet-only fields were sent unconditionally — `growth` AND `seasonality_mode`. The door returns on the first offender, so the message only ever showed one."
+  still_open: "Door policy (D-11) is NOT settled by this fix: should an off-arm option carrying its own DEFAULT (n_lags:0, growth:\"linear\") be refused, or only a non-neutral value? Deferred to Phase 7 — it bears on any client that serializes a full settings object." 
   reason: |
     User reported: 'Validation error: n_lags is neuralprophet-only; set model to "neuralprophet"'
     and 'Validation error: growth is prophet-only; set model to "prophet"'. Reproduced by curl
