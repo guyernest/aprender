@@ -1,6 +1,6 @@
 contract: forecast-tool-boundary
 metadata:
-  version: 1.4.0
+  version: 1.5.0
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
@@ -627,6 +627,33 @@ equations:
       - 'the measurement that motivates the pool: 1.0x with ONE router (the fits serialise behind pmcp streamable_http_server.rs:2094/:2122) and 3.9x with eight, on the spike-010 host'
       - 'a debug-profile or x86_64 run of the unit test is EXPECTED to print a low ratio and is not a failure of anything'
 
+  sc1_wall_swept:
+    formula: 'forall c in freq {D, W, MS} x growth {linear, logistic, flat} x holidays {none, at_design_cost_bound}, plus the neuralprophet row: accept(request(c)) and wall(request(c)) < sc1_wall_seconds, at the tightest legal history span, on an aarch64 release build'
+    domain: 'the 18-composition Prophet cross product at the tightest legal history span for the point count, each at the WIDEST horizon its own composition can legally ask for, plus one NeuralProphet row at its at-the-bound train-cost geometry'
+    codomain: 'a pass, or the NAME of every composition at or above the bar'
+    invariants:
+      - 'A BENCHMARK CLAIM, NOT A CORRECTNESS CLAIM. It is falsified by `just forecast-sc1-sweep` (plan 06-16) on a release build, and NEVER by a libtest assertion — the same split `pool_speedup_host_gated` already makes, for the same reason: a wall-clock assertion inside libtest moves with CPU throttling and background load independently of the code it claims to measure. The harness PRINTS under any profile and ASSERTS the bar only when cfg!(debug_assertions) is false, with profile= on every line so a reader can tell which run they are looking at.'
+      - >
+        WHY A SWEEP AND NOT A THIRD BENCH (06-REVIEW.md WR-04). Three benches each covered ONE
+        axis and the axis CR-01 actually lived on was covered by none of them: forecast-bench
+        sweeps point count with no holidays, forecast-holiday-bench sweeps the holiday axis, and
+        logistic_band_wall was #[ignore]d with no recipe and no bar. At the same points and
+        horizon the review measured 0.231 s on freq "D" and 2.334 s on freq "MS", because
+        dates::future_days multiplies the horizon COUNT by 1 / 7 / ~30.44 and so multiplies t_max
+        and the Poisson mean. Nothing in the phase could have caught it.
+      - >
+        OBSERVED FAILING ON THE DEFECT IT EXISTS FOR (CLAUDE.md rule 5). With
+        fit_max_logistic_changepoint_lambda and its Rust mirror raised to 200000 — past the
+        86 789.8 structural maximum, so the CR-01 configuration is accepted again — the sweep
+        goes RED naming two compositions: freq=MS growth=logistic holidays=none at 2.443 s and
+        holidays=at_bound at 2.536 s, against freq=D passing at 0.219 s on the same run. Restored
+        to 20000, all 19 compositions pass, worst 1.433 s. A gate that cannot be shown failing on
+        the defect it exists for is theater.
+      - 'the matrix SHRINKS BY POINTS AND HORIZON, never by an axis: dropping an axis is the defect this equation exists to prevent, so a sweep that no longer covers all three freq values and all three growth arms is a violation even if every remaining composition is fast'
+      - 'each composition is ASSERTED ACCEPTED by the door before it is timed, because a refused request walls at ~0.001 s and would otherwise read as the fastest pass in the matrix'
+      - 'the bar is asserted TWICE — inside the harness, where the message names the failing composition, and again in the recipe over the re-parsed SC1 WALL: lines, which is what catches a harness that silently stopped emitting them. The recipe prints the count it checked, so a run that checked zero compositions cannot report success.'
+      - 'every bar in the recipe goes through scripts/assert_measurement_under.sh, whose 23-row case table runs BEFORE any measurement is taken (06-REVIEW.md IN-01)'
+
   default_seed_42:
     formula: 'seed defaults to constants.default_seed = 42 per request; no state is carried between requests'
     domain: 'the optional seed argument of the fit server'
@@ -762,6 +789,11 @@ proof_obligations:
     property: 'The Poisson mean the logistic uncertainty simulation draws is bounded at the door, before the design is built'
     formal: 'forall args: accept(args) and args.growth == logistic implies changepoint_count(len(args.ds)) * (t_max(args) - 1) <= constants.fit_max_logistic_changepoint_lambda'
     applies_to: all
+
+  - type: bound
+    property: 'The SC1 wall holds across the whole surface where the cost is decided — every accepted composition of frequency, growth arm and holiday shape — and not only on the two shapes the phase happened to bench'
+    formal: 'forall c in freq x growth x holiday_shape: accept(request(c)) and wall_release(request(c)) < sc1_wall_seconds'
+    applies_to: fit
 
 falsification_tests:
 
@@ -1095,6 +1127,37 @@ falsification_tests:
       about the changepoint count, which is why prophet::changepoint_count was extracted in
       plan 06-14. A second inline copy of the sweep width or the epoch rule in forecast.rs is
       how that drift starts.
+
+  - id: FALSIFY-BOUNDARY-026
+    rule: 'The SC1 bar is asserted across the surface where the cost is decided — freq x growth x holiday shape — and not only on the two shapes the phase happened to bench'
+    prediction: >
+      `just forecast-sc1-sweep` runs `sc1_wall::sc1_wall_sweep` on a RELEASE build over the
+      18-composition Prophet cross product at the tightest legal history span plus the
+      NeuralProphet row at its at-the-bound train-cost geometry, and every composition walls
+      under 2.0 s. MEASURED, all 19 accepted: the worst is the NeuralProphet row at
+      train_cost 14 810 040 and 1.433 s; the worst Prophet composition is
+      freq=W growth=logistic holidays=at_bound at 0.791 s with lambda 19 960.9. The bar is
+      asserted TWICE and neither is redundant — inside the harness, where the message names
+      every failing composition (all compositions are measured and printed BEFORE anything is
+      asserted, so a failure does not hide the shape of the rest of the matrix), and again in
+      the recipe over the re-parsed `SC1 WALL:` lines, which is what catches a harness that
+      stopped emitting them. The recipe prints the count it checked, so a run that checked
+      zero compositions cannot report success. It is NOT `#[ignore]`d: a plain
+      `cargo test -p aprender-forecast --lib sc1_wall::` reports a non-zero passed count with
+      no `--ignored` flag, which is the exact state `logistic_band_wall` lacked.
+      OBSERVED RED on the CR-01 configuration: with `fit_max_logistic_changepoint_lambda` and
+      `types::MAX_LOGISTIC_CHANGEPOINT_LAMBDA` raised to 200000, past the 86 789.8 structural
+      maximum, `freq=MS growth=logistic` walls at 2.443 s (holidays=none) and 2.536 s
+      (holidays=at_bound) and the gate goes red naming both, while `freq=D` passes at 0.219 s
+      on the same run. Restoring both to 20000 restores green.
+    test: 'just forecast-sc1-sweep'
+    if_fails: >
+      Either a composition crossed the 2 s bar — the log names which, and its `lambda=` and
+      `cells=` tokens say which axis it is loaded on — or the sweep lost an axis. NEVER close
+      this by shrinking the matrix to the compositions that still pass: shrink
+      SC1_SWEEP_POINTS and SC1_SWEEP_HORIZON, or the NeuralProphet row, and never an axis.
+      Dropping an axis is the WR-04 defect this gate replaced, and it is how a green gate
+      shipped a resource-exhaustion breach (CR-01) that three separate benches could not see.
 
 kani_harnesses:
 

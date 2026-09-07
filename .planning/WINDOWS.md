@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 8
+open_count: 9
 waived_count: 2
 fixed_count: 0
-total_count: 10
-last_updated: 2026-09-07T15:58:32.289Z
+total_count: 11
+last_updated: 2026-09-07T17:54:46.394Z
 ---
 
 # Broken Windows Ledger
@@ -25,6 +25,7 @@ last_updated: 2026-09-07T15:58:32.289Z
 | 8 | 06 | deviation | justfile |  | 06-12 T3 asked to change forecast-holiday-bench's defaults to the at-the-bound geometry; 06-11 deviation 2 had already done so ((800+200)x50 = 50 000 cells = MAX_HOLIDAY_DESIGN_COST). No change made; plan text was stale. | open |  | 2026-09-07T03:57:44.081Z |  |
 | 9 | 06 | unmet-truth | contracts/forecast-tool-boundary-v1.yaml |  | Cost axis C-07 (holidays[].name byte amplification) carries unbounded_pending_06_15; held open by the DECLARED-RED types::tests::no_cost_axis_is_pending. Owed by 06-15 T2. | open |  | 2026-09-07T15:58:32.207Z |  |
 | 10 | 06 | unmet-truth | contracts/forecast-tool-boundary-v1.yaml |  | Cost axis C-08 (unbudgeted NeuralProphet training work) carries unbounded_pending_06_15; held open by the DECLARED-RED types::tests::no_cost_axis_is_pending. Owed by 06-15 T3. | open |  | 2026-09-07T15:58:32.289Z |  |
+| 11 | 06 | unrun-verify | justfile | 656 | chronos-coldstart's 150 ms SC4 bar uses [ $med -ge 150 ]; an erroring token takes the not-taken branch and prints COLD START OK. Closed today only by the upstream sed digits-only parse, not by the bar (D-ITEM-06-16). | open |  | 2026-09-07T17:54:46.394Z |  |
 
 ````json
 [
@@ -146,6 +147,18 @@ last_updated: 2026-09-07T15:58:32.289Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-07T15:58:32.289Z",
+    "resolved_at": null
+  },
+  {
+    "id": 11,
+    "kind": "unrun-verify",
+    "phase": "06",
+    "file": "justfile",
+    "line": 656,
+    "description": "chronos-coldstart's 150 ms SC4 bar uses [ $med -ge 150 ]; an erroring token takes the not-taken branch and prints COLD START OK. Closed today only by the upstream sed digits-only parse, not by the bar (D-ITEM-06-16).",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T17:54:46.394Z",
     "resolved_at": null
   }
 ]

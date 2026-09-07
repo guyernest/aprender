@@ -135,20 +135,31 @@ pub const MAX_HOLIDAY_DATES_TOTAL: usize = 10_000;
 /// four points (lambda 2 852 -> 0.231 s, 2 866 -> 0.209 s, 19 925 -> 0.634 s, 86 790 ->
 /// 2.334 s) puts the 2 s bar near lambda 74 000; 20 000 is the largest round value with
 /// roughly 3x measured headroom. Walled at three compositions on a release build, at the
-/// tightest legal history span (33 daily points), by
-/// `prophet::sampler::logistic_band_wall` under `LOGISTIC_BENCH_FREQ`:
+/// tightest legal history span (33 daily points). Originally measured by
+/// `prophet::sampler::logistic_band_wall` under `LOGISTIC_BENCH_FREQ`; that harness was
+/// DELETED by plan 06-16 because it was `#[ignore]`d with no recipe and no bar, and its
+/// geometry is now three rows of [`crate::sc1_wall`]'s cross product, which
+/// `just forecast-sc1-sweep` runs on release with the 2 s bar asserted:
 ///
-/// | freq | points | horizon | lambda | total_s | predict_s |
-/// |------|--------|---------|--------|---------|-----------|
-/// | `D`  | 33 | 3 650 | 2 851.6 (freq `D`'s OWN structural maximum) | **0.244 s** | 0.215 s |
-/// | `W`  | 33 | 3 650 | 19 960.9 | **0.711 s** | 0.680 s |
-/// | `MS` | 33 |   840 | 19 974.2 | **0.582 s** | 0.552 s |
+/// | freq | points | horizon | lambda | total_s (06-14) | total_s (06-16 sweep) |
+/// |------|--------|---------|--------|-----------------|-----------------------|
+/// | `D`  | 33 | 3 650 | 2 851.6 (freq `D`'s OWN structural maximum) | **0.244 s** | 0.224 s |
+/// | `W`  | 33 | 3 650 | 19 960.9 | **0.711 s** | 0.714 s |
+/// | `MS` | 33 | 840 / 841 | 19 974.2 / 19 996.1 | **0.582 s** | 0.620 s |
 ///
-/// The worst of the three is 0.711 s against the 2 s bar — roughly 2.8x headroom — and the
+/// The two columns are the SAME compositions measured by two harnesses on the same host and
+/// they agree; the `MS` row differs in the last horizon step because the sweep DERIVES the
+/// widest legal horizon from the bound rather than being told one.
+///
+/// The worst of the three is ~0.71 s against the 2 s bar — roughly 2.8x headroom — and the
 /// cost is almost entirely in `predict_s`, which is the half `FIT_BUDGET_SECS` does not
-/// cover. `mean_band_width` is 49.37 / 49.39 on the two at-the-bound rows against 45.51 on
-/// the `D` row, so the accepted band still widens with lambda: the bound refuses cost, it
-/// does not quietly truncate the simulation the way the pre-06-13 saturation did.
+/// cover. The band still widens with lambda (the sweep prints `band_width=` on every line:
+/// 21.07 on both at-the-bound rows against 19.74 on the `D` row), so the bound refuses cost;
+/// it does not quietly truncate the simulation the way the pre-06-13 saturation did. The
+/// absolute widths are smaller than the 49.37 / 49.39 / 45.51 the deleted harness recorded
+/// because it hardcoded `cap: 50.0` while the sweep derives the cap from `max(y)`, which is
+/// the change that stops a future edit to the synthetic series silently invalidating the
+/// composition.
 ///
 /// `freq: "D"` cannot reach this bound at all: at 33 points its largest attainable lambda is
 /// 2 851.6, so its row is that maximum rather than an at-the-bound point. That is a fact about

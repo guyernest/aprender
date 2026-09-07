@@ -789,13 +789,26 @@ mase-rolling-origin:
 # holiday-carrying shape, which shares its point count and missed the bar by 8x:
 # 3000 x 181 x 84 walled at 16.081 s inside every bound the door checked.
 #
-# THE DEFAULTS ARE THE WORST SHAPE THE DOOR STILL ACCEPTS, deliberately.
-# 800 points + a 200-step horizon x 50 holiday columns = 50 000 design feature cells,
-# exactly `constants.fit_max_holiday_design_cost`, and the slowest of the three
-# at-the-bound compositions measured on the aarch64 release host (1.692 s, vs 1.174 s
-# many-rows and 0.106 s many-columns). That is the configuration a 2 s bar has to be
-# asserted against, and 06-12 adds the bar here. The verifier's original 3000/181/84
-# is now REFUSED at the door and can only be run against a build without the bound.
+# THE DEFAULTS ARE THE SLOWEST OF THE THREE COMPOSITIONS ACTUALLY MEASURED at the
+# design-cost bound — not the worst shape the door accepts. 800 points + a 200-step
+# horizon x 50 holiday columns = 50 000 design feature cells, exactly
+# `constants.fit_max_holiday_design_cost`, and 1.692 s on the aarch64 release host
+# against 1.174 s for the many-rows composition (9 500 x 5) and 0.106 s for the
+# many-columns one (50 x 500). Three points, and the defaults are the slowest of them.
+#
+# That is a DIFFERENT and weaker claim than the superlative this block used to make,
+# and the paragraph above is why it had to change (06-REVIEW.md WR-04): the very next
+# paragraph records an ACCEPTED 4 700-point / 5-column request walling at ~4.2 s, which
+# is 2.5x slower than these "worst" defaults. Both sentences cannot be true. Since
+# 06-11 measured that no payload statistic bounds the wall, no set of defaults can be
+# the worst accepted shape, and a comment asserting one is the sentence a future reader
+# would quote as coverage evidence.
+#
+# THE SURFACE THIS ONE RECIPE CANNOT COVER IS COVERED BY `just forecast-sc1-sweep`,
+# which sweeps freq x growth x holiday shape rather than one hard-coded geometry. This
+# recipe remains the single-composition entry point onto the same builder.
+# The verifier's original 3000/181/84 is now REFUSED at the door and can only be run
+# against a build without the bound.
 #
 # The ignored test PRINTS one machine-parsable measurement line and asserts NO wall
 # (REVIEW-06-04: a wall-clock assertion inside libtest moves with CPU throttling).

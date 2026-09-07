@@ -2383,7 +2383,7 @@ contract-audit-phase6: ## Audit Phase 6 binding coverage + source resolution (BL
 			continue; \
 		fi; \
 		if [ "$$file" = "justfile" ]; then \
-			pattern="^$$name[[:space:]]*:"; \
+			pattern="^$$name([[:space:]][^:]*)?:"; \
 		else \
 			pattern="(^|[^[:alnum:]_])fn[[:space:]]+$$name[[:space:]]*[(<]"; \
 		fi; \

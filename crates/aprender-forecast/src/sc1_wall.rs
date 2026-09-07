@@ -109,10 +109,66 @@ pub(crate) fn holidays_for(
     out
 }
 
+/// `"debug"` or `"release"`, derived from `cfg!(debug_assertions)` and NEVER from intent.
+///
+/// CLAUDE.md rule 2: a debug wall labelled `release` is the class of error that turns a
+/// measurement into a confident wrong answer. Shared so the sweep and every folded
+/// single-composition entry point cannot label a run two different ways.
+pub(crate) fn profile_token() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
+/// Put a request through the door, ASSERT it was accepted, and return it with its wall.
+///
+/// The acceptance assertion is the point: a composition the door REFUSES is timed at
+/// ~0.001 s and looks like the fastest pass in the matrix. Shared so no harness can measure
+/// a refusal and report a wall.
+pub(crate) fn time_accepted(
+    args: &ForecastArgs,
+    label: &str,
+) -> (crate::types::ForecastResponse, f64) {
+    let t = std::time::Instant::now();
+    let r = crate::forecast::forecast(args).unwrap_or_else(|e| {
+        panic!(
+            "the composition [{label}] must be ACCEPTED by the door, or its wall is a \
+             meaningless fast pass — the door refused it: {e}"
+        )
+    });
+    let total = t.elapsed().as_secs_f64();
+    assert_eq!(r.yhat.len(), args.horizon, "one row per horizon step");
+    (r, total)
+}
+
+/// The mean uncertainty-band width over the horizon.
+///
+/// The OUTPUT the logistic changepoint sampler is about: a sampler that draws fewer
+/// changepoints than the law asks for spreads its simulated trends less, so the interval
+/// comes back narrower than the `interval_width` it advertises. Printed on every line so the
+/// bound is visibly refusing COST rather than quietly truncating the simulation — which is
+/// the distinction `MAX_LOGISTIC_CHANGEPOINT_LAMBDA`'s doc rests on.
+fn mean_band_width(r: &crate::types::ForecastResponse) -> f64 {
+    if r.yhat.is_empty() {
+        return 0.0;
+    }
+    r.yhat_upper
+        .iter()
+        .zip(r.yhat_lower.iter())
+        .map(|(u, l)| u - l)
+        .sum::<f64>()
+        / r.yhat.len() as f64
+}
+
 /// A strictly-ascending DAILY series of `points` points, which is the TIGHTEST legal history
 /// span for that point count — and therefore the geometry that maximises `t_max` and so the
 /// logistic simulation's Poisson mean. This is the geometry `06-REVIEW.md` CR-01 measured.
-fn tight_daily_series(points: usize) -> (Vec<String>, Vec<f64>, i64) {
+///
+/// THE ONE SERIES BUILDER (WR-04). `prophet::design_cost::holiday_design_wall` built a
+/// byte-identical series of its own until this plan folded it onto this function.
+pub(crate) fn tight_daily_series(points: usize) -> (Vec<String>, Vec<f64>, i64) {
     let t0 = days_from_civil(2015, 1, 1);
     let ds: Vec<String> = (0..points).map(|i| format_ymd(t0 + i as i64)).collect();
     let y: Vec<f64> = (0..points)
@@ -280,33 +336,20 @@ fn measure(case: Case, points: usize, horizon_cap: usize) -> Row {
         if case.holidays { "at_bound" } else { "none" }
     );
 
-    let t = std::time::Instant::now();
-    // A REFUSED composition timed as a wall is a 0.001 s pass that means nothing, so the
-    // acceptance is asserted here, naming the composition and the door's own message.
-    let r = crate::forecast::forecast(&built.args).unwrap_or_else(|e| {
-        panic!(
-            "the sweep composition [{label} points={points} horizon={}] must be ACCEPTED by \
-             the door, or its wall is a meaningless fast pass — the door refused it: {e}",
-            built.horizon
-        )
-    });
-    let total = t.elapsed().as_secs_f64();
-    assert_eq!(r.yhat.len(), built.horizon, "one row per horizon step");
+    let scope = format!("{label} points={points} horizon={}", built.horizon);
+    let (r, total) = time_accepted(&built.args, &scope);
 
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
     println!(
         "SC1 WALL: {label} points={points} horizon={} lambda={:.1} cells={} total_s={total:.3} \
-         fit_s={:.3} predict_s={:.3} arch={} profile={profile}",
+         fit_s={:.3} predict_s={:.3} band_width={:.4} arch={} profile={}",
         built.horizon,
         built.lambda,
         built.cells,
         r.fit_seconds,
         r.predict_seconds,
-        std::env::consts::ARCH
+        mean_band_width(&r),
+        std::env::consts::ARCH,
+        profile_token()
     );
     Row {
         label: format!("{label} points={points} horizon={}", built.horizon),
@@ -341,27 +384,17 @@ fn measure_np(points: usize, n_lags: usize, horizon: usize) -> Row {
     let d = crate::np::NpData::new(&days, &args.y, days.len(), 10, 0.8);
     let cost = crate::np::request_train_cost(&d, days.len(), n_lags);
 
-    let t = std::time::Instant::now();
-    let r = crate::forecast::forecast(&args).unwrap_or_else(|e| {
-        panic!(
-            "the sweep composition [{label} points={points} horizon={horizon}] must be \
-             ACCEPTED by the door — the door refused it: {e}"
-        )
-    });
-    let total = t.elapsed().as_secs_f64();
-    assert_eq!(r.yhat.len(), horizon, "one row per horizon step");
+    let scope = format!("{label} points={points} horizon={horizon}");
+    let (r, total) = time_accepted(&args, &scope);
 
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
     println!(
         "SC1 WALL: {label} points={points} horizon={horizon} lambda=0.0 cells={cost} \
-         total_s={total:.3} fit_s={:.3} predict_s={:.3} arch={} profile={profile}",
+         total_s={total:.3} fit_s={:.3} predict_s={:.3} band_width={:.4} arch={} profile={}",
         r.fit_seconds,
         r.predict_seconds,
-        std::env::consts::ARCH
+        mean_band_width(&r),
+        std::env::consts::ARCH,
+        profile_token()
     );
     Row {
         label: format!("{label} points={points} horizon={horizon}"),
@@ -394,11 +427,7 @@ fn sc1_wall_sweep() {
     println!(
         "SC1 SWEEP: compositions={} elapsed_s={elapsed:.3} profile={}",
         rows.len(),
-        if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        }
+        profile_token()
     );
 
     // NOT an SC1 bar, and deliberately not throttling-sensitive the way a 2 s bar is: this

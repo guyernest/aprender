@@ -1081,108 +1081,20 @@ mod sampler {
         );
     }
 
-    /// The worst IN-BOUNDS logistic request, walled on a release build.
-    ///
-    /// This is the configuration the verifier named as reachable: 100 consecutive daily points
-    /// with `horizon: 3650, growth: "logistic"`, every factor inside every door bound. Correcting
-    /// the sampler makes `n_changes` grow from the ~745 the underflow imposed to ~lambda, and the
-    /// per-row work (`logistic_gammas` + a sort + `piecewise_logistic`) is LINEAR in that count —
-    /// so the cost increase is a bounded multiple, and this harness is what turns that argument
-    /// into two numbers against SC1's 2 s bar.
-    ///
-    /// `#[ignore]` for the same reason `design_cost::holiday_design_wall` is: a wall-clock number
-    /// from a debug build measures the profile, not the code.
-    #[test]
-    #[ignore = "release-profile wall-clock measurement; run with --release --ignored"]
-    fn logistic_band_wall() {
-        use crate::dates::{days_from_civil, format_ymd};
-        use crate::types::ForecastArgs;
-
-        // Selectable so the OTHER reachable extreme can be walled with the same harness: the
-        // 10-point `MIN_POINTS` floor at the same horizon is the lambda ~= 2839 case, where the
-        // pre-fix truncation was ~3.8x rather than ~1.24x. `.unwrap()` is banned by
-        // `.clippy.toml`; an unparseable selector falls back to the default rather than aborting
-        // the run with a panic that would look like a measurement.
-        let env_usize = |key: &str, default: usize| -> usize {
-            std::env::var(key)
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(default)
-        };
-        let points = env_usize("LOGISTIC_BENCH_POINTS", 100);
-        let horizon = env_usize("LOGISTIC_BENCH_HORIZON", 3650);
-        // `dates::future_days` multiplies the horizon COUNT by 1 / 7 / ~30.44 for D / W /
-        // MS, so the frequency is a 30x multiplier on the future span and therefore on
-        // `t_max` and on the Poisson mean `MAX_LOGISTIC_CHANGEPOINT_LAMBDA` bounds. A wall
-        // measured on one frequency is not a wall for the others, which is exactly why this
-        // knob exists: the bound's value rests on three compositions, not one. An
-        // unrecognised value falls through to `future_days`' own refusal rather than being
-        // silently coerced to "D".
-        let freq = std::env::var("LOGISTIC_BENCH_FREQ").unwrap_or_else(|_| "D".into());
-        let t0 = days_from_civil(2015, 1, 1);
-        let ds: Vec<String> = (0..points).map(|i| format_ymd(t0 + i as i64)).collect();
-        let y: Vec<f64> = (0..points)
-            .map(|i| {
-                let t = i as f64;
-                10.0 + 0.01 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin()
-            })
-            .collect();
-        let args = ForecastArgs {
-            ds,
-            y,
-            horizon,
-            freq: Some(freq.clone()),
-            growth: Some("logistic".into()),
-            cap: Some(50.0),
-            ..ForecastArgs::default()
-        };
-        // The quantity the bound is ON, printed with the wall so a recorded measurement can
-        // be checked against the constant it justifies rather than merely believed.
-        let lambda = {
-            let ds_days: Vec<i64> = args
-                .ds
-                .iter()
-                .map(|s| crate::dates::parse_date(s).expect("the bench builds valid dates"))
-                .collect();
-            let fut = crate::dates::future_days(ds_days[ds_days.len() - 1], horizon, &freq)
-                .expect("the bench builds a valid freq");
-            let t_scale = (ds_days[ds_days.len() - 1] - ds_days[0]) as f64;
-            let t_max = (fut[fut.len() - 1] - ds_days[0]) as f64 / t_scale;
-            let spec = super::Spec::default_linear(super::auto_seasonalities(
-                &ds_days,
-                10.0,
-                super::Mode::Additive,
-            ));
-            super::changepoint_count(ds_days.len(), &spec) as f64 * (t_max - 1.0)
-        };
-
-        let t = std::time::Instant::now();
-        let r = crate::forecast::forecast(&args).expect("the bench configuration must be accepted");
-        let total = t.elapsed().as_secs_f64();
-        assert_eq!(r.yhat.len(), horizon, "one row per horizon step");
-
-        // The mean band width is the OUTPUT this plan is about: a sampler stuck at ~745 draws
-        // fewer changepoints than the law asks for, so the simulated trends spread less and the
-        // interval comes back narrower than the `interval_width` it advertises.
-        let width: f64 = r
-            .yhat_upper
-            .iter()
-            .zip(r.yhat_lower.iter())
-            .map(|(u, l)| u - l)
-            .sum::<f64>()
-            / horizon as f64;
-        let profile = if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        };
-        println!(
-            "LOGISTIC BAND WALL: points={points} horizon={horizon} freq={freq} \
-             growth=logistic lambda={lambda:.1} total_s={total:.3} fit_s={:.3} \
-             predict_s={:.3} mean_band_width={width:.4} profile={profile}",
-            r.fit_seconds, r.predict_seconds
-        );
-    }
+    // `logistic_band_wall` USED TO LIVE HERE and was DELETED by plan 06-16 (WR-04).
+    //
+    // It was `#[ignore]`d, had no `just` recipe and asserted no bar, so the one harness
+    // watching the axis CR-01 actually lived on could only ever be reached by someone who
+    // already knew to pass `--ignored` — and all four of its recorded lines were
+    // `freq: "D"`, the single value that does not exhibit the defect. Its whole geometry
+    // (33 points at the tightest legal daily span, `growth: "logistic"`, the widest horizon
+    // each frequency can legally ask for) is now one row of `crate::sc1_wall`'s cross
+    // product, which runs with NO flag, prints `band_width=` on every line exactly as this
+    // harness did, and asserts the 2 s SC1 bar on a release profile.
+    //
+    // Deleted rather than folded: unlike `design_cost::holiday_design_wall`, nothing drove
+    // it. It had no recipe and no caller, so there was no entry point to preserve — only a
+    // second geometry to stop maintaining. `just forecast-sc1-sweep` is its replacement.
 }
 
 #[cfg(test)]
@@ -2108,13 +2020,25 @@ mod parity {
 /// wall-clock ratio assertion from `pool_equality` for the reason that binds here too — a
 /// wall inside libtest moves with CPU throttling independently of what is being measured,
 /// so the BAR lives in the host-gated `just` recipe and the TEST only measures.
+///
+/// SINCE PLAN 06-16 IT BUILDS NOTHING OF ITS OWN (WR-04). The series, the holiday splitter,
+/// the accept-and-time step and the `profile=` token all come from [`crate::sc1_wall`], so
+/// this is a SINGLE-COMPOSITION ENTRY POINT onto the sweep's builder rather than a third
+/// harness with a third geometry. It is kept rather than deleted because
+/// `just forecast-holiday-bench` is cited by `06-EVIDENCE.md` and by
+/// `contracts/forecast-tool-boundary-v1.yaml`, and its caller-facing behaviour is unchanged.
+/// The COVERAGE claim now belongs to `just forecast-sc1-sweep`, which sweeps the surface
+/// this one composition cannot.
 #[cfg(test)]
 mod design_cost {
-    use crate::dates::{days_from_civil, format_ymd};
-    // ONE splitter, ONE env reader (WR-04): both used to be defined here, where only this
-    // bench could reach them. They now live in `crate::sc1_wall` beside the composition
-    // builder the sweep and every single-composition entry point share.
-    use crate::sc1_wall::{env_usize, holidays_for};
+    use crate::dates::days_from_civil;
+    // ONE splitter, ONE env reader, ONE series builder, ONE accept-and-time step (WR-04):
+    // all of these used to be defined here, where only this bench could reach them. They
+    // now live in `crate::sc1_wall` beside the composition builder the sweep and every
+    // single-composition entry point share.
+    use crate::sc1_wall::{
+        env_usize, holidays_for, profile_token, tight_daily_series, time_accepted,
+    };
     use crate::types::ForecastArgs;
 
     #[test]
@@ -2125,14 +2049,13 @@ mod design_cost {
         let dates = env_usize("HOLIDAY_BENCH_DATES", 84);
         let horizon = env_usize("HOLIDAY_BENCH_HORIZON", 365);
 
-        let t0 = days_from_civil(2015, 1, 1);
-        let ds: Vec<String> = (0..points).map(|i| format_ymd(t0 + i as i64)).collect();
-        let y: Vec<f64> = (0..points)
-            .map(|i| {
-                let t = i as f64;
-                10.0 + 0.01 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin()
-            })
-            .collect();
+        let (ds, y, t0) = tight_daily_series(points);
+        debug_assert_eq!(
+            t0,
+            days_from_civil(2015, 1, 1),
+            "the shared series builder still starts where this bench's recorded numbers were \
+             measured; a moved epoch changes the holiday dates and therefore the design"
+        );
         let holidays = holidays_for(columns, dates, t0, points);
         let n_holidays = holidays.len();
         let dates_total: usize = holidays.iter().map(|h| h.dates.len()).sum();
@@ -2144,26 +2067,21 @@ mod design_cost {
             ..ForecastArgs::default()
         };
 
-        let t = std::time::Instant::now();
-        let r = crate::forecast::forecast(&args).expect("the bench configuration must be accepted");
-        let total = t.elapsed().as_secs_f64();
-        assert_eq!(r.yhat.len(), horizon, "one row per horizon step");
-
-        let profile = if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        };
+        let (r, total) = time_accepted(
+            &args,
+            &format!("holiday_design_wall points={points} columns={columns} horizon={horizon}"),
+        );
         println!(
             "HOLIDAY DESIGN WALL: points={points} columns={columns} dates={dates_total} \
              holidays={n_holidays} horizon={horizon} cells={} triple={} total_s={total:.3} \
-             fit_s={:.3} predict_s={:.3} other_s={:.3} arch={} profile={profile}",
+             fit_s={:.3} predict_s={:.3} other_s={:.3} arch={} profile={}",
             (points + horizon) * columns,
             points * columns * dates_total,
             r.fit_seconds,
             r.predict_seconds,
             total - r.fit_seconds - r.predict_seconds,
-            std::env::consts::ARCH
+            std::env::consts::ARCH,
+            profile_token()
         );
     }
 }

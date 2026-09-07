@@ -1607,7 +1607,7 @@ bindings:
   status: implemented
   notes: 'Landed with plan 05-10. DECLARATIVE equation: it maps PF-007 and PF-008 onto the mechanisms that answer them, and the RENDERER is where a violation would surface (a best-seed headline, an unlabelled F1, an adapter-only size comparison, a verdict word). render_human composes every table, and its tests scan the whole output for verdict vocabulary and pair every absence assertion with a non-vacuity one. Row corrected from the non-existent `bench_report`.'
 # ---------------------------------------------------------------------------
-# Phase 6 (native time-series forecasting stack). 62 rows, one per equation of
+# Phase 6 (native time-series forecasting stack). 63 rows, one per equation of
 # the four Phase 6 contracts, audited as a BLOCKING tier3 gate by the Makefile's
 # `contract-audit-phase6`. That target does MORE than `pv audit`: it also resolves
 # every row below to a definition site in the file its `module_path` names, because
@@ -1617,9 +1617,10 @@ bindings:
 #
 # `module_path` here is a CRATE path, not an `aprender::` path: these three crates
 # are workspace members outside the `aprender` facade, following the Phase 2
-# `aprender_contrastive_data` precedent. Two rows bind to `justfile` recipes rather
-# than to Rust — a benchmark ratio and a working-tree ignore claim are falsified by
-# recipes, and no function can be either claim (REVIEW-06-03 / REVIEW-06-04).
+# `aprender_contrastive_data` precedent. THREE rows bind to `justfile` recipes rather
+# than to Rust — a benchmark ratio, a working-tree ignore claim and a swept wall-clock
+# bar are falsified by recipes, and no function can be any of them
+# (REVIEW-06-03 / REVIEW-06-04 / 06-REVIEW.md WR-04).
 # ---------------------------------------------------------------------------
 - contract: prophet-parity-v1.yaml
   equation: data_prep_exact
@@ -2020,6 +2021,13 @@ bindings:
   signature: 'just recipe: forecast-pool-ratio'
   status: implemented
   notes: 'REVIEW-06-04. Binds to the RECIPE, not to a unit test: a wall-clock ratio is a benchmark claim, and putting it in the correctness suite makes the suite flaky without making the pool faster. Host-gated (aarch64 release); measured 5.162x against a 2.0 bar in 06-EVIDENCE.md §3.'
+- contract: forecast-tool-boundary-v1.yaml
+  equation: sc1_wall_swept
+  module_path: justfile
+  function: forecast-sc1-sweep
+  signature: 'just recipe: forecast-sc1-sweep'
+  status: implemented
+  notes: '06-REVIEW.md WR-04. Binds to the RECIPE and not to the libtest, following pool_speedup_host_gated and for the same reason: a wall-clock bar inside the correctness suite moves with CPU throttling. The harness (sc1_wall::sc1_wall_sweep) prints under any profile and asserts the bar only on release; the recipe forces --release, widens the NeuralProphet row to its at-the-bound geometry, and re-checks every printed line. Landed with plan 06-16, which also DELETED prophet::sampler::logistic_band_wall (#[ignore]d, no recipe, no bar, all four recorded lines freq="D") and folded design_cost::holiday_design_wall onto this sweep composition builder, so there is one geometry builder rather than three. OBSERVED failing on the CR-01 configuration with the lambda bound raised.'
 - contract: forecast-tool-boundary-v1.yaml
   equation: logistic_changepoint_cost_bounded
   module_path: aprender_forecast::forecast

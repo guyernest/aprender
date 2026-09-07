@@ -576,3 +576,52 @@ macOS dev box today. Whoever picks it up should fix `aprender-compute` rather th
 `#[allow]`s, and should re-run on BOTH arches — three of the findings are arch-conditional and
 therefore invisible to CI, which is X64. That is the same shape as CLAUDE.md #2370's "findings
 accumulate where no gate looks".
+
+## D-ITEM-06-16 — `chronos-coldstart`'s 150 ms bar has a different vacuous-pass mechanism, closed only by an upstream parse
+
+Plan 06-16 Task 3 step (4) enumerated every wall-clock bar in the repository. Five were
+converted to `scripts/assert_measurement_under.sh`. Two comparison sites were DELIBERATELY
+EXCLUDED, and one of the two carries a residual worth writing down rather than leaving in a
+commit message.
+
+`justfile` `chronos-coldstart` asserts its bar as `if [ "$med" -ge 150 ]; then FAIL`, and
+`chronos-embed-build` asserts a binary-size ceiling the same way. That is bash's INTEGER test,
+not `awk`'s `+ 0`, and the difference was MEASURED rather than assumed:
+
+```
+  token=[]     -> refused rc=2  [: : integer expression expected
+  token=[abc]  -> refused rc=2  [: abc: integer expression expected
+  token=[1.5]  -> refused rc=2  [: 1.5: integer expression expected
+  token=[150]  -> rc=0 (at the bar)
+  token=[149]  -> rc=1 (under the bar)
+```
+
+So neither site can COERCE garbage to 0 the way IN-01 describes. That is the stated reason for
+the exclusion.
+
+**The residual.** The direction still matters. In `chronos-coldstart` the test is
+`if [ "$med" -ge 150 ]; then FAIL; fi`, so a token that makes the test ERROR (rc=2) takes the
+NOT-taken branch and the recipe goes on to print `COLD START OK`. `set -euo pipefail` does not
+catch it: a command in an `if` condition is exempt from errexit. The hole is closed today only
+because `med` is extracted by `sed -n 's/^median: ... \([0-9][0-9]*\) ms.*/\1/p'`, a pattern
+that can emit nothing but digits, and an EMPTY `med` is caught by the explicit `[ -z "$med" ]`
+guard immediately above. The bar is therefore safe by its upstream parse, not by itself.
+
+status: open
+
+**What to do.** Route it through `assert_measurement_under.sh under "$med" 150` like the other
+five, so the guarantee lives at the bar instead of two lines above it. Out of scope for 06-16,
+whose fence was the five `awk`-coercion sites named by IN-01.
+
+## D-ITEM-06-16-b — the Phase 6 binding resolver could not resolve a PARAMETERIZED `just` recipe
+
+`Makefile`'s `contract-audit-phase6` resolved a `justfile`-bound row with
+`pattern="^$name[[:space:]]*:"`, which matches `forecast-pool-ratio:` but NOT
+`forecast-sc1-sweep points="33" ...:`. It was invisible until 06-16 became the first plan to
+bind a parameterized recipe, and it would equally have failed for `forecast-holiday-bench`.
+
+FIXED in 06-16 (`^$name([[:space:]][^:]*)?:`), with a must-match / must-not-match table run over
+the OLD and NEW patterns together, and re-mutated in its own scope: renaming the recipe makes
+the audit exit 2 with `RESOLVE- forecast-tool-boundary-v1.yaml sc1_wall_swept`.
+
+status: resolved
