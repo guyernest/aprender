@@ -56,7 +56,7 @@ metadata:
     `[self-hosted, X64, Linux, clean-room]` (`.github/workflows/ci.yml:96,516,988,1039`), where that
     microkernel does not run and inner-product accumulation order through a 12-layer T5 differs. The
     aarch64 bar is NOT loosened. A SECOND equation, `quantiles_abs_f32_nonaarch64`, carries a
-    PROVISIONAL 5.0e-6 that the tests select on `!cfg!(target_arch = "aarch64")`, and it is headroom,
+    MEASURED 2.0e-6 that the tests select on `!cfg!(target_arch = "aarch64")`. It was provisional headroom until the first x86_64 run on 2026-09-07 measured 9.5367e-7 and discharged the obligation below,
     not evidence — see its own description and FALSIFY-CHRONOS-002.
   references:
     - 'Ansari, A. F., Stella, L., Turkmen, C., Zhang, X., Mercado, P., Shen, H., Shchur, O., Rangapuram, S. S., Pineda Arango, S., Kapoor, S., Zschiegner, J., Maddix, D. C., Mahoney, M. W., Torkkola, K., Gordon Wilson, A., Bohlke-Schneider, M. & Wang, Y. (2024). Chronos: Learning the Language of Time Series. arXiv:2403.07815.'
@@ -277,7 +277,7 @@ proof_obligations:
     applies_to: all
 
   - type: bound
-    property: 'On any non-aarch64 target the same quantiles hold the provisional bar, and the run records the measured value'
+    property: 'On any non-aarch64 target the same quantiles hold the MEASURED 2.0e-6 bar (provisional until 2026-09-07), and the run records the measured value'
     formal: 'max|q_rust - q_py| <= equations.quantiles_abs_f32_nonaarch64.float_tolerance when !cfg!(target_arch = "aarch64")'
     applies_to: all
 
@@ -365,15 +365,15 @@ falsification_tests:
 
   - id: FALSIFY-CHRONOS-001
     rule: 'Peyton Manning 64-step f32 quantile parity against chronos-forecasting 2.3.1'
-    prediction: 'On aarch64 the max absolute quantile difference is <= 1.0e-6 (measured 9.54e-7); on any other target it is <= the provisional 5.0e-6. The test prints which equation and which ARCH it selected, and the measured max|delta|.'
+    prediction: 'On aarch64 the max absolute quantile difference is <= 1.0e-6 (measured 9.54e-7); on any other target it is <= 2.0e-6 (measured 9.5367e-7 on x86_64, 2026-09-07). The test prints which equation and which ARCH it selected, and the measured max|delta|.'
     test: 'cargo test -p aprender-forecast --lib bolt::parity::peyton_ladder_matches_oracle_f32'
     if_fails: 'Either a kernel drifted or the routing changed. Read the hidden-state rungs in the SAME test first: if input_embeds and the encoder are green and only the quantiles are red, the defect is in the output head or the instance-norm rescale, not in the transformer. If the encoder rung is also red, suspect the relative-position bias or the attention mask.'
 
   - id: FALSIFY-CHRONOS-002
-    rule: 'The non-aarch64 bar is PROVISIONAL and must be replaced by a measurement'
-    prediction: 'The first x86_64 run of peyton_ladder_matches_oracle_f32 prints `quantiles_abs_f32_nonaarch64` together with its measured max|delta|. That number, plus margin, then REPLACES 5.0e-6 in this file.'
+    rule: 'The non-aarch64 bar is PROVISIONAL and must be replaced by a measurement — DISCHARGED 2026-09-07'
+    prediction: 'The first x86_64 run of peyton_ladder_matches_oracle_f32 prints `quantiles_abs_f32_nonaarch64` together with its measured max|delta|. That number, plus margin, then REPLACES 5.0e-6 in this file. DISCHARGED: the first x86_64 run (AWS EC2, Amazon Linux 2023) printed `quantiles_abs_f32_nonaarch64 = 5e-6 (ARCH=x86_64)` and `max|delta| 9.5367e-7`; the bar is now 2.0e-6 and this file is at version 2.0.0 on pv diff''s MAJOR verdict.'
     test: 'cargo test -p aprender-forecast --lib bolt::parity::peyton_ladder_matches_oracle_f32 (on an x86_64 host; every CI job in this repo is one)'
-    if_fails: 'If the measured value EXCEEDS 5.0e-6, the x86_64 accumulation order costs more than a 5x allowance and the phase owes a real investigation before loosening anything further — do not raise the bar to fit the observation. If it is far BELOW 5.0e-6 and the bar is left at 5.0e-6, this obligation has failed in the other direction: a stated unknown has been converted into unstated slack.'
+    if_fails: 'If the measured value EXCEEDS 5.0e-6, the x86_64 accumulation order costs more than a 5x allowance and the phase owes a real investigation before loosening anything further — do not raise the bar to fit the observation. If it is far BELOW 5.0e-6 and the bar is left at 5.0e-6, this obligation has failed in the other direction: a stated unknown has been converted into unstated slack. WHAT HAPPENED: it measured 9.5367e-7, far below — and rather than narrow to the measurement (1.0e-6 would also have passed, at 95.4%), the bar was set to 2.0e-6. One run on one instance type is one sample; fitting a bound from one side is the CR-01 error. The premise was also FALSIFIED: 9.5367431640625e-7 is exactly 2^-20, a quantization quantum of the f32 output, identical to the aarch64 value — so the different x86_64 GEMM accumulation order the headroom existed for does not move it at all.'
 
   - id: FALSIFY-CHRONOS-003
     rule: 'The air and short100 ladders reproduce the oracle relative to scale'

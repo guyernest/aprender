@@ -518,6 +518,11 @@ chronos-embed-build:
 # does not rest on that anyway — the gate requires `0 ignored` AND at least one
 # passing test in BOTH summaries, so a filter that matched nothing would fail.
 # THE embedded-weights gate: verify the pinned weights, then run both armed suites.
+# MANUAL BY DECISION, NOT BY OVERSIGHT (UAT item 3, D-ITEM-06-03, decided 2026-09-07).
+# This gate runs NOWHERE automatically: .github/workflows/ci.yml contains zero `chronos`
+# and zero `forecast` matches, and that was ACCEPTED rather than fixed. Every SC4 parity
+# claim therefore rests on someone running THIS recipe. A green recorded in a SUMMARY is
+# evidence that it passed once, on the machine that ran it — not that it is enforced.
 chronos-gate:
     #!/usr/bin/env bash
     set -euo pipefail

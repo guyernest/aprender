@@ -28,7 +28,6 @@ tested_on: http://localhost:8770 (built from HEAD 22e85dd3f; the servers already
   testing phase-06 code)
 how: `cargo run -p aprender-mcp-forecast -- --http 8770` and `cargo run -p aprender-mcp-chronos -- --http 8771`, open each demo page, drive initialize -> tools/list -> tools/call. CHECK FOR STALE LISTENERS FIRST (`lsof -nP -iTCP:PORT -sTCP:LISTEN`) — four stale servers were occupying the documented ports and answered `initialize` with HTTP 200.
 why_human: CARRIED FORWARD, still open. 06-08 declared this a human end-of-phase check (visual rendering + a real browser MCP client). No automated test covers the pages; re-confirmed at HEAD.
-result: [pending]
 
 ### 2. Chronos x86_64 parity measurement replaces the PROVISIONAL tolerance
 expected: A measured max|delta| replaces the PROVISIONAL 5.0e-6 headroom value in contracts/chronos-bolt-parity-v1.yaml.
@@ -67,7 +66,6 @@ how: |
   before `--` and fails with `error: unexpected argument 'chronos::parity' found` (verified).
   cargo test takes ONE positional; both filters must follow `--`. The justfile had it right.
 why_human: CARRIED FORWARD, still open. This box is aarch64 (arm64); every CI runner is X64 with no Chronos leg. D-ITEM-06-04 / REVIEW-06-02.
-result: [pending]
 
 ### 3. Decide whether SC4's Chronos ladder staying DARK in CI is acceptable
 expected: An explicit decision recorded against D-ITEM-06-03.
@@ -87,7 +85,6 @@ follow_on: |
   - Any future claim that SC4 is "enforced" must name the manual command, not CI.
 how: Decide whether the ci.yml embedded-weights leg should now be applied, or the ladder stays a manual local gate.
 why_human: CARRIED FORWARD, still open. `.github/workflows/ci.yml` contains ZERO `chronos` or `forecast` matches; every SC4 parity claim rests on a manual local gate.
-result: [pending]
 
 ### 4. Decide the disposition of CR-01 (MAX_NP_TRAIN_COST over-refuses in-spec requests)
 expected: A bound whose VALUE is resolved per deployment envelope, with the accepted region written down and asserted.
@@ -123,7 +120,18 @@ follow_on: |
 expected: Either the wiring lands, or the recipe headers and binding.yaml's `sc1_wall_swept ... status: implemented` note say explicitly that the gate is MANUAL, so `implemented` is not read as `running`.
 how: Decide whether `just forecast-sc1-sweep` (and chronos-bench / chronos-coldstart / forecast-pool-ratio / forecast-holiday-bench) belong in a `make` tier or a scheduled workflow shaped like toolchain-ceiling.yml.
 why_human: Every round-3 plan fences off .github/workflows/*.yml and states that CI wiring is a human decision. No reference to forecast-sc1-sweep exists in .github/, Makefile or scripts/. The in-suite sc1_wall_sweep that CI does run is a debug build and returns before the 2 s assertion by design.
-result: [pending]
+result: DECIDED 2026-09-07 by Guy — wire into `make tier3`.
+decision: |
+  `just forecast-sc1-sweep` now runs as `make forecast-sc1-gate` inside tier3 (commit 6ce4ff7d8),
+  wired per the Makefile's own evidence convention rather than by appending a line: standalone
+  first with rc captured off the command (rc=0, 25 s warm, 19 compositions), then a failure
+  INDUCED and OBSERVED — the bar lowered 2.0 -> 1.0 made the neuralprophet row fail at 1.579 s
+  while every prophet composition (0.156-0.843 s) still PASSED, and the target exited 2. Bar
+  restored, re-run green.
+  NOT wired into CI: item 3 keeps Phase 6's release-profile gates manual/pre-push. The gate
+  FAILS LOUDLY if `just` is absent rather than skipping.
+  Recorded margin: the worst composition measured 1.420 s then 1.579 s on the SAME geometry —
+  11.2% run-to-run spread, 21-29% headroom under the 2 s bar.
 
 ## Summary
 
