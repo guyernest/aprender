@@ -154,3 +154,84 @@ pilot first costs nothing extra and replaces the projection's weakest input (an 
 per-step cost, where the two measured bases differ by ~2.2x) with one measured cell of exactly
 the shape being run. The remaining 39 are then re-presented against a measured number rather
 than a 5.5–12.6 h range.
+
+---
+
+# ADDENDUM — the RE-PROJECTION against the measured pilot cell (option-b)
+
+Recorded 2026-09-08 after the pilot ran. Decision at the first checkpoint, verbatim:
+
+> Select: option-b — run the pilot cell only, then re-present the projection against its
+> measured time before any of the remaining 39.
+
+Scope authorized and honoured: **ONE s8 pilot cell**. The remaining 39 did not run.
+
+## The measurement
+
+| quantity | value | where it comes from |
+|---|---|---|
+| pilot wall clock | **47 s** | `date` around the driver's own invocation, `\|\|` capture, no pipe |
+| `train_wall_ms` | **30 713** (30.713 s) | the row's own field — prepare + tune_encoder + fit_head + verify_artifact |
+| shot-independent remainder | **16.287 s** | 47 − 30.713 |
+| steps at s8 | 24 | the closed form, confirmed by the run |
+
+The remainder is genuinely shot-independent: encoder load, the 86.6 MiB APR write, the reload
+through the production door, the dedicated cold-probe child, 3 warm classifies, throughput over
+the 280-row test split, and the 66-row + 280-row evaluations. None of them scales with shots.
+
+## The re-projection
+
+`train_wall = fixed_train + steps x per_step` is one equation in two unknowns, and one cell
+cannot solve it. So the only PURELY MEASURED figure is the upper bound, taken by attributing all
+of `train_wall` to the steps:
+
+```
+per_step <= 30.713 / 24 = 1.2797 s/step
+matrix   = 20 400 steps x 1.2797 = 26 106 s = 7.25 h
+         + 40 x 16.287 s         =    651 s
+UPPER BOUND (measured)           = 26 757 s = 7.43 h
+```
+
+Sensitivity to the unmeasured split, LABELLED AS ASSUMPTION, not measurement:
+
+| assumed `fixed_train` | implied s/step | matrix total |
+|---|---|---|
+| 0 s (pure upper bound, measured) | 1.2797 | **7.43 h** |
+| 5 s | 1.0714 | 6.31 h |
+| 8 s | 0.9464 | 5.63 h |
+| 12 s | 0.7797 | 4.73 h |
+
+> **RE-PROJECTION: 7.4 h as a measured upper bound; 4.7–7.4 h as the honest range.**
+> The pre-pilot range was 5.5–12.6 h. The upper edge fell by **41%**.
+
+## Which basis it corroborates — stated plainly
+
+- **Basis A is REFUTED.** It predicted 2.033 s/step at s8 and therefore a 48.8 s s8 *tuning*
+  phase. The measured whole `train_wall` is 30.7 s — less than Basis A's tuning alone — so
+  Basis A is high by **at least 1.59x**, however the 30.7 s splits.
+- **Basis B is CORROBORATED.** Its bracket was 0.925–1.542 s/step; the measured upper bound
+  1.2797 falls **inside** it, nearer the upper edge.
+- **The cell did NOT land outside both.** It lands inside Basis B, and it is mutually consistent
+  with 05-07's other CLI-tier datum: 47 s here versus ~37 s there is +27%, which is what adding
+  an APR write, a reload, a cold-probe child and a throughput pass to that ladder should cost.
+
+The projection's weakest input has been replaced by a measurement, which is exactly what
+option-b bought.
+
+## Disk — measured per-cell anchor, and a correction
+
+| figure | value |
+|---|---|
+| per-cell artifact | **86.6 MiB** (`artifact_bytes = 90 777 156`) — the projection assumed 87 MB, so it holds |
+| bench directory after the pilot | 87 MB total |
+| remaining 39 cells | **3.30 GiB** |
+| free now | **21.6 GiB** |
+| projected free after the sweep | **~18.3 GiB** |
+
+**Correction to a number that would otherwise mislead.** Free space fell 36.19 → 18.64 GiB
+across the pilot half. Almost none of that is the cell: `target/` is now **39 GB** because the
+pin correctly refused two stale binaries and forced two release rebuilds (74 s and 84 s). That
+is build cost, not per-cell cost, and it will not recur during the sweep — the binary is now
+fresh and `CARGO_INCREMENTAL=0` is exported by the driver. Reporting the 17.55 GiB drop as a
+per-cell figure would have projected a volume-filling sweep that the measurement does not
+support.
