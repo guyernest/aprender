@@ -21,7 +21,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 2: Deterministic Pair and Data Protocol** - Make few-shot selection and bounded pair generation reproducible, provenance-complete, leakage-safe, and non-quadratic. (code-complete 2026-08-09; verification returned `human_needed` — 4 items pending in `02-HUMAN-UAT.md`)
 - [x] **Phase 3: Faithful Two-Stage Trainer and Head** - Deliver an auditable encoder-tuning then unique-row classifier-fitting lifecycle that alone may identify as SetFit. (all 10 plans code-complete 2026-08-11; verification returned `human_needed` — 5/5 roadmap criteria verified, 47/50 must-have truths. **All 5 items adjudicated 2026-08-14**: `03-HUMAN-UAT.md` is `status: complete`, `03-VERIFICATION.md` reads `passed`. The 4 code-review blockers were VERIFICATION-layer weaknesses, not implementation defects — see `03-REVIEW.md`.) (completed 2026-08-14)
 - [ ] **Phase 4: APR Artifact and Production Parity** - Persist, reload, inspect, predict, evaluate, and serve the exact verified model through shared CPU-first APIs. (all 22 plans code-complete 2026-08-16; verification returned `gaps_found` — 0/5 roadmap criteria fully met (2 FAILED, 3 PARTIAL), 94/95 must-have truths, and 04-11's per-crate mutation gate unmet. Five gap-closure plans 04-18..04-22 landed 2026-08-16 for the user-scoped subset that does NOT depend on F-10. **UAT ran 2026-08-16 at `b3f816c25`: 12 tests, 12 passed, 0 issues — `04-UAT.md`.** Verification reconciled to `gaps_acknowledged` with its verdict UNAMENDED. Closed since the report: BIND-004/backend_identity, WR-08, WR-09, WR-10, both D-04-11-A production survivors, F-07. **Still NOT closed:** F-10 (→ Phase 5, keeps SC1/SC3 UNMET and OPS-01/OPS-02 NOT MET), the per-crate mutation baselines + aggregate score (→ standalone compute ticket by human ruling; no mutation score exists for Phase 4), WR-01 (`fs::rename` not race-free), and SAFE-02's "in CI" clause (the 16 ci.yml setfit legs have never executed). **Blocked on `/gsd:secure-phase 04`** — security enforcement is ON and no `04-SECURITY.md` exists; `04-REVIEW.md` holds six unreferenced Warnings incl. a symlink-following non-exclusive temp file in the selection-lock write path. **This box has now been wrongly `[x]`-ed TWICE by `roadmap.update-plan-progress`, which marks a phase complete as soon as summary_count reaches plan_count — before any verifier runs and regardless of unmet must-haves. Do not re-check it until secure-phase lands and F-10 closes.**)
-- [ ] **Phase 5: Benchmark and Claims Gate** - Produce the complete reproducible 40-cell SetFit-versus-9B-LoRA evidence set and reject incomplete or unequal claims.
+- [ ] **Phase 5: Benchmark and Claims Gate** - Produce the complete reproducible 40-cell SetFit evidence set and reject incomplete or unequal claims. (**AMENDED 2026-09-07, `05-CONTEXT.md` D-19**: the 9B LoRA comparison arm is descoped — aprender cannot run the Qwen3.5-9B hybrid architecture and no GPU host is reachable. The fail-closed gate is unchanged; only the declared matrix shrinks. Deferred as `D-ITEM-05-15`.)
 - [ ] **Phase 6: Native Time-Series Forecasting Stack** - Ship pure-Rust Prophet, NeuralProphet and Chronos-Bolt forecasters behind stateless `forecast` MCP tools, each proven to parity with its Python original. (added 2026-09-05 from ten VALIDATED spikes; independent of Phases 1–5)
 
 ## Phase Details
@@ -252,8 +252,15 @@ Plans:
 
 ### Phase 5: Benchmark and Claims Gate
 
-**Goal**: Users can audit and recompute a complete, selection-safe TweetEval comparison between the
-verified SetFit APR and the existing 9B LoRA path across every contracted shot and seed.
+**Goal**: Users can audit and recompute a complete, selection-safe TweetEval evidence set for the
+verified SetFit APR across every contracted shot and seed, with each cell bound to a recorded
+selection manifest so a second method can later be paired against it without re-running this half.
+**AMENDED 2026-09-07 (`05-CONTEXT.md` D-19)** — the original goal read "a complete, selection-safe
+TweetEval comparison between the verified SetFit APR and the existing 9B LoRA path". The comparison
+is deferred, not cancelled (`D-ITEM-05-15`): the Qwen3.5-9B checkpoint is hybrid-attention (24
+linear + 8 full layers), gated, and multimodal, and `TransformerConfig` models none of that, so the
+arm was never buildable in this phase; separately, no GPU host is reachable. No report produced
+under this phase may state or imply a SetFit-versus-LoRA result.
 **Depends on**: Phase 4
 **Blocked by a Phase 3 gate until a contract edit lands**: Phase 3's SetFit-identity gate
 freezes its per-parameter update thresholds against a CALIBRATED REGIME, and by user decision
@@ -267,9 +274,9 @@ contract edit per Phase 3 D-10(c), never an inline relaxation by a Phase 5 execu
 **Success Criteria** (what must be TRUE):
 
   1. A user can evaluate ordered predictions with the official `F_avg = (F1_against + F1_favor) / 2`, per-class metrics, three-class macro-F1, MCC, confusion matrix, and validation-only calibration diagnostics bound to explicit ordered labels.
-  2. A user can run all 40 shot/seed cells for both SetFit and 9B LoRA—shots `{8,16,32,64}` crossed with the ten contracted seeds—with an identical sampled-ID hash for both methods in every cell.
+  2. A user can run all 40 shot/seed cells for SetFit—shots `{8,16,32,64}` crossed with the ten contracted seeds—each cell recording the selection-manifest hash that would bind a second method to an identical sampled-ID set. *(AMENDED 2026-09-07, D-19: originally "for both SetFit and 9B LoRA ... for both methods in every cell". The pairing mechanism is delivered; the second arm is deferred.)*
   3. A user receives one machine-readable row per method/shot/seed run containing dataset/model revisions, selection lock, artifact hash, encoder-update evidence, backend/hardware identity, quality metrics, and consistently bounded resource measurements.
-  4. A user can exactly recompute headline means, dispersion, uncertainty, and paired SetFit-versus-LoRA deltas from all stored rows, while any missing, selectively omitted, unmatched, or post-test-selected cell invalidates the report.
+  4. A user can exactly recompute headline means, dispersion, and uncertainty from all stored rows, while any missing, selectively omitted, unmatched, or post-test-selected cell invalidates the report. *(AMENDED 2026-09-07, D-19: the "paired SetFit-versus-LoRA deltas" clause is deferred. The invalidate-on-omission behaviour is NOT weakened — 05-10's gate and its six doctored negatives are unchanged.)*
   5. A user can compare training time, cold/warm latency, throughput with batch/warmup boundaries, peak memory, artifact size, calibration, and classification quality measured from the same reloaded production artifacts.
 
 **Branch base**: Phase 5 continues on `gsd/phase-2-contract-gate` per the 02-01 policy (phases

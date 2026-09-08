@@ -1,17 +1,17 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: 06
-current_phase_name: Native Time-Series Forecasting Stack
+current_phase: 05
+current_phase_name: Benchmark and Claims Gate
 status: executing
 stopped_at: Completed 06-17-PLAN.md
-last_updated: "2026-09-07T18:39:26.226Z"
+last_updated: "2026-09-08T03:14:46.930Z"
 last_activity: 2026-09-07
-last_activity_desc: 06-14..06-17 planned — gap-closure round 3, scoped to the door-bound CLASS
-state_head: b27f663304bb2cd3efd16f480dcce2b15d92fff2
+last_activity_desc: Phase 05 execution started
+state_head: 1996d2792626384a931ceaaa3352dad565afd43b
 progress:
-  total_phases: 6
-  completed_phases: 1
+  total_phases: 7
+  completed_phases: 2
   total_plans: 81
   completed_plans: 78
 milestone_name: milestone
@@ -24,13 +24,13 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-07)
 
 **Core value:** A small labeled dataset can produce an accurate, fast, reproducible classifier that trains and runs entirely through Aprender's native Rust and APR lifecycle.
-**Current focus:** Phase 06 — Native Time-Series Forecasting Stack
+**Current focus:** Phase 05 — Benchmark and Claims Gate
 
 ## Current Position
 
-Phase: 06 (Native Time-Series Forecasting Stack) — EXECUTING
-Plan: 5 of 17
-Status: Ready to execute
+Phase: 05 (Benchmark and Claims Gate) — EXECUTING
+Plan: 1 of 14
+Status: Executing Phase 05
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-07 — Phase 06 execution started
+Last activity: 2026-09-07 — Phase 05 execution started
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,

@@ -277,6 +277,74 @@ files under the plan's calibration store (each carrying a verified `evidence_sha
   survive rounding. It would be tested by measuring near-null at an intermediate step
   count. It has NOT been tested and must not be stated as a result.
 
+- **D-19: The 9B LoRA comparison arm is not buildable in this phase; EVAL-02/EVAL-04 descope to a
+  SetFit-only claim set.** *(recorded 2026-09-07, at plan 05-11's Task 1 checkpoint, before any
+  compute was spent — no LoRA cell was ever run.)*
+
+  Two independent findings, either of which alone blocks the arm.
+
+  **(a) No GPU host exists to run it on.** `lambda-vector`/`gx10` — the host every
+  `scripts/dispatch-*.sh` hardcodes (`GX10_HOST=gx10`, `GX10_USER=noah`,
+  `/home/noah/src/aprender`) — is unreachable: 12 enumerated candidates, 12 failures, rc captured
+  per attempt (8 × `Could not resolve hostname`, 4 × TCP timeout on the two RFC1918 addresses in
+  `known_hosts`). Credentials are not the missing piece; `~/.ssh/config` holds one stanza (`rvsc`,
+  an AWS EC2 box) and there is no tailscale, no lambda CLI, and nothing in `/etc/hosts`. Human
+  ruling: the box belongs to the project's main maintainer and is not accessible to us. The AWS
+  fallback was enumerated and refuted rather than assumed — all five instances in the account
+  (eu-west-1, eu-west-2, us-east-1 ×3) are **stopped**, and none is a GPU instance; the largest is
+  a `t4g.large`. `rvsc` itself is a `t3.small`, which is exactly right for what it did do (the
+  Chronos x86_64 parity run, `06-UAT.md:36`) and cannot hold a 9B model.
+
+  **(b) More decisively, aprender cannot run the Qwen3.5-9B architecture — so a GPU would not have
+  helped.** The weights are NOT the blocker: `Qwen/Qwen3.5-9B` is public and ungated, revision
+  `c202236235762e1c871ad0ccb60c8ee5ba337b9a`, 19.31 GB bf16 across 4 shards. The blocker is
+  structural, three gaps, each independently fatal:
+
+  | The checkpoint declares | `TransformerConfig` (`crates/aprender-train/src/transformer/config.rs`) has |
+  |---|---|
+  | `layer_types` — **24 `linear_attention` + 8 `full_attention`** over 32 layers, `full_attention_interval: 4` (measured from the live config, not inferred) | no `layer_types` field — 14 `pub` fields, uniform layers only |
+  | `attn_output_gate: true` | no such field |
+  | `Qwen3_5ForConditionalGeneration`, `image_token_id: 248056`, image+video preprocessor configs, every text hyperparameter nested under `text_config` | `qwen3_5_9b()` is a flat, text-only config |
+
+  The only hybrid-forward artifact in the tree is
+  `crates/aprender-contracts-staging/generated/qwen35-hybrid-forward-v1_scaffold.rs`, and
+  `aprender-contracts-staging` **has no `Cargo.toml`** — CLAUDE.md names it as one of the two
+  directories under `crates/` that are not crates. It never compiles. It is a scaffold.
+
+  `contracts/qwen35-e2e-verification-v1.yaml` does not contradict this: all seven of its
+  falsification tests are **analytical** — parameter count, FLOPs-per-token, quantized-memory
+  ordering, roofline, obligation coverage, per-block shape preservation, layer composition. Not
+  one loads a weight or compares against the reference implementation. It verifies the
+  *description* of the architecture, not an implementation of it. Consistent with that, every
+  `"9B"` occurrence in the workspace resolves to config, CLI dispatch, or `training_plan.rs`
+  (cost *estimation*) — nothing that loads 9B weights.
+
+  Corroborating scale evidence: 05-06 Task 3's reload preflight, the precondition licensing 9B
+  compute, passed against a **783,236-byte** base model. The LoRA machinery is proven at fixture
+  scale and has never met a real 9B checkpoint.
+
+  **Confidence, stated honestly.** (b) rests on *structural absence* — fields that do not exist in
+  a config struct — not on an observed loader failure. By this repo's own Verification Discipline
+  rule 6 that is an inference from one line of evidence, not a measurement. The cheap falsifier
+  needs no GPU and was offered before this amendment was written: point aprender's loader at the
+  real `config.json` and see whether it accepts or rejects the checkpoint. **It was not run.** If
+  it ever loads cleanly, D-19(b) is refuted and the arm becomes a pure host-access question again.
+  (a) is measured and stands on its own regardless.
+
+  **What this changes.** EVAL-02 and EVAL-04 drop the LoRA arm and the paired-delta clause; the
+  Phase 5 goal and success criteria 2 and 4 follow. **The claims gate itself is untouched** —
+  05-10's fail-closed `verify_run`, its six doctored negatives, and the "any missing, selectively
+  omitted, unmatched or post-test-selected cell invalidates the report" behaviour all survive
+  byte-for-byte. Only the *declared matrix* shrinks, from 40 comparison cells (80 rows) to 40
+  SetFit rows. The phase's thesis — *reject incomplete or unequal claims* — is preserved by
+  refusing to publish a comparison we cannot substantiate, which is that thesis applied to
+  ourselves.
+
+  **What this does NOT license.** This is not a ruling that the 9B path is unnecessary, and it is
+  not permission to compare SetFit against nothing and call it a win. The comparison is deferred
+  as real work, not cancelled: see `D-ITEM-05-15`. No report produced under this amendment may
+  state or imply a SetFit-versus-LoRA result.
+
 </decisions>
 
 <canonical_refs>
@@ -457,3 +525,4 @@ files under the plan's calibration store (each carrying a verified `evidence_sha
 *Phase: 5-Benchmark and Claims Gate*
 *Context gathered: 2026-08-16*
 *Amended: 2026-08-17 with plan 05-01 execution evidence (D-16..D-18)*
+*Amended: 2026-09-07 at plan 05-11's Task 1 checkpoint — the 9B LoRA arm descoped (D-19)*

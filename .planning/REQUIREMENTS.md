@@ -258,16 +258,31 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
   calibration diagnostics
 
 - [ ] **EVAL-02**: A user can run every combination of 8, 16, 32, and 64 shots per class with the ten
-  contracted seeds for both SetFit and the 9B LoRA baseline using an identical sampled-ID hash in
-  each comparison cell
+  contracted seeds for SetFit, each cell bound to a recorded selection manifest so that any future
+  second method can be paired against it on an identical sampled-ID hash
+  — **AMENDED 2026-09-07 (Phase 5 D-19): the 9B LoRA arm is descoped.** The original text required
+  "both SetFit and the 9B LoRA baseline ... in each comparison cell". aprender cannot run the
+  Qwen3.5-9B architecture (hybrid `layer_types` 24 linear + 8 full, `attn_output_gate`, and a
+  multimodal `text_config`-nested checkpoint; `TransformerConfig` models none of the three, and the
+  only hybrid-forward artifact lives in the non-compiling `aprender-contracts-staging`), and no GPU
+  host is reachable. The pairing *mechanism* — the selection manifest and its hash — is retained
+  and delivered, so the arm can be added later without re-running the SetFit half. Deferred as
+  `D-ITEM-05-15`, not cancelled.
 
 - [ ] **EVAL-03**: A user receives one machine-readable row per method/shot/seed run containing
   dataset/model revisions, selection lock, artifact hash, encoder-update evidence, backend/hardware,
   quality metrics, and resource metrics
 
-- [ ] **EVAL-04**: A user can recompute headline means, dispersion, uncertainty, and paired SetFit-
-  versus-LoRA deltas exactly from all 40 stored comparison cells, and missing or selectively omitted
-  cells invalidate the report
+- [ ] **EVAL-04**: A user can recompute headline means, dispersion, and uncertainty exactly from all
+  40 stored SetFit cells, and any missing, selectively omitted, unmatched, or post-test-selected
+  cell invalidates the report
+  — **AMENDED 2026-09-07 (Phase 5 D-19): the paired SetFit-versus-LoRA delta clause is descoped**
+  for the reason recorded against EVAL-02. **The fail-closed behaviour is NOT weakened**: 05-10's
+  `verify_run`, its six doctored negatives, and the invalidate-on-omission rule survive
+  byte-for-byte; only the declared matrix shrinks from 40 comparison cells (80 rows) to 40 SetFit
+  rows. The paired-t machinery built by 05-04 is retained and remains contract-bound; it is
+  unexercised by this phase's report rather than removed. No report produced under this amendment
+  may state or imply a SetFit-versus-LoRA result.
 
 - [ ] **EVAL-05**: A user can compare training time, warm/cold prediction latency, throughput with
   batch/warmup boundaries, peak memory, artifact size, calibration, and classification quality from
@@ -410,6 +425,23 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
 | SAFE-01 | Phase 4 | Partial — parity clause delivered and falsifiable; one binding row unresolved |
 | SAFE-02 | Phase 4 | Partial — local 4x3 matrix green; the CI half is an UNAPPLIED patch awaiting human approval |
 | SAFE-03 | Phase 3 | Complete |
+
+## Phase 5 in-flight amendment — the 9B LoRA arm (05-11 checkpoint, 2026-09-07)
+
+Recorded here rather than absorbed silently, because this file outlives the phase.
+
+| # | Item | Where | State |
+|---|------|-------|-------|
+| 1 | **D-19 descope** — EVAL-02 loses the "both SetFit and the 9B LoRA baseline" clause; EVAL-04 loses "paired SetFit-versus-LoRA deltas". Declared matrix: 40 comparison cells (80 rows) → 40 SetFit rows | `05-CONTEXT.md` D-19 | amended above, in-requirement |
+| 2 | **Cause (a): no GPU host** — `lambda-vector`/`gx10` unreachable (12 candidates, 12 failures, rc per attempt); the box is the upstream maintainer's and is not accessible to us. AWS fallback enumerated and refuted: 5 instances, all stopped, none GPU | `05-11-SUMMARY.md` | measured, closed |
+| 3 | **Cause (b): the architecture is unimplemented** — Qwen3.5-9B is hybrid-attention (24 linear + 8 full) with `attn_output_gate` and a multimodal `text_config` checkpoint; `TransformerConfig` has no field for any of the three; the hybrid-forward scaffold sits in `aprender-contracts-staging`, which has no `Cargo.toml` and never compiles | `05-CONTEXT.md` D-19(b) | **inference from structural absence, not an observed loader failure** — falsifier named and NOT run |
+| 4 | **`qwen35-e2e-verification-v1.yaml` is not counter-evidence** — all 7 falsification tests are analytical (param count, FLOPs, memory ordering, roofline, obligation coverage, shape preservation, layer composition). None loads a weight. It verifies the architecture's *description* | `contracts/qwen35-e2e-verification-v1.yaml` | recorded |
+| 5 | **What survives untouched** — 05-10's fail-closed claims gate, its six doctored negatives, the invalidate-on-omission rule, the selection-manifest pairing key, and 05-04's paired-t machinery (retained, contract-bound, unexercised) | 05-10, 05-04 | no change |
+| 6 | **Deferred, not cancelled** — the SetFit-versus-LoRA comparison and the 9B hybrid forward path | `D-ITEM-05-15` | open ticket |
+
+**Traceability note.** EVAL-02 and EVAL-04 remain Phase 5 requirements and remain `Pending`; they
+are amended in scope, not satisfied by this amendment. A future milestone that implements the 9B
+hybrid path should restore the descoped clauses rather than re-deriving them.
 
 ## Phase 4 closing audit — recorded amendments and limitations (04-11)
 

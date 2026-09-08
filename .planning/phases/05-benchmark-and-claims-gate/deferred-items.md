@@ -226,3 +226,59 @@ this red is either not actually running with `-D warnings` on this path or is sc
 than the docs claim. Worth resolving as its own ticket: either clear the kernel crate or
 record explicitly which crates the `-D warnings` gate covers. A plan-level clippy check in this
 phase should scope to `crates/aprender-train/src` and read the finding count for its own files.
+
+---
+
+## D-ITEM-05-15: the 9B LoRA comparison arm — Qwen3.5 hybrid forward path is unimplemented
+
+**Found during:** plan 05-11, Task 1 checkpoint (2026-09-07), before any compute was spent.
+No LoRA cell was ever run.
+
+**Symptom:** the phase's comparison arm cannot be built. Two independent causes.
+
+**(a) No GPU host.** `lambda-vector`/`gx10`, hardcoded by every `scripts/dispatch-*.sh`
+(`GX10_HOST=gx10`, `GX10_USER=noah`, `/home/noah/src/aprender`), is unreachable — 12 enumerated
+candidates, 12 failures, rc captured per attempt (8 × `Could not resolve hostname`, 4 × TCP timeout
+against the two RFC1918 addresses in `known_hosts`). Human ruling: the host belongs to the
+project's upstream maintainer and is not accessible to us. AWS fallback refuted, not assumed — all
+five instances in the account are stopped and none is a GPU instance.
+
+**(b) The architecture is unimplemented — the blocking cause.** Weights are NOT the obstacle:
+`Qwen/Qwen3.5-9B` is public and ungated, revision `c202236235762e1c871ad0ccb60c8ee5ba337b9a`,
+19.31 GB bf16 across 4 shards. Three structural gaps, each independently fatal:
+
+| Checkpoint declares | `crates/aprender-train/src/transformer/config.rs` has |
+|---|---|
+| `layer_types`: 24 `linear_attention` + 8 `full_attention` over 32 layers, `full_attention_interval: 4` | no `layer_types` field (14 `pub` fields, uniform layers) |
+| `attn_output_gate: true` | no such field |
+| `Qwen3_5ForConditionalGeneration`, `image_token_id: 248056`, image+video preprocessor configs, text hyperparameters nested under `text_config` | `qwen3_5_9b()` is flat and text-only |
+
+The only hybrid-forward artifact is
+`crates/aprender-contracts-staging/generated/qwen35-hybrid-forward-v1_scaffold.rs`;
+`aprender-contracts-staging` has no `Cargo.toml` (CLAUDE.md: one of the two non-crate directories
+under `crates/`), so it never compiles.
+
+**Why `qwen35-e2e-verification-v1.yaml` is not counter-evidence:** all seven falsification tests
+are analytical — parameter count, FLOPs-per-token, quantized-memory ordering, roofline, obligation
+coverage, per-block shape preservation, layer composition. None loads a weight or compares against
+the reference implementation. It verifies the architecture's *description*.
+
+**Scale corroboration:** 05-06 Task 3's reload preflight — the precondition that licenses 9B
+compute — passed against a 783,236-byte base model. The LoRA path is proven at fixture scale only.
+
+**Confidence:** (b) is an inference from *structural absence*, not an observed loader failure —
+Verification Discipline rule 6. The falsifier is cheap and needs no GPU: point aprender's loader at
+the real `config.json` and see whether it accepts or rejects the checkpoint. **It has not been
+run.** Run it first when picking this up; if it loads, (b) is refuted and only (a) remains.
+
+**Not caused by Phase 5.** `TransformerConfig` has never modelled hybrid layers; `qwen3_5_9b()` and
+the staging scaffold both predate this phase. Phase 5 is where the gap became load-bearing.
+
+**To close:** implement the Qwen3.5 hybrid forward path (linear attention + gated output + the
+full-attention interval) with a real weight-loading conformance fixture, then restore EVAL-02's
+"both SetFit and the 9B LoRA baseline" clause and EVAL-04's paired-delta clause and run the 40 LoRA
+cells against the retained selection manifests. The SetFit half does not need re-running — the
+pairing key is recorded per cell precisely so the arm can be added later.
+
+**Blocks:** the descoped halves of EVAL-02 and EVAL-04 (`05-CONTEXT.md` D-19; the Phase 5 amendment
+table in `.planning/REQUIREMENTS.md`).
