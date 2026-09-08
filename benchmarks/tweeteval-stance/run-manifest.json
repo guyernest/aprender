@@ -1,0 +1,293 @@
+{
+  "semantic_hash": "1762a57842b6266da228184b2c9fd5078c394673108b9468e84bb98ca243d82a",
+  "volatile": {
+    "created_at": "",
+    "tool_version": "0.63.0"
+  },
+  "payload": {
+    "schema_version": 1,
+    "contract_id": "setfit-benchmark-claims-v1",
+    "cells": [
+      {
+        "method": "setfit",
+        "shots": 8,
+        "seed": 13,
+        "status": "complete",
+        "row_sha256": "fbce5eef210ea2e940300d3ffb40cb6604bd98d950389ea59b1faa154155ec77"
+      },
+      {
+        "method": "setfit",
+        "shots": 8,
+        "seed": 17,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 8,
+        "seed": 23,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 8,
+        "seed": 29,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 8,
+        "seed": 31,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 8,
+        "seed": 37,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 8,
+        "seed": 41,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 8,
+        "seed": 43,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 8,
+        "seed": 47,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 8,
+        "seed": 53,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 16,
+        "seed": 13,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 16,
+        "seed": 17,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 16,
+        "seed": 23,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 16,
+        "seed": 29,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 16,
+        "seed": 31,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 16,
+        "seed": 37,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 16,
+        "seed": 41,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 16,
+        "seed": 43,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 16,
+        "seed": 47,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 16,
+        "seed": 53,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 32,
+        "seed": 13,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 32,
+        "seed": 17,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 32,
+        "seed": 23,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 32,
+        "seed": 29,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 32,
+        "seed": 31,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 32,
+        "seed": 37,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 32,
+        "seed": 41,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 32,
+        "seed": 43,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 32,
+        "seed": 47,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 32,
+        "seed": 53,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 64,
+        "seed": 13,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 64,
+        "seed": 17,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 64,
+        "seed": 23,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 64,
+        "seed": 29,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 64,
+        "seed": 31,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 64,
+        "seed": 37,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 64,
+        "seed": 41,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 64,
+        "seed": 43,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 64,
+        "seed": 47,
+        "status": "pending",
+        "row_sha256": null
+      },
+      {
+        "method": "setfit",
+        "shots": 64,
+        "seed": 53,
+        "status": "pending",
+        "row_sha256": null
+      }
+    ]
+  }
+}

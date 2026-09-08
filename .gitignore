@@ -108,3 +108,11 @@ per-layer-trace/
 # `deploy.toml` IS curated and tracked; `deployment.toml` is written by
 # `cargo pmcp deploy` on every run and only records the last endpoint.
 /.pmcp/deployment.toml
+
+# Phase 5 benchmark working files. Root-anchored per CB-510: the evidence set
+# (rows, selections, locks, run-manifest.json) IS committed; the 87 MB-per-cell
+# .apr artifacts, per-cell logs, probe text and the driver pid lock are not.
+/benchmarks/*/artifacts/
+/benchmarks/*/logs/
+/benchmarks/*/probe/
+/benchmarks/*/.driver.lock
