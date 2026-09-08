@@ -829,7 +829,16 @@ impl RunManifest {
     /// Declare a fresh manifest: all 40 ACTIVE cells `Pending`, no digests yet.
     #[must_use]
     pub fn declare() -> Self {
-        let cells = Self::expectation()
+        Self::declare_for(ExpectationScope::Active)
+    }
+
+    /// Declare a fresh manifest over an explicit scope.
+    ///
+    /// Production callers can only name [`ExpectationScope::Active`], because the deferred
+    /// variant is `#[cfg(test)]`-gated — so this is not a widening door.
+    #[must_use]
+    pub fn declare_for(scope: ExpectationScope) -> Self {
+        let cells = Self::expectation_for(scope)
             .into_iter()
             .map(|cell| CellEntry {
                 method: cell.method,

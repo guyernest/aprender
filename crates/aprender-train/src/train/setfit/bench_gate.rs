@@ -19,14 +19,20 @@
 //! failure:
 //!
 //! 1. the manifest's own digest, recomputed from its payload's canonical bytes;
-//! 2. the manifest's expectation set equals the contract-derived 80, in contract order;
+//! 2. the manifest's expectation set equals the contract-derived ACTIVE 40, in contract order;
 //! 3. every declared cell is `complete` with a recorded digest;
 //! 4. per cell: the row file exists, [`BenchRow::from_bytes`] accepts it (schema first, then its
 //!    own envelope digest — that ORDER belongs to `bench_row` and is documented there), the file
 //!    bytes hash to the digest the MANIFEST recorded, and the payload agrees with the slot;
-//! 5. per `(shots, seed)`: the two rows carry an identical `selection_manifest_hash`;
+//! 5. per `(shots, seed)`: the two rows carry an identical `selection_manifest_hash`
+//!    (DEFERRED — the active scope has one method, so this rule's domain is empty and it is
+//!    reported as not exercised, never as satisfied);
 //! 6. per row: provenance RECOMPUTED from committed bytes (below);
-//! 7. per LoRA row: the no-selection attestation's conjuncts.
+//! 7. per LoRA row: the no-selection attestation's conjuncts (DEFERRED, same reason).
+//!
+//! Steps 1 + 4 + 6 are ALSO available over a single declared cell as [`verify_cell`], which
+//! deliberately excludes the set-level steps — see that function's own note for why a door
+//! that inherited them could never pass at pilot time.
 //!
 //! Refusing early is not an optimisation. Aggregating over partially-verified rows would produce
 //! a number, and a number is what a reader takes away.
@@ -45,7 +51,14 @@
 //! credential, and it is not claimed to. **A producer that controls the rows AND the lock/ledger
 //! files can still emit a mutually consistent forgery.** The six doctored negatives in this
 //! module's test file prove detection of INCONSISTENT evidence; they prove nothing about
-//! TRUTHFUL provenance. This is the same wording `setfit-benchmark-claims-v1`'s own
+//! TRUTHFUL provenance.
+//!
+//! A SECOND RESIDUAL SINCE THE 2.0.0 NARROWING, stated rather than left to be inferred: the
+//! active scope means this gate cannot be handed a second method's row AT ALL, so nothing it
+//! verifies is a cross-method claim. That narrowing buys exactly one thing — the manifest no
+//! longer declares cells that cannot exist — and it must not be read as having strengthened
+//! anything. The two-method machinery below (pairing, the LoRA attestation, the paired delta)
+//! is retained, contract-bound and unexercised, exactly as 05-04's paired-t is. This is the same wording `setfit-benchmark-claims-v1`'s own
 //! `selection_safety_evidence.residual_risk` uses, and it is repeated here because a gate whose
 //! module doc overstates what it proves is the exact failure this phase exists to prevent — the
 //! phase's own bar is "a gate could pass while the claim is false".
@@ -74,15 +87,15 @@ use std::path::{Path, PathBuf};
 
 use aprender::error::AprenderError;
 use aprender::stats::hypothesis::{
-    mean_f64, min_max_f64, paired_ci95_df9, sample_std_f64, ttest_rel_f64, PAIRED_DESIGN_N,
-    T_CRIT_975_DF9,
+    ci95_one_sample_df9, mean_f64, min_max_f64, paired_ci95_df9, sample_std_f64, ttest_rel_f64,
+    PAIRED_DESIGN_N, T_CRIT_975_DF9,
 };
 use serde::{Deserialize, Serialize};
 
 use super::bench_row::{
-    sha256_hex, BenchRow, CellKey, CellStatus, Method, MethodEvidence, RunManifest, BENCH_METHODS,
-    BENCH_SEEDS, BENCH_SHOTS, CLAIMS_CONTRACT_ID, EXPECTED_CELLS, MECHANISM_CHILD_MAX_RSS_TIME_L,
-    MECHANISM_CHILD_MAX_RSS_VM_HWM,
+    sha256_hex, BenchRow, CellEntry, CellKey, CellStatus, ExpectationScope, Method, MethodEvidence,
+    RunManifest, ACTIVE_METHODS, BENCH_METHODS, BENCH_SEEDS, BENCH_SHOTS, CLAIMS_CONTRACT_ID,
+    EXPECTED_CELLS, MECHANISM_CHILD_MAX_RSS_TIME_L, MECHANISM_CHILD_MAX_RSS_VM_HWM,
 };
 use super::lock::SelectionRule;
 
@@ -597,20 +610,28 @@ pub fn verify_run(
     manifest: &RunManifest,
     bench_dir: &Path,
 ) -> Result<VerifiedRunSet, BenchGateError> {
+    // TWO ARGUMENTS, AND NO SCOPE ARGUMENT (T-05-11-07). The public door admits no way to
+    // widen the expectation set: it delegates with the ACTIVE scope and nothing else. The
+    // scoped form below is `pub(crate)` and its only other caller is a deferred-scope test,
+    // because `ExpectationScope::DeferredTwoMethod` is itself `#[cfg(test)]`-gated.
+    verify_run_scoped(manifest, bench_dir, ExpectationScope::Active)
+}
+
+/// [`verify_run`] against an explicit scope.
+///
+/// Identical logic; the scope only chooses which expectation set step 2 compares against.
+/// One implementation for both scopes (OPS-03) — a separate deferred-scope verifier would be
+/// a second definition of the seven refusals and would drift from this one.
+pub(crate) fn verify_run_scoped(
+    manifest: &RunManifest,
+    bench_dir: &Path,
+    scope: ExpectationScope,
+) -> Result<VerifiedRunSet, BenchGateError> {
     // ---- 1. THE MANIFEST'S OWN DIGEST -----------------------------------------------------
     // Recomputed here even though `RunManifest::from_bytes` already checked it, because a
     // manifest can also be built in memory (`declare()` + `record()`), and this gate must not
     // depend on which door its argument came through.
-    let recomputed = manifest
-        .payload
-        .to_canonical_bytes()
-        .map_or_else(|_| String::new(), |bytes| sha256_hex(&bytes));
-    if recomputed != manifest.semantic_hash {
-        return Err(BenchGateError::ManifestDigestMismatch {
-            expected: manifest.semantic_hash.clone(),
-            got: recomputed,
-        });
-    }
+    verify_manifest_digest(manifest)?;
 
     // ---- 2. THE EXPECTATION SET, BEFORE ANY ROW BYTE IS READ -------------------------------
     // The two vacuity backstops. Without them a producer can declare almost nothing, satisfy it
@@ -618,12 +639,17 @@ pub fn verify_run(
     if manifest.payload.cells.is_empty() {
         return Err(BenchGateError::EmptyExpectationSet);
     }
-    let expectation = RunManifest::expectation();
+    let expectation = RunManifest::expectation_for(scope);
     let declared: Vec<CellKey> = manifest.payload.cells.iter().map(|e| e.cell()).collect();
     if declared != expectation {
+        // THIS IS ALSO THE OUT-OF-SCOPE REFUSAL, and deliberately so. A manifest DECLARING a
+        // cell for a method outside the active scope differs from the expectation set, so it
+        // is refused HERE — before any row byte is read — by the backstop that already
+        // existed. No new variant is minted for it: a variant reachable only from a test-only
+        // constructor would be a guard over a path production cannot take.
         return Err(BenchGateError::ExpectationSetMismatch {
             declared: declared.len(),
-            expected: EXPECTED_CELLS,
+            expected: expectation.len(),
         });
     }
 
@@ -632,87 +658,19 @@ pub fn verify_run(
     // a selectively omitted cell VISIBLE, and reading rows first would report a file-level
     // symptom for a run-level omission.
     for entry in &manifest.payload.cells {
-        match (entry.status, entry.row_sha256.as_deref()) {
-            (CellStatus::Complete, Some(digest)) if !digest.is_empty() => {}
-            (CellStatus::Complete, _) => {
-                return Err(BenchGateError::IncompleteCell {
-                    cell: entry.cell().render(),
-                    detail: "the manifest marks it complete but records no row digest".to_string(),
-                });
-            }
-            (CellStatus::Pending, _) => {
-                return Err(BenchGateError::IncompleteCell {
-                    cell: entry.cell().render(),
-                    detail: "the manifest still lists it as `pending`, so this run is not \
-                             complete and no aggregate over it is publishable"
-                        .to_string(),
-                });
-            }
-        }
+        verify_entry_complete(entry)?;
     }
 
     // ---- 4. PER CELL: FILE, SCHEMA + ENVELOPE DIGEST, MANIFEST DIGEST, SLOT ----------------
+    // The loop BODY is `verify_row_evidence`, shared verbatim with the single-cell door
+    // (OPS-03). Nothing moved between passes: it performs exactly the checks this body always
+    // performed, in exactly that order, so the order in which refusals fire across rows is
+    // unchanged.
     let rows_dir = bench_dir.join(ROWS_DIR);
-    let mut rows: Vec<(CellKey, BenchRow)> = Vec::with_capacity(EXPECTED_CELLS);
+    let mut rows: Vec<(CellKey, BenchRow)> = Vec::with_capacity(expectation.len());
     for entry in &manifest.payload.cells {
         let cell = entry.cell();
-        let path = rows_dir.join(row_file_name(cell));
-        let bytes = read_evidence(cell, &path)?;
-
-        // `from_bytes` is the ONE door: it parses (schema) and then recomputes the envelope
-        // digest, and it returns nothing on either failure. The two outcomes are separated here
-        // because they are different defects with the same symptom — a trimmed block is an
-        // omission, a digest mismatch is tampering.
-        // Match the variant directly rather than dispatching on `variant_tag()` and
-        // then re-matching: the string compare discarded the type information the
-        // second match needed back, which forced an unreachable arm to stay total.
-        // Matching once makes that arm impossible to write, and moves `expected`/
-        // `got` out of the owned error instead of cloning them.
-        let row = BenchRow::from_bytes(&bytes).map_err(|error| match error {
-            super::bench_row::BenchRowError::SemanticHashMismatch { expected, got } => {
-                BenchGateError::RowDigestMismatch {
-                    cell: cell.render(),
-                    path: path.display().to_string(),
-                    expected,
-                    got,
-                }
-            }
-            other => BenchGateError::RowSchemaRefused {
-                cell: cell.render(),
-                path: path.display().to_string(),
-                detail: other.to_string(),
-            },
-        })?;
-
-        let recorded = entry.row_sha256.clone().unwrap_or_default();
-        // WHICH DIGEST THE MANIFEST HOLDS, stated once. `emit_row` records `row.semantic_hash`
-        // — the digest over the payload's CANONICAL COMPACT bytes — not a digest over the file.
-        // That is deliberate and it is `bench_row_schema`'s own invariant: the file is PRETTY so
-        // rows can be reviewed in diffs, and the digest is canonical so whitespace cannot change
-        // a row's identity. Comparing the file's bytes here would refuse a byte-identical row
-        // that had been reformatted, and would call it tampering.
-        //
-        // The check is not weakened by that: `from_bytes` above has already proven
-        // `semantic_hash == sha256(canonical(payload))`, so a row whose payload differs at all
-        // carries a different `semantic_hash` and is caught here.
-        if row.semantic_hash != recorded {
-            return Err(BenchGateError::RowManifestDigestMismatch {
-                cell: cell.render(),
-                path: path.display().to_string(),
-                recorded,
-                actual: row.semantic_hash.clone(),
-            });
-        }
-
-        if row.payload.cell() != cell {
-            return Err(BenchGateError::RowSlotMismatch {
-                cell: cell.render(),
-                path: path.display().to_string(),
-                payload_cell: row.payload.cell().render(),
-            });
-        }
-
-        rows.push((cell, row));
+        rows.push((cell, verify_row_evidence(entry, &rows_dir, cell)?));
     }
 
     // ---- 5. PAIRING ------------------------------------------------------------------------
@@ -731,6 +689,210 @@ pub fn verify_run(
     }
 
     Ok(VerifiedRunSet { rows })
+}
+
+/// Step 4's loop body, as ONE named function — `verify_run`'s step-4 loop and the single-cell
+/// door both call it, so there is exactly one definition of "is this row's evidence valid".
+///
+/// Performs, IN THIS ORDER: file present, `from_bytes` (schema, then envelope digest),
+/// manifest-digest agreement, slot agreement. Returns the PARSED row, because both callers
+/// need the value — `verify_run` accumulates it for steps 5 through 7, and the door hands it
+/// to [`verify_provenance`].
+///
+/// EQUIVALENCE IS PROVEN BEHAVIOURALLY, not structurally. `bench_gate_tests.rs` feeds a table
+/// of per-row defects to BOTH entry points and asserts the same variant tag comes back from
+/// each. A test that merely asserted the door calls this function would restate the door's own
+/// definition and could never go red.
+///
+/// # Errors
+///
+/// [`BenchGateError::RowFileMissing`], [`BenchGateError::EvidenceReadFailed`],
+/// [`BenchGateError::RowSchemaRefused`], [`BenchGateError::RowDigestMismatch`],
+/// [`BenchGateError::RowManifestDigestMismatch`] or [`BenchGateError::RowSlotMismatch`].
+fn verify_row_evidence(
+    entry: &CellEntry,
+    rows_dir: &Path,
+    cell: CellKey,
+) -> Result<BenchRow, BenchGateError> {
+    let path = rows_dir.join(row_file_name(cell));
+    let bytes = read_evidence(cell, &path)?;
+
+    // `from_bytes` is the ONE door: it parses (schema) and then recomputes the envelope
+    // digest, and it returns nothing on either failure. The two outcomes are separated here
+    // because they are different defects with the same symptom — a trimmed block is an
+    // omission, a digest mismatch is tampering.
+    // Match the variant directly rather than dispatching on `variant_tag()` and
+    // then re-matching: the string compare discarded the type information the
+    // second match needed back, which forced an unreachable arm to stay total.
+    // Matching once makes that arm impossible to write, and moves `expected`/
+    // `got` out of the owned error instead of cloning them.
+    let row = BenchRow::from_bytes(&bytes).map_err(|error| match error {
+        super::bench_row::BenchRowError::SemanticHashMismatch { expected, got } => {
+            BenchGateError::RowDigestMismatch {
+                cell: cell.render(),
+                path: path.display().to_string(),
+                expected,
+                got,
+            }
+        }
+        other => BenchGateError::RowSchemaRefused {
+            cell: cell.render(),
+            path: path.display().to_string(),
+            detail: other.to_string(),
+        },
+    })?;
+
+    let recorded = entry.row_sha256.clone().unwrap_or_default();
+    // WHICH DIGEST THE MANIFEST HOLDS, stated once. `emit_row` records `row.semantic_hash`
+    // — the digest over the payload's CANONICAL COMPACT bytes — not a digest over the file.
+    // That is deliberate and it is `bench_row_schema`'s own invariant: the file is PRETTY so
+    // rows can be reviewed in diffs, and the digest is canonical so whitespace cannot change
+    // a row's identity. Comparing the file's bytes here would refuse a byte-identical row
+    // that had been reformatted, and would call it tampering.
+    //
+    // The check is not weakened by that: `from_bytes` above has already proven
+    // `semantic_hash == sha256(canonical(payload))`, so a row whose payload differs at all
+    // carries a different `semantic_hash` and is caught here.
+    if row.semantic_hash != recorded {
+        return Err(BenchGateError::RowManifestDigestMismatch {
+            cell: cell.render(),
+            path: path.display().to_string(),
+            recorded,
+            actual: row.semantic_hash.clone(),
+        });
+    }
+
+    if row.payload.cell() != cell {
+        return Err(BenchGateError::RowSlotMismatch {
+            cell: cell.render(),
+            path: path.display().to_string(),
+            payload_cell: row.payload.cell().render(),
+        });
+    }
+
+    Ok(row)
+}
+
+/// Step 1, as a named function: the manifest's digest over its own canonical bytes.
+///
+/// Recomputed even though `RunManifest::from_bytes` already checked it, because a manifest can
+/// also be built in memory (`declare()` + `record()`), and no door may depend on which
+/// constructor its argument came through.
+///
+/// # Errors
+///
+/// [`BenchGateError::ManifestDigestMismatch`].
+fn verify_manifest_digest(manifest: &RunManifest) -> Result<(), BenchGateError> {
+    let recomputed = manifest
+        .payload
+        .to_canonical_bytes()
+        .map_or_else(|_| String::new(), |bytes| sha256_hex(&bytes));
+    if recomputed != manifest.semantic_hash {
+        return Err(BenchGateError::ManifestDigestMismatch {
+            expected: manifest.semantic_hash.clone(),
+            got: recomputed,
+        });
+    }
+    Ok(())
+}
+
+/// Step 3's PER-ENTRY rule: this entry is `Complete` and carries a non-empty row digest.
+///
+/// `verify_run` applies it to every entry (the sweep); the single-cell door applies it to its
+/// one declared cell and to no other, which is exactly what lets the door pass at pilot time
+/// when the other 39 entries are still `pending`.
+///
+/// # Errors
+///
+/// [`BenchGateError::IncompleteCell`].
+fn verify_entry_complete(entry: &CellEntry) -> Result<(), BenchGateError> {
+    match (entry.status, entry.row_sha256.as_deref()) {
+        (CellStatus::Complete, Some(digest)) if !digest.is_empty() => Ok(()),
+        (CellStatus::Complete, _) => Err(BenchGateError::IncompleteCell {
+            cell: entry.cell().render(),
+            detail: "the manifest marks it complete but records no row digest".to_string(),
+        }),
+        (CellStatus::Pending, _) => Err(BenchGateError::IncompleteCell {
+            cell: entry.cell().render(),
+            detail: "the manifest still lists it as `pending`, so this run is not \
+                     complete and no aggregate over it is publishable"
+                .to_string(),
+        }),
+    }
+}
+
+/// THE SINGLE-CELL VERIFICATION DOOR — `verify_run`'s steps 1 + 4 + 6, over ONE declared cell.
+///
+/// # Which steps it applies, and which it deliberately does not
+///
+/// APPLIES, in `verify_run`'s order:
+/// 1. the manifest's own digest ([`verify_manifest_digest`]);
+/// 3'. step 3's per-entry rule, TO THIS ONE ENTRY ONLY ([`verify_entry_complete`]);
+/// 4. the row's file, schema, envelope digest, manifest-digest agreement and slot agreement
+///    ([`verify_row_evidence`]);
+/// 6. provenance recomputed from committed bytes ([`verify_provenance`]).
+///
+/// DOES NOT APPLY: step 2 (expectation-set equality), step 3's SWEEP over every entry, step 5
+/// (pairing) and step 7 (the second method's attestation).
+///
+/// # Why the set-level steps are excluded — this is the whole point of the door
+///
+/// At pilot time the manifest declares 40 cells with 39 still `pending`, which is PRECISELY
+/// the state step 3's sweep refuses on. A door that inherited the set-level checks could
+/// therefore never pass on the one cell it exists to check, and `bench report` over a copy
+/// holding a single row refuses at completeness — BEFORE the row loop — so the pilot row's own
+/// bytes are never read at all. This door reads them.
+///
+/// # It emits no statistic, and cannot
+///
+/// The return type is `()`, not the row and not an aggregate: no mean, no dispersion, no
+/// interval, nothing a reader could mistake for a partial report (T-05-11-06). The report is
+/// the only door that emits numbers. What this validates is exactly what those two stages
+/// validate and no more — file present, schema parse, envelope digest, manifest-digest
+/// agreement, slot agreement, and the recomputed lock digest with its role and rule. The
+/// resource and size FIELDS are serde fields whose presence and parse are covered by
+/// `BenchRow::from_bytes`; this door does not independently validate their values.
+///
+/// # Errors
+///
+/// [`BenchGateError::ExpectationSetMismatch`] if `cell` is not in the ACTIVE expectation set —
+/// the EXISTING variant, because asking for a cell the contract does not declare is exactly an
+/// expectation-set disagreement and no new variant is minted for it. Otherwise whatever
+/// [`verify_manifest_digest`], [`verify_entry_complete`], [`verify_row_evidence`] or
+/// [`verify_provenance`] returns, with the SAME variant tag `verify_run` would have produced
+/// for the same defect.
+pub fn verify_cell(
+    manifest: &RunManifest,
+    bench_dir: &Path,
+    cell: CellKey,
+) -> Result<(), BenchGateError> {
+    // ---- 1. THE MANIFEST'S OWN DIGEST -----------------------------------------------------
+    verify_manifest_digest(manifest)?;
+
+    // ---- THE CELL MUST BE ONE THE CONTRACT DECLARES ---------------------------------------
+    // Not step 2: this does NOT compare the manifest's whole cell list against the
+    // expectation, which is what would refuse a 39-pending pilot manifest. It only refuses a
+    // REQUEST for a cell outside the active scope — including a second method's cell.
+    let Some(entry) = manifest.payload.cells.iter().find(|e| e.cell() == cell) else {
+        return Err(BenchGateError::ExpectationSetMismatch {
+            declared: 0,
+            expected: EXPECTED_CELLS,
+        });
+    };
+
+    // ---- 3'. STEP 3's PER-ENTRY RULE, FOR THIS ENTRY AND NO OTHER -------------------------
+    // The status of every other entry is ignored, which is what lets this pass at pilot time.
+    verify_entry_complete(entry)?;
+
+    // ---- 4. THE ROW'S OWN EVIDENCE --------------------------------------------------------
+    let rows_dir = bench_dir.join(ROWS_DIR);
+    let row = verify_row_evidence(entry, &rows_dir, cell)?;
+
+    // ---- 6. PROVENANCE, RECOMPUTED FROM COMMITTED BYTES ------------------------------------
+    verify_provenance(cell, &row, bench_dir)?;
+
+    // Deliberately nothing returned. See the module note above.
+    Ok(())
 }
 
 /// Every `(shots, seed)` pair's two rows must carry an identical `selection_manifest_hash`.
@@ -989,6 +1151,14 @@ pub struct MethodShotQuality {
     pub macro_f1: SeriesSummary,
     /// MCC's summary.
     pub mcc: SeriesSummary,
+    /// THE ACTIVE-SCOPE UNCERTAINTY: a 95% interval for `f_avg` over the ten contracted
+    /// seeds, on the frozen `T_CRIT_975_DF9`.
+    ///
+    /// A SEED-DISPERSION interval at fixed data and protocol — how far the headline moves
+    /// when only the sampling seed moves. NOT a population interval and NOT a comparison.
+    /// The renderer must label it as such at the point of presentation; a bare interval
+    /// beside a mean reads as a comparison the active scope did not make.
+    pub f_avg_seed_ci95: Ci95,
     /// Every seed's own numbers, seed ascending.
     pub per_seed: Vec<SeedValue>,
 }
@@ -1122,9 +1292,18 @@ pub struct RunAggregate {
     pub t_crit_975_df9: f64,
     /// The cell keys, in the exact order this aggregate iterated them. Pinned by test.
     pub key_sequence: Vec<String>,
+    /// The methods this aggregate actually covers, in contract order. Under the ACTIVE scope
+    /// this is one method, and that is what makes `deltas` empty rather than defective.
+    pub methods: Vec<String>,
     /// Quality per `(method, shots)`, in contract order.
     pub quality: Vec<MethodShotQuality>,
     /// The paired deltas per shot level, shots ascending.
+    ///
+    /// EMPTY, AND STRUCTURALLY ABSENT FROM THE SERIALIZED FORM, whenever fewer than two
+    /// methods are present — which is every run under the active scope. Not an empty section
+    /// and not a null: a delta key carrying `[]` still tells a reader a comparison was
+    /// attempted, and that is the implication D-19 forbids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deltas: Vec<ShotDelta>,
     /// Resource per `(method, shots)`, in contract order.
     pub resource: Vec<MethodShotResource>,
@@ -1179,7 +1358,20 @@ pub fn aggregate(verified: &VerifiedRunSet) -> RunAggregate {
         by_cell.insert(*cell, row);
     }
 
-    for method in BENCH_METHODS {
+    // THE METHODS THIS SET ACTUALLY CONTAINS, in contract order — read from the verified
+    // rows rather than from a constant. Under the active scope that is one method, so no
+    // group is emitted for a method nobody measured, and the deltas below are empty rather
+    // than computed over an absent arm. Reading it from a constant would have produced a
+    // group of empty series for the deferred method and called it data.
+    let mut methods_present: Vec<Method> = BENCH_METHODS
+        .iter()
+        .copied()
+        .filter(|m| verified.rows().iter().any(|(cell, _)| cell.method == *m))
+        .collect();
+    methods_present
+        .sort_unstable_by_key(|m| BENCH_METHODS.iter().position(|b| b == m).unwrap_or(0));
+
+    for method in methods_present.iter().copied() {
         for shots in BENCH_SHOTS {
             let mut f_avg = Vec::with_capacity(PAIRED_DESIGN_N);
             let mut macro_f1 = Vec::with_capacity(PAIRED_DESIGN_N);
@@ -1247,6 +1439,7 @@ pub fn aggregate(verified: &VerifiedRunSet) -> RunAggregate {
                 method,
                 shots,
                 f_avg: summarise(&f_avg),
+                f_avg_seed_ci95: seed_dispersion_ci95(&f_avg),
                 macro_f1: summarise(&macro_f1),
                 mcc: summarise(&mcc),
                 per_seed,
@@ -1280,7 +1473,14 @@ pub fn aggregate(verified: &VerifiedRunSet) -> RunAggregate {
         }
     }
 
-    let deltas = BENCH_SHOTS.iter().map(|shots| shot_delta(*shots, &by_cell)).collect();
+    // A DELTA NEEDS TWO ARMS. With one method present there is no pair to difference, so no
+    // delta is computed at all — rather than computed over an absent arm and reported with a
+    // null reason, which is a comparison section wearing a caveat.
+    let deltas: Vec<ShotDelta> = if methods_present.len() >= 2 {
+        BENCH_SHOTS.iter().map(|shots| shot_delta(*shots, &by_cell)).collect()
+    } else {
+        Vec::new()
+    };
 
     RunAggregate {
         contract_id: CLAIMS_CONTRACT_ID.to_string(),
@@ -1288,9 +1488,49 @@ pub fn aggregate(verified: &VerifiedRunSet) -> RunAggregate {
         degrees_of_freedom: PAIRED_DESIGN_N - 1,
         t_crit_975_df9: T_CRIT_975_DF9,
         key_sequence,
+        methods: methods_present.iter().map(|m| m.tag().to_string()).collect(),
         quality,
         deltas,
         resource,
+    }
+}
+
+/// The ACTIVE-scope seed-dispersion interval for one series, in the typed [`Ci95`] shape.
+///
+/// Delegates to `aprender_core::stats::hypothesis::ci95_one_sample_df9`, which itself
+/// delegates to the PAIRED helper against a zero comparator — so the mean and the (n-1) std
+/// come from the one `moments_or_zero_variance` the paired path uses (OPS-03). There is no
+/// second definition of either moment anywhere in this layer.
+///
+/// Ten identical seed scores produce the typed zero-variance shape with an explicit
+/// no-interval reason. Never a NaN, and never a serde null a reader would take for a missing
+/// measurement (CR-03).
+fn seed_dispersion_ci95(values: &[f64]) -> Ci95 {
+    match ci95_one_sample_df9(values) {
+        Ok(ci) => Ci95 {
+            low: Some(ci.low),
+            high: Some(ci.high),
+            half_width: Some(ci.half_width),
+            std_err: Some(ci.std_err),
+            null_reason: None,
+        },
+        Err(AprenderError::ZeroVarianceDifferences { .. }) => Ci95 {
+            low: None,
+            high: None,
+            half_width: None,
+            std_err: None,
+            null_reason: Some(ZERO_VARIANCE_NULL_REASON.to_string()),
+        },
+        // Unreachable through a VerifiedRunSet, which guarantees ten seeds per group.
+        // Reported with its reason rather than panicked: a gate that aborts tells a reader
+        // less than one that says which number is missing and why.
+        Err(other) => Ci95 {
+            low: None,
+            high: None,
+            half_width: None,
+            std_err: None,
+            null_reason: Some(other.to_string()),
+        },
     }
 }
 

@@ -166,9 +166,9 @@ fn ci95_one_sample_df9_refuses_a_seed_set_with_no_dispersion() {
                     "case {id}: the refusal must report the constant, not a NaN"
                 );
             }
-            other => panic!(
-                "case {id}: ten identical seeds must be the typed refusal, got {other:?}"
-            ),
+            other => {
+                panic!("case {id}: ten identical seeds must be the typed refusal, got {other:?}")
+            }
         }
     }
 }
