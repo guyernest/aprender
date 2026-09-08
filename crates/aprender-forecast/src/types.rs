@@ -514,9 +514,31 @@ mod tests {
     //
     // Three rounds of gap closure each fixed exactly the ONE measured probe and the next
     // adversarial pass found the next instance of the same class. `door_surface:` in
-    // forecast-tool-boundary-v1.yaml is the structural answer, and these three tests are what
+    // forecast-tool-boundary-v1.yaml is the structural answer, and these FOUR tests are what
     // make it a CHECKED claim rather than a document that goes stale. An enumeration nobody
     // verifies is the aspirational invariant this round exists to replace.
+    //
+    // WHAT IS ACTUALLY CHECKED, stated narrowly on purpose (T-06-32, 06-SECURITY.md). The
+    // security audit found this comment claiming more than the tests did, so:
+    //
+    //   1. KNOBS, both directions, DERIVED — set equality against `schemars::schema_for!` for
+    //      all THREE argument structs, across BOTH doors (`ForecastArgs` + `HolidayArg` for
+    //      the forecast tool, `ChronosArgs` for the Chronos tool). Until 2026-09-07 the second
+    //      door was absent entirely while this file claimed to cover the whole surface.
+    //   2. CEILINGS -> AXES, DERIVED — every `fit_max_*` / `chronos_max_*` key in `constants:`
+    //      must be named by a cost axis or carry a checked `ceilings_subsumed` exemption.
+    //      The ceiling list comes from the mapping itself, so a new ceiling cannot be added
+    //      without something reasoning about the work it bounds.
+    //   3. AXES -> CEILINGS — every listed axis names a real constant (or a measured
+    //      disposition carrying its measurement).
+    //
+    // THE RESIDUAL, which is real and is NOT closed by the above: an expensive path added
+    // inside `prophet.rs`/`np.rs` that introduces NO constant and NO axis entry is invisible
+    // to all four tests. That is precisely C-06's shape — and note that C-06 would NOT have
+    // been caught by the knobs half either, since `growth`, `freq`, `horizon` and `ds` all had
+    // knobs entries the whole time it was open. The detector for that residual is not a test
+    // here but `just forecast-sc1-sweep` (wired into `make tier3`), which measures the wall
+    // rather than the enumeration. Do not read these four tests as covering it.
 
     /// The `field` + `owner` pairs of every `door_surface.knobs` entry.
     fn enumerated_knobs() -> std::collections::BTreeSet<(String, String)> {
@@ -549,6 +571,15 @@ mod tests {
             (
                 "HolidayArg",
                 serde_json::to_value(schemars::schema_for!(super::HolidayArg)),
+            ),
+            // T-06-32 (06-SECURITY.md): the enumeration covered ONE of the two doors.
+            // `ChronosArgs` is a second live, unauthenticated `tools/call` surface
+            // (`aprender-mcp-chronos`), and its five caller-settable fields had no knobs
+            // entry, no `enforced_by` and no cost axis — the exact condition that let C-07
+            // through — while this contract's header called itself "THE DOOR'S WHOLE SURFACE".
+            (
+                "ChronosArgs",
+                serde_json::to_value(schemars::schema_for!(crate::chronos::ChronosArgs)),
             ),
         ] {
             let schema = schema.expect("schema serializes");
@@ -620,6 +651,105 @@ mod tests {
     /// The pending marker prefix. An axis carrying it is a KNOWN-OPEN axis, held open by
     /// [`no_cost_axis_is_pending`] rather than by a note nobody runs.
     const PENDING_MARKER_PREFIX: &str = "unbounded_pending_";
+
+    /// The INVERSE direction of [`every_cost_axis_names_a_real_bound`], and the half T-06-32
+    /// found missing: every cost CEILING declared in `constants:` must be named by at least one
+    /// cost axis, or be explicitly recorded as subsumed by one.
+    ///
+    /// Why this direction is the one that matters. `every_cost_axis_names_a_real_bound` iterates
+    /// `door_surface.cost_axes` and can therefore only ever check axes that are LISTED. An axis
+    /// nobody wrote down is invisible to it — which is exactly how C-06, the axis behind the
+    /// CRITICAL T-06-31, got in: `growth`, `freq`, `horizon` and `ds` all carried knobs entries
+    /// the whole time, so the knobs half was green throughout. The contract's own claim that
+    /// "MISSING (a field exists with no entry) is how CR-01's cost axis got in" describes a
+    /// mechanism that did not fire.
+    ///
+    /// This test is derivable rather than hand-kept: the ceiling list comes from the
+    /// `constants:` mapping itself (`fit_max_*` / `chronos_max_*`), so a new ceiling added
+    /// there with no axis naming it turns this red without anyone remembering to update a list.
+    ///
+    /// `ceilings_subsumed` is the escape hatch, and it is checked in BOTH directions so it
+    /// cannot rot into a licence: an entry naming a constant that does not exist is a phantom,
+    /// and an entry whose `subsumed_by` is not itself a real axis bound is a dangling claim.
+    #[test]
+    fn every_cost_ceiling_constant_is_named_by_an_axis() {
+        let doc = crate::test_support::contract_value("forecast-tool-boundary-v1");
+        let constants = doc
+            .get("constants")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("forecast-tool-boundary-v1 must carry constants");
+
+        let ceilings: std::collections::BTreeSet<String> = constants
+            .keys()
+            .filter_map(serde_yaml::Value::as_str)
+            .filter(|k| k.starts_with("fit_max_") || k.starts_with("chronos_max_"))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            ceilings.len() >= 10,
+            "vacuity guard: only {} ceiling constants found — the filter has stopped matching \
+             and this test would pass by checking nothing",
+            ceilings.len()
+        );
+
+        let axis_bounds: std::collections::BTreeSet<String> =
+            enumerated_axes().into_iter().map(|(_, b, _)| b).collect();
+
+        let subsumed: Vec<(String, String)> = doc
+            .get("door_surface")
+            .and_then(|d| d.get("ceilings_subsumed"))
+            .and_then(serde_yaml::Value::as_sequence)
+            .map(|seq| {
+                seq.iter()
+                    .map(|e| {
+                        let get = |k: &str| {
+                            e.get(k)
+                                .and_then(serde_yaml::Value::as_str)
+                                .unwrap_or_else(|| {
+                                    panic!("every ceilings_subsumed entry needs {k}")
+                                })
+                                .to_string()
+                        };
+                        (get("constant"), get("subsumed_by"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // PHANTOM, direction 1: an exemption for a constant that no longer exists.
+        let phantom: Vec<&String> = subsumed
+            .iter()
+            .map(|(c, _)| c)
+            .filter(|c| !ceilings.contains(*c))
+            .collect();
+        assert!(
+            phantom.is_empty(),
+            "ceilings_subsumed names constants that are not ceilings in this file — the \
+             exemption has stopped describing the contract: {phantom:?}"
+        );
+        // PHANTOM, direction 2: an exemption pointing at an axis bound nobody asserts.
+        let dangling: Vec<&(String, String)> = subsumed
+            .iter()
+            .filter(|(_, by)| !axis_bounds.contains(by))
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "ceilings_subsumed claims a constant is covered by a bound that no cost axis \
+             names — the exemption is a dangling claim: {dangling:?}"
+        );
+
+        let exempt: std::collections::BTreeSet<&String> = subsumed.iter().map(|(c, _)| c).collect();
+        let unreferenced: Vec<&String> = ceilings
+            .iter()
+            .filter(|c| !axis_bounds.contains(*c) && !exempt.contains(c))
+            .collect();
+        assert!(
+            unreferenced.is_empty(),
+            "cost CEILINGS declared in constants: that NO cost axis names and that carry no \
+             ceilings_subsumed entry — nothing has reasoned about what work they bound, which \
+             is the T-06-32 condition: {unreferenced:?}"
+        );
+    }
 
     /// Every NON-pending cost axis names a bound that actually exists.
     ///

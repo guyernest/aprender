@@ -247,6 +247,31 @@ door_surface:
   # INSIDE `fit::fit_prophet`; `make_design` runs before it and `predict` runs after it, which
   # is the STRUCTURAL reason 13 of these 14 axes are outside it and why every bound this phase
   # has added had to go at the door. Exactly ONE axis is inside.
+    # ---- ChronosArgs: the SECOND door (aprender-mcp-chronos), added closing T-06-32 ----
+    # Absent from this enumeration entirely until 2026-09-07, while the header above called
+    # it THE DOOR'S WHOLE SURFACE. A live, unauthenticated `tools/call` surface with its own
+    # bounds; the four `chronos_*` keys in `constants:` existed the whole time with nothing
+    # in door_surface naming them.
+    - field: ds
+      owner: ChronosArgs
+      arms: 'the zero-shot Chronos-Bolt door'
+      enforced_by: 'len(ds) == len(y) (chronos.rs:206); chronos_min_points <= len(ds) <= chronos_max_points (:213, :219); parse_date per entry; strictly ascending with no duplicates (:254)'
+    - field: y
+      owner: ChronosArgs
+      arms: 'the zero-shot Chronos-Bolt door'
+      enforced_by: 'len(y) == len(ds) (:206); every non-null value is_finite (:243); at least 2 observed (non-null) values (:246). `null` is legal and marks a gap the model handles'
+    - field: horizon
+      owner: ChronosArgs
+      arms: 'the zero-shot Chronos-Bolt door'
+      enforced_by: 'horizon >= 1 (:225); horizon <= chronos_max_horizon (:228); beyond chronos_native_horizon it additionally requires allow_long_horizon (:234)'
+    - field: freq
+      owner: ChronosArgs
+      arms: 'the zero-shot Chronos-Bolt door'
+      enforced_by: 'parsed to the D / W / MS enum by the same parser the forecast door uses; an unknown value is refused. Bounded set, no cost axis'
+    - field: allow_long_horizon
+      owner: ChronosArgs
+      arms: 'the zero-shot Chronos-Bolt door'
+      enforced_by: 'a bool gate, not a bound: it UNLOCKS horizon in (chronos_native_horizon, chronos_max_horizon] (:234) and is therefore the opt-in multiplier on cost axis C-15. The response carries a measured-accuracy warning when it is used'
   cost_axes:
     - axis: C-01
       name: 'history date parse'
@@ -300,7 +325,7 @@ door_surface:
       spent_outside_fit_budget: true
       bound: fit_max_holiday_name_len
       checked_at: 'the door, FIRST in the holiday loop, before the name is cloned into any Column (06-15)'
-      note: 'CLOSED BY A BOUND, never by a measurement. 06-14 shipped this axis with no_structural_maximum: true because holidays[].name is an unbounded String with no structural maximum to measure: crates/aprender-mcp-forecast/src/lib.rs''s router construction (http_app / pooled_app) applies no DefaultBodyLimit, no max_body and no content-length layer, and the stdio transport has no framing cap at all — so any measured_seconds would have described an arbitrarily CHOSEN name length rather than a maximum. 1 000 columns x an N-byte name is a ~2 000:1 amplification off one payload occurrence; at the bound that is ~400 KB of String and ~10 000 comparisons of <= 200 bytes. The bound is on BYTES because bytes are what the clone and the byte-wise comparison cost. The check is FIRST in the loop, which also bounds every other refusal message in that loop — each formats h.name back to the caller.'
+      note: 'CLOSED BY A BOUND, never by a measurement. 06-14 shipped this axis with no_structural_maximum: true because holidays[].name is an unbounded String with no structural maximum to measure: crates/aprender-mcp-forecast/src/lib.rs''s router construction (http_app / pooled_app) applies no DefaultBodyLimit of its own — though pmcp 2.19.3 StreamableHttpServerConfig::stateless() does set max_request_bytes = 4 MiB, enforced with a 413 (limits.rs:46, streamable_http_server.rs:4571), so HTTP DOES have a structural maximum and only stdio genuinely lacks one; the 200-byte bound stands on its own amplification argument rather than on the absence of a transport cap, no max_body and no content-length layer, and the stdio transport has no framing cap at all — so any measured_seconds would have described an arbitrarily CHOSEN name length rather than a maximum. 1 000 columns x an N-byte name is a ~2 000:1 amplification off one payload occurrence; at the bound that is ~400 KB of String and ~10 000 comparisons of <= 200 bytes. The bound is on BYTES because bytes are what the clone and the byte-wise comparison cost. The check is FIRST in the loop, which also bounds every other refusal message in that loop — each formats h.name back to the caller.'
     - axis: C-08
       name: 'NeuralProphet training work'
       formula: 'n_lrs * epochs * n_samples * (n_lags + 1), with n_lrs in {2, 3}, epochs = auto_epochs(n) <= 500 (or <= 320 with lags) and n_samples <= n_train_grid'
@@ -355,6 +380,40 @@ door_surface:
       bound: fit_max_points
       checked_at: 'inside the fit, by MAX_ITERS_PER_ROUND and the cooperative FIT_BUDGET_SECS round-boundary budget'
       note: 'The ONLY axis inside the budget. It is also the only one FIT_BUDGET_SECS could ever have covered, which is the structural fact behind every door bound this phase has added — and the budget is COOPERATIVE, so it overshoots by up to one full round (a 20 000-point / 1 000-column request measured 70.089 s against a 15 s budget).'
+    # ---- The Chronos door's own cost axes, added closing T-06-32 (06-SECURITY.md) ----
+    # Both `chronos_max_*` ceilings sat in `constants:` from the start with NOTHING in
+    # door_surface naming them. They are here because `every_cost_ceiling_constant_is_named_by_an_axis`
+    # now derives the ceiling list from `constants:` itself and goes red on an unreferenced one.
+    - axis: C-15
+      name: 'Chronos rolling long-horizon forward passes'
+      formula: 'ceil(horizon / chronos_native_horizon)'
+      spent_in: 'chronos::forecast, the rollout loop past the model native 64 steps'
+      spent_outside_fit_budget: true
+      bound: chronos_max_horizon
+      checked_at: 'the door, chronos.rs:228, before a single weight is touched; and beyond chronos_native_horizon the caller must additionally pass allow_long_horizon (:234), so the multiplier is opt-in as well as bounded'
+    - axis: C-16
+      name: 'Chronos history parse and context fill'
+      formula: 'len(ds)'
+      spent_in: 'chronos::validate parse loop and the context window fill in chronos::forecast'
+      spent_outside_fit_budget: true
+      bound: chronos_max_points
+      checked_at: 'the door, chronos.rs:219. The MODEL cost is flat in len(ds) because the context is capped at cfg.context_length (2048) at :287, so this axis bounds the parse and the copy rather than the forward pass'
+
+  # ---- Ceilings whose work is bounded by another axis PRODUCT ----
+  # Checked in BOTH directions: an entry naming a constant that is not a ceiling here is a
+  # phantom, and an entry whose subsumed_by is not itself a real axis bound is a dangling
+  # claim. An exemption with a stated, checked reason - not a licence to leave a ceiling
+  # unreasoned.
+  ceilings_subsumed:
+    - constant: fit_max_holiday_columns
+      subsumed_by: fit_max_holiday_design_cost
+      why: 'C-04 bounds (len(ds) + horizon) * holiday_columns, the PRODUCT this ceiling is one factor of. holiday_columns is accumulated at forecast.rs:253 and separately capped at :254; the product bound is the tighter of the two for every request that reaches make_design'
+    - constant: fit_max_holiday_window
+      subsumed_by: fit_max_holiday_design_cost
+      why: 'the window buys no work directly - it is the multiplier that BECOMES holiday_columns at forecast.rs:253 (holiday_columns += upper_window - lower_window + 1). Bounding the window alone would leave the column count unbounded across many holidays; C-04 bounds what the expansion actually costs'
+    - constant: fit_max_holiday_dates
+      subsumed_by: fit_max_holiday_dates_total
+      why: 'the per-holiday date count is one term of C-03 sum(len(h.dates)), refused INSIDE the loop at forecast.rs:241-250. The aggregate is the axis that bounds the parse work; this per-item ceiling only caps a single list'
 
 equations:
 
@@ -446,7 +505,7 @@ equations:
   # The equation the OTHER equations in this file are instances of. Every bound above closes
   # one axis; this one says the SET of axes and the SET of knobs are both accounted for.
   door_surface_is_complete:
-    formula: 'knobs(door_surface) == properties(schema_for!(ForecastArgs)) union properties(schema_for!(HolidayArg)) AND forall a in cost_axes(door_surface): a.bound in keys(constants) or (a.bound == measured_at_structural_maximum and a.measured_seconds < 2.0) or a.bound matches unbounded_pending_*'
+    formula: 'knobs(door_surface) == properties(schema_for!(ForecastArgs)) union properties(schema_for!(HolidayArg)) union properties(schema_for!(ChronosArgs)) AND forall c in keys(constants) matching ^(fit|chronos)_max_: c in bounds(cost_axes) or c in constants(ceilings_subsumed) AND forall a in cost_axes(door_surface): a.bound in keys(constants) or (a.bound == measured_at_structural_maximum and a.measured_seconds < 2.0) or a.bound matches unbounded_pending_*'
     domain: 'the enumeration in this file''s door_surface block, against the Rust structs and constants it claims to describe'
     codomain: 'green, or a named field / named axis on one side of a symmetric difference'
     invariants:
@@ -455,7 +514,7 @@ equations:
       - 'BOTH directions are checked, because a one-directional check lets the list rot in the other one. MISSING (a field exists with no entry) is how CR-01''s cost axis got in; PHANTOM (an entry for a field that exists on neither struct) is how an enumeration silently stops describing the code while still looking complete. Both were OBSERVED RED by mutation, not merely asserted'
       - 'the cost-axis check is SPLIT IN TWO on purpose. every_cost_axis_names_a_real_bound validates only the NON-pending entries, so a regression toward a phantom bound key is visible; no_cost_axis_is_pending asserts the pending set is EMPTY. The second SHIPPED RED at the close of plan 06-14, naming C-07 and C-08, and plan 06-15 turned it green by replacing both markers with real bounds — not by editing it. A plan whose thesis is that a guard which cannot fail is theater must not make its own open items invisible, and the RED-to-GREEN transition across those two plans is the observable form of that'
       - 'C-07 (holidays[].name byte amplification) could be closed ONLY by a bound, never by a measurement: the field is an unbounded String, the router construction in crates/aprender-mcp-forecast/src/lib.rs applies no DefaultBodyLimit / max_body / content-length layer, and the stdio transport has no framing cap — so it has NO structural maximum and any measured_seconds for it would have measured an arbitrarily CHOSEN length. 06-14 recorded that with no_structural_maximum: true; 06-15 closed it with fit_max_holiday_name_len. C-08 is the OTHER shape: it HAS a structural maximum, the maximum was measured at 47.924 s on release, and the measurement is what forced a bound rather than a measured_at_structural_maximum record'
-      - '13 of the 14 enumerated cost axes are spent OUTSIDE fit::FIT_BUDGET_SECS. That is the structural fact behind every door bound this phase has added: the budget is entered inside fit::fit_prophet, make_design runs before it and predict runs after it, so no setting of it could ever have seen those costs'
+      - '15 of the 16 enumerated cost axes are spent OUTSIDE fit::FIT_BUDGET_SECS. That is the structural fact behind every door bound this phase has added: the budget is entered inside fit::fit_prophet, make_design runs before it and predict runs after it, so no setting of it could ever have seen those costs'
     preconditions:
       - 'the door_surface block is present and parseable; pv drops it as an unknown top-level key exactly as it drops constants:, so it is read at TEST time rather than by the contract engine'
 

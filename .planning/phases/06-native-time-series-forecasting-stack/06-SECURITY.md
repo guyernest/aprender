@@ -3,11 +3,12 @@ phase: 06-native-time-series-forecasting-stack
 asvs_level: 1
 block_on: high
 threats_total: 65
-threats_open: 1
-threats_closed: 58
+threats_open: 0
+threats_closed: 59
 threats_accepted: 6
-verdict: OPEN_THREATS
+verdict: SECURED
 audited: 2026-09-07
+remediated: 2026-09-07
 auditor: gsd-security-auditor
 register_source: 17 PLAN.md <threat_model> blocks (79 rows -> 65 unique threat_id x component pairs, 48 distinct IDs)
 ---
@@ -102,7 +103,7 @@ Two facts established during the audit change how several verdicts should be rea
 | 47 | T-06-29 | Repudiation | med | mitigate | `diagnostics` on long-horizon logistic | CLOSED | degradation removed, not clamped; over-bound requests REFUSED loudly (row 49) |
 | 48 | T-06-30 | DoS | med | mitigate | cost of the fix | CLOSED | 06-13-SUMMARY:115 — both reachable extremes on release: 0.225->0.233 s, 0.144->0.205 s vs the 2 s bar |
 | 49 | T-06-31 | DoS | **critical** | mitigate | logistic uncertainty arm | CLOSED | `forecast.rs:350-371` — lambda via `changepoint_count`, the SAME function `make_design` uses, refused against `MAX_LOGISTIC_CHANGEPOINT_LAMBDA` BEFORE `make_design`; e2e `:910`/`:933`; contract `:413` |
-| 50 | T-06-32 | DoS | high | mitigate | the door's un-enumerated surface | **OPEN** | see Open Threats |
+| 50 | T-06-32 | DoS | high | mitigate | the door's un-enumerated surface | CLOSED | REMEDIATED 2026-09-07 — see Remediation |
 | 51 | T-06-33 | Tampering | med | mitigate | `POISSON_NORMAL_BRANCH_LAMBDA` | CLOSED | contract `:128`, mirrored by `cost_bounds_match_contract` (passed) |
 | 52 | T-06-34 | Repudiation | low | accept | over-lambda refusal message | ACCEPTED | AR-4; `forecast.rs:360-369` |
 | 53 | T-06-35 | DoS | high | mitigate | `prophet::columns` via `holidays[].name` | CLOSED | `forecast.rs:208-216` FIRST check in the loop, in BYTES; `:1018`; e2e `:1057`/`:1078` |
@@ -119,7 +120,7 @@ Two facts established during the audit change how several verdicts should be rea
 | 64 | T-06-46 | Tampering | med | mitigate | `bolt::transpose`'s `expect` | CLOSED (see F-6) | `bolt.rs:287` `debug_assert_eq!` |
 | 65 | T-06-47 | Repudiation | med | mitigate | the round's own completion claim | CLOSED | 06-17-SUMMARY:463 ledger verified against the TREE; `:578-589` residual-risk statement |
 
-## Open threats (blocking — severity >= high)
+## Remediation — T-06-32 (was the sole blocker, CLOSED 2026-09-07)
 
 ### T-06-32 — DoS — high — the door's un-enumerated surface as a whole (06-14)
 
@@ -154,7 +155,55 @@ green: the declared-RED window that held C-07 and C-08 open is CLOSED.
 
 **Blocking:** severity high >= `block_on: high`. Counts as 1 toward `threats_open`.
 
-**Suggested resolution (either closes it):** add `("ChronosArgs", schema_for!(ChronosArgs))` to
+**REMEDIATED — both halves, each observed RED first.**
+
+*Half 1, the second door.* `schema_knobs()` (`types.rs:544-566`) now feeds `ChronosArgs`
+alongside `ForecastArgs` and `HolidayArg`. Adding it turned
+`every_request_knob_is_enumerated` RED naming exactly the five missing fields —
+`[("ChronosArgs","allow_long_horizon"), ("ChronosArgs","ds"), ("ChronosArgs","freq"),
+("ChronosArgs","horizon"), ("ChronosArgs","y")]` — which is the observed proof the gap was
+real rather than theoretical. Five knobs rows were added to `door_surface.knobs` with the
+enforcement read out of `chronos.rs` (`:206` length equality, `:213`/`:219` point bounds,
+`:225`/`:228` horizon, `:234` the `allow_long_horizon` gate, `:243`/`:246` value checks,
+`:254` monotonicity). Green.
+
+*Half 2, cost-axis completeness, now DERIVABLE.* A new test
+`every_cost_ceiling_constant_is_named_by_an_axis` (`types.rs`) derives the ceiling list from
+the `constants:` mapping itself (`^(fit|chronos)_max_`) and requires each to be named by a
+`cost_axes[].bound` or carry a `ceilings_subsumed` exemption. It shipped RED naming five
+unreferenced ceilings — `["chronos_max_horizon", "chronos_max_points",
+"fit_max_holiday_columns", "fit_max_holiday_dates", "fit_max_holiday_window"]`. Closed by two
+real axes (C-15 Chronos rolling long-horizon forwards -> `chronos_max_horizon`; C-16 Chronos
+history parse and context fill -> `chronos_max_points`) and three `ceilings_subsumed` entries
+for the holiday component bounds, each verified against the code rather than asserted
+(`forecast.rs:253` shows `holiday_columns += upper_window - lower_window + 1`, so both the
+window and the column ceiling are factors of C-04's product; the per-holiday date count is one
+term of C-03's sum). The exemption list is checked in BOTH directions — a phantom constant and
+a dangling `subsumed_by` each fail — plus a vacuity guard requiring >= 10 ceilings so the
+filter cannot silently stop matching.
+
+*Overstated claims corrected in the same change,* since the audit showed the text asserted
+more than the tests did: the `door_surface_is_complete` formula now names all three structs
+and the ceiling direction; `inv[2]`'s claim that "MISSING is how CR-01's cost axis got in" is
+replaced with the audited finding that it is **false**; `inv[4]`'s "applies no
+DefaultBodyLimit" now records pmcp's 4 MiB `max_request_bytes` and 413 (F-3); the axis count
+moved 14 -> 16.
+
+**RESIDUAL, stated rather than closed.** An expensive path added inside `prophet.rs`/`np.rs`
+that introduces NO constant and NO axis entry remains invisible to all four tests. That is
+C-06's exact shape. Its detector is not a test here but `just forecast-sc1-sweep`, now wired
+into `make tier3` (`forecast-sc1-gate`), which measures the wall rather than the enumeration.
+The module comment at `types.rs` and the binding note both say so.
+
+**Verification:** `cargo test -p aprender-forecast --lib types::` -> 11 passed / 0 failed
+(was 10; the 11th is the new test). Full suites `aprender-forecast` + `aprender-mcp-forecast`
++ `aprender-mcp-chronos` -> 161 passed / 0 failed. `pv validate` rc=0 on the boundary
+contract. `make contract-audit-phase6` rc=0, 63 rows, zero BIND-. clippy `-D warnings` rc=0,
+`cargo fmt --all --check` rc=0.
+
+---
+
+**Original suggested resolution, retained for the record (either would have closed it):** add `("ChronosArgs", schema_for!(ChronosArgs))` to
 `schema_knobs()` plus the five knobs entries and the Chronos cost axes (the rolling long-horizon
 path at `ceil(horizon / chronos_native_horizon)` forward passes is the obvious one); AND make the
 axes half derivable — the cheapest real check is the inverse direction, "every `constants.fit_max_*`
