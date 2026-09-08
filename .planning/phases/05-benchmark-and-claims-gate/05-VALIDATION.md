@@ -74,13 +74,15 @@ updated: 2026-08-16
 | 05-10.T1 | 05-10 | 5 | EVAL-04 | T-05-10-01/02/03/04 | 5 negatives refused in every cargo test; deterministic aggregate | unit (tdd) | `cargo test -p aprender-train --lib --features setfit bench_gate` | ❌ Wave 0 | ⬜ pending |
 | 05-10.T2 | 05-10 | 5 | EVAL-04 | T-05-10-05 | estimation-first rendering; refusal = no tables | unit | `cargo test -p apr-cli --lib --features setfit setfit_bench` | ◐ extends 05-09 | ⬜ pending |
 | 05-10.T3 | 05-10 | 5 | EVAL-04 | T-05-10-01 | floors measured; two induced reds reverted | make gates | `make setfit-bench-tests` + `make contract-audit-phase5` | ❌ Wave 0 | ⬜ pending |
-| 05-11.T1 | 05-11 | 5 | EVAL-02 | T-05-11-01 | probe-first; A1 resolved at checkpoint | checkpoint (human) | — (human-check; ssh probes automated) | — | ⬜ pending |
-| 05-11.T2 | 05-11 | 5 | EVAL-02/03/05 | T-05-11-02/03/04/05 | same-SHA remote; digest-verified ingest x40 | dispatch + record | `ls rows/lora-*.json | wc -l` == 40 + bashrs lint | ❌ Wave 0 | ⬜ pending |
-| 05-12.T1 | 05-12 | 6 | EVAL-02/03/05 | T-05-12-01/04 | pre-authorized compute; reloaded-artifact cells | driver run | `ls rows/setfit-*.json | wc -l` == 40 | ❌ Wave 0 | ⬜ pending |
-| 05-12.T2 | 05-12 | 6 | EVAL-02 | T-05-12-02/03 | 80/80 manifest; pairing spot-check; text-free | json count + grep | manifest complete-count == 80 | ❌ Wave 0 | ⬜ pending |
-| 05-13.T1 | 05-13 | 7 | EVAL-04/05 | T-05-13-01/02 | gate green on real set; bit-identical re-run | spawned report + cmp | report.json/md exist; no "significant" | ❌ Wave 0 | ⬜ pending |
-| 05-13.T2 | 05-13 | 7 | (D-11) | — | refusal names remedy; exit code unchanged | unit | `cargo test -p apr-cli --lib qa` | ◐ edits existing | ⬜ pending |
-| 05-13.T3 | 05-13 | 7 | EVAL-01..05 | T-05-13-03 | closing audits; no checkbox flips | make + pv | `make setfit-bench-tests` + `make contract-audit-phase5` | — | ⬜ pending |
+| 05-11.T1 | 05-11 | 6 | EVAL-02/04 | T-05-11-01/04 | contract narrowing approved at a blocking checkpoint; nothing committed before | checkpoint (human) | — (human-check; pv validate + pv diff automated first) | — | ⬜ pending |
+| 05-11.T2 | 05-11 | 6 | EVAL-02/04 | T-05-11-02/07 | 40-cell active scope closed-form; six negatives preserved, four re-mutated at the new scope; out-of-scope row refused | unit (tdd) + pv | `cargo test -p aprender-train --lib --features setfit bench_gate` + `cargo test -p aprender-core --lib stats::` | ◐ edits existing | ⬜ pending |
+| 05-11.T3 | 05-11 | 6 | EVAL-04/05 | T-05-11-03/05/06 | no comparison section or literal; peak mechanisms separate; floors raised and provably able to fail | unit + make gates | `cargo test -p apr-cli --lib --features setfit setfit_bench` + `make setfit-bench-tests` | ◐ extends 05-09/05-10 | ⬜ pending |
+| 05-12.T1 | 05-12 | 7 | EVAL-02/03/05 | T-05-12-01 | compute NOT pre-authorized (05-03 deferred to wave 7); projection recorded as a number first | checkpoint (human) | — (human-check; projection automated) | — | ⬜ pending |
+| 05-12.T2 | 05-12 | 7 | EVAL-03 | T-05-12-05/07 | pilot proved BOTH ways: per-row door exits 0, whole-set report refuses at a missing cell | spawned door + report | pilot row exists; door status 0; report refusal status non-zero | ❌ Wave 0 | ⬜ pending |
+| 05-12.T3 | 05-12 | 7 | EVAL-02/03/05 | T-05-12-02/03/04/06 | 40 sequential cells; 40/40 closure; 40-row mechanism tally; text-free | driver run + json count | `ls rows/setfit-*.json \| wc -l` == 40; manifest complete-count == 40 | ❌ Wave 0 | ⬜ pending |
+| 05-13.T1 | 05-13 | 8 | EVAL-01/04/05 | T-05-13-01/02/04/05 | gate green on the real 40-cell set; bit-identical re-run; omission and no-comparison controls on copies | spawned report + digest compare | report.json/md exist; no comparative literal in either | ❌ Wave 0 | ⬜ pending |
+| 05-13.T2 | 05-13 | 8 | (D-11) | — | refusal names remedy; exit code unchanged | unit | `cargo test -p apr-cli --lib qa` | ◐ edits existing | ⬜ pending |
+| 05-13.T3 | 05-13 | 8 | EVAL-01..05 | T-05-13-03/06 | closing audits; no checkbox flips; amended ids marked met-narrowly | make + pv | `make setfit-bench-tests` + `make contract-audit-phase5` + `make contract-audit-phase4` | — | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
