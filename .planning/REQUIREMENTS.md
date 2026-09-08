@@ -278,9 +278,16 @@ that trains and runs entirely through Aprender's native Rust and APR lifecycle.
   cell invalidates the report
   — **AMENDED 2026-09-07 (Phase 5 D-19): the paired SetFit-versus-LoRA delta clause is descoped**
   for the reason recorded against EVAL-02. **The fail-closed behaviour is NOT weakened**: 05-10's
-  `verify_run`, its six doctored negatives, and the invalidate-on-omission rule survive
-  byte-for-byte; only the declared matrix shrinks from 40 comparison cells (80 rows) to 40 SetFit
-  rows. The paired-t machinery built by 05-04 is retained and remains contract-bound; it is
+  `verify_run` and the invalidate-on-omission rule are unchanged, and the declared matrix shrinks
+  from 40 comparison cells (80 rows) to 40 SetFit rows. **CORRECTED 2026-09-08:** an earlier
+  revision of this entry claimed the six doctored negatives survive "byte-for-byte". That was
+  false and is retracted. Two of the six — `UnpairedSelection` and the forged candidate ledger —
+  target a *second method's* row; `BenchGateError::UnpairedSelection` carries a `lora_hash` field
+  (`bench_gate.rs:449`), so under a 40-cell single-method expectation neither is constructible
+  from a production path. Their shapes and variant tags are preserved under a retained deferred
+  scope with no production constructor. The other four are re-mutated at the new scope rather
+  than inherited — CLAUDE.md Verification Discipline rule 4: extending a guard's scope requires
+  re-proving it there, because the 80-cell proof does not transfer. The paired-t machinery built by 05-04 is retained and remains contract-bound; it is
   unexercised by this phase's report rather than removed. No report produced under this amendment
   may state or imply a SetFit-versus-LoRA result.
 
@@ -433,7 +440,7 @@ Recorded here rather than absorbed silently, because this file outlives the phas
 | # | Item | Where | State |
 |---|------|-------|-------|
 | 1 | **D-19 descope** — EVAL-02 loses the "both SetFit and the 9B LoRA baseline" clause; EVAL-04 loses "paired SetFit-versus-LoRA deltas". Declared matrix: 40 comparison cells (80 rows) → 40 SetFit rows | `05-CONTEXT.md` D-19 | amended above, in-requirement |
-| 2 | **Cause (a): no GPU host** — `lambda-vector`/`gx10` unreachable (12 candidates, 12 failures, rc per attempt); the box is the upstream maintainer's and is not accessible to us. AWS fallback enumerated and refuted: 5 instances, all stopped, none GPU | `05-11-SUMMARY.md` | measured, closed |
+| 2 | **Cause (a): no GPU host** — `lambda-vector`/`gx10` unreachable (12 candidates, 12 failures, rc per attempt); the box is the upstream maintainer's and is not accessible to us. AWS fallback enumerated and refuted: 5 instances, all stopped, none GPU | `05-CONTEXT.md` D-19(a); re-recorded in `05-11-SUMMARY.md` on execution | measured, closed |
 | 3 | **Cause (b): the architecture is unimplemented** — Qwen3.5-9B is hybrid-attention (24 linear + 8 full) with `attn_output_gate` and a multimodal `text_config` checkpoint; `TransformerConfig` has no field for any of the three; the hybrid-forward scaffold sits in `aprender-contracts-staging`, which has no `Cargo.toml` and never compiles | `05-CONTEXT.md` D-19(b) | **inference from structural absence, not an observed loader failure** — falsifier named and NOT run |
 | 4 | **`qwen35-e2e-verification-v1.yaml` is not counter-evidence** — all 7 falsification tests are analytical (param count, FLOPs, memory ordering, roofline, obligation coverage, shape preservation, layer composition). None loads a weight. It verifies the architecture's *description* | `contracts/qwen35-e2e-verification-v1.yaml` | recorded |
 | 5 | **What survives untouched** — 05-10's fail-closed claims gate, its six doctored negatives, the invalidate-on-omission rule, the selection-manifest pairing key, and 05-04's paired-t machinery (retained, contract-bound, unexercised) | 05-10, 05-04 | no change |

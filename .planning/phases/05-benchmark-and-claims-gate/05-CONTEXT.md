@@ -333,10 +333,20 @@ files under the plan's calibration store (each carrying a verified `evidence_sha
 
   **What this changes.** EVAL-02 and EVAL-04 drop the LoRA arm and the paired-delta clause; the
   Phase 5 goal and success criteria 2 and 4 follow. **The claims gate itself is untouched** —
-  05-10's fail-closed `verify_run`, its six doctored negatives, and the "any missing, selectively
-  omitted, unmatched or post-test-selected cell invalidates the report" behaviour all survive
-  byte-for-byte. Only the *declared matrix* shrinks, from 40 comparison cells (80 rows) to 40
-  SetFit rows. The phase's thesis — *reject incomplete or unequal claims* — is preserved by
+  05-10's fail-closed `verify_run` and the "any missing, selectively omitted, unmatched or
+  post-test-selected cell invalidates the report" behaviour are unchanged, and the *declared
+  matrix* shrinks from 40 comparison cells (80 rows) to 40 SetFit rows.
+
+  **CORRECTED 2026-09-08 — the six doctored negatives do NOT survive byte-for-byte.** This
+  record originally said they did; that was written from the intent of the descope rather than
+  from the code, and it is retracted. `EXPECTED_CELLS` is a product of the method list, and two
+  of the six negatives target a second method's row — `BenchGateError::UnpairedSelection` carries
+  a `lora_hash` field (`bench_gate.rs:449`), and the forged-candidate-ledger case likewise needs
+  a counterpart row. Under a 40-cell single-method expectation neither is constructible from a
+  production path. Disposition: both keep their shape and variant tag under a retained deferred
+  scope with no production constructor; the remaining four are **re-mutated at the new scope**,
+  per Verification Discipline rule 4 — the 80-cell RED proof does not transfer to a 40-cell gate.
+  The gate's *strength* is therefore preserved by re-proof, not by assertion of sameness. The phase's thesis — *reject incomplete or unequal claims* — is preserved by
   refusing to publish a comparison we cannot substantiate, which is that thesis applied to
   ourselves.
 
