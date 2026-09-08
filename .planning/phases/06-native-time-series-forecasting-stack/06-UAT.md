@@ -137,7 +137,7 @@ decision: |
 
 total: 5
 passed: 2
-decided: 2
+decided: 3
 issues: 0
 pending: 0
 skipped: 0
