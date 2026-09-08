@@ -370,10 +370,24 @@ fn setfit_bench_accepts_every_contracted_cell() {
             }
         }
     }
+    // THE ROW-VALIDITY DOMAIN, NOT THE EXPECTATION SET — the two questions this plan split
+    // apart. `resolve_cell` answers "is this a representable cell", which still admits both
+    // methods; EXPECTED_CELLS answers "what must a complete run contain", which since the 2.0.0
+    // narrowing is the SetFit half alone. Asserting one against the other is exactly the
+    // collapse ACTIVE_METHODS exists to prevent, and it is what this assertion used to do.
     assert_eq!(
         accepted,
-        entrenar::train::setfit::bench_row::EXPECTED_CELLS,
-        "the accepted set is exactly the contract's expectation set"
+        entrenar::train::setfit::bench_row::BENCH_METHODS.len()
+            * BENCH_SHOTS.len()
+            * BENCH_SEEDS.len(),
+        "every REPRESENTABLE cell resolves — both methods, because BENCH_METHODS is the \
+         row-validity domain and keeps both"
+    );
+    assert_eq!(
+        accepted,
+        2 * entrenar::train::setfit::bench_row::EXPECTED_CELLS,
+        "and the ACTIVE expectation set is exactly half of it: a second method's cell is VALID \
+         as a cell while being OUT OF SCOPE for a complete run"
     );
 }
 
@@ -1451,6 +1465,8 @@ fn driver_never_reads_a_status_through_a_pipe() {
     // that could not fail while printing success.
     let body = driver_without_comments();
     let lines: Vec<&str> = body.lines().map(str::trim).collect();
+
+    // FORM 1 — a bare `rc=$?` on its own line. The line BEFORE it must not be a pipeline.
     for (index, line) in lines.iter().enumerate() {
         if !line.starts_with("rc=$?") {
             continue;
@@ -1465,10 +1481,42 @@ fn driver_never_reads_a_status_through_a_pipe() {
              command's status rather than the one it appears to describe"
         );
     }
+
+    // FORM 2 — `... || rc=$?` inline, which is the form THIS driver deliberately uses: it runs
+    // under `set -e`, so a bare `rc=$?` on the next line is unreachable after a non-zero exit.
+    // The same defect is reachable here — `cmd | tee log || rc=$?` captures tee's status — so
+    // the inline form is scanned too. Scanning only form 1 left this half unguarded.
+    for (index, line) in lines.iter().enumerate() {
+        let Some(before) = line
+            .split("|| rc=$?")
+            .next()
+            .filter(|_| line.contains("|| rc=$?"))
+        else {
+            continue;
+        };
+        // Strip the `||` that belongs to the capture itself before looking for a pipe.
+        let command = before.trim_end().trim_end_matches('|');
+        assert!(
+            !command.contains('|'),
+            "`|| rc=$?` at line {index} captures the status of a PIPELINE (`{command}`), which \
+             is the last command's status, not the one it appears to describe"
+        );
+    }
+
+    // NON-VACUITY. The scan must have something to scan — a driver with no rc capture in EITHER
+    // form would satisfy both loops above trivially.
+    //
+    // This assertion used to look only for form 1 and had been unsatisfiable since the driver
+    // moved to the inline form under `set -e` (commit 9920feae8): every remaining bare `rc=$?`
+    // in the file sits in a COMMENT, and comments are stripped before the scan. Repaired rather
+    // than deleted — a non-vacuity guard that cannot pass is the same defect it exists to catch.
+    let captures = lines
+        .iter()
+        .filter(|line| line.starts_with("rc=$?") || line.contains("|| rc=$?"))
+        .count();
     assert!(
-        lines.iter().any(|line| line.starts_with("rc=$?")),
-        "and the scan must have something to scan — a driver with no rc capture would satisfy \
-         the loop above vacuously"
+        captures > 0,
+        "the driver captures no exit status in either form, so both scans above were vacuous"
     );
 }
 
@@ -1626,8 +1674,11 @@ mod report_render {
     use crate::commands::setfit_bench::report::{
         render_deltas, render_human, render_quality, render_resource_comparison,
         render_resource_detail, render_sizes, verified_aggregate, ReportPayload,
-        ADAPTER_ONLY_LABEL, CI_UNAVAILABLE, INCOMPARABLE_NOTE, PER_HOST_FRAMING,
-        QUALITY_TABLE_HEADER, REPORT_PAYLOAD_SCHEMA, SIZE_TABLE_HEADER,
+        ADAPTER_ONLY_LABEL, CI_UNAVAILABLE, COMPARISON_ROW_MARKER, DELTA_TABLE_HEADER,
+        ESTIMATION_FIRST_NOTE, ESTIMATION_FIRST_NOTE_PAIRED, INCOMPARABLE_NOTE, PER_HOST_FRAMING,
+        PER_HOST_FRAMING_TWO_HOST, QUALITY_TABLE_HEADER, REPORT_PAYLOAD_SCHEMA,
+        RESOURCE_COMPARISON_HEADER, SAMPLED_LOWER_BOUND_LABEL, SEED_CI_LABEL, SINGLE_METHOD_NOTE,
+        SINGLE_METHOD_TITLE, SIZE_TABLE_HEADER, TWO_METHOD_TITLE,
     };
 
     /// LoRA's ADAPTER-ONLY byte count.
@@ -1716,6 +1767,13 @@ mod report_render {
                     f_avg: summary(base),
                     macro_f1: summary(base - 0.05),
                     mcc: summary(base - 0.10),
+                    f_avg_seed_ci95: Ci95 {
+                        low: Some(base - 0.02),
+                        high: Some(base + 0.02),
+                        half_width: Some(0.02),
+                        std_err: Some(0.008),
+                        null_reason: None,
+                    },
                     per_seed: BENCH_SEEDS
                         .iter()
                         .map(|seed| SeedValue {
@@ -1784,6 +1842,7 @@ mod report_render {
             degrees_of_freedom: 9,
             t_crit_975_df9: 2.262_157_162_798_205,
             key_sequence,
+            methods: BENCH_METHODS.iter().map(|m| m.tag().to_string()).collect(),
             quality,
             deltas,
             resource,
@@ -1791,12 +1850,242 @@ mod report_render {
     }
 
     /// The everyday report: two hosts, two train mechanisms, no degenerate level.
+    ///
+    /// DEFERRED SCOPE. Retained so the two-method renderer keeps a running proof and
+    /// D-ITEM-05-15 restores a renderer that still works.
     fn ordinary() -> RunAggregate {
         synthetic_aggregate(
             None,
             "sysinfo_sampled_10hz",
             MechanismClass::SampledLowerBound,
         )
+    }
+
+    /// The ACTIVE-scope report: ONE method, no deltas, one host.
+    ///
+    /// Built by NARROWING `ordinary()` exactly as `aggregate` narrows a verified set — the
+    /// second method's groups are dropped and the delta list is emptied — so the fixture cannot
+    /// describe a shape the library cannot produce.
+    fn active_scope() -> RunAggregate {
+        let mut report = ordinary();
+        report.methods = vec![Method::Setfit.tag().to_string()];
+        report.quality.retain(|g| g.method == Method::Setfit);
+        report.resource.retain(|g| g.method == Method::Setfit);
+        report.key_sequence.retain(|k| k.starts_with("setfit/"));
+        report.deltas.clear();
+        report
+    }
+
+    /// The literals the TWO-METHOD renderer actually emitted, and which the ACTIVE report must
+    /// not contain anywhere.
+    ///
+    /// EVERY ROW IS A REAL PRIOR OUTPUT, NOT AN INVENTED NEAR-MISS. Each is either a shipped
+    /// constant of the two-method renderer or a fragment copied out of its own format string,
+    /// so the table asserts against text this program genuinely used to print. A must-not-match
+    /// list of plausible-looking strings nobody ever emitted would pass forever while the real
+    /// literal sat in the report.
+    ///
+    /// Provenance, recorded here rather than left to a reader to reconstruct:
+    /// - `DELTA_TABLE_HEADER`      — `render_deltas`, first line of its output
+    /// - `RESOURCE_COMPARISON_HEADER` — `render_resource_comparison`, first line
+    /// - `COMPARISON_ROW_MARKER`   — `comparison_row`'s own format string, the `"  |  lora "`
+    ///                               separator between the two sides of one row
+    /// - `TWO_METHOD_TITLE`        — `render_header`'s title line
+    /// - `ESTIMATION_FIRST_NOTE_PAIRED` — the note that advertised paired intervals
+    /// - `PER_HOST_FRAMING_TWO_HOST`    — the framing line that described a two-host design
+    fn must_not_match_literals() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("delta table header", DELTA_TABLE_HEADER),
+            ("cross-method comparison header", RESOURCE_COMPARISON_HEADER),
+            ("per-row comparison format", COMPARISON_ROW_MARKER),
+            ("two-method title line", TWO_METHOD_TITLE),
+            ("paired estimation-first note", ESTIMATION_FIRST_NOTE_PAIRED),
+            ("two-host resource framing", PER_HOST_FRAMING_TWO_HOST),
+        ]
+    }
+
+    #[test]
+    fn setfit_bench_report_active_scope_matches_the_case_table() {
+        let rendered = render_human(&active_scope());
+
+        // MUST MATCH — what the active report has to contain to be worth publishing.
+        for (label, needle) in [
+            ("the single-method title", SINGLE_METHOD_TITLE),
+            ("the quality table", QUALITY_TABLE_HEADER),
+            ("the seed-dispersion label", SEED_CI_LABEL),
+            ("the estimation-first note", ESTIMATION_FIRST_NOTE),
+            ("the single-method scope note", SINGLE_METHOD_NOTE),
+            ("the single-host resource framing", PER_HOST_FRAMING),
+            ("the size table", SIZE_TABLE_HEADER),
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "{label} is MISSING from the active-scope report"
+            );
+        }
+
+        // MUST NOT MATCH — the real literals the two-method renderer emitted.
+        for (label, needle) in must_not_match_literals() {
+            assert!(
+                !rendered.contains(needle),
+                "the active-scope report emitted the two-method literal `{label}` \
+                 ({needle:?}); the cross-method sections are REMOVED under this scope, not \
+                 emitted empty"
+            );
+        }
+
+        // NON-VACUITY, BOTH WAYS. The must-not-match rows must be capable of matching
+        // SOMETHING, or the loop above proves nothing: every one of them appears in the
+        // TWO-METHOD render of the same fixture.
+        let two_method = render_human(&ordinary());
+        for (label, needle) in must_not_match_literals() {
+            assert!(
+                two_method.contains(needle),
+                "must-not-match row `{label}` never appears in ANY render, so asserting its \
+                 absence from the active report is vacuous"
+            );
+        }
+    }
+
+    #[test]
+    fn setfit_bench_report_active_scope_emits_no_delta_or_comparison_section() {
+        let rendered = render_human(&active_scope());
+        // Not "an empty section": the headers are ABSENT. A header with no rows still tells a
+        // reader a comparison was attempted.
+        assert!(!rendered.contains("PAIRED DELTA"));
+        assert!(!rendered.contains("RESOURCE COMPARISON"));
+        // ... and the interval that DOES belong to this scope is present and labelled.
+        assert!(rendered.contains(SEED_CI_LABEL));
+        assert!(rendered.contains("95% CI (seeds)"));
+    }
+
+    #[test]
+    fn setfit_bench_report_single_method_note_cannot_trip_the_gate_it_is_mandated_beside() {
+        // THE TENSION RESOLVED IN THE SUITE RATHER THAN DISCOVERED IN 05-13. The note is
+        // mandated by this plan; 05-13 gates the committed report against the same
+        // must-not-match table. A note written with those words would trip a gate this plan
+        // also mandates, which would pressure an executor into weakening one or gutting the
+        // other. So the note is pinned against the table here.
+        for (label, needle) in must_not_match_literals() {
+            assert!(
+                !SINGLE_METHOD_NOTE.contains(needle),
+                "the mandated note contains the must-not-match literal `{label}`"
+            );
+        }
+        // The constrained vocabulary, asserted rather than described.
+        let lower = SINGLE_METHOD_NOTE.to_lowercase();
+        for forbidden in [
+            "lora", // must not name the deferred method
+            " vs ", // no comparative connective
+            "versus",
+            "compared to",
+            "beside",
+            "delta",       // not the phrase for a paired difference
+            "significant", // not the word for a statistical verdict
+        ] {
+            assert!(
+                !lower.contains(forbidden),
+                "the note used the forbidden term `{forbidden}`: {SINGLE_METHOD_NOTE}"
+            );
+        }
+        // And it DOES carry the two identifiers and the permitted phrase, so the reader can
+        // follow the absence to its record rather than reading it as parity.
+        assert!(SINGLE_METHOD_NOTE.contains("D-19"));
+        assert!(SINGLE_METHOD_NOTE.contains("D-ITEM-05-15"));
+        assert!(SINGLE_METHOD_NOTE.contains("a second method"));
+    }
+
+    #[test]
+    fn setfit_bench_report_renders_the_two_peaks_as_separate_labelled_figures() {
+        let rendered = render_resource_detail(&active_scope().resource);
+
+        // TWO figures, TWO labels — never one column and never one combined number.
+        assert!(rendered.contains("train peak RSS (training process)"));
+        assert!(rendered.contains("inference peak RSS (cold child)"));
+        // Each carries its own mechanism string beside its number.
+        assert_eq!(
+            rendered.matches("mechanism:").count(),
+            2 * BENCH_SHOTS.len(),
+            "every peak figure in every group prints its own mechanism"
+        );
+
+        // A SAMPLED figure carries its lower-bound label WHERE IT IS RENDERED. Built with a
+        // sampled train mechanism so the label has something to attach to.
+        let mut sampled = active_scope();
+        for group in &mut sampled.resource {
+            group.train_peak_rss_mechanisms = vec!["sysinfo_sampled_10hz".to_string()];
+            group.train_peak_rss_mechanism_classes = vec![MechanismClass::SampledLowerBound];
+        }
+        let sampled_render = render_resource_detail(&sampled.resource);
+        assert!(
+            sampled_render.contains(SAMPLED_LOWER_BOUND_LABEL),
+            "a sampled peak must carry its lower-bound label at the point of presentation, \
+             not only in a methods paragraph"
+        );
+        // NON-VACUITY: the exact-mechanism control does NOT carry it, so the label is not
+        // simply always printed.
+        let mut exact = active_scope();
+        for group in &mut exact.resource {
+            group.train_peak_rss_mechanisms = vec!["vm_hwm".to_string()];
+            group.train_peak_rss_mechanism_classes = vec![MechanismClass::ExactKernelHighWaterMark];
+            group.inference_peak_rss_mechanisms = vec!["vm_hwm".to_string()];
+            group.inference_peak_rss_mechanism_classes =
+                vec![MechanismClass::ExactKernelHighWaterMark];
+        }
+        assert!(
+            !render_resource_detail(&exact.resource).contains(SAMPLED_LOWER_BOUND_LABEL),
+            "a label that is always printed carries no information"
+        );
+    }
+
+    #[test]
+    fn setfit_bench_verify_cell_door_emits_none_of_the_report_statistic_literals() {
+        // T-05-11-06. The door is a DIAGNOSTIC, and it must not be readable as a partial
+        // report. Its entire output is the pass prefix plus the scope note, so the assertion
+        // is over the text it can possibly print.
+        use crate::commands::setfit_bench::verify_cell::{DOOR_SCOPE_NOTE, PASS_LINE_PREFIX};
+        let door_output = format!("{PASS_LINE_PREFIX}setfit/s16/seed29\n{DOOR_SCOPE_NOTE}");
+
+        // Every statistic literal the REPORT emits. If the door ever grows a number, one of
+        // these fires.
+        for (label, needle) in [
+            ("the quality table header", QUALITY_TABLE_HEADER),
+            ("the size table header", SIZE_TABLE_HEADER),
+            ("the delta table header", DELTA_TABLE_HEADER),
+            ("the comparison header", RESOURCE_COMPARISON_HEADER),
+            ("the seed-CI label", SEED_CI_LABEL),
+            ("the estimation-first note", ESTIMATION_FIRST_NOTE),
+            ("the degenerate-interval marker", CI_UNAVAILABLE),
+        ] {
+            assert!(
+                !door_output.contains(needle),
+                "the single-cell door emitted the report literal `{label}`; it is a diagnostic \
+                 door and the report is the only door that publishes numbers"
+            );
+        }
+        for word in ["mean", "std", "95%", "dispersion", "interval"] {
+            assert!(
+                !door_output.to_lowercase().contains(word),
+                "the door's output contains the statistic word `{word}`"
+            );
+        }
+
+        // NON-VACUITY: the same absence assertions would hold over an empty string, so the
+        // door's output must actually say something, and it must say WHICH steps it applied.
+        assert!(door_output.contains("steps 1+4+6"));
+        assert!(door_output.contains("NOT the set-level steps"));
+        assert!(door_output.contains("setfit/s16/seed29"));
+    }
+
+    #[test]
+    fn setfit_bench_report_deferred_scope_still_renders_the_comparison() {
+        // The two-method renderer is RETAINED and unexercised, not deleted. Restoring the arm
+        // must restore a renderer that still works.
+        let rendered = render_human(&ordinary());
+        assert!(rendered.contains(DELTA_TABLE_HEADER));
+        assert!(rendered.contains(RESOURCE_COMPARISON_HEADER));
+        assert!(rendered.contains(COMPARISON_ROW_MARKER));
+        assert!(rendered.contains(TWO_METHOD_TITLE));
     }
 
     #[test]

@@ -1158,6 +1158,16 @@ fn dispatch_setfit_bench_command(
                 out: out.as_deref(),
             })
         }
+        BenchCommands::VerifyCell { bench_dir, method, shots, seed, .. } => {
+            commands::setfit_bench::verify_cell::run(
+                &commands::setfit_bench::verify_cell::BenchVerifyCellArgs {
+                    bench_dir,
+                    method,
+                    shots: *shots,
+                    seed: *seed,
+                },
+            )
+        }
     }
 }
 #[cfg(feature = "training")]

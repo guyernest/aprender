@@ -260,4 +260,60 @@ pub enum BenchCommands {
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
+
+    /// Verify ONE declared cell's own evidence - a diagnostic door, never a report
+    ///
+    /// # Which steps it applies
+    ///
+    /// `verify_run`'s steps 1 + 4 + 6, over one cell and in that order: the manifest's
+    /// own digest; step 3's per-entry rule applied to THAT entry only; the row's file,
+    /// schema, envelope digest, manifest-digest agreement and slot agreement; then
+    /// provenance recomputed from the committed lock (and, for a second method, ledger)
+    /// bytes.
+    ///
+    /// # Which steps it deliberately EXCLUDES, and why
+    ///
+    /// NOT step 2 (expectation-set equality), NOT step 3's sweep over every entry, NOT
+    /// step 5 (pairing) and NOT step 7. At pilot time the manifest declares 40 cells
+    /// with 39 still `pending` - which is precisely the state step 3's sweep refuses on
+    /// - so a door that inherited the set-level checks could never pass on the cell it
+    /// exists to check. `bench report` over a copy holding one row likewise refuses at
+    /// completeness BEFORE the row loop, so the pilot row's own bytes are never read at
+    /// all. This door reads them.
+    ///
+    /// # It emits NO statistic
+    ///
+    /// No mean, no dispersion, no interval, no aggregate. `bench report` is the only
+    /// door that publishes numbers; a per-cell door that printed statistics would be a
+    /// partial-data report under another name. It therefore CONFLICTS with the
+    /// report-shaped output flag rather than trusting a reader not to combine them.
+    VerifyCell {
+        /// Where rows, locks, ledgers and the run manifest live
+        #[arg(long = "bench-dir", value_name = "DIR")]
+        bench_dir: PathBuf,
+
+        /// `setfit` or `lora`
+        ///
+        /// This is the ROW-VALIDITY vocabulary, which admits both. Whether a cell is in
+        /// the ACTIVE expectation set is a different question, and asking for one that
+        /// is not is refused by the gate rather than by clap.
+        #[arg(long, value_name = "METHOD", default_value = "setfit")]
+        method: String,
+
+        /// Examples per class: 8, 16, 32 or 64
+        #[arg(long, value_name = "SHOTS")]
+        shots: u32,
+
+        /// One of the ten contracted seeds (13 17 23 29 31 37 41 43 47 53)
+        #[arg(long, value_name = "SEED")]
+        seed: u32,
+
+        /// REFUSED. This door emits no machine-readable report payload
+        ///
+        /// Declared only so that a report-shaped invocation is REJECTED with an
+        /// explanation rather than silently accepted: a diagnostic door that took a
+        /// report flag would invite being read as a partial report.
+        #[arg(long, value_name = "FILE", conflicts_with = "bench_dir", hide = true)]
+        out: Option<PathBuf>,
+    },
 }

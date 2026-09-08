@@ -2251,6 +2251,10 @@ pub(crate) mod report {
         "QUALITY - official F_avg, mean +/- (n-1) std [min, max]";
 
     /// The paired-delta table's header.
+    ///
+    /// RETAINED AND DEFERRED. Never emitted under the active scope, and pinned as a
+    /// MUST-NOT-MATCH literal by the rendering case table — the ACTUAL string the two-method
+    /// renderer emitted, not an invented near-miss.
     pub(crate) const DELTA_TABLE_HEADER: &str =
         "PAIRED DELTA - F_avg(setfit) - F_avg(lora), same selection manifest, 95% CI";
 
@@ -2259,17 +2263,55 @@ pub(crate) mod report {
         "RESOURCE - per method and host, every figure with its measurement boundary";
 
     /// The cross-method resource comparison's header.
+    ///
+    /// RETAINED AND DEFERRED. Same rule as [`DELTA_TABLE_HEADER`].
     pub(crate) const RESOURCE_COMPARISON_HEADER: &str =
         "RESOURCE COMPARISON - setfit beside lora, mechanism-labelled at the point of comparison";
+
+    /// The distinctive fragment of one cross-method comparison ROW.
+    ///
+    /// Copied out of `comparison_row`'s own format string, so the case table asserts the
+    /// SHIPPED format rather than a copy of it that can drift.
+    pub(crate) const COMPARISON_ROW_MARKER: &str = "  |  lora ";
+
+    /// The two-method report's title line. Retained, deferred, a MUST-NOT-MATCH literal.
+    pub(crate) const TWO_METHOD_TITLE: &str = "SetFit vs LoRA - benchmark claims report";
+
+    /// The ACTIVE report's title line. One method, and it says so in the first line.
+    pub(crate) const SINGLE_METHOD_TITLE: &str = "SetFit - benchmark claims report";
 
     /// The cross-method size table's header. It NAMES `deployable`, because the field it uses is
     /// the claim.
     pub(crate) const SIZE_TABLE_HEADER: &str =
         "MODEL SIZE - deployable_total_bytes, what a user must ship to serve this";
 
-    /// The D-09 framing line every resource section carries.
-    pub(crate) const PER_HOST_FRAMING: &str = "as-deployed method costs; hosts differ by design \
-                                               and are never averaged together";
+    /// The D-09 framing line the TWO-METHOD resource sections carried.
+    ///
+    /// RETAINED AND DEFERRED (2.0.0, D-19). It describes a two-host design that the active
+    /// scope does not have, so the active report no longer emits it: a framing line describing
+    /// a design that was not run is a claim about the report. Kept, not deleted, because
+    /// D-ITEM-05-15 restores exactly the design it describes.
+    pub(crate) const PER_HOST_FRAMING_TWO_HOST: &str =
+        "as-deployed method costs; hosts differ by design and are never averaged together";
+
+    /// The framing line the ACTIVE, single-method resource section carries.
+    pub(crate) const PER_HOST_FRAMING: &str =
+        "as-deployed costs on ONE host for ONE method; every figure carries its measurement \
+         boundary, and no figure here is averaged across hosts";
+
+    /// The label a sampled peak-RSS figure carries EVERYWHERE it is rendered.
+    ///
+    /// A poll at any finite rate can miss the peak entirely, the bias is one-directional, and
+    /// its magnitude depends on the allocation pattern — so a reader who sees the number must
+    /// see the bound, in the per-shot summary and not only in a methods paragraph.
+    pub(crate) const SAMPLED_LOWER_BOUND_LABEL: &str = "LOWER BOUND (sampled; can only understate)";
+
+    /// The within-row mechanism-asymmetry note the active resource section carries.
+    pub(crate) const WITHIN_ROW_ASYMMETRY_NOTE: &str =
+        "The two figures above are TWO metrics from TWO processes, and here they come from two \
+         different mechanism CLASSES. They are never added, never averaged, and never reduced \
+         to a single figure: a kernel high-water mark is process-cumulative, so the training \
+         process's peak is not the inference peak.";
 
     /// The note a mixed-mechanism comparison row carries.
     pub(crate) const INCOMPARABLE_NOTE: &str =
@@ -2279,14 +2321,46 @@ pub(crate) mod report {
     /// What a degenerate paired interval renders as.
     pub(crate) const CI_UNAVAILABLE: &str = "CI unavailable (zero variance)";
 
-    /// The estimation-first statement (D-08).
+    /// The estimation-first statement the TWO-METHOD report carried.
+    ///
+    /// RETAINED AND DEFERRED (2.0.0, D-19). It advertises PAIRED intervals, which the active
+    /// scope does not produce — and a note promising a statistic the report does not contain
+    /// is itself a claim about the report.
+    pub(crate) const ESTIMATION_FIRST_NOTE_PAIRED: &str =
+        "Estimation-first (D-08): point estimates, dispersion and paired 95% CIs only. No \
+         binary verdict is printed; p-values live in the --json detail.";
+
+    /// The estimation-first statement (D-08), for the ACTIVE single-method scope.
     ///
     /// It deliberately does NOT contain the word a verdict would use. A report that prints a
     /// binary better/worse is precisely where few-shot seed sensitivity hides: rankings that
-    /// reverse across seeds become one word.
+    /// reverse across seeds become one word. It advertises exactly the interval the active
+    /// scope computes and no other.
     pub(crate) const ESTIMATION_FIRST_NOTE: &str =
-        "Estimation-first (D-08): point estimates, dispersion and paired 95% CIs only. No \
-         binary verdict is printed; p-values live in the --json detail.";
+        "Estimation-first (D-08): point estimates, dispersion and 95% seed-dispersion \
+         intervals only. No binary verdict is printed.";
+
+    /// How the seed-dispersion interval is labelled AT THE POINT OF PRESENTATION.
+    ///
+    /// A bare interval beside a mean reads as a comparison. This says what it actually is.
+    pub(crate) const SEED_CI_LABEL: &str =
+        "95% CI over the ten contracted seeds at fixed data and protocol - a seed-dispersion \
+         interval, not a population interval";
+
+    /// The single-method note.
+    ///
+    /// ITS VOCABULARY IS CONSTRAINED, AND NOT FOR STYLE. Plan 05-13 gates the committed report
+    /// against the must-not-match literals this module's tests pin, and a note written with
+    /// those words would trip a gate mandated by the same plan — which would pressure someone
+    /// into either weakening the gate or gutting the note. So it refers to the deferred arm
+    /// ONLY by the decision id, the ticket id, and the phrase "a second method". It does not
+    /// name the deferred method, uses no comparative connective, does not use the phrase for a
+    /// paired difference, and does not use the word for a statistical verdict.
+    pub(crate) const SINGLE_METHOD_NOTE: &str =
+        "SCOPE - ONE METHOD WAS MEASURED. This report covers SetFit alone. A second method was \
+         planned for this matrix and was not run; the reason is recorded as decision D-19 and \
+         the restoration path as ticket D-ITEM-05-15. Nothing here states or implies any \
+         result about a second method. Read the absence as absence.";
 
     /// How LoRA's adapter-only figure is labelled where it IS shown.
     pub(crate) const ADAPTER_ONLY_LABEL: &str = "adapter only";
@@ -2403,8 +2477,13 @@ pub(crate) mod report {
 
     /// The header block: what was verified, and what a reader may conclude from it.
     fn render_header(report: &RunAggregate) -> String {
+        let title = if report.methods.len() >= 2 {
+            TWO_METHOD_TITLE
+        } else {
+            SINGLE_METHOD_TITLE
+        };
         format!(
-            "SetFit vs LoRA - benchmark claims report\n\
+            "{title}\n\
              contract: {}\n\
              design:   {} seeds per cell, df = {}, 95% CI uses the frozen t = {:.15}\n\
              verified: every cell of the contracted matrix. A missing, substituted, unmatched or\n\
@@ -2422,15 +2501,23 @@ pub(crate) mod report {
         let mut out = String::from(QUALITY_TABLE_HEADER);
         out.push('\n');
         out.push_str(
-            "method   shots       mean       std        min        max   \
+            "method   shots       mean       std        min        max      95% CI (seeds)   \
              (macro F1 mean / MCC mean)\n",
         );
         for group in quality {
+            // THE INTERVAL IS RENDERED BESIDE THE MEAN IT BELONGS TO, and a degenerate one is
+            // a NAMED state rather than a blank cell — never a `null` a reader takes for a
+            // missing measurement (CR-03).
+            let interval = match (group.f_avg_seed_ci95.low, group.f_avg_seed_ci95.high) {
+                (Some(low), Some(high)) => format!("[{low:.4}, {high:.4}]"),
+                _ => CI_UNAVAILABLE.to_string(),
+            };
             out.push_str(&format!(
-                "{:<8} {:>5} {} {:>12.4} {:>8.4}\n",
+                "{:<8} {:>5} {} {:>18} {:>12.4} {:>8.4}\n",
                 group.method.tag(),
                 group.shots,
                 summary_cell(&group.f_avg),
+                interval,
                 group.macro_f1.mean,
                 group.mcc.mean
             ));
@@ -2439,6 +2526,10 @@ pub(crate) mod report {
             "F_avg = (F1_against + F1_favor) / 2, the official TweetEval stance metric. Macro F1\n\
              is published BESIDE it and never instead of it.\n",
         );
+        // THE LABEL TRAVELS WITH THE NUMBER. A bare interval beside a mean reads as a
+        // comparison; this states what it actually measures, in the same block.
+        out.push_str(SEED_CI_LABEL);
+        out.push_str(".\n");
         out
     }
 
@@ -2460,7 +2551,7 @@ pub(crate) mod report {
                 delta.shots, delta.mean_delta
             ));
         }
-        out.push_str(ESTIMATION_FIRST_NOTE);
+        out.push_str(ESTIMATION_FIRST_NOTE_PAIRED);
         out.push('\n');
         out
     }
@@ -2496,18 +2587,31 @@ pub(crate) mod report {
                 group.throughput_rows_per_sec.mean,
                 join_u32(&group.throughput_batch_sizes)
             ));
+            // TWO PEAKS, TWO ROWS, TWO MECHANISM STRINGS — never one column and never one
+            // combined figure. A kernel high-water mark is process-cumulative, so the training
+            // process's peak is not the inference peak, and on this host the two fields can
+            // carry different mechanism CLASSES within the SAME row. A sampled figure carries
+            // its lower-bound label HERE, beside the value.
             out.push_str(&format!(
-                "  train peak RSS                        {:>12.0} B   mechanism: {} [{}]\n",
+                "  train peak RSS (training process)     {:>12.0} B   mechanism: {} [{}]{}\n",
                 group.train_peak_rss_bytes.mean,
                 group.train_peak_rss_mechanisms.join(", "),
-                class_tags(group.train_peak_rss_mechanism_classes.as_slice())
+                class_tags(group.train_peak_rss_mechanism_classes.as_slice()),
+                lower_bound_suffix(group.train_peak_rss_mechanism_classes.as_slice()),
             ));
             out.push_str(&format!(
-                "  inference peak RSS                    {:>12.0} B   mechanism: {} [{}]\n",
+                "  inference peak RSS (cold child)       {:>12.0} B   mechanism: {} [{}]{}\n",
                 group.inference_peak_rss_bytes.mean,
                 group.inference_peak_rss_mechanisms.join(", "),
-                class_tags(group.inference_peak_rss_mechanism_classes.as_slice())
+                class_tags(group.inference_peak_rss_mechanism_classes.as_slice()),
+                lower_bound_suffix(group.inference_peak_rss_mechanism_classes.as_slice()),
             ));
+            // THE WITHIN-ROW ASYMMETRY, SURFACED WHERE IT HAPPENS. With no second method to
+            // compare against, one row's two peaks are the ONLY place it can be seen.
+            if group.train_peak_rss_mechanism_classes != group.inference_peak_rss_mechanism_classes
+            {
+                out.push_str(&format!("  ^ {WITHIN_ROW_ASYMMETRY_NOTE}\n"));
+            }
             // THE ADAPTER-ONLY FIGURE, LABELLED, AND ONLY HERE. It answers "what did this method
             // write", which is a different question from "what must a user ship".
             out.push_str(&format!(
@@ -2532,6 +2636,23 @@ pub(crate) mod report {
             .join(", ")
     }
 
+    /// The lower-bound label, when ANY of a group's mechanisms is a sampled one.
+    ///
+    /// A suffix, so it renders on the same line as the number it qualifies.
+    fn lower_bound_suffix(
+        classes: &[entrenar::train::setfit::bench_gate::MechanismClass],
+    ) -> String {
+        use entrenar::train::setfit::bench_gate::MechanismClass;
+        if classes
+            .iter()
+            .any(|c| *c == MechanismClass::SampledLowerBound)
+        {
+            format!("  {SAMPLED_LOWER_BOUND_LABEL}")
+        } else {
+            String::new()
+        }
+    }
+
     /// Render a list of mechanism classes as their tags.
     fn class_tags(classes: &[entrenar::train::setfit::bench_gate::MechanismClass]) -> String {
         classes
@@ -2550,7 +2671,7 @@ pub(crate) mod report {
     pub(crate) fn render_resource_comparison(resource: &[MethodShotResource]) -> String {
         let mut out = String::from(RESOURCE_COMPARISON_HEADER);
         out.push('\n');
-        out.push_str(PER_HOST_FRAMING);
+        out.push_str(PER_HOST_FRAMING_TWO_HOST);
         out.push_str("\n\n");
         for shots in BENCH_SHOTS {
             let setfit = resource
@@ -2649,15 +2770,140 @@ pub(crate) mod report {
     /// The whole human report.
     #[must_use]
     pub(crate) fn render_human(report: &RunAggregate) -> String {
+        // SCOPE-AWARE, NOT DEFENSIVE. Under the active scope the cross-method sections are
+        // REMOVED, not emitted empty: a section header with no rows still tells a reader a
+        // comparison was attempted, which is the implication D-19 forbids.
+        let cross_method = report.methods.len() >= 2;
+
         let mut out = render_header(report);
+        if !cross_method {
+            out.push_str(SINGLE_METHOD_NOTE);
+            out.push_str("\n\n");
+        }
         out.push_str(&render_quality(&report.quality));
         out.push('\n');
-        out.push_str(&render_deltas(&report.deltas));
-        out.push('\n');
+        if cross_method {
+            out.push_str(&render_deltas(&report.deltas));
+            out.push('\n');
+        }
         out.push_str(&render_resource_detail(&report.resource));
-        out.push_str(&render_resource_comparison(&report.resource));
+        if cross_method {
+            out.push_str(&render_resource_comparison(&report.resource));
+        }
         out.push_str(&render_sizes(&report.resource));
+        if !cross_method {
+            // The estimation-first note lived inside the delta table, which the active scope
+            // does not render. It is not dropped with it — it is a statement about how every
+            // number in this report is presented, not about the deltas.
+            out.push('\n');
+            out.push_str(ESTIMATION_FIRST_NOTE);
+            out.push('\n');
+        }
         out
+    }
+}
+
+/// `apr setfit bench verify-cell` — the SINGLE-CELL verification door (plan 05-11 task 3).
+///
+/// # Which steps it applies, and which it deliberately excludes
+///
+/// It is `verify_run`'s steps 1 + 4 + 6 over ONE declared cell: the manifest's own digest,
+/// step 3's per-entry rule applied to THAT entry only, the row's file / schema / envelope
+/// digest / manifest-digest / slot checks, and provenance recomputed from committed bytes.
+///
+/// It does NOT apply step 2 (expectation-set equality), step 3's SWEEP over every entry, step 5
+/// (pairing) or step 7. The reason is not tidiness: at pilot time the manifest declares 40 cells
+/// with 39 still `pending`, which is exactly the state step 3's sweep refuses on — so a door
+/// that inherited the set-level checks could never pass on the cell it exists to check. And
+/// `bench report` over a copy holding one row refuses at completeness BEFORE the row loop, so
+/// the pilot row's own bytes are never read at all. This door reads them.
+///
+/// # It emits no statistic
+///
+/// No mean, no dispersion, no interval, no aggregate — the library door it calls returns `()`,
+/// so there is nothing to print even by accident. `bench report` is the only door that emits
+/// numbers; a per-cell door that printed statistics would be a partial-data report under
+/// another name, which the claims contract forbids.
+pub(crate) mod verify_cell {
+    use std::path::Path;
+
+    use entrenar::train::setfit::bench_gate::verify_cell as verify_one_cell;
+    use entrenar::train::setfit::bench_row::{
+        CellKey, Method, RunManifest, BENCH_SEEDS, BENCH_SHOTS,
+    };
+
+    use super::{read_bounded, RUN_MANIFEST_FILE};
+    use crate::error::{CliError, Result};
+
+    /// Everything `bench verify-cell` carries, resolved from clap.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct BenchVerifyCellArgs<'a> {
+        /// Where rows, locks, ledgers and the run manifest live.
+        pub(crate) bench_dir: &'a Path,
+        /// `setfit` or `lora` — the row-validity vocabulary, not the active scope.
+        pub(crate) method: &'a str,
+        /// Examples per class.
+        pub(crate) shots: u32,
+        /// One of the ten contracted seeds.
+        pub(crate) seed: u32,
+    }
+
+    /// What a passing door prints. ONE line, and not a statistic in it.
+    pub(crate) const PASS_LINE_PREFIX: &str = "VERIFIED (single cell): ";
+
+    /// The scope statement the pass line carries, so a reader cannot take it for a report.
+    pub(crate) const DOOR_SCOPE_NOTE: &str =
+        "scope: steps 1+4+6 of verify_run over ONE cell - manifest digest, this entry's own \
+         completeness, the row file/schema/envelope digest/manifest digest/slot, and provenance \
+         recomputed from committed bytes. NOT the set-level steps (expectation-set equality, \
+         the all-entries sweep, pairing, attestation), which is what lets this pass while other \
+         cells are still pending. No statistic is emitted; `bench report` is the only door that \
+         publishes numbers.";
+
+    /// Verify one cell's own evidence.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::ValidationFailed`] when the cell key is not contracted, when the manifest
+    /// cannot be read or parsed, or when the gate refuses the cell.
+    pub(crate) fn run(args: &BenchVerifyCellArgs<'_>) -> Result<()> {
+        let method = Method::from_tag(args.method).ok_or_else(|| {
+            CliError::ValidationFailed(format!(
+                "--method must be `setfit` or `lora`, got `{}`",
+                args.method
+            ))
+        })?;
+        if !BENCH_SHOTS.contains(&args.shots) {
+            return Err(CliError::ValidationFailed(format!(
+                "--shots {} is not contracted; the matrix is exactly {BENCH_SHOTS:?}",
+                args.shots
+            )));
+        }
+        if !BENCH_SEEDS.contains(&args.seed) {
+            return Err(CliError::ValidationFailed(format!(
+                "--seed {} is not contracted; the ten contracted seeds are {BENCH_SEEDS:?}, and \
+                 42 is deliberately NOT among them",
+                args.seed
+            )));
+        }
+        let cell = CellKey::new(method, args.shots, args.seed);
+
+        let manifest_path = args.bench_dir.join(RUN_MANIFEST_FILE);
+        let bytes = read_bounded(&manifest_path)?;
+        let manifest = RunManifest::from_bytes(&bytes).map_err(|error| {
+            CliError::ValidationFailed(format!(
+                "the run manifest at {} was refused: {error}",
+                manifest_path.display()
+            ))
+        })?;
+
+        verify_one_cell(&manifest, args.bench_dir, cell).map_err(|error| {
+            CliError::ValidationFailed(format!("cell {} REFUSED: {error}", cell.render()))
+        })?;
+
+        println!("{PASS_LINE_PREFIX}{}", cell.render());
+        println!("{DOOR_SCOPE_NOTE}");
+        Ok(())
     }
 }
 
