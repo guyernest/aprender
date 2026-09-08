@@ -4,14 +4,14 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: Benchmark and Claims Gate
 status: executing
-stopped_at: Completed 06-17-PLAN.md
-last_updated: "2026-09-08T14:59:29.633Z"
+stopped_at: Completed 05-11-PLAN.md
+last_updated: "2026-09-08T18:57:32.260Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 05 replanned for D-19 — 05-11/12/13 rewritten, 0 blockers
-state_head: 9a42112d3329b54b83af6de1681e4dc22a12cb87
+state_head: f54f5f1b37a594d55dc3d7c99bd96cf4e7d16af0
 progress:
   total_phases: 7
-  completed_phases: 2
+  completed_phases: 1
   total_plans: 81
   completed_plans: 78
 milestone_name: milestone
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 05 (Benchmark and Claims Gate) — EXECUTING
-Plan: 1 of 14
-Status: Executing Phase 05
+Plan: 2 of 14
+Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -205,6 +205,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P15 | 3h 5m | 3 tasks | 6 files |
 | Phase 06 P16 | 96 min | 3 tasks | 14 files |
 | Phase 06 P17 | 31 min | 3 tasks | 6 files |
+| Phase 05 P11 | session | 3 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -339,6 +340,9 @@ Recent decisions affecting current work:
 - [Phase 06]: poisson_sampler_domain float_tolerance = 0.01: 3.16 sigma at the noisiest sweep point (lambda 5), >= 7.62 sigma elsewhere, against a 17.2% pre-fix failure at lambda 900
 - [Phase 06]: Cost axis C-07 (holidays[].name) can be closed ONLY by a bound, never by a measurement: the field is an unbounded String and the router construction applies no DefaultBodyLimit / max_body / content-length layer, with no stdio framing cap — so it has no structural maximum to measure against.
 - [Phase 06]: A plan whose thesis is that a guard which cannot fail is theater must not reduce its own open items to a note. types::tests::no_cost_axis_is_pending SHIPS RED naming C-07 and C-08 instead of giving C-07 a measured disposition it cannot honestly carry.
+- [Phase 05]: D-19 contract narrowing APPROVED at a blocking human checkpoint: setfit-benchmark-claims-v1 goes 1.0.0 -> 2.0.0, active expectation set 80 two-method cells -> 40 SetFit cells, with the two-method design RETAINED as an explicitly deferred scope pointing at D-ITEM-05-15. pv diff suggested major; major taken. — Nothing describing the two-method design was deleted (equations 10->10, obligations 9->9, falsification tests 10->10, machine-checked), so D-ITEM-05-15 is a restoration rather than a re-derivation, and two of the six doctored negatives keep their meaning.
+- [Phase 05]: The narrowing lands on a NEW constant ACTIVE_METHODS (expectation-set domain), not on BENCH_METHODS (row-validity domain), which keeps both methods. — Narrowing BENCH_METHODS would have made a second method row fail row validity and silently DELETED the two deferred-scope negatives by making the rows they doctor unbuildable - a gate that looks tighter while proving less.
+- [Phase 05]: A single-cell verification door (verify_cell / apr setfit bench verify-cell) is verify_run steps 1+4+6 over ONE declared cell, excluding the set-level steps, and emits no statistic. — At pilot time the manifest declares 40 cells with 39 pending - exactly what step 3 sweep refuses on - so a door inheriting the set-level checks could never pass on the cell it exists to check. Equivalence with verify_run is proven behaviourally by a per-defect variant-tag table, never by asserting the door calls the two functions.
 
 ### Pending Todos
 
@@ -438,8 +442,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-07T18:39:26.092Z
-Stopped at: Completed 06-17-PLAN.md
+Last session: 2026-09-08T18:57:16.851Z
+Stopped at: Completed 05-11-PLAN.md
 Resume file: None
 
 ## Accumulated Context

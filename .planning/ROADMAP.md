@@ -282,7 +282,7 @@ contract edit per Phase 3 D-10(c), never an inline relaxation by a Phase 5 execu
 **Branch base**: Phase 5 continues on `gsd/phase-2-contract-gate` per the 02-01 policy (phases
 2-4 all ride this branch; no PR has been opened — opening one is the human's call).
 
-**Plans**: 11/14 plans executed in 8 waves — **replanned again 2026-09-08 for D-19**: 05-11 repurposed from the LoRA dispatch to the 80→40 matrix retarget (the selection manifests it claimed to own were already shipped by 05-09's `run_bench_cells.sh::generate_selections`), 05-12 became the only cell-generation plan, 05-13 retargeted to 40 cells. Waves and `depends_on` edges unchanged. Verified by gsd-plan-checker over two revisions: 3 blockers → 0. Previously replanned 2026-08-17 after 05-01's measurements refuted 05-03's premise. At production step count (s64 = 1536 steps) five of six parameter classes have NO legal ε under the contracted 10×/10× rule (only `layer_norm_weight` survives); recorded as `05-CONTEXT.md` D-16..D-18. 05-03 was reshaped from "prepare → approve → commit" to "derive candidates → SELECT → commit" (D-04 ceremony intact) and now decides which of two already-contracted lower bounds binds. 05-14 was ADDED (wave 1, before 05-03) to make the evidence gate fail-closed on window collapse — it currently exits `rc=0` while printing `EMPTY` five times, because separation is asserted while `supports_margin` is only reported. No other plan's wave or depends_on changed; 05-14 is numbered 14 rather than inserted so the dependency graph is not renumbered. **Replanned again 2026-09-08 after `05-CONTEXT.md` D-19 descoped the 9B LoRA arm** — the declared matrix shrinks from 40 comparison cells (80 rows) to 40 SetFit rows. Only 05-11, 05-12 and 05-13 were rewritten; 05-01..05-10 and 05-14 are executed and untouched. 05-11 was REPURPOSED (LoRA dispatch retired, matrix retarget in its place) rather than vacated, so no wave and no `depends_on` edge changed and no plan is left depending on an artifact nothing produces. The fail-closed gate is not weakened: 05-10's `verify_run`, its refusal order and its six doctored negatives all survive, with four of the six re-mutated at the new 40-cell scope because the old proof does not transfer to a different expectation set.
+**Plans**: 12/14 plans executed in 8 waves — **replanned again 2026-09-08 for D-19**: 05-11 repurposed from the LoRA dispatch to the 80→40 matrix retarget (the selection manifests it claimed to own were already shipped by 05-09's `run_bench_cells.sh::generate_selections`), 05-12 became the only cell-generation plan, 05-13 retargeted to 40 cells. Waves and `depends_on` edges unchanged. Verified by gsd-plan-checker over two revisions: 3 blockers → 0. Previously replanned 2026-08-17 after 05-01's measurements refuted 05-03's premise. At production step count (s64 = 1536 steps) five of six parameter classes have NO legal ε under the contracted 10×/10× rule (only `layer_norm_weight` survives); recorded as `05-CONTEXT.md` D-16..D-18. 05-03 was reshaped from "prepare → approve → commit" to "derive candidates → SELECT → commit" (D-04 ceremony intact) and now decides which of two already-contracted lower bounds binds. 05-14 was ADDED (wave 1, before 05-03) to make the evidence gate fail-closed on window collapse — it currently exits `rc=0` while printing `EMPTY` five times, because separation is asserted while `supports_margin` is only reported. No other plan's wave or depends_on changed; 05-14 is numbered 14 rather than inserted so the dependency graph is not renumbered. **Replanned again 2026-09-08 after `05-CONTEXT.md` D-19 descoped the 9B LoRA arm** — the declared matrix shrinks from 40 comparison cells (80 rows) to 40 SetFit rows. Only 05-11, 05-12 and 05-13 were rewritten; 05-01..05-10 and 05-14 are executed and untouched. 05-11 was REPURPOSED (LoRA dispatch retired, matrix retarget in its place) rather than vacated, so no wave and no `depends_on` edge changed and no plan is left depending on an artifact nothing produces. The fail-closed gate is not weakened: 05-10's `verify_run`, its refusal order and its six doctored negatives all survive, with four of the six re-mutated at the new 40-cell scope because the old proof does not transfer to a different expectation set.
 
 Plans:
 **Wave 1** *(the F-10 unblock work — D-01 — plus the independent numerics substrate 05-04, whose t_critical.json fixture is the source of 05-05's frozen contract literal; nothing F-10-downstream runs until the edit lands)*
@@ -313,7 +313,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 — the declared matrix must shrink to 40 BEFORE any cell is generated, because the first `bench run` writes a run manifest derived from `RunManifest::expectation()`)*
 
-- [ ] 05-11-PLAN.md — **(REPURPOSED 2026-09-08, D-19)** Retarget the declared matrix from 80 comparison cells to 40 SetFit cells: blocking human approval of the claims-contract narrowing (`pv diff`, RETAINED-vs-NARROWED inventory), the 40-cell active expectation set with the two-method design retained as an explicitly deferred scope, all six doctored negatives preserved with four RE-MUTATED at the new scope, an out-of-scope-row refusal, single-method uncertainty on the frozen t constant, the comparison-free renderer, and a single-cell verification door. The LoRA GPU-dispatch arm this number used to carry is RETIRED in-band with its evidence (`D-ITEM-05-15`); `scripts/dispatch-bench-lora.sh` is not written. The number is repurposed rather than vacated so 05-12 and 05-13 keep pointing at a plan that produces what they consume — the dependency graph is unchanged
+- [x] 05-11-PLAN.md — **(REPURPOSED 2026-09-08, D-19)** Retarget the declared matrix from 80 comparison cells to 40 SetFit cells: blocking human approval of the claims-contract narrowing (`pv diff`, RETAINED-vs-NARROWED inventory), the 40-cell active expectation set with the two-method design retained as an explicitly deferred scope, all six doctored negatives preserved with four RE-MUTATED at the new scope, an out-of-scope-row refusal, single-method uncertainty on the frozen t constant, the comparison-free renderer, and a single-cell verification door. The LoRA GPU-dispatch arm this number used to carry is RETIRED in-band with its evidence (`D-ITEM-05-15`); `scripts/dispatch-bench-lora.sh` is not written. The number is repurposed rather than vacated so 05-12 and 05-13 keep pointing at a plan that produces what they consume — the dependency graph is unchanged
 
 **Wave 7** *(blocked on Wave 6 — a cell generated before the retarget would declare 80 expected cells, 40 of which can never exist)*
 
@@ -446,7 +446,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5; Phase 6 is an independen
 | 2. Deterministic Pair and Data Protocol | 9/9 | Complete   | 2026-08-09 |
 | 3. Faithful Two-Stage Trainer and Head | 10/10 | Complete   | 2026-08-14 |
 | 4. APR Artifact and Production Parity | 22/22 | UAT passed, awaiting secure-phase |  |
-| 5. Benchmark and Claims Gate | 11/14 | In Progress|  |
+| 5. Benchmark and Claims Gate | 12/14 | In Progress|  |
 | 6. Native Time-Series Forecasting Stack | 17/17 | In Progress|  |
 
 ### Phase 7: Tier-Resolved Door Limits
@@ -471,11 +471,13 @@ class gap-closure round 3 existed to end, recurring one level up.
 
 **Flexible is NOT unbounded.** Round 3's enumeration, completeness tests and contract
 ownership all stand. The invariant strengthens:
+
 - before — "cost axis C-08 is bounded at 15 000 000"
 - after — "C-08 is ALWAYS bounded; its value comes from the resolved profile; no profile
   can disable a bound or set it above its tier's structural maximum"
 
 **Success Criteria (draft — to be firmed at plan time):**
+
 1. `DoorLimits` struct with `Default` byte-equal to today's 13 constants; every door check
    reads the resolved profile, no call site reads a bare `const`.
 2. `contracts/forecast-tool-boundary-v1.yaml` `constants:` becomes the DEFAULT profile and

@@ -282,3 +282,45 @@ pairing key is recorded per cell precisely so the arm can be added later.
 
 **Blocks:** the descoped halves of EVAL-02 and EVAL-04 (`05-CONTEXT.md` D-19; the Phase 5 amendment
 table in `.planning/REQUIREMENTS.md`).
+
+---
+
+## D-ITEM-05-16: three PRE-EXISTING red gates found by plan 05-11, out of its scope
+
+**Found during:** plan 05-11 (2026-09-08), while running the wider suites to check for
+collateral damage from the 40-cell retarget. **None is caused by this plan** — measured, not
+assumed: `git diff --name-only <plan-base>..HEAD` touches no file under `gpu/`, `prune/` or the
+`data` command surface. Logged here rather than fixed, per the executor scope boundary: only
+issues directly caused by the current task's changes are auto-fixed.
+
+**(a) `gpu::guard` / `gpu::ledger` / `gpu::wait` — 21 failing unit tests.**
+`cargo test -p aprender-train --lib --features setfit gpu::ledger -- --test-threads=1` → rc=101,
+"25 passed; 12 failed". Serial execution does NOT fix them, so this is not a parallelism
+artifact; e.g. `test_capacity_invariant_prevents_overallocation` fails
+`assert!(result.is_err())` at `crates/aprender-train/src/gpu/ledger.rs:608`. The capacity
+invariant that is supposed to REFUSE an overallocation is accepting one — worth treating as a
+real defect rather than a flake.
+
+**(b) `prune::snapshot_tests` — 3 failing tests.** Also fails serially.
+
+**(c) FALSIFY-CLI-006 red: three undeclared depth-2 commands.**
+`cargo test -p apr-cli --test cli_commands` → rc=101,
+`FALSIFY-CLI-006: the binary offers depth-2 commands the contract does not declare:
+["data tweet-eval-stance", "data select", "data pairs"]`. The binary ships three `apr data`
+subcommands that `contracts/apr-cli-commands-v1.yaml` does not list. The fix is to add them
+under `data`'s `subcommands:` — a contract edit, which is exactly the kind of edit this phase
+requires a checkpoint for, so it is not something to slip into an unrelated plan.
+
+Note that 05-11's own `apr setfit bench verify-cell` is NOT among the undeclared: the gate
+checks depth-2 paths and `verify-cell` sits at depth 3.
+
+**(d) 15 clippy findings under `-D warnings`.** All in `aprender-compute` (14) and
+`aprender-present-terminal` (1) — crates 05-11 never touched. `cargo clippy -p aprender-train
+--lib --features setfit -- -D warnings` → rc=101, but zero findings in `aprender-train` or
+`aprender-core`.
+
+**Why this matters beyond bookkeeping:** (a) and (c) are gates that are RED in the tree today.
+A phase whose thesis is "refuse incomplete or unequal claims" should not leave red gates
+unrecorded, and CLAUDE.md's own lesson is that a gate nobody runs is a gate that stops being
+run. `make setfit-bench-tests` and `make contract-audit-phase5` — the two gates 05-11 owns —
+are both green; these three are not, and they were already not before this plan started.
