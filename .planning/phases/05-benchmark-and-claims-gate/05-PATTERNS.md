@@ -1,5 +1,15 @@
 # Phase 5: Benchmark and Claims Gate - Pattern Map
 
+> **RECONCILED 2026-09-08 against `05-CONTEXT.md` D-19 — the 9B LoRA arm is DESCOPED.**
+> Every claim below about the 40 LoRA cells, the lambda-vector GPU host, or a
+> SetFit-versus-LoRA comparison is **superseded**: the host is unreachable and aprender
+> cannot run the Qwen3.5-9B hybrid architecture. EVAL-02/EVAL-04 and the Phase 5 goal were
+> amended accordingly; the arm is deferred as `D-ITEM-05-15`. Findings about the SetFit half,
+> the numerics substrate, the row schema and the claims gate are UNAFFECTED and still hold.
+> This file was reconciled in place rather than regenerated — the descope narrows scope, it
+> does not invalidate the surviving research.
+
+
 **Mapped:** 2026-08-16
 **Files analyzed:** 16 new/modified surfaces
 **Analogs found:** 13 exact / 16 (3 with no in-repo analog — see "No Analog Found")
@@ -610,7 +620,7 @@ Planner should use RESEARCH.md patterns (cited) instead of a code analog:
 |---|---|---|---|
 | Peak-RSS measurement | resource metric | measurement | Nothing in-repo measures peak memory (`aprender-simulate`'s `peak_memory_bytes` is an always-`None` placeholder). Use RESEARCH Pattern 6: Linux `/proc/self/status` VmHWM text read (no `unsafe`), `sysinfo` 0.32 (already a workspace dep, root `Cargo.toml:266`) as sampled fallback — contract must say "sampled". Latency/warmup precedent DOES exist: `apr bench --warmup/--iterations` (`commands/bench.rs:102-117`, defaults warmup 3) and `ClassifyResponse.latency_ms` (bit-asserted, excluded from `PartialEq`). |
 | LoRA-side selection-lock semantics | access-control rule | — | `create_selection_lock`/`mint_test_token`/`grant` are generic over a SEALED `SetFitCredential` (exactly two implementors, counted by `credential_seal_is_a_private_supertrait`). No LoRA analog exists by design. RESEARCH Open Q3 recommendation (b): claims-contract-level no-selection attestation + manifest hash in LoRA rows, with a doctored-row negative — do not widen the seal. |
-| 40-cell GPU-host orchestration/transport | orchestration script | batch/remote | Nearest precedent is `scripts/dispatch-*.sh` (e.g. `dispatch-distill-phase-3-gx10.sh` — ssh, build, run, artifacts return as files) — MEDIUM-confidence house pattern, not a strong analog. lambda-vector reachability is UNVERIFIED from this host (RESEARCH Open Q1, human checkpoint). Hash-committed rows make transport mechanism-agnostic (see Shared Patterns: digest-verify). |
+| 40-cell GPU-host orchestration/transport **[DESCOPED 2026-09-08, D-19 — no longer to be built]** | orchestration script | batch/remote | Nearest precedent is `scripts/dispatch-*.sh` (e.g. `dispatch-distill-phase-3-gx10.sh` — ssh, build, run, artifacts return as files) — MEDIUM-confidence house pattern, not a strong analog. lambda-vector reachability is UNVERIFIED from this host (RESEARCH Open Q1, human checkpoint). Hash-committed rows make transport mechanism-agnostic (see Shared Patterns: digest-verify). |
 
 ## Metadata
 

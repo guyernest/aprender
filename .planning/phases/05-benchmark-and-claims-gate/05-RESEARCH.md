@@ -1,5 +1,15 @@
 # Phase 5: Benchmark and Claims Gate - Research
 
+> **RECONCILED 2026-09-08 against `05-CONTEXT.md` D-19 — the 9B LoRA arm is DESCOPED.**
+> Every claim below about the 40 LoRA cells, the lambda-vector GPU host, or a
+> SetFit-versus-LoRA comparison is **superseded**: the host is unreachable and aprender
+> cannot run the Qwen3.5-9B hybrid architecture. EVAL-02/EVAL-04 and the Phase 5 goal were
+> amended accordingly; the arm is deferred as `D-ITEM-05-15`. Findings about the SetFit half,
+> the numerics substrate, the row schema and the claims gate are UNAFFECTED and still hold.
+> This file was reconciled in place rather than regenerated — the descope narrows scope, it
+> does not invalidate the surviving research.
+
+
 **Researched:** 2026-08-16
 **Domain:** SetFit-vs-LoRA benchmark claims layer (calibration unblock, paired statistics, selection-safe row/manifest gate) — pure in-repo Rust + pinned Python fixture env
 **Confidence:** HIGH (all load-bearing claims verified by reading the shipped code and contracts in this session; the few [ASSUMED] items are listed in the Assumptions Log)
@@ -66,6 +76,7 @@
 #### LoRA Baseline Execution
 
 - **D-09: LoRA cells run on the lambda-vector GPU host (pre-authorized); SetFit cells run CPU.**
+  **[SUPERSEDED 2026-09-08 by D-19 — the LoRA half is descoped; only the CPU SetFit half remains.]**
   Every row records its true backend/hardware identity read from execution (Ph4 D-12 — never
   echoed from config). Resource comparisons are presented as as-deployed method costs — which is
   the milestone's actual question (cheap CPU SetFit vs GPU-hungry 9B LoRA) — and never framed as
@@ -861,7 +872,7 @@ pub fn ttest_rel(sample1: &[f32], sample2: &[f32]) -> Result<TTestResult> // dif
 | A2 | SetFit reference recipe defaults: 1 contrastive epoch, batch 16, body lr 2e-5, pair-iteration R=20, logistic head (paper + setfit 1.1.3 defaults) | Hyperparameter-policy discretion | Wrong "frozen defaults" for the SetFit side. Verify from the PINNED env, not the web: `cd scripts/setfit_fixtures && uv run python -c "from setfit import TrainingArguments; print(TrainingArguments())"` |
 | A3 | sklearn 1.9.0 has no multiclass-ECE API; `brier_score_loss` is binary-only | Pattern 2 | Fixture generator design changes if wrong (would simplify, not break); verify in env before writing the generator |
 | A4 | The OvR identity `multiclass BS = Σ_k binary BS_k` for one-hot labels | Pattern 2 | Cross-check in the generator; it is an algebraic identity but must be confirmed numerically against the implementation's edge handling |
-| A5 | lambda-vector is reachable and holds/can pull the qwen3.5-9b base weights | Pattern 5, Environment | The 40 LoRA cells cannot run; the phase's D-09 half stalls. No ssh config entry found on THIS host — must be confirmed with the human before planning locks the orchestration |
+| A5 | **REFUTED 2026-09-08 (D-19)** — lambda-vector is NOT reachable (12 candidates, 12 failures) AND the architecture is unimplemented, so the weights are moot. Arm descoped. Original assumption: lambda-vector is reachable and holds/can pull the qwen3.5-9b base weights | Pattern 5, Environment | The 40 LoRA cells cannot run; the phase's D-09 half stalls. No ssh config entry found on THIS host — must be confirmed with the human before planning locks the orchestration |
 | A6 | `ClassifyTrainer` tolerates `val_split: 0.0` / effectively-disabled early stopping | Pitfall 3 | If it divides by zero or requires val batches, D-10 wiring needs a trainer-side patch; probe with a 5-minute test before the LoRA wave |
 | A7 | The SetFit train completion report carries (or can trivially carry) wall-clock timing | Pattern 6 | Minor: the driver can wall-clock the invocation regardless |
 

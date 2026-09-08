@@ -10,6 +10,16 @@ updated: 2026-08-16
 
 # Phase 5 — Validation Strategy
 
+> **RECONCILED 2026-09-08 against `05-CONTEXT.md` D-19 — the 9B LoRA arm is DESCOPED.**
+> Every claim below about the 40 LoRA cells, the lambda-vector GPU host, or a
+> SetFit-versus-LoRA comparison is **superseded**: the host is unreachable and aprender
+> cannot run the Qwen3.5-9B hybrid architecture. EVAL-02/EVAL-04 and the Phase 5 goal were
+> amended accordingly; the arm is deferred as `D-ITEM-05-15`. Findings about the SetFit half,
+> the numerics substrate, the row schema and the claims gate are UNAFFECTED and still hold.
+> This file was reconciled in place rather than regenerated — the descope narrows scope, it
+> does not invalidate the surviving research.
+
+
 > Per-phase validation contract for feedback sampling during execution.
 
 ---
@@ -97,7 +107,7 @@ Mapped from RESEARCH.md "Wave 0 Gaps" to owning plans (all covered):
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
 | Contract-edit approval (D-04) | EVAL-02..05 unblock | Human checkpoint by explicit ruling | 05-03.T2: executor presents pv diff + measured thresholds + MEASURED/COVERED margins; approve before commit |
-| lambda-vector GPU access + 9B base weights (A1) | EVAL-02/03/05 | Remote host credentials + weight provenance | 05-11.T1: automation-first ssh probes presented; human supplies access, confirms weight hash, decides Q6 SetFit host |
+| ~~lambda-vector GPU access + 9B base weights (A1)~~ **RESOLVED-AS-BLOCKED 2026-09-08 (D-19): arm descoped, row retired** | EVAL-02/03/05 | Remote host credentials + weight provenance | 05-11.T1: automation-first ssh probes presented; human supplies access, confirms weight hash, decides Q6 SetFit host |
 | >1hr compute authorizations | CLAUDE.md rule | Compute-budget decisions reserved for the human | 05-01.T1 (matrix projection), 05-03.T2 (05-12 pre-auth), 05-12.T1 (fallback gate) |
 
 ---
