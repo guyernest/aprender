@@ -174,8 +174,8 @@ fn bench_row_parity_rejects_a_contract_with_an_extra_seed() {
     // every value it looks for is still present — while the benchmark it describes has 88
     // cells rather than 80.
     let mutated = CLAIMS_CONTRACT_YAML.replace(
-        "      - 53\n    expected_cells: 80",
-        "      - 53\n      - 59\n    expected_cells: 80",
+        "      - 53\n    expected_cells: 40",
+        "      - 53\n      - 59\n    expected_cells: 40",
     );
     assert_ne!(
         mutated, CLAIMS_CONTRACT_YAML,
@@ -193,8 +193,8 @@ fn bench_row_parity_rejects_a_contract_with_a_duplicated_seed() {
     // The Cartesian SET is unchanged by a duplicate — only the list cardinality moves. This
     // is the negative a naive set-only comparison passes.
     let mutated = CLAIMS_CONTRACT_YAML.replace(
-        "      - 53\n    expected_cells: 80",
-        "      - 53\n      - 53\n    expected_cells: 80",
+        "      - 53\n    expected_cells: 40",
+        "      - 53\n      - 53\n    expected_cells: 40",
     );
     assert_ne!(
         mutated, CLAIMS_CONTRACT_YAML,
@@ -207,17 +207,100 @@ fn bench_row_parity_rejects_a_contract_with_a_duplicated_seed() {
     );
 }
 
+#[test]
+fn bench_row_parity_rejects_a_contract_with_an_extra_method() {
+    // THE MUTATION THE 2.0.0 NARROWING MADE NECESSARY. The method axis is the one that
+    // moved, so it is the axis a silent widening would move back — and a widening is the
+    // only direction in which the narrowing can be undone without anyone noticing. The
+    // seed mutations above cannot catch it: they move a different axis.
+    let mutated = CLAIMS_CONTRACT_YAML.replace(
+        "    methods:\n      - setfit\n    shots:",
+        "    methods:\n      - setfit\n      - lora\n    shots:",
+    );
+    assert_ne!(
+        mutated, CLAIMS_CONTRACT_YAML,
+        "the mutation must actually apply, or this negative proves nothing",
+    );
+    assert!(
+        parity_verdict(&mutated).is_err(),
+        "restoring a SECOND METHOD to the ACTIVE expectation set must fail parity: the \
+         contract would declare 80 cells while RunManifest::expectation() derives 40",
+    );
+}
+
+#[test]
+fn bench_row_active_scope_and_row_validity_are_different_questions() {
+    // THE TWO FACTS THAT MUST NOT COLLAPSE INTO ONE. A second method's cell is:
+    //   (a) VALID AS A ROW — `is_contracted` reads BENCH_METHODS, which keeps both, so the
+    //       deferred-scope negatives can still construct the rows they doctor; and
+    //   (b) OUT OF SCOPE for the active expectation set — `expectation()` derives from
+    //       ACTIVE_METHODS, so no complete run contains it.
+    // Narrowing BENCH_METHODS would have made (a) false and silently deleted two shipped
+    // negatives while looking like a tightened gate.
+    let lora_cell = CellKey::new(Method::Lora, 16, 29);
+
+    assert!(
+        lora_cell.is_contracted(),
+        "row validity must still admit a second method's cell — BENCH_METHODS is the \
+         ROW-VALIDITY domain and keeps both methods",
+    );
+    assert!(
+        !RunManifest::expectation().contains(&lora_cell),
+        "the ACTIVE expectation set must NOT contain it — ACTIVE_METHODS is the \
+         EXPECTATION domain and names one method",
+    );
+
+    // And the active set is exactly the SetFit half, cell for cell.
+    let active = RunManifest::expectation();
+    assert!(
+        active.iter().all(|c| c.method == Method::Setfit),
+        "every active cell is a SetFit cell",
+    );
+    assert_eq!(active.len(), EXPECTED_CELLS);
+}
+
+#[test]
+fn bench_row_deferred_scope_is_the_retained_eighty_cell_product() {
+    // The deferred scope is RETAINED, not deleted — D-ITEM-05-15 restores it rather than
+    // re-deriving it. Its constructor is `#[cfg(test)]`-gated, so this test is one of the
+    // only places that can name it and production code cannot reach it at all.
+    let deferred = RunManifest::expectation_for(ExpectationScope::DeferredTwoMethod);
+    assert_eq!(deferred.len(), 80, "2 methods x 4 shots x 10 seeds");
+
+    let unique: BTreeSet<CellKey> = deferred.iter().copied().collect();
+    assert_eq!(unique.len(), 80, "no cell key may repeat");
+
+    // The active scope is a strict SUBSET of the deferred one: restoration ADDS cells, it
+    // does not move the ones already measured.
+    let active: BTreeSet<CellKey> = RunManifest::expectation().iter().copied().collect();
+    assert!(
+        active.is_subset(&unique),
+        "restoring the second arm must not invalidate a single active cell",
+    );
+    assert_eq!(unique.len() - active.len(), EXPECTED_CELLS, "the deferred half is the same size");
+}
+
 // ===========================================================================================
 // The expectation set itself
 // ===========================================================================================
 
 #[test]
-fn bench_row_expectation_is_eighty_unique_cells() {
+fn bench_row_expectation_is_forty_unique_cells() {
     let cells = RunManifest::expectation();
     let unique: BTreeSet<CellKey> = cells.iter().copied().collect();
     assert_eq!(cells.len(), EXPECTED_CELLS);
     assert_eq!(unique.len(), EXPECTED_CELLS, "no cell key may repeat");
-    assert_eq!(EXPECTED_CELLS, BENCH_METHODS.len() * BENCH_SHOTS.len() * BENCH_SEEDS.len());
+    // Derived from ACTIVE_METHODS — the expectation-set domain — NOT from BENCH_METHODS,
+    // which is the row-validity domain and still carries both methods. Asserting the product
+    // against the wrong constant is exactly the collapse this plan exists to prevent.
+    assert_eq!(EXPECTED_CELLS, ACTIVE_METHODS.len() * BENCH_SHOTS.len() * BENCH_SEEDS.len());
+    assert_eq!(EXPECTED_CELLS, 40, "1 active method x 4 shots x 10 seeds");
+    assert_eq!(
+        BENCH_METHODS.len(),
+        2,
+        "the ROW-VALIDITY domain keeps both methods; narrowing it would make the two \
+         deferred-scope negatives unbuildable"
+    );
 }
 
 #[test]
@@ -239,11 +322,11 @@ fn bench_row_expectation_is_in_the_deterministic_contract_order() {
     assert_eq!(
         &rendered[EXPECTED_CELLS - 5..],
         &[
-            "lora/s64/seed37".to_string(),
-            "lora/s64/seed41".to_string(),
-            "lora/s64/seed43".to_string(),
-            "lora/s64/seed47".to_string(),
-            "lora/s64/seed53".to_string(),
+            "setfit/s64/seed37".to_string(),
+            "setfit/s64/seed41".to_string(),
+            "setfit/s64/seed43".to_string(),
+            "setfit/s64/seed47".to_string(),
+            "setfit/s64/seed53".to_string(),
         ],
         "iterating a hash-ordered map instead of the contract order changes this sequence",
     );
@@ -596,7 +679,10 @@ fn bench_row_manifest_record_is_idempotent_on_an_identical_hash() {
 #[test]
 fn bench_row_manifest_record_collides_on_a_differing_hash() {
     let mut manifest = declared_manifest();
-    let cell = CellKey::new(Method::Lora, 64, 53);
+    // The LAST cell of the ACTIVE expectation set. It was `lora/s64/seed53` before the
+    // 2.0.0 narrowing; a manifest cannot record a cell it does not declare, so the tail of
+    // the set moved with the set rather than this test losing its subject.
+    let cell = CellKey::new(Method::Setfit, 64, 53);
     let first = "1".repeat(64);
     let second = "2".repeat(64);
 
@@ -666,7 +752,9 @@ fn bench_row_manifest_refuses_a_reordered_expectation_set() {
     let bytes = manifest.to_file_bytes().expect("serialize");
     let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     let cells = value["payload"]["cells"].as_array_mut().expect("an array");
-    cells.swap(0, 79);
+    // The LAST index of the ACTIVE set, derived rather than typed: a literal 79 was a
+    // second, silently-drifting statement of the set's size.
+    cells.swap(0, EXPECTED_CELLS - 1);
     let resealed = reseal(&mut value);
 
     let err = RunManifest::from_bytes(&resealed).expect_err("a reordered manifest is refused");

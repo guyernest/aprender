@@ -430,6 +430,139 @@ def gen_paired_t_cases() -> None:
 
 
 # ====================================================================================
+# (b2) seed-dispersion one-sample CI95 -- the ACTIVE-scope statistic of claims 2.0.0
+# ====================================================================================
+
+
+def gen_seed_dispersion_ci_cases() -> None:
+    """Reference endpoints for `ci95_one_sample_df9` (claims 2.0.0 seed_dispersion_ci95).
+
+    The active, single-method scope has no second arm to difference against, so its
+    uncertainty is the dispersion of one method's score across the ten contracted seeds
+    at fixed data and protocol. The Rust side computes it by delegating to the PAIRED
+    helper against an all-zero comparator, so there is exactly one mean and one (n-1)
+    std in the claims layer (OPS-03). This fixture pins the endpoints that delegation
+    must reproduce, computed here independently by scipy -- so a mistake in the
+    delegation is caught by a reference rather than by the delegation's own arithmetic.
+    """
+    t_crit = float(stats.t.ppf(CI_Q, PAIRED_DF))
+
+    # F_avg-shaped, ten entries per case, one per contracted seed.
+    spread = [0.612, 0.640, 0.598, 0.671, 0.655, 0.603, 0.688, 0.629, 0.647, 0.618]
+    tight = [0.7031, 0.7028, 0.7034, 0.7029, 0.7033, 0.7030, 0.7035, 0.7027, 0.7032, 0.7031]
+    low = [0.311, 0.289, 0.402, 0.256, 0.377, 0.298, 0.341, 0.266, 0.388, 0.303]
+    # Exact binary fractions: identical in binary64 AND binary32, so the degenerate
+    # case is degenerate on both sides rather than by rounding.
+    constant = [0.6875] * PAIRED_N
+
+    def finite(case_id: str, note: str, values: list[float]) -> dict:
+        arr = np.asarray(values, dtype=np.float64)
+        n = int(arr.size)
+        if n != PAIRED_N:
+            sys.exit(f"FATAL: {case_id} has {n} values, the design is {PAIRED_N}")
+        mean = float(arr.mean())
+        std = float(arr.std(ddof=1))
+        se = std / math.sqrt(n)
+        half = t_crit * se
+
+        # CROSS-CHECK against scipy's own interval machinery, not just the closed form.
+        sp_low, sp_high = stats.t.interval(0.95, n - 1, loc=mean, scale=se)
+        # And against the one-sample t-test's sem, which is the same quantity by a
+        # different route.
+        sp_se = float(stats.sem(arr, ddof=1))
+
+        return {
+            "id": case_id,
+            "kind": "finite",
+            "note": note,
+            "values": [float(v) for v in values],
+            "n": n,
+            "df": PAIRED_DF,
+            "mean": agree(f"{case_id}.mean", mean, float(np.mean(arr))),
+            "std": agree(f"{case_id}.std", std, float(np.std(arr, ddof=1))),
+            "std_err": agree(f"{case_id}.std_err", se, sp_se),
+            "half_width": half,
+            "ci95_low": agree(f"{case_id}.ci95_low", mean - half, float(sp_low)),
+            "ci95_high": agree(f"{case_id}.ci95_high", mean + half, float(sp_high)),
+        }
+
+    cases = [
+        finite(
+            "seed_spread_typical",
+            "Ten seeds with the dispersion a few-shot run actually shows; the interval "
+            "is wide enough that quoting the mean alone would overstate precision, "
+            "which is the whole reason EVAL-04 asks for uncertainty and not just a mean.",
+            spread,
+        ),
+        finite(
+            "seed_spread_tight",
+            "Barely-varying seeds. The interval is narrow but PRESENT -- narrowness is "
+            "a measurement, not a licence to drop the interval.",
+            tight,
+        ),
+        finite(
+            "seed_spread_wide_low_scores",
+            "Low scores with large seed-to-seed swing: at 8 shots the sampled subset is "
+            "a larger source of variation than anything else, which is PF-007's point.",
+            low,
+        ),
+        {
+            "id": "all_seeds_identical",
+            "kind": "degenerate_zero_variance",
+            "note": (
+                "All ten seeds scored exactly the same. There is no dispersion to "
+                "interval over, so the contracted result is the typed "
+                "ZeroVarianceDifferences refusal with the constant reported -- never a "
+                "NaN and never a serde null that reads as a missing measurement (CR-03)."
+            ),
+            "values": [float(v) for v in constant],
+            "n": PAIRED_N,
+            "df": PAIRED_DF,
+            "expect": "ZeroVarianceDifferences",
+            "constant_value": float(constant[0]),
+        },
+    ]
+
+    n_finite = sum(1 for c in cases if c["kind"] == "finite")
+    n_degen = sum(1 for c in cases if c["kind"] == "degenerate_zero_variance")
+    if n_finite < 2 or n_degen < 1:
+        sys.exit(f"FATAL: need >= 2 finite and >= 1 degenerate cases, got {n_finite}/{n_degen}")
+
+    write_fixture(
+        "seed_dispersion_ci_cases.json",
+        {
+            "generator": GENERATOR,
+            "versions": env_versions(),
+            "formula": (
+                "x_bar = mean(x); s = std(x, ddof=1); se = s / sqrt(n); df = n - 1; "
+                "CI95 = x_bar +/- t_crit * se"
+            ),
+            "t_crit_source": "scipy.stats.t.ppf(0.975, 9), see t_critical.json",
+            "t_crit": t_crit,
+            "scope": (
+                "ACTIVE scope of setfit-benchmark-claims-v1 2.0.0 "
+                "(equations.claims_statistics.seed_dispersion_ci95). A seed-dispersion "
+                "interval at fixed data and protocol -- NOT a population interval and "
+                "NOT a comparison."
+            ),
+            "degenerate_policy": (
+                "A case whose ten values are all identical has no dispersion. It carries "
+                "kind=degenerate_zero_variance and expect=ZeroVarianceDifferences and "
+                "records no interval. ci95_one_sample_df9 must return that typed error "
+                "rather than a non-finite f64."
+            ),
+            "cross_checks": [
+                "mean: closed form vs numpy.mean to 1e-12",
+                "std: closed form vs numpy.std(ddof=1) to 1e-12",
+                "std_err: s/sqrt(n) vs scipy.stats.sem(ddof=1) to 1e-12",
+                "endpoints: closed form vs scipy.stats.t.interval(0.95, df, loc, scale) to 1e-12",
+            ],
+            "cases": cases,
+        },
+    )
+
+
+# ====================================================================================
 # (c) top-label ECE -- D-07, VERIFIES A3
 # ====================================================================================
 
@@ -908,6 +1041,7 @@ def main() -> None:
 
     gen_t_critical()
     gen_paired_t_cases()
+    gen_seed_dispersion_ci_cases()
     gen_ece_cases()
     gen_brier_cases()
 

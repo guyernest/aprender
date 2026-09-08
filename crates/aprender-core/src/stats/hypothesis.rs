@@ -476,6 +476,43 @@ pub fn paired_ci95_df9(sample1: &[f64], sample2: &[f64]) -> Result<PairedCi> {
     paired_ci(sample1, sample2, T_CRIT_975_DF9)
 }
 
+/// One-sample 95%-style interval `x̄ ± t_crit · s / √n` at the benchmark's fixed design.
+///
+/// THE SEED-DISPERSION INTERVAL of `setfit-benchmark-claims-v1` 2.0.0
+/// (`equations.claims_statistics.seed_dispersion_ci95`): the active, single-method scope has
+/// no second arm to difference against, so uncertainty is reported as how far a score moves
+/// when only the sampling seed moves, at fixed data and protocol. It is NOT a population
+/// interval and NOT a comparison.
+///
+/// NOT A SECOND IMPLEMENTATION (OPS-03). It delegates to [`paired_ci`] against an all-zero
+/// comparator, which is the exact one-sample specialisation — `values - 0 == values` — so the
+/// mean and the (n − 1) standard deviation come from the SAME
+/// `moments_or_zero_variance` the paired path uses. There is no second mean and no second std
+/// anywhere in the claims layer, and therefore nothing that can drift. The degrees of freedom
+/// are 9 for both, because both are over the same ten contracted seeds, so the one frozen
+/// [`T_CRIT_975_DF9`] serves both and no inverse CDF is implemented.
+///
+/// # Errors
+///
+/// - `DimensionMismatch` if `values` does not hold exactly [`PAIRED_DESIGN_N`] observations.
+///   The frozen critical value is only correct at df = 9; applying it to another `n` would
+///   produce a plausible, wrong interval.
+/// - [`AprenderError::ZeroVarianceDifferences`] if all ten seeds scored identically. The
+///   claims layer renders that as a typed no-interval shape with a stated reason — never a
+///   NaN, and never a serde `null` a reader would take for a missing measurement (CR-03).
+pub fn ci95_one_sample_df9(values: &[f64]) -> Result<PairedCi> {
+    if values.len() != PAIRED_DESIGN_N {
+        return Err(AprenderError::DimensionMismatch {
+            expected: format!(
+                "{PAIRED_DESIGN_N} observations (df = 9, the design T_CRIT_975_DF9 was frozen for)"
+            ),
+            actual: format!("{} observations", values.len()),
+        });
+    }
+    let zeros = vec![0.0_f64; values.len()];
+    paired_ci(values, &zeros, T_CRIT_975_DF9)
+}
+
 /// Chi-square goodness-of-fit test: Tests if observed frequencies match expected.
 ///
 /// H₀: Observed frequencies follow expected distribution

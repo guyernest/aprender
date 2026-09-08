@@ -23,6 +23,8 @@ const T_CRITICAL_FIXTURE: &str =
     include_str!("../../../../scripts/setfit_fixtures/claims_stats/t_critical.json");
 const PAIRED_T_FIXTURE: &str =
     include_str!("../../../../scripts/setfit_fixtures/claims_stats/paired_t_cases.json");
+const SEED_DISPERSION_FIXTURE: &str =
+    include_str!("../../../../scripts/setfit_fixtures/claims_stats/seed_dispersion_ci_cases.json");
 
 /// Statistic parity band. Both sides do the same IEEE-754 binary64 operations on the
 /// same stored inputs, so agreement is expected to the last few ulp.
@@ -99,6 +101,124 @@ fn t_crit_975_df9_is_the_value_the_planning_documents_guessed() {
         (T_CRIT_975_DF9 - 2.262_157_162_8).abs() < 1e-10,
         "A1 REFUTED: env-computed t critical is {T_CRIT_975_DF9:?}"
     );
+}
+
+// ---- the ACTIVE-scope seed-dispersion interval (claims 2.0.0) -----------------------
+//
+// `ci95_one_sample_df9` is what the narrowed, single-method scope reports uncertainty
+// with. It DELEGATES to `paired_ci` against an all-zero comparator so there is exactly
+// one mean and one (n-1) std in the claims layer (OPS-03) — and that delegation is
+// exactly what needs an independent reference: checking it against its own arithmetic
+// would prove nothing. scipy computed the endpoints below.
+
+#[test]
+fn ci95_one_sample_df9_matches_scipy_for_every_finite_case() {
+    let cases = fixture_cases(SEED_DISPERSION_FIXTURE);
+    let finite: Vec<_> = cases.iter().filter(|c| c["kind"] == "finite").collect();
+    assert!(
+        finite.len() >= 2,
+        "fixture set shrank below the contracted 2 finite cases"
+    );
+
+    for case in finite {
+        let id = case_id(case);
+        let values = f64_array(case, "values");
+        let got = ci95_one_sample_df9(&values).expect("finite case must produce an interval");
+
+        for (label, got_v, want_v) in [
+            ("mean", got.mean_diff, f64_field(case, "mean")),
+            ("std", got.std_diff, f64_field(case, "std")),
+            ("std_err", got.std_err, f64_field(case, "std_err")),
+            ("half_width", got.half_width, f64_field(case, "half_width")),
+            ("ci95_low", got.low, f64_field(case, "ci95_low")),
+            ("ci95_high", got.high, f64_field(case, "ci95_high")),
+        ] {
+            assert!(
+                (got_v - want_v).abs() < STATISTIC_TOL,
+                "case {id}: {label} is {got_v:?}, scipy says {want_v:?}"
+            );
+        }
+
+        assert_eq!(got.n, 10, "case {id}: the design is ten contracted seeds");
+    }
+}
+
+#[test]
+fn ci95_one_sample_df9_refuses_a_seed_set_with_no_dispersion() {
+    let cases = fixture_cases(SEED_DISPERSION_FIXTURE);
+    let degenerate: Vec<_> = cases
+        .iter()
+        .filter(|c| c["kind"] == "degenerate_zero_variance")
+        .collect();
+    assert!(
+        !degenerate.is_empty(),
+        "the degenerate case is the CR-03 guard; a fixture without it proves nothing"
+    );
+
+    for case in degenerate {
+        let id = case_id(case);
+        let values = f64_array(case, "values");
+        match ci95_one_sample_df9(&values) {
+            Err(AprenderError::ZeroVarianceDifferences { n, constant_value }) => {
+                assert_eq!(n, 10, "case {id}");
+                assert!(
+                    (constant_value - f64_field(case, "constant_value")).abs() < STATISTIC_TOL,
+                    "case {id}: the refusal must report the constant, not a NaN"
+                );
+            }
+            other => panic!(
+                "case {id}: ten identical seeds must be the typed refusal, got {other:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn ci95_one_sample_df9_is_the_paired_helper_against_zero_not_a_second_definition() {
+    // OPS-03 made falsifiable. If someone re-implements the one-sample interval with its
+    // own mean/std instead of delegating, this goes red the moment the two implementations
+    // differ by a single ulp — which is what "one definition of the moments" has to mean
+    // to be worth asserting.
+    let values = f64_array(
+        fixture_cases(SEED_DISPERSION_FIXTURE)
+            .iter()
+            .find(|c| c["kind"] == "finite")
+            .expect("at least one finite case"),
+        "values",
+    );
+    let zeros = vec![0.0_f64; values.len()];
+
+    let direct = ci95_one_sample_df9(&values).expect("interval exists");
+    let through_paired = paired_ci95_df9(&values, &zeros).expect("interval exists");
+
+    assert_eq!(
+        direct.mean_diff.to_bits(),
+        through_paired.mean_diff.to_bits(),
+        "the mean must be BIT-identical, not merely close"
+    );
+    assert_eq!(direct.std_diff.to_bits(), through_paired.std_diff.to_bits());
+    assert_eq!(direct.low.to_bits(), through_paired.low.to_bits());
+    assert_eq!(direct.high.to_bits(), through_paired.high.to_bits());
+}
+
+#[test]
+fn ci95_one_sample_df9_refuses_any_sample_size_but_the_frozen_design() {
+    // The frozen t is only correct at df = 9. Applied to another n it would produce a
+    // plausible, WRONG interval — the exact failure freezing the constant prevents.
+    for n in [2_usize, 9, 11, 20] {
+        let values = vec![0.5_f64; n]
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v + i as f64 * 1e-3)
+            .collect::<Vec<f64>>();
+        assert!(
+            matches!(
+                ci95_one_sample_df9(&values),
+                Err(AprenderError::DimensionMismatch { .. })
+            ),
+            "n = {n} is not the ten-seed design and must be refused"
+        );
+    }
 }
 
 // ---- paired t parity ----------------------------------------------------------------

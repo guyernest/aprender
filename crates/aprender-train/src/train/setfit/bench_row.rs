@@ -7,7 +7,8 @@
 //!
 //! # Why this lives in the library and not in `apr-cli`
 //!
-//! The row schema, the digest discipline and the 80-cell expectation set ARE the claim. An
+//! The row schema, the digest discipline and the 40-cell ACTIVE expectation set ARE the claim.
+//! (The two-method 80-cell scope is retained as deferred — see [`ExpectationScope`].) An
 //! adapter is a filesystem shim over them, and a shim is the wrong place for a definition
 //! that two commands, a report renderer and a GPU host all have to agree on.
 //!
@@ -61,8 +62,33 @@ pub const BENCH_ROW_SCHEMA_VERSION: u32 = 1;
 /// The manifest schema version this build writes and reads.
 pub const RUN_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-/// The two compared methods, in the contract's declared order.
+/// THE ROW-VALIDITY DOMAIN: which method tags a row may carry AT ALL.
+///
+/// This answers "is this a representable row", and it is READ BY [`CellKey::is_contracted`].
+/// It keeps BOTH methods after the 2.0.0 narrowing, deliberately. Narrowing it would make a
+/// second method's row fail row validity, which would delete the two deferred-scope negatives
+/// by making the rows they doctor unbuildable — a gate that looks tighter while proving less.
+///
+/// It is NOT the expectation-set domain. See [`ACTIVE_METHODS`], which is, and read both
+/// comments together: the whole defect class here is ONE list being taken as the answer to TWO
+/// different questions.
 pub const BENCH_METHODS: [Method; 2] = [Method::Setfit, Method::Lora];
+
+/// THE EXPECTATION-SET DOMAIN: which methods a COMPLETE RUN must contain a cell for.
+///
+/// This answers "what does complete mean", and it is what [`EXPECTED_CELLS`] and
+/// [`RunManifest::expectation()`] derive from. Since the claims contract's 2.0.0 narrowing
+/// (D-19, approved at a blocking human checkpoint) it names ONE method, matching
+/// `equations.expectation_set.methods`, so the expectation set is 1 * 4 * 10 = 40 cells.
+///
+/// The two-method 80-cell product is not deleted: it is retained, marked deferred, at
+/// `equations.expectation_set.deferred_two_method_scope` in the contract and reachable in code
+/// only from the `#[cfg(test)]`-gated deferred scope. `D-ITEM-05-15` restores it, and
+/// restoration is an edit to THIS constant plus the contract list it is pinned to — not a
+/// re-derivation.
+///
+/// It is NOT the row-validity domain. See [`BENCH_METHODS`], which is.
+pub const ACTIVE_METHODS: [Method; 1] = [Method::Setfit];
 
 /// The four contracted shot counts, ASCENDING.
 pub const BENCH_SHOTS: [u32; 4] = [8, 16, 32, 64];
@@ -74,8 +100,46 @@ pub const BENCH_SHOTS: [u32; 4] = [8, 16, 32, 64];
 /// outside the contract while appearing to honour it.
 pub const BENCH_SEEDS: [u32; 10] = [13, 17, 23, 29, 31, 37, 41, 43, 47, 53];
 
-/// The size of the expectation set: `|methods| * |shots| * |seeds|`.
-pub const EXPECTED_CELLS: usize = BENCH_METHODS.len() * BENCH_SHOTS.len() * BENCH_SEEDS.len();
+/// The size of the ACTIVE expectation set: `|ACTIVE_METHODS| * |shots| * |seeds|` = 40.
+///
+/// A PRODUCT, never a literal — so narrowing the method list moved this number automatically
+/// and a hand-typed count beside an unchanged list is unrepresentable. Derived from
+/// [`ACTIVE_METHODS`] (what a complete run must contain), NOT from [`BENCH_METHODS`] (what a
+/// row may carry).
+pub const EXPECTED_CELLS: usize = ACTIVE_METHODS.len() * BENCH_SHOTS.len() * BENCH_SEEDS.len();
+
+/// Which expectation set a derivation or a verification is performed against.
+///
+/// TWO SCOPES, ONE IMPLEMENTATION (OPS-03). [`RunManifest::expectation_for`] builds both from
+/// the same product, so the deferred scope cannot drift from the active one by being written
+/// twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectationScope {
+    /// The ACTIVE scope: [`ACTIVE_METHODS`] x [`BENCH_SHOTS`] x [`BENCH_SEEDS`] = 40 cells.
+    /// This is what every shipped door verifies against.
+    Active,
+    /// The DEFERRED two-method scope: [`BENCH_METHODS`] x shots x seeds = 80 cells, matching
+    /// `equations.expectation_set.deferred_two_method_scope` in the claims contract.
+    ///
+    /// THE VARIANT ITSELF IS `#[cfg(test)]`-GATED, so in a production build it does not exist
+    /// and no caller can name it — which is stronger than a variant that merely happens not to
+    /// be constructed (T-05-11-07). Its only callers are the deferred-scope negatives that
+    /// doctor a second method's rows, which is work `D-ITEM-05-15` restores.
+    #[cfg(test)]
+    DeferredTwoMethod,
+}
+
+impl ExpectationScope {
+    /// The method axis this scope's product is built over.
+    #[must_use]
+    pub fn methods(self) -> &'static [Method] {
+        match self {
+            Self::Active => &ACTIVE_METHODS,
+            #[cfg(test)]
+            Self::DeferredTwoMethod => &BENCH_METHODS,
+        }
+    }
+}
 
 /// The split calibration diagnostics are measured on, and the only value a row may record.
 pub const CALIBRATION_SPLIT: &str = "validation";
@@ -684,7 +748,7 @@ pub struct RunManifestPayload {
     pub schema_version: u32,
     /// The contract the expectation set is derived from.
     pub contract_id: String,
-    /// All 80 declared cells, in the deterministic contract order.
+    /// All 40 declared ACTIVE cells, in the deterministic contract order.
     pub cells: Vec<CellEntry>,
 }
 
@@ -725,15 +789,28 @@ pub struct RunManifest {
 }
 
 impl RunManifest {
-    /// The contract-derived expectation set: 80 unique cells in the deterministic contract
-    /// order (method in declared order, then shots ascending, then seed ascending).
+    /// The contract-derived ACTIVE expectation set: 40 unique cells in the deterministic
+    /// contract order (method in declared order, then shots ascending, then seed ascending).
     ///
     /// Derived IN CODE from the constants, never read from row hashes or a directory — which
     /// is what lets the manifest be declared BEFORE any cell runs.
+    ///
+    /// Derives from [`ACTIVE_METHODS`]. The deferred two-method scope is
+    /// [`Self::expectation_for`] with [`ExpectationScope::DeferredTwoMethod`], which is
+    /// `#[cfg(test)]`-gated and therefore unreachable from production code.
     #[must_use]
     pub fn expectation() -> Vec<CellKey> {
-        let mut cells = Vec::with_capacity(EXPECTED_CELLS);
-        let mut methods = BENCH_METHODS;
+        Self::expectation_for(ExpectationScope::Active)
+    }
+
+    /// The expectation set of a given scope, in the deterministic contract order.
+    ///
+    /// One implementation for both scopes (OPS-03): a second, separately-written product would
+    /// be a second definition of "the expectation set" and two definitions drift.
+    #[must_use]
+    pub fn expectation_for(scope: ExpectationScope) -> Vec<CellKey> {
+        let mut methods = scope.methods().to_vec();
+        let mut cells = Vec::with_capacity(methods.len() * BENCH_SHOTS.len() * BENCH_SEEDS.len());
         methods.sort_unstable_by_key(|m| m.order());
         let mut shots = BENCH_SHOTS;
         shots.sort_unstable();
@@ -749,7 +826,7 @@ impl RunManifest {
         cells
     }
 
-    /// Declare a fresh manifest: all 80 cells `Pending`, no digests yet.
+    /// Declare a fresh manifest: all 40 ACTIVE cells `Pending`, no digests yet.
     #[must_use]
     pub fn declare() -> Self {
         let cells = Self::expectation()
@@ -790,8 +867,11 @@ impl RunManifest {
     /// returning — and BEFORE any row byte is read.
     ///
     /// The two backstops are the point: a zero-cell manifest is an ERROR rather than an `Ok`
-    /// over an empty aggregate, and a cell sequence that is not exactly the 80 contract-derived
-    /// cells in contract order is an ERROR rather than a smaller definition of "complete".
+    /// over an empty aggregate, and a cell sequence that is not exactly the 40 contract-derived
+    /// ACTIVE cells in contract order is an ERROR rather than a smaller definition of
+    /// "complete". This second backstop is also what refuses a manifest DECLARING a cell for a
+    /// method outside the active scope, before any row byte is read — no separate refusal is
+    /// minted for that, because it is the same defect.
     ///
     /// # Errors
     ///
