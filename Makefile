@@ -2649,25 +2649,29 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 	tail -3 target/setfit-bench-row.log; \
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: the BenchRow/RunManifest suite is red (rc=$$rc)"; \
-		echo "The row schema and the 80-cell expectation set ARE the claim; see"; \
+		echo "The row schema and the 40-cell ACTIVE expectation set ARE the claim; see"; \
 		echo "target/setfit-bench-row.log"; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-bench-row.log,22,setfit-bench-tests/bench_row)
+	@$(call assert_tests_ran,target/setfit-bench-row.log,27,setfit-bench-tests/bench_row)
 	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --lib --features setfit bench_gate \
 		> target/setfit-bench-gate.log 2>&1; rc=$$?; \
 	set -e; \
 	tail -3 target/setfit-bench-gate.log; \
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: the claims gate is red (rc=$$rc)"; \
-		echo "This suite carries the SIX doctored negatives — a missing cell, a trimmed"; \
-		echo "row, an unpaired pair, edited row bytes, post-test selection, and forged"; \
-		echo "provenance. A red here means one of those dishonesty shapes is no longer"; \
-		echo "detected, or is no longer detected as its OWN refusal. See"; \
-		echo "target/setfit-bench-gate.log"; \
+		echo "This suite carries the SIX doctored negatives. FOUR run under the ACTIVE"; \
+		echo "40-cell scope, RE-MUTATED there rather than inherited from the 80-cell"; \
+		echo "proof: a missing cell, a trimmed row, edited row bytes, post-test"; \
+		echo "selection. TWO are DEFERRED-SCOPE negatives, because the shapes exist only"; \
+		echo "in a two-method design production code cannot construct: an unpaired pair"; \
+		echo "and forged provenance. Plus the two ACTIVE-scope out-of-scope refusals,"; \
+		echo "which reuse existing variants rather than minting new ones. A red here"; \
+		echo "means one of those dishonesty shapes is no longer detected, or is no"; \
+		echo "longer detected as its OWN refusal. See target/setfit-bench-gate.log"; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-bench-gate.log,29,setfit-bench-tests/bench_gate)
+	@$(call assert_tests_ran,target/setfit-bench-gate.log,38,setfit-bench-tests/bench_gate)
 	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --lib --features setfit bench_metrics \
 		> target/setfit-bench-metrics.log 2>&1; rc=$$?; \
 	set -e; \
@@ -2677,20 +2681,24 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 		echo "See target/setfit-bench-metrics.log"; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-bench-metrics.log,12,setfit-bench-tests/bench_metrics)
+	@$(call assert_tests_ran,target/setfit-bench-metrics.log,14,setfit-bench-tests/bench_metrics)
 	@set +e; CARGO_INCREMENTAL=0 cargo test -p apr-cli --lib --features setfit setfit_bench \
 		> target/setfit-bench-cli.log 2>&1; rc=$$?; \
 	set -e; \
 	tail -3 target/setfit-bench-cli.log; \
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: the bench run/report adapters are red (rc=$$rc)"; \
-		echo "This suite carries the two-sided incomparability control and the"; \
-		echo "no-verdict-word scan; a red there means the report may now read as a"; \
-		echo "like-for-like benchmark it is not. See target/setfit-bench-cli.log"; \
+		echo "This suite carries the ACTIVE-scope rendering case table, whose"; \
+		echo "must-not-match rows are the ACTUAL literals the two-method renderer"; \
+		echo "emitted; the no-verdict-word scan; the peak-RSS mechanism-asymmetry"; \
+		echo "assertions; and the single-cell door's no-statistic check. A red there"; \
+		echo "means the report may now read as a comparison it did not make. See"; \
+		echo "target/setfit-bench-cli.log"; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-bench-cli.log,55,setfit-bench-tests/apr-cli)
-	@echo "  phase 5 bench surface: row, gate (six negatives), metrics and CLI report all ran"
+	@$(call assert_tests_ran,target/setfit-bench-cli.log,64,setfit-bench-tests/apr-cli)
+	@echo "  phase 5 bench surface: row, gate (six negatives: four active-scope, two"
+	@echo "  deferred-scope), metrics and the single-method CLI report all ran"
 
 setfit-repro-inproc: ## TRN-06/D-16 (tier2 half): in-process two-clean-runs equality
 	@echo "TRN-06: in-process two-run equality (D-16's fast, non-authoritative half)"
