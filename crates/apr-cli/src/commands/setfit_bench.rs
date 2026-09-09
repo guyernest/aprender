@@ -2365,6 +2365,51 @@ pub(crate) mod report {
     /// How LoRA's adapter-only figure is labelled where it IS shown.
     pub(crate) const ADAPTER_ONLY_LABEL: &str = "adapter only";
 
+    /// The per-method artifact-bytes ROW LABEL the two-method detail carried.
+    ///
+    /// RETAINED AND DEFERRED (2.0.0, D-19). It names the deferred method in a label that is
+    /// printed on every SetFit row, so under the active scope it puts the second method's name
+    /// beside a SetFit number in the one place a reader is looking at a number. A label is
+    /// prose, and the prohibition is on prose too.
+    pub(crate) const ARTIFACT_BYTES_LABEL_TWO_METHOD: &str =
+        "artifact bytes (adapter only for lora)";
+
+    /// The ACTIVE, single-method artifact-bytes row label.
+    ///
+    /// It states which question the figure answers — what this method WROTE — because that is a
+    /// different question from what a user must ship, which is the size table's column.
+    pub(crate) const ARTIFACT_BYTES_LABEL: &str = "artifact bytes (what this method wrote)";
+
+    /// The size table's CROSS-METHOD footnote.
+    ///
+    /// RETAINED AND DEFERRED (2.0.0, D-19). Every sentence in it is about a comparison between
+    /// two methods and about the size of a base model that was never loaded here, so under the
+    /// active scope it is a paragraph of claim language about a run that did not happen.
+    pub(crate) const SIZE_TABLE_FOOTNOTE_TWO_METHOD: &str =
+        "A cross-method size claim uses THIS column and no other. LoRA's adapter-only\n\
+         artifact bytes are in the per-method detail above, labelled; an adapter is not a\n\
+         deployable model, and presenting it beside SetFit's standalone APR would understate\n\
+         LoRA by the size of its base model.\n";
+
+    /// The size table's ACTIVE footnote.
+    ///
+    /// It keeps the RULE — a size claim uses this column and no other — and drops the
+    /// comparison the rule was written to protect, because the comparison was not run.
+    pub(crate) const SIZE_TABLE_FOOTNOTE: &str =
+        "A size claim uses THIS column and no other. The artifact bytes in the per-method\n\
+         detail above are what this method WROTE, which is a different question from what a\n\
+         user must ship to serve it.\n";
+
+    /// The provenance sources the header names — TWO-METHOD.
+    ///
+    /// RETAINED AND DEFERRED (2.0.0, D-19). A candidate ledger is the second method's selection
+    /// evidence. Under the active scope there is no ledger to recompute from, so naming one is
+    /// a claim about a verification this run did not perform.
+    pub(crate) const PROVENANCE_SOURCES_TWO_METHOD: &str = "the committed lock and ledger bytes";
+
+    /// The provenance sources the header names — ACTIVE.
+    pub(crate) const PROVENANCE_SOURCES: &str = "the committed lock bytes";
+
     /// The machine-readable payload's schema tag.
     pub(crate) const REPORT_PAYLOAD_SCHEMA: &str = "setfit-bench-report-v1";
 
@@ -2477,10 +2522,19 @@ pub(crate) mod report {
 
     /// The header block: what was verified, and what a reader may conclude from it.
     fn render_header(report: &RunAggregate) -> String {
-        let title = if report.methods.len() >= 2 {
+        let cross_method = report.methods.len() >= 2;
+        let title = if cross_method {
             TWO_METHOD_TITLE
         } else {
             SINGLE_METHOD_TITLE
+        };
+        // THE HEADER MAY ONLY NAME EVIDENCE THIS RUN ACTUALLY RECOMPUTED. A candidate ledger
+        // belongs to the deferred arm; under the active scope there is none, and a header that
+        // names one describes a check that did not run.
+        let sources = if cross_method {
+            PROVENANCE_SOURCES_TWO_METHOD
+        } else {
+            PROVENANCE_SOURCES
         };
         format!(
             "{title}\n\
@@ -2488,8 +2542,8 @@ pub(crate) mod report {
              design:   {} seeds per cell, df = {}, 95% CI uses the frozen t = {:.15}\n\
              verified: every cell of the contracted matrix. A missing, substituted, unmatched or\n\
              \x20         post-test-selected cell would have REFUSED this report rather than\n\
-             \x20         shrunk it, and provenance was recomputed from the committed lock and\n\
-             \x20         ledger bytes rather than read off the rows.\n\
+             \x20         shrunk it, and provenance was recomputed from {sources}\n\
+             \x20         rather than read off the rows.\n\
              residual: a producer holding both the rows and those files could still emit a\n\
              \x20         mutually consistent forgery. This report proves consistency, not truth.\n\n",
             report.contract_id, report.n_seeds, report.degrees_of_freedom, report.t_crit_975_df9
@@ -2556,8 +2610,22 @@ pub(crate) mod report {
         out
     }
 
+    /// Does this resource set cover more than one method?
+    ///
+    /// DERIVED FROM THE DATA, never from a flag a caller can get wrong. The two renderers below
+    /// take only a resource slice, so the scope they render under has to come from the slice
+    /// itself — and a set holding one method's groups is, definitionally, a single-method
+    /// report. This is the same predicate `render_human` applies via `report.methods`.
+    fn resource_is_cross_method(resource: &[MethodShotResource]) -> bool {
+        let Some(first) = resource.first() else {
+            return false;
+        };
+        resource.iter().any(|g| g.method != first.method)
+    }
+
     /// The per-method resource detail. Every figure carries its measurement boundary.
     pub(crate) fn render_resource_detail(resource: &[MethodShotResource]) -> String {
+        let cross_method = resource_is_cross_method(resource);
         let mut out = String::from(RESOURCE_TABLE_HEADER);
         out.push('\n');
         out.push_str(PER_HOST_FRAMING);
@@ -2612,10 +2680,17 @@ pub(crate) mod report {
             {
                 out.push_str(&format!("  ^ {WITHIN_ROW_ASYMMETRY_NOTE}\n"));
             }
-            // THE ADAPTER-ONLY FIGURE, LABELLED, AND ONLY HERE. It answers "what did this method
-            // write", which is a different question from "what must a user ship".
+            // THE ARTIFACT-BYTES FIGURE, LABELLED, AND ONLY HERE. It answers "what did this
+            // method write", which is a different question from "what must a user ship".
+            // The label is SCOPE-AWARE: the two-method form names the deferred method, and a
+            // label naming a method that was not run is a claim about the report (D-19).
             out.push_str(&format!(
-                "  artifact bytes ({ADAPTER_ONLY_LABEL} for lora)  {:>12.0} B\n",
+                "  {:<38}{:>12.0} B\n",
+                if cross_method {
+                    ARTIFACT_BYTES_LABEL_TWO_METHOD
+                } else {
+                    ARTIFACT_BYTES_LABEL
+                },
                 group.artifact_bytes.mean
             ));
             out.push('\n');
@@ -2739,6 +2814,7 @@ pub(crate) mod report {
     /// most natural chart to draw from the row schema, which is exactly why the field this
     /// table may use is named in the contract and enforced here.
     pub(crate) fn render_sizes(resource: &[MethodShotResource]) -> String {
+        let cross_method = resource_is_cross_method(resource);
         let mut out = String::from(SIZE_TABLE_HEADER);
         out.push('\n');
         out.push_str("method   shots   deployable_total_bytes\n");
@@ -2758,12 +2834,11 @@ pub(crate) mod report {
                 ));
             }
         }
-        out.push_str(
-            "A cross-method size claim uses THIS column and no other. LoRA's adapter-only\n\
-             artifact bytes are in the per-method detail above, labelled; an adapter is not a\n\
-             deployable model, and presenting it beside SetFit's standalone APR would understate\n\
-             LoRA by the size of its base model.\n",
-        );
+        out.push_str(if cross_method {
+            SIZE_TABLE_FOOTNOTE_TWO_METHOD
+        } else {
+            SIZE_TABLE_FOOTNOTE
+        });
         out
     }
 

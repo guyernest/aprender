@@ -2690,13 +2690,17 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 		echo "FAIL: the bench run/report adapters are red (rc=$$rc)"; \
 		echo "This suite carries the ACTIVE-scope rendering case table, whose"; \
 		echo "must-not-match rows are the ACTUAL literals the two-method renderer"; \
-		echo "emitted; the no-verdict-word scan; the peak-RSS mechanism-asymmetry"; \
-		echo "assertions; and the single-cell door's no-statistic check. A red there"; \
-		echo "means the report may now read as a comparison it did not make. See"; \
-		echo "target/setfit-bench-cli.log"; \
+		echo "emitted (nine rows since 05-13: the six section-level literals plus"; \
+		echo "the artifact-bytes ROW LABEL, the size footnote and the provenance"; \
+		echo "clause, which named the deferred method BELOW section level and so"; \
+		echo "survived the 05-11 retarget); the token-level scan that refuses the"; \
+		echo "deferred method's name by any spelling; the no-verdict-word scan; the"; \
+		echo "peak-RSS mechanism-asymmetry assertions; and the single-cell door's"; \
+		echo "no-statistic check. A red there means the report may now read as a"; \
+		echo "comparison it did not make. See target/setfit-bench-cli.log"; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-bench-cli.log,64,setfit-bench-tests/apr-cli)
+	@$(call assert_tests_ran,target/setfit-bench-cli.log,65,setfit-bench-tests/apr-cli)
 	@echo "  phase 5 bench surface: row, gate (six negatives: four active-scope, two"
 	@echo "  deferred-scope), metrics and the single-method CLI report all ran"
 

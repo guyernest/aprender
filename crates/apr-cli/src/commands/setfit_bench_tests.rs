@@ -1674,11 +1674,13 @@ mod report_render {
     use crate::commands::setfit_bench::report::{
         render_deltas, render_human, render_quality, render_resource_comparison,
         render_resource_detail, render_sizes, verified_aggregate, ReportPayload,
-        ADAPTER_ONLY_LABEL, CI_UNAVAILABLE, COMPARISON_ROW_MARKER, DELTA_TABLE_HEADER,
-        ESTIMATION_FIRST_NOTE, ESTIMATION_FIRST_NOTE_PAIRED, INCOMPARABLE_NOTE, PER_HOST_FRAMING,
-        PER_HOST_FRAMING_TWO_HOST, QUALITY_TABLE_HEADER, REPORT_PAYLOAD_SCHEMA,
-        RESOURCE_COMPARISON_HEADER, SAMPLED_LOWER_BOUND_LABEL, SEED_CI_LABEL, SINGLE_METHOD_NOTE,
-        SINGLE_METHOD_TITLE, SIZE_TABLE_HEADER, TWO_METHOD_TITLE,
+        ADAPTER_ONLY_LABEL, ARTIFACT_BYTES_LABEL, ARTIFACT_BYTES_LABEL_TWO_METHOD, CI_UNAVAILABLE,
+        COMPARISON_ROW_MARKER, DELTA_TABLE_HEADER, ESTIMATION_FIRST_NOTE,
+        ESTIMATION_FIRST_NOTE_PAIRED, INCOMPARABLE_NOTE, PER_HOST_FRAMING,
+        PER_HOST_FRAMING_TWO_HOST, PROVENANCE_SOURCES, PROVENANCE_SOURCES_TWO_METHOD,
+        QUALITY_TABLE_HEADER, REPORT_PAYLOAD_SCHEMA, RESOURCE_COMPARISON_HEADER,
+        SAMPLED_LOWER_BOUND_LABEL, SEED_CI_LABEL, SINGLE_METHOD_NOTE, SINGLE_METHOD_TITLE,
+        SIZE_TABLE_FOOTNOTE, SIZE_TABLE_FOOTNOTE_TWO_METHOD, SIZE_TABLE_HEADER, TWO_METHOD_TITLE,
     };
 
     /// LoRA's ADAPTER-ONLY byte count.
@@ -1893,6 +1895,17 @@ mod report_render {
     /// - `TWO_METHOD_TITLE`        — `render_header`'s title line
     /// - `ESTIMATION_FIRST_NOTE_PAIRED` — the note that advertised paired intervals
     /// - `PER_HOST_FRAMING_TWO_HOST`    — the framing line that described a two-host design
+    /// - `ARTIFACT_BYTES_LABEL_TWO_METHOD` — `render_resource_detail`'s per-group artifact-bytes
+    ///                               ROW LABEL, copied out of its own format string. Added by
+    ///                               plan 05-13: it survived the 05-11 retarget because the
+    ///                               table only carried section-level literals, and it printed
+    ///                               the deferred method's name on all four active groups.
+    /// - `SIZE_TABLE_FOOTNOTE_TWO_METHOD` — `render_sizes`'s trailing paragraph. Same origin,
+    ///                               same omission: four sentences of cross-method claim
+    ///                               language under a scope with one method.
+    /// - `PROVENANCE_SOURCES_TWO_METHOD` — the fragment `render_header`'s `verified:` block used
+    ///                               to name; it credited a candidate-ledger recomputation the
+    ///                               active scope has no ledger to perform.
     fn must_not_match_literals() -> Vec<(&'static str, &'static str)> {
         vec![
             ("delta table header", DELTA_TABLE_HEADER),
@@ -1901,6 +1914,15 @@ mod report_render {
             ("two-method title line", TWO_METHOD_TITLE),
             ("paired estimation-first note", ESTIMATION_FIRST_NOTE_PAIRED),
             ("two-host resource framing", PER_HOST_FRAMING_TWO_HOST),
+            (
+                "two-method artifact-bytes row label",
+                ARTIFACT_BYTES_LABEL_TWO_METHOD,
+            ),
+            ("cross-method size footnote", SIZE_TABLE_FOOTNOTE_TWO_METHOD),
+            (
+                "two-method provenance sources",
+                PROVENANCE_SOURCES_TWO_METHOD,
+            ),
         ]
     }
 
@@ -1917,6 +1939,12 @@ mod report_render {
             ("the single-method scope note", SINGLE_METHOD_NOTE),
             ("the single-host resource framing", PER_HOST_FRAMING),
             ("the size table", SIZE_TABLE_HEADER),
+            (
+                "the single-method artifact-bytes label",
+                ARTIFACT_BYTES_LABEL,
+            ),
+            ("the single-method size footnote", SIZE_TABLE_FOOTNOTE),
+            ("the active provenance sources", PROVENANCE_SOURCES),
         ] {
             assert!(
                 rendered.contains(needle),
@@ -1945,6 +1973,39 @@ mod report_render {
                  absence from the active report is vacuous"
             );
         }
+    }
+
+    /// The active report must not name the deferred METHOD anywhere, by any spelling.
+    ///
+    /// WHY A TOKEN CHECK AND NOT ONLY THE CASE TABLE. The case table asserts against literals
+    /// that were once shipped, which is what makes it non-vacuous — but it can only refuse the
+    /// literals someone thought to add. Plan 05-13 found the gap empirically: the retarget
+    /// removed the delta and comparison SECTIONS and left the deferred method's name in a row
+    /// label printed on all four active groups and in a four-sentence size footnote, neither of
+    /// which the section-level table covered. This assertion is over the rendered TEXT, so it
+    /// catches the next such label without anyone having to predict it.
+    #[test]
+    fn setfit_bench_report_active_scope_never_names_the_deferred_method() {
+        let rendered = render_human(&active_scope()).to_lowercase();
+        assert!(
+            !rendered.contains("lora"),
+            "the active-scope report named the deferred method; absence must read as absence              (D-19), and a reader who sees the name beside a number reads a comparison:              {rendered}"
+        );
+        for connective in ["versus", " vs ", "compared to", "paired delta"] {
+            assert!(
+                !rendered.contains(connective),
+                "the active-scope report used the comparative connective `{connective}`"
+            );
+        }
+        // NON-VACUITY. The token IS present in the two-method render of the same fixture, so
+        // asserting its absence above is a real constraint rather than a check over a
+        // vocabulary this program never had.
+        let two_method = render_human(&ordinary()).to_lowercase();
+        assert!(
+            two_method.contains("lora"),
+            "the deferred method's name never appears in ANY render, so asserting its absence              from the active report is vacuous"
+        );
+        assert!(rendered.len() > 1_000, "the report must have rendered");
     }
 
     #[test]
@@ -2086,6 +2147,9 @@ mod report_render {
         assert!(rendered.contains(RESOURCE_COMPARISON_HEADER));
         assert!(rendered.contains(COMPARISON_ROW_MARKER));
         assert!(rendered.contains(TWO_METHOD_TITLE));
+        assert!(rendered.contains(ARTIFACT_BYTES_LABEL_TWO_METHOD));
+        assert!(rendered.contains(SIZE_TABLE_FOOTNOTE_TWO_METHOD));
+        assert!(rendered.contains(PROVENANCE_SOURCES_TWO_METHOD));
     }
 
     #[test]
