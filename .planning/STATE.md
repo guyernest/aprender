@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: Benchmark and Claims Gate
 status: executing
-stopped_at: Completed 05-12-PLAN.md
-last_updated: "2026-09-09T03:54:29.086Z"
+stopped_at: Completed 05-13-PLAN.md
+last_updated: "2026-09-09T04:55:54.873Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 05 replanned for D-19 — 05-11/12/13 rewritten, 0 blockers
-state_head: 9666dc44f461ff84f79f2b7cf26a6a3fb81204be
+state_head: 75e9eb21597df02a830a08bb072f2e371e31c11b
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 81
-  completed_plans: 80
+  completed_plans: 81
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 05 (Benchmark and Claims Gate) — EXECUTING
-Plan: 3 of 14
+Plan: 4 of 14
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -207,6 +207,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P17 | 31 min | 3 tasks | 6 files |
 | Phase 05 P11 | session | 3 tasks | 17 files |
 | Phase 05 P12 | 6h 56m | 3 tasks | 126 files |
+| Phase 05 P13 | 4h 0m | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -344,6 +345,8 @@ Recent decisions affecting current work:
 - [Phase 05]: D-19 contract narrowing APPROVED at a blocking human checkpoint: setfit-benchmark-claims-v1 goes 1.0.0 -> 2.0.0, active expectation set 80 two-method cells -> 40 SetFit cells, with the two-method design RETAINED as an explicitly deferred scope pointing at D-ITEM-05-15. pv diff suggested major; major taken. — Nothing describing the two-method design was deleted (equations 10->10, obligations 9->9, falsification tests 10->10, machine-checked), so D-ITEM-05-15 is a restoration rather than a re-derivation, and two of the six doctored negatives keep their meaning.
 - [Phase 05]: The narrowing lands on a NEW constant ACTIVE_METHODS (expectation-set domain), not on BENCH_METHODS (row-validity domain), which keeps both methods. — Narrowing BENCH_METHODS would have made a second method row fail row validity and silently DELETED the two deferred-scope negatives by making the rows they doctor unbuildable - a gate that looks tighter while proving less.
 - [Phase 05]: A single-cell verification door (verify_cell / apr setfit bench verify-cell) is verify_run steps 1+4+6 over ONE declared cell, excluding the set-level steps, and emits no statistic. — At pilot time the manifest declares 40 cells with 39 pending - exactly what step 3 sweep refuses on - so a door inheriting the set-level checks could never pass on the cell it exists to check. Equivalence with verify_run is proven behaviourally by a per-defect variant-tag table, never by asserting the door calls the two functions.
+- [Phase 05]: The active claims report must not name the deferred method BELOW section level: 05-11's case table carried only section-level literals, so a row label, a size footnote and the header's provenance clause survived the retarget. Case table grown 6 -> 9 rows plus a token-level control. — Found by running the plan's own automated verify rather than by review. A section-level absence table cannot refuse a sub-section literal nobody thought to add, so the report is now gated on the rendered TEXT as well as on the constants.
+- [Phase 05]: EVAL-02, EVAL-04 and EVAL-05 recorded as met by a NARROWER deliverable under the 2026-09-07 amendment, with D-ITEM-05-15 named; no requirement checkbox flipped and requirements.mark-complete not run. — Filing a narrower deliverable against an unamended promise is the false-completion defect this project has hit six times. Flipping requirement or phase-completion state is the verifier's act.
 
 ### Pending Todos
 
@@ -443,8 +446,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-09T03:54:28.923Z
-Stopped at: Completed 05-12-PLAN.md
+Last session: 2026-09-09T04:55:45.535Z
+Stopped at: Completed 05-13-PLAN.md
 Resume file: None
 
 ## Accumulated Context
