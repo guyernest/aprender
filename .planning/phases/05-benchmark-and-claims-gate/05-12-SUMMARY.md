@@ -119,8 +119,11 @@ metrics:
 actuals:
   tokens: 41000
   tasks: 3
-  commits: 4
+  commits: 6
   plan_head_before: 00350eb603a5ba583436df297591193adff8b274
+  # MEASURED with `git rev-list --count ${plan_head_before}..HEAD`, re-measured after
+  # the SUMMARY and STATE/ROADMAP commits landed. It read 4 at SUMMARY-write time and
+  # was corrected upward rather than left understated.
 ---
 
 # Phase 05 Plan 12: The 40-Cell SetFit Benchmark Evidence Set Summary

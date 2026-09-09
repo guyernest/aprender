@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: Benchmark and Claims Gate
 status: executing
-stopped_at: Completed 05-11-PLAN.md
-last_updated: "2026-09-08T18:57:32.260Z"
+stopped_at: Completed 05-12-PLAN.md
+last_updated: "2026-09-09T03:54:29.086Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 05 replanned for D-19 — 05-11/12/13 rewritten, 0 blockers
-state_head: f54f5f1b37a594d55dc3d7c99bd96cf4e7d16af0
+state_head: 9666dc44f461ff84f79f2b7cf26a6a3fb81204be
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 81
-  completed_plans: 78
+  completed_plans: 80
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 05 (Benchmark and Claims Gate) — EXECUTING
-Plan: 2 of 14
+Plan: 3 of 14
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -206,6 +206,7 @@ pending F-10 in Phase 5.)
 | Phase 06 P16 | 96 min | 3 tasks | 14 files |
 | Phase 06 P17 | 31 min | 3 tasks | 6 files |
 | Phase 05 P11 | session | 3 tasks | 17 files |
+| Phase 05 P12 | 6h 56m | 3 tasks | 126 files |
 
 ## Accumulated Context
 
@@ -442,8 +443,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-08T18:57:16.851Z
-Stopped at: Completed 05-11-PLAN.md
+Last session: 2026-09-09T03:54:28.923Z
+Stopped at: Completed 05-12-PLAN.md
 Resume file: None
 
 ## Accumulated Context
