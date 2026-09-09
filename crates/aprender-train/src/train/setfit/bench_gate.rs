@@ -94,8 +94,8 @@ use serde::{Deserialize, Serialize};
 
 use super::bench_row::{
     sha256_hex, BenchRow, CellEntry, CellKey, CellStatus, ExpectationScope, Method, MethodEvidence,
-    RunManifest, ACTIVE_METHODS, BENCH_METHODS, BENCH_SEEDS, BENCH_SHOTS, CLAIMS_CONTRACT_ID,
-    EXPECTED_CELLS, MECHANISM_CHILD_MAX_RSS_TIME_L, MECHANISM_CHILD_MAX_RSS_VM_HWM,
+    RunManifest, BENCH_METHODS, BENCH_SEEDS, BENCH_SHOTS, CLAIMS_CONTRACT_ID, EXPECTED_CELLS,
+    MECHANISM_CHILD_MAX_RSS_TIME_L, MECHANISM_CHILD_MAX_RSS_VM_HWM,
 };
 use super::lock::SelectionRule;
 

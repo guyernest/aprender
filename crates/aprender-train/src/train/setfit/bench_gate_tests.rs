@@ -797,6 +797,17 @@ fn bench_gate_the_six_doctored_negatives_are_six_distinct_variants() {
         6,
         "six doctored shapes must produce SIX DISTINCT refusals, got {tags:?}"
     );
+
+    // PRINTED SO A CLOSING AUDIT CAN READ THE COUNT OFF A LOG RATHER THAN QUOTE IT FROM A
+    // PLAN. A number an auditor copies out of a document is a number nobody measured; under
+    // `--nocapture` this line makes the tally an observation. Visible with
+    // `cargo test -p aprender-train --lib --features setfit bench_gate -- --nocapture`.
+    println!(
+        "[bench_gate] DOCTORED_NEGATIVES={} DISTINCT_REFUSAL_VARIANTS={} TAGS={:?}",
+        tags.len(),
+        distinct.len(),
+        tags
+    );
 }
 
 // ===========================================================================================
