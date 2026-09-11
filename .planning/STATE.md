@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: Benchmark and Claims Gate
 status: executing
-stopped_at: Completed 05-15-PLAN.md
-last_updated: "2026-09-11T22:23:32.759Z"
+stopped_at: Completed 05-16-PLAN.md
+last_updated: "2026-09-11T23:43:30.475Z"
 last_activity: 2026-09-11
 last_activity_desc: Phase 05 replanned for D-19 — 05-11/12/13 rewritten, 0 blockers
-state_head: 78b99308967987828913e1913184fe745065c455
+state_head: e7c54d8d714bb6d866f55b8468477b9bf34f95f4
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 84
-  completed_plans: 82
+  completed_plans: 83
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 05 (Benchmark and Claims Gate) — EXECUTING
-Plan: 2 of 17
+Plan: 3 of 17
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -209,6 +209,7 @@ pending F-10 in Phase 5.)
 | Phase 05 P12 | 6h 56m | 3 tasks | 126 files |
 | Phase 05 P13 | 4h 0m | 3 tasks | 8 files |
 | Phase 05 P15 | 113 min | 3 tasks | 6 files |
+| Phase 05 P16 | 61 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -351,6 +352,12 @@ Recent decisions affecting current work:
 - [Phase 05]: WR-06 taken as option (a): read_evidence takes an EvidenceKind, so a missing lock or ledger names its own artifact instead of telling the operator to restore a row file — Minting a correctly-typed path-escape variant beside a mis-typed missing-file variant, inside one function, in one edit, would be incoherent
 - [Phase 05]: resolve_committed_evidence_path returns the JOINED path, not the canonical one; canonicalization is used only for the containment check — On macOS a temp dir canonicalizes /var to /private/var, so returning the canonical form would rewrite every downstream refusal message and show operators a path they never typed
 - [Phase 05]: throughput_batch_size deliberately left class (iii) while three sibling contract-pinned constants were closed — The contract pins no value for it and the writer constant lives in apr-cli as a producer choice, so comparing against it would refuse a legitimately different batch size while calling it a contract violation
+- [Phase 05]: 05-16 closes verifier gap 2 (EVAL-02): verify_selection_binding recomputes the row's selection_manifest_hash from the manifest at selections/s{shots}-seed{seed}/, a path built from the CELL KEY and taking no BenchRow, and compares the manifest's own shots_per_class/root_seed against the cell key so a transplanted manifest is refused even when the row's hash is doctored to match it.
+- [Phase 05]: The digest is NOT recomputed in bench_gate: SelectionManifest::from_bytes verifies it before returning, so a second recomputation would be a second definition of a manifest's identity (OPS-03). A structural guard goes red on the three obvious ways to write one.
+- [Phase 05]: The binding is step 6b, AFTER verify_pairing (step 5), which is byte-unchanged. Earlier would pre-empt the deferred-scope unpaired_selection negative and silently change which rule it observes; a test asserts that negative still fires on its own variant.
+- [Phase 05]: contracts/setfit-benchmark-claims-v1.yaml bumped 2.0.0 -> 3.0.0, the bump pv diff suggested. Additive in shape but the ACCEPTANCE SET NARROWS: a tree that verified at 2.0.0 can be refused now. pairing_rule keeps status: deferred and D-ITEM-05-15.
+- [Phase 05]: The setfit-bench-gate floor is the MEASURED 52, not the plan's 'floor plus 9'. That arithmetic contradicted the plan's own single-swept-table criterion; the gap is closed instead by pinning the 11-row table length inside the test, which a test-FUNCTION floor cannot see.
+- [Phase 05]: Re-measured for the selection manifests: compact JSON in FILE/DECLARATION order reproduces 40/40 committed semantic_hash values, key-SORTED reproduces 0/40 — 05-15's bench_row.rs:37-43 finding confirmed on a second artifact. Harmless here because SelectionPayload serializes as a struct, but the comment's stated reason is still false.
 
 ### Pending Todos
 
@@ -439,6 +446,7 @@ Recent decisions affecting current work:
 - DECLARED-RED WINDOW OPEN (06-14 -> 06-15): types::tests::no_cost_axis_is_pending fails on purpose, turning `make tier3` and CI `workspace-test` red. `workspace-test` is a REQUIRED check on protected `main`. Mitigation is push sequencing — land waves 12 and 13 in ONE push. Do NOT delete/weaken/ignore/CI-filter the test.
 - Workspace lint debt blocks the plan-level clippy line: cargo clippy -p aprender-train --features setfit -- -D warnings exits 101 on pre-existing findings in aprender-compute and aprender-present-terminal. Zero are in aprender-train (--no-deps is rc=0). CLAUDE.md #2370 class; owned by toolchain-ceiling.yml, not by phase 5.
 - bench_row.rs:37-43 claims canonical bytes are key-SORTED because no workspace crate enables preserve_order. MEASURED false: sorting reproduces neither the row nor the manifest digest, file order reproduces both. Not a correctness defect; the stated reason and the field-reordering property it claims are wrong. For 05-16 or 05-17, which touch that module.
+- FINDING for 05-17: apr setfit bench verify-cell's printed 'scope:' prose (apr-cli/src/commands/setfit_bench.rs:2931) and bench report's 'verified:' header no longer enumerate the selection binding both doors now perform. Under-claiming, not a false attestation; assigned to 05-17 by threat T-05-16-05.
 
 ## Deferred Items
 
@@ -452,8 +460,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-11T22:22:57.572Z
-Stopped at: Completed 05-15-PLAN.md
+Last session: 2026-09-11T23:43:06.848Z
+Stopped at: Completed 05-16-PLAN.md
 Resume file: None
 
 ## Accumulated Context
