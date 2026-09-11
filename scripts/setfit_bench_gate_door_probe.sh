@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# setfit_bench_gate_door_probe.sh - replay verifier spot-check E through the SHIPPED door.
+# setfit_bench_gate_door_probe.sh - replay verifier spot-checks E, G and F through
+# the SHIPPED door.
 #
 # WHY THIS EXISTS. Phase 5's verification found that `verify_provenance` built
 # `bench_dir.join(row.evidence.setfit.lock.lock_record_path)` from a row-supplied
@@ -15,12 +16,40 @@
 # finding - because a guard that does not scan the surface where the DECISION is
 # made is theater (CLAUDE.md Verification Discipline rule 5).
 #
-# TWO RUNS, AND THE ORDER IS THE PROPERTY:
+# Verification also found (gap 2, EVAL-02) that the gate opened no SELECTION
+# MANIFEST at all. `apr setfit bench report` therefore exited 0 with the entire
+# `benchmarks/tweeteval-stance/selections/` directory deleted (spot-check G) and
+# exited 0 with a row's `selection_manifest_hash` doctored to 64 zeros
+# (spot-check F). The forty committed manifests were inert files, and the pairing
+# key that a future second METHOD would pair against was a string a
+# producer typed.
+#
+# FOUR RUNS, AND THE ORDER IS THE PROPERTY:
 #   1. POSITIVE CONTROL on the undoctored slim copy. It must exit 0. Without it,
 #      a probe cannot distinguish "the gate refused the attack" from "the scratch
 #      copy was broken", and would report success for the wrong reason.
-#   2. THE ATTACK on the doctored copy. It must exit non-zero AND name the
+#   2. SPOT-CHECK E on a doctored copy. It must exit non-zero AND name the
 #      escaping path.
+#   3. SPOT-CHECK G: `selections/` deleted, rows untouched. This one needs NO
+#      digest repair, because deleting a directory changes no row byte - which
+#      makes it the cheapest and most direct disproof of "the manifests are
+#      inert".
+#   4. SPOT-CHECK F: one row's `selection_manifest_hash` doctored to 64 zeros,
+#      with the row's own digest, the manifest's `row_sha256` for that cell and
+#      the manifest's envelope digest all repaired. THE REPAIR IS LOAD-BEARING:
+#      `selection_manifest_hash` sits inside the hashed payload, so an unrepaired
+#      edit is refused at step 4 as a row-digest mismatch BEFORE step 6 is
+#      reached, and the probe would go green having proven nothing about the
+#      binding. Case 4 asserts the refusal is the SELECTION one and not that one.
+#
+# EACH CASE GETS ITS OWN SLIM COPY, so a later case cannot pass because an
+# earlier one already broke the tree.
+#
+# The refusals are matched on the gate's rendered PROSE, never on a variant tag:
+# `apr` prints `BenchGateError`'s `Display`, so `row_digest_mismatch` as a
+# literal can never appear in this output and a grep for it would be a guard that
+# cannot fire (CLAUDE.md Verification Discipline rule 5). The row-digest refusal
+# is matched by its own distinctive sentence instead.
 #
 # Status is captured as `cmd > "$log" 2>&1; rc=$?` and NEVER through a pipe.
 # `$?` after a pipeline is the LAST command's status; this repo has shipped that
@@ -93,26 +122,41 @@ if [ "$surface_rc" -ne 0 ]; then
     exit 1
 fi
 
-BENCH_DIR="$SCRATCH/bench"
-OUTSIDE_DIR="$SCRATCH/outside"
-mkdir -p "$BENCH_DIR" "$OUTSIDE_DIR"
-
+# ---- One slim copy per case ------------------------------------------------
+#
 # Copy everything EXCEPT `artifacts/` (40 x ~90 MB of .apr) and `logs/`. The gate
 # reads neither; the positive control below is what proves the slim copy is
 # sufficient, rather than this comment asserting it.
 # Both operands are derived here, never from user input: $SOURCE_DIR is
-# $REPO_ROOT/benchmarks/tweeteval-stance and $BENCH_DIR is under mktemp's own
+# $REPO_ROOT/benchmarks/tweeteval-stance and the destination is under mktemp's own
 # output, so neither can carry a traversal a caller supplied.
-# bashrs:allow SEC014
-find "$SOURCE_DIR" -mindepth 1 -maxdepth 1 ! -name artifacts ! -name logs \
-    -exec cp -R {} "$BENCH_DIR/" \;
+slim_copy() {
+    dest="$1"
+    mkdir -p "$dest"
+    # bashrs:allow SEC014
+    find "$SOURCE_DIR" -mindepth 1 -maxdepth 1 ! -name artifacts ! -name logs \
+        -exec cp -R {} "$dest/" \;
+}
+
+# Run the report and capture its status WITHOUT a pipe. `$?` after a pipeline is
+# the LAST command's status, and this repo has shipped that defect twice.
+report_rc=0
+run_report() {
+    set +e
+    "$APR" setfit bench report --bench-dir "$1" > "$2" 2>&1
+    report_rc=$?
+    set -e
+}
+
+BENCH_DIR="$SCRATCH/bench"
+OUTSIDE_DIR="$SCRATCH/outside"
+mkdir -p "$OUTSIDE_DIR"
+slim_copy "$BENCH_DIR"
 
 # ---- 1. POSITIVE CONTROL --------------------------------------------------
 CONTROL_LOG="$SCRATCH/control.log"
-set +e
-"$APR" setfit bench report --bench-dir "$BENCH_DIR" > "$CONTROL_LOG" 2>&1
-control_rc=$?
-set -e
+run_report "$BENCH_DIR" "$CONTROL_LOG"
+control_rc="$report_rc"
 if [ "$control_rc" -ne 0 ]; then
     printf 'CONTROL: rc=%s on the UNDOCTORED slim copy - the probe cannot proceed.\n' \
         "$control_rc" >&2
@@ -134,7 +178,7 @@ printf 'CONTROL: undoctored slim copy of %s verifies (rc=0)\n' "$SOURCE_DIR"
 # same method 05-VERIFICATION.md used to produce spot-checks B through G - and
 # not the ML-stack substitution that crates/aprender-train/CLAUDE.md's Python
 # prohibition targets. Nothing here touches the checkout.
-ESCAPE_PATH=$(python3 scripts/setfit_bench_gate_doctor.py \
+ESCAPE_PATH=$(python3 scripts/setfit_bench_gate_doctor.py escape \
     "$BENCH_DIR" "$OUTSIDE_DIR" "$TARGET_CELL")
 [ -n "$ESCAPE_PATH" ] || fail "the doctoring step produced no escape path"
 [ -f "$ESCAPE_PATH" ] || fail "the escape target $ESCAPE_PATH does not hold the attested lock bytes"
@@ -145,10 +189,8 @@ printf 'DOCTORED: %s now points at %s, and the committed lock record is gone\n' 
 
 # ---- 3. THE ATTACK --------------------------------------------------------
 ATTACK_LOG="$SCRATCH/attack.log"
-set +e
-"$APR" setfit bench report --bench-dir "$BENCH_DIR" > "$ATTACK_LOG" 2>&1
-attack_rc=$?
-set -e
+run_report "$BENCH_DIR" "$ATTACK_LOG"
+attack_rc="$report_rc"
 
 if [ "$attack_rc" -eq 0 ]; then
     tail -20 "$ATTACK_LOG" >&2
@@ -171,5 +213,65 @@ if grep -q "not the bytes that were attested" "$ATTACK_LOG"; then
 fi
 
 printf 'ATTACK: rc=%s, refused as a path escape naming %s\n' "$attack_rc" "$ESCAPE_PATH"
-printf 'PASS: %s refuses a row-supplied evidence path that leaves the benchmark directory, having first verified the undoctored tree\n' "$APR"
+
+# ---- 4. SPOT-CHECK G: the `selections/` tree deleted -----------------------
+#
+# The cheapest disproof of "the forty committed manifests are inert": it edits no
+# row byte, so NO digest repair is needed and nothing but the binding itself can
+# be what refuses. Verification measured this tree returning 0.
+G_DIR="$SCRATCH/bench-g"
+slim_copy "$G_DIR"
+[ -d "$G_DIR/selections" ] || fail "the slim copy carries no selections/ directory to delete"
+rm -rf "${G_DIR:?}/selections"
+G_LOG="$SCRATCH/selections-deleted.log"
+run_report "$G_DIR" "$G_LOG"
+g_rc="$report_rc"
+if [ "$g_rc" -eq 0 ]; then
+    tail -20 "$G_LOG" >&2
+    fail "the tree with selections/ DELETED was ACCEPTED (rc=0) - verifier gap 2 is open again"
+fi
+if ! grep -q "selection manifest at" "$G_LOG"; then
+    tail -20 "$G_LOG" >&2
+    fail "the refusal does not name the selection manifest, so it is not the binding refusal"
+fi
+if ! grep -q "does not exist" "$G_LOG"; then
+    tail -20 "$G_LOG" >&2
+    fail "the refusal does not say the manifest is absent; the gate refused for some other reason"
+fi
+printf 'SPOT-CHECK G: rc=%s with selections/ deleted and every row byte untouched, refused as an absent selection manifest\n' \
+    "$g_rc"
+
+# ---- 5. SPOT-CHECK F: a row's pairing key doctored to 64 zeros -------------
+#
+# The digest repair here is LOAD-BEARING - see the header. Without it the gate
+# refuses at step 4 and step 6 is never reached, so the probe would go green
+# having proven nothing about the binding.
+F_DIR="$SCRATCH/bench-f"
+slim_copy "$F_DIR"
+DOCTORED_KEY=$(python3 scripts/setfit_bench_gate_doctor.py selection-hash-zeros \
+    "$F_DIR" "$OUTSIDE_DIR" "$TARGET_CELL")
+[ -n "$DOCTORED_KEY" ] || fail "the selection-hash doctoring step produced no key"
+F_LOG="$SCRATCH/selection-hash-zeros.log"
+run_report "$F_DIR" "$F_LOG"
+f_rc="$report_rc"
+if [ "$f_rc" -eq 0 ]; then
+    tail -20 "$F_LOG" >&2
+    fail "the tree with a doctored selection_manifest_hash was ACCEPTED (rc=0) - verifier gap 2 is open again"
+fi
+if grep -q "not the bytes that were attested" "$F_LOG"; then
+    tail -20 "$F_LOG" >&2
+    fail "the gate refused at the ROW-DIGEST step: the digest repair was skipped, so the binding was never reached"
+fi
+if ! grep -q "selection_manifest_hash" "$F_LOG"; then
+    tail -20 "$F_LOG" >&2
+    fail "the refusal does not name selection_manifest_hash, so it is not the binding refusal"
+fi
+if ! grep -q -- "$DOCTORED_KEY" "$F_LOG"; then
+    tail -20 "$F_LOG" >&2
+    fail "the refusal does not quote the doctored key, so it is not reporting what was claimed"
+fi
+printf 'SPOT-CHECK F: rc=%s with %s claiming selection_manifest_hash=%s, refused by the recomputation and NOT at the row digest\n' \
+    "$f_rc" "$TARGET_CELL" "$DOCTORED_KEY"
+
+printf 'PASS: %s refuses a row-supplied evidence path that leaves the benchmark directory, a deleted selection manifest, and a doctored pairing key, having first verified the undoctored tree\n' "$APR"
 exit 0

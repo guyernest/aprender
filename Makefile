@@ -2660,7 +2660,7 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 	tail -3 target/setfit-bench-gate.log; \
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: the claims gate is red (rc=$$rc)"; \
-		echo "This suite carries FIFTEEN doctored shapes, and the SCOPE each is mutated"; \
+		echo "This suite carries TWENTY doctored shapes, and the SCOPE each is mutated"; \
 		echo "at is part of what it proves — a proof taken at one scope does not"; \
 		echo "transfer to another (CLAUDE.md Verification Discipline rule 4):"; \
 		echo "  * ACTIVE 40-cell scope, through the PUBLIC verify_run door: a missing"; \
@@ -2670,6 +2670,20 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 		echo "    manifest, three contract-pinned constants a row may not choose, the"; \
 		echo "    three-shape escape sweep (absolute / '..' / symlink), and the"; \
 		echo "    deterministic refusal ORDER over two escaping cells."; \
+		echo "  * ACTIVE 40-cell scope, THE SELECTION BINDING (05-16, EVAL-02): an"; \
+		echo "    eleven-row swept case table carrying a CONTROL that must be"; \
+		echo "    ACCEPTED, the two trees verification measured returning 0 (the"; \
+		echo "    whole selections/ directory deleted, and a row's pairing key"; \
+		echo "    doctored to 64 zeros), an absent per-cell directory, a zero-byte"; \
+		echo "    manifest, a key doctored to another cell's REAL digest, three"; \
+		echo "    TRANSPLANTED manifests with the row key doctored to match (which"; \
+		echo "    is what makes the hash check agree so only the cell-key check can"; \
+		echo "    refuse), the same transplant WITHOUT that doctoring as the"; \
+		echo "    inversion, and an unsealed manifest payload — plus both ends of"; \
+		echo "    the shot axis, exact byte equality of the 64-hex key, and the"; \
+		echo "    deterministic order over two broken cells. THE ROW COUNT IS"; \
+		echo "    ASSERTED INSIDE THE TEST: this floor counts test FUNCTIONS, so"; \
+		echo "    eleven table rows collapsing to three would not move it."; \
 		echo "  * DEFERRED two-method scope: an unpaired pair and forged LoRA"; \
 		echo "    provenance. Those shapes exist only in a design production code"; \
 		echo "    cannot construct; D-ITEM-05-15 restores the arm."; \
@@ -2681,7 +2695,7 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 		echo "is no longer detected as its OWN refusal. See target/setfit-bench-gate.log"; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-bench-gate.log,45,setfit-bench-tests/bench_gate)
+	@$(call assert_tests_ran,target/setfit-bench-gate.log,52,setfit-bench-tests/bench_gate)
 	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --lib --features setfit bench_metrics \
 		> target/setfit-bench-metrics.log 2>&1; rc=$$?; \
 	set -e; \
@@ -2711,10 +2725,11 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 		exit $$rc; \
 	fi
 	@$(call assert_tests_ran,target/setfit-bench-cli.log,65,setfit-bench-tests/apr-cli)
-	@echo "  phase 5 bench surface: row, gate (fifteen doctored shapes across three"
-	@echo "  scopes: the public verify_run door over the ACTIVE 40, the deferred"
-	@echo "  two-method scope, and the evidence-path resolver), metrics and the"
-	@echo "  single-method CLI report all ran"
+	@echo "  phase 5 bench surface: row, gate (twenty doctored shapes across three"
+	@echo "  scopes: the public verify_run door over the ACTIVE 40 — including the"
+	@echo "  selection binding recomputed from the committed manifest at a"
+	@echo "  cell-key-derived path — the deferred two-method scope, and the"
+	@echo "  evidence-path resolver), metrics and the single-method CLI report all ran"
 
 # The DOOR-LEVEL probe, deliberately NOT wired into setfit-bench-tests or any tier.
 #

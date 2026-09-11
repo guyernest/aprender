@@ -37,7 +37,38 @@ metadata:
   # field in `TransformerConfig`). No LoRA cell was ever run. (b) is an inference from
   # STRUCTURAL ABSENCE, not an observed loader failure — Verification Discipline rule 6 —
   # and its cheap falsifier is named and NOT run; it is recorded that way in D-ITEM-05-15.
-  version: 2.0.0
+  #
+  # 3.0.0 (2026-09-11, plan 05-16) — THE SELECTION BINDING BECOMES AN ENFORCED, ACTIVE RULE.
+  #   git show HEAD:contracts/setfit-benchmark-claims-v1.yaml > /tmp/claims-old.yaml
+  #   target/release/pv diff /tmp/claims-old.yaml contracts/setfit-benchmark-claims-v1.yaml
+  # `pv diff` (pv 0.63.0) reported, VERBATIM:
+  #   Contract diff: v2.0.0 -> v2.0.0
+  #   Suggested bump: major
+  #     equations:
+  #       + selection_binding_rule
+  #       ~ pairing_rule: invariants changed
+  #     proof_obligations:
+  #       + equivalence:OBLIG-CLAIMS-SELECTION-BOUND: ...
+  #     falsification_tests:
+  #       + FALSIFY-CLAIMS-011
+  # THE TOOL'S SUGGESTION IS TAKEN, and it is also the right answer on the reasoning this file
+  # uses. Every element is ADDITIVE, which on its own reads like a minor — but the ACCEPTANCE
+  # SET NARROWS: a benchmark directory that `apr setfit bench report` accepted at 2.0.0 can be
+  # REFUSED at 3.0.0, because the gate now opens `selections/s{shots}-seed{seed}/selection-manifest.json`,
+  # recomputes its `semantic_hash` and compares the manifest's own declared shots and seed
+  # against the cell key. A strengthened guarantee is a breaking change to every producer
+  # relying on the old acceptance, whatever a structural differ would score the shape of the
+  # edit as.
+  #
+  # WHAT PROMPTED IT. Verifier gap 2 (EVAL-02, graded PARTIAL): the RECORDING half was complete
+  # — 40/40 rows carry a distinct `selection_manifest_hash` equal to the `semantic_hash` of the
+  # committed manifest for their own cell — while the ENFORCING half did not exist. The report
+  # returned 0 with the whole `selections/` directory deleted (spot-check G) and returned 0
+  # with a row's key doctored to 64 zeros (spot-check F). `pairing_rule` KEEPS its
+  # `status: deferred` and its `deferred_ticket`: the cross-method rule is untouched, and its
+  # third invariant is amended only to point at the new rule and to stop calling the key
+  # merely "recorded".
+  version: 3.0.0
   created: '2026-08-17'
   author: PAIML Engineering
   kind: kernel
@@ -415,12 +446,65 @@ equations:
         different exclusion record, a different sampler version. The hash is the only field
         that can tell them apart, and D-10 makes both methods read that one artifact through
         the same code path so the guarantee is structural rather than clerical.'
-      - 'THE RULE IS DEFERRED; THE KEY IS NOT. Every ACTIVE SetFit cell still records its
-        `selection_manifest_hash`, and the selection manifest itself is still generated once
-        per (shots, seed) and consumed by whatever runs against it. So the 40 active cells are
-        already pair-ready: restoring the second arm requires running the second arm, not
-        re-running SetFit. A deferral that dropped the key would have made D-ITEM-05-15 a
-        re-run of the whole matrix rather than of half of it.'
+      - 'THE RULE IS DEFERRED; THE KEY IS NOT — AND SINCE 3.0.0 THE KEY IS ENFORCED, NOT
+        MERELY RECORDED. Every ACTIVE SetFit cell still records its `selection_manifest_hash`,
+        and the selection manifest itself is still generated once per (shots, seed) and
+        consumed by whatever runs against it. So the 40 active cells are already pair-ready:
+        restoring the second arm requires running the second arm, not re-running SetFit. A
+        deferral that dropped the key would have made D-ITEM-05-15 a re-run of the whole
+        matrix rather than of half of it. Until 3.0.0 the key was RECORDED and never checked,
+        which meant a restored second arm would have paired against a value nothing had ever
+        attested; `selection_binding_rule` below is the ACTIVE, single-method, intra-cell rule
+        that closes that, and it is what makes this deferral safe to hold open.'
+
+  # ==========================================================================
+  # 4b. THE SELECTION BINDING (EVAL-02) — ACTIVE, single-method, intra-cell
+  #
+  # ADDED AT 3.0.0. This is NOT `pairing_rule` under another name. `pairing_rule`
+  # is CROSS-METHOD and needs a second arm that does not exist; this rule is
+  # INTRA-CELL and is constructible today against the forty committed manifests.
+  # One is deferred because its domain is empty; the other runs on every report.
+  # ==========================================================================
+
+  selection_binding_rule:
+    status: active
+    formula: 'forall cell in ACTIVE expectation set: semantic_hash(read(selections/s{shots}-seed{seed}/selection-manifest.json)) == row(cell).selection_manifest_hash AND manifest.payload.shots_per_class == cell.shots AND manifest.payload.root_seed == cell.seed'
+    domain: 'the 40 cells of the ACTIVE expectation set, each with the selection manifest committed under the benchmark directory for its own (shots, seed)'
+    codomain: 'accepted, or a typed refusal naming the cell, the manifest path, and both the claimed and the recomputed digest'
+    invariants:
+      - 'THE PATH IS DERIVED FROM THE CELL KEY, NEVER FROM A ROW FIELD. `selections/s{shots}-seed{seed}/selection-manifest.json`
+        is built from the cell the manifest declares, so there is nothing for a producer to
+        choose and no validation door to get right — unlike `lock_record_path` and
+        `candidate_ledger_path`, which ARE row-supplied and must be resolved through the
+        containment door `selection_safety_evidence` describes. THIS IS WHAT MAKES THE
+        RECOMPUTATION MEAN ANYTHING: reading a manifest at a path the row named and comparing
+        its digest against a hash the same row named would compare a producer''s two
+        statements with each other and call the agreement evidence.'
+      - 'THE CELL-KEY COMPARISON IS A SECOND, INDEPENDENT STATEMENT, and without it a
+        transplanted manifest satisfies the hash check completely. A manifest lifted from
+        another (shots, seed) is internally valid and seals correctly, so a producer who also
+        doctors the row''s `selection_manifest_hash` makes the digest comparison AGREE. The
+        manifest''s own `payload.shots_per_class` and `payload.root_seed` say which cell drew
+        it, and that is the only thing left that can refuse.'
+      - 'THE DIGEST IS VERIFIED BY THE MANIFEST''S OWN DOOR, NOT RECOMPUTED A SECOND TIME.
+        `SelectionManifest::from_bytes` checks `sha256(payload.to_canonical_bytes()) ==
+        semantic_hash` BEFORE returning, so a caller cannot hold an unsealed manifest. A
+        second recomputation in the gate would be a second definition of a manifest''s
+        identity, and two definitions of one value disagree eventually and invisibly (OPS-03).
+        Consequently an UNSEALED manifest is refused as a digest disagreement sourced from
+        that door, not from a comparison this rule performs.'
+      - 'THIS RULE IS SINGLE-METHOD AND INTRA-CELL, AND IT IS NOT `pairing_rule`. It asks
+        "did this cell consume the selection its own directory commits?" — one row, one
+        manifest, answerable today. `pairing_rule` asks "did the two methods of this pair
+        consume the SAME selection?" — two rows, and the second does not exist. Reading this
+        rule''s green as discharging that one would be exactly the overstatement D-19''s
+        narrowing exists to avoid.'
+      - 'THE COMPARISON IS EXACT BYTE EQUALITY of two 64-character lowercase hex strings. No
+        truncation, no case folding, no prefix match: a key agreeing in its first N characters
+        is a different key, and every relaxation is a way for a doctored row to pass.'
+      - 'A CELL WHOSE BINDING FAILS INVALIDATES THE WHOLE REPORT. It is not excluded from the
+        aggregate and it is not downgraded to a warning — the report has no partial-data mode,
+        which is `completeness_rule`''s own structural claim applied here.'
 
   # ==========================================================================
   # 5. SELECTION SAFETY AS RECOMPUTABLE EVIDENCE (EVAL-04)
@@ -811,6 +895,47 @@ proof_obligations:
                         line_count(candidate_ledger) == candidates_trained == 1
     applies_to: all
 
+  - type: equivalence
+    property: >
+      OBLIG-CLAIMS-SELECTION-BOUND: a row's `selection_manifest_hash` — THE PAIRING KEY — is
+      recomputed from the selection manifest the cell's own directory commits, at a path
+      DERIVED FROM THE CELL KEY and never from any row field, and the manifest's own
+      `payload.shots_per_class` and `payload.root_seed` are compared against that key. Added
+      at 3.0.0, ACTIVE from the first report that runs it.
+
+      WHY THE OBLIGATION EXISTS SEPARATELY FROM OBLIG-CLAIMS-SELECTION-RECOMPUTED. That one
+      covers the lock record and the candidate ledger, whose paths are ROW-SUPPLIED and must
+      be contained before they are read. This one covers an artifact whose path the gate
+      derives, and the value it protects is not a digest of evidence but the KEY a future
+      second method pairs against. Before 3.0.0 the key was recorded and never checked: the
+      report exited 0 with the entire `selections/` directory deleted and exited 0 with a
+      row's key doctored to 64 zeros, so the forty committed manifests were inert files.
+
+      WHAT THIS OBLIGATION DOES NOT COVER, stated here rather than left to be inferred:
+
+      (1) It says NOTHING about `ece_top_label_validation` or `brier_multiclass_validation`.
+      Neither is derivable from a selection manifest — they need per-row validation
+      probabilities no committed file carries — so they remain producer-declared numbers and
+      this obligation must not be read as reducing that surface.
+
+      (2) It proves WHICH SAMPLED-ID SET THE CELL CONSUMED, not that the model was trained on
+      it. The manifest names the selected examples; nothing here binds the training run to
+      them. A producer who reported a manifest honestly and trained on something else
+      satisfies this obligation completely. That binding is what the SetFit credential's
+      typestate is for, and it is a different claim.
+
+      (3) It is SINGLE-METHOD and INTRA-CELL. `pairing_rule` — the cross-method rule — stays
+      deferred with an empty domain under D-19, and a green here discharges no part of it.
+      Discharged by FALSIFY-CLAIMS-011.
+    formal: >
+      report(dir) == Ok => forall c in ACTIVE expectation set:
+        let m = selection_manifest(dir, c) in
+          sha256(m.payload.to_canonical_bytes()) == m.semantic_hash &&
+          m.semantic_hash == row(c).selection_manifest_hash &&
+          m.payload.shots_per_class == c.shots && m.payload.root_seed == c.seed ;
+      path(m) is a function of c alone, NOT of row(c)
+    applies_to: all
+
   - type: bound
     property: >
       OBLIG-CLAIMS-RESOURCE-BOUNDARIES: every resource number carries the boundary it was
@@ -1054,6 +1179,53 @@ falsification_tests:
       — and it would be compared against another method with a different train/infer ratio. That
       comparison is arithmetically correct and factually meaningless, which is the class of
       defect PF-008 names.
+
+  - id: FALSIFY-CLAIMS-011
+    rule: OBLIG-CLAIMS-SELECTION-BOUND — the pairing key is recomputed, and the manifest must be this cell's
+    prediction: >
+      `bench_gate_selection_binding_case_table_at_the_active_scope` sweeps ONE named `const`
+      array of eleven rows over freshly built VALID 40-cell ACTIVE runs, through the PUBLIC
+      `verify_run` door, and asserts both the variant tag AND the cell each refusal names. The
+      rows: a CONTROL that must be ACCEPTED (without which a table that refused everything
+      would pass); the whole `selections/` tree deleted; one cell's own selection directory
+      deleted; one manifest truncated to zero bytes; one row's `selection_manifest_hash`
+      doctored to 64 zeros; one row's key doctored to ANOTHER CELL'S REAL digest; THREE
+      TRANSPLANTS in which a donor cell's manifest is copied over this cell's file AND the
+      row's key is doctored to the transplanted manifest's hash; the SAME TRANSPLANT WITHOUT
+      the row-hash doctoring; and one manifest payload edited without resealing its envelope.
+
+      THE TRANSPLANT ROWS CARRY THE WEIGHT AND ARE THE ONES MOST EASILY MADE VACUOUS. Without
+      the accompanying row-hash doctoring the hash check fires first, the test observes
+      `selection_manifest_mismatch`, and it passes while the cell-key comparison it exists to
+      prove is never reached. The row-hash doctoring is what makes the hashes AGREE so only
+      the cell-key check can refuse, and the tenth row — the same transplant WITHOUT the
+      doctoring, expecting the hash mismatch — is the INVERSION that proves the two checks are
+      distinguishable.
+
+      Three further tests carry the edges: the transplant proven at BOTH ENDS of the shot axis
+      (an s16 manifest under an s8 cell and an s32 under an s64, where there is no contracted
+      step below 8 or above 64); exact byte equality of the 64-hex key against a last-character
+      flip, a truncation to sixteen characters and an upper-casing; and the deterministic
+      first-offending-cell order over two broken cells, asserted across three invocations.
+
+      Every one of the eleven rows was observed RED against the pre-fix gate, each reporting
+      `Ok(40 rows verified)` — the attacks SUCCEEDED — and GREEN afterwards with its own
+      variant. A red that had been some OTHER refusal would have proved the mutation was
+      detected rather than that the binding was missing.
+    test: cargo test -p aprender-train --lib --features setfit bench_gate
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_gate
+    expected_output: 'test result: ok'
+    if_fails: >
+      A green-while-broken state here means the forty committed selection manifests are inert
+      files again: `apr setfit bench report` would exit 0 with `selections/` deleted and with a
+      row's pairing key doctored to 64 zeros, exactly as verifier spot-checks G and F measured
+      before 3.0.0. The damage is EXPORTED FORWARD rather than contained — under D-19 the
+      pairing mechanism is the whole remaining justification for holding EVAL-02 open, so a
+      future second arm would pair against a key nothing ever attested, and every paired delta
+      computed from it would be a comparison across two different few-shot subsets wearing one
+      cell's name. The row-count assertion inside the sweep exists because the Make floor
+      cannot see this: `assert_tests_ran` counts test FUNCTIONS, and eleven table rows
+      collapsing to three would not move it by a single test.
 
 kani_harnesses:
   - id: KANI-CLAIMS-001

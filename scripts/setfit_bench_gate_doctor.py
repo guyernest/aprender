@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Doctor a SCRATCH copy of the benchmark directory into verifier spot-check E.
+"""Doctor a SCRATCH copy of the benchmark directory into a verifier spot-check.
+
+TWO MODES, one per attack the probe replays:
+
+``escape``
+    Spot-check E. Moves the committed lock record out of the tree and repoints
+    the row's ``lock_record_path`` at it. Prints the escape path.
+
+``selection-hash-zeros``
+    Spot-check F. Doctors the row's ``selection_manifest_hash`` - THE PAIRING
+    KEY - to 64 zeros and leaves the committed selection manifest untouched, so
+    the only disagreement is between the row's claim and the manifest the gate
+    recomputes. Prints the doctored key.
+
+Both repair the row's own ``semantic_hash``, the manifest's ``row_sha256`` for
+that cell, and the manifest's envelope digest, for the reason in step 3 below.
 
 Called only by ``scripts/setfit_bench_gate_door_probe.sh``. It is a separate file
 rather than an inline heredoc because ``bashrs`` — the shell linter this repo uses
@@ -32,8 +47,8 @@ method ``05-VERIFICATION.md`` used to produce spot-checks B through G. It is not
 the ML-stack substitution that ``crates/aprender-train/CLAUDE.md``'s Python
 prohibition targets, and it never touches the checkout.
 
-Usage: setfit_bench_gate_doctor.py <scratch-bench-dir> <outside-dir> <cell>
-Prints the absolute escape path on stdout.
+Usage: setfit_bench_gate_doctor.py <mode> <scratch-bench-dir> <outside-dir> <cell>
+Prints the mode's own handle (escape path, or doctored key) on stdout.
 """
 
 import hashlib
@@ -66,12 +81,16 @@ def load(path):
         return json.load(handle)
 
 
+MODES = ("escape", "selection-hash-zeros")
+
+
 def main(argv):
-    if len(argv) != 4:
+    if len(argv) != 5 or argv[1] not in MODES:
         raise SystemExit(
-            "usage: setfit_bench_gate_doctor.py <scratch-bench-dir> <outside-dir> <cell>"
+            "usage: setfit_bench_gate_doctor.py <{0}> "
+            "<scratch-bench-dir> <outside-dir> <cell>".format("|".join(MODES))
         )
-    bench_dir, outside_dir, cell = argv[1], argv[2], argv[3]
+    mode, bench_dir, outside_dir, cell = argv[1], argv[2], argv[3], argv[4]
 
     row_path = os.path.join(bench_dir, "rows", cell + ".json")
     lock_path = os.path.join(bench_dir, "locks", cell + ".lock.json")
@@ -91,9 +110,24 @@ def main(argv):
     if digest(manifest["payload"]) != manifest["semantic_hash"]:
         raise SystemExit("the manifest digest scheme no longer reproduces the committed digest")
 
-    shutil.move(lock_path, escape_path)
+    if mode == "escape":
+        shutil.move(lock_path, escape_path)
+        row["payload"]["evidence"]["setfit"]["lock"]["lock_record_path"] = escape_path
+        handle = escape_path
+    else:
+        # THE COMMITTED SELECTION MANIFEST IS LEFT ALONE. Only the row's claim
+        # about it moves, so the single disagreement is the one the gate is
+        # supposed to find by recomputing from the manifest's own bytes. Editing
+        # the manifest instead would produce a refusal that proves the manifest
+        # was read, but not that the ROW's claim was ever compared against it.
+        selections = os.path.join(bench_dir, "selections")
+        if not os.path.isdir(selections):
+            raise SystemExit("the scratch copy carries no selections/ directory")
+        handle = "0" * 64
+        if row["payload"]["selection_manifest_hash"] == handle:
+            raise SystemExit("the committed row already claims the doctored key; this is vacuous")
+        row["payload"]["selection_manifest_hash"] = handle
 
-    row["payload"]["evidence"]["setfit"]["lock"]["lock_record_path"] = escape_path
     row["semantic_hash"] = digest(row["payload"])
     write_pretty(row_path, row)
 
@@ -110,7 +144,7 @@ def main(argv):
     manifest["semantic_hash"] = digest(manifest["payload"])
     write_pretty(manifest_path, manifest)
 
-    print(escape_path)
+    print(handle)
     return 0
 
 
