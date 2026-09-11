@@ -717,13 +717,12 @@ fn resolve_committed_evidence_path(
 
     // ---- STAGE 2: CANONICAL CONTAINMENT ---------------------------------------------------
     let joined = bench_dir.join(relative);
-    let canonical_base = fs::canonicalize(bench_dir).map_err(|error| {
-        BenchGateError::EvidenceReadFailed {
+    let canonical_base =
+        fs::canonicalize(bench_dir).map_err(|error| BenchGateError::EvidenceReadFailed {
             cell: cell.render(),
             path: bench_dir.display().to_string(),
             detail: format!("the benchmark directory could not be canonicalized: {error}"),
-        }
-    })?;
+        })?;
     let canonical_target = match fs::canonicalize(&joined) {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -765,7 +764,11 @@ fn missing_evidence(cell: CellKey, kind: EvidenceKind, path: &Path) -> BenchGate
 }
 
 /// Read a small evidence file, refused from its DECLARED length before a byte is read.
-fn read_evidence(cell: CellKey, kind: EvidenceKind, path: &Path) -> Result<Vec<u8>, BenchGateError> {
+fn read_evidence(
+    cell: CellKey,
+    kind: EvidenceKind,
+    path: &Path,
+) -> Result<Vec<u8>, BenchGateError> {
     let metadata = fs::metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             missing_evidence(cell, kind, path)
