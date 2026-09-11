@@ -50,10 +50,23 @@
 //! | 13 | a MANIFEST declaring a foreign `contract_id` | `row_schema_refused` | `verify_run` / 40 | 05-15 |
 //! | 14 | a contract-pinned constant a row may not choose (three fields) | `row_schema_refused` | `verify_run` / 40 | 05-15 |
 //! | 15 | TWO cells carrying an escaping path | `evidence_path_escape` on the FIRST in contract order | `verify_run` / 40 | 05-15 |
+//! | 16 | the SELECTION-BINDING case table: a deleted `selections/` tree, a deleted per-cell directory, a zero-byte manifest, a row hash doctored to 64 zeros, a row hash doctored to another cell's real hash, three transplanted manifests WITH the row hash doctored to match, the same transplant WITHOUT it, and an unsealed manifest payload — plus one ACCEPTANCE row | `evidence_file_missing`, `evidence_read_failed`, `selection_manifest_mismatch`, `selection_manifest_cell_mismatch`, and `Ok` | `verify_run` / 40 | 05-16 |
+//! | 17 | a transplanted manifest at BOTH ENDS of the shot axis (s16 under s8, s32 under s64) | `selection_manifest_cell_mismatch` | `verify_run` / 40 | 05-16 |
+//! | 18 | a pairing key agreeing in its first characters — last byte flipped, truncated to 16, upper-cased | `selection_manifest_mismatch` | `verify_run` / 40 | 05-16 |
+//! | 19 | TWO cells carrying a broken selection binding | `selection_manifest_mismatch` on the FIRST in contract order | `verify_run` / 40 | 05-16 |
+//! | 20 | the DEFERRED-scope pairing negative re-asserted after the fixture change | `unpaired_selection`, NOT one of entry 16's tags | deferred 80 | 05-16 |
 //!
 //! Entries 9 and 10 overlap by design: three of entry 10's rows are the same SHAPES as entry
 //! 9's, proven at a different scope. Deleting either for duplicating the other is exactly the
-//! scope transfer rule 4 forbids. 05-16 and 05-17 each extend this table when they add theirs.
+//! scope transfer rule 4 forbids. Entry 20 is the same discipline pointed the other way: it
+//! asserts that 05-16's step-6 addition did not PRE-EMPT a step-5 negative and quietly change
+//! which rule that negative observes. 05-17 extends this table when it adds its own.
+//!
+//! Entry 16's transplant rows are the ones most easily made vacuous, and the reason is stated
+//! at the table itself: without the accompanying row-hash doctoring the HASH check fires first
+//! and the cell-key check those rows exist to prove is never reached. The inverting row (the
+//! same transplant WITHOUT the doctoring, expecting `selection_manifest_mismatch`) is what
+//! keeps that honest.
 //!
 //! Every negative in this file runs in a default `cargo test -p aprender-train --lib --features
 //! setfit` invocation: no `#[ignore]`, no extra feature, no network, no fixture file. The
@@ -72,6 +85,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use aprender_contrastive_data::dedup::ExclusionRecord;
+use aprender_contrastive_data::ledger::AccessRecord;
+use aprender_contrastive_data::manifest::{
+    SelectedExampleRecord, SelectionManifest, SelectionPayload, VolatileMetadata,
+    SELECTION_SCHEMA_VERSION,
+};
 use serde::Deserialize;
 use tempfile::TempDir;
 
@@ -125,9 +144,98 @@ fn synthetic_f_avg(spec: RunSpec, cell: CellKey) -> f64 {
     }
 }
 
+/// The relative spelling of one cell's committed selection manifest.
+///
+/// Stated here as a LITERAL rather than through `selection_manifest_path`, deliberately: the
+/// production helper is the thing under test, and a fixture that built its paths by calling it
+/// would agree with it by construction and could never go red on a drift.
+/// `bench_gate_layout_constants_agree_with_the_shipped_row_filename_grammar` cross-pins the two.
+fn selection_manifest_rel(shots: u32, seed: u32) -> String {
+    format!("selections/s{shots}-seed{seed}/selection-manifest.json")
+}
+
+/// That manifest's absolute path under a benchmark directory.
+fn selection_manifest_at(root: &Path, shots: u32, seed: u32) -> PathBuf {
+    root.join(selection_manifest_rel(shots, seed))
+}
+
+/// A minimal, VALID [`ExclusionRecord`].
+///
+/// Built through the type's own public `Deserialize` impl because its four fields are PRIVATE
+/// and it exposes no constructor and no `Default` (`aprender-contrastive-data/src/dedup.rs:67`).
+/// Widening another crate's API so a test could build one would change production surface for a
+/// fixture's convenience; deserializing the empty record uses only what is already public.
+fn synthetic_exclusions() -> ExclusionRecord {
+    serde_json::from_str(
+        "{\"excluded_train_ids\":[],\"groups\":[],\"reduced_pools\":{},\
+         \"normalization_version\":\"nfc-trim-ws-v1\"}",
+    )
+    .expect("the exclusion record's public Deserialize accepts an empty record")
+}
+
+/// A real, SEALED selection manifest for one `(shots, seed)` cell.
+///
+/// SEALED THROUGH THE SHIPPED SERIALIZER: `semantic_hash` is
+/// `sha256(payload.to_canonical_bytes())`, the same bytes and the same function
+/// `SelectionManifest::from_bytes` verifies against. A fixture that computed the digest any
+/// other way would be testing the fixture's arithmetic rather than the gate's.
+///
+/// The forty manifests must be DISTINCT — the committed set carries 40 distinct
+/// `semantic_hash` values — so `ordered_examples` varies with `(shots, seed)`. A fixture whose
+/// manifests collided would make the TRANSPLANT negatives pass for the wrong reason: a donor
+/// manifest identical to the target's would satisfy the hash check by accident and the
+/// cell-key check would never be the thing that refused.
+fn synthetic_selection_manifest(shots: u32, seed: u32) -> SelectionManifest {
+    let payload = SelectionPayload {
+        schema_version: SELECTION_SCHEMA_VERSION,
+        algorithm_version: 1,
+        profile: "canonical".to_string(),
+        dataset_fingerprint: "0".repeat(64),
+        validation_fingerprint: "1".repeat(64),
+        // The SAME label order the synthetic rows carry in `quality.ordered_labels`.
+        label_names: vec!["none".to_string(), "against".to_string(), "favor".to_string()],
+        normalization_version: "nfc-trim-ws-v1".to_string(),
+        // THE WIDENING, in the fixture as in the gate: `root_seed` is `u64` and
+        // `CellKey::seed` is `u32`.
+        root_seed: u64::from(seed),
+        shots_per_class: shots,
+        ordered_examples: (0_usize..3)
+            .map(|index| SelectedExampleRecord {
+                id: format!("train:s{shots}-seed{seed}-{index}"),
+                label: index,
+                exact_hash: sha256_hex(format!("exact:{shots}:{seed}:{index}").as_bytes()),
+                normalized_hash: sha256_hex(format!("norm:{shots}:{seed}:{index}").as_bytes()),
+            })
+            .collect(),
+        exclusions: synthetic_exclusions(),
+        access_ledger: vec![AccessRecord {
+            role: "train".to_string(),
+            profile: "canonical".to_string(),
+            purpose: "select".to_string(),
+            fingerprint_hex: "0".repeat(64),
+        }],
+        ledger_hash: "2".repeat(64),
+    };
+    let semantic_hash =
+        sha256_hex(&payload.to_canonical_bytes().expect("the selection payload serializes"));
+    SelectionManifest {
+        semantic_hash,
+        volatile: VolatileMetadata {
+            created_at: String::new(),
+            tool_version: "bench-gate-fixture".to_string(),
+        },
+        payload,
+    }
+}
+
 /// The pairing key both methods of a `(shots, seed)` cell consume.
+///
+/// Since 05-16 this is the REAL sealed digest of the manifest the builder commits for that
+/// cell, not a label. Before 05-16 it was the string `selection-manifest-s{shots}-seed{seed}`
+/// and no file existed for it, because nothing on the gate path ever opened one — which is
+/// precisely verifier gap 2.
 fn synthetic_selection_hash(shots: u32, seed: u32) -> String {
-    format!("selection-manifest-s{shots}-seed{seed}")
+    synthetic_selection_manifest(shots, seed).semantic_hash
 }
 
 /// The committed lock record's bytes for a SetFit cell.
@@ -348,6 +456,24 @@ fn write_valid_run_scoped(spec: RunSpec, scope: ExpectationScope) -> TempDir {
     fs::create_dir_all(root.join(LEDGER_DIR)).expect("ledger dir");
 
     for cell in RunManifest::expectation_for(scope) {
+        // THE SELECTION MANIFEST, one per `(shots, seed)` and SHARED by the pair.
+        //
+        // Written per cell rather than per pair, which is idempotent: both methods of a
+        // `(shots, seed)` resolve the SAME path and the same bytes, because
+        // `selection_manifest_path` is built from shots and seed alone. That sharing IS the
+        // pairing design — one selection, two methods — and it is what keeps the deferred-scope
+        // `unpaired_selection` negative constructible after this change.
+        let manifest_path = selection_manifest_at(root, cell.shots, cell.seed);
+        fs::create_dir_all(manifest_path.parent().expect("the manifest has a parent"))
+            .expect("selection dir");
+        fs::write(
+            &manifest_path,
+            synthetic_selection_manifest(cell.shots, cell.seed)
+                .to_file_bytes()
+                .expect("the selection manifest serializes"),
+        )
+        .expect("selection manifest write");
+
         match cell.method {
             Method::Setfit => {
                 let relative = format!(
@@ -1342,6 +1468,508 @@ fn bench_gate_reports_the_first_offending_cell_in_contract_order_across_runs() {
         named,
         vec![first.render(), first.render(), first.render()],
         "the refusal must name the FIRST offending cell in contract order, on every run"
+    );
+}
+
+// ===========================================================================================
+// GAP 2 — THE SELECTION-MANIFEST BINDING CASE TABLE (plan 05-16 task 2)
+//
+// Verifier gap 2 (EVAL-02, graded PARTIAL) measured that the RECORDING half is complete —
+// 40/40 committed rows carry a distinct `selection_manifest_hash` equal to the `semantic_hash`
+// of the committed manifest for their own cell — while the ENFORCING half did not exist:
+// `verify_run` opened no selection manifest, so the report exited 0 with the whole
+// `selections/` directory deleted (spot-check G) and exited 0 with a row's hash doctored to 64
+// zeros (spot-check F). The forty committed manifests were inert files.
+//
+// SCOPE: every row below is mutated on a freshly built VALID ACTIVE 40-cell run and driven
+// through the PUBLIC `verify_run` door. That is deliberate and it is not interchangeable with a
+// helper-level proof — CLAUDE.md Verification Discipline rule 4, the same rule that forced
+// 05-11 to re-mutate four of the six original negatives.
+//
+// Ship the TABLE and re-run it rather than re-reading the check (rule 7). A further shape is a
+// new row here, never another test function.
+// ===========================================================================================
+
+/// One mutation of a valid run's selection-manifest binding.
+///
+/// Every variant carries the cell it breaks, so the table can assert WHICH cell the refusal
+/// names as well as which variant it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionMutation {
+    /// The control. Nothing is touched.
+    None,
+    /// The ENTIRE `selections/` directory is removed — spot-check G, and the cheapest possible
+    /// disproof of "the forty manifests are inert", because it edits no row byte at all.
+    DeleteSelectionsDir,
+    /// One cell's own `selections/s{shots}-seed{seed}/` directory is removed.
+    DeleteCellDir(CellKey),
+    /// One manifest is truncated to zero bytes: a PARSE failure, not a hash disagreement.
+    TruncateManifestToZeroBytes(CellKey),
+    /// Spot-check F: one row's `selection_manifest_hash` doctored to 64 zeros, resealed.
+    RowHashToZeros(CellKey),
+    /// The same, but doctored to another cell's REAL hash — so the value is well-formed and
+    /// even meaningful, just not this cell's.
+    RowHashToAnotherCellsHash {
+        /// The cell whose row is doctored.
+        cell: CellKey,
+        /// The cell whose real hash is written into it.
+        other: CellKey,
+    },
+    /// TRANSPLANT: the donor's manifest is copied over this cell's file AND this cell's row
+    /// hash is doctored to the transplanted manifest's hash, so the hash check AGREES and only
+    /// the cell-key comparison can refuse.
+    TransplantWithRowDoctored {
+        /// The cell whose manifest file is overwritten.
+        cell: CellKey,
+        /// The cell whose manifest is transplanted into it.
+        donor: CellKey,
+    },
+    /// THE INVERTING CASE: the same transplant WITHOUT the row-hash doctoring, which must be
+    /// refused by the HASH check instead. Without this row the transplant rows could pass while
+    /// the cell-key check they exist to prove was never reached.
+    TransplantWithoutRowDoctored {
+        /// The cell whose manifest file is overwritten.
+        cell: CellKey,
+        /// The cell whose manifest is transplanted into it.
+        donor: CellKey,
+    },
+    /// One manifest's payload is edited and its envelope digest is NOT resealed.
+    EditManifestPayloadWithoutResealing(CellKey),
+}
+
+/// What the swept run must do with a mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionExpect {
+    /// `verify_run` returns `Ok`. Without this row the table could pass by refusing everything.
+    Accepted,
+    /// Refused with this variant tag, naming this cell.
+    Refused(&'static str, CellKey),
+}
+
+/// One row of the table.
+struct SelectionCase {
+    label: &'static str,
+    mutation: SelectionMutation,
+    expect: SelectionExpect,
+    why: &'static str,
+}
+
+/// The first cell in contract order: `(setfit, 8, 13)`. Whatever breaks EVERY cell is reported
+/// here, and the low end of the shot axis has no contracted step below it.
+const FIRST_CELL: CellKey = CellKey::new(Method::Setfit, 8, 13);
+/// Its seed-adjacent neighbour, whose manifest is byte-DIFFERENT despite the adjacency.
+const ADJACENT_SEED: CellKey = CellKey::new(Method::Setfit, 8, 17);
+/// One contracted step UP the shot axis from [`FIRST_CELL`].
+const ONE_SHOT_STEP_UP: CellKey = CellKey::new(Method::Setfit, 16, 13);
+/// The high end of the shot axis: no contracted step above 64.
+const TOP_OF_SHOT_AXIS: CellKey = CellKey::new(Method::Setfit, 64, 13);
+/// One contracted step DOWN from the top of the shot axis.
+const ONE_SHOT_STEP_DOWN: CellKey = CellKey::new(Method::Setfit, 32, 13);
+
+const SELECTION_BINDING_CASES: [SelectionCase; 11] = [
+    // ---- THE CONTROL --------------------------------------------------------------------
+    SelectionCase {
+        label: "control",
+        mutation: SelectionMutation::None,
+        expect: SelectionExpect::Accepted,
+        why: "a valid run with forty real sealed manifests must still verify; without this row \
+              a table that refused everything would pass",
+    },
+    // ---- ABSENT EVIDENCE ----------------------------------------------------------------
+    SelectionCase {
+        label: "selections_dir_deleted",
+        mutation: SelectionMutation::DeleteSelectionsDir,
+        expect: SelectionExpect::Refused("evidence_file_missing", FIRST_CELL),
+        why: "SPOT-CHECK G. Every cell loses its manifest, so the FIRST in contract order is \
+              the one named. No row byte changes, so nothing else can be what refused",
+    },
+    SelectionCase {
+        label: "one_cell_dir_deleted",
+        mutation: SelectionMutation::DeleteCellDir(TARGET_SETFIT),
+        expect: SelectionExpect::Refused("evidence_file_missing", TARGET_SETFIT),
+        why: "a missing PER-CELL directory is as absent as a missing file, and must name the \
+              cell and the path rather than producing an Ok over an absent input",
+    },
+    SelectionCase {
+        label: "manifest_truncated_to_zero_bytes",
+        mutation: SelectionMutation::TruncateManifestToZeroBytes(TARGET_SETFIT),
+        expect: SelectionExpect::Refused("evidence_read_failed", TARGET_SETFIT),
+        why: "OBSERVED, not assumed: a zero-byte file is a regular file within the cap, so the \
+              bounded read SUCCEEDS and `SelectionManifest::from_bytes` fails at serde — a \
+              PARSE failure, which the implementation maps to `evidence_read_failed` and NOT \
+              to the digest-sourced mismatch. A zero-byte file is not a hash disagreement",
+    },
+    // ---- A DOCTORED ROW HASH ------------------------------------------------------------
+    SelectionCase {
+        label: "row_hash_doctored_to_64_zeros",
+        mutation: SelectionMutation::RowHashToZeros(TARGET_SETFIT),
+        expect: SelectionExpect::Refused("selection_manifest_mismatch", TARGET_SETFIT),
+        why: "SPOT-CHECK F. The row is resealed and its manifest digest re-recorded, so every \
+              other check still passes and ONLY the recomputation from the committed manifest \
+              can catch it",
+    },
+    SelectionCase {
+        label: "row_hash_doctored_to_another_cells_real_hash",
+        mutation: SelectionMutation::RowHashToAnotherCellsHash {
+            cell: FIRST_CELL,
+            other: ADJACENT_SEED,
+        },
+        expect: SelectionExpect::Refused("selection_manifest_mismatch", FIRST_CELL),
+        why: "ADJACENCY: two cells one seed apart do not merge. The value written is a REAL, \
+              well-formed manifest digest — just not this cell's — so a check that only \
+              validated the SHAPE of the hash would accept it",
+    },
+    // ---- TRANSPLANTS: the rows that carry the weight ------------------------------------
+    SelectionCase {
+        label: "transplant_adjacent_seed_with_row_doctored",
+        mutation: SelectionMutation::TransplantWithRowDoctored {
+            cell: FIRST_CELL,
+            donor: ADJACENT_SEED,
+        },
+        expect: SelectionExpect::Refused("selection_manifest_cell_mismatch", FIRST_CELL),
+        why: "THE ROW-HASH DOCTORING IS WHAT MAKES THIS ROW MEAN ANYTHING. The transplanted \
+              manifest is internally valid and seals correctly, and the row now claims its \
+              hash — so step 1 AGREES and the cell-key comparison is the only thing left that \
+              can refuse. Without the doctoring this row would report the hash mismatch and \
+              prove nothing about the second check",
+    },
+    SelectionCase {
+        label: "transplant_one_shot_step_down_with_row_doctored",
+        mutation: SelectionMutation::TransplantWithRowDoctored {
+            cell: ONE_SHOT_STEP_UP,
+            donor: FIRST_CELL,
+        },
+        expect: SelectionExpect::Refused("selection_manifest_cell_mismatch", ONE_SHOT_STEP_UP),
+        why: "8 against a 16 cell — one contracted step DOWN the shot axis, in the interior. \
+              Row doctored, as above",
+    },
+    SelectionCase {
+        label: "transplant_one_shot_step_up_with_row_doctored",
+        mutation: SelectionMutation::TransplantWithRowDoctored {
+            cell: ONE_SHOT_STEP_DOWN,
+            donor: TOP_OF_SHOT_AXIS,
+        },
+        expect: SelectionExpect::Refused("selection_manifest_cell_mismatch", ONE_SHOT_STEP_DOWN),
+        why: "64 against a 32 cell — one contracted step UP, in the interior. Row doctored",
+    },
+    // ---- THE INVERTING ROW --------------------------------------------------------------
+    SelectionCase {
+        label: "transplant_WITHOUT_row_doctored",
+        mutation: SelectionMutation::TransplantWithoutRowDoctored {
+            cell: FIRST_CELL,
+            donor: ADJACENT_SEED,
+        },
+        expect: SelectionExpect::Refused("selection_manifest_mismatch", FIRST_CELL),
+        why: "THE INVERSION. The same transplant with the row left alone must report the HASH \
+              mismatch, which proves the two checks are DISTINGUISHABLE and that the rows \
+              above really reach the second one rather than passing on the first",
+    },
+    // ---- AN UNSEALED MANIFEST -----------------------------------------------------------
+    SelectionCase {
+        label: "manifest_payload_edited_without_resealing",
+        mutation: SelectionMutation::EditManifestPayloadWithoutResealing(TARGET_SETFIT),
+        expect: SelectionExpect::Refused("selection_manifest_mismatch", TARGET_SETFIT),
+        why: "sourced from `SelectionManifest::from_bytes`'s OWN digest refusal, never from a \
+              second recomputation in `bench_gate` — one definition of a manifest's identity \
+              (OPS-03)",
+    },
+];
+
+/// The shot-axis transplants proven at BOTH ENDS of the axis, where there is no contracted
+/// step below 8 or above 64. Kept beside the interior rows rather than folded into them,
+/// because "the comparison works one step away" and "the comparison works where there is no
+/// step" are two different statements.
+const SELECTION_BOUNDARY_TRANSPLANTS: [(&str, CellKey, CellKey); 2] = [
+    ("s16_manifest_under_an_s8_cell", FIRST_CELL, ONE_SHOT_STEP_UP),
+    ("s32_manifest_under_an_s64_cell", TOP_OF_SHOT_AXIS, ONE_SHOT_STEP_DOWN),
+];
+
+/// Overwrite a row's `selection_manifest_hash` and reseal it.
+fn doctor_selection_hash(root: &Path, cell: CellKey, hash: &str) {
+    let hash = hash.to_string();
+    reseal_row(root, cell, |payload| {
+        payload.selection_manifest_hash = hash;
+    });
+}
+
+/// Copy `donor`'s committed manifest over `cell`'s own file, returning the donor's digest.
+fn transplant_manifest(root: &Path, cell: CellKey, donor: CellKey) -> String {
+    let donor_manifest = synthetic_selection_manifest(donor.shots, donor.seed);
+    fs::write(
+        selection_manifest_at(root, cell.shots, cell.seed),
+        donor_manifest.to_file_bytes().expect("the donor manifest serializes"),
+    )
+    .expect("transplant write");
+    donor_manifest.semantic_hash
+}
+
+/// Apply one mutation to a freshly built valid run, BEFORE the manifest is derived.
+fn apply_selection_mutation(root: &Path, mutation: SelectionMutation) {
+    match mutation {
+        SelectionMutation::None => {}
+        SelectionMutation::DeleteSelectionsDir => {
+            fs::remove_dir_all(root.join("selections")).expect("remove the selections dir");
+        }
+        SelectionMutation::DeleteCellDir(cell) => {
+            let path = selection_manifest_at(root, cell.shots, cell.seed);
+            fs::remove_dir_all(path.parent().expect("the manifest has a parent"))
+                .expect("remove the per-cell selection dir");
+        }
+        SelectionMutation::TruncateManifestToZeroBytes(cell) => {
+            fs::write(selection_manifest_at(root, cell.shots, cell.seed), b"")
+                .expect("truncate the manifest");
+        }
+        SelectionMutation::RowHashToZeros(cell) => {
+            doctor_selection_hash(root, cell, &"0".repeat(64));
+        }
+        SelectionMutation::RowHashToAnotherCellsHash { cell, other } => {
+            let hash = synthetic_selection_hash(other.shots, other.seed);
+            doctor_selection_hash(root, cell, &hash);
+        }
+        SelectionMutation::TransplantWithRowDoctored { cell, donor } => {
+            let hash = transplant_manifest(root, cell, donor);
+            doctor_selection_hash(root, cell, &hash);
+        }
+        SelectionMutation::TransplantWithoutRowDoctored { cell, donor } => {
+            let _ = transplant_manifest(root, cell, donor);
+        }
+        SelectionMutation::EditManifestPayloadWithoutResealing(cell) => {
+            let path = selection_manifest_at(root, cell.shots, cell.seed);
+            let bytes = fs::read(&path).expect("manifest read");
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("the manifest is JSON");
+            // An EXISTING field's value, because the envelope is `deny_unknown_fields` and a
+            // new key would fail to PARSE rather than fail to hash.
+            *value
+                .get_mut("payload")
+                .and_then(|p| p.get_mut("normalization_version"))
+                .expect("the payload carries a normalization version") =
+                serde_json::Value::String("nfc-trim-ws-v99".to_string());
+            let mut edited = serde_json::to_vec_pretty(&value).expect("manifest serializes");
+            edited.push(b'\n');
+            fs::write(&path, edited).expect("manifest write");
+        }
+    }
+}
+
+#[test]
+fn bench_gate_selection_binding_case_table_at_the_active_scope() {
+    let mut observations: Vec<(&str, String)> = Vec::new();
+
+    for case in &SELECTION_BINDING_CASES {
+        let dir = write_valid_run(RunSpec::default());
+        apply_selection_mutation(dir.path(), case.mutation);
+        // AFTER the mutation, so a resealed row's new digest is what the manifest records and
+        // the defect under test is the binding rather than a row-digest disagreement.
+        let manifest = manifest_for(dir.path());
+
+        let (observed, named_cell, rendered) = match verify_run(&manifest, dir.path()) {
+            Ok(set) => (format!("Ok({} rows verified)", set.len()), String::new(), String::new()),
+            Err(error) => (
+                error.variant_tag().to_string(),
+                error.cell().unwrap_or("<none>").to_string(),
+                error.to_string(),
+            ),
+        };
+        // PRINTED PER ROW, and asserted only at the end, so one run reports every row rather
+        // than aborting on the first — the same shape 05-15's escape sweep used.
+        println!(
+            "[bench_gate] SELECTION_BINDING case={} observed={observed} cell={named_cell} ({})",
+            case.label, case.why
+        );
+
+        let expected = match case.expect {
+            SelectionExpect::Accepted => "Ok(40 rows verified)".to_string(),
+            SelectionExpect::Refused(tag, cell) => {
+                if observed == tag {
+                    // The refusal must NAME the cell and the manifest path, or an operator
+                    // cannot tell which of forty cells to look at.
+                    assert_eq!(
+                        named_cell,
+                        cell.render(),
+                        "[{}] the refusal must name {}: {rendered}",
+                        case.label,
+                        cell.render()
+                    );
+                    assert!(
+                        rendered.contains(&selection_manifest_rel(cell.shots, cell.seed))
+                            || rendered.contains("selections"),
+                        "[{}] the refusal must name the manifest path: {rendered}",
+                        case.label
+                    );
+                }
+                tag.to_string()
+            }
+        };
+        observations.push((case.label, format!("{observed}|expected={expected}")));
+    }
+
+    let failures: Vec<&(&str, String)> = observations
+        .iter()
+        .filter(|(_, line)| {
+            let (observed, expected) = line.split_once("|expected=").unwrap_or((line, ""));
+            observed != expected
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "every selection-binding shape must be refused with its own variant through verify_run \
+         at the ACTIVE 40-cell scope, and the control must be ACCEPTED; these were not: \
+         {failures:#?}"
+    );
+
+    // NON-VACUITY over the table itself: a row deleted to make something pass goes red here.
+    let accepted = SELECTION_BINDING_CASES
+        .iter()
+        .filter(|case| case.expect == SelectionExpect::Accepted)
+        .count();
+    let cell_mismatches = SELECTION_BINDING_CASES
+        .iter()
+        .filter(|case| {
+            matches!(case.expect, SelectionExpect::Refused("selection_manifest_cell_mismatch", _))
+        })
+        .count();
+    assert_eq!(accepted, 1, "the table must carry exactly one ACCEPTANCE row");
+    assert!(
+        cell_mismatches >= 3,
+        "the table must carry at least three transplant rows, has {cell_mismatches}"
+    );
+
+    // THE SCOPE FENCE, asserted rather than asserted-in-prose: this proof is single-method and
+    // intra-cell, so it must not lean on the DEFERRED two-method scope for any of its rows.
+    assert!(
+        SELECTION_BINDING_CASES
+            .iter()
+            .all(|case| matches!(case.expect, SelectionExpect::Accepted)
+                || matches!(case.expect, SelectionExpect::Refused(_, cell) if cell.method == Method::Setfit)),
+        "every selection-binding row is an ACTIVE-scope, single-method cell; a LoRA cell here \
+         would be D-ITEM-05-15's cross-method check wearing this one's name"
+    );
+}
+
+#[test]
+fn bench_gate_refuses_a_transplanted_manifest_at_both_ends_of_the_shot_axis() {
+    // The interior transplants above prove the cell-key comparison one contracted step away.
+    // These two prove it where there IS no step — below 8 and above 64 — because "works for a
+    // neighbour" and "works at the end of the axis" are different statements and the second is
+    // where an off-by-one in an axis walk would hide.
+    for (label, cell, donor) in SELECTION_BOUNDARY_TRANSPLANTS {
+        let dir = write_valid_run(RunSpec::default());
+        let hash = transplant_manifest(dir.path(), cell, donor);
+        doctor_selection_hash(dir.path(), cell, &hash);
+        let manifest = manifest_for(dir.path());
+
+        let error = refuse(&manifest, dir.path(), label);
+        assert_eq!(
+            error.variant_tag(),
+            "selection_manifest_cell_mismatch",
+            "[{label}] a transplanted manifest at the end of the shot axis must be refused by \
+             the CELL-KEY comparison, got: {error}"
+        );
+        assert_eq!(error.cell(), Some(cell.render().as_str()), "[{label}] {error}");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&donor.shots.to_string()),
+            "[{label}] the refusal must name the manifest's own declared shots: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn bench_gate_the_forty_synthetic_selection_manifests_are_forty_distinct_digests() {
+    // The committed set carries 40 DISTINCT `semantic_hash` values (measured on the tree, not
+    // assumed). A fixture whose manifests collided would make every transplant negative pass
+    // for the wrong reason: a donor identical to the target satisfies the hash check by
+    // accident and the cell-key comparison is never what refused.
+    let digests: BTreeSet<String> = RunManifest::expectation()
+        .into_iter()
+        .map(|cell| synthetic_selection_hash(cell.shots, cell.seed))
+        .collect();
+    assert_eq!(digests.len(), EXPECTED_CELLS, "forty cells, forty distinct selection digests");
+    for digest in &digests {
+        assert_eq!(digest.len(), 64, "a sealed digest is 64 lowercase hex characters");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+}
+
+#[test]
+fn bench_gate_a_hash_agreeing_in_its_first_characters_is_still_a_refusal() {
+    // EXACT BYTE EQUALITY, stated as a negative. A prefix match, a truncation to 8 or 16
+    // characters, or an `eq_ignore_ascii_case` would each accept one of the three rows below,
+    // and each is a plausible implementation slip that no other test in this file would see.
+    let honest = synthetic_selection_hash(FIRST_CELL.shots, FIRST_CELL.seed);
+    let mut flipped_last: String = honest.clone();
+    flipped_last.pop();
+    flipped_last.push(if honest.ends_with('0') { '1' } else { '0' });
+
+    let doctored: Vec<(&str, String)> = vec![
+        ("last_character_flipped", flipped_last),
+        ("truncated_to_sixteen", honest[..16].to_string()),
+        ("upper_cased", honest.to_uppercase()),
+    ];
+    for (label, hash) in doctored {
+        assert_ne!(hash, honest, "[{label}] the doctored value must differ from the honest one");
+        let dir = write_valid_run(RunSpec::default());
+        doctor_selection_hash(dir.path(), FIRST_CELL, &hash);
+        let manifest = manifest_for(dir.path());
+
+        let error = refuse(&manifest, dir.path(), label);
+        assert_eq!(
+            error.variant_tag(),
+            "selection_manifest_mismatch",
+            "[{label}] a hash that agrees in its first characters is still a refusal, got: \
+             {error}"
+        );
+    }
+}
+
+#[test]
+fn bench_gate_reports_the_first_offending_selection_binding_in_contract_order_across_runs() {
+    // TWO cells broken, so there is a CHOICE. Contract order is (method, shots ascending, seed
+    // ascending), so (8, 17) precedes (32, 41) and must be named on every invocation. The two
+    // are broken in REVERSE contract order, so a gate reporting "whichever was edited first"
+    // names the wrong one.
+    let first = ADJACENT_SEED;
+    let second = CellKey::new(Method::Setfit, 32, 41);
+    let mut named: Vec<String> = Vec::new();
+
+    for _ in 0..3 {
+        let dir = write_valid_run(RunSpec::default());
+        for cell in [second, first] {
+            doctor_selection_hash(dir.path(), cell, &"0".repeat(64));
+        }
+        let manifest = manifest_for(dir.path());
+        let error = refuse(&manifest, dir.path(), "two broken selection bindings are a refusal");
+        assert_eq!(error.variant_tag(), "selection_manifest_mismatch");
+        named.push(error.cell().unwrap_or("<none>").to_string());
+    }
+
+    assert_eq!(
+        named,
+        vec![first.render(), first.render(), first.render()],
+        "the refusal must name the FIRST offending cell in contract order, on every run"
+    );
+}
+
+#[test]
+fn bench_gate_the_deferred_scope_pairing_negative_still_reports_unpaired_selection() {
+    // THE FENCE BETWEEN THIS PLAN AND D-ITEM-05-15, asserted rather than reasoned about.
+    // The selection binding runs in STEP 6; `verify_pairing` is step 5 and is byte-unchanged.
+    // Had the binding been wired earlier it would PRE-EMPT this negative and silently change
+    // which variant the cross-method check is observed through — the negative would still be
+    // green and would have stopped testing what it names.
+    let dir = write_valid_run_deferred(RunSpec::default());
+    reseal_row(dir.path(), TARGET_LORA, |payload| {
+        payload.selection_manifest_hash = "a-different-draw-entirely".to_string();
+    });
+    let manifest = manifest_for(dir.path());
+
+    let error = refuse(&manifest, dir.path(), "an unpaired pair is still an unpaired pair");
+    assert_eq!(
+        error.variant_tag(),
+        "unpaired_selection",
+        "step 5 runs before step 6, so the cross-method rule is what must fire here — not one \
+         of 05-16's intra-cell tags: {error}"
     );
 }
 
