@@ -316,6 +316,7 @@ fn test_no_unauthorized_binaries() {
         "aprender-setfit-train-lambda", // the training server's Lambda runtime
         "aprender-mcp-forecast",        // Prophet/NeuralProphet forecast server (Phase 6 D-06)
         "aprender-mcp-chronos",         // Chronos-Bolt server (Phase 6 D-06; created in plan 06-07)
+        "aprender-mcp-chronos-lambda",  // Chronos-Bolt AWS Lambda custom runtime (bootstrap)
     ]
     .into();
 
@@ -428,7 +429,7 @@ fn test_no_unauthorized_binaries() {
     // binary being minted. Raising this number is a phase-CONTEXT decision
     // (the human gate at 06-02 Task 1), never an edit made alongside the crate
     // that needs it.
-    const DEPLOYMENT_UNIT_BASELINE: usize = 6;
+    const DEPLOYMENT_UNIT_BASELINE: usize = 7;
     assert!(
         deployment_unit_bins.len() <= DEPLOYMENT_UNIT_BASELINE,
         "FALSIFY-MONO-011: the thin-MCP deployment-unit register grew to {} \

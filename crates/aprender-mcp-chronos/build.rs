@@ -28,9 +28,20 @@ fn main() {
     // ---- 1. embedding ----------------------------------------------------------------
     println!("cargo:rerun-if-env-changed=CHRONOS_EMBED_DIR");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo always sets OUT_DIR"));
-    match std::env::var_os("CHRONOS_EMBED_DIR") {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
+    let default_f16 = manifest_dir.join("../../models/chronos-bolt-tiny/f16");
+    let embed_dir = std::env::var_os("CHRONOS_EMBED_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            if default_f16.join("model.safetensors").exists() {
+                Some(default_f16)
+            } else {
+                None
+            }
+        });
+
+    match embed_dir {
         Some(dir) => {
-            let dir = PathBuf::from(dir);
             for name in ["model.safetensors", "config.json"] {
                 let src = dir.join(name);
                 println!("cargo:rerun-if-changed={}", src.display());

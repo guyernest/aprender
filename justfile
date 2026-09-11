@@ -295,6 +295,11 @@ pmcp-train-deploy target="":
     cargo pmcp deploy --manifest-path crates \
         {{ if target == "" { "" } else { "--target " + target } }} --no-color
 
+# Deploy the Chronos-Bolt zero-shot forecasting MCP server to pmcp.run
+pmcp-chronos-deploy target="":
+    cargo pmcp deploy --manifest-path crates/aprender-mcp-chronos-lambda \
+        {{ if target == "" { "" } else { "--target " + target } }} --no-color
+
 # Pack an attested benchmark directory for `dataset_upload_url`.
 #
 # The archive is FLAT — `tar -C <dir> .` — so `selection-manifest.json` sits at

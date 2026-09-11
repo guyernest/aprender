@@ -831,6 +831,7 @@ version = "0.63.0"
 dependencies = [
  "criterion 0.7.0",
  "proptest",
+ "serde",
  "thiserror 2.0.18",
 ]
 
@@ -862,6 +863,21 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tokio",
+]
+
+[[package]]
+name = "aprender-mcp-chronos-lambda"
+version = "0.63.0"
+dependencies = [
+ "aprender-mcp-chronos",
+ "lambda_http",
+ "once_cell",
+ "pmcp",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

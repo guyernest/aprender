@@ -62,6 +62,7 @@ members = [
     "crates/aprender-forecast",
     "crates/aprender-mcp-forecast",
     "crates/aprender-mcp-chronos",
+    "crates/aprender-mcp-chronos-lambda",
     # --- APR-MONO Phase 2f: satellite repos (main crates) ---
     "crates/aprender-profile",
     "crates/aprender-profile-core",

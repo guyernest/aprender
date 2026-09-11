@@ -21,8 +21,9 @@
 use std::sync::Arc;
 
 use aprender_forecast::chronos::{
-    load_model_from_bytes, load_model_from_dir, ChronosArgs, Model, ModelLoadError,
+    load_model_from_bytes, load_model_from_dir, ChronosArgs,
 };
+pub use aprender_forecast::chronos::{Model, ModelLoadError};
 use aprender_forecast::ForecastError;
 use pmcp::types::capabilities::ServerCapabilities;
 use pmcp::Server;
