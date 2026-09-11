@@ -6,26 +6,63 @@
 //! prints `test result: ok. 0 passed` and exits 0 (CR-02), so the Make floor reads the matched
 //! count out of the log rather than trusting `ok`.
 //!
-//! # The six doctored negatives
+//! # How every negative here is built, and the ONE rule that governs the list
 //!
-//! Each is built by MUTATING a programmatically-generated VALID 80-row set, so the mutation is
-//! the only difference between a green run and a red one — a hand-written broken fixture proves
-//! only that some bytes are refused, never that THIS defect is what refused them. All six run in
-//! a default `cargo test -p aprender-train --lib --features setfit` invocation: no `#[ignore]`,
-//! no extra feature, no network, no fixture file.
+//! Each is built by MUTATING a programmatically-generated VALID run, so the mutation is the only
+//! difference between a green run and a red one — a hand-written broken fixture proves only that
+//! some bytes are refused, never that THIS defect is what refused them.
 //!
-//! | # | doctored shape | asserted variant |
-//! |---|---|---|
-//! | 1 | a cell left `pending` (selective omission) | `incomplete_cell` |
-//! | 2 | a required evidence block removed from a row | `row_schema_refused` |
-//! | 3 | one pair's two rows on different selection manifests | `unpaired_selection` |
-//! | 4 | a payload byte edited without resealing | `row_digest_mismatch` |
-//! | 5 | post-test selection (lock rule; epochs_completed) | `post_test_selection` |
-//! | 6 | FORGED PROVENANCE (two-line ledger; edited lock file) | `provenance_mismatch` |
+//! **THE SCOPE A NEGATIVE IS MUTATED AT IS PART OF WHAT IT PROVES.** Since the claims contract's
+//! 2.0.0 narrowing (D-19) the ACTIVE expectation set is 40 cells, one method. A proof taken at
+//! one scope does NOT transfer to another (CLAUDE.md Verification Discipline rule 4), which is
+//! why the `scope` column below exists and why two entries deliberately overlap in shape while
+//! differing in scope. The Makefile banner at the `setfit-bench-gate` leg carries the same
+//! account; they must agree.
+//!
+//! Three scopes appear:
+//!
+//! * **`verify_run` / ACTIVE 40** — through the PUBLIC two-argument door, over the shipped
+//!   expectation set. This is what a user runs.
+//! * **`verify_run_scoped` / DEFERRED 80** — the two-method scope, `#[cfg(test)]`-gated. The
+//!   shapes that exist ONLY in a two-method design (an unpaired pair, a forged LoRA ledger)
+//!   need rows production code cannot construct. `D-ITEM-05-15` restores this arm; these
+//!   negatives are retained, contract-bound and unexercised by any shipped door.
+//! * **resolver helper, directly** — `resolve_committed_evidence_path` called with an evidence
+//!   kind and a declared string. This holds the resolver's two stages; it does NOT hold the
+//!   wiring that makes the resolver reachable from a row at all.
+//!
+//! # The negative inventory
+//!
+//! | # | doctored shape | asserted variant | scope | added by |
+//! |---|---|---|---|---|
+//! | 1 | a cell left `pending` (selective omission) | `incomplete_cell` | `verify_run` / 40 | 05-10, re-mutated 05-11 |
+//! | 2 | a required evidence block removed from a row | `row_schema_refused` | `verify_run` / 40 | 05-10, re-mutated 05-11 |
+//! | 3 | one pair's two rows on different selection manifests | `unpaired_selection` | deferred 80 | 05-10 |
+//! | 4 | a payload byte edited without resealing | `row_digest_mismatch` | `verify_run` / 40 | 05-10, re-mutated 05-11 |
+//! | 5 | post-test selection (lock rule; epochs_completed) | `post_test_selection` | `verify_run` / 40 and deferred 80 | 05-10, re-mutated 05-11 |
+//! | 6 | FORGED PROVENANCE (two-line ledger; edited lock file) | `provenance_mismatch` | deferred 80 | 05-10 |
+//! | 7 | a manifest declaring a second method's cell | `expectation_set_mismatch` | `verify_run` / 40 | 05-11 |
+//! | 8 | a second method's ROW in a declared slot | `row_slot_mismatch` | `verify_run` / 40 | 05-11 |
+//! | 9 | an escaping `lock_record_path` — absolute, `..`, last-component symlink | `evidence_path_escape` | `verify_run` / 40 | 05-15 |
+//! | 10 | thirteen path shapes x two evidence kinds | `evidence_path_escape`, `evidence_file_missing`, `evidence_read_failed`, and three ACCEPTANCE rows | resolver helper | 05-15 |
+//! | 11 | a deleted committed lock record | `evidence_file_missing` | `verify_run` / 40 | 05-15 |
+//! | 12 | a row declaring a foreign `contract_id` | `row_schema_refused` | `verify_run` / 40 | 05-15 |
+//! | 13 | a MANIFEST declaring a foreign `contract_id` | `row_schema_refused` | `verify_run` / 40 | 05-15 |
+//! | 14 | a contract-pinned constant a row may not choose (three fields) | `row_schema_refused` | `verify_run` / 40 | 05-15 |
+//! | 15 | TWO cells carrying an escaping path | `evidence_path_escape` on the FIRST in contract order | `verify_run` / 40 | 05-15 |
+//!
+//! Entries 9 and 10 overlap by design: three of entry 10's rows are the same SHAPES as entry
+//! 9's, proven at a different scope. Deleting either for duplicating the other is exactly the
+//! scope transfer rule 4 forbids. 05-16 and 05-17 each extend this table when they add theirs.
+//!
+//! Every negative in this file runs in a default `cargo test -p aprender-train --lib --features
+//! setfit` invocation: no `#[ignore]`, no extra feature, no network, no fixture file. The
+//! deferred-scope entries run too — what is deferred is the PRODUCTION arm, not the test.
 //!
 //! # What these negatives do NOT prove
 //!
-//! They prove the gate detects INCONSISTENT evidence. They prove nothing about TRUTHFUL
+//! They prove the gate detects INCONSISTENT evidence, and since 05-15 that a row cannot point
+//! the gate at bytes outside the benchmark directory. They prove nothing about TRUTHFUL
 //! provenance: a producer holding both the rows and the lock/ledger files can still emit a
 //! mutually consistent forgery. That residual is stated in `bench_gate.rs`'s module doc and in
 //! the contract's own `selection_safety_evidence.residual_risk`, and it is repeated here so a
@@ -959,6 +996,353 @@ fn bench_gate_refuses_each_contract_pinned_constant_a_row_may_not_choose() {
             "the refusal must name the offending field `{field}`: {error}"
         );
     }
+}
+
+// ===========================================================================================
+// THE PATH-SHAPE CASE TABLE (plan 05-15 task 3)
+//
+// Scope: this table drives `resolve_committed_evidence_path` DIRECTLY, over BOTH evidence
+// kinds. The ACTIVE-scope sweep above drives three of these same shapes through `verify_run`
+// over 40 cells. NEITHER PROOF TRANSFERS TO THE OTHER (CLAUDE.md Verification Discipline rule
+// 4): this one holds the resolver's two stages across every refusal shape, three acceptance
+// rows and two behaviour-preserving rows; that one holds the wiring that makes the resolver
+// reachable from a row at all. Deleting a row here because "the sweep covers it" is exactly
+// the scope transfer rule 4 forbids.
+//
+// Ship the TABLE and re-run it, rather than re-reading the pattern (rule 7). A fourth shape is
+// a new row, never a new test function.
+// ===========================================================================================
+
+/// How a case's declared string is built for a given [`EvidenceKind`].
+///
+/// A shape rather than a literal, because five of the thirteen cases need a filesystem object
+/// created first and three need this kind's own directory spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Declared {
+    /// Used verbatim. For shapes stage 1 refuses without touching the filesystem.
+    Literal(&'static str),
+    /// The real committed file for this kind, under this kind's own directory.
+    CommittedForKind,
+    /// The same file, prefixed `./` — [`std::path::Component::CurDir`], which names the SAME
+    /// file and must be ACCEPTED. This row goes red if the syntactic stage over-refuses.
+    CommittedForKindCurDir,
+    /// A well-formed relative path under this kind's directory naming a file that is absent.
+    AbsentUnderKindDir,
+    /// A well-formed relative path naming this kind's DIRECTORY itself.
+    KindDirItself,
+    /// A path under this kind's directory whose LAST component is a symlink out of the tree.
+    LastComponentSymlink,
+    /// A path whose FIRST component is a symlinked DIRECTORY pointing out of the tree.
+    FirstComponentSymlinkDir,
+    /// A path resolving, via a symlink, into a SIBLING directory whose name has the bench
+    /// directory's name as a STRING PREFIX. This row goes red if containment is implemented
+    /// with `str::starts_with` instead of `Path::starts_with`, which is component-wise.
+    PrefixSiblingSymlink,
+}
+
+/// What the resolver-then-read pair must do with a case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expect {
+    /// Refused with this variant tag.
+    Refused(&'static str),
+    /// Resolved AND read. Without these rows the table would prove only that something is
+    /// refused, which every broken implementation also achieves.
+    Accepted,
+}
+
+/// One row of the table.
+struct PathCase {
+    label: &'static str,
+    declared: Declared,
+    expect: Expect,
+    /// A substring the rendered refusal must carry. Empty means no additional check.
+    detail_contains: &'static str,
+    why: &'static str,
+}
+
+const EVIDENCE_PATH_CASES: [PathCase; 13] = [
+    // ---- MUST NOT MATCH: eight refusal shapes ------------------------------------------
+    PathCase {
+        label: "absolute",
+        declared: Declared::Literal("/tmp/outside/anywhere.json"),
+        expect: Expect::Refused("evidence_path_escape"),
+        detail_contains: "ABSOLUTE",
+        why: "`Path::join` DISCARDS its base when the argument is absolute",
+    },
+    PathCase {
+        label: "leading_parent_traversal",
+        declared: Declared::Literal("../../../etc/passwd"),
+        expect: Expect::Refused("evidence_path_escape"),
+        detail_contains: "`..`",
+        why: "`Path::join` never resolves `..`; the kernel does, at open time",
+    },
+    PathCase {
+        label: "interior_parent_traversal",
+        declared: Declared::Literal("locks/../../outside.json"),
+        expect: Expect::Refused("evidence_path_escape"),
+        detail_contains: "`..`",
+        why: "a `..` that is not the FIRST component climbs out just as effectively",
+    },
+    PathCase {
+        label: "empty",
+        declared: Declared::Literal(""),
+        expect: Expect::Refused("evidence_path_escape"),
+        detail_contains: "empty",
+        why: "an empty join yields the benchmark directory itself, which would be READ as a \
+              directory and reported as an I/O accident rather than as the nonsense it is",
+    },
+    PathCase {
+        label: "whitespace_only",
+        declared: Declared::Literal("   "),
+        expect: Expect::Refused("evidence_path_escape"),
+        detail_contains: "empty",
+        why: "same as the empty case, and a trim is the only thing that separates them",
+    },
+    PathCase {
+        label: "last_component_symlink",
+        declared: Declared::LastComponentSymlink,
+        expect: Expect::Refused("evidence_path_escape"),
+        detail_contains: "outside the benchmark directory",
+        why: "the declared string is well-formed; only canonicalization can see this",
+    },
+    PathCase {
+        label: "first_component_symlink_dir",
+        declared: Declared::FirstComponentSymlinkDir,
+        expect: Expect::Refused("evidence_path_escape"),
+        detail_contains: "outside the benchmark directory",
+        why: "the escape is in the FIRST component, so a last-component-only check misses it",
+    },
+    PathCase {
+        label: "prefix_sibling_symlink",
+        declared: Declared::PrefixSiblingSymlink,
+        expect: Expect::Refused("evidence_path_escape"),
+        detail_contains: "outside the benchmark directory",
+        why: "THE ROW THAT GOES RED IF CONTAINMENT USES `str::starts_with`: a bench dir of \
+              `<tmp>/bench` is a string prefix of `<tmp>/bench-evil/x.json` and a COMPONENT \
+              prefix of nothing in it. `Path::starts_with` is component-wise, and is why this \
+              row passes",
+    },
+    // ---- MUST MATCH: three acceptance rows ---------------------------------------------
+    PathCase {
+        label: "committed_spelling",
+        declared: Declared::CommittedForKind,
+        expect: Expect::Accepted,
+        detail_contains: "",
+        why: "the real spelling every committed row carries; a gate that refuses it cannot pass",
+    },
+    PathCase {
+        label: "committed_spelling_cur_dir",
+        declared: Declared::CommittedForKindCurDir,
+        expect: Expect::Accepted,
+        detail_contains: "",
+        why: "`./x` names the same file as `x`; THE ROW THAT GOES RED IF STAGE 1 OVER-REFUSES",
+    },
+    PathCase {
+        label: "committed_spelling_other_kind_dir",
+        declared: Declared::CommittedForKind,
+        expect: Expect::Accepted,
+        detail_contains: "",
+        why: "swept over BOTH kinds by the loop, so the LEDGER_DIR spelling is proven to be \
+              accepted under `EvidenceKind::Ledger` and not only the LOCKS_DIR one",
+    },
+    // ---- BEHAVIOUR-PRESERVING: the new refusal must not swallow a distinct diagnosis ----
+    PathCase {
+        label: "absent_file_under_kind_dir",
+        declared: Declared::AbsentUnderKindDir,
+        expect: Expect::Refused("evidence_file_missing"),
+        detail_contains: "does not exist",
+        why: "AN ABSENT FILE IS NOT AN ESCAPE. Reporting it as one would tell an operator to \
+              repoint a field that is already correct",
+    },
+    PathCase {
+        label: "directory_in_a_files_position",
+        declared: Declared::KindDirItself,
+        expect: Expect::Refused("evidence_read_failed"),
+        detail_contains: "not a regular file",
+        why: "a contained, existing DIRECTORY passes containment and is refused by the bounded \
+              read — the pre-existing diagnosis, unchanged",
+    },
+];
+
+/// This kind's own directory under the benchmark directory.
+fn kind_dir(kind: EvidenceKind) -> &'static str {
+    match kind {
+        EvidenceKind::Row => ROWS_DIR,
+        EvidenceKind::Lock => LOCKS_DIR,
+        EvidenceKind::Ledger => LEDGER_DIR,
+    }
+}
+
+/// The committed filename this kind carries for the s8/seed13 cell.
+fn kind_committed_file(kind: EvidenceKind) -> &'static str {
+    match kind {
+        EvidenceKind::Row => "setfit-s8-seed13.json",
+        EvidenceKind::Lock => "setfit-s8-seed13.lock.json",
+        EvidenceKind::Ledger => "setfit-s8-seed13.jsonl",
+    }
+}
+
+/// A purpose-built tree whose BENCH DIRECTORY HAS A CHOSEN NAME.
+///
+/// `write_valid_run`'s temp dir has a random name, and the prefix-sibling row needs a sibling
+/// whose name has the bench directory's name as a string prefix — which cannot be arranged
+/// without naming the bench directory. Returns `(root, bench_dir)`; the root must outlive the
+/// bench dir, so it is handed back rather than dropped.
+fn path_case_fixture(kind: EvidenceKind) -> (TempDir, PathBuf) {
+    let root = TempDir::new().expect("a temp root");
+    let bench = root.path().join("bench");
+    // `bench-evil` has `bench` as a STRING prefix and is not under it by any component.
+    let evil = root.path().join("bench-evil");
+    let outside = root.path().join("outside");
+    fs::create_dir_all(bench.join(LOCKS_DIR)).expect("locks dir");
+    fs::create_dir_all(bench.join(LEDGER_DIR)).expect("ledger dir");
+    fs::create_dir_all(&evil).expect("the prefix-sibling dir");
+    fs::create_dir_all(&outside).expect("the outside dir");
+    fs::write(evil.join("x.json"), b"{}\n").expect("prefix-sibling file");
+    fs::write(outside.join("anywhere.json"), b"{}\n").expect("outside file");
+    fs::write(bench.join(kind_dir(kind)).join(kind_committed_file(kind)), b"{}\n")
+        .expect("the committed evidence file");
+    (root, bench)
+}
+
+/// Build one case's declared string against a fixture, creating any symlink it needs.
+fn declared_string(declared: Declared, root: &Path, bench: &Path, kind: EvidenceKind) -> String {
+    let dir = kind_dir(kind);
+    match declared {
+        Declared::Literal(literal) => literal.to_string(),
+        Declared::CommittedForKind => format!("{dir}/{}", kind_committed_file(kind)),
+        Declared::CommittedForKindCurDir => format!("./{dir}/{}", kind_committed_file(kind)),
+        Declared::AbsentUnderKindDir => format!("{dir}/never-written.json"),
+        Declared::KindDirItself => dir.to_string(),
+        Declared::LastComponentSymlink => {
+            let relative = format!("{dir}/via-last-link.json");
+            symlink_for_test(&root.join("outside").join("anywhere.json"), &bench.join(&relative));
+            relative
+        }
+        Declared::FirstComponentSymlinkDir => {
+            symlink_for_test(&root.join("outside"), &bench.join("linked-dir"));
+            "linked-dir/anywhere.json".to_string()
+        }
+        Declared::PrefixSiblingSymlink => {
+            let relative = format!("{dir}/to-prefix-sibling.json");
+            symlink_for_test(&root.join("bench-evil").join("x.json"), &bench.join(&relative));
+            relative
+        }
+    }
+}
+
+/// `#[cfg(unix)]` gates the MATERIALIZER, never a table row: a table that silently shrinks on
+/// some host is a coverage loss no test-count floor can see.
+fn symlink_for_test(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).expect("symlink");
+    #[cfg(not(unix))]
+    {
+        let _ = (target, link);
+    }
+}
+
+#[test]
+fn bench_gate_evidence_path_case_table_over_both_evidence_kinds() {
+    let mut checked = 0_usize;
+    for kind in [EvidenceKind::Lock, EvidenceKind::Ledger] {
+        for case in &EVIDENCE_PATH_CASES {
+            // A FRESH fixture per (case, kind), so no case can see another's symlinks.
+            let (root, bench) = path_case_fixture(kind);
+            let declared = declared_string(case.declared, root.path(), &bench, kind);
+            let cell = CellKey::new(Method::Setfit, 8, 13);
+
+            // The resolver, then the bounded read — exactly the pair `verify_provenance`
+            // composes, so `evidence_read_failed` can still be reached for a contained
+            // directory and is not swallowed by the new refusal.
+            let outcome = resolve_committed_evidence_path(cell, &bench, kind, &declared)
+                .and_then(|path| read_evidence(cell, kind, &path));
+
+            match (case.expect, outcome) {
+                (Expect::Accepted, Ok(_)) => {}
+                (Expect::Accepted, Err(error)) => panic!(
+                    "[{kind:?}/{}] `{declared}` must be ACCEPTED ({}), but was refused: {error}",
+                    case.label, case.why
+                ),
+                (Expect::Refused(tag), Err(error)) => {
+                    assert_eq!(
+                        error.variant_tag(),
+                        tag,
+                        "[{kind:?}/{}] `{declared}` must be refused as `{tag}` ({}), got: {error}",
+                        case.label,
+                        case.why
+                    );
+                    if !case.detail_contains.is_empty() {
+                        assert!(
+                            error.to_string().contains(case.detail_contains),
+                            "[{kind:?}/{}] the refusal must carry `{}`: {error}",
+                            case.label,
+                            case.detail_contains
+                        );
+                    }
+                }
+                (Expect::Refused(tag), Ok(_)) => panic!(
+                    "[{kind:?}/{}] `{declared}` was ACCEPTED but must be refused as `{tag}`. {}",
+                    case.label, case.why
+                ),
+            }
+            checked += 1;
+        }
+    }
+    // ROWS x KINDS, asserted, so neither field can silently lose coverage and a row deleted
+    // to make something pass goes red here rather than quietly.
+    assert_eq!(checked, EVIDENCE_PATH_CASES.len() * 2, "every row is swept over BOTH kinds");
+    let refused = EVIDENCE_PATH_CASES
+        .iter()
+        .filter(|case| matches!(case.expect, Expect::Refused("evidence_path_escape")))
+        .count();
+    let accepted =
+        EVIDENCE_PATH_CASES.iter().filter(|case| case.expect == Expect::Accepted).count();
+    assert!(refused >= 8, "the table must carry at least eight escape shapes, has {refused}");
+    assert!(accepted >= 3, "the table must carry at least three acceptance rows, has {accepted}");
+    println!(
+        "[bench_gate] EVIDENCE_PATH_CASES rows={} kinds=2 assertions={checked} escapes={refused} \
+         accepted={accepted}",
+        EVIDENCE_PATH_CASES.len()
+    );
+}
+
+// ===========================================================================================
+// DETERMINISTIC REFUSAL ORDER (plan 05-15 task 3)
+// ===========================================================================================
+
+#[test]
+fn bench_gate_reports_the_first_offending_cell_in_contract_order_across_runs() {
+    // TWO cells doctored, so there is a CHOICE to make. The contract order is (method, shots
+    // ascending, seed ascending), so s8/seed17 precedes s32/seed41 and must be the one named
+    // on every invocation. Repeated, because an assertion taken once is about a run rather
+    // than about an order.
+    let first = CellKey::new(Method::Setfit, 8, 17);
+    let second = CellKey::new(Method::Setfit, 32, 41);
+    let mut named: Vec<String> = Vec::new();
+
+    for _ in 0..3 {
+        let dir = write_valid_run(RunSpec::default());
+        for cell in [second, first] {
+            // Doctored in REVERSE contract order, so a gate that reported "whichever was
+            // edited first" would name the wrong one.
+            reseal_row(dir.path(), cell, |payload| {
+                if let MethodEvidence::Setfit(evidence) = &mut payload.evidence {
+                    evidence.lock.lock_record_path = "../escaped.json".to_string();
+                }
+            });
+        }
+        let manifest = manifest_for(dir.path());
+        let error = refuse(&manifest, dir.path(), "two escaping cells are a refusal");
+        assert_eq!(error.variant_tag(), "evidence_path_escape");
+        named.push(error.cell().unwrap_or("<none>").to_string());
+    }
+
+    assert_eq!(
+        named,
+        vec![first.render(), first.render(), first.render()],
+        "the refusal must name the FIRST offending cell in contract order, on every run"
+    );
 }
 
 // ===========================================================================================

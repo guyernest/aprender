@@ -2660,18 +2660,28 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 	tail -3 target/setfit-bench-gate.log; \
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: the claims gate is red (rc=$$rc)"; \
-		echo "This suite carries the SIX doctored negatives. FOUR run under the ACTIVE"; \
-		echo "40-cell scope, RE-MUTATED there rather than inherited from the 80-cell"; \
-		echo "proof: a missing cell, a trimmed row, edited row bytes, post-test"; \
-		echo "selection. TWO are DEFERRED-SCOPE negatives, because the shapes exist only"; \
-		echo "in a two-method design production code cannot construct: an unpaired pair"; \
-		echo "and forged provenance. Plus the two ACTIVE-scope out-of-scope refusals,"; \
-		echo "which reuse existing variants rather than minting new ones. A red here"; \
-		echo "means one of those dishonesty shapes is no longer detected, or is no"; \
-		echo "longer detected as its OWN refusal. See target/setfit-bench-gate.log"; \
+		echo "This suite carries FIFTEEN doctored shapes, and the SCOPE each is mutated"; \
+		echo "at is part of what it proves — a proof taken at one scope does not"; \
+		echo "transfer to another (CLAUDE.md Verification Discipline rule 4):"; \
+		echo "  * ACTIVE 40-cell scope, through the PUBLIC verify_run door: a missing"; \
+		echo "    cell, a trimmed row, edited row bytes, post-test selection, the two"; \
+		echo "    out-of-scope refusals (which REUSE existing variants), a deleted"; \
+		echo "    committed lock record, a foreign contract_id on a row and on the"; \
+		echo "    manifest, three contract-pinned constants a row may not choose, the"; \
+		echo "    three-shape escape sweep (absolute / '..' / symlink), and the"; \
+		echo "    deterministic refusal ORDER over two escaping cells."; \
+		echo "  * DEFERRED two-method scope: an unpaired pair and forged LoRA"; \
+		echo "    provenance. Those shapes exist only in a design production code"; \
+		echo "    cannot construct; D-ITEM-05-15 restores the arm."; \
+		echo "  * RESOLVER HELPER, directly: thirteen path shapes crossed with both"; \
+		echo "    evidence kinds — eight escapes, three ACCEPTANCE rows (without which"; \
+		echo "    the table would prove only that something is refused) and two"; \
+		echo "    behaviour-preserving rows."; \
+		echo "A red here means one of those dishonesty shapes is no longer detected, or"; \
+		echo "is no longer detected as its OWN refusal. See target/setfit-bench-gate.log"; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-bench-gate.log,38,setfit-bench-tests/bench_gate)
+	@$(call assert_tests_ran,target/setfit-bench-gate.log,45,setfit-bench-tests/bench_gate)
 	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --lib --features setfit bench_metrics \
 		> target/setfit-bench-metrics.log 2>&1; rc=$$?; \
 	set -e; \
@@ -2701,8 +2711,43 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 		exit $$rc; \
 	fi
 	@$(call assert_tests_ran,target/setfit-bench-cli.log,65,setfit-bench-tests/apr-cli)
-	@echo "  phase 5 bench surface: row, gate (six negatives: four active-scope, two"
-	@echo "  deferred-scope), metrics and the single-method CLI report all ran"
+	@echo "  phase 5 bench surface: row, gate (fifteen doctored shapes across three"
+	@echo "  scopes: the public verify_run door over the ACTIVE 40, the deferred"
+	@echo "  two-method scope, and the evidence-path resolver), metrics and the"
+	@echo "  single-method CLI report all ran"
+
+# The DOOR-LEVEL probe, deliberately NOT wired into setfit-bench-tests or any tier.
+#
+# It needs an `apr` built from HEAD and carrying the `setfit` feature, which the
+# unit-test floors above do not. A leg that silently skips when the binary is
+# stale or feature-less is exactly the vacuous gate this phase exists to prevent,
+# so this is its own target with its own prerequisite rather than a step that
+# degrades quietly inside a suite people run for other reasons.
+#
+# rc is captured on the line AFTER the redirect, never through a pipe: `$?` after
+# a pipeline is the LAST command's status, and this repo has shipped that defect
+# twice (#2336, #2360).
+setfit-bench-door-probe: ## EVAL-04: replay spot-check E through the SHIPPED apr door (needs: cargo build --release --bin apr --features setfit)
+	@echo "Phase 5 claims gate, DOOR LEVEL: a row-supplied evidence path that leaves"
+	@echo "the benchmark directory must be refused by 'apr setfit bench report' itself."
+	@echo "PREREQUISITE: cargo build --release --bin apr --features setfit"
+	@mkdir -p target
+	@set +e; bash scripts/setfit_bench_gate_door_probe.sh \
+		> target/setfit-bench-door.log 2>&1; rc=$$?; \
+	set -e; \
+	cat target/setfit-bench-door.log; \
+	if [ $$rc -ne 0 ]; then \
+		echo "FAIL: the door probe did not pass (rc=$$rc)"; \
+		echo "It runs a POSITIVE CONTROL on the undoctored committed evidence FIRST,"; \
+		echo "then replays verifier spot-check E: the committed lock record moved out"; \
+		echo "of the tree, the row repointed at it, and every digest repaired. A"; \
+		echo "control failure means the evidence or the binary is wrong; an attack"; \
+		echo "failure means gap 1 is open again. The probe builds nothing: if"; \
+		echo "scripts/apr_bin.sh refuses, run"; \
+		echo "  cargo build --release --bin apr --features setfit"; \
+		echo "See target/setfit-bench-door.log"; \
+		exit $$rc; \
+	fi
 
 setfit-repro-inproc: ## TRN-06/D-16 (tier2 half): in-process two-clean-runs equality
 	@echo "TRN-06: in-process two-run equality (D-16's fast, non-authoritative half)"
