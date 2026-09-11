@@ -44,6 +44,16 @@
 //! and it counts the ledger's lines rather than reading `candidates_trained`. A row field that
 //! disagrees with the file it names is a refusal naming BOTH the cell and the file.
 //!
+//! **AND THE PATH ITSELF IS RESOLVED AT A LOCATION THE ROW CANNOT CHOOSE.** Both of those
+//! strings are producer-written, so both go through [`resolve_committed_evidence_path`], which
+//! refuses an absolute, rooted, `..`-carrying or empty declaration before any filesystem call
+//! and then refuses any target whose canonical form lands outside the canonical benchmark
+//! directory. Until that door existed the recomputation above was true of whatever file the row
+//! pointed at — including one the benchmark does not commit — which made the sentence
+//! "provenance was recomputed from the committed lock bytes" printable on a run where it was
+//! false. One helper serves BOTH arms, so a restored two-method scope inherits the enforcement
+//! rather than re-opening the hole.
+//!
 //! # THE RESIDUAL, STATED RATHER THAN HIDDEN
 //!
 //! Recomputing the lock and ledger digests raises selection safety from a SELF-ASSERTED BOOLEAN
@@ -83,7 +93,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use aprender::error::AprenderError;
 use aprender::stats::hypothesis::{
@@ -94,8 +104,8 @@ use serde::{Deserialize, Serialize};
 
 use super::bench_row::{
     sha256_hex, BenchRow, CellEntry, CellKey, CellStatus, ExpectationScope, Method, MethodEvidence,
-    RunManifest, BENCH_METHODS, BENCH_SEEDS, BENCH_SHOTS, CLAIMS_CONTRACT_ID, EXPECTED_CELLS,
-    MECHANISM_CHILD_MAX_RSS_TIME_L, MECHANISM_CHILD_MAX_RSS_VM_HWM,
+    RunManifest, BENCH_METHODS, BENCH_SEEDS, BENCH_SHOTS, CALIBRATION_SPLIT, CLAIMS_CONTRACT_ID,
+    EXPECTED_CELLS, MECHANISM_CHILD_MAX_RSS_TIME_L, MECHANISM_CHILD_MAX_RSS_VM_HWM, WARMUP_COUNT,
 };
 use super::lock::SelectionRule;
 
@@ -221,6 +231,47 @@ pub fn mechanisms_are_comparable(left: &str, right: &str) -> bool {
 }
 
 // ===========================================================================================
+// Which KIND of evidence file a path names
+// ===========================================================================================
+
+/// Which kind of evidence file a path resolution or a bounded read is about.
+///
+/// Two refusals need this, and both are about honesty of diagnosis rather than about control
+/// flow. [`read_evidence`] used to map every `NotFound` to
+/// [`BenchGateError::RowFileMissing`] unconditionally, so an absent LOCK RECORD told the
+/// operator to restore a ROW file and reported the wrong variant tag to any caller matching on
+/// one. And [`resolve_committed_evidence_path`] has to name, in its refusal, which of a row's
+/// two path fields left the benchmark directory.
+///
+/// Deliberately NOT `#[non_exhaustive]`: 05-16 adds a `SelectionManifest` variant, and a
+/// non-exhaustive enum would let that addition compile while a `_` arm silently gave the new
+/// kind somebody else's diagnosis. Every match on this type must be revisited by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceKind {
+    /// The per-cell row file under [`ROWS_DIR`]. Its path is DERIVED by
+    /// [`row_file_name`], never supplied by the row.
+    Row,
+    /// The committed SetFit selection-lock record under [`LOCKS_DIR`], named by
+    /// `evidence.setfit.lock.lock_record_path`.
+    Lock,
+    /// The append-only LoRA candidate ledger under [`LEDGER_DIR`], named by
+    /// `evidence.lora.candidate_ledger_path`.
+    Ledger,
+}
+
+impl EvidenceKind {
+    /// The stable, human-facing name of this kind, as it appears in a refusal.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::Row => "row",
+            Self::Lock => "lock record",
+            Self::Ledger => "candidate ledger",
+        }
+    }
+}
+
+// ===========================================================================================
 // Refusals
 // ===========================================================================================
 
@@ -259,6 +310,37 @@ pub enum BenchGateError {
     RowFileMissing {
         /// The offending cell, rendered.
         cell: String,
+        /// The path that was expected to hold it.
+        path: String,
+    },
+    /// A ROW-SUPPLIED evidence path names bytes outside the benchmark directory.
+    ///
+    /// The schema documents `lock_record_path` and `candidate_ledger_path` as RELATIVE to the
+    /// benchmark directory. Until this variant existed, nothing enforced that: `Path::join`
+    /// discards its base when the argument is absolute and never resolves `..`, so a row could
+    /// point the gate at any file on the host and have its provenance "recomputed" from bytes
+    /// the benchmark does not commit.
+    EvidencePathEscape {
+        /// The offending cell, rendered.
+        cell: String,
+        /// Which kind of evidence file the path was for ([`EvidenceKind::tag`]).
+        kind: String,
+        /// The declared string, VERBATIM — quoting it is what lets a reader see the shape.
+        declared: String,
+        /// Which bound it crossed, and how.
+        detail: String,
+    },
+    /// A non-ROW evidence file a row names is not on disk.
+    ///
+    /// Distinct from [`Self::RowFileMissing`] because the REMEDY is different: a missing row
+    /// file is restored or re-run, a missing lock record or candidate ledger is re-run or
+    /// restored as that artifact. One unconditional mapping told the operator to restore the
+    /// wrong thing and reported a variant tag that named the wrong artifact.
+    EvidenceFileMissing {
+        /// The offending cell, rendered.
+        cell: String,
+        /// Which kind of evidence file was absent ([`EvidenceKind::tag`]).
+        kind: String,
         /// The path that was expected to hold it.
         path: String,
     },
@@ -365,6 +447,8 @@ impl BenchGateError {
             Self::ExpectationSetMismatch { .. } => "expectation_set_mismatch",
             Self::IncompleteCell { .. } => "incomplete_cell",
             Self::RowFileMissing { .. } => "row_file_missing",
+            Self::EvidencePathEscape { .. } => "evidence_path_escape",
+            Self::EvidenceFileMissing { .. } => "evidence_file_missing",
             Self::EvidenceReadFailed { .. } => "evidence_read_failed",
             Self::RowDigestMismatch { .. } => "row_digest_mismatch",
             Self::RowSchemaRefused { .. } => "row_schema_refused",
@@ -382,6 +466,8 @@ impl BenchGateError {
         match self {
             Self::IncompleteCell { cell, .. }
             | Self::RowFileMissing { cell, .. }
+            | Self::EvidencePathEscape { cell, .. }
+            | Self::EvidenceFileMissing { cell, .. }
             | Self::EvidenceReadFailed { cell, .. }
             | Self::RowDigestMismatch { cell, .. }
             | Self::RowSchemaRefused { cell, .. }
@@ -433,6 +519,21 @@ impl core::fmt::Display for BenchGateError {
                 "cell {cell} is recorded complete in the manifest, but {path} does not exist. \
                  A recorded digest with no bytes behind it is an omission the manifest cannot \
                  see; re-run the cell or restore the row file",
+            ),
+            Self::EvidencePathEscape { cell, kind, declared, detail } => write!(
+                f,
+                "cell {cell}: the declared {kind} path `{declared}` leaves the benchmark \
+                 directory ({detail}). That field is RELATIVE to the benchmark directory by \
+                 contract, and a path that leaves it names bytes the benchmark does not commit \
+                 — so recomputing a digest from them would attest to evidence no reader can \
+                 audit. Re-run the cell, or repoint the field at the committed file under the \
+                 benchmark directory",
+            ),
+            Self::EvidenceFileMissing { cell, kind, path } => write!(
+                f,
+                "cell {cell}: the {kind} at {path} does not exist. The row's provenance is \
+                 recomputed from that file's bytes, and there are none; re-run the cell or \
+                 restore the {kind}",
             ),
             Self::EvidenceReadFailed { cell, path, detail } => {
                 write!(f, "cell {cell}: {path} could not be read: {detail}",)
@@ -534,11 +635,140 @@ impl VerifiedRunSet {
 // Bounded evidence reads
 // ===========================================================================================
 
+/// THE ONE DOOR a row-supplied path may reach the filesystem through.
+///
+/// `declared` is attacker-controlled in this gate's own threat model: the report's header says a
+/// doctored cell would have been refused, so the adversary is a producer who writes rows. The
+/// schema documents both path fields as RELATIVE to the benchmark directory, and until this
+/// function existed that was an assertion with nothing behind it.
+///
+/// # Two stages, and the ORDER is the property
+///
+/// 1. **Syntactic, total, filesystem-independent.** Empty or whitespace-only, absolute, or
+///    carrying a `ParentDir` / `RootDir` / `Prefix` component — refused before any `fs` call.
+///    Running first is what stops a "that file does not exist" answer from MASKING an escape:
+///    the verdict is the same whether or not the target happens to be present.
+///    [`Component::CurDir`] is ALLOWED, because `./locks/x.json` names the same file as
+///    `locks/x.json` and refusing it would be over-refusal, not safety.
+/// 2. **Canonical containment.** Both the joined target and `bench_dir` are canonicalized and
+///    compared with [`Path::starts_with`], which is COMPONENT-wise. `str::starts_with` would
+///    accept `<tmp>/bench-evil/x.json` under a `bench_dir` of `<tmp>/bench`. Canonicalizing
+///    the BASE too is not optional: on macOS `/tmp` is itself a symlink to `/private/tmp`, so
+///    comparing a canonical target against a raw base would reject every legitimate path under
+///    a temp directory. This stage is the only one that can see a SYMLINK, which stage 1
+///    cannot.
+///
+/// The value returned is the JOINED path, not the canonical one, so refusals downstream keep
+/// naming the file by the spelling the operator sees on disk.
+///
+/// # The residual, stated rather than hidden
+///
+/// Containment is checked and then the file is opened, so a symlink swapped between the two
+/// calls would be read. That race needs write access to the benchmark directory DURING the
+/// verification, which is strictly more than the producer-written-tree threat this gate is
+/// built for; it is recorded here rather than left for a reader to discover.
+///
+/// # Errors
+///
+/// [`BenchGateError::EvidencePathEscape`] when the declared path leaves the benchmark
+/// directory by either stage; [`BenchGateError::EvidenceFileMissing`] (or
+/// [`BenchGateError::RowFileMissing`] for [`EvidenceKind::Row`]) when the target is absent —
+/// an absent file is NOT an escape and must not be reported as one;
+/// [`BenchGateError::EvidenceReadFailed`] for any other canonicalization failure.
+fn resolve_committed_evidence_path(
+    cell: CellKey,
+    bench_dir: &Path,
+    kind: EvidenceKind,
+    declared: &str,
+) -> Result<PathBuf, BenchGateError> {
+    let escape = |detail: &str| BenchGateError::EvidencePathEscape {
+        cell: cell.render(),
+        kind: kind.tag().to_string(),
+        declared: declared.to_string(),
+        detail: detail.to_string(),
+    };
+
+    // ---- STAGE 1: SYNTACTIC, TOTAL, FILESYSTEM-INDEPENDENT --------------------------------
+    if declared.trim().is_empty() {
+        return Err(escape(
+            "it is empty or whitespace-only, so it names no file at all and would resolve to \
+             the benchmark directory itself",
+        ));
+    }
+    let relative = Path::new(declared);
+    if relative.is_absolute() {
+        return Err(escape(
+            "it is ABSOLUTE, and `Path::join` discards its base when the argument is absolute",
+        ));
+    }
+    for component in relative.components() {
+        match component {
+            Component::ParentDir => {
+                return Err(escape(
+                    "it carries a `..` component, which `Path::join` never resolves — the climb \
+                     happens at open time, after this gate has stopped looking",
+                ))
+            }
+            Component::RootDir => return Err(escape("it carries a root component")),
+            Component::Prefix(_) => return Err(escape("it carries a path prefix")),
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+
+    // ---- STAGE 2: CANONICAL CONTAINMENT ---------------------------------------------------
+    let joined = bench_dir.join(relative);
+    let canonical_base = fs::canonicalize(bench_dir).map_err(|error| {
+        BenchGateError::EvidenceReadFailed {
+            cell: cell.render(),
+            path: bench_dir.display().to_string(),
+            detail: format!("the benchmark directory could not be canonicalized: {error}"),
+        }
+    })?;
+    let canonical_target = match fs::canonicalize(&joined) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(missing_evidence(cell, kind, &joined))
+        }
+        Err(error) => {
+            return Err(BenchGateError::EvidenceReadFailed {
+                cell: cell.render(),
+                path: joined.display().to_string(),
+                detail: error.to_string(),
+            })
+        }
+    };
+    if !canonical_target.starts_with(&canonical_base) {
+        return Err(escape(&format!(
+            "it resolves to {}, which is outside the benchmark directory {}",
+            canonical_target.display(),
+            canonical_base.display()
+        )));
+    }
+    Ok(joined)
+}
+
+/// The ONE mapping from "this evidence file is absent" to a refusal that names its own kind.
+///
+/// Shared by [`read_evidence`] and [`resolve_committed_evidence_path`] so the two cannot
+/// disagree about which artifact an operator is told to restore.
+fn missing_evidence(cell: CellKey, kind: EvidenceKind, path: &Path) -> BenchGateError {
+    match kind {
+        EvidenceKind::Row => {
+            BenchGateError::RowFileMissing { cell: cell.render(), path: path.display().to_string() }
+        }
+        EvidenceKind::Lock | EvidenceKind::Ledger => BenchGateError::EvidenceFileMissing {
+            cell: cell.render(),
+            kind: kind.tag().to_string(),
+            path: path.display().to_string(),
+        },
+    }
+}
+
 /// Read a small evidence file, refused from its DECLARED length before a byte is read.
-fn read_evidence(cell: CellKey, path: &Path) -> Result<Vec<u8>, BenchGateError> {
+fn read_evidence(cell: CellKey, kind: EvidenceKind, path: &Path) -> Result<Vec<u8>, BenchGateError> {
     let metadata = fs::metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            BenchGateError::RowFileMissing { cell: cell.render(), path: path.display().to_string() }
+            missing_evidence(cell, kind, path)
         } else {
             BenchGateError::EvidenceReadFailed {
                 cell: cell.render(),
@@ -601,6 +831,16 @@ fn read_evidence(cell: CellKey, path: &Path) -> Result<Vec<u8>, BenchGateError> 
 /// `lock_record_path` and `candidate_ledger_path` are RELATIVE TO THE BENCHMARK DIRECTORY —
 /// a rows-only parameter could not resolve the very files this gate recomputes from.
 ///
+/// That relativity is ENFORCED, not merely documented: both fields are resolved through
+/// [`resolve_committed_evidence_path`], which refuses a declaration that is absolute, rooted,
+/// empty or carries `..` before touching the filesystem, and then refuses any target whose
+/// canonical form escapes the canonical `bench_dir` — which is the only stage that can see a
+/// symlink. A declaration that leaves the tree is
+/// [`BenchGateError::EvidencePathEscape`], naming the cell, the kind and the declared string
+/// verbatim. This paragraph used to assert the convention while nothing checked it, and a run
+/// pointing at `/tmp` exited 0 while printing that provenance had been recomputed from the
+/// committed bytes.
+///
 /// # Errors
 ///
 /// One [`BenchGateError`] naming the FIRST rule that failed and the cell (and, for provenance,
@@ -632,6 +872,7 @@ pub(crate) fn verify_run_scoped(
     // manifest can also be built in memory (`declare()` + `record()`), and this gate must not
     // depend on which door its argument came through.
     verify_manifest_digest(manifest)?;
+    verify_manifest_contract(manifest)?;
 
     // ---- 2. THE EXPECTATION SET, BEFORE ANY ROW BYTE IS READ -------------------------------
     // The two vacuity backstops. Without them a producer can declare almost nothing, satisfy it
@@ -714,8 +955,11 @@ fn verify_row_evidence(
     rows_dir: &Path,
     cell: CellKey,
 ) -> Result<BenchRow, BenchGateError> {
+    // The row's path is GATE-DERIVED — `row_file_name` builds it from the cell key — so it
+    // never goes through `resolve_committed_evidence_path`, which exists for the strings a ROW
+    // supplies. The kind is passed so an absent row file still reports `row_file_missing`.
     let path = rows_dir.join(row_file_name(cell));
-    let bytes = read_evidence(cell, &path)?;
+    let bytes = read_evidence(cell, EvidenceKind::Row, &path)?;
 
     // `from_bytes` is the ONE door: it parses (schema) and then recomputes the envelope
     // digest, and it returns nothing on either failure. The two outcomes are separated here
@@ -770,7 +1014,113 @@ fn verify_row_evidence(
         });
     }
 
+    // LAST, so every refusal that fired before this plan still fires in the same order.
+    verify_contracted_row_constants(cell, &path, &row)?;
+
     Ok(row)
+}
+
+/// The contract-derived constants a row DECLARES, compared rather than carried.
+///
+/// `05-15-gate-input-surface.md` enumerated the gate's whole row-supplied input surface and
+/// found four fields that the schema accepts as free-form values while the contract pins them
+/// to one value each. Every one was checked only at EMISSION time — by `bench_metrics` or by
+/// the CLI writer — and never when the gate READ a committed row, so a hand-edited row could
+/// declare any of them and be published.
+///
+/// `contract_id` is the one that matters most and the one the enumeration existed to find:
+/// nothing anywhere compared a row's declared contract against [`CLAIMS_CONTRACT_ID`], while
+/// [`aggregate`] stamped the published payload with that constant regardless — so the
+/// aggregate would assert a contract its inputs never claimed.
+///
+/// `throughput_batch_size` is deliberately NOT checked here: the contract pins no value for it
+/// ("the batch size that pass used"), and the writer's constant is a producer choice. Comparing
+/// against it would refuse a legitimately different batch size while calling it a contract
+/// violation. The reasoning is recorded in the enumeration artifact rather than only here.
+///
+/// No new variant is minted. A row declaring a value the contract forbids is exactly "not a row
+/// this schema accepts", which [`BenchGateError::RowSchemaRefused`] already says, and every
+/// refusal names BOTH the declared value and the expected one.
+///
+/// # Errors
+///
+/// [`BenchGateError::RowSchemaRefused`].
+fn verify_contracted_row_constants(
+    cell: CellKey,
+    path: &Path,
+    row: &BenchRow,
+) -> Result<(), BenchGateError> {
+    let refuse = |detail: String| BenchGateError::RowSchemaRefused {
+        cell: cell.render(),
+        path: path.display().to_string(),
+        detail,
+    };
+
+    if row.payload.contract_id != CLAIMS_CONTRACT_ID {
+        return Err(refuse(format!(
+            "the row declares contract `{}`, but this build verifies against \
+             `{CLAIMS_CONTRACT_ID}`. A row written against a foreign contract is not a row this \
+             schema accepts, and publishing it would stamp the aggregate with a contract its \
+             inputs never claimed",
+            row.payload.contract_id
+        )));
+    }
+    if row.payload.quality.calibration_split != CALIBRATION_SPLIT {
+        return Err(refuse(format!(
+            "the row records `calibration_split` = `{}`, but the contract measures calibration \
+             on `{CALIBRATION_SPLIT}` and only there (D-07). Diagnostics from another split are \
+             a different measurement wearing this one's name",
+            row.payload.quality.calibration_split
+        )));
+    }
+    if row.payload.resource.warmup_count != WARMUP_COUNT {
+        return Err(refuse(format!(
+            "the row records `warmup_count` = {}, but the contract discards exactly \
+             {WARMUP_COUNT} warmup classifies before the warm measurement. A different warmup \
+             count produces a warm latency that is not comparable to the published ones",
+            row.payload.resource.warmup_count
+        )));
+    }
+    if !row.payload.resource.cold_measured_in_child_process {
+        return Err(refuse(
+            "the row records `cold_measured_in_child_process` = false. A cold latency measured \
+             in the process that just finished training is operationally WARM — populated \
+             caches, resident pages — and the contract pins this field to the literal true"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// The manifest's own declared contract, compared against [`CLAIMS_CONTRACT_ID`].
+///
+/// The manifest half of the third enumerated field. Called by BOTH doors right after
+/// [`verify_manifest_digest`], because a manifest can be built in memory as well as parsed and
+/// no door may depend on which constructor its argument came through.
+///
+/// Reuses [`BenchGateError::RowSchemaRefused`] rather than minting a variant, matching the row
+/// side so one defect has one tag. The `cell` field carries the sentinel `<run manifest>`: this
+/// refusal is about the run-level artifact and not about any one cell, and saying so in the
+/// field a reader already looks at is more honest than leaving a real cell key there.
+///
+/// # Errors
+///
+/// [`BenchGateError::RowSchemaRefused`].
+fn verify_manifest_contract(manifest: &RunManifest) -> Result<(), BenchGateError> {
+    if manifest.payload.contract_id != CLAIMS_CONTRACT_ID {
+        return Err(BenchGateError::RowSchemaRefused {
+            cell: "<run manifest>".to_string(),
+            path: RUN_MANIFEST_FILE.to_string(),
+            detail: format!(
+                "the run manifest declares contract `{}`, but this build verifies against \
+                 `{CLAIMS_CONTRACT_ID}`. The expectation set is DERIVED from the contract, so a \
+                 manifest naming another one declares completeness against a definition this \
+                 build does not implement",
+                manifest.payload.contract_id
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Step 1, as a named function: the manifest's digest over its own canonical bytes.
@@ -868,6 +1218,7 @@ pub fn verify_cell(
 ) -> Result<(), BenchGateError> {
     // ---- 1. THE MANIFEST'S OWN DIGEST -----------------------------------------------------
     verify_manifest_digest(manifest)?;
+    verify_manifest_contract(manifest)?;
 
     // ---- THE CELL MUST BE ONE THE CONTRACT DECLARES ---------------------------------------
     // Not step 2: this does NOT compare the manifest's whole cell list against the
@@ -937,9 +1288,13 @@ fn verify_provenance(
 ) -> Result<(), BenchGateError> {
     match &row.payload.evidence {
         MethodEvidence::Setfit(evidence) => {
-            let relative = PathBuf::from(&evidence.lock.lock_record_path);
-            let path = bench_dir.join(&relative);
-            let bytes = read_evidence(cell, &path)?;
+            let path = resolve_committed_evidence_path(
+                cell,
+                bench_dir,
+                EvidenceKind::Lock,
+                &evidence.lock.lock_record_path,
+            )?;
+            let bytes = read_evidence(cell, EvidenceKind::Lock, &path)?;
             let recomputed = sha256_hex(&bytes);
             if recomputed != evidence.lock.lock_hash {
                 return Err(BenchGateError::ProvenanceMismatch {
@@ -978,9 +1333,16 @@ fn verify_provenance(
             Ok(())
         }
         MethodEvidence::Lora(evidence) => {
-            let relative = PathBuf::from(&evidence.candidate_ledger_path);
-            let path = bench_dir.join(&relative);
-            let bytes = read_evidence(cell, &path)?;
+            // THE SAME HELPER, THE OTHER FIELD. One door for both arms is what makes the
+            // deferred two-method scope INHERIT this fix instead of re-opening the hole when
+            // `D-ITEM-05-15` restores it.
+            let path = resolve_committed_evidence_path(
+                cell,
+                bench_dir,
+                EvidenceKind::Ledger,
+                &evidence.candidate_ledger_path,
+            )?;
+            let bytes = read_evidence(cell, EvidenceKind::Ledger, &path)?;
             let recomputed = sha256_hex(&bytes);
             if recomputed != evidence.candidate_ledger_sha256 {
                 return Err(BenchGateError::ProvenanceMismatch {

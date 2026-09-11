@@ -707,6 +707,261 @@ fn bench_gate_refuses_a_ledger_transplanted_from_another_cell() {
 }
 
 // ===========================================================================================
+// GAP 1 — THE ACTIVE 40-CELL SCOPE ESCAPE SWEEP (plan 05-15 task 2)
+//
+// Verifier gap 1's second `missing:` bullet names THREE bounds — an absolute path, a `..`
+// traversal, and a symlink out of `bench_dir` — and requires a RED-turning negative for each,
+// RE-MUTATED at the ACTIVE scope. The helper-level case table further down drives
+// `resolve_committed_evidence_path` DIRECTLY, which is a different scope: it holds the
+// resolver's two stages, not the wiring that makes the resolver reachable from a row at all.
+// CLAUDE.md Verification Discipline rule 4 — extending a guard's SCOPE requires re-mutating in
+// the new scope — is why both exist and why neither may be deleted for duplicating the other.
+// ===========================================================================================
+
+/// One escaping path SHAPE, as something the materializer builds rather than a hardcoded
+/// literal — the two temp directories' real names are only known at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapeShape {
+    /// An ABSOLUTE declared path. `Path::join` DISCARDS the base when its argument is
+    /// absolute, so the benchmark directory stops being part of the resolution at all.
+    Absolute,
+    /// A RELATIVE declared path that climbs out with `..`. `Path::join` never resolves `..`;
+    /// the kernel does, at open time, after the gate has stopped looking.
+    ParentTraversal,
+    /// A relative path INSIDE the benchmark directory whose LAST component is a symlink to a
+    /// file outside it. No syntactic check can see this one — only canonicalization can.
+    LastComponentSymlink,
+}
+
+/// The three bounds gap 1 names, as a TABLE. A fourth bound is added as a row here, never as
+/// another test function (CLAUDE.md Verification Discipline rule 7).
+const ACTIVE_SCOPE_ESCAPE_SHAPES: [(&str, EscapeShape, &str); 3] = [
+    (
+        "absolute",
+        EscapeShape::Absolute,
+        "an absolute component makes `Path::join` discard the benchmark directory entirely",
+    ),
+    (
+        "parent_traversal",
+        EscapeShape::ParentTraversal,
+        "`Path::join` never resolves `..`, so the climb happens at open time, unseen",
+    ),
+    (
+        "last_component_symlink",
+        EscapeShape::LastComponentSymlink,
+        "the declared string is entirely well-formed; only the canonical form leaves the tree",
+    ),
+];
+
+/// Build the declared string for one shape, creating whatever filesystem object it needs.
+///
+/// `outside_file` already holds the cell's OWN attested lock bytes, and the in-tree lock record
+/// has already been deleted by the caller. That pairing is load-bearing: it reproduces
+/// spot-check E exactly, so the PRE-FIX gate hashes the escape target, MATCHES, and returns
+/// `Ok`. Aim any of these rows at `/etc/passwd` instead and the pre-fix run refuses with
+/// `provenance_mismatch` — still red, but red for the wrong reason, proving the escape was
+/// DETECTED rather than that it SUCCEEDED.
+fn materialize(shape: EscapeShape, bench_dir: &Path, outside_file: &Path) -> String {
+    match shape {
+        EscapeShape::Absolute => outside_file.display().to_string(),
+        EscapeShape::ParentTraversal => {
+            // Built from the two temp dirs' REAL names at runtime. They are siblings under
+            // `$TMPDIR`, so one `..` from the bench dir lands beside the scratch dir.
+            let outside_dir = outside_file.parent().expect("the scratch file has a parent");
+            format!(
+                "../{}/{}",
+                outside_dir.file_name().expect("the scratch dir has a name").to_string_lossy(),
+                outside_file.file_name().expect("the scratch file has a name").to_string_lossy(),
+            )
+        }
+        EscapeShape::LastComponentSymlink => {
+            let relative = format!("{LOCKS_DIR}/escape-via-symlink.lock.json");
+            let link = bench_dir.join(&relative);
+            // `#[cfg(unix)]` gates the MATERIALIZER, never the table: a table that silently
+            // shrinks on some host is a coverage loss no test-count floor can see.
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(outside_file, &link).expect("symlink into the scratch dir");
+            #[cfg(not(unix))]
+            let _ = &link;
+            relative
+        }
+    }
+}
+
+#[test]
+fn bench_gate_refuses_every_escaping_lock_path_shape_at_the_active_scope() {
+    let mut observations: Vec<(&str, String)> = Vec::new();
+
+    for (label, shape, why) in ACTIVE_SCOPE_ESCAPE_SHAPES {
+        let dir = write_valid_run(RunSpec::default());
+        let outside = TempDir::new().expect("a scratch dir OUTSIDE the bench dir");
+        let outside_file = outside.path().join("anywhere.json");
+
+        // 1. The escape target holds the very bytes the row attests.
+        fs::write(&outside_file, synthetic_lock_bytes(TARGET_SETFIT)).expect("scratch lock write");
+        // 2. The IN-TREE lock record is deleted, so nothing legitimate can satisfy the row.
+        fs::remove_file(dir.path().join(format!(
+            "{LOCKS_DIR}/{}-s{}-seed{}.lock.json",
+            TARGET_SETFIT.method.tag(),
+            TARGET_SETFIT.shots,
+            TARGET_SETFIT.seed
+        )))
+        .expect("delete the in-tree lock record");
+        // 3. The row points at the materialized escape.
+        let declared = materialize(shape, dir.path(), &outside_file);
+        reseal_row(dir.path(), TARGET_SETFIT, |payload| {
+            if let MethodEvidence::Setfit(evidence) = &mut payload.evidence {
+                evidence.lock.lock_record_path = declared.clone();
+            }
+        });
+        // 4. The manifest re-records the resealed row, so the run is otherwise self-consistent.
+        let manifest = manifest_for(dir.path());
+
+        let (observed, rendered) = match verify_run(&manifest, dir.path()) {
+            Ok(set) => (format!("Ok({} rows verified)", set.len()), String::new()),
+            Err(error) => (error.variant_tag().to_string(), error.to_string()),
+        };
+        // PRINTED PER SHAPE. The sweep is one test function but three bounds, and a single
+        // combined verdict would hide a row that was never red.
+        println!(
+            "[bench_gate] ACTIVE_SCOPE_ESCAPE shape={label} declared={declared} \
+             observed={observed} ({why})"
+        );
+        if observed == "evidence_path_escape" {
+            assert!(
+                rendered.contains(&declared),
+                "the `{label}` refusal must quote the declared string verbatim: {rendered}"
+            );
+        }
+        observations.push((label, observed));
+    }
+
+    let failures: Vec<&(&str, String)> =
+        observations.iter().filter(|(_, observed)| observed != "evidence_path_escape").collect();
+    assert!(
+        failures.is_empty(),
+        "every bound gap 1 names must be refused as `evidence_path_escape` through verify_run \
+         at the ACTIVE 40-cell scope; these were not: {failures:?}"
+    );
+}
+
+// ===========================================================================================
+// WR-06 — a missing LOCK RECORD names its own kind, not the row's (plan 05-15 task 2)
+// ===========================================================================================
+
+#[test]
+fn bench_gate_refuses_a_missing_lock_record_as_its_own_kind_not_as_a_missing_row() {
+    let dir = write_valid_run(RunSpec::default());
+    let lock_path = dir.path().join(format!(
+        "{LOCKS_DIR}/{}-s{}-seed{}.lock.json",
+        TARGET_SETFIT.method.tag(),
+        TARGET_SETFIT.shots,
+        TARGET_SETFIT.seed
+    ));
+    // The row is untouched and still names the committed spelling. ONLY the lock file is gone,
+    // which is the honest shape of this defect: the row is fine, the evidence is not.
+    fs::remove_file(&lock_path).expect("delete the in-tree lock record");
+    let manifest = manifest_for(dir.path());
+
+    let error = refuse(&manifest, dir.path(), "a missing lock record is a refusal");
+    assert_eq!(error.variant_tag(), "evidence_file_missing");
+    assert_eq!(error.cell(), Some(TARGET_SETFIT.render().as_str()));
+    let rendered = error.to_string();
+    assert!(rendered.contains("lock record"), "the refusal must name the KIND: {rendered}");
+    assert!(
+        rendered.contains(&lock_path.display().to_string()),
+        "the refusal must name the FILE: {rendered}"
+    );
+    assert!(
+        !rendered.contains("restore the row file"),
+        "a missing lock record must not carry the ROW remedy — that is WR-06: {rendered}"
+    );
+
+    // And the ROW kind is UNCHANGED, message and all. This is a typing correction, not a
+    // behaviour change for the row path: spot-check A's output must still read as it did.
+    let dir = write_valid_run(RunSpec::default());
+    let row_path = dir.path().join(ROWS_DIR).join(row_file_name(TARGET_SETFIT));
+    let error = read_evidence(TARGET_SETFIT, EvidenceKind::Row, &row_path.with_extension("gone"))
+        .expect_err("a missing row file is a refusal");
+    assert_eq!(error.variant_tag(), "row_file_missing");
+    assert!(
+        error.to_string().contains("restore the row file"),
+        "the ROW remedy is kept VERBATIM: {error}"
+    );
+}
+
+// ===========================================================================================
+// THE THIRD ENUMERATED FIELD — a foreign contract id, on both sides (plan 05-15 task 2)
+// ===========================================================================================
+
+#[test]
+fn bench_gate_refuses_a_row_declaring_a_foreign_contract_id() {
+    // Found by `05-15-gate-input-surface.md`, not by a probe: nothing anywhere compared a
+    // row's declared contract against the constant, while `aggregate` stamped the published
+    // payload with that constant regardless.
+    let dir = write_valid_run(RunSpec::default());
+    reseal_row(dir.path(), TARGET_SETFIT, |payload| {
+        payload.contract_id = "setfit-benchmark-claims-v99".to_string();
+    });
+    let manifest = manifest_for(dir.path());
+
+    let error = refuse(&manifest, dir.path(), "a foreign contract id is a refusal");
+    assert_eq!(error.variant_tag(), "row_schema_refused");
+    assert_eq!(error.cell(), Some(TARGET_SETFIT.render().as_str()));
+    let rendered = error.to_string();
+    assert!(rendered.contains("setfit-benchmark-claims-v99"), "names the DECLARED id: {rendered}");
+    assert!(rendered.contains(CLAIMS_CONTRACT_ID), "names the EXPECTED id: {rendered}");
+}
+
+#[test]
+fn bench_gate_refuses_a_manifest_declaring_a_foreign_contract_id() {
+    let dir = write_valid_run(RunSpec::default());
+    let mut manifest = manifest_for(dir.path());
+    manifest.payload.contract_id = "setfit-benchmark-claims-v99".to_string();
+    // Resealed by hand so the ENVELOPE digest does not fire first and mask the comparison.
+    manifest.semantic_hash =
+        sha256_hex(&manifest.payload.to_canonical_bytes().expect("payload serializes"));
+
+    let error = refuse(&manifest, dir.path(), "a foreign manifest contract id is a refusal");
+    assert_eq!(error.variant_tag(), "row_schema_refused");
+    let rendered = error.to_string();
+    assert!(rendered.contains("setfit-benchmark-claims-v99"), "names the DECLARED id: {rendered}");
+    assert!(rendered.contains(CLAIMS_CONTRACT_ID), "names the EXPECTED id: {rendered}");
+}
+
+#[test]
+fn bench_gate_refuses_each_contract_pinned_constant_a_row_may_not_choose() {
+    // The other three (iii) entries the enumeration found: fields the contract pins to one
+    // value each, checked only at EMISSION time and never when the gate READ a committed row.
+    // Swept as a table rather than as three functions (CLAUDE.md Verification Discipline
+    // rule 7). `throughput_batch_size` is deliberately absent — the contract pins no value for
+    // it, so there is nothing contract-derived to compare against.
+    let mutations: Vec<(&str, fn(&mut BenchRowPayload))> = vec![
+        ("calibration_split", |p| p.quality.calibration_split = "test".to_string()),
+        ("warmup_count", |p| p.resource.warmup_count = WARMUP_COUNT + 7),
+        ("cold_measured_in_child_process", |p| {
+            p.resource.cold_measured_in_child_process = false;
+        }),
+    ];
+    for (field, mutate) in mutations {
+        let dir = write_valid_run(RunSpec::default());
+        reseal_row(dir.path(), TARGET_SETFIT, mutate);
+        let manifest = manifest_for(dir.path());
+
+        let error = refuse(&manifest, dir.path(), field);
+        assert_eq!(
+            error.variant_tag(),
+            "row_schema_refused",
+            "`{field}` must be refused as a schema-domain violation, got: {error}"
+        );
+        assert!(
+            error.to_string().contains(field),
+            "the refusal must name the offending field `{field}`: {error}"
+        );
+    }
+}
+
+// ===========================================================================================
 // The six negatives are SIX DISTINCT variants
 // ===========================================================================================
 
@@ -1391,14 +1646,29 @@ fn bench_gate_layout_constants_agree_with_the_shipped_row_filename_grammar() {
 fn bench_gate_evidence_reads_are_bounded_from_the_declared_length() {
     let dir = TempDir::new().expect("temp dir");
     let path: PathBuf = dir.path().join("rows").join("setfit-s8-seed13.json");
-    let error = read_evidence(CellKey::new(Method::Setfit, 8, 13), &path)
+    let error = read_evidence(CellKey::new(Method::Setfit, 8, 13), EvidenceKind::Row, &path)
         .expect_err("a missing file is a refusal");
     assert_eq!(error.variant_tag(), "row_file_missing");
 
     // A directory in a file's position is refused rather than read.
-    let error = read_evidence(CellKey::new(Method::Setfit, 8, 13), dir.path())
+    let error = read_evidence(CellKey::new(Method::Setfit, 8, 13), EvidenceKind::Row, dir.path())
         .expect_err("a directory is not a row");
     assert_eq!(error.variant_tag(), "evidence_read_failed");
+
+    // WR-06, option (a): the SAME absence under a non-ROW kind names its own artifact. One
+    // unconditional mapping told the operator to restore the wrong thing.
+    for kind in [EvidenceKind::Lock, EvidenceKind::Ledger] {
+        let error = read_evidence(CellKey::new(Method::Setfit, 8, 13), kind, &path)
+            .expect_err("a missing evidence file is a refusal");
+        assert_eq!(error.variant_tag(), "evidence_file_missing");
+        let rendered = error.to_string();
+        assert!(rendered.contains(kind.tag()), "the refusal must name its own kind: {rendered}");
+        assert!(
+            !rendered.contains("restore the row file"),
+            "a missing {} must not carry the ROW remedy: {rendered}",
+            kind.tag()
+        );
+    }
 }
 
 // ===========================================================================================
@@ -1616,10 +1886,24 @@ fn bench_gate_the_single_cell_door_refuses_a_cell_outside_the_active_scope() {
 }
 
 #[test]
-fn bench_gate_the_variant_tag_table_gained_no_arm_in_this_plan() {
-    // T-05-11-03 / the plan's own prohibition: the two out-of-scope refusals reuse EXISTING
-    // variants. Counted over the SHIPPED SOURCE rather than eyeballed in a diff, because a
-    // diff review is exactly what missed this class of change before.
+fn bench_gate_the_variant_tag_table_gained_exactly_the_two_arms_this_round_authorised() {
+    // Counted over the SHIPPED SOURCE rather than eyeballed in a diff, because a diff review is
+    // exactly what missed this class of change before.
+    //
+    // 05-11 pinned this at 13 and its own two out-of-scope refusals reused EXISTING variants,
+    // which is still the default answer. 05-15 mints exactly TWO, and both are reachable from
+    // production input rather than from a test-only constructor — which is what 05-11's rule
+    // actually forbade:
+    //   * `evidence_path_escape`  — gap 1. A producer-written path leaving the benchmark tree
+    //     had no refusal at all; reusing `evidence_read_failed` would have reported an I/O
+    //     accident for a deliberate escape.
+    //   * `evidence_file_missing` — WR-06. An absent LOCK or LEDGER was reported as a missing
+    //     ROW file with a remedy naming the wrong artifact.
+    //
+    // The four contract-derived comparisons this round also added (contract_id on both the row
+    // and the manifest, calibration_split, warmup_count, cold_measured_in_child_process) mint
+    // NOTHING: they reuse `row_schema_refused`. That asymmetry is the point of this guard — a
+    // new arm has to be argued for, one at a time.
     const GATE_SOURCE: &str = include_str!("bench_gate.rs");
     let table = GATE_SOURCE
         .split_once("pub const fn variant_tag(&self) -> &'static str {")
@@ -1630,8 +1914,11 @@ fn bench_gate_the_variant_tag_table_gained_no_arm_in_this_plan() {
         .0;
     let arms = table.matches("=> \"").count();
     assert_eq!(
-        arms, 13,
-        "BenchGateError::variant_tag has {arms} arms; it had 13 before this plan and a new \
-         variant would be a guard over a path production code cannot take",
+        arms, 15,
+        "BenchGateError::variant_tag has {arms} arms; it had 13 before 05-15 and that plan \
+         authorised exactly two. A sixteenth would be a variant nobody argued for",
     );
+    for minted in ["evidence_path_escape", "evidence_file_missing"] {
+        assert!(table.contains(minted), "the `{minted}` arm must be the one that was minted");
+    }
 }
