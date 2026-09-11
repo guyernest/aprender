@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 11
+open_count: 14
 waived_count: 2
 fixed_count: 0
-total_count: 13
-last_updated: 2026-09-07T18:40:10.438Z
+total_count: 16
+last_updated: 2026-09-11T22:23:42.862Z
 ---
 
 # Broken Windows Ledger
@@ -28,6 +28,9 @@ last_updated: 2026-09-07T18:40:10.438Z
 | 11 | 06 | unrun-verify | justfile | 656 | chronos-coldstart's 150 ms SC4 bar uses [ $med -ge 150 ]; an erroring token takes the not-taken branch and prints COLD START OK. Closed today only by the upstream sed digits-only parse, not by the bar (D-ITEM-06-16). | open |  | 2026-09-07T17:54:46.394Z |  |
 | 12 | 06 | deviation | Makefile |  | make contract-audit-phase6's success line contains the literal BIND-, so grep -c 'BIND-' == 0 is unsatisfiable; four consecutive plans each fixed it locally. Needs a shared scripts/assert_no_audit_findings.sh with a case table. | open |  | 2026-09-07T18:40:10.361Z |  |
 | 13 | 06 | deviation | CHANGELOG.md |  | The two breaking 0.63.0 surface changes (prophet::feature_row's fourth parameter, safetensors::load removal) are documented in the crate README but not yet in the root CHANGELOG; release-time follow-up. | open |  | 2026-09-07T18:40:10.438Z |  |
+| 14 | 05 | deviation | scripts/setfit_bench_gate_doctor.py |  | Probe helper extracted to a sibling .py not in 05-15 files_modified; bashrs cannot parse a quoted heredoc body (12 phantom shell errors). Load-bearing for the door probe. | open |  | 2026-09-11T22:23:42.703Z |  |
+| 15 | 05 | lint-warning | crates/aprender-compute/src |  | cargo clippy -p aprender-train --features setfit -- -D warnings exits 101 on pre-existing aprender-compute / aprender-present-terminal findings; the 05-15 plan verification line cannot pass on this tree. | open |  | 2026-09-11T22:23:42.783Z |  |
+| 16 | 05 | unmet-truth | crates/aprender-train/src/train/setfit/bench_row.rs | 37 | Module doc claims canonical bytes are key-sorted (no preserve_order). Measured false: file-order reproduces both committed digests, sorted reproduces neither. | open |  | 2026-09-11T22:23:42.862Z |  |
 
 ````json
 [
@@ -185,6 +188,42 @@ last_updated: 2026-09-07T18:40:10.438Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-07T18:40:10.438Z",
+    "resolved_at": null
+  },
+  {
+    "id": 14,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "scripts/setfit_bench_gate_doctor.py",
+    "line": null,
+    "description": "Probe helper extracted to a sibling .py not in 05-15 files_modified; bashrs cannot parse a quoted heredoc body (12 phantom shell errors). Load-bearing for the door probe.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-11T22:23:42.703Z",
+    "resolved_at": null
+  },
+  {
+    "id": 15,
+    "kind": "lint-warning",
+    "phase": "05",
+    "file": "crates/aprender-compute/src",
+    "line": null,
+    "description": "cargo clippy -p aprender-train --features setfit -- -D warnings exits 101 on pre-existing aprender-compute / aprender-present-terminal findings; the 05-15 plan verification line cannot pass on this tree.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-11T22:23:42.783Z",
+    "resolved_at": null
+  },
+  {
+    "id": 16,
+    "kind": "unmet-truth",
+    "phase": "05",
+    "file": "crates/aprender-train/src/train/setfit/bench_row.rs",
+    "line": 37,
+    "description": "Module doc claims canonical bytes are key-sorted (no preserve_order). Measured false: file-order reproduces both committed digests, sorted reproduces neither.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-11T22:23:42.862Z",
     "resolved_at": null
   }
 ]

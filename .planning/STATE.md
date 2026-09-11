@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: Benchmark and Claims Gate
 status: executing
-stopped_at: Completed 05-13-PLAN.md
-last_updated: "2026-09-11T20:16:57.392Z"
-last_activity: 2026-09-07
+stopped_at: Completed 05-15-PLAN.md
+last_updated: "2026-09-11T22:23:32.759Z"
+last_activity: 2026-09-11
 last_activity_desc: Phase 05 replanned for D-19 — 05-11/12/13 rewritten, 0 blockers
-state_head: 718869d4a857cc0c8d5c62e459f275f154084ef8
+state_head: 78b99308967987828913e1913184fe745065c455
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 84
-  completed_plans: 81
+  completed_plans: 82
 milestone_name: milestone
 ---
 
@@ -28,8 +28,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 05 (Benchmark and Claims Gate) — READY TO EXECUTE
-Plan: 4 of 14
+Phase: 05 (Benchmark and Claims Gate) — EXECUTING
+Plan: 2 of 17
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-07 — Phase 05 execution started
+Last activity: 2026-09-11 — Phase 05 execution started
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -208,6 +208,7 @@ pending F-10 in Phase 5.)
 | Phase 05 P11 | session | 3 tasks | 17 files |
 | Phase 05 P12 | 6h 56m | 3 tasks | 126 files |
 | Phase 05 P13 | 4h 0m | 3 tasks | 8 files |
+| Phase 05 P15 | 113 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -347,6 +348,9 @@ Recent decisions affecting current work:
 - [Phase 05]: A single-cell verification door (verify_cell / apr setfit bench verify-cell) is verify_run steps 1+4+6 over ONE declared cell, excluding the set-level steps, and emits no statistic. — At pilot time the manifest declares 40 cells with 39 pending - exactly what step 3 sweep refuses on - so a door inheriting the set-level checks could never pass on the cell it exists to check. Equivalence with verify_run is proven behaviourally by a per-defect variant-tag table, never by asserting the door calls the two functions.
 - [Phase 05]: The active claims report must not name the deferred method BELOW section level: 05-11's case table carried only section-level literals, so a row label, a size footnote and the header's provenance clause survived the retarget. Case table grown 6 -> 9 rows plus a token-level control. — Found by running the plan's own automated verify rather than by review. A section-level absence table cannot refuse a sub-section literal nobody thought to add, so the report is now gated on the rendered TEXT as well as on the constants.
 - [Phase 05]: EVAL-02, EVAL-04 and EVAL-05 recorded as met by a NARROWER deliverable under the 2026-09-07 amendment, with D-ITEM-05-15 named; no requirement checkbox flipped and requirements.mark-complete not run. — Filing a narrower deliverable against an unamended promise is the false-completion defect this project has hit six times. Flipping requirement or phase-completion state is the verifier's act.
+- [Phase 05]: WR-06 taken as option (a): read_evidence takes an EvidenceKind, so a missing lock or ledger names its own artifact instead of telling the operator to restore a row file — Minting a correctly-typed path-escape variant beside a mis-typed missing-file variant, inside one function, in one edit, would be incoherent
+- [Phase 05]: resolve_committed_evidence_path returns the JOINED path, not the canonical one; canonicalization is used only for the containment check — On macOS a temp dir canonicalizes /var to /private/var, so returning the canonical form would rewrite every downstream refusal message and show operators a path they never typed
+- [Phase 05]: throughput_batch_size deliberately left class (iii) while three sibling contract-pinned constants were closed — The contract pins no value for it and the writer constant lives in apr-cli as a producer choice, so comparing against it would refuse a legitimately different batch size while calling it a contract violation
 
 ### Pending Todos
 
@@ -433,6 +437,8 @@ Recent decisions affecting current work:
 - contracts/chronos-bolt-parity-v1.yaml quantiles_abs_f32_nonaarch64 = 5.0e-6 is PROVISIONAL AND UNMEASURED: no x86_64 run has happened, and every CI job here is [self-hosted, X64]. FALSIFY-CHRONOS-002 obliges the first x86_64 run to record its measured max|delta| and tighten the bar in a pv diff-visible edit.
 - 06-07: REVIEW-06-02's provisional non-aarch64 f32 bar (5.0e-6) is STILL unmeasured — this host is aarch64, so quantiles_abs_f32 (1e-6, measured 9.5367e-7) is what ran. The server test now prints what a first x86_64 run needs.
 - DECLARED-RED WINDOW OPEN (06-14 -> 06-15): types::tests::no_cost_axis_is_pending fails on purpose, turning `make tier3` and CI `workspace-test` red. `workspace-test` is a REQUIRED check on protected `main`. Mitigation is push sequencing — land waves 12 and 13 in ONE push. Do NOT delete/weaken/ignore/CI-filter the test.
+- Workspace lint debt blocks the plan-level clippy line: cargo clippy -p aprender-train --features setfit -- -D warnings exits 101 on pre-existing findings in aprender-compute and aprender-present-terminal. Zero are in aprender-train (--no-deps is rc=0). CLAUDE.md #2370 class; owned by toolchain-ceiling.yml, not by phase 5.
+- bench_row.rs:37-43 claims canonical bytes are key-SORTED because no workspace crate enables preserve_order. MEASURED false: sorting reproduces neither the row nor the manifest digest, file order reproduces both. Not a correctness defect; the stated reason and the field-reordering property it claims are wrong. For 05-16 or 05-17, which touch that module.
 
 ## Deferred Items
 
@@ -446,8 +452,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-09T04:55:45.535Z
-Stopped at: Completed 05-13-PLAN.md
+Last session: 2026-09-11T22:22:57.572Z
+Stopped at: Completed 05-15-PLAN.md
 Resume file: None
 
 ## Accumulated Context
