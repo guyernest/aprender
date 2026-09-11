@@ -27,7 +27,11 @@
 //! 5. per `(shots, seed)`: the two rows carry an identical `selection_manifest_hash`
 //!    (DEFERRED — the active scope has one method, so this rule's domain is empty and it is
 //!    reported as not exercised, never as satisfied);
-//! 6. per row: provenance RECOMPUTED from committed bytes (below);
+//! 6. per row: provenance AND THE SELECTION BINDING, both RECOMPUTED from committed bytes
+//!    (below) — the lock/ledger digests at a row-supplied path that had to be validated, and
+//!    the `selection_manifest_hash` against the manifest at a GATE-DERIVED path the row cannot
+//!    choose ([`selection_manifest_path`]), including the manifest's own declared shots and
+//!    seed against the cell key;
 //! 7. per LoRA row: the no-selection attestation's conjuncts (DEFERRED, same reason).
 //!
 //! Steps 1 + 4 + 6 are ALSO available over a single declared cell as [`verify_cell`], which
@@ -122,6 +126,12 @@ pub const LOCKS_DIR: &str = "locks";
 /// Append-only LoRA candidate ledgers live here.
 pub const LEDGER_DIR: &str = "ledger";
 
+/// Committed selection manifests live here, one per-cell directory beneath.
+pub const SELECTIONS_DIR: &str = "selections";
+
+/// The per-cell selection manifest's filename.
+pub const SELECTION_MANIFEST_FILE: &str = "selection-manifest.json";
+
 /// The pre-declared expectation set lives here.
 pub const RUN_MANIFEST_FILE: &str = "run-manifest.json";
 
@@ -165,6 +175,36 @@ const BENCH_GATE_SOURCE: &str = include_str!("bench_gate.rs");
 #[must_use]
 pub fn row_file_name(cell: CellKey) -> String {
     format!("{}-s{}-seed{}.json", cell.method.tag(), cell.shots, cell.seed)
+}
+
+/// The committed selection manifest for one cell — `selections/s{shots}-seed{seed}/…`.
+///
+/// # THIS SIGNATURE IS THE POINT OF THE WHOLE FIX
+///
+/// The path is built from the CELL KEY and from nothing the row supplies. Compare it with the
+/// lock and ledger paths, which are producer-written strings and therefore have to be dragged
+/// through [`resolve_committed_evidence_path`]'s two stages before they may touch the
+/// filesystem: there, validation is the only thing standing between a row and any file on the
+/// host. Here there is nothing for an attacker to choose. A reviewer can settle that from the
+/// signature alone — this function takes a [`CellKey`] and a [`Path`], and no [`BenchRow`] —
+/// without reading the body, which is a strictly stronger guarantee than a correct body.
+///
+/// That is also what makes the RECOMPUTATION meaningful. Reading a manifest at a path the row
+/// named and comparing its digest to a hash the same row named would compare a producer's two
+/// statements against each other and call the agreement evidence.
+///
+/// Only the `(shots, seed)` half of the key is used, and deliberately: ONE selection is drawn
+/// per `(shots, seed)` and BOTH methods consume it. That sharing IS the pairing design, and it
+/// is why a restored second arm inherits this binding instead of needing its own.
+///
+/// Follows [`row_file_name`]'s precedent — one function produces the spelling, so a writer and
+/// a reader cannot drift into two filenames for one file.
+#[must_use]
+pub fn selection_manifest_path(bench_dir: &Path, cell: CellKey) -> PathBuf {
+    bench_dir
+        .join(SELECTIONS_DIR)
+        .join(format!("s{}-seed{}", cell.shots, cell.seed))
+        .join(SELECTION_MANIFEST_FILE)
 }
 
 // ===========================================================================================
@@ -257,6 +297,12 @@ pub enum EvidenceKind {
     /// The append-only LoRA candidate ledger under [`LEDGER_DIR`], named by
     /// `evidence.lora.candidate_ledger_path`.
     Ledger,
+    /// The committed selection manifest under [`SELECTIONS_DIR`]. Like [`Self::Row`] and
+    /// unlike the two above, its path is GATE-DERIVED — by [`selection_manifest_path`], from
+    /// the cell key — so it never passes through [`resolve_committed_evidence_path`]. The kind
+    /// exists so an ABSENT manifest names its own artifact rather than telling an operator to
+    /// restore a row (WR-06's rule, applied to the field 05-16 adds).
+    SelectionManifest,
 }
 
 impl EvidenceKind {
@@ -267,6 +313,7 @@ impl EvidenceKind {
             Self::Row => "row",
             Self::Lock => "lock record",
             Self::Ledger => "candidate ledger",
+            Self::SelectionManifest => "selection manifest",
         }
     }
 }
@@ -412,6 +459,41 @@ pub enum BenchGateError {
         /// The LoRA row's pairing key.
         lora_hash: String,
     },
+    /// The row's pairing key disagrees with the selection manifest its own cell committed.
+    ///
+    /// `selection_manifest_hash` is THE PAIRING KEY: it is the whole remaining justification
+    /// for keeping EVAL-02 open under D-19, because a future second arm pairs against it.
+    /// Until this variant existed the gate opened no manifest at all, so the key was a
+    /// 64-character string a producer typed and the forty committed manifests were inert
+    /// files — `apr setfit bench report` returned 0 with the entire `selections/` directory
+    /// deleted, and returned 0 with a row's key doctored to 64 zeros.
+    SelectionManifestMismatch {
+        /// The offending cell, rendered.
+        cell: String,
+        /// The manifest whose bytes were recomputed, at the GATE-DERIVED path.
+        path: String,
+        /// The digest the ROW claims.
+        claimed: String,
+        /// The digest the committed manifest's own bytes produce.
+        recomputed: String,
+    },
+    /// A selection manifest that is internally valid but belongs to a DIFFERENT cell.
+    ///
+    /// Distinct from [`Self::SelectionManifestMismatch`] and NOT reachable by the same
+    /// attack: a manifest transplanted from another cell seals correctly and hashes
+    /// correctly, so a producer who also doctors the row's key makes the digest comparison
+    /// AGREE. The manifest's own `payload.shots_per_class` and `payload.root_seed` are a
+    /// second, independent statement of which cell drew it, and that is what refuses here.
+    SelectionManifestCellMismatch {
+        /// The slot the manifest was found under, rendered.
+        cell: String,
+        /// The manifest, at the GATE-DERIVED path.
+        path: String,
+        /// The `shots_per_class` the manifest itself declares.
+        manifest_shots: u32,
+        /// The `root_seed` the manifest itself declares.
+        manifest_seed: u64,
+    },
     /// A row field disagrees with the committed file it names — FORGED PROVENANCE.
     ProvenanceMismatch {
         /// The offending cell, rendered.
@@ -455,6 +537,8 @@ impl BenchGateError {
             Self::RowManifestDigestMismatch { .. } => "row_manifest_digest_mismatch",
             Self::RowSlotMismatch { .. } => "row_slot_mismatch",
             Self::UnpairedSelection { .. } => "unpaired_selection",
+            Self::SelectionManifestMismatch { .. } => "selection_manifest_mismatch",
+            Self::SelectionManifestCellMismatch { .. } => "selection_manifest_cell_mismatch",
             Self::ProvenanceMismatch { .. } => "provenance_mismatch",
             Self::PostTestSelection { .. } => "post_test_selection",
         }
@@ -473,6 +557,8 @@ impl BenchGateError {
             | Self::RowSchemaRefused { cell, .. }
             | Self::RowManifestDigestMismatch { cell, .. }
             | Self::RowSlotMismatch { cell, .. }
+            | Self::SelectionManifestMismatch { cell, .. }
+            | Self::SelectionManifestCellMismatch { cell, .. }
             | Self::ProvenanceMismatch { cell, .. }
             | Self::PostTestSelection { cell, .. } => Some(cell),
             Self::ManifestDigestMismatch { .. }
@@ -568,6 +654,30 @@ impl core::fmt::Display for BenchGateError {
                  the same thing — at 8 examples per class the subset is a larger source of \
                  variation than the method. Re-run both cells against ONE selection manifest",
             ),
+            Self::SelectionManifestMismatch { cell, path, claimed, recomputed } => write!(
+                f,
+                "cell {cell}: the row's `selection_manifest_hash` is {claimed}, but the \
+                 committed selection manifest at {path} hashes to {recomputed}. THE PAIRING \
+                 KEY IS RECOMPUTED FROM THE COMMITTED MANIFEST, never read off the row — and \
+                 the manifest is opened at a path DERIVED FROM THE CELL KEY, which is what \
+                 makes the recomputation mean anything. A row field that disagrees with the \
+                 manifest its own cell committed is evidence of nothing. Re-run the cell \
+                 rather than editing the row or the manifest",
+            ),
+            Self::SelectionManifestCellMismatch { cell, path, manifest_shots, manifest_seed } => {
+                write!(
+                    f,
+                    "cell {cell}: the selection manifest at {path} declares \
+                     `shots_per_class` = {manifest_shots} and `root_seed` = {manifest_seed}, \
+                     which is not this cell. This is DISTINCT from a hash disagreement and is \
+                     not reachable by the same attack: a manifest transplanted from another \
+                     cell is internally valid and seals correctly, so a producer who also \
+                     doctors the row's `selection_manifest_hash` makes the digest comparison \
+                     AGREE. The manifest's own declared shots and seed are a second, \
+                     independent statement of which cell drew it. Restore this cell's own \
+                     manifest, or re-run the cell",
+                )
+            }
             Self::ProvenanceMismatch { cell, file, claimed, recomputed, detail } => write!(
                 f,
                 "cell {cell}: {detail}. The row claims {claimed}; {file} produces {recomputed}. \
@@ -755,11 +865,17 @@ fn missing_evidence(cell: CellKey, kind: EvidenceKind, path: &Path) -> BenchGate
         EvidenceKind::Row => {
             BenchGateError::RowFileMissing { cell: cell.render(), path: path.display().to_string() }
         }
-        EvidenceKind::Lock | EvidenceKind::Ledger => BenchGateError::EvidenceFileMissing {
-            cell: cell.render(),
-            kind: kind.tag().to_string(),
-            path: path.display().to_string(),
-        },
+        // The SELECTION MANIFEST joins the two producer-named kinds here rather than the ROW,
+        // even though its path is gate-derived like the row's: the REMEDY is what this match
+        // selects (WR-06), and an absent manifest is restored or re-selected as a manifest,
+        // never "restored as the row file".
+        EvidenceKind::Lock | EvidenceKind::Ledger | EvidenceKind::SelectionManifest => {
+            BenchGateError::EvidenceFileMissing {
+                cell: cell.render(),
+                kind: kind.tag().to_string(),
+                path: path.display().to_string(),
+            }
+        }
     }
 }
 
@@ -923,6 +1039,15 @@ pub(crate) fn verify_run_scoped(
     // ---- 6. PROVENANCE, RECOMPUTED FROM COMMITTED BYTES ------------------------------------
     for (cell, row) in &rows {
         verify_provenance(*cell, row, bench_dir)?;
+    }
+
+    // ---- 6b. THE SELECTION BINDING, RECOMPUTED FROM COMMITTED BYTES ------------------------
+    // ITS OWN LOOP, AND IN STEP 6 RATHER THAN EARLIER. Step 5 is `verify_pairing`, the
+    // DEFERRED cross-method rule; moving the binding above it would pre-empt the
+    // deferred-scope `unpaired_selection` negative and silently change which variant that
+    // negative observes, leaving it green while it had stopped testing what it names.
+    for (cell, row) in &rows {
+        verify_selection_binding(*cell, row, bench_dir)?;
     }
 
     // ---- 7. THE LoRA NO-SELECTION ATTESTATION ----------------------------------------------
@@ -1183,7 +1308,11 @@ fn verify_entry_complete(entry: &CellEntry) -> Result<(), BenchGateError> {
 /// 3'. step 3's per-entry rule, TO THIS ONE ENTRY ONLY ([`verify_entry_complete`]);
 /// 4. the row's file, schema, envelope digest, manifest-digest agreement and slot agreement
 ///    ([`verify_row_evidence`]);
-/// 6. provenance recomputed from committed bytes ([`verify_provenance`]).
+/// 6. provenance recomputed from committed bytes ([`verify_provenance`]), AND the selection
+///    binding recomputed from the committed manifest at a gate-derived path
+///    ([`verify_selection_binding`]) — the row's `selection_manifest_hash` against the
+///    recomputed `semantic_hash`, and the manifest's own declared shots and seed against this
+///    cell's key.
 ///
 /// DOES NOT APPLY: step 2 (expectation-set equality), step 3's SWEEP over every entry, step 5
 /// (pairing) and step 7 (the second method's attestation).
@@ -1202,7 +1331,8 @@ fn verify_entry_complete(entry: &CellEntry) -> Result<(), BenchGateError> {
 /// interval, nothing a reader could mistake for a partial report (T-05-11-06). The report is
 /// the only door that emits numbers. What this validates is exactly what those two stages
 /// validate and no more — file present, schema parse, envelope digest, manifest-digest
-/// agreement, slot agreement, and the recomputed lock digest with its role and rule. The
+/// agreement, slot agreement, the recomputed lock digest with its role and rule, and the
+/// selection binding recomputed from this cell's own committed manifest. The
 /// resource and size FIELDS are serde fields whose presence and parse are covered by
 /// `BenchRow::from_bytes`; this door does not independently validate their values.
 ///
@@ -1244,6 +1374,12 @@ pub fn verify_cell(
 
     // ---- 6. PROVENANCE, RECOMPUTED FROM COMMITTED BYTES ------------------------------------
     verify_provenance(cell, &row, bench_dir)?;
+
+    // ---- 6b. THE SELECTION BINDING, RECOMPUTED FROM COMMITTED BYTES ------------------------
+    // The single-cell door performs this too. A door whose own doc enumerates its coverage and
+    // is WRONG about it is the artifact this phase exists to prevent, so the enumeration above
+    // names it and this call is what makes the enumeration true.
+    verify_selection_binding(cell, &row, bench_dir)?;
 
     // Deliberately nothing returned. See the module note above.
     Ok(())
@@ -1406,6 +1542,105 @@ fn verify_provenance(
             Ok(())
         }
     }
+}
+
+/// Recompute the row's PAIRING KEY from the selection manifest its own cell committed.
+///
+/// # Why this exists — verifier gap 2 (EVAL-02)
+///
+/// `payload.selection_manifest_hash` is documented in `bench_row` as THE PAIRING KEY, and
+/// under D-19 it is the whole remaining justification for keeping EVAL-02 open: the active
+/// scope has one method, so the key's only job is to let a FUTURE second arm pair against the
+/// same sampled few-shot subset. Until this function existed nothing on the gate path ever
+/// opened a selection manifest, so the property held in the DATA by construction and not by
+/// enforcement — `apr setfit bench report` returned 0 with the entire `selections/` directory
+/// deleted and returned 0 with a row's key doctored to 64 zeros, and a future arm would have
+/// paired against a key nothing ever attested.
+///
+/// # The digest is NOT recomputed here, and that is deliberate
+///
+/// [`SelectionManifest::from_bytes`](aprender_contrastive_data::manifest::SelectionManifest::from_bytes)
+/// verifies `sha256(payload.to_canonical_bytes()) == semantic_hash` BEFORE returning, so a
+/// caller cannot hold an unsealed manifest. Recomputing it again in this module would be a
+/// SECOND definition of a manifest's identity, and two definitions of one value disagree
+/// eventually and invisibly — the same OPS-03 argument the module header makes about not
+/// reimplementing a mean.
+///
+/// # The ORDER of the two comparisons, and why each one needs its own negative
+///
+/// 1. the recomputed `semantic_hash` against the row's claim — the common case;
+/// 2. the manifest's own `payload.shots_per_class` / `payload.root_seed` against the cell key.
+///
+/// The hash check fires first because it is what an ordinary tamper trips. The cell-key check
+/// is what REMAINS reachable once an attacker has already made the hashes agree: a manifest
+/// transplanted from another cell seals correctly, so a producer who also doctors the row's
+/// key satisfies step 1 completely. Placing the cell-key check first would be equally correct
+/// and would simply make step 1 the unreachable one instead — which is why the test table
+/// carries a transplant WITH the row hash doctored (reaching step 2) and the same transplant
+/// WITHOUT it (reaching step 1), rather than one standing in for both.
+///
+/// The seed comparison widens the CELL KEY with [`u64::from`] rather than narrowing the
+/// manifest: `root_seed` is `u64` and `CellKey::seed` is `u32`, and a `try_from` that failed
+/// would silently change the question being asked from "are these the same seed" to "are these
+/// the same seed, given it fits".
+///
+/// # Errors
+///
+/// [`BenchGateError::EvidenceFileMissing`] carrying [`EvidenceKind::SelectionManifest`] when
+/// the manifest is absent; [`BenchGateError::EvidenceReadFailed`] when it cannot be read or
+/// parsed; [`BenchGateError::SelectionManifestMismatch`] when the digests disagree (including
+/// the manifest's own unsealed-payload refusal); [`BenchGateError::SelectionManifestCellMismatch`]
+/// when the manifest belongs to a different cell.
+fn verify_selection_binding(
+    cell: CellKey,
+    row: &BenchRow,
+    bench_dir: &Path,
+) -> Result<(), BenchGateError> {
+    let path = selection_manifest_path(bench_dir, cell);
+    let bytes = read_evidence(cell, EvidenceKind::SelectionManifest, &path)?;
+
+    let manifest = aprender_contrastive_data::manifest::SelectionManifest::from_bytes(&bytes)
+        .map_err(|error| match error {
+            aprender_contrastive_data::ContrastiveDataError::SemanticHashMismatch {
+                expected,
+                got,
+            } => BenchGateError::SelectionManifestMismatch {
+                cell: cell.render(),
+                path: path.display().to_string(),
+                claimed: expected,
+                recomputed: got,
+            },
+            other => BenchGateError::EvidenceReadFailed {
+                cell: cell.render(),
+                path: path.display().to_string(),
+                detail: other.to_string(),
+            },
+        })?;
+
+    // EXACT BYTE EQUALITY of the two 64-character lowercase hex strings. No truncation, no
+    // `eq_ignore_ascii_case`, no prefix match: a key agreeing in its first N characters is a
+    // different key, and every relaxation of this line is a way for a doctored row to pass.
+    if manifest.semantic_hash != row.payload.selection_manifest_hash {
+        return Err(BenchGateError::SelectionManifestMismatch {
+            cell: cell.render(),
+            path: path.display().to_string(),
+            claimed: row.payload.selection_manifest_hash.clone(),
+            recomputed: manifest.semantic_hash,
+        });
+    }
+
+    if manifest.payload.shots_per_class != cell.shots
+        || manifest.payload.root_seed != u64::from(cell.seed)
+    {
+        return Err(BenchGateError::SelectionManifestCellMismatch {
+            cell: cell.render(),
+            path: path.display().to_string(),
+            manifest_shots: manifest.payload.shots_per_class,
+            manifest_seed: manifest.payload.root_seed,
+        });
+    }
+
+    Ok(())
 }
 
 /// The six conjuncts of `no_selection_attestation`, each closing a different route to a

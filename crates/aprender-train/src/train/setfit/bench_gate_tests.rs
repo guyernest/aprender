@@ -1296,6 +1296,10 @@ fn kind_dir(kind: EvidenceKind) -> &'static str {
         EvidenceKind::Row => ROWS_DIR,
         EvidenceKind::Lock => LOCKS_DIR,
         EvidenceKind::Ledger => LEDGER_DIR,
+        // Never swept by `EVIDENCE_PATH_CASES`, and that is the point: the selection
+        // manifest's path is GATE-DERIVED and never reaches `resolve_committed_evidence_path`,
+        // so a row shape for it would be a guard over a path production cannot take.
+        EvidenceKind::SelectionManifest => SELECTIONS_DIR,
     }
 }
 
@@ -1305,6 +1309,10 @@ fn kind_committed_file(kind: EvidenceKind) -> &'static str {
         EvidenceKind::Row => "setfit-s8-seed13.json",
         EvidenceKind::Lock => "setfit-s8-seed13.lock.json",
         EvidenceKind::Ledger => "setfit-s8-seed13.jsonl",
+        // See `kind_dir`: this kind is never swept by the path-shape table, because its path
+        // is derived and never row-supplied. The arm exists so that adding the kind forces
+        // this file to be revisited rather than falling into a `_` arm.
+        EvidenceKind::SelectionManifest => SELECTION_MANIFEST_FILE,
     }
 }
 
@@ -1829,6 +1837,16 @@ fn bench_gate_selection_binding_case_table_at_the_active_scope() {
             matches!(case.expect, SelectionExpect::Refused("selection_manifest_cell_mismatch", _))
         })
         .count();
+    // THE SWEPT-ROW COUNT IS PINNED HERE, and it has to be, because the Make floor cannot see
+    // it. `assert_tests_ran` counts test FUNCTIONS, and this table is deliberately ONE
+    // function sweeping eleven rows — so eleven rows silently becoming three would not move
+    // the floor by a single test. A row deleted to make something pass goes red on this line.
+    assert_eq!(
+        observations.len(),
+        SELECTION_BINDING_CASES.len(),
+        "every row of the table must be swept"
+    );
+    assert_eq!(SELECTION_BINDING_CASES.len(), 11, "the table carries eleven rows");
     assert_eq!(accepted, 1, "the table must carry exactly one ACCEPTANCE row");
     assert!(
         cell_mismatches >= 3,
@@ -2642,6 +2660,57 @@ fn bench_gate_verify_run_reads_the_lock_and_ledger_bytes_from_disk() {
 }
 
 #[test]
+fn bench_gate_the_selection_manifest_path_cannot_be_influenced_by_a_row() {
+    let source = non_comment_source(BENCH_GATE_SOURCE);
+
+    // THE SIGNATURE IS THE PROOF, and it is asserted rather than described. A reviewer must be
+    // able to settle "can a row choose this path?" from the declaration alone — a strictly
+    // stronger guarantee than a body that happens to be correct today.
+    assert!(
+        source
+            .contains("pub fn selection_manifest_path(bench_dir: &Path, cell: CellKey) -> PathBuf"),
+        "the derived-path helper must take only a benchmark directory and a cell key; a \
+         `&BenchRow` parameter would re-open exactly the surface gap 1 closed"
+    );
+
+    // NO SECOND DEFINITION OF A MANIFEST'S IDENTITY (OPS-03). `SelectionManifest::from_bytes`
+    // verifies `sha256(payload.to_canonical_bytes()) == semantic_hash` BEFORE returning, so a
+    // recomputation here would be a second definition that drifts. This guard goes red on the
+    // obvious way to write one.
+    assert!(
+        !source.contains("to_canonical_bytes()).map_or_else"),
+        "non-vacuity: the guard's haystack must still hold the manifest's own digest check"
+    );
+    for forbidden in
+        ["sha256_hex(&manifest.payload", "manifest.payload.to_canonical_bytes", "verify_digest()"]
+    {
+        assert!(
+            !source.contains(forbidden),
+            "`{forbidden}` would recompute a selection manifest's semantic_hash inside \
+             bench_gate. `SelectionManifest::from_bytes` already verifies it before returning; \
+             two definitions of one value disagree eventually and invisibly (OPS-03)"
+        );
+    }
+
+    // The comparison must be EXACT. Each of these is a plausible relaxation that would accept
+    // a doctored key, and `bench_gate_a_hash_agreeing_in_its_first_characters_is_still_a_refusal`
+    // is the behavioural half of the same statement.
+    for forbidden in ["eq_ignore_ascii_case", "starts_with(&row.payload.selection", "[..16]"] {
+        assert!(
+            !source.contains(forbidden),
+            "`{forbidden}` would weaken the pairing-key comparison below exact byte equality"
+        );
+    }
+
+    // And the cell key is WIDENED, never the manifest narrowed: a `try_from` that failed would
+    // silently change the question from "the same seed" to "the same seed, if it fits".
+    assert!(
+        source.contains("u64::from(cell.seed)"),
+        "the seed comparison must widen the cell key with u64::from"
+    );
+}
+
+#[test]
 fn bench_gate_layout_constants_agree_with_the_shipped_row_filename_grammar() {
     // The gate resolves rows by NAME. Two spellings of a filename are two filenames, and a
     // drift would report `row_file_missing` for a path the writer never used.
@@ -2652,6 +2721,25 @@ fn bench_gate_layout_constants_agree_with_the_shipped_row_filename_grammar() {
     assert_eq!(LEDGER_DIR, "ledger");
     assert_eq!(RUN_MANIFEST_FILE, "run-manifest.json");
     assert_eq!(CONTRACTED_CANDIDATES_TRAINED, 1);
+
+    // THE SELECTION-MANIFEST SPELLING, cross-pinned the same way. The fixture builds this path
+    // from a literal and the gate builds it from `selection_manifest_path`; a drift between
+    // them would make the fixture write forty manifests the gate never finds and report
+    // `evidence_file_missing` for a file that is on disk.
+    assert_eq!(SELECTIONS_DIR, "selections");
+    assert_eq!(SELECTION_MANIFEST_FILE, "selection-manifest.json");
+    let bench = Path::new("/tmp/bench");
+    assert_eq!(
+        selection_manifest_path(bench, CellKey::new(Method::Setfit, 16, 29)),
+        bench.join(selection_manifest_rel(16, 29))
+    );
+    // BOTH METHODS OF A PAIR RESOLVE THE SAME FILE — the pairing design, asserted rather than
+    // described. A path that took the method into account would give the two halves of a pair
+    // two different manifests and make `pairing_rule` unsatisfiable by construction.
+    assert_eq!(
+        selection_manifest_path(bench, CellKey::new(Method::Setfit, 8, 13)),
+        selection_manifest_path(bench, CellKey::new(Method::Lora, 8, 13)),
+    );
 }
 
 #[test]
@@ -2898,7 +2986,7 @@ fn bench_gate_the_single_cell_door_refuses_a_cell_outside_the_active_scope() {
 }
 
 #[test]
-fn bench_gate_the_variant_tag_table_gained_exactly_the_two_arms_this_round_authorised() {
+fn bench_gate_the_variant_tag_table_gained_exactly_the_two_arms_this_round_authorised_05_16() {
     // Counted over the SHIPPED SOURCE rather than eyeballed in a diff, because a diff review is
     // exactly what missed this class of change before.
     //
@@ -2912,10 +3000,25 @@ fn bench_gate_the_variant_tag_table_gained_exactly_the_two_arms_this_round_autho
     //   * `evidence_file_missing` — WR-06. An absent LOCK or LEDGER was reported as a missing
     //     ROW file with a remedy naming the wrong artifact.
     //
-    // The four contract-derived comparisons this round also added (contract_id on both the row
-    // and the manifest, calibration_split, warmup_count, cold_measured_in_child_process) mint
+    // The four contract-derived comparisons 05-15 also added (contract_id on both the row and
+    // the manifest, calibration_split, warmup_count, cold_measured_in_child_process) mint
     // NOTHING: they reuse `row_schema_refused`. That asymmetry is the point of this guard — a
     // new arm has to be argued for, one at a time.
+    //
+    // 05-16 mints exactly TWO more, 15 -> 17, and each is argued separately because they are
+    // NOT reachable by the same attack:
+    //   * `selection_manifest_mismatch`      — gap 2. The pairing key was never recomputed
+    //     from the committed manifest, so `apr setfit bench report` returned 0 with the whole
+    //     `selections/` tree deleted and with a row's key doctored to 64 zeros. Reusing
+    //     `provenance_mismatch` would have filed a PAIRING-KEY forgery under the lock/ledger
+    //     recomputation, which names a different file and carries a different remedy.
+    //   * `selection_manifest_cell_mismatch` — the transplant. A manifest from another cell
+    //     seals correctly and hashes correctly, so a producer who also doctors the row's key
+    //     satisfies the hash check completely; this is the second, independent statement of
+    //     which cell drew the selection, and folding it into the tag above would tell an
+    //     operator to look for a digest disagreement that does not exist.
+    // 05-16's missing-manifest case mints NOTHING — it reuses `evidence_file_missing` via a
+    // new `EvidenceKind`, which is the default answer and is why only two arms appear here.
     const GATE_SOURCE: &str = include_str!("bench_gate.rs");
     let table = GATE_SOURCE
         .split_once("pub const fn variant_tag(&self) -> &'static str {")
@@ -2926,11 +3029,16 @@ fn bench_gate_the_variant_tag_table_gained_exactly_the_two_arms_this_round_autho
         .0;
     let arms = table.matches("=> \"").count();
     assert_eq!(
-        arms, 15,
-        "BenchGateError::variant_tag has {arms} arms; it had 13 before 05-15 and that plan \
-         authorised exactly two. A sixteenth would be a variant nobody argued for",
+        arms, 17,
+        "BenchGateError::variant_tag has {arms} arms; it had 13 before 05-15, 15 after it, and \
+         05-16 authorised exactly two more. An eighteenth would be a variant nobody argued for",
     );
-    for minted in ["evidence_path_escape", "evidence_file_missing"] {
-        assert!(table.contains(minted), "the `{minted}` arm must be the one that was minted");
+    for minted in [
+        "evidence_path_escape",
+        "evidence_file_missing",
+        "selection_manifest_mismatch",
+        "selection_manifest_cell_mismatch",
+    ] {
+        assert!(table.contains(minted), "the `{minted}` arm must be one of those argued for");
     }
 }
