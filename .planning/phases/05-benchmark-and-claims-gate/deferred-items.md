@@ -324,3 +324,101 @@ A phase whose thesis is "refuse incomplete or unequal claims" should not leave r
 unrecorded, and CLAUDE.md's own lesson is that a gate nobody runs is a gate that stops being
 run. `make setfit-bench-tests` and `make contract-audit-phase5` — the two gates 05-11 owns —
 are both green; these three are not, and they were already not before this plan started.
+
+---
+
+## D-ITEM-05-17-A — the BENCH ROW SEAL is build-graph dependent (`serde_json/preserve_order`)
+
+**Found during:** plan 05-17, Task 2, while writing the 40-committed-row agreement
+measurement. It is the third independent measurement of the `bench_row.rs:37-43` comment
+05-15 and 05-16 both flagged, and the first one to find a CONSEQUENCE rather than stale prose.
+
+**Symptom, measured on `benchmarks/tweeteval-stance/rows/setfit-s16-seed13.json`:**
+
+| statement | value |
+|---|---|
+| the envelope's own `semantic_hash` | `1c54f3b4e38540040a2a2224a424969bae473e7b28da6b33ee2fb4be9f1eae69` |
+| `sha256` over the payload in **declaration order** | `1c54f3b4…` — reproduces |
+| `sha256` over the payload **key-sorted** | `fafda6485f47531aaf277a095ea782cd86ba148e694956bb902e3e0d9c5ad04c` |
+| what `BenchRow::from_bytes` computed under `cargo test -p aprender-train --lib --features setfit` | `fafda648…` — the KEY-SORTED one |
+
+So the SAME committed row parses under the shipped `apr` binary and is refused as
+`row_digest_mismatch` under the `aprender-train` test binary. Measured over all 40 rows:
+declaration order reproduces **40/40**, key-sorted **0/40**.
+
+**Cause, named rather than inferred.** `BenchRowPayload::to_canonical_bytes` serializes through
+`serde_json::Value`, whose `Map` is an `IndexMap` when the `serde_json/preserve_order` feature
+is enabled anywhere in the binary's dependency graph and a `BTreeMap` when it is not.
+`cargo tree -p apr-cli --features setfit -e features -i serde_json` shows
+`serde_json feature "preserve_order" <- pmcp v2.19.3`; the same query against
+`aprender-train` shows no `preserve_order` at all. `pmcp` is in `apr-cli`'s graph (the MCP
+servers) and absent from `aprender-train`'s.
+
+**Why the module comment is worse than wrong.** `bench_row.rs:37-43` says the digest is
+key-sorted "no workspace crate enables `preserve_order`" and concludes it is "independent of
+Rust field-declaration order, so adding a field in a different position cannot silently change
+every historical digest". Both halves are false today, and the second is the load-bearing one:
+declaration order IS what the committed digests encode, so reordering a struct field WOULD
+silently invalidate all 40 rows and 40 manifests — and so would ADDING OR REMOVING A DEPENDENCY
+that touches `serde_json/preserve_order` anywhere in a binary's graph. A cargo feature-unification
+change, with no code change at all, can flip the whole committed evidence set between "verifies"
+and "refused". An auditor who builds a different binary does not reproduce the guarantee.
+
+**Why 05-17 did not fix it.** `crates/aprender-train/src/train/setfit/bench_row.rs` is outside
+this plan's `files_modified`, and a real fix — pinning the canonicalization explicitly rather
+than inheriting it from feature unification — re-seals 40 rows, 40 selection manifests and the
+run manifest, which is a plan of its own with its own evidence obligations. 05-17's measurement
+test routes around it deliberately and says so in its own doc comment, so the next reader cannot
+lose the finding: it deserializes the `payload` object directly instead of calling
+`BenchRow::from_bytes`.
+
+**Action.** Own ticket. The fix is to make `to_canonical_bytes` state its key order rather than
+inherit it (serialize through a type whose ordering is fixed, or sort explicitly), re-seal the
+committed evidence in the same commit, and add a test that the digest of a fixed payload equals
+a pinned constant — which is the only shape of test that can catch feature-unification drift,
+because every test that recomputes the digest the same way the code does will agree with
+whatever the code currently produces.
+
+---
+
+## D-ITEM-05-17-B — `uuid_v4()` in `aprender-test-lib` is a timestamp, and its uniqueness test fails on this host
+
+**Found during:** plan 05-17's post-implementation workspace regression. The run reported
+**85 failed** against a baseline of 84; the one beyond baseline is
+`aprender-test-lib brick::pipeline::tests::test_uuid_v4_generates_unique_ids`.
+
+**Proven not caused by 05-17** — three independent controls:
+- `git diff --stat 49832d05c..HEAD -- crates/aprender-test-lib/` is EMPTY: the file is
+  byte-identical to the commit the 84-failure baseline was measured at, yet it passed there
+  and fails here.
+- `cargo tree -p aprender-test-lib` declares no dependency on `aprender-train`, `apr-cli` or
+  `aprender-core` — no path exists by which this plan's change could reach it.
+- Zero of the 85 failures are in `bench_gate`, `bench_metrics`, `bench_row` or `setfit_bench`.
+
+**The real defect, which is worth a ticket rather than a rerun.**
+`crates/aprender-test-lib/src/brick/pipeline.rs`'s `uuid_v4()` is
+`format!("{:x}{:x}", SystemTime::now().duration_since(UNIX_EPOCH).as_nanos(), process::id())`
+— a TIMESTAMP wearing a UUID's name. `test_uuid_v4_generates_unique_ids` generates 100 in a
+tight loop and asserts `ids.len() >= 90`, so its verdict is a function of the host's clock
+resolution and loop speed, not of the code. It failed **5/5** on re-run here (deterministic on
+this box today, not flaky), and it passed on the same bytes three hours earlier.
+
+**Action.** Either give `uuid_v4()` a real entropy source or a monotonic counter, or delete a
+test whose pass depends on the machine being slow enough. A "unique ID" that collides under a
+fast loop is a latent defect in anything that uses it as a key, not only in its own test.
+
+---
+
+## D-ITEM-05-17-C — `verify_tests.rs:628` fails `clippy::search_is_some` under `--all-targets`
+
+**Found during:** plan 05-17, Task 1, running
+`cargo clippy -p aprender-train --lib --features setfit --no-deps --all-targets -- -D warnings`
+(rc=101).
+
+`crates/aprender-train/src/train/setfit/verify_tests.rs:628` writes
+`src[door_at + 1..].find("…").is_none()`, which clippy wants as `!…contains(…)`.
+
+**Pre-existing and out of scope:** the file is untouched by 05-17, and the plan's own literal
+clippy line (`--lib`, without `--all-targets`) does not compile `#[cfg(test)]` modules and is
+rc=0. Recorded because a later plan that widens its clippy scope to `--all-targets` will hit it
+and should not mistake it for its own.

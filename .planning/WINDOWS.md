@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 14
+open_count: 16
 waived_count: 2
 fixed_count: 0
-total_count: 16
-last_updated: 2026-09-11T22:23:42.862Z
+total_count: 18
+last_updated: 2026-09-12T01:12:33.076Z
 ---
 
 # Broken Windows Ledger
@@ -31,6 +31,8 @@ last_updated: 2026-09-11T22:23:42.862Z
 | 14 | 05 | deviation | scripts/setfit_bench_gate_doctor.py |  | Probe helper extracted to a sibling .py not in 05-15 files_modified; bashrs cannot parse a quoted heredoc body (12 phantom shell errors). Load-bearing for the door probe. | open |  | 2026-09-11T22:23:42.703Z |  |
 | 15 | 05 | lint-warning | crates/aprender-compute/src |  | cargo clippy -p aprender-train --features setfit -- -D warnings exits 101 on pre-existing aprender-compute / aprender-present-terminal findings; the 05-15 plan verification line cannot pass on this tree. | open |  | 2026-09-11T22:23:42.783Z |  |
 | 16 | 05 | unmet-truth | crates/aprender-train/src/train/setfit/bench_row.rs | 37 | Module doc claims canonical bytes are key-sorted (no preserve_order). Measured false: file-order reproduces both committed digests, sorted reproduces neither. | open |  | 2026-09-11T22:23:42.862Z |  |
+| 17 | 05 | deviation | crates/aprender-train/src/train/setfit/bench_row.rs | 37 | The bench row seal is build-graph dependent: serde_json/preserve_order (via pmcp) makes to_canonical_bytes emit declaration order in apr-cli and key-sorted in aprender-train, so the same committed row verifies in one binary and is refused in the other (D-ITEM-05-17-A) | open |  | 2026-09-12T01:12:32.984Z |  |
+| 18 | 05 | deviation | crates/aprender-test-lib/src/brick/pipeline.rs | 1965 | uuid_v4() is a timestamp, not a UUID; test_uuid_v4_generates_unique_ids fails 5/5 on this host and its verdict depends on clock resolution (D-ITEM-05-17-B) | open |  | 2026-09-12T01:12:33.076Z |  |
 
 ````json
 [
@@ -224,6 +226,30 @@ last_updated: 2026-09-11T22:23:42.862Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-11T22:23:42.862Z",
+    "resolved_at": null
+  },
+  {
+    "id": 17,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "crates/aprender-train/src/train/setfit/bench_row.rs",
+    "line": 37,
+    "description": "The bench row seal is build-graph dependent: serde_json/preserve_order (via pmcp) makes to_canonical_bytes emit declaration order in apr-cli and key-sorted in aprender-train, so the same committed row verifies in one binary and is refused in the other (D-ITEM-05-17-A)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-12T01:12:32.984Z",
+    "resolved_at": null
+  },
+  {
+    "id": 18,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "crates/aprender-test-lib/src/brick/pipeline.rs",
+    "line": 1965,
+    "description": "uuid_v4() is a timestamp, not a UUID; test_uuid_v4_generates_unique_ids fails 5/5 on this host and its verdict depends on clock resolution (D-ITEM-05-17-B)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-12T01:12:33.076Z",
     "resolved_at": null
   }
 ]
