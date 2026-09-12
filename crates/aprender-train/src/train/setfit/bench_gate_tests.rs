@@ -98,13 +98,6 @@ use serde::Deserialize;
 use tempfile::TempDir;
 
 use super::*;
-// The SHIPPED metric surfaces, imported so the fixture's quality blocks are computed by the
-// SAME functions `assemble_quality_block` calls (05-17). Any other route would give the phase a
-// second definition of `f_avg`.
-use aprender::metrics::matthews_corrcoef;
-
-use crate::eval::classification::{f1_average_for_classes, Average, MultiClassMetrics};
-use crate::train::setfit::bench_metrics::OFFICIAL_F_AVG_CLASSES;
 use crate::train::setfit::bench_row::ExpectationScope;
 use crate::train::setfit::bench_row::{
     BenchLockRef, BenchRowPayload, HostIdentity, LoraEvidence, QualityBlock, ResourceBlock,
@@ -181,27 +174,6 @@ fn synthetic_confusion(spec: RunSpec, cell: CellKey) -> Vec<Vec<u64>> {
         vec![(11 + method_offset) - seed_index, (27 + seed_index) - method_offset, 2],
         vec![3, 4, 33 + shots_index],
     ]
-}
-
-/// Expand a confusion matrix back into the `(y_pred, y_true)` index vectors that produced it.
-///
-/// Pushes `count` copies of `(predicted, true)` for each `[true][predicted]` cell, reconstructing
-/// the exact MULTISET of prediction pairs the matrix records. Every metric below is a function of
-/// the counts alone and all of them accumulate from integers, so the order the pairs are emitted
-/// in cannot change any result — `bench_metrics_the_recomputation_is_order_independent` asserts
-/// that rather than leaving it as a claim.
-fn expand_confusion(matrix: &[Vec<u64>]) -> (Vec<usize>, Vec<usize>) {
-    let mut y_pred = Vec::new();
-    let mut y_true = Vec::new();
-    for (true_index, row) in matrix.iter().enumerate() {
-        for (pred_index, &count) in row.iter().enumerate() {
-            for _ in 0..count {
-                y_pred.push(pred_index);
-                y_true.push(true_index);
-            }
-        }
-    }
-    (y_pred, y_true)
 }
 
 /// The synthetic headline metric for one cell, DERIVED from that cell's confusion matrix.
@@ -347,29 +319,23 @@ fn synthetic_ledger_line(cell: CellKey) -> String {
 fn synthetic_quality(spec: RunSpec, cell: CellKey) -> QualityBlock {
     let ordered_labels = synthetic_labels();
     let confusion_matrix = synthetic_confusion(spec, cell);
-    let (y_pred, y_true) = expand_confusion(&confusion_matrix);
-    let metrics = MultiClassMetrics::from_predictions_with_min_classes(
-        &y_pred,
-        &y_true,
-        ordered_labels.len(),
-    );
-    let f_avg = f1_average_for_classes(&metrics.f1, &OFFICIAL_F_AVG_CLASSES)
-        .expect("the three-label synthetic map contains classes 1 and 2");
-    let macro_f1 = metrics.f1_avg(Average::Macro);
-    let mcc = f64::from(matthews_corrcoef(&y_pred, &y_true));
-    let n_test_rows = y_true.len() as u64;
+    // THROUGH THE PRODUCTION RECOMPUTATION ITSELF, so the fixture and the gate hold exactly one
+    // definition of each number rather than two that have to be kept in step. The doctored rows
+    // are what prove the gate; the control's job is only to be a run the gate must accept.
+    let recomputed = quality_from_confusion_matrix(&confusion_matrix, &ordered_labels)
+        .expect("the synthetic confusion matrix is a well-formed 3x3 over three labels");
     QualityBlock {
-        f_avg,
-        f_avg_bits: f_avg.to_bits(),
-        macro_f1,
-        macro_f1_bits: macro_f1.to_bits(),
-        per_class_precision: metrics.precision.clone(),
-        per_class_recall: metrics.recall.clone(),
-        per_class_f1: metrics.f1.clone(),
-        mcc,
-        mcc_bits: mcc.to_bits(),
+        f_avg: recomputed.f_avg,
+        f_avg_bits: recomputed.f_avg.to_bits(),
+        macro_f1: recomputed.macro_f1,
+        macro_f1_bits: recomputed.macro_f1.to_bits(),
+        per_class_precision: recomputed.per_class_precision,
+        per_class_recall: recomputed.per_class_recall,
+        per_class_f1: recomputed.per_class_f1,
+        mcc: recomputed.mcc,
+        mcc_bits: recomputed.mcc.to_bits(),
         confusion_matrix,
-        n_test_rows,
+        n_test_rows: recomputed.n_rows,
         ordered_labels,
         ece_top_label_validation: 0.05,
         ece_top_label_validation_bits: 0.05_f64.to_bits(),
