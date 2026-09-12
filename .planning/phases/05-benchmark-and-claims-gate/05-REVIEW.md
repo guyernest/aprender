@@ -1,466 +1,466 @@
 ---
 phase: 05-benchmark-and-claims-gate
-reviewed: 2026-09-08T00:00:00Z
+reviewed: 2026-09-12T00:00:00Z
 depth: standard
-files_reviewed: 52
+supersedes: "the 4e80e48cc review of this phase (previous 05-REVIEW.md, 52 files)"
+scope_note: "Tier-2 SUMMARY-derived scope for the 05-15 / 05-16 / 05-17 gap-closure work only. The
+  aprender-image / aprender-mcp-chronos / spectral-indices files that a raw diff against
+  4e80e48cc also lists belong to unrelated commit fdf6b1802 and were NOT reviewed."
+files_reviewed: 12
 files_reviewed_list:
-  - crates/apr-cli/Cargo.toml
-  - crates/apr-cli/src/commands/data_tweeteval.rs
-  - crates/apr-cli/src/commands/eval/setfit_tests.rs
-  - crates/apr-cli/src/commands/finetune_display_tests.rs
-  - crates/apr-cli/src/commands/finetune_selection_tests.rs
-  - crates/apr-cli/src/commands/finetune_tests.rs
-  - crates/apr-cli/src/commands/finetune.rs
-  - crates/apr-cli/src/commands/mod.rs
-  - crates/apr-cli/src/commands/output_verification.rs
-  - crates/apr-cli/src/commands/predict_tests.rs
-  - crates/apr-cli/src/commands/setfit_bench_tests.rs
-  - crates/apr-cli/src/commands/setfit_bench.rs
-  - crates/apr-cli/src/commands/setfit_train.rs
-  - crates/apr-cli/src/dispatch_analysis.rs
-  - crates/apr-cli/src/dispatch.rs
-  - crates/apr-cli/src/model_ops_commands.rs
-  - crates/apr-cli/src/setfit_commands.rs
-  - crates/apr-cli/tests/setfit_cli_lifecycle.rs
-  - crates/apr-cli/tests/setfit_parity.rs
-  - crates/aprender-core/src/calibration_tests.rs
-  - crates/aprender-core/src/calibration.rs
-  - crates/aprender-core/src/error.rs
-  - crates/aprender-core/src/generated_contracts.rs
-  - crates/aprender-core/src/stats/hypothesis.rs
-  - crates/aprender-core/src/stats/mod.rs
-  - crates/aprender-core/src/stats/tests_claims_stats.rs
-  - crates/aprender-train/src/eval/classification/metrics.rs
-  - crates/aprender-train/src/finetune/classify_pipeline/mod.rs
-  - crates/aprender-train/src/finetune/classify_pipeline/training.rs
-  - crates/aprender-train/src/finetune/classify_reload_tests.rs
-  - crates/aprender-train/src/finetune/classify_trainer_tests.rs
-  - crates/aprender-train/src/finetune/classify_trainer.rs
-  - crates/aprender-train/src/finetune/mod.rs
-  - crates/aprender-train/src/train/setfit/apr_evaluate_row_tests.rs
-  - crates/aprender-train/src/train/setfit/apr_evaluate_tests.rs
-  - crates/aprender-train/src/train/setfit/apr_evaluate.rs
-  - crates/aprender-train/src/train/setfit/bench_gate_tests.rs
   - crates/aprender-train/src/train/setfit/bench_gate.rs
-  - crates/aprender-train/src/train/setfit/bench_metrics_tests.rs
+  - crates/aprender-train/src/train/setfit/bench_gate_tests.rs
   - crates/aprender-train/src/train/setfit/bench_metrics.rs
-  - crates/aprender-train/src/train/setfit/bench_row_tests.rs
-  - crates/aprender-train/src/train/setfit/bench_row.rs
-  - crates/aprender-train/src/train/setfit/evidence.rs
-  - crates/aprender-train/src/train/setfit/mod.rs
-  - crates/aprender-train/src/train/setfit/thresholds.rs
-  - crates/aprender-train/src/train/setfit/tune.rs
-  - crates/aprender-train/src/train/setfit/verify.rs
-  - crates/aprender-train/src/transformer/model.rs
-  - crates/aprender-train/tests/setfit_apr_lifecycle.rs
+  - crates/aprender-train/src/train/setfit/bench_metrics_tests.rs
+  - crates/apr-cli/src/commands/setfit_bench.rs
+  - crates/apr-cli/src/commands/setfit_bench_tests.rs
+  - scripts/setfit_bench_gate_door_probe.sh
+  - scripts/setfit_bench_gate_doctor.py
   - Makefile
-  - scripts/run_bench_cells.sh
-  - scripts/setfit_fixtures/gen_claims_fixtures.py
+  - contracts/setfit-benchmark-claims-v1.yaml
+  - benchmarks/tweeteval-stance/report.md
+  - .planning/phases/05-benchmark-and-claims-gate/05-15-gate-input-surface.md
 findings:
-  critical: 2
-  warning: 16
-  info: 4
-  total: 22
+  critical: 1
+  warning: 8
+  info: 5
+  total: 14
 status: issues_found
 ---
 
-# Phase 5: Code Review Report
+# Phase 5: Code Review Report (05-15 / 05-16 / 05-17 gap closure)
 
-**Reviewed:** 2026-09-08
+**Reviewed:** 2026-09-12
 **Depth:** standard
-**Files Reviewed:** 52
+**Files Reviewed:** 12
 **Status:** issues_found
+**Supersedes:** the `4e80e48cc` review of this phase.
 
 ## Summary
 
-Phase 5 ships a falsifiable claims gate (`bench_row` / `bench_gate` / `bench_metrics`), an
-f64 claims-statistics surface in `aprender-core::stats::hypothesis`, two new multiclass
-calibration metrics, a 40-cell sweep driver, and a large Makefile hardening pass. The
-typestate design (`VerifiedRunSet` with no public constructor) and the fixture-pinned f64
-statistics are genuinely well built, and the numeric closed forms check out against the
-frozen scipy fixtures.
+The three gap closures do what they say at the level that matters most. I traced
+`resolve_committed_evidence_path` against every bypass on the hunt list and **found none**:
+stage 1 is total and filesystem-independent, `Component::ParentDir` / `RootDir` / `Prefix` are
+all refused, containment is genuinely `Path::starts_with` over **both** sides canonicalized
+(`bench_gate.rs:918`), the TOCTOU residual is disclosed in the doc comment rather than hidden,
+`selection_manifest_path` takes no `BenchRow` so there is nothing to steer, `verify_selection_binding`
+compares the 64-hex key by full `String` equality with no truncation or case folding
+(`bench_gate.rs:1712`), `verify_quality_closed_form` compares every `f64` through `to_bits()`
+and never `==`, the confusion-matrix total is accumulated with `saturating_add` and
+short-circuits before any allocation (`bench_metrics.rs:462-474`), `matthews_corrcoef`
+accumulates in `i64` so the expansion really is order-independent, and the CLI fails closed —
+any `BenchGateError` becomes `CliError::ValidationFailed` and the rendering functions are never
+reached (`setfit_bench.rs:2517-2522`). There is no `unwrap()` in any non-test code in scope.
+The door probe captures status with `cmd > log 2>&1; rc=$?` throughout and never through a pipe,
+and every one of its `grep` assertions matches a literal that really is in a `Display` arm — I
+checked all six against `bench_gate.rs:630-762`.
 
-Two defects reach BLOCKER. The first is the Makefile hardening itself: the new
-`.SHELLFLAGS := -o pipefail -c` is dead — a pre-existing `.SHELLFLAGS := -e -c` 28 lines
-later overwrites it, so none of the 14 laundering pipes the change was written to close are
-actually closed. This was verified by running Make, not by reading. The second is a
-path-traversal in the gate's provenance recomputation: the "committed lock / ledger bytes"
-a row names are joined to the bench directory without any check that the path is relative,
-so an absolute or `..`-bearing path in an untrusted transported row resolves outside the
-benchmark directory entirely — defeating the exact invariant the module documents.
+What I did find falls into three groups.
 
-Both are of the class CLAUDE.md's Verification Discipline section names: a guard that
-cannot fire, and a claim about a file that is not the file it claims.
+**One blocker, and it is in the phase's own tooling rather than the gate.** The Python fixture
+doctor's "refuse to doctor the real tree" guard is both cwd-relative and a *string*-prefix test —
+the exact containment mistake 05-15 spent a whole plan removing from the Rust — so it fails open
+outside the repo root and the script will then move a committed lock record out of the tree and
+overwrite committed rows and the run manifest.
 
-## Narrative Findings (AI reviewer)
+**A stale completeness artifact, which is the class invariant this phase exists to enforce.**
+`05-15-gate-input-surface.md` still records `payload.quality.ordered_labels` and
+`payload.quality.confusion_matrix` as having "no gate consumer" and files `ordered_labels` under
+"the identifying facts of the run, which nothing under `bench_dir` attests". Since 05-17 both
+**steer** the recomputation — `ordered_labels.len()` sets the class count, the matrix dimension
+check and which indices `f_avg` averages — and `ordered_labels` is compared against nothing
+anywhere on the gate path. The artifact's whole reason for existing is that a field which moved
+class must not be describable by a stale table.
+
+**Several disclosure and negative-control defects.** The published report now prints that the
+row's own confusion matrix was "RECOMPUTED ... rather than read off the rows"; the contract
+asserts the three residual statements agree "WORD FOR WORD" when they do not; the "ragged
+matrix" case in both suites is not ragged, so the branch that catches a ragged matrix is never
+the branch that decides any test; one of the path table's three "acceptance rows" is a verbatim
+duplicate of another; and the only end-to-end proof that the *shipped* door refuses is a Make
+target that nothing depends on and that is not even in `.PHONY`.
+
+Known and already filed (`D-ITEM-05-17-A`, `-B`, `-C`, the workspace clippy debt,
+`bench_row.rs:37-43`) are not re-reported. I found no *new* in-scope code whose correctness
+depends on which `serde_json` feature set is linked.
 
 ## Critical Issues
 
-### CR-01: The new `.SHELLFLAGS` pipefail hardening is overwritten and never takes effect
+### CR-01: The fixture doctor's "refuse to doctor the real tree" guard fails open outside the repo root, then destroys committed evidence
 
-**File:** `Makefile:29` (overwritten by `Makefile:57`)
-**Issue:**
-This phase added, with a 17-line justification block:
+**File:** `scripts/setfit_bench_gate_doctor.py:110-111`
 
-```make
-# Measured on this Makefile before the change: 577 recipe lines, 14 with a pipe.
-# The worst was the release gate itself, `contracts:` -> `pv lint contracts/ 2>&1
-# | tail -5`, which could never fail the build no matter what pv reported.
-.SHELLFLAGS := -o pipefail -c
+```python
+if os.path.realpath(bench_dir).startswith(os.path.realpath("benchmarks")):
+    raise SystemExit("refusing to doctor the committed benchmark directory")
 ```
 
-Line 57 of the *same file* still carries the pre-existing `.SHELLFLAGS := -e -c`. `:=` is a
-plain assignment and the last one in the makefile wins, so the value in force for every
-recipe is `-e -c`. `pipefail` is not set anywhere. Measured, not inferred:
+**Issue:** Two independent defects in one line.
 
-```
-$ cat > /tmp/probe.mk <<'EOF'
-include Makefile
-shellflags-probe:
-	@echo "flags=[$(.SHELLFLAGS)]"
-	@false | true
-	@echo "pipefail-did-not-fire"
-EOF
-$ make -f /tmp/probe.mk shellflags-probe; echo "rc=$?"
-flags=[-e -c]
-pipefail-did-not-fire
-rc=0
-```
+1. **`os.path.realpath("benchmarks")` is resolved against the process's cwd**, and `realpath`
+   does not require the path to exist — it happily returns `<cwd>/benchmarks` for a directory
+   that is not there. The one caller (`setfit_bench_gate_door_probe.sh:85`) does
+   `cd "$REPO_ROOT"` first, so the guard happens to be correct there and nowhere else. The
+   module docstring ends with a `Usage:` line (`:58`) and the file has a `__main__` block
+   (`:172`), so hand invocation is invited. Run from any other directory, e.g.
+   `cd crates && python3 ../scripts/setfit_bench_gate_doctor.py escape ../benchmarks/tweeteval-stance /tmp/x setfit-s8-seed13`,
+   the guard compares `/repo/benchmarks/tweeteval-stance` against `/repo/crates/benchmarks`,
+   does not match, and proceeds.
+2. **`str.startswith` is a string-prefix test on a path.** This is precisely the bug
+   `resolve_committed_evidence_path` exists to avoid — `bench_gate.rs:833-834` documents the
+   `<tmp>/bench` vs `<tmp>/bench-evil` case and the path case table carries a dedicated
+   `prefix_sibling_symlink` row that goes red on it. The same mistake is re-introduced in the
+   same phase's Python. Here it also over-refuses: a scratch tree at `<repo>/benchmarks-scratch`
+   would be wrongly rejected.
 
-Every consequence claimed for the change is false. `contracts:` was rewritten to
-`@. scripts/pv_bin.sh && "$$PV" lint contracts/ 2>&1 | tail -5` (Makefile:1043) and still
-reports `tail`'s status. This is precisely the #2336/#2360 defect class the comment block
-cites, reintroduced by the fix for it.
+**What then happens** is not a no-op. In `escape` mode the script calls
+`shutil.move(lock_path, escape_path)` (`:123`), physically moving
+`benchmarks/tweeteval-stance/locks/setfit-s8-seed13.lock.json` out of the repository; then
+`write_pretty(row_path, row)` (`:153`) overwrites the committed row with a doctored
+`lock_record_path`, and `write_pretty(manifest_path, manifest)` (`:166`) overwrites
+`run-manifest.json` with a re-sealed digest. The result is a *self-consistent* doctored tree —
+every digest is repaired by design — so `apr setfit bench report` would refuse only at the path
+escape, and `git status` would show three modified/deleted files that look like a legitimate
+re-seal. These 40 rows plus the manifest are the only evidence the entire phase rests on.
 
-Compounding it, the two comment blocks now contradict each other on the record: lines 21-28
-argue `-e` was *deliberately excluded* ("248 recipe lines use `;` chains (-e would abort
-them mid-recipe)"), while lines 49-54 argue `-e` is *deliberately the only flag set* and
-`-o pipefail` was excluded for SIGPIPE reasons. A reader cannot tell which policy the file
-is under.
+**Fix:** make the guard absolute, repo-derived and component-wise, and check it before anything
+else touches the filesystem:
 
-**Fix:** Delete the duplicate and set one value, then re-run the probe above to confirm
-`false | true` exits non-zero:
+```python
+from pathlib import Path
 
-```make
-# Makefile:57 — single site
-.SHELLFLAGS := -e -o pipefail -c
-```
+REPO_ROOT = Path(__file__).resolve().parent.parent
+COMMITTED = (REPO_ROOT / "benchmarks").resolve()
 
-If the blast-radius argument against combining them stands, then delete line 29 and its
-comment block outright rather than leaving a dead assignment that documents a property the
-build does not have. Either way, re-measure the `contracts:`/`coverage:`/`contract-test:`
-pipes with a deliberately-failing producer before claiming the class is closed
-(CLAUDE.md Verification Discipline rules 1 and 8).
-
----
-
-### CR-02: Row-controlled provenance paths escape the benchmark directory (path traversal / arbitrary read)
-
-**File:** `crates/aprender-train/src/train/setfit/bench_gate.rs:963-969` and `:993-999`
-**Issue:**
-`verify_provenance` resolves the file a row names by:
-
-```rust
-let relative = PathBuf::from(&evidence.lock.lock_record_path);
-let path = bench_dir.join(&relative);
-let bytes = read_evidence(cell, &path)?;
+target = Path(bench_dir).resolve()
+if target == COMMITTED or COMMITTED in target.parents:
+    raise SystemExit(
+        "refusing to doctor the committed benchmark directory {0}; this script only "
+        "doctors a scratch copy".format(target)
+    )
 ```
 
-Nothing validates `lock_record_path` (or `candidate_ledger_path`). `bench_row.rs:396-409`
-documents them as "RELATIVE to the benchmark directory" but only declares them as `String`
-with `deny_unknown_fields`; there is no `is_absolute` check, no `Component::ParentDir`
-rejection, and no canonicalise-and-contain check anywhere in `bench_row.rs` or
-`bench_gate.rs`.
-
-`Path::join` with an absolute argument **discards the base**. A row carrying
-`"lock_record_path": "/tmp/attacker/lock.json"` makes the gate read `/tmp/attacker/lock.json`;
-`"../../../elsewhere/lock.json"` escapes upward. Both then hash normally and both **pass**,
-because the only assertion is `sha256(bytes) == row.lock_hash`.
-
-This is not a theoretical input. The `--record` transport mode
-(`crates/apr-cli/src/commands/setfit_bench.rs:913`) exists specifically to ingest a row
-file *executed on a different host*, and validates only digest, schema, cell identity and
-filename — never the embedded paths. The module header states the threat model explicitly
-("A row's `lock_hash` and `candidate_ledger_sha256` are CLAIMS ABOUT FILES", "Provenance is
-recomputed, never trusted"), so the row is by construction untrusted input. The property
-that "selection safety is recomputed from **committed** bytes" silently becomes "recomputed
-from *some* bytes somewhere on this filesystem".
-
-Secondary impact: an arbitrary-file-read primitive (bounded at 16 MiB) driven by attacker
-data, and `EvidenceReadFailed`/`ProvenanceMismatch` messages that echo the resolved path.
-
-**Fix:** Reject non-relative and escaping paths before the join, in `bench_row`'s
-`from_bytes` (so the refusal is a schema refusal, at the earliest door) and defensively in
-`verify_provenance`:
-
-```rust
-fn contained_evidence_path(raw: &str) -> Result<PathBuf, BenchRowError> {
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        return Err(BenchRowError::EvidencePathEscapes { path: raw.to_string(),
-            detail: "must be relative to the benchmark directory".into() });
-    }
-    for component in p.components() {
-        match component {
-            Component::Normal(_) => {}
-            _ => return Err(BenchRowError::EvidencePathEscapes { path: raw.to_string(),
-                     detail: "must contain no `..`, `.`, root or prefix component".into() }),
-        }
-    }
-    Ok(p.to_path_buf())
-}
-```
-
-Then add the two negatives to `bench_gate_tests.rs`'s doctored-negative table (an absolute
-path and a `..` path), because the existing six negatives prove nothing about this route.
-
----
+`Path.parents` is component-wise, so `benchmarks-scratch` is correctly allowed and
+`benchmarks/tweeteval-stance` correctly refused, and `__file__` makes the answer independent of
+cwd. Add a test row (or a `# must-refuse` case in the probe) that invokes the script with a
+`bench_dir` under `benchmarks/` and asserts a non-zero exit with no file touched — the guard
+currently has no negative control at all.
 
 ## Warnings
 
-### WR-01: `is_evidence_failure` misclassifies real evidence failures as transient, and has no case table
+### WR-01: `ordered_labels` now steers the recomputation but is compared against nothing, and the input-surface enumeration still says it has "no gate consumer"
 
-**File:** `scripts/run_bench_cells.sh:289-295`
-**Issue:**
+**File:** `crates/aprender-train/src/train/setfit/bench_metrics.rs:439-456` ·
+`crates/aprender-train/src/train/setfit/bench_gate.rs:1776-1783` ·
+`.planning/phases/05-benchmark-and-claims-gate/05-15-gate-input-surface.md:71,73,236-238,258-260`
 
-```bash
-is_evidence_failure() {
-    log="$1"
-    if grep -qE 'UncalibratedRegime|evidence table|threshold|selection lock|attestation|digest mismatch|already recorded|outside the contracted matrix|candidate' "$log"; then
-```
+**Issue:** `verify_quality_closed_form` passes `quality.ordered_labels` straight into
+`quality_from_confusion_matrix`, where `n_classes = ordered_labels.len()` decides (a) the
+required matrix dimension, (b) the length of all three per-class vectors, (c) the class count
+handed to `MultiClassMetrics::from_predictions_with_min_classes`, and (d) whether
+`f1_average_for_classes(..., &OFFICIAL_F_AVG_CLASSES)` (`[1, 2]`) is in range. Nothing on the
+gate path compares it against anything: `verify_contracted_row_constants`
+(`bench_gate.rs:1254-1299`) closes `contract_id`, `calibration_split`, `warmup_count` and
+`cold_measured_in_child_process` and does not touch it, and `bench_row.rs:341` declares it as a
+bare `Vec<String>`.
 
-The classifier decides whether the operator is told `HALT: evidence-class failure ...
-Re-running will not fix it` or `RESUMING IS SAFE`. Several refusals this phase itself
-introduced contain none of these tokens, so they land on the *dangerous* side:
+Concretely, a producer can ship `ordered_labels = ["none","against","favor","pad"]` with a
+consistent 4×4 matrix. Every cross-check passes, the per-class vectors are length 4,
+`macro_f1` is averaged over four classes, and `f_avg` is `(F1[1]+F1[2])/2` over a label map that
+is not the contract's — while `benchmarks/tweeteval-stance/report.md` prints unconditionally
+"F_avg = (F1_against + F1_favor) / 2, the official TweetEval stance metric". This grants an
+adversary no *numeric* freedom he did not already have via residual (1) (the matrix is
+producer-written), which is why this is a Warning and not a Critical — but it does mean the
+published number need not be the metric the report names it as.
 
-- `BenchMetricsError::LabelOrderMismatch` — "the declared label order ... is not ...".
-- `BenchMetricsError::WrongSplit` — "requires evidence from the `validation` split".
-- `BenchMetricsError::EmptySplit`, `ClassIndexOutsideLabelMap`.
-- `SetFitTrainError::SelectionLabelOutOfRange`, `AprEvaluateError::LabelMapMismatch`.
-- `BenchGateError::RowSlotMismatch` — "the manifest slot and the row payload ...".
+The artifact defect is the sharper half. `05-15-gate-input-surface.md:71` still says
+`confusion_matrix` has "no gate consumer" and `:73` says the same of `ordered_labels`, filing it
+under section **F, "The identifying facts of the run, which nothing under `bench_dir`
+attests"** (`:236-238`). Both are now false: they are the two inputs the whole 05-17 cross-check
+is a function of. That file is the phase's own claim that the input surface was enumerated
+completely, and it is the artifact a future round will read to decide what is still open.
 
-Each of those is exactly the "no re-run can fix it" class, and each is reported as
-transient. Symmetrically, `threshold` and `candidate` are generic enough to fire on
-unrelated infrastructure output.
-
-CLAUDE.md Verification Discipline rule 7 requires guard regexes to ship a must-match /
-must-not-match case table. There is none: `setfit_bench_tests.rs:1542` only asserts that
-the string `is_evidence_failure` appears in the script, and
-`driver_holds_a_single_writer_lock_with_distinct_failure_exit_codes` only greps for
-`UncalibratedRegime`. Both are source-string matches; neither exercises the classifier.
-
-**Fix:** Invert the default — classify as **evidence** unless a known-transient signature
-matches (ENOSPC, "Killed", ssh/network, "Resource temporarily unavailable") — and ship a
-case table:
-
-```bash
-# scripts/lib/bench_failure_cases.txt: one `expect<TAB>fixture-line` per row
-#   evidence   the declared label order ["a"] is not `test_rows`'s own ["b"]
-#   evidence   cell setfit/s8/seed13: ... carries a payload for setfit/s8/seed17
-#   transient  No space left on device (os error 28)
-```
-and a `--self-test` mode in the driver that runs the table and exits non-zero on any
-disagreement, wired into `setfit-bench-tests`.
-
-### WR-02: `assemble_quality_block` can panic instead of returning its typed refusal
-
-**File:** `crates/aprender-core/src/calibration.rs:195-230`, reached from
-`crates/aprender-train/src/train/setfit/bench_metrics.rs:229-234`
-**Issue:** `multiclass_rows` enforces its preconditions with hard `assert!`, including
-`assert!((sum - 1.0).abs() < 1e-3, ...)`. `assemble_quality_block` returns
-`Result<QualityBlock, BenchMetricsError>` and its own error docs say a row of NaNs "is worse
-than a missing row" — but a NaN probability, or an f64→f32 narrowing that pushes a row's sum
-outside 1e-3, aborts the process instead of producing that refusal. The narrowing at
-`bench_metrics.rs:225-229` (`row.iter().map(|&p| p as f32)`) is precisely where such a row
-can appear, and the call is inside a 40-cell sweep whose driver classifies a crash as
-transient (see WR-01).
-
-**Fix:** Add fallible mirrors used by the claims path and keep the `assert!` forms for the
-contract-macro entry points:
+**Fix:** two parts.
+1. In the document: move `ordered_labels` and `confusion_matrix` out of section F into a new
+   class — they are neither "recomputed" nor "compared" nor "carried and read by nothing"; they
+   are *trusted values that steer a comparison*, which is a strictly worse class than (iii) and
+   the one this phase's invariant is about. Restate `ordered_labels`'s open item in those terms.
+2. In the code, close it the way 05-15 closed `contract_id` — a one-line class-(ii) comparison,
+   using the label map the crate already pins:
 
 ```rust
-pub fn try_expected_calibration_error_top_label(
-    probabilities: &[f32], n_classes: usize, labels: &[usize], n_bins: usize,
-) -> Result<f32, CalibrationError> { ... }
-```
-and map `CalibrationError` into a new `BenchMetricsError::DegenerateProbabilities` variant.
-
-### WR-03: The claims-layer moments accept NaN, so the "never a non-finite f64" guarantee does not hold
-
-**File:** `crates/aprender-core/src/stats/hypothesis.rs:330-352`
-**Issue:** `moments_or_zero_variance` guards two degenerate shapes but not non-finite input.
-With any NaN in `values`: `values.iter().all(|&v| v == first)` is false, `mean` is NaN,
-`variance` is NaN, `std == 0.0` is false — so it returns `Ok((NaN, NaN))`. `ttest_1samp_f64`
-then yields `statistic: NaN, pvalue: NaN`, and `paired_ci` yields NaN `low`/`high`/
-`half_width`. `bench_gate::seed_dispersion_ci95` takes the `Ok` arm and emits
-`Some(NaN)` for every bound, which `serde_json` serialises as `null` — the exact Ph3 CR-03
-outcome the doc comment on this function and on `Ci95` claims is unreachable.
-
-**Fix:** Reject non-finite input at the same door:
-
-```rust
-if let Some((i, bad)) = values.iter().copied().enumerate().find(|(_, v)| !v.is_finite()) {
-    return Err(AprenderError::NonFiniteObservation { index: i, value: bad });
-}
-```
-and add a fixture case (`kind: "non_finite_input"`, `expect: "NonFiniteObservation"`) to
-`seed_dispersion_ci_cases.json` so the refusal is asserted rather than assumed.
-
-### WR-04: `mechanism_classes` compares order-and-multiplicity, producing spurious asymmetry notes
-
-**File:** `crates/aprender-train/src/train/setfit/bench_gate.rs:1533-1538`, consumed at
-`crates/apr-cli/src/commands/setfit_bench.rs:2676-2680`
-**Issue:**
-
-```rust
-fn mechanism_classes(mechanisms: &[String]) -> Vec<MechanismClass> {
-    let mut out: Vec<MechanismClass> = mechanisms.iter().map(|m| mechanism_class(m.as_str())).collect();
-    out.dedup();   // only removes CONSECUTIVE duplicates
-    out
+// in verify_contracted_row_constants, beside the other contract-pinned constants
+if row.payload.quality.ordered_labels != CONTRACTED_ORDERED_LABELS {
+    return Err(refuse(format!(
+        "the row declares ordered_labels {:?}, but `tweet-eval-stance-benchmark-v1` at its \
+         pinned revision declares {CONTRACTED_ORDERED_LABELS:?}. `OFFICIAL_F_AVG_CLASSES` \
+         selects indices [1, 2] of THAT map, so a different map publishes a different metric \
+         under the official one's name",
+        row.payload.quality.ordered_labels
+    )));
 }
 ```
 
-The input is `distinct_sorted(...)`, i.e. sorted by *mechanism string*, not by class. Classes
-therefore interleave and `dedup()` does not produce a set. With
-`["child_max_rss_time_l", "sysinfo_sampled_20", "vm_hwm"]` the result is
-`[Exact, Sampled, Exact]`. The renderer then does
+`bench_metrics_tests.rs:355` (`..._label_order_is_evidence_from_the_pinned_dataset_revision`)
+already establishes the map from the dataset contract; this is the same constant reused on the
+read side instead of only the emit side. If pulling a second contract into `bench_gate`'s
+compile-time surface is not wanted this round, at minimum bound the arity
+(`ordered_labels.len() == 3`), which is a one-line refusal with no new dependency.
+
+### WR-02: the equivalence the whole cross-check rests on is asserted nowhere, and the gate fixture is circular
+
+**File:** `crates/aprender-train/src/train/setfit/bench_gate_tests.rs:319-346` ·
+`crates/aprender-train/src/train/setfit/bench_metrics_tests.rs` (absence)
+
+**Issue:** The load-bearing claim is "`quality_from_confusion_matrix` produces bit-for-bit what
+`assemble_quality_block` published for the same counts" — stated in `bench_metrics.rs:33-38`, in
+`bench_gate.rs:1745-1752`, and as a contract invariant
+(`setfit-benchmark-claims-v1.yaml:572-579`, "EXACTNESS IS STRUCTURAL, NOT LUCKY"). Nothing
+asserts it directly:
+
+- `synthetic_quality` (`bench_gate_tests.rs:325`) builds the fixture **by calling
+  `quality_from_confusion_matrix` itself**. The control row of
+  `QUALITY_CROSS_CHECK_CASES` therefore passes by construction and cannot detect an error in
+  the recomputation; it can only detect the gate failing to call it. The comment at `:322-324`
+  acknowledges this ("the fixture and the gate hold exactly one definition") but the consequence
+  — the table's acceptance row is tautological w.r.t. the recomputation — is not stated.
+- `bench_metrics_tests.rs` calls `assemble_quality_block` in nine tests and
+  `quality_from_confusion_matrix` in six, and **never in the same test**. The only cross-anchor
+  is `..._the_forty_committed_rows_agree_with_their_own_confusion_matrices` (`:681`), which
+  compares the recomputation against 40 rows emitted by a *previous* build.
+
+So if `assemble_quality_block` drifted tomorrow (a different MCC surface, a different
+`Average`), the 40-row test stays green on historical evidence, the gate table stays green on a
+circular fixture, and the failure surfaces only as `apr setfit bench report` refusing rows a
+fresh run just emitted.
+
+**Fix:** one test, no new machinery, closing the loop on the toy predictions that already exist:
 
 ```rust
-if group.train_peak_rss_mechanism_classes != group.inference_peak_rss_mechanism_classes {
-    out.push_str(&format!("  ^ {WITHIN_ROW_ASYMMETRY_NOTE}\n"));
+#[test]
+fn bench_metrics_the_recomputation_reproduces_what_the_emitter_published() {
+    // THE EQUIVALENCE THE CROSS-CHECK RESTS ON, asserted on freshly emitted numbers rather
+    // than only on forty rows a previous build wrote.
+    let block = assemble_quality_block(&toy_test_rows(), &toy_validation_rows(), &labels())
+        .expect("the toy split assembles");
+    let back = quality_from_confusion_matrix(&block.confusion_matrix, &block.ordered_labels)
+        .expect("its own matrix is well formed");
+    assert_eq!(block.f_avg.to_bits(), back.f_avg.to_bits());
+    assert_eq!(block.macro_f1.to_bits(), back.macro_f1.to_bits());
+    assert_eq!(block.mcc.to_bits(), back.mcc.to_bits());
+    assert_eq!(block.per_class_precision, back.per_class_precision);
+    assert_eq!(block.per_class_recall, back.per_class_recall);
+    assert_eq!(block.per_class_f1, back.per_class_f1);
+    assert_eq!(block.n_test_rows, back.n_rows);
 }
 ```
 
-so `[Exact, Sampled, Exact]` vs `[Sampled, Exact]` — the same class *set* — reports an
-asymmetry that does not exist. `class_tags` also renders the duplicate
-(`exact_kernel_high_water_mark, sampled_lower_bound, exact_kernel_high_water_mark`) into the
-published table.
+Also worth adding a line to `synthetic_quality`'s comment naming the circularity and pointing at
+this test as the thing that discharges it.
 
-**Fix:** Make it a set with a deterministic order:
+### WR-03: the published report says the confusion matrix was recomputed "rather than read off the rows" — it is read off the row
 
-```rust
-fn mechanism_classes(mechanisms: &[String]) -> Vec<MechanismClass> {
-    let mut out: Vec<MechanismClass> = mechanisms.iter().map(|m| mechanism_class(m)).collect();
-    out.sort_unstable_by_key(|c| c.tag());
-    out.dedup();
-    out
-}
+**File:** `crates/apr-cli/src/commands/setfit_bench.rs:2412-2415, 2584-2588` ·
+`benchmarks/tweeteval-stance/report.md:4-9`
+
+**Issue:** The header now renders:
+
+```
+verified: ... and the evidence below was RECOMPUTED from
+          the committed lock bytes, the committed selection manifest, and
+          the row's own confusion matrix
+          rather than read off the rows.
 ```
 
-### WR-05: `--val-split NaN` bypasses the range guard and silently disables validation
+Two of the three named sources are files opened at paths the row cannot choose. The third —
+"the row's own confusion matrix" — is by definition read off the row; `verify_quality_closed_form`
+opens no file at all (`bench_gate.rs:1770-1783`, and the contract says so in its own `domain`,
+`setfit-benchmark-claims-v1.yaml:558`). "Recomputed from X rather than read off the rows" where
+X *is* a row field is self-contradictory as written, and it reads as a stronger claim than the
+gate makes. The `residual:` paragraph below does say the matrix is producer-written, but the
+`verified:` line is the sentence a reader takes away, and this phase exists because an
+attestation line said something that was not true of the run that printed it.
 
-**File:** `crates/aprender-train/src/finetune/classify_trainer.rs:197-201`,
-`crates/apr-cli/src/model_ops_commands.rs` (`val_split: Option<f32>`)
-**Issue:** `if config.val_split < 0.0 || config.val_split > 0.5` is false for NaN, so NaN
-passes. `split_dataset` then computes `((len as f32) * NaN).ceil() as usize` → `0`, clamped
-by `.max(1)` to a one-row validation set; `let validation_requested = config.val_split > 0.0`
-is false, so the run proceeds as if validation were disabled while one row has been removed
-from training. No refusal, no warning.
+This is shipped: `benchmarks/tweeteval-stance/report.md` is the committed, published artifact.
 
-The new clap flag has no `value_parser` range check. This phase fixed the identical NaN-guard
-class for `--threshold` in `dispatch.rs:564-568` via
-`commands::threshold_arg::guard_f32` (GH-2391, "against a NaN threshold every term is false"),
-and did not apply it to the flag it introduced.
+**Fix:** split the clause so the "rather than read off the rows" qualifier attaches only to the
+two file-derived sources:
+
+```rust
+pub(crate) const PROVENANCE_SOURCES: &str =
+    "the committed lock bytes and the committed selection manifest, at paths the\n\
+     \x20         row cannot choose rather than read off the rows; and every published\n\
+     \x20         accuracy figure recomputed in closed form from the row's own\n\
+     \x20         confusion_matrix, which the residual below scopes";
+```
+
+and drop the trailing `rather than read off the rows.\n` line from `render_header`'s format
+string. Regenerate `report.md` in the same commit — leaving it stale is the defect 05-17's own
+Decision ("The committed `report.md` was refreshed") already ruled on. Add a must-not-match row
+to `setfit_bench_report_residual_concedes_exactly_what_the_gate_still_cannot_refuse` for the
+literal `confusion matrix\n          rather than read off the rows`, so the shape cannot return.
+
+### WR-04: the contract claims the three residual statements agree "WORD FOR WORD"; they do not, and nothing checks it
+
+**File:** `contracts/setfit-benchmark-claims-v1.yaml` (`selection_safety_evidence.residual_risk.amended_4_0_0`)
+
+**Issue:** The amendment says the remaining residuals are "what `apr setfit bench report`'s
+`residual:` line and `bench_gate`'s module header now say WORD FOR WORD", then lists **four**
+items. Measured against the other two artifacts:
+
+- The report's `residual:` (`report.md:10-17`) names three, and omits the closure condition
+  ("closing that needs a committed per-row prediction artifact no run writes today") that both
+  the contract and `bench_gate.rs:85-86` carry.
+- The contract's item (4) (the deferred LoRA arm) appears in neither the report nor the gate
+  header.
+- The three wordings are paraphrases of each other, not identical text.
+
+The 05-17 SUMMARY concedes the gap ("nothing yet catches the gate header or the contract
+drifting from it"), but the contract nonetheless asserts the agreement as a fact. A provable
+contract asserting an unverified cross-artifact identity is the same defect class this phase
+was opened for, and `pv validate` cannot see it.
+
+**Fix:** two options, in order of preference.
+1. Make it true and gate it. Hoist the three residual sentences to one `pub const` in
+   `bench_gate` (e.g. `RESIDUAL_STATEMENTS: [&str; 3]`), have `apr-cli`'s `RESIDUAL_DISCLOSURE`
+   be built from it, and add a test in `bench_gate_tests.rs` asserting each element appears
+   verbatim in `CLAIMS_CONTRACT_YAML` (already `include_str!`-ed at `bench_gate.rs:195`). That
+   is the cross-artifact test the 05-17 SUMMARY identifies as a candidate, and the constant is
+   already compiled in.
+2. If the wordings must differ, soften the claim to what is true — "state the SAME THREE
+   residuals; the wording differs per artifact and the agreement is not yet gated
+   (D-ITEM-…)" — and scope item (4) explicitly to the deferred arm. Do not leave "WORD FOR WORD"
+   standing unverified.
+
+### WR-05: no test exercises a ragged confusion matrix; the branch that catches one never decides any case
+
+**File:** `crates/aprender-train/src/train/setfit/bench_metrics.rs:449-456` ·
+`crates/aprender-train/src/train/setfit/bench_metrics_tests.rs:853` ·
+`crates/aprender-train/src/train/setfit/bench_gate_tests.rs:2235-2237` · `Makefile` (gate banner)
+
+**Issue:** The shape check is a disjunction:
+
+```rust
+if confusion_matrix.len() != n_classes || row_widths.iter().any(|width| *width != n_classes) {
+```
+
+Every case fed to it is caught by the **first** disjunct, which short-circuits the second:
+
+| case | shape | which disjunct |
+|---|---|---|
+| `bench_metrics_tests.rs:853` labelled `"ragged"` | `[[1,2,3],[4,5,6]]` — 2 uniform rows of width 3 | `len() 2 != 3` |
+| `bench_metrics_tests.rs:855` `four_by_four…` | `[[1;4];4]` | `len() 4 != 3` |
+| `bench_gate_tests.rs:2236` `NonSquareMatrix` | `[[1,2,3],[4,5,6]]` | `len() 2 != 3` |
+| `bench_gate_tests.rs:2239` `DimensionMismatch` | 4×4 | `len() 4 != 3` |
+
+Neither test file ever constructs a matrix with `len() == ordered_labels.len()` but a row of a
+different width — i.e. an actually *ragged* matrix, e.g. `[[1,2,3],[4,5],[6,7,8]]`. So
+`row_widths.iter().any(...)` is dead as far as the suite can tell: deleting it leaves every test
+green. (I checked what a regression would do — `ConfusionMatrix::from_predictions_with_min_classes`
+grows its class count from the observed max index rather than indexing blindly
+(`eval/classification/confusion.rs:41-50`), so the consequence is a wrong-arity result caught
+downstream by `cross_check_vector`, not a panic. That is luck, not design.)
+
+Three artifacts nonetheless claim the coverage: the case label `"ragged"`, the Makefile gate
+banner ("three degenerate matrices (ragged, 4x4 against three labels, all-zero)") and the
+contract invariant ("A matrix that is ragged, whose dimension disagrees with
+`ordered_labels.len()`, …").
+
+**Fix:** rename the existing row to `wrong_row_count` and add the missing shape, which also
+makes the `mutation` half of the phase's own re-mutation rule real:
+
+```rust
+("ragged_uniform_row_count", vec![vec![1, 2, 3], vec![4, 5], vec![6, 7, 8]], "ConfusionMatrixShape"),
+("row_wider_than_the_label_map", vec![vec![1, 0, 0, 0], vec![0, 1, 0, 0], vec![0, 0, 1, 0]], "ConfusionMatrixShape"),
+```
+
+and a matching `QualityMutation::RaggedMatrix` row in `QUALITY_CROSS_CHECK_CASES` so the shape is
+also proven at the ACTIVE 40-cell scope (bump `QUALITY_CROSS_CHECK_CASES.len()` pin and the
+Make floor to the newly measured count).
+
+### WR-06: one of `EVIDENCE_PATH_CASES`'s three "acceptance rows" is a verbatim duplicate of another
+
+**File:** `crates/aprender-train/src/train/setfit/bench_gate_tests.rs:1307-1328, 1488-1491`
+
+**Issue:** Row `committed_spelling` (`:1307`) and row `committed_spelling_other_kind_dir`
+(`:1321`) carry **identical** `declared: Declared::CommittedForKind`, identical
+`expect: Expect::Accepted` and identical `detail_contains: ""`. `declared_string` is a pure
+function of `(declared, root, bench, kind)` (`:1398-1421`), so for a given `kind` the two rows
+build the same string against the same fixture shape and make the same assertion twice.
+
+The second row's `why` — "swept over BOTH kinds by the loop, so the LEDGER_DIR spelling is
+proven to be accepted under `EvidenceKind::Ledger`" — describes what the **outer loop**
+(`:1437`) already does for every row including the first. The consequence is that
+`assert!(accepted >= 3, ...)` (`:1491`) is satisfied by a duplicate: there are two distinct
+acceptance shapes, not three. The Makefile banner ("three ACCEPTANCE rows") and the 05-15
+SUMMARY (D7: "including three acceptance rows") both repeat the inflated count. An acceptance
+row's whole job is to stop a table passing by refusing everything, and one that is a copy adds
+no such protection.
+
+**Fix:** replace the duplicate with an acceptance shape that is actually distinct and that the
+current table does not cover — a nested path under the kind directory, which is the shape a
+restored two-method scope will plausibly produce:
+
+```rust
+PathCase {
+    label: "committed_spelling_nested_subdirectory",
+    declared: Declared::NestedUnderKindDir,   // e.g. "{dir}/2026-09/{file}"
+    expect: Expect::Accepted,
+    detail_contains: "",
+    why: "a contained path with more than two components must still resolve; the `..` and \
+          root refusals are per-COMPONENT, and an over-refusal on depth would be invisible \
+          to a table whose accepted rows are all two components deep",
+},
+```
+
+(`path_case_fixture` needs one extra `create_dir_all` + `fs::write`.) Alternatively drop the
+row and lower the assertion to `>= 2`, and correct the Makefile banner and the SUMMARY — but
+adding the shape is the better trade.
+
+### WR-07: the only end-to-end proof that the shipped door refuses is a Make target nothing depends on, and it is not in `.PHONY`
+
+**File:** `Makefile:2779-2790` (target `setfit-bench-door-probe`), `Makefile:60` (`.PHONY` list)
+
+**Issue:** `setfit-bench-door-probe` is deliberately not wired into `setfit-bench-tests` or any
+tier (the comment at `:2779-2785` argues it, and 05-15's D9 records it as a decision). The
+argument — that it needs a release `apr` built with a non-default feature and a silently-skipping
+leg is worse than no leg — is sound as far as it goes, but the outcome is that **no gate runs
+it**: `grep` over `Makefile` and `.github/workflows/*.yml` finds no other reference. The four
+trees verification measured `apr setfit bench report` accepting are proven refused exactly once,
+by hand, and a regression in the *adapter* (as opposed to the library) — a changed exit path, a
+`--bench-dir` default, a renderer that prints before verifying — would be caught by nothing.
+That is the mirror of CLAUDE.md Verification Discipline rule 5: the guard scans the decision
+surface, but nothing invokes the guard.
+
+Separately, the target is missing from `.PHONY` (`Makefile:60`), where every sibling
+(`setfit-bench-tests`, `setfit-repro-inproc`, …) is listed. A file or directory named
+`setfit-bench-door-probe` in the repo root would make `make setfit-bench-door-probe` report
+"up to date" and run nothing — a silent pass.
 
 **Fix:**
+1. Add `setfit-bench-door-probe` to the `.PHONY` list at `Makefile:60`.
+2. Give it a real caller that cannot skip silently. Add a `tier3`- or `pre-push`-level target
+   that **builds its own prerequisite** and then runs the probe, so there is no "binary is
+   stale" degradation to protect against:
 
-```rust
-if !config.val_split.is_finite() || !(0.0..=0.5).contains(&config.val_split) {
-    return Err(crate::Error::ConfigError(format!(
-        "SSC-026: val_split must be a finite value in [0.0, 0.5] (0.0 disables validation), got {}",
-        config.val_split)));
-}
-```
-plus `commands::threshold_arg::guard_f32("--val-split", val_split, ..)` at the dispatch door,
-so the refusal comes before the 9B base model is loaded.
-
-### WR-06: A missing lock or ledger file is reported as a missing *row* file
-
-**File:** `crates/aprender-train/src/train/setfit/bench_gate.rs:524-531`, reached from
-`verify_provenance` at `:965` and `:995`
-**Issue:** `read_evidence` maps `ErrorKind::NotFound` to `BenchGateError::RowFileMissing`
-unconditionally. It is called for three different file kinds. When the *lock record* is
-absent, the operator gets:
-
-> cell setfit/s8/seed13 is recorded complete in the manifest, but
-> `<bench>/locks/setfit-s8-seed13.lock.json` does not exist. A recorded digest with no bytes
-> behind it is an omission the manifest cannot see; re-run the cell or **restore the row file**
-
-The path named is a lock; the remedy names a row; `variant_tag()` reports
-`row_file_missing`, so any downstream triage keyed on the tag is wrong too. The module's own
-stated bar is that "which cell" and "which file" are what a reader needs to re-run.
-
-**Fix:** Pass the file kind into `read_evidence` and mint an `EvidenceFileMissing { cell,
-kind, path }` variant, or route the provenance calls through a wrapper that remaps
-`RowFileMissing` to `ProvenanceMismatch`/`EvidenceReadFailed` with the correct remedy.
-
-### WR-07: `AprenderError` is not `#[non_exhaustive]`; the new variant is a semver break
-
-**File:** `crates/aprender-core/src/error.rs:23-24`, new variant at `:111-127`
-**Issue:** `pub enum AprenderError` carries only `#[derive(Debug)]`. Adding
-`ZeroVarianceDifferences` is a breaking change for any downstream crate that matches it
-exhaustively — and `aprender` is published to crates.io. The sibling `AprFormatError` in the
-same file *is* `#[non_exhaustive]` (see the comment at `:246`), so the convention exists and
-was not followed for the parent.
-
-**Fix:** Add `#[non_exhaustive]` to `AprenderError` in the same change that adds the variant,
-and note the minor-version bump. If exhaustive matching inside the workspace depends on it,
-add the `_ =>` arms now rather than after publish.
-
-### WR-08: The driver's resume check scans the whole manifest for the digest, not this cell's entry
-
-**File:** `scripts/run_bench_cells.sh:274-283`
-**Issue:** After extracting `row_hash` from the row file, the check is:
-
-```bash
-while IFS= read -r line; do
-    case "$line" in
-        *"$row_hash"*) return 0 ;;
+```make
+setfit-bench-door-probe-ci: ## EVAL-01/02/04 end-to-end: build the feature-enabled apr, then probe
+	cargo build --release --bin apr --features setfit
+	@$(MAKE) setfit-bench-door-probe
 ```
 
-Any line of `run-manifest.json` containing the digest as a substring satisfies it. The
-comment above it claims "the manifest must record exactly that digest **for this cell**",
-which is not what the code checks — a digest recorded against a *different* cell would
-cause this cell to be skipped as complete. The stated guarantee ("it is the collision
-`RunManifest::record` refuses, and re-running is how the operator sees it") is therefore not
-delivered by this predicate.
+and make that a prerequisite of the phase-5 leg of `tier3`. If the build cost is the objection,
+say so in the comment as a cost decision rather than leaving the current text, which reads as
+though the probe is covered.
 
-**Fix:** Delegate to the tool that already knows the answer instead of re-implementing a
-manifest reader in shell (CLAUDE.md: dogfood the in-tree CLI):
+### WR-08: `verify_cell`'s doc and inline comment both claim an ACTIVE-scope refusal it does not perform
 
-```bash
-cell_is_complete() {
-    "$APR" setfit bench verify-cell --bench-dir "$BENCH_DIR" \
-        --method "$1" --shots "$2" --seed "$3" >/dev/null 2>&1
-}
-```
-`verify-cell` was built in this same phase for exactly this scope (steps 1+4+6 over one
-declared cell) and checks the *cell's own* manifest entry.
+**File:** `crates/aprender-train/src/train/setfit/bench_gate.rs:1424-1426, 1439-1448` ·
+`crates/aprender-train/src/train/setfit/bench_gate_tests.rs:3467-3477`
 
-### WR-09: Documented cell counts contradict `EXPECTED_CELLS`
-
-**File:** `crates/aprender-train/src/train/setfit/bench_gate.rs:244`, `:492`, `:1399`;
-`crates/apr-cli/src/commands/setfit_bench.rs:2452`
-**Issue:** `EXPECTED_CELLS = ACTIVE_METHODS.len() * BENCH_SHOTS.len() * BENCH_SEEDS.len()`
-= 1 × 4 × 10 = **40** (`bench_row.rs:109`). Four live doc comments still say 80:
-
-- `:244` "The manifest's cell sequence is not exactly the contract-derived **80** in contract order."
-- `:492` "**Eighty rows** that passed every rule of `setfit-benchmark-claims-v1`"
-- `:1399` "Unreachable through verify_run, which proved **all 80 cells** present."
-- `setfit_bench.rs:2452` "would be a report over **eighty** pending cells"
-
-The module header at `:21` correctly says "the contract-derived ACTIVE 40". In a phase whose
-whole subject is that published counts must be derivable, four stale ones in the gate's own
-rustdoc is a real defect, not a typo.
-
-**Fix:** Replace the literals with the constant in the doc text
-(`the contract-derived [`EXPECTED_CELLS`]`), and add the file to whatever the phase uses as
-its drift gate so the next narrowing goes red instead of quiet.
-
-### WR-10: `verify_cell` reports `declared: 0` for a manifest that declares 40
-
-**File:** `crates/aprender-train/src/train/setfit/bench_gate.rs:857-862`
-**Issue:**
+**Issue:** The `# Errors` section says `ExpectationSetMismatch` is returned "if `cell` is not in
+the ACTIVE expectation set", and the inline comment says "It only refuses a REQUEST for a cell
+outside the active scope — including a second method's cell." The code performs neither check:
 
 ```rust
 let Some(entry) = manifest.payload.cells.iter().find(|e| e.cell() == cell) else {
@@ -468,182 +468,115 @@ let Some(entry) = manifest.payload.cells.iter().find(|e| e.cell() == cell) else 
 };
 ```
 
-`declared` is documented as "How many cells the manifest declares". The refusal renders as
-"the run manifest declares **0** cells, but setfit-benchmark-claims-v1 derives 40" for a
-manifest that declares all 40 and simply does not contain the *requested* cell. A false
-number inside a refusal is the same failure mode this phase spent its budget eliminating
-from published numbers.
+That is **manifest membership**, not active-scope membership. A manifest declaring a LoRA cell
+makes `verify_cell(…, TARGET_LORA)` proceed all the way through steps 4, 6, 6b and 6c and
+return `Ok(())` — and step 7, the LoRA no-selection attestation, is excluded from this door, so
+the post-test-selection conjuncts would never run.
 
-**Fix:** Either report the true count (`manifest.payload.cells.len()`) or, better, mint a
-`CellNotDeclared { cell }` variant whose message says what actually happened.
+The property is currently *reachable-safe* for a different reason: `RunManifest::from_bytes`
+(`bench_row.rs:918-924`) enforces `declared == Self::expectation()` over the ACTIVE set, so the
+CLI cannot construct such a manifest from a file. But `verify_cell` is a `pub fn` taking a
+`RunManifest` by reference, and this module states its own rule three lines earlier at
+`:1059-1061` — "a manifest can also be built in memory … and this gate must not depend on which
+door its argument came through" — which is exactly the dependency this check has.
 
-### WR-11: The sweep driver hardcodes `40` instead of deriving it from the matrix arrays
+The test named for the property cannot distinguish the two reasons either:
+`bench_gate_the_single_cell_door_refuses_a_cell_outside_the_active_scope` (`:3468`) builds an
+ACTIVE-scope manifest and asks for `TARGET_LORA`, so it goes red on manifest membership and
+would stay green if the active-scope check were never added.
 
-**File:** `scripts/run_bench_cells.sh:385-395`
-**Issue:** The arrays `SHOTS` and `SEEDS` are the contracted matrix, but the vacuity floor
-and the DONE line both hardcode `40`:
-
-```bash
-printf 'DONE %s: %s executed, %s skipped, %s of 40 cells covered\n' ...
-if [ "$total" -ne 40 ]; then
-```
-
-The comment above it argues that "the count is asserted, not reported" — but the assertion
-is against a literal, so an edit to `SHOTS`/`SEEDS` makes the *guard* the thing that lies.
-`EXPECTED_CELLS` is derived in Rust for exactly this reason.
-
-**Fix:**
-
-```bash
-EXPECTED_CELLS=$(( ${#SHOTS[@]} * ${#SEEDS[@]} ))
-readonly EXPECTED_CELLS
-...
-if [ "$total" -ne "$EXPECTED_CELLS" ]; then
-```
-
-### WR-12: `aggregate` publishes `key_sequence` entries for cells it then skips
-
-**File:** `crates/aprender-train/src/train/setfit/bench_gate.rs:1393-1402`
-**Issue:** `key_sequence.push(cell.render())` runs before the `let Some(row) = by_cell.get(&cell)
-else { continue; }`, so a skipped cell still appears in the published `key_sequence`. The
-comment justifies the skip as "Skipped rather than panicked so a future in-crate caller gets
-a short series and a loud `expect` below rather than an abort here" — but `summarise` calls
-`mean_f64(...).expect(SERIES_INVARIANT)`, which *is* an abort, and for an empty series it
-aborts before anything is reported. The escape hatch described does not exist; the only
-outcome of the `continue` is a `key_sequence` that names a cell with no data, followed by a
-panic.
-
-**Fix:** Push the key only after the row is resolved, and replace the `continue` with an
-explicit `unreachable!`-free typed path or an honest `expect` at the lookup:
+**Fix:** add the check the comment describes, one line, before the `find`:
 
 ```rust
-let Some(row) = by_cell.get(&cell) else { continue };
-key_sequence.push(cell.render());
-```
-
-### WR-13: `TrainRssSampler` leaks its polling thread when `finish()` is not reached
-
-**File:** `crates/apr-cli/src/commands/setfit_bench.rs:524-614`
-**Issue:** On non-Linux the constructor spawns a thread that polls `sysinfo` at
-`SAMPLE_TARGET_HZ` until `stop` is set. `stop` is only set in `finish(mut self)`. Any `?`
-between `start()` and `finish()` in the training path drops the sampler, and `Drop` is not
-implemented — the thread runs for the remainder of the process, contending for CPU with the
-very measurement the module exists to keep clean, and holding an `Arc` alive.
-
-**Fix:**
-
-```rust
-#[cfg(not(target_os = "linux"))]
-impl Drop for TrainRssSampler {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() { let _ = handle.join(); }
-    }
-}
-```
-(and let `finish` take the handle before the drop runs).
-
-### WR-14: `make audit` writes to fixed, world-writable `/tmp` paths
-
-**File:** `Makefile:1197-1215`
-**Issue:**
-
-```make
-@cargo tree --duplicates > /tmp/apr-dup.txt 2>&1; \
-@cargo audit > /tmp/apr-audit.txt 2>&1; rc=$$?; \
-```
-
-Predictable paths in a shared directory. A pre-planted symlink at `/tmp/apr-dup.txt` is
-followed by `>` and truncates/overwrites the target with the caller's privileges. The rest
-of the Makefile already uses `target/` for scratch output (`target/contract-audit-phase5-*.log`).
-
-**Fix:** `@mkdir -p target && cargo tree --duplicates > target/apr-dup.txt 2>&1; ...`
-(or `mktemp` if `/tmp` is required).
-
-### WR-15: `throughput_rows_per_sec` reports `0.0` for an empty pass instead of refusing
-
-**File:** `crates/apr-cli/src/commands/setfit_bench.rs:767-794`
-**Issue:** The function refuses a zero-wall-time pass with a well-argued message ("the number
-this would produce is not a throughput"), but an `n_rows == 0` pass skips the loop, measures a
-positive elapsed, and returns `0.0` — a *published* throughput of zero rows/second for a
-measurement that never ran. That is the same class of number the zero-wall-time guard exists
-to prevent, on the other axis.
-
-**Fix:**
-
-```rust
-if n_rows == 0 {
-    return Err(CliError::InferenceFailed(
-        "the throughput pass measured zero rows; a rate over an empty pass is not a throughput"
-            .to_string()));
+if !RunManifest::expectation_for(ExpectationScope::Active).contains(&cell) {
+    return Err(BenchGateError::ExpectationSetMismatch { declared: 0, expected: EXPECTED_CELLS });
 }
 ```
 
-### WR-16: `bench run --cold-probe` is an unauthenticated file-load surface on the public CLI
-
-**File:** `crates/apr-cli/src/commands/setfit_bench.rs:132-136`,
-`crates/apr-cli/src/setfit_commands.rs:203-227`
-**Issue:** The cold-probe mode is documented as "machinery, not a user surface" and only
-`hide_short_help`-ed, but `run()` dispatches it *first*, "because it is the mode with the
-fewest obligations: it takes no bench directory, writes nothing, and must not pay for any
-check the other two need." It therefore skips the `--bench-dir` requirement and every cell
-validation, and loads an arbitrary `--cold-probe <ARTIFACT>` (plus optional
-`--cold-probe-base`) through the full reload path with only `requires = "cold_probe"`
-relating the three flags. A `--probe-text` file is read with no size bound visible at that
-door. Being reachable by users, it needs the same input discipline as the modes around it.
-
-**Fix:** Route `probe_text` through `read_bounded`, validate that the artifact is a regular
-file before the reload, and consider `hide = true` plus an explicit
-"internal — spawned by `bench run`" refusal when the process was not started by
-`measure_cold` (e.g. an env marker set on the child `Command`).
+and make the test distinguishing by building a manifest that *does* declare the LoRA cell
+(`declare_for(ExpectationScope::DeferredTwoMethod)`, already `#[cfg(test)]`-available) and
+asserting the door still refuses it — which is the assertion that currently cannot fail.
 
 ## Info
 
-### IN-01: `stats/mod.rs` re-exports the unused helper and not the used one
+### IN-01: `symlink_for_test` makes three table rows fail with a misleading diagnosis on non-unix rather than skip
 
-**File:** `crates/aprender-core/src/stats/mod.rs:35-39`
-**Issue:** The re-export list carries `paired_ci95_df9` — which under the active single-method
-scope is never reached (`shot_delta` only runs when `methods_present.len() >= 2`) — but omits
-`ci95_one_sample_df9`, the function the claims path actually calls. `bench_gate.rs:90` reaches
-it through the full `stats::hypothesis::` path as a result, so the two claims helpers are
-imported inconsistently.
-**Fix:** Add `ci95_one_sample_df9` to the `pub use` list and import both from `stats::`.
+**File:** `crates/aprender-train/src/train/setfit/bench_gate_tests.rs:1423-1432`
 
-### IN-02: `VerifyCell::out` is enforced by a conflict that produces the wrong message
+**Issue:** The comment argues that gating the materializer rather than the table row avoids a
+silently shrinking table. It does — but on a non-unix host the three symlink rows
+(`last_component_symlink`, `first_component_symlink_dir`, `prefix_sibling_symlink`) still run
+with no symlink created, so the declared path names an absent file and the test fails with
+`must be refused as 'evidence_path_escape' … got: evidence_file_missing`. A reader on that host
+reads it as a containment regression. Given the repo tracks `WINDOWS.md` items, this will
+eventually be somebody's bad hour.
 
-**File:** `crates/apr-cli/src/setfit_commands.rs:311-313`,
-`crates/apr-cli/src/dispatch_analysis.rs:1161`
-**Issue:** `out` is declared `conflicts_with = "bench_dir"` where `bench_dir` is a *required*
-argument, so `--out` is always rejected — the intent. But the rendered clap error names
-`--bench-dir`, not the documented reason ("This door emits no machine-readable report
-payload"). The field is destructured away with `..` and never read.
-**Fix:** Drop the field and let clap reject `--out` as an unknown argument, or keep it and
-handle it in `verify_cell::run` with the explanatory `CliError::ValidationFailed` the doc
-comment promises.
+**Fix:** keep the rows in the table (the count assertion at `:1483` depends on them) but have
+`symlink_for_test` return `bool` and, on a host where symlinks are unavailable, assert loudly at
+the top of the test with a message naming the host limitation — never re-interpret the row's
+expectation.
 
-### IN-03: `is_evidence_failure` assigns a global where the file's own convention requires `local`
+### IN-02: the disclosure test's "overclaim" scan uses near-miss literals that cannot plausibly fire
 
-**File:** `scripts/run_bench_cells.sh:289-290` (and `holder` at `:163`)
-**Issue:** `run_one_cell` carries a comment explaining that "`local` throughout ... an
-unqualified assignment here would silently rewrite the loop's own `shots`/`seed`
-mid-iteration". `is_evidence_failure` then does `log="$1"` with no `local`, and the lock
-branch assigns `holder` globally. Harmless today (bash dynamic scoping happens to bind
-`run_one_cell`'s own `log`), but it is the pattern the file elsewhere calls out as a defect,
-and it is a bashrs finding.
-**Fix:** `local log; log="$1"` and `local holder`.
+**File:** `crates/apr-cli/src/commands/setfit_bench_tests.rs` (`setfit_bench_report_residual_concedes_exactly_what_the_gate_still_cannot_refuse`)
 
-### IN-04: `beta_continued_fraction_f64` silently returns a non-converged value
+**Issue:** The must-not-match set is `["proves the matrix", "verified against the model",
+"cannot be forged"]`. None is a phrase the disclosure has ever carried or is likely to drift
+into — unlike the two *retired* literals above them, which were copied verbatim out of the
+program's own former format string and are genuine negative controls. The overclaim half is
+therefore closer to decoration than to a guard.
 
-**File:** `crates/aprender-core/src/stats/hypothesis.rs:717-767`
-**Issue:** The Lentz loop breaks on convergence but falls out of `for m in 1..=MAX_ITER`
-without any signal when it does not converge, returning whatever `h` happened to hold. For a
-p-value asserted to 1e-9 against scipy this is the one place a silent numeric failure could
-enter a published number. The fixtures cover df = 9, so the risk is small today.
-**Fix:** `debug_assert!(converged, ...)` at minimum, or return `Option<f64>` and let
-`t_distribution_pvalue_f64` surface a refusal rather than a value.
+**Fix:** either scan for the *class* rather than three guesses — e.g. assert the disclosure
+still contains the hedge `cannot distinguish` and the words `producer-written`, which any
+overclaiming rewrite would have to remove — or document that these three are aspirational and
+carry no red-taking evidence, the way the retired-sentence rows do.
+
+### IN-03: `row_widths` is materialized before the cheaper length check, and the class count is unbounded
+
+**File:** `crates/aprender-train/src/train/setfit/bench_metrics.rs:449-456`
+
+**Issue:** `row_widths` is built unconditionally, then the length test runs. For a doctored row
+declaring ~2×10⁶ empty matrix rows (which fits inside the 16 MB `MAX_EVIDENCE_FILE_BYTES` cap),
+that is a 16 MB `Vec<usize>` that is then embedded in `ConfusionMatrixShape` and rendered by
+`{row_widths:?}` into a multi-MB console message. Relatedly, 05-17's `MAX_CROSS_CHECK_ROWS`
+bounds the observation *total* but not `ordered_labels.len()`: a ~16 MB row can declare a
+2800-label map, and `ConfusionMatrix::new(2800)` then allocates ~62 MB. Both are a small
+multiple of an input that is already capped, so neither is a denial of service — but the plan's
+own pattern is "Bound any expansion driven by producer-supplied counts", and the class-count
+dimension was not bounded.
+
+**Fix:** check `confusion_matrix.len() != n_classes` *first* and only then compute `row_widths`;
+truncate `row_widths` in the error to a bounded prefix; and consider a
+`MAX_CROSS_CHECK_CLASSES` beside `MAX_CROSS_CHECK_ROWS`, derived the same way.
+
+### IN-04: the door probe's positive control only checks `rc=0`
+
+**File:** `scripts/setfit_bench_gate_door_probe.sh:170-180`
+
+**Issue:** The control asserts `control_rc -eq 0` and nothing about `CONTROL_LOG`'s contents. A
+future `apr setfit bench report` that exited 0 without verifying anything — a changed default,
+an early return — would satisfy the control, and the four attacks would then be the only signal.
+The control is the thing that makes the attacks mean something, so it is worth the extra line.
+
+**Fix:** add one assertion that the control actually produced a verified report, e.g.
+`grep -qF 'every cell of the contracted matrix' "$CONTROL_LOG" || fail "the control produced no verified: header"`.
+
+### IN-05: the probe's `grep` assertions are BRE where literal matching is meant
+
+**File:** `scripts/setfit_bench_gate_door_probe.sh:216, 312, 316, 283`
+
+**Issue:** `grep -q -- "$ESCAPE_PATH"`, `grep -q "quality.f_avg"` and friends treat their
+arguments as basic regular expressions. `.` matches any character, so `quality.f_avg` would also
+match `qualityXf_avg`, and `$ESCAPE_PATH` (an mktemp path containing `.` and `-`) is matched
+more loosely than intended. No assertion is currently wrong, but every one of them is weaker
+than its author's intent and a path containing a regex metacharacter could in principle change
+a verdict.
+
+**Fix:** use `grep -qF --` for all six literal assertions in this script. `-F` also removes the
+need for the `--` guard against a leading `-`.
 
 ---
 
-_Reviewed: 2026-09-08_
+_Reviewed: 2026-09-12_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
