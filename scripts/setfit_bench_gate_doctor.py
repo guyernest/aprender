@@ -13,6 +13,14 @@ TWO MODES, one per attack the probe replays:
     the only disagreement is between the row's claim and the manifest the gate
     recomputes. Prints the doctored key.
 
+``f-avg-to-0-99``
+    Spot-check D. Doctors ``quality.f_avg`` to 0.99 AND its ``f_avg_bits``
+    sibling to match, leaving the row's own ``confusion_matrix`` untouched - so
+    the row is internally consistent in every way EXCEPT against the counts it
+    records itself, which is precisely what the closed-form cross-check exists to
+    find. Verification measured this tree returning rc=0 with the published mean
+    moving 0.4746 -> 0.5278. Prints the doctored headline.
+
 Both repair the row's own ``semantic_hash``, the manifest's ``row_sha256`` for
 that cell, and the manifest's envelope digest, for the reason in step 3 below.
 
@@ -55,6 +63,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import sys
 
 
@@ -81,7 +90,7 @@ def load(path):
         return json.load(handle)
 
 
-MODES = ("escape", "selection-hash-zeros")
+MODES = ("escape", "selection-hash-zeros", "f-avg-to-0-99")
 
 
 def main(argv):
@@ -114,6 +123,18 @@ def main(argv):
         shutil.move(lock_path, escape_path)
         row["payload"]["evidence"]["setfit"]["lock"]["lock_record_path"] = escape_path
         handle = escape_path
+    elif mode == "f-avg-to-0-99":
+        # THE CONFUSION MATRIX IS LEFT ALONE. Doctoring it too would produce a row
+        # that is internally consistent and would be ACCEPTED - which is the
+        # residual the report discloses, not the attack this case replays. Only
+        # the published headline moves, and its bits sibling moves with it so the
+        # refusal cannot come from the row contradicting itself in two encodings.
+        quality = row["payload"]["quality"]
+        handle = "0.99"
+        if quality["f_avg"] == 0.99:
+            raise SystemExit("the committed row already publishes 0.99; this is vacuous")
+        quality["f_avg"] = 0.99
+        quality["f_avg_bits"] = struct.unpack("<Q", struct.pack("<d", 0.99))[0]
     else:
         # THE COMMITTED SELECTION MANIFEST IS LEFT ALONE. Only the row's claim
         # about it moves, so the single disagreement is the one the gate is

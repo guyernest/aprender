@@ -68,7 +68,49 @@ metadata:
   # `status: deferred` and its `deferred_ticket`: the cross-method rule is untouched, and its
   # third invariant is amended only to point at the new rule and to stop calling the key
   # merely "recorded".
-  version: 3.0.0
+  #
+  # 4.0.0 (2026-09-12, plan 05-17) — THE PUBLISHED QUALITY BECOMES A RECOMPUTED FIGURE.
+  #   git show HEAD:contracts/setfit-benchmark-claims-v1.yaml > /tmp/claims-old-17.yaml
+  #   target/release/pv diff /tmp/claims-old-17.yaml contracts/setfit-benchmark-claims-v1.yaml
+  # `pv diff` (pv 0.63.0) reported, VERBATIM:
+  #   Contract diff: v3.0.0 -> v3.0.0
+  #   Suggested bump: minor
+  #     equations:
+  #       + quality_closed_form_crosscheck
+  #     proof_obligations:
+  #       + equivalence:OBLIG-CLAIMS-QUALITY-CLOSED-FORM: ...
+  #     falsification_tests:
+  #       + FALSIFY-CLAIMS-012
+  #
+  # THE TOOL'S SUGGESTION IS RECORDED AND IS NOT TAKEN, and the disagreement is stated rather
+  # than smoothed over. `pv diff` scores the SHAPE of the edit and every element here is
+  # ADDITIVE, which is a minor. But the ACCEPTANCE SET NARROWS AGAIN: the exact tree verifier
+  # spot-check D built — `quality.f_avg` 0.4579 -> 0.99 with the row envelope digest, the
+  # manifest's `row_sha256` and the manifest envelope digest all repaired — VERIFIED at 3.0.0
+  # and is REFUSED here. That is the same reasoning the 3.0.0 block above records for taking
+  # `pv`'s major when the tool and the argument agreed, and it does not stop applying because
+  # the tool scored this edit differently: a strengthened guarantee is a breaking change to
+  # every producer relying on the old acceptance, whatever a structural differ scores the shape
+  # of the edit as. Taking the larger bump is also the conservative error — a consumer misled
+  # into expecting MORE change than occurred loses nothing, while one told a narrowing was a
+  # minor may not re-verify at all.
+  #
+  # WHAT PROMPTED IT. Verifier advisory 2 (EVAL-01), the "cheap hardening miss": every row
+  # already recorded the `confusion_matrix` and `ordered_labels` that determine `f_avg`,
+  # `macro_f1`, `mcc`, the three per-class vectors and `n_test_rows` IN CLOSED FORM, and
+  # nothing read them — so the published metrics were numbers a producer typed, and
+  # `apr setfit bench report` exited 0 on spot-check D with the published mean moving
+  # 0.4746 -> 0.5278. The recomputation needs no new evidence file and no re-run.
+  #
+  # THE BAND IS EXACT IEEE-754 BIT EQUALITY, MEASURED BEFORE IT WAS CHOSEN: 40/40 bit-identical
+  # on every field over the committed rows, maximum absolute deviation 0e0. There is no epsilon
+  # in this contract because none was needed, and none was fitted.
+  #
+  # `selection_safety_evidence.residual_risk` gains `amended_4_0_0` rather than losing its
+  # existing statement: the LoRA-side concession stays verbatim (that arm is deferred and has
+  # never been recomputed against real bytes), while the three attacks the gate now refuses
+  # stop being conceded and the three that remain are named.
+  version: 4.0.0
   created: '2026-08-17'
   author: PAIML Engineering
   kind: kernel
@@ -507,6 +549,61 @@ equations:
         which is `completeness_rule`''s own structural claim applied here.'
 
   # ==========================================================================
+  # 4b. THE PUBLISHED QUALITY, RECOMPUTED IN CLOSED FORM (EVAL-01, 4.0.0)
+  # ==========================================================================
+
+  quality_closed_form_crosscheck:
+    status: active
+    formula: 'forall cell in ACTIVE expectation set, let M = row(cell).quality.confusion_matrix and L = row(cell).quality.ordered_labels: n_test_rows == sum(M) AND f_avg == f1_average_for_classes(metrics(M, L).f1, [1, 2]) AND macro_f1 == mean(metrics(M, L).f1) AND mcc == widen_f32(matthews_corrcoef(expand(M))) AND per_class_precision == metrics(M, L).precision AND per_class_recall == metrics(M, L).recall AND per_class_f1 == metrics(M, L).f1 AND forall x in {f_avg, macro_f1, mcc, ece_top_label_validation, brier_multiclass_validation}: x_bits == to_bits(x)'
+    domain: 'the 40 cells of the ACTIVE expectation set, each row read from its own committed bytes; NO external file is opened by this rule'
+    codomain: 'accepted, or a typed refusal naming the cell, the disagreeing field, the published value and the recomputed one'
+    invariants:
+      - 'THE COMPARISON IS EXACT IEEE-754 BIT EQUALITY, AND THE BAND WAS MEASURED BEFORE IT WAS
+        CHOSEN. Over all forty committed rows the recomputation agrees BIT-IDENTICALLY on every
+        field — `n_test_rows` 40/40, `f_avg` 40/40, `macro_f1` 40/40, `mcc` 40/40, all three
+        per-class vectors 40/40, all five `_bits` siblings 40/40, maximum absolute deviation
+        0e0 on every one. The measurement is a shipped test
+        (`bench_metrics_the_forty_committed_rows_agree_with_their_own_confusion_matrices`),
+        taken and recorded BEFORE any acceptance band existed. THERE IS THEREFORE NO EPSILON TO
+        JUSTIFY, which is the strongest available statement and the honest one: choosing a
+        tolerance after seeing which value makes the committed tree pass is epsilon-fitting,
+        and a metric that disagreed with its own confusion matrix would have been a finding
+        about the evidence rather than a band to widen.'
+      - 'EXACTNESS IS STRUCTURAL, NOT LUCKY. The recomputation EXPANDS the counts back into the
+        `(y_pred, y_true)` index vectors that produced them and feeds the SAME entry points
+        `assemble_quality_block` fed — `MultiClassMetrics::from_predictions_with_min_classes`
+        with the DECLARED class count, `f1_average_for_classes` over the official `[1, 2]`, and
+        `matthews_corrcoef` with the same `f64::from` widening of the same `f32` return. Every
+        metric is a function of the counts alone and all of them accumulate from integers, so
+        the expansion order cannot change any result. NO SECOND IMPLEMENTATION IS AUTHORED:
+        two definitions of one number disagree eventually and invisibly (OPS-03).'
+      - 'THE TWO CALIBRATION DIAGNOSTICS ARE OUT OF THIS RULE''S DOMAIN, and the reason is that
+        they are not recomputable AT ALL from committed bytes: `ece_top_label_validation` and
+        `brier_multiclass_validation` need per-row validation probability VECTORS that no
+        committed file carries. Their VALUES remain producer-declared. Their `_bits` siblings
+        are still held against the `f64` beside them, because that is an internal consistency
+        claim a row makes about ITSELF and costs nothing — but holding the encoding is not
+        proving the value, and this rule must not be read as reducing that surface.'
+      - 'THE RULE PROVES CONSISTENCY WITH THE RECORDED MATRIX, NOT THE TRUTH OF THE MATRIX. The
+        `confusion_matrix` is itself producer-written. A producer who edits it and recomputes
+        the metrics from it emits a set nothing here can distinguish from a measurement.
+        Closing that needs a committed per-row prediction artifact no run writes today, and it
+        is DISCLOSED in `apr setfit bench report`''s `residual:` line rather than left for a
+        reader to infer.'
+      - 'A DEGENERATE MATRIX IS A TYPED REFUSAL, NEVER A ROW OF NaNs. A matrix that is ragged,
+        whose dimension disagrees with `ordered_labels.len()`, whose counts total zero, or
+        whose counts exceed the recomputation''s expansion cap is refused before any metric is
+        computed. `Vec<Vec<u64>>` is the wire type, so serde cannot hold the shape; and the
+        alternative to refusing is a NaN, which `serde_json` renders as `null` — and a `null`
+        reads as a MISSING cell rather than as a visible failure.'
+      - 'A CLASS WITH ZERO SUPPORT AND ZERO PREDICTIONS STILL OCCUPIES ITS INDEX, because the
+        DECLARED label map is passed as the class count. `per_class_f1[2]` therefore means
+        `favor` on every row rather than being out of range on some, and the official `F_avg`
+        never reports "not computable" for a class that merely did not occur.'
+      - 'A CELL WHOSE CROSS-CHECK FAILS INVALIDATES THE WHOLE REPORT, on `completeness_rule`''s
+        own structural claim: there is no partial-data mode and no warning level.'
+
+  # ==========================================================================
   # 5. SELECTION SAFETY AS RECOMPUTABLE EVIDENCE (EVAL-04)
   # ==========================================================================
 
@@ -528,6 +625,7 @@ equations:
       statement: 'A PRODUCER THAT CONTROLS BOTH THE LEDGER AND THE ROWS CAN STILL EMIT A MUTUALLY CONSISTENT FORGERY. Nothing here binds the ledger to an external clock, an external witness, or a key the producer does not hold. This raises LoRA selection safety from a SELF-ASSERTED BOOLEAN to RECOMPUTABLE APPEND-ONLY EVIDENCE — a real and checkable improvement — and it does not reach the standard of the SetFit side, where the credential is minted from a verified run object by a typestate that cannot be constructed otherwise.'
       not_claimed: 'A cryptographic train-then-seal credential for the LoRA side is FUTURE WORK. It is named here rather than omitted, because a contract that quietly overstates its own guarantee is the failure this phase exists to prevent, and "a gate could pass while the claim is false" is this phase''s own stated bar.'
       not_widened: 'The SetFitCredential seal is NOT widened to cover the LoRA path (Open Q3 option (b), adopted). Making one credential type cover a path whose evidence is weaker would export the weaker guarantee onto everything the credential already protects.'
+      amended_4_0_0: 'THE UNQUALIFIED CONCESSION ABOVE IS SCOPED TO THE LoRA LEDGER AND MUST NOT BE READ AS THE WHOLE REPORT''S RESIDUAL, which is what it had become by 3.0.0. Three attacks it used to cover are now REFUSED: an evidence path that leaves the benchmark directory (the containment door, 2.0.0/05-15), a doctored pairing key or a transplanted selection manifest (`selection_binding_rule`, 3.0.0), and a published quality metric that does not follow from the row''s own confusion matrix (`quality_closed_form_crosscheck`, 4.0.0). A residual that keeps conceding a refused attack teaches a reader to trust the evidence LESS than it warrants, which is over-claiming with the sign flipped and is as much a defect as overstating the gate. WHAT REMAINS TRUE, and is what `apr setfit bench report`''s `residual:` line and `bench_gate`''s module header now say WORD FOR WORD: (1) the confusion matrix is itself producer-written, so a producer who edits it and recomputes the metrics from it emits a set nothing distinguishes from a measurement — closing that needs a committed per-row prediction artifact no run writes today; (2) `ece_top_label_validation` and `brier_multiclass_validation` are not recomputable at all, because no committed file carries the per-row probability vectors they need, so those two figures stay self-asserted and only their `_bits` siblings are held; (3) `evidence_table_hash` and `apr_artifact_sha256` remain claims about artifacts this index deliberately does not carry; and (4) on the DEFERRED LoRA side nothing above has ever been recomputed against real bytes, so its own concession stands verbatim. These three statements of one fact — contract, gate header, report line — are ONE statement written down three times, and gap 1 was findable precisely because three statements of one fact had drifted apart.'
 
   # ==========================================================================
   # 6. LoRA NO-SELECTION ATTESTATION (Open Q3 option (b), strengthened)
@@ -936,6 +1034,62 @@ proof_obligations:
       path(m) is a function of c alone, NOT of row(c)
     applies_to: all
 
+  - type: equivalence
+    property: >
+      OBLIG-CLAIMS-QUALITY-CLOSED-FORM: every published accuracy figure on a row — `f_avg`,
+      `macro_f1`, `mcc`, the three per-class vectors and `n_test_rows` — is RECOMPUTED from
+      that row's own `confusion_matrix` and `ordered_labels` through the same shipped surfaces
+      that produced it, and compared by exact IEEE-754 bit equality. Every `_bits` sibling is
+      compared against `to_bits()` of the `f64` beside it. Added at 4.0.0, ACTIVE from the
+      first report that runs it.
+
+      WHY IT EXISTS. Verifier advisory 2 / spot-check D: `quality.f_avg` was moved from 0.4579
+      to 0.99, the row envelope digest, the manifest's `row_sha256` and the manifest envelope
+      digest were all repaired, and `apr setfit bench report` exited 0 with the published mean
+      moving 0.4746 -> 0.5278. The row already carried the counts that determine the metric in
+      closed form; nothing read them.
+
+      WHY THE BAND IS EXACT AND NOT A TOLERANCE. Measured over all forty committed rows BEFORE
+      the band was set: bit-identical agreement on every field, maximum absolute deviation 0e0.
+      Exactness is structural — the recomputation expands the counts and routes to the same
+      integer-sourced surfaces, rather than re-deriving the arithmetic — so there is no epsilon
+      to justify. Choosing a tolerance after seeing which value makes the committed tree pass
+      is the epsilon-fitting this contract discloses elsewhere as a hazard.
+
+      WHAT THIS OBLIGATION DOES NOT COVER, stated here rather than left to be inferred:
+
+      (1) It does NOT prove the confusion matrix is the one the model produced. The matrix is
+      producer-written; a producer who edits it and recomputes the metrics from it satisfies
+      this obligation completely. That residual is disclosed in the report's own `residual:`
+      line, and closing it needs a committed per-row prediction artifact no run writes today.
+
+      (2) It says NOTHING about the VALUES of `ece_top_label_validation` or
+      `brier_multiclass_validation`. Those need per-row validation probability vectors no
+      committed file carries, so they remain producer-declared. Their `_bits` siblings ARE
+      held, which is an internal consistency claim and not a proof of the value.
+
+      (3) It says nothing about the RESOURCE half of a row. Those fields are serde fields whose
+      presence and parse `bench_row_schema` covers, and no committed file makes them
+      recomputable.
+
+      Discharged by FALSIFY-CLAIMS-012.
+    formal: >
+      report(dir) == Ok => forall c in ACTIVE expectation set:
+        let q = row(c).quality, R = recompute(q.confusion_matrix, q.ordered_labels) in
+          q.n_test_rows == R.n_rows &&
+          to_bits(q.f_avg) == to_bits(R.f_avg) &&
+          to_bits(q.macro_f1) == to_bits(R.macro_f1) &&
+          to_bits(q.mcc) == to_bits(R.mcc) &&
+          map(to_bits, q.per_class_precision) == map(to_bits, R.per_class_precision) &&
+          map(to_bits, q.per_class_recall) == map(to_bits, R.per_class_recall) &&
+          map(to_bits, q.per_class_f1) == map(to_bits, R.per_class_f1) &&
+          q.f_avg_bits == to_bits(q.f_avg) && q.macro_f1_bits == to_bits(q.macro_f1) &&
+          q.mcc_bits == to_bits(q.mcc) &&
+          q.ece_top_label_validation_bits == to_bits(q.ece_top_label_validation) &&
+          q.brier_multiclass_validation_bits == to_bits(q.brier_multiclass_validation) ;
+      recompute opens NO file: its entire input is row(c) itself
+    applies_to: all
+
   - type: bound
     property: >
       OBLIG-CLAIMS-RESOURCE-BOUNDARIES: every resource number carries the boundary it was
@@ -1226,6 +1380,60 @@ falsification_tests:
       cell's name. The row-count assertion inside the sweep exists because the Make floor
       cannot see this: `assert_tests_ran` counts test FUNCTIONS, and eleven table rows
       collapsing to three would not move it by a single test.
+
+  - id: FALSIFY-CLAIMS-012
+    rule: OBLIG-CLAIMS-QUALITY-CLOSED-FORM — the published metrics are recomputed from the row's own confusion matrix
+    prediction: >
+      `bench_gate_quality_cross_check_case_table_at_the_active_scope` sweeps ONE named `const`
+      array of TWELVE rows over freshly built VALID 40-cell ACTIVE runs, through the PUBLIC
+      `verify_run` door, and asserts the variant tag, the cell each refusal names AND the FIELD
+      it names. Every mutation repairs all three of spot-check D's digests — the row's own
+      envelope digest, the manifest's `row_sha256` for that cell, and the manifest envelope
+      digest — because without them the tree is refused at step 4 as a row-digest mismatch and
+      step 6 is never reached.
+
+      The rows: a CONTROL that must be ACCEPTED; `quality.f_avg` doctored to 0.99 (SPOT-CHECK D
+      replayed); `macro_f1` doctored; `mcc` doctored; ONE element of ONE per-class vector
+      doctored; `n_test_rows` inflated; `f_avg_bits` doctored with the decimal untouched; the
+      decimal doctored with `f_avg_bits` untouched; `ece_top_label_validation_bits` doctored; a
+      ragged matrix; a 4x4 matrix against three `ordered_labels`; and an all-zero matrix. The
+      first nine report `quality_cross_check_mismatch`; the three degenerate matrices report
+      `row_schema_refused`, which mints no new variant because `Vec<Vec<u64>>` is the wire type
+      and a shape the schema cannot hold IS a schema refusal.
+
+      THE TWO BITS ROWS ARE AN INVERTING PAIR and neither is redundant. Doctoring the bits alone
+      must report `f_avg_bits`; doctoring the decimal alone must report `f_avg` — the
+      recomputation runs FIRST in the fixed field order, so the refusal names the figure a
+      reader saw rather than its encoding. Without the second row the first could pass while
+      the value check was never reached.
+
+      Every one of the eleven mutations was observed RED against the pre-fix gate, each
+      reporting `Ok(40 rows verified)` — the attacks SUCCEEDED, which is the same false green
+      the verifier measured through the shipped door — and GREEN afterwards. A red that had been
+      `row_digest_mismatch` would have proved the digest repair was skipped rather than that the
+      cross-check was missing.
+
+      Three further tests carry the rest: the SAME spot-check D replayed through the SINGLE-CELL
+      `verify_cell` door with a passing control on the untouched cell (scope is part of what a
+      negative proves); the 40-committed-row agreement measurement, which reports per-field
+      bit-identical counts and the maximum deviation and is what the exact band was chosen FROM;
+      and an order-independence assertion over the expansion, which is the one property the
+      reconstruction rests on.
+    test: cargo test -p aprender-train --lib --features setfit bench_gate
+    test_harness: cargo test -p aprender-train --lib --features setfit bench_gate
+    expected_output: 'test result: ok'
+    if_fails: >
+      A green-while-broken state here means the published metrics are numbers a producer typed
+      again: `apr setfit bench report` would exit 0 on the exact tree verifier spot-check D
+      built, with the headline moved from 0.4579 to 0.99 and the published mean moving from
+      0.4746 to 0.5278 — every digest intact, every other rule satisfied, and the only
+      disagreement the one between a row's published figure and the counts the row itself
+      records. The damage is EXPORTED FORWARD into the report's own `residual:` line, which
+      since 4.0.0 stops conceding this attack: a disclosure that says a forgery is refused while
+      the gate no longer refuses it is worse than the unqualified concession it replaced. The
+      row-count assertion inside the sweep exists because the Make floor cannot see it —
+      `assert_tests_ran` counts test FUNCTIONS, and twelve table rows collapsing to three would
+      not move it by a single test.
 
 kani_harnesses:
   - id: KANI-CLAIMS-001

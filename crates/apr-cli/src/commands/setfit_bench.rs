@@ -2405,10 +2405,51 @@ pub(crate) mod report {
     /// RETAINED AND DEFERRED (2.0.0, D-19). A candidate ledger is the second method's selection
     /// evidence. Under the active scope there is no ledger to recompute from, so naming one is
     /// a claim about a verification this run did not perform.
-    pub(crate) const PROVENANCE_SOURCES_TWO_METHOD: &str = "the committed lock and ledger bytes";
+    pub(crate) const PROVENANCE_SOURCES_TWO_METHOD: &str =
+        "the committed lock and ledger bytes, the committed selection manifest,\n\
+         \x20         and the row's own confusion matrix";
 
-    /// The provenance sources the header names — ACTIVE.
-    pub(crate) const PROVENANCE_SOURCES: &str = "the committed lock bytes";
+    /// The evidence the header names as RECOMPUTED — ACTIVE.
+    ///
+    /// Extended by 05-16 (the selection manifest, opened at a gate-derived path the row cannot
+    /// choose) and 05-17 (the row's own confusion matrix, from which every published accuracy
+    /// figure is recomputed in closed form). A header that named fewer sources than the run
+    /// actually recomputes teaches a reader to trust the report LESS than the evidence warrants,
+    /// which is the same defect as over-claiming with the sign flipped.
+    pub(crate) const PROVENANCE_SOURCES: &str =
+        "the committed lock bytes, the committed selection manifest, and\n\
+         \x20         the row's own confusion matrix";
+
+    /// What the report still CANNOT rule out, stated rather than hidden — ACTIVE and deferred.
+    ///
+    /// 05-17 RETIRED the previous sentence, which read: "a producer holding both the rows and
+    /// those files could still emit a mutually consistent forgery. This report proves
+    /// consistency, not truth." That is no longer true as an unqualified claim — a forged
+    /// quality metric is now refused by the closed-form cross-check, a forged evidence path by
+    /// containment, and a forged pairing key by the manifest recomputation.
+    ///
+    /// THREE residuals remain, and all three are named here because an understated disclosure
+    /// is as much a defect as an overstated one:
+    /// 1. the cross-check proves the metrics agree with the recorded matrix, NOT that the matrix
+    ///    is the one the model produced;
+    /// 2. the two calibration diagnostics are not recomputable at all — no committed file
+    ///    carries the per-row probabilities they need;
+    /// 3. `evidence_table_hash` and `apr_artifact_sha256` are claims about artifacts this index
+    ///    deliberately does not carry.
+    ///
+    /// It must stay byte-identical in meaning to `bench_gate`'s own residual section and to
+    /// `selection_safety_evidence.residual_risk` in the claims contract; the three are one
+    /// statement written down three times, and gap 1 was findable precisely because three
+    /// statements of one fact had drifted apart.
+    pub(crate) const RESIDUAL_DISCLOSURE: &str =
+        "every published accuracy figure is recomputed from the row's OWN confusion\n\
+         \x20         matrix, so a doctored figure is refused — but the matrix itself is\n\
+         \x20         producer-written, and a producer who edits it and recomputes the\n\
+         \x20         figures from it emits a set this report cannot distinguish from a\n\
+         \x20         measurement. The two calibration diagnostics are not recomputable at\n\
+         \x20         all: no committed file carries the per-row probabilities they need.\n\
+         \x20         `evidence_table_hash` and `apr_artifact_sha256` stay claims about\n\
+         \x20         artifacts this index does not carry.";
 
     /// The machine-readable payload's schema tag.
     pub(crate) const REPORT_PAYLOAD_SCHEMA: &str = "setfit-bench-report-v1";
@@ -2542,10 +2583,10 @@ pub(crate) mod report {
              design:   {} seeds per cell, df = {}, 95% CI uses the frozen t = {:.15}\n\
              verified: every cell of the contracted matrix. A missing, substituted, unmatched or\n\
              \x20         post-test-selected cell would have REFUSED this report rather than\n\
-             \x20         shrunk it, and provenance was recomputed from {sources}\n\
+             \x20         shrunk it, and the evidence below was RECOMPUTED from\n\
+             \x20         {sources}\n\
              \x20         rather than read off the rows.\n\
-             residual: a producer holding both the rows and those files could still emit a\n\
-             \x20         mutually consistent forgery. This report proves consistency, not truth.\n\n",
+             residual: {RESIDUAL_DISCLOSURE}\n\n",
             report.contract_id, report.n_seeds, report.degrees_of_freedom, report.t_crit_975_df9
         )
     }
@@ -2927,13 +2968,22 @@ pub(crate) mod verify_cell {
     pub(crate) const PASS_LINE_PREFIX: &str = "VERIFIED (single cell): ";
 
     /// The scope statement the pass line carries, so a reader cannot take it for a report.
+    ///
+    /// CORRECTED BY 05-17 (finding T-05-16-05). This enumeration had fallen BEHIND the door: it
+    /// named provenance alone while step 6 had grown the selection binding (05-16) and the
+    /// closed-form quality cross-check (05-17). Under-claiming is the safe direction and is
+    /// still a defect — a door whose own printed account of its coverage is incomplete teaches
+    /// a reader to trust it less than the evidence warrants, and it is the same class of
+    /// artifact this phase exists to prevent.
     pub(crate) const DOOR_SCOPE_NOTE: &str =
         "scope: steps 1+4+6 of verify_run over ONE cell - manifest digest, this entry's own \
-         completeness, the row file/schema/envelope digest/manifest digest/slot, and provenance \
-         recomputed from committed bytes. NOT the set-level steps (expectation-set equality, \
-         the all-entries sweep, pairing, attestation), which is what lets this pass while other \
-         cells are still pending. No statistic is emitted; `bench report` is the only door that \
-         publishes numbers.";
+         completeness, the row file/schema/envelope digest/manifest digest/slot, provenance \
+         recomputed from the committed lock bytes at a path that had to pass containment, the \
+         selection manifest recomputed at a path derived from the cell key, and every published \
+         accuracy figure recomputed from the row's own confusion matrix. NOT the set-level \
+         steps (expectation-set equality, the all-entries sweep, pairing, attestation), which \
+         is what lets this pass while other cells are still pending. No statistic is emitted; \
+         `bench report` is the only door that publishes numbers.";
 
     /// Verify one cell's own evidence.
     ///

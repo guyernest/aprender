@@ -65,20 +65,47 @@
 //!
 //! Recomputing the lock and ledger digests raises selection safety from a SELF-ASSERTED BOOLEAN
 //! to APPEND-ONLY, RECOMPUTABLE EVIDENCE. It does not reach a cryptographic train-then-seal
-//! credential, and it is not claimed to. **A producer that controls the rows AND the lock/ledger
-//! files can still emit a mutually consistent forgery.** The six doctored negatives in this
-//! module's test file prove detection of INCONSISTENT evidence; they prove nothing about
-//! TRUTHFUL provenance.
+//! credential, and it is not claimed to. The doctored negatives in this module's test file
+//! prove detection of INCONSISTENT evidence; they prove nothing about TRUTHFUL provenance.
+//!
+//! **The former unqualified sentence here — "a producer that controls the rows AND the
+//! lock/ledger files can still emit a mutually consistent forgery" — was RETIRED by 05-17 and
+//! is not to be restored as written.** It conceded three attacks this gate now refuses: an
+//! escaping evidence path (05-15's containment door), a doctored pairing key (05-16's manifest
+//! recomputation at a gate-derived path), and a doctored quality metric (05-17's closed-form
+//! cross-check). A residual that keeps conceding a refused attack teaches a reader to trust the
+//! evidence LESS than it warrants, which is over-claiming with the sign flipped, and it is as
+//! much a defect as overstating the gate.
+//!
+//! THREE RESIDUALS REMAIN, and they are stated precisely rather than dropped:
+//!
+//! 1. **The confusion MATRIX is producer-written.** The cross-check proves the published
+//!    metrics agree with the matrix recorded beside them; it does NOT prove that matrix is the
+//!    one the model produced. A producer who edits the matrix and recomputes the metrics from
+//!    it emits a set nothing here can distinguish from a measurement. Closing this needs a new
+//!    committed evidence artifact (per-row predictions) that no run writes today.
+//! 2. **`ece_top_label_validation` and `brier_multiclass_validation` are not recomputable at
+//!    all.** They need per-row probability vectors no committed file carries, so those two
+//!    figures stay SELF-ASSERTED. Their `_bits` siblings ARE held against the `f64` beside
+//!    them, which is an internal consistency claim and not a proof of the value.
+//! 3. **`evidence_table_hash` and `apr_artifact_sha256`** remain claims about artifacts the
+//!    index deliberately does not carry.
+//!
+//! This is the same statement `apr setfit bench report`'s `residual:` line and
+//! `setfit-benchmark-claims-v1`'s `selection_safety_evidence.residual_risk` make. The three are
+//! ONE fact written down three times, and gap 1 was findable precisely because three statements
+//! of one fact had drifted apart — so a change to any of them is a change to all three.
 //!
 //! A SECOND RESIDUAL SINCE THE 2.0.0 NARROWING, stated rather than left to be inferred: the
 //! active scope means this gate cannot be handed a second method's row AT ALL, so nothing it
 //! verifies is a cross-method claim. That narrowing buys exactly one thing — the manifest no
 //! longer declares cells that cannot exist — and it must not be read as having strengthened
 //! anything. The two-method machinery below (pairing, the LoRA attestation, the paired delta)
-//! is retained, contract-bound and unexercised, exactly as 05-04's paired-t is. This is the same wording `setfit-benchmark-claims-v1`'s own
-//! `selection_safety_evidence.residual_risk` uses, and it is repeated here because a gate whose
-//! module doc overstates what it proves is the exact failure this phase exists to prevent — the
-//! phase's own bar is "a gate could pass while the claim is false".
+//! is retained, contract-bound and unexercised, exactly as 05-04's paired-t is. It is repeated
+//! here because a gate whose module doc MISDESCRIBES what it proves — in either direction — is
+//! the exact failure this phase exists to prevent; the phase's own bar is "a gate could pass
+//! while the claim is false", and its mirror image is "a disclosure could concede what the gate
+//! refuses".
 //!
 //! # No RNG, and no second definition of the arithmetic
 //!

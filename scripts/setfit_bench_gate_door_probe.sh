@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# setfit_bench_gate_door_probe.sh - replay verifier spot-checks E, G and F through
-# the SHIPPED door.
+# setfit_bench_gate_door_probe.sh - replay verifier spot-checks E, G, F and D
+# through the SHIPPED door.
 #
 # WHY THIS EXISTS. Phase 5's verification found that `verify_provenance` built
 # `bench_dir.join(row.evidence.setfit.lock.lock_record_path)` from a row-supplied
@@ -24,7 +24,15 @@
 # key that a future second METHOD would pair against was a string a
 # producer typed.
 #
-# FOUR RUNS, AND THE ORDER IS THE PROPERTY:
+# Verification also found (advisory 2, EVAL-01) that the published quality
+# metrics were numbers a producer typed, even though the row records the
+# `confusion_matrix` and `ordered_labels` that determine them in closed form.
+# Spot-check D moved `quality.f_avg` from 0.4579 to 0.99, repaired the row
+# envelope digest, the manifest's `row_sha256` and the manifest envelope digest,
+# and `apr setfit bench report` exited 0 with the published mean moving
+# 0.4746 -> 0.5278.
+#
+# FIVE RUNS, AND THE ORDER IS THE PROPERTY:
 #   1. POSITIVE CONTROL on the undoctored slim copy. It must exit 0. Without it,
 #      a probe cannot distinguish "the gate refused the attack" from "the scratch
 #      copy was broken", and would report success for the wrong reason.
@@ -41,6 +49,12 @@
 #      edit is refused at step 4 as a row-digest mismatch BEFORE step 6 is
 #      reached, and the probe would go green having proven nothing about the
 #      binding. Case 4 asserts the refusal is the SELECTION one and not that one.
+#   5. SPOT-CHECK D: one row's `quality.f_avg` doctored to 0.99 with its bits
+#      sibling moved to match and the row's own `confusion_matrix` LEFT ALONE,
+#      with the same three digests repaired. The repair is load-bearing for the
+#      same reason, and leaving the matrix alone is what makes the disagreement
+#      the one the counts-based cross-check exists to find. Case 5 asserts the
+#      refusal is the CROSS-CHECK one and not the row-digest one.
 #
 # EACH CASE GETS ITS OWN SLIM COPY, so a later case cannot pass because an
 # earlier one already broke the tree.
@@ -273,5 +287,38 @@ fi
 printf 'SPOT-CHECK F: rc=%s with %s claiming selection_manifest_hash=%s, refused by the recomputation and NOT at the row digest\n' \
     "$f_rc" "$TARGET_CELL" "$DOCTORED_KEY"
 
-printf 'PASS: %s refuses a row-supplied evidence path that leaves the benchmark directory, a deleted selection manifest, and a doctored pairing key, having first verified the undoctored tree\n' "$APR"
+# ---- 6. SPOT-CHECK D: a row's published headline doctored to 0.99 ----------
+#
+# The digest repair is LOAD-BEARING, exactly as in case 5, and the CONFUSION
+# MATRIX IS DELIBERATELY LEFT ALONE: doctoring it too would produce a row that is
+# internally consistent and would be ACCEPTED, which is the residual the report
+# discloses rather than the attack this case replays.
+D_DIR="$SCRATCH/bench-d"
+slim_copy "$D_DIR"
+DOCTORED_HEADLINE=$(python3 scripts/setfit_bench_gate_doctor.py f-avg-to-0-99 \
+    "$D_DIR" "$OUTSIDE_DIR" "$TARGET_CELL")
+[ -n "$DOCTORED_HEADLINE" ] || fail "the f_avg doctoring step produced no headline"
+D_LOG="$SCRATCH/f-avg-doctored.log"
+run_report "$D_DIR" "$D_LOG"
+d_rc="$report_rc"
+if [ "$d_rc" -eq 0 ]; then
+    tail -20 "$D_LOG" >&2
+    fail "the tree with a doctored quality.f_avg was ACCEPTED (rc=0) - verifier advisory 2 is open again"
+fi
+if grep -q "not the bytes that were attested" "$D_LOG"; then
+    tail -20 "$D_LOG" >&2
+    fail "the gate refused at the ROW-DIGEST step: the digest repair was skipped, so the cross-check was never reached"
+fi
+if ! grep -q "quality.f_avg" "$D_LOG"; then
+    tail -20 "$D_LOG" >&2
+    fail "the refusal does not name quality.f_avg, so it is not the cross-check refusal"
+fi
+if ! grep -q "confusion_matrix" "$D_LOG"; then
+    tail -20 "$D_LOG" >&2
+    fail "the refusal does not name the confusion matrix it recomputed from"
+fi
+printf 'SPOT-CHECK D: rc=%s with %s publishing f_avg=%s beside an untouched confusion matrix, refused by the cross-check against its own counts and NOT at the row digest\n' \
+    "$d_rc" "$TARGET_CELL" "$DOCTORED_HEADLINE"
+
+printf 'PASS: %s refuses a row-supplied evidence path that leaves the benchmark directory, a deleted selection manifest, a doctored pairing key, and a published metric that does not follow from its own confusion matrix, having first verified the undoctored tree\n' "$APR"
 exit 0

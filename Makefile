@@ -2660,9 +2660,9 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 	tail -3 target/setfit-bench-gate.log; \
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: the claims gate is red (rc=$$rc)"; \
-		echo "This suite carries TWENTY doctored shapes, and the SCOPE each is mutated"; \
-		echo "at is part of what it proves — a proof taken at one scope does not"; \
-		echo "transfer to another (CLAUDE.md Verification Discipline rule 4):"; \
+		echo "This suite carries TWENTY-THREE doctored shapes, and the SCOPE each is"; \
+		echo "mutated at is part of what it proves — a proof taken at one scope does"; \
+		echo "not transfer to another (CLAUDE.md Verification Discipline rule 4):"; \
 		echo "  * ACTIVE 40-cell scope, through the PUBLIC verify_run door: a missing"; \
 		echo "    cell, a trimmed row, edited row bytes, post-test selection, the two"; \
 		echo "    out-of-scope refusals (which REUSE existing variants), a deleted"; \
@@ -2684,6 +2684,24 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 		echo "    deterministic order over two broken cells. THE ROW COUNT IS"; \
 		echo "    ASSERTED INSIDE THE TEST: this floor counts test FUNCTIONS, so"; \
 		echo "    eleven table rows collapsing to three would not move it."; \
+		echo "  * ACTIVE 40-cell scope, THE CLOSED-FORM QUALITY CROSS-CHECK (05-17,"; \
+		echo "    EVAL-01): a TWELVE-row swept case table carrying a CONTROL that"; \
+		echo "    must be ACCEPTED and the tree verification measured returning 0"; \
+		echo "    (spot-check D: quality.f_avg 0.4579 -> 0.99 with the row envelope"; \
+		echo "    digest, the manifest row_sha256 and the manifest envelope digest"; \
+		echo "    ALL repaired, which is what makes the cross-check the only thing"; \
+		echo "    left that can refuse), plus macro_f1, mcc, one per-class vector"; \
+		echo "    element and n_test_rows doctored; f_avg_bits moved with the"; \
+		echo "    decimal untouched AND the decimal moved with the bits untouched,"; \
+		echo "    which is an INVERTING pair proving the value check is reached"; \
+		echo "    before the encoding check; a calibration bits sibling doctored;"; \
+		echo "    and three degenerate matrices (ragged, 4x4 against three labels,"; \
+		echo "    all-zero) that must be a TYPED refusal rather than a row of NaNs,"; \
+		echo "    because serde_json renders a NaN as null and a null reads as a"; \
+		echo "    MISSING cell. THE ROW COUNT IS ASSERTED INSIDE THE TEST, for the"; \
+		echo "    same reason as the binding table. The same spot-check D is also"; \
+		echo "    replayed through the SINGLE-CELL verify_cell door, because scope"; \
+		echo "    is part of what a negative proves."; \
 		echo "  * DEFERRED two-method scope: an unpaired pair and forged LoRA"; \
 		echo "    provenance. Those shapes exist only in a design production code"; \
 		echo "    cannot construct; D-ITEM-05-15 restores the arm."; \
@@ -2695,17 +2713,32 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 		echo "is no longer detected as its OWN refusal. See target/setfit-bench-gate.log"; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-bench-gate.log,52,setfit-bench-tests/bench_gate)
+	@$(call assert_tests_ran,target/setfit-bench-gate.log,55,setfit-bench-tests/bench_gate)
 	@set +e; CARGO_INCREMENTAL=0 cargo test -p aprender-train --lib --features setfit bench_metrics \
 		> target/setfit-bench-metrics.log 2>&1; rc=$$?; \
 	set -e; \
 	tail -3 target/setfit-bench-metrics.log; \
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: the EVAL-01 metric assembly is red (rc=$$rc)"; \
+		echo "This suite carries the hand-computed toy cases (every asserted number"; \
+		echo "derived in a comment from the counts, so a refactor has to argue with"; \
+		echo "arithmetic rather than re-record a baseline) and, since 05-17, the"; \
+		echo "CLOSED-FORM RECOMPUTATION: the 40-COMMITTED-ROW AGREEMENT MEASUREMENT"; \
+		echo "that the acceptance band was chosen FROM — it reports per-field"; \
+		echo "bit-identical counts and the maximum deviation, and was 40/40 exact"; \
+		echo "with max deviation 0e0 BEFORE any band existed, which is why the band"; \
+		echo "is exact bit equality and no epsilon appears anywhere; the"; \
+		echo "order-independence assertion the count expansion rests on; the"; \
+		echo "degenerate-matrix refusals; the zero-support class holding its index;"; \
+		echo "and the structural scan that refuses a SECOND definition of any metric"; \
+		echo "inside the recomputation (OPS-03). A red here can mean the committed"; \
+		echo "evidence itself disagrees with its own confusion matrices — read the"; \
+		echo "COMMITTED_ROW_AGREEMENT lines before touching a tolerance, and do not"; \
+		echo "widen one: that is a finding about the evidence, not a band to fit."; \
 		echo "See target/setfit-bench-metrics.log"; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-bench-metrics.log,14,setfit-bench-tests/bench_metrics)
+	@$(call assert_tests_ran,target/setfit-bench-metrics.log,19,setfit-bench-tests/bench_metrics)
 	@set +e; CARGO_INCREMENTAL=0 cargo test -p apr-cli --lib --features setfit setfit_bench \
 		> target/setfit-bench-cli.log 2>&1; rc=$$?; \
 	set -e; \
@@ -2720,16 +2753,28 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 		echo "survived the 05-11 retarget); the token-level scan that refuses the"; \
 		echo "deferred method's name by any spelling; the no-verdict-word scan; the"; \
 		echo "peak-RSS mechanism-asymmetry assertions; and the single-cell door's"; \
-		echo "no-statistic check. A red there means the report may now read as a"; \
-		echo "comparison it did not make. See target/setfit-bench-cli.log"; \
+		echo "no-statistic check. Since 05-17 it also GATES THE DISCLOSURE itself:"; \
+		echo "the residual: line must no longer carry the retired unqualified"; \
+		echo "forgery concession, must still name the three residuals that remain"; \
+		echo "true (a producer-written confusion matrix, the two non-recomputable"; \
+		echo "calibration diagnostics, and the artifacts the index does not carry),"; \
+		echo "and must not overstate; and the single-cell door's printed scope note"; \
+		echo "must enumerate every recomputation the door performs. A red there"; \
+		echo "means the report may now read as a comparison it did not make, or may"; \
+		echo "describe a strength it does not have — or concede a weakness it no"; \
+		echo "longer has, which teaches a reader to trust real evidence less than it"; \
+		echo "warrants. See target/setfit-bench-cli.log"; \
 		exit $$rc; \
 	fi
-	@$(call assert_tests_ran,target/setfit-bench-cli.log,65,setfit-bench-tests/apr-cli)
-	@echo "  phase 5 bench surface: row, gate (twenty doctored shapes across three"
-	@echo "  scopes: the public verify_run door over the ACTIVE 40 — including the"
-	@echo "  selection binding recomputed from the committed manifest at a"
-	@echo "  cell-key-derived path — the deferred two-method scope, and the"
-	@echo "  evidence-path resolver), metrics and the single-method CLI report all ran"
+	@$(call assert_tests_ran,target/setfit-bench-cli.log,67,setfit-bench-tests/apr-cli)
+	@echo "  phase 5 bench surface: row, gate (twenty-three doctored shapes across"
+	@echo "  four scopes: the public verify_run door over the ACTIVE 40 — including"
+	@echo "  the selection binding recomputed from the committed manifest at a"
+	@echo "  cell-key-derived path AND every published quality figure recomputed from"
+	@echo "  the row's own confusion matrix — the single-cell verify_cell door, the"
+	@echo "  deferred two-method scope, and the evidence-path resolver), metrics"
+	@echo "  (including the 40-committed-row agreement measurement the exact band was"
+	@echo "  chosen from) and the single-method CLI report all ran"
 
 # The DOOR-LEVEL probe, deliberately NOT wired into setfit-bench-tests or any tier.
 #
@@ -2742,9 +2787,12 @@ setfit-bench-tests: ## EVAL-03/04/05 (tier3): the Phase 5 row, gate, metric and 
 # rc is captured on the line AFTER the redirect, never through a pipe: `$?` after
 # a pipeline is the LAST command's status, and this repo has shipped that defect
 # twice (#2336, #2360).
-setfit-bench-door-probe: ## EVAL-04: replay spot-check E through the SHIPPED apr door (needs: cargo build --release --bin apr --features setfit)
-	@echo "Phase 5 claims gate, DOOR LEVEL: a row-supplied evidence path that leaves"
-	@echo "the benchmark directory must be refused by 'apr setfit bench report' itself."
+setfit-bench-door-probe: ## EVAL-01/02/04: replay spot-checks E, G, F and D through the SHIPPED apr door (needs: cargo build --release --bin apr --features setfit)
+	@echo "Phase 5 claims gate, DOOR LEVEL: the four trees verification measured"
+	@echo "'apr setfit bench report' ACCEPTING must now be refused by that same door -"
+	@echo "an escaping evidence path, a deleted selections/ tree, a doctored pairing"
+	@echo "key, and a published metric that does not follow from its own confusion"
+	@echo "matrix - after a POSITIVE CONTROL on the undoctored evidence passes first."
 	@echo "PREREQUISITE: cargo build --release --bin apr --features setfit"
 	@mkdir -p target
 	@set +e; bash scripts/setfit_bench_gate_door_probe.sh \
@@ -2754,10 +2802,17 @@ setfit-bench-door-probe: ## EVAL-04: replay spot-check E through the SHIPPED apr
 	if [ $$rc -ne 0 ]; then \
 		echo "FAIL: the door probe did not pass (rc=$$rc)"; \
 		echo "It runs a POSITIVE CONTROL on the undoctored committed evidence FIRST,"; \
-		echo "then replays verifier spot-check E: the committed lock record moved out"; \
-		echo "of the tree, the row repointed at it, and every digest repaired. A"; \
-		echo "control failure means the evidence or the binary is wrong; an attack"; \
-		echo "failure means gap 1 is open again. The probe builds nothing: if"; \
+		echo "then replays FOUR verifier spot-checks, each on its OWN slim copy so a"; \
+		echo "later case cannot pass because an earlier one broke the tree: E (the"; \
+		echo "committed lock record moved out of the tree and the row repointed at"; \
+		echo "it), G (the whole selections/ directory deleted, no row byte touched),"; \
+		echo "F (a row's pairing key doctored to 64 zeros) and D (a row's f_avg"; \
+		echo "doctored to 0.99 beside an UNTOUCHED confusion matrix). E, F and D"; \
+		echo "repair every digest, which is LOAD-BEARING: without the repair the gate"; \
+		echo "refuses at step 4 and the probe goes green having proven nothing."; \
+		echo "A control failure means the evidence or the binary is wrong; an attack"; \
+		echo "failure means gap 1, gap 2 or advisory 2 is open again. It builds"; \
+		echo "nothing: if"; \
 		echo "scripts/apr_bin.sh refuses, run"; \
 		echo "  cargo build --release --bin apr --features setfit"; \
 		echo "See target/setfit-bench-door.log"; \

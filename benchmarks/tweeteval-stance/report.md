@@ -3,10 +3,18 @@ contract: setfit-benchmark-claims-v1
 design:   10 seeds per cell, df = 9, 95% CI uses the frozen t = 2.262157162798205
 verified: every cell of the contracted matrix. A missing, substituted, unmatched or
           post-test-selected cell would have REFUSED this report rather than
-          shrunk it, and provenance was recomputed from the committed lock bytes
+          shrunk it, and the evidence below was RECOMPUTED from
+          the committed lock bytes, the committed selection manifest, and
+          the row's own confusion matrix
           rather than read off the rows.
-residual: a producer holding both the rows and those files could still emit a
-          mutually consistent forgery. This report proves consistency, not truth.
+residual: every published accuracy figure is recomputed from the row's OWN confusion
+          matrix, so a doctored figure is refused — but the matrix itself is
+          producer-written, and a producer who edits it and recomputes the
+          figures from it emits a set this report cannot distinguish from a
+          measurement. The two calibration diagnostics are not recomputable at
+          all: no committed file carries the per-row probabilities they need.
+          `evidence_table_hash` and `apr_artifact_sha256` stay claims about
+          artifacts this index does not carry.
 
 SCOPE - ONE METHOD WAS MEASURED. This report covers SetFit alone. A second method was planned for this matrix and was not run; the reason is recorded as decision D-19 and the restoration path as ticket D-ITEM-05-15. Nothing here states or implies any result about a second method. Read the absence as absence.
 

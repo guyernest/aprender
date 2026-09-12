@@ -1678,9 +1678,10 @@ mod report_render {
         COMPARISON_ROW_MARKER, DELTA_TABLE_HEADER, ESTIMATION_FIRST_NOTE,
         ESTIMATION_FIRST_NOTE_PAIRED, INCOMPARABLE_NOTE, PER_HOST_FRAMING,
         PER_HOST_FRAMING_TWO_HOST, PROVENANCE_SOURCES, PROVENANCE_SOURCES_TWO_METHOD,
-        QUALITY_TABLE_HEADER, REPORT_PAYLOAD_SCHEMA, RESOURCE_COMPARISON_HEADER,
-        SAMPLED_LOWER_BOUND_LABEL, SEED_CI_LABEL, SINGLE_METHOD_NOTE, SINGLE_METHOD_TITLE,
-        SIZE_TABLE_FOOTNOTE, SIZE_TABLE_FOOTNOTE_TWO_METHOD, SIZE_TABLE_HEADER, TWO_METHOD_TITLE,
+        QUALITY_TABLE_HEADER, REPORT_PAYLOAD_SCHEMA, RESIDUAL_DISCLOSURE,
+        RESOURCE_COMPARISON_HEADER, SAMPLED_LOWER_BOUND_LABEL, SEED_CI_LABEL, SINGLE_METHOD_NOTE,
+        SINGLE_METHOD_TITLE, SIZE_TABLE_FOOTNOTE, SIZE_TABLE_FOOTNOTE_TWO_METHOD,
+        SIZE_TABLE_HEADER, TWO_METHOD_TITLE,
     };
 
     /// LoRA's ADAPTER-ONLY byte count.
@@ -1945,6 +1946,9 @@ mod report_render {
             ),
             ("the single-method size footnote", SIZE_TABLE_FOOTNOTE),
             ("the active provenance sources", PROVENANCE_SOURCES),
+            // 05-17. THE DISCLOSURE IS GATED, not merely edited. A residual line is a claim
+            // about the report's own strength, and it drifts the way any other claim does.
+            ("the corrected residual disclosure", RESIDUAL_DISCLOSURE),
         ] {
             assert!(
                 rendered.contains(needle),
@@ -1971,6 +1975,110 @@ mod report_render {
                 two_method.contains(needle),
                 "must-not-match row `{label}` never appears in ANY render, so asserting its \
                  absence from the active report is vacuous"
+            );
+        }
+    }
+
+    #[test]
+    fn setfit_bench_report_residual_concedes_exactly_what_the_gate_still_cannot_refuse() {
+        // 05-17. THE RESIDUAL LINE IS A CLAIM ABOUT THE REPORT'S OWN STRENGTH, and it is held
+        // to the same standard as the numbers: it must not overstate what the gate enforces,
+        // and it must not keep conceding something the gate now refuses. Both directions are
+        // defects — an understated disclosure teaches a reader to trust real evidence less than
+        // it warrants, which is over-claiming with the sign flipped.
+        let rendered = render_human(&active_scope());
+
+        // GONE — the sentence this program actually used to print, copied verbatim out of its
+        // own format string rather than invented as a near-miss. It conceded a forgery that
+        // three separate checks now refuse: a doctored quality figure (the closed-form
+        // cross-check, 05-17), an escaping evidence path (containment, 05-15), and a doctored
+        // pairing key (the selection-manifest recomputation, 05-16).
+        for (label, needle) in [
+            (
+                "the retired unqualified-forgery concession",
+                "a producer holding both the rows and those files could still emit a",
+            ),
+            (
+                "the retired consistency-not-truth sentence",
+                "proves consistency, not truth",
+            ),
+        ] {
+            assert!(
+                !rendered.contains(needle),
+                "the report still carries `{label}` ({needle:?}); the gate now refuses what \
+                 that sentence concedes"
+            );
+        }
+
+        // STILL CONCEDED — the three residuals that remain TRUE. Retiring the sentence without
+        // replacing it would have been the opposite defect, and a bigger one.
+        for (label, needle) in [
+            ("the doctored-matrix residual", "the matrix itself is"),
+            ("the calibration residual", "not recomputable at"),
+            ("the uncommitted-artifact residual", "apr_artifact_sha256"),
+            ("the evidence-table residual", "evidence_table_hash"),
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "the corrected residual must still concede `{label}` ({needle:?})"
+            );
+        }
+
+        // AND IT MUST NOT OVERSTATE. The cross-check proves consistency with the RECORDED
+        // matrix; a residual claiming the matrix itself was verified would be the forgery this
+        // disclosure exists to keep visible.
+        let lower = rendered.to_lowercase();
+        for overclaim in [
+            "proves the matrix",
+            "verified against the model",
+            "cannot be forged",
+        ] {
+            assert!(
+                !lower.contains(overclaim),
+                "the residual overstates the gate with `{overclaim}`"
+            );
+        }
+
+        // NON-VACUITY: the disclosure is actually present, so the absence assertions above are
+        // not holding over a report that dropped the line entirely.
+        assert!(rendered.contains(RESIDUAL_DISCLOSURE));
+        assert!(rendered.contains("residual:"));
+    }
+
+    #[test]
+    fn setfit_bench_verify_cell_scope_note_enumerates_every_recomputation_the_door_performs() {
+        // FINDING T-05-16-05, carried into this plan by 05-16's own threat model. The door's
+        // printed `scope:` line named provenance alone while step 6 had grown the selection
+        // binding (05-16) and the closed-form quality cross-check (05-17). Under-claiming is
+        // the SAFE direction and is still a defect: a door whose own account of its coverage is
+        // incomplete is exactly the class of artifact this phase exists to prevent.
+        use crate::commands::setfit_bench::verify_cell::DOOR_SCOPE_NOTE;
+
+        for (label, needle) in [
+            ("the step list", "steps 1+4+6"),
+            ("provenance", "provenance"),
+            ("the selection manifest", "selection manifest"),
+            ("the quality cross-check", "confusion matrix"),
+            ("the excluded set-level steps", "NOT the set-level steps"),
+        ] {
+            assert!(
+                DOOR_SCOPE_NOTE.contains(needle),
+                "the door's scope note does not name `{label}` ({needle:?}): {DOOR_SCOPE_NOTE}"
+            );
+        }
+
+        // AND IT MUST NOT CLAIM THE SET-LEVEL STEPS IT DELIBERATELY SKIPS. The under-claim is
+        // fixed; the opposite error would be worse, because a reader would take a single-cell
+        // pass for a run-level one.
+        let lower = DOOR_SCOPE_NOTE.to_lowercase();
+        for overclaim in [
+            "every cell",
+            "the whole run",
+            "expectation-set equality holds",
+        ] {
+            assert!(
+                !lower.contains(overclaim),
+                "the door's scope note claims the set-level coverage it skips: `{overclaim}`"
             );
         }
     }
