@@ -95,6 +95,13 @@ use serde::Deserialize;
 use tempfile::TempDir;
 
 use super::*;
+// The SHIPPED metric surfaces, imported so the fixture's quality blocks are computed by the
+// SAME functions `assemble_quality_block` calls (05-17). Any other route would give the phase a
+// second definition of `f_avg`.
+use aprender::metrics::matthews_corrcoef;
+
+use crate::eval::classification::{f1_average_for_classes, Average, MultiClassMetrics};
+use crate::train::setfit::bench_metrics::OFFICIAL_F_AVG_CLASSES;
 use crate::train::setfit::bench_row::ExpectationScope;
 use crate::train::setfit::bench_row::{
     BenchLockRef, BenchRowPayload, HostIdentity, LoraEvidence, QualityBlock, ResourceBlock,
@@ -118,30 +125,89 @@ fn index_of<T: PartialEq + Copy>(list: &[T], value: T) -> usize {
     list.iter().position(|item| *item == value).unwrap_or(0)
 }
 
-/// The synthetic headline metric for one cell.
+/// The three labels every synthetic row declares, in the pinned dataset's own order.
+fn synthetic_labels() -> Vec<String> {
+    vec!["none".to_string(), "against".to_string(), "favor".to_string()]
+}
+
+/// The synthetic confusion matrix for one cell — row-major `[true][predicted]`, three classes.
 ///
-/// Small, exactly-representable values chosen so the non-degenerate deltas VARY across seeds
-/// (otherwise every shot level would take the zero-variance branch and the interval arm of the
-/// aggregate would never be exercised) and the degenerate ones are bit-identical.
-fn synthetic_f_avg(spec: RunSpec, cell: CellKey) -> f64 {
-    let shots_index = index_of(&BENCH_SHOTS, cell.shots);
-    let seed_index = index_of(&BENCH_SEEDS, cell.seed);
-    if spec.zero_variance_shots == Some(cell.shots) {
-        // 0.5 and 0.25 are exact in binary64, so all ten differences are bit-identical 0.25.
-        return match cell.method {
-            Method::Setfit => 0.5,
-            Method::Lora => 0.25,
-        };
-    }
-    #[allow(clippy::cast_precision_loss)]
-    let (base, seed_step) = match cell.method {
-        Method::Setfit => (0.50 + shots_index as f64 * 0.01, 0.001),
-        Method::Lora => (0.40 + shots_index as f64 * 0.01, 0.002),
+/// **Since 05-17 this matrix is the SOURCE of every quality number the fixture publishes.**
+/// Before it, `synthetic_quality` wrote a fixed `[[10,1,1],[1,10,1],[1,1,10]]` beside
+/// `n_test_rows: 35` (that matrix totals **36**), `macro_f1 = f_avg - 0.05`, `mcc = f_avg - 0.10`
+/// and the constants `[0.6, 0.5, 0.4]` for all three per-class vectors — so every synthetic row
+/// was internally inconsistent with the matrix printed next to it. A closed-form cross-check
+/// added over that fixture would have gone red for the right reason at the wrong time: the
+/// failure would have been the fixture, not the gate.
+///
+/// Two dispersion properties are load-bearing for tests that predate this plan, so they are
+/// built into the matrix's shape rather than left to the caller — and each is ASSERTED by
+/// `bench_gate_the_synthetic_fixture_keeps_its_two_dispersion_properties` rather than argued
+/// here:
+///
+/// * **At a non-degenerate shot level the ten seeds must give ten DISTINCT `f_avg` values**, or
+///   `seed_dispersion_ci95` takes the zero-variance branch everywhere and the interval arm of
+///   the aggregate is never exercised. `seed_index` moves counts from the `(against, none)` cell
+///   onto `against`'s diagonal, which makes `F1[against]` STRICTLY INCREASING in the seed index
+///   while `F1[favor]` is untouched. Strict monotonicity is what makes the ten distinct;
+///   *increasing* is what keeps `min` at the first seed and `max` at the last, which
+///   `bench_gate_aggregate_recomputes_the_closed_form_summary_from_the_rows` asserts.
+/// * **At `zero_variance_shots` the ten seeds must be BIT-IDENTICAL per method**, so the seed
+///   index is pinned to `0` at that shot level and the matrix is a function of `(method, shots)`
+///   alone. Identical matrices produce identical `f64`s by construction, and the paired delta
+///   over them is therefore bit-identical too.
+///
+/// `shots_index` moves `favor`'s diagonal, so the four shot levels differ from one another;
+/// `method` moves the same `against` cell the seed does, which keeps SetFit above LoRA exactly
+/// as the arithmetic generator this replaced did.
+fn synthetic_confusion(spec: RunSpec, cell: CellKey) -> Vec<Vec<u64>> {
+    let shots_index = index_of(&BENCH_SHOTS, cell.shots) as u64;
+    let seed_index = if spec.zero_variance_shots == Some(cell.shots) {
+        0
+    } else {
+        index_of(&BENCH_SEEDS, cell.seed) as u64
     };
-    #[allow(clippy::cast_precision_loss)]
-    {
-        base + seed_index as f64 * seed_step
+    let method_offset: u64 = match cell.method {
+        Method::Setfit => 0,
+        Method::Lora => 6,
+    };
+    // Written so no subtraction can underflow at any (shots, seed, method) in the contract's
+    // own axes: `seed_index <= 9 < 11 + method_offset`, and `method_offset <= 6 < 27`.
+    vec![
+        vec![30, 5, 5],
+        vec![(11 + method_offset) - seed_index, (27 + seed_index) - method_offset, 2],
+        vec![3, 4, 33 + shots_index],
+    ]
+}
+
+/// Expand a confusion matrix back into the `(y_pred, y_true)` index vectors that produced it.
+///
+/// Pushes `count` copies of `(predicted, true)` for each `[true][predicted]` cell, reconstructing
+/// the exact MULTISET of prediction pairs the matrix records. Every metric below is a function of
+/// the counts alone and all of them accumulate from integers, so the order the pairs are emitted
+/// in cannot change any result — `bench_metrics_the_recomputation_is_order_independent` asserts
+/// that rather than leaving it as a claim.
+fn expand_confusion(matrix: &[Vec<u64>]) -> (Vec<usize>, Vec<usize>) {
+    let mut y_pred = Vec::new();
+    let mut y_true = Vec::new();
+    for (true_index, row) in matrix.iter().enumerate() {
+        for (pred_index, &count) in row.iter().enumerate() {
+            for _ in 0..count {
+                y_pred.push(pred_index);
+                y_true.push(true_index);
+            }
+        }
     }
+    (y_pred, y_true)
+}
+
+/// The synthetic headline metric for one cell, DERIVED from that cell's confusion matrix.
+///
+/// Kept as a named function because the aggregate tests recompute the published mean, std and
+/// interval from it by hand — the property EVAL-04 asks for is that a reader can re-derive the
+/// number from the stored rows, and this is the test-side half of that.
+fn synthetic_f_avg(spec: RunSpec, cell: CellKey) -> f64 {
+    synthetic_quality(spec, cell).f_avg
 }
 
 /// The relative spelling of one cell's committed selection manifest.
@@ -265,23 +331,43 @@ fn synthetic_ledger_line(cell: CellKey) -> String {
 }
 
 /// A synthetic `QualityBlock`, every headline carrying its bits sibling.
+///
+/// EVERY recomputable field is a closed-form function of [`synthetic_confusion`]'s output,
+/// computed by routing to the SAME shipped surfaces `assemble_quality_block` routes to
+/// ([`MultiClassMetrics::from_predictions_with_min_classes`], [`f1_average_for_classes`],
+/// [`matthews_corrcoef`]). No arithmetic is written here: a fixture that computed the metric a
+/// second way and a gate that computed it a third would be two chances to disagree.
+///
+/// The two calibration diagnostics stay constants, and that is not an oversight — they are the
+/// two quality fields NO committed file makes recomputable (they need per-row probability
+/// vectors), so they are the two the closed-form cross-check deliberately does not reach.
 fn synthetic_quality(spec: RunSpec, cell: CellKey) -> QualityBlock {
-    let f_avg = synthetic_f_avg(spec, cell);
-    let macro_f1 = f_avg - 0.05;
-    let mcc = f_avg - 0.10;
+    let ordered_labels = synthetic_labels();
+    let confusion_matrix = synthetic_confusion(spec, cell);
+    let (y_pred, y_true) = expand_confusion(&confusion_matrix);
+    let metrics = MultiClassMetrics::from_predictions_with_min_classes(
+        &y_pred,
+        &y_true,
+        ordered_labels.len(),
+    );
+    let f_avg = f1_average_for_classes(&metrics.f1, &OFFICIAL_F_AVG_CLASSES)
+        .expect("the three-label synthetic map contains classes 1 and 2");
+    let macro_f1 = metrics.f1_avg(Average::Macro);
+    let mcc = f64::from(matthews_corrcoef(&y_pred, &y_true));
+    let n_test_rows = y_true.len() as u64;
     QualityBlock {
         f_avg,
         f_avg_bits: f_avg.to_bits(),
         macro_f1,
         macro_f1_bits: macro_f1.to_bits(),
-        per_class_precision: vec![0.6, 0.5, 0.4],
-        per_class_recall: vec![0.6, 0.5, 0.4],
-        per_class_f1: vec![0.6, 0.5, 0.4],
+        per_class_precision: metrics.precision.clone(),
+        per_class_recall: metrics.recall.clone(),
+        per_class_f1: metrics.f1.clone(),
         mcc,
         mcc_bits: mcc.to_bits(),
-        confusion_matrix: vec![vec![10, 1, 1], vec![1, 10, 1], vec![1, 1, 10]],
-        n_test_rows: 35,
-        ordered_labels: vec!["none".to_string(), "against".to_string(), "favor".to_string()],
+        confusion_matrix,
+        n_test_rows,
+        ordered_labels,
         ece_top_label_validation: 0.05,
         ece_top_label_validation_bits: 0.05_f64.to_bits(),
         brier_multiclass_validation: 0.30,
@@ -2438,7 +2524,30 @@ fn bench_gate_a_zero_variance_delta_set_reports_a_point_estimate_and_no_interval
     assert!(degenerate.std_delta.is_none());
     // THE POINT ESTIMATE SURVIVES. It is well defined and it is what a reader wants; only the
     // interval is absent, and it is absent WITH A REASON.
-    assert_eq!(degenerate.mean_delta.to_bits(), 0.25_f64.to_bits());
+    //
+    // RE-DERIVED FROM THE FIXTURE, not a literal. Before 05-17 this line read
+    // `0.25_f64.to_bits()`, which was the difference between the two hand-written constants the
+    // degenerate branch of the old `synthetic_f_avg` returned. The quality block is now a closed
+    // form over its own confusion matrix, so the degenerate delta is whatever those two matrices
+    // produce — and pinning a stale literal here would have been the same defect this plan is
+    // closing elsewhere: a published number that no longer follows from the evidence beside it.
+    // The PROPERTY under test is unchanged and is asserted below: identical across all ten
+    // seeds, bit for bit.
+    let degenerate_spec = RunSpec { zero_variance_shots: Some(8) };
+    let expected_delta = synthetic_f_avg(degenerate_spec, CellKey::new(Method::Setfit, 8, 13))
+        - synthetic_f_avg(degenerate_spec, CellKey::new(Method::Lora, 8, 13));
+    assert_eq!(degenerate.mean_delta.to_bits(), expected_delta.to_bits());
+    for seed in BENCH_SEEDS {
+        let per_seed = synthetic_f_avg(degenerate_spec, CellKey::new(Method::Setfit, 8, seed))
+            - synthetic_f_avg(degenerate_spec, CellKey::new(Method::Lora, 8, seed));
+        assert_eq!(
+            per_seed.to_bits(),
+            expected_delta.to_bits(),
+            "seed {seed}'s paired delta at the degenerate shot level must be BIT-identical to \
+             every other seed's, or the branch under test is not reached for the reason its \
+             name claims"
+        );
+    }
     // The non-degenerate levels are unaffected, so the branch is not a global switch.
     let ordinary = report.deltas.iter().find(|d| d.shots == 16).expect("the shot level exists");
     assert!(ordinary.ci95.is_present());
@@ -2460,6 +2569,93 @@ fn bench_gate_a_zero_variance_delta_set_reports_a_point_estimate_and_no_interval
     }
     let rendered = serde_json::to_string(&value).expect("renders");
     assert!(rendered.contains("\"null_reason\":\"zero_variance\""), "{rendered}");
+}
+
+#[test]
+fn bench_gate_the_synthetic_fixture_keeps_its_two_dispersion_properties() {
+    // 05-17. `synthetic_quality` became a closed form over `synthetic_confusion`, and two
+    // properties of the OLD arithmetic generator are load-bearing for tests that predate this
+    // plan. They are asserted here rather than argued in a comment, because a matrix edited in
+    // a later round could break either of them while every existing test stayed green for the
+    // wrong reason: the interval tests would silently exercise the zero-variance branch, and
+    // the zero-variance test would silently exercise the interval one.
+
+    // PROPERTY 1 — a non-degenerate shot level gives ten PAIRWISE DISTINCT f_avg values, per
+    // method, so `seed_dispersion_ci95` has a non-degenerate sample and the interval arm runs.
+    for method in BENCH_METHODS {
+        for shots in BENCH_SHOTS {
+            let values: Vec<u64> = BENCH_SEEDS
+                .iter()
+                .map(|seed| {
+                    synthetic_f_avg(RunSpec::default(), CellKey::new(method, shots, *seed))
+                        .to_bits()
+                })
+                .collect();
+            let mut unique = values.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(
+                unique.len(),
+                BENCH_SEEDS.len(),
+                "{method:?}/s{shots}: the ten synthetic f_avg values must be pairwise distinct; \
+                 got {values:?}"
+            );
+            // And MONOTONE INCREASING, which is the stronger statement the aggregate test
+            // depends on when it asserts `min == expected[0]` and `max == expected[9]`.
+            let mut ascending = values.clone();
+            ascending.sort_unstable();
+            assert_eq!(
+                values, ascending,
+                "{method:?}/s{shots}: the ten values must ascend with the seed index"
+            );
+        }
+    }
+
+    // PROPERTY 2 — at `zero_variance_shots` the ten seeds are BIT-IDENTICAL per method, which
+    // is what `paired_ci95_df9` refuses with `ZeroVarianceDifferences`.
+    let spec = RunSpec { zero_variance_shots: Some(8) };
+    for method in BENCH_METHODS {
+        let first = synthetic_f_avg(spec, CellKey::new(method, 8, BENCH_SEEDS[0])).to_bits();
+        for seed in BENCH_SEEDS {
+            assert_eq!(
+                synthetic_f_avg(spec, CellKey::new(method, 8, seed)).to_bits(),
+                first,
+                "{method:?}/s8/seed{seed} must be bit-identical to seed {} at the degenerate \
+                 shot level",
+                BENCH_SEEDS[0],
+            );
+        }
+        // NON-VACUITY: the degenerate pin must apply to THAT shot level only, or the fixture
+        // would be globally degenerate and property 1 above would be testing nothing.
+        let other: Vec<u64> = BENCH_SEEDS
+            .iter()
+            .map(|seed| synthetic_f_avg(spec, CellKey::new(method, 16, *seed)).to_bits())
+            .collect();
+        assert!(
+            other.iter().any(|bits| *bits != other[0]),
+            "{method:?}: s16 must still vary across seeds when s8 is pinned"
+        );
+    }
+
+    // PROPERTY 3 — every synthetic block's `n_test_rows` is its own matrix's total. The
+    // pre-05-17 fixture said 35 against a matrix totalling 36; the cross-check this plan adds
+    // would have refused every synthetic row for the fixture's defect rather than the gate's.
+    for method in BENCH_METHODS {
+        for shots in BENCH_SHOTS {
+            for seed in BENCH_SEEDS {
+                let cell = CellKey::new(method, shots, seed);
+                let quality = synthetic_quality(RunSpec::default(), cell);
+                let total: u64 = quality.confusion_matrix.iter().flatten().sum();
+                assert_eq!(
+                    quality.n_test_rows,
+                    total,
+                    "{} publishes n_test_rows={} beside a matrix totalling {total}",
+                    cell.render(),
+                    quality.n_test_rows,
+                );
+            }
+        }
+    }
 }
 
 #[test]
