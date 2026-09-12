@@ -92,8 +92,105 @@ def load(path):
 
 MODES = ("escape", "selection-hash-zeros", "f-avg-to-0-99")
 
+# The committed tree this script must never doctor, anchored on THIS FILE's own
+# location rather than on the caller's cwd.
+#
+# CR-01. The guard used to read:
+#
+#     os.path.realpath(bench_dir).startswith(os.path.realpath("benchmarks"))
+#
+# and was wrong twice over. `realpath("benchmarks")` is CWD-RELATIVE and does not
+# require the path to exist, so from `crates/` it resolved to
+# `<repo>/crates/benchmarks`, matched nothing, and let the script proceed to
+# `shutil.move` the committed lock record out of the real tree. Measured: the
+# guard refused from the repo root and did NOT refuse from `crates/`. And
+# `str.startswith` is a STRING-PREFIX test on a path — the exact containment bug
+# plan 05-15 spent a round removing from `resolve_committed_evidence_path`, which
+# is component-wise `Path::starts_with` over canonicalized paths for this reason.
+# A sibling named `benchmarks-evil` string-prefixes `benchmarks` while being no
+# part of it.
+#
+# Anchored on `__file__`, the base is the same from every working directory.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+COMMITTED_BENCHMARKS = os.path.join(REPO_ROOT, "benchmarks")
+
+
+def is_inside_committed_benchmarks(path):
+    """True when `path` is the committed benchmarks tree or lives inside it.
+
+    Component-wise via ``os.path.commonpath``, never ``str.startswith``: a
+    sibling whose name merely begins with ``benchmarks`` is NOT inside it.
+    Both sides go through ``realpath`` first, so a symlink into the committed
+    tree is caught by where it LANDS rather than by how it is spelled.
+    """
+    target = os.path.realpath(path)
+    base = os.path.realpath(COMMITTED_BENCHMARKS)
+    try:
+        return os.path.commonpath([target, base]) == base
+    except ValueError:
+        # Different drives (Windows) — cannot be inside. Fail closed is not
+        # available here: `commonpath` raising means the paths share no root,
+        # which is positive evidence of NON-containment, not an unknown.
+        return False
+
+
+def self_test():
+    """Must-match / must-not-match case table for the containment guard.
+
+    CLAUDE.md Verification Discipline rule 7 — a guard ships a case table, and
+    the table is re-run rather than the predicate re-read. Rule 4 — the table is
+    exercised from more than one working directory, because CWD-dependence is
+    the defect it exists to catch.
+
+    Pure predicate only: it never doctors anything, so it is safe to run against
+    the real committed paths.
+    """
+    committed = COMMITTED_BENCHMARKS
+    cases = [
+        # (path, must_refuse, why)
+        (committed, True, "the committed tree itself"),
+        (os.path.join(committed, "tweeteval-stance"), True, "a cell dir inside it"),
+        (os.path.join(committed, "tweeteval-stance", "rows"), True, "deeper inside it"),
+        (committed + "-evil", False, "SIBLING that string-prefixes it — startswith goes red here"),
+        (os.path.join(REPO_ROOT, "benchmarksomething"), False, "another prefix sibling"),
+        ("/tmp/scratch-bench", False, "a scratch dir outside the repo"),
+        (os.path.join(REPO_ROOT, "crates"), False, "a repo dir that is not benchmarks"),
+        (os.path.join(REPO_ROOT, "benchmarks", "..", "crates"), False, "climbs back out"),
+    ]
+    cwds = [REPO_ROOT, os.path.join(REPO_ROOT, "crates"), "/tmp"]
+
+    failures = []
+    for cwd in cwds:
+        if not os.path.isdir(cwd):
+            continue
+        os.chdir(cwd)
+        for path, must_refuse, why in cases:
+            got = is_inside_committed_benchmarks(path)
+            ok = got == must_refuse
+            print(
+                "[guard] cwd={0:<28} refuse={1:<5} expected={2:<5} {3} ({4})".format(
+                    os.path.basename(cwd) or cwd, str(got), str(must_refuse),
+                    "ok" if ok else "FAIL", why,
+                )
+            )
+            if not ok:
+                failures.append((cwd, path, must_refuse, got))
+
+    if failures:
+        print("\n{0} case(s) FAILED".format(len(failures)))
+        for cwd, path, want, got in failures:
+            print("  cwd={0} path={1} expected refuse={2} got={3}".format(cwd, path, want, got))
+        return 1
+    print("\nall {0} cases pass from {1} working directories".format(
+        len(cases) * len([c for c in cwds if os.path.isdir(c)]),
+        len([c for c in cwds if os.path.isdir(c)]),
+    ))
+    return 0
+
 
 def main(argv):
+    if len(argv) == 2 and argv[1] == "--self-test":
+        return self_test()
     if len(argv) != 5 or argv[1] not in MODES:
         raise SystemExit(
             "usage: setfit_bench_gate_doctor.py <{0}> "
@@ -106,9 +203,16 @@ def main(argv):
     manifest_path = os.path.join(bench_dir, "run-manifest.json")
     escape_path = os.path.join(outside_dir, "anywhere.json")
 
-    # Refuse to doctor the real tree, whatever a caller passes.
-    if os.path.realpath(bench_dir).startswith(os.path.realpath("benchmarks")):
-        raise SystemExit("refusing to doctor the committed benchmark directory")
+    # Refuse to doctor the committed tree, from any working directory a caller
+    # runs this from. See `is_inside_committed_benchmarks` for why the previous
+    # cwd-relative `startswith` form could not hold (CR-01), and `--self-test`
+    # for the case table that keeps it honest.
+    if is_inside_committed_benchmarks(bench_dir):
+        raise SystemExit(
+            "refusing to doctor the committed benchmark directory: {0} is inside {1}".format(
+                os.path.realpath(bench_dir), COMMITTED_BENCHMARKS
+            )
+        )
 
     row = load(row_path)
     manifest = load(manifest_path)
