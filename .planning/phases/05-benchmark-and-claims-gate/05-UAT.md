@@ -3,17 +3,17 @@ status: testing
 phase: 05-benchmark-and-claims-gate
 source: [05-VERIFICATION.md]
 started: "2026-09-12T02:12:00Z"
-updated: "2026-09-12T02:12:00Z"
+updated: "2026-09-12T17:45:00Z"
 ---
 
 ## Current Test
 
-number: 1
-name: Decide the disposition of D-ITEM-05-17-A (build-graph-dependent row seal)
+number: 4
+name: Run `/gsd-secure-phase 05` — no 05-SECURITY.md exists
 expected: |
-  An explicit decision recorded as a plan or a deferred-item disposition, AND the false claim at
-  `bench_row.rs:39-44` corrected in the same change. A doc that states the opposite of the shipped
-  behaviour is the exact defect class this phase was opened for.
+  A threat-mitigation record covering the path-traversal class 05-15 closed, the
+  evidence-substitution class 05-16 closed, the TOCTOU residual disclosed at
+  `bench_gate.rs:844-849`, and the `MAX_CROSS_CHECK_ROWS` expansion cap.
 awaiting: user response
 
 ## Tests
@@ -29,7 +29,12 @@ evidence: `cargo tree -p aprender --features inference -e features -i serde_json
 why_human: Architectural. The fix re-seals 40 rows, 40 selection manifests and the run manifest, or
   else commits the project to a feature pin. Auditability is NOT broken — the verifier reproduced
   the committed digest from committed bytes with no aprender code — so this is advisory, not a gap.
-result: [pending]
+result: pass
+reported: "pass"
+note: Accepted by the user 2026-09-12. Recorded state at acceptance — no code or doc change was
+  made in this run: `bench_row.rs:39-44` still carries the key-sorted-independence claim that
+  measurement contradicts, and D-ITEM-05-17-A remains an open deferred item. Accepting is a valid
+  call (auditability was proven intact outside the codebase), but the divergence is not yet closed.
 
 ### 2. Rule on the eleven judgment-tier prohibitions across 05-15/16/17
 expected: Each prohibition explicitly accepted or turned into a fix. Two need a ruling:
@@ -41,7 +46,15 @@ expected: Each prohibition explicitly accepted or turned into a fix. Two need a 
 why_human: Judgment-tier prohibitions in interactive mode; neither is decidable by grep. Neither
   claims MORE than the gate enforces — which is why these are rulings, not gaps — but both are
   claim-language defects in a phase whose entire subject is claim language.
-result: [pending]
+result: pass
+reported: "pass. I'm not sure what are the tests and if is OK to review and clean up the rule,
+  especially, after the deployment of the servers were successful."
+note: Accepted 2026-09-12, with the user asking whether cleanup is safe post-deployment. Verified
+  and answered: the deployed servers (aprender-mcp-chronos / -lambda / -forecast) depend only on
+  `aprender-forecast`; grep confirms NOTHING in the deploy path references `bench_gate` or
+  `setfit_bench`. WR-03/WR-04 are wording-only defects in the phase-5 report and contract, both in
+  the UNDER-claiming direction, so cleanup is non-urgent and carries no deployment risk. Deferred,
+  not fixed, in this run.
 
 ### 3. Fix or consciously accept CR-01 (doctor-script containment guard)
 expected: The guard refuses `<repo>/benchmarks/tweeteval-stance` from EVERY cwd, proven by a
@@ -55,7 +68,19 @@ evidence: CONFIRMED empirically — from `crates/`, `os.path.realpath("benchmark
 why_human: Destructive-hazard triage on a fixture tool. The shipped probe path was proven safe
   (`cd $REPO_ROOT` + `mktemp`; tracked trees clean after two runs), so this is the unsafe
   hand-invocation path only. Fix-now vs accept-the-footgun is a maintainer call.
-result: [pending]
+result: pass
+reported: "Please fix the containment guard if they are irrelevant anymore after the work that we
+  did."
+resolution: FIXED 2026-09-12 in `480a06fe3`. First confirmed the script is NOT irrelevant — the
+  door probe invokes it three times (escape / selection-hash-zeros / f-avg-to-0-99), so the guard
+  had to be repaired rather than removed. Guard now anchors on
+  `os.path.dirname(os.path.dirname(os.path.abspath(__file__)))` and compares with
+  `os.path.commonpath`, replacing the cwd-relative `str.startswith` form. Ships a `--self-test`
+  case table (CLAUDE.md rule 7) exercised from three working directories (rule 4).
+  PROVEN RED-TURNING, not assumed: 8 of 24 cases fail against the old predicate — 6 under-refusals
+  (committed tree not refused from `crates/` and `/tmp`) and 2 over-refusals (prefix siblings
+  refused from the repo root). New guard 24/24 from 3 cwds. Regression: door probe rc=0 against
+  `apr 0.63.0 (572fb2fec)` with control first and all four refusals; `benchmarks/` untouched.
 
 ### 4. Run `/gsd-secure-phase 05` — no 05-SECURITY.md exists
 expected: A threat-mitigation record covering at minimum: the path-traversal class 05-15 closed
@@ -82,9 +107,9 @@ result: PASSED — discharged by the orchestrator 2026-09-12, not deferred to th
 ## Summary
 
 total: 5
-passed: 1
+passed: 4
 issues: 0
-pending: 4
+pending: 1
 skipped: 0
 blocked: 0
 
