@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: Benchmark and Claims Gate
 status: executing
-stopped_at: Completed 05-16-PLAN.md
-last_updated: "2026-09-11T23:43:30.475Z"
+stopped_at: Completed 05-17-PLAN.md
+last_updated: "2026-09-12T01:17:51.919Z"
 last_activity: 2026-09-11
 last_activity_desc: Phase 05 replanned for D-19 — 05-11/12/13 rewritten, 0 blockers
-state_head: e7c54d8d714bb6d866f55b8468477b9bf34f95f4
+state_head: e81fca7e7b719886b4ba2a891d4a6d5d81ad58eb
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 84
-  completed_plans: 83
+  completed_plans: 84
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 05 (Benchmark and Claims Gate) — EXECUTING
-Plan: 3 of 17
+Plan: 4 of 17
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -210,6 +210,7 @@ pending F-10 in Phase 5.)
 | Phase 05 P13 | 4h 0m | 3 tasks | 8 files |
 | Phase 05 P15 | 113 min | 3 tasks | 6 files |
 | Phase 05 P16 | 61 min | 3 tasks | 6 files |
+| Phase 05 P17 | 71 min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -358,6 +359,9 @@ Recent decisions affecting current work:
 - [Phase 05]: contracts/setfit-benchmark-claims-v1.yaml bumped 2.0.0 -> 3.0.0, the bump pv diff suggested. Additive in shape but the ACCEPTANCE SET NARROWS: a tree that verified at 2.0.0 can be refused now. pairing_rule keeps status: deferred and D-ITEM-05-15.
 - [Phase 05]: The setfit-bench-gate floor is the MEASURED 52, not the plan's 'floor plus 9'. That arithmetic contradicted the plan's own single-swept-table criterion; the gap is closed instead by pinning the 11-row table length inside the test, which a test-FUNCTION floor cannot see.
 - [Phase 05]: Re-measured for the selection manifests: compact JSON in FILE/DECLARATION order reproduces 40/40 committed semantic_hash values, key-SORTED reproduces 0/40 — 05-15's bench_row.rs:37-43 finding confirmed on a second artifact. Harmless here because SelectionPayload serializes as a struct, but the comment's stated reason is still false.
+- [Phase 05]: The acceptance band for the closed-form quality cross-check is EXACT IEEE-754 bit equality, chosen from a measurement taken first: 40/40 bit-identical on every field over the committed rows, max deviation 0e0. No epsilon was needed and none was fitted. — Exactness is structural rather than lucky: the recomputation expands the counts and routes to the SAME integer-sourced surfaces assemble_quality_block used, so agreement is bit-identical by construction and no tolerance can be justified.
+- [Phase 05]: Contract 4.0.0: pv diff suggested MINOR, the suggestion was recorded verbatim and NOT taken. — The acceptance set narrows again - the exact tree verifier spot-check D built verified at 3.0.0 and is refused now. pv scores the shape of the edit; a strengthened guarantee is a breaking change to every producer relying on the old acceptance, which is the reasoning the 3.0.0 metadata block itself records.
+- [Phase 05]: The report residual, the gate module header and the contract residual_risk are ONE statement written down three times, and all three were corrected together. — Three attacks the sentence conceded are now refused (path escape, pairing key, quality metric). An understated disclosure teaches a reader to trust real evidence less than it warrants, which is over-claiming with the sign flipped.
 
 ### Pending Todos
 
@@ -447,6 +451,7 @@ Recent decisions affecting current work:
 - Workspace lint debt blocks the plan-level clippy line: cargo clippy -p aprender-train --features setfit -- -D warnings exits 101 on pre-existing findings in aprender-compute and aprender-present-terminal. Zero are in aprender-train (--no-deps is rc=0). CLAUDE.md #2370 class; owned by toolchain-ceiling.yml, not by phase 5.
 - bench_row.rs:37-43 claims canonical bytes are key-SORTED because no workspace crate enables preserve_order. MEASURED false: sorting reproduces neither the row nor the manifest digest, file order reproduces both. Not a correctness defect; the stated reason and the field-reordering property it claims are wrong. For 05-16 or 05-17, which touch that module.
 - FINDING for 05-17: apr setfit bench verify-cell's printed 'scope:' prose (apr-cli/src/commands/setfit_bench.rs:2931) and bench report's 'verified:' header no longer enumerate the selection binding both doors now perform. Under-claiming, not a false attestation; assigned to 05-17 by threat T-05-16-05.
+- D-ITEM-05-17-A: the bench row seal is BUILD-GRAPH DEPENDENT. serde_json/preserve_order (via pmcp v2.19.3) is in apr-cli graph and absent from aprender-train, so the same committed row verifies under apr and is refused as row_digest_mismatch under cargo test -p aprender-train. A cargo feature-unification change with no code change can flip the whole committed evidence set. Needs its own plan: the fix re-seals 40 rows, 40 selection manifests and the run manifest.
 
 ## Deferred Items
 
@@ -460,8 +465,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-11T23:43:06.848Z
-Stopped at: Completed 05-16-PLAN.md
+Last session: 2026-09-12T01:17:51.751Z
+Stopped at: Completed 05-17-PLAN.md
 Resume file: None
 
 ## Accumulated Context
