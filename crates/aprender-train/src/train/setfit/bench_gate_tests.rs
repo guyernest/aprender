@@ -2055,6 +2055,332 @@ fn bench_gate_reports_the_first_offending_selection_binding_in_contract_order_ac
     );
 }
 
+// ===========================================================================================
+// THE CLOSED-FORM QUALITY CROSS-CHECK (05-17, verifier advisory 2)
+// ===========================================================================================
+//
+// Spot-check D doctored `quality.f_avg` from 0.4579 to 0.99, repaired the row envelope digest,
+// the manifest's `row_sha256` and the manifest envelope digest, and got rc=0 with the published
+// mean moving 0.4746 -> 0.5278. Every mutation below repairs the same three digests — that is
+// what `reseal_row` followed by `manifest_for` does — so nothing other than the cross-check can
+// be the thing that refuses, and the PRE-FIX observation for every row is `Ok(40 rows verified)`.
+
+/// One doctoring of a published quality figure, applied to a VALID run.
+#[derive(Debug, Clone, Copy)]
+enum QualityMutation {
+    /// No mutation. The ACCEPTANCE row.
+    None,
+    /// SPOT-CHECK D REPLAYED: `f_avg` -> 0.99, every digest repaired.
+    FAvgTo099(CellKey),
+    /// `macro_f1` moved, with its bits sibling repaired so only the matrix can catch it.
+    MacroF1Doctored(CellKey),
+    /// `mcc` moved, bits repaired.
+    MccDoctored(CellKey),
+    /// ONE element of ONE per-class vector moved — the smallest edit the check must see.
+    PerClassF1ElementDoctored(CellKey),
+    /// `n_test_rows` inflated, so the cell looks better powered than its matrix says.
+    NTestRowsDoctored(CellKey),
+    /// `f_avg_bits` moved while `f_avg` is left alone: the row contradicts ITSELF.
+    FAvgBitsOnlyDoctored(CellKey),
+    /// The reverse — `f_avg` moved while `f_avg_bits` is left alone.
+    FAvgDecimalOnlyDoctored(CellKey),
+    /// `ece_top_label_validation_bits` moved. Its VALUE is not recomputable from any committed
+    /// file, but a bits field is a claim the row makes about ITSELF and costs nothing to hold.
+    EceBitsOnlyDoctored(CellKey),
+    /// A confusion matrix that is not square.
+    NonSquareMatrix(CellKey),
+    /// A square 4x4 matrix against three `ordered_labels`.
+    DimensionMismatch(CellKey),
+    /// A square, correctly-dimensioned matrix whose counts total zero.
+    AllZeroMatrix(CellKey),
+}
+
+/// What the swept run must do with a quality mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QualityExpect {
+    /// `verify_run` returns `Ok`. Without this row the table could pass by refusing everything.
+    Accepted,
+    /// Refused with this variant tag, naming this cell, and naming this field in its message.
+    Refused(&'static str, CellKey, &'static str),
+}
+
+/// One row of the quality cross-check table.
+struct QualityCase {
+    label: &'static str,
+    mutation: QualityMutation,
+    expect: QualityExpect,
+    why: &'static str,
+}
+
+const QUALITY_CROSS_CHECK_CASES: [QualityCase; 12] = [
+    // ---- THE CONTROL --------------------------------------------------------------------
+    QualityCase {
+        label: "control",
+        mutation: QualityMutation::None,
+        expect: QualityExpect::Accepted,
+        why: "the synthetic quality blocks are closed forms over their own confusion matrices \
+              (05-17 task 1), so an untouched run must still verify; without this row a table \
+              that refused everything would pass",
+    },
+    // ---- THE RECOMPUTED FIGURES ---------------------------------------------------------
+    QualityCase {
+        label: "spot_check_D_f_avg_to_0_99",
+        mutation: QualityMutation::FAvgTo099(FIRST_CELL),
+        expect: QualityExpect::Refused("quality_cross_check_mismatch", FIRST_CELL, "f_avg"),
+        why: "SPOT-CHECK D, replayed. The verifier measured rc=0 for exactly this with the row \
+              envelope digest, the manifest's row_sha256 and the manifest envelope digest all \
+              repaired — which this mutation also repairs — so the headline is recomputable or \
+              nothing refuses it",
+    },
+    QualityCase {
+        label: "macro_f1_doctored",
+        mutation: QualityMutation::MacroF1Doctored(TARGET_SETFIT),
+        expect: QualityExpect::Refused("quality_cross_check_mismatch", TARGET_SETFIT, "macro_f1"),
+        why: "the second published accuracy figure. It is averaged over a DIFFERENT class set \
+              than f_avg, so a check that only held the headline would leave it free",
+    },
+    QualityCase {
+        label: "mcc_doctored",
+        mutation: QualityMutation::MccDoctored(TARGET_SETFIT),
+        expect: QualityExpect::Refused("quality_cross_check_mismatch", TARGET_SETFIT, "mcc"),
+        why: "MCC narrows to f32 before the row widens it back, so its recomputation has to \
+              reproduce the NARROWING as well as the arithmetic — a row that matched a pure-f64 \
+              recomputation would be refused here for the wrong reason",
+    },
+    QualityCase {
+        label: "one_per_class_f1_element_doctored",
+        mutation: QualityMutation::PerClassF1ElementDoctored(TARGET_SETFIT),
+        expect: QualityExpect::Refused(
+            "quality_cross_check_mismatch",
+            TARGET_SETFIT,
+            "per_class_f1",
+        ),
+        why: "ONE element of ONE vector: the smallest edit a reader could publish, and the one \
+              a check comparing only vector LENGTHS would miss",
+    },
+    QualityCase {
+        label: "n_test_rows_doctored",
+        mutation: QualityMutation::NTestRowsDoctored(TARGET_SETFIT),
+        expect: QualityExpect::Refused(
+            "quality_cross_check_mismatch",
+            TARGET_SETFIT,
+            "n_test_rows",
+        ),
+        why: "the denominator every metric divides by, and the field that makes a cell look \
+              better powered than it was. The matrix's own total is the answer",
+    },
+    // ---- THE ROW CONTRADICTING ITSELF ---------------------------------------------------
+    QualityCase {
+        label: "f_avg_bits_doctored_value_untouched",
+        mutation: QualityMutation::FAvgBitsOnlyDoctored(FIRST_CELL),
+        expect: QualityExpect::Refused("quality_cross_check_mismatch", FIRST_CELL, "f_avg_bits"),
+        why: "the row states the same number twice in two encodings. The lock hashes BITS and a \
+              decimal is a rendering, so a bits field a consumer trusts while the decimal it \
+              reads says otherwise is the worst of the two to leave unheld",
+    },
+    QualityCase {
+        label: "f_avg_decimal_doctored_bits_untouched",
+        mutation: QualityMutation::FAvgDecimalOnlyDoctored(FIRST_CELL),
+        expect: QualityExpect::Refused("quality_cross_check_mismatch", FIRST_CELL, "f_avg"),
+        why: "THE REVERSE, and it must report `f_avg` rather than `f_avg_bits`: the recomputation \
+              runs FIRST in the fixed field order, so the report names the figure a reader saw \
+              rather than its encoding. Without this row the previous one could pass while the \
+              value check was never reached",
+    },
+    QualityCase {
+        label: "ece_bits_doctored",
+        mutation: QualityMutation::EceBitsOnlyDoctored(TARGET_SETFIT),
+        expect: QualityExpect::Refused(
+            "quality_cross_check_mismatch",
+            TARGET_SETFIT,
+            "ece_top_label_validation_bits",
+        ),
+        why: "THE CALIBRATION DIAGNOSTICS ARE NOT RECOMPUTABLE — no committed file carries the \
+              per-row probability vectors — but their BITS siblings are an internal consistency \
+              claim, and holding what can be held is not the same as claiming the value is \
+              proven. The residual disclosure says which of the two this is",
+    },
+    // ---- DEGENERATE MATRICES: a typed refusal, never a row of NaNs ----------------------
+    QualityCase {
+        label: "non_square_matrix",
+        mutation: QualityMutation::NonSquareMatrix(TARGET_SETFIT),
+        expect: QualityExpect::Refused("row_schema_refused", TARGET_SETFIT, "confusion_matrix"),
+        why: "serde accepts any Vec<Vec<u64>>, so the shape is not a schema property the parse \
+              can hold. The alternative to this refusal is a metric computed over a ragged \
+              tally, or a panic on an index",
+    },
+    QualityCase {
+        label: "four_by_four_against_three_labels",
+        mutation: QualityMutation::DimensionMismatch(TARGET_SETFIT),
+        expect: QualityExpect::Refused("row_schema_refused", TARGET_SETFIT, "confusion_matrix"),
+        why: "a square matrix can still disagree with the LABEL MAP, and then index i of one is \
+              not index i of the other — every per-class number would be published under another \
+              class's name",
+    },
+    QualityCase {
+        label: "all_zero_matrix",
+        mutation: QualityMutation::AllZeroMatrix(TARGET_SETFIT),
+        expect: QualityExpect::Refused("row_schema_refused", TARGET_SETFIT, "confusion_matrix"),
+        why: "EVERY metric divides by this total. The alternative to refusing is a row of NaNs, \
+              and serde_json renders a NaN as `null` — which a reader takes for a MISSING cell \
+              rather than a visible failure",
+    },
+];
+
+/// Apply one quality mutation to a freshly built valid run, resealing the row.
+///
+/// `reseal_row` recomputes the row's own envelope digest and `manifest_for` then records the new
+/// digest, so all three of spot-check D's repairs happen for every row of the table. That is
+/// deliberate: a mutation that left any digest stale would be refused at step 4 as
+/// `row_digest_mismatch` and would prove nothing about step 6.
+fn apply_quality_mutation(root: &Path, mutation: QualityMutation) {
+    match mutation {
+        QualityMutation::None => {}
+        QualityMutation::FAvgTo099(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.f_avg = 0.99;
+            payload.quality.f_avg_bits = 0.99_f64.to_bits();
+        }),
+        QualityMutation::MacroF1Doctored(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.macro_f1 = 0.91;
+            payload.quality.macro_f1_bits = 0.91_f64.to_bits();
+        }),
+        QualityMutation::MccDoctored(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.mcc = 0.87;
+            payload.quality.mcc_bits = 0.87_f64.to_bits();
+        }),
+        QualityMutation::PerClassF1ElementDoctored(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.per_class_f1[2] = 0.95;
+        }),
+        QualityMutation::NTestRowsDoctored(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.n_test_rows += 1_000;
+        }),
+        QualityMutation::FAvgBitsOnlyDoctored(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.f_avg_bits ^= 1;
+        }),
+        QualityMutation::FAvgDecimalOnlyDoctored(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.f_avg = f64::from_bits(payload.quality.f_avg_bits ^ 1);
+        }),
+        QualityMutation::EceBitsOnlyDoctored(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.ece_top_label_validation_bits ^= 1;
+        }),
+        QualityMutation::NonSquareMatrix(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.confusion_matrix = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        }),
+        QualityMutation::DimensionMismatch(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.confusion_matrix =
+                vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8], vec![9, 10, 11, 12], vec![13, 14, 15, 16]];
+        }),
+        QualityMutation::AllZeroMatrix(cell) => reseal_row(root, cell, |payload| {
+            payload.quality.confusion_matrix = vec![vec![0; 3]; 3];
+        }),
+    }
+}
+
+#[test]
+fn bench_gate_quality_cross_check_case_table_at_the_active_scope() {
+    let mut observations: Vec<(&str, String)> = Vec::new();
+
+    for case in &QUALITY_CROSS_CHECK_CASES {
+        let dir = write_valid_run(RunSpec::default());
+        apply_quality_mutation(dir.path(), case.mutation);
+        // AFTER the mutation, so the resealed row's NEW digest is what the manifest records —
+        // spot-check D's third repair, without which every row would be refused at step 4.
+        let manifest = manifest_for(dir.path());
+
+        let (observed, named_cell, rendered) = match verify_run(&manifest, dir.path()) {
+            Ok(set) => (format!("Ok({} rows verified)", set.len()), String::new(), String::new()),
+            Err(error) => (
+                error.variant_tag().to_string(),
+                error.cell().unwrap_or("<none>").to_string(),
+                error.to_string(),
+            ),
+        };
+        println!(
+            "[bench_gate] QUALITY_CROSS_CHECK case={} observed={observed} cell={named_cell} ({})",
+            case.label, case.why
+        );
+
+        let expected = match case.expect {
+            QualityExpect::Accepted => "Ok(40 rows verified)".to_string(),
+            QualityExpect::Refused(tag, cell, field) => {
+                if observed == tag {
+                    assert_eq!(
+                        named_cell,
+                        cell.render(),
+                        "[{}] the refusal must name {}: {rendered}",
+                        case.label,
+                        cell.render()
+                    );
+                    // The FIELD is what tells an operator which published figure to look at.
+                    // A refusal that named only the cell would leave seventeen candidates.
+                    assert!(
+                        rendered.contains(field),
+                        "[{}] the refusal must name the field `{field}`: {rendered}",
+                        case.label
+                    );
+                }
+                tag.to_string()
+            }
+        };
+        observations.push((case.label, format!("{observed}|expected={expected}")));
+    }
+
+    let failures: Vec<&(&str, String)> = observations
+        .iter()
+        .filter(|(_, line)| {
+            let (observed, expected) = line.split_once("|expected=").unwrap_or((line, ""));
+            observed != expected
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "every published quality figure must be recomputable from the row's own confusion \
+         matrix through verify_run at the ACTIVE 40-cell scope, and the control must be \
+         ACCEPTED; these were not: {failures:#?}"
+    );
+
+    // THE SWEPT-ROW COUNT IS PINNED HERE, as 05-16 established, because `assert_tests_ran`
+    // counts test FUNCTIONS and this table is ONE function sweeping twelve rows — twelve rows
+    // silently becoming three would not move the Make floor by a single test.
+    assert_eq!(
+        observations.len(),
+        QUALITY_CROSS_CHECK_CASES.len(),
+        "every row of the table must have been swept"
+    );
+    assert_eq!(QUALITY_CROSS_CHECK_CASES.len(), 12, "eleven mutations plus one acceptance row");
+    assert_eq!(
+        QUALITY_CROSS_CHECK_CASES
+            .iter()
+            .filter(|case| case.expect == QualityExpect::Accepted)
+            .count(),
+        1,
+        "a refusal table with no acceptance row can pass by refusing everything"
+    );
+}
+
+#[test]
+fn bench_gate_the_single_cell_door_also_applies_the_quality_cross_check() {
+    // SCOPE IS PART OF WHAT A NEGATIVE PROVES (CLAUDE.md rule 4). The table above holds the
+    // cross-check at `verify_run` / ACTIVE 40; this holds it at the OTHER shipped door, which
+    // `apr setfit bench verify-cell` drives and whose own printed enumeration must say so.
+    let dir = write_valid_run(RunSpec::default());
+    apply_quality_mutation(dir.path(), QualityMutation::FAvgTo099(TARGET_SETFIT));
+    let manifest = manifest_for(dir.path());
+
+    let error = verify_cell(&manifest, dir.path(), TARGET_SETFIT)
+        .expect_err("spot-check D through the single-cell door");
+    assert_eq!(error.variant_tag(), "quality_cross_check_mismatch", "{error}");
+    let expected_cell = TARGET_SETFIT.render();
+    assert_eq!(error.cell(), Some(expected_cell.as_str()), "{error}");
+
+    // NON-VACUITY: the door must still PASS on the untouched cell, or the assertion above
+    // would hold for a door that refused everything.
+    let clean = write_valid_run(RunSpec::default());
+    let clean_manifest = manifest_for(clean.path());
+    verify_cell(&clean_manifest, clean.path(), TARGET_SETFIT)
+        .expect("the untouched cell verifies through the single-cell door");
+}
+
 #[test]
 fn bench_gate_the_deferred_scope_pairing_negative_still_reports_unpaired_selection() {
     // THE FENCE BETWEEN THIS PLAN AND D-ITEM-05-15, asserted rather than reasoned about.
