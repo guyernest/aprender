@@ -601,3 +601,342 @@ fn bench_metrics_does_not_import_the_resampling_evaluator() {
         assert!(code.contains(required), "the assembly must call `{required}`");
     }
 }
+
+// ===========================================================================================
+// The closed-form recomputation (05-17, verifier advisory 2)
+// ===========================================================================================
+
+/// The committed benchmark rows, at a path derived from this crate's own manifest directory.
+///
+/// A runtime read rather than `include_str!` because there are forty of them — but the test
+/// below FAILS if the directory is absent or holds a different count, on `bench_row`'s own
+/// precedent: an evidence test that silently skips when its evidence is missing proves nothing.
+const COMMITTED_ROWS_DIR: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../benchmarks/tweeteval-stance/rows");
+
+/// How many cells the ACTIVE scope declares, and therefore how many rows must be measured.
+const COMMITTED_ROW_COUNT: usize = 40;
+
+/// Read and parse every committed row's PAYLOAD, in a deterministic (sorted) order.
+///
+/// # Why this does NOT go through `BenchRow::from_bytes`, stated rather than left as a gap
+///
+/// It cannot, in this build. `BenchRow::from_bytes` recomputes the envelope digest through
+/// `to_canonical_bytes`, which serializes via `serde_json::Value` — whose `Map` is an
+/// `IndexMap` when the `serde_json/preserve_order` feature is on anywhere in the binary's
+/// dependency graph, and a `BTreeMap` when it is not. **MEASURED, on the committed row
+/// `setfit-s16-seed13.json`:** its envelope claims
+/// `1c54f3b4e38540040a2a2224a424969bae473e7b28da6b33ee2fb4be9f1eae69`, which is the
+/// DECLARATION-ORDER digest; under `cargo test -p aprender-train --lib` the same payload
+/// hashes to `fafda6485f47531aaf277a095ea782cd86ba148e694956bb902e3e0d9c5ad04c`, which is the
+/// KEY-SORTED digest. `pmcp v2.19.3` turns the feature on in `apr-cli`'s graph and is absent
+/// from `aprender-train`'s, so the shipped `apr` binary accepts these rows and this test
+/// binary would refuse all forty as `row_digest_mismatch`.
+///
+/// That is a FINDING about the row seal, reported in 05-17's SUMMARY and in
+/// `deferred-items.md`; it is NOT this plan's to fix (`bench_row.rs` is outside its
+/// `files_modified`, and the fix re-seals forty rows and their manifests). It is deliberately
+/// routed around here rather than worked around silently: the subject of THIS measurement is
+/// whether a published metric follows from the confusion matrix beside it, which the envelope
+/// digest has nothing to do with. Deserializing the payload still exercises the schema,
+/// including `deny_unknown_fields`.
+fn committed_rows() -> Vec<(String, crate::train::setfit::bench_row::BenchRowPayload)> {
+    use crate::train::setfit::bench_row::BenchRowPayload;
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(COMMITTED_ROWS_DIR)
+        .unwrap_or_else(|error| {
+            panic!("the committed rows must be readable at {COMMITTED_ROWS_DIR}: {error}")
+        })
+        .map(|entry| entry.expect("a readable directory entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = path.file_name().expect("a file name").to_string_lossy().to_string();
+            let bytes = std::fs::read(&path).expect("the committed row reads");
+            let envelope: serde_json::Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|error| panic!("committed row {name} is not JSON: {error}"));
+            let payload = envelope
+                .get("payload")
+                .unwrap_or_else(|| panic!("committed row {name} carries no payload"))
+                .clone();
+            let payload: BenchRowPayload =
+                serde_json::from_value(payload).unwrap_or_else(|error| {
+                    panic!("committed row {name}'s payload does not parse: {error}")
+                });
+            (name, payload)
+        })
+        .collect()
+}
+
+/// One measured field: how many cells agreed BIT-IDENTICALLY, and the largest deviation seen.
+struct FieldAgreement {
+    field: &'static str,
+    bit_identical: usize,
+    max_abs_deviation: f64,
+}
+
+#[test]
+fn bench_metrics_the_forty_committed_rows_agree_with_their_own_confusion_matrices() {
+    // THE MEASUREMENT THE ACCEPTANCE BAND WAS CHOSEN FROM, and it was taken BEFORE the band
+    // was set (05-17's own prohibition: "a tolerance must not be chosen because it makes the
+    // committed evidence pass"). It reports, per field, the number of cells agreeing bit for
+    // bit and the maximum absolute deviation — so the band is derived from evidence rather than
+    // fitted to it.
+    //
+    // If any cell disagreed, the answer is NOT a widened band. A metric that disagrees with its
+    // own confusion matrix on committed evidence is a finding about the evidence, to be
+    // reported; the row is not edited to make the check pass.
+    let rows = committed_rows();
+    assert_eq!(
+        rows.len(),
+        COMMITTED_ROW_COUNT,
+        "NON-VACUITY: the measurement must cover the whole ACTIVE expectation set; a glob that \
+         matched nothing would report 0/0 agreement and pass"
+    );
+
+    let mut scalar = vec![
+        FieldAgreement { field: "f_avg", bit_identical: 0, max_abs_deviation: 0.0 },
+        FieldAgreement { field: "macro_f1", bit_identical: 0, max_abs_deviation: 0.0 },
+        FieldAgreement { field: "mcc", bit_identical: 0, max_abs_deviation: 0.0 },
+        FieldAgreement { field: "per_class_precision", bit_identical: 0, max_abs_deviation: 0.0 },
+        FieldAgreement { field: "per_class_recall", bit_identical: 0, max_abs_deviation: 0.0 },
+        FieldAgreement { field: "per_class_f1", bit_identical: 0, max_abs_deviation: 0.0 },
+    ];
+    let mut n_rows_agreed = 0_usize;
+    let mut bits_agreed = 0_usize;
+
+    for (name, payload) in &rows {
+        let quality = &payload.quality;
+        let recomputed =
+            quality_from_confusion_matrix(&quality.confusion_matrix, &quality.ordered_labels)
+                .unwrap_or_else(|error| panic!("committed row {name}: {error}"));
+
+        if quality.n_test_rows == recomputed.n_rows {
+            n_rows_agreed += 1;
+        }
+        let pairs: [(usize, f64, f64); 3] = [
+            (0, quality.f_avg, recomputed.f_avg),
+            (1, quality.macro_f1, recomputed.macro_f1),
+            (2, quality.mcc, recomputed.mcc),
+        ];
+        for (index, claimed, expected) in pairs {
+            if claimed.to_bits() == expected.to_bits() {
+                scalar[index].bit_identical += 1;
+            }
+            scalar[index].max_abs_deviation =
+                scalar[index].max_abs_deviation.max((claimed - expected).abs());
+        }
+        let vectors: [(usize, &Vec<f64>, &Vec<f64>); 3] = [
+            (3, &quality.per_class_precision, &recomputed.per_class_precision),
+            (4, &quality.per_class_recall, &recomputed.per_class_recall),
+            (5, &quality.per_class_f1, &recomputed.per_class_f1),
+        ];
+        for (index, claimed, expected) in vectors {
+            if claimed.len() == expected.len()
+                && claimed.iter().zip(expected.iter()).all(|(l, r)| l.to_bits() == r.to_bits())
+            {
+                scalar[index].bit_identical += 1;
+            }
+            for (l, r) in claimed.iter().zip(expected.iter()) {
+                scalar[index].max_abs_deviation =
+                    scalar[index].max_abs_deviation.max((l - r).abs());
+            }
+        }
+        // The five bits siblings, counted per ROW: all five must hold for the row to count.
+        let bits_ok = quality.f_avg_bits == quality.f_avg.to_bits()
+            && quality.macro_f1_bits == quality.macro_f1.to_bits()
+            && quality.mcc_bits == quality.mcc.to_bits()
+            && quality.ece_top_label_validation_bits == quality.ece_top_label_validation.to_bits()
+            && quality.brier_multiclass_validation_bits
+                == quality.brier_multiclass_validation.to_bits();
+        if bits_ok {
+            bits_agreed += 1;
+        }
+    }
+
+    // THE MEASUREMENT, printed so it can be read off a run rather than taken on trust.
+    println!(
+        "[bench_metrics] COMMITTED_ROW_AGREEMENT rows={} field=n_test_rows bit_identical={}/{} \
+         max_abs_dev=0 (integer)",
+        rows.len(),
+        n_rows_agreed,
+        rows.len()
+    );
+    for measured in &scalar {
+        println!(
+            "[bench_metrics] COMMITTED_ROW_AGREEMENT rows={} field={} bit_identical={}/{} \
+             max_abs_dev={:e}",
+            rows.len(),
+            measured.field,
+            measured.bit_identical,
+            rows.len(),
+            measured.max_abs_deviation
+        );
+    }
+    println!(
+        "[bench_metrics] COMMITTED_ROW_AGREEMENT rows={} field=all_five_bits_siblings \
+         bit_identical={}/{} max_abs_dev=0 (integer)",
+        rows.len(),
+        bits_agreed,
+        rows.len()
+    );
+
+    assert_eq!(n_rows_agreed, rows.len(), "`n_test_rows` must equal its matrix's own total");
+    assert_eq!(
+        bits_agreed,
+        rows.len(),
+        "every `_bits` field must equal `to_bits()` of the f64 beside it"
+    );
+    for measured in &scalar {
+        assert_eq!(
+            measured.bit_identical,
+            rows.len(),
+            "`{}` agreed on {}/{} committed rows with a maximum deviation of {:e}. THE BAND IS \
+             EXACT IEEE-754 BIT EQUALITY and it is not to be widened: a published metric that \
+             disagrees with its own confusion matrix is a finding about the evidence, not a \
+             tolerance to fit",
+            measured.field,
+            measured.bit_identical,
+            rows.len(),
+            measured.max_abs_deviation
+        );
+    }
+}
+
+#[test]
+fn bench_metrics_the_recomputation_is_order_independent() {
+    // THE ONE PROPERTY THE COUNT EXPANSION RESTS ON, asserted rather than argued. Every metric
+    // involved accumulates from integers, so the order the reconstructed pairs are emitted in
+    // cannot change any result — but "cannot" is cheaper to test than to reason about.
+    let labels = labels();
+    let matrix = vec![vec![31, 9, 5], vec![74, 66, 49], vec![6, 12, 28]];
+    let forward = quality_from_confusion_matrix(&matrix, &labels).expect("the matrix is valid");
+
+    // The SAME multiset of pairs, reached by reversing both the row and the column walk. A
+    // transposed matrix would be a different multiset and is deliberately not what this does.
+    let mut reversed: Vec<Vec<u64>> = matrix.clone();
+    reversed.reverse();
+    for row in &mut reversed {
+        row.reverse();
+    }
+    let mut relabelled = vec![vec![0_u64; 3]; 3];
+    for (true_index, row) in reversed.iter().enumerate() {
+        for (pred_index, &count) in row.iter().enumerate() {
+            relabelled[2 - true_index][2 - pred_index] = count;
+        }
+    }
+    assert_eq!(relabelled, matrix, "the walk-reversal must reconstruct the same tally");
+
+    let backward =
+        quality_from_confusion_matrix(&relabelled, &labels).expect("the matrix is valid");
+    assert_eq!(forward.f_avg.to_bits(), backward.f_avg.to_bits());
+    assert_eq!(forward.macro_f1.to_bits(), backward.macro_f1.to_bits());
+    assert_eq!(forward.mcc.to_bits(), backward.mcc.to_bits());
+    assert_eq!(forward.n_rows, backward.n_rows);
+    assert_eq!(forward, backward, "every field, not only the three headlines");
+}
+
+#[test]
+fn bench_metrics_a_degenerate_confusion_matrix_is_refused_rather_than_producing_nans() {
+    // serde_json renders a NaN as `null`, which a reader takes for a MISSING cell rather than a
+    // visible failure. Each shape below is a state in which SOME number could still be
+    // produced, and every one of those numbers would be a NaN or a wrong attribution.
+    let labels = labels();
+    // THE VARIANT IS ASSERTED, not a substring of the prose. A message scan for "NaN"/"null"
+    // would be the wrong instrument twice over: `EmptySplit`'s own explanation deliberately
+    // contains the word `null` (it is explaining why a NaN is worse than a refusal), so the
+    // scan collides with the very sentence that documents the property — the same collision
+    // 05-16 recorded when it stopped grepping serialized output for "NaN".
+    let cases: [(&str, Vec<Vec<u64>>, &str); 4] = [
+        ("ragged", vec![vec![1, 2, 3], vec![4, 5, 6]], "ConfusionMatrixShape"),
+        (
+            "four_by_four_against_three_labels",
+            vec![vec![1; 4], vec![1; 4], vec![1; 4], vec![1; 4]],
+            "ConfusionMatrixShape",
+        ),
+        ("all_zero", vec![vec![0; 3]; 3], "EmptySplit"),
+        (
+            "above_the_expansion_cap",
+            vec![vec![u64::MAX, 0, 0], vec![0, 0, 0], vec![0, 0, 0]],
+            "ConfusionMatrixTooLarge",
+        ),
+    ];
+    for (label, matrix, expected_variant) in cases {
+        let error = quality_from_confusion_matrix(&matrix, &labels)
+            .expect_err("a degenerate matrix must be refused");
+        let observed = match &error {
+            BenchMetricsError::ConfusionMatrixShape { .. } => "ConfusionMatrixShape",
+            BenchMetricsError::ConfusionMatrixTooLarge { .. } => "ConfusionMatrixTooLarge",
+            BenchMetricsError::EmptySplit { .. } => "EmptySplit",
+            other => panic!("[{label}] unexpected variant: {other:?}"),
+        };
+        assert_eq!(observed, expected_variant, "[{label}] wrong refusal: {error}");
+        assert!(
+            error.to_string().contains("confusion_matrix"),
+            "[{label}] the refusal must name the field an operator has to look at: {error}"
+        );
+    }
+
+    // AND FEWER THAN TWO LABELS, which is a statement about the map rather than the matrix.
+    let one_label = vec!["none".to_string()];
+    assert!(quality_from_confusion_matrix(&[vec![1]], &one_label).is_err());
+
+    // NON-VACUITY: a well-formed matrix over the same label map is ACCEPTED, so the assertions
+    // above are not holding for a function that refuses everything.
+    quality_from_confusion_matrix(&[vec![1, 0, 0], vec![0, 1, 0], vec![0, 0, 1]], &labels)
+        .expect("a well-formed matrix is accepted");
+}
+
+#[test]
+fn bench_metrics_a_zero_support_class_still_occupies_its_index() {
+    // EVAL-01's empty edge. A class with zero support AND zero predictions must still be
+    // present in every per-class vector at its own index and score the shipped zero-division
+    // value — otherwise `per_class_f1[2]` would mean `favor` on one row of a results table and
+    // be out of range on the next, and the official F_avg would report "not computable" for a
+    // class that merely did not occur.
+    let labels = labels();
+    let matrix = vec![vec![4, 1, 0], vec![1, 5, 0], vec![0, 0, 0]];
+    let recomputed = quality_from_confusion_matrix(&matrix, &labels).expect("valid");
+    assert_eq!(recomputed.per_class_f1.len(), 3);
+    assert_eq!(recomputed.per_class_precision.len(), 3);
+    assert_eq!(recomputed.per_class_recall.len(), 3);
+    assert_eq!(recomputed.per_class_f1[2].to_bits(), 0.0_f64.to_bits());
+    assert!(recomputed.f_avg.is_finite(), "the headline must be a number, never a NaN");
+    assert_eq!(recomputed.n_rows, 11);
+}
+
+#[test]
+fn bench_metrics_the_recomputation_authors_no_metric_arithmetic() {
+    // OPS-03, held structurally. The recomputation must ROUTE to the same surfaces
+    // `assemble_quality_block` routes to; a second definition of `F_avg` living here would
+    // disagree with the first eventually and invisibly. The whole function is scanned rather
+    // than only its signature, because a local re-derivation is exactly what would not show up
+    // in a signature.
+    let source = BENCH_METRICS_SOURCE;
+    let start = source
+        .find("pub fn quality_from_confusion_matrix")
+        .expect("the recomputation is in this file");
+    let end = source[start..]
+        .find("\n/// Expand `[true][predicted]` counts")
+        .map(|offset| start + offset)
+        .expect("the function is followed by the expansion helper");
+    let body = &source[start..end];
+
+    for required in [
+        "MultiClassMetrics::from_predictions_with_min_classes",
+        "f1_average_for_classes",
+        "matthews_corrcoef",
+        "f1_avg(Average::Macro)",
+    ] {
+        assert!(body.contains(required), "the recomputation must route to `{required}`");
+    }
+    for banned in ["2.0 *", "/ 2.0", ".sqrt()", "as f64 /", "powi"] {
+        assert!(
+            !body.contains(banned),
+            "`{banned}` in the recomputation would be a SECOND definition of a metric this \
+             crate already ships; route to the surface instead"
+        );
+    }
+}

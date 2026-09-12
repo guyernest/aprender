@@ -27,11 +27,14 @@
 //! 5. per `(shots, seed)`: the two rows carry an identical `selection_manifest_hash`
 //!    (DEFERRED — the active scope has one method, so this rule's domain is empty and it is
 //!    reported as not exercised, never as satisfied);
-//! 6. per row: provenance AND THE SELECTION BINDING, both RECOMPUTED from committed bytes
-//!    (below) — the lock/ledger digests at a row-supplied path that had to be validated, and
-//!    the `selection_manifest_hash` against the manifest at a GATE-DERIVED path the row cannot
-//!    choose ([`selection_manifest_path`]), including the manifest's own declared shots and
-//!    seed against the cell key;
+//! 6. per row: provenance, THE SELECTION BINDING and THE PUBLISHED QUALITY, all three
+//!    RECOMPUTED rather than trusted (below) — the lock/ledger digests at a row-supplied path
+//!    that had to be validated; the `selection_manifest_hash` against the manifest at a
+//!    GATE-DERIVED path the row cannot choose ([`selection_manifest_path`]), including the
+//!    manifest's own declared shots and seed against the cell key; and `f_avg`, `macro_f1`,
+//!    `mcc`, the three per-class vectors, `n_test_rows` and every `_bits` sibling against what
+//!    the row's OWN `confusion_matrix` and `ordered_labels` determine in closed form
+//!    ([`verify_quality_closed_form`]);
 //! 7. per LoRA row: the no-selection attestation's conjuncts (DEFERRED, same reason).
 //!
 //! Steps 1 + 4 + 6 are ALSO available over a single declared cell as [`verify_cell`], which
@@ -111,6 +114,10 @@ use super::bench_row::{
     RunManifest, BENCH_METHODS, BENCH_SEEDS, BENCH_SHOTS, CALIBRATION_SPLIT, CLAIMS_CONTRACT_ID,
     EXPECTED_CELLS, MECHANISM_CHILD_MAX_RSS_TIME_L, MECHANISM_CHILD_MAX_RSS_VM_HWM, WARMUP_COUNT,
 };
+// THE RECOMPUTATION LIVES IN `bench_metrics`, NOT HERE (05-17). This module routes to it and
+// compares; it authors no metric arithmetic of its own, for the same reason it holds no second
+// definition of the mean.
+use super::bench_metrics::quality_from_confusion_matrix;
 use super::lock::SelectionRule;
 
 // ===========================================================================================
@@ -494,6 +501,28 @@ pub enum BenchGateError {
         /// The `root_seed` the manifest itself declares.
         manifest_seed: u64,
     },
+    /// A published quality figure that does not follow from the row's OWN confusion matrix.
+    ///
+    /// The row records `confusion_matrix` and `ordered_labels` beside every metric it
+    /// publishes, and those counts determine `f_avg`, `macro_f1`, `mcc`, the three per-class
+    /// vectors and `n_test_rows` IN CLOSED FORM. Until this variant existed the metrics were
+    /// numbers a producer typed: verifier spot-check D moved `quality.f_avg` from 0.4579 to
+    /// 0.99, repaired the row envelope digest, the manifest's `row_sha256` and the manifest
+    /// envelope digest, and `apr setfit bench report` returned 0 with the published mean moving
+    /// 0.4746 -> 0.5278.
+    ///
+    /// Also covers the `_bits` siblings, which are the row stating the same number twice in two
+    /// encodings — an internal contradiction no external file is needed to detect.
+    QualityCrossCheckMismatch {
+        /// The offending cell, rendered.
+        cell: String,
+        /// Which published field disagreed, indexed where it is a vector element.
+        field: String,
+        /// What the row publishes.
+        claimed: String,
+        /// What the row's own confusion matrix produces.
+        recomputed: String,
+    },
     /// A row field disagrees with the committed file it names — FORGED PROVENANCE.
     ProvenanceMismatch {
         /// The offending cell, rendered.
@@ -539,6 +568,7 @@ impl BenchGateError {
             Self::UnpairedSelection { .. } => "unpaired_selection",
             Self::SelectionManifestMismatch { .. } => "selection_manifest_mismatch",
             Self::SelectionManifestCellMismatch { .. } => "selection_manifest_cell_mismatch",
+            Self::QualityCrossCheckMismatch { .. } => "quality_cross_check_mismatch",
             Self::ProvenanceMismatch { .. } => "provenance_mismatch",
             Self::PostTestSelection { .. } => "post_test_selection",
         }
@@ -559,6 +589,7 @@ impl BenchGateError {
             | Self::RowSlotMismatch { cell, .. }
             | Self::SelectionManifestMismatch { cell, .. }
             | Self::SelectionManifestCellMismatch { cell, .. }
+            | Self::QualityCrossCheckMismatch { cell, .. }
             | Self::ProvenanceMismatch { cell, .. }
             | Self::PostTestSelection { cell, .. } => Some(cell),
             Self::ManifestDigestMismatch { .. }
@@ -678,6 +709,17 @@ impl core::fmt::Display for BenchGateError {
                      manifest, or re-run the cell",
                 )
             }
+            Self::QualityCrossCheckMismatch { cell, field, claimed, recomputed } => write!(
+                f,
+                "cell {cell}: the published `quality.{field}` is {claimed}, but the row's OWN \
+                 `confusion_matrix` and `ordered_labels` produce {recomputed}. These counts \
+                 determine the metric in CLOSED FORM, through the same surfaces that computed \
+                 it — so a published figure that disagrees with the matrix printed beside it is \
+                 not a measurement. The comparison is exact IEEE-754 bit equality and needs no \
+                 tolerance, because the recomputation routes to the same integer-sourced \
+                 surfaces rather than re-deriving the arithmetic. Re-run the cell rather than \
+                 editing either number",
+            ),
             Self::ProvenanceMismatch { cell, file, claimed, recomputed, detail } => write!(
                 f,
                 "cell {cell}: {detail}. The row claims {claimed}; {file} produces {recomputed}. \
@@ -1050,6 +1092,15 @@ pub(crate) fn verify_run_scoped(
         verify_selection_binding(*cell, row, bench_dir)?;
     }
 
+    // ---- 6c. THE PUBLISHED QUALITY, RECOMPUTED FROM THE ROW'S OWN CONFUSION MATRIX ---------
+    // ITS OWN LOOP, AND AFTER 6b for the same reason 6b came after step 5: a check placed
+    // earlier pre-empts the negatives that prove the later ones, leaving them green while they
+    // had stopped testing what they name. This one reads NO file — the counts are already in
+    // the row — so it is last among the step-6 recomputations by that rule alone.
+    for (cell, row) in &rows {
+        verify_quality_closed_form(*cell, row, bench_dir)?;
+    }
+
     // ---- 7. THE LoRA NO-SELECTION ATTESTATION ----------------------------------------------
     for (cell, row) in &rows {
         if let MethodEvidence::Lora(evidence) = &row.payload.evidence {
@@ -1308,11 +1359,12 @@ fn verify_entry_complete(entry: &CellEntry) -> Result<(), BenchGateError> {
 /// 3'. step 3's per-entry rule, TO THIS ONE ENTRY ONLY ([`verify_entry_complete`]);
 /// 4. the row's file, schema, envelope digest, manifest-digest agreement and slot agreement
 ///    ([`verify_row_evidence`]);
-/// 6. provenance recomputed from committed bytes ([`verify_provenance`]), AND the selection
+/// 6. provenance recomputed from committed bytes ([`verify_provenance`]); the selection
 ///    binding recomputed from the committed manifest at a gate-derived path
 ///    ([`verify_selection_binding`]) — the row's `selection_manifest_hash` against the
 ///    recomputed `semantic_hash`, and the manifest's own declared shots and seed against this
-///    cell's key.
+///    cell's key; AND the published quality recomputed in closed form from the row's own
+///    confusion matrix ([`verify_quality_closed_form`]).
 ///
 /// DOES NOT APPLY: step 2 (expectation-set equality), step 3's SWEEP over every entry, step 5
 /// (pairing) and step 7 (the second method's attestation).
@@ -1331,10 +1383,14 @@ fn verify_entry_complete(entry: &CellEntry) -> Result<(), BenchGateError> {
 /// interval, nothing a reader could mistake for a partial report (T-05-11-06). The report is
 /// the only door that emits numbers. What this validates is exactly what those two stages
 /// validate and no more — file present, schema parse, envelope digest, manifest-digest
-/// agreement, slot agreement, the recomputed lock digest with its role and rule, and the
-/// selection binding recomputed from this cell's own committed manifest. The
+/// agreement, slot agreement, the recomputed lock digest with its role and rule, the
+/// selection binding recomputed from this cell's own committed manifest, and every published
+/// QUALITY figure recomputed in closed form from the row's own confusion matrix. The
 /// resource and size FIELDS are serde fields whose presence and parse are covered by
-/// `BenchRow::from_bytes`; this door does not independently validate their values.
+/// `BenchRow::from_bytes`; this door does not independently validate their values. The quality
+/// fields ARE independently validated, and the two calibration diagnostics are the exception
+/// inside that exception: their `_bits` siblings are held against the `f64` beside them, but
+/// their VALUES are not recomputable from any committed file and are not claimed to be.
 ///
 /// # Errors
 ///
@@ -1380,6 +1436,12 @@ pub fn verify_cell(
     // is WRONG about it is the artifact this phase exists to prevent, so the enumeration above
     // names it and this call is what makes the enumeration true.
     verify_selection_binding(cell, &row, bench_dir)?;
+
+    // ---- 6c. THE PUBLISHED QUALITY, RECOMPUTED FROM THE ROW'S OWN CONFUSION MATRIX ---------
+    // The single-cell door performs this too, and the enumeration above names it. A door whose
+    // own printed scope under-describes what it enforces teaches a reader to trust it less than
+    // the evidence warrants, which is the same defect as over-claiming with the sign flipped.
+    verify_quality_closed_form(cell, &row, bench_dir)?;
 
     // Deliberately nothing returned. See the module note above.
     Ok(())
@@ -1641,6 +1703,165 @@ fn verify_selection_binding(
     }
 
     Ok(())
+}
+
+/// Recompute a row's published quality from the row's OWN confusion matrix, and compare.
+///
+/// # This function computes nothing
+///
+/// It calls [`quality_from_confusion_matrix`], which routes to the same
+/// `MultiClassMetrics` / `f1_average_for_classes` / `matthews_corrcoef` surfaces
+/// `assemble_quality_block` routed to. A second metric computation HERE would give the phase
+/// two definitions of `F_avg`, and two definitions of one number disagree eventually and
+/// invisibly (OPS-03) — the same argument this module already makes about a second mean.
+///
+/// # The band is exact bits, and that was MEASURED before it was chosen
+///
+/// Over all forty committed rows the recomputation agrees BIT-IDENTICALLY on every field, so
+/// the acceptance band is exact IEEE-754 bit equality and there is no epsilon to justify. Every
+/// `f64` here is compared through `to_bits()` rather than `==`: the row carries the bits for
+/// exactly this reason (the lock hashes bits and a decimal is a rendering), and
+/// `clippy::float_cmp` is allowed workspace-wide for ML code, so the lint would not have caught
+/// a sloppy comparison.
+///
+/// # What it does NOT prove
+///
+/// That the confusion matrix is the one the model produced. A producer who doctors the MATRIX
+/// and recomputes the metrics from it emits a consistent forgery, and closing that needs an
+/// evidence artifact no run commits today (per-row predictions). The report's `residual:` line
+/// says so; see THE RESIDUAL, STATED RATHER THAN HIDDEN in this module's header.
+///
+/// `bench_dir` is used only so a shape refusal can NAME the row file an operator has to look
+/// at, exactly as [`verify_provenance`] and [`verify_selection_binding`] use it.
+///
+/// # Errors
+///
+/// [`BenchGateError::QualityCrossCheckMismatch`] when a published figure or a `_bits` sibling
+/// disagrees; [`BenchGateError::RowSchemaRefused`] when the matrix is not a shape any metric
+/// can be computed from — ragged, mis-dimensioned against `ordered_labels`, totalling zero, or
+/// above the recomputation's expansion cap.
+fn verify_quality_closed_form(
+    cell: CellKey,
+    row: &BenchRow,
+    bench_dir: &Path,
+) -> Result<(), BenchGateError> {
+    let quality = &row.payload.quality;
+    let recomputed =
+        quality_from_confusion_matrix(&quality.confusion_matrix, &quality.ordered_labels).map_err(
+            |error| BenchGateError::RowSchemaRefused {
+                cell: cell.render(),
+                path: bench_dir.join(ROWS_DIR).join(row_file_name(cell)).display().to_string(),
+                detail: error.to_string(),
+            },
+        )?;
+
+    // A FIXED FIELD ORDER, so the first reported disagreement is deterministic across runs and
+    // across machines. `n_test_rows` is first because it is the denominator every other number
+    // divides by: a reader told "f_avg disagrees" when the row count is wrong would chase the
+    // wrong field.
+    if quality.n_test_rows != recomputed.n_rows {
+        return Err(BenchGateError::QualityCrossCheckMismatch {
+            cell: cell.render(),
+            field: "n_test_rows".to_string(),
+            claimed: quality.n_test_rows.to_string(),
+            recomputed: recomputed.n_rows.to_string(),
+        });
+    }
+    cross_check_f64(cell, "f_avg", quality.f_avg, recomputed.f_avg)?;
+    cross_check_f64(cell, "macro_f1", quality.macro_f1, recomputed.macro_f1)?;
+    cross_check_f64(cell, "mcc", quality.mcc, recomputed.mcc)?;
+    cross_check_vector(
+        cell,
+        "per_class_precision",
+        &quality.per_class_precision,
+        &recomputed.per_class_precision,
+    )?;
+    cross_check_vector(
+        cell,
+        "per_class_recall",
+        &quality.per_class_recall,
+        &recomputed.per_class_recall,
+    )?;
+    cross_check_vector(cell, "per_class_f1", &quality.per_class_f1, &recomputed.per_class_f1)?;
+
+    // ---- THE BITS SIBLINGS -----------------------------------------------------------------
+    // ALL FIVE, including the two calibration ones whose VALUES no committed file makes
+    // recomputable. A bits field is a claim the row makes about ITSELF, so it costs nothing to
+    // hold — and holding it is not the same as proving the value, which is a distinction the
+    // report's residual disclosure has to keep making.
+    for (field, value, claimed_bits) in [
+        ("f_avg_bits", quality.f_avg, quality.f_avg_bits),
+        ("macro_f1_bits", quality.macro_f1, quality.macro_f1_bits),
+        ("mcc_bits", quality.mcc, quality.mcc_bits),
+        (
+            "ece_top_label_validation_bits",
+            quality.ece_top_label_validation,
+            quality.ece_top_label_validation_bits,
+        ),
+        (
+            "brier_multiclass_validation_bits",
+            quality.brier_multiclass_validation,
+            quality.brier_multiclass_validation_bits,
+        ),
+    ] {
+        if claimed_bits != value.to_bits() {
+            return Err(BenchGateError::QualityCrossCheckMismatch {
+                cell: cell.render(),
+                field: field.to_string(),
+                claimed: format!("{claimed_bits:#018x}"),
+                recomputed: format!("{:#018x} (the bits of the f64 beside it)", value.to_bits()),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Compare one published `f64` against its recomputation by IEEE-754 BITS, never by `==`.
+fn cross_check_f64(
+    cell: CellKey,
+    field: &str,
+    claimed: f64,
+    recomputed: f64,
+) -> Result<(), BenchGateError> {
+    if claimed.to_bits() == recomputed.to_bits() {
+        return Ok(());
+    }
+    Err(BenchGateError::QualityCrossCheckMismatch {
+        cell: cell.render(),
+        field: field.to_string(),
+        claimed: render_f64(claimed),
+        recomputed: render_f64(recomputed),
+    })
+}
+
+/// Compare one published per-class vector, element by element and by bits.
+///
+/// A LENGTH disagreement is reported first and as its own message: a vector shorter than the
+/// label map means index i of one is not index i of the other, which is a different defect from
+/// a wrong value at a known index.
+fn cross_check_vector(
+    cell: CellKey,
+    field: &str,
+    claimed: &[f64],
+    recomputed: &[f64],
+) -> Result<(), BenchGateError> {
+    if claimed.len() != recomputed.len() {
+        return Err(BenchGateError::QualityCrossCheckMismatch {
+            cell: cell.render(),
+            field: field.to_string(),
+            claimed: format!("{} element(s)", claimed.len()),
+            recomputed: format!("{} element(s), one per declared label", recomputed.len()),
+        });
+    }
+    for (index, (left, right)) in claimed.iter().zip(recomputed.iter()).enumerate() {
+        cross_check_f64(cell, &format!("{field}[{index}]"), *left, *right)?;
+    }
+    Ok(())
+}
+
+/// An `f64` rendered with BOTH its decimal and its bits, because the two can disagree.
+fn render_f64(value: f64) -> String {
+    format!("{value:?} (bits {:#018x})", value.to_bits())
 }
 
 /// The six conjuncts of `no_selection_attestation`, each closing a different route to a

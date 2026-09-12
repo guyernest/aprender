@@ -16,9 +16,26 @@
 //! | MCC | [`matthews_corrcoef`] | `aprender-core`'s agreement metrics |
 //! | top-label ECE | [`expected_calibration_error_top_label`] | 05-04's pinned-env fixtures |
 //! | multiclass Brier | [`brier_score_multiclass`] | 05-04's pinned-env fixtures |
+//! | THE CLOSED-FORM RECOMPUTATION of every row above | [`quality_from_confusion_matrix`] | the SAME three surfaces, over the counts the row itself recorded (05-17) |
 //!
 //! The one thing this module DOES decide is which vectors reach which surface, and that is the
 //! decision the whole plan is about — so it is made structurally rather than by convention.
+//!
+//! # The recomputation is HERE, and not in the gate (05-17)
+//!
+//! [`quality_from_confusion_matrix`] reads a published row's own `confusion_matrix` and
+//! `ordered_labels` and returns what the accuracy family must be. It lives beside
+//! [`assemble_quality_block`] because it is the same routing decision read backwards, and
+//! putting a second metric computation in `bench_gate` would give the phase two definitions of
+//! `F_avg` — which is exactly the failure mode that module's own header names. The gate calls
+//! this function and compares; it computes nothing.
+//!
+//! It is NOT a reimplementation and the reason is structural rather than a tolerance: every
+//! metric involved is a function of the counts alone, all of them accumulate from integers, and
+//! the expansion feeds the SAME entry points [`assemble_quality_block`] fed. Agreement is
+//! therefore BIT-IDENTICAL by construction — measured 40/40 exact on every field over the
+//! committed `benchmarks/tweeteval-stance/rows/` before any acceptance band was chosen, which
+//! is why the band is exact IEEE-754 bit equality and there is no epsilon to justify.
 //!
 //! # Calibration is validation-only, and the signature is what enforces it (D-07)
 //!
@@ -132,6 +149,30 @@ pub enum BenchMetricsError {
         /// The label map's size.
         n_classes: usize,
     },
+    /// A recorded `confusion_matrix` that is not a square tally over the declared label map.
+    ///
+    /// `Vec<Vec<u64>>` is the wire type, so serde accepts a ragged or mis-dimensioned matrix
+    /// and the shape is not a property the parse can hold.
+    ConfusionMatrixShape {
+        /// How many rows the matrix has.
+        rows: usize,
+        /// Each row's width, in row order.
+        row_widths: Vec<usize>,
+        /// How many labels were declared beside it.
+        declared_labels: usize,
+    },
+    /// A recorded `confusion_matrix` whose counts total more than [`MAX_CROSS_CHECK_ROWS`].
+    ///
+    /// The recomputation expands the counts back into index vectors, so an unbounded total is a
+    /// denial of service through a shipped door rather than a wrong number: a few hundred bytes
+    /// of JSON can declare `u64::MAX` in one cell.
+    ConfusionMatrixTooLarge {
+        /// The running total when the cap was crossed — a lower bound, since the sum stops
+        /// there rather than continuing (and rather than overflowing).
+        at_least: u64,
+        /// The cap.
+        cap: u64,
+    },
 }
 
 impl fmt::Display for BenchMetricsError {
@@ -167,6 +208,23 @@ impl fmt::Display for BenchMetricsError {
                 "the official F_avg averages classes {classes:?}, which is not inside a \
                  {n_classes}-label map. Reporting 0 here would publish a headline score for a \
                  class that does not exist",
+            ),
+            Self::ConfusionMatrixShape { rows, row_widths, declared_labels } => write!(
+                f,
+                "the recorded `confusion_matrix` has {rows} row(s) of widths {row_widths:?} \
+                 against {declared_labels} `ordered_labels`. Every per-class number indexes \
+                 this matrix by a DECLARED class, so a ragged or mis-dimensioned tally would \
+                 publish class i's counts under class j's name — or index out of the matrix \
+                 entirely. `Vec<Vec<u64>>` is the wire type, so serde cannot hold this and the \
+                 recomputation has to",
+            ),
+            Self::ConfusionMatrixTooLarge { at_least, cap } => write!(
+                f,
+                "the recorded `confusion_matrix` totals at least {at_least} observations, above \
+                 the cap of {cap}. The recomputation expands the counts back into index \
+                 vectors, so an unbounded total is a denial of service through a shipped door \
+                 rather than a wrong number: a few hundred bytes of JSON can declare u64::MAX \
+                 in one cell",
             ),
         }
     }
@@ -309,6 +367,149 @@ fn confusion_counts(predicted: &[usize], truth: &[usize], n_classes: usize) -> V
         .iter()
         .map(|row| row.iter().map(|&count| count as u64).collect())
         .collect()
+}
+
+// ===========================================================================================
+// The closed-form recomputation (05-17, verifier advisory 2)
+// ===========================================================================================
+
+/// The most observations the recomputation will expand back into index vectors.
+///
+/// DERIVED FROM AN EXISTING DECLARED BOUND, not chosen: the expansion allocates two
+/// `Vec<usize>` of `total` elements, so at 10^6 it allocates 16 MB — the same order as
+/// `MAX_EVIDENCE_FILE_BYTES`, the cap the gate already applies to the bytes this matrix arrives
+/// in. It is not a band fitted to the committed evidence: the forty committed rows total **280**
+/// observations each, some three and a half thousand times below this cap.
+pub const MAX_CROSS_CHECK_ROWS: u64 = 1_000_000;
+
+/// The accuracy family a row's own `confusion_matrix` and `ordered_labels` determine.
+///
+/// Every field is what [`assemble_quality_block`] would have published for the same counts.
+/// The two calibration diagnostics are deliberately ABSENT: they need per-row probability
+/// vectors that no committed file carries, so they are not recomputable and this struct does
+/// not pretend otherwise.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecomputedQuality {
+    /// Official `F_avg = (F1_against + F1_favor) / 2`.
+    pub f_avg: f64,
+    /// Three-class macro F1.
+    pub macro_f1: f64,
+    /// Matthews correlation coefficient, widened from the `f32` the surface returns.
+    pub mcc: f64,
+    /// Per-class precision, in `ordered_labels` order.
+    pub per_class_precision: Vec<f64>,
+    /// Per-class recall, in `ordered_labels` order.
+    pub per_class_recall: Vec<f64>,
+    /// Per-class F1, in `ordered_labels` order.
+    pub per_class_f1: Vec<f64>,
+    /// The matrix's own total — what `n_test_rows` must equal.
+    pub n_rows: u64,
+}
+
+/// Recompute a published row's accuracy family from the counts the row itself recorded.
+///
+/// # Why expanding the counts is sound, and is not a second implementation
+///
+/// The matrix is `[true][predicted]` counts. Pushing `count` copies of `(predicted, true)` for
+/// each cell reconstructs the exact MULTISET of prediction pairs that produced it. Every metric
+/// below is a function of the counts alone — [`MultiClassMetrics::from_confusion_matrix`]
+/// reduces a tally, and [`matthews_corrcoef`] rebuilds its own tally from the pairs and
+/// accumulates in `i64` — so the ORDER the pairs are emitted in cannot change any result, and
+/// `bench_metrics_the_recomputation_is_order_independent` asserts that rather than arguing it.
+///
+/// The expansion then feeds the SAME entry points [`assemble_quality_block`] fed, with the same
+/// declared class count and the same `f64::from` widening of the same `f32` MCC return. So the
+/// agreement is bit-identical BY CONSTRUCTION rather than within a tolerance, which is why the
+/// gate compares `to_bits()` and no epsilon appears anywhere in this file.
+///
+/// A class with zero support and zero predictions still occupies its index, because
+/// `from_predictions_with_min_classes` is given `ordered_labels.len()` — so `per_class_f1[2]`
+/// means `favor` on every row rather than being out of range on some.
+///
+/// # Errors
+///
+/// [`BenchMetricsError::TooFewLabels`] for fewer than two declared labels;
+/// [`BenchMetricsError::ConfusionMatrixShape`] for a ragged matrix or one whose dimension
+/// disagrees with the label map; [`BenchMetricsError::ConfusionMatrixTooLarge`] above
+/// [`MAX_CROSS_CHECK_ROWS`]; [`BenchMetricsError::EmptySplit`] for counts totalling zero.
+///
+/// Each of those is a state in which SOME number could still be produced, and every one of
+/// those numbers would be a NaN — which `serde_json` renders as `null`, and which a reader takes
+/// for a MISSING cell rather than a visible failure.
+pub fn quality_from_confusion_matrix(
+    confusion_matrix: &[Vec<u64>],
+    ordered_labels: &[String],
+) -> Result<RecomputedQuality, BenchMetricsError> {
+    let n_classes = ordered_labels.len();
+    if n_classes < 2 {
+        return Err(BenchMetricsError::TooFewLabels { declared: n_classes });
+    }
+
+    // ---- SHAPE FIRST, before any arithmetic and before any allocation ----------------------
+    let row_widths: Vec<usize> = confusion_matrix.iter().map(Vec::len).collect();
+    if confusion_matrix.len() != n_classes || row_widths.iter().any(|width| *width != n_classes) {
+        return Err(BenchMetricsError::ConfusionMatrixShape {
+            rows: confusion_matrix.len(),
+            row_widths,
+            declared_labels: n_classes,
+        });
+    }
+
+    // ---- THEN THE TOTAL, saturating and short-circuited ------------------------------------
+    // `saturating_add` cannot wrap and cannot panic, and the loop stops at the cap — so a
+    // doctored `u64::MAX` is refused in a few comparisons rather than attempting an allocation
+    // no machine can serve.
+    let mut n_rows: u64 = 0;
+    for &count in confusion_matrix.iter().flatten() {
+        n_rows = n_rows.saturating_add(count);
+        if n_rows > MAX_CROSS_CHECK_ROWS {
+            return Err(BenchMetricsError::ConfusionMatrixTooLarge {
+                at_least: n_rows,
+                cap: MAX_CROSS_CHECK_ROWS,
+            });
+        }
+    }
+    if n_rows == 0 {
+        return Err(BenchMetricsError::EmptySplit { parameter: "confusion_matrix" });
+    }
+
+    let (y_pred, y_true) = expand_confusion_counts(confusion_matrix, n_rows);
+
+    // ---- ROUTE. No arithmetic is authored below this line ----------------------------------
+    let metrics = MultiClassMetrics::from_predictions_with_min_classes(&y_pred, &y_true, n_classes);
+    let f_avg = f1_average_for_classes(&metrics.f1, &OFFICIAL_F_AVG_CLASSES).ok_or_else(|| {
+        BenchMetricsError::ClassIndexOutsideLabelMap {
+            classes: OFFICIAL_F_AVG_CLASSES.to_vec(),
+            n_classes,
+        }
+    })?;
+    Ok(RecomputedQuality {
+        f_avg,
+        macro_f1: metrics.f1_avg(Average::Macro),
+        mcc: f64::from(matthews_corrcoef(&y_pred, &y_true)),
+        per_class_precision: metrics.precision,
+        per_class_recall: metrics.recall,
+        per_class_f1: metrics.f1,
+        n_rows,
+    })
+}
+
+/// Expand `[true][predicted]` counts back into the `(y_pred, y_true)` index vectors.
+///
+/// `n_rows` is the already-validated total, used only to size the allocation once.
+fn expand_confusion_counts(confusion_matrix: &[Vec<u64>], n_rows: u64) -> (Vec<usize>, Vec<usize>) {
+    let capacity = usize::try_from(n_rows).unwrap_or(usize::MAX);
+    let mut y_pred = Vec::with_capacity(capacity);
+    let mut y_true = Vec::with_capacity(capacity);
+    for (true_index, row) in confusion_matrix.iter().enumerate() {
+        for (pred_index, &count) in row.iter().enumerate() {
+            for _ in 0..count {
+                y_pred.push(pred_index);
+                y_true.push(true_index);
+            }
+        }
+    }
+    (y_pred, y_true)
 }
 
 #[cfg(test)]

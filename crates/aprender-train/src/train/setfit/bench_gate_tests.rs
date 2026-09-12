@@ -55,6 +55,9 @@
 //! | 18 | a pairing key agreeing in its first characters — last byte flipped, truncated to 16, upper-cased | `selection_manifest_mismatch` | `verify_run` / 40 | 05-16 |
 //! | 19 | TWO cells carrying a broken selection binding | `selection_manifest_mismatch` on the FIRST in contract order | `verify_run` / 40 | 05-16 |
 //! | 20 | the DEFERRED-scope pairing negative re-asserted after the fixture change | `unpaired_selection`, NOT one of entry 16's tags | deferred 80 | 05-16 |
+//! | 21 | the QUALITY CROSS-CHECK case table: spot-check D replayed (`f_avg` -> 0.99 with the row envelope digest, the manifest `row_sha256` and the manifest envelope digest all repaired), `macro_f1`, `mcc`, one `per_class_f1` element, `n_test_rows`, `f_avg_bits` with the decimal untouched, the decimal with the bits untouched, `ece_top_label_validation_bits`, a ragged matrix, a 4x4 matrix against three labels and an all-zero matrix — plus one ACCEPTANCE row | `quality_cross_check_mismatch`, `row_schema_refused`, and `Ok` | `verify_run` / 40 | 05-17 |
+//! | 22 | spot-check D replayed through the SINGLE-CELL door | `quality_cross_check_mismatch`, with a passing control on the untouched cell | `verify_cell` | 05-17 |
+//! | 23 | the synthetic fixture's two dispersion properties and its `n_test_rows`-against-matrix-total identity | pairwise-distinct ascending `f_avg`, bit-identical at `zero_variance_shots`, `n_test_rows == sum(matrix)` | fixture | 05-17 |
 //!
 //! Entries 9 and 10 overlap by design: three of entry 10's rows are the same SHAPES as entry
 //! 9's, proven at a different scope. Deleting either for duplicating the other is exactly the
@@ -3508,7 +3511,7 @@ fn bench_gate_the_single_cell_door_refuses_a_cell_outside_the_active_scope() {
 }
 
 #[test]
-fn bench_gate_the_variant_tag_table_gained_exactly_the_two_arms_this_round_authorised_05_16() {
+fn bench_gate_the_variant_tag_table_gained_exactly_the_one_arm_this_round_authorised_05_17() {
     // Counted over the SHIPPED SOURCE rather than eyeballed in a diff, because a diff review is
     // exactly what missed this class of change before.
     //
@@ -3541,6 +3544,19 @@ fn bench_gate_the_variant_tag_table_gained_exactly_the_two_arms_this_round_autho
     //     operator to look for a digest disagreement that does not exist.
     // 05-16's missing-manifest case mints NOTHING — it reuses `evidence_file_missing` via a
     // new `EvidenceKind`, which is the default answer and is why only two arms appear here.
+    //
+    // 05-17 mints exactly ONE, 17 -> 18, and the argument is that no existing tag says what it
+    // says:
+    //   * `quality_cross_check_mismatch` — verifier advisory 2 / spot-check D. The published
+    //     metrics were numbers a producer typed, even though the row records the counts that
+    //     determine them in closed form. Reusing `row_schema_refused` would report a PARSE
+    //     problem for a row that parses perfectly and whose every digest is intact; reusing
+    //     `provenance_mismatch` would name a committed FILE this refusal never opens — the
+    //     evidence is inside the row itself.
+    // Its THREE degenerate-matrix cases mint NOTHING: a ragged, mis-dimensioned, oversized or
+    // all-zero `confusion_matrix` reuses `row_schema_refused`, because `Vec<Vec<u64>>` is the
+    // wire type and a shape the schema cannot hold IS a schema refusal. The five `_bits`
+    // sibling checks mint nothing either — they are the same claim about the same row.
     const GATE_SOURCE: &str = include_str!("bench_gate.rs");
     let table = GATE_SOURCE
         .split_once("pub const fn variant_tag(&self) -> &'static str {")
@@ -3551,15 +3567,17 @@ fn bench_gate_the_variant_tag_table_gained_exactly_the_two_arms_this_round_autho
         .0;
     let arms = table.matches("=> \"").count();
     assert_eq!(
-        arms, 17,
-        "BenchGateError::variant_tag has {arms} arms; it had 13 before 05-15, 15 after it, and \
-         05-16 authorised exactly two more. An eighteenth would be a variant nobody argued for",
+        arms, 18,
+        "BenchGateError::variant_tag has {arms} arms; it had 13 before 05-15, 15 after it, 17 \
+         after 05-16, and 05-17 authorised exactly one more. A nineteenth would be a variant \
+         nobody argued for",
     );
     for minted in [
         "evidence_path_escape",
         "evidence_file_missing",
         "selection_manifest_mismatch",
         "selection_manifest_cell_mismatch",
+        "quality_cross_check_mismatch",
     ] {
         assert!(table.contains(minted), "the `{minted}` arm must be one of those argued for");
     }
