@@ -1606,6 +1606,39 @@ bindings:
   function: render_human
   status: implemented
   notes: 'Landed with plan 05-10. DECLARATIVE equation: it maps PF-007 and PF-008 onto the mechanisms that answer them, and the RENDERER is where a violation would surface (a best-seed headline, an unlabelled F1, an adapter-only size comparison, a verdict word). render_human composes every table, and its tests scan the whole output for verdict vocabulary and pair every absence assertion with a non-vacuity one. Row corrected from the non-existent `bench_report`.'
+# --- ADDED BY GAP-CLOSURE ROUND (plans 05-16 / 05-17) ----------------------------------
+# TWELVE rows now, not ten. Plans 05-16 and 05-17 each added an ACTIVE equation to
+# setfit-benchmark-claims-v1.yaml (4.0.0) without adding its binding row, and
+# `make contract-audit-phase5` said so: captured directly, not through a pipe,
+#   make contract-audit-phase5 > /tmp/phase5-audit.log 2>&1; rc=$?
+# returned rc=2 with exactly two lines --
+#   [ERROR] BIND-001: Equation 'quality_closed_form_crosscheck' ... has no binding entry
+#   [ERROR] BIND-001: Equation 'selection_binding_rule' ... has no binding entry
+# That rc=2 IS this gate's induced failure mode for the "new equation, no row" case the
+# target's own FAIL message names; the two rows below are what turns it green.
+#
+# THE SYMBOLS WERE RESOLVED AGAINST THE SHIPPED SOURCE, NOT INFERRED FROM THE FILE PATH,
+# for the reason the block above records: `pv audit` reads `status` and CANNOT resolve a
+# symbol, so a wrong module_path/function pair is a claim nothing checks, and
+# contract-audit-phase5 (unlike contract-audit-phase6) has NO resolver step to catch it.
+# Both are private `fn`s in crates/aprender-train/src/train/setfit/bench_gate.rs --
+# verify_selection_binding at :1683 and verify_quality_closed_form at :1770 -- reached
+# per-cell from verify_run. `entrenar` is the [lib] name of the aprender-train package,
+# matching the module_path form the ten rows above already use.
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: selection_binding_rule
+  module_path: entrenar::train::setfit::bench_gate
+  function: verify_selection_binding
+  signature: 'fn verify_selection_binding(cell: CellKey, row: &BenchRow, bench_dir: &Path) -> Result<(), BenchGateError>'
+  status: implemented
+  notes: 'Landed with plan 05-16 (contract 3.0.0). The intra-cell selection door: the manifest path is DERIVED from the cell key (selections/s{shots}-seed{seed}/selection-manifest.json), never taken from a row field, so the recomputation compares a file against a claim rather than a producer against itself. The digest is verified by SelectionManifest::from_bytes'' own seal check (OPS-03: one definition of a manifest''s identity), and the manifest''s payload.shots_per_class / payload.root_seed are compared against the cell key as the independent second statement that refuses a transplanted manifest. Sited in the LIBRARY beside verify_run, not in the report adapter, for the same reason completeness_rule is. Bound here rather than to verify_run because the per-cell door is the thing the equation is about.'
+- contract: setfit-benchmark-claims-v1.yaml
+  equation: quality_closed_form_crosscheck
+  module_path: entrenar::train::setfit::bench_gate
+  function: verify_quality_closed_form
+  signature: 'fn verify_quality_closed_form(cell: CellKey, row: &BenchRow, bench_dir: &Path) -> Result<(), BenchGateError>'
+  status: implemented
+  notes: 'Landed with plan 05-17 (contract 4.0.0). Recomputes every published quality figure from the row''s OWN confusion_matrix and ordered_labels and compares by exact IEEE-754 bit equality -- no epsilon, because the band was measured before it was chosen and all forty committed rows agree bit-identically (bench_metrics_the_forty_committed_rows_agree_with_their_own_confusion_matrices). It authors no second metric implementation: it expands the counts back into (y_pred, y_true) index vectors and calls the SAME entry points assemble_quality_block called. A degenerate matrix -- ragged, mis-dimensioned, zero-total, or over the expansion cap -- is a typed RowSchemaRefused before any metric is computed, never a NaN that serde_json would render as a null. The two calibration diagnostics stay producer-declared and out of domain; only their _bits siblings are held.'
 # ---------------------------------------------------------------------------
 # Phase 6 (native time-series forecasting stack). 63 rows, one per equation of
 # the four Phase 6 contracts — COUNTED, not incremented. Four plans in gap-closure

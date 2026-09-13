@@ -57,7 +57,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 contract-audit-phase6 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests lint-current check-wasm32
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 contract-audit-phase6 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests setfit-bench-door-probe setfit-bench-door-probe-build lint-current check-wasm32
 
 # Default target
 all: tier2
@@ -938,6 +938,11 @@ contrastive-data-boundary: ## D-04: bytes boundary for aprender-contrastive-data
 tier4: tier3
 	@echo "Running Tier 4: CI/CD validation..."
 	@PROPTEST_CASES=100 QUICKCHECK_TESTS=100 cargo test --release
+# Phase 5's DOOR-LEVEL claims proof (gap-closure round). Wired here, not in tier3, because
+# it needs a release `apr` built with the non-default `setfit` feature and tier4 is the tier
+# that already builds release artifacts. See the target's own comment block for why the
+# build is a prerequisite rather than a skip path.
+	@$(MAKE) setfit-bench-door-probe-build
 	@echo "Running pmat analysis..."
 	-pmat tdg . --include-components
 	-pmat rust-project-score
@@ -2818,6 +2823,55 @@ setfit-bench-door-probe: ## EVAL-01/02/04: replay spot-checks E, G, F and D thro
 		echo "See target/setfit-bench-door.log"; \
 		exit $$rc; \
 	fi
+
+# THE DOOR PROBE, WITH ITS PREREQUISITE MADE REAL — and the reason it now runs somewhere.
+#
+# `setfit-bench-door-probe` above was a prerequisite of NOTHING and was absent from
+# `.PHONY`: the string occurred exactly once in this file, in its own definition. It is
+# the SOLE automated door-level proof of spot-checks D, E, F and G, and the secondary leg
+# cited by five threats (T-05-15-01/-03, T-05-16-01/-03, T-05-17-01). Each of those has a
+# primary LIBRARY mechanism already inside `setfit-bench-tests`, so nothing was
+# unprotected — but "a target outside the tiers is a target that stops being run" is this
+# Makefile's own stated rule four times over in tier3, and the probe was outside them.
+#
+# WHY A SEPARATE TARGET RATHER THAN WIRING THE PROBE ITSELF INTO A TIER. The probe BUILDS
+# NOTHING by design: `scripts/apr_bin.sh` REFUSES unless a built `apr` matches HEAD, and
+# the script turns that refusal into `exit 1` (:102-107), then re-checks that the binary
+# actually carries the `setfit` feature by running `apr setfit bench report --help` and
+# exiting 1 if the surface is missing (:129-136). That is the correct behaviour for a
+# hand-run target and the WRONG behaviour for a tier leg: wired bare, it would make the
+# tier red on every checkout whose binary is stale — including this one right now — which
+# teaches people to ignore the tier. The fix is to make the prerequisite real instead of
+# making the failure tolerable, so this target BUILDS the binary first. There is
+# deliberately NO skip path: a probe that skipped when the binary was stale would be the
+# vacuous gate T-05-07-02 exists to prevent, and `apr_bin.sh`'s refusal plus the
+# `--help` surface check together mean the mechanism must engage or the target fails
+# (CLAUDE.md Verification rule 2: never label a run by intent).
+#
+# WHY tier4 AND NOT tier3. tier3 is the pre-push tier (1-5 min) and builds no release
+# binary; a release `apr` build does not belong in it. tier4 is the CI/CD tier and already
+# runs `cargo test --release`, so the release artifacts are being built there anyway. The
+# probe's cost lands where build cost already lives. `setfit-bench-door-probe` remains
+# available standalone for anyone who already has the binary.
+#
+# rc is captured on the line AFTER the redirect, never through a pipe (#2336, #2360).
+setfit-bench-door-probe-build: ## EVAL-01/02/04 (tier4): build apr --features setfit, THEN run the door probe
+	@echo "Building the apr binary the door probe needs (release, --features setfit)."
+	@echo "The probe itself builds nothing and REFUSES a stale or feature-less binary,"
+	@echo "so this build is the prerequisite made real rather than a skip path."
+	@mkdir -p target
+	@set +e; cargo build --release --bin apr --features setfit \
+		> target/setfit-bench-door-build.log 2>&1; rc=$$?; \
+	set -e; \
+	if [ $$rc -ne 0 ]; then \
+		tail -40 target/setfit-bench-door-build.log; \
+		echo "FAIL: could not build apr --release --features setfit (rc=$$rc)."; \
+		echo "The door probe cannot run without it, and it has no skip path by design."; \
+		echo "See target/setfit-bench-door-build.log"; \
+		exit $$rc; \
+	fi
+	@$(MAKE) setfit-bench-door-probe
+
 
 setfit-repro-inproc: ## TRN-06/D-16 (tier2 half): in-process two-clean-runs equality
 	@echo "TRN-06: in-process two-run equality (D-16's fast, non-authoritative half)"
