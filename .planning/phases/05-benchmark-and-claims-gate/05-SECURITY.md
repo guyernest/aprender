@@ -288,7 +288,7 @@ severity column.
 
 ## Warnings — 3, none blocking
 
-**1. `make setfit-bench-door-probe` is an orphaned target.** `Makefile:2790` defines it; it is
+**1. ~~`make setfit-bench-door-probe` is an orphaned target.~~ — RESOLVED 2026-09-13 in `b5bd11a65`.** `Makefile:2790` defines it; it is
 a prerequisite of nothing and absent from `.PHONY` (`Makefile:60`) — the only occurrence of the
 string in the file is its own definition. The phase's own `05-VERIFICATION.md:469,484` already
 grades it "PRESENT, NOT RUNNABLE AT HEAD / ORPHANED TARGET (WR-07)" and records rc=1 at HEAD on
@@ -296,6 +296,15 @@ grades it "PRESENT, NOT RUNNABLE AT HEAD / ORPHANED TARGET (WR-07)" and records 
 T-05-17-01. Each of those threats' **primary** mechanism is a library construct plus a case
 table wired into `make setfit-bench-tests`, which `tier3` invokes at `Makefile:408` — so no
 threat opens. But the door-level proof those five threats cite does not run in any gate.
+
+> **Closed 2026-09-13.** `/gsd-validate-phase 05` found the same orphan independently and fixed it:
+> a new `setfit-bench-door-probe-build` target builds the release `apr` with the non-default
+> `setfit` feature and then runs the probe, wired into **tier4** (`Makefile:945`) unprefixed so a
+> failure fails the tier. Both targets are now in `.PHONY`. Re-measured at this HEAD: `make
+> setfit-bench-door-probe-build` → **rc=0**, with the positive CONTROL passing *before* the four
+> attacks (path escape, deleted `selections/`, zeroed pairing key, `f_avg=0.99`), each **rc=5** and
+> the last two explicitly refused by the recomputation **and NOT at the row digest**. The secondary
+> leg of T-05-15-01/-03, T-05-16-01/-03 and T-05-17-01 now runs in a gate.
 
 **2. T-05-03-05's success-value leg is `#[ignore]`d.** `PRODUCTION_LOWER_BOUND`
 (`evidence.rs:1749`) has exactly one caller, `:4221`, inside the `#[ignore]`d production combine.
@@ -316,7 +325,8 @@ but a future `/gsd-secure-phase` run that reads only the heading would see nothi
 | Audit Date | Threats Total | Closed | Open | Run By |
 |------------|---------------|--------|------|--------|
 | 2026-09-12 | 115 | 115 | 0 | gsd-security-auditor (ASVS L1, block_on: high) |
-| 2026-09-13 | 116 | 116 | 0 | UAT test 4 amendment — AR-11 (TOCTOU residual) added; see note below |
+| 2026-09-13 | 115 | 115 | 0 | UAT test 4 amendment — AR-11 (TOCTOU residual) recorded as an accepted risk; register count unchanged |
+| 2026-09-13 | 115 | 115 | 0 | **State A re-audit** (`/gsd-secure-phase 05`) — carried forward on a proven-empty diff; Warning 1 closed |
 
 **Method.** Register parsed from all 17 plan `<threat_model>` blocks and cross-read against the
 17 SUMMARY discharge sections. Verification was against the implemented code — `bench_gate.rs`,
@@ -327,6 +337,51 @@ not against plan prose. Four claims were confirmed independently of the summarie
 them: the dataset-text absence in committed rows (T-05-12-03), the empty REQUIREMENTS.md diff
 (T-05-13-03), the exhaustive `read_evidence` call-site enumeration (T-05-15-03), and the
 single-manifest-touch finding across 136 commits (the SC rows / AR-10).
+
+---
+
+---
+
+## Security Audit 2026-09-13 (State A re-audit)
+
+| Metric | Count |
+|--------|-------|
+| Threats found | 115 |
+| Closed | 115 |
+| Open | **0** |
+| Accepted risks logged | 11 (AR-01 … AR-11) |
+
+**Why this re-audit did not re-verify 115 mitigations one by one, and why that is sound
+rather than lazy.** Three commits landed since the 2026-09-12 audit — `b5bd11a65`
+(Makefile + `binding.yaml`), `824e96941` (VALIDATION.md) and `46bb8b102` (this file). The
+question a re-audit has to answer is whether any of them moved code a verdict depends on.
+Measured, not assumed:
+
+| Check | Result |
+|---|---|
+| `git diff --stat 71948eccc..HEAD -- <the 15 files carrying the 115 mitigations>` | **0 bytes** |
+| `git diff --stat 71948eccc..HEAD -- benchmarks/tweeteval-stance/` (the committed evidence set) | **0 bytes** |
+| `git diff --name-only 71948eccc..HEAD -- 'crates/*/src/*'` | **empty** |
+| `git status --porcelain` on those surfaces | **clean** |
+
+Every verdict in the register above therefore points at byte-identical code. Re-running the
+auditor over unchanged bytes would produce the same answers at real cost — the short-circuit
+the workflow allows at `asvs_level: 1` with `threats_open: 0` is *earned here* by that
+measurement, where on 2026-09-12 it was not (nothing had been verified yet, so the auditor ran).
+
+**Warning status carried from the 2026-09-12 audit:**
+
+| # | Warning | Status |
+|---|---------|--------|
+| 1 | `setfit-bench-door-probe` orphaned — the door-level proof of five threats ran in no gate | ✅ **CLOSED** in `b5bd11a65`; gate re-measured rc=0 at this HEAD |
+| 2 | T-05-03-05's frozen-epsilon success leg is `#[ignore]`d | ⚠️ **STANDS** — `PRODUCTION_LOWER_BOUND` still has exactly one caller (`evidence.rs:4221`), inside the ignored combine |
+| 3 | 05-04 and 05-14 SUMMARYs carry no `## Threat Flags` heading | ⚠️ **STANDS** — both still 0; their 11 threats were verified against code on 2026-09-12 and hold |
+
+**New this round:** AR-11. UAT test 4 named four items this record had to cover; three were
+present and the fourth — the TOCTOU residual at `bench_gate.rs:843-848` — was not, because it
+is disclosed in the source module doc but appears in none of the 17 plan `<threat_model>`
+blocks. A register derived from plan-time threat models structurally cannot contain it. That
+limitation is now stated in this file rather than left for the next reader to rediscover.
 
 ---
 
