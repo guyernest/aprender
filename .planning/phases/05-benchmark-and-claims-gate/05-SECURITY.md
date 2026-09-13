@@ -218,7 +218,7 @@ severity column.
 
 | Threat ID | Category | Component | Severity | Disposition | Mitigation | Status |
 |-----------|----------|-----------|----------|-------------|------------|--------|
-| T-05-15-01 | Tampering | `verify_provenance` lock-path resolution | critical | mitigate | `bench_gate.rs:857-925` — stage 1 refuses empty/absolute/`ParentDir`/`RootDir`/`Prefix` before any syscall; stage 2 canonicalizes both and compares component-wise. Swept by 13 path cases × 2 kinds | closed |
+| T-05-15-01 | Tampering | `verify_provenance` lock-path resolution | critical | mitigate | `resolve_committed_evidence_path`, `bench_gate.rs:857-925` — stage 1 refuses empty/absolute/`ParentDir`/`RootDir`/`Prefix` before any syscall; stage 2 canonicalizes both and compares component-wise. Swept by 13 path cases × 2 kinds | closed |
 | T-05-15-02 | Information disclosure | arbitrary read via lock / ledger path | high | mitigate | **both arms** through the same helper (`:1519`, `:1567`); 16 MiB two-stage cap | closed |
 | T-05-15-03 | Repudiation | the "recomputed from committed bytes" attestation | high | mitigate | **verified by exhaustion** — all four `read_evidence` call sites enumerated; the only `fs::metadata`/`File::open` in the file are inside `read_evidence`. No bypass exists | closed |
 | T-05-15-04 | Spoofing | foreign `contract_id` | medium | mitigate | row `:1265-1272` and manifest `:1316-1327`, `RowSchemaRefused` naming both ids | closed |
@@ -274,6 +274,7 @@ severity column.
 | AR-08 | T-05-17-06 | `ece_top_label_validation` / `brier_multiclass_validation` are not recomputable — the calibration diagnostics need per-row probability vectors no committed file carries. Disclosed in the corrected residual, recorded as class (iii) in 05-15's enumeration with its reason. | Phase 05 plan author (05-17) | 2026-09-12 |
 | AR-09 | T-05-17-08 | Same as AR-04 — read-only library call, no privilege transition, no process spawn from row content. | Phase 05 plan author (05-17) | 2026-09-12 |
 | AR-10 | `T-05-NN-SC` ×14 | The fourteen per-plan package-supply-chain rows are `accept (n/a)`: no package-manager install ran. Verified in the diff, not taken on trust — across all 136 phase-05 commits the only Cargo manifest touch is `159f8ca25`, which adds `sysinfo = { workspace = true }` and one Cargo.lock dependency edge, with **no new `[[package]]` block**. Plans 05-15/16/17 record the absence in prose instead of emitting a vacuous row — the honest form. | Auditor (verified) | 2026-09-12 |
+| AR-11 | (unregistered — disclosed in source, not a plan register row) | **TOCTOU between containment check and open.** `resolve_committed_evidence_path` checks containment and the file is then opened, so a symlink swapped between the two calls would be read (`bench_gate.rs:843-848`). The source states the residual rather than hiding it. Accepted because the race needs WRITE access to the benchmark directory *during* verification — strictly more than the producer-written-tree adversary this gate is built for. Surfaced by UAT test 4 (2026-09-13), which named it as a required element of this record; it was absent from all 17 plan `<threat_model>` blocks, so the plan-time register could not carry it. | Auditor + UAT test 4 | 2026-09-13 |
 
 ---
 
@@ -315,6 +316,7 @@ but a future `/gsd-secure-phase` run that reads only the heading would see nothi
 | Audit Date | Threats Total | Closed | Open | Run By |
 |------------|---------------|--------|------|--------|
 | 2026-09-12 | 115 | 115 | 0 | gsd-security-auditor (ASVS L1, block_on: high) |
+| 2026-09-13 | 116 | 116 | 0 | UAT test 4 amendment — AR-11 (TOCTOU residual) added; see note below |
 
 **Method.** Register parsed from all 17 plan `<threat_model>` blocks and cross-read against the
 17 SUMMARY discharge sections. Verification was against the implemented code — `bench_gate.rs`,
@@ -335,4 +337,13 @@ single-manifest-touch finding across 136 commits (the SC rows / AR-10).
 - [x] `threats_open: 0` confirmed
 - [x] `status: verified` set in frontmatter
 
-**Approval:** verified 2026-09-12
+**Amendment 2026-09-13 (UAT test 4).** Test 4 required this record to cover four specific
+items. Three were present; the fourth — the TOCTOU residual the resolver discloses at
+`bench_gate.rs:843-848` — was **not**, because it appears in the source module doc but in none
+of the 17 plan `<threat_model>` blocks, so a register built from plan-time threat models could
+not contain it. Recorded as **AR-11**, and `resolve_committed_evidence_path` is now named
+explicitly in T-05-15-01's mitigation cell. This is a real limitation of plan-time register
+derivation worth stating plainly: a residual disclosed only in code is invisible to an audit
+that reads only plans.
+
+**Approval:** verified 2026-09-12; amended 2026-09-13
