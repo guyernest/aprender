@@ -1,20 +1,14 @@
 ---
-status: testing
+status: complete
 phase: 05-benchmark-and-claims-gate
 source: [05-VERIFICATION.md]
 started: "2026-09-12T02:12:00Z"
-updated: "2026-09-12T17:45:00Z"
+updated: "2026-09-13T00:00:00Z"
 ---
 
 ## Current Test
 
-number: 4
-name: Run `/gsd-secure-phase 05` — no 05-SECURITY.md exists
-expected: |
-  A threat-mitigation record covering the path-traversal class 05-15 closed, the
-  evidence-substitution class 05-16 closed, the TOCTOU residual disclosed at
-  `bench_gate.rs:844-849`, and the `MAX_CROSS_CHECK_ROWS` expansion cap.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
@@ -92,7 +86,21 @@ why_human: `.planning/config.json` sets `security_enforcement: true`, `security_
   `security_block_on: high`, and all three gap plans declare `asvs_level: 1, block_on: high`. A
   security gate that never ran cannot be discharged by reading code — and this phase's subject
   matter IS path traversal and evidence tampering.
-result: [pending]
+result: pass
+reported: "pass"
+resolution: DISCHARGED 2026-09-13 across two runs. `/gsd-secure-phase 05` (State B) built the
+  record from all 17 plan `<threat_model>` blocks and verified it against code, not prose:
+  115 threats, 115 closed, threats_open 0, committed `71948eccc`. A State A re-audit
+  (`419cc2223`) carried the verdicts forward on a PROVEN-empty diff (0 bytes across the 15
+  mitigation-bearing files and the committed evidence set) rather than re-asserting them.
+  All four named expectations are covered: path traversal via `resolve_committed_evidence_path`
+  (T-05-15-01, 13 path cases x 2 kinds); evidence substitution (T-05-16-02/03, transplanted and
+  deleted manifests); the `MAX_CROSS_CHECK_ROWS` cap (T-05-17-07).
+  THE FOURTH WAS INITIALLY MISSING AND THIS TEST IS WHAT CAUGHT IT: the TOCTOU residual at
+  `bench_gate.rs:843-848` was absent from the first record, because it is disclosed in the
+  source module doc but appears in NONE of the 17 plan threat models — a register derived from
+  plan-time models structurally cannot contain it. Added as AR-11 (`46bb8b102`) with that
+  limitation stated in the file. Test 4 did real work rather than rubber-stamping a run.
 
 ### 5. Re-run the shipped end-to-end door proof against a HEAD-built binary
 expected: rc=0, positive control passing FIRST, then all four refusals (E, G, F, D).
@@ -101,15 +109,20 @@ result: PASSED — discharged by the orchestrator 2026-09-12, not deferred to th
   `apr 0.63.0 (55cf37600)`, byte-matching HEAD `55cf37600` (binary pin proven, CLAUDE.md rule 3);
   `make setfit-bench-door-probe` rc=0 with CONTROL first then E/G/F/D all rc=5, F and D each
   explicitly "NOT at the row digest". 05-15's `verification: backstop` truth is now fully
-  discharged. RESIDUAL (not blocking): `setfit-bench-door-probe` is still absent from `.PHONY`
+  discharged. RESIDUAL (not blocking): `setfit-bench-door-probe` was still absent from `.PHONY`
   (WR-07) — a one-line Makefile fix left unmade because the phase is pending and it was not in scope.
+  CLOSED 2026-09-13 in `b5bd11a65`: `/gsd-validate-phase 05` found the same orphan independently
+  and fixed it properly — both targets added to `.PHONY`, and a new `setfit-bench-door-probe-build`
+  target that BUILDS the release `apr` it needs, wired into tier4 unprefixed. The probe was a
+  prerequisite of nothing, so the door-level proof of five threats ran in no gate at all; it now
+  runs in one, re-measured rc=0 at HEAD with the control passing before all four refusals.
 
 ## Summary
 
 total: 5
-passed: 4
+passed: 5
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 
