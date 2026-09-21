@@ -277,6 +277,8 @@ fn np_lite_row(tr_ds: &[i64], tr_y: &[f64], te_ds: &[i64]) -> (String, Fc) {
             huber_beta: 0.3,
             newer_w: 2.0,
             seed: 7,
+            // This example is event-free; the block exists but nothing here builds one.
+            event_design: None,
         };
         let (model, log) = np::train(&data, &cfg, false);
         let loss = *log.epoch_loss.last().expect("at least one epoch");
@@ -285,8 +287,8 @@ fn np_lite_row(tr_ds: &[i64], tr_y: &[f64], te_ds: &[i64]) -> (String, Fc) {
         }
     }
     let (_, model) = best.expect("at least one finite NeuralProphet-lite fit");
-    let yhat = np::predict_ts(&data, &model, te_ds);
-    let fitted = np::predict_ts(&data, &model, tr_ds);
+    let yhat = np::predict_ts(&data, &model, te_ds, None);
+    let fitted = np::predict_ts(&data, &model, tr_ds, None);
     let sd = (fitted
         .iter()
         .zip(tr_y)

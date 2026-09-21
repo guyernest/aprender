@@ -19,6 +19,7 @@
 //! * Fourier features are on days since 1900-01-01, which is NeuralProphet's own epoch.
 
 use crate::dates::days_from_civil;
+use crate::events::{EventBlock, EventDesign};
 use aprender::autograd::{clear_graph, graph_tape_len, no_grad, Tensor};
 use aprender::nn::optim::{AdamW, Optimizer};
 use aprender::nn::{Linear, Module};
@@ -443,7 +444,31 @@ pub fn n_training_samples(d: &NpData, n_lags: usize) -> usize {
 }
 
 /// A door-computable PROXY for the multiply-accumulates ONE [`train`] call spends:
-/// `epochs * n_samples * (n_lags + 1)`.
+///
+/// ```text
+/// epochs * n_samples * ( (n_lags + 1) + fit_np_event_cost_per_column * E )
+/// ```
+///
+/// # The event term sits INSIDE the per-sample width (SC4, D-34)
+///
+/// `(n_lags + 1)` is the PER-SAMPLE FEATURE WIDTH the optimiser sweeps, and the event block
+/// adds work to that width. The measured growth is a PER-STEP slope
+/// (`us/step ~= a + b*E`), so the added work is paid once per sample per epoch, exactly like
+/// the width beside it.
+///
+/// The alternative reading — `product + c * E` — scales with NEITHER epochs NOR samples, so
+/// it can be tuned to pass an observation at one geometry while under-pricing every larger
+/// series. That is the shape this function must not have, and
+/// `tests::the_event_cost_shape_scales_with_geometry` is what discriminates the two: the
+/// width form's `priced(E)/priced(0)` is identical at two geometries differing 10x in
+/// samples, while the additive-outside form's collapses toward 1 as the product grows.
+///
+/// The event contribution to the width is rounded UP before the multiplications — a door
+/// must never under-price by a fractional column — and at `n_event_cols == 0` the `ceil` of
+/// zero is zero, so the priced cost is BIT-IDENTICAL to what it was before the term existed
+/// (`tests::the_priced_cost_at_zero_event_columns_is_unchanged`).
+///
+/// # The original contract of this function, unchanged
 ///
 /// **It is a proxy, not a wall-clock prediction.** It counts the per-sample feature width
 /// the optimiser sweeps (`n_lags` AR inputs plus the trend/seasonality block, collapsed to
@@ -461,10 +486,32 @@ pub fn n_training_samples(d: &NpData, n_lags: usize) -> usize {
 /// that a future bound change cannot turn an overflow into a silently SMALL cost that
 /// passes the door.
 #[must_use]
-pub fn train_cost(n_samples: usize, epochs: usize, n_lags: usize) -> u64 {
+pub fn train_cost(n_samples: usize, epochs: usize, n_lags: usize, n_event_cols: usize) -> u64 {
+    let width = (n_lags as u64 + 1).saturating_add(per_sample_event_width(n_event_cols));
     (epochs as u64)
         .saturating_mul(n_samples as u64)
-        .saturating_mul(n_lags as u64 + 1)
+        .saturating_mul(width)
+}
+
+/// The event block's contribution to the per-sample feature width, in whole proxy units.
+///
+/// Rounded UP: a door must never under-price by a fractional column, and at
+/// `n_event_cols == 0` the `ceil` of zero is zero, which is what makes the event-free price
+/// bit-identical to the pre-event arithmetic.
+#[must_use]
+fn per_sample_event_width(n_event_cols: usize) -> u64 {
+    if n_event_cols == 0 {
+        return 0;
+    }
+    let raw = crate::types::FIT_NP_EVENT_COST_PER_COLUMN * n_event_cols as f64;
+    // `ceil` then a saturating cast: a non-finite or negative coefficient must not wrap into
+    // a silently SMALL width that passes the door, which is the same reason every
+    // multiplication below saturates.
+    if raw.is_finite() && raw > 0.0 {
+        raw.ceil() as u64
+    } else {
+        0
+    }
 }
 
 /// The learning-rate sweep the DOOR runs for this `n_lags`.
@@ -505,10 +552,15 @@ pub fn door_epochs(n_points: usize, n_samples: usize, n_lags: usize) -> usize {
 /// and it is built out of the same three functions the door then uses to CONFIGURE the
 /// sweep, so a request cannot buy work the door did not price.
 #[must_use]
-pub fn request_train_cost(d: &NpData, n_points: usize, n_lags: usize) -> u64 {
+pub fn request_train_cost(d: &NpData, n_points: usize, n_lags: usize, n_event_cols: usize) -> u64 {
     let n_samples = n_training_samples(d, n_lags);
-    train_cost(n_samples, door_epochs(n_points, n_samples, n_lags), n_lags)
-        .saturating_mul(door_lr_sweep(n_lags).len() as u64)
+    train_cost(
+        n_samples,
+        door_epochs(n_points, n_samples, n_lags),
+        n_lags,
+        n_event_cols,
+    )
+    .saturating_mul(door_lr_sweep(n_lags).len() as u64)
 }
 
 // -------------------------------------------------------------- training ----
@@ -522,12 +574,23 @@ pub struct TrainConfig {
     pub huber_beta: f32,
     pub newer_w: f64,
     pub seed: u64,
+    /// The expanded event design, or `None` for an event-free fit (D-30, SC3).
+    ///
+    /// `Some(design)` attaches an additive [`EventBlock`] BESIDE [`NpModel`] — one `.add()`
+    /// on the forward, both parameter sets handed to ONE `AdamW`. `None` and an empty design
+    /// are the same fit, bit for bit: no block is built, nothing is added, and the recorded
+    /// [`TrainLog::train_cost`] is unchanged.
+    ///
+    /// Declared LAST so the exhaustive struct literals that build it stay in declaration
+    /// order (`clippy::inconsistent_struct_constructor` is a workspace `warn`).
+    pub event_design: Option<EventDesign>,
 }
 
 pub struct TrainLog {
     pub epochs: usize,
     pub batch: usize,
     pub n_samples: usize,
+    /// Scalar parameter count, INCLUDING the event block's when one was trained.
     pub n_params: usize,
     pub epoch_loss: Vec<f64>,
     pub seconds: f64,
@@ -536,6 +599,39 @@ pub struct TrainLog {
     /// [`train_cost`] evaluated on the `n_samples` / `epochs` / `n_lags` this call actually
     /// used — the same number the door priced the request at before calling in.
     pub train_cost: u64,
+    /// The number of event indicator columns this fit trained on; `0` when events were off.
+    pub n_event_cols: usize,
+    /// The number of parameter TENSORS handed to `AdamW`, recorded at the moment the
+    /// optimiser was constructed.
+    ///
+    /// This is what makes "the block is actually being optimised" checkable. A block whose
+    /// parameters are built and forwarded but never extended into that vector still
+    /// contributes to the forward pass — its weights simply never move — and the failure
+    /// then surfaces as "the planted effect was not recovered", which names the symptom
+    /// rather than the cause.
+    pub n_opt_tensors: usize,
+    /// The trained event block, or `None` when events were off.
+    ///
+    /// It rides in the LOG rather than being returned as a third value on purpose: `train`'s
+    /// return arity is unchanged, so every existing call site stays as it was. The predict
+    /// helpers need the block (and the design) to add an event contribution for the rows
+    /// they predict, and the caller already holds the log.
+    pub events: Option<EventBlock>,
+}
+
+impl TrainLog {
+    /// The learned per-column event weights, in [`crate::events::event_columns`] order.
+    ///
+    /// Empty when events were off. Read from the block rather than copied into a second
+    /// field, so there is exactly one source for the number a recovery or determinism test
+    /// asserts on.
+    #[must_use]
+    pub fn event_weights(&self) -> Vec<f32> {
+        self.events
+            .as_ref()
+            .map(EventBlock::weights)
+            .unwrap_or_default()
+    }
 }
 
 /// Precomputed per-grid-row features.
@@ -588,9 +684,18 @@ fn gather(rows: &[f32], width: usize, idx: &[usize]) -> Vec<f32> {
 pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog) {
     let mut rng = Rng::new(cfg.seed);
     let mut model = NpModel::new(d, cfg.n_lags, &cfg.ar_layers, &mut rng);
+    // The event block is drawn from the SAME rng, AFTER the model, so an events-OFF run at
+    // the same seed initialises the model identically — which is what makes an ON/OFF
+    // comparison a comparison of the block (D-30).
+    let design = cfg.event_design.as_ref().filter(|g| g.dim() > 0);
+    let ed = design.map_or(0, EventDesign::dim);
+    let mut block = design.map(|_| EventBlock::new(ed, &mut rng));
     let n_grid = d.n_train_grid;
     let y_norm: Vec<f32> = d.grid_y[..n_grid].iter().map(|v| d.norm(*v)).collect();
     let rows = rows_for(d, &d.grid_days[..n_grid], &y_norm, cfg.newer_w);
+    // Built ONCE over the training grid, with `rows_for`'s hoisting discipline: the
+    // membership sets live on the design and the row loop only looks days up in them.
+    let ev_rows: Vec<f32> = design.map_or_else(Vec::new, |g| g.rows(&d.grid_days[..n_grid]));
     let l = cfg.n_lags;
     // NP trains the lag-free model on the OBSERVED rows only (no imputation needed);
     // with lags it trains on the imputed daily grid so every window is complete.
@@ -604,7 +709,7 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     let epochs = cfg.epochs.unwrap_or_else(|| auto_epochs(n));
     let n_batches = n.div_ceil(batch);
     let total_steps = epochs * n_batches;
-    // The door priced this request with `train_cost(n_training_samples(d, l), epochs, l)`
+    // The door priced this request with `train_cost(n_training_samples(d, l), epochs, l, E)`
     // BEFORE calling in (cost axis C-08). If the two ever derived a different `n` the bound
     // would be evadable wherever they disagreed, so the sample rule is pinned here rather
     // than argued. `debug_assert` because this is the hot path and the rule is one branch.
@@ -613,20 +718,33 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
         n_training_samples(d, l),
         "np::train and np::n_training_samples must agree about how many rows a request buys"
     );
-    let mut opt = {
-        let params = model.parameters_mut();
-        AdamW::new(params, cfg.max_lr as f32).weight_decay(cfg.weight_decay)
+    let (mut opt, n_opt_tensors) = {
+        // ONE optimiser over BOTH parameter sets. Two optimisers would give the event
+        // weights their own moment estimates and their own schedule, which is a different
+        // model rather than a wiring detail.
+        let mut params = model.parameters_mut();
+        if let Some(bl) = block.as_mut() {
+            params.extend(bl.parameters_mut());
+        }
+        let handed_over = params.len();
+        (
+            AdamW::new(params, cfg.max_lr as f32).weight_decay(cfg.weight_decay),
+            handed_over,
+        )
     };
     let mut log = TrainLog {
         epochs,
         batch,
         n_samples: n,
-        n_params: model.n_params(),
+        n_params: model.n_params() + block.as_ref().map_or(0, EventBlock::n_params),
         epoch_loss: Vec::new(),
         seconds: 0.0,
         tape_len_per_step: 0,
         steps: 0,
-        train_cost: train_cost(n, epochs, l),
+        train_cost: train_cost(n, epochs, l, ed),
+        n_event_cols: ed,
+        n_opt_tensors,
+        events: None,
     };
     let t0 = Instant::now();
     let mut order = samples.clone();
@@ -642,7 +760,7 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
             let xs = Tensor::from_vec(gather(&rows.se, rows.sd, chunk), &[b, rows.sd]);
             let yt = Tensor::from_vec(chunk.iter().map(|&i| rows.y[i]).collect(), &[b, 1]);
             let wt = Tensor::from_vec(chunk.iter().map(|&i| rows.w[i]).collect(), &[b, 1]);
-            let pred = if l == 0 {
+            let mut pred = if l == 0 {
                 model.forward(&xt, &xs, None)
             } else {
                 let lag_idx: Vec<usize> = chunk.iter().flat_map(|&i| i - l..i).collect();
@@ -655,6 +773,15 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
                 let tr_lag = Tensor::from_vec(tr_lag.data().to_vec(), &[b, l]);
                 model.forward(&xt, &xs, Some((&raw, &se_lag, &tr_lag)))
             };
+            // The event term: ONE `.add()` on the model's own output (D-30). Note the AR
+            // stationarisation above does NOT subtract the event effect at the lag times,
+            // and the predict paths do not either — the two agree, which is the property
+            // that matters. Subtracting it in one place and not the other would make the
+            // forecast disagree with the fit.
+            if let Some(bl) = block.as_ref() {
+                let xe = Tensor::from_vec(gather(&ev_rows, ed, chunk), &[b, ed]);
+                pred = pred.add(&bl.forward(&xe));
+            }
             let loss = weighted_huber(&pred, &yt, &wt, cfg.huber_beta);
             acc += f64::from(loss.item()) * b as f64;
             loss.backward();
@@ -662,6 +789,9 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
                 log.tape_len_per_step = graph_tape_len();
             }
             let mut params = model.parameters_mut();
+            if let Some(bl) = block.as_mut() {
+                params.extend(bl.parameters_mut());
+            }
             opt.step_with_params(&mut params);
             opt.zero_grad();
             clear_graph();
@@ -678,22 +808,54 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     }
     log.seconds = t0.elapsed().as_secs_f64();
     log.steps = step;
+    log.events = block;
     (model, log)
 }
 
-/// Trend + seasonality prediction (original scale) for arbitrary days.
-pub fn predict_ts(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
+/// The event channel the predict helpers take: the design that says WHICH days are events
+/// and the trained block that says what an active column is WORTH.
+///
+/// `None` is an event-free prediction, and it is what every door path passes today —
+/// `holidays` is still refused on the `"neuralprophet"` arm (plan 06.1-06 opens it).
+/// Both halves are needed: weights alone cannot build an indicator row for a future day.
+pub type EventChannel<'a> = Option<(&'a EventDesign, &'a EventBlock)>;
+
+/// Add the event contribution for `days` to a `[n, 1]` prediction, inside `no_grad`.
+///
+/// A zero-width design is treated as absent rather than forwarded: `Tensor` shaped `[n, 0]`
+/// trips trueno's empty-transpose contract deep inside `Linear::forward`, which is a
+/// confusing place to learn that a caller passed an empty design.
+fn add_events(p: Tensor, ev: EventChannel<'_>, days: &[i64]) -> Tensor {
+    match ev {
+        Some((g, b)) if g.dim() > 0 => {
+            let xe = Tensor::from_vec(g.rows(days), &[days.len(), g.dim()]);
+            p.add(&b.forward(&xe))
+        }
+        _ => p,
+    }
+}
+
+/// Trend + seasonality prediction (original scale) for arbitrary days, plus the additive
+/// event contribution when an [`EventChannel`] is supplied.
+pub fn predict_ts(d: &NpData, m: &NpModel, days: &[i64], ev: EventChannel<'_>) -> Vec<f64> {
     let rows = rows_for(d, days, &vec![0.0; days.len()], DEFAULT_END_W);
     let xt = Tensor::from_vec(rows.tr.clone(), &[days.len(), rows.td]);
     let xs = Tensor::from_vec(rows.se.clone(), &[days.len(), rows.sd]);
-    let out = no_grad(|| m.forward(&xt, &xs, None));
+    let out = no_grad(|| add_events(m.forward(&xt, &xs, None), ev, days));
     clear_graph();
     out.data().iter().map(|v| d.denorm(*v)).collect()
 }
 
-/// One-step-ahead AR prediction (original scale) for grid indices `idx` using true lags.
-pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize]) -> Vec<f64> {
+/// One-step-ahead AR prediction (original scale) for grid indices `idx` using true lags,
+/// plus the additive event contribution for the predicted rows.
+pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize], ev: EventChannel<'_>) -> Vec<f64> {
     let l = m.n_lags;
+    // The days `idx` names, for the event indicator rows. Total lookup, because `idx` is
+    // caller-built and `grid_days` is a different field (IN-02).
+    let days: Vec<i64> = idx
+        .iter()
+        .filter_map(|&i| d.grid_days.get(i).copied())
+        .collect();
     let y_norm: Vec<f32> = d.grid_y.iter().map(|v| d.norm(*v)).collect();
     let rows = rows_for(d, &d.grid_days, &y_norm, DEFAULT_END_W);
     let b = idx.len();
@@ -705,7 +867,11 @@ pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize]) -> Vec<f64> {
     let tr_feats = Tensor::from_vec(gather(&rows.tr, rows.td, &lag_idx), &[b * l, rows.td]);
     let out = no_grad(|| {
         let tr_lag = Tensor::from_vec(m.trend.forward(&tr_feats).data().to_vec(), &[b, l]);
-        m.forward(&xt, &xs, Some((&raw, &se_lag, &tr_lag)))
+        add_events(
+            m.forward(&xt, &xs, Some((&raw, &se_lag, &tr_lag))),
+            ev,
+            &days,
+        )
     });
     clear_graph();
     out.data().iter().map(|v| d.denorm(*v)).collect()
@@ -720,8 +886,18 @@ pub fn predict_trend(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
     out.data().iter().map(|v| d.denorm(*v)).collect()
 }
 
-/// Multi-step AR forecast by feeding predictions back as lags (days must continue the daily grid).
-pub fn predict_ar_recursive(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
+/// Multi-step AR forecast by feeding predictions back as lags (days must continue the daily
+/// grid), plus the additive event contribution for every day it rolls through.
+///
+/// The event term is added BEFORE the value is pushed into the recursive history, so an
+/// event on a future day moves not only that day's forecast but every lagged day after it.
+/// That is D-30's substance: spike 013 measured only the lag-free path.
+pub fn predict_ar_recursive(
+    d: &NpData,
+    m: &NpModel,
+    days: &[i64],
+    ev: EventChannel<'_>,
+) -> Vec<f64> {
     let l = m.n_lags;
     let mut hist: Vec<f32> = d.grid_y.iter().map(|v| d.norm(*v)).collect();
     let mut hist_days: Vec<i64> = d.grid_days.clone();
@@ -745,7 +921,12 @@ pub fn predict_ar_recursive(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
             let tr_feats = Tensor::from_vec(tr_lag, &[l, d.trend_dim()]);
             let v = no_grad(|| {
                 let tl = Tensor::from_vec(m.trend.forward(&tr_feats).data().to_vec(), &[1, l]);
-                m.forward(&xt, &xs, Some((&raw, &se_l, &tl))).data()[0]
+                add_events(
+                    m.forward(&xt, &xs, Some((&raw, &se_l, &tl))),
+                    ev,
+                    std::slice::from_ref(&next),
+                )
+                .data()[0]
             });
             clear_graph();
             hist.push(v);
@@ -755,6 +936,331 @@ pub fn predict_ar_recursive(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
         out.push(d.denorm(hist[idx]));
     }
     out
+}
+
+// ============================================================== C-08 cost ====
+// The SC4 acceptance: the event-column term's SHAPE, and the observation that the 7.6x
+// under-pricing is closed. Both numbers on the measured side are READ from the C-08
+// `calibration:` mapping in `contracts/forecast-tool-boundary-v1.yaml`, never written as
+// literals here — a test carrying a measured number drifts from the calibration the moment
+// either is re-measured, and Phase 7 re-points that mapping at a tier without touching these
+// tests.
+#[cfg(test)]
+mod tests {
+    use super::{
+        auto_epochs, door_epochs, door_lr_sweep, n_training_samples, request_train_cost,
+        train_cost, NpData,
+    };
+    use crate::dates::days_from_civil;
+
+    /// Read one real-valued key off the C-08 `calibration:` mapping.
+    ///
+    /// Panics NAMING THE KEY if it is absent: a bar or a measurement that silently defaulted
+    /// to something plausible is the vacuous-guard class this crate's tests refuse.
+    fn c08_calibration_f64(key: &str) -> f64 {
+        let doc = crate::test_support::contract_value("forecast-tool-boundary-v1");
+        let axes = doc
+            .get("door_surface")
+            .and_then(|d| d.get("cost_axes"))
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("forecast-tool-boundary-v1 must carry door_surface.cost_axes");
+        let c08 = axes
+            .iter()
+            .find(|a| a.get("axis").and_then(serde_yaml::Value::as_str) == Some("C-08"))
+            .expect("forecast-tool-boundary-v1 must carry cost axis C-08");
+        let cal = c08
+            .get("calibration")
+            .expect("cost axis C-08 must carry a calibration: MAPPING (D-34)");
+        let v = cal
+            .get(key)
+            .unwrap_or_else(|| panic!("C-08 calibration: must define {key}"));
+        v.as_f64()
+            .or_else(|| {
+                #[allow(clippy::cast_precision_loss)]
+                v.as_u64().map(|n| n as f64)
+            })
+            .unwrap_or_else(|| panic!("C-08 calibration.{key} must be a number"))
+    }
+
+    /// A contiguous daily series of `points` points, the calibration geometry.
+    fn daily(points: usize) -> NpData {
+        let t0 = days_from_civil(2018, 1, 1);
+        let days: Vec<i64> = (0..points).map(|i| t0 + i as i64).collect();
+        let y: Vec<f64> = (0..points)
+            .map(|i| {
+                let t = i as f64;
+                10.0 + 0.01 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin()
+            })
+            .collect();
+        NpData::new(&days, &y, points, 10, 0.8)
+    }
+
+    /// At ZERO event columns the priced cost is BIT-IDENTICAL to the pre-event arithmetic.
+    ///
+    /// The pre-event formula was `epochs * n_samples * (n_lags + 1)`, written out on the
+    /// right-hand side below, plus four values computed from it BEFORE this task for the
+    /// geometries the ladder and the bound derivation actually use. Both halves matter: the
+    /// identity catches a structural change, the literals catch an identity that was
+    /// rewritten to agree with a changed implementation.
+    #[test]
+    fn the_priced_cost_at_zero_event_columns_is_unchanged() {
+        for n_samples in [10usize, 1_200, 2_540, 19_993] {
+            for epochs in [20usize, 50, 80, 320] {
+                for n_lags in [0usize, 7, 30, 365] {
+                    assert_eq!(
+                        train_cost(n_samples, epochs, n_lags, 0),
+                        (epochs as u64) * (n_samples as u64) * (n_lags as u64 + 1),
+                        "train_cost at E = 0 must equal the pre-event arithmetic exactly \
+                         (n_samples={n_samples} epochs={epochs} n_lags={n_lags})"
+                    );
+                }
+            }
+        }
+        // Values computed from the PRE-EVENT formula, so a rewritten identity above cannot
+        // agree with a changed implementation: `np::parity`'s Peyton rungs and the three
+        // at-the-bound compositions `MAX_NP_TRAIN_COST` was derived from.
+        for (n_samples, epochs, n_lags, expected) in [
+            (2_905usize, 80usize, 0usize, 232_400u64),
+            (2_934, 80, 30, 7_276_320),
+            (19_994, 50, 6, 6_997_900),
+            (9_989, 80, 11, 9_589_440),
+        ] {
+            assert_eq!(
+                train_cost(n_samples, epochs, n_lags, 0),
+                expected,
+                "the event-free price of a geometry this crate already derived bounds from \
+                 must not have moved"
+            );
+        }
+    }
+
+    /// The event term rises, is rounded UP, and never under-prices a fractional column.
+    #[test]
+    fn the_event_width_is_rounded_up_and_monotone() {
+        let c = crate::types::FIT_NP_EVENT_COST_PER_COLUMN;
+        let (n, e, l) = (1_000usize, 10usize, 0usize);
+        let base = train_cost(n, e, l, 0);
+        let mut prev = base;
+        for cols in [0usize, 1, 10, 100, 500, 1_000] {
+            let got = train_cost(n, e, l, cols);
+            assert!(
+                got >= prev,
+                "the priced cost must never FALL as event columns are added: {cols} columns \
+                 priced {got} against {prev} at the previous point"
+            );
+            // The width the price implies, recovered by division, must be at or above the
+            // exact real-valued width. Below it is an under-price by a fractional column.
+            let implied_width = got as f64 / (e as f64 * n as f64);
+            let exact_width = (l as f64 + 1.0) + c * cols as f64;
+            assert!(
+                implied_width >= exact_width - 1e-9,
+                "at {cols} event columns the priced width {implied_width} is BELOW the exact \
+                 {exact_width}: the door is under-pricing by a fractional column"
+            );
+            prev = got;
+        }
+        // ONE column must already cost something, or the `ceil` is not doing its job and a
+        // caller could add columns for free up to 1/c of them.
+        assert!(
+            train_cost(n, e, l, 1) > base,
+            "a single event column must raise the price: the width contribution is rounded \
+             UP, so even {c} of a unit becomes a whole one"
+        );
+    }
+
+    /// SC4: the 7.6x under-pricing is OBSERVED closed, as a RATIO.
+    ///
+    /// # Why a ratio, and not a comparison of the two numbers
+    ///
+    /// The priced cost is a unit-less integer proxy; the measured work is microseconds per
+    /// step. There is no defensible conversion between them, and inventing one would make
+    /// this test a statement about the conversion. What IS well defined — and what closure
+    /// actually means — is that the priced cost must grow AT LEAST AS FAST as the measured
+    /// cost as event columns are added:
+    ///
+    /// ```text
+    /// measured(E) / measured(0)  <=  priced(E) / priced(0)
+    /// ```
+    ///
+    /// Both ratios are dimensionless, both are taken at the same geometry, and the batch
+    /// size, the step count and the sample count all cancel out of both sides.
+    ///
+    /// ONE-SIDED on purpose: over-pricing is safe, under-pricing is the defect.
+    ///
+    /// Both measured numbers are READ from the C-08 `calibration:` mapping. A test that
+    /// recomputed the priced formula on both sides would prove the formula equals itself; a
+    /// test carrying the measured number as a literal would drift from the calibration the
+    /// moment either was re-measured.
+    /// Asserted on EVERY architecture the calibration records, not only on the one the
+    /// constant was derived from. The deriving host (aarch64) carries the unsuffixed keys;
+    /// each confirming host carries `<key>_<arch>`. A confirmation that no test reads is a
+    /// sentence rather than a confirmation.
+    #[test]
+    fn the_event_column_underpricing_is_observed_closed() {
+        let e_max = c08_calibration_f64("measured_at_e_max") as usize;
+        let n_lags_cal = c08_calibration_f64("n_lags_cal") as usize;
+        // The calibration geometry, so both sides describe the same request shape. The
+        // priced side does not vary by architecture — it is the door's arithmetic — so it is
+        // computed once and compared against every measured side.
+        let points = 1_200usize;
+        let d = daily(points);
+        let priced_at_zero = request_train_cost(&d, points, n_lags_cal, 0);
+        let priced_at_max = request_train_cost(&d, points, n_lags_cal, e_max);
+        let priced_ratio = priced_at_max as f64 / priced_at_zero as f64;
+
+        let hosts: [(&str, &str, &str); 2] = [
+            (
+                "aarch64 (deriving)",
+                "measured_us_per_step_at_e0",
+                "measured_us_per_step_at_e_max",
+            ),
+            (
+                "x86_64 (confirming)",
+                "measured_us_per_step_at_e0_x86_64",
+                "measured_us_per_step_at_e_max_x86_64",
+            ),
+        ];
+        // VACUITY GUARD: a list silently shrunk to one host is this test quietly going back
+        // to being single-architecture.
+        assert_eq!(
+            hosts.len(),
+            2,
+            "the closure is asserted on the deriving host AND on every confirming host"
+        );
+
+        for (what, e0_key, emax_key) in hosts {
+            let us_at_zero = c08_calibration_f64(e0_key);
+            let us_at_max = c08_calibration_f64(emax_key);
+            assert!(
+                us_at_zero > 0.0 && us_at_max > 0.0 && e_max > 0,
+                "{what}: the calibration must carry positive measurements at both ends, got \
+                 {us_at_zero} / {us_at_max} at E = {e_max}"
+            );
+            let measured_ratio = us_at_max / us_at_zero;
+            let headroom = priced_ratio - measured_ratio;
+            println!(
+                "C-08 closure on {what} at E = {e_max} (n_lags_cal = {n_lags_cal}): measured \
+                 ratio {measured_ratio:.4} ({us_at_max} / {us_at_zero} us per step) vs priced \
+                 ratio {priced_ratio:.4} ({priced_at_max} / {priced_at_zero}); headroom \
+                 {headroom:.4}"
+            );
+            assert!(
+                measured_ratio > 1.0,
+                "{what}: the measured cost must RISE with the event-column count, or there \
+                 was never an under-pricing to close and this test proves nothing: measured \
+                 ratio {measured_ratio}"
+            );
+            assert!(
+                measured_ratio <= priced_ratio,
+                "{what}: UNDER-PRICED at {e_max} event columns — the measured work grows \
+                 {measured_ratio:.4}x while the price grows only {priced_ratio:.4}x. A \
+                 request at the holiday-column ceiling would buy more work than the door \
+                 priced it at: the SC4 defect, still open on this architecture."
+            );
+        }
+    }
+
+    /// The SHAPE discriminator: the priced ratio is the SAME at two geometries differing
+    /// roughly 10x in samples.
+    ///
+    /// This is the test that tells the correct shape from the one a looser wording permits.
+    /// With the event term INSIDE the per-sample width,
+    /// `priced(E)/priced(0) = ((n_lags + 1) + ceil(c*E)) / (n_lags + 1)` — free of epochs and
+    /// samples entirely. With `product + c*E` the ratio is `1 + c*E/product`, which collapses
+    /// toward 1 as the product grows, so a coefficient tuned to pass an observation at one
+    /// geometry under-prices every larger series.
+    ///
+    /// A SINGLE-geometry observation cannot tell the two apart, which is precisely how a
+    /// passing test could have left the 7.6x open.
+    #[test]
+    fn the_event_cost_shape_scales_with_geometry() {
+        /// EXACTLY two, and the count is carried in the failure message: a sweep silently
+        /// shrunk to one geometry is this test quietly becoming unable to discriminate.
+        const GEOMETRIES: usize = 2;
+        let points = [1_200usize, 12_000];
+        assert_eq!(
+            points.len(),
+            GEOMETRIES,
+            "this test discriminates the two shapes ONLY by comparing across geometries; \
+             with {GEOMETRIES} it is a shape test, with one it is a tautology"
+        );
+        let e_max = c08_calibration_f64("measured_at_e_max") as usize;
+
+        // The two geometries really do differ ~10x in samples AND in the epoch budget, so a
+        // ratio that survives both is not surviving a pair of near-identical requests.
+        let samples: Vec<usize> = points
+            .iter()
+            .map(|p| n_training_samples(&daily(*p), 0))
+            .collect();
+        assert!(
+            samples[1] >= samples[0] * 8,
+            "the two geometries must differ by roughly 10x in samples: {samples:?}"
+        );
+        assert_ne!(
+            auto_epochs(samples[0]),
+            auto_epochs(samples[1]),
+            "the two geometries must also differ in the epoch budget, or a shape that \
+             depends on epochs would survive this test"
+        );
+
+        for n_lags in [0usize, 7] {
+            let mut ratios: Vec<f64> = Vec::new();
+            for &p in &points {
+                let d = daily(p);
+                let at_zero = request_train_cost(&d, p, n_lags, 0);
+                let at_max = request_train_cost(&d, p, n_lags, e_max);
+                let ratio = at_max as f64 / at_zero as f64;
+                println!(
+                    "shape: points={p} n_lags={n_lags} samples={} epochs={} sweep={} \
+                     priced(0)={at_zero} priced({e_max})={at_max} ratio={ratio:.6}",
+                    n_training_samples(&d, n_lags),
+                    door_epochs(p, n_training_samples(&d, n_lags), n_lags),
+                    door_lr_sweep(n_lags).len()
+                );
+                ratios.push(ratio);
+            }
+            assert_eq!(ratios.len(), GEOMETRIES);
+            assert!(
+                (ratios[0] - ratios[1]).abs() < 1e-12,
+                "at n_lags={n_lags} the priced ratio is {} at {} points and {} at {} points. \
+                 The event term is therefore NOT inside the per-sample width: a ratio that \
+                 moves with the sample count is the `product + c*E` shape, which scales with \
+                 neither epochs nor samples and under-prices every larger series.",
+                ratios[0],
+                points[0],
+                ratios[1],
+                points[1]
+            );
+            // ...and it is the CLOSED FORM the width shape predicts, not merely stable.
+            let width_at_zero = n_lags as f64 + 1.0;
+            let expected = (width_at_zero
+                + (crate::types::FIT_NP_EVENT_COST_PER_COLUMN * e_max as f64).ceil())
+                / width_at_zero;
+            assert!(
+                (ratios[0] - expected).abs() < 1e-12,
+                "at n_lags={n_lags} the priced ratio {} is not the width form's closed form \
+                 {expected}",
+                ratios[0]
+            );
+        }
+
+        // Separately: a differing `n_lags` MUST move the ratio, because the event term is
+        // additive to `(n_lags + 1)` and therefore a smaller share of a wider sweep. A ratio
+        // that ignored `n_lags` would mean the term had escaped the width in the other
+        // direction.
+        let d = daily(points[0]);
+        let r0 = request_train_cost(&d, points[0], 0, e_max) as f64
+            / request_train_cost(&d, points[0], 0, 0) as f64;
+        let r7 = request_train_cost(&d, points[0], 7, e_max) as f64
+            / request_train_cost(&d, points[0], 7, 0) as f64;
+        println!("shape: ratio at n_lags=0 is {r0:.6}, at n_lags=7 is {r7:.6}");
+        assert!(
+            r7 < r0,
+            "the priced ratio must SHRINK as n_lags grows ({r7} at 7 lags against {r0} at 0): \
+             the event term is additive to the per-sample width, so it is a smaller share of \
+             a wider one"
+        );
+    }
 }
 
 // ============================================================== parity ====
@@ -956,6 +1462,7 @@ mod parity {
                 huber_beta: 0.3,
                 newer_w: 2.0,
                 seed: 42,
+                event_design: None,
             };
             let (m, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -963,7 +1470,7 @@ mod parity {
                 continue;
             }
             if best.as_ref().is_none_or(|b| fl < b.0) {
-                best = Some((fl, lr, predict_ts(&d, &m, test_days)));
+                best = Some((fl, lr, predict_ts(&d, &m, test_days, None)));
             }
         }
         let (train_loss, selected_lr, yhat) =
@@ -1016,6 +1523,7 @@ mod parity {
                 huber_beta: 0.3,
                 newer_w: 2.0,
                 seed: 42,
+                event_design: None,
             };
             let (m, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -1023,7 +1531,7 @@ mod parity {
                 continue;
             }
             if best.as_ref().is_none_or(|b| fl < b.0) {
-                best = Some((fl, lr, predict_ar_1step(&d, &m, &test_idx)));
+                best = Some((fl, lr, predict_ar_1step(&d, &m, &test_idx, None)));
             }
         }
         let (train_loss, selected_lr, yhat) =
@@ -1144,6 +1652,7 @@ mod parity {
             huber_beta: 0.3,
             newer_w: 2.0,
             seed: 42,
+            event_design: None,
         };
         let (m, log) = train(&d, &cfg, false);
         assert!(log.steps > 0, "the fit must have taken at least one step");
@@ -1154,7 +1663,7 @@ mod parity {
         );
         // The prediction helpers must clear it too: they build a no_grad forward that still
         // allocates tape entries.
-        let _ = predict_ts(&d, &m, &ds[..5]);
+        let _ = predict_ts(&d, &m, &ds[..5], None);
         assert_eq!(
             graph_tape_len(),
             0,
@@ -1271,6 +1780,7 @@ mod parity {
                 huber_beta: 0.3,
                 newer_w: 2.0,
                 seed: 42,
+                event_design: None,
             };
             let (_, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -1415,7 +1925,7 @@ mod wall {
         );
         // The door's OWN pricing function, so this line reports the number the bound is
         // compared against rather than a second arithmetic that could drift from it.
-        let cost = super::request_train_cost(&d, points, n_lags);
+        let cost = super::request_train_cost(&d, points, n_lags, 0);
         drop(d);
 
         let t0 = std::time::Instant::now();

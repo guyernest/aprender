@@ -868,7 +868,9 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             // functions used to configure the sweep below (`door_lr_sweep`, `door_epochs`,
             // `n_training_samples`), so the door cannot price a request differently from the
             // work it then spends.
-            let np_cost = np::request_train_cost(&d, n_train, n_lags);
+            // Event-free: the arm refuses `holidays`, so no request reaching here carries
+            // an event column. Plan 06.1-06 opens the arm and passes the real count.
+            let np_cost = np::request_train_cost(&d, n_train, n_lags, 0);
             if np_train_cost_is_over(np_cost) {
                 let n_samples = np::n_training_samples(&d, n_lags);
                 let epochs = np::door_epochs(n_train, n_samples, n_lags);
@@ -901,6 +903,12 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     huber_beta: 0.3,
                     newer_w: 2.0,
                     seed,
+                    // EVENT-FREE, deliberately and for this whole plan. `holidays` is still
+                    // refused on this arm above, so there is no event design to attach; plan
+                    // 06.1-06 opens the arm together with the hoisted bounds, so no window
+                    // of unpriced acceptance opens between the block existing and the door
+                    // pricing it.
+                    event_design: None,
                 };
                 let (m, log) = np::train(&d, &cfg, false);
                 let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -919,22 +927,22 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             // `predict_trend` is branch-independent; only the yhat path differs.
             let trend = np::predict_trend(&d, &m, &fut);
             let yhat = if n_lags == 0 {
-                np::predict_ts(&d, &m, &fut)
+                np::predict_ts(&d, &m, &fut, None)
             } else {
-                np::predict_ar_recursive(&d, &m, &fut)
+                np::predict_ar_recursive(&d, &m, &fut, None)
             };
             // Residual-based band. NeuralProphet itself would use quantile regression; that
             // was NOT spiked (CONTEXT deferred), and the diagnostics say so rather than
             // implying a coverage guarantee this band does not have.
             let fitted = if n_lags == 0 {
-                np::predict_ts(&d, &m, &ds)
+                np::predict_ts(&d, &m, &ds, None)
             } else {
                 let idx: Vec<usize> = ds
                     .iter()
                     .map(|day| (day - d.t0) as usize)
                     .filter(|i| *i >= n_lags)
                     .collect();
-                let pr = np::predict_ar_1step(&d, &m, &idx);
+                let pr = np::predict_ar_1step(&d, &m, &idx, None);
                 let mut out = vec![f64::NAN; ds.len()];
                 let mut k = 0;
                 for (i, day) in ds.iter().enumerate() {
@@ -1151,6 +1159,37 @@ mod tests {
         }
     }
 
+    /// The `"neuralprophet"` arm STILL refuses `holidays`, and this plan is what makes that
+    /// worth asserting rather than assuming.
+    ///
+    /// Plan 06.1-05 lands the event block (`crate::events`) and wires it through `np::train`
+    /// and all three predict paths, so from here on the capability EXISTS. What must not
+    /// exist yet is a way for a caller to reach it: the C-08 event-column price and the
+    /// hoisted holiday bounds are plan 06.1-06's, and an event surface open before either
+    /// is exactly the unpriced window this sequencing exists to prevent.
+    ///
+    /// The refusal is asserted BEHAVIOURALLY. "The door file did not change" was the old
+    /// proof and it is not satisfiable — the exhaustive `np::TrainConfig` literal and the
+    /// three predict call sites had to be updated for the crate to compile at all. A control
+    /// on the neighbouring `cap` refusal keeps this from passing because the whole arm broke.
+    #[test]
+    fn the_neuralprophet_arm_still_refuses_holidays() {
+        let mut args = np_args(60, 7);
+        args.holidays = Some(vec![crate::types::HolidayArg {
+            name: "promo".into(),
+            dates: vec!["2020-03-15".into()],
+            lower_window: -1,
+            upper_window: 1,
+        }]);
+        refusal(&args, "holidays is prophet-only");
+
+        // CONTROL: the arm is otherwise alive. Without this, a request refused for some
+        // unrelated reason would satisfy the assertion above and prove nothing.
+        let ok = np_args(60, 7);
+        let r = forecast(&ok).expect("the neuralprophet arm must still accept a plain request");
+        assert_eq!(r.yhat.len(), 7, "one row per horizon step");
+    }
+
     /// `MAX_POINTS` bounds how MANY points arrive, never how far apart they are, and the
     /// NeuralProphet path materialises an imputed daily grid over the whole span.
     #[test]
@@ -1353,7 +1392,7 @@ mod tests {
             };
             let epochs = crate::np::door_epochs(PEYTON_ROWS, n_samples, n_lags);
             let sweep = crate::np::door_lr_sweep(n_lags).len() as u64;
-            let cost = crate::np::train_cost(n_samples, epochs, n_lags) * sweep;
+            let cost = crate::np::train_cost(n_samples, epochs, n_lags, 0) * sweep;
             assert!(
                 cost <= MAX_NP_TRAIN_COST,
                 "np::parity's own Peyton rung at n_lags={n_lags} prices at {cost}, which the \
@@ -1392,12 +1431,13 @@ mod tests {
             .collect();
         for n_lags in [0usize, 7, 30] {
             let d = crate::np::NpData::new(&days, &y, days.len(), 10, 0.8);
+            let n_points = days.len();
             let n_samples = crate::np::n_training_samples(&d, n_lags);
-            let epochs = crate::np::door_epochs(days.len(), n_samples, n_lags);
+            let epochs = crate::np::door_epochs(n_points, n_samples, n_lags);
             let sweep = crate::np::door_lr_sweep(n_lags).len() as u64;
             assert_eq!(
-                crate::np::request_train_cost(&d, days.len(), n_lags),
-                crate::np::train_cost(n_samples, epochs, n_lags) * sweep,
+                crate::np::request_train_cost(&d, n_points, n_lags, 0),
+                crate::np::train_cost(n_samples, epochs, n_lags, 0) * sweep,
                 "request_train_cost must be exactly sweep x train_cost at n_lags={n_lags}"
             );
         }

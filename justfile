@@ -1089,3 +1089,111 @@ forecast-sc1-sweep points="33" horizon="3650" np_points="2000" np_lags="41" np_h
         exit 1
     fi
     echo "  SC1 SWEEP OK: $checked compositions, every one under the 2.0 s SC1 bar"
+
+# THE C-08 EVENT-COLUMN CALIBRATION (SC4, D-32, D-34).
+#
+# `np::train_cost` had NO event term: at `fit_max_holiday_columns` (1 000 — the
+# ceiling the event surface inherits by reusing `HolidayArg`) a request bought
+# 7.6x the work it was priced at, measured by spike 013. This recipe is the
+# DERIVATION harness for `fit_np_event_cost_per_column`, and it is what a later
+# re-calibration (Phase 7, or the D-32 on-target measurement) re-runs.
+#
+# WHAT IT MEASURES, and what it deliberately does not. The per-column SLOPE of
+# microseconds-per-step against the event-column count — NOT the 47.924 s
+# structural maximum. D-32 is explicit that the slope is cheap enough to live in
+# CI while the structural maximum is not.
+#
+# THE COEFFICIENT IS A RATIO, which is why the recipe needs no batch size, step
+# count or sample count. The sweep fits `us/step ~= a + b*E` at ONE geometry; the
+# coefficient is `b * (n_lags_cal + 1) / a`, in the proxy's own width units. The
+# batch size divides `a` and `b` identically and cancels, so an absolute
+# microsecond figure would be the one number the door could not convert at check
+# time. `n_lags_cal` is printed on the FIT line so the reduction to `b/a` (valid
+# only when the calibration is lag-free) is checkable rather than assumed.
+#
+# Release-only ON PURPOSE, and the guard is hard: this crate carries
+# `[profile.dev.package.aprender-forecast] opt-level = 3`, which covers the crate
+# and NOT its dependencies, so a dev-profile number looks plausible and is not the
+# measurement (CLAUDE.md rule 2). Every line carries `profile=`, derived from
+# `cfg!(debug_assertions)` rather than from intent, and this recipe refuses any
+# line that does not say `release`.
+#
+# Every line also carries `commit=` and `arch=`, so a pasted sweep identifies the
+# tree and the architecture it came from. Never label a run by intent.
+#
+# `rc` is captured BEFORE any pipe. Reading a status through a pipe gives the LAST
+# command's status, and that exact defect shipped twice in this repo and made
+# three green runs prove nothing (#2336, #2360).
+#
+# ON A BARE x86_64 HOST this needs nothing but a Rust toolchain and a checkout:
+# no fixtures, no model weights, no network, no Python. `just` itself is the only
+# non-cargo dependency, and the two cargo commands below are the whole recipe.
+# Sweep the C-08 event-column axis on release and fit the per-column slope.
+forecast-np-event-calibration points="" lags="" epochs="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    LOG=target/p06.1-05-forecast-np-event-calibration.log
+    # An UNSET variable means "the harness default"; exporting an empty one would
+    # be parsed as 0 by a less careful reader, so they are exported only when set.
+    if [ -n "{{points}}" ]; then export NP_EVENT_CAL_POINTS="{{points}}"; fi
+    if [ -n "{{lags}}" ]; then export NP_EVENT_CAL_LAGS="{{lags}}"; fi
+    if [ -n "{{epochs}}" ]; then export NP_EVENT_CAL_EPOCHS="{{epochs}}"; fi
+    # The commit the numbers were produced at, carried onto every printed line.
+    NP_EVENT_CAL_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    export NP_EVENT_CAL_COMMIT
+    set +e
+    CARGO_INCREMENTAL=0 cargo test --release -p aprender-forecast --lib \
+        sc1_wall::np_event_calibration -- --ignored --nocapture > "$LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        grep -E '^NP EVENT CAL' "$LOG" || true
+        tail -30 "$LOG"
+        echo "FAIL: the event calibration exited $rc - log $LOG" >&2
+        exit "$rc"
+    fi
+    if ! grep -q '^NP EVENT CAL: ' "$LOG"; then
+        tail -30 "$LOG"
+        echo "FAIL: no 'NP EVENT CAL:' line in $LOG - nothing was measured. A sweep" >&2
+        echo "      that measured zero points must never report success." >&2
+        exit 1
+    fi
+    checked=0
+    while IFS= read -r line; do
+        echo "$line"
+        # CLAUDE.md rule 2 - prove the mechanism engaged, never label a run by
+        # intent. A debug number on this crate looks plausible and is not the
+        # measurement the coefficient is derived from.
+        case "$line" in
+            *profile=release*) ;;
+            *)
+                echo "FAIL: a calibration point was not measured on a release build" >&2
+                echo "      (profile= is not release), so it is not the calibration." >&2
+                echo "      line: $line" >&2
+                exit 1
+                ;;
+        esac
+        # Parse BY TOKEN, never by column position: the printed field order must
+        # not become load-bearing.
+        us=$(printf '%s\n' "$line" \
+            | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^us_per_step=/) { sub(/^us_per_step=/, "", $i); print $i; exit } }')
+        if [ -z "$us" ]; then
+            echo "FAIL: an NP EVENT CAL line carries no us_per_step= token - that" >&2
+            echo "      point was never measured. line: $line" >&2
+            exit 1
+        fi
+        checked=$((checked + 1))
+    done < <(grep '^NP EVENT CAL: ' "$LOG")
+    if [ "$checked" -lt 6 ]; then
+        echo "FAIL: the sweep is at least SIX event-column counts and this run" >&2
+        echo "      checked $checked. A slope fitted through fewer points is not a" >&2
+        echo "      measurement of a shape." >&2
+        exit 1
+    fi
+    if ! grep -q '^NP EVENT CAL FIT: ' "$LOG"; then
+        echo "FAIL: the sweep printed no FIT line, so no slope was fitted." >&2
+        exit 1
+    fi
+    grep -m1 '^NP EVENT CAL FIT: ' "$LOG"
+    echo "  NP EVENT CALIBRATION OK: $checked points swept on release, slope fitted"

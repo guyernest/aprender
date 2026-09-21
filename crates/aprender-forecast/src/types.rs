@@ -445,6 +445,63 @@ pub const MAX_HOLIDAY_NAME_LEN: usize = 200;
 /// boundary without paying for it.
 pub const MAX_NP_TRAIN_COST: u64 = 15_000_000;
 
+/// The event-column term of cost axis C-08, in PROXY WIDTH UNITS per event column
+/// (`constants.fit_np_event_cost_per_column`, SC4 / D-32 / D-34).
+///
+/// # It is a COEFFICIENT, not a ceiling, and that distinction is checked
+///
+/// Nothing is ever refused for exceeding this number. It is multiplied into the priced
+/// quantity, which is THEN compared against [`MAX_NP_TRAIN_COST`]. That is why it is
+/// deliberately NOT named `fit_max_*`: `every_cost_ceiling_constant_is_named_by_an_axis`
+/// enumerates cost CEILINGS, and capturing a coefficient there would make that test assert
+/// that a coefficient is a bound and would require inventing an axis whose `bound:` no door
+/// check ever compares against. The obligation a coefficient DOES carry — that some priced
+/// formula reads it — is enforced by the sibling
+/// `every_cost_coefficient_constant_is_named_by_an_axis_formula`.
+///
+/// # Where it sits in the formula, and why not beside the product
+///
+/// ```text
+/// request_train_cost = n_lrs * epochs * n_samples
+///                      * ( (n_lags + 1) + FIT_NP_EVENT_COST_PER_COLUMN * E )
+/// ```
+///
+/// `(n_lags + 1)` is the PER-SAMPLE FEATURE WIDTH the optimiser sweeps, and the event block
+/// adds work to that width — the measured growth is a PER-STEP slope, so the added work is
+/// paid once per sample per epoch exactly like the width beside it. The alternative reading,
+/// `product + c * E`, scales with NEITHER epochs NOR samples: it can be tuned to pass an
+/// observation at one geometry and under-price every larger series, which is the failure
+/// SC4's "observed closed, not asserted closed" exists to prevent.
+/// `np::tests::the_event_cost_shape_scales_with_geometry` is the discriminator.
+///
+/// # What the number IS, dimensionally
+///
+/// The calibration sweep measures, at ONE named geometry, an intercept `a` (microseconds per
+/// step at `E = 0`) and a slope `b` (microseconds per step per event column). The proxy's
+/// width at `E = 0` is `(n_lags_cal + 1)` and corresponds to `a`, so one proxy width unit is
+/// `a / (n_lags_cal + 1)` microseconds per step, and the coefficient is
+///
+/// ```text
+/// FIT_NP_EVENT_COST_PER_COLUMN = b * (n_lags_cal + 1) / a     [rounded UP, then x safety]
+/// ```
+///
+/// which reduces to `b / a` only when the calibration is LAG-FREE. `n_lags_cal` is recorded
+/// in the C-08 `calibration:` mapping so that reduction is checkable rather than assumed.
+/// The batch size divides `a` and `b` identically and cancels out of the ratio, which is
+/// exactly why the coefficient is defined as a ratio of two measurements at one geometry and
+/// never as an absolute microsecond figure — an absolute number would need a batch, a step
+/// count and a sample count to convert, none of which the door knows at check time.
+///
+/// # The value in force, and its provenance
+///
+/// The measurement, the host, the architecture, the date, the commit, the method and the
+/// safety factor with its reason all live in the C-08 `calibration:` mapping in
+/// `contracts/forecast-tool-boundary-v1.yaml`, which is the single source. `constant_f64`
+/// asserts this constant equals the YAML value in `cost_bounds_match_contract`. Phase 7
+/// re-prices the CONSTANT per tier without re-deriving the SHAPE, which is what D-34 asked
+/// for.
+pub const FIT_NP_EVENT_COST_PER_COLUMN: f64 = 0.0126;
+
 /// Default router-pool size for the streamable-HTTP server (`constants.pool_default`).
 ///
 /// Lives here, beside the other contract-mirrored bounds, because this is the crate that
@@ -599,12 +656,12 @@ impl std::error::Error for ForecastError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        ForecastArgs, ForecastError, DEFAULT_POOL, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
-        MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
-        MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS,
-        MAX_REGRESSORS, MAX_REGRESSOR_DESIGN_COST, MAX_SPAN_DAYS, MIN_POINTS,
-        REGRESSOR_CONDITION_NUMBER_WARN, REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN,
-        REGRESSOR_VIF_WARN,
+        ForecastArgs, ForecastError, DEFAULT_POOL, FIT_NP_EVENT_COST_PER_COLUMN,
+        MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES, MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST,
+        MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW, MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA,
+        MAX_NP_TRAIN_COST, MAX_POINTS, MAX_REGRESSORS, MAX_REGRESSOR_DESIGN_COST, MAX_SPAN_DAYS,
+        MIN_POINTS, REGRESSOR_CONDITION_NUMBER_WARN, REGRESSOR_PRIOR_SCALE_MAX,
+        REGRESSOR_PRIOR_SCALE_MIN, REGRESSOR_VIF_WARN,
     };
     use crate::test_support::{constant_f64, constant_u64};
 
@@ -673,6 +730,16 @@ mod tests {
                 "REGRESSOR_CONDITION_NUMBER_WARN",
                 "regressor_condition_number_warn",
                 REGRESSOR_CONDITION_NUMBER_WARN,
+            ),
+            // A per-column cost SLOPE is conceptually real for the same reason: rounding it
+            // to fit `constant_u64` would round 0.0126 to 0 and make the mirror assert
+            // nothing at all. It is a COEFFICIENT and not a ceiling — see
+            // `every_cost_coefficient_constant_is_named_by_an_axis_formula` below for the
+            // obligation it does carry.
+            (
+                "FIT_NP_EVENT_COST_PER_COLUMN",
+                "fit_np_event_cost_per_column",
+                FIT_NP_EVENT_COST_PER_COLUMN,
             ),
         ] {
             let from_contract = constant_f64("forecast-tool-boundary-v1", key);
@@ -1072,6 +1139,90 @@ mod tests {
             "cost CEILINGS declared in constants: that NO cost axis names and that carry no \
              ceilings_subsumed entry — nothing has reasoned about what work they bound, which \
              is the T-06-32 condition: {unreferenced:?}"
+        );
+    }
+
+    /// The SIBLING of [`every_cost_ceiling_constant_is_named_by_an_axis`], for the other
+    /// kind of number in the pricing path: every cost COEFFICIENT declared in `constants:`
+    /// must be READ by some cost axis's `formula:`.
+    ///
+    /// # Why this is a second test and not a widening of the ceiling filter
+    ///
+    /// The ceiling filter (`fit_max_*` / `chronos_max_*`) is CORRECT as it stands, and
+    /// widening it to catch `fit_np_event_cost_per_column` would be a defect rather than a
+    /// fix. That test's contract is "every cost CEILING is named by at least one cost axis",
+    /// and a ceiling is a value a request is REFUSED for exceeding.
+    /// [`FIT_NP_EVENT_COST_PER_COLUMN`] is a COEFFICIENT: it is multiplied into the priced
+    /// quantity, which is THEN compared against [`MAX_NP_TRAIN_COST`]. Nothing is ever
+    /// refused for exceeding it. Capturing it under the ceiling filter would make that test
+    /// assert that a coefficient is a bound, and would require inventing an axis whose
+    /// `bound:` is a number no door check compares against — a dangling claim in exactly the
+    /// direction [`every_cost_axis_names_a_real_bound`] exists to refuse.
+    ///
+    /// # The hole is real, and it is a DIFFERENT hole
+    ///
+    /// The enumeration's PURPOSE is that a new number in the pricing path cannot be added
+    /// without something reasoning about it. A coefficient added to `constants:` with nothing
+    /// naming it is exactly that failure, one category over. So the obligation asserted here
+    /// is the coefficient's correct one: to be READ by a priced formula, rather than to bound
+    /// anything.
+    ///
+    /// # What stays OPEN, recorded rather than claimed closed
+    ///
+    /// The complete closure is the general form: every key in `constants:` falls into exactly
+    /// one named category (ceiling, coefficient, deployment default, warning threshold) and
+    /// each category carries its own obligation. That would immediately require categorising
+    /// `pool_default`, `poisson_normal_branch_lambda`, `chronos_native_horizon`,
+    /// `fit_min_points`, `default_seed`, `default_interval_width_x100` and the two regressor
+    /// warning thresholds. It is NOT built here, and this narrow enumeration must not be read
+    /// as covering it. The same follow-up is recorded in the contract beside the constant.
+    #[test]
+    fn every_cost_coefficient_constant_is_named_by_an_axis_formula() {
+        let doc = crate::test_support::contract_value("forecast-tool-boundary-v1");
+        let constants = doc
+            .get("constants")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("forecast-tool-boundary-v1 must carry constants");
+        let coefficients: std::collections::BTreeSet<String> = constants
+            .keys()
+            .filter_map(serde_yaml::Value::as_str)
+            .filter(|k| k.contains("_cost_per_"))
+            .map(str::to_string)
+            .collect();
+        // VACUITY GUARD. A filter that has silently stopped matching passes this test by
+        // checking nothing, which is the failure mode the whole door-surface class of tests
+        // exists to refuse. MEASURED 2026-09-21: exactly one `_cost_per_` constant exists,
+        // `fit_np_event_cost_per_column`, added by plan 06.1-05.
+        assert!(
+            !coefficients.is_empty(),
+            "vacuity guard: no `_cost_per_` coefficient constants found — the filter has \
+             stopped matching and this test would pass by checking nothing"
+        );
+
+        let formulas: Vec<String> = doc
+            .get("door_surface")
+            .and_then(|d| d.get("cost_axes"))
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("forecast-tool-boundary-v1 must carry door_surface.cost_axes")
+            .iter()
+            .filter_map(|a| a.get("formula").and_then(serde_yaml::Value::as_str))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            !formulas.is_empty(),
+            "vacuity guard: no cost axis carries a formula, so every coefficient below \
+             would be reported unreferenced for the wrong reason"
+        );
+
+        let unread: Vec<&String> = coefficients
+            .iter()
+            .filter(|k| !formulas.iter().any(|f| f.contains(k.as_str())))
+            .collect();
+        assert!(
+            unread.is_empty(),
+            "cost COEFFICIENTS declared in constants: that NO cost axis formula reads — a \
+             number was added to the pricing path with nothing reasoning about it, which is \
+             the T-06-32 condition one category over from a ceiling: {unread:?}"
         );
     }
 
