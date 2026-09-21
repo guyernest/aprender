@@ -43,11 +43,12 @@
 //! CI's existing `--lib` workspace sweep with no workflow change at all.
 
 use crate::dates::parse_ymd;
+use crate::fit::fit_prophet;
 use crate::prophet::{
-    make_design, predict, Design, Forecast, Holiday, Mode, Params, Seasonality, Spec,
+    make_design, predict, Design, Forecast, Holiday, Mode, Model, Params, Seasonality, Spec,
 };
 use crate::regressors::{splice, standardize_one, RegressorChannel, RegressorSpec, Standardized};
-use crate::test_support::{equation_tolerance, load_json};
+use crate::test_support::{constant_u64, equation_tolerance, load_json};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
@@ -351,6 +352,15 @@ impl Rig {
             beta: f64s(&self.fx["params"]["beta"], "params.beta"),
             sigma_obs: scalar(&self.fx["params"]["sigma_obs"], "params.sigma_obs"),
         }
+    }
+
+    /// The UNSCALED negative log posterior at a parameter vector, on the SPLICED design.
+    ///
+    /// `Model::new` scales the objective by 1/T (the D-09 recipe) and `FitInfo.objective`
+    /// is already unscaled, so the scale is undone here for the two to be comparable.
+    fn objective_at(&self, p: &Params) -> f64 {
+        let model = Model::new(&self.design);
+        model.objective(&model.pack(p)) / model.scale
     }
 
     /// The oracle's own MAP parameters through the regressor-aware Rust `predict`.
@@ -700,4 +710,473 @@ fn retail_regressors_components_via_python_params() {
 #[test]
 fn retail_regressors_holidays_components_via_python_params() {
     components_via_python_params("retail_regressors_holidays");
+}
+
+// ----------------------------------------------------------------- rung 2 ----
+
+/// Rung 2: the Rust objective at the oracle's MAP against the oracle's OWN published
+/// objective — asserted as an EXACT digit-for-digit identity, with no tolerance at all.
+///
+/// # Why this rung exists here, and why it does not bind `objective_at_python_map_abs`
+///
+/// The plan that produced this module recorded rung 2 as unavailable, on the premise that
+/// neither regressor oracle publishes a Python objective. That premise is half wrong: both
+/// publish `params.lp__`, Stan's log posterior at the MAP. Measured once, against the
+/// existing rung-2 arithmetic (`Model::objective(pack(theta_py)) / Model::scale`, compared
+/// as a SUM because the fixture stores a positive log posterior while the model computes a
+/// negative one):
+///
+/// | fixture | `f_rust` | `lp__` | `f_rust + lp__` |
+/// |---|---|---|---|
+/// | 24 columns | -1022.494294424 | 1022.4943 | 5.576e-6 |
+/// | 30 columns | -1022.462291772 | 1022.4623 | 8.228e-6 |
+///
+/// That is far outside the crate-wide `objective_at_python_map_abs` bar of one part in a
+/// billion, so extending that equation's domain to these two fixtures would be writing
+/// something FALSE into the contract. But the residual is not a model disagreement either,
+/// and the guessed explanation — that Stan's `lp__` carries Jacobian and prior terms this
+/// port's objective does not — is REFUTED by the numbers above: the oracle stores `lp__`
+/// rounded to FOUR DECIMAL PLACES, and both residuals are bounded by half of that last
+/// place. `lp__` is exactly the Rust objective rounded to four decimals, at both widths.
+///
+/// So the honest rung is the exact one: assert that the Rust objective agrees with the
+/// oracle's own objective in EVERY DIGIT THE ORACLE PUBLISHED. It reads no bar, because
+/// there is no tolerance in it — which is also why it is not a `float_tolerance` key in
+/// `contracts/prophet-parity-v1.yaml`.
+///
+/// What this buys the rest of the ladder: rung 4's reference is the Rust objective at the
+/// oracle's MAP rather than a published Python number. That stand-in is legitimate only if
+/// the quantity really IS Python's objective — and this rung is the proof, on the same two
+/// fixtures, exactly as `objective_at_python_map_abs` is the proof for the spike-001 family.
+fn objective_at_python_map(stem: &'static str) {
+    let r = rig(stem);
+    let f_rust = r.objective_at(&r.python_params());
+    let lp = scalar(&r.fx["params"]["lp__"], "params.lp__");
+    assert!(
+        f_rust.is_finite() && lp.is_finite(),
+        "{stem}: f_rust {f_rust} and lp__ {lp} must both be finite before they are compared"
+    );
+
+    // The oracle publishes `lp__` to four decimals. Compare at that precision by scaling to
+    // integers: `(x * 10_000.0).round()` is exact at these magnitudes, where reconstructing
+    // a rounded f64 by dividing back down is not — and a bit-comparison of the
+    // reconstruction would fail for a reason with nothing to do with parity.
+    let scaled = |x: f64| (x * 10_000.0).round();
+    let (got, want) = (scaled(-f_rust), scaled(lp));
+    println!(
+        "  {stem} rung 2: f_rust {f_rust:.9}, oracle lp__ {lp:.4}, sum {:.3e} \
+         (bounded by the oracle's own last published place)",
+        f_rust + lp
+    );
+    assert!(
+        got.to_bits() == want.to_bits(),
+        "{stem} rung 2: the Rust objective at the oracle's MAP is {f_rust:.9}, so rounded to \
+         the four decimals the oracle publishes it is {:.4}; the oracle published {lp:.4}. \
+         These must agree in EVERY DIGIT the oracle wrote down. A disagreement means the \
+         priors, the exact L1 on `delta`, the sigma terms, the Fourier column order or the \
+         changepoint grid diverged — and nothing downstream, INCLUDING rung 4 whose \
+         reference is this same quantity, means anything until it is green",
+        -f_rust
+    );
+}
+
+#[test]
+fn retail_regressors_objective_at_python_map() {
+    objective_at_python_map("retail_regressors");
+}
+
+#[test]
+fn retail_regressors_holidays_objective_at_python_map() {
+    objective_at_python_map("retail_regressors_holidays");
+}
+
+// ----------------------------------------------------------------- rung 4 ----
+
+/// Rung 4: what the Rust MAP fit itself reaches on the SPLICED design, ONE-SIDED, plus the
+/// coefficient identifiability table — RECORDED, never asserted.
+///
+/// # The rule this rung enforces, and the one it refuses
+///
+/// ENFORCED: the fitted objective may not land more than the contract's slack ABOVE the
+/// objective at the oracle's MAP. REFUSED: any assertion on a coefficient VALUE. Rust's
+/// `price` beta came out about 4.7x from Python's while the objective slack was about
+/// -3.42 — Rust found a BETTER optimum on a flat ridge. `discount` is a six-month cosine
+/// and therefore a harmonic of the yearly seasonality; its coefficient is not identifiable
+/// at all. Asserting on either would make this ladder red for being right, so the table is
+/// printed and carried in the assertion message instead.
+///
+/// FINITENESS IS ASSERTED FIRST, and is not a value assertion. A NaN compares false against
+/// every bound, so an ill-conditioned solve would make the one-sided slack below, the ratio
+/// table and every downstream comparison pass while proving nothing.
+fn fit_objective_and_identifiability(stem: &'static str) {
+    let r = rig(stem);
+    let rounds = usize::try_from(constant_u64(CONTRACT, "max_rounds")).expect("max_rounds");
+    let (fitted, info) = fit_prophet(&r.design, rounds);
+
+    // ---- finiteness, before any tolerance is applied ----
+    assert_eq!(
+        fitted.beta.len(),
+        r.design.k,
+        "{stem}: the fit must return one coefficient per design column"
+    );
+    if let Some(i) = fitted.beta.iter().position(|v| !v.is_finite()) {
+        panic!(
+            "{stem}: fitted beta[{i}] is {} — non-finite. A NaN compares false against every \
+             bound, so the one-sided slack below and the ratio table would BOTH pass while \
+             proving nothing",
+            fitted.beta[i]
+        );
+    }
+    assert!(
+        info.objective.is_finite(),
+        "{stem}: the fitted objective is {}, not a finite number",
+        info.objective
+    );
+
+    // ---- the identifiability table: RECORDED, not asserted ----
+    let py = r.python_params();
+    let base_k = r.design.k - r.std_regs.len();
+    let table = r
+        .std_regs
+        .iter()
+        .enumerate()
+        .map(|(j, s)| {
+            let (o, g) = (py.beta[base_k + j], fitted.beta[base_k + j]);
+            let ratio = if o == 0.0 { f64::NAN } else { g / o };
+            format!("{}: oracle {o:+.6} rust {g:+.6} ratio {ratio:+.2}x", s.name)
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    // ---- the objective control, ONE-SIDED ----
+    let reference = r.objective_at(&py);
+    let slack = equation_tolerance(CONTRACT, "regressor_fitted_objective_slack");
+    let delta = info.objective - reference;
+    println!(
+        "  {stem} rung 4: f_rust(fit) {:.4} vs f_rust(oracle MAP) {reference:.4} \
+         (delta {delta:+.4}, bar +{slack}); {} rounds, {} iters, status {}\n    \
+         identifiability: {table}",
+        info.objective, info.rounds, info.iterations, info.status
+    );
+    assert!(
+        info.objective <= reference + slack,
+        "{stem}: the Rust fit landed at {:.6} against the objective at the oracle's MAP \
+         {reference:.6}, i.e. {delta:+.6}, over the contract's ONE-SIDED slack {slack}. A \
+         LOWER objective is a BETTER MAP and passes; only EXCEEDING the reference is a \
+         defect. Coefficients at this point, for the record and NOT as a bar — {table}",
+        info.objective
+    );
+
+    // D-09 diagnostics, observable on the spliced design exactly as on the base one.
+    assert!(
+        info.rounds <= rounds,
+        "{stem}: {} restart rounds exceeds the contract's max_rounds {rounds}",
+        info.rounds
+    );
+    assert!(
+        !info.budget_hit,
+        "{stem}: the cooperative fit budget was crossed at a round boundary — a \
+         fixture-sized fit on {} columns must never reach it",
+        r.design.k
+    );
+    assert!(
+        info.status == "Stalled" || info.status == "Converged",
+        "{stem}: L-BFGS terminal status {:?} is not one the D-09 recipe accepts",
+        info.status
+    );
+}
+
+#[test]
+fn retail_regressors_fit_objective_and_identifiability() {
+    fit_objective_and_identifiability("retail_regressors");
+}
+
+#[test]
+fn retail_regressors_holidays_fit_objective_and_identifiability() {
+    fit_objective_and_identifiability("retail_regressors_holidays");
+}
+
+// GSD_REG_PARITY-GATE_REGION_END
+//
+// EVERYTHING ABOVE THIS LINE IS THE SCANNED REGION. Everything below is the gate itself,
+// its literal set and its case table — all three of which necessarily CONTAIN the numbers
+// they hunt, which is exactly why the scan stops here. The tail is not unguarded: the gate
+// asserts it holds no test attribute beyond its own two, so no rung can be hidden below the
+// line to escape the scan.
+
+/// The no-literal region gate (D-15, T-06.1-06) and the case table that proves it
+/// discriminates.
+///
+/// # Why this is Rust and not a shell grep
+///
+/// The prior-phase gate over `prophet.rs::parity` is a bash grep inside a plan's `<verify>`.
+/// CLAUDE.md Verification Discipline rule 7 requires a guard regex to ship a
+/// must-match / must-not-match case table — and a Rust test cannot exercise a bash regex,
+/// so a shell-only gate plus a Rust case table would be TWO artifacts free to drift apart.
+/// One implementation, one case table, both under `--lib`, both inside CI's existing sweep.
+/// The plan's `<verify>` runs these two tests rather than re-implementing the scan.
+///
+/// The repo's guard patterns have been wrong five times, and every one was caught by a case
+/// table rather than by review. Re-run the table; do not re-read the pattern.
+#[cfg(test)]
+mod no_literal {
+    /// Every tolerance `contracts/prophet-parity-v1.yaml` owns and this ladder asserts, in
+    /// both the bare and the `1.0`-prefixed spellings Rust accepts.
+    ///
+    /// `1e-15` is in this set deliberately: it is `regressor_predict_path_rel_yscale`, the
+    /// tightest bar in the phase and SC1's own number, and the first draft of this pattern
+    /// omitted it — a gate blind to the tolerance most worth protecting. `3.33e-15` is the
+    /// MEASURED design-cell residual, which belongs in prose and never in code.
+    const BANNED: [&str; 10] = [
+        "1e-14", "1.0e-14", "1e-15", "1.0e-15", "1e-10", "1.0e-10", "0.5", "0.02", "0.0079",
+        "3.33e-15",
+    ];
+
+    /// The boundary marker, assembled at run time so the full string appears in the source
+    /// exactly ONCE — at the boundary. A `const` holding it literally would appear twice and
+    /// the "exactly once" assertion below would be vacuous.
+    fn marker() -> String {
+        format!("{}-{}", "GSD_REG_PARITY", "GATE_REGION_END")
+    }
+
+    /// Remove line comments (`//`, `///`, `//!`) AND block comments (`/* … */`, nested,
+    /// multi-line), keeping string literals, which ARE code.
+    ///
+    /// Stripping only line comments — as the first draft of this gate did — turns a block
+    /// comment explaining why a bar is what it is into a CI failure, and this module's
+    /// rationale is full of exactly those numbers.
+    ///
+    /// SCOPE, stated rather than assumed: character literals are not tracked, so a literal
+    /// double-quote character would flip the string state and mask the rest of the region.
+    /// That is the one blind spot, and the gate ASSERTS the region contains no such literal
+    /// rather than hoping. Lifetimes are unaffected precisely BECAUSE char literals are not
+    /// tracked.
+    fn strip_comments(src: &str) -> String {
+        let b: Vec<char> = src.chars().collect();
+        let mut out = String::with_capacity(src.len());
+        let (mut i, mut depth) = (0_usize, 0_usize);
+        let (mut in_line, mut in_str) = (false, false);
+        while i < b.len() {
+            let c = b[i];
+            let n = if i + 1 < b.len() { b[i + 1] } else { '\0' };
+            if in_line {
+                if c == '\n' {
+                    in_line = false;
+                    out.push('\n');
+                }
+                i += 1;
+            } else if depth > 0 {
+                if c == '/' && n == '*' {
+                    depth += 1;
+                    i += 2;
+                } else if c == '*' && n == '/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    if c == '\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            } else if in_str {
+                if c == '\\' {
+                    i += 2;
+                } else {
+                    if c == '"' {
+                        in_str = false;
+                    }
+                    out.push(c);
+                    i += 1;
+                }
+            } else if c == '/' && n == '/' {
+                in_line = true;
+                i += 2;
+            } else if c == '/' && n == '*' {
+                depth = 1;
+                i += 2;
+            } else {
+                if c == '"' {
+                    in_str = true;
+                }
+                out.push(c);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// The first banned tolerance appearing as a COMPLETE numeric token, or `None`.
+    ///
+    /// The token boundary is what separates a bar from an innocent number: a bare substring
+    /// search flags `10.5` for containing the objective-slack bar, and a gate that cries
+    /// wolf gets deleted. A match is rejected when the character immediately before or after
+    /// is a digit or a dot — which is why `10.5`, `0.05` and a version string are all clean
+    /// while a bare assignment of the same number is not.
+    fn first_banned(code: &str) -> Option<&'static str> {
+        let bytes = code.as_bytes();
+        let edge = |o: Option<&u8>| o.is_some_and(|c| c.is_ascii_digit() || *c == b'.');
+        for pat in BANNED {
+            let mut from = 0;
+            while let Some(rel) = code[from..].find(pat) {
+                let at = from + rel;
+                let before = at.checked_sub(1).map(|p| &bytes[p]);
+                let after = bytes.get(at + pat.len());
+                if !edge(before) && !edge(after) {
+                    return Some(pat);
+                }
+                from = at + 1;
+            }
+        }
+        None
+    }
+
+    /// Does `src` open a RAW string literal (`r"…"`, `r#"…"#`)?
+    ///
+    /// The identifier boundary is the whole content of this predicate, and the first draft
+    /// did not have it: a bare search for the two characters `r` then a quote fires on
+    /// `"weather",` — the last letter of a perfectly ordinary string followed by its own
+    /// closing quote — which made the gate red against clean code. A raw string opener is
+    /// an `r` (optionally followed by hashes) that is NOT part of a longer identifier.
+    fn has_raw_string(src: &str) -> bool {
+        let b = src.as_bytes();
+        for (i, &c) in b.iter().enumerate() {
+            if c != b'r' {
+                continue;
+            }
+            let prev_is_ident = i
+                .checked_sub(1)
+                .is_some_and(|p| b[p].is_ascii_alphanumeric() || b[p] == b'_');
+            if prev_is_ident {
+                continue;
+            }
+            let mut j = i + 1;
+            while b.get(j) == Some(&b'#') {
+                j += 1;
+            }
+            if b.get(j) == Some(&b'"') {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The gate: no contract-owned tolerance literal lives in the ladder's non-comment code.
+    #[test]
+    fn tolerance_literals_live_in_the_contract_not_in_this_module() {
+        let src = include_str!("reg_parity.rs");
+        let m = marker();
+        assert_eq!(
+            src.matches(m.as_str()).count(),
+            1,
+            "the region boundary marker must appear EXACTLY once; a second copy makes the \
+             scanned region ambiguous and zero copies make it empty"
+        );
+        let at = src.find(m.as_str()).expect("the marker is present");
+        let region = &src[..at];
+        assert!(
+            region.len() > 10_000,
+            "the scanned region is {} bytes, which means the marker moved and this gate is \
+             now scanning almost nothing",
+            region.len()
+        );
+        // The stripper's one blind spot, asserted absent rather than assumed absent.
+        assert!(
+            !region.contains("'\"'"),
+            "the region contains a literal double-quote CHARACTER, the one construct \
+             `strip_comments` cannot track: it would flip the string state and mask \
+             everything after it"
+        );
+        assert!(
+            !has_raw_string(region),
+            "the region contains a raw string literal, which `strip_comments` does not model"
+        );
+
+        let code = strip_comments(region);
+        assert!(
+            first_banned(&code).is_none(),
+            "a contract-owned tolerance literal ({:?}) appears in the ladder's non-comment \
+             code. Every bar must be read at test time through `equation_tolerance`: a bar \
+             written here can be loosened without the contract ever noticing, which makes \
+             every tolerance in `contracts/prophet-parity-v1.yaml` decorative. Put the \
+             NUMBER in the contract and the RATIONALE in a comment — comments are stripped \
+             before this search precisely so the rationale can stay in the file",
+            first_banned(&code)
+        );
+
+        // ANTI-VACUITY for the tail. The scan stops at the marker, so the one way to evade
+        // it is to put a rung BELOW the line. Exactly two tests live there: this one and the
+        // case table. The needle is assembled at run time so it does not match itself.
+        let needle = format!("#[{}]", "test");
+        assert_eq!(
+            src[at..].matches(needle.as_str()).count(),
+            2,
+            "exactly two tests may live below the region marker — this gate and its case \
+             table. A rung below the line would be UNSCANNED, which is the only way to \
+             hardcode a bar in this module and stay green"
+        );
+    }
+
+    /// The must-match / must-not-match case table (CLAUDE.md Verification Discipline #7).
+    ///
+    /// The `0.5` and `0.02` entries in [`BANNED`] are known traps for a legitimate midpoint
+    /// or half-width written in code. They stay, because both ARE contract-owned tolerances
+    /// here and dropping them would let the objective-slack bar be hardcoded. The trap is
+    /// pinned by the must-not-match rows instead, so the next person meets it as a DECISION
+    /// rather than as a surprise.
+    #[test]
+    fn case_table_proves_the_pattern_discriminates() {
+        let cases: [(&str, bool); 15] = [
+            // ---- MUST MATCH: a bar written into code ----
+            ("let tol = 1e-15;", true),
+            ("assert!(d < 1.0e-14)", true),
+            ("if x > 0.5 {", true),
+            ("let b = 1e-10;", true),
+            ("let rel = 0.02;", true),
+            ("let band = 0.0079;", true),
+            ("let measured = 3.33e-15;", true),
+            ("let t = 1.0e-15_f64;", true),
+            // ---- MUST NOT MATCH: comments, contract reads, near-miss numbers ----
+            ("// the measured residual is 3.33e-15", false),
+            ("/* 1e-14 has 3x headroom over the measured value */", false),
+            ("equation_tolerance(\"regressor_design_cells_abs\")", false),
+            ("const V: &str = \"1.5.0\";", false),
+            ("let v = x[15];", false),
+            ("let p = 0.05;", false),
+            ("let q = 10.5;", false),
+        ];
+        for (src, want) in cases {
+            let hit = first_banned(&strip_comments(src)).is_some();
+            assert_eq!(
+                hit, want,
+                "case table row {src:?}: expected match = {want}, got {hit}. Re-run this \
+                 table rather than re-reading the pattern — every wrong guard regex in this \
+                 repo was caught by a table and none by review"
+            );
+        }
+        // A table that exercised only one verdict would prove one half of nothing.
+        assert!(
+            cases.iter().any(|(_, w)| *w) && cases.iter().any(|(_, w)| !*w),
+            "the case table must exercise BOTH verdicts"
+        );
+
+        // SECOND PATTERN, SECOND TABLE. `has_raw_string` is a guard regex in its own right
+        // and gets its own cases, because its first draft was wrong in exactly the way rule
+        // 7 predicts: it fired on `"weather",`, where the `r` is the last letter of the
+        // word and the quote is the string's own terminator.
+        let raw_cases: [(&str, bool); 6] = [
+            ("let s = r\"x\";", true),
+            ("let s = r#\"x\"#;", true),
+            ("let s = r##\"x\"##;", true),
+            ("            \"weather\",", false),
+            ("let four = \"fourier_order\";", false),
+            ("let n = \"a number\";", false),
+        ];
+        for (src, want) in raw_cases {
+            assert_eq!(
+                has_raw_string(src),
+                want,
+                "raw-string case table row {src:?}: expected {want}"
+            );
+        }
+    }
 }
