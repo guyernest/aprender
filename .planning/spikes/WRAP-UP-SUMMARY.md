@@ -1,12 +1,98 @@
 # Spike Wrap-Up Summary
 
-**Date:** 2026-09-05
+## Session 2 — 2026-09-20
+
+**Spikes processed:** 4 (011–014, all VALIDATED)
+**Idea:** `forecast-exogenous-inputs`
+**Feature areas:** Prophet external regressors · NeuralProphet exogenous inputs (events, regressors) · No-argument bitwise invariance gate
+**Skill output:** `./.claude/skills/spike-findings-aprender/` (SKILL.md now 2 ideas, 10 references, sources for 14 spikes)
+
+### Processed Spikes
+
+| # | Name | Type | Verdict | Feature Area |
+|---|------|------|---------|--------------|
+| 011 | prophet-regressor-parity | standard | VALIDATED | Prophet external regressors (`prophet-external-regressors.md`) |
+| 012 | no-arg-bitwise-invariance | standard | VALIDATED | No-argument invariance gate (`no-argument-invariance-gate.md`) |
+| 013 | np-events-autograd | standard | VALIDATED | NeuralProphet exogenous inputs (`neuralprophet-exogenous-inputs.md`) |
+| 014 | np-gap-imputation-regressors | standard | VALIDATED | NeuralProphet exogenous inputs (`neuralprophet-exogenous-inputs.md`) |
+
+### Key Findings
+
+**The change request was re-priced before a line was written (011).** Four premises checked against
+the consumer's own pinned tag `aprender-forecast-v0.63.0` (`fdf6b1802`), not HEAD. Three refuted:
+NeuralProphet does not silently ignore `holidays` (`forecast.rs:117-130` already refuses); a
+holidays parity fixture *is* committed (`peyton_holidays_prophet140.json`); and `fitted_forecast`
+does not exist — the public door is `forecast(&ForecastArgs)`.
+
+**Prophet regressors are an additive change, not a restructure (011).** A 219-line prototype that
+touches nothing under `crates/` reaches full parity on both fixtures: column order identical at 24
+and 30 columns, `prior_scales`/`s_a`/`s_m` exact `0.0`, yhat at Python MAP 4.5e-16 of `y_scale`,
+9–12 components worst 3.6e-11, fit slack −3.42 / −2.22 against a 0.5 bar. The optimiser and gradient
+needed no change. Column order is **seasonalities → holidays (name-sorted) → regressors (insertion
+order)**; `std` is pandas `Series.std()`, **ddof = 1**, not numpy's default. The only real signature
+change is a per-row value channel on `predict` — `feature_row` is untouched.
+
+**A collinear driver has no reproducible lift (011).** `discount`, a cosine of period 6 months, is
+r = +0.999 with `yearly_delim_4` — a harmonic of the yearly seasonality. Two optimisers at
+equal-or-better objective report its coefficient 2× apart. This lands on the CR's own verification
+plan, which backtests "with and without" each driver and reports lift. A pairwise correlation cutoff
+is too loose (0.759 `price` was flagged identifiable and is still 5× off) — use condition number or
+per-column VIF, and surface the diagnostic beside each regressor.
+
+**No-argument invariance falls out of the column-order decision (012).** Because regressor columns
+append, no existing index moves and the plumbing is provably inert at zero regressors: `Design`,
+`yhat`, `trend` and all shared components bit-identical against the crate's untouched `predict` on
+three datasets. 8/8 door cases reproduce on repeat; the signature is mutation-proven to detect a
+1-ULP change and an extra component key. `fit_seconds`/`predict_seconds` are excluded (wall-clock);
+f64s hash by `to_bits()`. Bands are **not** in the mechanism test — add them when the feature lands
+in-crate. The harness plus `baseline.json` is the release gate for every tag.
+
+**DEFECT — the door's budget promise does not survive events (013).** An additive `Linear(E,1)`
+block composes beside `NpModel` without forking it, recovers a planted `+8.0` to within 5.8 % on all
+six columns, is seed-42 bit-identical (seed 43 differs), and grows the tape by a fixed +5 that does
+not scale with E. But `train_cost(n_samples, epochs, n_lags)` has **no event term**: measured work is
+linear in E (`µs/step ≈ 12.9 + 0.085·E`) while the priced cost stays at 132 000, so at
+`MAX_HOLIDAY_COLUMNS` (1 000) a request buys **7.6×** the work it was priced at. `request_train_cost`
+must take `n_event_cols` and `a_neuralprophet_request_over_the_train_cost_bound_is_refused` must be
+re-derived **before** events ship. The shape transfers; the constant is one machine, lag-free.
+
+**The proposed `RegressorArg` contract does not cover NeuralProphet with lags (014).** NP trains on
+an imputed daily grid denser than `ds`. Lag-free trains on observed rows only, so the imputed-day
+regressor value is **never read** — all four fill rules including a garbage probe are bit-identical.
+With `n_lags = 7` every grid row is a sample: two *defensible* rules differ by 10.48 on scale 35.32
+(~30 %), and a garbage value on 12 % of days **flips the sign of both coefficients**. The CR's
+`values.len() == ds.len() + horizon` leaves 109 values undefined. Three ways out, ranked: refuse /
+require grid-complete values / impute-and-disclose (carry-forward for binary — linear interpolation
+of a binary driver invents a "0.5 promo" day).
+
+**Spike 012 voided spike 014's original premise mid-session.** `forecast.rs:421-423` refuses
+`freq != "D"` on the neuralprophet arm, pinned by `neuralprophet_refuses_non_daily_freq` — so the
+CR's P5 Q3 ("how do weekly and month-start series map onto NP's daily grid?") is answered by a
+refusal, and 014 was re-scoped to the daily-gap case before building.
+
+### Open Items Surfaced (not spiked)
+
+- **Blocking events:** add an event-column term to `train_cost`/`request_train_cost`, calibrate the
+  per-column constant on the deployment target, round the bound up, re-derive the C-08 invariant in
+  `contracts/forecast-tool-boundary-v1.yaml`.
+- **Unmeasured:** NP event blocks with `n_lags > 0` (`predict_ar_recursive` / `predict_ar_1step`
+  interaction with stationarised lags); multiplicative event mode; uncertainty bands in the
+  part-C inertness comparison.
+- **Contract hygiene:** bind the components rung relative to `y_scale` on large-scale series
+  (`components_via_python_params_abs` passes with only 3× headroom on `retail_sales`).
+- **Diagnostics:** a per-regressor identifiability figure (condition number / VIF) in the response,
+  so an operator cannot read a lift that will not hold.
+
+---
+
+## Session 1 — 2026-09-05
+
 **Spikes processed:** 10 (001–010, all VALIDATED)
 **Idea:** `prophet-forecast-mcp`
 **Feature areas:** Prophet port · NeuralProphet-lite · Forecast MCP thin server · Chronos zero-shot ports · Chronos MCP server · Forecaster evaluation and routing · NEON GEMM kernel
 **Skill output:** `./.claude/skills/spike-findings-aprender/` (SKILL.md, 7 references, sources for 10 spikes)
 
-## Processed Spikes
+### Processed Spikes
 
 | # | Name | Type | Verdict | Feature Area |
 |---|------|------|---------|--------------|
@@ -21,7 +107,7 @@
 | 009 | chronos-2-parity | standard | VALIDATED | Chronos zero-shot ports (`chronos-zero-shot-port.md`) |
 | 010 | forecast-server-concurrency | standard | VALIDATED | Forecast MCP thin server (`forecast-mcp-thin-server.md`) |
 
-## Key Findings
+### Key Findings
 
 **Prophet (001, 003).** The Rust port of Prophet 1.4.0's Stan model is bit-for-bit on data prep and
 predict and reaches the MAP with `aprender::optim::LbfgsF64` — but only with objective ÷ T, a
@@ -71,7 +157,7 @@ Chronos forward 137 → 21 ms, rollout 6.4 → 0.97 s, parity unchanged. Package
 pre-existing `Instant::now()` resolution flake reproduced 4/8 on untouched `upstream/main`.
 Opening the PR is a checkpoint.
 
-## Open Items Surfaced (not spiked)
+### Open Items Surfaced (not spiked)
 
 - Core: fix `SmoothL1Loss` graph connectivity + a connectivity test for every `nn::loss`; add
   `where`/`clamp`, `cat` to the autograd; `WolfeSearch` initial-step scaling / non-finite backtracking;

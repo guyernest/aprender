@@ -24,11 +24,13 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - Zero-shot model spikes: `models/<name>` is a symlink to the HF snapshot or a sibling spike's weights (gitignored);
   `tools/oracle.py` dumps a ladder (scaling → features → embeddings → hidden rows → quantiles, model AND pipeline
   outputs, timings) plus edge probes into one `fixtures/*_fixture.json`; the driver prints one ladder table.
-- **Wrapped findings live in `.claude/skills/spike-findings-aprender/`** (`/gsd-spike --wrap-up`, 2026-09-05):
-  one reference per feature area plus `sources/NNN-*/` (README, Cargo.toml, build.rs, src/, tools/, tests/, static/,
-  RUN-OUTPUT, results, PR.md). Fixtures, `models/`, `report*.html` and `*.log` are NOT copied — cite
-  `.planning/spikes/NNN-*/fixtures/` from the reference. Re-run the wrap-up after new spikes; the skill's
-  `processed_spikes` list is the filter.
+- **Wrapped findings live in `.claude/skills/spike-findings-aprender/`** (`/gsd-spike --wrap-up`, 2026-09-05
+  for 001–010, 2026-09-20 for 011–014): one reference per feature area plus `sources/NNN-*/` (README, Cargo.toml,
+  build.rs, src/, tools/, tests/, static/, RUN-OUTPUT, results, baseline.json, PR.md). Fixtures, `models/`,
+  `report*.html`, `*.log` and any oversized chart-feeding `results.json` (011's is 256 KB) are NOT copied — cite
+  `.planning/spikes/NNN-*/` from the reference instead. SKILL.md groups Requirements **by idea key** once more
+  than one idea has been wrapped. Re-run the wrap-up after new spikes; the skill's `processed_spikes` list is
+  the filter.
 
 ## Patterns
 - **Parity ladder before optimiser claims:** data prep (0 diff) → objective at the oracle's MAP (1e-12) → finite-difference
