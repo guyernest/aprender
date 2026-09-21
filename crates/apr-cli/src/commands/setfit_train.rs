@@ -70,10 +70,11 @@ const ACCEPTED_CONFIG_EXTENSIONS: &str = "`.toml` or `.json`";
 ///
 /// The library cannot name a CLI flag, and it cannot know that this command never
 /// downloads. Both facts belong in the adapter's message.
-const MODEL_DIR_REMEDY: &str = "Point --model-dir at a pinned all-MiniLM-L6-v2 checkout \
-     containing tokenizer.json and the encoder weights. This command NEVER downloads: \
-     obtain the pinned revision beforehand (for example with `batuta hf pull`) and pass \
-     the directory.";
+const MODEL_DIR_REMEDY: &str = "Point --model-dir at a BERT checkout containing \
+     tokenizer.json and the encoder weights — the pinned all-MiniLM-L6-v2, which is held to \
+     its tokenizer digest, or any other BERT, which is validated structurally. This command \
+     NEVER downloads: obtain the checkout beforehand (for example with `batuta hf pull`) and \
+     pass the directory.";
 
 // ==========================================================================================
 // CLOSED GAP (04-17 G1): the verified artifact's bytes ARE now reachable
@@ -707,6 +708,23 @@ pub(crate) fn run(
     //     digest.
     let bytes = verified.into_artifact_bytes();
     atomic_write(output_path, &bytes, force)?;
+
+    // Advisory, on stderr, in BOTH modes. Suppressing it under --json would hide
+    // it from the one consumer that can act on it — a packaging pipeline — while
+    // leaving the JSON document on stdout untouched either way.
+    //
+    // Both numbers in the sentence are MB (10^6), the unit AWS states the quota
+    // in. Printing MiB next to a decimal-MB threshold is how "256.0 MB exceeds
+    // the 250 MB limit" comes to be a comparison of two different units.
+    let limit = aprender::setfit::AWS_LAMBDA_ZIP_LIMIT_BYTES;
+    if bytes.len() as u64 > limit {
+        let size_mb = bytes.len() as f64 / 1_000_000.0;
+        let limit_mb = limit as f64 / 1_000_000.0;
+        eprintln!(
+            "  {} Artifact size ({size_mb:.1} MB) exceeds the {limit_mb:.0} MB unzipped limit for standard AWS Lambda zip deployment. Deploy via container image (Docker) or other compute targets (ECS, EC2, Kubernetes).",
+            output::badge_info("NOTE")
+        );
+    }
 
     // (8) The report, from the run's own recorded values.
     let report = TrainReport {

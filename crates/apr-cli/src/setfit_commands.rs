@@ -52,13 +52,21 @@ pub enum SetfitCommands {
         #[arg(long, value_name = "FILE")]
         selection: PathBuf,
 
-        /// Pinned all-MiniLM-L6-v2 checkout: tokenizer.json plus the encoder weights
+        /// Model checkout: tokenizer.json plus the encoder weights
         ///
-        /// OFFLINE PREREQUISITE. This command never downloads. Obtain the pinned
-        /// revision separately (for example `batuta hf pull`) and point --model-dir
-        /// at the directory. The tokenizer bytes must hash to the pinned digest, so
-        /// a near-miss checkout is refused rather than silently producing a model
-        /// whose tokenizer and encoder disagree.
+        /// OFFLINE PREREQUISITE. This command never downloads. Obtain the checkout
+        /// separately (for example `batuta hf pull`) and point --model-dir at the
+        /// directory.
+        ///
+        /// Which checks apply depends on what the directory DECLARES. A config.json
+        /// declaring the pinned all-MiniLM-L6-v2 architecture is held to the full
+        /// pin: the tokenizer bytes must hash to the pinned digest, so a near-miss
+        /// checkout is refused rather than silently producing a model whose
+        /// tokenizer and encoder disagree. Any other BERT checkout (AlephBERT,
+        /// DictaBERT, multilingual BERT) is validated structurally — architecture,
+        /// activation, position scheme, dropout, dimension bounds, and the
+        /// tokenizer/vocabulary pairing — but there is no digest to pin it to, so
+        /// its provenance is recorded as `general-bert`.
         #[arg(long = "model-dir", value_name = "DIR")]
         model_dir: PathBuf,
 

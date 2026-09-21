@@ -231,7 +231,7 @@ mod setfit {
     /// Deliberately NOT `fs::read`, and deliberately not routed through
     /// `setfit_io`: that door is for ARTIFACT bytes and carries the artifact cap.
     /// A request document is a different resource class with a different bound, and
-    /// reading it through the artifact door would apply a 256 MiB cap to a 1 MiB
+    /// reading it through the artifact door would apply MAX_ARTIFACT_BYTES to a 1 MiB
     /// resource.
     fn read_request_document(path: &Path) -> Result<ClassifyRequestDocument> {
         let metadata = std::fs::metadata(path).map_err(|error| {

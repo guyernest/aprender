@@ -1460,7 +1460,7 @@ fn start_setfit_server(model_path: &Path, config: &ServerConfig) -> Result<()> {
     // The rebuilt model is the only thing the server needs; the raw artifact is dead from
     // here. `bytes` is a function-scope local and this fn does not return until shutdown, so
     // without an explicit drop the whole artifact stays resident for the process lifetime —
-    // up to MAX_ARTIFACT_BYTES (256 MiB) by contract, ~90 MB for a pinned MiniLM. For scale,
+    // up to MAX_ARTIFACT_BYTES (1 GiB) by contract, ~90 MB for a pinned MiniLM. For scale,
     // 04-17 measured and justified a 1.8 MB retention in verify.rs; this is the same class of
     // cost, one to two orders larger, and it buys nothing.
     drop(bytes);

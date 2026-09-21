@@ -30,7 +30,7 @@
 //!    filesystem reporting zero) still cannot exhaust memory.
 //!
 //! Passing `None` for the declared length would compile and would still be bounded
-//! by check (2) — and would read 256 MiB of a hostile file before refusing it.
+//! by check (2) — and would read MAX_ARTIFACT_BYTES of a hostile file before refusing it.
 //! Passing the stat'd length is what makes the refusal free.
 
 use std::fs;
@@ -176,7 +176,7 @@ mod tests {
         // `set_len` past the cap without writing a byte: a sparse file on every
         // filesystem this repo builds on, so the test costs no disk and no time. It is
         // also the honest shape of the threat — an attacker does not have to spend
-        // 256 MiB to make a reader spend it.
+        // MAX_ARTIFACT_BYTES to make a reader spend it.
         file.set_len(MAX_ARTIFACT_BYTES + 1)
             .expect("a sparse over-cap file is creatable");
         drop(file);

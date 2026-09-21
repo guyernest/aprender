@@ -1497,21 +1497,41 @@ fn build_artifact_doc(
 // parse-only path would be a second verification policy with its own tolerances.
 // ===========================================================================
 
-/// The contract's outer artifact size bound, in bytes (256 MiB).
+/// The contract's outer artifact size bound, in bytes (1 GiB).
 ///
 /// `contracts/setfit-apr-v1.yaml`, equation `artifact_size_bounds`, constant
-/// `max_artifact_bytes: 268435456`. It is DERIVED there, not chosen for
-/// roundness: the pinned encoder payload is 22565376 f32 (90261504 bytes), the
-/// pinned tokenizer is 466247 bytes and a three-label head is 4620 bytes, so a
-/// legitimate artifact is about 90.8 MB and this clears it by ~2.9x — the same
-/// headroom factor `MAX_BUNDLE_BYTES` uses.
+/// `max_artifact_bytes: 1073741824`. It is DERIVED there, not chosen for
+/// roundness: the widest supported encoder is a BERT-base at a 52k vocabulary
+/// (AlephBERT and friends) — 125386752 f32 (501547008 bytes) — plus a ~1.5 MB
+/// tokenizer and a three-label head, so the largest legitimate artifact is about
+/// 503 MB and this clears it by ~2.1x.
+///
+/// That factor is BELOW the ~2.9x `MAX_BUNDLE_BYTES` uses; the bound is the
+/// tighter of "clears the widest supported model" and "a round power of two",
+/// and the derivation above is what moves if a wider architecture is admitted.
 ///
 /// # This is an outer RESOURCE bound, not a correctness check
 ///
 /// Correctness is the per-entry size rule and the architecture-derived tensor
 /// set. The cap exists so a hostile input cannot exhaust memory before either of
-/// those can run — see [`read_setfit_apr_bytes_bounded`].
-pub const MAX_ARTIFACT_BYTES: u64 = 268_435_456;
+/// those can run — see [`read_setfit_apr_bytes_bounded`]. Raising it raises the
+/// residual: the bounded read reserves `min(declared_len, cap)` up front, so a
+/// source that lies about its length can now commit 1 GiB rather than 256 MiB.
+///
+/// For AWS Lambda standard zip deployment, see [`AWS_LAMBDA_ZIP_LIMIT_BYTES`].
+pub const MAX_ARTIFACT_BYTES: u64 = 1_073_741_824;
+
+/// AWS Lambda's unzipped deployment-package quota, in bytes.
+///
+/// 262144000 — the exact figure Lambda's own
+/// `InvalidParameterValueException` names ("Unzipped size must be smaller than
+/// 262144000 bytes"), which is what "250 MB" in the AWS quota tables means. NOT
+/// 256 MiB: that is 268435456, six megabytes above the quota, and a bound six
+/// megabytes too generous is silent in exactly the band where the deploy fails.
+///
+/// Deployments exceeding this size require container image (Docker) deployment
+/// or alternative compute targets (ECS, EC2, Kubernetes).
+pub const AWS_LAMBDA_ZIP_LIMIT_BYTES: u64 = 262_144_000;
 
 /// The largest encoder depth this loader will expand the per-layer templates over.
 ///
@@ -1545,7 +1565,7 @@ pub const PROBE_PROBABILITIES_ABS_TOLERANCE: f64 = 1.0e-5;
 /// # Why the bound is a parameter at all
 ///
 /// The cap has to be shown BITING, and it bites only on inputs far larger than
-/// any fixture. Materializing 256 MiB in a unit test would make the suite pay a
+/// any fixture. Materializing MAX_ARTIFACT_BYTES in a unit test would make the suite pay a
 /// quarter of a gigabyte to learn that a comparison compares. So the bound VALUE
 /// and the bound MECHANISM are falsified separately: the mechanism against a
 /// deliberately tiny bound on a real artifact, the value against the contract it
@@ -1883,7 +1903,7 @@ pub(crate) fn split_embedding_rows(
 /// `reader.take(MAX_ARTIFACT_BYTES + 1)` anyway, so a length that LIES — a FIFO,
 /// a growing file, a filesystem reporting zero — still cannot exhaust memory.
 /// Check (a) alone trusts metadata an attacker controls; check (b) alone reads
-/// 256 MiB of garbage before refusing.
+/// MAX_ARTIFACT_BYTES of garbage before refusing.
 ///
 /// The `+ 1` is load-bearing: reading exactly the cap cannot distinguish "a legal
 /// artifact of exactly the cap size" from "a larger stream truncated at the cap".
@@ -4492,7 +4512,7 @@ mod ladder {
     /// The largest byte count any test in this module is allowed to materialize.
     ///
     /// The cap boundary is exercised through the injected limit instead, so the
-    /// suite never pays 256 MiB to learn that a comparison compares.
+    /// suite never pays MAX_ARTIFACT_BYTES to learn that a comparison compares.
     const TEST_ALLOCATION_CEILING: usize = 1_048_576;
 
     /// A reader that PANICS the moment it is read from.
@@ -4571,9 +4591,9 @@ mod ladder {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn the_public_cap_constant_is_the_contracts_268435456() {
+    fn the_public_cap_constant_is_the_contracts_1073741824() {
         assert_eq!(
-            MAX_ARTIFACT_BYTES, 268_435_456,
+            MAX_ARTIFACT_BYTES, 1_073_741_824,
             "contracts/setfit-apr-v1.yaml artifact_size_bounds.max_artifact_bytes"
         );
         assert_eq!(
