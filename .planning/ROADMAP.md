@@ -463,6 +463,107 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5; Phase 6 is an independen
 | 5. Benchmark and Claims Gate | 17/17 | In Progress|  |
 | 6. Native Time-Series Forecasting Stack | 17/17 | In Progress|  |
 
+### Phase 06.1: Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)
+
+**Goal**: An operator can supply the information the forecast models cannot infer — known future
+events and numeric drivers (price, promotions) — through the same one stateless `forecast` door,
+with Prophet regressors proven to Python Prophet 1.4.0 parity, NeuralProphet events trained on the
+autograd, every unsupported combination refused rather than silently ignored, and the existing
+deployed results reproducing **byte-identically** when no new argument is passed.
+**Depends on**: Phase 6.
+**Requirements**: TBD — the binding inputs are the seven `forecast-exogenous-inputs` decisions in
+`.planning/spikes/MANIFEST.md` (to be transcribed as D-xx in `06.1-CONTEXT.md`) plus the Success
+Criteria below. There are no REQ-IDs in `.planning/REQUIREMENTS.md` for this work — that document
+is the SetFit milestone's.
+**UI hint**: no (no product surface; the demo page is unchanged)
+**Spike evidence**: four VALIDATED spikes (011–014), packaged as `Skill("spike-findings-aprender")`
+— `references/prophet-external-regressors.md`, `references/neuralprophet-exogenous-inputs.md`,
+`references/no-argument-invariance-gate.md`. Raw experiments, oracle fixtures and run outputs in
+`.planning/spikes/011-*` … `014-*`.
+
+**Why this is a phase and not a feature add.** The architectural risk is already retired — spike 011
+proved Prophet regressors are an **additive** change (a 219-line splice on the shipped `Design`,
+nothing under `crates/` touched, full parity at 24 and 30 columns), and spike 012 proved the
+consumer's byte-identical tag-bump gate is **free** because regressor columns append. What makes
+this a phase is two measured defects that the feature cannot ship over:
+
+- **The door's budget promise does not survive events.** `train_cost(n_samples, epochs, n_lags)`
+  (`np.rs:464`) has no event-column term. Measured work is linear in E (`µs/step ≈ 12.9 + 0.085·E`)
+  while the priced cost stays flat, so at `MAX_HOLIDAY_COLUMNS` (1 000 — the ceiling events inherit
+  by reusing `HolidayArg`) a request buys **7.6× the work it was priced at**. This is cost axis
+  **C-08**, the one the door refuses on under Lambda's timeout.
+- **The proposed `RegressorArg` contract does not cover NeuralProphet with lags.** NP trains on an
+  imputed daily grid denser than `ds`. Lag-free never reads an imputed-day regressor value (all
+  fill rules including a garbage probe are bit-identical); with `n_lags > 0` it reads all of them,
+  and two *defensible* fill rules differ by **10.48 on a series of scale 35.32 (~30 %)** while a
+  wrong value on 12 % of grid days **flips the sign of both coefficients**. The CR's
+  `values.len() == ds.len() + horizon` leaves those values undefined. This phase owns the decision
+  (refuse / require grid-complete / impute-and-disclose) — it is not the planner's to invent.
+
+**Relationship to Phase 7 (deliberate, not overlooked).** Both bounds above are hard-coded
+constants — `MAX_NP_TRAIN_COST` (`types.rs:258`) and `MAX_HOLIDAY_COLUMNS` (`types.rs:43`) — that
+Phase 7 converts into a resolved `DoorLimits` profile. Sequencing this phase first was a decided
+trade (2026-09-20): Forecast Coach is a waiting consumer and Phase 7 ships no consumer-visible
+feature. The **accepted cost** is that the event-column term lands on a hard constant here and is
+re-expressed as tier policy in Phase 7. Phase 7's scope therefore grows by one item: the C-08 term
+this phase adds must become tier-resolved along with the rest. Record the term's shape
+(linear in E) and its calibration constant separately, so Phase 7 re-prices the constant without
+re-deriving the shape.
+
+**Success Criteria** (what must be TRUE):
+
+  1. A caller can pass external regressors to `model: prophet` through the one stateless `forecast`
+     door, and the port reproduces Python Prophet 1.4.0 on committed regressor fixtures as tests
+     that run in CI: column order identical to Python at both 24 columns (regressors only) and 30
+     (regressors plus two holidays with non-zero windows), standardisation constants within 1e-14
+     using pandas `Series.std()` (**ddof = 1**), `prior_scales` / `s_a` / `s_m` exact `0.0`,
+     Python's parameters through the Rust predict path within **1e-15 of `y_scale`**, every named
+     component including `extra_regressors_additive` and `extra_regressors_multiplicative`, and a
+     fitted objective slack no worse than the contract's `+0.5` bar. The components rung binds
+     **relative to `y_scale`**, not the absolute 1e-10 — on `retail_sales` (y_scale 518 253) the
+     absolute bar passes with only 3× headroom and would fail for arithmetic reasons.
+  2. Every committed pre-change fixture reproduces its `ForecastResponse` **byte-identically** when
+     no new argument is passed, across both models, linear / logistic / multiplicative growth,
+     holidays with windows and AR lags. The signature covers `ds`, `yhat`, `yhat_lower`,
+     `yhat_upper`, `trend`, `components` and `diagnostics`, hashes f64s by `to_bits()`, excludes
+     `fit_seconds` / `predict_seconds`, and is **proven able to fail** by a 1-ULP mutation test that
+     runs in CI — a green gate with no falsification probe beside it does not satisfy this
+     criterion. Uncertainty bands are inside the comparison, not outside it.
+  3. A caller can pass events to `model: neuralprophet` through the **same argument shape** the
+     prophet arm already takes, trained as an additive block on the f32 autograd: a planted
+     synthetic effect is recovered to within 10 % on every indicator column, fixed-seed runs are
+     bit-identical with a differing-seed control, and the tape does not grow with the event-column
+     count. `holidays` on `neuralprophet` either works or keeps refusing with a message naming the
+     limitation — it is never silently ignored.
+  4. The NeuralProphet training-cost bound carries an event-column term: `request_train_cost` takes
+     the event-column count, the per-column constant is **measured on the deployment target** (not
+     inherited from the spike's dev box) and rounded up, and
+     `a_neuralprophet_request_over_the_train_cost_bound_is_refused` is re-derived against it. A
+     request at `MAX_HOLIDAY_COLUMNS` is priced at no less than its measured work — the 7.6×
+     under-pricing is observed closed, not asserted closed.
+  5. The NeuralProphet-with-lags gappy-series regressor case has one decided, documented and
+     **enforced** behaviour, with a test at `n_lags = 0` proving the imputed-day value is unread and
+     a test at `n_lags > 0` proving the chosen rule (or the refusal) actually fires. If the decision
+     is impute-and-disclose, the invented values appear in the response diagnostics; if it is
+     refuse, the message names the gap. Binary drivers are never linearly interpolated.
+  6. Every gate is green and the consumer can bump one line: workspace lib tests, `cargo clippy
+     -- -D warnings` on every touched crate, `cargo fmt --all -- --check`, `pv validate` on every
+     touched contract, the forecast server e2e tests, and a tag cut that builds `--locked`.
+
+**Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
+**Plans:** 8 plans
+
+Plans:
+
+- [ ] 06.1-01-PLAN.md — TRACER: external regressors end-to-end through the prophet door at 24-column Python Prophet 1.4.0 parity, with the pre-change no-argument invariance signature and baseline committed first (wave 1)
+- [ ] 06.1-02-PLAN.md — the regressor parity ladder at 24 and 30 columns, plus the regressor rungs in `contracts/prophet-parity-v1.yaml` (wave 2)
+- [ ] 06.1-03-PLAN.md — regressor cost ceilings and cost axis C-17, four door refusals, and the VIF / condition-number identifiability diagnostic that warns and never refuses (wave 2)
+- [ ] 06.1-04-PLAN.md — the three-part invariance gate: determinism, the 1-ULP mutation proof, and the part-C mechanism test with the uncertainty bands inside it (wave 2)
+- [ ] 06.1-05-PLAN.md — the NeuralProphet event block beside `NpModel`, and the calibrated C-08 event-column cost term with its enumeration decision (wave 3, has a checkpoint)
+- [ ] 06.1-06-PLAN.md — hoist all four holiday bounds above the model dispatch with an operand-aware design cost, then unblock `holidays` on the neuralprophet arm with per-event components (wave 4, has a checkpoint)
+- [ ] 06.1-07-PLAN.md — regressors on the neuralprophet arm: the by-construction lag-free guarantee, the gappy-series refusal at lags, and the multiplicative refusal (wave 5)
+- [ ] 06.1-08-PLAN.md — the READMEs and the advertised tool description, the coverage declaration, and the SC6 all-gates-green sweep ending in a pristine-worktree `--locked` build (wave 6)
+
 ### Phase 7: Tier-Resolved Door Limits
 
 **Goal**: Every forecast door bound keeps its enforcement but loses its hard-coded value:
