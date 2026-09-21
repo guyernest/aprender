@@ -1,6 +1,6 @@
 contract: neuralprophet-parity
 metadata:
-  version: 1.1.0
+  version: 1.2.0
   created: '2026-09-05'
   author: PAIML Engineering
   kind: kernel
@@ -206,7 +206,36 @@ equations:
       - 'the planted effect is applied through the SAME event_row expansion the block reads, so "recovered" is a statement about the block and not about the harness agreeing with itself'
       - 'clear_graph() runs after every optimiser step, as tape_cleared_per_step requires: an un-cleared tape changes nothing about the arithmetic but makes the measurement unreproducible in a long-lived process'
       - 'the planted event OCCURRENCES cover the whole series span. A fixed occurrence list on a longer series leaves its later rows event-free, and np::sample_weight weights the later rows MORE (newer_w = 2), so the measurement would be reporting the generator rather than the model. Re-measured with and without: at 2400 points lag-free the worst relative error moved from 0.034-0.038 to 0.017-0.025'
-      - 'AT n_lags > 0 THE FIT MUST BE CONVERGED, AND THIS IS AN OPEN ITEM RATHER THAN A SETTLED PRECONDITION. The bar is measured at constants.auto_epochs_cap_with_lags epochs with the learning rate selected by final train loss. MEASURED 2026-09-21 on a 1200-point synthetic series, worst relative error per column across seeds 42/43/7/11: at np::door_epochs own budget (110 epochs) 0.0915 / 0.2293 / 0.4660 / 0.3326 — THREE OF FOUR OVER THE BAR; at the 320-epoch AR cap 0.0528 / 0.0659 / 0.0668 / 0.0667 — all inside. On a 2400-point series: at door_epochs (90) 0.2191 / 0.3597 / 0.3897 / 0.2954, all over; at the cap 0.0677 / 0.0628 / 0.1663 / 0.0901 — ONE OF FOUR STILL OVER. So this equation is NOT a claim that the shipped door configuration recovers the effect at lags. Plan 06.1-06 opens the neuralprophet arm to holidays and therefore chooses the epoch budget the door configures; it owns closing this. The lag-free arm has no such precondition — it holds at the door budget at both series lengths, worst 0.017-0.063'
+      - 'AT n_lags > 0 THE FIT MUST BE CONVERGED, AND THIS IS AN OPEN ITEM RATHER THAN A SETTLED PRECONDITION. The bar is measured at constants.auto_epochs_cap_with_lags epochs with the learning rate selected by final train loss. MEASURED 2026-09-21 on a 1200-point synthetic series, worst relative error per column across seeds 42/43/7/11: at np::door_epochs own budget (110 epochs) 0.0915 / 0.2293 / 0.4660 / 0.3326 — THREE OF FOUR OVER THE BAR; at the 320-epoch AR cap 0.0528 / 0.0659 / 0.0668 / 0.0667 — all inside. On a 2400-point series: at door_epochs (90) 0.2191 / 0.3597 / 0.3897 / 0.2954, all over; at the cap 0.0677 / 0.0628 / 0.1663 / 0.0901 — ONE OF FOUR STILL OVER. So this equation is NOT a claim that the shipped door configuration recovers the effect at lags. RESOLVED by plan 06.1-06, and NOT by relaxing this bar: the door now REFUSES holidays together with n_lags > 0, so the configuration this precondition describes is no longer reachable from the public door and the bar is not being asserted over a configuration it fails. Raising the epoch budget was considered and rejected on measurement — np::door_epochs at n_lags > 0 is min(auto_epochs(n), constants.auto_epochs_cap_with_lags) and auto_epochs DECREASES with the point count, so the 320 cap binds only at n <= 50 against a fit_min_points of 10 and is a budget the door configures for no realistic series; even at 320 one seed at 2400 points still reads 0.1663; and a flat 320 at 5000 points with six event columns prices at 191.7 % of fit_max_np_train_cost, so it would turn requests the door accepts today into refusals. A cost bound is a published surface. The lag-free arm has no such precondition — it holds at the door budget at both series lengths, worst 0.017-0.063, and plan 06.1-06 re-measured it THROUGH THE DOOR under the door''s own sweep and epoch rule'
+
+  event_training_determinism_bitwise:
+    formula: 'train(d, cfg with event_design, seed = s) twice yields BIT-IDENTICAL event weights and a BIT-IDENTICAL epoch_loss trace; and the same fit at seed s2 (s2 != s) yields event weights that DIFFER'
+    domain: 'two np::train calls with an events::EventDesign attached at one seed, and a third at a different seed, on the same series and the same TrainConfig in every other field'
+    codomain: 'the per-column event weights of the additive Linear(E, 1) block, and the per-epoch training loss trace, compared by IEEE-754 bit pattern'
+    float_tolerance: 0.0
+    invariants:
+      - 'the tolerance is EXACTLY 0.0 and the comparison is on BIT PATTERNS, not on values: f64 equality would treat -0.0 and +0.0 as equal and would treat two NaNs as unequal, and neither is the statement this bar makes. A reproducible fit reproduces the bits'
+      - 'THE SECOND HALF IS THE BAR. "Two runs at one seed agree" is satisfied by an implementation that ignores the seed entirely, or that never trains at all. Requiring seed 43 to DIFFER from seed 42 is what makes this check able to fail, and it is asserted rather than assumed'
+      - 'MEASURED, spike 013 and plan 06.1-05: seed 42 twice is bit-identical in both the weights and the loss trace, and seed 43 differs. The block is drawn from the SAME Rng as NpModel and AFTER it, so an events-OFF run at one seed initialises the model identically — which is what makes an events ON/OFF comparison a comparison of the BLOCK'
+      - 'the block''s draws DO shift the subsequent shuffle stream, so an events-ON and an events-OFF fit at the same seed are NOT the same fit. MEASURED 2026-09-21 (plan 06.1-06) through the public door on a 1200-point series: the two forecasts differ by a near-constant level of -1.7864 with a mean absolute deviation of 0.0703, i.e. 3.9 % of the shift. Any reconciliation of published event components against an ON-minus-OFF difference must remove that level first, or it is measuring the two fits rather than the events'
+      - 'the bar binds THROUGH THE PUBLIC DOOR as well as at the library level (plan 06.1-06): the door selects its learning rate by train loss over a sweep, so a non-deterministic fit could also change WHICH rate wins, and only a door-level check sees that'
+    preconditions:
+      - 'clear_graph() runs after every optimiser step, as tape_cleared_per_step requires: a tape left dirty by a previous fit on the same thread makes the measurement unreproducible without changing any arithmetic'
+      - 'the seed reaches BOTH parameter sets through one Rng, and the block is drawn after the model; a block seeded independently would make the events-OFF control a different model rather than the same one without a block'
+
+  event_tape_length_flat_in_columns:
+    formula: 'tape_len_per_step(E) - tape_len_per_step(0) is the SAME fixed increment for every event-column count E > 0; it does not grow with E'
+    domain: 'np::train with an events::EventDesign of E columns, for at least two VERY different non-zero E, against the events-OFF baseline on the same series and TrainConfig'
+    codomain: 'the autograd tape length recorded per optimiser step by np::TrainLog::tape_len_per_step'
+    float_tolerance: 0.0
+    invariants:
+      - 'the tolerance is EXACTLY 0.0 because this is a COUNT, not a measurement: the increment is equal or it is not, and an approximate tape length would not mean anything'
+      - 'MEASURED, spike 013 and reproduced exactly by plan 06.1-05: 20 entries per step with events OFF, 25 with events ON — a fixed increment of FIVE — and the increment is IDENTICAL at 6 columns and at 280. The block is one Linear forward and one add regardless of its width'
+      - 'THE CONSEQUENCE, which is why this bar exists: a per-step tape that grew with the column count would mean clear_graph() is clearing an ever-larger graph, and a wide design would leak tape into every subsequent step. A flat increment is what makes the existing tape_cleared_per_step guarantee survive the event block'
+      - 'ONE column count cannot establish this. A single observation cannot distinguish a fixed increment from a linear one, which is why the domain requires two very different E and the shipped test uses 6 against 280'
+    preconditions:
+      - 'the events-OFF baseline is taken on the SAME series and the SAME TrainConfig in every other field, so the difference is attributable to the block'
+      - 'clear_graph() runs per step; without it the recorded per-step length is the cumulative history and the increment is meaningless'
 
 proof_obligations:
 
@@ -264,6 +293,12 @@ proof_obligations:
     property: 'A planted additive event effect is recovered by the event block on EVERY indicator column, at n_lags = 0 and at n_lags > 0 alike, rather than being absorbed by the trend, the seasonality or the AR term'
     formal: 'forall j in event columns: |w_j * NpData::scale - effect| / |effect| <= equations.event_effect_recovery_rel.float_tolerance, for n_lags in {0, 7}'
     applies_to: all
+
+  - type: determinism
+    property: 'The event block is bitwise reproducible at a fixed seed and genuinely seed-dependent, and its autograd tape cost is flat in the event-column count'
+    formal: 'bits(train(d, cfg_E, s).event_weights()) == bits(train(d, cfg_E, s).event_weights()) AND bits(train(d, cfg_E, s).event_weights()) != bits(train(d, cfg_E, s2).event_weights()) for s2 != s, both at equations.event_training_determinism_bitwise.float_tolerance = 0.0; AND tape_len_per_step(E1) - tape_len_per_step(0) == tape_len_per_step(E2) - tape_len_per_step(0) for any two E1, E2 > 0, at equations.event_tape_length_flat_in_columns.float_tolerance = 0.0'
+    status: proven
+    evidence: 'crates/aprender-forecast/src/events.rs::tests::fixed_seed_event_training_is_bit_identical_and_a_different_seed_differs and ::tests::the_tape_does_not_grow_with_the_event_column_count; and through the PUBLIC DOOR, crates/aprender-forecast/src/forecast.rs::tests::door_level_event_training_is_deterministic_at_a_fixed_seed'
 
 falsification_tests:
 
@@ -332,6 +367,12 @@ falsification_tests:
     prediction: 'On a 1200-point synthetic daily series carrying a known additive per-indicator effect on six event columns, every learned event weight denormalised by NpData::scale is within equations.event_effect_recovery_rel.float_tolerance (10 %) of the planted magnitude — asserted PER COLUMN, at n_lags = 0 and again at n_lags = 7.'
     test: 'cargo test -p aprender-forecast --lib events::tests::a_planted_effect_is_recovered'
     if_fails: 'Either the block is not being optimised (its parameters were built but never extended into the AdamW vector — check events::tests::the_event_block_weights_are_actually_optimised, which names that cause directly), or the effect is being absorbed by another term. The n_lags = 7 half is the one that catches absorption: spike 014 measured the AR term swallowing a smooth continuous driver almost entirely (a weight of -0.0493 lag-free collapsing to -0.0048 at seven lags), and an absorbed event effect still produces a plausible-looking forecast while the per-event component it reports is wrong.'
+
+  - id: FALSIFY-NP-012
+    rule: 'Event training is bitwise deterministic at a fixed seed, genuinely seed-dependent, and flat in tape cost'
+    prediction: 'Two fits of the same series with the same event design at seed 42 produce bit-identical event weights AND a bit-identical epoch_loss trace; the same fit at seed 43 produces DIFFERENT weights; and the per-step autograd tape increment over the events-OFF baseline is the same fixed number at 6 event columns and at 280 (measured 20 OFF against 25 ON, an increment of five at both). The determinism half also holds THROUGH THE PUBLIC DOOR, where the learning rate is selected by train loss over a sweep.'
+    test: 'cargo test -p aprender-forecast --lib events::tests::fixed_seed_event_training_is_bit_identical_and_a_different_seed_differs events::tests::the_tape_does_not_grow_with_the_event_column_count forecast::tests::door_level_event_training_is_deterministic_at_a_fixed_seed'
+    if_fails: 'If the seed-42 halves disagree, something outside the seeded Rng is entering the fit — most likely an unordered iteration or an uncleared tape from a previous fit on the same thread, neither of which changes the arithmetic but both of which make the result unreproducible. If the seed-43 half AGREES, the seed is not reaching the block at all and the determinism claim is vacuous. If the tape increment grows with the column count, clear_graph() is clearing an ever-larger graph and a wide event design leaks tape into every subsequent step, which is the leak tape_cleared_per_step exists to prevent.'
 
 kani_harnesses:
 
