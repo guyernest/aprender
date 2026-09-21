@@ -22,6 +22,7 @@
 //!     ds: vec!["2020-01-01".into()], y: vec![1.0], horizon: 7,
 //!     freq: None, model: None, growth: None, cap: None, seasonality_mode: None,
 //!     interval_width: None, holidays: None, n_lags: None, seed: None,
+//!     regressors: None,
 //! };
 //! assert!(forecast(&args).is_err()); // refused: fewer than MIN_POINTS points
 //! ```
@@ -47,6 +48,7 @@ pub mod fit;
 pub mod forecast;
 pub mod np;
 pub mod prophet;
+pub mod regressors;
 pub mod safetensors;
 
 /// The SC1 wall swept over freq x growth x holiday shape (WR-04). Test-only, so it stays in
@@ -67,5 +69,6 @@ pub(crate) mod test_support;
 
 pub use forecast::forecast;
 pub use types::{
-    ForecastArgs, ForecastError, ForecastResponse, HolidayArg, MAX_HORIZON, MAX_POINTS, MIN_POINTS,
+    ForecastArgs, ForecastError, ForecastResponse, HolidayArg, RegressorArg, MAX_HORIZON,
+    MAX_POINTS, MIN_POINTS,
 };

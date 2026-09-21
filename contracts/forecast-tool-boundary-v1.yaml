@@ -1,6 +1,6 @@
 contract: forecast-tool-boundary
 metadata:
-  version: 1.5.0
+  version: 1.6.0
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
@@ -173,9 +173,12 @@ constants:
 door_surface:
 
   # ---- (a) every caller-settable field reachable through `aprender_forecast::forecast` ----
-  # 12 `ForecastArgs` fields + 4 `HolidayArg` fields = 16. Derived from
-  # `schemars::schema_for!`, never hand-kept: the test walks `schema["properties"]` for both
-  # structs and asserts SET EQUALITY against the `field` + `owner` pairs below.
+  # 13 `ForecastArgs` fields + 4 `HolidayArg` fields + 5 `RegressorArg` fields = 22, plus
+  # the 5 `ChronosArgs` fields of the SECOND door below. Derived from
+  # `schemars::schema_for!`, never hand-kept: the test walks `schema["properties"]` for every
+  # owner struct and asserts SET EQUALITY against the `field` + `owner` pairs below. Re-derive
+  # this total from the file rather than adding one to the sentence — a count in a comment
+  # that drifts is the defect the enumeration test exists to replace.
   knobs:
     - field: ds
       owner: ForecastArgs
@@ -241,6 +244,34 @@ door_surface:
       owner: HolidayArg
       arms: 'prophet only'
       enforced_by: 'must be >= 0 and <= fit_max_holiday_window; contributes (upper - lower + 1) to the running column count, refused past fit_max_holiday_columns'
+    # ---- RegressorArg: external regressors (D-22), added by plan 06.1-01 ----
+    # The third design column family, after seasonalities and holidays. Columns APPEND at
+    # the trailing index range base_k..k, so no existing column index moves — which is what
+    # makes the D-19 no-argument invariance gate free rather than expensive.
+    - field: regressors
+      owner: ForecastArgs
+      arms: 'both models'
+      enforced_by: 'optional with a serde default, so it introduces NO required argument (D-20); absent means None, never an empty list. On the neuralprophet arm it is REFUSED BY NAME rather than accepted and ignored (D-21) until plan 06.1-07 lands the D-26/D-28 rules. Plan 06.1-03 owns the regressor COUNT ceiling and the (points + horizon) x n_regressors design-cost product (cost axis C-17); until it lands, plan 06.1-01 Task 2 carries an INTERIM count ceiling of 50'
+    - field: name
+      owner: RegressorArg
+      arms: 'both models'
+      enforced_by: 'becomes a response component KEY, so duplicates are refused within one request (a BTreeSet over the names, O(R log R)) — the second would silently overwrite the first. Plan 06.1-03 bounds the length in BYTES on the same fit_max_holiday_name_len ceiling and, like the C-07 holiday check, refuses on LENGTH without echoing the name'
+    - field: values
+      owner: RegressorArg
+      arms: 'both models'
+      enforced_by: 'len(values) must equal len(ds) + horizon EXACTLY, refused before anything is copied, so the per-regressor payload is tied to the already-bounded point and horizon counts; every value must be finite, mirroring the y and cap finiteness refusals that closed the JSON 1e400 class. Separately, every DERIVED quantity (mu, the variance, std and each standardised cell) is re-checked for finiteness after the arithmetic, because finite inputs are not sufficient: 1e300 values overflow the sum of squares. `prophet::predict` re-checks the channel length at the call boundary and returns a typed error, never a panic, because forecast.rs passes `fut` of length horizon and an off-by-one would silently offset every future feature'
+    - field: mode
+      owner: RegressorArg
+      arms: 'both models; multiplicative is prophet-only (refused on the neuralprophet arm)'
+      enforced_by: 'closed allowlist {additive, multiplicative}, refused BY NAME otherwise, copying seasonality_mode''s message shape; absent defaults to additive'
+    - field: prior_scale
+      owner: RegressorArg
+      arms: 'both models'
+      enforced_by: 'when present, must be finite AND within the closed range [regressor_prior_scale_min, regressor_prior_scale_max] — a numerically usable range, not merely "greater than zero". The objective and gradient SQUARE the prior scale into a denominator (prophet.rs:536, :685), so f64::MIN_POSITIVE squares to exactly 0.0 and the initial zero coefficients then meet 0.0/0.0, a NaN that propagates through L-BFGS into every response field and serialises as JSON null. Absent defaults to 10.0, Prophet''s holidays_prior_scale'
+    - field: standardize
+      owner: RegressorArg
+      arms: 'both models'
+      enforced_by: 'an optional boolean; ABSENT means Prophet''s auto rule — do not standardise a column whose unique HISTORY values are exactly the two-element set {0, 1}, both present. A single-valued column is therefore NOT exempt, is standardised, and comes out at std = 0.0, which is refused as a constant column carrying no information rather than divided by inside splice'
 
   # ---- (b) every cost axis whose magnitude is a function of caller input ----
   # `spent_outside_fit_budget` is the column that matters. `fit::FIT_BUDGET_SECS` is entered

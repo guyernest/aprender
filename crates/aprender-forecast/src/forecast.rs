@@ -369,12 +369,57 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     )));
                 }
             }
-            let design = make_design(&ds, &args.y, &spec);
+            // ---- EXTERNAL REGRESSORS (D-22) ----
+            //
+            // Split each caller array into the HISTORY prefix (`ds.len()` rows, what the
+            // standardisation constants are computed over) and the FUTURE tail (`horizon`
+            // rows, what `predict` is handed). `fut` has length `horizon`, NOT
+            // `ds.len() + horizon`, so handing `predict` the whole array would silently
+            // offset every future feature — `predict` re-checks the length for that reason.
+            let mut reg_std: Vec<crate::regressors::Standardized> = Vec::new();
+            let mut reg_hist: Vec<Vec<f64>> = Vec::new();
+            let mut reg_fut: Vec<Vec<f64>> = Vec::new();
+            for r in args.regressors.iter().flatten() {
+                let mode = match r.mode.as_deref() {
+                    None | Some("additive") => Mode::Additive,
+                    Some("multiplicative") => Mode::Multiplicative,
+                    Some(other) => {
+                        return Err(ForecastError::Validation(format!(
+                            "regressor mode {other:?} is not supported; use \"additive\" \
+                             or \"multiplicative\""
+                        )))
+                    }
+                };
+                let spec_r = crate::regressors::RegressorSpec {
+                    name: r.name.clone(),
+                    mode,
+                    prior_scale: r.prior_scale.unwrap_or(10.0),
+                    standardize: r.standardize,
+                };
+                let (hist, futv) = r.values.split_at(ds.len().min(r.values.len()));
+                reg_std.push(crate::regressors::standardize_one(&spec_r, hist));
+                reg_hist.push(hist.to_vec());
+                reg_fut.push(futv.to_vec());
+            }
+
+            let mut design = make_design(&ds, &args.y, &spec);
+            crate::regressors::splice(&mut design, &reg_std, &reg_hist);
             let t0 = Instant::now();
+            // UNCHANGED: the optimiser and the gradient need no regressor awareness — the
+            // spliced columns are ordinary design columns with ordinary prior scales.
             let (p, info) = fit_prophet(&design, 8);
             let fit_seconds = t0.elapsed().as_secs_f64();
             let t1 = Instant::now();
-            let fc = predict(&design, &p, &fut, seed);
+            let fc = predict(
+                &design,
+                &p,
+                &fut,
+                seed,
+                &crate::regressors::RegressorChannel {
+                    specs: &reg_std,
+                    values: &reg_fut,
+                },
+            )?;
             let predict_seconds = t1.elapsed().as_secs_f64();
             let mut components = serde_json::Map::new();
             for (n, v) in &fc.components {
@@ -421,6 +466,17 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             if freq != "D" {
                 return Err(ForecastError::Validation(
                     "neuralprophet supports freq D only".into(),
+                ));
+            }
+            // REFUSED, not accepted-and-ignored (D-21). An argument that is silently
+            // dropped is the exact failure this phase exists to prevent: the caller gets a
+            // forecast that looks like it used their covariate and did not. Plan 06.1-07
+            // replaces this message with the D-26/D-28 rules that make it work here.
+            if args.regressors.is_some() {
+                return Err(ForecastError::Validation(
+                    "regressors on model \"neuralprophet\" are not enabled yet; set model \
+                     to \"prophet\""
+                        .into(),
                 ));
             }
             let n_lags = args.n_lags.unwrap_or(0);
@@ -643,6 +699,7 @@ mod tests {
             holidays: None,
             n_lags: None,
             seed: None,
+            regressors: None,
         }
     }
 

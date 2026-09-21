@@ -81,6 +81,7 @@ fn bench(sizes: &[usize]) {
             holidays: None,
             n_lags: None,
             seed: None,
+            regressors: None,
         };
         let t0 = Instant::now();
         match aprender_forecast::forecast(&args) {

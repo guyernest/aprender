@@ -1247,6 +1247,7 @@ mod parity {
             holidays: None,
             n_lags: None,
             seed: None,
+            regressors: None,
         };
         let r = crate::forecast::forecast(&args).expect("the neuralprophet arm must dispatch");
         let reported_lr = r.diagnostics["selected_lr"]

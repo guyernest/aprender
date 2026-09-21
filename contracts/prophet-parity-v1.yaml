@@ -1,6 +1,6 @@
 contract: prophet-parity
 metadata:
-  version: 2.0.0
+  version: 2.1.0
   created: '2026-09-05'
   author: PAIML Engineering
   kind: kernel
@@ -114,6 +114,33 @@ equations:
       - 'the scale-free form of predict_path_abs_peyton; measured <= 5.5e-16 relative on every fixture'
       - 'retail_sales is 2.3e-10 ABSOLUTE at y_scale 518253 — an absolute 1e-10 bar would be FALSE there while the relative bar is met by four orders of magnitude'
       - 'the fit is not involved: this rung is fit-independent by construction, so an optimiser disagreement cannot leak into it'
+
+  regressor_standardization_abs:
+    formula: 'max(|mu_rust - mu_py|, |std_rust - std_py|) over every extra regressor <= 1.0e-14'
+    domain: 'the HISTORY rows only of each caller-supplied regressor column in `retail_regressors_prophet140.json`, plus its requested `standardize` setting (absent = Prophet auto)'
+    codomain: 'Prophet 1.4.0 `initialize_scales` output as committed in the fixture `extra_regressors.<name>.mu` / `.std`'
+    float_tolerance: 1.0e-14
+    invariants:
+      - 'the spread is pandas `Series.std()` — the SAMPLE standard deviation, variance divided by (n - 1), i.e. ddof = 1. numpy default ddof = 0 gives 6.500320 where the oracle stores 6.511441581253706 for `price`: a silent 0.17 percent shift in every coefficient that surfaces as arithmetic-looking noise rather than as a wrong divisor'
+      - 'measured 3.6e-15 worst case across the four regressors, so the bar has roughly 2.8x headroom'
+      - 'the constants are computed over HISTORY rows only, never over history + horizon: including future rows would leak the forecast period into the scaling'
+      - 'Prophet auto means "do not standardize a column whose unique history values are EXACTLY the two-element set {0, 1}" — both present. A single-valued column is NOT exempt, is standardized, and yields std = 0.0, which the door refuses as constant'
+    preconditions:
+      - 'the regressor carries one value per history row and per horizon row, so its length is exactly points + horizon'
+
+  regressor_predict_path_rel_yscale:
+    formula: 'max|yhat_rust(theta_py) - yhat_py| <= 1.0e-15 * y_scale and max|trend_rust(theta_py) - trend_py| <= 1.0e-15 * y_scale, on the extra-regressor path'
+    domain: 'the committed regressor fixtures, Python MAP parameters (k, m, delta, beta, sigma_obs) pushed through the regressor-aware Rust `predict` over the fixture forecast ds with the full per-row regressor value channel'
+    codomain: 'the fixture `forecast.yhat` / `forecast.trend` columns Python Prophet 1.4.0 produced with the same regressors'
+    float_tolerance: 1.0e-15
+    invariants:
+      - 'DELIBERATELY TIGHTER than, and a SEPARATE key from, the crate-wide `predict_path_rel_yscale` (1.0e-14). SC1 names 1e-15 of y_scale for the regressor path specifically; reusing the looser key would accept a regressor path that the Success Criterion says must not pass'
+      - 'measured 4.5e-16 relative at 24 columns and 3.4e-16 at 30, so the bar has roughly 2.2x and 2.9x headroom — tight, measured, and the number the Success Criterion asks for'
+      - 'RELATIVE to y_scale, not absolute: on retail_sales the absolute 1.0e-10 bar passes with only about 3x headroom at a y_scale of 518253 and would begin failing for arithmetic reasons rather than for a defect'
+      - 'fit-independent by construction — the oracle MAP is pushed through predict, so an optimiser disagreement cannot leak into this rung'
+    preconditions:
+      - 'data_prep_exact holds for the same fixture: a predict path over a different design matrix is not a parity claim'
+      - 'the value channel covers every predicted row, so its length equals the forecast grid length'
 
   fitted_objective_slack:
     formula: 'f_rust(theta_fit) <= f_python + 0.5, where theta_fit is the D-09 restart-loop MAP and f_python is Python -lp where published, else the Rust objective at theta_py'

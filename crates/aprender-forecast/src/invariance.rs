@@ -345,15 +345,24 @@ fn capture_baseline() {
         println!(
             "INVARIANCE CAPTURE: case={label} arch={arch} profile={profile} signature={sig:016x}"
         );
-        cases.insert(
-            label.to_string(),
-            serde_json::json!({
-                "signature": format!("{sig:016x}"),
-                "arch": arch,
-                "profile": profile,
-                "captured_at_commit": head,
-            }),
+        // Built field by field rather than with `serde_json::json!`: that macro expands to
+        // an internal `.unwrap()` for runtime values, which `.clippy.toml` bans outright
+        // (GH-41). `Value::String` is the same result with no hidden unwrap.
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "signature".into(),
+            serde_json::Value::String(format!("{sig:016x}")),
         );
+        entry.insert("arch".into(), serde_json::Value::String(arch.to_string()));
+        entry.insert(
+            "profile".into(),
+            serde_json::Value::String(profile.to_string()),
+        );
+        entry.insert(
+            "captured_at_commit".into(),
+            serde_json::Value::String(head.clone()),
+        );
+        cases.insert(label.to_string(), serde_json::Value::Object(entry));
     }
 
     let path = fixture_path(BASELINE);
@@ -368,8 +377,14 @@ fn capture_baseline() {
         serde_json::Map::new()
     };
     if !doc.contains_key("captured_at_commit") {
-        doc.insert("captured_at_commit".into(), serde_json::json!(head));
-        doc.insert("captured_on".into(), serde_json::json!(iso_date_utc()));
+        doc.insert(
+            "captured_at_commit".into(),
+            serde_json::Value::String(head.clone()),
+        );
+        doc.insert(
+            "captured_on".into(),
+            serde_json::Value::String(iso_date_utc()),
+        );
     }
     if let Some(recorded) = doc.get("captured_at_commit").and_then(|v| v.as_str()) {
         assert!(
@@ -381,17 +396,17 @@ fn capture_baseline() {
     }
     doc.insert(
         "note".into(),
-        serde_json::json!(
+        serde_json::Value::String(String::from(
             "Evidence for ONE tag bump, not a permanent certificate. These signatures \
              describe the tree at `captured_at_commit`; a later intentional behaviour \
              change re-captures them at its own pre-change commit. Keyed by \
              std::env::consts::ARCH because libm and the f32 GEMM routing differ bitwise \
-             across architectures."
-        ),
+             across architectures.",
+        )),
     );
     let by_arch = doc
         .entry("by_arch")
-        .or_insert_with(|| serde_json::json!({}))
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
         .as_object_mut()
         .expect("by_arch is an object");
     by_arch.insert(arch.to_string(), serde_json::Value::Object(cases));
@@ -549,8 +564,10 @@ fn the_signature_detects_a_one_ulp_change() {
     );
     r.trend[last] = orig_t;
 
-    r.components
-        .insert("phantom".into(), serde_json::json!([0.0]));
+    r.components.insert(
+        "phantom".into(),
+        serde_json::Value::Array(vec![serde_json::Value::Null]),
+    );
     assert_ne!(signature(&r), clean, "an extra component key must show");
     r.components.remove("phantom");
 

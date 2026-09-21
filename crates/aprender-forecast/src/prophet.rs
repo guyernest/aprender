@@ -810,9 +810,62 @@ pub struct Forecast {
     pub components: Vec<(String, Vec<f64>)>,
 }
 
-pub fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast {
+/// Point estimates, components and the uncertainty band over `ds_days`.
+///
+/// `regs` is the per-row external-regressor value channel; pass
+/// [`RegressorChannel::NONE`] when there are none. A regressor value is not a function of
+/// the day, so it cannot come out of [`feature_row`] (which is keyed on `day`) and has to
+/// travel beside the design as caller data.
+///
+/// # Errors
+///
+/// Returns [`ForecastError::Validation`] when the channel is malformed: a `values` array
+/// whose length is not exactly `ds_days.len()`, a spec/values count mismatch, or a channel
+/// claiming more columns than the design has.
+///
+/// This is an ERROR and not a panic on purpose (IN-02, the same rule as `feature_row`'s
+/// total lookup): every `Design` field is `pub` and these slices are caller-built, and a
+/// library must not abort the caller's process over them. The check is load-bearing rather
+/// than defensive — `forecast.rs` calls this with `fut`, whose length is `horizon`, NOT
+/// `ds.len() + horizon`, so the door must hand over only the `values[ds.len()..]` tail. An
+/// off-by-one there would silently offset every future feature instead of failing.
+pub fn predict(
+    d: &Design,
+    p: &Params,
+    ds_days: &[i64],
+    seed: u64,
+    regs: &crate::regressors::RegressorChannel<'_>,
+) -> Result<Forecast, crate::types::ForecastError> {
     let spec = &d.spec;
     let n = ds_days.len();
+
+    // ---- the channel is well-formed, asserted AT THE BOUNDARY ----
+    if regs.values.len() != regs.specs.len() {
+        return Err(crate::types::ForecastError::Validation(format!(
+            "the regressor channel carries {} value arrays for {} regressors; they must \
+             correspond one-to-one",
+            regs.values.len(),
+            regs.specs.len()
+        )));
+    }
+    let Some(base_k) = d.k.checked_sub(regs.len()) else {
+        return Err(crate::types::ForecastError::Validation(format!(
+            "the regressor channel claims {} columns but the design has only {}; the \
+             channel does not belong to this design",
+            regs.len(),
+            d.k
+        )));
+    };
+    for (j, v) in regs.values.iter().enumerate() {
+        if v.len() != n {
+            return Err(crate::types::ForecastError::Validation(format!(
+                "regressor {j} carries {} values for {n} predicted rows; it must carry \
+                 exactly one value per row",
+                v.len()
+            )));
+        }
+    }
+
     let t: Vec<f64> = ds_days
         .iter()
         .map(|&x| (x - d.start_days) as f64 / d.t_scale_days)
@@ -820,10 +873,21 @@ pub fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast {
     let cap: Option<Vec<f64>> = d.cap_scaled.as_ref().map(|c| vec![c[0]; n]);
     let model = Model::new(d);
     let trend_s = model.trend(p, &t, cap.as_deref());
-    let mut x = Vec::with_capacity(n * d.k);
+    // The base (seasonality + holiday) cells still come from the UNCHANGED `feature_row`;
+    // only the trailing regressor cells are written from the caller's channel. With an
+    // empty channel `base_k == d.k` and this is arithmetically the original loop, which is
+    // what the D-19 baseline re-checks.
+    let base_cols = &d.cols[..base_k];
+    let mut x = vec![0.0f64; n * d.k];
     let hol_sets = holiday_day_sets(spec);
-    for &day in ds_days {
-        feature_row(day, spec, &d.cols, &hol_sets, &mut x);
+    let mut row: Vec<f64> = Vec::with_capacity(base_k);
+    for (i, &day) in ds_days.iter().enumerate() {
+        row.clear();
+        feature_row(day, spec, base_cols, &hol_sets, &mut row);
+        x[i * d.k..i * d.k + base_k].copy_from_slice(&row);
+        for (j, reg) in regs.specs.iter().enumerate() {
+            x[i * d.k + base_k + j] = (regs.values[j][i] - reg.mu) / reg.std;
+        }
     }
     // components
     let mut names: Vec<String> = Vec::new();
@@ -868,6 +932,40 @@ pub fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast {
             spec.holidays_mode == Mode::Additive,
         );
         components.push(("holidays".into(), hol));
+    }
+    // The two roll-ups Prophet publishes by name. Emitted ONLY when the channel is
+    // non-empty, so the no-regressor component map is unchanged and the D-19 baseline holds.
+    //
+    // Columns are selected by the STRUCTURAL trailing index range `base_k..d.k`, never by
+    // name membership. Name membership is what the spike prototype did, and it is silently
+    // wrong under a collision: a regressor literally named `yearly_delim_1` would be summed
+    // in here.
+    if !regs.is_empty() {
+        let roll_up = |want: Mode, additive: bool| -> Vec<f64> {
+            (0..n)
+                .map(|i| {
+                    let mut v = 0.0;
+                    for c in base_k..d.k {
+                        if d.cols[c].mode == want {
+                            v += x[i * d.k + c] * p.beta[c];
+                        }
+                    }
+                    if additive {
+                        v * d.y_scale
+                    } else {
+                        v
+                    }
+                })
+                .collect()
+        };
+        components.push((
+            "extra_regressors_additive".into(),
+            roll_up(Mode::Additive, true),
+        ));
+        components.push((
+            "extra_regressors_multiplicative".into(),
+            roll_up(Mode::Multiplicative, false),
+        ));
     }
     components.push(("additive_terms".into(), add_terms.clone()));
     components.push(("multiplicative_terms".into(), mul_terms.clone()));
@@ -976,7 +1074,7 @@ pub fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast {
         tl.push(percentile(&col_t, lo_p));
         tu.push(percentile(&col_t, hi_p));
     }
-    Forecast {
+    Ok(Forecast {
         ds_days: ds_days.to_vec(),
         trend,
         yhat,
@@ -985,7 +1083,7 @@ pub fn predict(d: &Design, p: &Params, ds_days: &[i64], seed: u64) -> Forecast {
         trend_lower: tl,
         trend_upper: tu,
         components,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1565,12 +1663,16 @@ mod parity {
         CELLS[fixture_index(stem)]
             .get_or_init(|| {
                 let l = ladder(stem);
-                Arc::new(predict(
-                    &l.design,
-                    &l.python_params(),
-                    &l.forecast_days,
-                    SEED,
-                ))
+                Arc::new(
+                    predict(
+                        &l.design,
+                        &l.python_params(),
+                        &l.forecast_days,
+                        SEED,
+                        &crate::regressors::RegressorChannel::NONE,
+                    )
+                    .expect("the parity ladder passes an inert channel"),
+                )
             })
             .clone()
     }
@@ -1965,7 +2067,14 @@ mod parity {
             info.status
         );
 
-        let f = predict(&l.design, p, &l.forecast_days, SEED);
+        let f = predict(
+            &l.design,
+            p,
+            &l.forecast_days,
+            SEED,
+            &crate::regressors::RegressorChannel::NONE,
+        )
+        .expect("the parity ladder passes an inert channel");
         let py_yhat = f64s(&l.fx["forecast"]["yhat"], "forecast.yhat");
         let future = max_abs_diff(&f.yhat[l.n_hist..], &py_yhat[l.n_hist..], "future yhat");
         let history = max_abs_diff(&f.yhat[..l.n_hist], &py_yhat[..l.n_hist], "history yhat");
@@ -2034,7 +2143,14 @@ mod parity {
 
         if l.is_spike_003() {
             let handle = fitted(stem);
-            let f = predict(&l.design, &handle.0, &l.forecast_days, SEED);
+            let f = predict(
+                &l.design,
+                &handle.0,
+                &l.forecast_days,
+                SEED,
+                &crate::regressors::RegressorChannel::NONE,
+            )
+            .expect("the parity ladder passes an inert channel");
             let u = &l.fx["uncertainty"];
             let py = |key: &str| {
                 u[key]

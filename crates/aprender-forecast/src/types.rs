@@ -281,6 +281,56 @@ pub struct HolidayArg {
     pub upper_window: i64,
 }
 
+/// One external regressor: a caller-supplied covariate spliced onto the design matrix as a
+/// trailing column (D-22).
+///
+/// # Why this field set, and why it is not revisited cheaply
+///
+/// `ForecastArgs` IS the published MCP tool schema — `schemars::schema_for!` derives it at
+/// `aprender-mcp-forecast`'s tool registration — and `deny_unknown_fields` makes a renamed
+/// field a hard transport-layer refusal for every existing caller, with no migration path.
+/// So the shape was frozen deliberately before any of it was written:
+///
+/// - It matches the parity-proven spike 011 `RegressorSpec`, the prototype that actually
+///   produced the committed Python Prophet 1.4.0 oracle.
+/// - It matches [`HolidayArg`]'s conventions in this same file: `name` first, optionals
+///   carrying `#[serde(default)]`, and an ARRAY of objects rather than a map.
+/// - `standardize` is `Option<bool>` with `None` meaning Prophet's "auto". The oracle
+///   records the literal string `"auto"`, but that is its record of the PYTHON call, not a
+///   requirement on this wire; all four oracle regressors are `"auto"`, so nothing is lost.
+///
+/// # Rejected alternative: a map keyed by regressor name
+///
+/// Recorded here rather than only in the plan, so it is not re-proposed from the plan text.
+/// A map would make duplicate names structurally impossible, which is attractive — but
+/// `serde_json::Map` is a `BTreeMap`, so iteration is KEY-SORTED. The oracle's trailing
+/// four design columns are `promo, price, discount, weather`, which is INSERTION order;
+/// sorted order would be `discount, price, promo, weather`. A map-keyed wire shape would
+/// hand `splice` the wrong column order and break the 24-column parity assertion outright.
+/// Insertion order is load-bearing, so the array stays.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RegressorArg {
+    /// Regressor name. Becomes a response component key, so it must be unique within one
+    /// request. At most 200 bytes.
+    pub name: String,
+    /// One value per HISTORY row AND per HORIZON row, in `ds` order then future order — so
+    /// its length is exactly `ds.len() + horizon`. A future value is required because the
+    /// model needs the covariate over the period it is forecasting.
+    pub values: Vec<f64>,
+    /// "additive" (default) or "multiplicative". Multiplicative is Prophet-only.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Prior scale for this regressor's coefficient. Defaults to 10.0, which is Prophet's
+    /// `holidays_prior_scale`.
+    #[serde(default)]
+    pub prior_scale: Option<f64>,
+    /// Whether to standardise the column. Absent means Prophet's "auto" rule: standardise
+    /// unless the history values are exactly the two-element set {0, 1}.
+    #[serde(default)]
+    pub standardize: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ForecastArgs {
@@ -317,6 +367,11 @@ pub struct ForecastArgs {
     /// Random seed for the uncertainty simulation / training (default 42).
     #[serde(default)]
     pub seed: Option<u64>,
+    /// External regressors (covariates) spliced onto the design as trailing columns.
+    /// Prophet arm only for now; the NeuralProphet arm refuses them by name rather than
+    /// accepting and ignoring them (D-21).
+    #[serde(default)]
+    pub regressors: Option<Vec<RegressorArg>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -580,6 +635,15 @@ mod tests {
             (
                 "ChronosArgs",
                 serde_json::to_value(schemars::schema_for!(crate::chronos::ChronosArgs)),
+            ),
+            // D-20: without this owner the five `RegressorArg` fields are invisible to the
+            // MISSING direction below — they would be caller-settable, unenumerated, and
+            // the set-equality test would still be green. An owner that is not listed here
+            // is not "not yet covered", it is a hole shaped exactly like the one T-06-32
+            // found in `ChronosArgs`.
+            (
+                "RegressorArg",
+                serde_json::to_value(schemars::schema_for!(super::RegressorArg)),
             ),
         ] {
             let schema = schema.expect("schema serializes");
@@ -852,6 +916,26 @@ mod tests {
              guard-that-cannot-fail class this round exists to end. Land 06-15.",
             pending.len(),
             pending.join("; ")
+        );
+    }
+
+    /// D-20: adding `regressors` introduced NO required field.
+    ///
+    /// The partner of `an_unknown_argument_key_is_refused_not_ignored` below: that one pins
+    /// that `deny_unknown_fields` still refuses what it always refused, this one pins that
+    /// the body an existing caller already sends still deserialises and still means the same
+    /// thing. A new REQUIRED field would break every caller at the transport layer, which is
+    /// exactly the one-way break the wire shape was frozen to avoid.
+    #[test]
+    fn a_payload_with_no_new_keys_still_deserialises() {
+        let args = serde_json::from_value::<ForecastArgs>(serde_json::json!({
+            "ds": ["2020-01-01"], "y": [1.0], "horizon": 1
+        }))
+        .expect("a pre-existing minimal body must still deserialise");
+        assert!(
+            args.regressors.is_none(),
+            "absent `regressors` must mean None, not an empty vec: the door distinguishes \
+             'no regressors' from 'an empty regressor list' only by this"
         );
     }
 

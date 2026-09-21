@@ -241,7 +241,14 @@ fn prophet_row(tr_ds: &[i64], tr_y: &[f64], te_ds: &[i64]) -> (String, Fc) {
     let design = make_design(tr_ds, tr_y, &spec);
     let t0 = Instant::now();
     let (params, _info) = fit_prophet(&design, PROPHET_ROUNDS);
-    let fc = predict(&design, &params, te_ds, 42);
+    let fc = predict(
+        &design,
+        &params,
+        te_ds,
+        42,
+        &aprender_forecast::regressors::RegressorChannel::NONE,
+    )
+    .expect("this example passes an inert regressor channel");
     (
         "Prophet (Rust port)".to_string(),
         Fc {
