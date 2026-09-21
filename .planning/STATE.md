@@ -4,7 +4,7 @@ milestone: v1.0
 current_phase: "06.1"
 current_phase_name: "Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds"
 status: executing
-stopped_at: Wave 3 complete (06.1-05 merged); next is wave 4 (06.1-06)
+stopped_at: Wave 4 complete (06.1-06 merged); next is wave 5 (06.1-07)
 last_updated: "2026-09-21T16:45:55.278Z"
 last_activity: 2026-09-20
 last_activity_desc: Phase 06.1 execution started
@@ -481,7 +481,7 @@ Items acknowledged and carried forward from project scope:
 ## Session Continuity
 
 Last session: 2026-09-21T16:45:55.115Z
-Stopped at: Wave 3 complete (06.1-05 merged). SC4 is MET on an accepted substitute host (EC2 c7i.2xlarge); the C-08 checkpoint is closed. Next is wave 4 (06.1-06), which inherits SC3's recovery-bar finding because it opens the NP holiday arm and therefore owns the epoch budget.
+Stopped at: Wave 4 complete (06.1-06 merged). Holiday bounds hoisted above the dispatch, operand-aware by arm; `holidays` OPENED on the neuralprophet arm scoped to n_lags = 0 (recovery 0.0528-0.0677) and REFUSED with n_lags > 0 naming the limitation — operator ruling, because the 10% bar holds at no epoch budget the door configures for 51+ points and raising it would price 5000 points at 191.7% of MAX_NP_TRAIN_COST. Re-opening events at n_lags > 0 is a Phase 7 item, not a door fix. Next is wave 5 (06.1-07).
 Resume file: None
 
 ## Accumulated Context

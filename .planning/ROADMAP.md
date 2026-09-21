@@ -570,7 +570,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 06.1-06-PLAN.md — hoist all four holiday bounds above the model dispatch with an operand-aware design cost, then unblock `holidays` on the neuralprophet arm with per-event components (wave 4, has a checkpoint)
+- [x] 06.1-06-PLAN.md — hoist all four holiday bounds above the model dispatch with an operand-aware design cost, then unblock `holidays` on the neuralprophet arm with per-event components (wave 4, has a checkpoint)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
