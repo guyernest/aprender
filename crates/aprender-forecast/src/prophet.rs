@@ -2336,25 +2336,6 @@ mod parity {
     }
 }
 
-// ------------------------------------------------------- design-cost bench ----
-/// The release-profile wall-clock harness behind `just forecast-holiday-bench`.
-///
-/// It ATTRIBUTES a holiday-carrying request's wall rather than asserting a bar: the body
-/// emits exactly one machine-parsable measurement line (the token is written in exactly
-/// one place below, so the recipe's parse is unambiguous) and asserts only that the call
-/// succeeded and returned one row per horizon step. REVIEW-06-04 removed a
-/// wall-clock ratio assertion from `pool_equality` for the reason that binds here too — a
-/// wall inside libtest moves with CPU throttling independently of what is being measured,
-/// so the BAR lives in the host-gated `just` recipe and the TEST only measures.
-///
-/// SINCE PLAN 06-16 IT BUILDS NOTHING OF ITS OWN (WR-04). The series, the holiday splitter,
-/// the accept-and-time step and the `profile=` token all come from [`crate::sc1_wall`], so
-/// this is a SINGLE-COMPOSITION ENTRY POINT onto the sweep's builder rather than a third
-/// harness with a third geometry. It is kept rather than deleted because
-/// `just forecast-holiday-bench` is cited by `06-EVIDENCE.md` and by
-/// `contracts/forecast-tool-boundary-v1.yaml`, and its caller-facing behaviour is unchanged.
-/// The COVERAGE claim now belongs to `just forecast-sc1-sweep`, which sweeps the surface
-/// this one composition cannot.
 #[cfg(test)]
 mod predict_spans {
     //! The falsification probe for the span-restricted per-component roll-up.
@@ -2564,6 +2545,25 @@ mod predict_spans {
     }
 }
 
+// ------------------------------------------------------- design-cost bench ----
+/// The release-profile wall-clock harness behind `just forecast-holiday-bench`.
+///
+/// It ATTRIBUTES a holiday-carrying request's wall rather than asserting a bar: the body
+/// emits exactly one machine-parsable measurement line (the token is written in exactly
+/// one place below, so the recipe's parse is unambiguous) and asserts only that the call
+/// succeeded and returned one row per horizon step. REVIEW-06-04 removed a
+/// wall-clock ratio assertion from `pool_equality` for the reason that binds here too — a
+/// wall inside libtest moves with CPU throttling independently of what is being measured,
+/// so the BAR lives in the host-gated `just` recipe and the TEST only measures.
+///
+/// SINCE PLAN 06-16 IT BUILDS NOTHING OF ITS OWN (WR-04). The series, the holiday splitter,
+/// the accept-and-time step and the `profile=` token all come from [`crate::sc1_wall`], so
+/// this is a SINGLE-COMPOSITION ENTRY POINT onto the sweep's builder rather than a third
+/// harness with a third geometry. It is kept rather than deleted because
+/// `just forecast-holiday-bench` is cited by `06-EVIDENCE.md` and by
+/// `contracts/forecast-tool-boundary-v1.yaml`, and its caller-facing behaviour is unchanged.
+/// The COVERAGE claim now belongs to `just forecast-sc1-sweep`, which sweeps the surface
+/// this one composition cannot.
 #[cfg(test)]
 mod design_cost {
     use crate::dates::days_from_civil;

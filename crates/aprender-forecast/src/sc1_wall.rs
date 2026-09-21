@@ -515,8 +515,15 @@ pub(crate) fn regressor_compositions(cost: usize, max_r: usize) -> Vec<RegCompos
     });
 
     // 3. FEW ROWS, MANY REGRESSORS.
+    //
+    // The horizon is capped so the HISTORY still clears `MIN_POINTS`. Without that cap a
+    // large `max_r` shrinks `rows` until the even split leaves fewer than ten history
+    // points and the door refuses the composition outright — the harness would then be
+    // measuring a refusal, which `time_accepted` correctly panics on. Found by running the
+    // ladder at max_r = 2 000; the always-run geometry test exercises only the SHIPPED
+    // constants, so it could not have caught it.
     let rows = row_budget(max_r);
-    let horizon = (rows / 2).max(1);
+    let horizon = (rows / 2).max(1).min(rows - crate::types::MIN_POINTS);
     out.push(RegComposition {
         label: "few_rows_many_regressors",
         points: rows - horizon,
@@ -541,8 +548,7 @@ pub(crate) fn regressor_compositions(cost: usize, max_r: usize) -> Vec<RegCompos
     //    bar is shared.
     let rows = row_budget(max_r);
     let hc = (crate::types::MAX_HOLIDAY_DESIGN_COST / rows)
-        .min(crate::types::MAX_HOLIDAY_COLUMNS)
-        .max(1);
+        .clamp(1, crate::types::MAX_HOLIDAY_COLUMNS);
     out.push(RegComposition {
         label: "combined_holidays_and_regressors",
         points: rows - 1,

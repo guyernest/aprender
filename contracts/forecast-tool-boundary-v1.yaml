@@ -126,11 +126,11 @@ constants:
   regressor_prior_scale_min: 1.0e-153
   regressor_prior_scale_max: 1.0e150
   # ---- The REGRESSOR COST CEILINGS (cost axis C-17, plan 06.1-03) ----
-  # PROVISIONAL at the close of Task 1 and FINALISED by Task 2 step 5. C-17 prices the
-  # design cells AND the identifiability Gram plus its factorisation (len(ds) * K^2 + K^3);
-  # the second does not exist when Task 1 measures, so a value certified there is certified
-  # against incomplete work. Both sweeps, their delta and every rejected candidate are
-  # recorded in types::MAX_REGRESSOR_DESIGN_COST's rustdoc and in the 06.1-03 SUMMARY.
+  # DERIVED BY MEASUREMENT IN TWO STAGES, and FINALISED against the completed door. C-17
+  # prices the design cells AND the identifiability Gram plus its factorisation
+  # (len(ds) * K^2 + K^3); the second did not exist when the first sweep ran, so the whole
+  # sweep was re-run once the diagnostic landed. A ceiling certified against incomplete work
+  # is certified against the wrong request.
   #
   # fit_max_regressor_design_cost bounds (len(ds) + horizon) * n_regressors, the regressor
   # design feature cells one request buys across regressors::splice (history rows) and
@@ -138,16 +138,24 @@ constants:
   # family over: fit_max_points, fit_max_horizon and fit_max_regressors are each checked in
   # ISOLATION and their product was not.
   #
-  # SWEEP 1 (release, aarch64, just forecast-regressor-bench <cost> 200), total_s through
-  # the public door over five compositions of the SAME product differing in every factor:
-  #   cost   many/4      balanced/20     few/200  maxwidth/200   combined/200   verdict
-  #   50000  1.391       2.817           0.070    0.199          0.360          REJECTED
-  #   40000  1.132/1.369 2.182/3.021     0.055    4.735/6.024    0.190          REJECTED
-  #   30000  1.695/1.836 0.254           0.070    0.084          0.382          clears, 1.09x
-  #   25000  0.681/0.683 1.268/1.226     0.036    0.051          0.145          ACCEPTED 1.58x
-  # 50 000 and 40 000 were each RE-RUN: the failures are reproducible, not scheduler noise.
-  # 30 000 CLEARS and was still not taken — an 8 % margin before the expensive feature lands
-  # is a coin flip, not a ceiling.
+  # SWEEP 1 (design build only) and SWEEP 2 (whole request, diagnostic live), release,
+  # aarch64, total_s over five compositions of the SAME product differing in every factor:
+  #   cost   many/4      balanced/20  few/200  maxwidth/200  combined/200  verdict
+  #   50000  1.391       2.817        0.070    0.199         0.360         REJECTED (s1)
+  #   40000  1.132/1.369 2.182/3.021  0.055    4.735/6.024   0.190         REJECTED (s1)
+  #   40000  1.130       2.164        0.050    4.242         0.205         REJECTED (s2)
+  #   30000  1.695/1.836 0.254        0.070    0.084         0.382         clears, 1.09x
+  #   25000  0.681/0.683 1.268/1.226  0.036    0.051         0.145         ACCEPTED (s1)
+  #   25000  0.665       1.157        0.032    0.053         0.144         ACCEPTED (s2)
+  # 50 000 and 40 000 were each RE-RUN, so the failures are reproducible rather than
+  # scheduler noise, and 40 000 was re-rejected against the completed door. 30 000 CLEARS and
+  # was still not taken: an 8 % margin is a coin flip, not a ceiling.
+  #
+  # THE DELTA between the sweeps is the diagnostic's measured share, and it is the number
+  # Phase 7 needs when it re-prices this per tier. On total_s it is within run-to-run noise
+  # (-0.019, -0.031, +0.001, +0.002, -0.002). It IS visible in total_s - fit_s - predict_s,
+  # which rose from <= 1 ms to 3-4 ms at R = 200 — 0.2 % of the 2 s bar, measured rather than
+  # assumed. That is the evidence C-17's N*K^2 + K^3 term is bounded and not merely asserted.
   #
   # THE WALL IS DOMINATED BY THE L-BFGS ITERATION COUNT, which is data-dependent and
   # NON-MONOTONIC in the payload: every wall above is >= 97 % fit time, and the max-width
@@ -157,19 +165,50 @@ constants:
   # and it is why the sweep is five compositions rather than one.
   #
   # fit_max_regressors is NOT a derived consequence of that product and is deliberately its
-  # own ceiling. The product is satisfiable by trading rows for columns: at the tightest
-  # legal history (fit_min_points = 10, horizon 1) it alone would admit 25 000 / 11 = 2 272
-  # regressors. MEASURED on the stage-1 door: a request at 800 regressors (K = 807) walls at
-  # 0.063 s, so the count is provably NOT bounded by the fit, the design build or predict.
-  # It is bounded by the one cost that is a function of K ALONE — the diagnostic's O(K^3)
-  # factorisation, 5.3e8 float ops at K = 807 from a ~30-row request. A ceiling for that
-  # term cannot be derived from a sweep that does not include it, which is why this value is
-  # provisional and Task 2 owns the final number. ceilings_subsumed below records the
-  # PRODUCT relation without claiming the count is redundant.
+  # own ceiling, because the only cost that is a function of the COUNT alone is the
+  # diagnostic's O(K^3) factorisation. MEASURED against the stage-1 door (no diagnostic), a
+  # request at 800 regressors walled at 0.063 s — so nothing in the fit, the design build or
+  # predict constrains the count at all.
+  #
+  # THE COUNT LADDER, diagnostic live, at cost 25000. diag_s = total_s - fit_s - predict_s:
+  #   R      K      K^3     diag_s        worst total_s  verdict
+  #   200    207    8.9e6   0.003-0.004   1.157          ACCEPTED
+  #   400    407    6.7e7   0.017-0.018   1.203          clears
+  #   800    807    5.3e8   0.127-0.132   1.262          clears
+  #   2000   2001   8.0e9   1.902-1.951   2.038          REJECTED (3 of 5 at/over the bar)
+  # The cubic law is CONFIRMED by the ladder, not asserted by the formula: the diag_s ratios
+  # are 5.0x / 7.4x / 15x against K^3 ratios of 8.0x / 7.9x / 15x. At R = 2 000 the
+  # diagnostic is 96 % of the whole request.
+  #
+  # 200 IS DELIBERATELY NOT THE LARGEST THAT CLEARS. 800 clears and was not taken: there the
+  # diagnostic (0.130 s) costs MORE than the fit it describes (0.040-0.124 s), which is the
+  # wrong trade, and this is published refusal surface where raising a ceiling later is cheap
+  # while lowering one refuses requests that previously succeeded. 200 is 50x the largest
+  # regressor count in any committed fixture (4). Phase 7 can raise it per tier against the
+  # measured cubic law above.
   # Mirrored by types::MAX_REGRESSORS and types::MAX_REGRESSOR_DESIGN_COST via
   # types::tests::cost_bounds_match_contract.
   fit_max_regressors: 200
   fit_max_regressor_design_cost: 25000
+  # ---- The IDENTIFIABILITY WARNING THRESHOLDS (D-35, plan 06.1-03) ----
+  # NOT COST CEILINGS, and the naming is deliberate: a warning threshold bounds no work and
+  # refuses nothing, so it must NOT match the `fit_max_` / `chronos_max_` prefix filter that
+  # `types::tests::every_cost_ceiling_constant_is_named_by_an_axis` derives its ceiling list
+  # from. Do not "fix" the filter to capture them — a threshold pulled into that enumeration
+  # would demand a cost axis for a number that prices nothing.
+  #
+  # DERIVED from the committed spike-011 fixture retail_regressors_prophet140.json rather
+  # than chosen: the diagnostic was run over its four regressor columns against the 24-column
+  # design and the measured VIFs are recorded in the 06.1-03 SUMMARY. The threshold is pinned
+  # so the known-bad column (`discount`, a cosine of period six months and a harmonic of the
+  # yearly seasonality at r = 0.999 against yearly_delim_4) WARNS, and the two known-good
+  # columns (`promo`, `weather`) do NOT. `price` is labelled MARGINAL by the spike (r = 0.759,
+  # beta still 5x off) and is deliberately UNASSERTED — it is the column that proves a
+  # pairwise cutoff is the wrong test (D-35), not a control for this threshold.
+  # Mirrored by types::REGRESSOR_VIF_WARN and types::REGRESSOR_CONDITION_NUMBER_WARN via
+  # types::tests::cost_bounds_match_contract's real-valued table (constant_f64).
+  regressor_vif_warn: 10.0
+  regressor_condition_number_warn: 30.0
   # The ONE caller-settable field that had NO enforcement of any kind at the close of
   # 06-14 (door_surface.knobs, field: name, enforced_by: NOTHING) — found by that plan's
   # enumeration and by no review finding. prophet::columns turns ONE payload occurrence of
@@ -526,7 +565,7 @@ door_surface:
       spent_outside_fit_budget: true
       bound: fit_max_regressor_design_cost
       checked_at: 'the door, before make_design and before any regressor value is copied'
-      note: 'DERIVED BY MEASUREMENT IN TWO STAGES, and the second stage is the one that counts. Stage 1 (plan 06.1-03 Task 1) timed the public door at five compositions of the SAME product with no diagnostic in the tree; stage 2 (Task 2 step 5) re-timed the identical five with the diagnostic live, because the K^3 term this formula prices did not exist when stage 1 ran and a fixed feature-cell product fixes neither the N*K^2 nor the K^3 term. Both sweeps, their delta and both rejected candidates are recorded in the 06.1-03 SUMMARY and in types::MAX_REGRESSOR_DESIGN_COST. HOLIDAY indicator columns are EXCLUDED from the diagnostic column set, and that exclusion is what keeps this axis to ONE ceiling: the holiday block can reach fit_max_holiday_columns (1 000) design columns, which would make K^3 the dominant cost of the entire request and would force a second, much larger bound here. K is therefore bounded by the at-most-34 seasonality columns (a property of auto_seasonalities, not of the request — see C-11) plus fit_max_regressors, so the cubic term cannot be driven by fit_max_holiday_columns at all. The exclusion is surfaced in the response''s own `scope` note as well as here, so it is a STATED scope rather than a silent one (threat T-06.1-11). Every collinearity spike 011 measured was regressor-against-seasonality or regressor-against-trend, so the excluded family is also the one with no measured evidence behind it.'
+      note: 'DERIVED BY MEASUREMENT IN TWO STAGES and FINALISED in the second. Stage 1 (plan 06.1-03 Task 1) timed the public door at five compositions of the SAME product with no diagnostic in the tree; stage 2 (Task 2 step 5) re-timed the identical five with the diagnostic live, because the K^3 term this formula prices did not exist when stage 1 ran and a fixed feature-cell product fixes neither the N*K^2 nor the K^3 term. FINALISED at 25 000 and 200. Rejected candidates: 50 000 and 40 000 for the product (40 000 re-rejected against the completed door), 2 000 for the count (its diagnostic alone is 1.95 s, 96 % of the request). The count ladder measured diag_s of 0.0035 / 0.0175 / 0.130 / 1.95 s at R = 200 / 400 / 800 / 2 000, whose ratios track K^3 within 7 % — so the cubic term is CONFIRMED by measurement rather than asserted by this formula. Both sweeps, the delta and the full ladder are in the 06.1-03 SUMMARY and in types::MAX_REGRESSOR_DESIGN_COST / types::MAX_REGRESSORS. HOLIDAY indicator columns are EXCLUDED from the diagnostic column set, and that exclusion is what keeps this axis to ONE ceiling: the holiday block can reach fit_max_holiday_columns (1 000) design columns, which would make K^3 the dominant cost of the entire request and would force a second, much larger bound here. K is therefore bounded by the at-most-34 seasonality columns (a property of auto_seasonalities, not of the request — see C-11) plus fit_max_regressors, so the cubic term cannot be driven by fit_max_holiday_columns at all. The exclusion is surfaced in the response''s own `scope` note as well as here, so it is a STATED scope rather than a silent one (threat T-06.1-11). Every collinearity spike 011 measured was regressor-against-seasonality or regressor-against-trend, so the excluded family is also the one with no measured evidence behind it.'
 
   # ---- Ceilings whose work is bounded by another axis PRODUCT ----
   # Checked in BOTH directions: an entry naming a constant that is not a ceiling here is a

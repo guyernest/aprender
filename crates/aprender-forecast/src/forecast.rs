@@ -24,7 +24,8 @@ use crate::types::{
     MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
     MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS,
     MAX_REGRESSORS, MAX_REGRESSOR_DESIGN_COST, MAX_SPAN_DAYS, MIN_POINTS,
-    REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN,
+    REGRESSOR_CONDITION_NUMBER_WARN, REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN,
+    REGRESSOR_VIF_WARN,
 };
 
 /// Response keys a regressor name must not shadow — the THIRD part of the collision
@@ -48,6 +49,33 @@ use crate::types::{
 /// six are top-level `ForecastResponse` fields a component key must not shadow in a consumer
 /// that flattens the response. `the_reserved_response_keys_slice_is_not_empty` pins the list
 /// so a later edit cannot empty it and make the check vacuous.
+/// A finite `f64` as a JSON number, and ANYTHING ELSE as an explicit `null`.
+///
+/// `serde_json` already renders a non-finite `f64` as `null`, so an accidental infinity and
+/// a DELIBERATE withholding produce the SAME wire bytes — and only one of them is an
+/// intended statement. Routing every emitted number through here makes the null a decision
+/// taken in one place instead of an accident that is invisible on the wire. The same defect
+/// is on record in this project as CR-03 (`UpdateEvidence::table_hash` not injective over
+/// inf/NaN), which is why the fix is a funnel rather than a comment.
+fn finite_or_null(v: f64) -> serde_json::Value {
+    if v.is_finite() {
+        serde_json::Number::from_f64(v).map_or(serde_json::Value::Null, serde_json::Value::Number)
+    } else {
+        serde_json::Value::Null
+    }
+}
+
+/// The WIRE spelling of a mode — the string the caller sent, or the default.
+///
+/// `format!("{mode:?}")` would emit `Additive`, which is the Rust spelling and not the one
+/// the caller used or the schema advertises.
+fn mode_wire_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Additive => "additive",
+        Mode::Multiplicative => "multiplicative",
+    }
+}
+
 pub(crate) const RESERVED_RESPONSE_KEYS: [&str; 11] = [
     "additive_terms",
     "multiplicative_terms",
@@ -676,7 +704,31 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             for (n, v) in &fc.components {
                 components.insert(n.clone(), serde_json::json!(v));
             }
-            Ok(ForecastResponse {
+            // ---- THE IDENTIFIABILITY DIAGNOSTIC (D-35, D-36) ----
+            //
+            // Computed AFTER the fit and only when the request actually carried regressors.
+            // Both keys are built CONDITIONALLY and inserted into the map below rather than
+            // being fields with a `skip_serializing_if`: a serialisation attribute that
+            // misfires emits `"regressors": []` on EVERY response, and `invariance::
+            // signature` hashes the WHOLE `diagnostics` object, so that would change every
+            // recorded baseline and break SC2. The mechanism has to be "the key is never
+            // constructed", not "the key is usually omitted".
+            //
+            // Nothing equivalent exists on the neuralprophet arm, deliberately (D-37): VIF
+            // and the condition number are properties of the design matrix PROPHET builds,
+            // and AR absorption is a training dynamic rather than column collinearity, so a
+            // green VIF there would reassure about the wrong thing.
+            let identifiability = if reg_std.is_empty() {
+                None
+            } else {
+                Some(crate::regressors::identifiability(
+                    &design,
+                    &reg_std,
+                    REGRESSOR_VIF_WARN,
+                    REGRESSOR_CONDITION_NUMBER_WARN,
+                ))
+            };
+            let mut response = ForecastResponse {
                 model: "prophet".into(),
                 freq,
                 n_history: ds.len(),
@@ -708,7 +760,59 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     "interval_width": interval_width,
                     "uncertainty_samples": spec.uncertainty_samples
                 }),
-            })
+            };
+            if let Some(id) = identifiability {
+                let diag = response
+                    .diagnostics
+                    .as_object_mut()
+                    .expect("the prophet diagnostics value is built as a JSON object above");
+                let mut rows = Vec::with_capacity(id.regressors.len());
+                for r in &id.regressors {
+                    let mut o = serde_json::Map::new();
+                    o.insert("name".into(), serde_json::Value::String(r.name.clone()));
+                    o.insert(
+                        "mode".into(),
+                        serde_json::Value::String(mode_wire_name(r.mode).into()),
+                    );
+                    o.insert("mu".into(), finite_or_null(r.mu));
+                    o.insert("std".into(), finite_or_null(r.std));
+                    o.insert("vif".into(), r.vif.map_or(serde_json::Value::Null, finite_or_null));
+                    // `warning` is ABSENT, not null, when the column is clean: a key that is
+                    // always present with a null is a key a consumer has to branch on.
+                    if let Some(w) = &r.warning {
+                        o.insert("warning".into(), serde_json::Value::String(w.clone()));
+                    }
+                    rows.push(serde_json::Value::Object(o));
+                }
+                diag.insert("regressors".into(), serde_json::Value::Array(rows));
+                let mut sib = serde_json::Map::new();
+                sib.insert("scope".into(), serde_json::Value::String(id.scope.clone()));
+                sib.insert(
+                    "condition_number".into(),
+                    id.condition_number
+                        .map_or(serde_json::Value::Null, finite_or_null),
+                );
+                sib.insert(
+                    "condition_number_warning".into(),
+                    id.condition_number_warning
+                        .clone()
+                        .map_or(serde_json::Value::Null, serde_json::Value::String),
+                );
+                sib.insert(
+                    "ridge".into(),
+                    id.ridge.map_or(serde_json::Value::Null, finite_or_null),
+                );
+                sib.insert("regularized".into(), serde_json::Value::Bool(id.regularized));
+                sib.insert(
+                    "status".into(),
+                    serde_json::Value::String(id.status.as_str().into()),
+                );
+                diag.insert(
+                    "regressors_identifiability".into(),
+                    serde_json::Value::Object(sib),
+                );
+            }
+            Ok(response)
         }
         // Ported verbatim from `sources/004-forecast-mcp-thin-server/src/lib.rs:226-262`
         // (D-08), replacing 06-01's refusing tracer stub (REVIEW-06-06). Every training
