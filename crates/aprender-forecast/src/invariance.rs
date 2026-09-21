@@ -979,6 +979,237 @@ fn the_signature_normalises_negative_zero() {
     );
 }
 
+// ------------------------------------- part C: the mechanism, measured ----
+
+/// Two f64 slices are equal BY BITS, with a diagnostic naming the first divergent element.
+///
+/// Not an epsilon comparison. The claim part C makes is bit equality, and an epsilon would
+/// accept exactly the drift class this module exists to catch.
+fn bitwise_equal(series: &str, field: &str, a: &[f64], b: &[f64]) {
+    assert!(
+        a.len() == b.len(),
+        "{series}: {field} has {} values without the splice and {} after splicing zero \
+         regressors; the splice changed a LENGTH, which is a structural break",
+        a.len(),
+        b.len()
+    );
+    if let Some(i) = a
+        .iter()
+        .zip(b)
+        .position(|(p, q)| p.to_bits() != q.to_bits())
+    {
+        let (p, q) = (a[i], b[i]);
+        panic!(
+            "{series}: {field}[{i}] is not bit-identical — unspliced {p:e} 0x{:016x} vs \
+             spliced-with-nothing {q:e} 0x{:016x}, abs diff {:e}. Splicing ZERO regressors \
+             must be inert; if it is not, D-19 is not free and every caller who passes no \
+             new argument is getting a different answer",
+            p.to_bits(),
+            q.to_bits(),
+            (p - q).abs()
+        );
+    }
+}
+
+/// A bit-exact fingerprint of one fitted parameter vector.
+fn params_fingerprint(p: &crate::prophet::Params) -> u64 {
+    let mut h = Hasher::new();
+    h.f64(p.k);
+    h.f64(p.m);
+    h.f64s(&p.delta);
+    h.f64s(&p.beta);
+    h.f64(p.sigma_obs);
+    h.finish()
+}
+
+/// Part C: `regressors::splice` at ZERO regressors is inert — MEASURED, not asserted.
+///
+/// # What this part claims, and what it explicitly does not
+///
+/// It compares the PRE-SPLICE design against the spliced-with-nothing design, through the
+/// SAME (post-change) [`crate::prophet::predict`]. It therefore establishes **SPLICE
+/// INERTNESS at zero regressors** and nothing wider. It does NOT establish that the
+/// `predict` signature change itself was inert: both sides call the same post-change
+/// function, so a regression common to the empty-channel branch moves both outputs equally
+/// and part C stays green.
+///
+/// That second claim — the historical one — is carried by the committed baseline in
+/// `invariance_baseline.json`, which was captured on a commit at which `regressors.rs` did
+/// not exist and is the only INDEPENDENT historical evidence in this gate. The two are
+/// deliberately different statements; see the module docs for the per-part table.
+///
+/// # part_c_is_a_measurement_not_an_assertion
+///
+/// The reason D-19 is free is a COLUMN-ORDER fact: regressor columns append, so no existing
+/// column index moves. A comment saying "appending is harmless" is not a gate — it is the
+/// same claim the gate exists to check, written where nothing can check it. So this part
+/// runs the real `make_design`, the real `splice` and the real `predict` on three real
+/// series and compares the results bit for bit.
+///
+/// # The bands are INSIDE the comparison
+///
+/// The spike's part C covered point estimates only, because its prototype computed no
+/// bands, and the reference flags that the band path resamples changepoints around a `yhat`
+/// that depends on `beta` and `X` — so the bands must be added once the feature lands
+/// in-crate. This test is that close-out: `yhat_lower` and `yhat_upper` are compared here,
+/// not excused.
+///
+/// # Each series is FIT ONCE
+///
+/// Both `predict` calls take the SAME `Params`. Fitting each design independently would
+/// fold L-BFGS's own run-to-run behaviour into a test whose claim is about the DESIGN, and
+/// the budget check at `fit.rs:104` / `fit.rs:112` BREAKS the optimisation loop on
+/// wall-clock — which changes the parameters, the iteration count, the objective, the
+/// predictions and the bands, not merely a flag. Masking `budget_hit` cannot subtract that,
+/// because by the time the flag differs the parameters already differ. Fitting once removes
+/// the fit from the variable set entirely, so the only input that differs between the two
+/// calls is the design, which is exactly the claim.
+#[test]
+fn part_c_the_splice_is_inert_at_zero_regressors() {
+    use crate::prophet::{auto_seasonalities, make_design, predict, Mode, Spec};
+
+    /// `(csv, horizon, freq)` — the three series, as the prophet door would take them.
+    const SERIES: [(&str, usize, &str); 3] = [
+        ("peyton_manning.csv", 30, "D"),
+        ("retail_sales.csv", 12, "MS"),
+        ("air_passengers.csv", 12, "MS"),
+    ];
+    const SEED: u64 = 42;
+
+    let mut series_compared = 0usize;
+    for (csv, horizon, freq) in SERIES {
+        let (ds_text, y) = read_csv(csv);
+        let ds: Vec<i64> = ds_text.iter().map(|s| crate::dates::parse_ymd(s)).collect();
+        let fut = crate::dates::future_days(ds[ds.len() - 1], horizon, freq)
+            .unwrap_or_else(|e| panic!("{csv}: the future grid must build: {e}"));
+
+        // The prophet arm's defaulted spec, built the way `forecast.rs:317` builds it.
+        let spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, Mode::Additive));
+        assert!(
+            !spec.seasonalities.is_empty(),
+            "{csv}: the defaulted spec must carry at least one seasonality, or this \
+             series exercises an almost-empty design and proves very little"
+        );
+
+        // ---- THE DESIGN: one straight from make_design, one spliced with nothing ----
+        let plain = make_design(&ds, &y, &spec);
+        let mut spliced = make_design(&ds, &y, &spec);
+        crate::regressors::splice(&mut spliced, &[], &[]);
+
+        assert!(
+            plain.k == spliced.k && plain.k > 0,
+            "{csv}: k must survive the empty splice unchanged and be non-zero, got {} vs {}",
+            plain.k,
+            spliced.k
+        );
+        assert!(
+            plain.cols.len() == spliced.cols.len(),
+            "{csv}: the column COUNT changed across an empty splice, {} vs {}",
+            plain.cols.len(),
+            spliced.cols.len()
+        );
+        for (i, (want, got)) in plain.cols.iter().zip(&spliced.cols).enumerate() {
+            assert!(
+                want.name == got.name
+                    && want.component == got.component
+                    && want.mode == got.mode
+                    && want.prior_scale.to_bits() == got.prior_scale.to_bits()
+                    && want.holiday == got.holiday,
+                "{csv}: column {i} changed across an empty splice: {want:?} vs {got:?}"
+            );
+        }
+        bitwise_equal(csv, "design.x", &plain.x, &spliced.x);
+        bitwise_equal(csv, "design.s_a", &plain.s_a, &spliced.s_a);
+        bitwise_equal(csv, "design.s_m", &plain.s_m, &spliced.s_m);
+        bitwise_equal(
+            csv,
+            "design.prior_scales",
+            &plain.prior_scales,
+            &spliced.prior_scales,
+        );
+
+        // ---- THE FORECAST: fit ONCE, the same Params and the same seed into both ----
+        let (params, _info) = crate::fit::fit_prophet(&plain, 8);
+        let before = params_fingerprint(&params);
+        let none = crate::regressors::RegressorChannel::NONE;
+        // Both seeds read from the same binding and are compared below, so a band
+        // difference can only come from the design and never from the RNG.
+        let seeds = [SEED, SEED];
+        let unspliced = predict(&plain, &params, &fut, seeds[0], &none)
+            .unwrap_or_else(|e| panic!("{csv}: predict on the unspliced design: {e}"));
+        let after_splice = predict(&spliced, &params, &fut, seeds[1], &none)
+            .unwrap_or_else(|e| panic!("{csv}: predict on the spliced design: {e}"));
+        assert!(
+            seeds[0] == seeds[1],
+            "{csv}: both predict calls must receive the SAME seed"
+        );
+        assert!(
+            params_fingerprint(&params) == before,
+            "{csv}: the fitted parameters changed between the two predict calls; the only \
+             input allowed to differ is the design"
+        );
+
+        assert!(
+            unspliced.yhat.len() == horizon,
+            "{csv}: expected {horizon} predicted rows, got {}",
+            unspliced.yhat.len()
+        );
+        bitwise_equal(csv, "yhat", &unspliced.yhat, &after_splice.yhat);
+        bitwise_equal(csv, "trend", &unspliced.trend, &after_splice.trend);
+        bitwise_equal(
+            csv,
+            "yhat_lower",
+            &unspliced.yhat_lower,
+            &after_splice.yhat_lower,
+        );
+        bitwise_equal(
+            csv,
+            "yhat_upper",
+            &unspliced.yhat_upper,
+            &after_splice.yhat_upper,
+        );
+        // Non-vacuity for the band half: comparing two degenerate zero-width bands would
+        // pass without the band path ever having produced anything.
+        assert!(
+            unspliced
+                .yhat_upper
+                .iter()
+                .zip(&unspliced.yhat_lower)
+                .any(|(hi, lo)| hi > lo),
+            "{csv}: the uncertainty band has zero width everywhere, so comparing it \
+             proves nothing about the band path"
+        );
+
+        let mut shared = 0usize;
+        for (name, left) in &unspliced.components {
+            let Some((_, right)) = after_splice.components.iter().find(|(n, _)| n == name) else {
+                panic!("{csv}: component {name} exists without the splice and is missing after it")
+            };
+            bitwise_equal(csv, name, left, right);
+            shared += 1;
+        }
+        assert!(
+            unspliced.components.len() == after_splice.components.len(),
+            "{csv}: the component COUNT changed across an empty splice, {} vs {}",
+            unspliced.components.len(),
+            after_splice.components.len()
+        );
+        assert!(
+            shared >= 3,
+            "{csv}: only {shared} components were compared; the spike measured 3 shared \
+             components and a mechanism test that compared none would report green"
+        );
+
+        series_compared += 1;
+    }
+
+    assert!(
+        series_compared == SERIES.len() && series_compared == 3,
+        "part C compared {series_compared} series; it must compare all 3 (SERIES.len() = {})",
+        SERIES.len()
+    );
+}
+
 /// Parts A and B are unconditional — enforced against this module's own source.
 ///
 /// The cross-commit baseline comparison is arch-keyed for a real libm reason, so a
