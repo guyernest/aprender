@@ -913,6 +913,7 @@ fn measure_event_cal(p: EventCalPoint) -> (f64, u64, u64) {
         newer_w: 2.0,
         seed: 42,
         event_design: if p.columns == 0 { None } else { Some(design) },
+        regressors: None,
     };
     let (_m, log) = crate::np::train(&d, &cfg, false);
     assert!(

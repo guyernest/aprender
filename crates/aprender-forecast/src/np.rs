@@ -20,6 +20,7 @@
 
 use crate::dates::days_from_civil;
 use crate::events::{EventBlock, EventDesign};
+use crate::regressors::{NpRegressorRows, NpRegressors, RegressorBlock, Standardized};
 use aprender::autograd::{clear_graph, graph_tape_len, no_grad, Tensor};
 use aprender::nn::optim::{AdamW, Optimizer};
 use aprender::nn::{Linear, Module};
@@ -473,10 +474,12 @@ pub fn training_samples(d: &NpData, n_lags: usize) -> (Vec<usize>, Vec<usize>) {
     if n_lags == 0 {
         let mut samples = Vec::new();
         let mut caller_rows = Vec::new();
+        let mut observed_so_far = 0usize;
         for i in 0..d.n_train_grid {
             if d.grid_observed[i] {
                 samples.push(i);
-                caller_rows.push(i);
+                caller_rows.push(observed_so_far);
+                observed_so_far += 1;
             }
         }
         (samples, caller_rows)
@@ -628,6 +631,21 @@ pub struct TrainConfig {
     /// Declared LAST so the exhaustive struct literals that build it stay in declaration
     /// order (`clippy::inconsistent_struct_constructor` is a workspace `warn`).
     pub event_design: Option<EventDesign>,
+    /// The numeric-regressor channel, or `None` for a regressor-free fit (D-22, D-27).
+    ///
+    /// `Some(channel)` attaches an additive [`RegressorBlock`] BESIDE [`NpModel`] and the
+    /// event block — a SECOND `.add()` on the forward, its parameters extended into the
+    /// same single `AdamW` vector. `None` and a zero-width channel are the same fit bit for
+    /// bit: no block is built, nothing is added, and both recorded neuralprophet invariance
+    /// signatures still reproduce.
+    ///
+    /// The channel holds the CALLER's arrays at caller length. There is no grid-shaped
+    /// regressor array anywhere in this file, which is the whole of D-27 — see the
+    /// [`crate::regressors`] module section for why the spike prototype's `reg_grid` is
+    /// deliberately not ported.
+    ///
+    /// Declared after `event_design` for the same declaration-order reason.
+    pub regressors: Option<NpRegressors>,
 }
 
 pub struct TrainLog {
@@ -661,6 +679,20 @@ pub struct TrainLog {
     /// helpers need the block (and the design) to add an event contribution for the rows
     /// they predict, and the caller already holds the log.
     pub events: Option<EventBlock>,
+    /// The trained numeric-regressor block, or `None` when regressors were off.
+    ///
+    /// Rides in the LOG beside [`TrainLog::events`], for the same reason and by the same
+    /// rule: `train`'s return arity is unchanged and the caller already holds the log.
+    pub regressors: Option<RegressorBlock>,
+    /// The standardisation constants the fit ACTUALLY used, in request order.
+    ///
+    /// They travel WITH the weights because a future row's contribution needs the SAME
+    /// `mu`/`std` the training rows used. Keeping them here means the predict paths and the
+    /// tests read them from ONE place rather than re-deriving them from the caller's array,
+    /// which is how two copies of one constant drift apart.
+    pub regressor_specs: Vec<Standardized>,
+    /// The number of numeric-regressor columns this fit trained on; `0` when they were off.
+    pub n_regressor_cols: usize,
 }
 
 impl TrainLog {
@@ -734,6 +766,14 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     let design = cfg.event_design.as_ref().filter(|g| g.dim() > 0);
     let ed = design.map_or(0, EventDesign::dim);
     let mut block = design.map(|_| EventBlock::new(ed, &mut rng));
+    // The regressor block is drawn from the SAME rng, AFTER the event block, for the same
+    // reason the event block is drawn after the model: a regressor-free run at the same seed
+    // then initialises the model and the event block identically, which is what keeps both
+    // recorded invariance signatures reproducing and makes an ON/OFF comparison a comparison
+    // of the block.
+    let reg_channel = cfg.regressors.as_ref().filter(|r| r.dim() > 0);
+    let rd = reg_channel.map_or(0, NpRegressors::dim);
+    let mut reg_block = reg_channel.map(|_| RegressorBlock::new(rd, &mut rng));
     let n_grid = d.n_train_grid;
     let y_norm: Vec<f32> = d.grid_y[..n_grid].iter().map(|v| d.norm(*v)).collect();
     let rows = rows_for(d, &d.grid_days[..n_grid], &y_norm, cfg.newer_w);
@@ -743,12 +783,19 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     let l = cfg.n_lags;
     // NP trains the lag-free model on the OBSERVED rows only (no imputation needed);
     // with lags it trains on the imputed daily grid so every window is complete.
-    let samples: Vec<usize> = if l == 0 {
-        (0..n_grid).filter(|&i| d.grid_observed[i]).collect()
-    } else {
-        (l..n_grid).collect()
-    };
+    //
+    // `caller_rows` is the parallel list D-27 turns on: the CALLER's own row index for each
+    // sample. It is built by the same function and in the same pass as `samples`, so the
+    // two cannot drift; see [`training_samples`].
+    let (samples, caller_rows) = training_samples(d, l);
     let n = samples.len();
+    // The standardised regressor rows, `[n, rd]` — one row per SAMPLE, indexed by the
+    // CALLER's row. Not `[n_grid, rd]`: building a grid-shaped array is what would create
+    // an imputed-day slot with an undefined value in it, and D-27 removes the slot rather
+    // than choosing a fill rule for it (spike 014 measured two defensible rules 10.48 apart
+    // on a series of scale 35.32, with a garbage probe flipping the sign of both
+    // coefficients).
+    let reg_rows: Vec<f32> = reg_channel.map_or_else(Vec::new, |r| r.history_rows(&caller_rows));
     let batch = cfg.batch.unwrap_or_else(|| auto_batch(n));
     let epochs = cfg.epochs.unwrap_or_else(|| auto_epochs(n));
     let n_batches = n.div_ceil(batch);
@@ -770,6 +817,15 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
         if let Some(bl) = block.as_mut() {
             params.extend(bl.parameters_mut());
         }
+        // The regressor block's parameters go into the SAME vector, beside the model's and
+        // the event block's. A block built and forwarded but never extended into this
+        // vector still contributes to the forward pass — its weights simply never move —
+        // and the failure then surfaces as "the driver had no effect", which names the
+        // symptom rather than the cause. `the_regressor_weights_move_under_the_optimiser`
+        // is what makes the registration observable.
+        if let Some(bl) = reg_block.as_mut() {
+            params.extend(bl.parameters_mut());
+        }
         let handed_over = params.len();
         (
             AdamW::new(params, cfg.max_lr as f32).weight_decay(cfg.weight_decay),
@@ -780,7 +836,9 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
         epochs,
         batch,
         n_samples: n,
-        n_params: model.n_params() + block.as_ref().map_or(0, EventBlock::n_params),
+        n_params: model.n_params()
+            + block.as_ref().map_or(0, EventBlock::n_params)
+            + reg_block.as_ref().map_or(0, RegressorBlock::n_params),
         epoch_loss: Vec::new(),
         seconds: 0.0,
         tape_len_per_step: 0,
@@ -789,9 +847,22 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
         n_event_cols: ed,
         n_opt_tensors,
         events: None,
+        regressors: None,
+        regressor_specs: reg_channel.map_or_else(Vec::new, |r| r.specs().to_vec()),
+        n_regressor_cols: rd,
     };
     let t0 = Instant::now();
-    let mut order = samples.clone();
+    // Shuffled over SAMPLE POSITIONS rather than over grid indices, so one chunk element
+    // addresses BOTH the grid-length feature rows (through `samples[pos]`) and the
+    // SAMPLE-length regressor rows (through `pos` itself) with no second lookup table and
+    // no grid-shaped regressor array.
+    //
+    // The fit is unchanged BIT FOR BIT. `rng.shuffle` draws a permutation of `n` whatever
+    // the vector holds, so the grid-index sequence is the same either way: it was
+    // `order[k] = samples[perm[k]]` and it is now `samples[order[k]] = samples[perm[k]]`.
+    // Both recorded neuralprophet invariance signatures reproduce, which is the evidence
+    // rather than this paragraph.
+    let mut order: Vec<usize> = (0..n).collect();
     let mut step = 0usize;
     for epoch in 0..epochs {
         rng.shuffle(&mut order);
@@ -800,14 +871,19 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
             let p = step as f64 / total_steps as f64;
             opt.set_lr(one_cycle_lr(p, cfg.max_lr) as f32);
             let b = chunk.len();
-            let xt = Tensor::from_vec(gather(&rows.tr, rows.td, chunk), &[b, rows.td]);
-            let xs = Tensor::from_vec(gather(&rows.se, rows.sd, chunk), &[b, rows.sd]);
-            let yt = Tensor::from_vec(chunk.iter().map(|&i| rows.y[i]).collect(), &[b, 1]);
-            let wt = Tensor::from_vec(chunk.iter().map(|&i| rows.w[i]).collect(), &[b, 1]);
+            // The GRID rows this chunk names. Everything keyed on the daily grid — the
+            // trend and seasonality features, the target, the sample weight, the lags and
+            // the event indicators — reads through here; only the regressor rows read
+            // through `chunk` directly, because they are the CALLER's rows (D-27).
+            let grid: Vec<usize> = chunk.iter().map(|&pos| samples[pos]).collect();
+            let xt = Tensor::from_vec(gather(&rows.tr, rows.td, &grid), &[b, rows.td]);
+            let xs = Tensor::from_vec(gather(&rows.se, rows.sd, &grid), &[b, rows.sd]);
+            let yt = Tensor::from_vec(grid.iter().map(|&i| rows.y[i]).collect(), &[b, 1]);
+            let wt = Tensor::from_vec(grid.iter().map(|&i| rows.w[i]).collect(), &[b, 1]);
             let mut pred = if l == 0 {
                 model.forward(&xt, &xs, None)
             } else {
-                let lag_idx: Vec<usize> = chunk.iter().flat_map(|&i| i - l..i).collect();
+                let lag_idx: Vec<usize> = grid.iter().flat_map(|&i| i - l..i).collect();
                 let raw = Tensor::from_vec(lag_idx.iter().map(|&j| rows.y[j]).collect(), &[b, l]);
                 let se_lag =
                     Tensor::from_vec(gather(&rows.se, rows.sd, &lag_idx), &[b * l, rows.sd]);
@@ -823,8 +899,20 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
             // that matters. Subtracting it in one place and not the other would make the
             // forecast disagree with the fit.
             if let Some(bl) = block.as_ref() {
-                let xe = Tensor::from_vec(gather(&ev_rows, ed, chunk), &[b, ed]);
+                let xe = Tensor::from_vec(gather(&ev_rows, ed, &grid), &[b, ed]);
                 pred = pred.add(&bl.forward(&xe));
+            }
+            // The regressor term: a SECOND, SEPARATE `.add()`. Not folded into the event
+            // block's columns — the two have different standardisation (0/1 indicators
+            // against ddof-1 standardised continuous columns) and different refusal
+            // surfaces, and one shared `Linear` would make the event recovery bar and the
+            // regressor behaviour inseparable.
+            //
+            // Gathered by `chunk` — the SAMPLE position — not by `grid`. That is the whole
+            // of D-27 at the one line where it could be got wrong.
+            if let Some(bl) = reg_block.as_ref() {
+                let xr = Tensor::from_vec(gather(&reg_rows, rd, chunk), &[b, rd]);
+                pred = pred.add(&bl.forward(&xr));
             }
             let loss = weighted_huber(&pred, &yt, &wt, cfg.huber_beta);
             acc += f64::from(loss.item()) * b as f64;
@@ -834,6 +922,9 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
             }
             let mut params = model.parameters_mut();
             if let Some(bl) = block.as_mut() {
+                params.extend(bl.parameters_mut());
+            }
+            if let Some(bl) = reg_block.as_mut() {
                 params.extend(bl.parameters_mut());
             }
             opt.step_with_params(&mut params);
@@ -853,6 +944,7 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     log.seconds = t0.elapsed().as_secs_f64();
     log.steps = step;
     log.events = block;
+    log.regressors = reg_block;
     (model, log)
 }
 
@@ -879,20 +971,57 @@ fn add_events(p: Tensor, ev: EventChannel<'_>, days: &[i64]) -> Tensor {
     }
 }
 
+/// The numeric-regressor channel the predict helpers take: the standardised rows KEYED BY
+/// DAY and the trained block.
+///
+/// Keyed by day rather than by index because the three helpers address rows three different
+/// ways — arbitrary days, grid indices, and a recursive roll-forward — and a day is the one
+/// identifier all three actually hold. The rows carry the caller's `ds.len() + horizon`
+/// values standardised with the constants the FIT used, so a future row's contribution uses
+/// the same `mu`/`std` the training rows did.
+pub type NpRegChannel<'a> = Option<(&'a NpRegressorRows, &'a RegressorBlock)>;
+
+/// Add the numeric-regressor contribution for `days` to a `[n, 1]` prediction.
+///
+/// A zero-width channel is treated as absent for the reason [`add_events`] treats an empty
+/// design as absent: a `[n, 0]` `Tensor` trips trueno's empty-transpose contract deep inside
+/// `Linear::forward`, which is a confusing place to learn that a caller passed nothing.
+fn add_regressors(p: Tensor, rc: NpRegChannel<'_>, days: &[i64]) -> Tensor {
+    match rc {
+        Some((rows, b)) if rows.dim() > 0 => {
+            let xr = Tensor::from_vec(rows.block_rows(days), &[days.len(), rows.dim()]);
+            p.add(&b.forward(&xr))
+        }
+        _ => p,
+    }
+}
+
 /// Trend + seasonality prediction (original scale) for arbitrary days, plus the additive
 /// event contribution when an [`EventChannel`] is supplied.
-pub fn predict_ts(d: &NpData, m: &NpModel, days: &[i64], ev: EventChannel<'_>) -> Vec<f64> {
+pub fn predict_ts(
+    d: &NpData,
+    m: &NpModel,
+    days: &[i64],
+    ev: EventChannel<'_>,
+    rc: NpRegChannel<'_>,
+) -> Vec<f64> {
     let rows = rows_for(d, days, &vec![0.0; days.len()], DEFAULT_END_W);
     let xt = Tensor::from_vec(rows.tr.clone(), &[days.len(), rows.td]);
     let xs = Tensor::from_vec(rows.se.clone(), &[days.len(), rows.sd]);
-    let out = no_grad(|| add_events(m.forward(&xt, &xs, None), ev, days));
+    let out = no_grad(|| add_regressors(add_events(m.forward(&xt, &xs, None), ev, days), rc, days));
     clear_graph();
     out.data().iter().map(|v| d.denorm(*v)).collect()
 }
 
 /// One-step-ahead AR prediction (original scale) for grid indices `idx` using true lags,
 /// plus the additive event contribution for the predicted rows.
-pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize], ev: EventChannel<'_>) -> Vec<f64> {
+pub fn predict_ar_1step(
+    d: &NpData,
+    m: &NpModel,
+    idx: &[usize],
+    ev: EventChannel<'_>,
+    rc: NpRegChannel<'_>,
+) -> Vec<f64> {
     let l = m.n_lags;
     // The days `idx` names, for the event indicator rows. Total lookup, because `idx` is
     // caller-built and `grid_days` is a different field (IN-02).
@@ -911,9 +1040,13 @@ pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize], ev: EventChannel
     let tr_feats = Tensor::from_vec(gather(&rows.tr, rows.td, &lag_idx), &[b * l, rows.td]);
     let out = no_grad(|| {
         let tr_lag = Tensor::from_vec(m.trend.forward(&tr_feats).data().to_vec(), &[b, l]);
-        add_events(
-            m.forward(&xt, &xs, Some((&raw, &se_lag, &tr_lag))),
-            ev,
+        add_regressors(
+            add_events(
+                m.forward(&xt, &xs, Some((&raw, &se_lag, &tr_lag))),
+                ev,
+                &days,
+            ),
+            rc,
             &days,
         )
     });
@@ -941,6 +1074,7 @@ pub fn predict_ar_recursive(
     m: &NpModel,
     days: &[i64],
     ev: EventChannel<'_>,
+    rc: NpRegChannel<'_>,
 ) -> Vec<f64> {
     let l = m.n_lags;
     let mut hist: Vec<f32> = d.grid_y.iter().map(|v| d.norm(*v)).collect();
@@ -965,9 +1099,16 @@ pub fn predict_ar_recursive(
             let tr_feats = Tensor::from_vec(tr_lag, &[l, d.trend_dim()]);
             let v = no_grad(|| {
                 let tl = Tensor::from_vec(m.trend.forward(&tr_feats).data().to_vec(), &[1, l]);
-                add_events(
-                    m.forward(&xt, &xs, Some((&raw, &se_l, &tl))),
-                    ev,
+                // The regressor term is added BEFORE the value is pushed into the recursive
+                // history, exactly as the event term is, so a driver on a future day moves
+                // not only that day's forecast but every lagged day after it.
+                add_regressors(
+                    add_events(
+                        m.forward(&xt, &xs, Some((&raw, &se_l, &tl))),
+                        ev,
+                        std::slice::from_ref(&next),
+                    ),
+                    rc,
                     std::slice::from_ref(&next),
                 )
                 .data()[0]
@@ -1507,6 +1648,7 @@ mod parity {
                 newer_w: 2.0,
                 seed: 42,
                 event_design: None,
+                regressors: None,
             };
             let (m, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -1514,7 +1656,7 @@ mod parity {
                 continue;
             }
             if best.as_ref().is_none_or(|b| fl < b.0) {
-                best = Some((fl, lr, predict_ts(&d, &m, test_days, None)));
+                best = Some((fl, lr, predict_ts(&d, &m, test_days, None, None)));
             }
         }
         let (train_loss, selected_lr, yhat) =
@@ -1568,6 +1710,7 @@ mod parity {
                 newer_w: 2.0,
                 seed: 42,
                 event_design: None,
+                regressors: None,
             };
             let (m, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -1575,7 +1718,7 @@ mod parity {
                 continue;
             }
             if best.as_ref().is_none_or(|b| fl < b.0) {
-                best = Some((fl, lr, predict_ar_1step(&d, &m, &test_idx, None)));
+                best = Some((fl, lr, predict_ar_1step(&d, &m, &test_idx, None, None)));
             }
         }
         let (train_loss, selected_lr, yhat) =
@@ -1697,6 +1840,7 @@ mod parity {
             newer_w: 2.0,
             seed: 42,
             event_design: None,
+            regressors: None,
         };
         let (m, log) = train(&d, &cfg, false);
         assert!(log.steps > 0, "the fit must have taken at least one step");
@@ -1707,7 +1851,7 @@ mod parity {
         );
         // The prediction helpers must clear it too: they build a no_grad forward that still
         // allocates tape entries.
-        let _ = predict_ts(&d, &m, &ds[..5], None);
+        let _ = predict_ts(&d, &m, &ds[..5], None, None);
         assert_eq!(
             graph_tape_len(),
             0,
@@ -1825,6 +1969,7 @@ mod parity {
                 newer_w: 2.0,
                 seed: 42,
                 event_design: None,
+                regressors: None,
             };
             let (_, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);

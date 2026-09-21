@@ -1063,6 +1063,24 @@ impl NpRegressors {
                     .into(),
             ));
         }
+        // ---- THE LAGGED PATH'S ALIGNMENT INVARIANT, IN RELEASE ----
+        //
+        // With lags the training sample list is every grid row from `n_lags` onward,
+        // imputed rows included, so `training_samples` hands back `i` as the caller row.
+        // That is total ONLY when the grid rows and the caller rows coincide one for one —
+        // which D-26 guarantees by REFUSING a regressor on a gappy series at non-zero lags.
+        // If that predicate ever regressed, the release door would index a shorter caller
+        // array. The message names BOTH lengths so the breach is diagnosable from a log
+        // line rather than from a stack trace.
+        if n_lags > 0 && !specs.is_empty() && d.n_train_grid != n_caller {
+            return Err(ForecastError::Internal(format!(
+                "the lagged regressor path requires the imputed training grid to equal the \
+                 caller's history rows one for one, but the grid carries {} rows and the \
+                 caller sent {n_caller}; a regressor on a gappy series at n_lags > 0 is \
+                 refused at the door (D-26), so reaching here means that predicate regressed",
+                d.n_train_grid
+            )));
+        }
         Ok(NpRegressors {
             specs,
             history,
@@ -1621,6 +1639,72 @@ mod tests {
                 "an unstandardised binary cell must pass through unchanged at row {i}"
             );
         }
+    }
+
+    /// The block is REGISTERED with the one `AdamW`, not merely built and forwarded.
+    ///
+    /// A block whose parameters are never extended into the optimiser's vector still
+    /// contributes to the forward pass — its weights simply never move — and the failure
+    /// then surfaces as "the driver had no effect", which names the symptom rather than the
+    /// cause. The initial weights are reproduced from the SAME rng sequence the trainer
+    /// draws from (a fresh `Rng(seed)`, an `NpModel` to consume the model's draws, then the
+    /// block), so this compares the trained weights against their own initialisation rather
+    /// than against an arbitrary constant.
+    #[test]
+    fn the_regressor_weights_move_under_the_optimiser() {
+        let (days, y) = contiguous_daily(120);
+        let d = crate::np::NpData::new(&days, &y, days.len(), 10, 0.8);
+        let hist = drive(days.len(), 0.0);
+        let regs = super::NpRegressors::new(
+            &d,
+            0,
+            vec![super::standardize_one(&spec_auto("price"), &hist)],
+            vec![hist],
+            vec![drive(7, 5.0)],
+        )
+        .expect("a lag-free channel is always aligned");
+        let dim = regs.dim();
+        let cfg = crate::np::TrainConfig {
+            n_lags: 0,
+            ar_layers: vec![],
+            max_lr: 0.03,
+            epochs: Some(1),
+            batch: Some(64),
+            weight_decay: 1e-3,
+            huber_beta: 0.3,
+            newer_w: 2.0,
+            seed: 42,
+            event_design: None,
+            regressors: Some(regs),
+        };
+        let (_m, log) = crate::np::train(&d, &cfg, false);
+        assert_eq!(
+            log.n_regressor_cols, dim,
+            "the log must record the width the fit actually trained on"
+        );
+
+        let mut rng = crate::np::Rng::new(42);
+        let _model = crate::np::NpModel::new(&d, 0, &[], &mut rng);
+        let before = super::RegressorBlock::new(dim, &mut rng).weights();
+        let after = log
+            .regressors
+            .as_ref()
+            .map(super::RegressorBlock::weights)
+            .unwrap_or_default();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "the block width must not change across training"
+        );
+        assert!(
+            before
+                .iter()
+                .zip(&after)
+                .any(|(x, y)| x.to_bits() != y.to_bits()),
+            "not one regressor weight moved across one optimiser step: the block is built \
+             and forwarded but its parameters were never extended into the AdamW vector. \
+             before {before:?} after {after:?}"
+        );
     }
 
     /// SC5: the grid-equals-caller-rows invariant on the LAGGED path is a RELEASE-mode

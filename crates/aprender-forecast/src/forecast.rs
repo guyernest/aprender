@@ -1042,6 +1042,7 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     // the sweep builds one config per rate. The clone is the columns and
                     // the membership sets, both bounded by the hoisted ceilings above.
                     event_design: event_design.clone(),
+                    regressors: None,
                 };
                 let (m, log) = np::train(&d, &cfg, false);
                 let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -1066,22 +1067,22 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             // `predict_trend` is branch-independent; only the yhat path differs.
             let trend = np::predict_trend(&d, &m, &fut);
             let yhat = if n_lags == 0 {
-                np::predict_ts(&d, &m, &fut, ev)
+                np::predict_ts(&d, &m, &fut, ev, None)
             } else {
-                np::predict_ar_recursive(&d, &m, &fut, ev)
+                np::predict_ar_recursive(&d, &m, &fut, ev, None)
             };
             // Residual-based band. NeuralProphet itself would use quantile regression; that
             // was NOT spiked (CONTEXT deferred), and the diagnostics say so rather than
             // implying a coverage guarantee this band does not have.
             let fitted = if n_lags == 0 {
-                np::predict_ts(&d, &m, &ds, ev)
+                np::predict_ts(&d, &m, &ds, ev, None)
             } else {
                 let idx: Vec<usize> = ds
                     .iter()
                     .map(|day| (day - d.t0) as usize)
                     .filter(|i| *i >= n_lags)
                     .collect();
-                let pr = np::predict_ar_1step(&d, &m, &idx, ev);
+                let pr = np::predict_ar_1step(&d, &m, &idx, ev, None);
                 let mut out = vec![f64::NAN; ds.len()];
                 let mut k = 0;
                 for (i, day) in ds.iter().enumerate() {
