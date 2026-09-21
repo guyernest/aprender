@@ -551,12 +551,12 @@ re-deriving the shape.
      touched contract, the forecast server e2e tests, and a tag cut that builds `--locked`.
 
 **Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
-**Plans:** 8 plans
+**Plans:** 1/8 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 06.1-01-PLAN.md — TRACER: external regressors end-to-end through the prophet door at 24-column Python Prophet 1.4.0 parity, with the pre-change no-argument invariance signature and baseline committed first (wave 1)
+- [x] 06.1-01-PLAN.md — TRACER: external regressors end-to-end through the prophet door at 24-column Python Prophet 1.4.0 parity, with the pre-change no-argument invariance signature and baseline committed first (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 

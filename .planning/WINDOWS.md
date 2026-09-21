@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 16
+open_count: 18
 waived_count: 2
 fixed_count: 0
-total_count: 18
-last_updated: 2026-09-12T01:12:33.076Z
+total_count: 20
+last_updated: 2026-09-21T14:23:10.777Z
 ---
 
 # Broken Windows Ledger
@@ -33,6 +33,8 @@ last_updated: 2026-09-12T01:12:33.076Z
 | 16 | 05 | unmet-truth | crates/aprender-train/src/train/setfit/bench_row.rs | 37 | Module doc claims canonical bytes are key-sorted (no preserve_order). Measured false: file-order reproduces both committed digests, sorted reproduces neither. | open |  | 2026-09-11T22:23:42.862Z |  |
 | 17 | 05 | deviation | crates/aprender-train/src/train/setfit/bench_row.rs | 37 | The bench row seal is build-graph dependent: serde_json/preserve_order (via pmcp) makes to_canonical_bytes emit declaration order in apr-cli and key-sorted in aprender-train, so the same committed row verifies in one binary and is refused in the other (D-ITEM-05-17-A) | open |  | 2026-09-12T01:12:32.984Z |  |
 | 18 | 05 | deviation | crates/aprender-test-lib/src/brick/pipeline.rs | 1965 | uuid_v4() is a timestamp, not a UUID; test_uuid_v4_generates_unique_ids fails 5/5 on this host and its verdict depends on clock resolution (D-ITEM-05-17-B) | open |  | 2026-09-12T01:12:33.076Z |  |
+| 19 | 06.1 | deviation | contracts/forecast-tool-boundary-v1.yaml |  | regressor_prior_scale_min is a representability bound, not the usability bound its rationale claimed; fit collapses below ~1e-8 | open |  | 2026-09-21T14:23:10.699Z |  |
+| 20 | 06.1 | unrun-verify | crates/aprender-image/src/lib.rs |  | cargo fmt --all --check and full clippy -D warnings are red on the committed tree (pre-existing); phase used rustfmt per-file and clippy --no-deps instead | open |  | 2026-09-21T14:23:10.777Z |  |
 
 ````json
 [
@@ -250,6 +252,30 @@ last_updated: 2026-09-12T01:12:33.076Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-12T01:12:33.076Z",
+    "resolved_at": null
+  },
+  {
+    "id": 19,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "contracts/forecast-tool-boundary-v1.yaml",
+    "line": null,
+    "description": "regressor_prior_scale_min is a representability bound, not the usability bound its rationale claimed; fit collapses below ~1e-8",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T14:23:10.699Z",
+    "resolved_at": null
+  },
+  {
+    "id": 20,
+    "kind": "unrun-verify",
+    "phase": "06.1",
+    "file": "crates/aprender-image/src/lib.rs",
+    "line": null,
+    "description": "cargo fmt --all --check and full clippy -D warnings are red on the committed tree (pre-existing); phase used rustfmt per-file and clippy --no-deps instead",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T14:23:10.777Z",
     "resolved_at": null
   }
 ]

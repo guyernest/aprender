@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: "06.1"
-current_phase_name: "Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)"
+current_phase_name: "Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds"
 status: executing
-stopped_at: Phase 06.1 context gathered
-last_updated: "2026-09-21T04:22:59.086Z"
-last_activity: 2026-09-11
-last_activity_desc: Phase 05 replanned for D-19 — 05-11/12/13 rewritten, 0 blockers
-state_head: c6a2bdfd9363246901382a75683290887658e11d
+stopped_at: Completed 06.1-01-PLAN.md
+last_updated: "2026-09-21T14:23:10.606Z"
+last_activity: 2026-09-20
+last_activity_desc: Phase 06.1 execution started
+state_head: a40276c076bf7cd1f8d359959321430c57026790
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 92
-  completed_plans: 84
+  completed_plans: 85
 milestone_name: milestone
 ---
 
@@ -24,12 +24,12 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-07)
 
 **Core value:** A small labeled dataset can produce an accurate, fast, reproducible classifier that trains and runs entirely through Aprender's native Rust and APR lifecycle.
-**Current focus:** Phase 05 — Benchmark and Claims Gate
+**Current focus:** Phase 06.1 — Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds
 
 ## Current Position
 
-Phase: 06.1 (Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)) — READY TO EXECUTE
-Plan: 4 of 17
+Phase: 06.1 (Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds) — EXECUTING
+Plan: 2 of 8
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-11 — Phase 05 execution started
+Last activity: 2026-09-20 — Phase 06.1 execution started
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -211,6 +211,7 @@ pending F-10 in Phase 5.)
 | Phase 05 P15 | 113 min | 3 tasks | 6 files |
 | Phase 05 P16 | 61 min | 3 tasks | 6 files |
 | Phase 05 P17 | 71 min | 3 tasks | 11 files |
+| Phase 06.1 P01 | 95 | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -362,6 +363,9 @@ Recent decisions affecting current work:
 - [Phase 05]: The acceptance band for the closed-form quality cross-check is EXACT IEEE-754 bit equality, chosen from a measurement taken first: 40/40 bit-identical on every field over the committed rows, max deviation 0e0. No epsilon was needed and none was fitted. — Exactness is structural rather than lucky: the recomputation expands the counts and routes to the SAME integer-sourced surfaces assemble_quality_block used, so agreement is bit-identical by construction and no tolerance can be justified.
 - [Phase 05]: Contract 4.0.0: pv diff suggested MINOR, the suggestion was recorded verbatim and NOT taken. — The acceptance set narrows again - the exact tree verifier spot-check D built verified at 3.0.0 and is refused now. pv scores the shape of the edit; a strengthened guarantee is a breaking change to every producer relying on the old acceptance, which is the reasoning the 3.0.0 metadata block itself records.
 - [Phase 05]: The report residual, the gate module header and the contract residual_risk are ONE statement written down three times, and all three were corrected together. — Three attacks the sentence conceded are now refused (path escape, pairing key, quality metric). An understated disclosure teaches a reader to trust real evidence less than it warrants, which is over-claiming with the sign flipped.
+- [Phase 06.1]: RegressorArg wire shape frozen as proposed (name, values, mode, prior_scale, standardize); map-keyed rejected because serde_json::Map is key-sorted and would break the oracle insertion-ordered column tail
+- [Phase 06.1]: Regressor columns identified by the structural trailing index range base_k..k, never by name membership; Column.holiday keeps its two-valued discriminator (add-alongside)
+- [Phase 06.1]: regressor_prior_scale_min kept at 1e-153 as planned, but MEASURED to be a representability bound not a usability bound - the fit runs zero iterations and silently zeroes the regressor for any prior_scale below ~1e-8; no NaN ever appears
 
 ### Pending Todos
 
@@ -452,6 +456,7 @@ Recent decisions affecting current work:
 - bench_row.rs:37-43 claims canonical bytes are key-SORTED because no workspace crate enables preserve_order. MEASURED false: sorting reproduces neither the row nor the manifest digest, file order reproduces both. Not a correctness defect; the stated reason and the field-reordering property it claims are wrong. For 05-16 or 05-17, which touch that module.
 - FINDING for 05-17: apr setfit bench verify-cell's printed 'scope:' prose (apr-cli/src/commands/setfit_bench.rs:2931) and bench report's 'verified:' header no longer enumerate the selection binding both doors now perform. Under-claiming, not a false attestation; assigned to 05-17 by threat T-05-16-05.
 - D-ITEM-05-17-A: the bench row seal is BUILD-GRAPH DEPENDENT. serde_json/preserve_order (via pmcp v2.19.3) is in apr-cli graph and absent from aprender-train, so the same committed row verifies under apr and is refused as row_digest_mismatch under cargo test -p aprender-train. A cargo feature-unification change with no code change can flip the whole committed evidence set. Needs its own plan: the fix re-seals 40 rows, 40 selection manifests and the run manifest.
+- DECISION NEEDED: regressor_prior_scale_min (1e-153) sits ~145 decades inside the region where the Prophet fit collapses to zero L-BFGS iterations with a silently-zeroed regressor. Measured across 18 configurations and 3 series shapes; the plan's stated NaN mechanism is refuted (no response field is ever non-finite). Raise to a measured usability floor (~1e-7) in plan 06.1-03, or accept knowingly. See 06.1-01-SUMMARY.md deviation 5.
 
 ### Roadmap Evolution
 
@@ -469,9 +474,9 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-21T02:51:50.605Z
-Stopped at: Phase 06.1 context gathered
-Resume file: .planning/phases/06.1-forecast-exogenous-inputs-prophet-regressors-neuralprophet-e/06.1-CONTEXT.md
+Last session: 2026-09-21T14:22:51.817Z
+Stopped at: Completed 06.1-01-PLAN.md
+Resume file: None
 
 ## Accumulated Context
 
