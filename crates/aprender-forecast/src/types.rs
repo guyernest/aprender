@@ -208,14 +208,86 @@ pub const REGRESSOR_PRIOR_SCALE_MIN: f64 = 1.0e-153;
 /// square is ~`1e300` — about 1.8e8 below `f64::MAX`.
 pub const REGRESSOR_PRIOR_SCALE_MAX: f64 = 1.0e150;
 
-/// INTERIM ceiling on the number of regressors in one request.
+/// Hard upper bound on the NUMBER of `RegressorArg` entries in one request.
 ///
-/// Deliberately temporary and deliberately a literal: plan 06.1-03 replaces it with the
-/// measured `fit_max_regressors` and `fit_max_regressor_design_cost`, and that plan's
-/// verify asserts this literal is gone. Without it, wave 1 accepts an unbounded array of
-/// `(points + horizon)`-long arrays and a small request can drive L-BFGS out of memory
-/// (T-06.1-01).
-pub const MAX_REGRESSORS_INTERIM: usize = 50;
+/// **PROVISIONAL at the close of plan 06.1-03 Task 1, and the task order says why.** The
+/// work this ceiling exists to bound — the identifiability diagnostic's `O(K^3)`
+/// factorisation — does not exist yet when Task 1 measures, so a value certified here is
+/// certified against INCOMPLETE work. Task 2 step 5 re-runs the same sweep with the
+/// diagnostic live and FINALISES it.
+///
+/// Replaces plan 06.1-01's interim literal of 50, which was deliberately temporary and
+/// carried no measurement at all.
+///
+/// **Why [`MAX_REGRESSOR_DESIGN_COST`] does not cover it, and why stage 1 cannot pick it.**
+/// The product ceiling is satisfiable by trading rows for columns — at the tightest legal
+/// history (`MIN_POINTS` = 10 points, horizon 1) the product alone would admit
+/// `25_000 / 11` = 2 272 regressors. MEASURED on the stage-1 door (release, aarch64,
+/// `just forecast-regressor-bench 25000 800`): a request at **800** regressors, `K = 807`,
+/// walls at **0.063 s** — the count is provably NOT bounded by the fit, the design build or
+/// `predict`. What it IS bounded by is every cost that is a function of `K` alone, and the
+/// only such term on this door is the diagnostic's `K^3`: at `K = 807` that is 5.3e8
+/// floating-point operations bought by a ~30-row request. So the count ceiling cannot be
+/// derived from a sweep that does not include the diagnostic, which is exactly why this
+/// constant is provisional and Task 2 owns the final number (cost axis C-17).
+///
+/// Mirrors `constants.fit_max_regressors`, asserted equal by `cost_bounds_match_contract`.
+pub const MAX_REGRESSORS: usize = 200;
+
+/// Hard upper bound on `(points + horizon) * n_regressors` — the regressor design feature
+/// cells ONE request buys across `regressors::splice` (history rows) and `prophet::predict`
+/// (horizon rows).
+///
+/// **PROVISIONAL at the close of plan 06.1-03 Task 1.** Cost axis C-17 prices two things:
+/// these design cells AND the identifiability Gram plus its factorisation,
+/// `len(ds) * K^2 + K^3`. The second does not exist when this value is measured — Task 2
+/// builds it — so **Task 2 step 5 re-runs the identical five compositions with the
+/// diagnostic live and finalises this number.** If the finalised value is lower, it is
+/// lower; that is the measurement doing its job.
+///
+/// **Why the existing bounds did not cover this.** Exactly the [`MAX_HOLIDAY_DESIGN_COST`]
+/// shape, one column family over: [`MAX_POINTS`], [`MAX_HORIZON`] and [`MAX_REGRESSORS`] are
+/// each checked in ISOLATION and their product is not, so a request inside all three would
+/// buy `(20_000 + 3_650) * 200` = 4 730 000 regressor design cells — and every fit iteration
+/// is `O(rows * K)` over exactly that matrix, `predict` re-sweeps it per distinct component,
+/// and the identifiability diagnostic builds an `N x K^2` Gram on top.
+/// `fit::FIT_BUDGET_SECS` cannot substitute for the same structural reason it could not
+/// substitute for the holiday product: it is a COOPERATIVE ROUND-BOUNDARY budget entered
+/// inside `fit::fit_prophet`, so it is blind to `splice` (which runs before) and to
+/// `predict` and the diagnostic (which run after), and it overshoots by a whole round
+/// inside the fit.
+///
+/// **SWEEP 1 — the design build alone, no diagnostic (Task 1).** Five compositions of the
+/// SAME product that differ in every factor, on a release build, aarch64, via
+/// `just forecast-regressor-bench <cost> 200`. Every number below is `total_s` through the
+/// public door, min-of-two-runs geometry re-measured for reproducibility:
+///
+/// | cost | many rows / 4 regs | balanced / 20 | few rows / 200 | max width / 200 | combined / 200 | verdict |
+/// |---|---|---|---|---|---|---|
+/// | 50 000 | 1.391 | **2.817** | 0.070 | 0.199 | 0.360 | **REJECTED** |
+/// | 40 000 | 1.132 / 1.369 | **2.182 / 3.021** | 0.055 | **4.735 / 6.024** | 0.190 | **REJECTED** |
+/// | 30 000 | 1.695 / 1.836 | 0.254 | 0.070 | 0.084 | 0.382 | clears, 1.09x headroom |
+/// | 25 000 | 0.681 / 0.683 | 1.268 / 1.226 | 0.036 | 0.051 | 0.145 | **ACCEPTED**, 1.58x |
+///
+/// **25 000 is the value.** 50 000 and 40 000 are the REJECTED candidates and both were
+/// re-run: the failures are reproducible, not scheduler noise. 30 000 CLEARS and was still
+/// not taken — its worst composition is 1.836 s against a 2.0 s bar, an 8 % margin, and
+/// Task 2 is about to add work to the same request. A bound that clears by 8 % before the
+/// expensive feature lands is a coin flip, not a ceiling.
+///
+/// **This bounds WORK, not WALL, and here the distinction is not a caveat but the dominant
+/// effect.** Every wall above is >= 97 % `fit_s`, and the L-BFGS iteration count is
+/// data-dependent and NON-MONOTONIC in the payload: the max-width composition at 199 points
+/// measures **4.735 s** while the SAME shape at 249 points measures **0.199 s**, a 24x swing
+/// across a 50-point change with the product held constant. No payload statistic predicts
+/// that, which is why the sweep is five compositions rather than one — and why the plan's
+/// own rule applies here more than anywhere: one failing input is an anecdote. What this
+/// constant guarantees is the arithmetic ceiling per iteration, per component sweep and per
+/// Gram, which is what turns an unbounded array of arrays into a refusal.
+///
+/// Mirrors `constants.fit_max_regressor_design_cost`, asserted equal by
+/// `cost_bounds_match_contract`.
+pub const MAX_REGRESSOR_DESIGN_COST: usize = 25_000;
 
 /// Hard upper bound on `len(holidays[].name)` in BYTES.
 ///
@@ -463,8 +535,9 @@ mod tests {
     use super::{
         ForecastArgs, ForecastError, DEFAULT_POOL, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
         MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
-        MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS, MAX_SPAN_DAYS,
-        MIN_POINTS, REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN,
+        MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS,
+        MAX_REGRESSORS, MAX_REGRESSOR_DESIGN_COST, MAX_SPAN_DAYS, MIN_POINTS,
+        REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN,
     };
     use crate::test_support::{constant_f64, constant_u64};
 
@@ -607,6 +680,16 @@ mod tests {
                 "MAX_NP_TRAIN_COST",
                 "fit_max_np_train_cost",
                 MAX_NP_TRAIN_COST,
+            ),
+            (
+                "MAX_REGRESSORS",
+                "fit_max_regressors",
+                MAX_REGRESSORS as u64,
+            ),
+            (
+                "MAX_REGRESSOR_DESIGN_COST",
+                "fit_max_regressor_design_cost",
+                MAX_REGRESSOR_DESIGN_COST as u64,
             ),
         ] {
             assert_eq!(
@@ -841,8 +924,13 @@ mod tests {
             .filter(|k| k.starts_with("fit_max_") || k.starts_with("chronos_max_"))
             .map(str::to_string)
             .collect();
+        // MEASURED 2026-09-21, not quoted: the contract carried 13 ceilings before plan
+        // 06.1-03 (`chronos_max_horizon`, `chronos_max_points` and eleven `fit_max_*`) and
+        // this plan adds exactly two — `fit_max_regressors` and
+        // `fit_max_regressor_design_cost`. The floor moves with the file, because a floor
+        // left at 10 would have passed a plan that added nothing.
         assert!(
-            ceilings.len() >= 10,
+            ceilings.len() >= 15,
             "vacuity guard: only {} ceiling constants found — the filter has stopped matching \
              and this test would pass by checking nothing",
             ceilings.len()

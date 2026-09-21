@@ -461,3 +461,312 @@ fn sc1_wall_sweep() {
         over.join("; ")
     );
 }
+
+// ------------------------------------------------- the REGRESSOR cost axis (C-17) ----
+
+/// One composition of the regressor cost sweep.
+///
+/// Every field is DERIVED from the two ceilings under test, never hard-coded: the whole
+/// point of the sweep is that the same PRODUCT is reached by five different shapes, so a
+/// ceiling certified on one geometry is not being read as a ceiling on the axis.
+#[derive(Clone, Debug)]
+pub(crate) struct RegComposition {
+    pub label: &'static str,
+    pub points: usize,
+    pub horizon: usize,
+    pub regressors: usize,
+    /// Holiday design columns carried ALONGSIDE the regressors. Non-zero on exactly one
+    /// composition: a caller may send both, and the holiday design cost and the regressor
+    /// design cost are checked by DIFFERENT constants against the SAME 2 s bar.
+    pub holiday_columns: usize,
+}
+
+/// The five compositions of `(points + horizon) * n_regressors == cost`, at `max_r`.
+///
+/// Three of them differ in every factor of the product (many rows / few regressors,
+/// balanced, few rows / many regressors); the fourth is the MAXIMUM-WIDTH case, where the
+/// identifiability diagnostic's `N * K^2` term peaks for this product; the fifth carries
+/// holidays as well, because the two design-cost ceilings are independent and a caller can
+/// buy both at once.
+pub(crate) fn regressor_compositions(cost: usize, max_r: usize) -> Vec<RegComposition> {
+    let row_budget = |r: usize| (cost / r.max(1)).max(crate::types::MIN_POINTS + 1);
+    let mut out = Vec::new();
+
+    // 1. MANY ROWS, FEW REGRESSORS.
+    let rows = row_budget(4).min(crate::types::MAX_POINTS);
+    let horizon = 365.min(rows / 2);
+    out.push(RegComposition {
+        label: "many_rows_few_regressors",
+        points: rows - horizon,
+        horizon,
+        regressors: 4,
+        holiday_columns: 0,
+    });
+
+    // 2. BALANCED.
+    let rows = row_budget(20).min(crate::types::MAX_POINTS);
+    let horizon = 365.min(rows / 2);
+    out.push(RegComposition {
+        label: "balanced",
+        points: rows - horizon,
+        horizon,
+        regressors: 20,
+        holiday_columns: 0,
+    });
+
+    // 3. FEW ROWS, MANY REGRESSORS.
+    let rows = row_budget(max_r);
+    let horizon = (rows / 2).max(1);
+    out.push(RegComposition {
+        label: "few_rows_many_regressors",
+        points: rows - horizon,
+        horizon,
+        regressors: max_r,
+        holiday_columns: 0,
+    });
+
+    // 4. MAXIMUM WIDTH: the count ceiling with the LARGEST len(ds) the product allows, so
+    //    the diagnostic's `N * K^2` term is at its peak for this product.
+    let rows = row_budget(max_r);
+    out.push(RegComposition {
+        label: "max_width_n_times_k_squared_peak",
+        points: rows - 1,
+        horizon: 1,
+        regressors: max_r,
+        holiday_columns: 0,
+    });
+
+    // 5. COMBINED: regressors at the count ceiling AND holidays at their own at-the-bound
+    //    column count for these rows. Both products are inside their own constants; the 2 s
+    //    bar is shared.
+    let rows = row_budget(max_r);
+    let hc = (crate::types::MAX_HOLIDAY_DESIGN_COST / rows)
+        .min(crate::types::MAX_HOLIDAY_COLUMNS)
+        .max(1);
+    out.push(RegComposition {
+        label: "combined_holidays_and_regressors",
+        points: rows - 1,
+        horizon: 1,
+        regressors: max_r,
+        holiday_columns: hc,
+    });
+
+    out
+}
+
+/// `n` distinct, finite, non-constant regressor columns of length `len`.
+///
+/// Distinct on purpose: an exactly duplicated column makes the design singular, which is a
+/// legitimate request the door accepts but is NOT the shape a cost ceiling should be derived
+/// on — the optimiser's iteration count on a degenerate design is not representative.
+pub(crate) fn regressor_values(n: usize, len: usize) -> Vec<Vec<f64>> {
+    (0..n)
+        .map(|j| {
+            let w = 0.017 * (j + 1) as f64;
+            (0..len)
+                .map(|i| (i as f64 * w).sin() + 0.0013 * i as f64 + j as f64)
+                .collect()
+        })
+        .collect()
+}
+
+/// Build the ACCEPTED request for one composition.
+pub(crate) fn build_regressor_args(c: &RegComposition) -> ForecastArgs {
+    let (ds, y, t0) = tight_daily_series(c.points);
+    let vals = regressor_values(c.regressors, c.points + c.horizon);
+    let regressors: Vec<crate::types::RegressorArg> = vals
+        .into_iter()
+        .enumerate()
+        .map(|(j, values)| crate::types::RegressorArg {
+            // `r{j}` collides with nothing in the three-part reserved set: it is neither a
+            // `{name}_delim_{n}` form, nor a seasonality/holiday component name, nor one of
+            // the eleven reserved response keys.
+            name: format!("r{j}"),
+            values,
+            mode: None,
+            prior_scale: None,
+            standardize: None,
+        })
+        .collect();
+    let mut args = ForecastArgs {
+        ds,
+        y,
+        horizon: c.horizon,
+        regressors: Some(regressors),
+        ..ForecastArgs::default()
+    };
+    if c.holiday_columns > 0 {
+        args.holidays = Some(holidays_for(c.holiday_columns, 8, t0, c.points));
+    }
+    args
+}
+
+/// Measure one composition and print one machine-parsable line.
+fn measure_regressor(c: &RegComposition) -> Row {
+    let args = build_regressor_args(c);
+    let cells = (c.points + c.horizon) * c.regressors;
+    let scope = format!(
+        "{} points={} horizon={} regressors={} holiday_columns={}",
+        c.label, c.points, c.horizon, c.regressors, c.holiday_columns
+    );
+    let (r, total) = time_accepted(&args, &scope);
+    // K as cost axis C-17 defines it for the diagnostic: the trend proxy, the seasonality
+    // columns and the regressor columns. Holiday columns are EXCLUDED, which is exactly why
+    // composition 5 can carry them without moving the cubic term.
+    // Derived from the SAME function the door calls, never from the diagnostics string
+    // list: `seasonalities` there is one entry per seasonality while the COLUMN count is
+    // `2 * order` per seasonality, so counting entries undercounts K by up to 6x.
+    let days: Vec<i64> = args
+        .ds
+        .iter()
+        .map(|s| crate::dates::parse_date(s).expect("the bench builds valid dates"))
+        .collect();
+    let seasonality_columns: usize = crate::prophet::auto_seasonalities(&days, 10.0, crate::prophet::Mode::Additive)
+        .iter()
+        .map(|s| 2 * s.order)
+        .sum();
+    let k = 1 + seasonality_columns + c.regressors;
+    println!(
+        "REGRESSOR WALL: composition={} points={} horizon={} regressors={} \
+         holiday_columns={} cells={cells} k={k} n_times_k_squared={} k_cubed={} \
+         total_s={total:.3} fit_s={:.3} predict_s={:.3} other_s={:.3} arch={} profile={}",
+        c.label,
+        c.points,
+        c.horizon,
+        c.regressors,
+        c.holiday_columns,
+        c.points * k * k,
+        k * k * k,
+        r.fit_seconds,
+        r.predict_seconds,
+        total - r.fit_seconds - r.predict_seconds,
+        std::env::consts::ARCH,
+        profile_token()
+    );
+    Row {
+        label: scope,
+        total_s: total,
+    }
+}
+
+/// The regressor cost sweep. Release-only by recipe (`just forecast-regressor-bench`).
+///
+/// `#[ignore]`d for the reason `holiday_design_wall` is: at the ceiling one composition is
+/// tens of seconds on a debug profile, and paying that in every `cargo test` run would be a
+/// large regression on this crate's suite. The always-run coverage of these ceilings is the
+/// refusal table in `forecast::tests`, which pins the comparison at the boundary without
+/// paying for it.
+#[test]
+#[ignore = "release-profile wall-clock measurement; run via just forecast-regressor-bench"]
+fn regressor_design_wall() {
+    let cost = env_usize("REGRESSOR_BENCH_COST", crate::types::MAX_REGRESSOR_DESIGN_COST);
+    let max_r = env_usize("REGRESSOR_BENCH_MAX_REGRESSORS", crate::types::MAX_REGRESSORS);
+    let comps = regressor_compositions(cost, max_r);
+    // MEASURE AND PRINT EVERY COMPOSITION FIRST, THEN ASSERT — a print-and-assert loop
+    // aborts at the first failure and hides the shape of the failure across the rest of the
+    // matrix, which is exactly how a one-geometry bench stays convincing.
+    let rows: Vec<Row> = comps.iter().map(measure_regressor).collect();
+    println!(
+        "REGRESSOR SWEEP: compositions={} cost={cost} max_regressors={max_r} profile={}",
+        rows.len(),
+        profile_token()
+    );
+    if cfg!(debug_assertions) {
+        // The bar lives on release (CLAUDE.md rule 2): this crate carries
+        // `[profile.dev.package.aprender-forecast] opt-level = 3`, which does NOT cover its
+        // dependencies, so a debug wall looks plausible and still is not the SC1 bar.
+        return;
+    }
+    let over: Vec<String> = rows
+        .iter()
+        .filter(|r| r.total_s >= 2.0)
+        .map(|r| format!("[{}] {:.3} s", r.label, r.total_s))
+        .collect();
+    assert!(
+        over.is_empty(),
+        "{} of {} regressor compositions are at or above the 2.0 s SC1 bar at cost={cost} \
+         max_regressors={max_r}: {}",
+        over.len(),
+        rows.len(),
+        over.join("; ")
+    );
+}
+
+#[cfg(test)]
+mod regressor_geometry {
+    //! The sweep's own shape checks, which run in the ALWAYS-RUN suite.
+    //!
+    //! `regressor_design_wall` is `#[ignore]`d, so without these a composition builder that
+    //! silently produced an illegal or trivial geometry would only be discovered by someone
+    //! running the release recipe.
+    use super::{regressor_compositions, RegComposition};
+    use crate::types::{MAX_HORIZON, MAX_POINTS, MIN_POINTS};
+
+    #[test]
+    fn every_composition_is_a_legal_request_at_the_same_product() {
+        let (cost, max_r) = (
+            crate::types::MAX_REGRESSOR_DESIGN_COST,
+            crate::types::MAX_REGRESSORS,
+        );
+        let comps = regressor_compositions(cost, max_r);
+        assert_eq!(comps.len(), 5, "the sweep is five compositions");
+        for c in &comps {
+            assert!(
+                c.points >= MIN_POINTS && c.points <= MAX_POINTS,
+                "{c:?} has an illegal point count"
+            );
+            assert!(
+                c.horizon >= 1 && c.horizon <= MAX_HORIZON,
+                "{c:?} has an illegal horizon"
+            );
+            assert!(
+                (c.points + c.horizon) * c.regressors <= cost,
+                "{c:?} is OVER the product ceiling the sweep is certifying, so the door \
+                 would refuse it and the sweep would measure a refusal"
+            );
+            assert!(
+                c.regressors <= max_r,
+                "{c:?} is over the count ceiling the sweep is certifying"
+            );
+            assert!(
+                (c.points + c.horizon) * c.holiday_columns <= crate::types::MAX_HOLIDAY_DESIGN_COST,
+                "{c:?} is over the HOLIDAY design cost ceiling, which is a different \
+                 constant against the same bar"
+            );
+        }
+    }
+
+    /// The compositions actually DIFFER in every factor — three shapes that all reach the
+    /// same product is the claim, and a builder collapsing to one shape would still satisfy
+    /// the legality checks above.
+    #[test]
+    fn the_compositions_differ_in_every_factor() {
+        let comps = regressor_compositions(
+            crate::types::MAX_REGRESSOR_DESIGN_COST,
+            crate::types::MAX_REGRESSORS,
+        );
+        let distinct = |f: fn(&RegComposition) -> usize| {
+            comps
+                .iter()
+                .map(f)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert!(
+            distinct(|c| c.regressors).len() >= 3,
+            "the regressor count must vary across the sweep"
+        );
+        assert!(
+            distinct(|c| c.points).len() >= 3,
+            "the history length must vary across the sweep"
+        );
+        assert!(
+            distinct(|c| c.horizon).len() >= 3,
+            "the horizon must vary across the sweep"
+        );
+        assert!(
+            comps.iter().any(|c| c.holiday_columns > 0),
+            "exactly one composition must carry holidays BESIDE the regressors: the two \
+             design-cost ceilings are independent constants against the SAME 2 s bar"
+        );
+    }
+}

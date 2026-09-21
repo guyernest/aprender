@@ -125,6 +125,51 @@ constants:
   # A larger prior scale buys no work; it only weakens a penalty term.
   regressor_prior_scale_min: 1.0e-153
   regressor_prior_scale_max: 1.0e150
+  # ---- The REGRESSOR COST CEILINGS (cost axis C-17, plan 06.1-03) ----
+  # PROVISIONAL at the close of Task 1 and FINALISED by Task 2 step 5. C-17 prices the
+  # design cells AND the identifiability Gram plus its factorisation (len(ds) * K^2 + K^3);
+  # the second does not exist when Task 1 measures, so a value certified there is certified
+  # against incomplete work. Both sweeps, their delta and every rejected candidate are
+  # recorded in types::MAX_REGRESSOR_DESIGN_COST's rustdoc and in the 06.1-03 SUMMARY.
+  #
+  # fit_max_regressor_design_cost bounds (len(ds) + horizon) * n_regressors, the regressor
+  # design feature cells one request buys across regressors::splice (history rows) and
+  # prophet::predict (horizon rows). Same shape as fit_max_holiday_design_cost, one column
+  # family over: fit_max_points, fit_max_horizon and fit_max_regressors are each checked in
+  # ISOLATION and their product was not.
+  #
+  # SWEEP 1 (release, aarch64, just forecast-regressor-bench <cost> 200), total_s through
+  # the public door over five compositions of the SAME product differing in every factor:
+  #   cost   many/4      balanced/20     few/200  maxwidth/200   combined/200   verdict
+  #   50000  1.391       2.817           0.070    0.199          0.360          REJECTED
+  #   40000  1.132/1.369 2.182/3.021     0.055    4.735/6.024    0.190          REJECTED
+  #   30000  1.695/1.836 0.254           0.070    0.084          0.382          clears, 1.09x
+  #   25000  0.681/0.683 1.268/1.226     0.036    0.051          0.145          ACCEPTED 1.58x
+  # 50 000 and 40 000 were each RE-RUN: the failures are reproducible, not scheduler noise.
+  # 30 000 CLEARS and was still not taken — an 8 % margin before the expensive feature lands
+  # is a coin flip, not a ceiling.
+  #
+  # THE WALL IS DOMINATED BY THE L-BFGS ITERATION COUNT, which is data-dependent and
+  # NON-MONOTONIC in the payload: every wall above is >= 97 % fit time, and the max-width
+  # composition at 199 points measures 4.735 s while the SAME shape at 249 points measures
+  # 0.199 s — a 24x swing across a 50-point change with the product held constant. This
+  # bound therefore bounds WORK, not WALL, exactly as fit_max_holiday_design_cost records,
+  # and it is why the sweep is five compositions rather than one.
+  #
+  # fit_max_regressors is NOT a derived consequence of that product and is deliberately its
+  # own ceiling. The product is satisfiable by trading rows for columns: at the tightest
+  # legal history (fit_min_points = 10, horizon 1) it alone would admit 25 000 / 11 = 2 272
+  # regressors. MEASURED on the stage-1 door: a request at 800 regressors (K = 807) walls at
+  # 0.063 s, so the count is provably NOT bounded by the fit, the design build or predict.
+  # It is bounded by the one cost that is a function of K ALONE — the diagnostic's O(K^3)
+  # factorisation, 5.3e8 float ops at K = 807 from a ~30-row request. A ceiling for that
+  # term cannot be derived from a sweep that does not include it, which is why this value is
+  # provisional and Task 2 owns the final number. ceilings_subsumed below records the
+  # PRODUCT relation without claiming the count is redundant.
+  # Mirrored by types::MAX_REGRESSORS and types::MAX_REGRESSOR_DESIGN_COST via
+  # types::tests::cost_bounds_match_contract.
+  fit_max_regressors: 200
+  fit_max_regressor_design_cost: 25000
   # The ONE caller-settable field that had NO enforcement of any kind at the close of
   # 06-14 (door_surface.knobs, field: name, enforced_by: NOTHING) — found by that plan's
   # enumeration and by no review finding. prophet::columns turns ONE payload occurrence of
@@ -473,6 +518,16 @@ door_surface:
       bound: chronos_max_points
       checked_at: 'the door, chronos.rs:219. The MODEL cost is flat in len(ds) because the context is capped at cfg.context_length (2048) at :287, so this axis bounds the parse and the copy rather than the forward pass'
 
+    # ---- The REGRESSOR door's own cost axis, added by plan 06.1-03 ----
+    - axis: C-17
+      name: 'external regressor design feature cells and the identifiability diagnostic'
+      formula: '(len(ds) + horizon) * n_regressors for the design cells, plus len(ds) * K^2 + K^3 for the identifiability Gram and its factorisation, where K = 1 + seasonality_columns + n_regressors and seasonality_columns <= 34'
+      spent_in: 'regressors::splice, prophet::predict and regressors::identifiability'
+      spent_outside_fit_budget: true
+      bound: fit_max_regressor_design_cost
+      checked_at: 'the door, before make_design and before any regressor value is copied'
+      note: 'DERIVED BY MEASUREMENT IN TWO STAGES, and the second stage is the one that counts. Stage 1 (plan 06.1-03 Task 1) timed the public door at five compositions of the SAME product with no diagnostic in the tree; stage 2 (Task 2 step 5) re-timed the identical five with the diagnostic live, because the K^3 term this formula prices did not exist when stage 1 ran and a fixed feature-cell product fixes neither the N*K^2 nor the K^3 term. Both sweeps, their delta and both rejected candidates are recorded in the 06.1-03 SUMMARY and in types::MAX_REGRESSOR_DESIGN_COST. HOLIDAY indicator columns are EXCLUDED from the diagnostic column set, and that exclusion is what keeps this axis to ONE ceiling: the holiday block can reach fit_max_holiday_columns (1 000) design columns, which would make K^3 the dominant cost of the entire request and would force a second, much larger bound here. K is therefore bounded by the at-most-34 seasonality columns (a property of auto_seasonalities, not of the request — see C-11) plus fit_max_regressors, so the cubic term cannot be driven by fit_max_holiday_columns at all. The exclusion is surfaced in the response''s own `scope` note as well as here, so it is a STATED scope rather than a silent one (threat T-06.1-11). Every collinearity spike 011 measured was regressor-against-seasonality or regressor-against-trend, so the excluded family is also the one with no measured evidence behind it.'
+
   # ---- Ceilings whose work is bounded by another axis PRODUCT ----
   # Checked in BOTH directions: an entry naming a constant that is not a ceiling here is a
   # phantom, and an entry whose subsumed_by is not itself a real axis bound is a dangling
@@ -488,6 +543,9 @@ door_surface:
     - constant: fit_max_holiday_dates
       subsumed_by: fit_max_holiday_dates_total
       why: 'the per-holiday date count is one term of C-03 sum(len(h.dates)), refused INSIDE the loop at forecast.rs:241-250. The aggregate is the axis that bounds the parse work; this per-item ceiling only caps a single list'
+    - constant: fit_max_regressors
+      subsumed_by: fit_max_regressor_design_cost
+      why: 'the regressor COUNT is one factor of the product C-17 bounds, exactly as fit_max_holiday_columns is one factor of C-04 — the count is accumulated from regs.len() and the product (len(ds) + horizon) * n_regressors is refused separately at the door. The exemption records the PRODUCT relation and deliberately does NOT claim the count is redundant: the product is satisfiable by trading rows for columns, and the K^3 term of C-17 is a function of the count ALONE, which is why fit_max_regressors is enforced in its own right and measured in its own right'
 
 equations:
 

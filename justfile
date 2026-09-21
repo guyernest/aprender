@@ -884,6 +884,120 @@ forecast-holiday-bench points="800" columns="50" dates="84" horizon="200":
     fi
     echo "  HOLIDAY DESIGN OK: $total s < 2.0 s (SC1)"
 
+# THE REGRESSOR COST GATE (cost axis C-17, plan 06.1-03).
+#
+# `forecast-holiday-bench` walls the HOLIDAY design axis and `forecast-sc1-sweep`
+# sweeps freq x growth x holiday shape. Neither carries a single regressor, so the
+# axis the external-regressor surface actually costs on — `(len(ds) + horizon) *
+# n_regressors` for the design cells, plus `len(ds) * K^2 + K^3` for the
+# identifiability Gram and its factorisation — was covered by NOTHING.
+#
+# This recipe is the DERIVATION harness for `fit_max_regressor_design_cost` and
+# `fit_max_regressors`, and it is also the gate that keeps them honest. It runs
+# five compositions of the SAME product that differ in every factor: many rows /
+# few regressors, balanced, few rows / many regressors, the MAXIMUM-WIDTH case
+# where the diagnostic's `N * K^2` term peaks, and a COMBINED case carrying
+# holidays at their own at-the-bound column count beside regressors at the count
+# ceiling — because a caller can send both and the two design-cost ceilings are
+# different constants against the SAME 2 s bar.
+#
+# One failing input is an anecdote (CLAUDE.md rule 6). A ceiling derived on one
+# geometry is a statement about that geometry, not about the axis, which is why
+# `sc1_wall::regressor_geometry::the_compositions_differ_in_every_factor` runs in
+# the always-on suite and fails a builder that collapses the five into one shape.
+#
+# The bar is asserted TWICE and neither is redundant: once inside the harness,
+# where the message names the failing composition, and once here over the
+# re-parsed log, which is what catches a harness that silently stopped emitting
+# lines. `REGRESSOR BENCH OK` reports the count it checked, so a run that checked
+# zero lines cannot report success.
+#
+# Release-only ON PURPOSE: this crate carries `[profile.dev.package.aprender-forecast]
+# opt-level = 3`, which covers the crate and NOT its dependencies, so a dev-profile
+# number looks plausible and still is not the SC1 bar (CLAUDE.md rule 2) — hence the
+# `profile=` token on every line and the hard guard on it below.
+#
+# The two arguments exist so the LADDER can be run: a candidate ceiling is measured
+# by pointing the compositions at it. They default to EMPTY, not to a number, and
+# an empty argument means "use the shipped constant" — the harness reads
+# `crate::types::MAX_REGRESSOR_DESIGN_COST` / `MAX_REGRESSORS` when the env var is
+# absent. A numeric default here would be a THIRD copy of a bound that already
+# lives in the contract and its Rust mirror, and it would go stale the first time
+# the ceiling moved — which it did, from the starting candidate down to the
+# measured value, inside this very plan. A bare invocation therefore always
+# re-certifies what is actually enforced.
+# Wall the five regressor compositions on release and enforce the 2 s SC1 bar.
+forecast-regressor-bench cost="" max_regressors="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    # The validator's OWN guard runs first, on every gate invocation — a bar whose
+    # parser was never exercised is the IN-01 defect waiting to come back.
+    bash scripts/check_assert_measurement_under_cases.sh
+    LOG=target/p06.1-03-forecast-regressor-bench.log
+    # An UNSET variable means "the shipped constant"; exporting an empty one would
+    # be parsed as 0 by a less careful reader, so the variables are only exported
+    # when they carry a value.
+    if [ -n "{{cost}}" ]; then export REGRESSOR_BENCH_COST="{{cost}}"; fi
+    if [ -n "{{max_regressors}}" ]; then export REGRESSOR_BENCH_MAX_REGRESSORS="{{max_regressors}}"; fi
+    set +e
+    CARGO_INCREMENTAL=0 cargo test --release -p aprender-forecast --lib \
+        sc1_wall::regressor_design_wall -- --ignored --nocapture > "$LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        grep -E '^REGRESSOR (WALL|SWEEP)' "$LOG" || true
+        tail -30 "$LOG"
+        echo "FAIL: the regressor bench exited $rc - log $LOG" >&2
+        exit "$rc"
+    fi
+    if ! grep -q '^REGRESSOR WALL: ' "$LOG"; then
+        tail -30 "$LOG"
+        echo "FAIL: no 'REGRESSOR WALL:' line in $LOG - nothing was measured. A gate" >&2
+        echo "      that checked zero compositions must never report success." >&2
+        exit 1
+    fi
+    checked=0
+    while IFS= read -r line; do
+        echo "$line"
+        # CLAUDE.md rule 2 - prove the mechanism engaged, never label a run by
+        # intent. A debug wall on this crate looks plausible and is not the bar.
+        case "$line" in
+            *profile=release*) ;;
+            *)
+                echo "FAIL: a composition was not measured on a release build" >&2
+                echo "      (profile= is not release), so it is not the SC1 bar." >&2
+                echo "      line: $line" >&2
+                exit 1
+                ;;
+        esac
+        # Parse total_s BY TOKEN, never by column position: the printed field
+        # order must not become load-bearing.
+        total=$(printf '%s\n' "$line" \
+            | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^total_s=/) { sub(/^total_s=/, "", $i); print $i; exit } }')
+        if [ -z "$total" ]; then
+            echo "FAIL: a REGRESSOR WALL line carries no total_s= token - that" >&2
+            echo "      composition was never measured. line: $line" >&2
+            exit 1
+        fi
+        label=$(printf '%s\n' "$line" | sed -n 's/^REGRESSOR WALL: composition=\([^ ]*\) .*/\1/p')
+        bash scripts/assert_measurement_under.sh under "$total" 2.0 "REGRESSOR $label"
+        checked=$((checked + 1))
+    done < <(grep '^REGRESSOR WALL: ' "$LOG")
+    if [ "$checked" -eq 0 ]; then
+        echo "FAIL: the loop checked zero compositions." >&2
+        exit 1
+    fi
+    if [ "$checked" -ne 5 ]; then
+        echo "FAIL: the sweep is FIVE compositions and this run checked $checked." >&2
+        echo "      A silently shrunk matrix is the WR-04 defect, not a faster gate." >&2
+        exit 1
+    fi
+    # The SWEEP line reports the values actually USED, resolved by the harness, so
+    # the gate's own summary cannot claim a geometry it did not measure.
+    grep -m1 '^REGRESSOR SWEEP: ' "$LOG"
+    echo "  REGRESSOR BENCH OK: $checked compositions, every one under the 2.0 s SC1 bar"
+
 # THE SC1 GATE, SWEPT (06-REVIEW.md WR-04).
 #
 # `forecast-bench` walls the no-holiday shape, `forecast-holiday-bench` walls the
