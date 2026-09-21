@@ -22,8 +22,9 @@ use crate::prophet::{
 use crate::types::{
     ForecastArgs, ForecastError, ForecastResponse, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
     MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
-    MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS, MAX_SPAN_DAYS,
-    MIN_POINTS,
+    MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS,
+    MAX_REGRESSORS_INTERIM, MAX_SPAN_DAYS, MIN_POINTS, REGRESSOR_PRIOR_SCALE_MAX,
+    REGRESSOR_PRIOR_SCALE_MIN,
 };
 
 /// Fit and forecast in ONE stateless call (D-01: no fit -> artifact -> forecast round-trip).
@@ -379,27 +380,143 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             let mut reg_std: Vec<crate::regressors::Standardized> = Vec::new();
             let mut reg_hist: Vec<Vec<f64>> = Vec::new();
             let mut reg_fut: Vec<Vec<f64>> = Vec::new();
-            for r in args.regressors.iter().flatten() {
-                let mode = match r.mode.as_deref() {
-                    None | Some("additive") => Mode::Additive,
-                    Some("multiplicative") => Mode::Multiplicative,
-                    Some(other) => {
+            if let Some(regs) = args.regressors.as_ref() {
+                // ---- 7. INTERIM COUNT CEILING, deliberately temporary ----
+                //
+                // FIRST, before any allocation proportional to the payload. Without it this
+                // wave accepts an unbounded array of (points + horizon)-long arrays and a
+                // small request can drive L-BFGS out of memory (T-06.1-01). Plan 06.1-03
+                // REPLACES this literal with the measured `fit_max_regressors` and
+                // `fit_max_regressor_design_cost` and must assert the literal is gone.
+                if regs.len() > MAX_REGRESSORS_INTERIM {
+                    return Err(ForecastError::Validation(format!(
+                        "the request carries {} regressors, which exceeds the interim \
+                         ceiling of {MAX_REGRESSORS_INTERIM}; send fewer regressors. This \
+                         ceiling is PROVISIONAL and is replaced by a measured bound in a \
+                         later plan",
+                        regs.len()
+                    )));
+                }
+                // ---- 5. DUPLICATE NAMES ----
+                //
+                // O(R log R) via a BTreeSet, not a quadratic scan: the component map is
+                // keyed by name, so the second of a pair would silently overwrite the first.
+                let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+                for r in regs {
+                    if !seen.insert(r.name.as_str()) {
                         return Err(ForecastError::Validation(format!(
-                            "regressor mode {other:?} is not supported; use \"additive\" \
-                             or \"multiplicative\""
-                        )))
+                            "regressor name {:?} appears more than once; the response \
+                             component map is keyed by name and the second would silently \
+                             replace the first, so give each regressor a distinct name",
+                            r.name
+                        )));
                     }
-                };
-                let spec_r = crate::regressors::RegressorSpec {
-                    name: r.name.clone(),
-                    mode,
-                    prior_scale: r.prior_scale.unwrap_or(10.0),
-                    standardize: r.standardize,
-                };
-                let (hist, futv) = r.values.split_at(ds.len().min(r.values.len()));
-                reg_std.push(crate::regressors::standardize_one(&spec_r, hist));
-                reg_hist.push(hist.to_vec());
-                reg_fut.push(futv.to_vec());
+                }
+
+                for (i, r) in regs.iter().enumerate() {
+                    // ---- 1. LENGTH TIE, before anything is copied ----
+                    let want = ds.len() + args.horizon;
+                    if r.values.len() != want {
+                        return Err(ForecastError::Validation(format!(
+                            "regressor {i} carries {} values but {want} are required \
+                             (points + horizon = {} + {}); the array must cover the \
+                             history rows AND the horizon rows",
+                            r.values.len(),
+                            ds.len(),
+                            args.horizon
+                        )));
+                    }
+                    // ---- 2. INPUT FINITENESS ----
+                    //
+                    // The same class the `cap` finiteness check closed: JSON `1e400` parses
+                    // to infinity. The row index is named, the VALUE is not echoed.
+                    if let Some(bad) = r.values.iter().position(|v| !v.is_finite()) {
+                        return Err(ForecastError::Validation(format!(
+                            "regressor {i} carries a non-finite value at row {bad}; every \
+                             value must be finite (note that JSON 1e400 parses to infinity)"
+                        )));
+                    }
+                    // ---- 3. MODE ALLOWLIST, refused BY NAME ----
+                    let mode = match r.mode.as_deref() {
+                        None | Some("additive") => Mode::Additive,
+                        Some("multiplicative") => Mode::Multiplicative,
+                        Some(other) => {
+                            return Err(ForecastError::Validation(format!(
+                                "regressor {i} mode {other:?} is not supported; use \
+                                 \"additive\" or \"multiplicative\""
+                            )))
+                        }
+                    };
+                    // ---- 4. PRIOR SCALE, in a NUMERICALLY USABLE range ----
+                    //
+                    // Not merely "> 0": the objective and gradient SQUARE this into a
+                    // denominator (prophet.rs:536, :685), so f64::MIN_POSITIVE squares to
+                    // exactly 0.0 and the initial zero coefficients meet 0.0/0.0.
+                    let prior_scale = r.prior_scale.unwrap_or(10.0);
+                    if !prior_scale.is_finite()
+                        || prior_scale < REGRESSOR_PRIOR_SCALE_MIN
+                        || prior_scale > REGRESSOR_PRIOR_SCALE_MAX
+                    {
+                        return Err(ForecastError::Validation(format!(
+                            "regressor {i} prior_scale {prior_scale:e} is outside the \
+                             usable range [{REGRESSOR_PRIOR_SCALE_MIN:e}, \
+                             {REGRESSOR_PRIOR_SCALE_MAX:e}]; the objective squares it into \
+                             a denominator, so a smaller value underflows to zero and \
+                             yields a NaN fit"
+                        )));
+                    }
+
+                    let spec_r = crate::regressors::RegressorSpec {
+                        name: r.name.clone(),
+                        mode,
+                        prior_scale,
+                        standardize: r.standardize,
+                    };
+                    let (hist, futv) = r.values.split_at(ds.len());
+                    let st = crate::regressors::standardize_one(&spec_r, hist);
+
+                    // ---- 6a. ZERO SPREAD ----
+                    //
+                    // Only when the column was actually STANDARDISED: the auto {0,1}
+                    // carve-out legitimately returns std = 1.0 and must not be caught here.
+                    if st.std == 0.0 {
+                        return Err(ForecastError::Validation(format!(
+                            "regressor {i} is constant over the history rows and carries \
+                             no information; drop the regressor"
+                        )));
+                    }
+                    // ---- 6b. POST-ARITHMETIC FINITENESS ----
+                    //
+                    // A SEPARATE check from 2, and both are needed: finite inputs are not
+                    // sufficient, because 1e300 values overflow the sum of squares in the
+                    // variance. Every DERIVED quantity is re-checked.
+                    if !st.mu.is_finite() {
+                        return Err(ForecastError::Validation(format!(
+                            "regressor {i} has a non-finite mean after standardisation; \
+                             the values are individually finite but their sum overflows"
+                        )));
+                    }
+                    if !st.std.is_finite() {
+                        return Err(ForecastError::Validation(format!(
+                            "regressor {i} has a non-finite standard deviation after \
+                             standardisation; the values are individually finite but the \
+                             sum of squares overflows"
+                        )));
+                    }
+                    if let Some(bad) = hist
+                        .iter()
+                        .position(|v| !((v - st.mu) / st.std).is_finite())
+                    {
+                        return Err(ForecastError::Validation(format!(
+                            "regressor {i} has a non-finite standardised cell at row \
+                             {bad}; the value is finite but (value - mu) / std is not"
+                        )));
+                    }
+
+                    reg_std.push(st);
+                    reg_hist.push(hist.to_vec());
+                    reg_fut.push(futv.to_vec());
+                }
             }
 
             let mut design = make_design(&ds, &args.y, &spec);
@@ -661,7 +778,10 @@ mod tests {
     use super::{forecast, normal_quantile};
     use crate::dates::{days_from_civil, format_ymd};
     use crate::prophet::Rng;
-    use crate::types::{ForecastArgs, ForecastError, MAX_NP_TRAIN_COST};
+    use crate::types::{
+        ForecastArgs, ForecastError, MAX_NP_TRAIN_COST, REGRESSOR_PRIOR_SCALE_MAX,
+        REGRESSOR_PRIOR_SCALE_MIN,
+    };
     use aprender::autograd::{clear_graph, graph_tape_len};
 
     /// A 120-point synthetic DAILY series: linear trend + a weekly sine + a little noise.
@@ -1413,6 +1533,340 @@ mod tests {
         let r = forecast(&args).expect("a weekly-spaced series is a legal request");
         assert_eq!(r.yhat.len(), 7);
         assert!(r.yhat.iter().all(|v| v.is_finite()));
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Plan 06.1-01 Task 2: the six external-regressor door refusals.
+    //
+    // Every refusal is paired with a POSITIVE CONTROL that is ACCEPTED, so no check can
+    // pass by refusing everything — the failure mode a refusal-only suite cannot see.
+    // ---------------------------------------------------------------------------------
+
+    /// A prophet request over `n` daily points with `horizon` future steps and the given
+    /// regressors, none of which is refused by anything except what the test is probing.
+    fn reg_args(n: usize, horizon: usize, regs: Vec<crate::types::RegressorArg>) -> ForecastArgs {
+        let (ds, y) = synthetic_daily(n);
+        ForecastArgs {
+            ds,
+            y,
+            horizon,
+            seed: Some(42),
+            regressors: Some(regs),
+            ..ForecastArgs::default()
+        }
+    }
+
+    /// A well-formed regressor of exactly the required length, varying enough to have a
+    /// non-zero spread.
+    fn good_reg(name: &str, n: usize, horizon: usize) -> crate::types::RegressorArg {
+        crate::types::RegressorArg {
+            name: name.into(),
+            values: (0..n + horizon)
+                .map(|i| f64::from(i as u32) * 0.5 + 1.0)
+                .collect(),
+            mode: None,
+            prior_scale: None,
+            standardize: None,
+        }
+    }
+
+    /// CONTROL for every refusal below: a well-formed four-regressor request is ACCEPTED
+    /// and its regressors reach the response as components.
+    #[test]
+    fn regressors_that_are_well_formed_are_accepted() {
+        let args = reg_args(60, 7, vec![good_reg("promo", 60, 7)]);
+        let r = forecast(&args).expect("a well-formed regressor request must be accepted");
+        assert!(
+            r.components.contains_key("promo")
+                && r.components.contains_key("extra_regressors_additive"),
+            "the regressor must reach the response; got {:?}",
+            r.components.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// CHECK 1, the length tie, from BOTH sides plus the exact value.
+    ///
+    /// Three shapes because one input is an anecdote (CLAUDE.md rule 6): a check keyed on
+    /// the wrong side of the comparison passes two of the three.
+    #[test]
+    fn a_regressor_whose_values_length_is_wrong_is_refused_from_both_sides() {
+        for (label, len) in [("too short", 66usize), ("too long", 68)] {
+            let mut reg = good_reg("promo", 60, 7);
+            reg.values = vec![1.0; len];
+            let args = reg_args(60, 7, vec![reg]);
+            match forecast(&args) {
+                Err(ForecastError::Validation(m)) => {
+                    assert!(
+                        m.contains("67"),
+                        "{label}: must state the required length, got {m:?}"
+                    );
+                    assert!(
+                        m.contains(&len.to_string()),
+                        "{label}: must state the length received, got {m:?}"
+                    );
+                }
+                other => panic!("{label} must be refused, got {:?}", other.map(|r| r.model)),
+            }
+        }
+        // POSITIVE CONTROL: exactly points + horizon is accepted.
+        let args = reg_args(60, 7, vec![good_reg("promo", 60, 7)]);
+        assert_eq!(args.regressors.as_ref().expect("regs")[0].values.len(), 67);
+        forecast(&args).expect("exactly points + horizon must be accepted");
+    }
+
+    /// CHECK 2, input finiteness. JSON `1e400` parses to infinity — the same class the
+    /// `cap` finiteness check closed.
+    #[test]
+    fn a_regressor_with_a_non_finite_value_is_refused() {
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let mut reg = good_reg("promo", 60, 7);
+            reg.values[13] = bad;
+            let args = reg_args(60, 7, vec![reg]);
+            refusal(&args, "row 13");
+        }
+        // POSITIVE CONTROL: a large-but-finite value is accepted.
+        let mut reg = good_reg("promo", 60, 7);
+        reg.values[13] = 1.0e12;
+        forecast(&reg_args(60, 7, vec![reg])).expect("a large finite value must be accepted");
+    }
+
+    /// CHECK 3, the mode allowlist, refused BY NAME.
+    #[test]
+    fn a_regressor_mode_outside_the_allowlist_is_refused_by_name() {
+        let mut reg = good_reg("promo", 60, 7);
+        reg.mode = Some("exponential".into());
+        refusal(&reg_args(60, 7, vec![reg]), "exponential");
+        // POSITIVE CONTROLS: both accepted values.
+        for m in ["additive", "multiplicative"] {
+            let mut reg = good_reg("promo", 60, 7);
+            reg.mode = Some(m.into());
+            forecast(&reg_args(60, 7, vec![reg]))
+                .unwrap_or_else(|e| panic!("mode {m:?} must be accepted: {e}"));
+        }
+    }
+
+    /// CHECK 4, the prior-scale domain.
+    ///
+    /// The bound is not "greater than zero": the objective SQUARES it into a denominator
+    /// (`prophet.rs:536`, `:685`), so `f64::MIN_POSITIVE` squares to exactly `0.0` and the
+    /// initial zero coefficients meet `0.0 / 0.0`.
+    #[test]
+    fn a_regressor_prior_scale_outside_the_usable_range_is_refused() {
+        for (label, bad) in [
+            ("MIN_POSITIVE squares to zero", f64::MIN_POSITIVE),
+            (
+                "one ULP below the floor",
+                f64::from_bits(REGRESSOR_PRIOR_SCALE_MIN.to_bits() - 1),
+            ),
+            ("above the ceiling", REGRESSOR_PRIOR_SCALE_MAX * 10.0),
+            ("zero", 0.0),
+            ("negative", -1.0),
+            ("infinite", f64::INFINITY),
+            ("nan", f64::NAN),
+        ] {
+            let mut reg = good_reg("promo", 60, 7);
+            reg.prior_scale = Some(bad);
+            match forecast(&reg_args(60, 7, vec![reg])) {
+                Err(ForecastError::Validation(m)) => {
+                    assert!(m.contains("prior_scale"), "{label}: got {m:?}");
+                }
+                other => panic!("{label} must be refused, got {:?}", other.map(|r| r.model)),
+            }
+        }
+    }
+
+    /// The POSITIVE CONTROL for check 4: a bound that has not been shown to keep the
+    /// arithmetic finite is a guess.
+    ///
+    /// NOTE what this does and does not establish. It pins FINITENESS at both ends, which
+    /// is this plan's acceptance criterion. It does NOT establish that a prior scale at the
+    /// floor produces a meaningful fit — measurement says it does not, and
+    /// `the_prior_scale_floor_is_a_representability_bound_not_a_usability_bound` below
+    /// records that explicitly rather than leaving it as a comment nobody re-runs.
+    #[test]
+    fn a_regressor_prior_scale_at_the_floor_fits_finitely() {
+        for (label, ps) in [
+            ("floor", REGRESSOR_PRIOR_SCALE_MIN),
+            ("ceiling", REGRESSOR_PRIOR_SCALE_MAX),
+            ("default-ish", 10.0),
+        ] {
+            let mut reg = good_reg("promo", 60, 7);
+            reg.prior_scale = Some(ps);
+            let r = forecast(&reg_args(60, 7, vec![reg]))
+                .unwrap_or_else(|e| panic!("{label} ({ps:e}) must be accepted: {e}"));
+            assert!(
+                r.yhat.iter().all(|v| v.is_finite()) && r.trend.iter().all(|v| v.is_finite()),
+                "{label} ({ps:e}): every yhat and trend value must be finite — a NaN here is \
+                 the 0/0 the bound exists to prevent"
+            );
+            let objective = r.diagnostics["lbfgs"]["objective"]
+                .as_f64()
+                .expect("the prophet arm reports its objective");
+            assert!(
+                objective.is_finite(),
+                "{label} ({ps:e}): the fitted objective must be finite, got {objective}"
+            );
+        }
+    }
+
+    /// CHECK 5, duplicate names. The component map is keyed by name.
+    #[test]
+    fn regressors_sharing_a_name_are_refused() {
+        let args = reg_args(
+            60,
+            7,
+            vec![good_reg("promo", 60, 7), good_reg("promo", 60, 7)],
+        );
+        refusal(&args, "promo");
+        // POSITIVE CONTROL: two DISTINCT names are accepted.
+        let args = reg_args(
+            60,
+            7,
+            vec![good_reg("promo", 60, 7), good_reg("price", 60, 7)],
+        );
+        forecast(&args).expect("two distinct names must be accepted");
+    }
+
+    /// CHECK 6a, zero spread over the history rows.
+    ///
+    /// An all-zero column has ONE unique value, so it is NOT auto-exempt, IS standardised,
+    /// and comes out at `std = 0.0`. This is what stops `splice` dividing by zero.
+    #[test]
+    fn a_regressor_constant_over_the_history_is_refused() {
+        for constant in [0.0, 1.0, 7.5] {
+            let mut reg = good_reg("flat", 60, 7);
+            reg.values = vec![constant; 67];
+            refusal(&reg_args(60, 7, vec![reg]), "constant over the history");
+        }
+        // POSITIVE CONTROL, and the OTHER half of the auto rule: a {0,1} column has TWO
+        // unique values, is auto-exempt, keeps std = 1.0, and is accepted.
+        let mut reg = good_reg("binary", 60, 7);
+        reg.values = (0..67).map(|i| f64::from(i as u32 % 2)).collect();
+        forecast(&reg_args(60, 7, vec![reg]))
+            .expect("a {0,1} indicator column is auto-exempt and must be accepted");
+    }
+
+    /// CHECK 6b, post-arithmetic finiteness. A SEPARATE check from input finiteness, and
+    /// both are needed: these inputs are each finite, but their sum of squares overflows.
+    #[test]
+    fn a_regressor_whose_derived_statistics_overflow_is_refused() {
+        let mut reg = good_reg("huge", 60, 7);
+        reg.values = (0..67)
+            .map(|i| if i % 2 == 0 { 1.0e300 } else { -1.0e300 })
+            .collect();
+        assert!(
+            reg.values.iter().all(|v| v.is_finite()),
+            "the probe's own inputs must be finite, or it is testing check 2 by accident"
+        );
+        match forecast(&reg_args(60, 7, vec![reg])) {
+            Err(ForecastError::Validation(m)) => assert!(
+                m.contains("non-finite"),
+                "must name the quantity that went non-finite, got {m:?}"
+            ),
+            other => panic!(
+                "overflowing derived stats must be refused, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+        // POSITIVE CONTROL at a large-but-safe magnitude, so the check cannot pass by
+        // refusing every large column.
+        let mut reg = good_reg("big", 60, 7);
+        reg.values = (0..67)
+            .map(|i| 1.0e100 + f64::from(i as u32) * 1.0e98)
+            .collect();
+        forecast(&reg_args(60, 7, vec![reg]))
+            .expect("a large but non-overflowing column must be accepted");
+    }
+
+    /// CHECK 7, the INTERIM count ceiling. Provisional: plan 06.1-03 replaces the literal.
+    #[test]
+    fn regressors_beyond_the_interim_ceiling_are_refused() {
+        let over: Vec<_> = (0..=crate::types::MAX_REGRESSORS_INTERIM)
+            .map(|i| good_reg(&format!("r{i}"), 60, 7))
+            .collect();
+        refusal(&reg_args(60, 7, over), "interim ceiling");
+        // POSITIVE CONTROL: exactly AT the ceiling is accepted.
+        let at: Vec<_> = (0..crate::types::MAX_REGRESSORS_INTERIM)
+            .map(|i| good_reg(&format!("r{i}"), 60, 7))
+            .collect();
+        assert_eq!(at.len(), 50);
+        forecast(&reg_args(60, 7, at)).expect("exactly the interim ceiling must be accepted");
+    }
+
+    /// D-21: the neuralprophet arm REFUSES regressors rather than silently dropping them.
+    #[test]
+    fn regressors_on_the_neuralprophet_arm_are_refused_not_dropped() {
+        let mut args = reg_args(60, 7, vec![good_reg("promo", 60, 7)]);
+        args.model = Some("neuralprophet".into());
+        refusal(&args, "set model to \"prophet\"");
+    }
+
+    /// Every new refusal message separates the LIMITATION from the FIX with a semicolon,
+    /// matching the existing door message shape, and none echoes a caller-supplied VALUE.
+    #[test]
+    fn a_regressor_refusal_names_the_limitation_and_the_fix() {
+        let mut short = good_reg("promo", 60, 7);
+        short.values = vec![1.0; 3];
+        let mut bad_mode = good_reg("promo", 60, 7);
+        bad_mode.mode = Some("exponential".into());
+        let mut flat = good_reg("flat", 60, 7);
+        flat.values = vec![2.0; 67];
+        for (label, reg) in [("length", short), ("mode", bad_mode), ("constant", flat)] {
+            match forecast(&reg_args(60, 7, vec![reg])) {
+                Err(ForecastError::Validation(m)) => assert!(
+                    m.contains(';'),
+                    "{label}: the message must separate the limitation from the fix with a \
+                     semicolon, got {m:?}"
+                ),
+                other => panic!("{label} must be refused, got {:?}", other.map(|r| r.model)),
+            }
+        }
+    }
+
+    /// The measured LIMIT of the prior-scale floor, recorded as a test so it cannot quietly
+    /// become folklore.
+    ///
+    /// `REGRESSOR_PRIOR_SCALE_MIN` is a REPRESENTABILITY bound: it keeps `sc * sc` normal
+    /// and the objective finite. It is NOT a usability bound. At the floor the fit is
+    /// degenerate — L-BFGS performs zero iterations and the regressor contributes exactly
+    /// nothing — while the door returns an ordinary-looking forecast.
+    ///
+    /// This test asserts BOTH halves, so the day either changes it goes red:
+    ///   - at the floor, the regressor contribution is exactly zero (the degenerate case
+    ///     the door currently ACCEPTS);
+    ///   - at a normal prior scale, it is not (so the assertion above is about the floor
+    ///     and not about the whole mechanism being broken).
+    ///
+    /// The contract records the sweep this came from: every `prior_scale <= 1e-9` measured
+    /// 0-1 iterations with a zero contribution; `>= 1e-7` fits normally. Closing that gap
+    /// needs a measurement campaign across series shapes and belongs to a later plan.
+    #[test]
+    fn the_prior_scale_floor_is_a_representability_bound_not_a_usability_bound() {
+        let contribution = |ps: f64| -> f64 {
+            let mut reg = good_reg("promo", 60, 7);
+            reg.prior_scale = Some(ps);
+            let r = forecast(&reg_args(60, 7, vec![reg]))
+                .unwrap_or_else(|e| panic!("prior_scale {ps:e} must be accepted: {e}"));
+            r.components["extra_regressors_additive"]
+                .as_array()
+                .expect("extra_regressors_additive is an array")
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(f64::NAN).abs())
+                .fold(0.0_f64, f64::max)
+        };
+        assert_eq!(
+            contribution(REGRESSOR_PRIOR_SCALE_MIN),
+            0.0,
+            "at the representability floor the regressor contributes exactly nothing — if \
+             this ever becomes non-zero the floor has become a usability bound and the \
+             contract comment must be re-measured"
+        );
+        assert!(
+            contribution(10.0) > 0.0,
+            "at a normal prior scale the regressor MUST contribute, or the assertion above \
+             is passing because the whole mechanism is dead rather than because the floor \
+             is degenerate"
+        );
     }
 }
 

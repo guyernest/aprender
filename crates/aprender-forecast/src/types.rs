@@ -167,6 +167,56 @@ pub const MAX_HOLIDAY_DATES_TOTAL: usize = 10_000;
 /// horizon, which is why the bound has to be on the PRODUCT and not on the horizon.
 pub const MAX_LOGISTIC_CHANGEPOINT_LAMBDA: f64 = 20_000.0;
 
+/// Lower end of the REPRESENTABLE domain for `RegressorArg.prior_scale`.
+///
+/// Mirrors `constants.regressor_prior_scale_min` in `forecast-tool-boundary-v1`, asserted
+/// equal by `cost_bounds_match_contract`.
+///
+/// **Why "greater than zero" is not the bound.** `Model::objective` computes
+/// `b * b / (2.0 * sc * sc)` (`prophet.rs:536`) and the gradient computes
+/// `beta[c] / (sc * sc)` (`prophet.rs:685`): the prior scale is SQUARED into a denominator,
+/// and `f64::MIN_POSITIVE` (2.2250738585072014e-308) squares to EXACTLY `0.0`, so the
+/// initial zero coefficients meet `0.0 / 0.0`.
+///
+/// **What that 0/0 actually does — measured, not assumed.** This bound was introduced on
+/// the theory that the NaN "propagates through L-BFGS into every response field and
+/// serialises as JSON null". That is REFUTED: across 18 configurations spanning three
+/// series shapes, no response field is ever non-finite, because `Model::objective`'s
+/// existing `if self.guard && !f.is_finite() { return 1e300 }` absorbs it. The real
+/// outcome is quieter and arguably worse — L-BFGS runs ZERO iterations and
+/// `extra_regressors_additive` is exactly `0.0` everywhere, while the door returns a
+/// normal-looking forecast. The regressor is silently ignored (the D-21 class).
+///
+/// **The residual, stated so it is not mistaken for covered.** The degenerate region is far
+/// wider than this floor: every `prior_scale <= 1e-9` measured 0-1 iterations with a zero
+/// regressor contribution, while `>= 1e-7` fits normally. `1e-153` therefore sits roughly
+/// 145 decades INSIDE the collapse region. This constant guarantees only that the
+/// arithmetic stays REPRESENTABLE and the objective finite — which is what this plan's
+/// acceptance criterion asks — never that the regressor is meaningfully fitted. A
+/// usability floor needs its own measurement campaign (plan 06.1-03's territory).
+///
+/// DERIVED, not chosen: the smallest value whose square is still normal, rounded up to a
+/// round decade. `sqrt(f64::MIN_POSITIVE) = 1.4916681462400413e-154`, so the decade above
+/// is `1e-153`, whose square `1e-306` IS normal; the decade below squares to `1e-308`,
+/// which is SUBNORMAL.
+pub const REGRESSOR_PRIOR_SCALE_MIN: f64 = 1.0e-153;
+
+/// Upper end of the same range. Mirrors `constants.regressor_prior_scale_max`.
+///
+/// DERIVED: the largest value whose square stays well inside `f64::MAX`.
+/// `sqrt(f64::MAX) = 1.3407807929942596e154`, backed off to the round decade `1e150`, whose
+/// square is ~`1e300` — about 1.8e8 below `f64::MAX`.
+pub const REGRESSOR_PRIOR_SCALE_MAX: f64 = 1.0e150;
+
+/// INTERIM ceiling on the number of regressors in one request.
+///
+/// Deliberately temporary and deliberately a literal: plan 06.1-03 replaces it with the
+/// measured `fit_max_regressors` and `fit_max_regressor_design_cost`, and that plan's
+/// verify asserts this literal is gone. Without it, wave 1 accepts an unbounded array of
+/// `(points + horizon)`-long arrays and a small request can drive L-BFGS out of memory
+/// (T-06.1-01).
+pub const MAX_REGRESSORS_INTERIM: usize = 50;
+
 /// Hard upper bound on `len(holidays[].name)` in BYTES.
 ///
 /// **Why the existing bounds did not cover this.** They did not cover it at all: at the close
@@ -414,7 +464,7 @@ mod tests {
         ForecastArgs, ForecastError, DEFAULT_POOL, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
         MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
         MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS, MAX_SPAN_DAYS,
-        MIN_POINTS,
+        MIN_POINTS, REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN,
     };
     use crate::test_support::{constant_f64, constant_u64};
 
@@ -479,6 +529,48 @@ mod tests {
                  forecast-tool-boundary-v1"
             );
         }
+        // The two prior-scale domain bounds are compared BIT FOR BIT, not within
+        // `f64::EPSILON`. An absolute epsilon of 2.2e-16 is meaningless beside 1e150 (it
+        // would accept anything) and impossibly strict beside 1e-153 (it would accept
+        // anything too, for the opposite reason). Both sides are written as the same
+        // decimal literal, so the only honest mirror test is exact equality.
+        for (name, key, value) in [
+            (
+                "REGRESSOR_PRIOR_SCALE_MIN",
+                "regressor_prior_scale_min",
+                REGRESSOR_PRIOR_SCALE_MIN,
+            ),
+            (
+                "REGRESSOR_PRIOR_SCALE_MAX",
+                "regressor_prior_scale_max",
+                REGRESSOR_PRIOR_SCALE_MAX,
+            ),
+        ] {
+            let from_contract = constant_f64("forecast-tool-boundary-v1", key);
+            assert_eq!(
+                value.to_bits(),
+                from_contract.to_bits(),
+                "types::{name} ({value:e}) must equal constants.{key} ({from_contract:e}) \
+                 in forecast-tool-boundary-v1, bit for bit"
+            );
+        }
+        // The DERIVATION, re-checked rather than quoted: these bounds exist because the
+        // objective squares the prior scale into a denominator. If either fact below
+        // stopped holding, the bounds would be protecting against nothing.
+        assert_eq!(
+            f64::MIN_POSITIVE * f64::MIN_POSITIVE,
+            0.0,
+            "the whole reason for a floor: MIN_POSITIVE squares to exactly zero"
+        );
+        assert!(
+            REGRESSOR_PRIOR_SCALE_MIN * REGRESSOR_PRIOR_SCALE_MIN >= f64::MIN_POSITIVE,
+            "the floor's square must still be NORMAL, or the floor does not do its job"
+        );
+        assert!(
+            (REGRESSOR_PRIOR_SCALE_MAX * REGRESSOR_PRIOR_SCALE_MAX).is_finite(),
+            "the ceiling's square must stay finite"
+        );
+
         for (name, key, value) in [
             ("MAX_SPAN_DAYS", "fit_max_span_days", MAX_SPAN_DAYS as u64),
             (

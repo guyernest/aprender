@@ -82,6 +82,49 @@ constants:
   fit_max_holiday_dates: 1000
   fit_max_holiday_design_cost: 50000
   fit_max_holiday_dates_total: 10000
+  # ---- RegressorArg.prior_scale, the REPRESENTABLE-DOMAIN range (plan 06.1-01 Task 2) ----
+  # DERIVED, not chosen. `Model::objective` computes `b * b / (2.0 * sc * sc)`
+  # (prophet.rs:536) and the gradient computes `p.beta[c] / (sc * sc)` (prophet.rs:685), so
+  # the prior scale is SQUARED into a denominator, and `f64::MIN_POSITIVE` squares to
+  # EXACTLY 0.0. "Greater than zero" is therefore not a sufficient bound.
+  #   LOWER: the smallest value whose SQUARE is still normal, rounded up to a round decade.
+  #     sqrt(f64::MIN_POSITIVE) = 1.4916681462400413e-154, so the round decade above it is
+  #     1e-153. Measured: (1e-153)^2 = 1e-306, which IS normal; the decade below,
+  #     (1e-154)^2 = 1e-308, is SUBNORMAL.
+  #   UPPER: the largest whose square stays well inside f64::MAX.
+  #     sqrt(f64::MAX) = 1.3407807929942596e154; backed off to the round decade 1e150, whose
+  #     square is ~1e300 — about 1.8e8 below f64::MAX.
+  #
+  # WHAT THIS BOUND DOES NOT DO, MEASURED RATHER THAN ASSUMED (plan 06.1-01, 2026-09-21).
+  # The bound was introduced on the stated theory that MIN_POSITIVE yields "a NaN that
+  # propagates through L-BFGS into every response field and serialises as JSON null". That
+  # theory is REFUTED by measurement. With the range check removed and MIN_POSITIVE passed
+  # through the door, across 18 configurations spanning three series shapes (60-point ramp,
+  # 300-point ramp, 300-point {0,1} indicator):
+  #   - NO response field is ever non-finite: non_finite_yhat = 0 in every configuration.
+  #   - `Model::objective`'s existing `if self.guard && !f.is_finite() { return 1e300 }`
+  #     absorbs the 0/0, so the optimiser sees a saturated constant, not a NaN.
+  # The ACTUAL failure is quieter and arguably worse: L-BFGS performs ZERO iterations and
+  # `extra_regressors_additive` comes back exactly 0 everywhere, while the door returns a
+  # normal-looking forecast. The regressor is silently ignored — the D-21 class.
+  #
+  # THE RESIDUAL THIS LEAVES OPEN, stated so it is not mistaken for covered. The degenerate
+  # region is far wider than the representable floor: measured on the same three shapes,
+  # every prior_scale <= 1e-9 gives 0-1 iterations and a zero regressor contribution, while
+  # >= 1e-7 fits normally (60-point ramp: 1e-9 -> 0 iters, 1e-8 -> 1 iter, 1e-7 -> 257
+  # iters). So 1e-153 sits roughly 145 decades INSIDE the region where the fit collapses.
+  # This bound guarantees only that the arithmetic stays representable and the objective
+  # finite, which is what plan 06.1-01's acceptance criterion asks for; it does NOT
+  # guarantee the regressor is meaningfully fitted. A USABILITY floor (~1e-7 on the
+  # measurements above) needs its own measurement campaign across series shapes and belongs
+  # with plan 06.1-03's measured bounds, not here.
+  #
+  # NOT COST CEILINGS. Like plan 06.1-03's warning thresholds, these are NUMERIC DOMAIN
+  # bounds and must not be pulled into `every_cost_ceiling_constant_is_named_by_an_axis`'s
+  # prefix filter (`fit_max_` / `chronos_max_`), which is why they are named `regressor_`.
+  # A larger prior scale buys no work; it only weakens a penalty term.
+  regressor_prior_scale_min: 1.0e-153
+  regressor_prior_scale_max: 1.0e150
   # The ONE caller-settable field that had NO enforcement of any kind at the close of
   # 06-14 (door_surface.knobs, field: name, enforced_by: NOTHING) — found by that plan's
   # enumeration and by no review finding. prophet::columns turns ONE payload occurrence of
