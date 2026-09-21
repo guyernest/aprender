@@ -554,14 +554,30 @@ re-deriving the shape.
 **Plans:** 8 plans
 
 Plans:
+**Wave 1**
 
 - [ ] 06.1-01-PLAN.md — TRACER: external regressors end-to-end through the prophet door at 24-column Python Prophet 1.4.0 parity, with the pre-change no-argument invariance signature and baseline committed first (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 06.1-02-PLAN.md — the regressor parity ladder at 24 and 30 columns, plus the regressor rungs in `contracts/prophet-parity-v1.yaml` (wave 2)
 - [ ] 06.1-03-PLAN.md — regressor cost ceilings and cost axis C-17, four door refusals, and the VIF / condition-number identifiability diagnostic that warns and never refuses (wave 2)
 - [ ] 06.1-04-PLAN.md — the three-part invariance gate: determinism, the 1-ULP mutation proof, and the part-C mechanism test with the uncertainty bands inside it (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 06.1-05-PLAN.md — the NeuralProphet event block beside `NpModel`, and the calibrated C-08 event-column cost term with its enumeration decision (wave 3, has a checkpoint)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 06.1-06-PLAN.md — hoist all four holiday bounds above the model dispatch with an operand-aware design cost, then unblock `holidays` on the neuralprophet arm with per-event components (wave 4, has a checkpoint)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 06.1-07-PLAN.md — regressors on the neuralprophet arm: the by-construction lag-free guarantee, the gappy-series refusal at lags, and the multiplicative refusal (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [ ] 06.1-08-PLAN.md — the READMEs and the advertised tool description, the coverage declaration, and the SC6 all-gates-green sweep ending in a pristine-worktree `--locked` build (wave 6)
 
 ### Phase 7: Tier-Resolved Door Limits

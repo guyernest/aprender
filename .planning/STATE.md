@@ -1,18 +1,18 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: 05
-current_phase_name: Benchmark and Claims Gate
+current_phase: "06.1"
+current_phase_name: "Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)"
 status: executing
 stopped_at: Phase 06.1 context gathered
-last_updated: "2026-09-21T02:51:50.910Z"
+last_updated: "2026-09-21T04:22:59.086Z"
 last_activity: 2026-09-11
 last_activity_desc: Phase 05 replanned for D-19 — 05-11/12/13 rewritten, 0 blockers
-state_head: 453063663e755073a155c4e8abf837b7eff1a90c
+state_head: c6a2bdfd9363246901382a75683290887658e11d
 progress:
   total_phases: 8
   completed_phases: 1
-  total_plans: 84
+  total_plans: 92
   completed_plans: 84
 milestone_name: milestone
 ---
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 05 (Benchmark and Claims Gate) — EXECUTING
+Phase: 06.1 (Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)) — READY TO EXECUTE
 Plan: 4 of 17
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
