@@ -1,0 +1,57 @@
+{
+  "by_arch": {
+    "aarch64": {
+      "air/prophet/multiplicative": {
+        "arch": "aarch64",
+        "captured_at_commit": "c850e62aaffa5e42e9ed644f9c1c81547cca562f",
+        "profile": "debug",
+        "signature": "3053244dcb27492c"
+      },
+      "peyton/neuralprophet/lag0": {
+        "arch": "aarch64",
+        "captured_at_commit": "c850e62aaffa5e42e9ed644f9c1c81547cca562f",
+        "profile": "debug",
+        "signature": "d5a583795591a3db"
+      },
+      "peyton/neuralprophet/lag7": {
+        "arch": "aarch64",
+        "captured_at_commit": "c850e62aaffa5e42e9ed644f9c1c81547cca562f",
+        "profile": "debug",
+        "signature": "726043759dde45dc"
+      },
+      "peyton/prophet/default": {
+        "arch": "aarch64",
+        "captured_at_commit": "c850e62aaffa5e42e9ed644f9c1c81547cca562f",
+        "profile": "debug",
+        "signature": "aa669c2352dd376a"
+      },
+      "peyton/prophet/holidays+windows": {
+        "arch": "aarch64",
+        "captured_at_commit": "c850e62aaffa5e42e9ed644f9c1c81547cca562f",
+        "profile": "debug",
+        "signature": "e0a13f9a10e3c3cc"
+      },
+      "retail/prophet/default": {
+        "arch": "aarch64",
+        "captured_at_commit": "c850e62aaffa5e42e9ed644f9c1c81547cca562f",
+        "profile": "debug",
+        "signature": "73b171523eb3fa3b"
+      },
+      "wp_log_R/neuralprophet/lag0": {
+        "arch": "aarch64",
+        "captured_at_commit": "c850e62aaffa5e42e9ed644f9c1c81547cca562f",
+        "profile": "debug",
+        "signature": "72528357591ad4d6"
+      },
+      "wp_log_R/prophet/logistic": {
+        "arch": "aarch64",
+        "captured_at_commit": "c850e62aaffa5e42e9ed644f9c1c81547cca562f",
+        "profile": "debug",
+        "signature": "331d67a8f8c924bb"
+      }
+    }
+  },
+  "captured_at_commit": "c850e62aaffa5e42e9ed644f9c1c81547cca562f",
+  "captured_on": "2026-09-21",
+  "note": "Evidence for ONE tag bump, not a permanent certificate. These signatures describe the tree at `captured_at_commit`; a later intentional behaviour change re-captures them at its own pre-change commit. Keyed by std::env::consts::ARCH because libm and the f32 GEMM routing differ bitwise across architectures."
+}

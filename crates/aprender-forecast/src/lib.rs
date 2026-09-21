@@ -55,6 +55,13 @@ pub mod safetensors;
 /// with an explicit flag.
 #[cfg(test)]
 mod sc1_wall;
+
+/// The D-19 no-argument bitwise invariance gate (SC2). Test-only for the same reason
+/// [`sc1_wall`] is: it must stay in `--lib` reach without entering the public surface, and
+/// a new `tests/*.rs` target would be DARK until someone adds it to the one explicit
+/// `--test` line in `.github/workflows/ci.yml`.
+#[cfg(test)]
+mod invariance;
 #[cfg(test)]
 pub(crate) mod test_support;
 
