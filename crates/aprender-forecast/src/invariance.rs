@@ -412,13 +412,59 @@ fn capture_baseline() {
             serde_json::Value::String(iso_date_utc()),
         );
     }
+    // ---- the two halves must describe ONE COMPUTATION, measured rather than inferred ----
+    //
+    // This check used to be `recorded == head`, and it made its own documented workflow
+    // IMPOSSIBLE: the only commit it accepted was `captured_at_commit` (c850e62aa), and this
+    // file does not exist at that commit — it was added by bfc21cbd9. So the harness could
+    // not run at the only commit the guard allowed, while 06.1-05's checkpoint simultaneously
+    // instructed an operator to capture "at the CURRENT commit". The two directions
+    // contradicted, and three capture attempts on x86_64 hit exactly this (measured by the
+    // phase orchestrator, `06.1-x64-baseline-measurement.md`, finding 3).
+    //
+    // The INTENT was right and is kept. A commit id was only ever a PROXY for "the
+    // computation tree is unchanged", so the fix is to measure the thing itself: the fresh
+    // signatures for the running architecture were just computed above, so if this file
+    // already records this architecture and every one of them still reproduces, then HEAD
+    // computes bit-for-bit what the file describes and capturing here composes — whatever
+    // the commit ids say. That is STRICTLY STRONGER evidence than commit-id equality, which
+    // could hold while a dependency moved under it.
+    //
+    // When the running architecture is NOT recorded there is nothing local that can
+    // establish the tree matches, and this correctly still refuses. That case is what
+    // `import_baseline` exists for: a signature for an architecture this host cannot execute
+    // can only arrive with stated provenance, never with a local proof.
     if let Some(recorded) = doc.get("captured_at_commit").and_then(|v| v.as_str()) {
-        assert!(
-            recorded == head,
-            "this baseline describes commit {recorded}, but HEAD is {head}; check out \
-             {recorded} before capturing another architecture, or the two halves of the \
-             file would describe different trees"
-        );
+        if recorded != head {
+            let already: Option<&serde_json::Map<String, serde_json::Value>> = doc
+                .get("by_arch")
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get(arch))
+                .and_then(|v| v.as_object());
+            let reproduces = already.is_some_and(|prev| {
+                prev.len() == CASES.len()
+                    && cases.iter().all(|(label, fresh)| {
+                        let fresh = fresh["signature"].as_str();
+                        let old = prev.get(label).and_then(|v| v["signature"].as_str());
+                        fresh.is_some() && fresh == old
+                    })
+            });
+            assert!(
+                reproduces,
+                "this baseline describes commit {recorded}, HEAD is {head}, and arch={arch} \
+                 does not reproduce the recorded signatures at HEAD — so the two halves of \
+                 the file would describe DIFFERENT computations. Either this is a deliberate \
+                 behaviour change, in which case re-capture the WHOLE file at its own \
+                 pre-change commit, or you are importing an architecture this host cannot \
+                 execute, in which case use import_baseline: {IMPORT_RECIPE}"
+            );
+            println!(
+                "INVARIANCE CAPTURE: HEAD {head} differs from the baseline's commit \
+                 {recorded}, but all {} recorded arch={arch} cases reproduce at HEAD, so the \
+                 computation tree is unchanged and this capture composes.",
+                CASES.len()
+            );
+        }
     }
     doc.insert(
         "note".into(),
@@ -440,6 +486,171 @@ fn capture_baseline() {
     let text = serde_json::to_string_pretty(&doc).expect("baseline serialises");
     std::fs::write(&path, text + "\n").expect("baseline is writable");
     println!("INVARIANCE CAPTURE: wrote {}", path.display());
+}
+
+/// The recipe for [`import_baseline`], printed by the guard that refuses a capture it
+/// cannot verify locally. One line, for the reason [`CAPTURE_RECIPE`] is one line.
+const IMPORT_RECIPE: &str = "INVARIANCE_BASELINE_MODE=import INVARIANCE_BASELINE_IMPORT=<payload.json> cargo test -p aprender-forecast --lib invariance::import_baseline -- --ignored --nocapture";
+
+/// Record signatures for an architecture THIS HOST CANNOT EXECUTE, with stated provenance.
+///
+/// # Why a second entry point exists at all
+///
+/// [`capture_baseline`] computes. It is the right tool whenever the host can run the
+/// architecture being recorded, and it is the only tool that produces evidence rather than
+/// transcribing it. But a cross-architecture baseline is, by construction, a claim about a
+/// machine that is not this one: no local check can establish a foreign architecture's
+/// signatures, and no amount of fixing `capture_baseline`'s guard changes that. The honest
+/// alternative to an import path is a hand-edited fixture, which has no guard at all.
+///
+/// So this path is deliberately narrow, and every one of its refusals is a guard the hand
+/// edit would not have had:
+///
+/// * it REFUSES to import the architecture it is running on — that one must be CAPTURED,
+///   which is what stops this from becoming a way around [`capture_baseline`];
+/// * it REFUSES to overwrite an architecture already recorded;
+/// * it requires the payload's case labels to equal [`CASES`] EXACTLY, both directions, so a
+///   short payload cannot land a partial architecture that
+///   [`the_baseline_records_at_least_one_architecture`] would then reject;
+/// * it requires every signature to be sixteen lowercase hex digits, the shape
+///   [`signature`] emits;
+/// * it requires a non-empty `measured_by`, stamped into EVERY entry, so the committed file
+///   says plainly that these were transcribed rather than computed here.
+///
+/// # What actually verifies an imported entry
+///
+/// Nothing here does, and the doc comment must not pretend otherwise.
+/// [`every_baseline_case_reproduces_its_signature`] verifies it — on the first host of that
+/// architecture that runs the suite. An imported entry that is wrong turns that gate RED
+/// there and names the case, which is strictly better than the alternative it replaces: a
+/// gate that SKIPS forever on the architecture the repo's own CI runs, reporting nothing
+/// either way.
+#[test]
+#[ignore = "import, not an assertion; run with INVARIANCE_BASELINE_MODE=import -- --ignored"]
+fn import_baseline() {
+    let mode = std::env::var("INVARIANCE_BASELINE_MODE").unwrap_or_default();
+    assert_eq!(
+        mode, "import",
+        "refusing to touch the committed baseline without INVARIANCE_BASELINE_MODE=import; \
+         the recipe is: {IMPORT_RECIPE}"
+    );
+    let payload_path = std::env::var("INVARIANCE_BASELINE_IMPORT").unwrap_or_default();
+    assert!(
+        !payload_path.is_empty(),
+        "INVARIANCE_BASELINE_IMPORT must name the payload file; the recipe is: {IMPORT_RECIPE}"
+    );
+    let raw = std::fs::read_to_string(&payload_path)
+        .unwrap_or_else(|e| panic!("the import payload {payload_path} must be readable: {e}"));
+    let payload: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("the import payload {payload_path} must be JSON: {e}"));
+
+    let field = |k: &str| -> String {
+        payload
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("the import payload must carry a string `{k}`"))
+            .trim()
+            .to_string()
+    };
+    let arch = field("arch");
+    let profile = field("profile");
+    let captured_at_commit = field("captured_at_commit");
+    let measured_by = field("measured_by");
+    assert!(
+        !arch.is_empty() && !profile.is_empty() && !captured_at_commit.is_empty(),
+        "arch, profile and captured_at_commit must all be non-empty"
+    );
+    assert!(
+        measured_by.len() >= 40,
+        "`measured_by` is the whole reason an import is admissible: it must state the host, \
+         the method and what was and was not controlled, in enough words to be checkable. \
+         Got {} characters",
+        measured_by.len()
+    );
+
+    // THE ANTI-BYPASS GUARD. What this host can execute, it must MEASURE.
+    assert_ne!(
+        arch,
+        std::env::consts::ARCH,
+        "refusing to IMPORT arch={arch}, which is the architecture this host runs: capture \
+         it instead, so the file records evidence rather than a transcription. The recipe \
+         is: {CAPTURE_RECIPE}"
+    );
+
+    let payload_cases = payload
+        .get("cases")
+        .and_then(|v| v.as_object())
+        .expect("the import payload must carry a `cases` object");
+    let want: std::collections::BTreeSet<&str> = CASES.iter().map(|(l, _, _, _)| *l).collect();
+    let got: std::collections::BTreeSet<&str> = payload_cases.keys().map(String::as_str).collect();
+    let missing: Vec<&&str> = want.difference(&got).collect();
+    let extra: Vec<&&str> = got.difference(&want).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "the payload must name EXACTLY the {} door cases — a partial architecture is one \
+         the gate would reject anyway, and an extra case is a label that no longer exists.\n  \
+         MISSING: {missing:?}\n  EXTRA: {extra:?}",
+        CASES.len()
+    );
+
+    let mut cases = serde_json::Map::new();
+    for (label, _, _, _) in CASES {
+        let sig = payload_cases
+            .get(label)
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("case {label} must be a hex signature string"))
+            .trim()
+            .to_string();
+        assert!(
+            sig.len() == 16
+                && sig
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "case {label}: {sig:?} is not sixteen lowercase hex digits, which is the shape \
+             `signature` emits — a mistyped signature must fail HERE and not silently become \
+             a red gate on another host"
+        );
+        println!("INVARIANCE IMPORT: case={label} arch={arch} profile={profile} signature={sig}");
+        let mut entry = serde_json::Map::new();
+        entry.insert("signature".into(), serde_json::Value::String(sig));
+        entry.insert("arch".into(), serde_json::Value::String(arch.clone()));
+        entry.insert("profile".into(), serde_json::Value::String(profile.clone()));
+        entry.insert(
+            "captured_at_commit".into(),
+            serde_json::Value::String(captured_at_commit.clone()),
+        );
+        // Stamped on EVERY entry, not once at the top: an entry read in isolation must say
+        // that it was transcribed and by what method.
+        entry.insert(
+            "measured_by".into(),
+            serde_json::Value::String(measured_by.clone()),
+        );
+        cases.insert((*label).to_string(), serde_json::Value::Object(entry));
+    }
+
+    let path = fixture_path(BASELINE);
+    let existing = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("an import EXTENDS a committed baseline; {BASELINE}: {e}"));
+    let mut doc: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&existing).expect("existing baseline is a JSON object");
+    let by_arch = doc
+        .entry("by_arch")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .expect("by_arch is an object");
+    assert!(
+        !by_arch.contains_key(&arch),
+        "arch={arch} is already recorded; an import must never silently replace measured \
+         signatures. Remove the entry deliberately first if it is genuinely being re-taken."
+    );
+    by_arch.insert(arch.clone(), serde_json::Value::Object(cases));
+
+    let text = serde_json::to_string_pretty(&doc).expect("baseline serialises");
+    std::fs::write(&path, text + "\n").expect("baseline is writable");
+    println!(
+        "INVARIANCE IMPORT: wrote arch={arch} into {}",
+        path.display()
+    );
 }
 
 /// `YYYY-MM-DD` for today, UTC, without adding a calendar dependency (D-17).

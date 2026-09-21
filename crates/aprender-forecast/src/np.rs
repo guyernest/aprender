@@ -1091,45 +1091,73 @@ mod tests {
     /// recomputed the priced formula on both sides would prove the formula equals itself; a
     /// test carrying the measured number as a literal would drift from the calibration the
     /// moment either was re-measured.
+    /// Asserted on EVERY architecture the calibration records, not only on the one the
+    /// constant was derived from. The deriving host (aarch64) carries the unsuffixed keys;
+    /// each confirming host carries `<key>_<arch>`. A confirmation that no test reads is a
+    /// sentence rather than a confirmation.
     #[test]
     fn the_event_column_underpricing_is_observed_closed() {
-        let us_at_zero = c08_calibration_f64("measured_us_per_step_at_e0");
-        let us_at_max = c08_calibration_f64("measured_us_per_step_at_e_max");
         let e_max = c08_calibration_f64("measured_at_e_max") as usize;
         let n_lags_cal = c08_calibration_f64("n_lags_cal") as usize;
-        assert!(
-            us_at_zero > 0.0 && us_at_max > 0.0 && e_max > 0,
-            "the calibration must carry positive measurements at both ends, got \
-             {us_at_zero} / {us_at_max} at E = {e_max}"
-        );
-
-        // The calibration geometry, so both sides describe the same request shape.
+        // The calibration geometry, so both sides describe the same request shape. The
+        // priced side does not vary by architecture — it is the door's arithmetic — so it is
+        // computed once and compared against every measured side.
         let points = 1_200usize;
         let d = daily(points);
         let priced_at_zero = request_train_cost(&d, points, n_lags_cal, 0);
         let priced_at_max = request_train_cost(&d, points, n_lags_cal, e_max);
-
-        let measured_ratio = us_at_max / us_at_zero;
         let priced_ratio = priced_at_max as f64 / priced_at_zero as f64;
-        let headroom = priced_ratio - measured_ratio;
-        println!(
-            "C-08 closure at E = {e_max} (n_lags_cal = {n_lags_cal}): measured ratio \
-             {measured_ratio:.4} ({us_at_max} / {us_at_zero} us per step) vs priced ratio \
-             {priced_ratio:.4} ({priced_at_max} / {priced_at_zero}); headroom {headroom:.4}"
+
+        let hosts: [(&str, &str, &str); 2] = [
+            (
+                "aarch64 (deriving)",
+                "measured_us_per_step_at_e0",
+                "measured_us_per_step_at_e_max",
+            ),
+            (
+                "x86_64 (confirming)",
+                "measured_us_per_step_at_e0_x86_64",
+                "measured_us_per_step_at_e_max_x86_64",
+            ),
+        ];
+        // VACUITY GUARD: a list silently shrunk to one host is this test quietly going back
+        // to being single-architecture.
+        assert_eq!(
+            hosts.len(),
+            2,
+            "the closure is asserted on the deriving host AND on every confirming host"
         );
-        assert!(
-            measured_ratio > 1.0,
-            "the measured cost must RISE with the event-column count, or there was never an \
-             under-pricing to close and this test proves nothing: measured ratio \
-             {measured_ratio}"
-        );
-        assert!(
-            measured_ratio <= priced_ratio,
-            "UNDER-PRICED at {e_max} event columns: the measured work grows \
-             {measured_ratio:.4}x while the price grows only {priced_ratio:.4}x. A request at \
-             the holiday-column ceiling would buy more work than the door priced it at — the \
-             SC4 defect, still open."
-        );
+
+        for (what, e0_key, emax_key) in hosts {
+            let us_at_zero = c08_calibration_f64(e0_key);
+            let us_at_max = c08_calibration_f64(emax_key);
+            assert!(
+                us_at_zero > 0.0 && us_at_max > 0.0 && e_max > 0,
+                "{what}: the calibration must carry positive measurements at both ends, got \
+                 {us_at_zero} / {us_at_max} at E = {e_max}"
+            );
+            let measured_ratio = us_at_max / us_at_zero;
+            let headroom = priced_ratio - measured_ratio;
+            println!(
+                "C-08 closure on {what} at E = {e_max} (n_lags_cal = {n_lags_cal}): measured \
+                 ratio {measured_ratio:.4} ({us_at_max} / {us_at_zero} us per step) vs priced \
+                 ratio {priced_ratio:.4} ({priced_at_max} / {priced_at_zero}); headroom \
+                 {headroom:.4}"
+            );
+            assert!(
+                measured_ratio > 1.0,
+                "{what}: the measured cost must RISE with the event-column count, or there \
+                 was never an under-pricing to close and this test proves nothing: measured \
+                 ratio {measured_ratio}"
+            );
+            assert!(
+                measured_ratio <= priced_ratio,
+                "{what}: UNDER-PRICED at {e_max} event columns — the measured work grows \
+                 {measured_ratio:.4}x while the price grows only {priced_ratio:.4}x. A \
+                 request at the holiday-column ceiling would buy more work than the door \
+                 priced it at: the SC4 defect, still open on this architecture."
+            );
+        }
     }
 
     /// The SHAPE discriminator: the priced ratio is the SAME at two geometries differing

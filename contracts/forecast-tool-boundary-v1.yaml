@@ -1,6 +1,6 @@
 contract: forecast-tool-boundary
 metadata:
-  version: 1.8.0
+  version: 1.9.0
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
@@ -564,15 +564,35 @@ door_surface:
         date: '2026-09-21'
         commit: 610f5301a
         method: 'just forecast-np-event-calibration -> sc1_wall::np_event_calibration, release profile. Seven event-column counts (0, 7, 28, 84, 210, 504, 1000) spanning zero to fit_max_holiday_columns, 1200 contiguous daily points, 30 epochs, seed 42, through np::train - the exact function C-08 prices. Least squares over the seven points gives an intercept a (us/step at E = 0) and a slope b (us/step per event column); the coefficient in PROXY WIDTH UNITS is b * (n_lags_cal + 1) / a, which reduces to b / a only because this calibration is LAG-FREE. The batch size divides a and b identically and cancels out of the ratio, which is why the coefficient is a ratio of two measurements at one geometry and never an absolute microsecond figure - an absolute number would need a batch, a step count and a sample count to convert, none of which the door knows at check time. D-32 requires the per-column SLOPE rather than the 47.924 s structural maximum, because the slope is cheap enough to live in CI. THREE runs at this commit (CLAUDE.md rule 6 - one input is an anecdote) fitted raw coefficients 0.006213, 0.005815 and 0.005723, an 8.6 per cent spread; the LARGEST is the basis, rounded UP to the next multiple of 1e-4 (0.0063) and multiplied by the safety factor. np_event_calibration re-asserts shipped >= freshly fitted on every run, so the sweep is itself a live one-sided guard against under-pricing on any host it is run on.'
-        status: provisional_pending_x64_measurement
+        status: final
+        confirmed_on_x86_64: 'MEASURED 2026-09-21 on an ephemeral EC2 c7i.2xlarge, Amazon Linux 2023, NATIVE x86_64, us-east-1, at commit 63a4bdb15, by the same `just forecast-np-event-calibration` recipe on release. Seven points: us/step 24.456 / 29.339 / 33.629 / 37.764 / 45.310 / 86.500 / 136.433 at E = 0 / 7 / 28 / 84 / 210 / 504 / 1000; fit intercept 27.4070 us/step, slope 0.109974 us/column, r^2 0.993785, raw coefficient 0.004013. The harness ASSERTED the shipped value rather than a reader inferring it: np_event_calibration re-checks shipped >= freshly fitted on every run and exited 0, so 0.0126 >= 0.004013 is a test result. THE COUNTER-INTUITIVE PART, and the reason the aarch64-derived constant is the CONSERVATIVE one: x86_64 has a HIGHER absolute slope (0.109974 against 0.089836) and yet a LOWER coefficient, because the coefficient is the ratio b/a and the c7i core is slower per step than the M4 Pro (intercept 27.41 against 14.46 us). So the shipped constant OVER-prices on x86_64 rather than under-pricing, and closure holds on both with more headroom on the architecture that gates the repo: aarch64 7.9122x <= 14.0x, x86_64 5.5787x <= 14.0x. The x86_64 measurement CONFIRMS 0.0126; it does not move it.'
+        host_substitution: 'SC4 says the constant is measured on the deployment target rather than inherited from the spike dev box, and D-32 resolves that target to the self-hosted X64 CI runner [self-hosted, X64, Linux, clean-room] on image localhost:5000/sovereign-ci:stable. THAT RUNNER WAS UNAVAILABLE, measured rather than assumed: `gh api repos/guyernest/aprender/actions/runners` returns total_count 0, the only runs-on in ci.yml is that runner, and its container image lives in a registry local to it, so the CI container cannot be reproduced on any other host either. The operator authorised and accepted an ephemeral EC2 c7i.2xlarge running Amazon Linux 2023 as the substitute, and ruled SC4 MET: the clause substance is that the constant is measured off the spike dev box, on the deployment ARCHITECTURE, with the under-pricing observed closed, and all three now hold on native x86_64 with the closure asserted by the harness own guard. STATED PLAINLY SO THE SUBSTITUTION IS LEGIBLE: this is NOT the self-hosted runner and NOT sovereign-ci:stable. The residual gap is WHICH x86_64 box, and the measurement above shows that does not change the verdict - the substitute is the slower core of the two and still leaves more headroom than aarch64. Phase 7 re-prices C-08 per tier regardless, which is where a per-host number would belong if one is ever wanted.'
         safety_factor: 2
-        safety_factor_reason: 'A door must never under-price, and the relative speed of THIS host against the one D-32 names - the self-hosted X64 CI runner - is UNKNOWN in direction as well as magnitude, so a bare local number could under-price there. D-34 leaves the multiplier and its size to discretion; this one covers an unknown-direction host difference, and it is stated here rather than folded silently into the value so the on-target measurement can replace the number and the factor independently. The 8.6 per cent run-to-run spread measured on this host is covered many times over by it.'
+        safety_factor_reason: 'A door must never under-price. When the factor was chosen the relative speed of the deriving host against an x86_64 deployment host was UNKNOWN in direction as well as magnitude, so a bare local number could have under-priced there. D-34 leaves the multiplier and its size to discretion; it is stated here rather than folded silently into the value so a later measurement can replace the number and the factor independently. It is KEPT at 2 now that x86_64 has been measured, and deliberately so: the x86_64 raw coefficient came in LOWER (0.004013 against the 0.006213 basis), so the factor is no longer covering an unknown - it is covering the 8.6 per cent run-to-run spread on the deriving host, the 2.1x spread BETWEEN the two architectures measured so far, and the fact that only two of the four envelopes Phase 7 will serve have been measured at all. Lowering it on a two-host sample would be fitting a bound to the hosts that happen to have been tried.'
         n_lags_cal: 0
+        # The DERIVING measurement (aarch64). These three are READ by
+        # np::tests::the_event_column_underpricing_is_observed_closed.
         measured_us_per_step_at_e0: 13.327
         measured_us_per_step_at_e_max: 105.446
         measured_at_e_max: 1000
         measured_slope_us_per_column: 0.089836
         fit_r_squared: 0.998067
+        # The CONFIRMING measurement (native x86_64, EC2 c7i.2xlarge, same recipe, same
+        # measured_at_e_max). Suffixed rather than nested so the same contract reader serves
+        # both, and READ by the same closure test - which asserts the closure on EVERY
+        # architecture recorded here rather than only on the one the constant came from. A
+        # confirmation nothing tests is a sentence, not a confirmation.
+        measured_us_per_step_at_e0_x86_64: 24.456
+        measured_us_per_step_at_e_max_x86_64: 136.433
+        measured_slope_us_per_column_x86_64: 0.109974
+        fit_r_squared_x86_64: 0.993785
+        # The SECONDARY item D-32 asked for while measuring, recorded as OUTSTANDING rather
+        # than inferred: C-08's measured_seconds: 47.924 was taken on aarch64 release and has
+        # NOT been re-checked on x86_64. The EC2 run produced no matching output and its
+        # console log hit a 64 KB cap, so nothing is known either way. It is independent of
+        # the coefficient: measured_seconds records the structural maximum that FORCED the
+        # bound, not a number any door check compares against.
+        structural_maximum_recheck_x86_64: outstanding
       note: 'CLOSED BY A BOUND, and the MEASUREMENT is what decided that. There is no budget of ANY kind on this path: FIT_BUDGET_SECS lives in fit::fit_prophet, which the neuralprophet arm never enters. Every factor is individually bounded (n_lags <= 365, n_samples <= n_train_grid <= fit_max_span_days, epochs <= 500) but their product is not, and the lr sweep multiplies the whole thing by 2 or 3. It is NOT that n_train_grid is bounded by a larger constant than fit_max_points — fit_max_span_days == fit_max_points — the drivers are the missing budget, the 2-3x sweep and n_lags. The structural maximum (20 000 contiguous daily points, n_lags 365, horizon 3650) prices at 718 641 000 and walls at 47.924 s on release, 24x SC1''s 2 s bar, so measured_at_structural_maximum was NOT an available disposition: the measurement is recorded here as the number that forced the bound rather than as a closure. The lag-free arm''s own structural maximum is 3 000 000 (0.508 s) and can never reach the bound; C-08 is entirely about the lagged arm.'
     - axis: C-09
       name: 'linear / flat uncertainty simulation'
