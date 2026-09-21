@@ -4,7 +4,7 @@ milestone: v1.0
 current_phase: "06.1"
 current_phase_name: "Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds"
 status: executing
-stopped_at: Completed 06.1-04-PLAN.md
+stopped_at: Wave 2 complete (06.1-02, 06.1-03, 06.1-04 merged); next is wave 3 (06.1-05)
 last_updated: "2026-09-21T16:45:55.278Z"
 last_activity: 2026-09-20
 last_activity_desc: Phase 06.1 execution started
@@ -461,7 +461,7 @@ Recent decisions affecting current work:
 - bench_row.rs:37-43 claims canonical bytes are key-SORTED because no workspace crate enables preserve_order. MEASURED false: sorting reproduces neither the row nor the manifest digest, file order reproduces both. Not a correctness defect; the stated reason and the field-reordering property it claims are wrong. For 05-16 or 05-17, which touch that module.
 - FINDING for 05-17: apr setfit bench verify-cell's printed 'scope:' prose (apr-cli/src/commands/setfit_bench.rs:2931) and bench report's 'verified:' header no longer enumerate the selection binding both doors now perform. Under-claiming, not a false attestation; assigned to 05-17 by threat T-05-16-05.
 - D-ITEM-05-17-A: the bench row seal is BUILD-GRAPH DEPENDENT. serde_json/preserve_order (via pmcp v2.19.3) is in apr-cli graph and absent from aprender-train, so the same committed row verifies under apr and is refused as row_digest_mismatch under cargo test -p aprender-train. A cargo feature-unification change with no code change can flip the whole committed evidence set. Needs its own plan: the fix re-seals 40 rows, 40 selection manifests and the run manifest.
-- DECISION NEEDED: regressor_prior_scale_min (1e-153) sits ~145 decades inside the region where the Prophet fit collapses to zero L-BFGS iterations with a silently-zeroed regressor. Measured across 18 configurations and 3 series shapes; the plan's stated NaN mechanism is refuted (no response field is ever non-finite). Raise to a measured usability floor (~1e-7) in plan 06.1-03, or accept knowingly. See 06.1-01-SUMMARY.md deviation 5.
+- RESOLVED (06.1-03, wave 2): regressor_prior_scale_min stays at 1e-153. The ~1e-7 usability-floor hypothesis was REFUTED by a 5-shape x 12-decade release campaign: at 1e-7 the seasonal series contributes 2.8e-12 relative to yhat, as negligible as at 1e-9 — so a floor there would refuse requests behaving exactly like ones it accepts — and there is no cliff, contribution decaying continuously and saturating between 1e-4 and 1e-2, shape-dependently, because prior_scale is a regularisation STRENGTH and shrinking the coefficient is what it is for. D-21 is instead closed at the OUTCOME: when a fitted coefficient is exactly zero (the optimiser starts at zero, so that means L-BFGS never moved it) the response says so. Threshold-free, shape-independent, and it refuses nothing previously accepted. See 06.1-03-SUMMARY.md.
 - Verify t2c in 06.1-04-PLAN.md cannot see an #[ignore] added to part A or part B (it anchors bodies at fn, and the attribute precedes fn). Measured green on a gated part A. The in-tree Rust test invariance::parts_a_and_b_are_unconditional is the real guard; a later plan should replace the python body with a call to it.
 
 ### Roadmap Evolution
@@ -481,7 +481,7 @@ Items acknowledged and carried forward from project scope:
 ## Session Continuity
 
 Last session: 2026-09-21T16:45:55.115Z
-Stopped at: Completed 06.1-04-PLAN.md
+Stopped at: Wave 2 complete (06.1-02, 06.1-03, 06.1-04 merged); next is wave 3 (06.1-05), which has a blocking checkpoint needing self-hosted X64 runner access
 Resume file: None
 
 ## Accumulated Context
