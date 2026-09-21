@@ -1,6 +1,6 @@
 contract: prophet-parity
 metadata:
-  version: 2.1.0
+  version: 3.0.0
   created: '2026-09-05'
   author: PAIML Engineering
   kind: kernel
@@ -25,6 +25,19 @@ metadata:
     Python reference for `fitted_objective_slack` is the Rust objective evaluated at PYTHON's MAP
     parameters — a legitimate stand-in precisely because `objective_at_python_map_abs` proves, on
     every fixture that does publish `-lp`, that this quantity IS Python's objective.
+
+    TWO FURTHER ORACLES CARRY THE EXTRA-REGRESSOR LADDER, and they are a separate family with their
+    own `regressor_*` keys: `retail_regressors_prophet140.json` (24 columns — four regressors, no
+    holidays) and `retail_regressors_holidays_prophet140.json` (30 columns — the same four regressors
+    plus `blackfriday` with a -1..+2 window and `newyear` with +0..+1). Both are spike 011, both are
+    `prophet==1.4.0` under Python 3.12, and both are committed byte-identical to the spike originals —
+    re-running the oracle is a DIFFERENT measurement, not the same one. They publish `columns`,
+    `prior_scales`, `s_a`, `s_m`, `component_cols`, `X_first3` / `X_last3`, `extra_regressors` and a
+    full `forecast.components` block, and they carry `params.lp__` rather than
+    `log_posterior_at_map_unnormalized`. Their rungs live in
+    `crates/aprender-forecast/src/reg_parity.rs`, one test per rung per fixture, and bind the
+    `regressor_*` equations below — never the seven-fixture keys, whose bars were measured on a
+    different design.
 
     WHY THE PREDICT PATH IS BARRED RELATIVE TO `y_scale` AS WELL AS ABSOLUTELY. D-04 states the
     predict-path bar as an absolute 1e-10 on Peyton Manning, whose `y_scale` is 12.85. The same
@@ -117,20 +130,21 @@ equations:
 
   regressor_standardization_abs:
     formula: 'max(|mu_rust - mu_py|, |std_rust - std_py|) over every extra regressor <= 1.0e-14'
-    domain: 'the HISTORY rows only of each caller-supplied regressor column in `retail_regressors_prophet140.json`, plus its requested `standardize` setting (absent = Prophet auto)'
+    domain: 'the HISTORY rows only of each caller-supplied regressor column in BOTH committed regressor oracles — `retail_regressors_prophet140.json` (24 columns, four regressors, no holidays) and `retail_regressors_holidays_prophet140.json` (30 columns, the same four regressors plus `blackfriday` with a -1..+2 window and `newyear` with +0..+1) — plus its requested `standardize` setting (absent = Prophet auto)'
     codomain: 'Prophet 1.4.0 `initialize_scales` output as committed in the fixture `extra_regressors.<name>.mu` / `.std`'
     float_tolerance: 1.0e-14
     invariants:
       - 'the spread is pandas `Series.std()` — the SAMPLE standard deviation, variance divided by (n - 1), i.e. ddof = 1. numpy default ddof = 0 gives 6.500320 where the oracle stores 6.511441581253706 for `price`: a silent 0.17 percent shift in every coefficient that surfaces as arithmetic-looking noise rather than as a wrong divisor'
       - 'measured 3.6e-15 worst case across the four regressors, so the bar has roughly 2.8x headroom'
       - 'the constants are computed over HISTORY rows only, never over history + horizon: including future rows would leak the forecast period into the scaling'
+      - 'the two oracles share one `regressor_values` block and one history, so the four (mu, std) pairs are IDENTICAL at 24 and at 30 columns. That is not redundancy: standardisation is defined over the history rows of the regressor column alone, and a port that let a holiday column reach `initialize_scales` would break exactly this equality'
       - 'Prophet auto means "do not standardize a column whose unique history values are EXACTLY the two-element set {0, 1}" — both present. A single-valued column is NOT exempt, is standardized, and yields std = 0.0, which the door refuses as constant'
     preconditions:
       - 'the regressor carries one value per history row and per horizon row, so its length is exactly points + horizon'
 
   regressor_predict_path_rel_yscale:
     formula: 'max|yhat_rust(theta_py) - yhat_py| <= 1.0e-15 * y_scale and max|trend_rust(theta_py) - trend_py| <= 1.0e-15 * y_scale, on the extra-regressor path'
-    domain: 'the committed regressor fixtures, Python MAP parameters (k, m, delta, beta, sigma_obs) pushed through the regressor-aware Rust `predict` over the fixture forecast ds with the full per-row regressor value channel'
+    domain: 'BOTH committed regressor oracles — `retail_regressors_prophet140.json` (24 columns) and `retail_regressors_holidays_prophet140.json` (30 columns) — with Python MAP parameters (k, m, delta, beta, sigma_obs) pushed through the regressor-aware Rust `predict` over the fixture forecast ds (293 history + 12 horizon = 305 rows) with the full per-row regressor value channel'
     codomain: 'the fixture `forecast.yhat` / `forecast.trend` columns Python Prophet 1.4.0 produced with the same regressors'
     float_tolerance: 1.0e-15
     invariants:
@@ -141,6 +155,69 @@ equations:
     preconditions:
       - 'data_prep_exact holds for the same fixture: a predict path over a different design matrix is not a parity claim'
       - 'the value channel covers every predicted row, so its length equals the forecast grid length'
+
+  regressor_column_order_exact:
+    formula: 'the Rust design column NAME list equals Python element-for-element, and max(|prior_scales_rust - prior_scales_py|, |s_a_rust - s_a_py|, |s_m_rust - s_m_py|) <= 0.0'
+    domain: 'the spliced Rust design for BOTH committed regressor oracles — `retail_regressors_prophet140.json` (24 columns) and `retail_regressors_holidays_prophet140.json` (30 columns)'
+    codomain: 'the fixture `columns`, `prior_scales`, `s_a` and `s_m` arrays Prophet 1.4.0 produced for the same request'
+    float_tolerance: 0.0
+    invariants:
+      - 'THIS KEY COVERS NAMES, MASKS AND PRIOR SCALES ONLY. The design-matrix CELLS are barred separately by `regressor_design_cells_abs` at a MEASURED 1.0e-14, because the committed spike records a non-zero residual there and an exact-zero cell bar would reject the validated port. Conflating the two is the defect this split exists to prevent'
+      - 'MEASURED ORDER: seasonalities in insertion order, then holiday columns sorted by the generated `{name}_delim_{±offset}` string, then extra regressors in INSERTION order. At 30 columns that is yearly_delim_1..20, then blackfriday_delim_+0, blackfriday_delim_+1, blackfriday_delim_+2, blackfriday_delim_-1, newyear_delim_+0, newyear_delim_+1, then promo, price, discount, weather'
+      - 'the holiday sort yields +0, +1, +2, -1 because the PLUS sign sorts before the HYPHEN in ASCII (0x2B < 0x2D). This is not a special case in the port: it is what the crate existing `hcols.sort_by(name)` already yields, and the oracle agrees'
+      - 'REGRESSORS APPEND and no existing column index moves. That structural fact is what D-19 no-argument bitwise invariance gate rests on, and what makes `splice` early return on an empty slice a correct no-op rather than a rebuild that happens to produce the same bytes'
+      - 'EXACT is right here and nowhere else in the regressor block: names are strings, `s_a` / `s_m` are mask BITS and `prior_scales` are the caller own integers echoed back. A non-zero difference in any of them is a structural defect with no arithmetic excuse, so these are deliberately NOT relaxed to the cell bar'
+      - 'measured: max abs d prior_scales / s_a / s_m = 0.00e0 at BOTH widths, and column order identical at both (.claude/skills/spike-findings-aprender/sources/011-prophet-regressor-parity/RUN-OUTPUT.md:18-23 and :82-87)'
+    preconditions:
+      - 'the regressor list is spliced in the caller insertion order, never sorted'
+
+  regressor_design_cells_abs:
+    formula: 'max|X_rust - X_py| over the fixture X_first3 and X_last3 history row blocks <= 1.0e-14'
+    domain: 'the `X_first3` and `X_last3` row blocks both regressor oracles publish (3 x 24 and 3 x 30 cells respectively), against the corresponding rows of the spliced Rust design'
+    codomain: 'the standardised design-matrix cells Prophet 1.4.0 built for the same request'
+    float_tolerance: 1.0e-14
+    invariants:
+      - 'MEASURED, NOT CHOSEN: the committed spike records `max abs d X (first3 + last3 rows) = 3.33e-15` at BOTH 24 and 30 columns (.claude/skills/spike-findings-aprender/sources/011-prophet-regressor-parity/RUN-OUTPUT.md:24 and :88). An exact-zero bar on these cells REJECTS the validated port, which is why this key exists separately from `regressor_column_order_exact`'
+      - 'the residual is float ARITHMETIC, not disagreement: a standardised cell is (v - mu) / std, and Python and Rust reach the same value by different association orders. 1e-14 gives roughly 3x headroom over the measured 3.33e-15'
+      - 'still TIGHT enough to be a real bar: a column-order defect or a wrong standardisation divisor moves cells by order unity, not by 1e-15. The ddof = 0 trap alone shifts `price` cells by ~0.17 percent, twelve orders of magnitude above this bar'
+      - 'NAMES, the `s_a` / `s_m` masks and `prior_scales` stay at EXACT zero under `regressor_column_order_exact` and are deliberately NOT relaxed to this bar: they are strings, mask bits and echoed caller integers, and a non-zero difference in any of them is a structural defect with no arithmetic excuse'
+      - 'the crate-wide `data_prep_exact` (0.0) still binds the seven NON-regressor fixtures unchanged. This key is additive and narrows nothing'
+    preconditions:
+      - 'the standardisation constants agree first (`regressor_standardization_abs`): a cell comparison over a different mu / std is not a parity claim'
+
+  regressor_components_rel_yscale:
+    formula: 'for every named component c the fixture publishes and Rust `predict` produces: max|c_rust(theta_py) - c_py| <= 1.0e-14 * y_scale'
+    domain: 'the named components of the regressor-aware Rust `predict` at Python MAP parameters on both regressor oracles: the yearly seasonality, each holiday and the `holidays` roll-up at 30 columns, one component per regressor, `extra_regressors_additive`, `extra_regressors_multiplicative`, `additive_terms` and `multiplicative_terms`'
+    codomain: 'the corresponding `forecast.components` arrays of the fixture'
+    float_tolerance: 1.0e-14
+    invariants:
+      - 'RELATIVE to y_scale, and that is the whole point. The crate-wide `components_via_python_params_abs` is an ABSOLUTE 1.0e-10; on retail_sales (y_scale 518253) the measured worst is 3.6e-11, which passes with only about 3x headroom and would begin failing for arithmetic reasons rather than for a defect. SC1 names the relative form for this path'
+      - '`extra_regressors_additive` is a sum over the additive regressor columns SCALED BY y_scale; `extra_regressors_multiplicative` is a FRACTION and is NOT rescaled. A roll-up that applied y_scale to the multiplicative arm would be wrong by five orders of magnitude and is exactly what this rung catches'
+      - 'COUNTS ARE PART OF THE BAR: 9 components are compared at 24 columns (promo, price, discount, weather, yearly, extra_regressors_additive, extra_regressors_multiplicative, additive_terms, multiplicative_terms) and 12 at 30 (those plus blackfriday, newyear, holidays). The ladder asserts set EQUALITY and the count as EQUALITY, not as a floor — an intersection plus a minimum is satisfiable by comparing the wrong nine'
+      - 'measured worst absolute difference 3.6e-11 at 24 columns and 2.9e-11 at 30, i.e. 6.9e-17 and 5.6e-17 of y_scale — roughly 145x and 180x headroom against this bar'
+      - 'the fixture publishes no `<component>_lower` / `_upper` or `cap` arrays on these two oracles, but the ladder still filters them by name so a regenerated fixture that grew them does not silently change the compared set'
+    preconditions:
+      - 'the predict path agrees first (`regressor_predict_path_rel_yscale`): components that sum to a different yhat are not a parity claim'
+
+  regressor_fitted_objective_slack:
+    formula: 'f_rust(theta_fit) <= f_reference + 0.5, ONE-SIDED, where theta_fit is the D-09 restart-loop MAP on the spliced design and f_reference is the Rust objective at the oracle MAP parameters'
+    domain: 'both committed regressor oracles, fitted by `fit::fit_prophet(spliced_design, constants.max_rounds)`'
+    codomain: 'the unscaled negative log posterior at the Prophet 1.4.0 MAP for the same design'
+    float_tolerance: 0.5
+    invariants:
+      - 'ONE-SIDED. A LOWER objective than Python is a BETTER MAP and is never a failure; only exceeding the reference by more than the slack is a defect'
+      - 'THE RULE THIS PHASE DEPENDS ON: a regressor coefficient disagreement is not a defect until the objective control says so. Rust `price` beta came out +0.183202 against Python +0.036035 — a ratio of 5.08x, re-measured in-tree — at a measured slack of -3.4166. That is a better optimum on a flat ridge, not a parity failure, and asserting on the beta VALUE would make the ladder red for being right'
+      - 'measured slack -3.4166 at 24 columns and -2.2226 at 30, IN-TREE by `reg_parity::<stem>_fit_objective_and_identifiability` on 2026-09-21, reproducing the spike RUN-OUTPUT numbers of -3.42 and -2.22. Both are far below the +0.5 bar, and both are NEGATIVE — the Rust fit reaches a lower objective than the oracle MAP at both widths'
+      - 'the in-tree identifiability ratios, recorded: at 24 columns promo 1.02x, price 5.08x, discount 2.31x, weather 0.96x; at 30 columns promo 1.00x, price 2.51x, discount 1.38x, weather 1.01x. The two well-conditioned controls (promo, weather) land within a few percent at both widths while the collinear pair does not — which is what an identifiability story looks like, and why the objective is the control and the coefficient is not'
+      - 'BETA FINITENESS IS ASSERTED SEPARATELY AND FIRST. A NaN compares false against every bound, so an ill-conditioned solve would make this one-sided slack, the ratio table and every downstream comparison pass while proving nothing. Finiteness is not a value assertion and does not re-open the rule above'
+      - 'the identifiability table (oracle beta, Rust beta, ratio, per regressor) is PRINTED and carried in this rung assertion message. `discount` is a 6-month cosine and therefore a harmonic of the yearly seasonality (r = 0.999 against yearly_delim_4); its coefficient is not identifiable and is recorded rather than barred'
+      - 'FitInfo.objective is already unscaled (best_f / Model::scale)'
+      - 'THE `lp__` QUESTION, RESOLVED BY MEASUREMENT RATHER THAN LEFT AS A GAP. Both regressor oracles DO publish a Python objective — `params.lp__`, Stan log posterior at the MAP — so the premise that they do not was half wrong. Measured against the existing rung-2 arithmetic (Model::objective(pack(theta_py)) / Model::scale, summed because the fixture stores a POSITIVE log posterior): f_rust = -1022.494294424 against lp__ = 1022.4943, residual 5.576e-6 at 24 columns; f_rust = -1022.462291772 against lp__ = 1022.4623, residual 8.228e-6 at 30'
+      - 'THE GUESSED EXPLANATION IS REFUTED. The residual is NOT Stan Jacobian and prior terms this port omits: the oracle stores `lp__` rounded to FOUR DECIMAL PLACES, and both residuals are bounded by half of that last place. `lp__` is EXACTLY the Rust objective rounded to four decimals at both widths. So the rung is NOT absent — it is asserted as a digit-for-digit identity by `reg_parity::<stem>_objective_at_python_map`, which reads no tolerance because there is none in it, and is therefore not a `float_tolerance` key here'
+      - 'that rung is what makes THIS one legitimate: f_reference is the RUST objective at the oracle MAP rather than a published Python number, and that stand-in is only valid because the quantity is PROVEN to be Python objective on the same two fixtures — the identical argument `objective_at_python_map_abs` makes for the spike-001 family'
+      - 'the crate-wide `objective_at_python_map_abs` (1.0e-9) is DELIBERATELY NOT extended to these two fixtures: at a residual of 5.6e-6 that would be writing something false into this contract. The oracle precision, not the port, is the limit'
+    preconditions:
+      - 'every returned beta is finite'
 
   fitted_objective_slack:
     formula: 'f_rust(theta_fit) <= f_python + 0.5, where theta_fit is the D-09 restart-loop MAP and f_python is Python -lp where published, else the Rust objective at theta_py'
@@ -330,6 +407,11 @@ proof_obligations:
     formal: 'forall fixture: info.rounds <= constants.max_rounds && info.status in {Stalled, Converged} && info.budget_hit == false'
     applies_to: all
 
+  - type: equivalence
+    property: 'The extra-regressor design reproduces Prophet 1.4.0 at BOTH committed widths, with names, masks and prior scales EXACT and the standardised cells inside their measured bar — and the components, predict path and fitted objective follow at their own rungs'
+    formal: 'forall regressor fixture in {24 columns, 30 columns}: columns_rust == columns_py elementwise AND max(|prior_scales_rust - prior_scales_py|, |s_a_rust - s_a_py|, |s_m_rust - s_m_py|) <= equations.regressor_column_order_exact.float_tolerance AND max|X_rust - X_py| over X_first3/X_last3 <= equations.regressor_design_cells_abs.float_tolerance AND max|c_rust(theta_py) - c_py| <= equations.regressor_components_rel_yscale.float_tolerance * y_scale for every published component AND f_rust(theta_fit) - f_reference <= equations.regressor_fitted_objective_slack.float_tolerance'
+    applies_to: all
+
 falsification_tests:
 
   - id: FALSIFY-PROPHET-001
@@ -415,6 +497,18 @@ falsification_tests:
     prediction: 'The same seven-point sweep additionally reports |var - lambda| / lambda <= equations.poisson_sampler_domain.variance_tolerance (0.05) at every lambda, and |p_zero - exp(-lambda)| / exp(-lambda) <= equations.poisson_sampler_domain.zero_mass_tolerance (0.22) at the two lambdas where N * exp(-lambda) >= 30 (3 and 5 at N = 60 000). TWO IMPLEMENTATIONS THAT PASS FALSIFY-PROPHET-013 FAIL THIS, both OBSERVED under plan 06-17 and then restored. (a) `fn poisson(_rng, lambda) -> lambda.round() as usize`, a zero-variance stub: variance rel = 1.000000 at all seven lambdas and zero mass rel = 1.000000 at 3 and 5, while every MEAN still reports rel = 0.000000. (b) `poisson_normal_branch_lambda` lowered from 30 to 3.2, handing every real logistic request the normal approximation: zero mass rel = 2.284878 at lambda = 5 (p_zero 0.022133 against an exact 0.006738) while every mean stays inside 0.01 AND the variance bar also stays green — so neither of the other two bars would have caught it.'
     test: 'cargo test -p aprender-forecast --lib prophet::sampler::poisson_mean_and_variance_track_lambda_across_its_whole_domain'
     if_fails: 'The sampler SPREAD has left its domain even if its centre has not. A count with the right mean and the wrong variance makes the simulated trends spread by something other than the Poisson law, so `yhat_lower` / `yhat_upper` come back NARROWER (or wider) than the `interval_width` the response advertises, with `diagnostics` saying nothing — the same silent change of meaning FALSIFY-PROPHET-013 guards against, in the moment the mean alone cannot see it. If it is the zero-mass half that is red, check `poisson_normal_branch_lambda` first: the low tail is the statistic that moves when the exact sampler is swapped for the approximation.'
+
+  - id: FALSIFY-PROPHET-015
+    rule: 'The extra-regressor ladder holds at BOTH committed widths, and each rung binds its OWN bar'
+    prediction: 'The twelve `reg_parity::retail_regressors_*` and `reg_parity::retail_regressors_holidays_*` tests report: the column NAME list equal element-for-element with a count of exactly 24 and exactly 30; max abs d prior_scales / s_a / s_m = 0.00e0 at the exact bar; max abs d X over X_first3 + X_last3 = 3.331e-15 at BOTH widths, inside the measured 1.0e-14 cell bar; mu and std within 1.0e-14 (worst 3.55e-15) with promo at exactly mu = 0.0, std = 1.0; the Rust objective at the oracle MAP equal to the published `lp__` in every one of the four decimals the oracle wrote down; yhat and trend within 1.0e-15 * y_scale (measured 2.33e-10 and 1.75e-10 absolute at a y_scale of 518253); EXACTLY 9 and EXACTLY 12 components compared as set equality within 1.0e-14 * y_scale (worst 3.6e-11 and 2.9e-11); and a one-sided fitted objective slack of -3.4166 and -2.2226 against the +0.5 bar with every beta finite.'
+    test: 'cargo test -p aprender-forecast --lib reg_parity'
+    if_fails: 'Read WHICH rung named itself. A red column-order rung means the splice stopped appending or the holiday name sort moved, and the D-19 no-argument invariance gate is no longer free. A red CELL rung at order-unity means the standardisation divisor or the column order is wrong; at order 1e-15 it means the bar was tightened to exact and is now rejecting the validated port — restore the measured bar, do not loosen the port. A red components rung with a COUNT mismatch means the compared set silently grew or shrank, which is how a value comparison stops comparing. A red objective rung is the only rung entitled to be read as a fit defect, and only after the printed identifiability table is checked: a coefficient 4.7x from Python at NEGATIVE slack is a better optimum, not a parity failure.'
+
+  - id: FALSIFY-PROPHET-016
+    rule: 'No contract-owned tolerance literal lives in the regressor ladder source'
+    prediction: '`reg_parity::no_literal_tolerance_lives_in_this_module` reads its own source via include_str!, strips line AND block comments, and finds none of 1e-14 / 1e-15 / 1e-10 / 0.5 / 0.02 / 0.0079 / 3.33e-15 in the remainder; `reg_parity::no_literal_case_table` proves the pattern discriminates by running a must-match / must-not-match table in the same process as the gate itself.'
+    test: 'cargo test -p aprender-forecast --lib reg_parity::no_literal'
+    if_fails: 'Either a bar was hardcoded into a test instead of read from this contract — in which case it can be loosened without the contract ever noticing, and every tolerance in this file becomes decorative — or the pattern itself drifted, which the case table names directly. A gate without its case table has been wrong five times in this repo (CLAUDE.md Verification Discipline rule 7); the two tests ship together for that reason.'
 
 kani_harnesses:
 

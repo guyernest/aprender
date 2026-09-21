@@ -1,9 +1,16 @@
 # Oracle fixtures for `aprender-forecast`
 
-These 18 files are the phase's **correctness bar**. The parity ladder does not check that
+These 21 files are the phase's **correctness bar**. The parity ladder does not check that
 the Rust port is self-consistent; it checks that the port reproduces a specific number
 produced by a specific version of a specific Python library on a specific dataset. That is
 what makes a green ladder evidence.
+
+**That count is a GATED CLAIM, not a comment.** `test_support::tests::
+every_committed_fixture_is_readable_and_the_readme_count_is_true` enumerates this directory,
+parses the number out of the sentence above and asserts they agree. The counting rule is
+every entry here EXCEPT `README.md` itself, which documents the fixtures rather than being
+one. Re-derive the sentence when you add a file; do not increment it by hand — the old
+hand-kept list went stale three times without any build noticing.
 
 **They are committed on purpose, and their absence is a defect.** `test_support::load_json`
 `expect`s — no test in this crate skips because a fixture is missing. A skipped parity test
@@ -32,6 +39,9 @@ the copies were verified identical to each other before ONE was taken.
 | `weights_index.json` | `005-chronos-bolt-tiny-parity` | chronos-forecasting 2.3.1 | `.planning/spikes/005-chronos-bolt-tiny-parity/tools/` |
 | `chronos_holdout_oracle.json` | `006-chronos-vs-prophet-holdout` | chronos-forecasting 2.3.1 | `.planning/spikes/006-chronos-vs-prophet-holdout/tools/` |
 | `peyton_tiny_oracle.json` | `007-chronos-mcp-thin-server` | chronos-forecasting 2.3.1 | `.planning/spikes/007-chronos-mcp-thin-server/tools/` |
+| `retail_regressors_prophet140.json` | `011-prophet-regressor-parity` | Python Prophet 1.4.0 under Python 3.12 | `.planning/spikes/011-prophet-regressor-parity/tools/oracle.py` |
+| `retail_regressors_holidays_prophet140.json` | `011-prophet-regressor-parity` | Python Prophet 1.4.0 under Python 3.12 | `.planning/spikes/011-prophet-regressor-parity/tools/oracle_holidays.py` |
+| `invariance_baseline.json` | `012-no-argument-invariance-gate` | not an oracle — see below | captured from this repo at `captured_at_commit`, never regenerated |
 | `peyton_manning.csv` | `002` (7 identical copies across 001-007) | raw dataset (Prophet's example data) | — |
 | `air_passengers.csv` | `004` (6 identical copies) | raw dataset | — |
 | `wp_log_R.csv` | `003` (2 identical copies) | raw dataset (Prophet's logistic example) | — |
@@ -58,6 +68,19 @@ the copies were verified identical to each other before ONE was taken.
 | the four remaining `*_prophet140` | `06-03` (the seven-fixture ladder) |
 | `np_oracle_peyton` | `06-04` (NeuralProphet-lite) |
 | `chronos_*`, `weights_index`, `peyton_tiny_oracle` | `06-05` / `06-07` (Chronos) |
+| `retail_regressors_prophet140` | `06.1-01` (the tracer, 24 columns) and `06.1-02` (the full rung ladder) |
+| `retail_regressors_holidays_prophet140` | `06.1-02` (the 30-column rungs, where holidays and regressors coexist and the column sort is load-bearing) |
+| `invariance_baseline` | `06.1-01` (the D-19 no-argument bitwise invariance gate, SC2) |
+
+## `invariance_baseline.json` — the one fixture that is not an oracle at all
+
+Every other file here is either a byte-identical spike copy or a pinned upstream artifact.
+This one is **evidence captured from this repository**, at the commit its own
+`captured_at_commit` field names, BEFORE the regressor splice existed — a baseline captured
+after the change would be circular. It carries per-architecture `ForecastResponse` signatures
+for eight pre-change door cases, keyed by `std::env::consts::ARCH`, and it is never
+regenerated: regenerating it would replace the evidence with a restatement of current
+behaviour.
 
 ## `chronos_bolt_tiny_config.json` — the one fixture that is not a spike copy
 
