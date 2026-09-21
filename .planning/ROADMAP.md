@@ -566,7 +566,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 06.1-05-PLAN.md — the NeuralProphet event block beside `NpModel`, and the calibrated C-08 event-column cost term with its enumeration decision (wave 3, has a checkpoint)
+- [x] 06.1-05-PLAN.md — the NeuralProphet event block beside `NpModel`, and the calibrated C-08 event-column cost term with its enumeration decision (wave 3, has a checkpoint)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
