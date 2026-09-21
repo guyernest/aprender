@@ -75,6 +75,46 @@ Patterns and stack choices established across spike sessions. New spikes follow 
   is the JSON signature of `ds/yhat/bands/trend/components` for a request run alone vs under 8–16 concurrent
   requests — must be identical, and the wall-time row must show parallelism (else the transport is serialising).
 
+- **Compose with the shipped crate; never fork it into the spike** (011, 013, 014). Build the
+  prototype against the crate's public API by path dependency, so "does this need restructuring?"
+  is answered by whether the spike *compiles* rather than by reading. `aprender-forecast` exposes
+  `Design` (all fields `pub`), `columns`, `feature_row`, `holiday_day_sets`, `make_design`,
+  `Model`, `fit_prophet`, `NpModel::forward`, `rows_for`, `weighted_huber`, `one_cycle_lr` and
+  `train_cost` — enough to splice new design columns or add a `Linear(E,1)` block beside the model
+  and hand both parameter sets to one `AdamW`.
+- **Check a change request's premises against its own pinned commit BEFORE decomposing** (011).
+  `git show <tag>:path`, not HEAD — the consumer is on the tag. Four premises were checked and
+  three were refuted (a claimed silent-ignore that the door already refuses; a "no fixture covers
+  this" that a committed fixture does cover; an entry point that does not exist), which re-priced
+  the request before a line was written.
+- **Every identity or invariance claim ships a falsification probe in the same table** (012, 013,
+  014): a 1-ULP mutation the signature must detect, a different seed that must differ, a garbage
+  fill value that must change something somewhere. A green "bit-identical" column with no probe
+  beside it is indistinguishable from a broken harness.
+- **Compare f64 by `to_bits()`, never by a formatted decimal** (012, 014); normalise `-0.0` to
+  `0.0` and let every other bit pattern be significant. A printed comparison silently accepts any
+  change below the print precision.
+- **Two optimisers disagreeing on a parameter is not a defect until the OBJECTIVE says so** (011).
+  Evaluate the model's own objective at both parameter vectors and report the slack against the
+  contract bar; then explain the disagreement (collinearity with the trend or Fourier basis) rather
+  than tuning it away.
+- **Sweep a cost or bound claim to the DOOR'S OWN CEILING, not to a typical value** (013). Events
+  cost 1.3x at 6 columns and 7.6x at `MAX_HOLIDAY_COLUMNS` (1000); only the second number decides
+  whether the budget promise survives. Report the shape (linear in E) as transferable and the
+  constant as machine-specific.
+
+**Prophet 1.4.0 oracle facts** (011), so they are not rediscovered:
+- `make_all_seasonality_features(df)` returns `(features, prior_scales, component_cols, modes)`.
+  `s_a` / `s_m` are DERIVED in `fit()` from `component_cols`, not returned.
+- Column order is **seasonalities -> holidays (sorted by the generated `{name}_delim_{±off}`
+  string, so `+0, +1, +2, -1`) -> extra regressors in INSERTION order**. Regressors append; they
+  never reorder an existing column, which is what makes no-argument invariance free.
+- `add_regressor` standardisation: `mu` = mean over HISTORY rows only; `std` = pandas
+  `Series.std()`, i.e. **ddof = 1**, not numpy's default 0; `standardize="auto"` leaves a column
+  whose unique values are exactly `{0, 1}` at `mu=0, std=1`.
+- The fixture CSVs under `crates/aprender-forecast/tests/fixtures/` **quote their fields**
+  (`"2007-12-10"`); strip quotes before parsing or the date validator refuses the row.
+
 ## Tools & Libraries
 - `pmcp = { version = "2.19", features = ["streamable-http", "schema-generation"] }`, `schemars = "1.0"`, `axum = "0.8"`,
   `reqwest = "0.12"` (dev) — all already in the workspace lock.
