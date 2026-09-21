@@ -547,8 +547,8 @@ pub(crate) fn regressor_compositions(cost: usize, max_r: usize) -> Vec<RegCompos
     //    column count for these rows. Both products are inside their own constants; the 2 s
     //    bar is shared.
     let rows = row_budget(max_r);
-    let hc = (crate::types::MAX_HOLIDAY_DESIGN_COST / rows)
-        .clamp(1, crate::types::MAX_HOLIDAY_COLUMNS);
+    let hc =
+        (crate::types::MAX_HOLIDAY_DESIGN_COST / rows).clamp(1, crate::types::MAX_HOLIDAY_COLUMNS);
     out.push(RegComposition {
         label: "combined_holidays_and_regressors",
         points: rows - 1,
@@ -627,10 +627,11 @@ fn measure_regressor(c: &RegComposition) -> Row {
         .iter()
         .map(|s| crate::dates::parse_date(s).expect("the bench builds valid dates"))
         .collect();
-    let seasonality_columns: usize = crate::prophet::auto_seasonalities(&days, 10.0, crate::prophet::Mode::Additive)
-        .iter()
-        .map(|s| 2 * s.order)
-        .sum();
+    let seasonality_columns: usize =
+        crate::prophet::auto_seasonalities(&days, 10.0, crate::prophet::Mode::Additive)
+            .iter()
+            .map(|s| 2 * s.order)
+            .sum();
     let k = 1 + seasonality_columns + c.regressors;
     println!(
         "REGRESSOR WALL: composition={} points={} horizon={} regressors={} \
@@ -665,8 +666,14 @@ fn measure_regressor(c: &RegComposition) -> Row {
 #[test]
 #[ignore = "release-profile wall-clock measurement; run via just forecast-regressor-bench"]
 fn regressor_design_wall() {
-    let cost = env_usize("REGRESSOR_BENCH_COST", crate::types::MAX_REGRESSOR_DESIGN_COST);
-    let max_r = env_usize("REGRESSOR_BENCH_MAX_REGRESSORS", crate::types::MAX_REGRESSORS);
+    let cost = env_usize(
+        "REGRESSOR_BENCH_COST",
+        crate::types::MAX_REGRESSOR_DESIGN_COST,
+    );
+    let max_r = env_usize(
+        "REGRESSOR_BENCH_MAX_REGRESSORS",
+        crate::types::MAX_REGRESSORS,
+    );
     let comps = regressor_compositions(cost, max_r);
     // MEASURE AND PRINT EVERY COMPOSITION FIRST, THEN ASSERT — a print-and-assert loop
     // aborts at the first failure and hides the shape of the failure across the rest of the

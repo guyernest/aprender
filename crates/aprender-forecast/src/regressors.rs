@@ -196,7 +196,6 @@ impl RegressorChannel<'_> {
     }
 }
 
-
 // ============================================================ identifiability (D-35) ====
 //
 // # What this answers, and what it deliberately does not
@@ -459,10 +458,10 @@ fn diagnostic_columns(
     let mut dropped: Vec<String> = Vec::new();
 
     let push = |name: String,
-                    raw: Vec<f64>,
-                    cols: &mut Vec<Vec<f64>>,
-                    labels: &mut Vec<String>,
-                    dropped: &mut Vec<String>|
+                raw: Vec<f64>,
+                cols: &mut Vec<Vec<f64>>,
+                labels: &mut Vec<String>,
+                dropped: &mut Vec<String>|
      -> Option<usize> {
         let nf = n as f64;
         let mu = raw.iter().sum::<f64>() / nf;
@@ -577,12 +576,14 @@ pub(crate) fn max_pairwise_correlation_for(d: &Design, name: &str) -> Option<f64
 pub fn identifiability(
     d: &Design,
     regs: &[Standardized],
+    beta: &[f64],
     vif_warn: f64,
     condition_number_warn: f64,
 ) -> Identifiability {
     identifiability_with_limits(
         d,
         regs,
+        beta,
         vif_warn,
         condition_number_warn,
         REGRESSOR_EIGEN_MAX_ITERS,
@@ -596,9 +597,11 @@ pub fn identifiability(
 /// non-convergence branch and OBSERVE it, rather than leaving a policy branch that nobody
 /// has seen execute. The public entry point above passes the named constants.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn identifiability_with_limits(
     d: &Design,
     regs: &[Standardized],
+    beta: &[f64],
     vif_warn: f64,
     condition_number_warn: f64,
     max_iters: usize,
@@ -688,7 +691,7 @@ pub(crate) fn identifiability_with_limits(
         // number available at this point would describe the ladder rather than the data.
         return Identifiability {
             scope,
-            regressors: singular_reports(reports, regularized),
+            regressors: flag_unfitted(singular_reports(reports, regularized), d, regs, beta),
             condition_number: None,
             condition_number_warning: Some(singular_note(regularized)),
             ridge: ridge_used,
@@ -746,7 +749,7 @@ pub(crate) fn identifiability_with_limits(
             fill_vifs(&mut reports, &l, k, &slots, vif_warn, regularized);
             return Identifiability {
                 scope,
-                regressors: reports,
+                regressors: flag_unfitted(reports, d, regs, beta),
                 condition_number: None,
                 condition_number_warning: Some(format!(
                     "the design condition number could not be computed: the eigenvalue \
@@ -765,7 +768,7 @@ pub(crate) fn identifiability_with_limits(
     if !unridged_lo.is_finite() || unridged_lo <= f64::EPSILON * hi.abs().max(1.0) {
         return Identifiability {
             scope,
-            regressors: singular_reports(reports, regularized),
+            regressors: flag_unfitted(singular_reports(reports, regularized), d, regs, beta),
             condition_number: None,
             condition_number_warning: Some(singular_note(regularized)),
             ridge: ridge_used,
@@ -805,13 +808,82 @@ pub(crate) fn identifiability_with_limits(
 
     Identifiability {
         scope,
-        regressors: reports,
+        regressors: flag_unfitted(reports, d, regs, beta),
         condition_number,
         condition_number_warning,
         ridge: ridge_used,
         regularized,
         status: IdentifiabilityStatus::Ok,
     }
+}
+
+/// Flag any regressor whose fitted coefficient is EXACTLY zero — it contributed nothing.
+///
+/// # Why this is an OUTCOME check and not a floor on `prior_scale`
+///
+/// D-21's worst failure at this door is the caller getting a plausible answer to a question
+/// they did not ask, and the sharpest instance on the regressor surface is a driver that was
+/// accepted, fitted and contributed EXACTLY NOTHING while a normal-looking forecast came
+/// back. Plan 06.1-01 found it and proposed closing it by raising
+/// [`crate::types::REGRESSOR_PRIOR_SCALE_MIN`] to a measured "usability floor" of ~1e-7.
+///
+/// **That hypothesis is REFUTED by measurement, across five series shapes** (60/300-point
+/// ramps, a 300-point {0,1} indicator, a 400-point seasonal series and a 200-point series at
+/// scale 5e5), sweeping `prior_scale` over twelve decades on a release build. The regressor's
+/// contribution relative to `yhat`:
+///
+/// | prior_scale | ramp60 | ramp300 | indicator300 | seasonal400 | bigscale200 |
+/// |---|---|---|---|---|---|
+/// | 1e-30 | 0 | 0 | 0 | 0 | 0 |
+/// | 1e-10 | 1.1e-16 | 5.2e-14 | 3.5e-12 | 0 | 1.5e-11 |
+/// | 1e-7 | 5.4e-9 | 1.6e-7 | 2.9e-8 | **2.8e-12** | 3.4e-8 |
+/// | 1e-4 | 1.2e-3 | 8.2e-4 | 6.0e-6 | 2.0e-6 | 6.3e-5 |
+/// | 1e-2 | 2.7e-3 | 8.2e-4 | 1.5e-5 | 4.6e-4 | 9.1e-5 |
+/// | 1e0 | 2.6e-3 | 8.3e-4 | 1.4e-5 | 4.7e-4 | 9.3e-5 |
+///
+/// Two things follow, and both say the floor is the wrong instrument:
+///
+/// 1. **1e-7 is not a usability floor on every shape.** On `seasonal400` the contribution at
+///    1e-7 is 2.8e-12 — as negligible as at 1e-9. A floor there would refuse requests that
+///    behave exactly like ones it accepts.
+/// 2. **There is no cliff to put a floor at.** The contribution decays CONTINUOUSLY and
+///    saturates only around 1e-4 to 1e-2, and where it saturates is shape-dependent. That is
+///    not a degeneracy — `prior_scale` is a regularisation strength and shrinking the
+///    coefficient toward zero is precisely what it is FOR. Any floor would be a guess that
+///    refuses legitimate strong-regularisation requests on one shape while still admitting
+///    zero-contribution requests on another.
+///
+/// So the floor is left where it is (a REPRESENTABILITY bound, which it correctly is) and
+/// the silent-ignore class is closed at the OUTCOME instead. This check is shape-independent
+/// by construction: it does not guess from the knob, it reports what actually happened. The
+/// optimiser starts every coefficient at zero, so a coefficient that is still EXACTLY zero
+/// is one L-BFGS never moved — a threshold-free, unambiguous statement that needs no
+/// contract constant of its own.
+fn flag_unfitted(
+    mut reports: Vec<RegressorReport>,
+    d: &Design,
+    regs: &[Standardized],
+    beta: &[f64],
+) -> Vec<RegressorReport> {
+    let base_k = d.k.saturating_sub(regs.len());
+    for (j, rep) in reports.iter_mut().enumerate() {
+        // A short `beta` cannot happen through the door — it comes straight out of the fit
+        // over this design — but this is a `pub` function over `pub` slices, so it reads
+        // rather than indexes.
+        if beta.get(base_k + j).copied() == Some(0.0) {
+            rep.warning = Some(
+                "this regressor's fitted coefficient is EXACTLY zero, so it contributed \
+                 nothing to the forecast: the response describes a model that ignored this \
+                 driver. The usual cause is a prior_scale so small that the penalty pins the \
+                 coefficient at its zero starting point — prior_scale is a regularisation \
+                 STRENGTH, and the contribution decays continuously as it shrinks, so there \
+                 is no floor that separates 'too small' from 'deliberately strong'. Raise \
+                 prior_scale (the default is 10.0) or drop the regressor"
+                    .to_string(),
+            );
+        }
+    }
+    reports
 }
 
 /// Every number withheld, with the cause named.
@@ -1061,8 +1133,9 @@ mod identifiability_tests {
     };
     use crate::prophet::Mode;
     use crate::test_support::load_json;
-    use crate::types::{ForecastArgs, RegressorArg, REGRESSOR_CONDITION_NUMBER_WARN,
-                       REGRESSOR_VIF_WARN};
+    use crate::types::{
+        ForecastArgs, RegressorArg, REGRESSOR_CONDITION_NUMBER_WARN, REGRESSOR_VIF_WARN,
+    };
 
     const FIXTURE: &str = "retail_regressors_prophet140.json";
 
@@ -1314,11 +1387,11 @@ mod identifiability_tests {
                 "a per-regressor entry must carry ONLY {allowed:?}, got {keys:?}"
             );
         }
-        let obj = diag["regressors_identifiability"]
-            .as_object()
-            .expect("diagnostics.regressors_identifiability must be an OBJECT — an array \
+        let obj = diag["regressors_identifiability"].as_object().expect(
+            "diagnostics.regressors_identifiability must be an OBJECT — an array \
                      cannot carry a `scope` property, which is the shape contradiction this \
-                     split exists to fix");
+                     split exists to fix",
+        );
         let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
         let want: std::collections::BTreeSet<&str> = [
             "scope",
@@ -1470,7 +1543,9 @@ mod identifiability_tests {
             serde_json::json!(true),
             "a ridge was needed to obtain a usable factor and the report must say so: {ident}"
         );
-        let ridge = ident["ridge"].as_f64().expect("the ridge VALUE is reported");
+        let ridge = ident["ridge"]
+            .as_f64()
+            .expect("the ridge VALUE is reported");
         // The VALUE, not merely its presence — otherwise "the value actually used" is not a
         // claim anything checks. The first rung is `1e-8 * trace / K`, and a correlation
         // matrix has a UNIT diagonal, so `trace / K` is exactly 1.
@@ -1489,7 +1564,10 @@ mod identifiability_tests {
                 warned += 1;
             }
         }
-        assert_eq!(warned, 5, "every regressor carries a warning on this design");
+        assert_eq!(
+            warned, 5,
+            "every regressor carries a warning on this design"
+        );
         let cw = ident["condition_number_warning"]
             .as_str()
             .expect("the condition number carries its own note");
@@ -1622,6 +1700,66 @@ mod identifiability_tests {
             .collect()
     }
 
+    /// The D-21 SILENT-IGNORE class, closed at the OUTCOME rather than by a floor.
+    ///
+    /// Plan 06.1-01 measured that a `prior_scale` deep inside the collapse region produces a
+    /// normal-looking forecast whose regressor contributed EXACTLY NOTHING, and proposed
+    /// raising `regressor_prior_scale_min` to a "usability floor" of ~1e-7. That hypothesis
+    /// is REFUTED by the five-shape campaign recorded on [`super::flag_unfitted`]: at 1e-7 a
+    /// seasonal series still contributes 2.8e-12 relative to `yhat`, and the contribution
+    /// decays CONTINUOUSLY with no cliff to put a floor at — because `prior_scale` is a
+    /// regularisation strength and shrinking the coefficient is what it is for.
+    ///
+    /// So the floor stays where it is and the caller is TOLD instead. This test is the
+    /// decision made executable: it is shape-independent because it asserts on what the fit
+    /// DID, not on the knob it was given.
+    #[test]
+    fn a_regressor_that_was_silently_ignored_says_so_identifiability() {
+        let mut args = fixture_args();
+        // Deep inside the collapse region, and still comfortably ABOVE the representability
+        // floor — so this is the accepted-but-inert case, not a refusal.
+        for r in args.regressors.as_mut().expect("regs") {
+            r.prior_scale = Some(1e-30);
+        }
+        let r = crate::forecast::forecast(&args).expect(
+            "an inert prior_scale is ACCEPTED — the floor is a representability \
+                     bound, and this case is exactly why the warning exists",
+        );
+        let arr = r.diagnostics["regressors"].as_array().expect("array");
+        for e in arr {
+            let w = e["warning"]
+                .as_str()
+                .unwrap_or_else(|| panic!("every ignored regressor must warn: {e}"));
+            assert!(
+                w.contains("EXACTLY zero") && w.contains("contributed"),
+                "the warning must say the coefficient is exactly zero and that the driver \
+                 was ignored, got {w:?}"
+            );
+            assert!(
+                w.contains("prior_scale"),
+                "and it must name the usual cause and the fix, got {w:?}"
+            );
+        }
+        // POSITIVE CONTROL at the DEFAULT prior scale: the same four columns, fitted
+        // normally, must NOT carry this warning — otherwise the check fires on everything
+        // and says nothing.
+        let ctrl = crate::forecast::forecast(&fixture_args()).expect("the clean fixture");
+        let ctrl_arr = ctrl.diagnostics["regressors"].as_array().expect("array");
+        let ignored = ctrl_arr
+            .iter()
+            .filter(|e| {
+                e["warning"]
+                    .as_str()
+                    .is_some_and(|w| w.contains("EXACTLY zero"))
+            })
+            .count();
+        assert_eq!(
+            ignored, 0,
+            "no regressor in the clean fixture was ignored, so none may carry the \
+             silently-ignored warning: {ctrl_arr:?}"
+        );
+    }
+
     /// The iteration cap is a NAMED constant AND it is actually exercised.
     ///
     /// "A bound that has never been hit is not known to work." The routine is driven with a
@@ -1631,7 +1769,10 @@ mod identifiability_tests {
     /// plausible WRONG number and the worst outcome available here.
     #[test]
     fn the_eigen_iteration_is_bounded() {
-        assert_eq!(REGRESSOR_EIGEN_MAX_ITERS, 100, "the cap is a named constant");
+        assert_eq!(
+            REGRESSOR_EIGEN_MAX_ITERS, 100,
+            "the cap is a named constant"
+        );
         assert!(
             REGRESSOR_EIGEN_TOL > 0.0 && REGRESSOR_EIGEN_TOL < 1e-6,
             "the tolerance is a named constant"
@@ -1648,6 +1789,7 @@ mod identifiability_tests {
         let report: Identifiability = identifiability_with_limits(
             &d,
             &regs,
+            &vec![1.0; d.k],
             REGRESSOR_VIF_WARN,
             REGRESSOR_CONDITION_NUMBER_WARN,
             1,
@@ -1689,11 +1831,7 @@ mod identifiability_tests {
     /// can reach the matrix directly rather than only through the JSON.
     fn fixture_design_and_regs() -> (crate::prophet::Design, Vec<Standardized>) {
         let args = fixture_args();
-        let ds: Vec<i64> = args
-            .ds
-            .iter()
-            .map(|s| crate::dates::parse_ymd(s))
-            .collect();
+        let ds: Vec<i64> = args.ds.iter().map(|s| crate::dates::parse_ymd(s)).collect();
         let spec = crate::prophet::Spec::default_linear(crate::prophet::auto_seasonalities(
             &ds,
             10.0,

@@ -2346,16 +2346,20 @@ mod predict_spans {
     //! `first..first + 1` (the "a component is one column" shortcut that is true for a
     //! regressor and FALSE for a seasonality) would produce a green parity run on any
     //! fixture whose seasonalities happen to be order 1.
-    use super::{
-        auto_seasonalities, make_design, predict, Column, Holiday, Mode, Params, Spec,
-    };
+    use super::{auto_seasonalities, make_design, predict, Column, Holiday, Mode, Params, Spec};
     use crate::dates::days_from_civil;
     use crate::regressors::{splice, RegressorChannel, Standardized};
 
     /// A design carrying all three column families: seasonalities (multi-column
     /// components), holidays (multi-column components, name-sorted) and regressors
     /// (single-column components).
-    fn rich_design() -> (super::Design, Params, Vec<i64>, Vec<Vec<f64>>, Vec<Standardized>) {
+    fn rich_design() -> (
+        super::Design,
+        Params,
+        Vec<i64>,
+        Vec<Vec<f64>>,
+        Vec<Standardized>,
+    ) {
         let t0 = days_from_civil(2018, 1, 1);
         let n = 800;
         let ds: Vec<i64> = (0..n as i64).map(|i| t0 + i).collect();

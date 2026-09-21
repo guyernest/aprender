@@ -22,10 +22,9 @@ use crate::prophet::{
 use crate::types::{
     ForecastArgs, ForecastError, ForecastResponse, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
     MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
-    MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS,
-    MAX_REGRESSORS, MAX_REGRESSOR_DESIGN_COST, MAX_SPAN_DAYS, MIN_POINTS,
-    REGRESSOR_CONDITION_NUMBER_WARN, REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN,
-    REGRESSOR_VIF_WARN,
+    MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS, MAX_REGRESSORS,
+    MAX_REGRESSOR_DESIGN_COST, MAX_SPAN_DAYS, MIN_POINTS, REGRESSOR_CONDITION_NUMBER_WARN,
+    REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN, REGRESSOR_VIF_WARN,
 };
 
 /// Response keys a regressor name must not shadow — the THIRD part of the collision
@@ -539,9 +538,11 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                 for k in RESERVED_RESPONSE_KEYS {
                     reserved.insert(k.to_string(), "a reserved response key");
                 }
-                if let Some((i, r, part)) = regs.iter().enumerate().find_map(|(i, r)| {
-                    reserved.get(r.name.as_str()).map(|part| (i, r, *part))
-                }) {
+                if let Some((i, r, part)) = regs
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, r)| reserved.get(r.name.as_str()).map(|part| (i, r, *part)))
+                {
                     return Err(ForecastError::Validation(format!(
                         "regressor {i} is named {:?}, which is already {part} in the \
                          response; the component map is keyed by name and one would \
@@ -724,6 +725,7 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                 Some(crate::regressors::identifiability(
                     &design,
                     &reg_std,
+                    &p.beta,
                     REGRESSOR_VIF_WARN,
                     REGRESSOR_CONDITION_NUMBER_WARN,
                 ))
@@ -776,7 +778,10 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     );
                     o.insert("mu".into(), finite_or_null(r.mu));
                     o.insert("std".into(), finite_or_null(r.std));
-                    o.insert("vif".into(), r.vif.map_or(serde_json::Value::Null, finite_or_null));
+                    o.insert(
+                        "vif".into(),
+                        r.vif.map_or(serde_json::Value::Null, finite_or_null),
+                    );
                     // `warning` is ABSENT, not null, when the column is clean: a key that is
                     // always present with a null is a key a consumer has to branch on.
                     if let Some(w) = &r.warning {
@@ -802,7 +807,10 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     "ridge".into(),
                     id.ridge.map_or(serde_json::Value::Null, finite_or_null),
                 );
-                sib.insert("regularized".into(), serde_json::Value::Bool(id.regularized));
+                sib.insert(
+                    "regularized".into(),
+                    serde_json::Value::Bool(id.regularized),
+                );
                 sib.insert(
                     "status".into(),
                     serde_json::Value::String(id.status.as_str().into()),
@@ -2111,7 +2119,11 @@ mod tests {
         let under: Vec<_> = (0..under_count)
             .map(|i| good_reg(&format!("r{i}"), n, horizon))
             .collect();
-        assert_eq!(under.len() + 1, over_count, "the pair must straddle the ceiling");
+        assert_eq!(
+            under.len() + 1,
+            over_count,
+            "the pair must straddle the ceiling"
+        );
         assert!((n + horizon) * under.len() <= crate::types::MAX_REGRESSOR_DESIGN_COST);
         forecast(&reg_args(n, horizon, under))
             .expect("the largest request under the product ceiling must be accepted");
@@ -2142,7 +2154,10 @@ mod tests {
                     "the message must name the INDEX and the LENGTH, got {m:?}"
                 );
             }
-            other => panic!("expected a Validation refusal, got {:?}", other.map(|r| r.model)),
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
         }
         // POSITIVE CONTROL: exactly AT the ceiling is accepted.
         let at = "z".repeat(crate::types::MAX_HOLIDAY_NAME_LEN);
@@ -2207,7 +2222,10 @@ mod tests {
                 m.contains("a generated design column name"),
                 "the message must say WHICH part of the reserved set matched, got {m:?}"
             ),
-            other => panic!("expected a Validation refusal, got {:?}", other.map(|r| r.model)),
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
         }
     }
 
@@ -2223,7 +2241,10 @@ mod tests {
                 m.contains("a response component name"),
                 "the message must say WHICH part matched, got {m:?}"
             ),
-            other => panic!("expected a Validation refusal, got {:?}", other.map(|r| r.model)),
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
         }
     }
 
@@ -2247,7 +2268,10 @@ mod tests {
                 m.contains("a response component name") && m.contains("blackfriday"),
                 "the message must name the collision and its part, got {m:?}"
             ),
-            other => panic!("expected a Validation refusal, got {:?}", other.map(|r| r.model)),
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
         }
     }
 
@@ -2258,7 +2282,12 @@ mod tests {
     /// silently OVERWRITTEN by the aggregate `predict` pushes afterwards.
     #[test]
     fn a_regressor_colliding_with_a_reserved_response_key_is_refused() {
-        for key in ["additive_terms", "extra_regressors_additive", "yhat", "trend"] {
+        for key in [
+            "additive_terms",
+            "extra_regressors_additive",
+            "yhat",
+            "trend",
+        ] {
             match forecast(&reg_args(60, 7, vec![good_reg(key, 60, 7)])) {
                 Err(ForecastError::Validation(m)) => assert!(
                     m.contains("a reserved response key") && m.contains(key),

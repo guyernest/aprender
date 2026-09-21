@@ -664,7 +664,11 @@ mod tests {
             // A per-column VIF and a condition number are conceptually REAL, so
             // `constant_f64` is the right reader: rounding either to fit `constant_u64`
             // would make the mirror assert something weaker than the constant it mirrors.
-            ("REGRESSOR_VIF_WARN", "regressor_vif_warn", REGRESSOR_VIF_WARN),
+            (
+                "REGRESSOR_VIF_WARN",
+                "regressor_vif_warn",
+                REGRESSOR_VIF_WARN,
+            ),
             (
                 "REGRESSOR_CONDITION_NUMBER_WARN",
                 "regressor_condition_number_warn",
