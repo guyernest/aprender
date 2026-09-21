@@ -192,6 +192,175 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
         }
     }
 
+    // ---- D-33: HOISTED HOLIDAY BOUNDS — one site, BOTH arms ----
+    //
+    // All four holiday bounds live HERE, above `match model_name`, so the neuralprophet
+    // arm pays every one of them the moment plan 06.1-06 Task 2 removes the prophet-only
+    // refusal. Bounds first, acceptance second: hoisting after the refusal was dropped
+    // would open a window in which a ~200-byte request buys an unbounded event surface.
+    //
+    // Until that refusal is gone the neuralprophet branch of the design-cost operand
+    // below is UNREACHABLE FROM THE DOOR, and that is deliberate — do not delete it as
+    // dead code. Task 2 opens the arm and re-mutates all four bounds in the new scope
+    // (CLAUDE.md Verification Discipline rule 4: the old proof does not transfer).
+    //
+    // The ORDER inside the loop is unchanged and load-bearing. The name-length check is
+    // FIRST because every other message in the loop formats `h.name` back to the caller.
+    let mut holidays = Vec::new();
+    // `prophet::columns` emits one design column per offset in the window, so an
+    // unbounded window is an unbounded column count from a ~200-byte request.
+    let mut holiday_columns = 0usize;
+    let mut holiday_dates_total = 0usize;
+    for h in args.holidays.as_deref().unwrap_or(&[]) {
+        // FIRST in the loop, deliberately (C-07). `prophet::columns` clones this
+        // name TWICE per design column and then makes it the key of an O(C log C)
+        // byte-wise comparison sort, so at MAX_HOLIDAY_COLUMNS one payload
+        // occurrence is amplified ~2 000:1 — and nothing bounded it at HEAD. Being
+        // first also bounds every OTHER refusal message in this loop, each of which
+        // formats `h.name` back to the caller.
+        //
+        // BYTES, not chars: `String::len` is bytes, and bytes are exactly what the
+        // clone and the comparison cost. Do NOT "fix" this to `chars().count()` —
+        // `a_holiday_name_whose_char_count_fits_but_whose_byte_length_does_not_is_refused`
+        // is the test that catches that rewrite.
+        //
+        // The message names the POSITION and the LENGTH and never the name itself:
+        // echoing an oversized string back re-materialises the very bytes the bound
+        // refuses and reflects attacker-controlled content into logs (T-06-38).
+        if h.name.len() > MAX_HOLIDAY_NAME_LEN {
+            return Err(ForecastError::Validation(format!(
+                "holiday at index {}: name is {} bytes, which exceeds \
+                     max_holiday_name_len {MAX_HOLIDAY_NAME_LEN}; use a shorter label \
+                     (the name is not echoed back — its LENGTH is what is at issue)",
+                holidays.len(),
+                h.name.len()
+            )));
+        }
+        if h.lower_window > 0 || h.upper_window < 0 {
+            return Err(ForecastError::Validation(format!(
+                "holiday {:?}: lower_window ≤ 0 ≤ upper_window",
+                h.name
+            )));
+        }
+        if h.lower_window < -MAX_HOLIDAY_WINDOW || h.upper_window > MAX_HOLIDAY_WINDOW {
+            return Err(ForecastError::Validation(format!(
+                "holiday {:?}: windows must be within ±{MAX_HOLIDAY_WINDOW} days",
+                h.name
+            )));
+        }
+        if h.dates.len() > MAX_HOLIDAY_DATES {
+            return Err(ForecastError::Validation(format!(
+                "holiday {:?}: {} dates exceeds max_holiday_dates {MAX_HOLIDAY_DATES}",
+                h.name,
+                h.dates.len()
+            )));
+        }
+        // Each term is now <= MAX_HOLIDAY_DATES; the running sum is refused HERE,
+        // the moment the aggregate ceiling is passed, so the remaining holidays'
+        // dates are never parsed and never allocated (WR-03). The post-loop check
+        // below is KEPT: this one can only report a PARTIAL sum, and a partial sum
+        // reported as "the total" would be a false statement in an error message.
+        holiday_dates_total += h.dates.len();
+        if holiday_dates_total > MAX_HOLIDAY_DATES_TOTAL {
+            return Err(ForecastError::Validation(format!(
+                "holidays carry {holiday_dates_total} dates in the first {} holidays \
+                     alone (a running total, not the request's total), which already \
+                     exceeds max_holiday_dates_total {MAX_HOLIDAY_DATES_TOTAL}; send \
+                     fewer holidays or fewer dates per holiday",
+                holidays.len() + 1
+            )));
+        }
+        // Both windows are now within ±MAX_HOLIDAY_WINDOW, so the width is small
+        // enough that this sum cannot overflow before the ceiling refuses it.
+        holiday_columns += (h.upper_window - h.lower_window + 1) as usize;
+        if holiday_columns > MAX_HOLIDAY_COLUMNS {
+            return Err(ForecastError::Validation(format!(
+                "holiday windows expand to more than max_holiday_columns \
+                     {MAX_HOLIDAY_COLUMNS} design columns"
+            )));
+        }
+        let days: Vec<i64> = h
+            .dates
+            .iter()
+            .map(|s| parse_date(s))
+            .collect::<Result<_, _>>()?;
+        holidays.push(Holiday {
+            name: h.name.clone(),
+            days,
+            lower_window: h.lower_window,
+            upper_window: h.upper_window,
+            prior_scale: 10.0,
+        });
+    }
+    // ---- the PRODUCT bounds, at THE door and BEFORE make_design ----
+    //
+    // Every per-holiday bound above has now fired with its own message, so
+    // `holiday_columns <= MAX_HOLIDAY_COLUMNS` and each `dates.len() <=
+    // MAX_HOLIDAY_DATES`. What was never checked is what they multiply to.
+    // `FIT_BUDGET_SECS` cannot cover it: it is a COOPERATIVE ROUND-BOUNDARY
+    // budget, so it is structurally blind to `make_design` (which runs below,
+    // before `fit_prophet` is entered) and it overshoots by a whole round inside
+    // the fit — a 20 000-point, 1 000-column request measured 70.089 s against a
+    // 15 s budget. The refusal has to be HERE.
+    // KEPT alongside the in-loop refusal above (WR-03). The in-loop one fires
+    // early and therefore knows only a RUNNING total; this one has seen every
+    // holiday, so it is the only one that can honestly report the request's EXACT
+    // total. Both are O(1) and they say different true things. Unreachable for a
+    // request whose sum crosses the ceiling mid-loop — which is exactly why the
+    // position test asserts on the MESSAGE and not on the constant's presence.
+    if holiday_dates_total > MAX_HOLIDAY_DATES_TOTAL {
+        return Err(ForecastError::Validation(format!(
+            "holidays carry {holiday_dates_total} dates in total, which exceeds \
+                 max_holiday_dates_total {MAX_HOLIDAY_DATES_TOTAL}; send fewer holidays \
+                 or fewer dates per holiday"
+        )));
+    }
+    // ONE ceiling, TWO operands, selected by arm (D-33).
+    //
+    // On prophet the design rows are the caller's POINT COUNT: `make_design` builds one
+    // row per supplied `ds` entry plus one per horizon step, and a gap in `ds` costs
+    // nothing because no row is materialised for it.
+    //
+    // On neuralprophet the design rows are the SPAN IN DAYS, because the event design is
+    // built over the IMPUTED DAILY GRID that `np::NpData::new` materialises over
+    // `first..=last` — at least as long as the point count, and longer on every gappy
+    // series. Inheriting the prophet operand verbatim would knowingly under-price the
+    // gappy NP case by exactly `span / points`, closing one under-pricing while opening
+    // another. `span_days` is already computed above for the `MAX_SPAN_DAYS` check, so
+    // this reuses that value rather than recomputing it.
+    //
+    // NOT a second constant: a `MAX_NP_EVENT_DESIGN_COST` would be a second ceiling, a
+    // second contract row and a second re-derivation whenever either moves.
+    //
+    // `ds.len() <= MAX_POINTS` (20 000), `span_days <= MAX_SPAN_DAYS` (also 20 000),
+    // `args.horizon <= MAX_HORIZON` (3 650) and `holiday_columns <=
+    // MAX_HOLIDAY_COLUMNS` (1 000) are all already refused above, so this product is at
+    // most 23 650 000 under EITHER operand — six orders of magnitude below `usize::MAX`
+    // on every supported target. A plain multiply therefore cannot overflow here, and
+    // `saturating_mul` would only obscure that the factors are bounded rather than add
+    // safety.
+    let (design_rows, design_operand) = if model_name == "neuralprophet" {
+        // `span_days >= 1` and is bounded by MAX_SPAN_DAYS above, so the cast is exact.
+        (span_days as usize, "span_days")
+    } else {
+        (ds.len(), "points")
+    };
+    let design_cells = (design_rows + args.horizon) * holiday_columns;
+    if design_cells > MAX_HOLIDAY_DESIGN_COST {
+        // The message STATES THE OPERAND IT USED, so a caller refused on one arm and
+        // accepted on the other can see which arithmetic refused them (D-21).
+        return Err(ForecastError::Validation(format!(
+            "holidays expand to {design_cells} design feature cells \
+                 (({design_operand} + horizon) x holiday_columns = ({design_rows} + {}) x \
+                 {holiday_columns}), which exceeds max_holiday_design_cost \
+                 {MAX_HOLIDAY_DESIGN_COST}; reduce the holiday windows, the number of \
+                 holidays, the history length or the horizon",
+            args.horizon
+        )));
+    }
+    // With no holidays `holiday_columns` and `holiday_dates_total` are both 0, so
+    // neither refusal above can fire and the no-holiday SC1 path is untouched.
+
     match model_name.as_str() {
         "prophet" => {
             let mode = match args.seasonality_mode.as_deref() {
@@ -247,135 +416,6 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                 }
                 checked_cap = Some(cap);
             }
-            let mut holidays = Vec::new();
-            // `prophet::columns` emits one design column per offset in the window, so an
-            // unbounded window is an unbounded column count from a ~200-byte request.
-            let mut holiday_columns = 0usize;
-            let mut holiday_dates_total = 0usize;
-            for h in args.holidays.as_deref().unwrap_or(&[]) {
-                // FIRST in the loop, deliberately (C-07). `prophet::columns` clones this
-                // name TWICE per design column and then makes it the key of an O(C log C)
-                // byte-wise comparison sort, so at MAX_HOLIDAY_COLUMNS one payload
-                // occurrence is amplified ~2 000:1 — and nothing bounded it at HEAD. Being
-                // first also bounds every OTHER refusal message in this loop, each of which
-                // formats `h.name` back to the caller.
-                //
-                // BYTES, not chars: `String::len` is bytes, and bytes are exactly what the
-                // clone and the comparison cost. Do NOT "fix" this to `chars().count()` —
-                // `a_holiday_name_whose_char_count_fits_but_whose_byte_length_does_not_is_refused`
-                // is the test that catches that rewrite.
-                //
-                // The message names the POSITION and the LENGTH and never the name itself:
-                // echoing an oversized string back re-materialises the very bytes the bound
-                // refuses and reflects attacker-controlled content into logs (T-06-38).
-                if h.name.len() > MAX_HOLIDAY_NAME_LEN {
-                    return Err(ForecastError::Validation(format!(
-                        "holiday at index {}: name is {} bytes, which exceeds \
-                         max_holiday_name_len {MAX_HOLIDAY_NAME_LEN}; use a shorter label \
-                         (the name is not echoed back — its LENGTH is what is at issue)",
-                        holidays.len(),
-                        h.name.len()
-                    )));
-                }
-                if h.lower_window > 0 || h.upper_window < 0 {
-                    return Err(ForecastError::Validation(format!(
-                        "holiday {:?}: lower_window ≤ 0 ≤ upper_window",
-                        h.name
-                    )));
-                }
-                if h.lower_window < -MAX_HOLIDAY_WINDOW || h.upper_window > MAX_HOLIDAY_WINDOW {
-                    return Err(ForecastError::Validation(format!(
-                        "holiday {:?}: windows must be within ±{MAX_HOLIDAY_WINDOW} days",
-                        h.name
-                    )));
-                }
-                if h.dates.len() > MAX_HOLIDAY_DATES {
-                    return Err(ForecastError::Validation(format!(
-                        "holiday {:?}: {} dates exceeds max_holiday_dates {MAX_HOLIDAY_DATES}",
-                        h.name,
-                        h.dates.len()
-                    )));
-                }
-                // Each term is now <= MAX_HOLIDAY_DATES; the running sum is refused HERE,
-                // the moment the aggregate ceiling is passed, so the remaining holidays'
-                // dates are never parsed and never allocated (WR-03). The post-loop check
-                // below is KEPT: this one can only report a PARTIAL sum, and a partial sum
-                // reported as "the total" would be a false statement in an error message.
-                holiday_dates_total += h.dates.len();
-                if holiday_dates_total > MAX_HOLIDAY_DATES_TOTAL {
-                    return Err(ForecastError::Validation(format!(
-                        "holidays carry {holiday_dates_total} dates in the first {} holidays \
-                         alone (a running total, not the request's total), which already \
-                         exceeds max_holiday_dates_total {MAX_HOLIDAY_DATES_TOTAL}; send \
-                         fewer holidays or fewer dates per holiday",
-                        holidays.len() + 1
-                    )));
-                }
-                // Both windows are now within ±MAX_HOLIDAY_WINDOW, so the width is small
-                // enough that this sum cannot overflow before the ceiling refuses it.
-                holiday_columns += (h.upper_window - h.lower_window + 1) as usize;
-                if holiday_columns > MAX_HOLIDAY_COLUMNS {
-                    return Err(ForecastError::Validation(format!(
-                        "holiday windows expand to more than max_holiday_columns \
-                         {MAX_HOLIDAY_COLUMNS} design columns"
-                    )));
-                }
-                let days: Vec<i64> = h
-                    .dates
-                    .iter()
-                    .map(|s| parse_date(s))
-                    .collect::<Result<_, _>>()?;
-                holidays.push(Holiday {
-                    name: h.name.clone(),
-                    days,
-                    lower_window: h.lower_window,
-                    upper_window: h.upper_window,
-                    prior_scale: 10.0,
-                });
-            }
-            // ---- the PRODUCT bounds, at THE door and BEFORE make_design ----
-            //
-            // Every per-holiday bound above has now fired with its own message, so
-            // `holiday_columns <= MAX_HOLIDAY_COLUMNS` and each `dates.len() <=
-            // MAX_HOLIDAY_DATES`. What was never checked is what they multiply to.
-            // `FIT_BUDGET_SECS` cannot cover it: it is a COOPERATIVE ROUND-BOUNDARY
-            // budget, so it is structurally blind to `make_design` (which runs below,
-            // before `fit_prophet` is entered) and it overshoots by a whole round inside
-            // the fit — a 20 000-point, 1 000-column request measured 70.089 s against a
-            // 15 s budget. The refusal has to be HERE.
-            // KEPT alongside the in-loop refusal above (WR-03). The in-loop one fires
-            // early and therefore knows only a RUNNING total; this one has seen every
-            // holiday, so it is the only one that can honestly report the request's EXACT
-            // total. Both are O(1) and they say different true things. Unreachable for a
-            // request whose sum crosses the ceiling mid-loop — which is exactly why the
-            // position test asserts on the MESSAGE and not on the constant's presence.
-            if holiday_dates_total > MAX_HOLIDAY_DATES_TOTAL {
-                return Err(ForecastError::Validation(format!(
-                    "holidays carry {holiday_dates_total} dates in total, which exceeds \
-                     max_holiday_dates_total {MAX_HOLIDAY_DATES_TOTAL}; send fewer holidays \
-                     or fewer dates per holiday"
-                )));
-            }
-            // `ds.len() <= MAX_POINTS` (20 000), `args.horizon <= MAX_HORIZON` (3 650) and
-            // `holiday_columns <= MAX_HOLIDAY_COLUMNS` (1 000) are all already refused
-            // above, so this product is at most 23 650 000 — six orders of magnitude below
-            // `usize::MAX` on every supported target. A plain multiply therefore cannot
-            // overflow here, and `saturating_mul` would only obscure that the factors are
-            // bounded rather than add safety.
-            let design_cells = (ds.len() + args.horizon) * holiday_columns;
-            if design_cells > MAX_HOLIDAY_DESIGN_COST {
-                return Err(ForecastError::Validation(format!(
-                    "holidays expand to {design_cells} design feature cells \
-                     ((points + horizon) x holiday_columns = ({} + {}) x {holiday_columns}), \
-                     which exceeds max_holiday_design_cost {MAX_HOLIDAY_DESIGN_COST}; reduce \
-                     the holiday windows, the number of holidays, the history length or the \
-                     horizon",
-                    ds.len(),
-                    args.horizon
-                )));
-            }
-            // With no holidays `holiday_columns` and `holiday_dates_total` are both 0, so
-            // neither refusal above can fire and the no-holiday SC1 path is untouched.
             let mut spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, mode));
             spec.growth = growth;
             spec.cap = checked_cap;
@@ -1257,6 +1297,41 @@ mod tests {
     fn an_in_bounds_holiday_spec_whose_product_is_not_is_refused() {
         let args = holiday_args(200, 100, 1, 400, 5);
         refusal(&args, "max_holiday_design_cost");
+    }
+
+    /// D-33 — the design-cost refusal STATES THE OPERAND IT USED.
+    ///
+    /// One ceiling now serves two arms with different arithmetic: the caller's POINT COUNT
+    /// on prophet and the imputed-grid SPAN IN DAYS on neuralprophet. A refusal that named
+    /// neither would leave a caller unable to tell why the same series is accepted on one
+    /// arm and refused on the other. This half pins the PROPHET form; the neuralprophet
+    /// span form is pinned by
+    /// [`tests::a_gappy_neuralprophet_series_is_refused_on_the_span_operand`], which cannot
+    /// exist until the arm accepts holidays at all.
+    #[test]
+    fn the_design_cost_refusal_names_the_operand_it_used_on_the_prophet_arm() {
+        let args = holiday_args(200, 100, 1, 400, 5);
+        match forecast(&args) {
+            Err(ForecastError::Validation(m)) => {
+                assert!(
+                    m.contains("(points + horizon) x holiday_columns"),
+                    "the prophet arm prices on the POINT COUNT and the message must say so; \
+                     got {m:?}"
+                );
+                assert!(
+                    !m.contains("span_days"),
+                    "the prophet arm must NOT claim it priced on the span; got {m:?}"
+                );
+                assert!(
+                    m.contains("(200 + 100) x 400"),
+                    "the message must report both factors and their VALUES; got {m:?}"
+                );
+            }
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
     }
 
     /// The NEAR MISS. Exactly at the bound — (50 + 50) x 500 = 50 000 — which the door

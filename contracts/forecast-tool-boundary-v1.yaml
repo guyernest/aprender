@@ -514,12 +514,12 @@ door_surface:
       checked_at: 'the door, INSIDE the holiday loop the moment the running sum passes the ceiling (WR-03 closed by 06-15 T1), with the post-loop exact-total refusal retained'
     - axis: C-04
       name: 'holiday design feature cells'
-      formula: '(len(ds) + horizon) * holiday_columns'
-      spent_in: 'prophet::make_design (points rows) and prophet::predict (horizon rows)'
+      formula: 'OPERAND-AWARE BY ARM, one ceiling: on model=prophet, (len(ds) + horizon) * holiday_columns; on model=neuralprophet, (span_days + horizon) * holiday_columns'
+      spent_in: 'prophet::make_design (points rows) and prophet::predict (horizon rows); on the neuralprophet arm, events::EventDesign::rows over the imputed daily grid np::NpData::new materialises'
       spent_outside_fit_budget: true
       bound: fit_max_holiday_design_cost
-      checked_at: 'the door, before make_design (06-11)'
-      note: 'predict additionally runs comp_of ONCE PER DISTINCT COMPONENT NAME, so the cells are re-swept (1 + distinct_components) times. distinct_components <= fit_max_holiday_columns, so the product stays bounded (<= 5e7 float ops at the ceiling) — but the multiplier was not part of this bound''s original derivation and is recorded here rather than left implicit.'
+      checked_at: 'the door, at ONE site ABOVE the model dispatch so both arms pay it, before make_design and before np::NpData::new (D-33, plan 06.1-06 T1)'
+      note: 'predict additionally runs comp_of ONCE PER DISTINCT COMPONENT NAME, so the cells are re-swept (1 + distinct_components) times. distinct_components <= fit_max_holiday_columns, so the product stays bounded (<= 5e7 float ops at the ceiling) — but the multiplier was not part of this bound''s original derivation and is recorded here rather than left implicit. SECOND note (D-33): the operand differs by ARM and the refusal message names the one it used. Prophet materialises one design row per SUPPLIED ds entry, so a gap costs nothing; the neuralprophet event design is built over the IMPUTED DAILY GRID spanning first..=last, so its row count is span_days, which is >= len(ds) and strictly greater on every gappy series. Inheriting the prophet operand verbatim would knowingly under-price the gappy NP case by exactly span/len(ds) — closing one under-pricing while opening another. There is deliberately NO second constant: fit_max_holiday_design_cost is one ceiling with two operands, because a fit_max_np_event_design_cost would be a second row and a second re-derivation whenever either moves. Both operands are bounded by 20 000 (fit_max_points and fit_max_span_days are the same number), so the product is <= 2.365e7 under either arm.'
     - axis: C-05
       name: 'future grid span in days'
       formula: 'horizon * freq_step, where freq_step is 1 (D), 7 (W) or ~30.44 (MS)'
