@@ -13,6 +13,7 @@
 use std::time::Instant;
 
 use crate::dates::{format_ymd, future_days, parse_date};
+use crate::events;
 use crate::fit::{fit_prophet, FIT_BUDGET_SECS, MAX_ITERS_PER_ROUND};
 use crate::np;
 use crate::prophet::{
@@ -178,17 +179,64 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
         ));
     }
     if model_name == "neuralprophet" {
+        // `holidays` is NOT in this list any more (D-29): it is one field serving both
+        // models, and a holiday IS an event indicator column in each of them. `growth`,
+        // `cap` and `seasonality_mode` stay, because they are genuinely prophet-only.
         for (name, present) in [
             ("growth", args.growth.is_some()),
             ("cap", args.cap.is_some()),
             ("seasonality_mode", args.seasonality_mode.is_some()),
-            ("holidays", args.holidays.is_some()),
         ] {
             if present {
                 return Err(ForecastError::Validation(format!(
                     "{name} is prophet-only; set model to \"prophet\""
                 )));
             }
+        }
+        // ---- the SCOPED opening: events are proven LAG-FREE and refused WITH LAGS ----
+        //
+        // D-30 put events in scope at `n_lags > 0` and made SC3's 10 % per-column recovery
+        // bar binding "at every configuration that ships". MEASURED (plan 06.1-05 FINDING 1,
+        // four seeds, learning rate selected by train loss in every cell): lag-free recovery
+        // is 0.0528-0.0677, comfortably inside the bar — while at `n_lags = 7` under the
+        // epoch budget THIS DOOR configures the worst per-column error runs 0.2191-0.4660,
+        // and one run produced a NEGATIVE weight. The AR term can read a planted effect out
+        // of the lags, so the split between the two terms is under-determined until the fit
+        // converges, and it is the trailing columns of each window that pay for it.
+        //
+        // Three measured facts rule out simply buying convergence, and they are recorded
+        // here because this refusal looks arbitrary without them:
+        //   1. `np::door_epochs` at `n_lags > 0` is `min(auto_epochs(n), 320)`, and
+        //      `auto_epochs` DECREASES with the point count — 110 at 1 200 points, 90 at
+        //      2 400, 50 at 20 000. The 320 cap binds only at n <= 50 (`MIN_POINTS` is 10),
+        //      so 320 — the only budget at which the bar was observed to hold — is one this
+        //      door configures for no realistic series.
+        //   2. Even at 320 the bar does not close: 2 400 points, seed 7, worst error 0.1663.
+        //   3. Raising the budget collides with C-08, a SHIPPED bound. At 5 000 points and
+        //      six event columns, 320 epochs prices at 191.7 % of `MAX_NP_TRAIN_COST` —
+        //      requests the door accepts today would start refusing. A cost bound is a
+        //      published surface; moving it to make an internal bar pass is the wrong
+        //      direction of fix.
+        //
+        // So the combination is REFUSED rather than shipped behind a disclaimer. That is
+        // D-21's own posture — refuse rather than silently ignore — applied to the
+        // COMBINATION instead of to the whole arm, and it satisfies both halves of SC3 at
+        // once: `holidays` on neuralprophet WORKS (lag-free) and keeps REFUSING with a
+        // message naming the limitation (lagged).
+        //
+        // Placed HERE, at the door and above the dispatch, beside the bounds it travels
+        // with — not buried in the arm — and before the holiday loop parses any date, since
+        // a request that cannot proceed should not buy that work.
+        if args.holidays.is_some() && args.n_lags.is_some_and(|l| l > 0) {
+            return Err(ForecastError::Validation(
+                "holidays on model \"neuralprophet\" are supported only at n_lags = 0: at \
+                 n_lags > 0 the event block and the autoregressive term are jointly \
+                 identified only once the fit converges, and the per-column effect recovery \
+                 that requires is NOT established at the epoch budget this door configures \
+                 (worst per-column error 0.2191-0.4660 against a 0.10 bar, one run \
+                 negative). Set n_lags to 0 to use holidays, or drop holidays to use lags"
+                    .into(),
+            ));
         }
     }
 
@@ -908,18 +956,59 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             // functions used to configure the sweep below (`door_lr_sweep`, `door_epochs`,
             // `n_training_samples`), so the door cannot price a request differently from the
             // work it then spends.
-            // Event-free: the arm refuses `holidays`, so no request reaching here carries
-            // an event column. Plan 06.1-06 opens the arm and passes the real count.
-            let np_cost = np::request_train_cost(&d, n_train, n_lags, 0);
+            //
+            // The event design is expanded HERE, before the price, so a request carrying
+            // events is priced FOR them before the first `np::train` (SC4, C-08). The
+            // caller's `HolidayArg` list was already validated and parsed by the hoisted
+            // bounds above; `EventSpec` mirrors `Holiday` field for field, which is what
+            // makes D-29's one-argument-two-models claim literal.
+            let event_design = if holidays.is_empty() {
+                None
+            } else {
+                Some(events::EventDesign::new(
+                    holidays
+                        .iter()
+                        .map(|h| events::EventSpec {
+                            name: h.name.clone(),
+                            days: h.days.clone(),
+                            lower_window: h.lower_window,
+                            upper_window: h.upper_window,
+                        })
+                        .collect(),
+                ))
+            };
+            let n_event_cols = event_design.as_ref().map_or(0, events::EventDesign::dim);
+            // The count the door PRICES must be the count the block is BUILT at. The
+            // hoisted `MAX_HOLIDAY_COLUMNS` loop accumulated exactly the same sum from the
+            // same windows, so a disagreement here would mean one of the two rules drifted.
+            debug_assert_eq!(
+                n_event_cols, holiday_columns,
+                "the priced event-column count must equal the bounded holiday column count"
+            );
+            let np_cost = np::request_train_cost(&d, n_train, n_lags, n_event_cols);
             if np_train_cost_is_over(np_cost) {
                 let n_samples = np::n_training_samples(&d, n_lags);
                 let epochs = np::door_epochs(n_train, n_samples, n_lags);
                 let sweep = np::door_lr_sweep(n_lags).len();
+                // The per-sample WIDTH is reported as the door computes it, event term
+                // included, so a request refused BECAUSE of its events can see that term
+                // rather than being shown an arithmetic that does not reproduce {np_cost}.
+                // At zero event columns the suffix is empty and the message is exactly the
+                // one this door has always sent (the e2e cases string-match it).
+                let event_term = if n_event_cols == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        " + {n_event_cols} event columns priced at \
+                         fit_np_event_cost_per_column"
+                    )
+                };
                 return Err(ForecastError::Validation(format!(
                     "this neuralprophet request buys {np_cost} units of training work \
                      (learning-rate sweep {sweep} x epochs {epochs} x samples {n_samples} x \
-                     (n_lags + 1) {}), which exceeds max_np_train_cost {MAX_NP_TRAIN_COST}; \
-                     reduce n_lags, shorten the history, or narrow the series span",
+                     (n_lags + 1) {}{event_term}), which exceeds max_np_train_cost \
+                     {MAX_NP_TRAIN_COST}; reduce n_lags, shorten the history, or narrow the \
+                     series span",
                     n_lags + 1
                 )));
             }
@@ -943,12 +1032,16 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     huber_beta: 0.3,
                     newer_w: 2.0,
                     seed,
-                    // EVENT-FREE, deliberately and for this whole plan. `holidays` is still
-                    // refused on this arm above, so there is no event design to attach; plan
-                    // 06.1-06 opens the arm together with the hoisted bounds, so no window
-                    // of unpriced acceptance opens between the block existing and the door
-                    // pricing it.
-                    event_design: None,
+                    // The expanded design, or `None` when the caller sent no holidays.
+                    // `None` and an empty design are the same fit bit for bit, so a
+                    // request without events produces exactly what it produced before this
+                    // plan — which is what keeps both recorded neuralprophet invariance
+                    // signatures reproducing.
+                    //
+                    // Cloned per learning rate because `TrainConfig` owns its design and
+                    // the sweep builds one config per rate. The clone is the columns and
+                    // the membership sets, both bounded by the hoisted ceilings above.
+                    event_design: event_design.clone(),
                 };
                 let (m, log) = np::train(&d, &cfg, false);
                 let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -964,25 +1057,31 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             })?;
             let fit_seconds = t0.elapsed().as_secs_f64();
             let t1 = Instant::now();
+            // The channel the predict helpers take: the DESIGN (which days are events) and
+            // the trained BLOCK (what an active column is worth). Weights alone cannot
+            // build an indicator row for a future day, which is why both travel together.
+            // `None` whenever the caller sent no holidays, so every event-free path is
+            // byte-identical to what it was before this plan.
+            let ev: np::EventChannel<'_> = event_design.as_ref().zip(log.events.as_ref());
             // `predict_trend` is branch-independent; only the yhat path differs.
             let trend = np::predict_trend(&d, &m, &fut);
             let yhat = if n_lags == 0 {
-                np::predict_ts(&d, &m, &fut, None)
+                np::predict_ts(&d, &m, &fut, ev)
             } else {
-                np::predict_ar_recursive(&d, &m, &fut, None)
+                np::predict_ar_recursive(&d, &m, &fut, ev)
             };
             // Residual-based band. NeuralProphet itself would use quantile regression; that
             // was NOT spiked (CONTEXT deferred), and the diagnostics say so rather than
             // implying a coverage guarantee this band does not have.
             let fitted = if n_lags == 0 {
-                np::predict_ts(&d, &m, &ds, None)
+                np::predict_ts(&d, &m, &ds, ev)
             } else {
                 let idx: Vec<usize> = ds
                     .iter()
                     .map(|day| (day - d.t0) as usize)
                     .filter(|i| *i >= n_lags)
                     .collect();
-                let pr = np::predict_ar_1step(&d, &m, &idx, None);
+                let pr = np::predict_ar_1step(&d, &m, &idx, ev);
                 let mut out = vec![f64::NAN; ds.len()];
                 let mut k = 0;
                 for (i, day) in ds.iter().enumerate() {
@@ -1004,6 +1103,71 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             let predict_seconds = t1.elapsed().as_secs_f64();
             let mut components = serde_json::Map::new();
             components.insert("trend".into(), serde_json::json!(trend));
+            // ---- D-31: per-EVENT components plus a `holidays` roll-up ----
+            //
+            // One component per event NAME, matching the prophet arm's grouping exactly
+            // (`prophet::columns` sets `Column.component = h.name`, and `predict` dedups by
+            // that string), plus the `holidays` roll-up prophet emits when its holiday list
+            // is non-empty. NOT one component per COLUMN: that map could reach
+            // MAX_HOLIDAY_COLUMNS entries and would disagree with the prophet arm's naming
+            // for the very same argument.
+            //
+            // Grouped by NAME rather than by event INDEX, because two `HolidayArg`s may
+            // share a name and prophet sums them into one component. Indexing would emit
+            // the same key twice and silently keep only the last.
+            //
+            // THE CONVERSION IS THE SUBSTANCE HERE. The block trains on the NORMALISED
+            // target — `NpData` carries `shift = min` and `scale = q95 - min`, and `d.norm`
+            // is applied to `y` before training — so `w_j * x_j` is in normalised units.
+            // The published component is therefore
+            //
+            //     component[event][i] = d.scale * SUM_{j in that event} ( w_j * x_j[i] )
+            //
+            // multiplying by `scale` and NEVER adding `shift`. A component is a
+            // CONTRIBUTION, not a level; the shift belongs to the trend component emitted
+            // beside it, and adding it per event would make the components sum to one shift
+            // per event more than the forecast, so the additive decomposition the prophet
+            // arm publishes would stop reconciling. `d.denorm` is deliberately NOT used
+            // here for exactly that reason — it adds the shift.
+            //
+            // Emitted ONLY when the request carried holidays, so an event-free
+            // neuralprophet response is the map it has always been and both recorded
+            // invariance signatures still reproduce.
+            if let (Some(design), Some(block)) = (event_design.as_ref(), log.events.as_ref()) {
+                let w = block.weights();
+                let dim = design.dim();
+                let rows = design.rows(&fut);
+                // One accumulator per DISTINCT name, in first-appearance order, plus the
+                // roll-up across every column.
+                let mut names: Vec<String> = Vec::new();
+                let mut sums: Vec<Vec<f64>> = Vec::new();
+                let mut roll_up = vec![0.0f64; fut.len()];
+                for (ci, &(ei, _)) in design.cols.iter().enumerate() {
+                    let Some(name) = design.events.get(ei).map(|e| e.name.as_str()) else {
+                        continue;
+                    };
+                    let slot = names.iter().position(|n| n == name).unwrap_or_else(|| {
+                        names.push(name.to_string());
+                        sums.push(vec![0.0f64; fut.len()]);
+                        names.len() - 1
+                    });
+                    // `w` is read through `get` rather than indexed: `weights()` and `cols`
+                    // are produced by two different objects and nothing in the type system
+                    // ties their lengths (IN-02). A short weight vector yields a zero
+                    // contribution instead of panicking inside a library.
+                    let wj = f64::from(w.get(ci).copied().unwrap_or(0.0));
+                    for i in 0..fut.len() {
+                        let x = f64::from(rows[i * dim + ci]);
+                        let term = d.scale * wj * x;
+                        sums[slot][i] += term;
+                        roll_up[i] += term;
+                    }
+                }
+                for (name, v) in names.into_iter().zip(sums) {
+                    components.insert(name, serde_json::json!(v));
+                }
+                components.insert("holidays".into(), serde_json::json!(roll_up));
+            }
             // Bound before the move so the literal stays in declaration order
             // (clippy::inconsistent_struct_constructor is a workspace `warn`).
             let yhat_lower: Vec<f64> = yhat.iter().map(|v| v - z * sd).collect();
@@ -1072,6 +1236,7 @@ mod tests {
     use super::{forecast, normal_quantile};
     use crate::dates::{days_from_civil, format_ymd};
     use crate::prophet::Rng;
+    use crate::test_support::equation_tolerance;
     use crate::types::{
         ForecastArgs, ForecastError, MAX_NP_TRAIN_COST, REGRESSOR_PRIOR_SCALE_MAX,
         REGRESSOR_PRIOR_SCALE_MIN,
@@ -1199,35 +1364,651 @@ mod tests {
         }
     }
 
-    /// The `"neuralprophet"` arm STILL refuses `holidays`, and this plan is what makes that
-    /// worth asserting rather than assuming.
+    /// D-29 INVERTED — the `"neuralprophet"` arm ACCEPTS `holidays` and publishes them.
     ///
-    /// Plan 06.1-05 lands the event block (`crate::events`) and wires it through `np::train`
-    /// and all three predict paths, so from here on the capability EXISTS. What must not
-    /// exist yet is a way for a caller to reach it: the C-08 event-column price and the
-    /// hoisted holiday bounds are plan 06.1-06's, and an event surface open before either
-    /// is exactly the unpriced window this sequencing exists to prevent.
+    /// This test replaces `the_neuralprophet_arm_still_refuses_holidays` in the SAME commit
+    /// that removes the refusal it pinned. That ordering is the point: a removed refusal
+    /// with no positive test in its place is a window in which an event could be accepted
+    /// and silently ignored, which is the D-21 failure class this phase exists to close.
     ///
-    /// The refusal is asserted BEHAVIOURALLY. "The door file did not change" was the old
-    /// proof and it is not satisfiable — the exhaustive `np::TrainConfig` literal and the
-    /// three predict call sites had to be updated for the crate to compile at all. A control
-    /// on the neighbouring `cap` refusal keeps this from passing because the whole arm broke.
+    /// Acceptance alone is not the claim. The control asserts the same request WITHOUT
+    /// holidays forecasts DIFFERENTLY, so "accepted" cannot be satisfied by an argument
+    /// that is parsed, bounded, priced and then inert.
     #[test]
-    fn the_neuralprophet_arm_still_refuses_holidays() {
-        let mut args = np_args(60, 7);
+    fn holidays_on_the_neuralprophet_arm_are_accepted_and_publish_per_event_components() {
+        let args = planted_np_args(PLANTED_POINTS, PLANTED_HORIZON, 0, 42);
+        let r = forecast(&args).expect("holidays must be ACCEPTED on the neuralprophet arm");
+        assert_eq!(r.model, "neuralprophet");
+        for key in ["trend", "promo", "blackfriday", "holidays"] {
+            assert!(
+                r.components.contains_key(key),
+                "the components map must carry {key:?}; got {:?}",
+                r.components.keys().collect::<Vec<_>>()
+            );
+        }
+        // The EVENT keys match the prophet arm's per-name grouping and its `holidays`
+        // roll-up exactly. The two arms' FULL maps do not match and are not claimed to:
+        // prophet also emits seasonality names, `additive_terms` and
+        // `multiplicative_terms`, while this arm emits `trend` and the event keys.
+        assert_eq!(
+            r.components.len(),
+            4,
+            "one component per event NAME plus the roll-up plus trend — never one per \
+             COLUMN, which could reach max_holiday_columns entries; got {:?}",
+            r.components.keys().collect::<Vec<_>>()
+        );
+
+        // CONTROL: the same request without holidays must forecast DIFFERENTLY, or
+        // "accepted" would be indistinguishable from "accepted and ignored".
+        let mut off = args.clone();
+        off.holidays = None;
+        let r_off = forecast(&off).expect("the event-free control must still be accepted");
+        assert!(
+            !r_off.components.contains_key("holidays"),
+            "an event-free neuralprophet response must publish NO event components, or the \
+             two recorded invariance signatures would move"
+        );
+        let moved = r
+            .yhat
+            .iter()
+            .zip(&r_off.yhat)
+            .filter(|(a, b)| (*a - *b).abs() > 1e-9)
+            .count();
+        assert!(
+            moved > 0,
+            "holidays were accepted but changed nothing: all {} forecast rows are \
+             bit-identical with and without them",
+            r.yhat.len()
+        );
+    }
+
+    /// The SCOPED half of D-29, and the reason this arm opened at `n_lags = 0` only.
+    ///
+    /// MEASURED (06.1-05 FINDING 1): at `n_lags > 0` the per-column recovery runs
+    /// 0.2191-0.4660 against SC3's 0.10 bar under the epoch budget this door configures,
+    /// with one run producing a negative weight. The combination is REFUSED rather than
+    /// shipped behind a disclaimer — D-21's posture applied to the COMBINATION rather than
+    /// to the whole arm.
+    ///
+    /// The message must name the LIMITATION, not merely say "unsupported": a caller who is
+    /// told `n_lags = 0` works can act on it, and a caller told "unsupported" cannot.
+    #[test]
+    fn the_neuralprophet_arm_refuses_holidays_with_lags_naming_the_limitation() {
+        let mut args = planted_np_args(200, 7, 7, 42);
+        assert_eq!(
+            args.n_lags,
+            Some(7),
+            "this case is only about the LAGGED arm"
+        );
+        match forecast(&args) {
+            Err(ForecastError::Validation(m)) => {
+                assert!(
+                    m.contains("n_lags = 0"),
+                    "the refusal must name the configuration that DOES work; got {m:?}"
+                );
+                assert!(
+                    m.contains("recovery") || m.contains("recover"),
+                    "the refusal must name the LIMITATION — effect recovery — rather than \
+                     saying 'unsupported'; got {m:?}"
+                );
+                assert!(
+                    !m.contains("prophet-only"),
+                    "this is no longer a prophet-only refusal; got {m:?}"
+                );
+            }
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+
+        // CONTROL A: the SAME lag count without holidays is still accepted, so the refusal
+        // is about the COMBINATION and not about lags.
+        let mut lags_only = args.clone();
+        lags_only.holidays = None;
+        forecast(&lags_only).expect("n_lags alone must still be accepted on this arm");
+
+        // CONTROL B: the SAME holidays without lags are still accepted, so the refusal is
+        // not quietly re-closing the arm.
+        args.n_lags = None;
+        forecast(&args).expect("holidays alone must still be accepted on this arm");
+    }
+
+    /// D-31 — the published component is in RESPONSE units, not normalised training units.
+    ///
+    /// The block trains on `d.norm(y)`, so a learned weight times an indicator is in
+    /// normalised units and must be multiplied by `NpData::scale` before publication (never
+    /// plus `shift`, which belongs to trend). This is the ONLY class of check that catches
+    /// the omission: component PRESENCE and a CHANGED forecast both stay green on an
+    /// unscaled component.
+    ///
+    /// The assertion is against the planted magnitude in RESPONSE units. The control makes
+    /// the test non-vacuous by asserting the normalised value would MISS the same bar by a
+    /// wide margin — if `scale` were ever near 1.0 the two would coincide and this case
+    /// would prove nothing, so the separation is asserted rather than assumed.
+    #[test]
+    fn the_event_components_are_in_response_units() {
+        let bar = equation_tolerance("neuralprophet-parity-v1", "event_effect_recovery_rel");
+        let args = planted_np_args(PLANTED_POINTS, PLANTED_HORIZON, 0, 42);
+        let r = forecast(&args).expect("the planted request must be accepted");
+        let (peak, active) = event_component_peak(&r, "promo");
+        assert!(
+            active > 0,
+            "the forecast window contains no active promo day, so this case would pass \
+             vacuously on an all-zero component"
+        );
+        let rel = (peak - PLANTED_EFFECT).abs() / PLANTED_EFFECT;
+        assert!(
+            rel <= bar,
+            "the published component peak is {peak}, which is {rel} away from the planted \
+             {PLANTED_EFFECT} in RESPONSE units against a {bar} bar — a component left in \
+             normalised training units misses by a factor of NpData::scale"
+        );
+        // The separation control: the same peak divided by a plausible series scale must
+        // NOT also satisfy the bar, or the check could not tell the two unit systems apart.
+        let scale = planted_series_scale();
+        assert!(
+            scale > 2.0,
+            "this control needs the series scale to be far from 1.0 to separate the two \
+             unit systems; got {scale}"
+        );
+        let unscaled_rel = (peak / scale - PLANTED_EFFECT).abs() / PLANTED_EFFECT;
+        assert!(
+            unscaled_rel > bar,
+            "a component left in normalised units would read {} and must FAIL the {bar} \
+             bar, or this test cannot distinguish the two unit systems",
+            peak / scale
+        );
+    }
+
+    /// D-31 — the components RECONCILE with the forecast they decompose.
+    ///
+    /// Asserted to a stated tolerance rather than exactly, and the reason is measured
+    /// rather than hand-waved: `np::train` draws the event block from the same `Rng` AFTER
+    /// the model, so an events-OFF run initialises the model identically — but the block's
+    /// draws shift the subsequent shuffle stream, so the two fits diverge slightly. The
+    /// difference between the ON and OFF forecasts is therefore the event contribution
+    /// PLUS a small base-model difference, and the bar is SC3's own recovery bar applied to
+    /// the planted magnitude.
+    ///
+    /// A component scaled wrongly by `NpData::scale` misses this by ~scale x, far outside
+    /// any tolerance this test could plausibly carry.
+    #[test]
+    fn the_event_components_reconcile_with_the_forecast() {
+        let bar = equation_tolerance("neuralprophet-parity-v1", "event_effect_recovery_rel");
+        let args = planted_np_args(PLANTED_POINTS, PLANTED_HORIZON, 0, 42);
+        let on = forecast(&args).expect("the events-ON request must be accepted");
+        let mut off_args = args.clone();
+        off_args.holidays = None;
+        let off = forecast(&off_args).expect("the events-OFF control must be accepted");
+
+        let roll = component_values(&on, "holidays");
+
+        // The BASE-MODEL LEVEL SHIFT, measured from the rows where the roll-up is exactly
+        // zero. On those rows the event term contributes nothing by construction, so
+        // whatever separates the two forecasts there is the two fits differing — and it
+        // must be removed before the remainder can be attributed to the events.
+        //
+        // MEASURED on this configuration: mean -1.7864 over 32 inactive rows with a mean
+        // absolute deviation of 0.0703, i.e. 3.9 % of the shift. That is a LEVEL offset,
+        // not noise, which is what makes subtracting a single number a correction rather
+        // than a fudge — and the character is ASSERTED below, not assumed, so a future
+        // change that made the two fits diverge in SHAPE would fail here instead of being
+        // silently absorbed.
+        let inactive: Vec<f64> = (0..on.yhat.len())
+            .filter(|&i| roll[i].abs() < 1e-9)
+            .map(|i| on.yhat[i] - off.yhat[i])
+            .collect();
+        assert!(
+            inactive.len() >= 8,
+            "too few event-free rows ({}) to measure the base-model shift against",
+            inactive.len()
+        );
+        let n = inactive.len() as f64;
+        let shift = inactive.iter().sum::<f64>() / n;
+        let mad = inactive.iter().map(|v| (v - shift).abs()).sum::<f64>() / n;
+        assert!(
+            mad < 0.25 * shift.abs(),
+            "the two fits differ in SHAPE, not merely in LEVEL (mad {mad} against shift \
+             {shift}), so a single-number correction is not justified and this \
+             reconciliation would be measuring the wrong thing"
+        );
+
+        let mut checked = 0usize;
+        let mut worst = 0.0f64;
+        for i in 0..on.yhat.len() {
+            if roll[i].abs() < 1e-9 {
+                continue; // inactive rows carry no event contribution to reconcile
+            }
+            let attributable = (on.yhat[i] - off.yhat[i]) - shift;
+            let err = (attributable - roll[i]).abs() / PLANTED_EFFECT;
+            worst = worst.max(err);
+            assert!(
+                err <= bar,
+                "row {i}: the events-ON minus events-OFF movement attributable to the \
+                 events is {attributable} but the published roll-up says {}, a relative \
+                 miss of {err} against the {bar} bar",
+                roll[i]
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no forecast row carried a non-zero event contribution, so this case \
+             reconciled nothing"
+        );
+
+        // THE CONTROL THAT MAKES THIS A UNITS CHECK. A roll-up left in normalised
+        // training units would be smaller by a factor of NpData::scale, and it must FAIL
+        // the same comparison the correct one just passed — otherwise this test would be
+        // green on the very defect it exists to catch.
+        let scale = planted_series_scale();
+        let mut unscaled_worst = 0.0f64;
+        for i in 0..on.yhat.len() {
+            if roll[i].abs() < 1e-9 {
+                continue;
+            }
+            let attributable = (on.yhat[i] - off.yhat[i]) - shift;
+            unscaled_worst =
+                unscaled_worst.max((attributable - roll[i] / scale).abs() / PLANTED_EFFECT);
+        }
+        assert!(
+            unscaled_worst > bar,
+            "a roll-up in normalised units would reconcile to {unscaled_worst}, inside the \
+             {bar} bar the scaled one passed at {worst} — this case cannot tell the two \
+             unit systems apart and proves nothing"
+        );
+    }
+
+    /// SC3 THROUGH THE PUBLIC DOOR, at the configuration that actually ships.
+    ///
+    /// Plan 06.1-05's `events::tests` run against a hand-built `TrainConfig`. The door uses
+    /// its OWN configuration — `np::door_lr_sweep`, `np::door_epochs`, empty `ar_layers`
+    /// lag-free, `weight_decay: 1e-3`, `huber_beta: 0.3`, `newer_w: 2.0`, and the learning
+    /// rate selected by TRAIN loss — and SC3's bar binds on what SHIPS. A recovery bar
+    /// proven only under a test harness's own hyperparameters is a bar about the harness.
+    ///
+    /// Only `n_lags = 0` appears here because `n_lags > 0` with holidays is now REFUSED at
+    /// the door; that half is
+    /// [`tests::the_neuralprophet_arm_refuses_holidays_with_lags_naming_the_limitation`].
+    /// The bar is not being asserted over a configuration it fails — that configuration is
+    /// refused.
+    #[test]
+    fn a_planted_event_effect_is_recovered_through_the_door() {
+        let bar = equation_tolerance("neuralprophet-parity-v1", "event_effect_recovery_rel");
+        let args = planted_np_args(PLANTED_POINTS, PLANTED_HORIZON, 0, 42);
+        let r = forecast(&args).expect("the planted request must be accepted");
+        let mut worst = 0.0f64;
+        for name in ["promo", "blackfriday"] {
+            let (peak, active) = event_component_peak(&r, name);
+            assert!(
+                active > 0,
+                "{name} has no active day in the forecast window, so its recovery is \
+                 untested rather than proven"
+            );
+            // EVERY active row of a per-event component must recover the planted effect —
+            // the peak alone could hide a column that recovered nothing.
+            for (i, v) in component_values(&r, name).iter().enumerate() {
+                if v.abs() < 1e-9 {
+                    continue;
+                }
+                let rel = (v - PLANTED_EFFECT).abs() / PLANTED_EFFECT;
+                worst = worst.max(rel);
+                assert!(
+                    rel <= bar,
+                    "{name} row {i}: recovered {v} against a planted {PLANTED_EFFECT}, a \
+                     relative error of {rel} over the {bar} bar (peak {peak})"
+                );
+            }
+        }
+        assert!(
+            worst > 0.0,
+            "no component row was compared, so the bar was never exercised"
+        );
+    }
+
+    /// D-10 determinism, THROUGH THE DOOR, with a control that makes it able to fail.
+    ///
+    /// Two runs at one seed must be bit-identical in `yhat` AND in every component; a run
+    /// at a DIFFERENT seed must differ. A determinism check without the second half cannot
+    /// fail — it would pass on an implementation that ignored the seed entirely.
+    #[test]
+    fn door_level_event_training_is_deterministic_at_a_fixed_seed() {
+        let args = planted_np_args(DETERMINISM_POINTS, 20, 0, 42);
+        let a = forecast(&args).expect("run A must be accepted");
+        let b = forecast(&args).expect("run B must be accepted");
+        assert_eq!(
+            a.yhat.to_bits_vec(),
+            b.yhat.to_bits_vec(),
+            "two runs at seed 42 must be BIT-identical in yhat"
+        );
+        for name in ["promo", "blackfriday", "holidays", "trend"] {
+            assert_eq!(
+                component_values(&a, name).to_bits_vec(),
+                component_values(&b, name).to_bits_vec(),
+                "two runs at seed 42 must be BIT-identical in the {name:?} component"
+            );
+        }
+
+        // CONTROL: a different seed must produce a different fit, or the check above is
+        // satisfied by an implementation that never reads the seed.
+        let mut other = args.clone();
+        other.seed = Some(43);
+        let c = forecast(&other).expect("the differing-seed control must be accepted");
+        assert_ne!(
+            a.yhat.to_bits_vec(),
+            c.yhat.to_bits_vec(),
+            "seed 43 must NOT reproduce seed 42's forecast, or the determinism assertion \
+             above cannot fail"
+        );
+    }
+
+    /// SC4 / C-08 — the event columns are PRICED, before the first `np::train`.
+    ///
+    /// Arithmetic only: no fit is run, because what is under test is the number the door
+    /// compares against `MAX_NP_TRAIN_COST`, not the work it then spends.
+    #[test]
+    fn the_event_column_count_raises_the_priced_cost() {
+        let ds: Vec<i64> = (0..600).map(|i| days_from_civil(2020, 1, 1) + i).collect();
+        let y: Vec<f64> = (0..600).map(|i| 100.0 + f64::from(i) * 0.01).collect();
+        let d = crate::np::NpData::new(&ds, &y, ds.len(), 10, 0.8);
+        let without = crate::np::request_train_cost(&d, ds.len(), 0, 0);
+        let with = crate::np::request_train_cost(&d, ds.len(), 0, 6);
+        assert!(
+            with > without,
+            "a request carrying 6 event columns must be priced ABOVE the same request \
+             without them; got {with} <= {without}"
+        );
+        assert_eq!(
+            crate::np::request_train_cost(&d, ds.len(), 0, 0),
+            without,
+            "the price at ZERO event columns must be bit-identical to the pre-event \
+             arithmetic"
+        );
+    }
+
+    // ---- the four hoisted bounds, RE-MUTATED IN THE NEURALPROPHET SCOPE ----
+    //
+    // CLAUDE.md Verification Discipline rule 4: extending a guard's SCOPE requires
+    // re-mutating in the new scope; the old proof does not transfer. Each of the four
+    // cases below is paired with a POSITIVE CONTROL that the same shape just inside the
+    // bound is ACCEPTED on this arm, so a bound cannot pass by refusing everything.
+
+    /// A neuralprophet request carrying `n_holidays` holidays, each `width` columns wide and
+    /// each carrying `dates` occurrences, over a `points`-day CONTIGUOUS daily series.
+    fn np_holiday_args(
+        points: usize,
+        horizon: usize,
+        n_holidays: usize,
+        width: i64,
+        dates: usize,
+    ) -> ForecastArgs {
+        let mut args = np_args(points, horizon);
+        let t0 = days_from_civil(2020, 1, 1);
+        let lower = -((width - 1) / 2);
+        args.holidays = Some(
+            (0..n_holidays)
+                .map(|h| crate::types::HolidayArg {
+                    name: format!("h{h}"),
+                    dates: (0..dates).map(|k| format_ymd(t0 + k as i64)).collect(),
+                    lower_window: lower,
+                    upper_window: width - 1 + lower,
+                })
+                .collect(),
+        );
+        args
+    }
+
+    #[test]
+    fn the_neuralprophet_arm_pays_the_holiday_name_ceiling() {
+        let mut args = np_holiday_args(60, 7, 1, 1, 1);
+        args.holidays.as_mut().expect("holidays")[0].name =
+            "n".repeat(crate::types::MAX_HOLIDAY_NAME_LEN + 1);
+        refusal(&args, "max_holiday_name_len");
+
+        let mut ok = np_holiday_args(60, 7, 1, 1, 1);
+        ok.holidays.as_mut().expect("holidays")[0].name =
+            "n".repeat(crate::types::MAX_HOLIDAY_NAME_LEN);
+        forecast(&ok).expect("a name exactly AT the bound must be accepted on this arm too");
+    }
+
+    #[test]
+    fn the_neuralprophet_arm_pays_the_holiday_column_ceiling() {
+        // MAX_HOLIDAY_COLUMNS + 1 columns from two holidays, each far inside every other
+        // bound, so only the column ceiling can refuse.
+        let width = (crate::types::MAX_HOLIDAY_COLUMNS / 2 + 1) as i64;
+        let args = np_holiday_args(60, 7, 2, width, 1);
+        refusal(&args, "max_holiday_columns");
+
+        let ok = np_holiday_args(60, 7, 1, 9, 1);
+        forecast(&ok).expect("a column count far inside the ceiling must be accepted");
+    }
+
+    #[test]
+    fn the_neuralprophet_arm_pays_the_aggregate_holiday_dates_ceiling() {
+        let args = np_holiday_args(60, 7, 11, 1, 1_000);
+        refusal(&args, "max_holiday_dates_total");
+
+        let ok = np_holiday_args(60, 7, 2, 1, 50);
+        forecast(&ok).expect("an aggregate far inside the ceiling must be accepted");
+    }
+
+    /// D-33's REASON FOR EXISTING: a GAPPY neuralprophet series whose POINT count clears the
+    /// design-cost ceiling but whose imputed-grid SPAN does not.
+    ///
+    /// This is the case the operand change exists for, and it is the one a verbatim
+    /// inheritance of the prophet operand would have accepted while the arm paid
+    /// `span/points` times the priced work. The refusal must NAME the span, and the paired
+    /// DENSE control — the same point count and the same column count, no gaps — must be
+    /// ACCEPTED, so the refusal cannot pass by refusing everything.
+    #[test]
+    fn a_gappy_neuralprophet_series_is_refused_on_the_holiday_span_operand() {
+        // 40 points, 30 columns, horizon 10: dense, the operand is 40 + 10 = 50 rows and
+        // 50 x 30 = 1 500 cells, far inside max_holiday_design_cost (50 000).
+        let dense = np_gappy_holiday_args(40, 10, 30, 1);
+        let r = forecast(&dense)
+            .expect("the DENSE control at the same point and column count must be accepted");
+        assert_eq!(r.yhat.len(), 10, "the control must really have forecast");
+
+        // The SAME 40 points and 30 columns, spread 100 days apart: the point count is
+        // unchanged but the imputed grid is 3 901 days, so (3 901 + 10) x 30 = 117 330
+        // cells, over the ceiling. Only the OPERAND distinguishes these two requests.
+        let gappy = np_gappy_holiday_args(40, 10, 30, 100);
+        match forecast(&gappy) {
+            Err(ForecastError::Validation(m)) => {
+                assert!(
+                    m.contains("max_holiday_design_cost"),
+                    "the design-cost ceiling must refuse, naming its key; got {m:?}"
+                );
+                assert!(
+                    m.contains("span_days"),
+                    "the refusal must NAME the span operand it used, or a caller cannot \
+                     tell why the same point count is accepted on the prophet arm; got {m:?}"
+                );
+                assert!(
+                    !m.contains("(points + horizon)"),
+                    "the neuralprophet arm must NOT claim it priced on the point count; \
+                     got {m:?}"
+                );
+            }
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+
+        // CONTROL: the very same GAPPY request on the PROPHET arm is ACCEPTED, because its
+        // design really is built per supplied row. This is what proves the two operands
+        // differ rather than that the gappy series is simply too big for anything.
+        let mut on_prophet = gappy.clone();
+        on_prophet.model = None;
+        forecast(&on_prophet).expect(
+            "the same gappy request must be ACCEPTED on the prophet arm, whose \
+                     design is built per supplied row",
+        );
+    }
+
+    /// A neuralprophet request whose `points` rows are `step` days apart, carrying one
+    /// holiday `width` columns wide. `step = 1` is the dense control; `step > 1` is gappy.
+    fn np_gappy_holiday_args(points: usize, horizon: usize, width: i64, step: i64) -> ForecastArgs {
+        let t0 = days_from_civil(2020, 1, 1);
+        let mut rng = crate::prophet::Rng::new(7);
+        let mut args = np_args(points, horizon);
+        args.ds = (0..points)
+            .map(|i| format_ymd(t0 + i as i64 * step))
+            .collect();
+        args.y = (0..points)
+            .map(|i| 10.0 + 0.01 * i as f64 + 0.05 * rng.normal())
+            .collect();
         args.holidays = Some(vec![crate::types::HolidayArg {
             name: "promo".into(),
-            dates: vec!["2020-03-15".into()],
-            lower_window: -1,
-            upper_window: 1,
+            dates: vec![format_ymd(t0 + 5)],
+            lower_window: -((width - 1) / 2),
+            upper_window: width - 1 - ((width - 1) / 2),
         }]);
-        refusal(&args, "holidays is prophet-only");
+        args
+    }
 
-        // CONTROL: the arm is otherwise alive. Without this, a request refused for some
-        // unrelated reason would satisfy the assertion above and prove nothing.
-        let ok = np_args(60, 7);
-        let r = forecast(&ok).expect("the neuralprophet arm must still accept a plain request");
-        assert_eq!(r.yhat.len(), 7, "one row per horizon step");
+    // ---- the planted-effect harness the door-level SC3 cases share ----
+
+    /// The planted per-indicator magnitude, in RESPONSE units. The recovery BAR is
+    /// contract-read; this is the harness's own INPUT, which is not a bar.
+    const PLANTED_EFFECT: f64 = 8.0;
+    /// The series length the door-level recovery cases use. 06.1-05 measured the lag-free
+    /// recovery at this length (worst 0.0602 against the 0.10 bar), so the configuration
+    /// these cases assert over is the one that has been measured.
+    const PLANTED_POINTS: usize = 1_200;
+    /// A horizon long enough to contain several active event days — asserted, not assumed,
+    /// by the `active > 0` guard in every case that reads a component.
+    const PLANTED_HORIZON: usize = 40;
+    /// The determinism case does not read a weight's VALUE, so it does not pay for
+    /// convergence: a shorter series is the same wiring claim for less compute.
+    const DETERMINISM_POINTS: usize = 240;
+
+    /// Two non-overlapping recurring events: `promo` every 30 days with a +/-1 window and
+    /// `blackfriday` 15 days later with a 0..2 window — six columns in all, and never two
+    /// active on the same day, so a component row reads ONE column's weight and a recovery
+    /// result is a statement about that column.
+    fn planted_events(t0: i64, span: usize) -> Vec<crate::types::HolidayArg> {
+        let last = span as i64 + 120;
+        vec![
+            crate::types::HolidayArg {
+                name: "promo".into(),
+                // A BOUNDED range, not `(0..).take_while(..)`: clippy's
+                // `maybe_infinite_iter` denies the open form, and the occurrence count is
+                // exactly derivable from the span anyway.
+                dates: (0..=last / 30).map(|k| format_ymd(t0 + k * 30)).collect(),
+                lower_window: -1,
+                upper_window: 1,
+            },
+            crate::types::HolidayArg {
+                name: "blackfriday".into(),
+                dates: (0..=last / 30)
+                    .map(|k| format_ymd(t0 + 15 + k * 30))
+                    .collect(),
+                lower_window: 0,
+                upper_window: 2,
+            },
+        ]
+    }
+
+    /// A synthetic daily series carrying a KNOWN additive effect on every active indicator,
+    /// planted THROUGH the same window expansion the block reads — so a recovery result is
+    /// a statement about the block, not about the harness agreeing with itself.
+    fn planted_np_args(points: usize, horizon: usize, n_lags: usize, seed: u64) -> ForecastArgs {
+        let t0 = days_from_civil(2018, 1, 1);
+        let holidays = planted_events(t0, points);
+        let active = planted_active_days(&holidays);
+        let mut rng = crate::prophet::Rng::new(7);
+        let mut ds = Vec::with_capacity(points);
+        let mut y = Vec::with_capacity(points);
+        for i in 0..points {
+            let day = t0 + i as i64;
+            let t = i as f64;
+            let mut v = 100.0
+                + 0.02 * t
+                + 6.0 * (2.0 * std::f64::consts::PI * t / 365.25).sin()
+                + 3.0 * (2.0 * std::f64::consts::PI * t / 7.0).sin();
+            if active.contains(&day) {
+                v += PLANTED_EFFECT;
+            }
+            v += 0.4 * rng.normal();
+            ds.push(format_ymd(day));
+            y.push(v);
+        }
+        let mut args = np_args(points, horizon);
+        args.ds = ds;
+        args.y = y;
+        args.holidays = Some(holidays);
+        args.n_lags = if n_lags == 0 { None } else { Some(n_lags) };
+        args.seed = Some(seed);
+        args
+    }
+
+    /// Every day on which some planted indicator column is active.
+    fn planted_active_days(
+        holidays: &[crate::types::HolidayArg],
+    ) -> std::collections::HashSet<i64> {
+        let mut out = std::collections::HashSet::new();
+        for h in holidays {
+            for dt in &h.dates {
+                let d = crate::dates::parse_date(dt).expect("the harness builds valid dates");
+                for off in h.lower_window..=h.upper_window {
+                    out.insert(d + off);
+                }
+            }
+        }
+        out
+    }
+
+    /// The `NpData::scale` the planted series produces — the factor a component left in
+    /// normalised units would be wrong by.
+    fn planted_series_scale() -> f64 {
+        let args = planted_np_args(PLANTED_POINTS, PLANTED_HORIZON, 0, 42);
+        let ds: Vec<i64> = args
+            .ds
+            .iter()
+            .map(|s| crate::dates::parse_date(s).expect("date"))
+            .collect();
+        crate::np::NpData::new(&ds, &args.y, ds.len(), 10, 0.8).scale
+    }
+
+    /// One component's values, or a panic NAMING the key: a component that silently
+    /// defaulted to zeros is the vacuous-guard class these tests refuse.
+    fn component_values(r: &crate::types::ForecastResponse, key: &str) -> Vec<f64> {
+        r.components
+            .get(key)
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| panic!("the response must carry a {key:?} component"))
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(f64::NAN))
+            .collect()
+    }
+
+    /// `(largest absolute value, count of non-zero rows)` for one event component.
+    fn event_component_peak(r: &crate::types::ForecastResponse, key: &str) -> (f64, usize) {
+        let v = component_values(r, key);
+        let peak = v
+            .iter()
+            .fold(0.0f64, |a, b| if b.abs() > a.abs() { *b } else { a });
+        let active = v.iter().filter(|x| x.abs() > 1e-9).count();
+        (peak, active)
+    }
+
+    /// Bit-pattern comparison for a float vector — `assert_eq!` on `f64` would compare
+    /// `-0.0 == 0.0` as equal and would not notice a NaN reproducing.
+    trait ToBitsVec {
+        fn to_bits_vec(&self) -> Vec<u64>;
+    }
+    impl ToBitsVec for [f64] {
+        fn to_bits_vec(&self) -> Vec<u64> {
+            self.iter().map(|v| v.to_bits()).collect()
+        }
+    }
+    impl ToBitsVec for Vec<f64> {
+        fn to_bits_vec(&self) -> Vec<u64> {
+            self.as_slice().to_bits_vec()
+        }
     }
 
     /// `MAX_POINTS` bounds how MANY points arrive, never how far apart they are, and the
@@ -1299,6 +2080,36 @@ mod tests {
         refusal(&args, "max_holiday_design_cost");
     }
 
+    /// `MAX_HOLIDAY_COLUMNS` on the PROPHET arm — and it had NO test on EITHER arm until
+    /// this plan.
+    ///
+    /// Found by the rule-4 re-mutation rather than by reading: disabling the column
+    /// ceiling at the shared hoisted site reddened the neuralprophet case and NOTHING
+    /// else, where every other bound reddened a prophet case beside it. MEASURED at the
+    /// phase base (`94ce60bb7`): `max_holiday_columns` occurs exactly once in the whole
+    /// file, inside the refusal message, so no test asserted on it. The ceiling has been
+    /// shipping unguarded.
+    ///
+    /// This is the POSITIVE CONTROL half of the re-mutation pair — it proves a mutation of
+    /// the shared site engages on the prophet arm too — and it is a real missing guard in
+    /// its own right.
+    #[test]
+    fn holiday_columns_over_the_ceiling_are_refused_on_the_prophet_arm() {
+        // Two holidays, 501 columns each: 1 002 > MAX_HOLIDAY_COLUMNS (1 000). The in-loop
+        // ceiling fires at the second holiday, before the post-loop design-cost check.
+        let args = holiday_args(60, 7, 2, 501, 1);
+        refusal(&args, "max_holiday_columns");
+
+        // The NEAR MISS: exactly AT the ceiling must still be accepted, or the bound is
+        // proven only to refuse and not to refuse just what it claims. 1 000 columns over
+        // (60 + 7) rows is 67 000 design cells, so the design-cost ceiling would refuse
+        // this — the near miss is therefore taken on the COLUMN count alone, at a horizon
+        // and history short enough to clear the product.
+        let ok = holiday_args(10, 10, 2, 500, 1);
+        let r = forecast(&ok).expect("a column count exactly AT the ceiling must be accepted");
+        assert_eq!(r.yhat.len(), 10, "one row per horizon step");
+    }
+
     /// D-33 — the design-cost refusal STATES THE OPERAND IT USED.
     ///
     /// One ceiling now serves two arms with different arithmetic: the caller's POINT COUNT
@@ -1306,7 +2117,7 @@ mod tests {
     /// neither would leave a caller unable to tell why the same series is accepted on one
     /// arm and refused on the other. This half pins the PROPHET form; the neuralprophet
     /// span form is pinned by
-    /// [`tests::a_gappy_neuralprophet_series_is_refused_on_the_span_operand`], which cannot
+    /// [`tests::a_gappy_neuralprophet_series_is_refused_on_the_holiday_span_operand`], which cannot
     /// exist until the arm accepts holidays at all.
     #[test]
     fn the_design_cost_refusal_names_the_operand_it_used_on_the_prophet_arm() {
