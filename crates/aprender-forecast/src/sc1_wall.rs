@@ -58,6 +58,7 @@
 //! rather than from intent, and the bar is asserted only when that says `release`.
 
 use crate::dates::{days_from_civil, format_ymd, future_days, parse_date};
+use crate::events::{EventDesign, EventSpec};
 use crate::prophet::{auto_seasonalities, changepoint_count, Mode, Spec};
 use crate::types::{
     ForecastArgs, HolidayArg, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_WINDOW, MAX_HORIZON,
@@ -382,7 +383,7 @@ fn measure_np(points: usize, n_lags: usize, horizon: usize) -> Row {
         .map(|s| parse_date(s).expect("the sweep builds valid dates"))
         .collect();
     let d = crate::np::NpData::new(&days, &args.y, days.len(), 10, 0.8);
-    let cost = crate::np::request_train_cost(&d, days.len(), n_lags);
+    let cost = crate::np::request_train_cost(&d, days.len(), n_lags, 0);
 
     let scope = format!("{label} points={points} horizon={horizon}");
     let (r, total) = time_accepted(&args, &scope);
@@ -782,4 +783,273 @@ mod regressor_geometry {
              design-cost ceilings are independent constants against the SAME 2 s bar"
         );
     }
+}
+
+// ------------------------------------- the EVENT-COLUMN calibration for C-08 (SC4) ----
+
+/// One point of the event-column calibration sweep: an event-column count and the geometry
+/// it was measured at.
+///
+/// Parameterised rather than hard-coded, for the reason [`regressor_compositions`] is: a
+/// coefficient derived on one geometry is a statement about that geometry. The sweep varies
+/// the column count with everything else held fixed, because the coefficient it fits is a
+/// SLOPE in that one variable.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EventCalPoint {
+    pub columns: usize,
+    pub points: usize,
+    pub n_lags: usize,
+    pub epochs: usize,
+}
+
+/// The swept event-column counts, spanning zero to `fit_max_holiday_columns`.
+///
+/// Spike 013's own ladder (0, 7, 28, 84, 210, 504) with the top point moved from 1001 to the
+/// ceiling itself: the events surface inherits `MAX_HOLIDAY_COLUMNS` by reusing `HolidayArg`,
+/// so the DOOR'S OWN CEILING is the number that decides whether the budget promise survives.
+/// Sweeping only to a typical value is the mistake the spike's own findings name.
+pub(crate) fn event_cal_columns() -> Vec<usize> {
+    vec![0, 7, 28, 84, 210, 504, crate::types::MAX_HOLIDAY_COLUMNS]
+}
+
+/// Build an [`crate::events::EventDesign`] of EXACTLY `columns` indicator columns.
+///
+/// Seven offsets per event (`-3..=3`), so the column count is reached by whole events plus a
+/// final narrowed one — the count is asserted by the caller rather than assumed, because a
+/// generator that quietly produced a different width would make the fitted slope a slope in
+/// the wrong variable.
+pub(crate) fn event_design_of_width(columns: usize, t0: i64, points: usize) -> EventDesign {
+    let mut specs: Vec<EventSpec> = Vec::new();
+    let mut remaining = columns;
+    let mut k = 0usize;
+    // Occurrences spread across the whole series span, so no part of the series is
+    // event-free and the measured per-step cost is the cost of a design that is actually
+    // exercised.
+    let occurrences = |seed: usize| -> Vec<i64> {
+        (0..12)
+            .map(|j| t0 + ((seed * 37 + j * points / 12) % points.max(1)) as i64)
+            .collect()
+    };
+    while remaining > 0 {
+        let width = remaining.min(7);
+        // `lower_window ..= upper_window` must span exactly `width` offsets.
+        let upper = (width - 1) as i64;
+        specs.push(EventSpec {
+            name: format!("cal{k}"),
+            days: occurrences(k),
+            lower_window: 0,
+            upper_window: upper,
+        });
+        remaining -= width;
+        k += 1;
+    }
+    EventDesign::new(specs)
+}
+
+/// Least squares `y = intercept + slope * x`, with the coefficient of determination.
+///
+/// Returned rather than printed alone: `fit_r_squared` is recorded in the C-08 `calibration:`
+/// mapping because the SHAPE claim is "linear in E", and a poor fit falsifies the shape
+/// rather than the constant.
+pub(crate) fn least_squares(xs: &[f64], ys: &[f64]) -> (f64, f64, f64) {
+    let n = xs.len() as f64;
+    let mean_x = xs.iter().sum::<f64>() / n;
+    let mean_y = ys.iter().sum::<f64>() / n;
+    let sxx: f64 = xs.iter().map(|x| (x - mean_x) * (x - mean_x)).sum();
+    let sxy: f64 = xs
+        .iter()
+        .zip(ys)
+        .map(|(x, y)| (x - mean_x) * (y - mean_y))
+        .sum();
+    let slope = if sxx == 0.0 { 0.0 } else { sxy / sxx };
+    let intercept = mean_y - slope * mean_x;
+    let ss_tot: f64 = ys.iter().map(|y| (y - mean_y) * (y - mean_y)).sum();
+    let ss_res: f64 = xs
+        .iter()
+        .zip(ys)
+        .map(|(x, y)| {
+            let e = y - (intercept + slope * x);
+            e * e
+        })
+        .sum();
+    let r2 = if ss_tot == 0.0 {
+        1.0
+    } else {
+        1.0 - ss_res / ss_tot
+    };
+    (intercept, slope, r2)
+}
+
+/// Measure ONE calibration point and print one machine-parsable line.
+///
+/// It trains through [`crate::np::train`] DIRECTLY rather than through the door, and that is
+/// forced rather than chosen: `forecast::forecast` still refuses `holidays` on the
+/// `"neuralprophet"` arm, so no door path can reach an event design at all in this plan.
+/// `np::train` is nonetheless the exact function C-08 prices — `request_train_cost` is a
+/// proxy for the multiply-accumulates ONE `train` call spends — so the measurement and the
+/// price describe the same work.
+fn measure_event_cal(p: EventCalPoint) -> (f64, u64, u64) {
+    let (ds, y, t0) = tight_daily_series(p.points);
+    let days: Vec<i64> = ds
+        .iter()
+        .map(|s| parse_date(s).expect("the sweep builds valid dates"))
+        .collect();
+    let d = crate::np::NpData::new(&days, &y, days.len(), 10, 0.8);
+    let design = event_design_of_width(p.columns, t0, p.points);
+    assert_eq!(
+        design.dim(),
+        p.columns,
+        "the calibration generator must produce EXACTLY the requested column count, or the \
+         fitted slope is a slope in a different variable than the one it is labelled with"
+    );
+    let cfg = crate::np::TrainConfig {
+        n_lags: p.n_lags,
+        ar_layers: if p.n_lags > 0 { vec![32] } else { vec![] },
+        max_lr: 0.03,
+        epochs: Some(p.epochs),
+        batch: None,
+        weight_decay: 1e-3,
+        huber_beta: 0.3,
+        newer_w: 2.0,
+        seed: 42,
+        event_design: if p.columns == 0 { None } else { Some(design) },
+    };
+    let (_m, log) = crate::np::train(&d, &cfg, false);
+    assert!(
+        log.steps > 0,
+        "a calibration point that took zero optimiser steps measured nothing"
+    );
+    let us_per_step = log.seconds * 1e6 / log.steps as f64;
+    // The DOOR'S OWN pricing function, so the numbers reported are the ones the bound is
+    // compared against rather than a second arithmetic that could drift from them.
+    let priced = crate::np::request_train_cost(&d, p.points, p.n_lags, p.columns);
+    let priced_at_zero = crate::np::request_train_cost(&d, p.points, p.n_lags, 0);
+    (us_per_step, priced, priced_at_zero)
+}
+
+/// Print one machine-parsable calibration line.
+///
+/// The ratios are taken against the `E = 0` point of the SAME sweep, which is why the lines
+/// are printed after every point is measured rather than inside the measuring loop. That is
+/// what makes `measured_over_priced` dimensionless: `measured(E)/measured(0)` divided by
+/// `priced(E)/priced(0)`, with the microseconds on one side and the unit-less proxy on the
+/// other each cancelled against their own baseline. At or below 1.0 the price is keeping up
+/// with the work; above 1.0 the door is UNDER-pricing, which is the 7.6x defect this axis
+/// exists to close.
+fn print_event_cal_line(p: EventCalPoint, us: f64, us0: f64, priced: u64, priced0: u64) {
+    let measured_ratio = us / us0;
+    let priced_ratio = priced as f64 / priced0 as f64;
+    let over = measured_ratio / priced_ratio;
+    println!(
+        "NP EVENT CAL: columns={} points={} n_lags={} epochs={} \
+         us_per_step={us:.3} priced={priced} priced_at_zero={priced0} \
+         measured_ratio={measured_ratio:.4} priced_ratio={priced_ratio:.4} \
+         measured_over_priced={over:.4} commit={} arch={} profile={}",
+        p.columns,
+        p.points,
+        p.n_lags,
+        p.epochs,
+        std::env::var("NP_EVENT_CAL_COMMIT").unwrap_or_else(|_| "unknown".into()),
+        std::env::consts::ARCH,
+        profile_token()
+    );
+}
+
+/// The C-08 event-column calibration sweep. Release-only by recipe
+/// (`just forecast-np-event-calibration`).
+///
+/// It measures the PER-COLUMN SLOPE, not the 47.924 s structural maximum: D-32 is explicit
+/// that the slope is cheap enough to live in CI while the structural maximum is not.
+///
+/// `#[ignore]`d for the reason `regressor_design_wall` is — it is a wall-clock MEASUREMENT
+/// and not an assertion about correctness, and a timing harness running concurrently with
+/// the rest of the suite measures the scheduler.
+#[test]
+#[ignore = "release-profile wall-clock measurement; run via just forecast-np-event-calibration"]
+fn np_event_calibration() {
+    let points = env_usize("NP_EVENT_CAL_POINTS", 1_200);
+    let n_lags = env_usize("NP_EVENT_CAL_LAGS", 0);
+    let epochs = env_usize("NP_EVENT_CAL_EPOCHS", 30);
+    let columns = event_cal_columns();
+    assert!(
+        columns.len() >= 6,
+        "the sweep must carry at least six points; a slope fitted through fewer is not a \
+         measurement of a shape"
+    );
+
+    // MEASURE AND PRINT EVERY POINT FIRST, THEN FIT. A print-and-assert loop aborts at the
+    // first failure and hides the shape across the rest of the sweep.
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    let mut rows: Vec<(EventCalPoint, f64, u64, u64)> = Vec::new();
+    for &c in &columns {
+        let p = EventCalPoint {
+            columns: c,
+            points,
+            n_lags,
+            epochs,
+        };
+        let (us, priced, priced0) = measure_event_cal(p);
+        xs.push(c as f64);
+        ys.push(us);
+        rows.push((p, us, priced, priced0));
+    }
+    // The `E = 0` point is the baseline both ratios are taken against, so it has to exist.
+    let us0 = rows
+        .iter()
+        .find(|(p, _, _, _)| p.columns == 0)
+        .map(|(_, us, _, _)| *us)
+        .expect("the sweep must include an E = 0 point: it is the ratio baseline");
+    for (p, us, priced, priced0) in &rows {
+        print_event_cal_line(*p, *us, us0, *priced, *priced0);
+    }
+    let (intercept, slope, r2) = least_squares(&xs, &ys);
+    // The coefficient, in PROXY WIDTH UNITS: `b * (n_lags_cal + 1) / a`, which reduces to
+    // `b / a` only when the calibration is lag-free. `n_lags_cal` is printed so the reduction
+    // is checkable rather than assumed.
+    let raw_coefficient = if intercept > 0.0 {
+        slope * (n_lags as f64 + 1.0) / intercept
+    } else {
+        f64::NAN
+    };
+    println!(
+        "NP EVENT CAL FIT: n_points={} n_lags_cal={n_lags} intercept_us={intercept:.4} \
+         slope_us_per_column={slope:.6} r_squared={r2:.6} \
+         raw_coefficient_proxy_units={raw_coefficient:.6} \
+         shipped_constant={} commit={} arch={} profile={}",
+        columns.len(),
+        crate::types::FIT_NP_EVENT_COST_PER_COLUMN,
+        std::env::var("NP_EVENT_CAL_COMMIT").unwrap_or_else(|_| "unknown".into()),
+        std::env::consts::ARCH,
+        profile_token()
+    );
+
+    // RE-ASSERT OVER WHAT WAS PRINTED, so a sweep that printed nothing cannot report success.
+    assert_eq!(
+        xs.len(),
+        columns.len(),
+        "every swept column count must have produced a measurement"
+    );
+    assert!(
+        ys.iter().all(|v| v.is_finite() && *v > 0.0),
+        "every measured us/step must be a positive finite number: {ys:?}"
+    );
+    assert!(
+        slope > 0.0,
+        "the measured per-step cost must RISE with the event-column count — a non-positive \
+         slope ({slope}) means the sweep measured nothing that varies with E, and a \
+         coefficient fitted from it would be meaningless"
+    );
+    assert!(
+        raw_coefficient.is_finite() && raw_coefficient > 0.0,
+        "the fitted coefficient must be a positive finite number, got {raw_coefficient}"
+    );
+    // The SHIPPED constant must not UNDER-price the measurement it was calibrated from. A
+    // door must never under-price, so this is one-sided: over-pricing is safe.
+    assert!(
+        crate::types::FIT_NP_EVENT_COST_PER_COLUMN >= raw_coefficient,
+        "the shipped coefficient {} is BELOW the freshly fitted {raw_coefficient:.6} on this \
+         host: the door would under-price an event request here. Re-calibrate and round UP.",
+        crate::types::FIT_NP_EVENT_COST_PER_COLUMN
+    );
 }

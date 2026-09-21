@@ -868,7 +868,9 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             // functions used to configure the sweep below (`door_lr_sweep`, `door_epochs`,
             // `n_training_samples`), so the door cannot price a request differently from the
             // work it then spends.
-            let np_cost = np::request_train_cost(&d, n_train, n_lags);
+            // Event-free: the arm refuses `holidays`, so no request reaching here carries
+            // an event column. Plan 06.1-06 opens the arm and passes the real count.
+            let np_cost = np::request_train_cost(&d, n_train, n_lags, 0);
             if np_train_cost_is_over(np_cost) {
                 let n_samples = np::n_training_samples(&d, n_lags);
                 let epochs = np::door_epochs(n_train, n_samples, n_lags);
@@ -1390,7 +1392,7 @@ mod tests {
             };
             let epochs = crate::np::door_epochs(PEYTON_ROWS, n_samples, n_lags);
             let sweep = crate::np::door_lr_sweep(n_lags).len() as u64;
-            let cost = crate::np::train_cost(n_samples, epochs, n_lags) * sweep;
+            let cost = crate::np::train_cost(n_samples, epochs, n_lags, 0) * sweep;
             assert!(
                 cost <= MAX_NP_TRAIN_COST,
                 "np::parity's own Peyton rung at n_lags={n_lags} prices at {cost}, which the \
@@ -1429,12 +1431,13 @@ mod tests {
             .collect();
         for n_lags in [0usize, 7, 30] {
             let d = crate::np::NpData::new(&days, &y, days.len(), 10, 0.8);
+            let n_points = days.len();
             let n_samples = crate::np::n_training_samples(&d, n_lags);
-            let epochs = crate::np::door_epochs(days.len(), n_samples, n_lags);
+            let epochs = crate::np::door_epochs(n_points, n_samples, n_lags);
             let sweep = crate::np::door_lr_sweep(n_lags).len() as u64;
             assert_eq!(
-                crate::np::request_train_cost(&d, days.len(), n_lags),
-                crate::np::train_cost(n_samples, epochs, n_lags) * sweep,
+                crate::np::request_train_cost(&d, n_points, n_lags, 0),
+                crate::np::train_cost(n_samples, epochs, n_lags, 0) * sweep,
                 "request_train_cost must be exactly sweep x train_cost at n_lags={n_lags}"
             );
         }
