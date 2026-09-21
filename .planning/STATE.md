@@ -4,13 +4,13 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: Benchmark and Claims Gate
 status: executing
-stopped_at: Completed 05-17-PLAN.md
-last_updated: "2026-09-12T01:17:51.919Z"
+stopped_at: Phase 06.1 context gathered
+last_updated: "2026-09-21T02:51:50.910Z"
 last_activity: 2026-09-11
 last_activity_desc: Phase 05 replanned for D-19 — 05-11/12/13 rewritten, 0 blockers
-state_head: e81fca7e7b719886b4ba2a891d4a6d5d81ad58eb
+state_head: 453063663e755073a155c4e8abf837b7eff1a90c
 progress:
-  total_phases: 7
+  total_phases: 8
   completed_phases: 1
   total_plans: 84
   completed_plans: 84
@@ -453,6 +453,10 @@ Recent decisions affecting current work:
 - FINDING for 05-17: apr setfit bench verify-cell's printed 'scope:' prose (apr-cli/src/commands/setfit_bench.rs:2931) and bench report's 'verified:' header no longer enumerate the selection binding both doors now perform. Under-claiming, not a false attestation; assigned to 05-17 by threat T-05-16-05.
 - D-ITEM-05-17-A: the bench row seal is BUILD-GRAPH DEPENDENT. serde_json/preserve_order (via pmcp v2.19.3) is in apr-cli graph and absent from aprender-train, so the same committed row verifies under apr and is refused as row_digest_mismatch under cargo test -p aprender-train. A cargo feature-unification change with no code change can flip the whole committed evidence set. Needs its own plan: the fix re-seals 40 rows, 40 selection manifests and the run manifest.
 
+### Roadmap Evolution
+
+- Phase 06.1 inserted after Phase 6: Forecast exogenous inputs (Prophet regressors, NeuralProphet events, tier-safe cost bounds) — sequenced ahead of Phase 7 by user decision 2026-09-20; accepted cost is that the C-08 event-column term lands on a hard constant and is re-expressed as tier policy in Phase 7 (URGENT)
+
 ## Deferred Items
 
 Items acknowledged and carried forward from project scope:
@@ -465,9 +469,9 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-12T01:17:51.751Z
-Stopped at: Completed 05-17-PLAN.md
-Resume file: None
+Last session: 2026-09-21T02:51:50.605Z
+Stopped at: Phase 06.1 context gathered
+Resume file: .planning/phases/06.1-forecast-exogenous-inputs-prophet-regressors-neuralprophet-e/06.1-CONTEXT.md
 
 ## Accumulated Context
 
