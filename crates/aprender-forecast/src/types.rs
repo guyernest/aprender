@@ -208,14 +208,152 @@ pub const REGRESSOR_PRIOR_SCALE_MIN: f64 = 1.0e-153;
 /// square is ~`1e300` — about 1.8e8 below `f64::MAX`.
 pub const REGRESSOR_PRIOR_SCALE_MAX: f64 = 1.0e150;
 
-/// INTERIM ceiling on the number of regressors in one request.
+/// Hard upper bound on the NUMBER of `RegressorArg` entries in one request.
 ///
-/// Deliberately temporary and deliberately a literal: plan 06.1-03 replaces it with the
-/// measured `fit_max_regressors` and `fit_max_regressor_design_cost`, and that plan's
-/// verify asserts this literal is gone. Without it, wave 1 accepts an unbounded array of
-/// `(points + horizon)`-long arrays and a small request can drive L-BFGS out of memory
-/// (T-06.1-01).
-pub const MAX_REGRESSORS_INTERIM: usize = 50;
+/// FINALISED by plan 06.1-03 Task 2 step 5, against a door that CONTAINS the identifiability
+/// diagnostic. Task 1 could not decide this value: the only cost that is a function of the
+/// count alone is the diagnostic's `O(K^3)` factorisation, and it did not exist yet.
+///
+/// Replaces plan 06.1-01's interim literal of 50, which was deliberately temporary and
+/// carried no measurement at all.
+///
+/// **Why [`MAX_REGRESSOR_DESIGN_COST`] does not cover it.** The product ceiling is
+/// satisfiable by trading rows for columns — at the tightest legal history it would alone
+/// admit `25_000 / 11` = 2 272 regressors — and it is measured NOT to bound the count:
+/// against the stage-1 door (no diagnostic) a request at 800 regressors walled at
+/// **0.063 s**, so neither the fit, the design build nor `predict` constrains it.
+///
+/// **THE COUNT LADDER, measured with the diagnostic LIVE** (release, aarch64,
+/// `just forecast-regressor-bench 25000 <R>`). `diag_s` is `total_s - fit_s - predict_s`,
+/// which is where this routine's work lands:
+///
+/// | R | K | K^3 | diag_s | worst total_s | verdict |
+/// |---|---|---|---|---|---|
+/// | 200 | 207 | 8.9e6 | 0.003-0.004 | 1.157 | **ACCEPTED** |
+/// | 400 | 407 | 6.7e7 | 0.017-0.018 | 1.203 | clears |
+/// | 800 | 807 | 5.3e8 | 0.127-0.132 | 1.262 | clears |
+/// | 2 000 | 2 001 | 8.0e9 | 1.902-1.951 | 2.038 | **REJECTED** — 3 of 5 at or over the bar |
+///
+/// **The cubic law is CONFIRMED by the ladder rather than asserted by the formula**: the
+/// `diag_s` ratios are 5.0x, 7.4x and 15x against `K^3` ratios of 8.0x, 7.9x and 15x, so
+/// the last two track within 7 %. At R = 2 000 the diagnostic is 96 % of the whole request.
+///
+/// **200 is the value, and it is deliberately NOT the largest that clears.** 2 000 is the
+/// measured rejection. 800 CLEARS and was still not taken, for two stated reasons:
+///
+/// 1. At 800 the diagnostic (0.130 s) costs MORE than the fit it describes (0.040-0.124 s).
+///    A diagnostic that dominates the thing it diagnoses is the wrong trade.
+/// 2. This is published refusal surface and the door swings one way: raising a ceiling later
+///    is cheap, lowering one refuses requests that previously succeeded. 6.5 % of the SC1
+///    budget on a host with headroom is not a margin Phase 7's tighter tiers can be assumed
+///    to have.
+///
+/// 200 is 50x the largest regressor count in any committed fixture, example or test (4, the
+/// spike-011 retail frame). Phase 7 can raise it per tier against the cubic law above, which
+/// is now measured rather than projected — that is the point of recording the whole ladder
+/// instead of only the chosen rung.
+///
+/// Mirrors `constants.fit_max_regressors`, asserted equal by `cost_bounds_match_contract`.
+pub const MAX_REGRESSORS: usize = 200;
+
+/// Hard upper bound on `(points + horizon) * n_regressors` — the regressor design feature
+/// cells ONE request buys across `regressors::splice` (history rows) and `prophet::predict`
+/// (horizon rows).
+///
+/// FINALISED by plan 06.1-03 Task 2 step 5. Cost axis C-17 prices these design cells AND the
+/// identifiability Gram plus its factorisation, `len(ds) * K^2 + K^3`; the second did not
+/// exist when Task 1 first measured, so that sweep was re-run in full against the completed
+/// door. Both sweeps are below, because a ceiling certified against incomplete work is
+/// certified against the wrong request.
+///
+/// **Why the existing bounds did not cover this.** Exactly the [`MAX_HOLIDAY_DESIGN_COST`]
+/// shape, one column family over: [`MAX_POINTS`], [`MAX_HORIZON`] and [`MAX_REGRESSORS`] are
+/// each checked in ISOLATION and their product is not, so a request inside all three would
+/// buy `(20_000 + 3_650) * 200` = 4 730 000 regressor design cells — and every fit iteration
+/// is `O(rows * K)` over exactly that matrix, `predict` re-sweeps it per distinct component,
+/// and the diagnostic builds an `N x K^2` Gram on top. `fit::FIT_BUDGET_SECS` cannot
+/// substitute for the same structural reason it could not substitute for the holiday
+/// product: it is a COOPERATIVE ROUND-BOUNDARY budget entered inside `fit::fit_prophet`, so
+/// it is blind to `splice` (before) and to `predict` and the diagnostic (after), and it
+/// overshoots by a whole round inside the fit.
+///
+/// **SWEEP 1 — the design build alone, no diagnostic (Task 1).** `total_s` through the
+/// public door at five compositions of the SAME product differing in every factor:
+///
+/// | cost | many/4 | balanced/20 | few/200 | max width/200 | combined/200 | verdict |
+/// |---|---|---|---|---|---|---|
+/// | 50 000 | 1.391 | **2.817** | 0.070 | 0.199 | 0.360 | **REJECTED** |
+/// | 40 000 | 1.132 / 1.369 | **2.182 / 3.021** | 0.055 | **4.735 / 6.024** | 0.190 | **REJECTED** |
+/// | 30 000 | 1.695 / 1.836 | 0.254 | 0.070 | 0.084 | 0.382 | clears, 1.09x headroom |
+/// | 25 000 | 0.681 / 0.683 | 1.268 / 1.226 | 0.036 | 0.051 | 0.145 | ACCEPTED, 1.58x |
+///
+/// **SWEEP 2 — the WHOLE REQUEST, diagnostic live (Task 2 step 5).** The identical five
+/// compositions, re-measured:
+///
+/// | cost | many/4 | balanced/20 | few/200 | max width/200 | combined/200 | verdict |
+/// |---|---|---|---|---|---|---|
+/// | 40 000 | 1.130 | **2.164** | 0.050 | **4.242** | 0.205 | **REJECTED**, re-confirmed |
+/// | 25 000 | 0.665 | 1.157 | 0.032 | 0.053 | 0.144 | **ACCEPTED**, 1.73x headroom |
+///
+/// **THE DELTA, which is the number Phase 7 needs.** Sweep 1 minus sweep 2 on `total_s` is
+/// within run-to-run noise on the fit-dominated rows (-0.019, -0.031, +0.001, +0.002,
+/// -0.002), so the diagnostic's share is NOT visible in the total. It IS visible in
+/// `total_s - fit_s - predict_s`, which rose from **<= 1 ms** to **3-4 ms** at R = 200 — a
+/// measured 0.2 % of the 2 s bar, not an unmeasured one. That is the evidence the
+/// `N*K^2 + K^3` term in C-17's formula is bounded rather than asserted; the full cubic
+/// ladder behind it is in [`MAX_REGRESSORS`].
+///
+/// **25 000 is the value.** 50 000 and 40 000 are the REJECTED candidates, each re-run so
+/// the failures are known to be reproducible rather than scheduler noise, and 40 000 was
+/// re-rejected against the completed door. 30 000 CLEARS and was still not taken: its worst
+/// composition is 1.836 s against a 2.0 s bar, an 8 % margin, and a bound that clears by
+/// 8 % is a coin flip rather than a ceiling.
+///
+/// **This bounds WORK, not WALL, and here the distinction is the dominant effect, not a
+/// caveat.** Every wall above is >= 97 % `fit_s`, and the L-BFGS iteration count is
+/// data-dependent and NON-MONOTONIC in the payload: the max-width composition at 199 points
+/// measures **4.735 s** while the SAME shape at 249 points measures **0.199 s**, a 24x swing
+/// across a 50-point change with the product held constant. No payload statistic predicts
+/// that, which is why the sweep is five compositions rather than one. What this constant
+/// guarantees is the arithmetic ceiling per iteration, per component sweep and per Gram.
+///
+/// Mirrors `constants.fit_max_regressor_design_cost`, asserted equal by
+/// `cost_bounds_match_contract`.
+pub const MAX_REGRESSOR_DESIGN_COST: usize = 25_000;
+
+/// WARN-above threshold for a regressor's variance inflation factor (D-35).
+///
+/// **NOT a cost ceiling, and the name is load-bearing.** A warning threshold bounds no work
+/// and refuses nothing, so it must NOT match the `fit_max_` / `chronos_max_` prefix filter
+/// that [`tests::every_cost_ceiling_constant_is_named_by_an_axis`] derives its ceiling list
+/// from — pulling it in would demand a cost axis for a number that prices nothing. Same
+/// reasoning as [`REGRESSOR_PRIOR_SCALE_MIN`], which is a numeric DOMAIN bound.
+///
+/// **DERIVED from the committed spike-011 fixture, not chosen.** Running the diagnostic over
+/// `retail_regressors_prophet140.json`'s four regressor columns against the 24-column design
+/// gives the VIFs recorded in the 06.1-03 SUMMARY. The value is pinned so that the KNOWN-BAD
+/// column warns and the two KNOWN-GOOD ones do not:
+///
+/// - `discount` — a cosine of period six months, a harmonic of the yearly seasonality at
+///   r = 0.999 against `yearly_delim_4`. Must WARN.
+/// - `promo`, `weather` — the controls. Must NOT warn; a threshold that warned on everything
+///   would prove nothing.
+/// - `price` — labelled MARGINAL by the spike (r = 0.759, beta still 5x off). Deliberately
+///   UNASSERTED: it is the column that proves a pairwise cutoff is the wrong test, not a
+///   control for this threshold.
+///
+/// 10.0 is also the conventional VIF rule of thumb, which is why the fixture's separation
+/// lands on a round number rather than on a fixture-specific one.
+pub const REGRESSOR_VIF_WARN: f64 = 10.0;
+
+/// WARN-above threshold for the DESIGN condition number (D-35). Not a cost ceiling either —
+/// see [`REGRESSOR_VIF_WARN`].
+///
+/// The reported number is the condition number of the DESIGN, i.e. the square root of the
+/// correlation matrix's, because the correlation matrix is the Gram of the scaled design.
+/// That is the scale every published rule of thumb is stated on, and 30 is the conventional
+/// one. Measured against the committed fixture in the 06.1-03 SUMMARY.
+pub const REGRESSOR_CONDITION_NUMBER_WARN: f64 = 30.0;
 
 /// Hard upper bound on `len(holidays[].name)` in BYTES.
 ///
@@ -463,8 +601,10 @@ mod tests {
     use super::{
         ForecastArgs, ForecastError, DEFAULT_POOL, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
         MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
-        MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS, MAX_SPAN_DAYS,
-        MIN_POINTS, REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN,
+        MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS,
+        MAX_REGRESSORS, MAX_REGRESSOR_DESIGN_COST, MAX_SPAN_DAYS, MIN_POINTS,
+        REGRESSOR_CONDITION_NUMBER_WARN, REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN,
+        REGRESSOR_VIF_WARN,
     };
     use crate::test_support::{constant_f64, constant_u64};
 
@@ -520,6 +660,19 @@ mod tests {
                 "prophet::POISSON_NORMAL_BRANCH_LAMBDA",
                 "poisson_normal_branch_lambda",
                 crate::prophet::POISSON_NORMAL_BRANCH_LAMBDA,
+            ),
+            // A per-column VIF and a condition number are conceptually REAL, so
+            // `constant_f64` is the right reader: rounding either to fit `constant_u64`
+            // would make the mirror assert something weaker than the constant it mirrors.
+            (
+                "REGRESSOR_VIF_WARN",
+                "regressor_vif_warn",
+                REGRESSOR_VIF_WARN,
+            ),
+            (
+                "REGRESSOR_CONDITION_NUMBER_WARN",
+                "regressor_condition_number_warn",
+                REGRESSOR_CONDITION_NUMBER_WARN,
             ),
         ] {
             let from_contract = constant_f64("forecast-tool-boundary-v1", key);
@@ -607,6 +760,16 @@ mod tests {
                 "MAX_NP_TRAIN_COST",
                 "fit_max_np_train_cost",
                 MAX_NP_TRAIN_COST,
+            ),
+            (
+                "MAX_REGRESSORS",
+                "fit_max_regressors",
+                MAX_REGRESSORS as u64,
+            ),
+            (
+                "MAX_REGRESSOR_DESIGN_COST",
+                "fit_max_regressor_design_cost",
+                MAX_REGRESSOR_DESIGN_COST as u64,
             ),
         ] {
             assert_eq!(
@@ -841,8 +1004,13 @@ mod tests {
             .filter(|k| k.starts_with("fit_max_") || k.starts_with("chronos_max_"))
             .map(str::to_string)
             .collect();
+        // MEASURED 2026-09-21, not quoted: the contract carried 13 ceilings before plan
+        // 06.1-03 (`chronos_max_horizon`, `chronos_max_points` and eleven `fit_max_*`) and
+        // this plan adds exactly two — `fit_max_regressors` and
+        // `fit_max_regressor_design_cost`. The floor moves with the file, because a floor
+        // left at 10 would have passed a plan that added nothing.
         assert!(
-            ceilings.len() >= 10,
+            ceilings.len() >= 15,
             "vacuity guard: only {} ceiling constants found — the filter has stopped matching \
              and this test would pass by checking nothing",
             ceilings.len()

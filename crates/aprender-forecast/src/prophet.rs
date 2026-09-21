@@ -887,17 +887,53 @@ pub fn predict(
         }
     }
     // components
+    //
+    // Each distinct `component` value is collected ONCE, together with the SPAN of column
+    // indices that carry it — the first and last index seen, inclusive. `d.cols` is walked
+    // in ascending index order, so the first occurrence fixes the low end and every later
+    // one raises the high end.
+    //
+    // The span is what stops the per-component roll-up being QUADRATIC in the regressor
+    // count. `comp_of` is called once per distinct component and each call used to scan all
+    // `d.k` columns, so the per-component work was `n * distinct_components * d.k` — and a
+    // regressor contributes one to BOTH factors, making it `O(n * R^2)` for work that is
+    // inherently `O(n * R)`: a regressor component is EXACTLY ONE column.
+    //
+    // MEASURED before and after, and the ordering of those two facts matters: under
+    // `MAX_REGRESSOR_DESIGN_COST` the quadratic term was already bounded to ~5.6e6 float
+    // ops (`(len(ds) + horizon) * R <= 25 000`, so `n * R * (34 + R) <= 25 000 * 226`), and
+    // the stage-1 sweep measured `predict_s` at 0.000-0.016 s at every at-the-bound
+    // composition — under 1 % of SC1's 2 s bar. So this was NOT urgent, and the record
+    // should not pretend otherwise. It is fixed because Phase 7 re-prices these ceilings
+    // per TIER: the quadratic is unreachable at the shipped bound and reachable the moment
+    // the bound moves, which is the worst time to discover a cost shape.
+    //
+    // THE SPAN IS A SUPERSET, NEVER A SUBSTITUTE FOR THE SELECTOR, and that is what makes
+    // the change BITWISE-IDENTICAL rather than merely equivalent. Every column outside
+    // `first..=last` has a different `component` by construction, so the selector was
+    // already false there and it contributed nothing; the set of accumulated terms, their
+    // ORDER, and the accumulator's initial `0.0` are all unchanged. Dropping the accumulator
+    // for the single-column case would NOT be safe — `0.0 + (-0.0)` is `+0.0` while the bare
+    // product is `-0.0` — so the accumulator stays.
+    // `predict::the_span_restricted_roll_up_matches_a_full_scan` is the falsification probe.
     let mut names: Vec<String> = Vec::new();
-    for c in &d.cols {
-        if !names.contains(&c.component) {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (ci, c) in d.cols.iter().enumerate() {
+        if let Some(pos) = names.iter().position(|n| n == &c.component) {
+            spans[pos].1 = ci;
+        } else {
             names.push(c.component.clone());
+            spans.push((ci, ci));
         }
     }
-    let comp_of = |sel: &dyn Fn(&Column) -> bool, additive: bool| -> Vec<f64> {
+    let comp_of = |sel: &dyn Fn(&Column) -> bool,
+                   additive: bool,
+                   range: std::ops::Range<usize>|
+     -> Vec<f64> {
         (0..n)
             .map(|i| {
                 let mut v = 0.0;
-                for c in 0..d.k {
+                for c in range.clone() {
                     if sel(&d.cols[c]) {
                         v += x[i * d.k + c] * p.beta[c];
                     }
@@ -911,22 +947,30 @@ pub fn predict(
             .collect()
     };
     let mut components: Vec<(String, Vec<f64>)> = Vec::new();
-    for nm in &names {
+    for (nm, &(first, last)) in names.iter().zip(spans.iter()) {
         let mode = d
             .cols
             .iter()
             .find(|c| &c.component == nm)
             .expect("col")
             .mode;
-        let v = comp_of(&|c: &Column| &c.component == nm, mode == Mode::Additive);
+        let v = comp_of(
+            &|c: &Column| &c.component == nm,
+            mode == Mode::Additive,
+            first..last + 1,
+        );
         components.push((nm.clone(), v));
     }
-    let add_terms = comp_of(&|c: &Column| c.mode == Mode::Additive, true);
-    let mul_terms = comp_of(&|c: &Column| c.mode == Mode::Multiplicative, false);
+    // The AGGREGATES still scan every column, and must: `additive_terms` is a roll-up ACROSS
+    // components, so it has no span to restrict to. Both are `O(n * K)` — linear — which is
+    // why they were never part of the quadratic.
+    let add_terms = comp_of(&|c: &Column| c.mode == Mode::Additive, true, 0..d.k);
+    let mul_terms = comp_of(&|c: &Column| c.mode == Mode::Multiplicative, false, 0..d.k);
     if !spec.holidays.is_empty() {
         let hol = comp_of(
             &|c: &Column| c.holiday.is_some(),
             spec.holidays_mode == Mode::Additive,
+            0..d.k,
         );
         components.push(("holidays".into(), hol));
     }
@@ -2289,6 +2333,219 @@ mod parity {
             }
         }
         assert_eq!(cases, 20 * 3 * 4, "the whole bounded grid was enumerated");
+    }
+}
+
+#[cfg(test)]
+mod predict_spans {
+    //! The falsification probe for the span-restricted per-component roll-up.
+    //!
+    //! The restriction is only safe because the span is a SUPERSET of the columns the
+    //! selector would have matched, so the accumulated terms and their order are unchanged.
+    //! That is an argument; this module is the measurement. Without it, a span computed as
+    //! `first..first + 1` (the "a component is one column" shortcut that is true for a
+    //! regressor and FALSE for a seasonality) would produce a green parity run on any
+    //! fixture whose seasonalities happen to be order 1.
+    use super::{auto_seasonalities, make_design, predict, Column, Holiday, Mode, Params, Spec};
+    use crate::dates::days_from_civil;
+    use crate::regressors::{splice, RegressorChannel, Standardized};
+
+    /// A design carrying all three column families: seasonalities (multi-column
+    /// components), holidays (multi-column components, name-sorted) and regressors
+    /// (single-column components).
+    fn rich_design() -> (
+        super::Design,
+        Params,
+        Vec<i64>,
+        Vec<Vec<f64>>,
+        Vec<Standardized>,
+    ) {
+        let t0 = days_from_civil(2018, 1, 1);
+        let n = 800;
+        let ds: Vec<i64> = (0..n as i64).map(|i| t0 + i).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64;
+                50.0 + 0.03 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin() * 3.0
+            })
+            .collect();
+        let mut spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, Mode::Additive));
+        spec.holidays = vec![
+            Holiday {
+                name: "alpha".into(),
+                days: vec![t0 + 30, t0 + 200],
+                lower_window: -2,
+                upper_window: 2,
+                prior_scale: 10.0,
+            },
+            // Deliberately a name that is a PREFIX-neighbour of the first, because the
+            // holiday columns are sorted by their generated name and a span is only a
+            // superset if the sort cannot interleave two holidays' columns.
+            Holiday {
+                name: "alphabet".into(),
+                days: vec![t0 + 90],
+                lower_window: -1,
+                upper_window: 1,
+                prior_scale: 10.0,
+            },
+        ];
+        spec.holidays_mode = Mode::Additive;
+        let mut d = make_design(&ds, &y, &spec);
+        let regs = vec![
+            Standardized {
+                name: "promo".into(),
+                mu: 0.0,
+                std: 1.0,
+                mode: Mode::Additive,
+                prior_scale: 10.0,
+            },
+            Standardized {
+                name: "price".into(),
+                mu: 2.0,
+                std: 0.5,
+                mode: Mode::Multiplicative,
+                prior_scale: 10.0,
+            },
+        ];
+        let hist: Vec<Vec<f64>> = vec![
+            (0..n).map(|i| f64::from((i % 2) as u32)).collect(),
+            (0..n).map(|i| 2.0 + (i as f64 * 0.01).sin()).collect(),
+        ];
+        splice(&mut d, &regs, &hist);
+        // Deterministic, NON-ZERO and sign-varying betas: a zero beta makes every roll-up
+        // zero and the comparison vacuous, and a uniformly positive one hides a -0.0.
+        let beta: Vec<f64> = (0..d.k)
+            .map(|c| if c % 3 == 0 { -0.017 } else { 0.023 } * (c + 1) as f64)
+            .collect();
+        let p = Params {
+            k: 0.4,
+            m: 0.1,
+            delta: vec![0.0; d.changepoints_t.len()],
+            beta,
+            sigma_obs: 0.1,
+        };
+        let fut: Vec<i64> = (0..40).map(|i| ds[n - 1] + 1 + i).collect();
+        let fut_vals: Vec<Vec<f64>> = vec![
+            (0..40).map(|i| f64::from((i % 2) as u32)).collect(),
+            (0..40).map(|i| 2.0 + (i as f64 * 0.01).cos()).collect(),
+        ];
+        (d, p, fut, fut_vals, regs)
+    }
+
+    /// Every per-component series `predict` emits is BIT-IDENTICAL to a full-scan
+    /// reference computed here from the same `x` and `beta`.
+    #[test]
+    fn the_span_restricted_roll_up_matches_a_full_scan() {
+        let (d, p, fut, fut_vals, regs) = rich_design();
+        let channel = RegressorChannel {
+            specs: &regs,
+            values: &fut_vals,
+        };
+        let fc = predict(&d, &p, &fut, 42, &channel).expect("the channel is well formed");
+
+        // Rebuild `x` over the predicted rows exactly as `predict` does, then roll each
+        // component up with an UNRESTRICTED scan — the code this change replaced.
+        let n = fut.len();
+        let base_k = d.k - regs.len();
+        let base_cols = &d.cols[..base_k];
+        let hol_sets = super::holiday_day_sets(&d.spec);
+        let mut x = Vec::with_capacity(n * d.k);
+        for (i, &day) in fut.iter().enumerate() {
+            super::feature_row(day, &d.spec, base_cols, &hol_sets, &mut x);
+            for (j, reg) in regs.iter().enumerate() {
+                x.push((fut_vals[j][i] - reg.mu) / reg.std);
+            }
+        }
+        let full_scan = |nm: &str, additive: bool| -> Vec<f64> {
+            (0..n)
+                .map(|i| {
+                    let mut v = 0.0;
+                    for c in 0..d.k {
+                        if d.cols[c].component == nm {
+                            v += x[i * d.k + c] * p.beta[c];
+                        }
+                    }
+                    if additive {
+                        v * d.y_scale
+                    } else {
+                        v
+                    }
+                })
+                .collect()
+        };
+
+        let mut checked = 0usize;
+        let mut names: Vec<&str> = Vec::new();
+        for c in &d.cols {
+            if !names.contains(&c.component.as_str()) {
+                names.push(&c.component);
+            }
+        }
+        assert!(
+            names.len() >= 5,
+            "the probe must carry several distinct components (seasonalities, two holidays              and two regressors), found {names:?}"
+        );
+        for nm in &names {
+            let mode = d
+                .cols
+                .iter()
+                .find(|c: &&Column| c.component == *nm)
+                .expect("component exists")
+                .mode;
+            let want = full_scan(nm, mode == Mode::Additive);
+            let got = &fc
+                .components
+                .iter()
+                .find(|(k, _)| k == nm)
+                .unwrap_or_else(|| panic!("component {nm} must be emitted"))
+                .1;
+            assert_eq!(want.len(), got.len());
+            for (i, (a, b)) in want.iter().zip(got.iter()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "component {nm} row {i}: the span-restricted roll-up must be BIT-identical                      to a full scan, got {b} want {a}"
+                );
+            }
+            // Non-vacuity: a component that is identically zero proves nothing.
+            if want.iter().any(|v| *v != 0.0) {
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 4,
+            "at least four components must carry a NON-ZERO series, or the bit comparison              above is comparing zeros; only {checked} did"
+        );
+    }
+
+    /// The span really is a SUPERSET: for every distinct component, no column carrying it
+    /// lies outside `first..=last`.
+    ///
+    /// This is the property the bitwise argument rests on, asserted directly rather than
+    /// inferred from the holiday sort's behaviour.
+    #[test]
+    fn every_component_span_contains_every_column_of_that_component() {
+        let (d, ..) = rich_design();
+        let mut names: Vec<String> = Vec::new();
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for (ci, c) in d.cols.iter().enumerate() {
+            if let Some(pos) = names.iter().position(|n| n == &c.component) {
+                spans[pos].1 = ci;
+            } else {
+                names.push(c.component.clone());
+                spans.push((ci, ci));
+            }
+        }
+        for (nm, &(first, last)) in names.iter().zip(spans.iter()) {
+            for (ci, c) in d.cols.iter().enumerate() {
+                if &c.component == nm {
+                    assert!(
+                        ci >= first && ci <= last,
+                        "column {ci} carries component {nm} but lies outside its span                          {first}..={last} — the restriction would DROP it"
+                    );
+                }
+            }
+        }
     }
 }
 

@@ -22,10 +22,72 @@ use crate::prophet::{
 use crate::types::{
     ForecastArgs, ForecastError, ForecastResponse, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
     MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
-    MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS,
-    MAX_REGRESSORS_INTERIM, MAX_SPAN_DAYS, MIN_POINTS, REGRESSOR_PRIOR_SCALE_MAX,
-    REGRESSOR_PRIOR_SCALE_MIN,
+    MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS, MAX_REGRESSORS,
+    MAX_REGRESSOR_DESIGN_COST, MAX_SPAN_DAYS, MIN_POINTS, REGRESSOR_CONDITION_NUMBER_WARN,
+    REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN, REGRESSOR_VIF_WARN,
 };
+
+/// Response keys a regressor name must not shadow — the THIRD part of the collision
+/// reserved set, and the only part that is not derivable from any column.
+///
+/// Parts (a) generated column names and (b) per-component names both come out of the spec,
+/// so a check built from the spec alone finds them. These eleven do not: they are pushed by
+/// [`crate::prophet::predict`] AFTER the per-component loop, or they are top-level
+/// [`ForecastResponse`] fields, and neither is a `Column.component` value anywhere.
+///
+/// Why it matters that this is a refusal and not a rename: the response component map is
+/// built by `components.insert(name, value)` — a MAP INSERT — so a regressor named
+/// `additive_terms` is computed as its own component and then silently OVERWRITTEN by the
+/// real aggregate that `predict` pushes afterwards. The regressor's own contribution
+/// vanishes from the response with no error anywhere, which is the D-21 silent-ignore class
+/// this phase exists to close (threat T-06.1-13).
+///
+/// The first five are component keys `predict` pushes unconditionally or on the regressor
+/// path (`prophet.rs`'s `holidays`, `extra_regressors_additive`,
+/// `extra_regressors_multiplicative`, `additive_terms`, `multiplicative_terms`); the last
+/// six are top-level `ForecastResponse` fields a component key must not shadow in a consumer
+/// that flattens the response. `the_reserved_response_keys_slice_is_not_empty` pins the list
+/// so a later edit cannot empty it and make the check vacuous.
+/// A finite `f64` as a JSON number, and ANYTHING ELSE as an explicit `null`.
+///
+/// `serde_json` already renders a non-finite `f64` as `null`, so an accidental infinity and
+/// a DELIBERATE withholding produce the SAME wire bytes — and only one of them is an
+/// intended statement. Routing every emitted number through here makes the null a decision
+/// taken in one place instead of an accident that is invisible on the wire. The same defect
+/// is on record in this project as CR-03 (`UpdateEvidence::table_hash` not injective over
+/// inf/NaN), which is why the fix is a funnel rather than a comment.
+fn finite_or_null(v: f64) -> serde_json::Value {
+    if v.is_finite() {
+        serde_json::Number::from_f64(v).map_or(serde_json::Value::Null, serde_json::Value::Number)
+    } else {
+        serde_json::Value::Null
+    }
+}
+
+/// The WIRE spelling of a mode — the string the caller sent, or the default.
+///
+/// `format!("{mode:?}")` would emit `Additive`, which is the Rust spelling and not the one
+/// the caller used or the schema advertises.
+fn mode_wire_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Additive => "additive",
+        Mode::Multiplicative => "multiplicative",
+    }
+}
+
+pub(crate) const RESERVED_RESPONSE_KEYS: [&str; 11] = [
+    "additive_terms",
+    "multiplicative_terms",
+    "holidays",
+    "extra_regressors_additive",
+    "extra_regressors_multiplicative",
+    "trend",
+    "yhat",
+    "yhat_lower",
+    "yhat_upper",
+    "ds",
+    "cap",
+];
 
 /// Fit and forecast in ONE stateless call (D-01: no fit -> artifact -> forecast round-trip).
 ///
@@ -381,20 +443,111 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             let mut reg_hist: Vec<Vec<f64>> = Vec::new();
             let mut reg_fut: Vec<Vec<f64>> = Vec::new();
             if let Some(regs) = args.regressors.as_ref() {
-                // ---- 7. INTERIM COUNT CEILING, deliberately temporary ----
+                // ---- 8. NAME LENGTH, in BYTES, FIRST in the block ----
                 //
-                // FIRST, before any allocation proportional to the payload. Without it this
-                // wave accepts an unbounded array of (points + horizon)-long arrays and a
-                // small request can drive L-BFGS out of memory (T-06.1-01). Plan 06.1-03
-                // REPLACES this literal with the measured `fit_max_regressors` and
-                // `fit_max_regressor_design_cost` and must assert the literal is gone.
-                if regs.len() > MAX_REGRESSORS_INTERIM {
+                // FIRST for the reason the holiday loop's identical check is first (C-07):
+                // every OTHER refusal below formats caller data — six of them format the
+                // index, two format the NAME — so an unbounded name would be reflected back
+                // through whichever check fires. The length check bounds all of them.
+                //
+                // Reuses MAX_HOLIDAY_NAME_LEN rather than adding a fourth name ceiling: the
+                // amplification argument is the SAME one C-07 records. `regressors::splice`
+                // clones the name TWICE per design column (the `Column.name` and the
+                // `Column.component`), `predict`'s component-name dedup compares it
+                // O(C * distinct_components) times, and it becomes a key of the serialized
+                // `components` map. One ceiling, one derivation, one place to raise it.
+                //
+                // BYTES, not chars: `String::len` is bytes and bytes are what the clone and
+                // the comparison cost. The message names the INDEX and the LENGTH and NEVER
+                // the name — echoing an oversized string back re-materialises the very bytes
+                // the bound refuses and reflects attacker-controlled content into logs
+                // (T-06.1-14).
+                if let Some((i, r)) = regs
+                    .iter()
+                    .enumerate()
+                    .find(|(_, r)| r.name.len() > MAX_HOLIDAY_NAME_LEN)
+                {
                     return Err(ForecastError::Validation(format!(
-                        "the request carries {} regressors, which exceeds the interim \
-                         ceiling of {MAX_REGRESSORS_INTERIM}; send fewer regressors. This \
-                         ceiling is PROVISIONAL and is replaced by a measured bound in a \
-                         later plan",
+                        "regressor at index {i}: name is {} bytes, which exceeds \
+                         max_holiday_name_len {MAX_HOLIDAY_NAME_LEN}; use a shorter label \
+                         (the name is not echoed back — its LENGTH is what is at issue)",
+                        r.name.len()
+                    )));
+                }
+                // ---- 7. THE COUNT CEILING, MEASURED (replaces the wave-1 interim 50) ----
+                //
+                // Before any allocation proportional to the payload. `fit_max_regressors` is
+                // its own ceiling rather than a consequence of the product below, because
+                // the product is satisfiable by trading rows for columns while the
+                // identifiability diagnostic's O(K^3) factorisation is a function of the
+                // COUNT alone (cost axis C-17).
+                if regs.len() > MAX_REGRESSORS {
+                    return Err(ForecastError::Validation(format!(
+                        "the request carries {} regressors, which exceeds \
+                         max_regressors {MAX_REGRESSORS}; send fewer regressors",
                         regs.len()
+                    )));
+                }
+                // ---- 9. THE DESIGN-COST PRODUCT, and it STATES ITS OPERANDS ----
+                //
+                // `ds.len() <= MAX_POINTS` (20 000), `args.horizon <= MAX_HORIZON` (3 650)
+                // and `regs.len() <= MAX_REGRESSORS` are all already refused above, so this
+                // product is at most 4 730 000 — six orders of magnitude below `usize::MAX`
+                // on every supported target. A plain multiply cannot overflow here, and
+                // `saturating_mul` would only obscure that the factors are bounded.
+                let regressor_cells = (ds.len() + args.horizon) * regs.len();
+                if regressor_cells > MAX_REGRESSOR_DESIGN_COST {
+                    return Err(ForecastError::Validation(format!(
+                        "regressors expand to {regressor_cells} design feature cells \
+                         ((points + horizon) x n_regressors = ({} + {}) x {}), which \
+                         exceeds max_regressor_design_cost {MAX_REGRESSOR_DESIGN_COST}; \
+                         send fewer regressors, a shorter history or a shorter horizon",
+                        ds.len(),
+                        args.horizon,
+                        regs.len()
+                    )));
+                }
+                // ---- 10. NAME COLLISION WITH A RESPONSE COMPONENT KEY ----
+                //
+                // The response component map is `components.insert(name, value)` — a MAP
+                // INSERT — so a duplicate key silently OVERWRITES the earlier entry and the
+                // operator sees ONE component where TWO were computed. Check 5 below closes
+                // regressor-against-regressor; this closes regressor-against-everything-else,
+                // over a reserved set with THREE parts (T-06.1-13):
+                //
+                //   (a) GENERATED COLUMN NAMES — `prophet::columns(&spec)`, i.e. the
+                //       `{seasonality}_delim_{n}` and `{holiday}_delim_{sign}{offset}` forms.
+                //   (b) PER-COMPONENT NAMES — the `Column.component` values behind those
+                //       columns. `predict` pushes one component per DISTINCT `component`
+                //       value, so a regressor named `yearly` collides even though `yearly`
+                //       is not itself a generated column name; and a regressor named after a
+                //       declared holiday collides for the same reason.
+                //   (c) RESERVED RESPONSE KEYS — [`RESERVED_RESPONSE_KEYS`], which are
+                //       invisible to (a) and (b) because they are pushed after the
+                //       per-component loop or are top-level response fields.
+                //
+                // The spec is fully assembled by this point (seasonalities, holidays and the
+                // empty-design weekly fallback are all settled above), so the reserved set is
+                // built ONCE from the real spec rather than from a reconstruction of it.
+                let mut reserved: std::collections::BTreeMap<String, &'static str> =
+                    std::collections::BTreeMap::new();
+                for c in crate::prophet::columns(&spec) {
+                    reserved.insert(c.name, "a generated design column name");
+                    reserved.insert(c.component, "a response component name");
+                }
+                for k in RESERVED_RESPONSE_KEYS {
+                    reserved.insert(k.to_string(), "a reserved response key");
+                }
+                if let Some((i, r, part)) = regs
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, r)| reserved.get(r.name.as_str()).map(|part| (i, r, *part)))
+                {
+                    return Err(ForecastError::Validation(format!(
+                        "regressor {i} is named {:?}, which is already {part} in the \
+                         response; the component map is keyed by name and one would \
+                         silently overwrite the other, so rename the regressor",
+                        r.name
                     )));
                 }
                 // ---- 5. DUPLICATE NAMES ----
@@ -552,7 +705,32 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             for (n, v) in &fc.components {
                 components.insert(n.clone(), serde_json::json!(v));
             }
-            Ok(ForecastResponse {
+            // ---- THE IDENTIFIABILITY DIAGNOSTIC (D-35, D-36) ----
+            //
+            // Computed AFTER the fit and only when the request actually carried regressors.
+            // Both keys are built CONDITIONALLY and inserted into the map below rather than
+            // being fields with a `skip_serializing_if`: a serialisation attribute that
+            // misfires emits `"regressors": []` on EVERY response, and `invariance::
+            // signature` hashes the WHOLE `diagnostics` object, so that would change every
+            // recorded baseline and break SC2. The mechanism has to be "the key is never
+            // constructed", not "the key is usually omitted".
+            //
+            // Nothing equivalent exists on the neuralprophet arm, deliberately (D-37): VIF
+            // and the condition number are properties of the design matrix PROPHET builds,
+            // and AR absorption is a training dynamic rather than column collinearity, so a
+            // green VIF there would reassure about the wrong thing.
+            let identifiability = if reg_std.is_empty() {
+                None
+            } else {
+                Some(crate::regressors::identifiability(
+                    &design,
+                    &reg_std,
+                    &p.beta,
+                    REGRESSOR_VIF_WARN,
+                    REGRESSOR_CONDITION_NUMBER_WARN,
+                ))
+            };
+            let mut response = ForecastResponse {
                 model: "prophet".into(),
                 freq,
                 n_history: ds.len(),
@@ -584,7 +762,65 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     "interval_width": interval_width,
                     "uncertainty_samples": spec.uncertainty_samples
                 }),
-            })
+            };
+            if let Some(id) = identifiability {
+                let diag = response
+                    .diagnostics
+                    .as_object_mut()
+                    .expect("the prophet diagnostics value is built as a JSON object above");
+                let mut rows = Vec::with_capacity(id.regressors.len());
+                for r in &id.regressors {
+                    let mut o = serde_json::Map::new();
+                    o.insert("name".into(), serde_json::Value::String(r.name.clone()));
+                    o.insert(
+                        "mode".into(),
+                        serde_json::Value::String(mode_wire_name(r.mode).into()),
+                    );
+                    o.insert("mu".into(), finite_or_null(r.mu));
+                    o.insert("std".into(), finite_or_null(r.std));
+                    o.insert(
+                        "vif".into(),
+                        r.vif.map_or(serde_json::Value::Null, finite_or_null),
+                    );
+                    // `warning` is ABSENT, not null, when the column is clean: a key that is
+                    // always present with a null is a key a consumer has to branch on.
+                    if let Some(w) = &r.warning {
+                        o.insert("warning".into(), serde_json::Value::String(w.clone()));
+                    }
+                    rows.push(serde_json::Value::Object(o));
+                }
+                diag.insert("regressors".into(), serde_json::Value::Array(rows));
+                let mut sib = serde_json::Map::new();
+                sib.insert("scope".into(), serde_json::Value::String(id.scope.clone()));
+                sib.insert(
+                    "condition_number".into(),
+                    id.condition_number
+                        .map_or(serde_json::Value::Null, finite_or_null),
+                );
+                sib.insert(
+                    "condition_number_warning".into(),
+                    id.condition_number_warning
+                        .clone()
+                        .map_or(serde_json::Value::Null, serde_json::Value::String),
+                );
+                sib.insert(
+                    "ridge".into(),
+                    id.ridge.map_or(serde_json::Value::Null, finite_or_null),
+                );
+                sib.insert(
+                    "regularized".into(),
+                    serde_json::Value::Bool(id.regularized),
+                );
+                sib.insert(
+                    "status".into(),
+                    serde_json::Value::String(id.status.as_str().into()),
+                );
+                diag.insert(
+                    "regressors_identifiability".into(),
+                    serde_json::Value::Object(sib),
+                );
+            }
+            Ok(response)
         }
         // Ported verbatim from `sources/004-forecast-mcp-thin-server/src/lib.rs:226-262`
         // (D-08), replacing 06-01's refusing tracer stub (REVIEW-06-06). Every training
@@ -1779,19 +2015,488 @@ mod tests {
             .expect("a large but non-overflowing column must be accepted");
     }
 
-    /// CHECK 7, the INTERIM count ceiling. Provisional: plan 06.1-03 replaces the literal.
+    /// CHECK 7, the MEASURED count ceiling — replaces plan 06.1-01's interim literal 50.
+    ///
+    /// The ceiling is read from `MAX_REGRESSORS` rather than written as a literal, so
+    /// lowering the constant after a second measurement cannot leave this test pinning a
+    /// number the door no longer enforces.
     #[test]
-    fn regressors_beyond_the_interim_ceiling_are_refused() {
-        let over: Vec<_> = (0..=crate::types::MAX_REGRESSORS_INTERIM)
+    fn regressors_beyond_the_measured_count_ceiling_are_refused() {
+        let over: Vec<_> = (0..=crate::types::MAX_REGRESSORS)
             .map(|i| good_reg(&format!("r{i}"), 60, 7))
             .collect();
-        refusal(&reg_args(60, 7, over), "interim ceiling");
+        // The probe must be INSIDE the product ceiling, or the refusal it triggers is the
+        // product check (which runs just after) and this test would be green for the wrong
+        // reason — a real risk, because both ceilings move together in Task 2 step 5.
+        assert!(
+            (60 + 7) * over.len() <= crate::types::MAX_REGRESSOR_DESIGN_COST,
+            "the over-count probe must violate ONLY the count ceiling"
+        );
+        refusal(&reg_args(60, 7, over), "max_regressors");
+        // POSITIVE CONTROL: exactly AT the ceiling is accepted. Re-derived against the
+        // MEASURED constant, so a refusal that refused everything would show here.
+        let at: Vec<_> = (0..crate::types::MAX_REGRESSORS)
+            .map(|i| good_reg(&format!("r{i}"), 60, 7))
+            .collect();
+        assert_eq!(at.len(), crate::types::MAX_REGRESSORS);
+        assert!(
+            (60 + 7) * at.len() <= crate::types::MAX_REGRESSOR_DESIGN_COST,
+            "the control must be inside the PRODUCT ceiling too, or it would be refused by \
+             the other check and prove nothing about this one"
+        );
+        forecast(&reg_args(60, 7, at)).expect("exactly the count ceiling must be accepted");
+    }
+
+    /// The fixed history geometry the product-ceiling probes use.
+    ///
+    /// 2 000 points and a 365-step horizon: both individually legal by a wide margin, so
+    /// the only thing a refusal here can be about is the PRODUCT.
+    const PRODUCT_PROBE_POINTS: usize = 2_000;
+    const PRODUCT_PROBE_HORIZON: usize = 365;
+
+    /// The smallest regressor count whose product EXCEEDS the ceiling, and the largest that
+    /// does not — both DERIVED from the constant.
+    ///
+    /// Derived rather than written down because the ceiling MOVES: plan 06.1-03 Task 1
+    /// derives a provisional value and Task 2 step 5 re-derives it with the identifiability
+    /// diagnostic live. A hardcoded pair silently stops straddling the boundary the moment
+    /// the constant changes — which is exactly what happened when the Task 1 sweep lowered
+    /// it from the starting candidate, and is why this is a function.
+    fn product_probe_counts() -> (usize, usize) {
+        let rows = PRODUCT_PROBE_POINTS + PRODUCT_PROBE_HORIZON;
+        let under = crate::types::MAX_REGRESSOR_DESIGN_COST / rows;
+        (under + 1, under)
+    }
+
+    /// CHECK 9, the design-cost PRODUCT, from both sides.
+    ///
+    /// The point of a product bound is that each factor is individually legal: this request
+    /// is inside `fit_max_points`, inside `fit_max_horizon` and inside `fit_max_regressors`,
+    /// and only their product is refused.
+    #[test]
+    fn a_regressor_design_cost_over_the_product_ceiling_is_refused() {
+        let (n, horizon) = (PRODUCT_PROBE_POINTS, PRODUCT_PROBE_HORIZON);
+        let (over_count, under_count) = product_probe_counts();
+        let over: Vec<_> = (0..over_count)
+            .map(|i| good_reg(&format!("r{i}"), n, horizon))
+            .collect();
+        assert!(
+            n <= crate::types::MAX_POINTS
+                && horizon <= crate::types::MAX_HORIZON
+                && over.len() <= crate::types::MAX_REGRESSORS,
+            "every factor must be individually legal, or this tests the wrong check"
+        );
+        assert!(
+            (n + horizon) * over.len() > crate::types::MAX_REGRESSOR_DESIGN_COST,
+            "the probe must actually be over the product ceiling"
+        );
+        let args = reg_args(n, horizon, over);
+        refusal(&args, "max_regressor_design_cost");
+        // The message STATES THE OPERANDS it used, the way the holiday design-cost message
+        // does — a bound that reports only its own value leaves the caller guessing which
+        // factor to shrink.
+        match forecast(&args) {
+            Err(ForecastError::Validation(m)) => {
+                let cells = (n + horizon) * over_count;
+                for needle in [
+                    "(points + horizon) x n_regressors".to_string(),
+                    format!("({n} + {horizon}) x {over_count}"),
+                    cells.to_string(),
+                ] {
+                    assert!(
+                        m.contains(&needle),
+                        "message must contain {needle:?}, got {m:?}"
+                    );
+                }
+            }
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+        // POSITIVE CONTROL, at the LARGEST count the same geometry admits — one below the
+        // refused one, so the two straddle the boundary rather than sitting near it.
+        let under: Vec<_> = (0..under_count)
+            .map(|i| good_reg(&format!("r{i}"), n, horizon))
+            .collect();
+        assert_eq!(
+            under.len() + 1,
+            over_count,
+            "the pair must straddle the ceiling"
+        );
+        assert!((n + horizon) * under.len() <= crate::types::MAX_REGRESSOR_DESIGN_COST);
+        forecast(&reg_args(n, horizon, under))
+            .expect("the largest request under the product ceiling must be accepted");
+    }
+
+    /// CHECK 8, the name byte bound — and it must not echo the name back (T-06.1-14).
+    ///
+    /// Reuses `fit_max_holiday_name_len`: the amplification argument is the same one C-07
+    /// records, so a fourth name ceiling would be a second number to keep in step.
+    #[test]
+    fn a_regressor_name_longer_than_the_byte_ceiling_is_refused_without_echoing_it() {
+        let long = "z".repeat(crate::types::MAX_HOLIDAY_NAME_LEN + 1);
+        let mut reg = good_reg(&long, 60, 7);
+        reg.name.clone_from(&long);
+        match forecast(&reg_args(60, 7, vec![reg])) {
+            Err(ForecastError::Validation(m)) => {
+                assert!(
+                    m.contains("the name is not echoed back"),
+                    "the message must say the name is withheld, got {m:?}"
+                );
+                assert!(
+                    !m.contains(&long),
+                    "the message must NOT echo the oversized name — echoing it \
+                     re-materialises the very bytes the bound refuses"
+                );
+                assert!(
+                    m.contains("index 0") && m.contains("201 bytes"),
+                    "the message must name the INDEX and the LENGTH, got {m:?}"
+                );
+            }
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
         // POSITIVE CONTROL: exactly AT the ceiling is accepted.
-        let at: Vec<_> = (0..crate::types::MAX_REGRESSORS_INTERIM)
-            .map(|i| good_reg(&format!("r{i}"), 60, 7))
+        let at = "z".repeat(crate::types::MAX_HOLIDAY_NAME_LEN);
+        forecast(&reg_args(60, 7, vec![good_reg(&at, 60, 7)]))
+            .expect("a name of exactly the ceiling must be accepted");
+    }
+
+    /// BYTES, not characters — the rewrite this test exists to catch.
+    ///
+    /// The holiday side already carries this case
+    /// (`a_holiday_name_whose_char_count_fits_but_whose_byte_length_does_not_is_refused`);
+    /// the regressor side needs its own, because a rewrite to `chars().count()` would be
+    /// made in one place and would have to be caught in both.
+    #[test]
+    fn a_regressor_name_whose_char_count_fits_but_whose_byte_length_does_not_is_refused() {
+        // 'é' is two UTF-8 bytes: 120 chars, 240 bytes.
+        let name = "é".repeat(120);
+        assert!(
+            name.chars().count() <= crate::types::MAX_HOLIDAY_NAME_LEN
+                && name.len() > crate::types::MAX_HOLIDAY_NAME_LEN,
+            "the probe must fit on chars and NOT on bytes, or it tests nothing"
+        );
+        refusal(&reg_args(60, 7, vec![good_reg(&name, 60, 7)]), "bytes");
+    }
+
+    /// CHECK 10 part (a): a regressor named exactly like a GENERATED design column.
+    #[test]
+    fn a_regressor_colliding_with_a_generated_column_name_is_refused() {
+        // 60 daily points gives a weekly seasonality, so `weekly_delim_1` is a real
+        // generated column name for this request — derived, not assumed.
+        let args = reg_args(60, 7, vec![good_reg("promo", 60, 7)]);
+        let probe = forecast(&args).expect("the control request must be accepted");
+        let generated = probe
+            .components
+            .keys()
+            .find(|k| k.contains("_delim_"))
+            .cloned();
+        // The components map carries COMPONENT names, not column names, so derive the
+        // column name from the spec the same way the door does.
+        let ds: Vec<i64> = args
+            .ds
+            .iter()
+            .map(|s| crate::dates::parse_date(s).expect("valid"))
             .collect();
-        assert_eq!(at.len(), 50);
-        forecast(&reg_args(60, 7, at)).expect("exactly the interim ceiling must be accepted");
+        let spec = crate::prophet::Spec::default_linear(crate::prophet::auto_seasonalities(
+            &ds,
+            10.0,
+            crate::prophet::Mode::Additive,
+        ));
+        let col = crate::prophet::columns(&spec)
+            .into_iter()
+            .map(|c| c.name)
+            .find(|n| n.contains("_delim_"))
+            .expect("this geometry must generate at least one _delim_ column");
+        assert!(
+            generated.is_none(),
+            "a _delim_ name is a COLUMN name, not a component key; if one appeared as a \
+             component this test's premise changed"
+        );
+        match forecast(&reg_args(60, 7, vec![good_reg(&col, 60, 7)])) {
+            Err(ForecastError::Validation(m)) => assert!(
+                m.contains("a generated design column name"),
+                "the message must say WHICH part of the reserved set matched, got {m:?}"
+            ),
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+    }
+
+    /// CHECK 10 part (b): a regressor named after a SEASONALITY component.
+    ///
+    /// `weekly` is not itself a generated column name — the columns are `weekly_delim_1`,
+    /// `weekly_delim_2`, … — so part (a) alone would let this through, and `predict` would
+    /// push a `weekly` component that the regressor's own entry then overwrote.
+    #[test]
+    fn a_regressor_colliding_with_a_seasonality_component_name_is_refused() {
+        match forecast(&reg_args(60, 7, vec![good_reg("weekly", 60, 7)])) {
+            Err(ForecastError::Validation(m)) => assert!(
+                m.contains("a response component name"),
+                "the message must say WHICH part matched, got {m:?}"
+            ),
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+    }
+
+    /// CHECK 10 part (b), the HOLIDAY half — and its accepted control, which is what makes
+    /// the check a collision test rather than a blocklist.
+    #[test]
+    fn a_regressor_colliding_with_a_declared_holiday_name_is_refused_but_not_otherwise() {
+        let mut args = reg_args(60, 7, vec![good_reg("blackfriday", 60, 7)]);
+        // WITHOUT the holiday declared, `blackfriday` is an ordinary name and is ACCEPTED.
+        forecast(&args)
+            .expect("`blackfriday` collides with nothing when no such holiday is declared");
+        // WITH it declared, the same name is refused.
+        args.holidays = Some(vec![crate::types::HolidayArg {
+            name: "blackfriday".into(),
+            dates: vec!["2020-01-10".into()],
+            lower_window: 0,
+            upper_window: 0,
+        }]);
+        match forecast(&args) {
+            Err(ForecastError::Validation(m)) => assert!(
+                m.contains("a response component name") && m.contains("blackfriday"),
+                "the message must name the collision and its part, got {m:?}"
+            ),
+            other => panic!(
+                "expected a Validation refusal, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+    }
+
+    /// CHECK 10 part (c): a RESERVED RESPONSE KEY, which is invisible to parts (a) and (b).
+    ///
+    /// This is the case the review found: `components.insert(name, value)` is a MAP INSERT,
+    /// so a regressor named `additive_terms` is computed as its own component and then
+    /// silently OVERWRITTEN by the aggregate `predict` pushes afterwards.
+    #[test]
+    fn a_regressor_colliding_with_a_reserved_response_key_is_refused() {
+        for key in [
+            "additive_terms",
+            "extra_regressors_additive",
+            "yhat",
+            "trend",
+        ] {
+            match forecast(&reg_args(60, 7, vec![good_reg(key, 60, 7)])) {
+                Err(ForecastError::Validation(m)) => assert!(
+                    m.contains("a reserved response key") && m.contains(key),
+                    "{key}: the message must name the collision and its part, got {m:?}"
+                ),
+                other => panic!(
+                    "{key}: expected a Validation refusal, got {:?}",
+                    other.map(|r| r.model)
+                ),
+            }
+        }
+        // POSITIVE CONTROL across all three parts: an ordinary name clears every one.
+        forecast(&reg_args(60, 7, vec![good_reg("promo", 60, 7)]))
+            .expect("`promo` must clear all three parts of the reserved set");
+    }
+
+    /// The part-(c) list cannot be silently emptied into vacuity.
+    ///
+    /// Parts (a) and (b) are DERIVED from the spec, so they cannot rot. Part (c) is a
+    /// hand-written slice, which is exactly the shape that goes stale — so it is pinned
+    /// here, by name, in one place.
+    #[test]
+    fn the_reserved_response_keys_slice_is_not_empty() {
+        assert_eq!(
+            super::RESERVED_RESPONSE_KEYS.len(),
+            11,
+            "the reserved response key list must carry all eleven names"
+        );
+        for want in [
+            "additive_terms",
+            "multiplicative_terms",
+            "holidays",
+            "extra_regressors_additive",
+            "extra_regressors_multiplicative",
+            "trend",
+            "yhat",
+            "yhat_lower",
+            "yhat_upper",
+            "ds",
+            "cap",
+        ] {
+            assert!(
+                super::RESERVED_RESPONSE_KEYS.contains(&want),
+                "{want} must be in the reserved response key list"
+            );
+        }
+    }
+
+    /// THE REFUSAL COVERAGE, pinned by MESSAGES EXERCISED rather than by test-function names.
+    ///
+    /// A floor on the number of test FUNCTIONS is coupled to how an executor chose to group
+    /// them: six checks can legitimately be six functions or one table. This test drives one
+    /// probe per refusal the regressor surface can produce, asserts each one actually fires
+    /// with the expected needle, and asserts its OWN row count — so the coverage number is a
+    /// property of the refusals rather than of the file's layout.
+    #[test]
+    fn the_regressor_refusal_table_is_complete() {
+        type Probe = fn() -> ForecastArgs;
+        let long_name = "z".repeat(crate::types::MAX_HOLIDAY_NAME_LEN + 1);
+        let table: Vec<(&str, &str, Box<dyn Fn() -> ForecastArgs>)> = vec![
+            (
+                "name byte length",
+                "max_holiday_name_len",
+                Box::new(move || reg_args(60, 7, vec![good_reg(&long_name, 60, 7)])),
+            ),
+            (
+                "count ceiling",
+                "max_regressors",
+                Box::new(|| {
+                    reg_args(
+                        60,
+                        7,
+                        (0..=crate::types::MAX_REGRESSORS)
+                            .map(|i| good_reg(&format!("r{i}"), 60, 7))
+                            .collect(),
+                    )
+                }),
+            ),
+            (
+                "design cost product",
+                "max_regressor_design_cost",
+                Box::new(|| {
+                    let (over_count, _) = product_probe_counts();
+                    reg_args(
+                        PRODUCT_PROBE_POINTS,
+                        PRODUCT_PROBE_HORIZON,
+                        (0..over_count)
+                            .map(|i| {
+                                good_reg(
+                                    &format!("r{i}"),
+                                    PRODUCT_PROBE_POINTS,
+                                    PRODUCT_PROBE_HORIZON,
+                                )
+                            })
+                            .collect(),
+                    )
+                }),
+            ),
+            (
+                "collision: generated column name",
+                "a generated design column name",
+                Box::new(|| reg_args(60, 7, vec![good_reg("weekly_delim_1", 60, 7)])),
+            ),
+            (
+                "collision: component name",
+                "a response component name",
+                Box::new(|| reg_args(60, 7, vec![good_reg("weekly", 60, 7)])),
+            ),
+            (
+                "collision: reserved response key",
+                "a reserved response key",
+                Box::new(|| reg_args(60, 7, vec![good_reg("additive_terms", 60, 7)])),
+            ),
+            (
+                "duplicate names",
+                "appears more than once",
+                Box::new(|| {
+                    reg_args(
+                        60,
+                        7,
+                        vec![good_reg("promo", 60, 7), good_reg("promo", 60, 7)],
+                    )
+                }),
+            ),
+            (
+                "length tie",
+                "values but 67 are required",
+                Box::new(|| {
+                    let mut r = good_reg("promo", 60, 7);
+                    r.values.truncate(10);
+                    reg_args(60, 7, vec![r])
+                }),
+            ),
+            (
+                "input finiteness",
+                "non-finite value at row",
+                Box::new(|| {
+                    let mut r = good_reg("promo", 60, 7);
+                    r.values[3] = f64::INFINITY;
+                    reg_args(60, 7, vec![r])
+                }),
+            ),
+            (
+                "mode allowlist",
+                "is not supported",
+                Box::new(|| {
+                    let mut r = good_reg("promo", 60, 7);
+                    r.mode = Some("exponential".into());
+                    reg_args(60, 7, vec![r])
+                }),
+            ),
+            (
+                "prior scale range",
+                "outside the",
+                Box::new(|| {
+                    let mut r = good_reg("promo", 60, 7);
+                    r.prior_scale = Some(0.0);
+                    reg_args(60, 7, vec![r])
+                }),
+            ),
+            (
+                "zero spread",
+                "carries no information",
+                Box::new(|| {
+                    let mut r = good_reg("flat", 60, 7);
+                    r.values = vec![2.0; 67];
+                    reg_args(60, 7, vec![r])
+                }),
+            ),
+            (
+                "post-arithmetic mean overflow",
+                "non-finite mean after standardisation",
+                Box::new(|| {
+                    let mut r = good_reg("huge", 60, 7);
+                    r.values = (0..67).map(|i| 1.0e307 + f64::from(i as u32)).collect();
+                    reg_args(60, 7, vec![r])
+                }),
+            ),
+            (
+                "neuralprophet arm",
+                "set model to \"prophet\"",
+                Box::new(|| {
+                    let mut a = reg_args(60, 7, vec![good_reg("promo", 60, 7)]);
+                    a.model = Some("neuralprophet".into());
+                    a
+                }),
+            ),
+        ];
+        // The floor is asserted on the TABLE, so the coverage claim survives any regrouping
+        // of the test functions around it.
+        assert!(
+            table.len() >= 14,
+            "the regressor refusal table must cover at least 14 distinct refusals, has {}",
+            table.len()
+        );
+        let _: Option<Probe> = None;
+        for (label, needle, build) in &table {
+            match forecast(&build()) {
+                Err(ForecastError::Validation(m)) => assert!(
+                    m.contains(needle),
+                    "{label}: the refusal must name {needle:?}, got {m:?}"
+                ),
+                other => panic!(
+                    "{label}: this probe must be REFUSED — a row that no longer refuses is a \
+                     silently removed check, got {:?}",
+                    other.map(|r| r.model)
+                ),
+            }
+        }
     }
 
     /// D-21: the neuralprophet arm REFUSES regressors rather than silently dropping them.
