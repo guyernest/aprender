@@ -21,6 +21,35 @@ single-purpose MCP server (pmcp, Lambda/pmcp.run) for time-series forecasting.
   self-consistency.
 - Frontier session 2026-09-05: build order 008 (NEON GEMM kernel, an upstream contribution) → 007 (Chronos thin server) → 009 (Chronos-2) → 010 (concurrency probe). The 008 kernel lives in `crates/aprender-compute` on a branch cut from `upstream/main`; opening the PR is a checkpoint, not automatic.
 
+### forecast-exogenous-inputs
+Let operators supply the information the forecast models cannot infer: known future events
+(holidays) and numeric drivers (price, promotions). Requested by Forecast Coach, an MCP app that
+consumes `aprender-forecast` as a git dependency pinned by tag and calls the crate's one stateless
+door for both `prophet` and `neuralprophet`. Extends the ports built under `prophet-forecast-mcp`.
+Two of the change request's four premises were refuted against its own pinned tag
+(`aprender-forecast-v0.63.0` = `fdf6b1802`) before any spike was built: the NeuralProphet
+`holidays` silent-ignore does not exist (`forecast.rs` already refuses with "holidays is
+prophet-only"), and the Prophet parity ladder already carries a holidays fixture
+(`peyton_holidays_prophet140.json`, two holidays with `upper_window: 1`, measured
+`X 0.00e0 (K=30)` at rung 1 and `playoff 0.0e0, superbowl 0.0e0, holidays 0.0e0` at rung 3).
+The real work is regressors on both models, events on NeuralProphet, and proving a tag bump is safe.
+
+**Requirements:**
+- **Byte-identical when the new arguments are absent.** Every committed fixture must reproduce its
+  pre-change `ForecastResponse` exactly after the plumbing lands. This is the consumer's acceptance
+  gate, not a nice-to-have (CR constraint 1, 2026-09-20).
+- **No new required arguments.** Every new field is `Option<_>` with a serde default;
+  `#[serde(deny_unknown_fields)]` stays as it is.
+- **Errors, not silence.** An unsupported combination (a driver on a model that cannot use it) is
+  refused at the door with a message naming the limitation — the existing D-11 pattern.
+- **One `RegressorArg` shape serves both models**, so the caller sends one argument to `prophet`
+  and `neuralprophet` alike.
+- **Correctness bar for regressors is parity with Python Prophet 1.4.0**, measured by extending the
+  existing rung ladder (data prep -> predict-at-Python-params -> components), not self-consistency.
+- **One tag per release**; the consumer bumps one line plus the lock entry and builds `--locked`.
+- The public entry point is `forecast(&ForecastArgs)`. `fitted_forecast` does not exist at HEAD or
+  at the pinned tag — the CR names an API the crate does not ship (recorded 2026-09-20).
+
 ## Spikes
 
 | # | Idea | Name | Type | Validates | Verdict | Tags |
@@ -35,3 +64,7 @@ single-purpose MCP server (pmcp, Lambda/pmcp.run) for time-series forecasting.
 | 007 | prophet-forecast-mcp | chronos-mcp-thin-server | standard | Given Chronos-Bolt embedded in a pmcp thin server exposing the spike-004 `forecast` shape, when called over streamable-HTTP and stdio with ds/y/horizon, then native quantile bands return in under 100 ms for a 2048-point context at horizon ≤ 64, horizon > 64 is refused unless explicitly allowed (with a warning in the response), the browser page charts it, and binary size and cold start with embedded weights (f32 vs f16) are measured for Lambda | VALIDATED ✓ (embedded tiny-f16: 24 MB binary, 52 ms cold start to first forecast, 18.5 ms forward on 2048 pts, parity 9.5e-7 through the server; small-f16 103 MB / 280 ms / 98 ms; f16 costs 0.1 % of std; horizon > 64 gated by allow_long_horizon) | chronos, mcp, pmcp, lambda, latency |
 | 009 | prophet-forecast-mcp | chronos-2-parity | standard | Given `amazon/chronos-2` safetensors (120M, RoPE, arcsinh scaling, 21 quantiles, covariates), when ported on the spike-005 ladder (scaling → embeddings → hidden states → quantiles), then Python parity holds on Peyton, air and the edge probes, forward cost is measured with and without 008, and a verdict is given on whether 120M is servable in one binary | VALIDATED ✓ (Rust port matches Python to 2e-5 of scale on Peyton at 64/365/1024 steps and on 7 edge probes; 0.59 s/forward single-thread at 65 GFLOP/s vs torch 0.05 s on 10 threads; f16 costs 0.3–0.6 % of scale; 228 MB f16 / 1.45 GB peak RAM; parallel GEMM ≤ 2.1× because it splits M only) | chronos-2, t5, rope, parity |
 | 010 | prophet-forecast-mcp | forecast-server-concurrency | standard | Given the spike-004 server, when 8 NeuralProphet and Prophet requests arrive concurrently over streamable-HTTP, then every response matches its sequential result and no fit is corrupted by another thread's autograd tape | VALIDATED ✓ (8/8 and 16/16 responses bit-identical under load; but pmcp's router holds one Arc<Mutex<Server>> across each tool call so the shipped server serialises — a pool of 8 routers gives 3.9× / 6× with identical outputs) | mcp, concurrency, autograd |
+| 011 | forecast-exogenous-inputs | prophet-regressor-parity | standard | Given Python Prophet 1.4.0 with `add_regressor` on retail_sales plus binary, continuous and multiplicative regressors, when the shipped design-matrix path grows regressor columns, then column order, standardisation constants, `s_a`/`s_m`, X, predict-at-Python-MAP and every named component match, and the fit stays inside `fitted_objective_slack` | VALIDATED ✓ (additive change, no restructure: column order identical at 24 and 29 cols, `prior_scales`/`s_a`/`s_m` exact 0.0, yhat 4.5e-16 of y_scale, 9/11 components worst 3.6e-11, fit slack −3.42/−0.16 vs bar 0.5; std is pandas ddof=1 not numpy ddof=0; a driver collinear with trend/seasonality has no reproducible lift) | prophet, regressors, parity, design-matrix, identifiability |
+| 012 | forecast-exogenous-inputs | no-arg-bitwise-invariance | standard | Given the 7 committed Prophet fixtures and the NP oracle, when the regressor plumbing exists but no new argument is passed, then every `ForecastResponse` signature is byte-identical to the pre-change build | PENDING | invariance, determinism, delivery-gate |
+| 013 | forecast-exogenous-inputs | np-events-autograd | standard | Given NP-lite's `forward()` and its three predict paths, when an event-indicator `Linear` block is added, then a known synthetic event effect is recovered, an event-free series is bit-identical, fixed-seed repeat calls are byte-identical, and the D-10 train-cost bound reflects the new input dims | PENDING | neuralprophet, events, autograd, train-cost |
+| 014 | forecast-exogenous-inputs | np-grid-cadence-regressors | standard | Given `W` and `MS` series on NP's daily imputed grid, when a future regressor is supplied at the series cadence, then the imputation rule for missing grid days is determined and the forecast's sensitivity to that choice is measured | PENDING | neuralprophet, regressors, cadence, imputation |
