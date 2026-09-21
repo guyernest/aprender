@@ -539,8 +539,24 @@ mod tests {
     }
 
     /// Determinism WITH a falsification control: seed 43 must differ, or the check is vacuous.
+    ///
+    /// The bar is `equations.event_training_determinism_bitwise`, read from the contract
+    /// rather than written here. It is EXACTLY `0.0` and the comparison is on BIT PATTERNS:
+    /// `f64` equality would call `-0.0` and `+0.0` equal and two NaNs unequal, and neither
+    /// is the statement this bar makes. Reading it keeps the number in one place even
+    /// though a zero tolerance looks like it could not drift — a later loosening to `1e-12`
+    /// would then have to happen in the contract, where it is visible.
     #[test]
     fn fixed_seed_event_training_is_bit_identical_and_a_different_seed_differs() {
+        let tol = equation_tolerance(
+            "neuralprophet-parity-v1",
+            "event_training_determinism_bitwise",
+        );
+        assert_eq!(
+            tol, 0.0,
+            "this check compares BIT PATTERNS, which is only the right instrument at a \
+             tolerance of exactly 0.0; the contract says {tol}"
+        );
         let evs = planted_events();
         let (_d, a) = fit(&evs, 0, 42);
         let (_d, b) = fit(&evs, 0, 42);
@@ -625,8 +641,21 @@ mod tests {
     /// Two VERY different column counts against the events-OFF baseline, asserting the same
     /// fixed increment at both. A single column count could not tell a fixed increment from a
     /// linear one.
+    ///
+    /// The bar is `equations.event_tape_length_flat_in_columns`, read from the contract. It
+    /// is `0.0` because this is a COUNT: the increment is equal or it is not, and an
+    /// approximate tape length would not mean anything.
     #[test]
     fn the_tape_does_not_grow_with_the_event_column_count() {
+        let tol = equation_tolerance(
+            "neuralprophet-parity-v1",
+            "event_tape_length_flat_in_columns",
+        );
+        assert_eq!(
+            tol, 0.0,
+            "a tape length is a COUNT, so the only meaningful tolerance is exactly 0.0; \
+             the contract says {tol}"
+        );
         // Two events x 3 offsets = 6 columns, against 40 events x 7 offsets = 280 columns.
         let wide: Vec<EventSpec> = (0..40)
             .map(|k: u32| EventSpec {

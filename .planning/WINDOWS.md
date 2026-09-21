@@ -118,7 +118,7 @@ last_updated: 2026-09-21T16:45:55.552Z
     "phase": "06",
     "file": "crates/aprender-forecast/src/types.rs",
     "line": null,
-    "description": "SC1's 2 s bar is not guaranteed for holiday-carrying requests: no payload statistic bounds the wall (a 25 000-cell request walls at 4.2 s reproducibly). MAX_HOLIDAY_DESIGN_COST caps WORK; residual wall-clock exposure is FIT_BUDGET_SECS (15 s). Human decision required — see 06-11-SUMMARY coverage D7.",
+    "description": "SC1's 2 s bar is not guaranteed for holiday-carrying requests: no payload statistic bounds the wall (a 25 000-cell request walls at 4.2 s reproducibly). MAX_HOLIDAY_DESIGN_COST caps WORK; residual wall-clock exposure is FIT_BUDGET_SECS (15 s). Human decision required \u2014 see 06-11-SUMMARY coverage D7.",
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-07T03:31:33.474Z",
@@ -302,6 +302,66 @@ last_updated: 2026-09-21T16:45:55.552Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-21T16:45:55.552Z",
+    "resolved_at": null
+  },
+  {
+    "id": 23,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": ".planning/phases/06.1-forecast-exogenous-inputs-prophet-regressors-neuralprophet-e/06.1-06-PLAN.md",
+    "line": null,
+    "description": "06.1-06 verify t1a check 3 (\"the prophet arm contains ZERO holiday bounds\") is UNSATISFIABLE on a correct hoist: the regressor name ceiling inside the prophet arm deliberately reuses MAX_HOLIDAY_NAME_LEN (landed by 06.1-03, which says so in its own comment). Measured red at forecast.rs:507/511 after a correct hoist. Repaired with a structurally-bounded exemption for that one block plus two CONTROLs; four broken-input probes observed red.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T22:24:48.215Z",
+    "resolved_at": null
+  },
+  {
+    "id": 24,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": ".planning/phases/06.1-forecast-exogenous-inputs-prophet-regressors-neuralprophet-e/06.1-06-PLAN.md",
+    "line": null,
+    "description": "06.1-06 verify t1a check 5 (no second np_event_design_cost ceiling) did not skip comment lines, so it went red on the hoisted site's own prose forbidding that constant. Measured. Narrowed to non-comment lines; re-probed red on a real `const MAX_NP_EVENT_DESIGN_COST`.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T22:24:48.215Z",
+    "resolved_at": null
+  },
+  {
+    "id": 25,
+    "kind": "unmet-truth",
+    "phase": "06.1",
+    "file": "crates/aprender-forecast/src/np.rs",
+    "line": 539,
+    "description": "SC3's per-column event recovery bar (event_effect_recovery_rel, 0.10) does NOT hold at the epoch budget np::door_epochs configures when n_lags > 0. MEASURED by 06.1-05 over four seeds; MEASURED here that the 320 AR cap -- the only budget at which the bar was observed to hold -- binds for no series of 51 points or more, and that even at 320 one seed at 2400 points reads 0.1663. Raising the budget to a flat 320 would also push C-08 over its bound at 5000+ points with lags. Blocks plan 06.1-06 Task 2 step 8; surfaced at the blocking-human checkpoint.",
+    "status": "resolved",
+    "reason": "Resolved by plan 06.1-06 Task 2 on the operator checkpoint ruling: the door now REFUSES holidays together with n_lags > 0, so SC3 recovery bar is no longer asserted over a configuration it fails. Recorded in equations.event_effect_recovery_rel preconditions with the rejected alternative and its numbers (the 320 cap binds only at n <= 50; one seed still reads 0.1663 at 320; a flat 320 prices at 191.7 % of C-08 at 5000 points, turning accepted requests into refusals).",
+    "recorded_at": "2026-09-21T22:24:48.215Z",
+    "resolved_at": "2026-09-21T23:03:16.632Z"
+  },
+  {
+    "id": 26,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": ".planning/phases/06.1-forecast-exogenous-inputs-prophet-regressors-neuralprophet-e/06.1-06-PLAN.md",
+    "line": null,
+    "description": "06.1-06 verify t2a counts tests with `.*(neuralprophet|np_).*(holiday|event)`, which requires the ARM token BEFORE the holiday/event token. MEASURED: 5 new cases named both but in the other order and only 1 matched. Resolved by renaming the tests to lead with the arm, keeping the verify body verbatim; the regex is still order-sensitive for any future case.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T23:03:16.632Z",
+    "resolved_at": null
+  },
+  {
+    "id": 27,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": ".planning/phases/06.1-forecast-exogenous-inputs-prophet-regressors-neuralprophet-e/06.1-06-PLAN.md",
+    "line": null,
+    "description": "06.1-06 Task 2 step 4's reconciliation premise is FALSE: published event components do NOT equal the events-ON minus events-OFF forecast difference, because the block's RNG draws shift the shuffle stream and the two fits diverge. MEASURED through the door: a near-constant level shift of -1.7864 (MAD 0.0703 over 32 event-free rows). The test now measures that shift from the zero-roll-up rows, asserts it is a level and not a shape difference, and reconciles to 0.0023-0.0212 against the 0.10 bar.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T23:03:16.632Z",
     "resolved_at": null
   }
 ]

@@ -1326,6 +1326,194 @@ mod e2e {
             out["diagnostics"]
         );
     }
+
+    // ---- D-29 / D-31 over the wire: `holidays` on the neuralprophet arm ----
+    //
+    // The TRANSPORT needs no change for any of these, and that is the property they prove.
+    // Every bound, every refusal and every default lives in the door (D-11), so opening a
+    // combination there is visible over the wire with nothing edited outside this test
+    // module. Plan 06.1-06 Task 3's placement check asserts exactly that.
+
+    /// Two holidays with non-zero windows on `model: neuralprophet`, over the wire.
+    ///
+    /// Until this plan the door refused this combination outright. The response must carry
+    /// one component per event NAME plus a `holidays` roll-up, matching the prophet arm's
+    /// keys for the same argument (D-31).
+    #[tokio::test]
+    async fn neuralprophet_with_holidays_publishes_per_event_components() {
+        let mut c = serve().await;
+        let (ds, y) = synth(240);
+        let r = c
+            .call(
+                "tools/call",
+                serde_json::json!({
+                    "name": "forecast",
+                    "arguments": {
+                        "ds": ds, "y": y, "horizon": 20, "model": "neuralprophet", "seed": 42,
+                        "holidays": [
+                            {"name": "promo", "dates": ["2020-03-15", "2020-06-15", "2020-09-15"],
+                             "lower_window": -1, "upper_window": 1},
+                            {"name": "blackfriday", "dates": ["2020-04-01", "2020-07-01"],
+                             "lower_window": 0, "upper_window": 2}
+                        ]
+                    }
+                }),
+            )
+            .await;
+        assert!(
+            r.get("error").is_none() && r["result"]["isError"] != true,
+            "neuralprophet + holidays must be ACCEPTED over the wire: {r}"
+        );
+        let out = tool_output(&r);
+        assert_eq!(out["model"], "neuralprophet");
+        assert_shared_shape(&out, 20);
+        for key in ["trend", "promo", "blackfriday", "holidays"] {
+            assert!(
+                out["components"].get(key).is_some(),
+                "the wire response must carry a {key:?} component: {}",
+                out["components"]
+            );
+        }
+    }
+
+    /// The CONTROL for the case above: the same request WITHOUT holidays succeeds and
+    /// forecasts DIFFERENTLY, so acceptance over the wire is not acceptance-and-ignore.
+    #[tokio::test]
+    async fn neuralprophet_without_holidays_forecasts_differently_over_the_wire() {
+        let (ds, y) = synth(240);
+        let base = serde_json::json!({
+            "ds": ds, "y": y, "horizon": 20, "model": "neuralprophet", "seed": 42
+        });
+        let mut with = base.clone();
+        with["holidays"] = serde_json::json!([
+            {"name": "promo", "dates": ["2020-03-15", "2020-06-15", "2020-09-15"],
+             "lower_window": -1, "upper_window": 1}
+        ]);
+
+        let mut c = serve().await;
+        let a = c
+            .call(
+                "tools/call",
+                serde_json::json!({"name": "forecast", "arguments": base}),
+            )
+            .await;
+        let b = c
+            .call(
+                "tools/call",
+                serde_json::json!({"name": "forecast", "arguments": with}),
+            )
+            .await;
+        for (label, r) in [("without", &a), ("with", &b)] {
+            assert!(
+                r.get("error").is_none() && r["result"]["isError"] != true,
+                "the {label}-holidays request must succeed: {r}"
+            );
+        }
+        let (off, on) = (tool_output(&a), tool_output(&b));
+        assert!(
+            off["components"].get("holidays").is_none(),
+            "an event-free neuralprophet response must publish NO event components: {}",
+            off["components"]
+        );
+        assert_ne!(
+            off["yhat"], on["yhat"],
+            "holidays were accepted over the wire but changed nothing"
+        );
+    }
+
+    /// The SCOPED half of the opening, over the wire: `holidays` with `n_lags > 0` is
+    /// refused, and the refusal text names the configuration that DOES work.
+    ///
+    /// MEASURED (06.1-05 FINDING 1): per-column recovery runs 0.2191-0.4660 against the
+    /// 0.10 bar at the epoch budget the door configures, one run negative. The combination
+    /// is refused rather than shipped behind a disclaimer.
+    #[tokio::test]
+    async fn neuralprophet_refuses_holidays_with_lags_over_the_wire() {
+        let (ds, y) = synth(240);
+        refused(
+            &mut serve().await,
+            serde_json::json!({
+                "ds": ds, "y": y, "horizon": 20, "model": "neuralprophet", "n_lags": 7,
+                "holidays": [
+                    {"name": "promo", "dates": ["2020-03-15"], "lower_window": -1,
+                     "upper_window": 1}
+                ]
+            }),
+            "n_lags = 0",
+        )
+        .await;
+    }
+
+    /// The hoisted COLUMN ceiling is paid on the neuralprophet arm over the wire.
+    ///
+    /// Before this plan the arm could not reach this bound at all, because `holidays` was
+    /// refused before dispatch. The bound now sits above the model dispatch and both arms
+    /// pay it (D-33).
+    #[tokio::test]
+    async fn neuralprophet_refuses_holidays_over_the_column_ceiling_over_the_wire() {
+        let (ds, y) = synth(60);
+        refused(
+            &mut serve().await,
+            serde_json::json!({
+                "ds": ds, "y": y, "horizon": 7, "model": "neuralprophet",
+                "holidays": [
+                    {"name": "a", "dates": ["2020-02-01"], "lower_window": -250,
+                     "upper_window": 250},
+                    {"name": "b", "dates": ["2020-02-02"], "lower_window": -250,
+                     "upper_window": 250}
+                ]
+            }),
+            "max_holiday_columns",
+        )
+        .await;
+    }
+
+    /// D-33's reason for existing, over the wire: a GAPPY neuralprophet series whose POINT
+    /// count clears the design-cost ceiling but whose imputed-grid SPAN does not, refused
+    /// with the SPAN operand named.
+    ///
+    /// The same request is ACCEPTED on the prophet arm, whose design really is built per
+    /// supplied row — which is what proves the two operands differ rather than that the
+    /// request is simply too big for anything.
+    #[tokio::test]
+    async fn neuralprophet_refuses_a_gappy_series_on_the_span_operand_over_the_wire() {
+        let t0 = days_from_civil(2020, 1, 1);
+        let ds: Vec<String> = (0..40).map(|i| format_ymd(t0 + i * 100)).collect();
+        let y: Vec<f64> = (0..40).map(|i| 10.0 + 0.05 * f64::from(i)).collect();
+        let holidays = serde_json::json!([
+            {"name": "promo", "dates": ["2020-01-06"], "lower_window": -15,
+             "upper_window": 14}
+        ]);
+
+        refused(
+            &mut serve().await,
+            serde_json::json!({
+                "ds": ds, "y": y, "horizon": 10, "model": "neuralprophet",
+                "holidays": holidays
+            }),
+            "span_days",
+        )
+        .await;
+
+        // The CONTROL: the very same gappy request on the PROPHET arm is accepted.
+        let mut c = serve().await;
+        let r = c
+            .call(
+                "tools/call",
+                serde_json::json!({
+                    "name": "forecast",
+                    "arguments": {
+                        "ds": ds, "y": y, "horizon": 10, "holidays": holidays
+                    }
+                }),
+            )
+            .await;
+        assert!(
+            r.get("error").is_none() && r["result"]["isError"] != true,
+            "the same gappy request must be ACCEPTED on the prophet arm, whose design is \
+             built per supplied row: {r}"
+        );
+    }
 }
 
 #[cfg(test)]
