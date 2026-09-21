@@ -19,6 +19,7 @@
 //! * Fourier features are on days since 1900-01-01, which is NeuralProphet's own epoch.
 
 use crate::dates::days_from_civil;
+use crate::events::{EventBlock, EventDesign};
 use aprender::autograd::{clear_graph, graph_tape_len, no_grad, Tensor};
 use aprender::nn::optim::{AdamW, Optimizer};
 use aprender::nn::{Linear, Module};
@@ -522,12 +523,23 @@ pub struct TrainConfig {
     pub huber_beta: f32,
     pub newer_w: f64,
     pub seed: u64,
+    /// The expanded event design, or `None` for an event-free fit (D-30, SC3).
+    ///
+    /// `Some(design)` attaches an additive [`EventBlock`] BESIDE [`NpModel`] — one `.add()`
+    /// on the forward, both parameter sets handed to ONE `AdamW`. `None` and an empty design
+    /// are the same fit, bit for bit: no block is built, nothing is added, and the recorded
+    /// [`TrainLog::train_cost`] is unchanged.
+    ///
+    /// Declared LAST so the exhaustive struct literals that build it stay in declaration
+    /// order (`clippy::inconsistent_struct_constructor` is a workspace `warn`).
+    pub event_design: Option<EventDesign>,
 }
 
 pub struct TrainLog {
     pub epochs: usize,
     pub batch: usize,
     pub n_samples: usize,
+    /// Scalar parameter count, INCLUDING the event block's when one was trained.
     pub n_params: usize,
     pub epoch_loss: Vec<f64>,
     pub seconds: f64,
@@ -536,6 +548,39 @@ pub struct TrainLog {
     /// [`train_cost`] evaluated on the `n_samples` / `epochs` / `n_lags` this call actually
     /// used — the same number the door priced the request at before calling in.
     pub train_cost: u64,
+    /// The number of event indicator columns this fit trained on; `0` when events were off.
+    pub n_event_cols: usize,
+    /// The number of parameter TENSORS handed to `AdamW`, recorded at the moment the
+    /// optimiser was constructed.
+    ///
+    /// This is what makes "the block is actually being optimised" checkable. A block whose
+    /// parameters are built and forwarded but never extended into that vector still
+    /// contributes to the forward pass — its weights simply never move — and the failure
+    /// then surfaces as "the planted effect was not recovered", which names the symptom
+    /// rather than the cause.
+    pub n_opt_tensors: usize,
+    /// The trained event block, or `None` when events were off.
+    ///
+    /// It rides in the LOG rather than being returned as a third value on purpose: `train`'s
+    /// return arity is unchanged, so every existing call site stays as it was. The predict
+    /// helpers need the block (and the design) to add an event contribution for the rows
+    /// they predict, and the caller already holds the log.
+    pub events: Option<EventBlock>,
+}
+
+impl TrainLog {
+    /// The learned per-column event weights, in [`crate::events::event_columns`] order.
+    ///
+    /// Empty when events were off. Read from the block rather than copied into a second
+    /// field, so there is exactly one source for the number a recovery or determinism test
+    /// asserts on.
+    #[must_use]
+    pub fn event_weights(&self) -> Vec<f32> {
+        self.events
+            .as_ref()
+            .map(EventBlock::weights)
+            .unwrap_or_default()
+    }
 }
 
 /// Precomputed per-grid-row features.
@@ -588,9 +633,18 @@ fn gather(rows: &[f32], width: usize, idx: &[usize]) -> Vec<f32> {
 pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog) {
     let mut rng = Rng::new(cfg.seed);
     let mut model = NpModel::new(d, cfg.n_lags, &cfg.ar_layers, &mut rng);
+    // The event block is drawn from the SAME rng, AFTER the model, so an events-OFF run at
+    // the same seed initialises the model identically — which is what makes an ON/OFF
+    // comparison a comparison of the block (D-30).
+    let design = cfg.event_design.as_ref().filter(|g| g.dim() > 0);
+    let ed = design.map_or(0, EventDesign::dim);
+    let mut block = design.map(|_| EventBlock::new(ed, &mut rng));
     let n_grid = d.n_train_grid;
     let y_norm: Vec<f32> = d.grid_y[..n_grid].iter().map(|v| d.norm(*v)).collect();
     let rows = rows_for(d, &d.grid_days[..n_grid], &y_norm, cfg.newer_w);
+    // Built ONCE over the training grid, with `rows_for`'s hoisting discipline: the
+    // membership sets live on the design and the row loop only looks days up in them.
+    let ev_rows: Vec<f32> = design.map_or_else(Vec::new, |g| g.rows(&d.grid_days[..n_grid]));
     let l = cfg.n_lags;
     // NP trains the lag-free model on the OBSERVED rows only (no imputation needed);
     // with lags it trains on the imputed daily grid so every window is complete.
@@ -613,20 +667,33 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
         n_training_samples(d, l),
         "np::train and np::n_training_samples must agree about how many rows a request buys"
     );
-    let mut opt = {
-        let params = model.parameters_mut();
-        AdamW::new(params, cfg.max_lr as f32).weight_decay(cfg.weight_decay)
+    let (mut opt, n_opt_tensors) = {
+        // ONE optimiser over BOTH parameter sets. Two optimisers would give the event
+        // weights their own moment estimates and their own schedule, which is a different
+        // model rather than a wiring detail.
+        let mut params = model.parameters_mut();
+        if let Some(bl) = block.as_mut() {
+            params.extend(bl.parameters_mut());
+        }
+        let handed_over = params.len();
+        (
+            AdamW::new(params, cfg.max_lr as f32).weight_decay(cfg.weight_decay),
+            handed_over,
+        )
     };
     let mut log = TrainLog {
         epochs,
         batch,
         n_samples: n,
-        n_params: model.n_params(),
+        n_params: model.n_params() + block.as_ref().map_or(0, EventBlock::n_params),
         epoch_loss: Vec::new(),
         seconds: 0.0,
         tape_len_per_step: 0,
         steps: 0,
         train_cost: train_cost(n, epochs, l),
+        n_event_cols: ed,
+        n_opt_tensors,
+        events: None,
     };
     let t0 = Instant::now();
     let mut order = samples.clone();
@@ -642,7 +709,7 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
             let xs = Tensor::from_vec(gather(&rows.se, rows.sd, chunk), &[b, rows.sd]);
             let yt = Tensor::from_vec(chunk.iter().map(|&i| rows.y[i]).collect(), &[b, 1]);
             let wt = Tensor::from_vec(chunk.iter().map(|&i| rows.w[i]).collect(), &[b, 1]);
-            let pred = if l == 0 {
+            let mut pred = if l == 0 {
                 model.forward(&xt, &xs, None)
             } else {
                 let lag_idx: Vec<usize> = chunk.iter().flat_map(|&i| i - l..i).collect();
@@ -655,6 +722,15 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
                 let tr_lag = Tensor::from_vec(tr_lag.data().to_vec(), &[b, l]);
                 model.forward(&xt, &xs, Some((&raw, &se_lag, &tr_lag)))
             };
+            // The event term: ONE `.add()` on the model's own output (D-30). Note the AR
+            // stationarisation above does NOT subtract the event effect at the lag times,
+            // and the predict paths do not either — the two agree, which is the property
+            // that matters. Subtracting it in one place and not the other would make the
+            // forecast disagree with the fit.
+            if let Some(bl) = block.as_ref() {
+                let xe = Tensor::from_vec(gather(&ev_rows, ed, chunk), &[b, ed]);
+                pred = pred.add(&bl.forward(&xe));
+            }
             let loss = weighted_huber(&pred, &yt, &wt, cfg.huber_beta);
             acc += f64::from(loss.item()) * b as f64;
             loss.backward();
@@ -662,6 +738,9 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
                 log.tape_len_per_step = graph_tape_len();
             }
             let mut params = model.parameters_mut();
+            if let Some(bl) = block.as_mut() {
+                params.extend(bl.parameters_mut());
+            }
             opt.step_with_params(&mut params);
             opt.zero_grad();
             clear_graph();
@@ -678,22 +757,54 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     }
     log.seconds = t0.elapsed().as_secs_f64();
     log.steps = step;
+    log.events = block;
     (model, log)
 }
 
-/// Trend + seasonality prediction (original scale) for arbitrary days.
-pub fn predict_ts(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
+/// The event channel the predict helpers take: the design that says WHICH days are events
+/// and the trained block that says what an active column is WORTH.
+///
+/// `None` is an event-free prediction, and it is what every door path passes today —
+/// `holidays` is still refused on the `"neuralprophet"` arm (plan 06.1-06 opens it).
+/// Both halves are needed: weights alone cannot build an indicator row for a future day.
+pub type EventChannel<'a> = Option<(&'a EventDesign, &'a EventBlock)>;
+
+/// Add the event contribution for `days` to a `[n, 1]` prediction, inside `no_grad`.
+///
+/// A zero-width design is treated as absent rather than forwarded: `Tensor` shaped `[n, 0]`
+/// trips trueno's empty-transpose contract deep inside `Linear::forward`, which is a
+/// confusing place to learn that a caller passed an empty design.
+fn add_events(p: Tensor, ev: EventChannel<'_>, days: &[i64]) -> Tensor {
+    match ev {
+        Some((g, b)) if g.dim() > 0 => {
+            let xe = Tensor::from_vec(g.rows(days), &[days.len(), g.dim()]);
+            p.add(&b.forward(&xe))
+        }
+        _ => p,
+    }
+}
+
+/// Trend + seasonality prediction (original scale) for arbitrary days, plus the additive
+/// event contribution when an [`EventChannel`] is supplied.
+pub fn predict_ts(d: &NpData, m: &NpModel, days: &[i64], ev: EventChannel<'_>) -> Vec<f64> {
     let rows = rows_for(d, days, &vec![0.0; days.len()], DEFAULT_END_W);
     let xt = Tensor::from_vec(rows.tr.clone(), &[days.len(), rows.td]);
     let xs = Tensor::from_vec(rows.se.clone(), &[days.len(), rows.sd]);
-    let out = no_grad(|| m.forward(&xt, &xs, None));
+    let out = no_grad(|| add_events(m.forward(&xt, &xs, None), ev, days));
     clear_graph();
     out.data().iter().map(|v| d.denorm(*v)).collect()
 }
 
-/// One-step-ahead AR prediction (original scale) for grid indices `idx` using true lags.
-pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize]) -> Vec<f64> {
+/// One-step-ahead AR prediction (original scale) for grid indices `idx` using true lags,
+/// plus the additive event contribution for the predicted rows.
+pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize], ev: EventChannel<'_>) -> Vec<f64> {
     let l = m.n_lags;
+    // The days `idx` names, for the event indicator rows. Total lookup, because `idx` is
+    // caller-built and `grid_days` is a different field (IN-02).
+    let days: Vec<i64> = idx
+        .iter()
+        .filter_map(|&i| d.grid_days.get(i).copied())
+        .collect();
     let y_norm: Vec<f32> = d.grid_y.iter().map(|v| d.norm(*v)).collect();
     let rows = rows_for(d, &d.grid_days, &y_norm, DEFAULT_END_W);
     let b = idx.len();
@@ -705,7 +816,11 @@ pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize]) -> Vec<f64> {
     let tr_feats = Tensor::from_vec(gather(&rows.tr, rows.td, &lag_idx), &[b * l, rows.td]);
     let out = no_grad(|| {
         let tr_lag = Tensor::from_vec(m.trend.forward(&tr_feats).data().to_vec(), &[b, l]);
-        m.forward(&xt, &xs, Some((&raw, &se_lag, &tr_lag)))
+        add_events(
+            m.forward(&xt, &xs, Some((&raw, &se_lag, &tr_lag))),
+            ev,
+            &days,
+        )
     });
     clear_graph();
     out.data().iter().map(|v| d.denorm(*v)).collect()
@@ -720,8 +835,18 @@ pub fn predict_trend(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
     out.data().iter().map(|v| d.denorm(*v)).collect()
 }
 
-/// Multi-step AR forecast by feeding predictions back as lags (days must continue the daily grid).
-pub fn predict_ar_recursive(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
+/// Multi-step AR forecast by feeding predictions back as lags (days must continue the daily
+/// grid), plus the additive event contribution for every day it rolls through.
+///
+/// The event term is added BEFORE the value is pushed into the recursive history, so an
+/// event on a future day moves not only that day's forecast but every lagged day after it.
+/// That is D-30's substance: spike 013 measured only the lag-free path.
+pub fn predict_ar_recursive(
+    d: &NpData,
+    m: &NpModel,
+    days: &[i64],
+    ev: EventChannel<'_>,
+) -> Vec<f64> {
     let l = m.n_lags;
     let mut hist: Vec<f32> = d.grid_y.iter().map(|v| d.norm(*v)).collect();
     let mut hist_days: Vec<i64> = d.grid_days.clone();
@@ -745,7 +870,12 @@ pub fn predict_ar_recursive(d: &NpData, m: &NpModel, days: &[i64]) -> Vec<f64> {
             let tr_feats = Tensor::from_vec(tr_lag, &[l, d.trend_dim()]);
             let v = no_grad(|| {
                 let tl = Tensor::from_vec(m.trend.forward(&tr_feats).data().to_vec(), &[1, l]);
-                m.forward(&xt, &xs, Some((&raw, &se_l, &tl))).data()[0]
+                add_events(
+                    m.forward(&xt, &xs, Some((&raw, &se_l, &tl))),
+                    ev,
+                    std::slice::from_ref(&next),
+                )
+                .data()[0]
             });
             clear_graph();
             hist.push(v);
@@ -956,6 +1086,7 @@ mod parity {
                 huber_beta: 0.3,
                 newer_w: 2.0,
                 seed: 42,
+                event_design: None,
             };
             let (m, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -963,7 +1094,7 @@ mod parity {
                 continue;
             }
             if best.as_ref().is_none_or(|b| fl < b.0) {
-                best = Some((fl, lr, predict_ts(&d, &m, test_days)));
+                best = Some((fl, lr, predict_ts(&d, &m, test_days, None)));
             }
         }
         let (train_loss, selected_lr, yhat) =
@@ -1016,6 +1147,7 @@ mod parity {
                 huber_beta: 0.3,
                 newer_w: 2.0,
                 seed: 42,
+                event_design: None,
             };
             let (m, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -1023,7 +1155,7 @@ mod parity {
                 continue;
             }
             if best.as_ref().is_none_or(|b| fl < b.0) {
-                best = Some((fl, lr, predict_ar_1step(&d, &m, &test_idx)));
+                best = Some((fl, lr, predict_ar_1step(&d, &m, &test_idx, None)));
             }
         }
         let (train_loss, selected_lr, yhat) =
@@ -1144,6 +1276,7 @@ mod parity {
             huber_beta: 0.3,
             newer_w: 2.0,
             seed: 42,
+            event_design: None,
         };
         let (m, log) = train(&d, &cfg, false);
         assert!(log.steps > 0, "the fit must have taken at least one step");
@@ -1154,7 +1287,7 @@ mod parity {
         );
         // The prediction helpers must clear it too: they build a no_grad forward that still
         // allocates tape entries.
-        let _ = predict_ts(&d, &m, &ds[..5]);
+        let _ = predict_ts(&d, &m, &ds[..5], None);
         assert_eq!(
             graph_tape_len(),
             0,
@@ -1271,6 +1404,7 @@ mod parity {
                 huber_beta: 0.3,
                 newer_w: 2.0,
                 seed: 42,
+                event_design: None,
             };
             let (_, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);

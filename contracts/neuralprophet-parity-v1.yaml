@@ -1,6 +1,6 @@
 contract: neuralprophet-parity
 metadata:
-  version: 1.0.0
+  version: 1.1.0
   created: '2026-09-05'
   author: PAIML Engineering
   kind: kernel
@@ -188,6 +188,26 @@ equations:
       - 'the sample weight is NeuralProphet `_get_time_based_sample_weight` with end_w = 2 and start_t = 0, applied inside the mean'
       - 'beta is the huber_beta the shipped arm pins at 0.3'
 
+  event_effect_recovery_rel:
+    formula: 'forall event columns j: |w_j * scale - effect| / |effect| <= 0.10, with w_j the learned weight of the additive Linear(E, 1) event block on column j, scale the NpData soft-normalisation width, and effect the planted per-indicator magnitude'
+    domain: 'a synthetic daily series carrying a KNOWN additive per-indicator effect on every active event column, trained by np::train with an events::EventDesign attached, at n_lags = 0 AND at n_lags > 0'
+    codomain: 'the denormalised per-column weights of the event block, one per (event, window offset) column, as recorded by np::TrainLog'
+    float_tolerance: 0.10
+    invariants:
+      - 'the bar is PER COLUMN and never on an average: an average hides a single column that learned nothing, and a block whose columns disagree is not a recovered effect. SC3 says "recovered to within 10 % on every indicator column"'
+      - 'MEASURED, spike 013: a planted magnitude of 8.0 on six columns (promo -1..+1, blackfriday 0..+2) over a 1200-point synthetic daily series of scale 30.43 recovered as +7.769, +8.293, +7.990, +8.043, +8.249, +8.462 — worst absolute error 0.462, which is 5.8 % of the planted effect. The 10 % bar sits at roughly 1.7x the worst error ever observed'
+      - 'the bar binds at n_lags > 0 as well as lag-free (D-30), and that half is the one this equation exists for: spike 013 measured ONLY the lag-free path, and spike 014 measured the AR term ABSORBING a smooth continuous driver — the `price` regressor weight collapsed from -0.0493 lag-free to -0.0048 at seven lags. An event effect absorbed by the AR term would leave the block reporting a near-zero weight while the forecast still looked right, so the per-column bar at lags is a real risk this catches rather than a formality'
+      - 'the weights are read in NORMALISED space and multiplied by NpData::scale to reach the planted units; comparing a normalised weight against a raw effect would be comparing two different quantities'
+      - 'the bar is RELATIVE (|w*scale - effect| / |effect|), not absolute: an absolute 10 % of one planted magnitude is not 10 % of another, and this equation is meant to bind at whatever magnitude a test plants'
+      - 'a passing recovery bar is not by itself evidence the block is wired into the optimiser — a block whose parameters are built but never extended into the AdamW vector fails this bar with "effect not recovered" rather than with its true cause. events::tests::the_event_block_weights_are_actually_optimised names that cause separately'
+      - 'MEASURED 2026-09-21 (plan 06.1-05), the AR-absorption MECHANISM, which is per-column and not uniform: the FIRST column of each event — the one whose n_lags-day lag window contains no earlier day of the same window — recovers correctly at EVERY budget tested (7.7 to 8.7 against a planted 8.0), while the TRAILING columns, whose lag windows overlap the event, drift anywhere from 4.3 to 10.7 until the fit converges. The AR term can read the effect out of the lags, so the split between the two terms is under-determined rather than wrong, and it is the trailing columns that pay for it. A bar taken on an average, or on the first column alone, would not see this'
+    preconditions:
+      - 'the event block is composed BESIDE NpModel with one `.add()` on the forward and both parameter sets handed to ONE AdamW; a block trained by a second optimiser is a different model'
+      - 'the planted effect is applied through the SAME event_row expansion the block reads, so "recovered" is a statement about the block and not about the harness agreeing with itself'
+      - 'clear_graph() runs after every optimiser step, as tape_cleared_per_step requires: an un-cleared tape changes nothing about the arithmetic but makes the measurement unreproducible in a long-lived process'
+      - 'the planted event OCCURRENCES cover the whole series span. A fixed occurrence list on a longer series leaves its later rows event-free, and np::sample_weight weights the later rows MORE (newer_w = 2), so the measurement would be reporting the generator rather than the model. Re-measured with and without: at 2400 points lag-free the worst relative error moved from 0.034-0.038 to 0.017-0.025'
+      - 'AT n_lags > 0 THE FIT MUST BE CONVERGED, AND THIS IS AN OPEN ITEM RATHER THAN A SETTLED PRECONDITION. The bar is measured at constants.auto_epochs_cap_with_lags epochs with the learning rate selected by final train loss. MEASURED 2026-09-21 on a 1200-point synthetic series, worst relative error per column across seeds 42/43/7/11: at np::door_epochs own budget (110 epochs) 0.0915 / 0.2293 / 0.4660 / 0.3326 — THREE OF FOUR OVER THE BAR; at the 320-epoch AR cap 0.0528 / 0.0659 / 0.0668 / 0.0667 — all inside. On a 2400-point series: at door_epochs (90) 0.2191 / 0.3597 / 0.3897 / 0.2954, all over; at the cap 0.0677 / 0.0628 / 0.1663 / 0.0901 — ONE OF FOUR STILL OVER. So this equation is NOT a claim that the shipped door configuration recovers the effect at lags. Plan 06.1-06 opens the neuralprophet arm to holidays and therefore chooses the epoch budget the door configures; it owns closing this. The lag-free arm has no such precondition — it holds at the door budget at both series lengths, worst 0.017-0.063'
+
 proof_obligations:
 
   - type: equivalence
@@ -238,6 +258,11 @@ proof_obligations:
   - type: invariant
     property: 'Fourier seasonality features are phased on days since 1900-01-01, NeuralProphet own epoch'
     formal: 'fourier_feats(day, ..) depends on day only through (day - days_from_civil(constants.fourier_epoch_year, 1, 1))'
+    applies_to: all
+
+  - type: bound
+    property: 'A planted additive event effect is recovered by the event block on EVERY indicator column, at n_lags = 0 and at n_lags > 0 alike, rather than being absorbed by the trend, the seasonality or the AR term'
+    formal: 'forall j in event columns: |w_j * NpData::scale - effect| / |effect| <= equations.event_effect_recovery_rel.float_tolerance, for n_lags in {0, 7}'
     applies_to: all
 
 falsification_tests:
@@ -301,6 +326,12 @@ falsification_tests:
     prediction: 'Training the same series at each rate in constants.lr_sweep_lag_free and taking the argmin of the final train loss selects the same rate the shipped arm reports as diagnostics.selected_lr.'
     test: 'cargo test -p aprender-forecast --lib np::parity::lr_selection_is_by_train_loss'
     if_fails: 'Selection now consults something other than the final train loss — most dangerously the test error, which turns the reported MAE into a fitted number rather than a forecast. On Peyton Manning the two criteria disagree (train picks 0.1, test would pick 0.01), so this is not a hypothetical.'
+
+  - id: FALSIFY-NP-011
+    rule: 'A planted additive event effect is recovered on every indicator column, with and without AR lags'
+    prediction: 'On a 1200-point synthetic daily series carrying a known additive per-indicator effect on six event columns, every learned event weight denormalised by NpData::scale is within equations.event_effect_recovery_rel.float_tolerance (10 %) of the planted magnitude — asserted PER COLUMN, at n_lags = 0 and again at n_lags = 7.'
+    test: 'cargo test -p aprender-forecast --lib events::tests::a_planted_effect_is_recovered'
+    if_fails: 'Either the block is not being optimised (its parameters were built but never extended into the AdamW vector — check events::tests::the_event_block_weights_are_actually_optimised, which names that cause directly), or the effect is being absorbed by another term. The n_lags = 7 half is the one that catches absorption: spike 014 measured the AR term swallowing a smooth continuous driver almost entirely (a weight of -0.0493 lag-free collapsing to -0.0048 at seven lags), and an absorbed event effect still produces a plausible-looking forecast while the per-event component it reports is wrong.'
 
 kani_harnesses:
 

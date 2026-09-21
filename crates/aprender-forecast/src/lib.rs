@@ -44,6 +44,11 @@ pub mod types;
 
 pub mod bolt;
 pub mod chronos;
+/// NeuralProphet events: the additive `Linear(E, 1)` block composed beside [`np::NpModel`]
+/// (D-30, SC3). Present but UNREACHABLE from the door — [`forecast`] still refuses
+/// `holidays` on the `"neuralprophet"` arm, so no unpriced event surface is open to callers
+/// until plan 06.1-06 lands the hoisted bounds beside the C-08 event-column price.
+pub mod events;
 pub mod fit;
 pub mod forecast;
 pub mod np;
