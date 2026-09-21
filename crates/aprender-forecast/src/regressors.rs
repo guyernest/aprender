@@ -78,20 +78,23 @@ pub struct Standardized {
 /// owns that refusal, because a library must not decide policy for every caller.
 #[must_use]
 pub fn standardize_one(spec: &RegressorSpec, history: &[f64]) -> Standardized {
+    // BOTH 0 and 1 must be present, and nothing else: a subset test would exempt a
+    // constant column and hand `splice` a division by zero instead of a refusal.
+    // One pass, short-circuiting on the first non-{0,1} element — the common case is a
+    // continuous column (`price`, `weather`), which exits at element 0.
     let binary = {
-        let mut seen_other = false;
-        let mut seen: Vec<f64> = Vec::new();
-        for &v in history {
-            if v != 0.0 && v != 1.0 {
-                seen_other = true;
-                break;
+        let (mut zero, mut one) = (false, false);
+        history.iter().all(|&v| {
+            if v == 0.0 {
+                zero = true;
+            } else if v == 1.0 {
+                one = true;
+            } else {
+                return false;
             }
-            if !seen.contains(&v) {
-                seen.push(v);
-            }
-        }
-        // BOTH 0 and 1 must be present: `seen.len() == 2`, never `<= 2`.
-        !seen_other && seen.len() == 2
+            true
+        }) && zero
+            && one
     };
     let do_std = spec.standardize.unwrap_or(!binary);
     let (mu, std) = if do_std {

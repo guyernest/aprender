@@ -536,7 +536,17 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     specs: &reg_std,
                     values: &reg_fut,
                 },
-            )?;
+            )
+            // The door BUILT this channel (`reg_std`/`reg_fut` above); the caller cannot
+            // shape it. `predict`'s three channel invariants are `Validation` because a
+            // direct Rust caller really is supplying the channel — but here a breach is the
+            // door's own arithmetic, so reporting it as the caller's bad input would be a
+            // lie the transport then repeats (`map_error`: "the caller's fault stays the
+            // caller's fault"). Matches 06.1-07's rule for the n_grid/n_train guard:
+            // `Internal` rather than `Validation` because the input was already accepted.
+            .map_err(|e| {
+                ForecastError::Internal(format!("the door built a malformed regressor channel: {e}"))
+            })?;
             let predict_seconds = t1.elapsed().as_secs_f64();
             let mut components = serde_json::Map::new();
             for (n, v) in &fc.components {
@@ -1758,16 +1768,7 @@ mod tests {
             reg.values.iter().all(|v| v.is_finite()),
             "the probe's own inputs must be finite, or it is testing check 2 by accident"
         );
-        match forecast(&reg_args(60, 7, vec![reg])) {
-            Err(ForecastError::Validation(m)) => assert!(
-                m.contains("non-finite"),
-                "must name the quantity that went non-finite, got {m:?}"
-            ),
-            other => panic!(
-                "overflowing derived stats must be refused, got {:?}",
-                other.map(|r| r.model)
-            ),
-        }
+        refusal(&reg_args(60, 7, vec![reg]), "non-finite");
         // POSITIVE CONTROL at a large-but-safe magnitude, so the check cannot pass by
         // refusing every large column.
         let mut reg = good_reg("big", 60, 7);

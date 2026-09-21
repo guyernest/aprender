@@ -42,12 +42,12 @@ fn scalar(v: &serde_json::Value, what: &str) -> f64 {
         .unwrap_or_else(|| panic!("{what} must be a number or a one-element array, got {v}"))
 }
 
+// D-17: date handling lives in ONE module. `parse_ymd` is the crate's trusted-input
+// parser and is what `prophet::parity::days` already uses; a second byte-slicing path
+// here panics with an opaque index message where the shared helper names the field.
+// Measured: every `ds` in this fixture is a bare `YYYY-MM-DD` of length 10.
 fn day(s: &str) -> i64 {
-    crate::dates::days_from_civil(
-        s[0..4].parse().expect("year"),
-        s[5..7].parse().expect("month"),
-        s[8..10].parse().expect("day"),
-    )
+    crate::dates::parse_ymd(s)
 }
 
 /// The one tracer, in four parts: the door, the design, the standardisation constants and

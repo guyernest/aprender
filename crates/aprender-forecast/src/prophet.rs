@@ -878,15 +878,12 @@ pub fn predict(
     // empty channel `base_k == d.k` and this is arithmetically the original loop, which is
     // what the D-19 baseline re-checks.
     let base_cols = &d.cols[..base_k];
-    let mut x = vec![0.0f64; n * d.k];
+    let mut x = Vec::with_capacity(n * d.k);
     let hol_sets = holiday_day_sets(spec);
-    let mut row: Vec<f64> = Vec::with_capacity(base_k);
     for (i, &day) in ds_days.iter().enumerate() {
-        row.clear();
-        feature_row(day, spec, base_cols, &hol_sets, &mut row);
-        x[i * d.k..i * d.k + base_k].copy_from_slice(&row);
+        feature_row(day, spec, base_cols, &hol_sets, &mut x);
         for (j, reg) in regs.specs.iter().enumerate() {
-            x[i * d.k + base_k + j] = (regs.values[j][i] - reg.mu) / reg.std;
+            x.push((regs.values[j][i] - reg.mu) / reg.std);
         }
     }
     // components
@@ -941,7 +938,7 @@ pub fn predict(
     // wrong under a collision: a regressor literally named `yearly_delim_1` would be summed
     // in here.
     if !regs.is_empty() {
-        let roll_up = |want: Mode, additive: bool| -> Vec<f64> {
+        let roll_up = |want: Mode| -> Vec<f64> {
             (0..n)
                 .map(|i| {
                     let mut v = 0.0;
@@ -950,7 +947,7 @@ pub fn predict(
                             v += x[i * d.k + c] * p.beta[c];
                         }
                     }
-                    if additive {
+                    if want == Mode::Additive {
                         v * d.y_scale
                     } else {
                         v
@@ -958,13 +955,10 @@ pub fn predict(
                 })
                 .collect()
         };
-        components.push((
-            "extra_regressors_additive".into(),
-            roll_up(Mode::Additive, true),
-        ));
+        components.push(("extra_regressors_additive".into(), roll_up(Mode::Additive)));
         components.push((
             "extra_regressors_multiplicative".into(),
-            roll_up(Mode::Multiplicative, false),
+            roll_up(Mode::Multiplicative),
         ));
     }
     components.push(("additive_terms".into(), add_terms.clone()));

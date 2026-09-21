@@ -96,12 +96,6 @@ impl Hasher {
     }
 }
 
-impl Default for Hasher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Walk a JSON value, tagging each variant so a string `"1"` and a number `1` differ.
 fn json(h: &mut Hasher, v: &serde_json::Value) {
     match v {
@@ -329,11 +323,10 @@ fn capture_baseline() {
         .trim()
         .to_string();
 
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
+    // CLAUDE.md rule 2: ONE owner for this token. A second derivation here is exactly the
+    // drift `profile_token`'s doc comment guards against — a debug run labelled `release`
+    // is stamped into the committed baseline and turns it into a confident wrong answer.
+    let profile = crate::sc1_wall::profile_token();
     let arch = std::env::consts::ARCH;
 
     let mut cases = serde_json::Map::new();
@@ -423,7 +416,8 @@ fn iso_date_utc() -> String {
         .expect("the clock is after 1970")
         .as_secs();
     let days = i64::try_from(secs / 86_400).expect("days since epoch fit in i64");
-    crate::dates::format_ymd(crate::dates::days_from_civil(1970, 1, 1) + days)
+    // `days_from_civil(1970, 1, 1)` is 0 by definition — the epoch is the origin.
+    crate::dates::format_ymd(days)
 }
 
 // ------------------------------------------------------------ the gate ----
