@@ -792,3 +792,270 @@ fn the_signature_ignores_the_two_wall_clock_fields() {
          time; it could never reproduce and would be red on every host forever"
     );
 }
+
+// ------------------------------------- part B: the falsification probe ----
+
+/// Step a finite f64 to its next representable neighbour — one unit in the last place.
+///
+/// Computed from the BIT PATTERN with `to_bits` / `from_bits`, never by adding a chosen
+/// epsilon, and that distinction is the whole probe. A 1-ULP change is BELOW print
+/// precision, which is exactly what a formatted comparison silently accepts; an epsilon
+/// large enough to be reliable across magnitudes would also be large enough to show up in
+/// a printed decimal, and would therefore test a weaker property than the one claimed.
+fn one_ulp_step(v: f64) -> f64 {
+    let bits = v.to_bits();
+    let stepped = f64::from_bits(bits.wrapping_add(1));
+    assert!(
+        stepped.to_bits() != bits,
+        "the ULP step must change the bit pattern of {v:e}"
+    );
+    assert!(
+        stepped.is_finite(),
+        "the ULP step of {v:e} left the finite range; probe a different element"
+    );
+    stepped
+}
+
+/// The mutation MUST move the signature.
+fn detected(clean: u64, r: &ForecastResponse, what: &str) {
+    assert!(
+        signature(r) != clean,
+        "mutation [{what}] did NOT change the signature, so the signature is hashing less \
+         than the field list claims. A green invariance table produced by a detector that \
+         cannot see this change is indistinguishable from a broken harness — which is the \
+         exact condition SC2 refuses to accept as satisfied"
+    );
+}
+
+/// Reverting it MUST bring the signature back.
+fn restored(clean: u64, r: &ForecastResponse, what: &str) {
+    assert!(
+        signature(r) == clean,
+        "reverting mutation [{what}] did not restore the clean signature, so the probe is \
+         reacting to something other than what it changed and proves nothing about that \
+         field"
+    );
+}
+
+/// Part B: the signature is PROVEN ABLE TO FAIL, on six mutation shapes, each reverted.
+///
+/// SC2's wording is the specification here: a green gate with no falsification probe beside
+/// it does not satisfy the criterion. A `signature` that returned a constant, or that
+/// quietly skipped a field, would produce exactly the same green table as a correct one on
+/// the baseline comparison, on part A AND on part C. Part B is the only thing in this
+/// module that makes the difference observable.
+///
+/// **Mutations 4 to 6 are not padding.** SC2 puts the uncertainty bands and `diagnostics`
+/// INSIDE the comparison, and plan 06.1-03 adds regressor keys to `diagnostics` whose
+/// absence-when-unused is the mechanism that keeps D-19 free. Nothing else in this module
+/// exercises those three fields: their inclusion is claimed by `signature`'s field list and,
+/// without these three mutations, tested by nothing.
+///
+/// UNCONDITIONAL on every architecture, by construction: it perturbs a response already in
+/// memory and never crosses a libm boundary.
+#[test]
+fn part_b_the_signature_is_proven_able_to_fail() {
+    let args = args_for("peyton_manning.csv", 30, Shape::ProphetDefault);
+    let mut r = crate::forecast::forecast(&args)
+        .expect("the peyton/prophet/default case must succeed through the door");
+    let clean = signature(&r);
+    let mut shapes = 0usize;
+
+    // ---- 1. the FIRST yhat value, one unit in the last place ----
+    let last_yhat = r.yhat.len() - 1;
+    let last_trend = r.trend.len() - 1;
+    let last_upper = r.yhat_upper.len() - 1;
+    assert!(
+        last_yhat > 0 && last_trend > 0 && last_upper > 0,
+        "the probe needs a multi-row response; got yhat {}, trend {}, yhat_upper {}",
+        r.yhat.len(),
+        r.trend.len(),
+        r.yhat_upper.len()
+    );
+
+    let orig = r.yhat[0];
+    r.yhat[0] = one_ulp_step(orig);
+    detected(clean, &r, "1: yhat[0] + 1 ULP");
+    r.yhat[0] = orig;
+    restored(clean, &r, "1: yhat[0]");
+    shapes += 1;
+
+    // ---- 2. the LAST trend value, one unit in the last place ----
+    let orig = r.trend[last_trend];
+    r.trend[last_trend] = one_ulp_step(orig);
+    detected(clean, &r, "2: trend[last] + 1 ULP");
+    r.trend[last_trend] = orig;
+    restored(clean, &r, "2: trend[last]");
+    shapes += 1;
+
+    // ---- 3. one extra key in `components` (structural, not numeric) ----
+    r.components.insert(
+        "phantom".into(),
+        serde_json::Value::Array(vec![serde_json::Value::Null]),
+    );
+    detected(clean, &r, "3: an extra components key");
+    r.components.remove("phantom");
+    restored(clean, &r, "3: the extra components key");
+    shapes += 1;
+
+    // ---- 4. the FIRST yhat_lower value — the LOWER band, inside the comparison ----
+    let orig = r.yhat_lower[0];
+    r.yhat_lower[0] = one_ulp_step(orig);
+    detected(clean, &r, "4: yhat_lower[0] + 1 ULP");
+    r.yhat_lower[0] = orig;
+    restored(clean, &r, "4: yhat_lower[0]");
+    shapes += 1;
+
+    // ---- 5. the LAST yhat_upper value — the UPPER band, inside the comparison ----
+    let orig = r.yhat_upper[last_upper];
+    r.yhat_upper[last_upper] = one_ulp_step(orig);
+    detected(clean, &r, "5: yhat_upper[last] + 1 ULP");
+    r.yhat_upper[last_upper] = orig;
+    restored(clean, &r, "5: yhat_upper[last]");
+    shapes += 1;
+
+    // ---- 6. one value inside `diagnostics`, in two sub-cases: numeric and boolean ----
+    let obj = r.diagnostics["lbfgs"]["objective"]
+        .as_f64()
+        .expect("diagnostics.lbfgs.objective must be a number");
+    let number = |v: f64| {
+        serde_json::Value::Number(
+            serde_json::Number::from_f64(v).expect("a finite f64 is a JSON number"),
+        )
+    };
+    r.diagnostics["lbfgs"]["objective"] = number(one_ulp_step(obj));
+    detected(clean, &r, "6a: diagnostics.lbfgs.objective + 1 ULP");
+    r.diagnostics["lbfgs"]["objective"] = number(obj);
+    restored(clean, &r, "6a: diagnostics.lbfgs.objective");
+
+    let flag = r.diagnostics["lbfgs"]["budget_hit"]
+        .as_bool()
+        .expect("diagnostics.lbfgs.budget_hit must be a boolean");
+    r.diagnostics["lbfgs"]["budget_hit"] = serde_json::Value::Bool(!flag);
+    detected(clean, &r, "6b: diagnostics.lbfgs.budget_hit flipped");
+    r.diagnostics["lbfgs"]["budget_hit"] = serde_json::Value::Bool(flag);
+    restored(clean, &r, "6b: diagnostics.lbfgs.budget_hit");
+    shapes += 1;
+
+    // Non-vacuity, for the same reason part A pins its case count.
+    assert!(
+        shapes == 6,
+        "part B exercised {shapes} mutation shapes; it must exercise all 6 — two point \
+         estimates, one structural, BOTH uncertainty bands and one diagnostics leaf — or \
+         the fields SC2 names are claimed by the field list and tested by nothing"
+    );
+    assert!(
+        signature(&r) == clean,
+        "after reverting every mutation the signature must equal the clean value captured \
+         before the first one; a probe that cannot get back is testing the wrong thing"
+    );
+}
+
+/// The ONE deliberate insensitivity in the hasher, stated as a property rather than a
+/// comment: `-0.0` and `0.0` hash the same. Every other bit pattern is significant.
+#[test]
+fn the_signature_normalises_negative_zero() {
+    let args = args_for("retail_sales.csv", 12, Shape::ProphetMonthly);
+    let mut r = crate::forecast::forecast(&args).expect("the retail case must succeed");
+    let last = r.trend.len() - 1;
+
+    r.yhat[0] = 0.0;
+    r.trend[last] = 0.0;
+    let positive = signature(&r);
+
+    r.yhat[0] = -0.0;
+    r.trend[last] = -0.0;
+    assert!(
+        r.yhat[0].to_bits() != 0.0_f64.to_bits() && r.trend[last].to_bits() != 0.0_f64.to_bits(),
+        "the two zeros must really differ in their BIT patterns, or this test is comparing \
+         a value with itself"
+    );
+    assert!(
+        signature(&r) == positive,
+        "-0.0 must hash as 0.0 in both yhat and trend. This is the hasher's single \
+         deliberate blind spot and it is deliberate because a sign flip on an arithmetic \
+         zero is not a behaviour change; every OTHER bit pattern, NaN payloads included, \
+         is significant"
+    );
+}
+
+/// Parts A and B are unconditional — enforced against this module's own source.
+///
+/// The cross-commit baseline comparison is arch-keyed for a real libm reason, so a
+/// cross-platform red WILL eventually appear in CI. The tempting repair is to relax
+/// whatever is red. This test makes that repair impossible to apply to the two parts SC2
+/// actually rests on: part A compares one host against itself and part B perturbs a
+/// response in memory, so neither can legitimately differ across runners, and neither may
+/// be gated behind `#[ignore]` or an architecture branch.
+#[test]
+fn parts_a_and_b_are_unconditional() {
+    const SRC: &str = include_str!("invariance.rs");
+    // Assembled at runtime so the needles appear only in THIS function's body and cannot
+    // make the test find itself.
+    let arch_needle = concat!("consts", "::ARCH");
+    let ignore_needle = concat!("#[", "ignore");
+
+    for name in [
+        "part_a_every_case_is_deterministic_through_the_door",
+        "part_b_the_signature_is_proven_able_to_fail",
+    ] {
+        // The trailing `(` matters: a bare `fn {name}` prefix-matches a RENAMED function,
+        // so `part_a_..._door` silently resolved to `part_a_..._doorX` and the MISSING
+        // direction never fired. Also measured, not reasoned.
+        let fn_at = SRC
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("MISSING test fn {name} in this module's own source"));
+        // Walk BACK to the `#[test]` attribute. An extraction that starts at `fn` is blind
+        // to exactly the gating this test exists to forbid, because `#[ignore]` sits
+        // BEFORE `fn`, not inside the body — MEASURED, not reasoned: with the naive
+        // `fn`-anchored slice, adding `#[ignore = "slow"]` to part A left this test GREEN.
+        // (CLAUDE.md Verification Discipline 4 and 7: extending a guard's scope requires
+        // re-mutating in the new scope, and the pattern is wrong until the case table says
+        // otherwise.)
+        let start = SRC[..fn_at]
+            .rfind("#[test]")
+            .unwrap_or_else(|| panic!("{name} is not preceded by a #[test] attribute"));
+        assert!(
+            !SRC[start..fn_at].contains("fn "),
+            "the attribute walk-back for {name} crossed another function; the extracted \
+             region does not belong to it"
+        );
+        let open = SRC[fn_at..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{name} has no body"))
+            + fn_at;
+        let mut depth = 0usize;
+        let mut end = None;
+        for (off, ch) in SRC[open..].char_indices() {
+            if ch == '{' {
+                depth += 1;
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(open + off + 1);
+                    break;
+                }
+            }
+        }
+        let end = end.unwrap_or_else(|| panic!("unbalanced braces in {name}"));
+        let body = &SRC[start..end];
+        // Self-check on the extractor: over-capturing would silently weaken the assertions
+        // below into a scan of some other function.
+        assert!(
+            !body.contains("\n#[test]"),
+            "the body extractor over-captured {name}; it swallowed the next test"
+        );
+        assert!(
+            !body.contains(arch_needle),
+            "{name} branches on the running architecture. It must not: it is \
+             arch-independent by construction, and making it conditional is how a \
+             cross-platform red gets silenced by removing the half of the gate that SC2 \
+             rests on"
+        );
+        assert!(
+            !body.contains(ignore_needle),
+            "{name} carries an ignore attribute, so part of the release gate is \
+             unreachable from a plain `cargo test --lib` run"
+        );
+    }
+}
