@@ -64,6 +64,14 @@ mod sc1_wall;
 /// `--test` line in `.github/workflows/ci.yml`.
 #[cfg(test)]
 mod invariance;
+
+/// The SC1 external-regressor parity ladder against the two committed Python Prophet 1.4.0
+/// regressor oracles, at 24 and 30 columns. Test-only for the same reason [`sc1_wall`] and
+/// [`invariance`] are: a `tests/*.rs` target would be DARK in CI until someone edits the
+/// one explicit `--test` line in `.github/workflows/ci.yml`, while a `--lib` module runs
+/// inside the existing workspace sweep with no workflow change.
+#[cfg(test)]
+mod reg_parity;
 #[cfg(test)]
 pub(crate) mod test_support;
 
