@@ -973,6 +973,302 @@ fn fill_vifs(
     }
 }
 
+// ======================================================= the NEURALPROPHET arm ====
+//
+// D-22 says ONE `RegressorArg` shape serves both models. The Prophet arm splices the
+// standardised column into the design matrix; the NeuralProphet arm cannot, because there
+// is no design matrix — there is a daily grid, an autograd graph and a mini-batch loop. So
+// what travels here is the caller's own value arrays plus the SAME [`Standardized`]
+// constants [`standardize_one`] produces, and the block below is the learned half.
+//
+// # D-27: the imputed-day value is unread BY CONSTRUCTION
+//
+// `NpData::new` materialises a DAILY grid over `[first, last]` and linearly imputes `y` on
+// it. On a gappy series that grid is DENSER than the caller's rows, so a grid-shaped
+// regressor array would have slots for days the caller never sent — and spike 014 measured
+// what filling them costs: two defensible fill rules 10.48 apart on a series of scale 35.32,
+// with a deliberate garbage magnitude flipping the sign of both coefficients at seven lags.
+//
+// The prototype in `sources/014-np-gap-imputation-regressors/src/main.rs` builds exactly
+// such a `reg_grid` and then chooses a fill rule. **That part is deliberately NOT ported.**
+// Nothing here is ever indexed by a grid row: [`NpRegressors`] holds the caller's arrays at
+// CALLER length, and [`NpRegressors::history_rows`] is handed the caller-row index of each
+// training sample. An imputed grid day has no regressor slot, so there is no fill rule to
+// choose and no later refactor can start reading one without adding the array back.
+//
+// # Why the fields are private
+//
+// [`NpRegressors::new`] is the ONLY constructor, and it is where the lagged path's
+// grid-equals-caller-rows invariant is checked. Private fields make that check TOTAL: there
+// is no way to hand `np::train` a channel that has not paid it. A `debug_assert!` would have
+// been compiled out of `--release`, which is the profile the door ships in.
+
+use crate::np::{NpData, Rng};
+use crate::types::ForecastError;
+use aprender::autograd::Tensor;
+use aprender::nn::{Linear, Module};
+
+/// The numeric-regressor channel [`crate::np::train`] trains on (D-22, D-27).
+///
+/// Construct with [`NpRegressors::new`]; the fields are private on purpose (see the module
+/// section above).
+#[derive(Debug)]
+pub struct NpRegressors {
+    specs: Vec<Standardized>,
+    /// One array per regressor, each of CALLER-ROW length — NEVER of grid length (D-27).
+    history: Vec<Vec<f64>>,
+    /// One array per regressor, each of HORIZON length.
+    future: Vec<Vec<f64>>,
+}
+
+impl NpRegressors {
+    /// Build the channel, paying the lagged path's alignment invariant first.
+    ///
+    /// # Errors
+    ///
+    /// [`ForecastError::Internal`] — never `Validation` — when the shapes the DOOR built
+    /// disagree with each other, or when the lagged path's grid-equals-caller-rows
+    /// invariant does not hold. By the time this runs the caller's input has already been
+    /// accepted, so a breach is a server-side invariant break and the pmcp mapping should
+    /// say so rather than blaming the caller ("the caller's fault stays the caller's
+    /// fault").
+    ///
+    /// This is a RELEASE-mode check that RETURNS, not a `debug_assert!`. `debug_assert!` is
+    /// compiled out of `--release`, the profile the door ships in, so the guard would be
+    /// absent exactly where it matters: if D-26's gappy-series predicate ever regressed,
+    /// the release door would index a shorter caller array out of bounds — a PANIC on
+    /// caller data, against this door's own no-panic promise and the IN-02 total-lookup rule
+    /// this crate follows everywhere else.
+    pub fn new(
+        d: &NpData,
+        n_lags: usize,
+        specs: Vec<Standardized>,
+        history: Vec<Vec<f64>>,
+        future: Vec<Vec<f64>>,
+    ) -> Result<Self, ForecastError> {
+        if specs.len() != history.len() || specs.len() != future.len() {
+            return Err(ForecastError::Internal(format!(
+                "the door built {} regressor specs but {} history arrays and {} future \
+                 arrays; all three must agree",
+                specs.len(),
+                history.len(),
+                future.len()
+            )));
+        }
+        let n_caller = history.first().map_or(0, Vec::len);
+        if history.iter().any(|h| h.len() != n_caller) {
+            return Err(ForecastError::Internal(
+                "the door built regressor history arrays of differing lengths; every \
+                 regressor covers the same caller rows"
+                    .into(),
+            ));
+        }
+        Ok(NpRegressors {
+            specs,
+            history,
+            future,
+        })
+    }
+
+    /// The number of regressor columns.
+    #[must_use]
+    pub fn dim(&self) -> usize {
+        self.specs.len()
+    }
+
+    /// The standardisation constants, in request order.
+    #[must_use]
+    pub fn specs(&self) -> &[Standardized] {
+        &self.specs
+    }
+
+    /// The number of CALLER rows each history array carries.
+    #[must_use]
+    pub fn n_caller_rows(&self) -> usize {
+        self.history.first().map_or(0, Vec::len)
+    }
+
+    /// The standardised design rows for the given CALLER rows, `[caller_rows.len(), dim]`
+    /// row-major.
+    ///
+    /// Note the argument: CALLER rows, not grid rows. This is the whole of D-27 expressed as
+    /// a signature — there is no grid-indexed overload to reach for.
+    ///
+    /// Total lookup (IN-02): a caller row outside the array yields `0.0` rather than
+    /// panicking inside a library. [`NpRegressors::new`]'s alignment guard is what makes
+    /// that branch unreachable on the lagged path; it is here because a library must not
+    /// panic on an index it did not build.
+    #[must_use]
+    pub fn history_rows(&self, caller_rows: &[usize]) -> Vec<f32> {
+        let dim = self.dim();
+        let mut out = Vec::with_capacity(caller_rows.len() * dim);
+        for &r in caller_rows {
+            for (j, st) in self.specs.iter().enumerate() {
+                let v = self.history[j].get(r).copied().unwrap_or(0.0);
+                out.push(standardise_cell(v, st));
+            }
+        }
+        out
+    }
+
+    /// The day-keyed standardised rows the PREDICT paths read.
+    ///
+    /// `history_days` are the caller's own rows, in the order the history arrays carry them;
+    /// `future_days` are the horizon rows. The two together are exactly `values.len()` rows
+    /// per regressor — the same array the caller sent, never a grid.
+    #[must_use]
+    pub fn rows_for(&self, history_days: &[i64], future_days: &[i64]) -> NpRegressorRows {
+        let dim = self.dim();
+        let mut days = Vec::with_capacity(history_days.len() + future_days.len());
+        let mut rows = Vec::with_capacity((history_days.len() + future_days.len()) * dim);
+        for (i, &day) in history_days.iter().enumerate() {
+            days.push(day);
+            for (j, st) in self.specs.iter().enumerate() {
+                let v = self.history[j].get(i).copied().unwrap_or(0.0);
+                rows.push(standardise_cell(v, st));
+            }
+        }
+        for (i, &day) in future_days.iter().enumerate() {
+            days.push(day);
+            for (j, st) in self.specs.iter().enumerate() {
+                let v = self.future[j].get(i).copied().unwrap_or(0.0);
+                rows.push(standardise_cell(v, st));
+            }
+        }
+        NpRegressorRows { days, rows, dim }
+    }
+}
+
+/// `(value - mu) / std`, with the binary-auto carve-out already folded into `st`.
+///
+/// ONE expression, read by both the training rows and the predict rows, so a future row and
+/// a training row can never be standardised by two different arithmetics. The door has
+/// already refused `std == 0.0` and re-checked every derived cell for finiteness, which is
+/// why there is no guard here — adding one would imply a case the door lets through.
+fn standardise_cell(v: f64, st: &Standardized) -> f32 {
+    ((v - st.mu) / st.std) as f32
+}
+
+/// Standardised regressor rows keyed by DAY, for the prediction paths.
+///
+/// Keyed by day rather than by index because the three predict helpers address rows three
+/// different ways — arbitrary days, grid indices, and a recursive roll-forward — and a day
+/// is the one identifier all three actually hold.
+pub struct NpRegressorRows {
+    /// Ascending, as built: the caller's history days then the horizon days.
+    days: Vec<i64>,
+    /// `[days.len(), dim]` row-major standardised values.
+    rows: Vec<f32>,
+    dim: usize,
+}
+
+impl NpRegressorRows {
+    /// The block's column count.
+    #[must_use]
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// `[days.len(), dim]` standardised rows for arbitrary `days`.
+    ///
+    /// A day this channel does not carry contributes a ZERO row rather than panicking
+    /// (IN-02). Zero is the right neutral: the columns are standardised, so zero is the
+    /// column's own mean and the contribution is the block's bias-free zero.
+    #[must_use]
+    pub fn block_rows(&self, days: &[i64]) -> Vec<f32> {
+        let mut out = vec![0.0f32; days.len() * self.dim];
+        for (i, &day) in days.iter().enumerate() {
+            if let Ok(k) = self.days.binary_search(&day) {
+                let src = &self.rows[k * self.dim..(k + 1) * self.dim];
+                out[i * self.dim..(i + 1) * self.dim].copy_from_slice(src);
+            }
+        }
+        out
+    }
+}
+
+/// The additive numeric-regressor block composed beside [`crate::np::NpModel`] — one
+/// `Linear(R, 1)` without bias, one `.add()` on the forward.
+///
+/// # Separate from [`crate::events::EventBlock`] on purpose
+///
+/// The two are NOT folded into one `Linear`. Event columns are 0/1 indicators; regressor
+/// columns are ddof-1 standardised continuous values. They have different standardisation,
+/// different refusal surfaces and different measured recovery properties, and sharing one
+/// `Linear` would make the event recovery bar and the regressor behaviour inseparable —
+/// a change to either would move the other with nothing able to say which.
+///
+/// No bias, for the reason `EventBlock` has none: `NpModel` already carries one and a second
+/// additive constant is unidentifiable against it.
+pub struct RegressorBlock {
+    lin: Linear,
+    dim: usize,
+}
+
+impl RegressorBlock {
+    /// Initialise a block of `dim` columns from the crate's `Rng`.
+    ///
+    /// `std = sqrt(1 / dim)`, the same scaling [`crate::events::EventBlock::new`] uses, so
+    /// the regressor term enters training at the same scale as every other linear term.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `dim` is zero: `Linear::without_bias(0, 1)` builds an empty weight whose
+    /// transpose trips trueno's `Contract transpose: input is empty` deep inside the forward
+    /// pass. Callers hold `Option<RegressorBlock>` and construct `None` for no regressors.
+    #[must_use]
+    pub fn new(dim: usize, rng: &mut Rng) -> Self {
+        assert!(
+            dim > 0,
+            "a RegressorBlock of width 0 is not a block: Linear::without_bias(0, 1) fails \
+             inside the forward pass. Hold None for an empty channel instead."
+        );
+        let mut lin = Linear::without_bias(dim, 1);
+        let std = (1.0 / dim as f64).sqrt();
+        lin.set_weight(
+            Tensor::from_vec(
+                (0..dim).map(|_| (rng.normal() * std) as f32).collect(),
+                &[1, dim],
+            )
+            .requires_grad(),
+        );
+        RegressorBlock { lin, dim }
+    }
+
+    /// `[b, dim]` standardised values to a `[b, 1]` additive contribution.
+    #[must_use]
+    pub fn forward(&self, x: &Tensor) -> Tensor {
+        self.lin.forward(x)
+    }
+
+    /// The block's parameter tensors, for extending into the ONE `AdamW` parameter vector.
+    ///
+    /// A block built and forwarded but never extended into that vector still contributes to
+    /// the forward pass — its weights simply never move — so this is what makes "the block
+    /// is actually being optimised" checkable.
+    pub fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+        self.lin.parameters_mut()
+    }
+
+    /// The number of scalar parameters — `dim`, since there is no bias.
+    #[must_use]
+    pub fn n_params(&self) -> usize {
+        self.lin.num_parameters()
+    }
+
+    /// The learned per-column weights, in request order.
+    #[must_use]
+    pub fn weights(&self) -> Vec<f32> {
+        self.lin.weight().data().to_vec()
+    }
+
+    /// The block's column count.
+    #[must_use]
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
 #[cfg(test)]
 mod tracer;
 
@@ -1118,6 +1414,276 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // D-27 / D-22: the NEURALPROPHET arm. The imputed-day value is unread BY
+    // CONSTRUCTION, and the standardisation rule is the single Prophet one reused.
+    // ---------------------------------------------------------------------------
+
+    /// A GAPPY daily series: 40 calendar days with 5 of them missing, so the imputed grid is
+    /// strictly longer than the caller's rows. Returns `(days, y, grid_len)`.
+    fn gappy_daily() -> (Vec<i64>, Vec<f64>) {
+        let t0 = crate::dates::days_from_civil(2021, 1, 1);
+        let missing = [3i64, 4, 11, 25, 26];
+        let mut days = Vec::new();
+        let mut y = Vec::new();
+        for k in 0..40i64 {
+            if missing.contains(&k) {
+                continue;
+            }
+            days.push(t0 + k);
+            y.push(10.0 + 0.3 * k as f64);
+        }
+        (days, y)
+    }
+
+    fn contiguous_daily(n: usize) -> (Vec<i64>, Vec<f64>) {
+        let t0 = crate::dates::days_from_civil(2021, 1, 1);
+        (
+            (0..n as i64).map(|k| t0 + k).collect(),
+            (0..n).map(|k| 10.0 + 0.3 * k as f64).collect(),
+        )
+    }
+
+    fn drive(n: usize, phase: f64) -> Vec<f64> {
+        (0..n)
+            .map(|i| 2.0 + (i as f64 * 0.37 + phase).sin() * 3.0)
+            .collect()
+    }
+
+    /// D-27, the STRUCTURAL half: the lag-free sample list carries a CALLER-row index, and
+    /// the regressor reads are one per OBSERVED row — never one per grid row.
+    ///
+    /// The discriminator is the third assertion. The rejected prototype indexes the
+    /// regressor array by the GRID row, which on a gap-free series is indistinguishable from
+    /// the caller row; on this gappy fixture the two lists differ, and a grid-indexed
+    /// implementation would additionally read past the end of a caller array of 35 entries.
+    #[test]
+    fn the_lag_free_sample_list_indexes_regressors_by_caller_row() {
+        let (days, y) = gappy_daily();
+        let d = crate::np::NpData::new(&days, &y, days.len(), 10, 0.8);
+        // CONTROL: the fixture really is gappy, or the claim below is untestable.
+        assert!(
+            d.n_train_grid > days.len(),
+            "the fixture must be gappy for this test to discriminate: grid {} vs caller rows {}",
+            d.n_train_grid,
+            days.len()
+        );
+
+        let (samples, caller_rows) = crate::np::training_samples(&d, 0);
+        assert_eq!(
+            samples.len(),
+            caller_rows.len(),
+            "the two lists are parallel by construction"
+        );
+        assert_eq!(
+            samples.len(),
+            days.len(),
+            "the lag-free sample list is the OBSERVED rows, so there is exactly one sample \
+             per caller row"
+        );
+        assert_eq!(
+            caller_rows,
+            (0..days.len()).collect::<Vec<usize>>(),
+            "each sample must name the caller's own row, in order — a grid-indexed list \
+             would skip {} positions and read past the end of a {}-entry caller array",
+            d.n_train_grid - days.len(),
+            days.len()
+        );
+        assert_ne!(
+            samples, caller_rows,
+            "on a gappy series the grid rows and the caller rows CANNOT coincide; if they \
+             do here the fixture stopped discriminating"
+        );
+
+        // The READ COUNT is the observed-row count, not the grid length.
+        let hist = vec![drive(days.len(), 0.0)];
+        let fut = vec![drive(7, 5.0)];
+        let specs = vec![super::standardize_one(&spec_auto("price"), &hist[0])];
+        let regs = super::NpRegressors::new(&d, 0, specs, hist, fut)
+            .expect("a lag-free channel is always aligned");
+        assert_eq!(
+            regs.history_rows(&caller_rows).len(),
+            days.len() * regs.dim(),
+            "one standardised cell per OBSERVED row per regressor — {} grid rows would be \
+             the prototype's grid-shaped array, which D-27 removes",
+            d.n_train_grid
+        );
+    }
+
+    /// The neuralprophet arm standardises over the OBSERVED TRAIN rows with the SAME rule,
+    /// bit for bit — constants and cells both.
+    ///
+    /// The third block is what stops this from being a tautology: standardising over the
+    /// IMPUTED GRID instead (carry-forward filled, the prototype's rule) produces different
+    /// constants, so the test can tell the two apart.
+    #[test]
+    fn the_neuralprophet_standardisation_matches_the_prophet_rule_bitwise() {
+        let (days, y) = gappy_daily();
+        let d = crate::np::NpData::new(&days, &y, days.len(), 10, 0.8);
+        let hist = drive(days.len(), 0.0);
+        let spec = spec_auto("price");
+
+        // The PROPHET rule, as the door computes it before `splice`.
+        let prophet = super::standardize_one(&spec, &hist);
+
+        // The NEURALPROPHET channel, built from the same observed rows.
+        let regs = super::NpRegressors::new(
+            &d,
+            0,
+            vec![super::standardize_one(&spec, &hist)],
+            vec![hist.clone()],
+            vec![drive(7, 5.0)],
+        )
+        .expect("a lag-free channel is always aligned");
+        let np_st = &regs.specs()[0];
+        assert_eq!(
+            np_st.mu.to_bits(),
+            prophet.mu.to_bits(),
+            "mu must match the prophet rule BIT FOR BIT, got {} vs {}",
+            np_st.mu,
+            prophet.mu
+        );
+        assert_eq!(
+            np_st.std.to_bits(),
+            prophet.std.to_bits(),
+            "std must match the prophet rule BIT FOR BIT, got {} vs {}",
+            np_st.std,
+            prophet.std
+        );
+
+        // The CELLS: the neuralprophet arm trains in f32, so the honest bit claim is that
+        // its cell equals the prophet f64 cell narrowed to f32 — not that an f32 equals an
+        // f64, which is not a statement anything could satisfy.
+        let caller_rows: Vec<usize> = (0..days.len()).collect();
+        let cells = regs.history_rows(&caller_rows);
+        for (i, cell) in cells.iter().enumerate() {
+            let want = (((hist[i] - prophet.mu) / prophet.std) as f32).to_bits();
+            assert_eq!(
+                cell.to_bits(),
+                want,
+                "standardised cell {i} must equal the prophet arithmetic narrowed to f32"
+            );
+        }
+
+        // THE DISCRIMINATOR: the same column standardised over the IMPUTED GRID instead —
+        // the prototype's rule — is a DIFFERENT number, so this test can tell them apart.
+        let mut grid_filled: Vec<f64> = Vec::with_capacity(d.n_train_grid);
+        let mut next_observed = 0usize;
+        for i in 0..d.n_train_grid {
+            if d.grid_observed[i] {
+                grid_filled.push(hist[next_observed]);
+                next_observed += 1;
+            } else {
+                // carry-forward, the spike's rule 3
+                grid_filled.push(grid_filled.last().copied().unwrap_or(hist[0]));
+            }
+        }
+        let over_grid = super::standardize_one(&spec, &grid_filled);
+        assert_ne!(
+            over_grid.mu.to_bits(),
+            prophet.mu.to_bits(),
+            "standardising over the imputed grid must give a DIFFERENT mu, or this test \
+             cannot distinguish the observed-rows rule from the grid rule"
+        );
+    }
+
+    /// The `{0, 1}` carve-out holds on the neuralprophet arm too: mu exactly zero, std
+    /// exactly one, and the standardised cells are the raw indicators unchanged.
+    #[test]
+    fn a_binary_driver_is_left_unstandardised_on_the_neuralprophet_arm() {
+        let (days, y) = contiguous_daily(30);
+        let d = crate::np::NpData::new(&days, &y, days.len(), 10, 0.8);
+        let promo: Vec<f64> = (0..days.len())
+            .map(|i| f64::from(u8::from(i % 5 == 0)))
+            .collect();
+        let regs = super::NpRegressors::new(
+            &d,
+            0,
+            vec![super::standardize_one(&spec_auto("promo"), &promo)],
+            vec![promo.clone()],
+            vec![vec![0.0; 7]],
+        )
+        .expect("a lag-free channel is always aligned");
+        let st = &regs.specs()[0];
+        assert_eq!(st.mu.to_bits(), 0.0f64.to_bits(), "mu must be EXACTLY zero");
+        assert_eq!(
+            st.std.to_bits(),
+            1.0f64.to_bits(),
+            "std must be EXACTLY one"
+        );
+        let rows = regs.history_rows(&(0..days.len()).collect::<Vec<usize>>());
+        for (i, cell) in rows.iter().enumerate() {
+            assert_eq!(
+                cell.to_bits(),
+                (promo[i] as f32).to_bits(),
+                "an unstandardised binary cell must pass through unchanged at row {i}"
+            );
+        }
+    }
+
+    /// SC5: the grid-equals-caller-rows invariant on the LAGGED path is a RELEASE-mode
+    /// check that RETURNS, not a `debug_assert!` that `--release` compiles out.
+    ///
+    /// The violated state is constructed DIRECTLY — through the internal constructor, since
+    /// the door refuses this case by name (D-26) — and the assertion is a typed
+    /// [`ForecastError::Internal`] rather than the absence of a panic. A guard whose failure
+    /// has never been observed is not known to work, and a `#[cfg(debug_assertions)]` guard
+    /// cannot be observed at all in the profile that ships.
+    #[test]
+    fn the_grid_mismatch_guard_fires_in_release() {
+        let (days, y) = gappy_daily();
+        let d = crate::np::NpData::new(&days, &y, days.len(), 10, 0.8);
+        assert!(
+            d.n_train_grid > days.len(),
+            "the violated state needs a grid longer than the caller's rows"
+        );
+        let spec = vec![super::standardize_one(
+            &spec_auto("price"),
+            &drive(days.len(), 0.0),
+        )];
+        let err = super::NpRegressors::new(
+            &d,
+            7,
+            spec,
+            vec![drive(days.len(), 0.0)],
+            vec![drive(7, 5.0)],
+        )
+        .expect_err(
+            "a lagged regressor channel whose grid is longer than the caller's rows must be \
+             REFUSED, not indexed",
+        );
+        match &err {
+            crate::types::ForecastError::Internal(m) => {
+                assert!(
+                    m.contains(&d.n_train_grid.to_string()) && m.contains(&days.len().to_string()),
+                    "the message must name BOTH lengths so the breach is diagnosable: {m}"
+                );
+            }
+            other => panic!("expected Internal (the input was already accepted), got {other:?}"),
+        }
+
+        // THE POSITIVE CONTROL: a gap-free series with the same lag count is accepted, so
+        // the guard is not simply refusing every lagged channel.
+        let (cd, cy) = contiguous_daily(40);
+        let cdat = crate::np::NpData::new(&cd, &cy, cd.len(), 10, 0.8);
+        assert_eq!(
+            cdat.n_train_grid,
+            cd.len(),
+            "the control series must be gap-free"
+        );
+        super::NpRegressors::new(
+            &cdat,
+            7,
+            vec![super::standardize_one(
+                &spec_auto("price"),
+                &drive(cd.len(), 0.0),
+            )],
+            vec![drive(cd.len(), 0.0)],
+            vec![drive(7, 5.0)],
+        )
+        .expect("a gap-free lagged channel must be ACCEPTED");
     }
 }
 

@@ -443,6 +443,50 @@ pub fn n_training_samples(d: &NpData, n_lags: usize) -> usize {
     }
 }
 
+/// The training sample list AND, parallel to it, the CALLER-row index of each sample.
+///
+/// ONE function, because the two lists must agree element for element and a second copy of
+/// the sample rule is the drift hazard [`n_training_samples`] was extracted to avoid. It is
+/// the single source both [`train`] and the D-27 tests read, so "the lag-free path indexes
+/// regressors by the caller's row" is a property of shipped code rather than of a test
+/// fixture.
+///
+/// # The lag-free branch: the caller's row, never the grid row (D-27)
+///
+/// `NpData::new` imputes a DAILY grid over `[first, last]`, so on a gappy series the grid is
+/// denser than the caller's rows. The lag-free sample list is already filtered to
+/// `grid_observed`, and the observed grid rows correspond ONE FOR ONE, in ascending order,
+/// to the caller's rows — so the caller-row index is simply the running count of observed
+/// rows. An imputed day is never selected here, so it has no regressor slot and there is no
+/// fill rule to choose.
+///
+/// # The lagged branch: total only because the door refuses the other case
+///
+/// With lags the sample list is every grid row from `n_lags` onward, imputed rows included,
+/// so a caller-row index does not exist for every sample in general. D-26 REFUSES a
+/// regressor on a gappy series at non-zero lags, and on a gap-free series the grid rows and
+/// the caller rows coincide one for one, so `i` is the caller row. That coincidence is
+/// asserted in RELEASE by [`crate::regressors::NpRegressors::new`], not by a `debug_assert!`
+/// that `--release` would compile out.
+#[must_use]
+pub fn training_samples(d: &NpData, n_lags: usize) -> (Vec<usize>, Vec<usize>) {
+    if n_lags == 0 {
+        let mut samples = Vec::new();
+        let mut caller_rows = Vec::new();
+        for i in 0..d.n_train_grid {
+            if d.grid_observed[i] {
+                samples.push(i);
+                caller_rows.push(i);
+            }
+        }
+        (samples, caller_rows)
+    } else {
+        let samples: Vec<usize> = (n_lags..d.n_train_grid).collect();
+        let caller_rows = samples.clone();
+        (samples, caller_rows)
+    }
+}
+
 /// A door-computable PROXY for the multiply-accumulates ONE [`train`] call spends:
 ///
 /// ```text
