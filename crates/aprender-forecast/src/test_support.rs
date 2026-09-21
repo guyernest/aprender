@@ -222,26 +222,80 @@ pub(crate) fn constant_u64(contract: &str, key: &str) -> u64 {
 mod tests {
     use super::{fixture_path, load_json, read_csv};
 
+    /// Every committed fixture is readable, and `README.md`'s stated count is TRUE.
+    ///
+    /// # Why this enumerates the directory instead of carrying a list
+    ///
+    /// It used to carry a hand-kept list of thirteen names, and `tests/fixtures/README.md`
+    /// stated a file count in prose. Both went stale the moment a plan added a fixture —
+    /// plan 06.1-01 added two and plan 06.1-02 a third — and neither staleness could fail a
+    /// build, because a list that does not enumerate cannot notice a file it was never told
+    /// about. That is the drift `readme_contract.rs` gates one level up and the one count it
+    /// does not reach.
+    ///
+    /// So the count is DERIVED from the directory and the README sentence is parsed and
+    /// compared against it, which turns a comment into a gated claim. The counting rule is
+    /// stated once, here and in the README: every entry under `tests/fixtures/` EXCEPT
+    /// `README.md` itself, which documents the fixtures rather than being one.
     #[test]
-    fn every_committed_fixture_is_readable() {
-        for name in [
-            "peyton_manning_prophet140.json",
-            "air_passengers_prophet140.json",
-            "retail_sales_prophet140.json",
-            "np_oracle_peyton.json",
-            "peyton_default_prophet140.json",
-            "peyton_holidays_prophet140.json",
-            "wp_log_R_logistic_prophet140.json",
-            "air_multiplicative_prophet140.json",
-            "chronos_bolt_tiny_fixture.json",
-            "chronos_probes.json",
-            "weights_index.json",
-            "chronos_holdout_oracle.json",
-            "peyton_tiny_oracle.json",
-        ] {
-            assert!(fixture_path(name).is_file(), "{name} must be committed");
-            assert!(load_json(name).is_object(), "{name} must be a JSON object");
+    fn every_committed_fixture_is_readable_and_the_readme_count_is_true() {
+        let dir = fixture_path("");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("tests/fixtures must exist at {}: {e}", dir.display()))
+            .map(|e| {
+                e.unwrap_or_else(|err| panic!("a tests/fixtures entry must be readable: {err}"))
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|n| n != "README.md")
+            .collect();
+        names.sort();
+        assert!(
+            names.len() > 15,
+            "the fixture directory enumerated only {} entries, which means this test is \
+             reading the wrong directory rather than that the fixtures were deleted",
+            names.len()
+        );
+
+        for name in &names {
+            let path = fixture_path(name);
+            assert!(
+                path.is_file(),
+                "{name} must be a committed FILE, not a directory"
+            );
+            // `expect`ing here is the point: absence or corruption is a DEFECT, never a
+            // skip (CLAUDE.md Verification Discipline #5).
+            if name.ends_with(".json") {
+                assert!(load_json(name).is_object(), "{name} must be a JSON object");
+            } else {
+                let raw = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{name} must be readable: {e}"));
+                assert!(!raw.trim().is_empty(), "{name} must not be empty");
+            }
         }
+
+        // The README's own sentence, re-derived rather than incremented by hand.
+        let readme = std::fs::read_to_string(fixture_path("README.md"))
+            .unwrap_or_else(|e| panic!("tests/fixtures/README.md must be committed: {e}"));
+        let stated: usize = readme
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("These "))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .expect(
+                "tests/fixtures/README.md must open with a sentence of the form \
+                 `These N files are the phase's correctness bar.` — the count is a GATED \
+                 claim, so the sentence has to be findable",
+            );
+        assert_eq!(
+            stated,
+            names.len(),
+            "tests/fixtures/README.md says {stated} files; the directory holds {} \
+             (excluding README.md itself). Re-derive the sentence, do not increment it: \
+             {names:?}",
+            names.len()
+        );
     }
 
     #[test]
