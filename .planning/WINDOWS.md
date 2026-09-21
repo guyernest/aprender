@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 18
+open_count: 20
 waived_count: 2
 fixed_count: 0
-total_count: 20
-last_updated: 2026-09-21T14:23:10.777Z
+total_count: 22
+last_updated: 2026-09-21T16:45:55.552Z
 ---
 
 # Broken Windows Ledger
@@ -35,6 +35,8 @@ last_updated: 2026-09-21T14:23:10.777Z
 | 18 | 05 | deviation | crates/aprender-test-lib/src/brick/pipeline.rs | 1965 | uuid_v4() is a timestamp, not a UUID; test_uuid_v4_generates_unique_ids fails 5/5 on this host and its verdict depends on clock resolution (D-ITEM-05-17-B) | open |  | 2026-09-12T01:12:33.076Z |  |
 | 19 | 06.1 | deviation | contracts/forecast-tool-boundary-v1.yaml |  | regressor_prior_scale_min is a representability bound, not the usability bound its rationale claimed; fit collapses below ~1e-8 | open |  | 2026-09-21T14:23:10.699Z |  |
 | 20 | 06.1 | unrun-verify | crates/aprender-image/src/lib.rs |  | cargo fmt --all --check and full clippy -D warnings are red on the committed tree (pre-existing); phase used rustfmt per-file and clippy --no-deps instead | open |  | 2026-09-21T14:23:10.777Z |  |
+| 21 | 06.1 | deviation | crates/aprender-forecast/src/invariance.rs |  | 06.1-04 verifies t1c and t3b are unsatisfiable by construction: both forbid any #[ignore] / any ignored test in the invariance module, but wave 1 deliberately ships capture_baseline as #[ignore]. Measured red on the untouched wave-1 tree. Intent-preserving substitutes pass. | open |  | 2026-09-21T16:45:55.473Z |  |
+| 22 | 06.1 | deviation | .planning/phases/06.1-forecast-exogenous-inputs-prophet-regressors-neuralprophet-e/06.1-04-PLAN.md |  | 06.1-04 verify t2c python probe is blind to #[ignore] (it anchors test bodies at fn; the attribute precedes fn) and prefix-matches a renamed fn. Measured green on a part A carrying #[ignore]. Fixed in the in-tree Rust twin only; the verify body was kept verbatim. | open |  | 2026-09-21T16:45:55.552Z |  |
 
 ````json
 [
@@ -276,6 +278,30 @@ last_updated: 2026-09-21T14:23:10.777Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-21T14:23:10.777Z",
+    "resolved_at": null
+  },
+  {
+    "id": 21,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": "crates/aprender-forecast/src/invariance.rs",
+    "line": null,
+    "description": "06.1-04 verifies t1c and t3b are unsatisfiable by construction: both forbid any #[ignore] / any ignored test in the invariance module, but wave 1 deliberately ships capture_baseline as #[ignore]. Measured red on the untouched wave-1 tree. Intent-preserving substitutes pass.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T16:45:55.473Z",
+    "resolved_at": null
+  },
+  {
+    "id": 22,
+    "kind": "deviation",
+    "phase": "06.1",
+    "file": ".planning/phases/06.1-forecast-exogenous-inputs-prophet-regressors-neuralprophet-e/06.1-04-PLAN.md",
+    "line": null,
+    "description": "06.1-04 verify t2c python probe is blind to #[ignore] (it anchors test bodies at fn; the attribute precedes fn) and prefix-matches a renamed fn. Measured green on a part A carrying #[ignore]. Fixed in the in-tree Rust twin only; the verify body was kept verbatim.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T16:45:55.552Z",
     "resolved_at": null
   }
 ]

@@ -551,7 +551,7 @@ re-deriving the shape.
      touched contract, the forecast server e2e tests, and a tag cut that builds `--locked`.
 
 **Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
-**Plans:** 1/8 plans executed
+**Plans:** 2/8 plans executed
 
 Plans:
 **Wave 1**
@@ -562,7 +562,7 @@ Plans:
 
 - [ ] 06.1-02-PLAN.md — the regressor parity ladder at 24 and 30 columns, plus the regressor rungs in `contracts/prophet-parity-v1.yaml` (wave 2)
 - [ ] 06.1-03-PLAN.md — regressor cost ceilings and cost axis C-17, four door refusals, and the VIF / condition-number identifiability diagnostic that warns and never refuses (wave 2)
-- [ ] 06.1-04-PLAN.md — the three-part invariance gate: determinism, the 1-ULP mutation proof, and the part-C mechanism test with the uncertainty bands inside it (wave 2)
+- [x] 06.1-04-PLAN.md — the three-part invariance gate: determinism, the 1-ULP mutation proof, and the part-C mechanism test with the uncertainty bands inside it (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 

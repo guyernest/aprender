@@ -24,6 +24,29 @@
 //! Both fields rely on that: the door builds `components` by inserting in computation
 //! order, and a future reordering of those inserts must not read as a behaviour change.
 //!
+//! # Three parts, three DIFFERENT claims — and the exposure each one carries
+//!
+//! SC2 does not ask for a green invariance table. It asks for one that is *proven able to
+//! fail*, and says in as many words that a green gate with no falsification probe beside it
+//! does not satisfy the criterion. A `signature` that returned a constant would produce
+//! exactly the same green table as a correct one. So the gate is four statements, not one,
+//! and they are deliberately not four ways of saying the same thing:
+//!
+//! | Part | Claim it CARRIES | Claim it does NOT carry | Arch exposure |
+//! |---|---|---|---|
+//! | the committed baseline ([`every_baseline_case_reproduces_its_signature`]) | the eight door cases answer today what they answered at a commit where `regressors.rs` did not exist — the only INDEPENDENT HISTORICAL evidence in this gate | nothing about whether the signature can detect a change | **arch-keyed** (skips loudly on an unrecorded arch) |
+//! | part A ([`part_a_every_case_is_deterministic_through_the_door`]) | the same host, twice, answers identically — so a baseline mismatch is a real difference and never run-to-run noise | nothing about the past: it compares now against now | **unconditional** |
+//! | part B ([`part_b_the_signature_is_proven_able_to_fail`]) | the signature MOVES for a change of one unit in the last place, and for the band and `diagnostics` fields nothing else exercises | nothing about the forecast being correct — only that the detector detects | **unconditional** |
+//! | part C ([`part_c_the_splice_is_inert_at_zero_regressors`]) | SPLICE INERTNESS: `regressors::splice` at zero regressors changes neither the design nor the forecast, measured bit for bit, bands included | it is NOT a pre-change comparison — both sides call the SAME post-change [`crate::prophet::predict`], so a regression common to the empty-regressor branch moves both sides equally and part C stays green | unconditional (but not independent of the current `predict`) |
+//!
+//! **Parts A and B must never be made conditional on the running architecture, and must
+//! never be `#[ignore]`d.** Part A compares one host against ITSELF and part B mutates a
+//! response in memory; neither touches libm, so neither can legitimately differ across
+//! runners. Only the cross-commit baseline comparison is arch-keyed, for the libm reason
+//! below. This distinction is written down because the tempting repair for a cross-platform
+//! red — relaxing whatever is red — would remove exactly the two parts SC2 rests on.
+//! [`parts_a_and_b_are_unconditional`] enforces it against this module's own source.
+//!
 //! # Why the baseline is keyed by architecture
 //!
 //! `by_arch` is keyed on [`std::env::consts::ARCH`], and this is a correctness requirement
@@ -137,6 +160,16 @@ fn json(h: &mut Hasher, v: &serde_json::Value) {
 /// `fit_seconds` and `predict_seconds` are excluded — see the module docs.
 #[must_use]
 pub fn signature(r: &ForecastResponse) -> u64 {
+    signature_with(r, &r.diagnostics)
+}
+
+/// The ONE hashing body. `signature` is this with the response's own `diagnostics`; part A's
+/// `budget_hit` triage is this with a masked copy.
+///
+/// `ForecastResponse` is not `Clone` (it is a serialisation type), so the triage cannot
+/// clone-and-edit. Factoring the body is the alternative to writing the field list twice —
+/// and a second field list is precisely how a gate starts hashing less than it claims.
+fn signature_with(r: &ForecastResponse, diagnostics: &serde_json::Value) -> u64 {
     let mut h = Hasher::new();
     h.str(&r.model);
     h.str(&r.freq);
@@ -154,7 +187,7 @@ pub fn signature(r: &ForecastResponse) -> u64 {
         h.str(k);
         json(&mut h, v);
     }
-    json(&mut h, &r.diagnostics);
+    json(&mut h, diagnostics);
     h.finish()
 }
 
@@ -571,4 +604,689 @@ fn the_signature_detects_a_one_ulp_change() {
         "reverting every mutation must return the original signature, or the detector is \
          reacting to something other than what was changed"
     );
+}
+
+// ------------------------------------------------- part A: determinism ----
+
+/// The four hashed f64 arrays, in the signature's own order, so the divergence walk and the
+/// signature cannot disagree about which fields or which order they are looking at.
+fn float_fields(r: &ForecastResponse) -> [(&'static str, &[f64]); 4] {
+    [
+        ("yhat", r.yhat.as_slice()),
+        ("yhat_lower", r.yhat_lower.as_slice()),
+        ("yhat_upper", r.yhat_upper.as_slice()),
+        ("trend", r.trend.as_slice()),
+    ]
+}
+
+/// This response's `diagnostics` with `lbfgs.budget_hit` forced to a fixed value.
+///
+/// Used ONLY by the mismatch triage below, never by the gate itself: the key stays inside
+/// the signature (see [`mismatch_report`] for why removing it would be a permanent
+/// weakening).
+fn diagnostics_with_budget_hit_masked(r: &ForecastResponse) -> serde_json::Value {
+    let mut d = r.diagnostics.clone();
+    if let Some(flag) = d.get_mut("lbfgs").and_then(|l| l.get_mut("budget_hit")) {
+        *flag = serde_json::Value::Bool(false);
+    }
+    d
+}
+
+/// A diagnostic for two runs of one case whose signatures disagree.
+///
+/// A bare "signatures differ" sends the reader back to the whole response. This is written
+/// for the place the failure is hardest to chase — CI, where nobody can re-run it
+/// interactively — so it names the first divergent BIT, the scale of the divergence per
+/// field, and whether the one wall-clock-dependent flag inside `diagnostics` accounts for
+/// it on its own.
+fn mismatch_report(label: &str, a: &ForecastResponse, b: &ForecastResponse) -> String {
+    let mut s = format!(
+        "case {label} produced two different signatures on the SAME host, from two calls \
+         made back to back with the same arguments: {:016x} then {:016x}.\n",
+        signature(a),
+        signature(b)
+    );
+
+    // (1) The FIRST divergent element, by field, index and bit pattern.
+    let mut first: Option<String> = None;
+    for ((field, xa), (_, xb)) in float_fields(a).into_iter().zip(float_fields(b)) {
+        if xa.len() != xb.len() {
+            first = Some(format!(
+                "  first divergence: {field} has {} values in run 1 and {} in run 2 — a \
+                 STRUCTURAL break, not arithmetic drift\n",
+                xa.len(),
+                xb.len()
+            ));
+            break;
+        }
+        if let Some(i) = xa
+            .iter()
+            .zip(xb)
+            .position(|(p, q)| p.to_bits() != q.to_bits())
+        {
+            let (p, q) = (xa[i], xb[i]);
+            first = Some(format!(
+                "  first divergence: {field}[{i}]  run1={p:e} 0x{:016x}  run2={q:e} \
+                 0x{:016x}  abs diff {:e}\n",
+                p.to_bits(),
+                q.to_bits(),
+                (p - q).abs()
+            ));
+            break;
+        }
+    }
+    s.push_str(&first.unwrap_or_else(|| {
+        String::from(
+            "  first divergence: NONE of yhat, yhat_lower, yhat_upper or trend differs by a \
+             single bit, so the difference is in ds, components or diagnostics — look \
+             there, not at the arithmetic\n",
+        )
+    }));
+
+    // (2) The whole-response max absolute difference, per field, so a one-ULP libm
+    //     difference reads differently from a structural break.
+    s.push_str("  max abs difference per field:");
+    for ((field, xa), (_, xb)) in float_fields(a).into_iter().zip(float_fields(b)) {
+        let m = xa
+            .iter()
+            .zip(xb)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0_f64, f64::max);
+        s.push_str(&format!(" {field}={m:e}"));
+    }
+    s.push('\n');
+
+    // (3) The budget_hit note, as a POINTER and not as a subtraction.
+    let masked_a = signature_with(a, &diagnostics_with_budget_hit_masked(a));
+    let masked_b = signature_with(b, &diagnostics_with_budget_hit_masked(b));
+    let verdict = if masked_a == masked_b {
+        "EQUAL"
+    } else {
+        "STILL UNEQUAL"
+    };
+    s.push_str(&format!(
+        "  with diagnostics.lbfgs.budget_hit masked to a fixed value, the two signatures \
+         are {verdict}.\n\
+         \x20   READ THAT AS A POINTER, NOT AS A SUBTRACTION. budget_hit records whether \
+         fit::fit_prophet's cooperative round-boundary budget (FIT_BUDGET_SECS, \
+         fit.rs:104 and fit.rs:112) was hit, and hitting it BREAKS the optimisation loop \
+         — so when the flag flips, the parameters, the iteration count, the objective, \
+         the predictions and the bands all differ too.\n\
+         \x20   MASKED-EQUAL means: the ONLY difference is the flag, so the two fits \
+         genuinely agreed and this is a loaded machine rather than a regression.\n\
+         \x20   MASKED-STILL-UNEQUAL does NOT mean the opposite. A REAL budget hit changes \
+         far more than the flag, so this line cannot rule an environment effect out; it \
+         can only ever rule one IN.\n\
+         \x20   budget_hit is deliberately NOT carved out of the signature. SC2 puts \
+         diagnostics inside the comparison, and removing one key to dodge a failure mode \
+         that has never been observed weakens the gate permanently in exchange for a \
+         convenience.\n"
+    ));
+    s
+}
+
+/// Part A: every recorded door case is DETERMINISTIC — the same host, twice, same answer.
+///
+/// This is the claim that makes the committed baseline mean something. Without it, a
+/// baseline mismatch has two readings — "the code changed" and "this run was noisy" — and
+/// the second reading is always available to whoever does not want to believe the first.
+///
+/// UNCONDITIONAL on every architecture, by construction: it compares one host against
+/// itself and never against a recorded value, so libm differences cannot reach it. See the
+/// module docs for which part carries which exposure.
+#[test]
+fn part_a_every_case_is_deterministic_through_the_door() {
+    let mut exercised = 0usize;
+    for (label, csv, horizon, shape) in CASES {
+        let args = args_for(csv, horizon, shape);
+        let first = crate::forecast::forecast(&args)
+            .unwrap_or_else(|e| panic!("case {label} must succeed through the door: {e}"));
+        let second = crate::forecast::forecast(&args)
+            .unwrap_or_else(|e| panic!("case {label} must succeed on its second call: {e}"));
+        assert!(
+            signature(&first) == signature(&second),
+            "{}",
+            mismatch_report(label, &first, &second)
+        );
+        exercised += 1;
+    }
+    // Non-vacuity, pinned and PRINTED: a determinism table that silently shrank would
+    // otherwise report green while proving less. Same discipline as the poisson sweep's
+    // checked-lambda count.
+    assert!(
+        exercised == CASES.len() && exercised == 8,
+        "part A exercised {exercised} cases; it must exercise all 8 recorded door cases \
+         (CASES.len() = {})",
+        CASES.len()
+    );
+}
+
+/// The two wall-clock fields are proven EXCLUDED, not merely documented as excluded.
+///
+/// Without this, "we left the timings out" is a claim about the code rather than a property
+/// of the function. And the failure it guards against is vacuity in the OPPOSITE direction:
+/// a signature carrying wall-clock can never reproduce, so the gate would be permanently
+/// red, therefore permanently ignored, which is exactly as useless as permanently green.
+#[test]
+fn the_signature_ignores_the_two_wall_clock_fields() {
+    let args = args_for("retail_sales.csv", 12, Shape::ProphetMonthly);
+    let mut r = crate::forecast::forecast(&args).expect("the retail case must succeed");
+    let before = signature(&r);
+    let (fit0, predict0) = (r.fit_seconds, r.predict_seconds);
+    assert!(
+        fit0.is_finite() && predict0.is_finite(),
+        "the door must report finite timings, got fit_seconds={fit0} \
+         predict_seconds={predict0}"
+    );
+
+    r.fit_seconds = fit0 + 1.0;
+    r.predict_seconds = predict0 + 2.0;
+    assert!(
+        r.fit_seconds.to_bits() != fit0.to_bits()
+            && r.predict_seconds.to_bits() != predict0.to_bits(),
+        "the mutation must actually change both fields, or this test proves nothing"
+    );
+    assert!(
+        signature(&r) == before,
+        "replacing BOTH wall-clock fields changed the signature, so the gate is hashing \
+         time; it could never reproduce and would be red on every host forever"
+    );
+}
+
+// ------------------------------------- part B: the falsification probe ----
+
+/// Step a finite f64 to its next representable neighbour — one unit in the last place.
+///
+/// Computed from the BIT PATTERN with `to_bits` / `from_bits`, never by adding a chosen
+/// epsilon, and that distinction is the whole probe. A 1-ULP change is BELOW print
+/// precision, which is exactly what a formatted comparison silently accepts; an epsilon
+/// large enough to be reliable across magnitudes would also be large enough to show up in
+/// a printed decimal, and would therefore test a weaker property than the one claimed.
+fn one_ulp_step(v: f64) -> f64 {
+    let bits = v.to_bits();
+    let stepped = f64::from_bits(bits.wrapping_add(1));
+    assert!(
+        stepped.to_bits() != bits,
+        "the ULP step must change the bit pattern of {v:e}"
+    );
+    assert!(
+        stepped.is_finite(),
+        "the ULP step of {v:e} left the finite range; probe a different element"
+    );
+    stepped
+}
+
+/// The mutation MUST move the signature.
+fn detected(clean: u64, r: &ForecastResponse, what: &str) {
+    assert!(
+        signature(r) != clean,
+        "mutation [{what}] did NOT change the signature, so the signature is hashing less \
+         than the field list claims. A green invariance table produced by a detector that \
+         cannot see this change is indistinguishable from a broken harness — which is the \
+         exact condition SC2 refuses to accept as satisfied"
+    );
+}
+
+/// Reverting it MUST bring the signature back.
+fn restored(clean: u64, r: &ForecastResponse, what: &str) {
+    assert!(
+        signature(r) == clean,
+        "reverting mutation [{what}] did not restore the clean signature, so the probe is \
+         reacting to something other than what it changed and proves nothing about that \
+         field"
+    );
+}
+
+/// Part B: the signature is PROVEN ABLE TO FAIL, on six mutation shapes, each reverted.
+///
+/// SC2's wording is the specification here: a green gate with no falsification probe beside
+/// it does not satisfy the criterion. A `signature` that returned a constant, or that
+/// quietly skipped a field, would produce exactly the same green table as a correct one on
+/// the baseline comparison, on part A AND on part C. Part B is the only thing in this
+/// module that makes the difference observable.
+///
+/// **Mutations 4 to 6 are not padding.** SC2 puts the uncertainty bands and `diagnostics`
+/// INSIDE the comparison, and plan 06.1-03 adds regressor keys to `diagnostics` whose
+/// absence-when-unused is the mechanism that keeps D-19 free. Nothing else in this module
+/// exercises those three fields: their inclusion is claimed by `signature`'s field list and,
+/// without these three mutations, tested by nothing.
+///
+/// UNCONDITIONAL on every architecture, by construction: it perturbs a response already in
+/// memory and never crosses a libm boundary.
+#[test]
+fn part_b_the_signature_is_proven_able_to_fail() {
+    let args = args_for("peyton_manning.csv", 30, Shape::ProphetDefault);
+    let mut r = crate::forecast::forecast(&args)
+        .expect("the peyton/prophet/default case must succeed through the door");
+    let clean = signature(&r);
+    let mut shapes = 0usize;
+
+    // ---- 1. the FIRST yhat value, one unit in the last place ----
+    let last_yhat = r.yhat.len() - 1;
+    let last_trend = r.trend.len() - 1;
+    let last_upper = r.yhat_upper.len() - 1;
+    assert!(
+        last_yhat > 0 && last_trend > 0 && last_upper > 0,
+        "the probe needs a multi-row response; got yhat {}, trend {}, yhat_upper {}",
+        r.yhat.len(),
+        r.trend.len(),
+        r.yhat_upper.len()
+    );
+
+    let orig = r.yhat[0];
+    r.yhat[0] = one_ulp_step(orig);
+    detected(clean, &r, "1: yhat[0] + 1 ULP");
+    r.yhat[0] = orig;
+    restored(clean, &r, "1: yhat[0]");
+    shapes += 1;
+
+    // ---- 2. the LAST trend value, one unit in the last place ----
+    let orig = r.trend[last_trend];
+    r.trend[last_trend] = one_ulp_step(orig);
+    detected(clean, &r, "2: trend[last] + 1 ULP");
+    r.trend[last_trend] = orig;
+    restored(clean, &r, "2: trend[last]");
+    shapes += 1;
+
+    // ---- 3. one extra key in `components` (structural, not numeric) ----
+    r.components.insert(
+        "phantom".into(),
+        serde_json::Value::Array(vec![serde_json::Value::Null]),
+    );
+    detected(clean, &r, "3: an extra components key");
+    r.components.remove("phantom");
+    restored(clean, &r, "3: the extra components key");
+    shapes += 1;
+
+    // ---- 4. the FIRST yhat_lower value — the LOWER band, inside the comparison ----
+    let orig = r.yhat_lower[0];
+    r.yhat_lower[0] = one_ulp_step(orig);
+    detected(clean, &r, "4: yhat_lower[0] + 1 ULP");
+    r.yhat_lower[0] = orig;
+    restored(clean, &r, "4: yhat_lower[0]");
+    shapes += 1;
+
+    // ---- 5. the LAST yhat_upper value — the UPPER band, inside the comparison ----
+    let orig = r.yhat_upper[last_upper];
+    r.yhat_upper[last_upper] = one_ulp_step(orig);
+    detected(clean, &r, "5: yhat_upper[last] + 1 ULP");
+    r.yhat_upper[last_upper] = orig;
+    restored(clean, &r, "5: yhat_upper[last]");
+    shapes += 1;
+
+    // ---- 6. one value inside `diagnostics`, in two sub-cases: numeric and boolean ----
+    let obj = r.diagnostics["lbfgs"]["objective"]
+        .as_f64()
+        .expect("diagnostics.lbfgs.objective must be a number");
+    let number = |v: f64| {
+        serde_json::Value::Number(
+            serde_json::Number::from_f64(v).expect("a finite f64 is a JSON number"),
+        )
+    };
+    r.diagnostics["lbfgs"]["objective"] = number(one_ulp_step(obj));
+    detected(clean, &r, "6a: diagnostics.lbfgs.objective + 1 ULP");
+    r.diagnostics["lbfgs"]["objective"] = number(obj);
+    restored(clean, &r, "6a: diagnostics.lbfgs.objective");
+
+    let flag = r.diagnostics["lbfgs"]["budget_hit"]
+        .as_bool()
+        .expect("diagnostics.lbfgs.budget_hit must be a boolean");
+    r.diagnostics["lbfgs"]["budget_hit"] = serde_json::Value::Bool(!flag);
+    detected(clean, &r, "6b: diagnostics.lbfgs.budget_hit flipped");
+    r.diagnostics["lbfgs"]["budget_hit"] = serde_json::Value::Bool(flag);
+    restored(clean, &r, "6b: diagnostics.lbfgs.budget_hit");
+    shapes += 1;
+
+    // Non-vacuity, for the same reason part A pins its case count.
+    assert!(
+        shapes == 6,
+        "part B exercised {shapes} mutation shapes; it must exercise all 6 — two point \
+         estimates, one structural, BOTH uncertainty bands and one diagnostics leaf — or \
+         the fields SC2 names are claimed by the field list and tested by nothing"
+    );
+    assert!(
+        signature(&r) == clean,
+        "after reverting every mutation the signature must equal the clean value captured \
+         before the first one; a probe that cannot get back is testing the wrong thing"
+    );
+}
+
+/// The ONE deliberate insensitivity in the hasher, stated as a property rather than a
+/// comment: `-0.0` and `0.0` hash the same. Every other bit pattern is significant.
+#[test]
+fn the_signature_normalises_negative_zero() {
+    let args = args_for("retail_sales.csv", 12, Shape::ProphetMonthly);
+    let mut r = crate::forecast::forecast(&args).expect("the retail case must succeed");
+    let last = r.trend.len() - 1;
+
+    r.yhat[0] = 0.0;
+    r.trend[last] = 0.0;
+    let positive = signature(&r);
+
+    r.yhat[0] = -0.0;
+    r.trend[last] = -0.0;
+    assert!(
+        r.yhat[0].to_bits() != 0.0_f64.to_bits() && r.trend[last].to_bits() != 0.0_f64.to_bits(),
+        "the two zeros must really differ in their BIT patterns, or this test is comparing \
+         a value with itself"
+    );
+    assert!(
+        signature(&r) == positive,
+        "-0.0 must hash as 0.0 in both yhat and trend. This is the hasher's single \
+         deliberate blind spot and it is deliberate because a sign flip on an arithmetic \
+         zero is not a behaviour change; every OTHER bit pattern, NaN payloads included, \
+         is significant"
+    );
+}
+
+// ------------------------------------- part C: the mechanism, measured ----
+
+/// Two f64 slices are equal BY BITS, with a diagnostic naming the first divergent element.
+///
+/// Not an epsilon comparison. The claim part C makes is bit equality, and an epsilon would
+/// accept exactly the drift class this module exists to catch.
+fn bitwise_equal(series: &str, field: &str, a: &[f64], b: &[f64]) {
+    assert!(
+        a.len() == b.len(),
+        "{series}: {field} has {} values without the splice and {} after splicing zero \
+         regressors; the splice changed a LENGTH, which is a structural break",
+        a.len(),
+        b.len()
+    );
+    if let Some(i) = a
+        .iter()
+        .zip(b)
+        .position(|(p, q)| p.to_bits() != q.to_bits())
+    {
+        let (p, q) = (a[i], b[i]);
+        panic!(
+            "{series}: {field}[{i}] is not bit-identical — unspliced {p:e} 0x{:016x} vs \
+             spliced-with-nothing {q:e} 0x{:016x}, abs diff {:e}. Splicing ZERO regressors \
+             must be inert; if it is not, D-19 is not free and every caller who passes no \
+             new argument is getting a different answer",
+            p.to_bits(),
+            q.to_bits(),
+            (p - q).abs()
+        );
+    }
+}
+
+/// A bit-exact fingerprint of one fitted parameter vector.
+fn params_fingerprint(p: &crate::prophet::Params) -> u64 {
+    let mut h = Hasher::new();
+    h.f64(p.k);
+    h.f64(p.m);
+    h.f64s(&p.delta);
+    h.f64s(&p.beta);
+    h.f64(p.sigma_obs);
+    h.finish()
+}
+
+/// Part C: `regressors::splice` at ZERO regressors is inert — MEASURED, not asserted.
+///
+/// # What this part claims, and what it explicitly does not
+///
+/// It compares the PRE-SPLICE design against the spliced-with-nothing design, through the
+/// SAME (post-change) [`crate::prophet::predict`]. It therefore establishes **SPLICE
+/// INERTNESS at zero regressors** and nothing wider. It does NOT establish that the
+/// `predict` signature change itself was inert: both sides call the same post-change
+/// function, so a regression common to the empty-channel branch moves both outputs equally
+/// and part C stays green.
+///
+/// That second claim — the historical one — is carried by the committed baseline in
+/// `invariance_baseline.json`, which was captured on a commit at which `regressors.rs` did
+/// not exist and is the only INDEPENDENT historical evidence in this gate. The two are
+/// deliberately different statements; see the module docs for the per-part table.
+///
+/// # part_c_is_a_measurement_not_an_assertion
+///
+/// The reason D-19 is free is a COLUMN-ORDER fact: regressor columns append, so no existing
+/// column index moves. A comment saying "appending is harmless" is not a gate — it is the
+/// same claim the gate exists to check, written where nothing can check it. So this part
+/// runs the real `make_design`, the real `splice` and the real `predict` on three real
+/// series and compares the results bit for bit.
+///
+/// # The bands are INSIDE the comparison
+///
+/// The spike's part C covered point estimates only, because its prototype computed no
+/// bands, and the reference flags that the band path resamples changepoints around a `yhat`
+/// that depends on `beta` and `X` — so the bands must be added once the feature lands
+/// in-crate. This test is that close-out: `yhat_lower` and `yhat_upper` are compared here,
+/// not excused.
+///
+/// # Each series is FIT ONCE
+///
+/// Both `predict` calls take the SAME `Params`. Fitting each design independently would
+/// fold L-BFGS's own run-to-run behaviour into a test whose claim is about the DESIGN, and
+/// the budget check at `fit.rs:104` / `fit.rs:112` BREAKS the optimisation loop on
+/// wall-clock — which changes the parameters, the iteration count, the objective, the
+/// predictions and the bands, not merely a flag. Masking `budget_hit` cannot subtract that,
+/// because by the time the flag differs the parameters already differ. Fitting once removes
+/// the fit from the variable set entirely, so the only input that differs between the two
+/// calls is the design, which is exactly the claim.
+#[test]
+fn part_c_the_splice_is_inert_at_zero_regressors() {
+    use crate::prophet::{auto_seasonalities, make_design, predict, Mode, Spec};
+
+    /// `(csv, horizon, freq)` — the three series, as the prophet door would take them.
+    const SERIES: [(&str, usize, &str); 3] = [
+        ("peyton_manning.csv", 30, "D"),
+        ("retail_sales.csv", 12, "MS"),
+        ("air_passengers.csv", 12, "MS"),
+    ];
+    const SEED: u64 = 42;
+
+    let mut series_compared = 0usize;
+    for (csv, horizon, freq) in SERIES {
+        let (ds_text, y) = read_csv(csv);
+        let ds: Vec<i64> = ds_text.iter().map(|s| crate::dates::parse_ymd(s)).collect();
+        let fut = crate::dates::future_days(ds[ds.len() - 1], horizon, freq)
+            .unwrap_or_else(|e| panic!("{csv}: the future grid must build: {e}"));
+
+        // The prophet arm's defaulted spec, built the way `forecast.rs:317` builds it.
+        let spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, Mode::Additive));
+        assert!(
+            !spec.seasonalities.is_empty(),
+            "{csv}: the defaulted spec must carry at least one seasonality, or this \
+             series exercises an almost-empty design and proves very little"
+        );
+
+        // ---- THE DESIGN: one straight from make_design, one spliced with nothing ----
+        let plain = make_design(&ds, &y, &spec);
+        let mut spliced = make_design(&ds, &y, &spec);
+        crate::regressors::splice(&mut spliced, &[], &[]);
+
+        assert!(
+            plain.k == spliced.k && plain.k > 0,
+            "{csv}: k must survive the empty splice unchanged and be non-zero, got {} vs {}",
+            plain.k,
+            spliced.k
+        );
+        assert!(
+            plain.cols.len() == spliced.cols.len(),
+            "{csv}: the column COUNT changed across an empty splice, {} vs {}",
+            plain.cols.len(),
+            spliced.cols.len()
+        );
+        for (i, (want, got)) in plain.cols.iter().zip(&spliced.cols).enumerate() {
+            assert!(
+                want.name == got.name
+                    && want.component == got.component
+                    && want.mode == got.mode
+                    && want.prior_scale.to_bits() == got.prior_scale.to_bits()
+                    && want.holiday == got.holiday,
+                "{csv}: column {i} changed across an empty splice: {want:?} vs {got:?}"
+            );
+        }
+        bitwise_equal(csv, "design.x", &plain.x, &spliced.x);
+        bitwise_equal(csv, "design.s_a", &plain.s_a, &spliced.s_a);
+        bitwise_equal(csv, "design.s_m", &plain.s_m, &spliced.s_m);
+        bitwise_equal(
+            csv,
+            "design.prior_scales",
+            &plain.prior_scales,
+            &spliced.prior_scales,
+        );
+
+        // ---- THE FORECAST: fit ONCE, the same Params and the same seed into both ----
+        let (params, _info) = crate::fit::fit_prophet(&plain, 8);
+        let before = params_fingerprint(&params);
+        let none = crate::regressors::RegressorChannel::NONE;
+        // Both seeds read from the same binding and are compared below, so a band
+        // difference can only come from the design and never from the RNG.
+        let seeds = [SEED, SEED];
+        let unspliced = predict(&plain, &params, &fut, seeds[0], &none)
+            .unwrap_or_else(|e| panic!("{csv}: predict on the unspliced design: {e}"));
+        let after_splice = predict(&spliced, &params, &fut, seeds[1], &none)
+            .unwrap_or_else(|e| panic!("{csv}: predict on the spliced design: {e}"));
+        assert!(
+            seeds[0] == seeds[1],
+            "{csv}: both predict calls must receive the SAME seed"
+        );
+        assert!(
+            params_fingerprint(&params) == before,
+            "{csv}: the fitted parameters changed between the two predict calls; the only \
+             input allowed to differ is the design"
+        );
+
+        assert!(
+            unspliced.yhat.len() == horizon,
+            "{csv}: expected {horizon} predicted rows, got {}",
+            unspliced.yhat.len()
+        );
+        bitwise_equal(csv, "yhat", &unspliced.yhat, &after_splice.yhat);
+        bitwise_equal(csv, "trend", &unspliced.trend, &after_splice.trend);
+        bitwise_equal(
+            csv,
+            "yhat_lower",
+            &unspliced.yhat_lower,
+            &after_splice.yhat_lower,
+        );
+        bitwise_equal(
+            csv,
+            "yhat_upper",
+            &unspliced.yhat_upper,
+            &after_splice.yhat_upper,
+        );
+        // Non-vacuity for the band half: comparing two degenerate zero-width bands would
+        // pass without the band path ever having produced anything.
+        assert!(
+            unspliced
+                .yhat_upper
+                .iter()
+                .zip(&unspliced.yhat_lower)
+                .any(|(hi, lo)| hi > lo),
+            "{csv}: the uncertainty band has zero width everywhere, so comparing it \
+             proves nothing about the band path"
+        );
+
+        let mut shared = 0usize;
+        for (name, left) in &unspliced.components {
+            let Some((_, right)) = after_splice.components.iter().find(|(n, _)| n == name) else {
+                panic!("{csv}: component {name} exists without the splice and is missing after it")
+            };
+            bitwise_equal(csv, name, left, right);
+            shared += 1;
+        }
+        assert!(
+            unspliced.components.len() == after_splice.components.len(),
+            "{csv}: the component COUNT changed across an empty splice, {} vs {}",
+            unspliced.components.len(),
+            after_splice.components.len()
+        );
+        assert!(
+            shared >= 3,
+            "{csv}: only {shared} components were compared; the spike measured 3 shared \
+             components and a mechanism test that compared none would report green"
+        );
+
+        series_compared += 1;
+    }
+
+    assert!(
+        series_compared == SERIES.len() && series_compared == 3,
+        "part C compared {series_compared} series; it must compare all 3 (SERIES.len() = {})",
+        SERIES.len()
+    );
+}
+
+/// Parts A and B are unconditional — enforced against this module's own source.
+///
+/// The cross-commit baseline comparison is arch-keyed for a real libm reason, so a
+/// cross-platform red WILL eventually appear in CI. The tempting repair is to relax
+/// whatever is red. This test makes that repair impossible to apply to the two parts SC2
+/// actually rests on: part A compares one host against itself and part B perturbs a
+/// response in memory, so neither can legitimately differ across runners, and neither may
+/// be gated behind `#[ignore]` or an architecture branch.
+#[test]
+fn parts_a_and_b_are_unconditional() {
+    const SRC: &str = include_str!("invariance.rs");
+    // Assembled at runtime so the needles appear only in THIS function's body and cannot
+    // make the test find itself.
+    let arch_needle = concat!("consts", "::ARCH");
+    let ignore_needle = concat!("#[", "ignore");
+
+    for name in [
+        "part_a_every_case_is_deterministic_through_the_door",
+        "part_b_the_signature_is_proven_able_to_fail",
+    ] {
+        // The trailing `(` matters: a bare `fn {name}` prefix-matches a RENAMED function,
+        // so `part_a_..._door` silently resolved to `part_a_..._doorX` and the MISSING
+        // direction never fired. Also measured, not reasoned.
+        let fn_at = SRC
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("MISSING test fn {name} in this module's own source"));
+        // Walk BACK to the `#[test]` attribute. An extraction that starts at `fn` is blind
+        // to exactly the gating this test exists to forbid, because `#[ignore]` sits
+        // BEFORE `fn`, not inside the body — MEASURED, not reasoned: with the naive
+        // `fn`-anchored slice, adding `#[ignore = "slow"]` to part A left this test GREEN.
+        // (CLAUDE.md Verification Discipline 4 and 7: extending a guard's scope requires
+        // re-mutating in the new scope, and the pattern is wrong until the case table says
+        // otherwise.)
+        let start = SRC[..fn_at]
+            .rfind("#[test]")
+            .unwrap_or_else(|| panic!("{name} is not preceded by a #[test] attribute"));
+        assert!(
+            !SRC[start..fn_at].contains("fn "),
+            "the attribute walk-back for {name} crossed another function; the extracted \
+             region does not belong to it"
+        );
+        let open = SRC[fn_at..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{name} has no body"))
+            + fn_at;
+        let mut depth = 0usize;
+        let mut end = None;
+        for (off, ch) in SRC[open..].char_indices() {
+            if ch == '{' {
+                depth += 1;
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(open + off + 1);
+                    break;
+                }
+            }
+        }
+        let end = end.unwrap_or_else(|| panic!("unbalanced braces in {name}"));
+        let body = &SRC[start..end];
+        // Self-check on the extractor: over-capturing would silently weaken the assertions
+        // below into a scan of some other function.
+        assert!(
+            !body.contains("\n#[test]"),
+            "the body extractor over-captured {name}; it swallowed the next test"
+        );
+        assert!(
+            !body.contains(arch_needle),
+            "{name} branches on the running architecture. It must not: it is \
+             arch-independent by construction, and making it conditional is how a \
+             cross-platform red gets silenced by removing the half of the gate that SC2 \
+             rests on"
+        );
+        assert!(
+            !body.contains(ignore_needle),
+            "{name} carries an ignore attribute, so part of the release gate is \
+             unreachable from a plain `cargo test --lib` run"
+        );
+    }
 }
