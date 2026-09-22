@@ -1,115 +1,72 @@
 # Deferred items — phase 06.1
 
-Out-of-scope discoveries logged rather than fixed, per the executor scope boundary: only
-issues DIRECTLY caused by a task's own changes are auto-fixed. Each entry below was
-MEASURED to pre-date this phase, not assumed to.
+Out-of-scope discoveries logged rather than fixed, per the executor's SCOPE BOUNDARY rule:
+only issues DIRECTLY caused by the current task's changes are auto-fixed.
 
-## D1 — `cargo fmt --all -- --check` is red on the committed tree
+## From plan 06.1-07
 
-**Found during:** plan 06.1-01, Task 1 (running the Task 3 gate early).
+### 1. README claim-table drift — 2 pre-existing RED tests in the README drift gate
 
-**Measurement.** `cargo fmt --all -- --check` reports diffs in six files beyond this
-phase's own. Three are the uncommitted SetFit work in the working tree
-(`crates/aprender-core/src/setfit/encoder.rs`, `.../import_tests.rs`); the other three are
-COMMITTED and byte-identical to `HEAD`:
+`cargo test -p aprender-core --test readme_contract` fails 2 of 15 at the wave base
+`10e121ee5`, before any change in this plan:
 
-```
-crates/aprender-image/src/lib.rs
-crates/aprender-image/src/spectral.rs
-crates/aprender-image/src/tests.rs
-crates/aprender-mcp-chronos/build.rs
-crates/aprender-mcp-chronos/src/lib.rs
-```
-
-`git diff --quiet HEAD -- crates/aprender-image crates/aprender-mcp-chronos` returns 0, so
-these are properties of the committed tree, not of any edit made here.
-
-**Impact on this plan.** Plan 06.1-01 Task 3's `cargo fmt --all -- --check` acceptance
-criterion CANNOT pass on this tree for reasons unrelated to the phase. Every file this
-phase touched IS fmt-clean, verified with
-`rustfmt --edition 2021 --check <the ten touched files>` (rc=0).
-
-## D2 — `cargo clippy -p aprender-forecast -p aprender-mcp-forecast --all-targets -- -D warnings` is red on the committed tree
-
-**Found during:** plan 06.1-01, Task 1.
-
-**Measurement.** The command exits 101 with 18 errors, and EVERY ONE is in
-`crates/aprender-compute/`:
-
-```
-backends/q4k/gemv/mod.rs, backends/q4k/gemv/scalar.rs, backends/q6k/gemv.rs,
-blis/backend_selection.rs, blis/compute.rs, blis/elementwise.rs, blis/gemv.rs,
-blis/packing.rs, brick/quant_ops/mod.rs, brick/simd_config/mod.rs, hardware/mod.rs,
-vector/ops/rounding.rs
-```
-
-`-D warnings` propagates to workspace path dependencies, so pre-existing `unused_imports`,
-`unreachable_code`, `unused_variables` and `dead_code` warnings in `aprender-compute`
-become errors and the build fails BEFORE either selected crate is linted.
-`git diff --quiet HEAD -- crates/aprender-compute` returns 0 — unchanged by this phase, and
-`aprender-compute` does not depend on `aprender-forecast`, so no edit here can reach it.
-
-**The scoped measurement that DOES work**, and which this phase used instead:
-
-```
-cargo clippy -p aprender-forecast -p aprender-mcp-forecast --all-targets --no-deps -- -D warnings
-```
-
-`--no-deps` lints only the selected packages. It exits 0, and it is not vacuous — it caught
-two real defects in this plan's own code (five `clippy::disallowed_methods` hits from
-`serde_json::json!`'s internal `unwrap`, and one `clippy::range_plus_one`), both fixed.
-
-**Recommendation.** Either clean `aprender-compute`'s 18 warnings, or change the phase's
-clippy acceptance criterion to the `--no-deps` form. The current criterion can never pass.
-
-## D3 — the README drift gate is red on the committed tree
-
-**Found during:** plan 06.1-01, Task 3.
-
-**Measurement.** `cargo test -p aprender-core --test readme_contract` fails two tests:
-`test_readme_contract_count_matches_workspace` and
-`test_readme_crate_count_matches_workspace`.
-
-| Claim | README says | Actual |
+| Test | README says | Derived says |
 |---|---|---|
-| provable contracts | 1790 | 1791 |
-| workspace crates | 86 | 87 |
+| `test_readme_contract_count_matches_workspace` | `**1790** provable contracts` | 1791 |
+| `test_readme_crate_count_matches_workspace` | `**86** workspace crates` | 87 |
 
-**Proof this phase did not cause it.** The contract count is IDENTICAL at the phase base and
-at HEAD:
+MEASURED as pre-existing, not inferred:
+`git ls-tree -r --name-only 10e121ee5 contracts | grep -c '\.yaml$'` returns **1791** at the
+wave base, and plan 06.1-07's whole diff against that base touches `contracts/` in exactly
+one file — MODIFIED, not added (`git diff --stat 10e121ee5 -- contracts README.md`:
+`1 file changed, 59 insertions(+), 9 deletions(-)`). No crate was added either. So both
+numbers were already true before this plan and the README rows were already stale.
 
-```
-git ls-tree -r --name-only c850e62aaffa5e42e9ed644f9c1c81547cca562f contracts/ | grep -c '\.yaml$'  -> 1791
-git ls-tree -r --name-only HEAD contracts/ | grep -c '\.yaml$'                                       -> 1791
-```
+Not fixed here: the README claims table is a published document whose counts belong to
+whichever change moved them, and editing it from this plan would attribute someone else's
+drift to this phase. Two one-line edits when someone owns them.
 
-This phase MODIFIED two contracts and ADDED none
-(`git diff --name-status <base>..HEAD -- contracts/` shows two `M` lines, no `A`), and added
-no crate. Both numbers drifted before the phase started.
+**Consequence for this plan's verify:** the `<automated>` t3d check requires
+`cargo test -p aprender-core --test readme_contract` to exit 0. It cannot at the wave base.
+The check's OTHER clause — at least 10 tests ran — passes (15 ran).
 
-**Not fixed here deliberately.** Editing the two README numbers would be a two-line change,
-but it is out of scope and would also paper over whatever added the 87th crate without
-updating the gate. It belongs to whoever landed that crate.
+### 2. `cargo fmt --all -- --check` is RED at the wave base
 
-## D4 — `regressor_prior_scale_min` is a representability bound, not the usability bound its rationale claimed
+17 `Diff in` entries across `crates/aprender-image`, `crates/aprender-mcp-chronos` and
+others — none in `crates/aprender-forecast`, which this plan changes. `cargo fmt
+-p aprender-forecast` keeps the changed crate clean and the workspace-wide check stays red
+for reasons that predate this plan.
 
-**Found during:** plan 06.1-01, Task 2. **This one is a finding about the plan itself**, and
-is written up in full in `06.1-01-SUMMARY.md`. Summarised here so the ledger is complete.
+### 3. `cargo clippy ... -- -D warnings` cannot pass while `aprender-compute` is dirty
 
-The plan justified the floor by asserting that `f64::MIN_POSITIVE` yields "a NaN that
-propagates through L-BFGS into every response field and serialises as JSON null".
-MEASURED across 18 configurations and three series shapes: no response field is ever
-non-finite. `Model::objective`'s existing `if self.guard && !f.is_finite() { return 1e300 }`
-absorbs the 0/0. The real failure is quieter — L-BFGS runs ZERO iterations and the regressor
-contributes exactly nothing, while the door returns a normal-looking forecast.
+`cargo clippy -p aprender-compute --lib -- -D warnings` reports **19 errors** on its own at
+the wave base — cfg-gated dead code on aarch64 (`MR_512V2`, `NR_512V2`, `NeonBackend`,
+`matmul_q4k_f32_parallel`, `PREFETCH_DISTANCE`, …). Because the flag reaches that dependency
+in this workspace's configuration, `cargo clippy -p aprender-forecast -p aprender-mcp-forecast
+--all-targets -- -D warnings` aborts there before it ever lints the two crates under change.
 
-The degenerate region is ~145 decades wider than the floor: every `prior_scale <= 1e-9`
-measured 0-1 iterations with a zero contribution; `>= 1e-7` fits normally. The shipped
-constant (1e-153, as the plan specifies) satisfies the plan's acceptance criterion (finite
-objective and beta) but does not make the fit meaningful.
+What this plan asserts instead, and what it measured: `cargo clippy -p aprender-forecast
+-p aprender-mcp-forecast --all-targets` exits 0 with **zero** findings whose path is under
+`crates/aprender-forecast/src` or `crates/aprender-mcp-forecast/src`.
 
-**Deliberately NOT changed here:** the value is a published contract constant that plan
-06.1-03 is specified to build on, so moving it is a decision for a human. What WAS done: the
-false rationale is corrected in both the contract and the Rust doc comment, and
-`forecast::tests::the_prior_scale_floor_is_a_representability_bound_not_a_usability_bound`
-now pins the measured behaviour so it cannot become folklore.
+This is the CLAUDE.md "Linting" section's own ceiling-gate class — findings accumulate
+invisibly on a toolchain nobody's gate runs.
+
+### 4. `pv diff` is blind to `constants:`, `door_surface` and `cost_axes` changes
+
+`pv diff /tmp/forecast-tool-boundary-old.yaml contracts/forecast-tool-boundary-v1.yaml`
+reports **`Contracts are identical.`** for a change that adds a new `constants:` key
+(`fit_np_regressor_cost_per_column`), rewrites cost axis C-08's `formula:`, adds twelve
+`calibration:` keys and rewrites six `door_surface.knobs` rows. `cmp` on the same two files
+reports them differing at line 294, and `diff` reports 56 lines.
+
+So `pv diff`'s semantic model covers equations / proof obligations / falsification tests and
+not the door surface or the constants table, and its semver suggestion must not be read as
+"no bump needed" for a door-surface change. Plan 06.1-07 set `metadata.version` to `1.10.0`
+on its own reasoning (a new published constant plus two new refusals on an arm that
+previously refused everything — additive, so MINOR) and recorded that the tool did not
+supply it.
+
+Worth its own ticket: either extend `pv diff` to the door-surface and constants sections, or
+have it say plainly which sections it compares, so a green "identical" is not mistaken for
+coverage.

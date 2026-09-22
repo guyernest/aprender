@@ -361,6 +361,7 @@ mod tests {
             } else {
                 Some(EventDesign::new(events.to_vec()))
             },
+            regressors: None,
         }
     }
 
@@ -798,13 +799,13 @@ mod tests {
 
             let (with, without) = if n_lags == 0 {
                 (
-                    crate::np::predict_ts(&d, &m, &future, Some((&design, block))),
-                    crate::np::predict_ts(&d, &m, &future, None),
+                    crate::np::predict_ts(&d, &m, &future, Some((&design, block)), None),
+                    crate::np::predict_ts(&d, &m, &future, None, None),
                 )
             } else {
                 (
-                    crate::np::predict_ar_recursive(&d, &m, &future, Some((&design, block))),
-                    crate::np::predict_ar_recursive(&d, &m, &future, None),
+                    crate::np::predict_ar_recursive(&d, &m, &future, Some((&design, block)), None),
+                    crate::np::predict_ar_recursive(&d, &m, &future, None, None),
                 )
             };
             let moved = with
@@ -827,8 +828,8 @@ mod tests {
             // The one-step path, on HISTORY rows, for the lagged arm.
             if n_lags > 0 {
                 let idx: Vec<usize> = (n_lags..d.grid_days.len().min(400)).collect();
-                let a = crate::np::predict_ar_1step(&d, &m, &idx, Some((&design, block)));
-                let b = crate::np::predict_ar_1step(&d, &m, &idx, None);
+                let a = crate::np::predict_ar_1step(&d, &m, &idx, Some((&design, block)), None);
+                let b = crate::np::predict_ar_1step(&d, &m, &idx, None, None);
                 let moved_1step = a
                     .iter()
                     .zip(&b)

@@ -20,6 +20,7 @@
 
 use crate::dates::days_from_civil;
 use crate::events::{EventBlock, EventDesign};
+use crate::regressors::{NpRegressorRows, NpRegressors, RegressorBlock, Standardized};
 use aprender::autograd::{clear_graph, graph_tape_len, no_grad, Tensor};
 use aprender::nn::optim::{AdamW, Optimizer};
 use aprender::nn::{Linear, Module};
@@ -443,6 +444,76 @@ pub fn n_training_samples(d: &NpData, n_lags: usize) -> usize {
     }
 }
 
+/// The training sample list AND, parallel to it, the CALLER-row index of each sample.
+///
+/// ONE function, because the two lists must agree element for element and a second copy of
+/// the sample rule is the drift hazard [`n_training_samples`] was extracted to avoid. It is
+/// the single source both [`train`] and the D-27 tests read, so "the lag-free path indexes
+/// regressors by the caller's row" is a property of shipped code rather than of a test
+/// fixture.
+///
+/// # The lag-free branch: the caller's row, never the grid row (D-27)
+///
+/// `NpData::new` imputes a DAILY grid over `[first, last]`, so on a gappy series the grid is
+/// denser than the caller's rows. The lag-free sample list is already filtered to
+/// `grid_observed`, and the observed grid rows correspond ONE FOR ONE, in ascending order,
+/// to the caller's rows — so the caller-row index is simply the running count of observed
+/// rows. An imputed day is never selected here, so it has no regressor slot and there is no
+/// fill rule to choose.
+///
+/// # The lagged branch: total only because the door refuses the other case
+///
+/// With lags the sample list is every grid row from `n_lags` onward, imputed rows included,
+/// so a caller-row index does not exist for every sample in general. D-26 REFUSES a
+/// regressor on a gappy series at non-zero lags, and on a gap-free series the grid rows and
+/// the caller rows coincide one for one, so `i` is the caller row. That coincidence is
+/// asserted in RELEASE by [`crate::regressors::NpRegressors::new`], not by a `debug_assert!`
+/// that `--release` would compile out.
+#[must_use]
+pub fn training_samples(d: &NpData, n_lags: usize) -> (Vec<usize>, Vec<usize>) {
+    if n_lags == 0 {
+        let mut samples = Vec::new();
+        let mut caller_rows = Vec::new();
+        let mut observed_so_far = 0usize;
+        for i in 0..d.n_train_grid {
+            if d.grid_observed[i] {
+                samples.push(i);
+                caller_rows.push(observed_so_far);
+                observed_so_far += 1;
+            }
+        }
+        (samples, caller_rows)
+    } else {
+        let samples: Vec<usize> = (n_lags..d.n_train_grid).collect();
+        let caller_rows = samples.clone();
+        (samples, caller_rows)
+    }
+}
+
+/// TEST-ONLY: apply a selection to a GRID-INDEXED value vector.
+///
+/// The shipped path never builds a grid-indexed regressor vector at all — that is the whole
+/// of D-27 — so this exists for ONE purpose: to let the four-rule falsification probe feed
+/// four genuinely DIFFERENT inputs into the one place the selection happens, and observe
+/// that the selection makes them identical again. Without it, after D-27 removed the
+/// grid-shaped array, four notionally different fills would collapse into four IDENTICAL
+/// calls and the probe would compare a function against itself and pass on any
+/// implementation, including a broken one.
+///
+/// It is `#[cfg(test)]` so it cannot become a shipped path by accident, and the
+/// no-interpolation source guard excludes `#[cfg(test)]` code by path for the same reason:
+/// the four fill rules are TEST INPUTS.
+///
+/// Total lookup (IN-02): a row outside the vector yields `NaN` rather than panicking, so a
+/// mis-built probe fails an assertion instead of aborting the test process.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn select_grid_values(grid: &[f64], rows: &[usize]) -> Vec<f64> {
+    rows.iter()
+        .map(|&i| grid.get(i).copied().unwrap_or(f64::NAN))
+        .collect()
+}
+
 /// A door-computable PROXY for the multiply-accumulates ONE [`train`] call spends:
 ///
 /// ```text
@@ -486,8 +557,16 @@ pub fn n_training_samples(d: &NpData, n_lags: usize) -> usize {
 /// that a future bound change cannot turn an overflow into a silently SMALL cost that
 /// passes the door.
 #[must_use]
-pub fn train_cost(n_samples: usize, epochs: usize, n_lags: usize, n_event_cols: usize) -> u64 {
-    let width = (n_lags as u64 + 1).saturating_add(per_sample_event_width(n_event_cols));
+pub fn train_cost(
+    n_samples: usize,
+    epochs: usize,
+    n_lags: usize,
+    n_event_cols: usize,
+    n_regressor_cols: usize,
+) -> u64 {
+    let width = (n_lags as u64 + 1)
+        .saturating_add(per_sample_event_width(n_event_cols))
+        .saturating_add(per_sample_regressor_width(n_regressor_cols));
     (epochs as u64)
         .saturating_mul(n_samples as u64)
         .saturating_mul(width)
@@ -507,6 +586,28 @@ fn per_sample_event_width(n_event_cols: usize) -> u64 {
     // `ceil` then a saturating cast: a non-finite or negative coefficient must not wrap into
     // a silently SMALL width that passes the door, which is the same reason every
     // multiplication below saturates.
+    if raw.is_finite() && raw > 0.0 {
+        raw.ceil() as u64
+    } else {
+        0
+    }
+}
+
+/// The numeric-regressor block's contribution to the per-sample feature width, in whole
+/// proxy units.
+///
+/// A SEPARATE function from [`per_sample_event_width`] reading a SEPARATE constant, because
+/// the two coefficients are separately measured — sharing one function would make a future
+/// re-price of either move both, which is the drift the contract-mirror pattern exists to
+/// prevent. Rounded UP for the same reason, and at `n_regressor_cols == 0` the `ceil` of
+/// zero is zero, which is what keeps the regressor-free price bit-identical to plan
+/// 06.1-05's arithmetic.
+#[must_use]
+fn per_sample_regressor_width(n_regressor_cols: usize) -> u64 {
+    if n_regressor_cols == 0 {
+        return 0;
+    }
+    let raw = crate::types::FIT_NP_REGRESSOR_COST_PER_COLUMN * n_regressor_cols as f64;
     if raw.is_finite() && raw > 0.0 {
         raw.ceil() as u64
     } else {
@@ -552,13 +653,20 @@ pub fn door_epochs(n_points: usize, n_samples: usize, n_lags: usize) -> usize {
 /// and it is built out of the same three functions the door then uses to CONFIGURE the
 /// sweep, so a request cannot buy work the door did not price.
 #[must_use]
-pub fn request_train_cost(d: &NpData, n_points: usize, n_lags: usize, n_event_cols: usize) -> u64 {
+pub fn request_train_cost(
+    d: &NpData,
+    n_points: usize,
+    n_lags: usize,
+    n_event_cols: usize,
+    n_regressor_cols: usize,
+) -> u64 {
     let n_samples = n_training_samples(d, n_lags);
     train_cost(
         n_samples,
         door_epochs(n_points, n_samples, n_lags),
         n_lags,
         n_event_cols,
+        n_regressor_cols,
     )
     .saturating_mul(door_lr_sweep(n_lags).len() as u64)
 }
@@ -584,6 +692,21 @@ pub struct TrainConfig {
     /// Declared LAST so the exhaustive struct literals that build it stay in declaration
     /// order (`clippy::inconsistent_struct_constructor` is a workspace `warn`).
     pub event_design: Option<EventDesign>,
+    /// The numeric-regressor channel, or `None` for a regressor-free fit (D-22, D-27).
+    ///
+    /// `Some(channel)` attaches an additive [`RegressorBlock`] BESIDE [`NpModel`] and the
+    /// event block — a SECOND `.add()` on the forward, its parameters extended into the
+    /// same single `AdamW` vector. `None` and a zero-width channel are the same fit bit for
+    /// bit: no block is built, nothing is added, and both recorded neuralprophet invariance
+    /// signatures still reproduce.
+    ///
+    /// The channel holds the CALLER's arrays at caller length. There is no grid-shaped
+    /// regressor array anywhere in this file, which is the whole of D-27 — see the
+    /// [`crate::regressors`] module section for why the spike prototype's `reg_grid` is
+    /// deliberately not ported.
+    ///
+    /// Declared after `event_design` for the same declaration-order reason.
+    pub regressors: Option<NpRegressors>,
 }
 
 pub struct TrainLog {
@@ -617,6 +740,20 @@ pub struct TrainLog {
     /// helpers need the block (and the design) to add an event contribution for the rows
     /// they predict, and the caller already holds the log.
     pub events: Option<EventBlock>,
+    /// The trained numeric-regressor block, or `None` when regressors were off.
+    ///
+    /// Rides in the LOG beside [`TrainLog::events`], for the same reason and by the same
+    /// rule: `train`'s return arity is unchanged and the caller already holds the log.
+    pub regressors: Option<RegressorBlock>,
+    /// The standardisation constants the fit ACTUALLY used, in request order.
+    ///
+    /// They travel WITH the weights because a future row's contribution needs the SAME
+    /// `mu`/`std` the training rows used. Keeping them here means the predict paths and the
+    /// tests read them from ONE place rather than re-deriving them from the caller's array,
+    /// which is how two copies of one constant drift apart.
+    pub regressor_specs: Vec<Standardized>,
+    /// The number of numeric-regressor columns this fit trained on; `0` when they were off.
+    pub n_regressor_cols: usize,
 }
 
 impl TrainLog {
@@ -690,6 +827,14 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     let design = cfg.event_design.as_ref().filter(|g| g.dim() > 0);
     let ed = design.map_or(0, EventDesign::dim);
     let mut block = design.map(|_| EventBlock::new(ed, &mut rng));
+    // The regressor block is drawn from the SAME rng, AFTER the event block, for the same
+    // reason the event block is drawn after the model: a regressor-free run at the same seed
+    // then initialises the model and the event block identically, which is what keeps both
+    // recorded invariance signatures reproducing and makes an ON/OFF comparison a comparison
+    // of the block.
+    let reg_channel = cfg.regressors.as_ref().filter(|r| r.dim() > 0);
+    let rd = reg_channel.map_or(0, NpRegressors::dim);
+    let mut reg_block = reg_channel.map(|_| RegressorBlock::new(rd, &mut rng));
     let n_grid = d.n_train_grid;
     let y_norm: Vec<f32> = d.grid_y[..n_grid].iter().map(|v| d.norm(*v)).collect();
     let rows = rows_for(d, &d.grid_days[..n_grid], &y_norm, cfg.newer_w);
@@ -699,17 +844,24 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     let l = cfg.n_lags;
     // NP trains the lag-free model on the OBSERVED rows only (no imputation needed);
     // with lags it trains on the imputed daily grid so every window is complete.
-    let samples: Vec<usize> = if l == 0 {
-        (0..n_grid).filter(|&i| d.grid_observed[i]).collect()
-    } else {
-        (l..n_grid).collect()
-    };
+    //
+    // `caller_rows` is the parallel list D-27 turns on: the CALLER's own row index for each
+    // sample. It is built by the same function and in the same pass as `samples`, so the
+    // two cannot drift; see [`training_samples`].
+    let (samples, caller_rows) = training_samples(d, l);
     let n = samples.len();
+    // The standardised regressor rows, `[n, rd]` — one row per SAMPLE, indexed by the
+    // CALLER's row. Not `[n_grid, rd]`: building a grid-shaped array is what would create
+    // an imputed-day slot with an undefined value in it, and D-27 removes the slot rather
+    // than choosing a fill rule for it (spike 014 measured two defensible rules 10.48 apart
+    // on a series of scale 35.32, with a garbage probe flipping the sign of both
+    // coefficients).
+    let reg_rows: Vec<f32> = reg_channel.map_or_else(Vec::new, |r| r.history_rows(&caller_rows));
     let batch = cfg.batch.unwrap_or_else(|| auto_batch(n));
     let epochs = cfg.epochs.unwrap_or_else(|| auto_epochs(n));
     let n_batches = n.div_ceil(batch);
     let total_steps = epochs * n_batches;
-    // The door priced this request with `train_cost(n_training_samples(d, l), epochs, l, E)`
+    // The door priced this request with `train_cost(n_training_samples(d, l), epochs, l, E, 0)`
     // BEFORE calling in (cost axis C-08). If the two ever derived a different `n` the bound
     // would be evadable wherever they disagreed, so the sample rule is pinned here rather
     // than argued. `debug_assert` because this is the hot path and the rule is one branch.
@@ -726,6 +878,15 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
         if let Some(bl) = block.as_mut() {
             params.extend(bl.parameters_mut());
         }
+        // The regressor block's parameters go into the SAME vector, beside the model's and
+        // the event block's. A block built and forwarded but never extended into this
+        // vector still contributes to the forward pass — its weights simply never move —
+        // and the failure then surfaces as "the driver had no effect", which names the
+        // symptom rather than the cause. `the_regressor_weights_move_under_the_optimiser`
+        // is what makes the registration observable.
+        if let Some(bl) = reg_block.as_mut() {
+            params.extend(bl.parameters_mut());
+        }
         let handed_over = params.len();
         (
             AdamW::new(params, cfg.max_lr as f32).weight_decay(cfg.weight_decay),
@@ -736,18 +897,33 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
         epochs,
         batch,
         n_samples: n,
-        n_params: model.n_params() + block.as_ref().map_or(0, EventBlock::n_params),
+        n_params: model.n_params()
+            + block.as_ref().map_or(0, EventBlock::n_params)
+            + reg_block.as_ref().map_or(0, RegressorBlock::n_params),
         epoch_loss: Vec::new(),
         seconds: 0.0,
         tape_len_per_step: 0,
         steps: 0,
-        train_cost: train_cost(n, epochs, l, ed),
+        train_cost: train_cost(n, epochs, l, ed, rd),
         n_event_cols: ed,
         n_opt_tensors,
         events: None,
+        regressors: None,
+        regressor_specs: reg_channel.map_or_else(Vec::new, |r| r.specs().to_vec()),
+        n_regressor_cols: rd,
     };
     let t0 = Instant::now();
-    let mut order = samples.clone();
+    // Shuffled over SAMPLE POSITIONS rather than over grid indices, so one chunk element
+    // addresses BOTH the grid-length feature rows (through `samples[pos]`) and the
+    // SAMPLE-length regressor rows (through `pos` itself) with no second lookup table and
+    // no grid-shaped regressor array.
+    //
+    // The fit is unchanged BIT FOR BIT. `rng.shuffle` draws a permutation of `n` whatever
+    // the vector holds, so the grid-index sequence is the same either way: it was
+    // `order[k] = samples[perm[k]]` and it is now `samples[order[k]] = samples[perm[k]]`.
+    // Both recorded neuralprophet invariance signatures reproduce, which is the evidence
+    // rather than this paragraph.
+    let mut order: Vec<usize> = (0..n).collect();
     let mut step = 0usize;
     for epoch in 0..epochs {
         rng.shuffle(&mut order);
@@ -756,14 +932,19 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
             let p = step as f64 / total_steps as f64;
             opt.set_lr(one_cycle_lr(p, cfg.max_lr) as f32);
             let b = chunk.len();
-            let xt = Tensor::from_vec(gather(&rows.tr, rows.td, chunk), &[b, rows.td]);
-            let xs = Tensor::from_vec(gather(&rows.se, rows.sd, chunk), &[b, rows.sd]);
-            let yt = Tensor::from_vec(chunk.iter().map(|&i| rows.y[i]).collect(), &[b, 1]);
-            let wt = Tensor::from_vec(chunk.iter().map(|&i| rows.w[i]).collect(), &[b, 1]);
+            // The GRID rows this chunk names. Everything keyed on the daily grid — the
+            // trend and seasonality features, the target, the sample weight, the lags and
+            // the event indicators — reads through here; only the regressor rows read
+            // through `chunk` directly, because they are the CALLER's rows (D-27).
+            let grid: Vec<usize> = chunk.iter().map(|&pos| samples[pos]).collect();
+            let xt = Tensor::from_vec(gather(&rows.tr, rows.td, &grid), &[b, rows.td]);
+            let xs = Tensor::from_vec(gather(&rows.se, rows.sd, &grid), &[b, rows.sd]);
+            let yt = Tensor::from_vec(grid.iter().map(|&i| rows.y[i]).collect(), &[b, 1]);
+            let wt = Tensor::from_vec(grid.iter().map(|&i| rows.w[i]).collect(), &[b, 1]);
             let mut pred = if l == 0 {
                 model.forward(&xt, &xs, None)
             } else {
-                let lag_idx: Vec<usize> = chunk.iter().flat_map(|&i| i - l..i).collect();
+                let lag_idx: Vec<usize> = grid.iter().flat_map(|&i| i - l..i).collect();
                 let raw = Tensor::from_vec(lag_idx.iter().map(|&j| rows.y[j]).collect(), &[b, l]);
                 let se_lag =
                     Tensor::from_vec(gather(&rows.se, rows.sd, &lag_idx), &[b * l, rows.sd]);
@@ -779,8 +960,20 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
             // that matters. Subtracting it in one place and not the other would make the
             // forecast disagree with the fit.
             if let Some(bl) = block.as_ref() {
-                let xe = Tensor::from_vec(gather(&ev_rows, ed, chunk), &[b, ed]);
+                let xe = Tensor::from_vec(gather(&ev_rows, ed, &grid), &[b, ed]);
                 pred = pred.add(&bl.forward(&xe));
+            }
+            // The regressor term: a SECOND, SEPARATE `.add()`. Not folded into the event
+            // block's columns — the two have different standardisation (0/1 indicators
+            // against ddof-1 standardised continuous columns) and different refusal
+            // surfaces, and one shared `Linear` would make the event recovery bar and the
+            // regressor behaviour inseparable.
+            //
+            // Gathered by `chunk` — the SAMPLE position — not by `grid`. That is the whole
+            // of D-27 at the one line where it could be got wrong.
+            if let Some(bl) = reg_block.as_ref() {
+                let xr = Tensor::from_vec(gather(&reg_rows, rd, chunk), &[b, rd]);
+                pred = pred.add(&bl.forward(&xr));
             }
             let loss = weighted_huber(&pred, &yt, &wt, cfg.huber_beta);
             acc += f64::from(loss.item()) * b as f64;
@@ -790,6 +983,9 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
             }
             let mut params = model.parameters_mut();
             if let Some(bl) = block.as_mut() {
+                params.extend(bl.parameters_mut());
+            }
+            if let Some(bl) = reg_block.as_mut() {
                 params.extend(bl.parameters_mut());
             }
             opt.step_with_params(&mut params);
@@ -809,6 +1005,7 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     log.seconds = t0.elapsed().as_secs_f64();
     log.steps = step;
     log.events = block;
+    log.regressors = reg_block;
     (model, log)
 }
 
@@ -835,20 +1032,57 @@ fn add_events(p: Tensor, ev: EventChannel<'_>, days: &[i64]) -> Tensor {
     }
 }
 
+/// The numeric-regressor channel the predict helpers take: the standardised rows KEYED BY
+/// DAY and the trained block.
+///
+/// Keyed by day rather than by index because the three helpers address rows three different
+/// ways — arbitrary days, grid indices, and a recursive roll-forward — and a day is the one
+/// identifier all three actually hold. The rows carry the caller's `ds.len() + horizon`
+/// values standardised with the constants the FIT used, so a future row's contribution uses
+/// the same `mu`/`std` the training rows did.
+pub type NpRegChannel<'a> = Option<(&'a NpRegressorRows, &'a RegressorBlock)>;
+
+/// Add the numeric-regressor contribution for `days` to a `[n, 1]` prediction.
+///
+/// A zero-width channel is treated as absent for the reason [`add_events`] treats an empty
+/// design as absent: a `[n, 0]` `Tensor` trips trueno's empty-transpose contract deep inside
+/// `Linear::forward`, which is a confusing place to learn that a caller passed nothing.
+fn add_regressors(p: Tensor, rc: NpRegChannel<'_>, days: &[i64]) -> Tensor {
+    match rc {
+        Some((rows, b)) if rows.dim() > 0 => {
+            let xr = Tensor::from_vec(rows.block_rows(days), &[days.len(), rows.dim()]);
+            p.add(&b.forward(&xr))
+        }
+        _ => p,
+    }
+}
+
 /// Trend + seasonality prediction (original scale) for arbitrary days, plus the additive
 /// event contribution when an [`EventChannel`] is supplied.
-pub fn predict_ts(d: &NpData, m: &NpModel, days: &[i64], ev: EventChannel<'_>) -> Vec<f64> {
+pub fn predict_ts(
+    d: &NpData,
+    m: &NpModel,
+    days: &[i64],
+    ev: EventChannel<'_>,
+    rc: NpRegChannel<'_>,
+) -> Vec<f64> {
     let rows = rows_for(d, days, &vec![0.0; days.len()], DEFAULT_END_W);
     let xt = Tensor::from_vec(rows.tr.clone(), &[days.len(), rows.td]);
     let xs = Tensor::from_vec(rows.se.clone(), &[days.len(), rows.sd]);
-    let out = no_grad(|| add_events(m.forward(&xt, &xs, None), ev, days));
+    let out = no_grad(|| add_regressors(add_events(m.forward(&xt, &xs, None), ev, days), rc, days));
     clear_graph();
     out.data().iter().map(|v| d.denorm(*v)).collect()
 }
 
 /// One-step-ahead AR prediction (original scale) for grid indices `idx` using true lags,
 /// plus the additive event contribution for the predicted rows.
-pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize], ev: EventChannel<'_>) -> Vec<f64> {
+pub fn predict_ar_1step(
+    d: &NpData,
+    m: &NpModel,
+    idx: &[usize],
+    ev: EventChannel<'_>,
+    rc: NpRegChannel<'_>,
+) -> Vec<f64> {
     let l = m.n_lags;
     // The days `idx` names, for the event indicator rows. Total lookup, because `idx` is
     // caller-built and `grid_days` is a different field (IN-02).
@@ -867,9 +1101,13 @@ pub fn predict_ar_1step(d: &NpData, m: &NpModel, idx: &[usize], ev: EventChannel
     let tr_feats = Tensor::from_vec(gather(&rows.tr, rows.td, &lag_idx), &[b * l, rows.td]);
     let out = no_grad(|| {
         let tr_lag = Tensor::from_vec(m.trend.forward(&tr_feats).data().to_vec(), &[b, l]);
-        add_events(
-            m.forward(&xt, &xs, Some((&raw, &se_lag, &tr_lag))),
-            ev,
+        add_regressors(
+            add_events(
+                m.forward(&xt, &xs, Some((&raw, &se_lag, &tr_lag))),
+                ev,
+                &days,
+            ),
+            rc,
             &days,
         )
     });
@@ -897,6 +1135,7 @@ pub fn predict_ar_recursive(
     m: &NpModel,
     days: &[i64],
     ev: EventChannel<'_>,
+    rc: NpRegChannel<'_>,
 ) -> Vec<f64> {
     let l = m.n_lags;
     let mut hist: Vec<f32> = d.grid_y.iter().map(|v| d.norm(*v)).collect();
@@ -921,9 +1160,16 @@ pub fn predict_ar_recursive(
             let tr_feats = Tensor::from_vec(tr_lag, &[l, d.trend_dim()]);
             let v = no_grad(|| {
                 let tl = Tensor::from_vec(m.trend.forward(&tr_feats).data().to_vec(), &[1, l]);
-                add_events(
-                    m.forward(&xt, &xs, Some((&raw, &se_l, &tl))),
-                    ev,
+                // The regressor term is added BEFORE the value is pushed into the recursive
+                // history, exactly as the event term is, so a driver on a future day moves
+                // not only that day's forecast but every lagged day after it.
+                add_regressors(
+                    add_events(
+                        m.forward(&xt, &xs, Some((&raw, &se_l, &tl))),
+                        ev,
+                        std::slice::from_ref(&next),
+                    ),
+                    rc,
                     std::slice::from_ref(&next),
                 )
                 .data()[0]
@@ -1008,7 +1254,7 @@ mod tests {
             for epochs in [20usize, 50, 80, 320] {
                 for n_lags in [0usize, 7, 30, 365] {
                     assert_eq!(
-                        train_cost(n_samples, epochs, n_lags, 0),
+                        train_cost(n_samples, epochs, n_lags, 0, 0),
                         (epochs as u64) * (n_samples as u64) * (n_lags as u64 + 1),
                         "train_cost at E = 0 must equal the pre-event arithmetic exactly \
                          (n_samples={n_samples} epochs={epochs} n_lags={n_lags})"
@@ -1026,7 +1272,7 @@ mod tests {
             (9_989, 80, 11, 9_589_440),
         ] {
             assert_eq!(
-                train_cost(n_samples, epochs, n_lags, 0),
+                train_cost(n_samples, epochs, n_lags, 0, 0),
                 expected,
                 "the event-free price of a geometry this crate already derived bounds from \
                  must not have moved"
@@ -1039,10 +1285,10 @@ mod tests {
     fn the_event_width_is_rounded_up_and_monotone() {
         let c = crate::types::FIT_NP_EVENT_COST_PER_COLUMN;
         let (n, e, l) = (1_000usize, 10usize, 0usize);
-        let base = train_cost(n, e, l, 0);
+        let base = train_cost(n, e, l, 0, 0);
         let mut prev = base;
         for cols in [0usize, 1, 10, 100, 500, 1_000] {
-            let got = train_cost(n, e, l, cols);
+            let got = train_cost(n, e, l, cols, 0);
             assert!(
                 got >= prev,
                 "the priced cost must never FALL as event columns are added: {cols} columns \
@@ -1062,7 +1308,7 @@ mod tests {
         // ONE column must already cost something, or the `ceil` is not doing its job and a
         // caller could add columns for free up to 1/c of them.
         assert!(
-            train_cost(n, e, l, 1) > base,
+            train_cost(n, e, l, 1, 0) > base,
             "a single event column must raise the price: the width contribution is rounded \
              UP, so even {c} of a unit becomes a whole one"
         );
@@ -1104,8 +1350,8 @@ mod tests {
         // computed once and compared against every measured side.
         let points = 1_200usize;
         let d = daily(points);
-        let priced_at_zero = request_train_cost(&d, points, n_lags_cal, 0);
-        let priced_at_max = request_train_cost(&d, points, n_lags_cal, e_max);
+        let priced_at_zero = request_train_cost(&d, points, n_lags_cal, 0, 0);
+        let priced_at_max = request_train_cost(&d, points, n_lags_cal, e_max, 0);
         let priced_ratio = priced_at_max as f64 / priced_at_zero as f64;
 
         let hosts: [(&str, &str, &str); 2] = [
@@ -1207,8 +1453,8 @@ mod tests {
             let mut ratios: Vec<f64> = Vec::new();
             for &p in &points {
                 let d = daily(p);
-                let at_zero = request_train_cost(&d, p, n_lags, 0);
-                let at_max = request_train_cost(&d, p, n_lags, e_max);
+                let at_zero = request_train_cost(&d, p, n_lags, 0, 0);
+                let at_max = request_train_cost(&d, p, n_lags, e_max, 0);
                 let ratio = at_max as f64 / at_zero as f64;
                 println!(
                     "shape: points={p} n_lags={n_lags} samples={} epochs={} sweep={} \
@@ -1249,10 +1495,10 @@ mod tests {
         // that ignored `n_lags` would mean the term had escaped the width in the other
         // direction.
         let d = daily(points[0]);
-        let r0 = request_train_cost(&d, points[0], 0, e_max) as f64
-            / request_train_cost(&d, points[0], 0, 0) as f64;
-        let r7 = request_train_cost(&d, points[0], 7, e_max) as f64
-            / request_train_cost(&d, points[0], 7, 0) as f64;
+        let r0 = request_train_cost(&d, points[0], 0, e_max, 0) as f64
+            / request_train_cost(&d, points[0], 0, 0, 0) as f64;
+        let r7 = request_train_cost(&d, points[0], 7, e_max, 0) as f64
+            / request_train_cost(&d, points[0], 7, 0, 0) as f64;
         println!("shape: ratio at n_lags=0 is {r0:.6}, at n_lags=7 is {r7:.6}");
         assert!(
             r7 < r0,
@@ -1260,6 +1506,603 @@ mod tests {
              the event term is additive to the per-sample width, so it is a smaller share of \
              a wider one"
         );
+    }
+
+    /// SC4 for NUMERIC REGRESSORS: the per-epoch work a regressor column buys is OBSERVED
+    /// priced, as a RATIO, on the same shape plan 06.1-05 used for event columns.
+    ///
+    /// ```text
+    /// measured(R) / measured(0)  <=  priced(R) / priced(0)
+    /// ```
+    ///
+    /// Both measured numbers are READ from the C-08 `calibration:` mapping. A test that
+    /// recomputed the priced formula on both sides would prove the formula equals itself; a
+    /// test carrying the measured number as a literal would drift from the calibration the
+    /// moment either was re-measured.
+    ///
+    /// Asserted on every architecture the regressor calibration records. TODAY that is ONE
+    /// — aarch64 — and that is stated rather than hidden: the event axis carries an x86_64
+    /// confirmation and this one does not yet. The host list below is asserted non-empty so
+    /// a silently emptied list cannot pass by checking nothing, and it is the place a second
+    /// host is added.
+    #[test]
+    fn the_regressor_column_underpricing_is_observed_closed() {
+        let r_max = c08_calibration_f64("measured_at_r_max") as usize;
+        let n_lags_cal = c08_calibration_f64("regressor_n_lags_cal") as usize;
+        let points = 1_200usize;
+        let d = daily(points);
+        let priced_at_zero = request_train_cost(&d, points, n_lags_cal, 0, 0);
+        let priced_at_max = request_train_cost(&d, points, n_lags_cal, 0, r_max);
+        let priced_ratio = priced_at_max as f64 / priced_at_zero as f64;
+
+        let hosts: [(&str, &str, &str); 1] = [(
+            "aarch64 (deriving)",
+            "measured_us_per_step_at_r0",
+            "measured_us_per_step_at_r_max",
+        )];
+        assert!(
+            !hosts.is_empty(),
+            "vacuity guard: the closure must be asserted on at least the deriving host"
+        );
+
+        for (what, r0_key, rmax_key) in hosts {
+            let us_at_zero = c08_calibration_f64(r0_key);
+            let us_at_max = c08_calibration_f64(rmax_key);
+            assert!(
+                us_at_zero > 0.0 && us_at_max > 0.0 && r_max > 0,
+                "{what}: the calibration must carry positive measurements at both ends, got \
+                 {us_at_zero} / {us_at_max} at R = {r_max}"
+            );
+            let measured_ratio = us_at_max / us_at_zero;
+            let headroom = priced_ratio - measured_ratio;
+            println!(
+                "C-08 regressor closure on {what} at R = {r_max} (n_lags_cal = \
+                 {n_lags_cal}): measured ratio {measured_ratio:.4} ({us_at_max} / \
+                 {us_at_zero} us per step) vs priced ratio {priced_ratio:.4} \
+                 ({priced_at_max} / {priced_at_zero}); headroom {headroom:.4}"
+            );
+            assert!(
+                measured_ratio > 1.0,
+                "{what}: the measured cost must RISE with the regressor-column count, or \
+                 there was never an under-pricing to close and this test proves nothing: \
+                 measured ratio {measured_ratio}"
+            );
+            assert!(
+                measured_ratio <= priced_ratio,
+                "{what}: UNDER-PRICED at {r_max} regressor columns — the measured work grows \
+                 {measured_ratio:.4}x while the price grows only {priced_ratio:.4}x. A \
+                 request at the regressor count ceiling would buy more work than the door \
+                 priced it at: the SC4 defect, one column family over."
+            );
+        }
+
+        // ---- THE COMBINED CASE: a caller can send BOTH, and the two terms must ADD ----
+        //
+        // Not mask each other. Without this a price that took the MAXIMUM of the two terms,
+        // or that dropped one whenever the other was present, would pass every single-axis
+        // assertion above and under-price every request carrying both.
+        let e_max = c08_calibration_f64("measured_at_e_max") as usize;
+        let e_only = request_train_cost(&d, points, n_lags_cal, e_max, 0);
+        let r_only = request_train_cost(&d, points, n_lags_cal, 0, r_max);
+        let both = request_train_cost(&d, points, n_lags_cal, e_max, r_max);
+        println!(
+            "C-08 combined: priced(0,0)={priced_at_zero} priced(E={e_max},0)={e_only} \
+             priced(0,R={r_max})={r_only} priced(E,R)={both}"
+        );
+        assert!(
+            both > e_only && both > r_only,
+            "a request carrying BOTH must price above either alone: {both} against \
+             {e_only} / {r_only}"
+        );
+        // Exactly additive in the WIDTH, which is the shape claim: the combined width is
+        // the base plus both rounded-up contributions.
+        let base_width = n_lags_cal as u64 + 1;
+        let expected_width = base_width
+            + (crate::types::FIT_NP_EVENT_COST_PER_COLUMN * e_max as f64).ceil() as u64
+            + (crate::types::FIT_NP_REGRESSOR_COST_PER_COLUMN * r_max as f64).ceil() as u64;
+        assert_eq!(
+            both,
+            priced_at_zero / base_width * expected_width,
+            "the two terms must ADD inside the per-sample width; expected width \
+             {expected_width} units against the base {base_width}"
+        );
+    }
+
+    /// The SHAPE discriminator for the REGRESSOR term, separate from the event one.
+    ///
+    /// A shape argument that is only ever checked on one of two terms is an argument about
+    /// the other by analogy, which is not evidence. With the term INSIDE the per-sample
+    /// width the ratio `priced(R)/priced(0)` is free of epochs and samples entirely; with
+    /// `product + c*R` it collapses toward 1 as the product grows, so a coefficient tuned to
+    /// pass an observation at one geometry under-prices every larger series.
+    #[test]
+    fn the_regressor_cost_shape_scales_with_geometry() {
+        const GEOMETRIES: usize = 2;
+        let points = [1_200usize, 12_000];
+        let r_max = c08_calibration_f64("measured_at_r_max") as usize;
+        let samples: Vec<usize> = points
+            .iter()
+            .map(|&p| n_training_samples(&daily(p), 0))
+            .collect();
+        assert_eq!(samples.len(), GEOMETRIES);
+        assert!(
+            samples[1] >= samples[0] * 5,
+            "the two geometries must differ by at least 5x in samples, or this test cannot \
+             discriminate the two shapes: {samples:?}"
+        );
+        assert_ne!(
+            auto_epochs(samples[0]),
+            auto_epochs(samples[1]),
+            "the two geometries must also differ in the epoch budget"
+        );
+
+        for n_lags in [0usize, 7] {
+            let mut ratios: Vec<f64> = Vec::new();
+            for &p in &points {
+                let d = daily(p);
+                let at_zero = request_train_cost(&d, p, n_lags, 0, 0);
+                let at_max = request_train_cost(&d, p, n_lags, 0, r_max);
+                ratios.push(at_max as f64 / at_zero as f64);
+            }
+            assert_eq!(ratios.len(), GEOMETRIES);
+            assert!(
+                (ratios[0] - ratios[1]).abs() < 1e-12,
+                "at n_lags={n_lags} the priced regressor ratio is {} at {} points and {} at \
+                 {} points. The regressor term is therefore NOT inside the per-sample width.",
+                ratios[0],
+                points[0],
+                ratios[1],
+                points[1]
+            );
+            let width_at_zero = n_lags as f64 + 1.0;
+            let expected = (width_at_zero
+                + (crate::types::FIT_NP_REGRESSOR_COST_PER_COLUMN * r_max as f64).ceil())
+                / width_at_zero;
+            assert!(
+                (ratios[0] - expected).abs() < 1e-12,
+                "at n_lags={n_lags} the priced regressor ratio {} is not the width form's \
+                 closed form {expected}",
+                ratios[0]
+            );
+        }
+    }
+
+    /// The REGRESSOR width rises, is rounded UP, and at `R = 0` the price is BIT-IDENTICAL
+    /// to plan 06.1-05's arithmetic.
+    ///
+    /// The bit-identity half is what keeps every bound this crate derived from the
+    /// regressor-free formula — `MAX_NP_TRAIN_COST`'s three at-the-bound compositions and
+    /// `np::parity`'s own Peyton geometries — meaning what they meant before this term
+    /// existed.
+    #[test]
+    fn the_regressor_width_is_rounded_up_and_the_zero_price_is_unchanged() {
+        let c = crate::types::FIT_NP_REGRESSOR_COST_PER_COLUMN;
+        let (n, e, l) = (1_000usize, 10usize, 0usize);
+        let base = train_cost(n, e, l, 0, 0);
+        let mut prev = base;
+        for cols in [0usize, 1, 10, 100, crate::types::MAX_REGRESSORS] {
+            let got = train_cost(n, e, l, 0, cols);
+            assert!(
+                got >= prev,
+                "the priced cost must never FALL as regressor columns are added: {cols} \
+                 columns priced {got} against {prev}"
+            );
+            let implied_width = got as f64 / (e as f64 * n as f64);
+            let exact_width = (l as f64 + 1.0) + c * cols as f64;
+            assert!(
+                implied_width >= exact_width - 1e-9,
+                "at {cols} regressor columns the priced width {implied_width} is BELOW the \
+                 exact {exact_width}: the door is under-pricing by a fractional column"
+            );
+            prev = got;
+        }
+        assert!(
+            train_cost(n, e, l, 0, 1) > base,
+            "a single regressor column must raise the price: the width contribution is \
+             rounded UP, so even {c} of a unit becomes a whole one"
+        );
+
+        // BIT-IDENTICAL at R = 0 AND E = 0, on the very geometries this crate derived bounds
+        // from. Values computed from the PRE-REGRESSOR (and pre-event) formula.
+        for (n_samples, epochs, n_lags, expected) in [
+            (2_905usize, 80usize, 0usize, 232_400u64),
+            (2_934, 80, 30, 7_276_320),
+            (19_994, 50, 6, 6_997_900),
+            (9_989, 80, 11, 9_589_440),
+        ] {
+            assert_eq!(
+                train_cost(n_samples, epochs, n_lags, 0, 0),
+                expected,
+                "the regressor-free AND event-free price of a geometry this crate already \
+                 derived bounds from must not have moved"
+            );
+        }
+    }
+}
+
+// ================== D-27: the four-rule falsification probe (SC5) ==================
+//
+// Spike 014 measured a gappy daily series — 790 observed rows on an 899-day grid, 109
+// imputed (12.1 %), scale 35.32 — and filled the imputed days' regressor values four ways:
+// linear interpolation, zero, carry-forward, and a deliberate garbage magnitude. At
+// `n_lags = 0` all four were BIT-IDENTICAL; at `n_lags = 7` two DEFENSIBLE rules were 10.48
+// apart (~30 % of scale) and the garbage rule moved the forecast by 192 and flipped the sign
+// of BOTH coefficients.
+//
+// # The probe's STATUS has changed, and this is where that is stated
+//
+// Before D-27 this table WAS the guarantee. After D-27 it CONFIRMS a structural fact: there
+// is no grid-shaped regressor array, so there is no slot for a fill rule to write into. D-27
+// rejected keeping the probe as the sole evidence precisely because a later refactor that
+// started reading the slot would go green until someone re-derived it — and it keeps the
+// probe anyway, because a structural claim with nothing able to DETECT its violation is the
+// shape this project has been withdrawing.
+//
+// # Why the naive port would be a tautology
+//
+// With no grid-shaped array to fill, four notionally different fills become four IDENTICAL
+// calls: the test would compare a function against itself and pass on any implementation.
+// So the four inputs are made genuinely different AT THE BOUNDARY the test probes — four
+// grid-length vectors — and pushed through [`super::select_grid_values`], the one place the
+// caller-row selection happens. The structural claim is then an EQUALITY BETWEEN THE
+// SELECTION'S OUTPUT AND THE CALLER'S INPUT, asserted before any training runs.
+#[cfg(test)]
+mod d27_probe {
+    use super::{
+        n_training_samples, predict_ts, select_grid_values, train, training_samples, NpData,
+        TrainConfig,
+    };
+    use crate::dates::days_from_civil;
+    use crate::prophet::Mode;
+    use crate::regressors::{standardize_one, NpRegressors, RegressorBlock, RegressorSpec};
+
+    /// EXACTLY four rules, and the count is asserted: a probe that silently lost a rule
+    /// would report the same green as a complete one.
+    const RULES: usize = 4;
+    const RULE_NAMES: [&str; RULES] = ["linear", "zero", "carry-forward", "garbage 1e3"];
+    /// The deliberate garbage magnitude, far outside the driver's own scale (which is
+    /// `2 ± 3`). It is the reason a green column cannot be mistaken for a broken harness.
+    const GARBAGE: f64 = 1e3;
+    const HORIZON: usize = 7;
+
+    /// A gappy daily series in spike 014's regime: 180 calendar days with 31 removed
+    /// (17.2 % of the grid). Returns `(days, y, the caller's driver array of len == points)`.
+    fn probe_series() -> (Vec<i64>, Vec<f64>, Vec<f64>) {
+        let t0 = days_from_civil(2021, 1, 1);
+        let (mut days, mut y, mut driver) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..180i64 {
+            if k % 8 == 3 || k % 23 == 7 {
+                continue;
+            }
+            let t = k as f64;
+            days.push(t0 + k);
+            y.push(20.0 + 0.05 * t + (2.0 * std::f64::consts::PI * t / 7.0).sin());
+            driver.push(2.0 + (t * 0.37).sin() * 3.0);
+        }
+        (days, y, driver)
+    }
+
+    /// Build a GRID-LENGTH value vector: the caller's real values at the observed positions,
+    /// and `rule`'s fill at the imputed ones.
+    ///
+    /// These are TEST INPUTS. Nothing here is a shipped code path, which is why the
+    /// no-interpolation source guard excludes `#[cfg(test)]` code by path — see
+    /// `no_shipped_regressor_path_interpolates_a_value`.
+    fn grid_with_rule(d: &NpData, caller: &[f64], rule: usize) -> Vec<f64> {
+        let n = d.n_train_grid;
+        let mut g = vec![f64::NAN; n];
+        let mut c = 0usize;
+        for i in 0..n {
+            if d.grid_observed[i] {
+                g[i] = caller[c];
+                c += 1;
+            }
+        }
+        for i in 0..n {
+            if !g[i].is_nan() {
+                continue;
+            }
+            g[i] = match rule {
+                // rule 0: linear interpolation between the neighbouring OBSERVED values.
+                // A binary driver would come out at a "half promo" day under this rule,
+                // which is exactly why no shipped path may do it.
+                0 => {
+                    let a = (0..i).rev().find(|&j| d.grid_observed[j]);
+                    let b = (i + 1..n).find(|&j| d.grid_observed[j]);
+                    match (a, b) {
+                        (Some(a), Some(b)) => {
+                            let f = (i - a) as f64 / (b - a) as f64;
+                            g[a] + f * (g[b] - g[a])
+                        }
+                        (Some(a), None) => g[a],
+                        (None, Some(b)) => g[b],
+                        (None, None) => 0.0,
+                    }
+                }
+                1 => 0.0,
+                2 => (0..i)
+                    .rev()
+                    .find(|&j| d.grid_observed[j])
+                    .map_or(0.0, |j| g[j]),
+                3 => GARBAGE,
+                _ => unreachable!("RULES is {RULES}"),
+            };
+        }
+        g
+    }
+
+    /// Fit on `hist` (a CALLER-length driver array) and return `(yhat bits, weight bits)`.
+    fn fit(d: &NpData, days: &[i64], hist: &[f64]) -> (Vec<u64>, Vec<u32>) {
+        let last = days[days.len() - 1];
+        let fut: Vec<i64> = (1..=HORIZON as i64).map(|k| last + k).collect();
+        let futv: Vec<f64> = (0..HORIZON)
+            .map(|i| 2.0 + ((days.len() + i) as f64 * 0.37).sin() * 3.0)
+            .collect();
+        let spec = RegressorSpec {
+            name: "price".into(),
+            mode: Mode::Additive,
+            prior_scale: 10.0,
+            standardize: None,
+        };
+        let regs = NpRegressors::new(
+            d,
+            0,
+            vec![standardize_one(&spec, hist)],
+            vec![hist.to_vec()],
+            vec![futv],
+        )
+        .expect("a lag-free channel is always aligned");
+        let cfg = TrainConfig {
+            n_lags: 0,
+            ar_layers: vec![],
+            max_lr: 0.03,
+            epochs: Some(12),
+            batch: Some(64),
+            weight_decay: 1e-3,
+            huber_beta: 0.3,
+            newer_w: 2.0,
+            seed: 42,
+            event_design: None,
+            regressors: Some(regs.clone()),
+        };
+        let (m, log) = train(d, &cfg, false);
+        let rows = regs.rows_for(days, &fut);
+        let block = log
+            .regressors
+            .as_ref()
+            .expect("a regressor block must have been trained");
+        let yhat = predict_ts(d, &m, &fut, None, Some((&rows, block)));
+        (
+            yhat.iter().map(|v| v.to_bits()).collect(),
+            RegressorBlock::weights(block)
+                .iter()
+                .map(|w| w.to_bits())
+                .collect(),
+        )
+    }
+
+    /// SC5, the `n_lags = 0` half: the imputed day's regressor value is UNREAD.
+    ///
+    /// Two claims, in order. The STRUCTURAL one — the four selections all return the
+    /// CALLER'S OWN ARRAY, byte for byte — is the statement D-27 actually makes, and it is
+    /// asserted before any model is fitted. The BEHAVIOURAL one — bit-identical predictions
+    /// and weights — follows from it and is asserted anyway, because that is what a
+    /// downstream reader can check without reading this module.
+    #[test]
+    fn the_four_fill_rules_are_bit_identical_at_zero_lags() {
+        let (days, y, caller) = probe_series();
+        let d = NpData::new(&days, &y, days.len(), 10, 0.8);
+        // The PREMISE, measured rather than assumed.
+        let imputed: Vec<usize> = (0..d.n_train_grid)
+            .filter(|&i| !d.grid_observed[i])
+            .collect();
+        println!(
+            "D-27 probe: {} caller rows, {} grid rows, {} imputed ({:.1} %)",
+            days.len(),
+            d.n_train_grid,
+            imputed.len(),
+            100.0 * imputed.len() as f64 / d.n_train_grid as f64
+        );
+        assert!(
+            !imputed.is_empty(),
+            "the probe needs a GAPPY series or it probes nothing"
+        );
+
+        let (samples, caller_rows) = training_samples(&d, 0);
+        assert_eq!(samples.len(), n_training_samples(&d, 0));
+        assert_eq!(
+            caller_rows,
+            (0..days.len()).collect::<Vec<usize>>(),
+            "the lag-free selection must name the caller's rows"
+        );
+
+        let grids: Vec<Vec<f64>> = (0..RULES).map(|r| grid_with_rule(&d, &caller, r)).collect();
+        assert_eq!(
+            grids.len(),
+            RULES,
+            "the probe exercises EXACTLY {RULES} rules ({RULE_NAMES:?}); a probe that \
+             silently lost one would report the same green as a complete one"
+        );
+        // The four INPUTS really do differ, or the probe is four copies of one thing.
+        for r in 1..RULES {
+            assert!(
+                imputed
+                    .iter()
+                    .any(|&i| grids[r][i].to_bits() != grids[0][i].to_bits()),
+                "rule {} ({}) must differ from rule 0 somewhere on the imputed days",
+                r,
+                RULE_NAMES[r]
+            );
+        }
+
+        // ---- THE STRUCTURAL CLAIM ----
+        let selected: Vec<Vec<f64>> = grids
+            .iter()
+            .map(|g| select_grid_values(g, &samples))
+            .collect();
+        for (r, s) in selected.iter().enumerate() {
+            assert_eq!(
+                s.len(),
+                caller.len(),
+                "rule {}: the selection returns one value per CALLER row",
+                RULE_NAMES[r]
+            );
+            for (i, v) in s.iter().enumerate() {
+                assert_eq!(
+                    v.to_bits(),
+                    caller[i].to_bits(),
+                    "rule {} row {i}: the selection must return the CALLER'S OWN value. This \
+                     is D-27 stated as an equality between the selection's output and the \
+                     caller's input — the fill rule is unreachable, not merely ignored.",
+                    RULE_NAMES[r]
+                );
+            }
+        }
+
+        // ---- THE BEHAVIOURAL HALF ----
+        let fits: Vec<(Vec<u64>, Vec<u32>)> = selected.iter().map(|h| fit(&d, &days, h)).collect();
+        for r in 1..RULES {
+            assert_eq!(
+                fits[r].0, fits[0].0,
+                "rule {} changed the PREDICTIONS against rule 0 at n_lags = 0",
+                RULE_NAMES[r]
+            );
+            assert_eq!(
+                fits[r].1, fits[0].1,
+                "rule {} changed the learned WEIGHTS against rule 0 at n_lags = 0",
+                RULE_NAMES[r]
+            );
+        }
+    }
+
+    /// THE FALSIFICATION CONTROL: the same four rules through a deliberately WRONG,
+    /// GRID-INDEXED selection produce DIFFERING results.
+    ///
+    /// Without it a probe that cannot distinguish a right selection from a wrong one reports
+    /// the same green as a correct one. The wrong selection here is the plausible mistake
+    /// the shipped code could regress into: treating the grid POSITION as the sample
+    /// position (`0..n` rather than the observed rows), which picks up imputed days and
+    /// therefore the fill rule.
+    ///
+    /// The observed difference is PRINTED, so the SUMMARY records a measurement rather than
+    /// the fact that an assertion passed.
+    #[test]
+    fn the_four_fill_rules_differ_under_a_wrong_grid_indexed_selection() {
+        let (days, y, caller) = probe_series();
+        let d = NpData::new(&days, &y, days.len(), 10, 0.8);
+        let n = caller.len();
+        let wrong_rows: Vec<usize> = (0..n).collect();
+
+        let grids: Vec<Vec<f64>> = (0..RULES).map(|r| grid_with_rule(&d, &caller, r)).collect();
+        let selected: Vec<Vec<f64>> = grids
+            .iter()
+            .map(|g| select_grid_values(g, &wrong_rows))
+            .collect();
+
+        // The wrong selection must actually pick up imputed days, or the control is vacuous.
+        let mut differing_inputs = 0usize;
+        for r in 1..RULES {
+            if selected[r]
+                .iter()
+                .zip(&selected[0])
+                .any(|(a, b)| a.to_bits() != b.to_bits())
+            {
+                differing_inputs += 1;
+            }
+        }
+        assert_eq!(
+            differing_inputs,
+            RULES - 1,
+            "CONTROL FAILED: the grid-indexed selection did not pick up the imputed days, so \
+             this control proves nothing about the correct one"
+        );
+
+        let fits: Vec<(Vec<u64>, Vec<u32>)> = selected.iter().map(|h| fit(&d, &days, h)).collect();
+        let base: Vec<f64> = fits[0].0.iter().map(|b| f64::from_bits(*b)).collect();
+        let mut any_differ = false;
+        for r in 1..RULES {
+            let got: Vec<f64> = fits[r].0.iter().map(|b| f64::from_bits(*b)).collect();
+            let max_abs = got
+                .iter()
+                .zip(&base)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
+            let w_before: Vec<f32> = fits[0].1.iter().map(|b| f32::from_bits(*b)).collect();
+            let w_after: Vec<f32> = fits[r].1.iter().map(|b| f32::from_bits(*b)).collect();
+            println!(
+                "D-27 falsification control: rule {} under the WRONG grid-indexed selection \
+                 moves the forecast by max |delta| = {max_abs:.6} (weights {w_before:?} -> \
+                 {w_after:?})",
+                RULE_NAMES[r]
+            );
+            if max_abs > 0.0 || fits[r].1 != fits[0].1 {
+                any_differ = true;
+            }
+        }
+        assert!(
+            any_differ,
+            "the probe cannot tell a WRONG selection from the right one: four genuinely \
+             different fills produced identical fits through a grid-indexed selection, so a \
+             green column in the sibling test would mean nothing"
+        );
+    }
+
+    /// SC5's OTHER half: at `n_lags > 0` the chosen rule — here the REFUSAL — actually
+    /// fires, on the SAME gappy series the four-rule probe proves is safe at zero lags.
+    ///
+    /// SC5 asks for both: a test at `n_lags = 0` proving the imputed-day value is unread,
+    /// and a test at `n_lags > 0` proving the chosen rule fires. The probe alone satisfies
+    /// only the first, and a phase that shipped only the first would have decided the lagged
+    /// case in prose. Sharing the fixture is what makes "the same series" literal rather
+    /// than approximate.
+    #[test]
+    fn the_gap_refusal_actually_fires_at_lags() {
+        let (days, y, caller) = probe_series();
+        let ds: Vec<String> = days.iter().map(|d| crate::dates::format_ymd(*d)).collect();
+        let futv: Vec<f64> = (0..HORIZON)
+            .map(|i| 2.0 + ((days.len() + i) as f64 * 0.37).sin() * 3.0)
+            .collect();
+        let mut values = caller.clone();
+        values.extend(futv);
+        let args = crate::types::ForecastArgs {
+            ds,
+            y,
+            horizon: HORIZON,
+            model: Some("neuralprophet".into()),
+            freq: Some("D".into()),
+            n_lags: Some(7),
+            seed: Some(42),
+            regressors: Some(vec![crate::types::RegressorArg {
+                name: "price".into(),
+                values,
+                mode: None,
+                prior_scale: None,
+                standardize: None,
+            }]),
+            ..crate::types::ForecastArgs::default()
+        };
+        match crate::forecast::forecast(&args) {
+            Err(crate::types::ForecastError::Validation(m)) => {
+                assert!(
+                    m.contains("Supply a gap-free daily series, or set n_lags to 0"),
+                    "the at-lags refusal must name the fix, got {m:?}"
+                );
+                println!("D-27/D-26 at lags: {m}");
+            }
+            other => panic!(
+                "the SAME series the probe proves safe at n_lags = 0 must be REFUSED at \
+                 n_lags = 7 — the fill rule is load-bearing there and there is no defensible \
+                 value to invent. Got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+
+        // THE CONTROL that keeps the refusal from being about the lag count alone: the same
+        // series and the same lag count with NO regressor is accepted.
+        let mut no_reg = args;
+        no_reg.regressors = None;
+        crate::forecast::forecast(&no_reg)
+            .expect("the same gappy series at the same lag count with NO regressor is fine");
     }
 }
 
@@ -1463,6 +2306,7 @@ mod parity {
                 newer_w: 2.0,
                 seed: 42,
                 event_design: None,
+                regressors: None,
             };
             let (m, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -1470,7 +2314,7 @@ mod parity {
                 continue;
             }
             if best.as_ref().is_none_or(|b| fl < b.0) {
-                best = Some((fl, lr, predict_ts(&d, &m, test_days, None)));
+                best = Some((fl, lr, predict_ts(&d, &m, test_days, None, None)));
             }
         }
         let (train_loss, selected_lr, yhat) =
@@ -1524,6 +2368,7 @@ mod parity {
                 newer_w: 2.0,
                 seed: 42,
                 event_design: None,
+                regressors: None,
             };
             let (m, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -1531,7 +2376,7 @@ mod parity {
                 continue;
             }
             if best.as_ref().is_none_or(|b| fl < b.0) {
-                best = Some((fl, lr, predict_ar_1step(&d, &m, &test_idx, None)));
+                best = Some((fl, lr, predict_ar_1step(&d, &m, &test_idx, None, None)));
             }
         }
         let (train_loss, selected_lr, yhat) =
@@ -1653,6 +2498,7 @@ mod parity {
             newer_w: 2.0,
             seed: 42,
             event_design: None,
+            regressors: None,
         };
         let (m, log) = train(&d, &cfg, false);
         assert!(log.steps > 0, "the fit must have taken at least one step");
@@ -1663,7 +2509,7 @@ mod parity {
         );
         // The prediction helpers must clear it too: they build a no_grad forward that still
         // allocates tape entries.
-        let _ = predict_ts(&d, &m, &ds[..5], None);
+        let _ = predict_ts(&d, &m, &ds[..5], None, None);
         assert_eq!(
             graph_tape_len(),
             0,
@@ -1781,6 +2627,7 @@ mod parity {
                 newer_w: 2.0,
                 seed: 42,
                 event_design: None,
+                regressors: None,
             };
             let (_, log) = train(&d, &cfg, false);
             let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -1925,7 +2772,7 @@ mod wall {
         );
         // The door's OWN pricing function, so this line reports the number the bound is
         // compared against rather than a second arithmetic that could drift from it.
-        let cost = super::request_train_cost(&d, points, n_lags, 0);
+        let cost = super::request_train_cost(&d, points, n_lags, 0, 0);
         drop(d);
 
         let t0 = std::time::Instant::now();
