@@ -115,3 +115,48 @@ goalposts and simply invert which scope is red. The real questions are (a) which
 feature changes the numerics, and (b) whether the answer a consumer gets is supposed to depend
 on the feature set of unrelated workspace members at all. Both need their own measurement and
 their own decision; this is outside plan 06.1-08's documentation-and-sweep scope.
+
+#### Follow-up narrowing (orchestrator, 2026-09-21, at `6c40821c3`)
+
+The blocker above was independently reproduced before being accepted: `-p aprender-forecast
+--lib` rc=0, `-p aprender-forecast -p apr-cli --lib` rc=101 with byte-identical hashes
+(`recorded aa669c2352dd376a, got e01f605419765a6a`). It is real and deterministic.
+
+Three corrections to the mechanism paragraph above, each measured:
+
+1. **The "23 core features" figure is a `--no-dedupe` artifact.** `cargo tree -e features`
+   without `--no-dedupe` shows `apr-cli` pulling exactly **6** `aprender-core` feature edges:
+   `default`, `format-compression`, `lz4_flex`, `parallel`, `rayon`, `zstd`. Since
+   `aprender-core`'s `default = ["parallel"]` and `parallel = ["rayon"]`, that reduces to two
+   independent axes: the parallel axis and the compression axis.
+2. **`safetensors-compare`, `setfit`, `format-encryption`, `format-quantize`, `half` and
+   `hf-hub-integration` are NOT in the delta** that reaches `aprender-forecast`. They do not
+   appear in the deduped edge set; they should not be chased.
+3. **The `parallel`/`rayon` exoneration above was reached on the wrong evidence.** The control
+   `-p aprender-forecast -p aprender-core` tests **`aprender-core`'s** `parallel` feature. The
+   crate whose feature set actually diverges is **`aprender-compute`** (`[lib] name = "trueno"`,
+   the SIMD/GPU layer): `default` alone in the scoped build vs
+   `default, parallel, rayon, gpu, wgpu, bytemuck, futures-intrusive, pollster` under `apr-cli`.
+   Two same-named features in two different crates.
+
+Additional controls run here, both PASS (so both are ruled out):
+
+| Control | Result |
+|---|---|
+| `-p aprender-forecast -p aprender-compute --features aprender-compute/parallel --lib` | **PASS** — `aprender-compute`'s `parallel`+`rayon` is not the variable either |
+| `-p aprender-forecast -p aprender-quant --lib` | **PASS** — refutes the `half` -> `num-traits/libm` hypothesis |
+
+The `num-traits/libm` lead was worth testing and is now dead: the chain `apr-cli` ->
+`aprender-quant`(default) -> `half`(default) -> `num-traits feature "libm"` is real and would
+swap `exp`/`ln`/`powf` for non-bit-identical pure-Rust implementations, which is exactly the
+shape of this symptom — but enabling it alone does not reproduce the flip.
+
+**Remaining candidate surface, measured:** ~190 feature edges across the 79 packages
+`aprender-forecast` links whose feature set grows when `apr-cli` joins the build. The full list
+is reproducible with the two `cargo tree -e features` runs above; `gpu`/`wgpu` on
+`aprender-compute` is the largest untested axis, since it can change kernel dispatch.
+
+This does not change the recommendation: still **do not** re-record the baseline under
+`--workspace`, and question (b) above — whether a consumer's answer may depend on the feature
+set of unrelated workspace members at all — is the decision that should be taken first, because
+a "yes" makes the bisect moot and a "no" makes it mandatory.
