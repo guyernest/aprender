@@ -29,8 +29,19 @@ pub const TOOL_DESCRIPTION: &str = "Fit a time-series forecaster to the series y
  is `prophet` (trend with changepoints + Fourier seasonality, with 80% uncertainty bands and named \
  components); `neuralprophet` adds an AR-Net over the last `n_lags` values for short-horizon \
  nowcasting and requires freq D. Both models accept `holidays` (named events with optional windows) \
- and `regressors` (external covariates you also supply over the horizon); on `neuralprophet`, \
- `holidays` require `n_lags` = 0. Returns future `ds`, `yhat`, `yhat_lower`, `yhat_upper`, `trend`, \
+ and `regressors` (numeric drivers: one value per HISTORY row AND per HORIZON row, so \
+ `len(values)` = `len(ds)` + `horizon`, with optional `mode`, `prior_scale` and `standardize`). \
+ Switch `model` and send the same arguments: on `neuralprophet`, events are published as one \
+ component per event name plus a `holidays` roll-up. Arm restrictions, refused rather than ignored: \
+ on `neuralprophet`, `holidays` require `n_lags` = 0, multiplicative `mode` and an explicit \
+ `prior_scale` are prophet-only, and a regressor on a series with missing days is refused when \
+ `n_lags` > 0. Caution: at `n_lags` > 0 the AR term competes with a continuous driver and can \
+ ABSORB it, so a regressor coefficient from `neuralprophet` is not a clean effect estimate \
+ (measured: the price weight collapsed to -0.0048 from -0.0493 lag-free — illustrative of the \
+ magnitude, NOT a bound); no VIF or condition number is computed on that arm because AR absorption \
+ is a training dynamic rather than column collinearity. On `prophet`, regressor requests get \
+ `diagnostics.regressors` with per-column VIF and a design condition number. \
+ Returns future `ds`, `yhat`, `yhat_lower`, `yhat_upper`, `trend`, \
  components and timing. Bounded at 20,000 points, a 3,650-period horizon and 200 regressors. \
  Band honesty: the nominal 80% interval covered 0.60 (Prophet) and 0.66 (NeuralProphet-lite) of held-out \
  points across 17 rolling-origin windows — treat `yhat_lower`/`yhat_upper` as a ~60-66% band, not an 80% one.";

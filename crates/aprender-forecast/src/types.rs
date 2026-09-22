@@ -619,6 +619,14 @@ pub struct RegressorArg {
     /// One value per HISTORY row AND per HORIZON row, in `ds` order then future order — so
     /// its length is exactly `ds.len() + horizon`. A future value is required because the
     /// model needs the covariate over the period it is forecasting.
+    ///
+    /// CAUTION on `model: "neuralprophet"` with `n_lags > 0`: a continuous driver competes
+    /// with the AR term, which can ABSORB its contribution, so the fitted coefficient is not
+    /// a clean effect estimate. Measured at `n_lags = 7`: the `price` weight collapsed to
+    /// -0.0048 from -0.0493 lag-free — illustrative of the MAGNITUDE, explicitly NOT a
+    /// bound (one series, one gap pattern). No VIF or condition number is computed on that
+    /// arm: AR absorption is a training dynamic, not column collinearity. Read coefficients
+    /// off the `prophet` arm, which publishes `diagnostics.regressors`, or set `n_lags = 0`.
     pub values: Vec<f64>,
     /// "additive" (default) or "multiplicative". Multiplicative is Prophet-only.
     #[serde(default)]
@@ -667,6 +675,14 @@ pub struct ForecastArgs {
     #[serde(default)]
     pub holidays: Option<Vec<HolidayArg>>,
     /// NeuralProphet only: number of autoregressive lags (0 = trend + seasonality only).
+    ///
+    /// CAUTION with `regressors`: at `n_lags > 0` the AR term competes with a continuous
+    /// driver and can ABSORB it, so a regressor coefficient on this arm is not a clean
+    /// effect estimate. Measured at `n_lags = 7`: the `price` weight collapsed to -0.0048
+    /// from -0.0493 lag-free — illustrative of the MAGNITUDE, explicitly NOT a bound. No
+    /// identifiability number is computed here (AR absorption is a training dynamic, not
+    /// column collinearity, so a green VIF would reassure about the wrong thing). `holidays`
+    /// require `n_lags = 0`, and a regressor on a GAPPY series is refused at `n_lags > 0`.
     #[serde(default)]
     pub n_lags: Option<usize>,
     /// Random seed for the uncertainty simulation / training (default 42).
