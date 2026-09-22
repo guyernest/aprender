@@ -62,6 +62,20 @@ crates/aprender-shell/qa_test_artifacts/
 /deploy/.build/
 # cargo-pmcp per-checkout state (which named target is active on THIS machine)
 /.pmcp/active-target
+# ...and the same two per-checkout files under a PER-CRATE .pmcp/ directory.
+# CB-510 in reverse: the root-anchored forms above are correctly narrow for the
+# root, but `cargo pmcp` also writes state into `crates/<crate>/.pmcp/`, which
+# they never matched — so `crates/aprender-mcp-chronos-lambda/.pmcp/active-target`
+# and `.../deployment.toml` sat permanently untracked and dirtied every
+# clean-tree assertion. Named EXACTLY, not a bare `.pmcp/`: `deploy.toml` and
+# `deploy.toml.template` under those same directories ARE curated and tracked.
+**/.pmcp/active-target
+**/.pmcp/deployment.toml
+# insta's pending-snapshot output. Written whenever a snapshot test fails (three
+# do on this box, pre-existing) and never committed: 0 of the 23 tracked
+# snapshots is a `.snap.new`. Left untracked it dirties the working tree after
+# any test run, which is exactly what the cleanroom `--locked` gate asserts against.
+**/*.snap.new
 .pmat-metrics/
 .cargo/config.toml
 
