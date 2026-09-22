@@ -1982,6 +1982,16 @@ mod identifiability_tests {
         let mut args = fixture_args();
         args.model = Some("neuralprophet".into());
         args.freq = Some("D".into());
+        // TWO regressors, not the fixture's four. The shared design-cost ceiling is now
+        // hoisted ABOVE the dispatch with the arm-dependent operand (D-33), and this
+        // fixture is gappy: its span is 8 888 days against 2 905 points, so four
+        // regressors price at (8888 + 12) x 4 = 35 600 on the neuralprophet operand and
+        // are refused by the SHARED ceiling before the arm is reached at all. Two price at
+        // 17 800, which clears it — so what this test observes stays the ARM's refusal,
+        // which is what it is about. The span-operand behaviour gets its own named test.
+        if let Some(regs) = args.regressors.as_mut() {
+            regs.truncate(2);
+        }
         // The arm REFUSES regressors outright in this wave (plan 06.1-07 opens it), which
         // is itself the strongest form of "nothing is computed".
         let err = crate::forecast::forecast(&args)

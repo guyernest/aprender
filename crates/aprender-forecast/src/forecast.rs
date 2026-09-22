@@ -409,78 +409,386 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
     // With no holidays `holiday_columns` and `holiday_dates_total` are both 0, so
     // neither refusal above can fire and the no-holiday SC1 path is untouched.
 
-    match model_name.as_str() {
-        "prophet" => {
-            let mode = match args.seasonality_mode.as_deref() {
+    // ---- D-33's PATTERN, APPLIED AGAIN: the SPEC is assembled ABOVE the dispatch ----
+    //
+    // It is hoisted for ONE reason, and it is the reserved-set reason below: part (a) and
+    // part (b) of the regressor name-collision check are built from `prophet::columns(&spec)`
+    // and the `Column.component` values behind those columns, so a SHARED collision check
+    // needs the spec. Rebuilding an equivalent spec at a second site would be two copies of
+    // one assembly rule, which is the drift hazard the whole hoisting pattern exists to
+    // close.
+    //
+    // Nothing about a PROPHET request changes. The relative order of every refusal below is
+    // exactly what it was inside the arm, and the hoisted holiday bounds still fire first.
+    // On the NEURALPROPHET arm `growth`, `cap` and `seasonality_mode` are already refused
+    // above, so all three parse to their defaults here and the only cost is one
+    // `auto_seasonalities` call and one holiday-list clone — paid so that a regressor name
+    // is refused by the SAME rule on both arms rather than by two rules that can drift.
+    let mode = match args.seasonality_mode.as_deref() {
+        None | Some("additive") => Mode::Additive,
+        Some("multiplicative") => Mode::Multiplicative,
+        Some(o) => {
+            return Err(ForecastError::Validation(format!(
+                "seasonality_mode {o:?}: additive or multiplicative"
+            )))
+        }
+    };
+    let growth = match args.growth.as_deref() {
+        None | Some("linear") => Growth::Linear,
+        Some("logistic") => Growth::Logistic,
+        Some("flat") => Growth::Flat,
+        Some(o) => {
+            return Err(ForecastError::Validation(format!(
+                "growth {o:?}: linear, logistic or flat"
+            )))
+        }
+    };
+    // `cap` belongs to the LOGISTIC growth arm, not merely to the prophet MODEL:
+    // `make_design` matches only `(Growth::Logistic, Some(c))` and falls to
+    // `_ => None` for every other pair, so a cap sent on the linear, flat or
+    // DEFAULTED arm was accepted and provably inert — the caller got a plausible
+    // answer to a question they did not ask (D-11, FALSIFY-BOUNDARY-005). This
+    // runs AFTER the `growth` enum is parsed, so an unknown growth string still
+    // refuses with its own message first.
+    if growth != Growth::Logistic && args.cap.is_some() {
+        return Err(ForecastError::Validation(
+            "cap is logistic-only; set growth to \"logistic\"".into(),
+        ));
+    }
+    // The ONLY path that puts a `Some` here is the one below that validated it,
+    // so `Spec` structurally cannot carry a cap the door did not check.
+    let mut checked_cap: Option<f64> = None;
+    if growth == Growth::Logistic {
+        let cap = args
+            .cap
+            .ok_or_else(|| ForecastError::Validation("logistic growth needs cap".into()))?;
+        // `y` is checked for finiteness above; `cap` was not, and JSON `1e400`
+        // parses to `f64::INFINITY`, for which `cap <= y_max` is false. An infinite
+        // cap makes every trend value infinite, which serialises as JSON `null`.
+        if !cap.is_finite() {
+            return Err(ForecastError::Validation(
+                "cap must be a finite number".into(),
+            ));
+        }
+        if cap <= y_max {
+            return Err(ForecastError::Validation(format!(
+                "cap {cap} must exceed max(y) = {y_max}"
+            )));
+        }
+        checked_cap = Some(cap);
+    }
+    let mut spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, mode));
+    spec.growth = growth;
+    spec.cap = checked_cap;
+    // CLONED, not moved: the neuralprophet arm reads the same hoisted list below to
+    // build its EventSpec list, which is what makes D-29's one-argument-two-models claim
+    // literal.
+    spec.holidays = holidays.clone();
+    spec.holidays_mode = mode;
+    spec.interval_width = interval_width;
+    if spec.seasonalities.is_empty() && spec.holidays.is_empty() {
+        // Prophet fits a 'zeros' column here; the design needs K >= 1 — give it a
+        // harmless weekly term with a tiny prior.
+        spec.seasonalities.push(Seasonality {
+            name: "weekly".into(),
+            period: 7.0,
+            order: 1,
+            prior_scale: 1e-3,
+            mode,
+        });
+    }
+
+    // ---- SHARED REGRESSOR VALIDATION — one site, BOTH arms (D-22, D-33's pattern) ----
+    //
+    // Plan 06.1-01 Task 2 placed the length tie, the finiteness checks, the mode allowlist,
+    // the prior-scale range, the duplicate-name check and the zero-spread refusal INSIDE the
+    // `"prophet" =>` arm, and plan 06.1-03 added the name-byte bound, the count ceiling, the
+    // design-cost product and the three-part name-collision check in the same place. The
+    // dispatch below separates the two execution paths, so deleting the neuralprophet
+    // refusal without MOVING these first would open that arm onto a regressor surface with
+    // no length tie, no finiteness guarantee, no mode allowlist, no duplicate-name check, no
+    // name bound, no count ceiling and no design-cost ceiling — reopening, on the second
+    // arm, every defect the first two waves closed on the first.
+    //
+    // Bounds first, acceptance second, in separate commits: hoisting AFTER the refusal was
+    // dropped would open a window in which a ~200-byte request buys an unbounded regressor
+    // surface. Plan 06.1-06 hoisted the four HOLIDAY bounds for exactly this reason and the
+    // argument reaches here unchanged.
+    //
+    // Every message below is BYTE-IDENTICAL to the one that shipped inside the arm — they
+    // are verbatim contracts that e2e cases string-match. The ONLY arm-dependent piece is
+    // the design-cost OPERAND, which follows D-33's rule: the caller's point count on
+    // prophet, the imputed daily grid's span in days on neuralprophet, because the NP
+    // regressor design is read over that grid on the lagged path. The message STATES the
+    // operand it used, as the holiday check does.
+    //
+    // Until plan 06.1-07's second commit removes the temporary neuralprophet refusal, the
+    // neuralprophet branch of the operand below is UNREACHABLE FROM THE DOOR, and that is
+    // deliberate — do not delete it as dead code.
+    // ---- EXTERNAL REGRESSORS (D-22) ----
+    //
+    // Split each caller array into the HISTORY prefix (`ds.len()` rows, what the
+    // standardisation constants are computed over) and the FUTURE tail (`horizon`
+    // rows, what `predict` is handed). `fut` has length `horizon`, NOT
+    // `ds.len() + horizon`, so handing `predict` the whole array would silently
+    // offset every future feature — `predict` re-checks the length for that reason.
+    let mut reg_std: Vec<crate::regressors::Standardized> = Vec::new();
+    let mut reg_hist: Vec<Vec<f64>> = Vec::new();
+    let mut reg_fut: Vec<Vec<f64>> = Vec::new();
+    if let Some(regs) = args.regressors.as_ref() {
+        // ---- 8. NAME LENGTH, in BYTES, FIRST in the block ----
+        //
+        // FIRST for the reason the holiday loop's identical check is first (C-07):
+        // every OTHER refusal below formats caller data — six of them format the
+        // index, two format the NAME — so an unbounded name would be reflected back
+        // through whichever check fires. The length check bounds all of them.
+        //
+        // Reuses MAX_HOLIDAY_NAME_LEN rather than adding a fourth name ceiling: the
+        // amplification argument is the SAME one C-07 records. `regressors::splice`
+        // clones the name TWICE per design column (the `Column.name` and the
+        // `Column.component`), `predict`'s component-name dedup compares it
+        // O(C * distinct_components) times, and it becomes a key of the serialized
+        // `components` map. One ceiling, one derivation, one place to raise it.
+        //
+        // BYTES, not chars: `String::len` is bytes and bytes are what the clone and
+        // the comparison cost. The message names the INDEX and the LENGTH and NEVER
+        // the name — echoing an oversized string back re-materialises the very bytes
+        // the bound refuses and reflects attacker-controlled content into logs
+        // (T-06.1-14).
+        if let Some((i, r)) = regs
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.name.len() > MAX_HOLIDAY_NAME_LEN)
+        {
+            return Err(ForecastError::Validation(format!(
+                "regressor at index {i}: name is {} bytes, which exceeds \
+                 max_holiday_name_len {MAX_HOLIDAY_NAME_LEN}; use a shorter label \
+                 (the name is not echoed back — its LENGTH is what is at issue)",
+                r.name.len()
+            )));
+        }
+        // ---- 7. THE COUNT CEILING, MEASURED (replaces the wave-1 interim 50) ----
+        //
+        // Before any allocation proportional to the payload. `fit_max_regressors` is
+        // its own ceiling rather than a consequence of the product below, because
+        // the product is satisfiable by trading rows for columns while the
+        // identifiability diagnostic's O(K^3) factorisation is a function of the
+        // COUNT alone (cost axis C-17).
+        if regs.len() > MAX_REGRESSORS {
+            return Err(ForecastError::Validation(format!(
+                "the request carries {} regressors, which exceeds \
+                 max_regressors {MAX_REGRESSORS}; send fewer regressors",
+                regs.len()
+            )));
+        }
+        // ---- 9. THE DESIGN-COST PRODUCT, and it STATES ITS OPERANDS ----
+        //
+        // `ds.len() <= MAX_POINTS` (20 000), `args.horizon <= MAX_HORIZON` (3 650)
+        // and `regs.len() <= MAX_REGRESSORS` are all already refused above, so this
+        // product is at most 4 730 000 — six orders of magnitude below `usize::MAX`
+        // on every supported target. A plain multiply cannot overflow here, and
+        // `saturating_mul` would only obscure that the factors are bounded.
+        //
+        // ONE ceiling, TWO operands, selected by arm — D-33's rule, the same one the
+        // hoisted holiday design-cost check above follows, and for the same reason.
+        // On prophet the design rows are the caller's POINT COUNT: `regressors::splice`
+        // writes one cell per supplied `ds` entry and `predict` one per horizon step,
+        // and a gap in `ds` costs nothing because no row is materialised for it. On
+        // neuralprophet the rows are the SPAN IN DAYS, because the regressor design is
+        // read over the IMPUTED DAILY GRID `np::NpData::new` materialises over
+        // `first..=last` on the lagged path — at least as long as the point count, and
+        // longer on every gappy series. Inheriting the prophet operand verbatim would
+        // knowingly under-price the gappy NP case by exactly `span / points`.
+        //
+        // `span_days` is already computed above for the `MAX_SPAN_DAYS` check and is
+        // bounded by it, so the cast is exact and this product is at most 23 650 000
+        // under EITHER operand — six orders of magnitude below `usize::MAX`.
+        let (reg_design_rows, reg_design_operand) = if model_name == "neuralprophet" {
+            (span_days as usize, "span_days")
+        } else {
+            (ds.len(), "points")
+        };
+        let regressor_cells = (reg_design_rows + args.horizon) * regs.len();
+        if regressor_cells > MAX_REGRESSOR_DESIGN_COST {
+            // The message STATES THE OPERAND IT USED, so a caller refused on one arm
+            // and accepted on the other can see which arithmetic refused them (D-21).
+            return Err(ForecastError::Validation(format!(
+                "regressors expand to {regressor_cells} design feature cells \
+                 (({reg_design_operand} + horizon) x n_regressors = ({} + {}) x {}), which \
+                 exceeds max_regressor_design_cost {MAX_REGRESSOR_DESIGN_COST}; \
+                 send fewer regressors, a shorter history or a shorter horizon",
+                reg_design_rows,
+                args.horizon,
+                regs.len()
+            )));
+        }
+        // ---- 10. NAME COLLISION WITH A RESPONSE COMPONENT KEY ----
+        //
+        // The response component map is `components.insert(name, value)` — a MAP
+        // INSERT — so a duplicate key silently OVERWRITES the earlier entry and the
+        // operator sees ONE component where TWO were computed. Check 5 below closes
+        // regressor-against-regressor; this closes regressor-against-everything-else,
+        // over a reserved set with THREE parts (T-06.1-13):
+        //
+        //   (a) GENERATED COLUMN NAMES — `prophet::columns(&spec)`, i.e. the
+        //       `{seasonality}_delim_{n}` and `{holiday}_delim_{sign}{offset}` forms.
+        //   (b) PER-COMPONENT NAMES — the `Column.component` values behind those
+        //       columns. `predict` pushes one component per DISTINCT `component`
+        //       value, so a regressor named `yearly` collides even though `yearly`
+        //       is not itself a generated column name; and a regressor named after a
+        //       declared holiday collides for the same reason.
+        //   (c) RESERVED RESPONSE KEYS — [`RESERVED_RESPONSE_KEYS`], which are
+        //       invisible to (a) and (b) because they are pushed after the
+        //       per-component loop or are top-level response fields.
+        //
+        // The spec is fully assembled by this point (seasonalities, holidays and the
+        // empty-design weekly fallback are all settled above), so the reserved set is
+        // built ONCE from the real spec rather than from a reconstruction of it.
+        let mut reserved: std::collections::BTreeMap<String, &'static str> =
+            std::collections::BTreeMap::new();
+        for c in crate::prophet::columns(&spec) {
+            reserved.insert(c.name, "a generated design column name");
+            reserved.insert(c.component, "a response component name");
+        }
+        for k in RESERVED_RESPONSE_KEYS {
+            reserved.insert(k.to_string(), "a reserved response key");
+        }
+        if let Some((i, r, part)) = regs
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| reserved.get(r.name.as_str()).map(|part| (i, r, *part)))
+        {
+            return Err(ForecastError::Validation(format!(
+                "regressor {i} is named {:?}, which is already {part} in the \
+                 response; the component map is keyed by name and one would \
+                 silently overwrite the other, so rename the regressor",
+                r.name
+            )));
+        }
+        // ---- 5. DUPLICATE NAMES ----
+        //
+        // O(R log R) via a BTreeSet, not a quadratic scan: the component map is
+        // keyed by name, so the second of a pair would silently overwrite the first.
+        let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for r in regs {
+            if !seen.insert(r.name.as_str()) {
+                return Err(ForecastError::Validation(format!(
+                    "regressor name {:?} appears more than once; the response \
+                     component map is keyed by name and the second would silently \
+                     replace the first, so give each regressor a distinct name",
+                    r.name
+                )));
+            }
+        }
+
+        for (i, r) in regs.iter().enumerate() {
+            // ---- 1. LENGTH TIE, before anything is copied ----
+            let want = ds.len() + args.horizon;
+            if r.values.len() != want {
+                return Err(ForecastError::Validation(format!(
+                    "regressor {i} carries {} values but {want} are required \
+                     (points + horizon = {} + {}); the array must cover the \
+                     history rows AND the horizon rows",
+                    r.values.len(),
+                    ds.len(),
+                    args.horizon
+                )));
+            }
+            // ---- 2. INPUT FINITENESS ----
+            //
+            // The same class the `cap` finiteness check closed: JSON `1e400` parses
+            // to infinity. The row index is named, the VALUE is not echoed.
+            if let Some(bad) = r.values.iter().position(|v| !v.is_finite()) {
+                return Err(ForecastError::Validation(format!(
+                    "regressor {i} carries a non-finite value at row {bad}; every \
+                     value must be finite (note that JSON 1e400 parses to infinity)"
+                )));
+            }
+            // ---- 3. MODE ALLOWLIST, refused BY NAME ----
+            let mode = match r.mode.as_deref() {
                 None | Some("additive") => Mode::Additive,
                 Some("multiplicative") => Mode::Multiplicative,
-                Some(o) => {
+                Some(other) => {
                     return Err(ForecastError::Validation(format!(
-                        "seasonality_mode {o:?}: additive or multiplicative"
+                        "regressor {i} mode {other:?} is not supported; use \
+                         \"additive\" or \"multiplicative\""
                     )))
                 }
             };
-            let growth = match args.growth.as_deref() {
-                None | Some("linear") => Growth::Linear,
-                Some("logistic") => Growth::Logistic,
-                Some("flat") => Growth::Flat,
-                Some(o) => {
-                    return Err(ForecastError::Validation(format!(
-                        "growth {o:?}: linear, logistic or flat"
-                    )))
-                }
+            // ---- 4. PRIOR SCALE, in a NUMERICALLY USABLE range ----
+            //
+            // Not merely "> 0": the objective and gradient SQUARE this into a
+            // denominator (prophet.rs:536, :685), so f64::MIN_POSITIVE squares to
+            // exactly 0.0 and the initial zero coefficients meet 0.0/0.0.
+            let prior_scale = r.prior_scale.unwrap_or(10.0);
+            if !prior_scale.is_finite()
+                || prior_scale < REGRESSOR_PRIOR_SCALE_MIN
+                || prior_scale > REGRESSOR_PRIOR_SCALE_MAX
+            {
+                return Err(ForecastError::Validation(format!(
+                    "regressor {i} prior_scale {prior_scale:e} is outside the \
+                     usable range [{REGRESSOR_PRIOR_SCALE_MIN:e}, \
+                     {REGRESSOR_PRIOR_SCALE_MAX:e}]; the objective squares it into \
+                     a denominator, so a smaller value underflows to zero and \
+                     yields a NaN fit"
+                )));
+            }
+
+            let spec_r = crate::regressors::RegressorSpec {
+                name: r.name.clone(),
+                mode,
+                prior_scale,
+                standardize: r.standardize,
             };
-            // `cap` belongs to the LOGISTIC growth arm, not merely to the prophet MODEL:
-            // `make_design` matches only `(Growth::Logistic, Some(c))` and falls to
-            // `_ => None` for every other pair, so a cap sent on the linear, flat or
-            // DEFAULTED arm was accepted and provably inert — the caller got a plausible
-            // answer to a question they did not ask (D-11, FALSIFY-BOUNDARY-005). This
-            // runs AFTER the `growth` enum is parsed, so an unknown growth string still
-            // refuses with its own message first.
-            if growth != Growth::Logistic && args.cap.is_some() {
-                return Err(ForecastError::Validation(
-                    "cap is logistic-only; set growth to \"logistic\"".into(),
-                ));
+            let (hist, futv) = r.values.split_at(ds.len());
+            let st = crate::regressors::standardize_one(&spec_r, hist);
+
+            // ---- 6a. ZERO SPREAD ----
+            //
+            // Only when the column was actually STANDARDISED: the auto {0,1}
+            // carve-out legitimately returns std = 1.0 and must not be caught here.
+            if st.std == 0.0 {
+                return Err(ForecastError::Validation(format!(
+                    "regressor {i} is constant over the history rows and carries \
+                     no information; drop the regressor"
+                )));
             }
-            // The ONLY path that puts a `Some` here is the one below that validated it,
-            // so `Spec` structurally cannot carry a cap the door did not check.
-            let mut checked_cap: Option<f64> = None;
-            if growth == Growth::Logistic {
-                let cap = args
-                    .cap
-                    .ok_or_else(|| ForecastError::Validation("logistic growth needs cap".into()))?;
-                // `y` is checked for finiteness above; `cap` was not, and JSON `1e400`
-                // parses to `f64::INFINITY`, for which `cap <= y_max` is false. An infinite
-                // cap makes every trend value infinite, which serialises as JSON `null`.
-                if !cap.is_finite() {
-                    return Err(ForecastError::Validation(
-                        "cap must be a finite number".into(),
-                    ));
-                }
-                if cap <= y_max {
-                    return Err(ForecastError::Validation(format!(
-                        "cap {cap} must exceed max(y) = {y_max}"
-                    )));
-                }
-                checked_cap = Some(cap);
+            // ---- 6b. POST-ARITHMETIC FINITENESS ----
+            //
+            // A SEPARATE check from 2, and both are needed: finite inputs are not
+            // sufficient, because 1e300 values overflow the sum of squares in the
+            // variance. Every DERIVED quantity is re-checked.
+            if !st.mu.is_finite() {
+                return Err(ForecastError::Validation(format!(
+                    "regressor {i} has a non-finite mean after standardisation; \
+                     the values are individually finite but their sum overflows"
+                )));
             }
-            let mut spec = Spec::default_linear(auto_seasonalities(&ds, 10.0, mode));
-            spec.growth = growth;
-            spec.cap = checked_cap;
-            spec.holidays = holidays;
-            spec.holidays_mode = mode;
-            spec.interval_width = interval_width;
-            if spec.seasonalities.is_empty() && spec.holidays.is_empty() {
-                // Prophet fits a 'zeros' column here; the design needs K >= 1 — give it a
-                // harmless weekly term with a tiny prior.
-                spec.seasonalities.push(Seasonality {
-                    name: "weekly".into(),
-                    period: 7.0,
-                    order: 1,
-                    prior_scale: 1e-3,
-                    mode,
-                });
+            if !st.std.is_finite() {
+                return Err(ForecastError::Validation(format!(
+                    "regressor {i} has a non-finite standard deviation after \
+                     standardisation; the values are individually finite but the \
+                     sum of squares overflows"
+                )));
             }
+            if let Some(bad) = hist
+                .iter()
+                .position(|v| !((v - st.mu) / st.std).is_finite())
+            {
+                return Err(ForecastError::Validation(format!(
+                    "regressor {i} has a non-finite standardised cell at row \
+                     {bad}; the value is finite but (value - mu) / std is not"
+                )));
+            }
+
+            reg_std.push(st);
+            reg_hist.push(hist.to_vec());
+            reg_fut.push(futv.to_vec());
+        }
+    }
+
+    match model_name.as_str() {
+        "prophet" => {
             // ---- the LOGISTIC CHANGEPOINT LAMBDA bound, at THE door and BEFORE make_design ----
             //
             // `predict`'s `Growth::Logistic` arm draws `poisson(lambda)` NEW changepoints on
@@ -518,245 +826,6 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                          shorten the horizon, use freq \"D\" instead of \"W\" or \"MS\", or \
                          send a longer history"
                     )));
-                }
-            }
-            // ---- EXTERNAL REGRESSORS (D-22) ----
-            //
-            // Split each caller array into the HISTORY prefix (`ds.len()` rows, what the
-            // standardisation constants are computed over) and the FUTURE tail (`horizon`
-            // rows, what `predict` is handed). `fut` has length `horizon`, NOT
-            // `ds.len() + horizon`, so handing `predict` the whole array would silently
-            // offset every future feature — `predict` re-checks the length for that reason.
-            let mut reg_std: Vec<crate::regressors::Standardized> = Vec::new();
-            let mut reg_hist: Vec<Vec<f64>> = Vec::new();
-            let mut reg_fut: Vec<Vec<f64>> = Vec::new();
-            if let Some(regs) = args.regressors.as_ref() {
-                // ---- 8. NAME LENGTH, in BYTES, FIRST in the block ----
-                //
-                // FIRST for the reason the holiday loop's identical check is first (C-07):
-                // every OTHER refusal below formats caller data — six of them format the
-                // index, two format the NAME — so an unbounded name would be reflected back
-                // through whichever check fires. The length check bounds all of them.
-                //
-                // Reuses MAX_HOLIDAY_NAME_LEN rather than adding a fourth name ceiling: the
-                // amplification argument is the SAME one C-07 records. `regressors::splice`
-                // clones the name TWICE per design column (the `Column.name` and the
-                // `Column.component`), `predict`'s component-name dedup compares it
-                // O(C * distinct_components) times, and it becomes a key of the serialized
-                // `components` map. One ceiling, one derivation, one place to raise it.
-                //
-                // BYTES, not chars: `String::len` is bytes and bytes are what the clone and
-                // the comparison cost. The message names the INDEX and the LENGTH and NEVER
-                // the name — echoing an oversized string back re-materialises the very bytes
-                // the bound refuses and reflects attacker-controlled content into logs
-                // (T-06.1-14).
-                if let Some((i, r)) = regs
-                    .iter()
-                    .enumerate()
-                    .find(|(_, r)| r.name.len() > MAX_HOLIDAY_NAME_LEN)
-                {
-                    return Err(ForecastError::Validation(format!(
-                        "regressor at index {i}: name is {} bytes, which exceeds \
-                         max_holiday_name_len {MAX_HOLIDAY_NAME_LEN}; use a shorter label \
-                         (the name is not echoed back — its LENGTH is what is at issue)",
-                        r.name.len()
-                    )));
-                }
-                // ---- 7. THE COUNT CEILING, MEASURED (replaces the wave-1 interim 50) ----
-                //
-                // Before any allocation proportional to the payload. `fit_max_regressors` is
-                // its own ceiling rather than a consequence of the product below, because
-                // the product is satisfiable by trading rows for columns while the
-                // identifiability diagnostic's O(K^3) factorisation is a function of the
-                // COUNT alone (cost axis C-17).
-                if regs.len() > MAX_REGRESSORS {
-                    return Err(ForecastError::Validation(format!(
-                        "the request carries {} regressors, which exceeds \
-                         max_regressors {MAX_REGRESSORS}; send fewer regressors",
-                        regs.len()
-                    )));
-                }
-                // ---- 9. THE DESIGN-COST PRODUCT, and it STATES ITS OPERANDS ----
-                //
-                // `ds.len() <= MAX_POINTS` (20 000), `args.horizon <= MAX_HORIZON` (3 650)
-                // and `regs.len() <= MAX_REGRESSORS` are all already refused above, so this
-                // product is at most 4 730 000 — six orders of magnitude below `usize::MAX`
-                // on every supported target. A plain multiply cannot overflow here, and
-                // `saturating_mul` would only obscure that the factors are bounded.
-                let regressor_cells = (ds.len() + args.horizon) * regs.len();
-                if regressor_cells > MAX_REGRESSOR_DESIGN_COST {
-                    return Err(ForecastError::Validation(format!(
-                        "regressors expand to {regressor_cells} design feature cells \
-                         ((points + horizon) x n_regressors = ({} + {}) x {}), which \
-                         exceeds max_regressor_design_cost {MAX_REGRESSOR_DESIGN_COST}; \
-                         send fewer regressors, a shorter history or a shorter horizon",
-                        ds.len(),
-                        args.horizon,
-                        regs.len()
-                    )));
-                }
-                // ---- 10. NAME COLLISION WITH A RESPONSE COMPONENT KEY ----
-                //
-                // The response component map is `components.insert(name, value)` — a MAP
-                // INSERT — so a duplicate key silently OVERWRITES the earlier entry and the
-                // operator sees ONE component where TWO were computed. Check 5 below closes
-                // regressor-against-regressor; this closes regressor-against-everything-else,
-                // over a reserved set with THREE parts (T-06.1-13):
-                //
-                //   (a) GENERATED COLUMN NAMES — `prophet::columns(&spec)`, i.e. the
-                //       `{seasonality}_delim_{n}` and `{holiday}_delim_{sign}{offset}` forms.
-                //   (b) PER-COMPONENT NAMES — the `Column.component` values behind those
-                //       columns. `predict` pushes one component per DISTINCT `component`
-                //       value, so a regressor named `yearly` collides even though `yearly`
-                //       is not itself a generated column name; and a regressor named after a
-                //       declared holiday collides for the same reason.
-                //   (c) RESERVED RESPONSE KEYS — [`RESERVED_RESPONSE_KEYS`], which are
-                //       invisible to (a) and (b) because they are pushed after the
-                //       per-component loop or are top-level response fields.
-                //
-                // The spec is fully assembled by this point (seasonalities, holidays and the
-                // empty-design weekly fallback are all settled above), so the reserved set is
-                // built ONCE from the real spec rather than from a reconstruction of it.
-                let mut reserved: std::collections::BTreeMap<String, &'static str> =
-                    std::collections::BTreeMap::new();
-                for c in crate::prophet::columns(&spec) {
-                    reserved.insert(c.name, "a generated design column name");
-                    reserved.insert(c.component, "a response component name");
-                }
-                for k in RESERVED_RESPONSE_KEYS {
-                    reserved.insert(k.to_string(), "a reserved response key");
-                }
-                if let Some((i, r, part)) = regs
-                    .iter()
-                    .enumerate()
-                    .find_map(|(i, r)| reserved.get(r.name.as_str()).map(|part| (i, r, *part)))
-                {
-                    return Err(ForecastError::Validation(format!(
-                        "regressor {i} is named {:?}, which is already {part} in the \
-                         response; the component map is keyed by name and one would \
-                         silently overwrite the other, so rename the regressor",
-                        r.name
-                    )));
-                }
-                // ---- 5. DUPLICATE NAMES ----
-                //
-                // O(R log R) via a BTreeSet, not a quadratic scan: the component map is
-                // keyed by name, so the second of a pair would silently overwrite the first.
-                let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-                for r in regs {
-                    if !seen.insert(r.name.as_str()) {
-                        return Err(ForecastError::Validation(format!(
-                            "regressor name {:?} appears more than once; the response \
-                             component map is keyed by name and the second would silently \
-                             replace the first, so give each regressor a distinct name",
-                            r.name
-                        )));
-                    }
-                }
-
-                for (i, r) in regs.iter().enumerate() {
-                    // ---- 1. LENGTH TIE, before anything is copied ----
-                    let want = ds.len() + args.horizon;
-                    if r.values.len() != want {
-                        return Err(ForecastError::Validation(format!(
-                            "regressor {i} carries {} values but {want} are required \
-                             (points + horizon = {} + {}); the array must cover the \
-                             history rows AND the horizon rows",
-                            r.values.len(),
-                            ds.len(),
-                            args.horizon
-                        )));
-                    }
-                    // ---- 2. INPUT FINITENESS ----
-                    //
-                    // The same class the `cap` finiteness check closed: JSON `1e400` parses
-                    // to infinity. The row index is named, the VALUE is not echoed.
-                    if let Some(bad) = r.values.iter().position(|v| !v.is_finite()) {
-                        return Err(ForecastError::Validation(format!(
-                            "regressor {i} carries a non-finite value at row {bad}; every \
-                             value must be finite (note that JSON 1e400 parses to infinity)"
-                        )));
-                    }
-                    // ---- 3. MODE ALLOWLIST, refused BY NAME ----
-                    let mode = match r.mode.as_deref() {
-                        None | Some("additive") => Mode::Additive,
-                        Some("multiplicative") => Mode::Multiplicative,
-                        Some(other) => {
-                            return Err(ForecastError::Validation(format!(
-                                "regressor {i} mode {other:?} is not supported; use \
-                                 \"additive\" or \"multiplicative\""
-                            )))
-                        }
-                    };
-                    // ---- 4. PRIOR SCALE, in a NUMERICALLY USABLE range ----
-                    //
-                    // Not merely "> 0": the objective and gradient SQUARE this into a
-                    // denominator (prophet.rs:536, :685), so f64::MIN_POSITIVE squares to
-                    // exactly 0.0 and the initial zero coefficients meet 0.0/0.0.
-                    let prior_scale = r.prior_scale.unwrap_or(10.0);
-                    if !prior_scale.is_finite()
-                        || prior_scale < REGRESSOR_PRIOR_SCALE_MIN
-                        || prior_scale > REGRESSOR_PRIOR_SCALE_MAX
-                    {
-                        return Err(ForecastError::Validation(format!(
-                            "regressor {i} prior_scale {prior_scale:e} is outside the \
-                             usable range [{REGRESSOR_PRIOR_SCALE_MIN:e}, \
-                             {REGRESSOR_PRIOR_SCALE_MAX:e}]; the objective squares it into \
-                             a denominator, so a smaller value underflows to zero and \
-                             yields a NaN fit"
-                        )));
-                    }
-
-                    let spec_r = crate::regressors::RegressorSpec {
-                        name: r.name.clone(),
-                        mode,
-                        prior_scale,
-                        standardize: r.standardize,
-                    };
-                    let (hist, futv) = r.values.split_at(ds.len());
-                    let st = crate::regressors::standardize_one(&spec_r, hist);
-
-                    // ---- 6a. ZERO SPREAD ----
-                    //
-                    // Only when the column was actually STANDARDISED: the auto {0,1}
-                    // carve-out legitimately returns std = 1.0 and must not be caught here.
-                    if st.std == 0.0 {
-                        return Err(ForecastError::Validation(format!(
-                            "regressor {i} is constant over the history rows and carries \
-                             no information; drop the regressor"
-                        )));
-                    }
-                    // ---- 6b. POST-ARITHMETIC FINITENESS ----
-                    //
-                    // A SEPARATE check from 2, and both are needed: finite inputs are not
-                    // sufficient, because 1e300 values overflow the sum of squares in the
-                    // variance. Every DERIVED quantity is re-checked.
-                    if !st.mu.is_finite() {
-                        return Err(ForecastError::Validation(format!(
-                            "regressor {i} has a non-finite mean after standardisation; \
-                             the values are individually finite but their sum overflows"
-                        )));
-                    }
-                    if !st.std.is_finite() {
-                        return Err(ForecastError::Validation(format!(
-                            "regressor {i} has a non-finite standard deviation after \
-                             standardisation; the values are individually finite but the \
-                             sum of squares overflows"
-                        )));
-                    }
-                    if let Some(bad) = hist
-                        .iter()
-                        .position(|v| !((v - st.mu) / st.std).is_finite())
-                    {
-                        return Err(ForecastError::Validation(format!(
-                            "regressor {i} has a non-finite standardised cell at row \
-                             {bad}; the value is finite but (value - mu) / std is not"
-                        )));
-                    }
-
-                    reg_std.push(st);
-                    reg_hist.push(hist.to_vec());
-                    reg_fut.push(futv.to_vec());
                 }
             }
 
@@ -3500,6 +3569,177 @@ mod tests {
              is passing because the whole mechanism is dead rather than because the floor \
              is degenerate"
         );
+    }
+
+    // =====================================================================
+    // D-33's pattern applied to REGRESSORS: the shared validation is ONE site
+    // above the dispatch, and this is the executable form of that claim.
+    // =====================================================================
+
+    /// EVERY hoisted regressor check fires on the NEURALPROPHET arm, with the SAME refusal
+    /// substring the prophet arm produces.
+    ///
+    /// Without this, "the checks are shared" is a claim about where the code SITS rather
+    /// than about what the neuralprophet arm DOES. Plan 06.1-01 put the length tie, the two
+    /// finiteness checks, the mode allowlist, the prior-scale range, the duplicate-name
+    /// check and the zero-spread refusal inside the `"prophet" =>` arm, and plan 06.1-03
+    /// added the name-byte bound, the count ceiling, the design-cost product and the
+    /// three-part name-collision check in the same place. Removing the neuralprophet
+    /// refusal without moving them would have opened that arm onto a regressor surface with
+    /// none of them.
+    ///
+    /// Each row is asserted on BOTH arms, which is what makes "the SAME refusal" a
+    /// comparison rather than an assertion about one side. The prophet column is the
+    /// control: a needle that stopped matching there would mean the row is testing a
+    /// message that no longer exists rather than a check that no longer runs.
+    ///
+    /// The test asserts its own ROW COUNT, so a check added to the hoisted site without a
+    /// row here makes it RED rather than silently uncovered.
+    #[test]
+    fn the_shared_regressor_validation_reaches_the_neuralprophet_arm() {
+        use crate::types::{RegressorArg, MAX_HOLIDAY_NAME_LEN, MAX_REGRESSORS};
+        const N: usize = 120;
+        const H: usize = 14;
+        const LEN: usize = N + H;
+
+        /// A well-formed column with a non-zero spread, of exactly the required length.
+        fn ok_reg(name: &str) -> RegressorArg {
+            good_reg(name, N, H)
+        }
+        fn many(n: usize) -> Vec<RegressorArg> {
+            (0..n).map(|i| ok_reg(&format!("r{i}"))).collect()
+        }
+
+        // ---- the hoisted checks, one row each, in the order the site keeps them ----
+        let mut short = ok_reg("price");
+        short.values.truncate(LEN - 1);
+
+        let mut nonfinite = ok_reg("price");
+        nonfinite.values[5] = f64::INFINITY;
+
+        let mut overflows = ok_reg("price");
+        // Individually FINITE, but the sum of squares overflows: the separate
+        // post-arithmetic check exists for exactly this, and check 2 above passes it.
+        overflows.values = (0..LEN)
+            .map(|i| if i % 2 == 0 { 1e300 } else { -1e300 })
+            .collect();
+
+        let mut bad_mode = ok_reg("price");
+        bad_mode.mode = Some("bogus".into());
+
+        let mut bad_prior = ok_reg("price");
+        bad_prior.prior_scale = Some(1e-300);
+
+        let mut constant = ok_reg("price");
+        constant.values = vec![7.0; LEN];
+
+        let long_name = ok_reg(&"a".repeat(MAX_HOLIDAY_NAME_LEN + 1));
+
+        // `(N + H) * 187 = 25 058`, which clears the count ceiling (187 <= 200) and trips
+        // the design-cost product on BOTH operands — the point count on prophet and the
+        // span in days on neuralprophet, which are equal on this contiguous series.
+        let design_cost = many(187);
+        let over_count = many(MAX_REGRESSORS + 1);
+
+        let rows: Vec<(&str, Vec<RegressorArg>, &str)> = vec![
+            (
+                "8. name length in bytes",
+                vec![long_name],
+                "exceeds max_holiday_name_len",
+            ),
+            (
+                "7. the count ceiling",
+                over_count,
+                "exceeds max_regressors 200",
+            ),
+            (
+                "9. the design-cost product",
+                design_cost,
+                "exceeds max_regressor_design_cost",
+            ),
+            (
+                "10a. collision with a generated design column name",
+                vec![ok_reg("weekly_delim_1")],
+                "which is already a generated design column name",
+            ),
+            (
+                "10b. collision with a per-component name",
+                vec![ok_reg("weekly")],
+                "which is already a response component name",
+            ),
+            (
+                "10c. collision with a reserved response key",
+                vec![ok_reg("yhat")],
+                "which is already a reserved response key",
+            ),
+            (
+                "5. duplicate names",
+                vec![ok_reg("price"), ok_reg("price")],
+                "appears more than once",
+            ),
+            (
+                "1. the length tie",
+                vec![short],
+                "values but 134 are required",
+            ),
+            (
+                "2. input finiteness",
+                vec![nonfinite],
+                "carries a non-finite value at row 5",
+            ),
+            (
+                "3. the mode allowlist",
+                vec![bad_mode],
+                "is not supported; use",
+            ),
+            (
+                "4. the prior-scale range",
+                vec![bad_prior],
+                "is outside the usable range",
+            ),
+            (
+                "6a. zero spread",
+                vec![constant],
+                "is constant over the history rows",
+            ),
+            (
+                "6b. derived-value finiteness",
+                vec![overflows],
+                "non-finite standard deviation after standardisation",
+            ),
+        ];
+
+        // The ROW COUNT, asserted. Ten checks plus all THREE parts of the name-collision
+        // set. A check added to the hoisted site without a row here turns this red rather
+        // than leaving the neuralprophet arm silently uncovered.
+        assert_eq!(
+            rows.len(),
+            13,
+            "one row per hoisted regressor check, the collision set counted as its three \
+             parts; add the row when you add the check"
+        );
+
+        for (label, regs, needle) in rows {
+            let mut np = reg_args(N, H, regs.clone());
+            np.model = Some("neuralprophet".into());
+            np.freq = Some("D".into());
+            let mut pr = reg_args(N, H, regs);
+            pr.model = Some("prophet".into());
+            for (arm, args) in [("neuralprophet", &np), ("prophet", &pr)] {
+                match forecast(args) {
+                    Err(ForecastError::Validation(m)) => assert!(
+                        m.contains(needle),
+                        "{label}: the {arm} arm must refuse with the SHARED message. Wanted \
+                         {needle:?}, got {m:?}"
+                    ),
+                    other => panic!(
+                        "{label}: the {arm} arm must refuse — the hoisted check did not run \
+                         there. Got {:?}",
+                        other.map(|r| r.model)
+                    ),
+                }
+            }
+        }
     }
 }
 
