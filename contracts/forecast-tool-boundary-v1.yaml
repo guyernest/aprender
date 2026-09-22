@@ -1,6 +1,6 @@
 contract: forecast-tool-boundary
 metadata:
-  version: 1.9.0
+  version: 1.10.0
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
@@ -291,6 +291,29 @@ constants:
   # below, which is the single source. Phase 7 re-prices the CONSTANT per tier without
   # re-deriving the SHAPE (D-34).
   fit_np_event_cost_per_column: 0.0126
+  # The NUMERIC-REGRESSOR term of cost axis C-08, in PROXY WIDTH UNITS per regressor column
+  # (SC4, D-34). Mirrored by types::FIT_NP_REGRESSOR_COST_PER_COLUMN via
+  # types::tests::cost_bounds_match_contract, read with constant_f64 for the same reason the
+  # event coefficient is. A COEFFICIENT, not a ceiling: every paragraph above applies to it
+  # unchanged, and its name contains _cost_per_ so the coefficient enumeration captures it
+  # while the fit_max_ ceiling filter correctly does not.
+  #
+  # A SECOND coefficient and not a reuse of the event one. fit_max_regressor_design_cost
+  # bounds the design CELLS, built once; on the neuralprophet arm a regressor column is also
+  # read on every batch of every epoch of every learning rate in the sweep, exactly as an
+  # event column is, and plan 06.1-05 priced event columns and only event columns. A request
+  # AT the regressor design-cost ceiling could therefore buy training work C-08 never saw.
+  #
+  # A regressor column is a dense f32 multiply-accumulate and an event column is a 0/1
+  # indicator through the same Linear, so the two slopes are plausibly close - and that is
+  # the kind of claim this project withdraws. MEASURED on its own sweep: the regressor basis
+  # (0.005264) is 15.3 per cent BELOW the event basis (0.006213) on the same host, same
+  # geometry, same recipe shape. Close, and not equal; reusing one constant for two axes
+  # would still have been a decision needing its own evidence, and this is that evidence.
+  #
+  # The value, its provenance and its safety factor live in the C-08 calibration: mapping
+  # below, which is the single source.
+  fit_np_regressor_cost_per_column: 0.0106
   # The Poisson mean the LOGISTIC uncertainty simulation draws on each of its 1 000 rows:
   # lambda = changepoint_count(len(ds)) x (t_max - 1), t_max = future_span_days /
   # history_span_days. fit_max_points, fit_max_span_days and fit_max_horizon are each
@@ -546,7 +569,7 @@ door_surface:
       note: 'CLOSED BY A BOUND, never by a measurement. 06-14 shipped this axis with no_structural_maximum: true because holidays[].name is an unbounded String with no structural maximum to measure: crates/aprender-mcp-forecast/src/lib.rs''s router construction (http_app / pooled_app) applies no DefaultBodyLimit of its own — though pmcp 2.19.3 StreamableHttpServerConfig::stateless() does set max_request_bytes = 4 MiB, enforced with a 413 (limits.rs:46, streamable_http_server.rs:4571), so HTTP DOES have a structural maximum and only stdio genuinely lacks one; the 200-byte bound stands on its own amplification argument rather than on the absence of a transport cap, no max_body and no content-length layer, and the stdio transport has no framing cap at all — so any measured_seconds would have described an arbitrarily CHOSEN name length rather than a maximum. 1 000 columns x an N-byte name is a ~2 000:1 amplification off one payload occurrence; at the bound that is ~400 KB of String and ~10 000 comparisons of <= 200 bytes. The bound is on BYTES because bytes are what the clone and the byte-wise comparison cost. The check is FIRST in the loop, which also bounds every other refusal message in that loop — each formats h.name back to the caller.'
     - axis: C-08
       name: 'NeuralProphet training work'
-      formula: 'n_lrs * epochs * n_samples * ((n_lags + 1) + fit_np_event_cost_per_column * E), with n_lrs in {2, 3}, epochs = auto_epochs(n) <= 500 (or <= 320 with lags), n_samples <= n_train_grid and E the event-column count. THE SHAPE: the event term is LINEAR in E and sits INSIDE the per-sample feature width, additive to (n_lags + 1) and NOT to the product. (n_lags + 1) is the per-sample width the optimiser sweeps and the event block adds work to that width, so the added work is paid once per sample per epoch - which is what the measured PER-STEP slope says. The rejected reading, product + c * E, scales with NEITHER epochs NOR samples: it can be tuned to pass an observation at one geometry and under-price every larger series, and np::tests::the_event_cost_shape_scales_with_geometry discriminates the two by evaluating priced(E)/priced(0) at two geometries differing ~10x in samples - identical under the width form, collapsing toward 1 under the additive-outside form. The event contribution to the width is rounded UP before the saturating multiplications, so the door never under-prices by a fractional column, and at E = 0 the ceil of zero is zero and the priced cost is BIT-IDENTICAL to the pre-event arithmetic.'
+      formula: 'n_lrs * epochs * n_samples * ((n_lags + 1) + fit_np_event_cost_per_column * E + fit_np_regressor_cost_per_column * R), with n_lrs in {2, 3}, epochs = auto_epochs(n) <= 500 (or <= 320 with lags), n_samples <= n_train_grid, E the event-column count and R the NUMERIC-REGRESSOR column count. R was added by plan 06.1-07 when regressors were opened on the neuralprophet arm: a regressor column is read on every batch of every epoch of every learning rate exactly as an event column is, so the design-cell ceiling fit_max_regressor_design_cost alone left the repeated per-epoch work unpriced. The two terms ADD rather than mask each other, because a caller can send both; np::tests::the_regressor_column_underpricing_is_observed_closed carries a COMBINED E > 0, R > 0 case for that. At R = 0 and E = 0 the priced cost is BIT-IDENTICAL to plan 06.1-05''s, asserted rather than argued. THE SHAPE: the event term is LINEAR in E and sits INSIDE the per-sample feature width, additive to (n_lags + 1) and NOT to the product. (n_lags + 1) is the per-sample width the optimiser sweeps and the event block adds work to that width, so the added work is paid once per sample per epoch - which is what the measured PER-STEP slope says. The rejected reading, product + c * E, scales with NEITHER epochs NOR samples: it can be tuned to pass an observation at one geometry and under-price every larger series, and np::tests::the_event_cost_shape_scales_with_geometry discriminates the two by evaluating priced(E)/priced(0) at two geometries differing ~10x in samples - identical under the width form, collapsing toward 1 under the additive-outside form. The event contribution to the width is rounded UP before the saturating multiplications, so the door never under-prices by a fractional column, and at E = 0 the ceil of zero is zero and the priced cost is BIT-IDENTICAL to the pre-event arithmetic.'
       spent_in: 'np::train'
       spent_outside_fit_budget: true
       bound: fit_max_np_train_cost
@@ -593,6 +616,33 @@ door_surface:
         # the coefficient: measured_seconds records the structural maximum that FORCED the
         # bound, not a number any door check compares against.
         structural_maximum_recheck_x86_64: outstanding
+        # ---- the NUMERIC-REGRESSOR sweep (plan 06.1-07, SC4) ----
+        # Its own measurement, on its own recipe, NOT inherited from the event slope.
+        # np::tests::the_regressor_column_underpricing_is_observed_closed READS the three
+        # measured_*_regressor keys through test_support::contract_value and computes
+        # measured(R)/measured(0) from them.
+        regressor_method: 'just forecast-np-regressor-calibration -> sc1_wall::np_regressor_calibration, release profile. Seven regressor-column counts (0, 5, 12, 25, 50, 100, 200) spanning zero to fit_max_regressors, 1200 contiguous daily points, 30 epochs, seed 42, through np::train - the exact function C-08 prices. Each column is a distinct continuous driver standardised by the SAME regressors::standardize_one the door calls, so the measured work is the work the shipped path does. Least squares over the seven points gives an intercept a (us/step at R = 0) and a slope b (us/step per regressor column); the coefficient in PROXY WIDTH UNITS is b * (n_lags_cal + 1) / a, which reduces to b / a only because this calibration is LAG-FREE - identical in form to the event derivation above. THREE runs at commit 5187a2aff (CLAUDE.md rule 6 - one input is an anecdote) fitted raw coefficients 0.005093, 0.005264 and 0.005096, a 3.4 per cent spread; the LARGEST is the basis, rounded UP to the next multiple of 1e-4 (0.0053) and multiplied by the safety factor 2. np_regressor_calibration re-asserts shipped >= freshly fitted on every run, so the sweep is itself a live one-sided guard against under-pricing on any host it is run on. STATED PLAINLY: at THIS geometry (1200 points) fit_max_regressor_design_cost would cap a DOOR request at 25000 / 1200 = 20 regressors, so the upper half of the ladder is reachable through the door only at a shorter history. That is sound for a coefficient defined as a RATIO at one geometry - the point count divides intercept and slope identically and cancels - but a reader must not infer that a 1200-point request may carry 200 regressors.'
+        regressor_host: 'Mac16,7 Apple M4 Pro, Darwin 25.6.0 (the plan executor dev box)'
+        regressor_arch: aarch64
+        regressor_date: '2026-09-21'
+        regressor_commit: 5187a2aff
+        regressor_status: final
+        regressor_safety_factor: 2
+        regressor_safety_factor_reason: 'Kept at 2, the same factor the event coefficient carries, and for the same reason rather than by analogy: it covers the 3.4 per cent run-to-run spread on the deriving host, the fact that only ONE architecture has been measured for this axis (the event axis has two), and the fact that none of the four envelopes Phase 7 will serve has been measured for it. UNLIKE the event coefficient, this one has NO x86_64 confirmation yet - that is recorded as outstanding below rather than inferred from the event axis agreeing on two hosts.'
+        regressor_n_lags_cal: 0
+        # The DERIVING measurement (aarch64), run 2 of 3 - the run whose fitted coefficient
+        # is the basis, so the recorded per-point numbers and the shipped constant come from
+        # the SAME run rather than from two different ones.
+        measured_us_per_step_at_r0: 13.708
+        measured_us_per_step_at_r_max: 31.621
+        measured_at_r_max: 200
+        measured_slope_us_per_column_regressor: 0.081875
+        fit_r_squared_regressor: 0.938818
+        # OUTSTANDING, recorded rather than inferred: the regressor axis has not been
+        # measured on x86_64. The event axis was confirmed there and came in LOWER (a slower
+        # core raises the intercept more than the slope), which is a reason to expect the
+        # same direction here and NOT evidence that it happens. Phase 7 re-prices per tier.
+        regressor_confirmed_on_x86_64: outstanding
       note: 'CLOSED BY A BOUND, and the MEASUREMENT is what decided that. There is no budget of ANY kind on this path: FIT_BUDGET_SECS lives in fit::fit_prophet, which the neuralprophet arm never enters. Every factor is individually bounded (n_lags <= 365, n_samples <= n_train_grid <= fit_max_span_days, epochs <= 500) but their product is not, and the lr sweep multiplies the whole thing by 2 or 3. It is NOT that n_train_grid is bounded by a larger constant than fit_max_points — fit_max_span_days == fit_max_points — the drivers are the missing budget, the 2-3x sweep and n_lags. The structural maximum (20 000 contiguous daily points, n_lags 365, horizon 3650) prices at 718 641 000 and walls at 47.924 s on release, 24x SC1''s 2 s bar, so measured_at_structural_maximum was NOT an available disposition: the measurement is recorded here as the number that forced the bound rather than as a closure. The lag-free arm''s own structural maximum is 3 000 000 (0.508 s) and can never reach the bound; C-08 is entirely about the lagged arm.'
     - axis: C-09
       name: 'linear / flat uncertainty simulation'

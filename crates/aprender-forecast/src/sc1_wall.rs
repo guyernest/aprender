@@ -383,7 +383,7 @@ fn measure_np(points: usize, n_lags: usize, horizon: usize) -> Row {
         .map(|s| parse_date(s).expect("the sweep builds valid dates"))
         .collect();
     let d = crate::np::NpData::new(&days, &args.y, days.len(), 10, 0.8);
-    let cost = crate::np::request_train_cost(&d, days.len(), n_lags, 0);
+    let cost = crate::np::request_train_cost(&d, days.len(), n_lags, 0, 0);
 
     let scope = format!("{label} points={points} horizon={horizon}");
     let (r, total) = time_accepted(&args, &scope);
@@ -923,8 +923,8 @@ fn measure_event_cal(p: EventCalPoint) -> (f64, u64, u64) {
     let us_per_step = log.seconds * 1e6 / log.steps as f64;
     // The DOOR'S OWN pricing function, so the numbers reported are the ones the bound is
     // compared against rather than a second arithmetic that could drift from them.
-    let priced = crate::np::request_train_cost(&d, p.points, p.n_lags, p.columns);
-    let priced_at_zero = crate::np::request_train_cost(&d, p.points, p.n_lags, 0);
+    let priced = crate::np::request_train_cost(&d, p.points, p.n_lags, p.columns, 0);
+    let priced_at_zero = crate::np::request_train_cost(&d, p.points, p.n_lags, 0, 0);
     (us_per_step, priced, priced_at_zero)
 }
 
@@ -1052,5 +1052,232 @@ fn np_event_calibration() {
         "the shipped coefficient {} is BELOW the freshly fitted {raw_coefficient:.6} on this \
          host: the door would under-price an event request here. Re-calibrate and round UP.",
         crate::types::FIT_NP_EVENT_COST_PER_COLUMN
+    );
+}
+
+// ==================== C-08, the NUMERIC-REGRESSOR column axis (SC4) ====================
+//
+// A SECOND sweep, not a reuse of the event one. A regressor column is a dense f32
+// multiply-accumulate and an event column is a 0/1 indicator through the same `Linear`, so
+// the two slopes are plausibly close — and "plausibly close" is exactly the kind of claim
+// this project withdraws. One measurement settles it, and both measurements are recorded in
+// the C-08 `calibration:` mapping so the comparison is checkable rather than asserted.
+
+/// One point of the regressor-column calibration sweep.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RegCalPoint {
+    pub columns: usize,
+    pub points: usize,
+    pub n_lags: usize,
+    pub epochs: usize,
+}
+
+/// The swept regressor-column counts, spanning zero to `fit_max_regressors`.
+///
+/// The top point is `MAX_REGRESSORS`, the DOOR'S OWN COUNT CEILING, for the reason the event
+/// ladder tops out at `MAX_HOLIDAY_COLUMNS`: sweeping only to a typical value is the mistake
+/// spike 014's findings name.
+///
+/// Stated plainly so the envelope is legible: at THIS geometry (1 200 points) the
+/// design-cost ceiling `fit_max_regressor_design_cost` would cap a door request at
+/// `25 000 / 1 200 = 20` regressors, so the upper half of this ladder is reachable through
+/// the door only at a SHORTER history. That is not a problem for a coefficient defined as a
+/// RATIO at one geometry — the point count divides the intercept and the slope identically
+/// and cancels — but a reader should not infer that a 1 200-point request may carry 200
+/// regressors.
+pub(crate) fn reg_cal_columns() -> Vec<usize> {
+    vec![0, 5, 12, 25, 50, 100, crate::types::MAX_REGRESSORS]
+}
+
+/// Build an [`crate::regressors::NpRegressors`] of EXACTLY `columns` numeric columns.
+///
+/// Each column is a distinct continuous driver with a non-zero spread, standardised by the
+/// SAME `regressors::standardize_one` the door calls — so the measured work is the work the
+/// shipped path does, not the work a simplified stand-in does. The width is asserted by the
+/// caller rather than assumed, because a generator that quietly produced a different count
+/// would make the fitted slope a slope in the wrong variable.
+pub(crate) fn np_regressors_of_width(
+    columns: usize,
+    d: &crate::np::NpData,
+    points: usize,
+) -> crate::regressors::NpRegressors {
+    let mut specs = Vec::with_capacity(columns);
+    let mut history = Vec::with_capacity(columns);
+    let mut future = Vec::with_capacity(columns);
+    for j in 0..columns {
+        let vals: Vec<f64> = (0..points)
+            .map(|i| 2.0 + (i as f64 * 0.37 + j as f64 * 1.7).sin() * 3.0)
+            .collect();
+        let spec = crate::regressors::RegressorSpec {
+            name: format!("cal{j}"),
+            mode: Mode::Additive,
+            prior_scale: 10.0,
+            standardize: None,
+        };
+        specs.push(crate::regressors::standardize_one(&spec, &vals));
+        history.push(vals);
+        future.push(vec![2.0; 1]);
+    }
+    crate::regressors::NpRegressors::new(d, 0, specs, history, future)
+        .expect("a lag-free calibration channel is always aligned")
+}
+
+/// Measure ONE regressor calibration point and return `(us/step, priced, priced_at_zero)`.
+///
+/// Trains through [`crate::np::train`] DIRECTLY, which is the exact function C-08 prices —
+/// `request_train_cost` is a proxy for the multiply-accumulates ONE `train` call spends — so
+/// the measurement and the price describe the same work.
+fn measure_reg_cal(p: RegCalPoint) -> (f64, u64, u64) {
+    let (ds, y, _t0) = tight_daily_series(p.points);
+    let days: Vec<i64> = ds
+        .iter()
+        .map(|s| parse_date(s).expect("the sweep builds valid dates"))
+        .collect();
+    let d = crate::np::NpData::new(&days, &y, days.len(), 10, 0.8);
+    let regs = np_regressors_of_width(p.columns, &d, days.len());
+    assert_eq!(
+        regs.dim(),
+        p.columns,
+        "the calibration generator must produce EXACTLY the requested column count, or the \
+         fitted slope is a slope in a different variable than the one it is labelled with"
+    );
+    let cfg = crate::np::TrainConfig {
+        n_lags: p.n_lags,
+        ar_layers: if p.n_lags > 0 { vec![32] } else { vec![] },
+        max_lr: 0.03,
+        epochs: Some(p.epochs),
+        batch: None,
+        weight_decay: 1e-3,
+        huber_beta: 0.3,
+        newer_w: 2.0,
+        seed: 42,
+        event_design: None,
+        regressors: if p.columns == 0 { None } else { Some(regs) },
+    };
+    let (_m, log) = crate::np::train(&d, &cfg, false);
+    assert!(
+        log.steps > 0,
+        "a calibration point that took zero optimiser steps measured nothing"
+    );
+    let us_per_step = log.seconds * 1e6 / log.steps as f64;
+    let priced = crate::np::request_train_cost(&d, p.points, p.n_lags, 0, p.columns);
+    let priced_at_zero = crate::np::request_train_cost(&d, p.points, p.n_lags, 0, 0);
+    (us_per_step, priced, priced_at_zero)
+}
+
+/// Print one machine-parsable calibration line.
+///
+/// `measured_over_priced` is dimensionless: `measured(R)/measured(0)` divided by
+/// `priced(R)/priced(0)`, each side cancelled against its own baseline. At or below 1.0 the
+/// price is keeping up with the work; above 1.0 the door is UNDER-pricing.
+fn print_reg_cal_line(p: RegCalPoint, us: f64, us0: f64, priced: u64, priced0: u64) {
+    let measured_ratio = us / us0;
+    let priced_ratio = priced as f64 / priced0 as f64;
+    let over = measured_ratio / priced_ratio;
+    println!(
+        "NP REG CAL: columns={} points={} n_lags={} epochs={} \
+         us_per_step={us:.3} priced={priced} priced_at_zero={priced0} \
+         measured_ratio={measured_ratio:.4} priced_ratio={priced_ratio:.4} \
+         measured_over_priced={over:.4} commit={} arch={} profile={}",
+        p.columns,
+        p.points,
+        p.n_lags,
+        p.epochs,
+        std::env::var("NP_REG_CAL_COMMIT").unwrap_or_else(|_| "unknown".into()),
+        std::env::consts::ARCH,
+        profile_token()
+    );
+}
+
+/// The C-08 regressor-column calibration sweep. Release-only by recipe
+/// (`just forecast-np-regressor-calibration`).
+///
+/// `#[ignore]`d for the reason `np_event_calibration` is: it is a wall-clock MEASUREMENT and
+/// not an assertion about correctness, and a timing harness running concurrently with the
+/// rest of the suite measures the scheduler.
+#[test]
+#[ignore = "release-profile wall-clock measurement; run via just forecast-np-regressor-calibration"]
+fn np_regressor_calibration() {
+    let points = env_usize("NP_REG_CAL_POINTS", 1_200);
+    let n_lags = env_usize("NP_REG_CAL_LAGS", 0);
+    let epochs = env_usize("NP_REG_CAL_EPOCHS", 30);
+    let columns = reg_cal_columns();
+    assert!(
+        columns.len() >= 6,
+        "the sweep must carry at least six points; a slope fitted through fewer is not a \
+         measurement of a shape"
+    );
+
+    // MEASURE AND PRINT EVERY POINT FIRST, THEN FIT. A print-and-assert loop aborts at the
+    // first failure and hides the shape across the rest of the sweep.
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    let mut rows: Vec<(RegCalPoint, f64, u64, u64)> = Vec::new();
+    for &c in &columns {
+        let p = RegCalPoint {
+            columns: c,
+            points,
+            n_lags,
+            epochs,
+        };
+        let (us, priced, priced0) = measure_reg_cal(p);
+        xs.push(c as f64);
+        ys.push(us);
+        rows.push((p, us, priced, priced0));
+    }
+    let us0 = rows
+        .iter()
+        .find(|(p, _, _, _)| p.columns == 0)
+        .map(|(_, us, _, _)| *us)
+        .expect("the sweep must include an R = 0 point: it is the ratio baseline");
+    for (p, us, priced, priced0) in &rows {
+        print_reg_cal_line(*p, *us, us0, *priced, *priced0);
+    }
+    let (intercept, slope, r2) = least_squares(&xs, &ys);
+    let raw_coefficient = if intercept > 0.0 {
+        slope * (n_lags as f64 + 1.0) / intercept
+    } else {
+        f64::NAN
+    };
+    println!(
+        "NP REG CAL FIT: n_points={} n_lags_cal={n_lags} intercept_us={intercept:.4} \
+         slope_us_per_column={slope:.6} r_squared={r2:.6} \
+         raw_coefficient_proxy_units={raw_coefficient:.6} \
+         shipped_constant={} event_constant={} commit={} arch={} profile={}",
+        columns.len(),
+        crate::types::FIT_NP_REGRESSOR_COST_PER_COLUMN,
+        crate::types::FIT_NP_EVENT_COST_PER_COLUMN,
+        std::env::var("NP_REG_CAL_COMMIT").unwrap_or_else(|_| "unknown".into()),
+        std::env::consts::ARCH,
+        profile_token()
+    );
+
+    // RE-ASSERT OVER WHAT WAS PRINTED, so a sweep that printed nothing cannot report success.
+    assert_eq!(
+        xs.len(),
+        columns.len(),
+        "every swept column count must have produced a measurement"
+    );
+    assert!(
+        ys.iter().all(|v| v.is_finite() && *v > 0.0),
+        "every measured us/step must be a positive finite number: {ys:?}"
+    );
+    assert!(
+        slope > 0.0,
+        "the measured per-step cost must RISE with the regressor-column count — a \
+         non-positive slope ({slope}) means the sweep measured nothing that varies with R, \
+         and a coefficient fitted from it would be meaningless"
+    );
+    assert!(
+        raw_coefficient.is_finite() && raw_coefficient > 0.0,
+        "the fitted coefficient must be a positive finite number, got {raw_coefficient}"
+    );
+    // ONE-SIDED, like the event sweep: a door must never under-price, and over-pricing is
+    // safe. This makes the sweep itself a live guard against under-pricing on any host.
+    assert!(
+        crate::types::FIT_NP_REGRESSOR_COST_PER_COLUMN >= raw_coefficient,
+        "the shipped coefficient {} is BELOW the freshly fitted {raw_coefficient:.6} on this \
+         host: the door would under-price a regressor request here. Re-calibrate and round UP.",
+        crate::types::FIT_NP_REGRESSOR_COST_PER_COLUMN
     );
 }

@@ -502,6 +502,63 @@ pub const MAX_NP_TRAIN_COST: u64 = 15_000_000;
 /// for.
 pub const FIT_NP_EVENT_COST_PER_COLUMN: f64 = 0.0126;
 
+/// The NUMERIC-REGRESSOR term of cost axis C-08, in PROXY WIDTH UNITS per regressor column
+/// (`constants.fit_np_regressor_cost_per_column`, SC4 / D-34).
+///
+/// # Why a SECOND coefficient and not a reuse of the event one
+///
+/// Plan 06.1-03's `fit_max_regressor_design_cost` bounds `(rows + horizon) x n_regressors` —
+/// the DESIGN CELLS, built once. On the neuralprophet arm a regressor column is also read on
+/// EVERY batch of EVERY epoch of EVERY learning rate in the sweep, exactly as an event column
+/// is, and plan 06.1-05 priced event columns and only event columns. So a request AT the
+/// regressor design-cost ceiling could buy training work cost axis C-08 never saw — the same
+/// under-pricing that plan closed, one column family over.
+///
+/// A regressor column is a dense `f32` multiply-accumulate and an event column is a 0/1
+/// indicator through the same `Linear`, so the two slopes are plausibly close. "Plausibly
+/// close" is the kind of claim this project withdraws, so it is MEASURED on its own sweep
+/// rather than inherited, and both measurements are recorded in the C-08 `calibration:`
+/// mapping so the comparison is checkable rather than asserted.
+///
+/// # It is a COEFFICIENT, not a ceiling
+///
+/// Nothing is ever refused for exceeding this number; it is multiplied into the priced
+/// quantity, which is THEN compared against [`MAX_NP_TRAIN_COST`]. That is why it is not
+/// named `fit_max_*`. Its name contains `_cost_per_`, so it is captured by
+/// `every_cost_coefficient_constant_is_named_by_an_axis_formula` and must NOT enter the
+/// `fit_max_` ceiling enumeration.
+///
+/// # Where it sits in the formula
+///
+/// ```text
+/// request_train_cost = n_lrs * epochs * n_samples
+///                      * ( (n_lags + 1) + FIT_NP_EVENT_COST_PER_COLUMN * E
+///                                       + FIT_NP_REGRESSOR_COST_PER_COLUMN * R )
+/// ```
+///
+/// The SAME width term plan 06.1-05 pinned, for the same measured reason: the growth is a
+/// PER-STEP slope, so the added work is paid once per sample per epoch. The rejected reading,
+/// `product + c * R`, scales with neither epochs nor samples.
+/// [`crate::np::tests::the_regressor_cost_shape_scales_with_geometry`] is the discriminator,
+/// and it is a separate test from the event one because a shape argument that is only ever
+/// checked on one of two terms is an argument about the other by analogy.
+///
+/// # What the number IS, dimensionally, and its provenance
+///
+/// Identical in form to the event coefficient: the sweep measures an intercept `a`
+/// (microseconds per step at `R = 0`) and a slope `b` (microseconds per step per regressor
+/// column) at ONE geometry, and
+///
+/// ```text
+/// FIT_NP_REGRESSOR_COST_PER_COLUMN = b * (n_lags_cal + 1) / a   [rounded UP, then x safety]
+/// ```
+///
+/// The measurement, the host, the architecture, the date, the commit, the method and the
+/// safety factor with its reason live in the C-08 `calibration:` mapping in
+/// `contracts/forecast-tool-boundary-v1.yaml`, which is the single source. `constant_f64`
+/// asserts this constant equals the YAML value in `cost_bounds_match_contract`.
+pub const FIT_NP_REGRESSOR_COST_PER_COLUMN: f64 = 0.0106;
+
 /// Default router-pool size for the streamable-HTTP server (`constants.pool_default`).
 ///
 /// Lives here, beside the other contract-mirrored bounds, because this is the crate that
@@ -657,11 +714,12 @@ impl std::error::Error for ForecastError {}
 mod tests {
     use super::{
         ForecastArgs, ForecastError, DEFAULT_POOL, FIT_NP_EVENT_COST_PER_COLUMN,
-        MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES, MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST,
-        MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW, MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA,
-        MAX_NP_TRAIN_COST, MAX_POINTS, MAX_REGRESSORS, MAX_REGRESSOR_DESIGN_COST, MAX_SPAN_DAYS,
-        MIN_POINTS, REGRESSOR_CONDITION_NUMBER_WARN, REGRESSOR_PRIOR_SCALE_MAX,
-        REGRESSOR_PRIOR_SCALE_MIN, REGRESSOR_VIF_WARN,
+        FIT_NP_REGRESSOR_COST_PER_COLUMN, MAX_HOLIDAY_COLUMNS, MAX_HOLIDAY_DATES,
+        MAX_HOLIDAY_DATES_TOTAL, MAX_HOLIDAY_DESIGN_COST, MAX_HOLIDAY_NAME_LEN, MAX_HOLIDAY_WINDOW,
+        MAX_HORIZON, MAX_LOGISTIC_CHANGEPOINT_LAMBDA, MAX_NP_TRAIN_COST, MAX_POINTS,
+        MAX_REGRESSORS, MAX_REGRESSOR_DESIGN_COST, MAX_SPAN_DAYS, MIN_POINTS,
+        REGRESSOR_CONDITION_NUMBER_WARN, REGRESSOR_PRIOR_SCALE_MAX, REGRESSOR_PRIOR_SCALE_MIN,
+        REGRESSOR_VIF_WARN,
     };
     use crate::test_support::{constant_f64, constant_u64};
 
@@ -740,6 +798,15 @@ mod tests {
                 "FIT_NP_EVENT_COST_PER_COLUMN",
                 "fit_np_event_cost_per_column",
                 FIT_NP_EVENT_COST_PER_COLUMN,
+            ),
+            // The SECOND cost coefficient, added by plan 06.1-07 when numeric regressors
+            // were opened on the neuralprophet arm. Separately MEASURED, not inherited:
+            // the regressor basis came in 15.3 per cent below the event basis on the same
+            // host and geometry.
+            (
+                "FIT_NP_REGRESSOR_COST_PER_COLUMN",
+                "fit_np_regressor_cost_per_column",
+                FIT_NP_REGRESSOR_COST_PER_COLUMN,
             ),
         ] {
             let from_contract = constant_f64("forecast-tool-boundary-v1", key);

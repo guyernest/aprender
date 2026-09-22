@@ -1167,7 +1167,10 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                 n_event_cols, holiday_columns,
                 "the priced event-column count must equal the bounded holiday column count"
             );
-            let np_cost = np::request_train_cost(&d, n_train, n_lags, n_event_cols);
+            let n_reg_cols = np_regs
+                .as_ref()
+                .map_or(0, crate::regressors::NpRegressors::dim);
+            let np_cost = np::request_train_cost(&d, n_train, n_lags, n_event_cols, n_reg_cols);
             if np_train_cost_is_over(np_cost) {
                 let n_samples = np::n_training_samples(&d, n_lags);
                 let epochs = np::door_epochs(n_train, n_samples, n_lags);
@@ -1904,15 +1907,15 @@ mod tests {
         let ds: Vec<i64> = (0..600).map(|i| days_from_civil(2020, 1, 1) + i).collect();
         let y: Vec<f64> = (0..600).map(|i| 100.0 + f64::from(i) * 0.01).collect();
         let d = crate::np::NpData::new(&ds, &y, ds.len(), 10, 0.8);
-        let without = crate::np::request_train_cost(&d, ds.len(), 0, 0);
-        let with = crate::np::request_train_cost(&d, ds.len(), 0, 6);
+        let without = crate::np::request_train_cost(&d, ds.len(), 0, 0, 0);
+        let with = crate::np::request_train_cost(&d, ds.len(), 0, 6, 0);
         assert!(
             with > without,
             "a request carrying 6 event columns must be priced ABOVE the same request \
              without them; got {with} <= {without}"
         );
         assert_eq!(
-            crate::np::request_train_cost(&d, ds.len(), 0, 0),
+            crate::np::request_train_cost(&d, ds.len(), 0, 0, 0),
             without,
             "the price at ZERO event columns must be bit-identical to the pre-event \
              arithmetic"
@@ -2470,7 +2473,7 @@ mod tests {
             };
             let epochs = crate::np::door_epochs(PEYTON_ROWS, n_samples, n_lags);
             let sweep = crate::np::door_lr_sweep(n_lags).len() as u64;
-            let cost = crate::np::train_cost(n_samples, epochs, n_lags, 0) * sweep;
+            let cost = crate::np::train_cost(n_samples, epochs, n_lags, 0, 0) * sweep;
             assert!(
                 cost <= MAX_NP_TRAIN_COST,
                 "np::parity's own Peyton rung at n_lags={n_lags} prices at {cost}, which the \
@@ -2514,8 +2517,8 @@ mod tests {
             let epochs = crate::np::door_epochs(n_points, n_samples, n_lags);
             let sweep = crate::np::door_lr_sweep(n_lags).len() as u64;
             assert_eq!(
-                crate::np::request_train_cost(&d, n_points, n_lags, 0),
-                crate::np::train_cost(n_samples, epochs, n_lags, 0) * sweep,
+                crate::np::request_train_cost(&d, n_points, n_lags, 0, 0),
+                crate::np::train_cost(n_samples, epochs, n_lags, 0, 0) * sweep,
                 "request_train_cost must be exactly sweep x train_cost at n_lags={n_lags}"
             );
         }
@@ -4219,6 +4222,199 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -------------------------------------------------------------------------------
+    // The 06.1-05 guard regex, FIXED and shipped as a live guard rather than left in a
+    // plan file. `request_train_cost\([^)]*\)` stops at the FIRST `)`, so every call
+    // site with a nested parenthesised argument — 3 of the 5 in this file — came back
+    // TRUNCATED, and a guard meant to prove an argument is threaded everywhere was
+    // blind at exactly the sites this plan changes. CLAUDE.md rule 7: it ships with a
+    // must-match / must-not-match case table, and the table is what gets re-run.
+    // -------------------------------------------------------------------------------
+
+    /// Every CALL of `name` in `src`, by a BALANCED-PAREN scan from the opening paren.
+    ///
+    /// Definitions (`pub fn NAME(`) are skipped: a definition is not a call site, and
+    /// including it would make the argument assertions below assert about a signature.
+    fn cost_call_sites(src: &str, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let needle = format!("{name}(");
+        let mut from = 0usize;
+        while let Some(rel) = src[from..].find(&needle) {
+            let i = from + rel;
+            from = i + needle.len();
+            // a call, not a definition, and not a longer identifier ending in `name`
+            let before = src[..i].trim_end();
+            if before.ends_with("fn") {
+                continue;
+            }
+            if src[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            let open = i + needle.len() - 1;
+            let mut depth = 0i32;
+            for (k, c) in src[open..].char_indices() {
+                if c == '(' {
+                    depth += 1;
+                } else if c == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        out.push(src[i..=(open + k)].to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The TOP-LEVEL comma-separated arguments of a call extracted by [`cost_call_sites`].
+    fn cost_call_args(call: &str) -> Vec<String> {
+        let open = call
+            .find('(')
+            .expect("an extracted call has an opening paren");
+        let body = &call[open + 1..call.len() - 1];
+        let mut args = Vec::new();
+        let mut depth = 0i32;
+        let mut cur = String::new();
+        for c in body.chars() {
+            match c {
+                '(' | '[' | '<' => {
+                    depth += 1;
+                    cur.push(c);
+                }
+                ')' | ']' | '>' => {
+                    depth -= 1;
+                    cur.push(c);
+                }
+                ',' if depth == 0 => args.push(std::mem::take(&mut cur)),
+                _ => cur.push(c),
+            }
+        }
+        if !cur.trim().is_empty() {
+            args.push(cur);
+        }
+        args.into_iter().map(|a| a.trim().to_string()).collect()
+    }
+
+    /// The BROKEN 06.1-05 form, reproduced so its blindness is an executable fact rather
+    /// than a sentence in a SUMMARY: `NAME\([^)]*\)` stops at the FIRST `)`.
+    fn naive_truncating_scan(src: &str, name: &str) -> Vec<String> {
+        let needle = format!("{name}(");
+        let mut out = Vec::new();
+        let mut from = 0usize;
+        while let Some(rel) = src[from..].find(&needle) {
+            let i = from + rel;
+            from = i + needle.len();
+            if src[..i].trim_end().ends_with("fn") {
+                continue;
+            }
+            if let Some(close) = src[i..].find(')') {
+                out.push(src[i..=(i + close)].to_string());
+            }
+        }
+        out
+    }
+
+    /// The door prices with the REAL exogenous counts, and every other call site in this
+    /// file passes literal zeros — a claim the compiler cannot make, because arity is
+    /// satisfied by any expression.
+    ///
+    /// This is the 06.1-05 check, corrected and extended to the regressor axis. Its
+    /// instrument is a balanced-paren scan; see the case table below for why, and re-run
+    /// the table rather than re-reading the scanner.
+    #[test]
+    fn every_cost_call_site_is_found_whole_and_prices_what_it_should() {
+        const SRC: &str = include_str!("forecast.rs");
+        // The SHIPPED region only: this test's own case-table literals below would
+        // otherwise be scanned as call sites.
+        let shipped = SRC
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map_or(SRC, |(head, _)| head);
+
+        // ---- THE CASE TABLE (CLAUDE.md rule 7) ----
+        //
+        // MUST MATCH, and must come back WHOLE. The first row is the exact shape the
+        // `[^)]*` form truncates, and it is a real shape from this crate.
+        for (probe, want_args) in [
+            ("let a = request_train_cost(&d, ds.len(), 0, 0, 0);", 5usize),
+            (
+                "request_train_cost(&d, p.points, p.n_lags, p.columns, 0)",
+                5,
+            ),
+            (
+                "let c = request_train_cost(\n    &d,\n    n_train,\n    n_lags,\n    \
+                 n_event_cols,\n    n_reg_cols,\n);",
+                5,
+            ),
+        ] {
+            let found = cost_call_sites(probe, "request_train_cost");
+            assert_eq!(found.len(), 1, "MUST MATCH exactly once: {probe:?}");
+            assert_eq!(
+                cost_call_args(&found[0]).len(),
+                want_args,
+                "the scan must return the WHOLE argument list of {probe:?}, got {:?}",
+                cost_call_args(&found[0])
+            );
+        }
+        // MUST NOT MATCH.
+        for probe in [
+            "pub fn request_train_cost(d: &NpData, n_points: usize) -> u64 {",
+            "log.train_cost",
+            "let x = my_request_train_cost(1, 2);",
+        ] {
+            assert!(
+                cost_call_sites(probe, "request_train_cost").is_empty()
+                    && cost_call_sites(probe, "train_cost").is_empty(),
+                "MUST NOT MATCH: {probe:?}"
+            );
+        }
+        // AND THE DEFECT ITSELF, pinned: the naive form TRUNCATES the nested-call shape.
+        let nested = "let a = request_train_cost(&d, ds.len(), 0, 0, 0);";
+        let naive = naive_truncating_scan(nested, "request_train_cost");
+        assert_eq!(
+            naive[0], "request_train_cost(&d, ds.len()",
+            "the 06.1-05 regex's blindness must stay observable: if this ever stops \
+             truncating, the balanced scan is no longer buying anything and the comment \
+             above is wrong"
+        );
+
+        // ---- THE LIVE CLAIM ----
+        let sites = cost_call_sites(shipped, "request_train_cost");
+        assert_eq!(
+            sites.len(),
+            1,
+            "the door prices a neuralprophet request at exactly ONE place, so the priced \
+             cost cannot disagree with the work spent. Found {sites:?}"
+        );
+        let args = cost_call_args(&sites[0]);
+        assert_eq!(
+            args.len(),
+            5,
+            "the priced call must carry BOTH exogenous counts"
+        );
+        assert_eq!(
+            args[3], "n_event_cols",
+            "the door must price the REAL event-column count"
+        );
+        assert_eq!(
+            args[4], "n_reg_cols",
+            "the door must price the REAL regressor-column count — a literal 0 here is the \
+             SC4 under-pricing this plan closed"
+        );
+        // And no OTHER cost call escapes into the shipped door.
+        assert!(
+            cost_call_sites(shipped, "train_cost")
+                .iter()
+                .all(|c| c.starts_with("request_train_cost(")),
+            "the shipped door must price through request_train_cost only: {:?}",
+            cost_call_sites(shipped, "train_cost")
+        );
     }
 }
 

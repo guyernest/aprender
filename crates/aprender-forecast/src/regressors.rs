@@ -1769,6 +1769,295 @@ mod tests {
         )
         .expect("a gap-free lagged channel must be ACCEPTED");
     }
+
+    // -----------------------------------------------------------------------------
+    // SC5's PROHIBITION as a SOURCE check: no SHIPPED regressor path interpolates a
+    // value. A binary driver linearly interpolated produces a "half promo" day, which
+    // is not a thing that happens.
+    // -----------------------------------------------------------------------------
+
+    /// `//` line comments removed, so the detector reads CODE and not prose.
+    ///
+    /// Without this, a doc comment explaining why interpolation is forbidden would itself
+    /// trip the guard — and neutering the guard to let the explanation through is exactly
+    /// how a guard stops guarding.
+    fn strip_line_comments(src: &str) -> String {
+        src.lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The `a + f * (b - a)` linear-interpolation SHAPE, plus the named forms.
+    ///
+    /// Returns the offending excerpt so a failure NAMES what it found rather than asserting
+    /// that something, somewhere, matched.
+    ///
+    /// The shape scan is deliberately not `a + f * (b - a)` as a literal: a real occurrence
+    /// uses whatever identifiers the surrounding code has. What is invariant is the
+    /// STRUCTURE — a `+`, then a multiplication, then a parenthesised DIFFERENCE. This is
+    /// the pattern's whole content, and CLAUDE.md rule 7 is why it ships with a case table
+    /// below rather than with a reading of this paragraph.
+    fn interpolation_excerpt(code: &str) -> Option<String> {
+        for named in ["lerp(", "interpolate(", "interpolated(", "linspace("] {
+            if let Some(i) = code.find(named) {
+                return Some(code[i..(i + 60).min(code.len())].to_string());
+            }
+        }
+        let bytes: Vec<char> = code.chars().collect();
+        let mut i = 0usize;
+        while i + 1 < bytes.len() {
+            if bytes[i] == '*' && bytes[i + 1] != '=' && bytes[i + 1] != '/' {
+                // a `+` within the preceding 48 characters, on the same statement
+                let lo = i.saturating_sub(48);
+                let before: String = bytes[lo..i].iter().collect();
+                let has_plus = before.rsplit(';').next().is_some_and(|s| s.contains('+'));
+                // the next parenthesised group, and whether it is a DIFFERENCE
+                let rest: String = bytes[i + 1..].iter().collect();
+                let open = rest.find('(');
+                if has_plus {
+                    if let Some(o) = open {
+                        if rest[..o].trim().is_empty() {
+                            let mut depth = 0i32;
+                            let mut end = None;
+                            for (k, c) in rest[o..].char_indices() {
+                                if c == '(' {
+                                    depth += 1;
+                                } else if c == ')' {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        end = Some(o + k);
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(e) = end {
+                                let group = &rest[o + 1..e];
+                                if group.contains('-') && !group.contains("->") {
+                                    let start = lo;
+                                    let excerpt: String = bytes
+                                        [start..(i + 1 + e + 1).min(bytes.len())]
+                                        .iter()
+                                        .collect();
+                                    return Some(excerpt.trim().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Extract the source of a top-level `fn NAME` by brace matching from its signature.
+    fn top_level_fn<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+        for prefix in ["\npub fn ", "\nfn ", "\npub(crate) fn "] {
+            let needle = format!("{prefix}{name}");
+            if let Some(i) = src.find(&needle) {
+                let body_start = src[i..].find('{')? + i;
+                let mut depth = 0i32;
+                for (k, c) in src[body_start..].char_indices() {
+                    if c == '{' {
+                        depth += 1;
+                    } else if c == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(&src[i..=(body_start + k)]);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// SC5: no SHIPPED regressor path interpolates a value, and the check is SCOPED.
+    ///
+    /// # Why the scope is ENUMERATED and not crate-wide
+    ///
+    /// `NpData::new` legitimately interpolates `y` over the imputed grid. That is the
+    /// crate's existing TARGET imputer, it predates this phase, and a crate-wide grep fires
+    /// on it and would have to be neutered to pass — which is how a guard stops guarding.
+    /// So the scope is all of `regressors.rs` above its test modules, plus the named
+    /// regressor-carrying functions of `np.rs`, and the case table below asserts POSITIVELY
+    /// that the scope EXCLUDES the `y` imputer rather than leaving that to inspection.
+    ///
+    /// # The COMPLETENESS guard
+    ///
+    /// An enumerated scope can go stale: a new regressor-carrying function added to `np.rs`
+    /// without a line here would be silently unscanned. The second half of this test scans
+    /// every top-level `fn` in `np.rs` for regressor tokens and requires each hit to be in
+    /// the enumeration. `NpData::new` is structurally out of that scan — it is an `impl`
+    /// method, not a top-level `fn` — which is stated here rather than relied on silently.
+    ///
+    /// # The RED was OBSERVED
+    ///
+    /// A source guard whose red has never been seen is a guard nobody has tested. The
+    /// must-match half of the case table below is run on every invocation; separately, an
+    /// interpolation expression was temporarily inserted into `regressors.rs` and this test
+    /// was observed failing on it before the insertion was removed — recorded in the plan
+    /// SUMMARY with the observed output.
+    #[test]
+    fn no_shipped_regressor_path_interpolates_a_value() {
+        const REG_SRC: &str = include_str!("regressors.rs");
+        const NP_SRC: &str = include_str!("np.rs");
+        const NP_SCOPE: [&str; 7] = [
+            "training_samples",
+            "per_sample_regressor_width",
+            "train",
+            "add_regressors",
+            "predict_ts",
+            "predict_ar_1step",
+            "predict_ar_recursive",
+        ];
+
+        // ---- THE PATTERN'S CASE TABLE (CLAUDE.md rule 7) ----
+        //
+        // The regexes in this repo were wrong five times, and every one was caught by a
+        // table like this rather than by review. Re-run the table; do not re-read the
+        // pattern.
+        for must_match in [
+            "g[i] = g[a] + f * (g[b] - g[a]);",
+            "let v = lo + frac * (hi - lo);",
+            "out[k] = prev + t * (next - prev)",
+            "let y = lerp(a, b, t);",
+        ] {
+            assert!(
+                interpolation_excerpt(must_match).is_some(),
+                "MUST MATCH but did not: {must_match:?}"
+            );
+        }
+        for must_not_match in [
+            "let x = a + b * (c + d);",
+            "acc += w * (x);",
+            "let term = d.scale * wj * x;",
+            "((v - st.mu) / st.std) as f32",
+            "10.0 + 0.01 * t + (2.0 * PI * t / 7.0).sin()",
+            "fn f(a: usize) -> Vec<f64> { Vec::new() }",
+            "let n = (last - first + 1) as usize;",
+        ] {
+            assert!(
+                interpolation_excerpt(must_not_match).is_none(),
+                "MUST NOT MATCH but did: {must_not_match:?} -> {:?}",
+                interpolation_excerpt(must_not_match)
+            );
+        }
+
+        // ---- BUILD THE SCOPE ----
+        // Cut at the first test MODULE, not at the first `#[cfg(test)]`: this file carries
+        // a `#[cfg(test)]` FUNCTION mid-file (`max_pairwise_correlation_for`), and cutting
+        // there would silently drop every shipped regressor item below it — a scope that
+        // scans nothing passes by checking nothing, which the vacuity guard below catches.
+        let reg_shipped = REG_SRC
+            .split_once("\n#[cfg(test)]\nmod ")
+            .map_or(REG_SRC, |(head, _)| head);
+        let mut scope = strip_line_comments(reg_shipped);
+        for name in NP_SCOPE {
+            let f = top_level_fn(NP_SRC, name)
+                .unwrap_or_else(|| panic!("the scope names np::{name}, which no longer exists"));
+            scope.push('\n');
+            scope.push_str(&strip_line_comments(f));
+        }
+
+        // VACUITY GUARD: the scope must actually contain the regressor code it claims to.
+        for token in [
+            "NpRegressors",
+            "RegressorBlock",
+            "standardize_one",
+            "add_regressors",
+        ] {
+            assert!(
+                scope.contains(token),
+                "vacuity guard: the scope does not contain {token:?}, so it is scanning \
+                 something other than the regressor path"
+            );
+        }
+
+        // ---- THE SCOPE'S OWN CASE TABLE, two-sided ----
+        //
+        // MUST BE EXCLUDED: `NpData::new`'s legitimate `y` imputation. Asserted POSITIVELY —
+        // the expression is confirmed to EXIST in np.rs and to be ABSENT from the scope — so
+        // a later widening that swallows the imputer is caught rather than silently
+        // tolerated.
+        const Y_IMPUTER: &str = "grid_y[k] = grid_y[a] + f * (grid_y[b] - grid_y[a]);";
+        assert!(
+            NP_SRC.contains(Y_IMPUTER),
+            "the control has gone stale: np.rs no longer contains the y imputer this scope \
+             is required to EXCLUDE, so excluding it proves nothing"
+        );
+        assert!(
+            interpolation_excerpt(Y_IMPUTER).is_some(),
+            "the y imputer must be something the DETECTOR would catch, or excluding it from \
+             the scope is not a meaningful exclusion"
+        );
+        assert!(
+            !scope.contains("grid_y[k] = grid_y[a]"),
+            "the scope SWALLOWED NpData::new's y imputer. That is the crate's existing \
+             target imputer and it predates this phase; a scope that includes it would have \
+             to be neutered to pass, which is how a guard stops guarding."
+        );
+        // MUST BE EXCLUDED: the probe's own fill rules, which are TEST INPUTS by design.
+        assert!(
+            !scope.contains("grid_with_rule") && !scope.contains("GARBAGE"),
+            "the scope swallowed the four-rule probe's fill rules, which are TEST INPUTS"
+        );
+
+        // ---- THE CHECK ITSELF ----
+        assert_eq!(
+            interpolation_excerpt(&scope),
+            None,
+            "a SHIPPED regressor path interpolates a value. A binary driver linearly \
+             interpolated produces a half-promo day, which is not a thing that happens \
+             (SC5). The four fill rules are TEST INPUTS and must never become a code path."
+        );
+
+        // ---- COMPLETENESS: no regressor-carrying np.rs function escapes the enumeration --
+        let mut unscoped: Vec<&str> = Vec::new();
+        for (i, _) in NP_SRC
+            .match_indices("\nfn ")
+            .chain(NP_SRC.match_indices("\npub fn "))
+        {
+            let head = &NP_SRC[i + 1..];
+            let Some(paren) = head.find('(') else {
+                continue;
+            };
+            let name = head[..paren]
+                .rsplit(' ')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            if name.is_empty() || NP_SCOPE.contains(&name) {
+                continue;
+            }
+            // `#[cfg(test)]` items are out of scope by design — the fill rules are inputs.
+            let before = &NP_SRC[..i];
+            let tail: String = before.chars().rev().take(400).collect::<String>();
+            if tail.contains("]tset(gfc[#") {
+                continue;
+            }
+            let Some(body) = top_level_fn(NP_SRC, name) else {
+                continue;
+            };
+            let code = strip_line_comments(body);
+            if ["NpRegressors", "RegressorBlock", "reg_rows", "reg_channel"]
+                .iter()
+                .any(|t| code.contains(t))
+            {
+                unscoped.push(name);
+            }
+        }
+        assert!(
+            unscoped.is_empty(),
+            "these np.rs functions carry regressor data but are NOT in the enumerated scope, \
+             so the no-interpolation guard does not scan them: {unscoped:?}. Add them to \
+             NP_SCOPE."
+        );
+    }
 }
 
 #[cfg(test)]

@@ -1197,3 +1197,80 @@ forecast-np-event-calibration points="" lags="" epochs="":
     fi
     grep -m1 '^NP EVENT CAL FIT: ' "$LOG"
     echo "  NP EVENT CALIBRATION OK: $checked points swept on release, slope fitted"
+
+# Sweep the C-08 NUMERIC-REGRESSOR column axis on release and fit the per-column
+# slope. A SIBLING of forecast-np-event-calibration on the same shape, not a
+# reuse of it: the two coefficients are separately measured, and one recipe
+# producing both would make a re-measure of either move the other.
+#
+# `rc` is captured BEFORE any pipe. Reading `$?` through a pipe gives the LAST
+# command's status, and that exact defect shipped twice in this repo and made
+# three green runs prove nothing (#2336, #2360).
+forecast-np-regressor-calibration points="" lags="" epochs="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    LOG=target/p06.1-07-forecast-np-regressor-calibration.log
+    # An UNSET variable means "the harness default"; exporting an empty one would
+    # be parsed as 0 by a less careful reader, so they are exported only when set.
+    if [ -n "{{points}}" ]; then export NP_REG_CAL_POINTS="{{points}}"; fi
+    if [ -n "{{lags}}" ]; then export NP_REG_CAL_LAGS="{{lags}}"; fi
+    if [ -n "{{epochs}}" ]; then export NP_REG_CAL_EPOCHS="{{epochs}}"; fi
+    # The commit the numbers were produced at, carried onto every printed line.
+    NP_REG_CAL_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    export NP_REG_CAL_COMMIT
+    set +e
+    CARGO_INCREMENTAL=0 cargo test --release -p aprender-forecast --lib \
+        sc1_wall::np_regressor_calibration -- --ignored --nocapture > "$LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        grep -E '^NP REG CAL' "$LOG" || true
+        tail -30 "$LOG"
+        echo "FAIL: the regressor calibration exited $rc - log $LOG" >&2
+        exit "$rc"
+    fi
+    if ! grep -q '^NP REG CAL: ' "$LOG"; then
+        tail -30 "$LOG"
+        echo "FAIL: no 'NP REG CAL:' line in $LOG - nothing was measured. A sweep" >&2
+        echo "      that measured zero points must never report success." >&2
+        exit 1
+    fi
+    checked=0
+    while IFS= read -r line; do
+        echo "$line"
+        # CLAUDE.md rule 2 - prove the mechanism engaged, never label a run by
+        # intent. A debug number on this crate looks plausible and is not the
+        # measurement the coefficient is derived from.
+        case "$line" in
+            *profile=release*) ;;
+            *)
+                echo "FAIL: a calibration point was not measured on a release build" >&2
+                echo "      (profile= is not release), so it is not the calibration." >&2
+                echo "      line: $line" >&2
+                exit 1
+                ;;
+        esac
+        # Parse BY TOKEN, never by column position: the printed field order must
+        # not become load-bearing.
+        us=$(printf '%s\n' "$line" \
+            | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^us_per_step=/) { sub(/^us_per_step=/, "", $i); print $i; exit } }')
+        if [ -z "$us" ]; then
+            echo "FAIL: an NP REG CAL line carries no us_per_step= token - that" >&2
+            echo "      point was never measured. line: $line" >&2
+            exit 1
+        fi
+        checked=$((checked + 1))
+    done < <(grep '^NP REG CAL: ' "$LOG")
+    if [ "$checked" -lt 6 ]; then
+        echo "FAIL: the sweep is at least SIX regressor-column counts and this run" >&2
+        echo "      checked $checked. A slope fitted through fewer points is not a" >&2
+        echo "      measurement of a shape." >&2
+        exit 1
+    fi
+    if ! grep -q '^NP REG CAL FIT: ' "$LOG"; then
+        echo "FAIL: the sweep printed no FIT line, so no slope was fitted." >&2
+        exit 1
+    fi
+    grep -m1 '^NP REG CAL FIT: ' "$LOG"
+    echo "  NP REGRESSOR CALIBRATION OK: $checked points swept on release, slope fitted"
