@@ -522,9 +522,6 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
     // regressor design is read over that grid on the lagged path. The message STATES the
     // operand it used, as the holiday check does.
     //
-    // Until plan 06.1-07's second commit removes the temporary neuralprophet refusal, the
-    // neuralprophet branch of the operand below is UNREACHABLE FROM THE DOOR, and that is
-    // deliberate — do not delete it as dead code.
     // ---- EXTERNAL REGRESSORS (D-22) ----
     //
     // Split each caller array into the HISTORY prefix (`ds.len()` rows, what the
@@ -603,11 +600,10 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
         // `span_days` is already computed above for the `MAX_SPAN_DAYS` check and is
         // bounded by it, so the cast is exact and this product is at most 23 650 000
         // under EITHER operand — six orders of magnitude below `usize::MAX`.
-        let (reg_design_rows, reg_design_operand) = if model_name == "neuralprophet" {
-            (span_days as usize, "span_days")
-        } else {
-            (ds.len(), "points")
-        };
+        // The SAME arm operand the hoisted holiday design-cost check already selected
+        // (D-33, :390). Re-deriving it per ceiling is how two ceilings come to disagree
+        // about what an "NP row" is — the drift the hoisting pattern exists to close.
+        let (reg_design_rows, reg_design_operand) = (design_rows, design_operand);
         let regressor_cells = (reg_design_rows + args.horizon) * regs.len();
         if regressor_cells > MAX_REGRESSOR_DESIGN_COST {
             // The message STATES THE OPERAND IT USED, so a caller refused on one arm
@@ -1076,7 +1072,11 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             // At `n_lags = 0` this does not fire at all: D-27 makes the imputed-day value
             // unread BY CONSTRUCTION there, so there is nothing to argue about.
             if n_lags > 0 && !reg_std.is_empty() {
-                let span = (ds[ds.len() - 1] - ds[0] + 1) as usize;
+                // `span_days` is the same quantity, computed once at :144 for the
+                // MAX_SPAN_DAYS check and reused by the design-cost operand at :606. Two
+                // expressions for one bounded quantity is how the ceiling and the gap
+                // predicate come to disagree about the span.
+                let span = span_days as usize;
                 if span != ds.len() {
                     // The FIRST missing day, in the same `YYYY-MM-DD` form the caller sent.
                     // `ds` is strictly ascending (refused above), so the first gap is the
@@ -1110,12 +1110,11 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             let np_regs = if reg_std.is_empty() {
                 None
             } else {
+                // Moved, not cloned: the prophet arm's readers of these three are in the
+                // mutually exclusive `match` arm, and nothing on THIS arm reads them after
+                // the channel is built.
                 Some(crate::regressors::NpRegressors::new(
-                    &d,
-                    n_lags,
-                    reg_std.clone(),
-                    reg_hist.clone(),
-                    reg_fut.clone(),
+                    &d, n_lags, reg_std, reg_hist, reg_fut,
                 )?)
             };
             if n_lags >= d.n_train_grid {
@@ -4117,10 +4116,24 @@ mod tests {
 
         let long_name = ok_reg(&"a".repeat(MAX_HOLIDAY_NAME_LEN + 1));
 
-        // `(N + H) * 187 = 25 058`, which clears the count ceiling (187 <= 200) and trips
-        // the design-cost product on BOTH operands — the point count on prophet and the
-        // span in days on neuralprophet, which are equal on this contiguous series.
-        let design_cost = many(187);
+        // DERIVED from the ceiling, never written down. A hardcoded column count stops
+        // straddling the boundary the moment the constant moves, and the row then fails as
+        // "the hoisted check did not run there" — blaming the check rather than the stale
+        // probe. `product_probe_counts()` cannot serve here: it is parameterised by
+        // PRODUCT_PROBE_POINTS/HORIZON (2 000 + 365), a different geometry from this test's
+        // N + H. Trips the design-cost product on BOTH operands — the point count on
+        // prophet and the span in days on neuralprophet, equal on this contiguous series.
+        let design_cost_cols = crate::types::MAX_REGRESSOR_DESIGN_COST / (N + H) + 1;
+        assert!(
+            (N + H) * design_cost_cols > crate::types::MAX_REGRESSOR_DESIGN_COST
+                && (N + H) * (design_cost_cols - 1) <= crate::types::MAX_REGRESSOR_DESIGN_COST
+                && design_cost_cols <= MAX_REGRESSORS,
+            "the probe must straddle the design-cost ceiling from above while staying \
+             inside the COUNT ceiling, or it stops testing the product: {design_cost_cols} \
+             columns over {} rows",
+            N + H
+        );
+        let design_cost = many(design_cost_cols);
         let over_count = many(MAX_REGRESSORS + 1);
 
         let rows: Vec<(&str, Vec<RegressorArg>, &str)> = vec![
@@ -4284,11 +4297,16 @@ mod tests {
         let mut cur = String::new();
         for c in body.chars() {
             match c {
-                '(' | '[' | '<' => {
+                // Parens and square brackets only. Counting `<`/`>` as depth drives it
+                // NEGATIVE on any argument containing `->` or a comparison, after which a
+                // genuine top-level comma stops splitting. Not reachable from today's call
+                // sites, which pass bare identifiers — elaboration bought for nothing, and
+                // wrong in the direction that silently merges two arguments into one.
+                '(' | '[' => {
                     depth += 1;
                     cur.push(c);
                 }
-                ')' | ']' | '>' => {
+                ')' | ']' => {
                     depth -= 1;
                     cur.push(c);
                 }
@@ -4409,10 +4427,15 @@ mod tests {
         );
         // And no OTHER cost call escapes into the shipped door.
         assert!(
-            cost_call_sites(shipped, "train_cost")
-                .iter()
-                .all(|c| c.starts_with("request_train_cost(")),
-            "the shipped door must price through request_train_cost only: {:?}",
+            // `is_empty`, NOT `all(starts_with("request_train_cost("))`: the scanner's
+            // identifier-prefix guard already drops every `train_cost(` preceded by a word
+            // character, so a `request_train_cost` occurrence can never reach the predicate.
+            // Written as `all` it reads as if it tolerated them and could not be observed
+            // false for that reason — the assertion still does real work (a BARE
+            // `train_cost(` in the shipped door fails it), so say that instead.
+            cost_call_sites(shipped, "train_cost").is_empty(),
+            "no bare `train_cost` call may appear in the shipped door — price through \
+             request_train_cost only: {:?}",
             cost_call_sites(shipped, "train_cost")
         );
     }

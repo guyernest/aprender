@@ -1159,8 +1159,11 @@ impl NpRegressors {
 
 /// `(value - mu) / std`, with the binary-auto carve-out already folded into `st`.
 ///
-/// ONE expression, read by both the training rows and the predict rows, so a future row and
-/// a training row can never be standardised by two different arithmetics. The door has
+/// ONE expression WITHIN THE NEURALPROPHET CHANNEL, read by both the training rows and the
+/// predict rows, so a future row and a training row on this arm can never be standardised by
+/// two different arithmetics. It is NOT the crate's only copy of `(v - mu) / std` — `splice`,
+/// `prophet::predict` and the identifiability re-standardisation each still inline it, so
+/// changing this function does NOT move the prophet arm. The door has
 /// already refused `std == 0.0` and re-checked every derived cell for finiteness, which is
 /// why there is no guard here — adding one would imply a case the door lets through.
 fn standardise_cell(v: f64, st: &Standardized) -> f32 {
@@ -1856,22 +1859,37 @@ mod tests {
 
     /// Extract the source of a top-level `fn NAME` by brace matching from its signature.
     fn top_level_fn<'a>(src: &'a str, name: &str) -> Option<&'a str> {
-        for prefix in ["\npub fn ", "\nfn ", "\npub(crate) fn "] {
-            let needle = format!("{prefix}{name}");
-            if let Some(i) = src.find(&needle) {
-                let body_start = src[i..].find('{')? + i;
-                let mut depth = 0i32;
-                for (k, c) in src[body_start..].char_indices() {
-                    if c == '{' {
-                        depth += 1;
-                    } else if c == '}' {
-                        depth -= 1;
-                        if depth == 0 {
-                            return Some(&src[i..=(body_start + k)]);
+        // The needle carries the OPEN PAREN, because a bare `fn NAME` prefix-matches any
+        // LONGER name. `"\npub fn train"` is a prefix of `"\npub fn training_samples"`, which
+        // appears 348 lines earlier in np.rs, so the old form returned the wrong body and
+        // `np::train` — the ONE function that builds `reg_rows`, holds `reg_channel` and
+        // runs the per-batch gather D-27 turns on — was never scanned by this guard. The
+        // `unwrap_or_else(panic!)` below could not catch it either, because SOMETHING
+        // matched. A guard that does not scan the surface where the decision is made is
+        // theater (CLAUDE.md Verification Discipline rule 5).
+        let needle = format!("fn {name}(");
+        let mut from = 0usize;
+        while let Some(rel) = src[from..].find(&needle) {
+            let hit = from + rel;
+            let line_start = src[..hit].rfind('\n').map_or(0, |k| k + 1);
+            // Top level only: the signature line carries nothing but a visibility keyword.
+            if matches!(&src[line_start..hit], "" | "pub " | "pub(crate) ") {
+                if let Some(rel_brace) = src[hit..].find('{') {
+                    let body_start = hit + rel_brace;
+                    let mut depth = 0i32;
+                    for (k, c) in src[body_start..].char_indices() {
+                        if c == '{' {
+                            depth += 1;
+                        } else if c == '}' {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(&src[line_start..=(body_start + k)]);
+                            }
                         }
                     }
                 }
             }
+            from = hit + needle.len();
         }
         None
     }
@@ -2036,8 +2054,10 @@ mod tests {
             }
             // `#[cfg(test)]` items are out of scope by design — the fill rules are inputs.
             let before = &NP_SRC[..i];
-            let tail: String = before.chars().rev().take(400).collect::<String>();
-            if tail.contains("]tset(gfc[#") {
+            // Forward slice on a char boundary, so the needle reads as the thing it
+            // matches and is greppable. The reversed form spelled it "]tset(gfc[#".
+            let from = before.char_indices().rev().nth(400).map_or(0, |(k, _)| k);
+            if before[from..].contains("#[cfg(test)]") {
                 continue;
             }
             let Some(body) = top_level_fn(NP_SRC, name) else {

@@ -432,16 +432,12 @@ pub fn auto_epochs(n: usize) -> usize {
 /// wherever the two disagree.
 #[must_use]
 pub fn n_training_samples(d: &NpData, n_lags: usize) -> usize {
-    if n_lags == 0 {
-        // NP trains the lag-free model on the OBSERVED rows only.
-        d.grid_observed[..d.n_train_grid]
-            .iter()
-            .filter(|o| **o)
-            .count()
-    } else {
-        // With lags it trains on `(n_lags..n_train_grid)` of the imputed daily grid.
-        d.n_train_grid.saturating_sub(n_lags)
-    }
+    // DERIVED from the sample list rather than re-deriving the branch, so the count the
+    // door PRICES with and the rows the trainer SPENDS on cannot disagree. They were two
+    // copies of one rule pinned only by a `debug_assert!` in `train` — compiled out of
+    // `--release`, the profile the door ships in, which is the same objection this module
+    // raises against `debug_assert!` elsewhere. Called once per request, not per step.
+    training_samples(d, n_lags).0.len()
 }
 
 /// The training sample list AND, parallel to it, the CALLER-row index of each sample.
@@ -579,13 +575,22 @@ pub fn train_cost(
 /// bit-identical to the pre-event arithmetic.
 #[must_use]
 fn per_sample_event_width(n_event_cols: usize) -> u64 {
-    if n_event_cols == 0 {
+    per_sample_exog_width(crate::types::FIT_NP_EVENT_COST_PER_COLUMN, n_event_cols)
+}
+
+/// The rounding and saturation POLICY both exogenous width terms share.
+///
+/// The two COEFFICIENTS stay separate — separately measured, separately mirrored in the
+/// contract, separately re-priceable by Phase 7 — and passing one as an argument keeps them
+/// that way. What must not be duplicated is this: `ceil` then a saturating cast, so a
+/// non-finite or negative coefficient cannot wrap into a silently SMALL width that passes
+/// the door. Two copies of that rule means hardening one and leaving the other on the
+/// door's own under-pricing path.
+fn per_sample_exog_width(coefficient: f64, n_cols: usize) -> u64 {
+    if n_cols == 0 {
         return 0;
     }
-    let raw = crate::types::FIT_NP_EVENT_COST_PER_COLUMN * n_event_cols as f64;
-    // `ceil` then a saturating cast: a non-finite or negative coefficient must not wrap into
-    // a silently SMALL width that passes the door, which is the same reason every
-    // multiplication below saturates.
+    let raw = coefficient * n_cols as f64;
     if raw.is_finite() && raw > 0.0 {
         raw.ceil() as u64
     } else {
@@ -604,15 +609,10 @@ fn per_sample_event_width(n_event_cols: usize) -> u64 {
 /// 06.1-05's arithmetic.
 #[must_use]
 fn per_sample_regressor_width(n_regressor_cols: usize) -> u64 {
-    if n_regressor_cols == 0 {
-        return 0;
-    }
-    let raw = crate::types::FIT_NP_REGRESSOR_COST_PER_COLUMN * n_regressor_cols as f64;
-    if raw.is_finite() && raw > 0.0 {
-        raw.ceil() as u64
-    } else {
-        0
-    }
+    per_sample_exog_width(
+        crate::types::FIT_NP_REGRESSOR_COST_PER_COLUMN,
+        n_regressor_cols,
+    )
 }
 
 /// The learning-rate sweep the DOOR runs for this `n_lags`.
@@ -861,7 +861,7 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     let epochs = cfg.epochs.unwrap_or_else(|| auto_epochs(n));
     let n_batches = n.div_ceil(batch);
     let total_steps = epochs * n_batches;
-    // The door priced this request with `train_cost(n_training_samples(d, l), epochs, l, E, 0)`
+    // The door priced this request with `train_cost(n_training_samples(d, l), epochs, l, E, R)`
     // BEFORE calling in (cost axis C-08). If the two ever derived a different `n` the bound
     // would be evadable wherever they disagreed, so the sample rule is pinned here rather
     // than argued. `debug_assert` because this is the hot path and the rule is one branch.
@@ -924,6 +924,10 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
     // Both recorded neuralprophet invariance signatures reproduce, which is the evidence
     // rather than this paragraph.
     let mut order: Vec<usize> = (0..n).collect();
+    // Refilled per batch rather than reallocated per batch. This buffer is on the step path
+    // — `epochs * n_batches * n_lrs` times per request — and it is paid by every NP fit,
+    // including the regressor-free ones that make up all existing traffic.
+    let mut grid_buf: Vec<usize> = Vec::with_capacity(batch);
     let mut step = 0usize;
     for epoch in 0..epochs {
         rng.shuffle(&mut order);
@@ -936,9 +940,11 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
             // trend and seasonality features, the target, the sample weight, the lags and
             // the event indicators — reads through here; only the regressor rows read
             // through `chunk` directly, because they are the CALLER's rows (D-27).
-            let grid: Vec<usize> = chunk.iter().map(|&pos| samples[pos]).collect();
-            let xt = Tensor::from_vec(gather(&rows.tr, rows.td, &grid), &[b, rows.td]);
-            let xs = Tensor::from_vec(gather(&rows.se, rows.sd, &grid), &[b, rows.sd]);
+            grid_buf.clear();
+            grid_buf.extend(chunk.iter().map(|&pos| samples[pos]));
+            let grid: &[usize] = &grid_buf;
+            let xt = Tensor::from_vec(gather(&rows.tr, rows.td, grid), &[b, rows.td]);
+            let xs = Tensor::from_vec(gather(&rows.se, rows.sd, grid), &[b, rows.sd]);
             let yt = Tensor::from_vec(grid.iter().map(|&i| rows.y[i]).collect(), &[b, 1]);
             let wt = Tensor::from_vec(grid.iter().map(|&i| rows.w[i]).collect(), &[b, 1]);
             let mut pred = if l == 0 {
@@ -960,7 +966,7 @@ pub fn train(d: &NpData, cfg: &TrainConfig, verbose: bool) -> (NpModel, TrainLog
             // that matters. Subtracting it in one place and not the other would make the
             // forecast disagree with the fit.
             if let Some(bl) = block.as_ref() {
-                let xe = Tensor::from_vec(gather(&ev_rows, ed, &grid), &[b, ed]);
+                let xe = Tensor::from_vec(gather(&ev_rows, ed, grid), &[b, ed]);
                 pred = pred.add(&bl.forward(&xe));
             }
             // The regressor term: a SECOND, SEPARATE `.add()`. Not folded into the event
