@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: "06.1"
 current_phase_name: "Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)"
 status: executing
-stopped_at: Wave 5 complete (06.1-07 merged); next is wave 6 (06.1-08), the SC6 sweep
-last_updated: "2026-09-22T01:56:59.223Z"
+stopped_at: "Completed 06.1-08-PLAN.md (SC6 sweep run and recorded; one BLOCKER: the SC2 invariance gate is red under the --workspace --lib build CI runs)"
+last_updated: "2026-09-22T05:15:54.657Z"
 last_activity: 2026-09-21
 last_activity_desc: Phase 06.1 execution started
-state_head: ec466706ee790ab53f2e7bb834af478a1881a6ba
+state_head: c04bd76eea16538a70253c56e3b86925cbfeff01
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 92
-  completed_plans: 90
+  completed_plans: 91
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 06.1 (Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)) — EXECUTING
-Plan: 1 of 8
-Status: Executing Phase 06.1
+Plan: 2 of 8
+Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -213,6 +213,7 @@ pending F-10 in Phase 5.)
 | Phase 05 P17 | 71 min | 3 tasks | 11 files |
 | Phase 06.1 P01 | 95 | 3 tasks | 14 files |
 | Phase 06.1 P04 | 78m | 3 tasks | 1 files |
+| Phase 06.1 P08 | 1h 20m | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -371,6 +372,10 @@ Recent decisions affecting current work:
 - [Phase 06.1]: Part C of the invariance gate establishes splice inertness only; the independent historical claim belongs to the committed pre-change baseline alone
 - [Phase 06.1]: Part C fits once per series and reuses the same Params for both predict calls, removing L-BFGS budget behaviour from a test whose claim is about the design
 - [Phase 06.1]: Verifies t1c and t3b kept verbatim and recorded RED with intent-preserving substitutes, rather than removing capture_baseline #[ignore] to make them pass
+- [Phase 06.1]: SC6 is NOT fully green on this host and the phase does not claim it is; the sweep is recorded gate by gate with what each command printed
+- [Phase 06.1]: The SC2 no-argument invariance gate is red under the --workspace --lib build CI runs and green under -p aprender-forecast; the variable is cargo feature unification, isolated to apr-cli by one-variable control
+- [Phase 06.1]: The AR-absorption caution reaches FOUR surfaces, because schemars supplies the input SCHEMA and nothing supplies the tool-level description an MCP client reads in tools/list
+- [Phase 06.1]: The compatibility promise is published as SCOPED to JSON/MCP callers, with both halves observed by a compile probe rather than asserted
 
 ### Pending Todos
 
@@ -463,6 +468,7 @@ Recent decisions affecting current work:
 - D-ITEM-05-17-A: the bench row seal is BUILD-GRAPH DEPENDENT. serde_json/preserve_order (via pmcp v2.19.3) is in apr-cli graph and absent from aprender-train, so the same committed row verifies under apr and is refused as row_digest_mismatch under cargo test -p aprender-train. A cargo feature-unification change with no code change can flip the whole committed evidence set. Needs its own plan: the fix re-seals 40 rows, 40 selection manifests and the run manifest.
 - RESOLVED (06.1-03, wave 2): regressor_prior_scale_min stays at 1e-153. The ~1e-7 usability-floor hypothesis was REFUTED by a 5-shape x 12-decade release campaign: at 1e-7 the seasonal series contributes 2.8e-12 relative to yhat, as negligible as at 1e-9 — so a floor there would refuse requests behaving exactly like ones it accepts — and there is no cliff, contribution decaying continuously and saturating between 1e-4 and 1e-2, shape-dependently, because prior_scale is a regularisation STRENGTH and shrinking the coefficient is what it is for. D-21 is instead closed at the OUTCOME: when a fitted coefficient is exactly zero (the optimiser starts at zero, so that means L-BFGS never moved it) the response says so. Threshold-free, shape-independent, and it refuses nothing previously accepted. See 06.1-03-SUMMARY.md.
 - Verify t2c in 06.1-04-PLAN.md cannot see an #[ignore] added to part A or part B (it anchors bodies at fn, and the attribute precedes fn). Measured green on a gated part A. The in-tree Rust test invariance::parts_a_and_b_are_unconditional is the real guard; a later plan should replace the python body with a call to it.
+- SC2 no-argument invariance gate (crates/aprender-forecast/src/invariance.rs:718) is RED under cargo nextest run --workspace --lib, the invocation CI runs; green under -p aprender-forecast. Deterministic, hash-stable, flipped by adding apr-cli to the package set. See 06.1 deferred-items.md item 5.
 
 ### Roadmap Evolution
 
@@ -480,8 +486,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-21T16:45:55.115Z
-Stopped at: Wave 5 complete (06.1-07 merged); next is wave 6 (06.1-08), the SC6 sweep
+Last session: 2026-09-22T05:15:24.574Z
+Stopped at: Completed 06.1-08-PLAN.md (SC6 sweep run and recorded; one BLOCKER: the SC2 invariance gate is red under the --workspace --lib build CI runs)
 Resume file: None
 
 ## Accumulated Context
