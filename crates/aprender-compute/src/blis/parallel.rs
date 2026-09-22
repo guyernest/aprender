@@ -263,6 +263,20 @@ pub fn gemm_blis_parallel_shared_b(
         return gemm_blis(m, n, k, a, b, c, None);
     }
 
+    // Require the 8×32 microkernel. It exists ONLY as an x86_64 AVX-512 path: the full-tile
+    // branch in the hot loop below (`if mr_block == 8 && nr_block == 32`) contains a single
+    // `#[cfg(target_arch = "x86_64")]` statement, so on every other target that branch
+    // compiles to an EMPTY block. The loop then runs to completion having written nothing for
+    // the aligned tiles and C is returned at its `vec![0.0; …]` initial value — silently
+    // ZERO, not merely inaccurate. Edge tiles take the scalar `else` arm, which is why a
+    // shape not aligned to mr/nr came out partially correct rather than wholly zero.
+    // `gemm_blis` is the portable path: it dispatches AVX2 / NEON / scalar properly, so a
+    // non-x86_64 caller gets a correct (and NEON-accelerated) answer instead of zeros.
+    // Refs .planning/debug/gemm-shared-b-parallel.md (FALSIFY-SHARED-B-001).
+    if !cfg!(target_arch = "x86_64") {
+        return gemm_blis(m, n, k, a, b, c, None);
+    }
+
     // Require AVX-512 for the 8×32 microkernel
     #[cfg(target_arch = "x86_64")]
     if !std::arch::is_x86_feature_detected!("avx512f") {
