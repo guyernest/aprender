@@ -19,10 +19,17 @@
 //! and `0.0` do not read as a change; every other bit pattern, NaN payloads included, is
 //! significant.
 //!
-//! `components` and `diagnostics` are walked as JSON. `serde_json::Map` is a `BTreeMap`,
-//! so object iteration is KEY-SORTED and the signature does not depend on insertion order.
-//! Both fields rely on that: the door builds `components` by inserting in computation
-//! order, and a future reordering of those inserts must not read as a behaviour change.
+//! `components` and `diagnostics` are walked as JSON. The walk sorts object keys itself
+//! (see [`json`]'s `Object` arm) rather than relying on `serde_json::Map`'s own iteration
+//! order: that order is a BTreeMap's key-sorted iteration by default, but flips to an
+//! IndexMap's insertion order the instant any crate in the build graph enables the
+//! `preserve_order` cargo feature — and cargo feature unification applies that choice
+//! workspace-wide, not only to the crate that asked for it (feature-unification-divergence,
+//! `.planning/debug/resolved/feature-unification-divergence.md`). `components` is built by
+//! inserting in computation order, so before this fix the signature silently depended on
+//! whichever backing store serde_json happened to be compiled with; explicit sorting means
+//! a future reordering of those inserts — or a future dependency enabling `preserve_order`
+//! — cannot read as a behaviour change either way.
 //!
 //! # Three parts, three DIFFERENT claims — and the exposure each one carries
 //!
@@ -143,11 +150,20 @@ fn json(h: &mut Hasher, v: &serde_json::Value) {
             }
         }
         serde_json::Value::Object(o) => {
-            // serde_json's default Map is a BTreeMap: iteration is key-sorted, so the
-            // signature does not depend on insertion order.
+            // serde_json's Map backing store is NOT a fixed choice this module can rely on:
+            // it is a BTreeMap (key-sorted iteration) by default, but becomes an IndexMap
+            // (insertion-ordered iteration) the moment ANY crate in the build graph enables
+            // the `preserve_order` cargo feature — and cargo feature unification applies
+            // that choice to every crate linking serde_json, not only the one that asked for
+            // it. `pmcp` enabling `serde_json/preserve_order` flipped this signature's
+            // ordering for a caller who never touched serde_json's feature flags at all
+            // (feature-unification-divergence). Sorting explicitly makes the signature
+            // ENFORCE its own order instead of INHERITING one from a dependency's features.
             h.bytes(b"{");
             h.len(o.len());
-            for (k, x) in o {
+            let mut entries: Vec<(&String, &serde_json::Value)> = o.iter().collect();
+            entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+            for (k, x) in entries {
                 h.str(k);
                 json(h, x);
             }
@@ -183,7 +199,18 @@ fn signature_with(r: &ForecastResponse, diagnostics: &serde_json::Value) -> u64 
     h.f64s(&r.yhat_upper);
     h.f64s(&r.trend);
     h.len(r.components.len());
-    for (k, v) in &r.components {
+    // `components` is a `serde_json::Map` walked HERE rather than through `json`, so it does
+    // NOT inherit that function's `Object` arm — it needs the same explicit sort for the same
+    // reason (see the `Object` arm: the backing store is BTreeMap or IndexMap depending on
+    // whether anything in the build graph enabled `serde_json/preserve_order`). The door
+    // inserts these keys in PROPHET'S COMPUTATION ORDER (`additive_terms`,
+    // `multiplicative_terms`, `holidays`, seasonality names), which is not sorted order, so
+    // under an IndexMap this loop hashed them in a different order than the baselines were
+    // recorded in. Sorting only inside `json` fixed `diagnostics` and nested objects and left
+    // this one — it is why the prophet cases still diverged after that fix.
+    let mut components: Vec<(&String, &serde_json::Value)> = r.components.iter().collect();
+    components.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    for (k, v) in components {
         h.str(k);
         json(&mut h, v);
     }
