@@ -948,12 +948,13 @@ pub fn predict(
     };
     let mut components: Vec<(String, Vec<f64>)> = Vec::new();
     for (nm, &(first, last)) in names.iter().zip(spans.iter()) {
-        let mode = d
-            .cols
-            .iter()
-            .find(|c| &c.component == nm)
-            .expect("col")
-            .mode;
+        // `first` IS the index of this component's first column — that is exactly what
+        // `spans.push((ci, ci))` recorded at first appearance above — so this is the same
+        // column the linear `find` used to walk `d.cols` to locate, at O(1) instead of
+        // O(columns) per component. Every column in `first..=last` carries the same mode
+        // by construction. No float term moves, so the response is bitwise unchanged;
+        // `the_span_restricted_roll_up_matches_a_full_scan` is the probe.
+        let mode = d.cols[first].mode;
         let v = comp_of(
             &|c: &Column| &c.component == nm,
             mode == Mode::Additive,

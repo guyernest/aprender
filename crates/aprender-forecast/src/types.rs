@@ -660,7 +660,10 @@ pub struct ForecastArgs {
     /// Width of the uncertainty band, default 0.8.
     #[serde(default)]
     pub interval_width: Option<f64>,
-    /// Holidays / events with optional windows (Prophet only).
+    /// Holidays / events with optional windows. Accepted on BOTH models (D-29): on
+    /// `neuralprophet` they require `n_lags = 0` and are published as per-event
+    /// response components plus a `holidays` roll-up. A name that is already a
+    /// reserved response key (`trend`, `holidays`, `additive_terms`, ...) is refused.
     #[serde(default)]
     pub holidays: Option<Vec<HolidayArg>>,
     /// NeuralProphet only: number of autoregressive lags (0 = trend + seasonality only).
@@ -670,8 +673,9 @@ pub struct ForecastArgs {
     #[serde(default)]
     pub seed: Option<u64>,
     /// External regressors (covariates) spliced onto the design as trailing columns.
-    /// Prophet arm only for now; the NeuralProphet arm refuses them by name rather than
-    /// accepting and ignoring them (D-21).
+    /// Accepted on BOTH models (D-26/D-28). On `prophet` each one is published as its
+    /// own response component with an identifiability diagnostic; on `neuralprophet`
+    /// they enter the additive regressor block. `neuralprophet` requires freq D.
     #[serde(default)]
     pub regressors: Option<Vec<RegressorArg>>,
 }

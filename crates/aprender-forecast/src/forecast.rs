@@ -227,7 +227,14 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
         // Placed HERE, at the door and above the dispatch, beside the bounds it travels
         // with — not buried in the arm — and before the holiday loop parses any date, since
         // a request that cannot proceed should not buy that work.
-        if args.holidays.is_some() && args.n_lags.is_some_and(|l| l > 0) {
+        // NON-EMPTY, not merely `is_some()`. `"holidays": []` configures zero event columns
+        // and is priced at zero — every later use normalises emptiness the same way
+        // (`as_deref().unwrap_or(&[])` in the bounds loop, `if holidays.is_empty()` at the
+        // event-design build) — so refusing it denied `n_lags` to any client that always
+        // serialises the key, and told them to drop a field they had already emptied.
+        if args.holidays.as_deref().is_some_and(|h| !h.is_empty())
+            && args.n_lags.is_some_and(|l| l > 0)
+        {
             return Err(ForecastError::Validation(
                 "holidays on model \"neuralprophet\" are supported only at n_lags = 0: at \
                  n_lags > 0 the event block and the autoregressive term are jointly \
@@ -243,13 +250,13 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
     // ---- D-33: HOISTED HOLIDAY BOUNDS — one site, BOTH arms ----
     //
     // All four holiday bounds live HERE, above `match model_name`, so the neuralprophet
-    // arm pays every one of them the moment plan 06.1-06 Task 2 removes the prophet-only
-    // refusal. Bounds first, acceptance second: hoisting after the refusal was dropped
-    // would open a window in which a ~200-byte request buys an unbounded event surface.
+    // arm pays every one of them. Bounds first, acceptance second: hoisting after the
+    // prophet-only refusal was dropped would have opened a window in which a ~200-byte
+    // request buys an unbounded event surface.
     //
-    // Until that refusal is gone the neuralprophet branch of the design-cost operand
-    // below is UNREACHABLE FROM THE DOOR, and that is deliberate — do not delete it as
-    // dead code. Task 2 opens the arm and re-mutates all four bounds in the new scope
+    // Plan 06.1-06 Task 2 has since removed that refusal (D-29), so the neuralprophet
+    // branch of the design-cost operand below is LIVE and is what refuses real requests —
+    // it is not retained dead code. The four bounds were re-mutated in the opened scope
     // (CLAUDE.md Verification Discipline rule 4: the old proof does not transfer).
     //
     // The ORDER inside the loop is unchanged and load-bearing. The name-length check is
@@ -282,6 +289,30 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                      (the name is not echoed back — its LENGTH is what is at issue)",
                 holidays.len(),
                 h.name.len()
+            )));
+        }
+        // ---- the RESERVED-KEY rule, for the OTHER caller-controlled name family ----
+        //
+        // A holiday name becomes a response component key on BOTH arms — `Column.component`
+        // via `prophet::columns` on prophet, and the D-31 per-event insert on neuralprophet.
+        // The component map is built with `components.insert(name, value)`, a MAP INSERT, so
+        // a holiday named `trend` is computed as its own component and then silently
+        // OVERWRITES (or is overwritten by) the server-owned one, with no error anywhere.
+        // Measured before this check existed: `{"model":"neuralprophet","holidays":[{"name":
+        // "trend",...}]}` returned `components.trend` as the event indicator — all zeros away
+        // from the holiday date — in place of the real trend series `[16.016, 16.110, ...]`.
+        //
+        // That is the D-21 silent-ignore class (threat T-06.1-13) that `RESERVED_RESPONSE_KEYS`
+        // was introduced to close. It was applied to regressor names only; holidays are the
+        // other family the caller names, so the same rule is paid here. Placed AFTER the
+        // length bound so an oversized name is still refused without being echoed back.
+        if RESERVED_RESPONSE_KEYS.contains(&h.name.as_str()) {
+            return Err(ForecastError::Validation(format!(
+                "holiday at index {} is named {:?}, which is already a reserved response \
+                 key; the component map is keyed by name and one would silently overwrite \
+                 the other, so rename the holiday",
+                holidays.len(),
+                h.name
             )));
         }
         if h.lower_window > 0 || h.upper_window < 0 {
@@ -498,6 +529,49 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
         });
     }
 
+    // ---- the HOLIDAY half of check 10, parts (a) and (b) ----
+    //
+    // The reserved-KEY half is paid in the holiday loop above, which is the earliest point
+    // it can be. This half cannot be: it needs the assembled spec, so it waits until the
+    // seasonalities (including the empty-design `weekly` fallback just above) are final.
+    //
+    // A holiday shares the component namespace with the seasonalities. `prophet::predict`
+    // deduplicates components BY NAME, so a holiday named `weekly` does not overwrite the
+    // weekly seasonality — it MERGES into it: one `components.weekly` is published carrying
+    // the sum of both, the holiday never appears as its own component, and the roll-up takes
+    // the mode of whichever column came first, so an additive holiday under
+    // `seasonality_mode: "multiplicative"` is published without its `y_scale` factor.
+    // Silent, and wrong in three ways at once.
+    //
+    // The set is built from a HOLIDAY-FREE view of the spec: `prophet::columns(&spec)`
+    // includes the holiday columns themselves, so every holiday would collide with its own
+    // name. This is the same two parts the regressor check pays — a generated design column
+    // name and a response component name — restricted to the sources a holiday does not
+    // itself produce.
+    {
+        let mut seasonal_only = spec.clone();
+        seasonal_only.holidays = Vec::new();
+        let mut reserved: std::collections::BTreeMap<String, &'static str> =
+            std::collections::BTreeMap::new();
+        for c in crate::prophet::columns(&seasonal_only) {
+            reserved.insert(c.name, "a generated design column name");
+            reserved.insert(c.component, "a response component name");
+        }
+        if let Some((i, h, part)) = spec
+            .holidays
+            .iter()
+            .enumerate()
+            .find_map(|(i, h)| reserved.get(h.name.as_str()).map(|part| (i, h, *part)))
+        {
+            return Err(ForecastError::Validation(format!(
+                "holiday at index {i} is named {:?}, which is already {part} in the \
+                 response; the component map is keyed by name and the two would be \
+                 merged into one component, so rename the holiday",
+                h.name
+            )));
+        }
+    }
+
     // ---- SHARED REGRESSOR VALIDATION — one site, BOTH arms (D-22, D-33's pattern) ----
     //
     // Plan 06.1-01 Task 2 placed the length tie, the finiteness checks, the mode allowlist,
@@ -601,19 +675,20 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
         // bounded by it, so the cast is exact and this product is at most 23 650 000
         // under EITHER operand — six orders of magnitude below `usize::MAX`.
         // The SAME arm operand the hoisted holiday design-cost check already selected
-        // (D-33, :390). Re-deriving it per ceiling is how two ceilings come to disagree
-        // about what an "NP row" is — the drift the hoisting pattern exists to close.
-        let (reg_design_rows, reg_design_operand) = (design_rows, design_operand);
-        let regressor_cells = (reg_design_rows + args.horizon) * regs.len();
+        // (D-33, :390), used DIRECTLY rather than through a rebinding alias. Re-deriving
+        // it per ceiling is how two ceilings come to disagree about what an "NP row" is —
+        // the drift the hoisting pattern exists to close — and an alias only hides the
+        // shared-ness the identifiers are supposed to show.
+        let regressor_cells = (design_rows + args.horizon) * regs.len();
         if regressor_cells > MAX_REGRESSOR_DESIGN_COST {
             // The message STATES THE OPERAND IT USED, so a caller refused on one arm
             // and accepted on the other can see which arithmetic refused them (D-21).
             return Err(ForecastError::Validation(format!(
                 "regressors expand to {regressor_cells} design feature cells \
-                 (({reg_design_operand} + horizon) x n_regressors = ({} + {}) x {}), which \
+                 (({design_operand} + horizon) x n_regressors = ({} + {}) x {}), which \
                  exceeds max_regressor_design_cost {MAX_REGRESSOR_DESIGN_COST}; \
                  send fewer regressors, a shorter history or a shorter horizon",
-                reg_design_rows,
+                design_rows,
                 args.horizon,
                 regs.len()
             )));
@@ -767,10 +842,55 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                      sum of squares overflows"
                 )));
             }
-            if let Some(bad) = hist
-                .iter()
-                .position(|v| !((v - st.mu) / st.std).is_finite())
+            // ---- 6a-bis. ZERO SPREAD THAT 6a CANNOT SEE ----
+            //
+            // 6a reads `st.std`, which only reports a constant column when the column was
+            // actually standardised. A caller sending `standardize: false` gets
+            // `(mu, std) = (0.0, 1.0)` unconditionally, so a perfectly constant driver —
+            // collinear with the intercept, carrying no information — was admitted by the
+            // flag alone, while the SAME values without the flag were refused.
+            // `contracts/forecast-tool-boundary-v1.yaml`'s `standardize` row states the
+            // guarantee this restores: "A single-valued column is therefore NOT exempt ...
+            // which is refused as a constant column carrying no information". On the
+            // neuralprophet arm there is no `diagnostics.regressors[]` block (D-37), so
+            // nothing downstream would have surfaced it either.
+            //
+            // AFTER the two finiteness checks, not beside 6a: a column of 1e308 values is
+            // constant AND overflows the mean, and the overflow is the more specific
+            // diagnosis — `the_regressor_refusal_table_is_complete` pins that ordering.
+            // The auto {0,1} carve-out is unaffected: a binary column holds both 0 and 1,
+            // so it has spread and is correctly not caught here.
+            if hist
+                .split_first()
+                .is_some_and(|(first, rest)| rest.iter().all(|v| v == first))
             {
+                return Err(ForecastError::Validation(format!(
+                    "regressor {i} is constant over the history rows and carries \
+                     no information; drop the regressor"
+                )));
+            }
+            // EVERY row, history AND the horizon tail — not `hist` alone.
+            //
+            // `mu`/`std` are fitted on the history, but the SAME standardisation is applied
+            // to the future values the caller supplies over the horizon (`prophet::predict`
+            // on one arm, `regressors::standardise_cell` on the other). Scanning only the
+            // history left the tail unchecked, so a history in [0, 1] paired with a single
+            // huge future value — each individually finite, so check 2 passes — produced a
+            // non-finite standardised cell that no check refused. `standardise_cell`'s own
+            // doc states the invariant this restores: "the door has already refused
+            // `std == 0.0` and re-checked every derived cell for finiteness, which is why
+            // there is no guard here".
+            //
+            // The f32 bound is the neuralprophet arm's: it narrows each cell with `as f32`,
+            // and a cell that is finite in f64 but exceeds f32::MAX narrows to infinity,
+            // which reaches `RegressorBlock::forward`, makes the AdamW step produce NaN
+            // weights, and returns an all-`null` yhat as a SUCCESS. Both arms pay the bound
+            // because the door is above the dispatch and the wider arm loses nothing: a
+            // standardised cell above 3.4e38 is pathological under either arithmetic.
+            if let Some(bad) = r.values.iter().position(|v| {
+                let z = (v - st.mu) / st.std;
+                !z.is_finite() || !(z as f32).is_finite()
+            }) {
                 return Err(ForecastError::Validation(format!(
                     "regressor {i} has a non-finite standardised cell at row \
                      {bad}; the value is finite but (value - mu) / std is not"
@@ -1162,10 +1282,26 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             // The count the door PRICES must be the count the block is BUILT at. The
             // hoisted `MAX_HOLIDAY_COLUMNS` loop accumulated exactly the same sum from the
             // same windows, so a disagreement here would mean one of the two rules drifted.
-            debug_assert_eq!(
-                n_event_cols, holiday_columns,
-                "the priced event-column count must equal the bounded holiday column count"
-            );
+            //
+            // This is a RELEASE-mode check that RETURNS, not a `debug_assert_eq!`.
+            // `debug_assert!` is compiled out of `--release`, the profile the door ships in,
+            // so the guard would be absent exactly where it matters: the door would price
+            // C-08 on one count and train on another, and `MAX_NP_TRAIN_COST` would be
+            // evadable by precisely the disagreement. This is the same rule
+            // `regressors::NpRegressors::new` states for the structurally identical
+            // priced-vs-built invariant, and `np.rs`'s sample-count derivation states again
+            // — stated in two places and then not followed in this third.
+            //
+            // `Internal`, not `Validation`: by this line the caller's input has already been
+            // accepted, so a breach is a server-side invariant break and the message should
+            // say so rather than blaming the caller.
+            if n_event_cols != holiday_columns {
+                return Err(ForecastError::Internal(format!(
+                    "the priced event-column count ({n_event_cols}) must equal the bounded \
+                     holiday column count ({holiday_columns}); the door bounded one \
+                     expansion and priced another"
+                )));
+            }
             let n_reg_cols = np_regs
                 .as_ref()
                 .map_or(0, crate::regressors::NpRegressors::dim);
@@ -1399,15 +1535,6 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
     }
 }
 
-/// Acklam's inverse normal CDF (enough for band z-scores).
-///
-/// The clamp is load-bearing and lives in `aprender::monte_carlo::engine::inverse_normal_cdf`,
-/// which this now delegates to. Without it the tails divide infinity by infinity:
-/// `interval_width = 0.9999999999999999` is the largest value the door accepts, and
-/// `(1.0 + w) / 2.0` rounds to EXACTLY 1.0, so `(1.0 - p).ln()` is `-inf`, `q` is `inf`
-/// and the returned z is `NaN` — which `serde_json` then writes as JSON `null` for every
-/// `yhat_lower`/`yhat_upper` in an otherwise successful response.
-#[must_use]
 /// The door's C-08 comparison, named ONCE so the boundary can be tested without paying it.
 ///
 /// It is `>`, not `>=`: a request pricing EXACTLY at the bound is accepted. That one-off is
@@ -1419,6 +1546,15 @@ fn np_train_cost_is_over(cost: u64) -> bool {
     cost > MAX_NP_TRAIN_COST
 }
 
+/// Acklam's inverse normal CDF (enough for band z-scores).
+///
+/// The clamp is load-bearing and lives in `aprender::monte_carlo::engine::inverse_normal_cdf`,
+/// which this now delegates to. Without it the tails divide infinity by infinity:
+/// `interval_width = 0.9999999999999999` is the largest value the door accepts, and
+/// `(1.0 + w) / 2.0` rounds to EXACTLY 1.0, so `(1.0 - p).ln()` is `-inf`, `q` is `inf`
+/// and the returned z is `NaN` — which `serde_json` then writes as JSON `null` for every
+/// `yhat_lower`/`yhat_upper` in an otherwise successful response.
+#[must_use]
 pub fn normal_quantile(p: f64) -> f64 {
     // Delegates rather than transcribes: proven bit-identical to core over a
     // 100k-point grid plus both clamp shoulders and both branch boundaries.
@@ -2642,6 +2778,133 @@ mod tests {
             upper_window: 0,
         }]);
         args
+    }
+
+    /// A HOLIDAY name that is a reserved response key is refused, on BOTH arms.
+    ///
+    /// The regressor family had this rule from the start; holidays are the OTHER
+    /// caller-controlled name family and did not, although a holiday name becomes a
+    /// component key on both arms — `Column.component` via `prophet::columns` on prophet,
+    /// the D-31 per-event insert on neuralprophet. The map is built with
+    /// `components.insert(name, value)`, so the collision was a silent overwrite, not an
+    /// error.
+    ///
+    /// MEASURED before the fix, on the neuralprophet arm: `{"holidays":[{"name":"trend",
+    /// ..}]}` returned `components.trend` as the event indicator — `[0.0, 0.0, 0.0, ..]` —
+    /// in place of the real trend series `[16.016, 16.110, 16.204, ..]` that the same
+    /// request with the holiday named `xmas` returns. That is the D-21 silent-ignore class
+    /// (T-06.1-13), so it is a refusal and not a rename.
+    ///
+    /// Every key in `RESERVED_RESPONSE_KEYS` is exercised, so the check cannot be narrowed
+    /// to the two that happen to be live component keys today.
+    #[test]
+    fn a_holiday_named_after_a_reserved_response_key_is_refused_on_both_arms() {
+        for model in [None, Some("neuralprophet".to_string())] {
+            for key in crate::forecast::RESERVED_RESPONSE_KEYS {
+                let mut args = named_holiday_args((*key).to_string());
+                args.model.clone_from(&model);
+                if model.is_some() {
+                    args.n_lags = Some(0);
+                }
+                let err = forecast(&args).expect_err(&format!(
+                    "a holiday named {key:?} must be refused on model {model:?}: it would \
+                     silently overwrite the response component of the same name"
+                ));
+                let msg = format!("{err:?}");
+                assert!(
+                    msg.contains("already a reserved response key"),
+                    "refusal for {key:?} on {model:?} must NAME the rule, got: {msg}"
+                );
+            }
+        }
+    }
+
+    /// A holiday named after a SEASONALITY is refused — the other half of check 10.
+    ///
+    /// The reserved-key list does not contain `weekly`, so this case survived that check.
+    /// `prophet::predict` deduplicates components BY NAME, so the holiday does not overwrite
+    /// the seasonality, it MERGES into it: one `components.weekly` carrying the sum of both,
+    /// no holiday component at all, and the roll-up mode taken from whichever column came
+    /// first. The same name sent as a REGRESSOR is refused by
+    /// `a_regressor_colliding_with_a_seasonality_component_name_is_refused`; holidays now
+    /// pay the same rule.
+    #[test]
+    fn a_holiday_named_after_a_seasonality_component_is_refused() {
+        let args = named_holiday_args("weekly".to_string());
+        let err =
+            forecast(&args).expect_err("a holiday named after a live seasonality must be refused");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("a response component name"),
+            "the message must say WHICH part matched, got: {msg}"
+        );
+    }
+
+    /// An EMPTY holiday list is not an event surface, so it does not block `n_lags`.
+    ///
+    /// The refusal keyed on `is_some()`, so a client that always serialises the key — or a
+    /// caller who cleared the list without dropping it — could not use lags at all, and was
+    /// told to "drop holidays" for a field they had already emptied. Zero event columns are
+    /// configured and zero are priced; every later use normalises emptiness the same way.
+    #[test]
+    fn an_empty_holiday_list_does_not_block_lags_on_neuralprophet() {
+        let mut args = np_args(60, 7);
+        args.model = Some("neuralprophet".to_string());
+        args.n_lags = Some(7);
+        args.holidays = Some(vec![]);
+        forecast(&args).expect("an empty holiday list must not refuse a lagged request");
+    }
+
+    /// A CONSTANT regressor is refused even when the caller turns standardisation off.
+    ///
+    /// `standardize: false` makes `standardize_one` return `(0.0, 1.0)` unconditionally, so
+    /// the `st.std == 0.0` test could not see the column and the flag alone admitted a
+    /// driver that is collinear with the intercept. The contract's `standardize` row
+    /// promises the opposite. The accepted control is the same flag on a column that DOES
+    /// vary, which must still be accepted — otherwise this is a ban on the flag, not a
+    /// constant-column check.
+    #[test]
+    fn a_constant_regressor_is_refused_even_with_standardize_false() {
+        let mut flat = good_reg("promo", 60, 7);
+        flat.values = vec![1.0; 67];
+        flat.standardize = Some(false);
+        let err = forecast(&reg_args(60, 7, vec![flat]))
+            .expect_err("a constant column must be refused however it is standardised");
+        assert!(
+            format!("{err:?}").contains("constant over the history rows"),
+            "got: {err:?}"
+        );
+
+        let mut varying = good_reg("promo", 60, 7);
+        varying.standardize = Some(false);
+        forecast(&reg_args(60, 7, vec![varying]))
+            .expect("standardize:false on a VARYING column is still accepted");
+    }
+
+    /// The positive control for the rule above: an ordinary holiday name is still accepted,
+    /// and on the neuralprophet arm it still publishes its own component beside a `trend`
+    /// that is the real trend and not the event indicator.
+    #[test]
+    fn an_ordinary_holiday_name_is_accepted_and_does_not_disturb_the_trend() {
+        let mut args = named_holiday_args("xmas".to_string());
+        args.model = Some("neuralprophet".to_string());
+        args.n_lags = Some(0);
+        let r = forecast(&args).expect("an ordinary holiday name must be accepted");
+        let v = serde_json::to_value(&r).expect("the response serialises");
+        let comps = v["components"]
+            .as_object()
+            .expect("the response carries a component map");
+        assert!(
+            comps.contains_key("xmas"),
+            "the event keeps its own component"
+        );
+        let trend = comps["trend"]
+            .as_array()
+            .expect("the trend component is an array");
+        assert!(
+            trend.iter().any(|x| x.as_f64().is_some_and(|f| f != 0.0)),
+            "`trend` must be the TREND, not an all-zero event indicator: {trend:?}"
+        );
     }
 
     /// The two-sided control for WR-03's move: a request whose aggregate is EXACTLY at

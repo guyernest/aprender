@@ -656,7 +656,12 @@ pub(crate) fn identifiability_with_limits(
     let base_ridge = REGRESSOR_RIDGE_BASE * trace / (k.max(1) as f64);
     let mut ridge_used: Option<f64> = None;
     let mut factor = cholesky(&corr, k);
-    let mut ridged = corr.clone();
+    // Left EMPTY until the ladder actually runs. The ridge path is the rare degenerate
+    // case; the common path used to allocate and memcpy a whole K x K matrix (K reaches
+    // 1 + 34 seasonality + 200 regressor columns, so ~442 KB) on every regressor-carrying
+    // request and then throw it away untouched. The loop's own `clone_from` fills it on
+    // the first attempt, so the eager copy bought nothing even on the failure path.
+    let mut ridged: Vec<f64> = Vec::new();
     if factor.is_none() {
         for attempt in 0..REGRESSOR_RIDGE_ATTEMPTS {
             let r = base_ridge * 100.0_f64.powi(i32::try_from(attempt).unwrap_or(0));
@@ -734,8 +739,19 @@ pub(crate) fn identifiability_with_limits(
             let min_piv = pivots.iter().copied().fold(f64::INFINITY, f64::min);
             if min_piv <= f64::EPSILON * max_piv * (k as f64) {
                 return Identifiability {
+                    // `flag_unfitted` on the SAME footing as the other two `Singular`
+                    // exits (:694 and :771). It was omitted here, so a regressor whose
+                    // fitted coefficient is exactly zero — the D-21 silent-ignore
+                    // outcome — was flagged on two of the three paths to this status and
+                    // not on the third, and which warning the caller got depended on
+                    // which internal branch fired rather than on their data.
+                    regressors: flag_unfitted(
+                        singular_reports(reports, regularized),
+                        d,
+                        regs,
+                        beta,
+                    ),
                     scope,
-                    regressors: singular_reports(reports, regularized),
                     condition_number: None,
                     condition_number_warning: Some(singular_note(regularized)),
                     ridge: ridge_used,

@@ -26,10 +26,12 @@ pub const TOOL_NAME: &str = "forecast";
 pub const TOOL_DESCRIPTION: &str = "Fit a time-series forecaster to the series you pass in and return a forecast — in one call, \
  no model to train or store first. Send parallel arrays `ds` (dates, YYYY-MM-DD) and `y` (numbers) plus \
  `horizon` (number of future periods) and optionally `freq` (D, W or MS — daily by default). Default model \
- is `prophet` (trend with changepoints + Fourier seasonality + optional holidays, with 80% uncertainty \
- bands and named components); `neuralprophet` adds an AR-Net over the last `n_lags` values for short-horizon \
- nowcasting. Returns future `ds`, `yhat`, `yhat_lower`, `yhat_upper`, `trend`, components and timing. \
- Bounded at 20,000 points and a 3,650-period horizon. \
+ is `prophet` (trend with changepoints + Fourier seasonality, with 80% uncertainty bands and named \
+ components); `neuralprophet` adds an AR-Net over the last `n_lags` values for short-horizon \
+ nowcasting and requires freq D. Both models accept `holidays` (named events with optional windows) \
+ and `regressors` (external covariates you also supply over the horizon); on `neuralprophet`, \
+ `holidays` require `n_lags` = 0. Returns future `ds`, `yhat`, `yhat_lower`, `yhat_upper`, `trend`, \
+ components and timing. Bounded at 20,000 points, a 3,650-period horizon and 200 regressors. \
  Band honesty: the nominal 80% interval covered 0.60 (Prophet) and 0.66 (NeuralProphet-lite) of held-out \
  points across 17 rolling-origin windows — treat `yhat_lower`/`yhat_upper` as a ~60-66% band, not an 80% one.";
 

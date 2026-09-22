@@ -40,12 +40,21 @@
 //! [`crate::test_support::equation_tolerance`]. It is never written as a literal here: a bar
 //! that lives in a test can be loosened without the contract noticing (D-15).
 //!
+//! # How this module is reached
+//!
+//! From the door, since plan 06.1-06 (D-29). `forecast::forecast` accepts `holidays` on the
+//! `"neuralprophet"` arm at `n_lags = 0`, builds an [`EventDesign`] from them and passes it
+//! into every `np::TrainConfig`; the per-event contributions are published as response
+//! components (D-31). Everything here is therefore on the request path, and the caller-facing
+//! bounds that hold it are the four hoisted holiday bounds in `forecast::forecast`
+//! (name length, window range, date counts, column count) plus the C-08 event-column price
+//! against `MAX_NP_TRAIN_COST`.
+//!
 //! # What this module does NOT do
 //!
-//! Nothing here is reachable from the door. `forecast::forecast` still refuses `holidays` on
-//! the `"neuralprophet"` arm and constructs every `np::TrainConfig` with no event design, so
-//! there is no window in which an event surface is open to callers before plan 06.1-06 lands
-//! the hoisted bounds and the C-08 event-column price.
+//! It is not reachable at `n_lags > 0`: the door refuses that combination, because the event
+//! block and the autoregressive term are jointly identified only once the fit converges, and
+//! the per-column effect recovery that requires is not established at the door's epoch budget.
 
 use crate::np::Rng;
 use aprender::autograd::Tensor;

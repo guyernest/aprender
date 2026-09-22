@@ -591,10 +591,21 @@ fn per_sample_exog_width(coefficient: f64, n_cols: usize) -> u64 {
         return 0;
     }
     let raw = coefficient * n_cols as f64;
-    if raw.is_finite() && raw > 0.0 {
+    if raw.is_finite() && raw >= 0.0 {
+        // Saturating by construction: Rust's float->int casts saturate, so an
+        // enormous `raw` lands on `u64::MAX` rather than wrapping.
         raw.ceil() as u64
     } else {
-        0
+        // FAIL HIGH, not to zero. `n_cols > 0` here, so the family IS present and must
+        // cost something; the only inputs that reach this arm are a non-finite or
+        // NEGATIVE coefficient, i.e. a broken calibration. Returning 0 — the smallest
+        // possible width — was precisely the "silently SMALL width that passes the door"
+        // this function's own doc says the ceil-then-saturate policy prevents: it would
+        // price E event columns and R regressor columns at the bare `(n_lags + 1)`
+        // arithmetic and reinstate the under-pricing the C-08 terms were added to close.
+        // A cost ceiling's only safe failure direction is high, so a bad coefficient
+        // refuses the request instead of discounting it.
+        u64::MAX
     }
 }
 
