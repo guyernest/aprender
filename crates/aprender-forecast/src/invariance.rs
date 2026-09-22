@@ -124,6 +124,30 @@ impl Hasher {
     pub fn finish(&self) -> u64 {
         self.0
     }
+
+    /// Hash a JSON object: its entry count, then its entries in KEY ORDER.
+    ///
+    /// THE one place the signature's object ordering is decided. It is decided HERE rather
+    /// than inherited from `serde_json::Map`'s iteration order, because that order is a
+    /// `BTreeMap`'s (key-sorted) by default but an `IndexMap`'s (insertion) the moment ANY
+    /// crate in the build graph enables `serde_json/preserve_order` — cargo feature
+    /// unification then applies that choice to every crate linking serde_json, not only the
+    /// one that asked for it. `pmcp` does exactly that.
+    ///
+    /// Both map-walking sites route through here deliberately. [`signature_with`] walks
+    /// `components` directly instead of through [`json`], so sorting only inside [`json`]
+    /// left that site hashing in insertion order — one operation with two implementations is
+    /// how this gate began hashing `components` under one rule and `diagnostics` under
+    /// another. A third map-typed field must call this, not copy it.
+    fn json_map(&mut self, o: &serde_json::Map<String, serde_json::Value>) {
+        self.len(o.len());
+        let mut entries: Vec<_> = o.iter().collect();
+        entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        for (k, v) in entries {
+            self.str(k);
+            json(self, v);
+        }
+    }
 }
 
 /// Walk a JSON value, tagging each variant so a string `"1"` and a number `1` differ.
@@ -150,23 +174,8 @@ fn json(h: &mut Hasher, v: &serde_json::Value) {
             }
         }
         serde_json::Value::Object(o) => {
-            // serde_json's Map backing store is NOT a fixed choice this module can rely on:
-            // it is a BTreeMap (key-sorted iteration) by default, but becomes an IndexMap
-            // (insertion-ordered iteration) the moment ANY crate in the build graph enables
-            // the `preserve_order` cargo feature — and cargo feature unification applies
-            // that choice to every crate linking serde_json, not only the one that asked for
-            // it. `pmcp` enabling `serde_json/preserve_order` flipped this signature's
-            // ordering for a caller who never touched serde_json's feature flags at all
-            // (feature-unification-divergence). Sorting explicitly makes the signature
-            // ENFORCE its own order instead of INHERITING one from a dependency's features.
             h.bytes(b"{");
-            h.len(o.len());
-            let mut entries: Vec<(&String, &serde_json::Value)> = o.iter().collect();
-            entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-            for (k, x) in entries {
-                h.str(k);
-                json(h, x);
-            }
+            h.json_map(o);
         }
     }
 }
@@ -198,22 +207,11 @@ fn signature_with(r: &ForecastResponse, diagnostics: &serde_json::Value) -> u64 
     h.f64s(&r.yhat_lower);
     h.f64s(&r.yhat_upper);
     h.f64s(&r.trend);
-    h.len(r.components.len());
-    // `components` is a `serde_json::Map` walked HERE rather than through `json`, so it does
-    // NOT inherit that function's `Object` arm — it needs the same explicit sort for the same
-    // reason (see the `Object` arm: the backing store is BTreeMap or IndexMap depending on
-    // whether anything in the build graph enabled `serde_json/preserve_order`). The door
-    // inserts these keys in PROPHET'S COMPUTATION ORDER (`additive_terms`,
-    // `multiplicative_terms`, `holidays`, seasonality names), which is not sorted order, so
-    // under an IndexMap this loop hashed them in a different order than the baselines were
-    // recorded in. Sorting only inside `json` fixed `diagnostics` and nested objects and left
-    // this one — it is why the prophet cases still diverged after that fix.
-    let mut components: Vec<(&String, &serde_json::Value)> = r.components.iter().collect();
-    components.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-    for (k, v) in components {
-        h.str(k);
-        json(&mut h, v);
-    }
+    // `components` is walked HERE rather than through `json`, so it does not reach that
+    // function's `Object` arm. The door inserts these keys in PROPHET'S COMPUTATION ORDER
+    // (`additive_terms`, `multiplicative_terms`, `holidays`, seasonality names), which is not
+    // sorted order — hence `json_map`, which is the single place that decides it.
+    h.json_map(&r.components);
     json(&mut h, diagnostics);
     h.finish()
 }
@@ -739,7 +737,7 @@ fn every_baseline_case_reproduces_its_signature() {
     // green right up until case 2 is reached on a later run. Measured, not assumed: this is
     // exactly the blind spot that made "only peyton/prophet/default is affected" an
     // early-termination artifact rather than a finding (see debug session evidence s7).
-    let mut mismatches: Vec<(&str, String, String)> = Vec::new();
+    let mut mismatches: Vec<String> = Vec::new();
     for (label, csv, horizon, shape) in CASES {
         let want = recorded
             .get(label)
@@ -750,7 +748,7 @@ fn every_baseline_case_reproduces_its_signature() {
             .unwrap_or_else(|e| panic!("case {label} must succeed through the door: {e}"));
         let got = format!("{:016x}", signature(&r));
         if got != want {
-            mismatches.push((label, want.to_string(), got));
+            mismatches.push(format!("  case {label}: recorded {want}, got {got}"));
         }
     }
 
@@ -761,11 +759,7 @@ fn every_baseline_case_reproduces_its_signature() {
          is not a one-line tag bump for them.\n{}",
         mismatches.len(),
         CASES.len(),
-        mismatches
-            .iter()
-            .map(|(label, want, got)| format!("  case {label}: recorded {want}, got {got}"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        mismatches.join("\n")
     );
 }
 
@@ -992,20 +986,33 @@ fn mismatch_report(label: &str, a: &ForecastResponse, b: &ForecastResponse) -> S
 /// module docs for which part carries which exposure.
 #[test]
 fn part_a_every_case_is_deterministic_through_the_door() {
+    // Accumulate across the FULL loop and assert ONCE, for the same reason
+    // `every_baseline_case_reproduces_its_signature` does: an `assert!` inside the loop stops
+    // at the first mismatch and never evaluates the remaining cases, so the failure reports
+    // "1 of 8" whatever the true blast radius is. Part A is the WORSE place to leave that —
+    // it is the unconditional, cross-arch test, the one most likely to fire on a runner with
+    // a different libm, and a misread blast radius there sends the next investigation at a
+    // single case when the class is general.
     let mut exercised = 0usize;
+    let mut nondeterministic: Vec<String> = Vec::new();
     for (label, csv, horizon, shape) in CASES {
         let args = args_for(csv, horizon, shape);
         let first = crate::forecast::forecast(&args)
             .unwrap_or_else(|e| panic!("case {label} must succeed through the door: {e}"));
         let second = crate::forecast::forecast(&args)
             .unwrap_or_else(|e| panic!("case {label} must succeed on its second call: {e}"));
-        assert!(
-            signature(&first) == signature(&second),
-            "{}",
-            mismatch_report(label, &first, &second)
-        );
+        if signature(&first) != signature(&second) {
+            nondeterministic.push(mismatch_report(label, &first, &second));
+        }
         exercised += 1;
     }
+    assert!(
+        nondeterministic.is_empty(),
+        "{} of {} cases are NOT deterministic through the door.\n{}",
+        nondeterministic.len(),
+        CASES.len(),
+        nondeterministic.join("\n")
+    );
     // Non-vacuity, pinned and PRINTED: a determinism table that silently shrank would
     // otherwise report green while proving less. Same discipline as the poisson sweep's
     // checked-lambda count.

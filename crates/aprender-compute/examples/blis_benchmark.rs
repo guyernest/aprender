@@ -265,6 +265,21 @@ fn main() {
     #[cfg(feature = "parallel")]
     {
         println!("\n--- Parallel Comparison (per-thread-B vs shared-B) ---");
+        // Section-level fact, so it is stated once rather than once per row. Ask the
+        // library the SAME question its dispatch asks: the fallback fires when the target
+        // is not x86_64 OR the CPU lacks AVX-512, and an earlier version of this note
+        // re-derived only the first half, so an x86_64 host without AVX-512 printed a
+        // shared-B column that was really gemm_blis with no caveat at all. Before the
+        // FALSIFY-SHARED-B-001 fix the column was worse than mislabelled on aarch64: the
+        // function computed nothing, so this loop timed an empty call and reported the
+        // result as throughput.
+        if !trueno::blis::shared_b_has_microkernel() {
+            println!(
+                "note: no 8x32 microkernel on this target/CPU — `shared-B` below measures \
+                 gemm_blis (the fallback), not a distinct implementation, so a ratio near \
+                 1.00x is the two columns running the same code."
+            );
+        }
         for &n in &[256, 512, 1024] {
             benchmark_parallel_compare(n);
         }
@@ -320,17 +335,6 @@ fn benchmark_parallel_compare(n: usize) {
         "{:4}x{:4}: per-thread-B {:6.1} GFLOPS ({:.2}ms) | shared-B {:6.1} GFLOPS ({:.2}ms) | ratio {:.2}x",
         n, n, gf_pt, per_thread * 1e3, gf_sb, shared * 1e3, ratio,
     );
-    // The shared-B kernel is x86_64/AVX-512 only; elsewhere `gemm_blis_parallel_shared_b`
-    // routes to `gemm_blis`. Say so, because the column above is otherwise read as a
-    // measurement of a distinct implementation. Before the FALSIFY-SHARED-B-001 fix this
-    // column was worse than misleading on aarch64: the function computed nothing, so it was
-    // timing an empty loop and reporting the resulting figure as throughput.
-    if !cfg!(target_arch = "x86_64") {
-        println!(
-            "          note: no shared-B microkernel on this target — the shared-B column \
-             measures gemm_blis, not a distinct implementation."
-        );
-    }
 }
 
 #[cfg(target_arch = "x86_64")]

@@ -80,6 +80,11 @@ pub use compute::{gemm_blis, gemm_blis_with_prepacked_b};
 // Re-export parallel
 #[cfg(feature = "parallel")]
 pub use parallel::gemm_blis_parallel_shared_b;
+/// Exported beside the function it guards so callers can ask the SAME question the
+/// dispatch asks, instead of re-deriving it. `examples/blis_benchmark.rs` does exactly
+/// that; before it existed, the example re-derived only half the condition.
+#[cfg(feature = "parallel")]
+pub use parallel::shared_b_has_microkernel;
 pub use parallel::{gemm_blis_parallel, gemm_blis_parallel_with_prepacked_b, HeijunkaScheduler};
 
 // Re-export prepacked
