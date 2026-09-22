@@ -706,6 +706,13 @@ fn every_baseline_case_reproduces_its_signature() {
         CASES.len()
     );
 
+    // Accumulate EVERY case's outcome across the FULL loop and assert ONCE at the end. An
+    // `assert_eq!` inside this loop panics at the first mismatch and never evaluates the
+    // remaining cases, so a fix that repairs case 1 but not cases 2..N would read as fully
+    // green right up until case 2 is reached on a later run. Measured, not assumed: this is
+    // exactly the blind spot that made "only peyton/prophet/default is affected" an
+    // early-termination artifact rather than a finding (see debug session evidence s7).
+    let mut mismatches: Vec<(&str, String, String)> = Vec::new();
     for (label, csv, horizon, shape) in CASES {
         let want = recorded
             .get(label)
@@ -715,13 +722,24 @@ fn every_baseline_case_reproduces_its_signature() {
         let r = crate::forecast::forecast(&args)
             .unwrap_or_else(|e| panic!("case {label} must succeed through the door: {e}"));
         let got = format!("{:016x}", signature(&r));
-        assert_eq!(
-            got, want,
-            "case {label} on arch={arch} no longer reproduces its pre-change signature: \
-             recorded {want}, got {got}. A caller who passes NO new argument is getting a \
-             different answer, so this delivery is not a one-line tag bump for them"
-        );
+        if got != want {
+            mismatches.push((label, want.to_string(), got));
+        }
     }
+
+    assert!(
+        mismatches.is_empty(),
+        "{} of {} cases on arch={arch} no longer reproduce their pre-change signature. A \
+         caller who passes NO new argument is getting a different answer, so this delivery \
+         is not a one-line tag bump for them.\n{}",
+        mismatches.len(),
+        CASES.len(),
+        mismatches
+            .iter()
+            .map(|(label, want, got)| format!("  case {label}: recorded {want}, got {got}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 /// The baseline records at least one architecture, and every architecture it records is
