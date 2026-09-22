@@ -1012,7 +1012,7 @@ use aprender::nn::{Linear, Module};
 ///
 /// Construct with [`NpRegressors::new`]; the fields are private on purpose (see the module
 /// section above).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NpRegressors {
     specs: Vec<Standardized>,
     /// One array per regressor, each of CALLER-ROW length — NEVER of grid length (D-27).
@@ -1982,23 +1982,40 @@ mod identifiability_tests {
         let mut args = fixture_args();
         args.model = Some("neuralprophet".into());
         args.freq = Some("D".into());
-        // TWO regressors, not the fixture's four. The shared design-cost ceiling is now
-        // hoisted ABOVE the dispatch with the arm-dependent operand (D-33), and this
-        // fixture is gappy: its span is 8 888 days against 2 905 points, so four
-        // regressors price at (8888 + 12) x 4 = 35 600 on the neuralprophet operand and
-        // are refused by the SHARED ceiling before the arm is reached at all. Two price at
-        // 17 800, which clears it — so what this test observes stays the ARM's refusal,
-        // which is what it is about. The span-operand behaviour gets its own named test.
+        // TWO regressors, not the fixture's four, and no `prior_scale`. The shared
+        // design-cost ceiling is now hoisted ABOVE the dispatch with the arm-dependent
+        // operand (D-33), and this fixture is gappy: its span is 8 888 days against 2 905
+        // points, so four regressors price at (8888 + 12) x 4 = 35 600 on the
+        // neuralprophet operand and are refused by the SHARED ceiling. Two price at
+        // 17 800, which clears it. `prior_scale` is dropped because it is prophet-only on
+        // this arm (D-21) — and the fixture sets it, so leaving it would make this test
+        // observe THAT refusal instead of the arm's diagnostics.
         if let Some(regs) = args.regressors.as_mut() {
             regs.truncate(2);
+            for r in regs.iter_mut() {
+                r.prior_scale = None;
+                r.mode = None;
+            }
         }
-        // The arm REFUSES regressors outright in this wave (plan 06.1-07 opens it), which
-        // is itself the strongest form of "nothing is computed".
-        let err = crate::forecast::forecast(&args)
-            .expect_err("regressors on the neuralprophet arm are refused in this wave");
+        // The arm now ACCEPTS regressors (plan 06.1-07 opened it), so the claim has to be
+        // made against a SUCCESSFUL response: the regressors reach the fit, and neither
+        // identifiability key appears. That is a stronger statement than the refusal this
+        // test used to observe, which could not distinguish "not computed" from "not
+        // reached".
+        let with_regs = crate::forecast::forecast(&args)
+            .expect("regressors on the neuralprophet arm are accepted after plan 06.1-07");
+        assert_eq!(with_regs.model, "neuralprophet");
         assert!(
-            err.to_string().contains("set model to \"prophet\""),
-            "the refusal must name the fix, got {err}"
+            with_regs.diagnostics.get("regressors").is_none()
+                && with_regs
+                    .diagnostics
+                    .get("regressors_identifiability")
+                    .is_none(),
+            "no identifiability key may appear on the neuralprophet arm even WITH \
+             regressors — VIF and the condition number are properties of the design matrix \
+             Prophet builds, and AR absorption is a training dynamic rather than column \
+             collinearity (D-37): {}",
+            with_regs.diagnostics
         );
         // And with no regressors the arm produces neither key (the positive control, so
         // this test cannot pass merely because the arm errors).

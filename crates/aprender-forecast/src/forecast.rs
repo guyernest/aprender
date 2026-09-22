@@ -988,23 +988,136 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     "neuralprophet supports freq D only".into(),
                 ));
             }
-            // REFUSED, not accepted-and-ignored (D-21). An argument that is silently
-            // dropped is the exact failure this phase exists to prevent: the caller gets a
-            // forecast that looks like it used their covariate and did not. Plan 06.1-07
-            // replaces this message with the D-26/D-28 rules that make it work here.
-            if args.regressors.is_some() {
-                return Err(ForecastError::Validation(
-                    "regressors on model \"neuralprophet\" are not enabled yet; set model \
-                     to \"prophet\""
-                        .into(),
-                ));
+            // ---- THE ARM RULES FOR REGRESSORS (D-26, D-28, D-21) ----
+            //
+            // The temporary refusal plan 06.1-01 left here is GONE; these are the real
+            // rules. Every SHARED check has already run above the dispatch, so what is left
+            // is only what is true of THIS arm.
+            //
+            // REFUSAL PRECEDENCE IS DECIDED HERE AND STATED, not left to evaluation order.
+            // A request can satisfy several of these at once — a multiplicative regressor
+            // carrying a prior_scale on a gappy series with lags — and which message the
+            // caller receives must be a DECISION, because the messages are verbatim
+            // contracts that e2e cases string-match. The order is:
+            //
+            //   (1) the SHARED hoisted checks, in the order that site keeps them (above);
+            //   (2) multiplicative mode;
+            //   (3) an explicitly present prior_scale;
+            //   (4) the gappy-series-at-lags predicate (below, after the n_lags range
+            //       checks, because it needs the parsed dates and the span).
+            //
+            // Cheapest and most unconditional first, most input-dependent last: (2) and (3)
+            // are single field reads on data already validated above, while (4) walks the
+            // day span. `the_refusal_precedence_is_stable_when_several_rules_apply` pins it,
+            // so a refactor cannot silently reorder them.
+            //
+            // (2) D-28. NP-lite has NO multiplicative composition path: the event block is
+            // one additive `.add()` on the forward and multiplicative mode was never built
+            // or measured. A field may be arm-restricted the way `cap` is growth-restricted
+            // without breaking D-22's one-shape requirement; accepting the field and
+            // ignoring it would violate the refuse-never-default rule outright (D-21).
+            // Read from `reg_std`, which carries the RESOLVED mode the shared allowlist
+            // above produced — not from the raw string, so `None` (the default) is additive
+            // here by exactly the rule the prophet arm uses.
+            if let Some(i) = reg_std.iter().position(|s| s.mode == Mode::Multiplicative) {
+                return Err(ForecastError::Validation(format!(
+                    "regressor {i} has mode \"multiplicative\", which is prophet-only: the \
+                     neuralprophet model composes exogenous terms with a single additive \
+                     block and has no multiplicative path. Set mode to \"additive\", or use \
+                     model \"prophet\""
+                )));
+            }
+            // (3) D-21 applied to `prior_scale`. The NP trainer has ONE global
+            // `weight_decay` and no per-parameter prior, so there is no mechanism by which
+            // a per-regressor prior scale could take effect and no measurement anywhere for
+            // what it should mean here. Accepting the field and dropping it is exactly the
+            // "plausible answer to a question they did not ask" failure D-21 names.
+            //
+            // The check keys on `Some(_)`, NEVER on the defaulted value: a check keyed on
+            // the default would refuse every neuralprophet regressor request. The positive
+            // control is `a_neuralprophet_regressor_without_a_prior_scale_is_accepted`.
+            if let Some(i) = args
+                .regressors
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .position(|r| r.prior_scale.is_some())
+            {
+                return Err(ForecastError::Validation(format!(
+                    "regressor {i} carries prior_scale, which is prophet-only: the \
+                     neuralprophet trainer applies one global weight decay and has no \
+                     per-regressor prior. Omit the field, or use model \"prophet\""
+                )));
             }
             let n_lags = args.n_lags.unwrap_or(0);
             if n_lags > 365 {
                 return Err(ForecastError::Validation("n_lags ≤ 365".into()));
             }
+            // (4) D-26, the gappy-series-at-lags predicate — computed from the span and the
+            // observed days the door already holds, BEFORE `NpData::new` materialises
+            // anything.
+            //
+            // THE PREDICATE IS WHOLE-SERIES, AND THAT IS NOT A SIMPLIFICATION. With
+            // `n_lags > 0` the training sample list is `(n_lags..n_train_grid)` — EVERY grid
+            // row, imputed rows included — so a gap ANYWHERE enters the loss. A narrower
+            // "only gaps inside a lag window" rule collapses to the same predicate.
+            //
+            // Three alternatives were rejected, one line each so the shape is legible here:
+            //   - refuse whenever `n_lags > 0`: refuses a well-defined case (a gap-free
+            //     daily series, where the grid equals the caller's rows) to avoid a cheap
+            //     check;
+            //   - require grid-complete values on this arm: makes `values.len()` differ
+            //     between the two models, breaking D-22's one-shape requirement outright;
+            //   - impute and disclose: spike 014 measured two DEFENSIBLE rules 10.48 apart
+            //     on a series of scale 35.32 (~30 %), with the garbage probe moving the
+            //     forecast by 192 and flipping the sign of BOTH coefficients. There is no
+            //     defensible value to invent.
+            //
+            // At `n_lags = 0` this does not fire at all: D-27 makes the imputed-day value
+            // unread BY CONSTRUCTION there, so there is nothing to argue about.
+            if n_lags > 0 && !reg_std.is_empty() {
+                let span = (ds[ds.len() - 1] - ds[0] + 1) as usize;
+                if span != ds.len() {
+                    // The FIRST missing day, in the same `YYYY-MM-DD` form the caller sent.
+                    // `ds` is strictly ascending (refused above), so the first gap is the
+                    // first place consecutive entries differ by more than one day.
+                    let first_missing = ds
+                        .windows(2)
+                        .find(|w| w[1] - w[0] > 1)
+                        .map_or(ds[0], |w| w[0] + 1);
+                    return Err(ForecastError::Validation(format!(
+                        "this request carries {} regressor(s) with n_lags {n_lags}, but the \
+                         series is missing {} day(s) between {} and {} — the first is {}. \
+                         With lags the neuralprophet model trains on an imputed DAILY grid \
+                         and reads a regressor value on every one of those days, and there \
+                         is no defensible value to invent for a day you did not send \
+                         (measured: two defensible fill rules 10.48 apart on a series of \
+                         scale 35.32). Supply a gap-free daily series, or set n_lags to 0",
+                        reg_std.len(),
+                        span - ds.len(),
+                        format_ymd(ds[0]),
+                        format_ymd(ds[ds.len() - 1]),
+                        format_ymd(first_missing)
+                    )));
+                }
+            }
             let n_train = ds.len();
             let d = np::NpData::new(&ds, &args.y, n_train, 10, 0.8);
+            // The channel `np::train` and the predict paths read. Its constructor pays the
+            // lagged path's grid-equals-caller-rows invariant in RELEASE and returns
+            // `ForecastError::Internal` if it is broken — which, given the predicate above,
+            // can only mean that predicate regressed.
+            let np_regs = if reg_std.is_empty() {
+                None
+            } else {
+                Some(crate::regressors::NpRegressors::new(
+                    &d,
+                    n_lags,
+                    reg_std.clone(),
+                    reg_hist.clone(),
+                    reg_fut.clone(),
+                )?)
+            };
             if n_lags >= d.n_train_grid {
                 return Err(ForecastError::Validation(
                     "n_lags must be smaller than the series span in days".into(),
@@ -1111,7 +1224,10 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
                     // the sweep builds one config per rate. The clone is the columns and
                     // the membership sets, both bounded by the hoisted ceilings above.
                     event_design: event_design.clone(),
-                    regressors: None,
+                    // Cloned per learning rate for the reason `event_design` is: `TrainConfig`
+                    // owns its channel and the sweep builds one config per rate. The clone is
+                    // the caller's own arrays, bounded by the hoisted design-cost ceiling.
+                    regressors: np_regs.clone(),
                 };
                 let (m, log) = np::train(&d, &cfg, false);
                 let fl = *log.epoch_loss.last().unwrap_or(&f64::INFINITY);
@@ -1133,25 +1249,31 @@ pub fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError> 
             // `None` whenever the caller sent no holidays, so every event-free path is
             // byte-identical to what it was before this plan.
             let ev: np::EventChannel<'_> = event_design.as_ref().zip(log.events.as_ref());
+            // The regressor channel: the caller's OWN rows — the history days and the
+            // horizon days, `ds.len() + horizon` of them, exactly the array the caller
+            // sent — standardised with the constants the FIT used (`log.regressor_specs`
+            // travel with the weights for that reason), never a grid-shaped array (D-27).
+            let reg_rows = np_regs.as_ref().map(|r| r.rows_for(&ds, &fut));
+            let rc: np::NpRegChannel<'_> = reg_rows.as_ref().zip(log.regressors.as_ref());
             // `predict_trend` is branch-independent; only the yhat path differs.
             let trend = np::predict_trend(&d, &m, &fut);
             let yhat = if n_lags == 0 {
-                np::predict_ts(&d, &m, &fut, ev, None)
+                np::predict_ts(&d, &m, &fut, ev, rc)
             } else {
-                np::predict_ar_recursive(&d, &m, &fut, ev, None)
+                np::predict_ar_recursive(&d, &m, &fut, ev, rc)
             };
             // Residual-based band. NeuralProphet itself would use quantile regression; that
             // was NOT spiked (CONTEXT deferred), and the diagnostics say so rather than
             // implying a coverage guarantee this band does not have.
             let fitted = if n_lags == 0 {
-                np::predict_ts(&d, &m, &ds, ev, None)
+                np::predict_ts(&d, &m, &ds, ev, rc)
             } else {
                 let idx: Vec<usize> = ds
                     .iter()
                     .map(|day| (day - d.t0) as usize)
                     .filter(|i| *i >= n_lags)
                     .collect();
-                let pr = np::predict_ar_1step(&d, &m, &idx, ev, None);
+                let pr = np::predict_ar_1step(&d, &m, &idx, ev, rc);
                 let mut out = vec![f64::NAN; ds.len()];
                 let mut k = 0;
                 for (i, day) in ds.iter().enumerate() {
@@ -3462,12 +3584,41 @@ mod tests {
                     reg_args(60, 7, vec![r])
                 }),
             ),
+            // The neuralprophet ARM rules replace the temporary blanket refusal plan
+            // 06.1-01 left there. Three rows, because the arm now has three rules and a
+            // single row would leave two of them uncovered by this table.
             (
-                "neuralprophet arm",
-                "set model to \"prophet\"",
+                "neuralprophet arm: multiplicative mode",
+                "which is prophet-only: the neuralprophet model composes",
                 Box::new(|| {
                     let mut a = reg_args(60, 7, vec![good_reg("promo", 60, 7)]);
                     a.model = Some("neuralprophet".into());
+                    a.freq = Some("D".into());
+                    if let Some(regs) = a.regressors.as_mut() {
+                        regs[0].mode = Some("multiplicative".into());
+                    }
+                    a
+                }),
+            ),
+            (
+                "neuralprophet arm: an explicit prior_scale",
+                "carries prior_scale, which is prophet-only",
+                Box::new(|| {
+                    let mut a = reg_args(60, 7, vec![good_reg("promo", 60, 7)]);
+                    a.model = Some("neuralprophet".into());
+                    a.freq = Some("D".into());
+                    if let Some(regs) = a.regressors.as_mut() {
+                        regs[0].prior_scale = Some(10.0);
+                    }
+                    a
+                }),
+            ),
+            (
+                "neuralprophet arm: a regressor on a gappy series with lags",
+                "Supply a gap-free daily series, or set n_lags to 0",
+                Box::new(|| {
+                    let mut a = gappy_np_args(90, &[13], 7);
+                    a.n_lags = Some(7);
                     a
                 }),
             ),
@@ -3495,12 +3646,340 @@ mod tests {
         }
     }
 
-    /// D-21: the neuralprophet arm REFUSES regressors rather than silently dropping them.
+    // ================================================================================
+    // D-22 / D-26 / D-28: the neuralprophet arm ACCEPTS regressors, and the two arm
+    // rules that scope that acceptance to what is measured.
+    // ================================================================================
+
+    /// A gappy daily series: `n` calendar days with `missing` of them removed, plus a
+    /// regressor array of the required `kept + horizon` length. Returns the args.
+    ///
+    /// `y` varies enough to have a non-zero spread on both the target and the driver, and
+    /// the series is long enough for `auto_epochs` to be cheap.
+    fn gappy_np_args(days: usize, missing: &[usize], horizon: usize) -> ForecastArgs {
+        let t0 = days_from_civil(2021, 1, 1);
+        let mut ds = Vec::new();
+        let mut y = Vec::new();
+        let mut rng = Rng::new(11);
+        for k in 0..days {
+            if missing.contains(&k) {
+                continue;
+            }
+            ds.push(format_ymd(t0 + k as i64));
+            let t = k as f64;
+            y.push(
+                20.0 + 0.05 * t
+                    + (2.0 * std::f64::consts::PI * t / 7.0).sin()
+                    + 0.05 * rng.normal(),
+            );
+        }
+        let n = ds.len();
+        ForecastArgs {
+            ds,
+            y,
+            horizon,
+            model: Some("neuralprophet".into()),
+            freq: Some("D".into()),
+            seed: Some(42),
+            regressors: Some(vec![crate::types::RegressorArg {
+                name: "price".into(),
+                values: (0..n + horizon)
+                    .map(|i| 2.0 + (i as f64 * 0.37).sin() * 3.0)
+                    .collect(),
+                mode: None,
+                prior_scale: None,
+                standardize: None,
+            }]),
+            ..ForecastArgs::default()
+        }
+    }
+
+    /// D-26, CASE 1 of 4: a GAP-FREE daily series with lags and a regressor is ACCEPTED.
+    ///
+    /// Four cases exist because ONE failing input is an anecdote (CLAUDE.md rule 6) and a
+    /// predicate keyed on the wrong conjunct passes three of them: keyed on `n_lags > 0`
+    /// alone it refuses this one; keyed on the gap alone it refuses case 3; keyed on the
+    /// regressor alone it refuses case 4.
     #[test]
-    fn regressors_on_the_neuralprophet_arm_are_refused_not_dropped() {
-        let mut args = reg_args(60, 7, vec![good_reg("promo", 60, 7)]);
-        args.model = Some("neuralprophet".into());
-        refusal(&args, "set model to \"prophet\"");
+    fn a_gap_free_neuralprophet_series_with_lags_and_a_regressor_is_accepted() {
+        let mut args = gappy_np_args(90, &[], 7);
+        args.n_lags = Some(7);
+        let r = forecast(&args).expect("a gap-free daily series with lags must be ACCEPTED");
+        assert_eq!(r.model, "neuralprophet");
+        assert!(
+            r.yhat.len() == 7 && r.yhat.iter().all(|v| v.is_finite()),
+            "the forecast must be finite: {:?}",
+            r.yhat
+        );
+    }
+
+    /// D-26, CASE 2 of 4: the SAME series with days removed and the same lags is REFUSED,
+    /// and the message names the count, the first missing date and the fix.
+    #[test]
+    fn a_gappy_neuralprophet_series_with_lags_and_a_regressor_is_refused() {
+        let mut args = gappy_np_args(90, &[13], 7);
+        args.n_lags = Some(7);
+        match forecast(&args) {
+            Err(ForecastError::Validation(m)) => {
+                // The COUNT, exactly: one day removed is one missing day, not "the grid
+                // length minus something approximate".
+                assert!(
+                    m.contains("missing 1 day(s)"),
+                    "the message must name the EXACT missing-day count, got {m:?}"
+                );
+                // The FIRST MISSING DATE, in the same YYYY-MM-DD form the caller sent.
+                let expected = format_ymd(days_from_civil(2021, 1, 1) + 13);
+                assert_eq!(expected, "2021-01-14", "fixture arithmetic");
+                assert!(
+                    m.contains(&expected),
+                    "the message must name the first missing date {expected:?}, got {m:?}"
+                );
+                assert!(
+                    m.contains("Supply a gap-free daily series, or set n_lags to 0"),
+                    "the message must state the fix, got {m:?}"
+                );
+            }
+            other => panic!(
+                "a gappy series with lags and a regressor must be REFUSED, got {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+    }
+
+    /// D-26, CASE 3 of 4: the SAME gappy series at `n_lags = 0` is ACCEPTED — D-27 makes
+    /// the imputed-day value unread by construction there, so there is nothing to refuse.
+    #[test]
+    fn a_gappy_neuralprophet_series_without_lags_and_a_regressor_is_accepted() {
+        let args = gappy_np_args(90, &[13, 40, 41], 7);
+        let r = forecast(&args).expect("a gappy series at n_lags = 0 must be ACCEPTED");
+        assert_eq!(r.model, "neuralprophet");
+        assert!(r.yhat.iter().all(|v| v.is_finite()));
+    }
+
+    /// D-26, CASE 4 of 4: the SAME gappy series with lags but NO regressor is ACCEPTED —
+    /// the refusal is about the REGRESSOR, not about gaps in general.
+    #[test]
+    fn a_gappy_neuralprophet_series_with_lags_and_no_regressor_is_accepted() {
+        let mut args = gappy_np_args(90, &[13], 7);
+        args.n_lags = Some(7);
+        args.regressors = None;
+        let r = forecast(&args)
+            .expect("a gappy series with lags and NO regressor must still be ACCEPTED");
+        assert_eq!(r.model, "neuralprophet");
+    }
+
+    /// D-28: a multiplicative regressor on the neuralprophet arm is REFUSED, with an
+    /// ADDITIVE control on the same series that is accepted.
+    ///
+    /// The control is what keeps the refusal from swallowing the happy path: a check that
+    /// refused every regressor would pass the first half alone.
+    #[test]
+    fn a_multiplicative_regressor_on_the_neuralprophet_arm_is_refused_but_additive_is_not() {
+        let mut args = gappy_np_args(90, &[], 7);
+        if let Some(regs) = args.regressors.as_mut() {
+            regs[0].mode = Some("multiplicative".into());
+        }
+        refusal(
+            &args,
+            "which is prophet-only: the neuralprophet model composes",
+        );
+        refusal(&args, "Set mode to \"additive\", or use model \"prophet\"");
+
+        // The ADDITIVE control, explicit rather than defaulted, and at both lag settings —
+        // D-28 is unconditional in `n_lags`.
+        for lags in [None, Some(7)] {
+            let mut ok = gappy_np_args(90, &[], 7);
+            ok.n_lags = lags;
+            if let Some(regs) = ok.regressors.as_mut() {
+                regs[0].mode = Some("additive".into());
+            }
+            forecast(&ok).unwrap_or_else(|e| {
+                panic!("an ADDITIVE regressor at n_lags {lags:?} must be accepted: {e}")
+            });
+        }
+    }
+
+    /// D-21 applied to `prior_scale`: REFUSED when explicitly present, ACCEPTED when
+    /// absent.
+    ///
+    /// The positive control is the whole point. The neuralprophet trainer has one global
+    /// weight decay and no per-regressor prior, so accepting the field and dropping it is
+    /// the silent-ignore failure this phase exists to close — but a check keyed on the
+    /// DEFAULTED value rather than on `Some(_)` would refuse every neuralprophet regressor
+    /// request, which is a different bug with the same green test.
+    #[test]
+    fn a_neuralprophet_regressor_carrying_a_prior_scale_is_refused_but_an_absent_one_is_not() {
+        let mut args = gappy_np_args(90, &[], 7);
+        if let Some(regs) = args.regressors.as_mut() {
+            // The PROPHET DEFAULT, sent explicitly. A check keyed on the value would not
+            // fire here; one keyed on `Some(_)` does, which is the distinction.
+            regs[0].prior_scale = Some(10.0);
+        }
+        refusal(&args, "carries prior_scale, which is prophet-only");
+        refusal(&args, "Omit the field, or use model \"prophet\"");
+
+        let absent = gappy_np_args(90, &[], 7);
+        assert!(
+            absent
+                .regressors
+                .as_ref()
+                .is_some_and(|r| r[0].prior_scale.is_none()),
+            "the control must genuinely omit the field"
+        );
+        forecast(&absent).expect("an ABSENT prior_scale must be accepted on this arm");
+    }
+
+    /// The refusal PRECEDENCE, pinned: which message a caller receives when several arm
+    /// rules apply at once is a DECISION, not an artefact of evaluation order.
+    ///
+    /// The messages are verbatim contracts that e2e cases string-match, so a refactor that
+    /// reordered the three `if`s would silently change what a caller is told. The order is
+    /// multiplicative, then `prior_scale`, then the gap predicate — cheapest and most
+    /// unconditional first.
+    #[test]
+    fn the_refusal_precedence_is_stable_when_several_rules_apply() {
+        // ALL THREE at once: multiplicative mode, an explicit prior_scale, and a gappy
+        // series with lags. The multiplicative message wins.
+        let mut all_three = gappy_np_args(90, &[13], 7);
+        all_three.n_lags = Some(7);
+        if let Some(regs) = all_three.regressors.as_mut() {
+            regs[0].mode = Some("multiplicative".into());
+            regs[0].prior_scale = Some(10.0);
+        }
+        refusal(
+            &all_three,
+            "which is prophet-only: the neuralprophet model composes",
+        );
+
+        // (3) and (4): prior_scale plus the gap predicate. The prior_scale message wins.
+        let mut two = gappy_np_args(90, &[13], 7);
+        two.n_lags = Some(7);
+        if let Some(regs) = two.regressors.as_mut() {
+            regs[0].prior_scale = Some(10.0);
+        }
+        refusal(&two, "carries prior_scale, which is prophet-only");
+
+        // And the SHARED hoisted checks still precede all three: the same request with a
+        // wrong `values` length is refused by the length tie, not by an arm rule.
+        let mut shared_first = all_three.clone();
+        if let Some(regs) = shared_first.regressors.as_mut() {
+            regs[0].values.truncate(3);
+        }
+        refusal(&shared_first, "are required (points + horizon");
+    }
+
+    /// D-22 as a LIVE test rather than a claim: ONE payload literal, both arms, both
+    /// succeed.
+    ///
+    /// The length contract must not differ between the models — `values.len()` is
+    /// `ds.len() + horizon` on both, with no amendment. Building the payload once and
+    /// sending it twice is what makes that a comparison instead of two independent
+    /// assertions that happen to agree.
+    #[test]
+    fn the_same_regressor_payload_is_accepted_by_both_arms() {
+        let base = gappy_np_args(90, &[], 14);
+        let payload = base
+            .regressors
+            .clone()
+            .expect("the fixture carries one regressor");
+        assert_eq!(
+            payload[0].values.len(),
+            base.ds.len() + base.horizon,
+            "the ONE length contract, stated before it is exercised"
+        );
+
+        let mut np = base.clone();
+        np.regressors = Some(payload.clone());
+        let np_r = forecast(&np).expect("the neuralprophet arm must accept this payload");
+
+        let mut pr = base.clone();
+        pr.model = Some("prophet".into());
+        pr.regressors = Some(payload);
+        let pr_r = forecast(&pr).expect("the prophet arm must accept the IDENTICAL payload");
+
+        assert_eq!(np_r.model, "neuralprophet");
+        assert_eq!(pr_r.model, "prophet");
+        assert_eq!(np_r.yhat.len(), pr_r.yhat.len());
+    }
+
+    /// D-33's operand rule for REGRESSORS: the neuralprophet arm prices the design over the
+    /// imputed grid's SPAN IN DAYS, the prophet arm over the caller's POINT COUNT.
+    ///
+    /// The rule-4 re-mutation of this operand at the shared hoisted site returned an EMPTY
+    /// failing set before this test existed — the arm-dependent operand had no test on
+    /// either arm. It has one now.
+    ///
+    /// The DENSE CONTROL is what makes the claim about the operand rather than about the
+    /// regressor count: the same point count and the same regressor count on a contiguous
+    /// series is ACCEPTED, so what refuses the first request is the span.
+    #[test]
+    fn the_regressor_design_cost_uses_the_span_operand_on_the_neuralprophet_arm() {
+        use crate::types::MAX_REGRESSOR_DESIGN_COST;
+        // 400 calendar days, every 4th day kept: 100 points over a 397-day span.
+        const SPAN: usize = 400;
+        const HORIZON: usize = 7;
+        const REGS: usize = 100;
+        let missing: Vec<usize> = (0..SPAN).filter(|k| k % 4 != 0).collect();
+        let mut sparse = gappy_np_args(SPAN, &missing, HORIZON);
+        let points = sparse.ds.len();
+        // Derived from the fixture rather than asserted from the constants above, so a
+        // change to the generator cannot silently make the premise below false.
+        let first = crate::dates::parse_date(&sparse.ds[0]).expect("a fixture date");
+        let last = crate::dates::parse_date(&sparse.ds[points - 1]).expect("a fixture date");
+        let span_days = usize::try_from(last - first + 1).expect("a positive span");
+        // The PREMISE, asserted rather than assumed: the two operands straddle the ceiling.
+        assert!(
+            (points + HORIZON) * REGS <= MAX_REGRESSOR_DESIGN_COST,
+            "the point operand must CLEAR the ceiling: ({points} + {HORIZON}) x {REGS}"
+        );
+        assert!(
+            (span_days + HORIZON) * REGS > MAX_REGRESSOR_DESIGN_COST,
+            "the span operand must EXCEED it: ({span_days} + {HORIZON}) x {REGS}"
+        );
+
+        let make = |n: usize, len: usize| -> Vec<crate::types::RegressorArg> {
+            (0..n)
+                .map(|j| crate::types::RegressorArg {
+                    name: format!("r{j}"),
+                    values: (0..len)
+                        .map(|i| 2.0 + (i as f64 * 0.37 + j as f64).sin() * 3.0)
+                        .collect(),
+                    mode: None,
+                    prior_scale: None,
+                    standardize: None,
+                })
+                .collect()
+        };
+        sparse.regressors = Some(make(REGS, points + HORIZON));
+        match forecast(&sparse) {
+            Err(ForecastError::Validation(m)) => {
+                assert!(
+                    m.contains("exceeds max_regressor_design_cost"),
+                    "the SPAN operand must refuse this request, got {m:?}"
+                );
+                assert!(
+                    m.contains("(span_days + horizon) x n_regressors"),
+                    "the message must NAME the operand it used, got {m:?}"
+                );
+            }
+            other => panic!(
+                "a sparse series whose SPAN product clears the ceiling must be refused, got \
+                 {:?}",
+                other.map(|r| r.model)
+            ),
+        }
+
+        // THE DENSE CONTROL: the same point count and the same regressor count, contiguous,
+        // is accepted — so what refused above was the span and not the count.
+        let mut dense = gappy_np_args(points, &[], HORIZON);
+        assert_eq!(
+            dense.ds.len(),
+            points,
+            "the control must match the point count"
+        );
+        dense.regressors = Some(make(REGS, points + HORIZON));
+        forecast(&dense)
+            .expect("the DENSE series of the same point count and regressor count is accepted");
     }
 
     /// Every new refusal message separates the LIMITATION from the FIX with a semicolon,
