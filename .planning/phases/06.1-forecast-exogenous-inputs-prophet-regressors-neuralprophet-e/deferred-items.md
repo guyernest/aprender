@@ -160,3 +160,56 @@ This does not change the recommendation: still **do not** re-record the baseline
 `--workspace`, and question (b) above — whether a consumer's answer may depend on the feature
 set of unrelated workspace members at all — is the decision that should be taken first, because
 a "yes" makes the bisect moot and a "no" makes it mandatory.
+
+#### RESOLVED (2026-09-22, `/gsd-debug feature-unification-divergence`) — and two corrections above are wrong
+
+**Root cause: `serde_json/preserve_order`.** `pmcp v2.19.3` enables it; cargo feature
+unification applies it to `aprender-forecast`'s own `serde_json`, which swaps
+`serde_json::Map`'s backing store from `BTreeMap` (key-sorted iteration) to `IndexMap`
+(insertion-ordered). The invariance signature hashed maps in raw iteration order, so it
+inherited its ordering from a dependency's feature flags. **It is not a numerics defect — no
+float changes anywhere**, which is exactly why all seven numerics controls above passed. Every
+hypothesis in this item was searching the wrong mechanism class.
+
+**Fixed in `e920b4e36`**, at TWO sites — the second is why a partial fix looked like a second
+cause:
+
+1. `json`'s `Object` arm (covers `diagnostics` and nested objects).
+2. `signature_with`'s `components` loop, which walks the top-level `serde_json::Map`
+   **directly** and therefore never inherited the `Object` arm. The door inserts those keys in
+   prophet's computation order (`additive_terms`, `multiplicative_terms`, `holidays`,
+   seasonality names), which is not sorted order. Fixing only site 1 left all five prophet
+   cases diverging and fixed the three neuralprophet ones.
+
+Sorting by `String`'s `Ord` reproduces `BTreeMap`'s own iteration order, so **no recorded
+baseline changed**. `--workspace --lib` — the scope `ci.yml:289` runs and the one this item was
+opened against — is now 9/9 rc=0. The baseline was never re-recorded, under `--workspace` or
+otherwise.
+
+**Two corrections in the 2026-09-21 narrowing above are wrong. Both are scope conflations.**
+
+| Claim above | Status | Measured |
+|---|---|---|
+| "the 23-feature figure is a `--no-dedupe` artifact" | **WRONG** | deduped `cargo tree -e features --workspace` returns exactly **23** `aprender-core` edges. Deduped `-p aprender-forecast -p apr-cli` returns exactly **6**. Both are correct *for their own scope*; neither is an artifact. The two narrowings compared different scopes and read the difference as a measurement error |
+| "`safetensors-compare`, `setfit`, `format-encryption`, `format-quantize`, `half`, `hf-hub-integration` are NOT in the delta" | **WRONG as written** | true for the `+apr-cli` scope only; all six ARE in the deduped `--workspace` delta |
+| "~190 feature edges across 79 packages" | unverified | not re-derived; the bisect became moot once the cause was found |
+| correction 3 (the diverging crate is `aprender-compute`, not `aprender-core`) | stands | unaffected by the above |
+
+**A `serde_json/raw_value` second cause was hypothesised mid-session and is refuted**, twice:
+the same divergence reproduces with `raw_value` provably absent
+(`cargo tree --format "{p}|{f}"` showing `indexmap,preserve_order` and no `raw_value`), and
+`-p aprender-forecast -p aprender-mcp-forecast` — where `raw_value` IS engaged — passes 9/9.
+It was attributed on a single isolation control in which both features moved together.
+
+**Instrument note, and the reason this item ran long.** `invariance.rs` put its `assert_eq!`
+INSIDE the `for … in CASES` loop, so it panicked on the first mismatch and never evaluated the
+other eight cases. "Only `peyton/prophet/default` is affected" was an early-termination
+artifact: the true count was **8 of 8**. Fixed first, in `b7317854c`, before any hash was
+touched — the blast radius could not have been measured otherwise, and a partial fix would have
+read as green.
+
+Question (b) — may a consumer's answer depend on the feature set of unrelated workspace
+members? — is **answered by construction** for this gate: after `e920b4e36` the signature
+enforces its own ordering instead of inheriting one, so the answer is no and it is now
+structural rather than a policy the next dependency can revoke. The broader question, whether
+anything *else* in the forecast path is feature-set-sensitive, is untested and remains open.
