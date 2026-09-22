@@ -343,9 +343,19 @@ impl SetFitBert {
     /// read produces, naming the field/file/tensor that failed.
     pub fn from_bert_dir(dir: &Path, root_seed: u64) -> Result<Self, SetFitError> {
         let import = BertImport::open(dir)?;
+        // `min(..)`, not the bare constant. A general BERT checkout may carry FEWER
+        // position rows than this crate's bound — `BertImport::open` only caps
+        // `max_position_embeddings` from above — and `BertSentenceEncoder::max_seq()` is
+        // `MAX_SEQUENCE_LENGTH.min(dims.max_positions)`. Configuring the tokenizer at the
+        // bare constant lets it emit a row the encoder then REFUSES with `OversizeInput`,
+        // at encode time, after the whole model has loaded: a data-dependent failure on
+        // whichever input happens to be long, which is exactly what the sibling
+        // `vocab_size` check below exists to prevent for the other half of the pair.
+        // The `max_sequence_length` field's own doc states this derivation as the
+        // invariant every constructor holds.
         let tokenizer = MiniLmTokenizer::from_bytes_with_config(
             import.tokenizer_bytes(),
-            tokenizer::MAX_SEQUENCE_LENGTH,
+            tokenizer::MAX_SEQUENCE_LENGTH.min(import.dims().max_positions),
             import.pad_token_id(),
         )?;
         // The two halves came from one directory; this is what makes them one
@@ -447,13 +457,15 @@ impl SetFitBert {
         // 0, so a checkout with a different pad token would tokenize differently
         // at serve time than it did at fit time — a train/serve skew the
         // tokenizer hash cannot detect, because the BYTES are identical and only
-        // the runtime params differ. The truncation bound is
-        // `MAX_SEQUENCE_LENGTH` here for the same reason every directory loader
-        // uses it: it is this crate's own bound, so both sides land on the same
-        // number by construction.
+        // the runtime params differ. The truncation bound is derived the same way
+        // `BertSentenceEncoder::max_seq()` derives it — `min(MAX_SEQUENCE_LENGTH,
+        // positions)` — and NOT from the bare constant: a bundle can now carry a
+        // general BERT whose position table is shorter than this crate's bound, in
+        // which case the constant alone would configure the tokenizer to emit rows
+        // the encoder refuses with `OversizeInput` at encode time.
         let tokenizer = MiniLmTokenizer::from_bytes_with_config(
             tokenizer_bytes,
-            tokenizer::MAX_SEQUENCE_LENGTH,
+            tokenizer::MAX_SEQUENCE_LENGTH.min(arch.positions),
             arch.pad_token_id,
         )?;
         let encoder = BertSentenceEncoder::from_named_tensors(arch, tensors, root_seed)?;

@@ -213,15 +213,15 @@ fi
 
 # The refusal must be the PATH one, not a digest one. A digest refusal would mean
 # the repair above was skipped and provenance was never reached.
-if ! grep -q -- "$ESCAPE_PATH" "$ATTACK_LOG"; then
+if ! grep -qF -- "$ESCAPE_PATH" "$ATTACK_LOG"; then
     tail -20 "$ATTACK_LOG" >&2
     fail "the refusal does not name the escaping path, so it is not the path-escape refusal"
 fi
-if ! grep -q "leaves the benchmark directory" "$ATTACK_LOG"; then
+if ! grep -qF "leaves the benchmark directory" "$ATTACK_LOG"; then
     tail -20 "$ATTACK_LOG" >&2
     fail "the refusal is not the path-escape one; the gate refused for some other reason"
 fi
-if grep -q "not the bytes that were attested" "$ATTACK_LOG"; then
+if grep -qF "not the bytes that were attested" "$ATTACK_LOG"; then
     tail -20 "$ATTACK_LOG" >&2
     fail "the gate refused at the DIGEST step: the digest repair was skipped, so provenance was never reached"
 fi
@@ -244,11 +244,11 @@ if [ "$g_rc" -eq 0 ]; then
     tail -20 "$G_LOG" >&2
     fail "the tree with selections/ DELETED was ACCEPTED (rc=0) - verifier gap 2 is open again"
 fi
-if ! grep -q "selection manifest at" "$G_LOG"; then
+if ! grep -qF "selection manifest at" "$G_LOG"; then
     tail -20 "$G_LOG" >&2
     fail "the refusal does not name the selection manifest, so it is not the binding refusal"
 fi
-if ! grep -q "does not exist" "$G_LOG"; then
+if ! grep -qF "does not exist" "$G_LOG"; then
     tail -20 "$G_LOG" >&2
     fail "the refusal does not say the manifest is absent; the gate refused for some other reason"
 fi
@@ -272,15 +272,15 @@ if [ "$f_rc" -eq 0 ]; then
     tail -20 "$F_LOG" >&2
     fail "the tree with a doctored selection_manifest_hash was ACCEPTED (rc=0) - verifier gap 2 is open again"
 fi
-if grep -q "not the bytes that were attested" "$F_LOG"; then
+if grep -qF "not the bytes that were attested" "$F_LOG"; then
     tail -20 "$F_LOG" >&2
     fail "the gate refused at the ROW-DIGEST step: the digest repair was skipped, so the binding was never reached"
 fi
-if ! grep -q "selection_manifest_hash" "$F_LOG"; then
+if ! grep -qF "selection_manifest_hash" "$F_LOG"; then
     tail -20 "$F_LOG" >&2
     fail "the refusal does not name selection_manifest_hash, so it is not the binding refusal"
 fi
-if ! grep -q -- "$DOCTORED_KEY" "$F_LOG"; then
+if ! grep -qF -- "$DOCTORED_KEY" "$F_LOG"; then
     tail -20 "$F_LOG" >&2
     fail "the refusal does not quote the doctored key, so it is not reporting what was claimed"
 fi
@@ -305,15 +305,15 @@ if [ "$d_rc" -eq 0 ]; then
     tail -20 "$D_LOG" >&2
     fail "the tree with a doctored quality.f_avg was ACCEPTED (rc=0) - verifier advisory 2 is open again"
 fi
-if grep -q "not the bytes that were attested" "$D_LOG"; then
+if grep -qF "not the bytes that were attested" "$D_LOG"; then
     tail -20 "$D_LOG" >&2
     fail "the gate refused at the ROW-DIGEST step: the digest repair was skipped, so the cross-check was never reached"
 fi
-if ! grep -q "quality.f_avg" "$D_LOG"; then
+if ! grep -qF "quality.f_avg" "$D_LOG"; then
     tail -20 "$D_LOG" >&2
     fail "the refusal does not name quality.f_avg, so it is not the cross-check refusal"
 fi
-if ! grep -q "confusion_matrix" "$D_LOG"; then
+if ! grep -qF "confusion_matrix" "$D_LOG"; then
     tail -20 "$D_LOG" >&2
     fail "the refusal does not name the confusion matrix it recomputed from"
 fi

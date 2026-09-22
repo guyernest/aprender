@@ -713,15 +713,21 @@ pub(crate) fn run(
     // it from the one consumer that can act on it — a packaging pipeline — while
     // leaving the JSON document on stdout untouched either way.
     //
-    // Both numbers in the sentence are MB (10^6), the unit AWS states the quota
-    // in. Printing MiB next to a decimal-MB threshold is how "256.0 MB exceeds
-    // the 250 MB limit" comes to be a comparison of two different units.
+    // Both numbers in the sentence are MiB (2^20), which is the unit the quota is
+    // actually expressed in: AWS_LAMBDA_ZIP_LIMIT_BYTES is 262_144_000 — the exact
+    // figure Lambda's InvalidParameterValueException names — and that is 250 MiB
+    // exactly, which is what "250 MB" in the AWS quota tables means. Dividing it by
+    // 10^6 printed "262 MB", a third threshold appearing in no AWS document and
+    // matching neither the quota page (250) nor the API error (262144000); an
+    // operator checking the advisory against AWS found no such number. Printing MiB
+    // next to a decimal-MB threshold is how "256.0 MB exceeds the 250 MB limit"
+    // comes to be a comparison of two different units, so BOTH sides use MiB.
     let limit = aprender::setfit::AWS_LAMBDA_ZIP_LIMIT_BYTES;
     if bytes.len() as u64 > limit {
-        let size_mb = bytes.len() as f64 / 1_000_000.0;
-        let limit_mb = limit as f64 / 1_000_000.0;
+        let size_mib = bytes.len() as f64 / 1_048_576.0;
+        let limit_mib = limit as f64 / 1_048_576.0;
         eprintln!(
-            "  {} Artifact size ({size_mb:.1} MB) exceeds the {limit_mb:.0} MB unzipped limit for standard AWS Lambda zip deployment. Deploy via container image (Docker) or other compute targets (ECS, EC2, Kubernetes).",
+            "  {} Artifact size ({size_mib:.1} MiB) exceeds the {limit_mib:.0} MiB unzipped limit for standard AWS Lambda zip deployment. Deploy via container image (Docker) or other compute targets (ECS, EC2, Kubernetes).",
             output::badge_info("NOTE")
         );
     }
