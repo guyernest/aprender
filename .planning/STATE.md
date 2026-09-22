@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: "06.1"
-current_phase_name: "Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds"
+current_phase_name: "Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)"
 status: executing
 stopped_at: Wave 4 complete (06.1-06 merged); next is wave 5 (06.1-07)
-last_updated: "2026-09-21T16:45:55.278Z"
-last_activity: 2026-09-20
+last_updated: "2026-09-21T23:18:01.031Z"
+last_activity: 2026-09-21
 last_activity_desc: Phase 06.1 execution started
-state_head: 67e74b61a81246178d63abca3b075c4118be706e
+state_head: 10e121ee58db6327ef25702afcbcae61f21fb21f
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 92
-  completed_plans: 86
+  completed_plans: 90
 milestone_name: milestone
 ---
 
@@ -24,13 +24,13 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-07)
 
 **Core value:** A small labeled dataset can produce an accurate, fast, reproducible classifier that trains and runs entirely through Aprender's native Rust and APR lifecycle.
-**Current focus:** Phase 06.1 — Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds
+**Current focus:** Phase 06.1 — Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)
 
 ## Current Position
 
-Phase: 06.1 (Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds) — EXECUTING
-Plan: 3 of 8
-Status: Ready to execute
+Phase: 06.1 (Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)) — EXECUTING
+Plan: 1 of 8
+Status: Executing Phase 06.1
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-20 — Phase 06.1 execution started
+Last activity: 2026-09-21 — Phase 06.1 execution started
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,

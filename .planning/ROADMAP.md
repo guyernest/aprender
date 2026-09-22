@@ -551,7 +551,7 @@ re-deriving the shape.
      touched contract, the forecast server e2e tests, and a tag cut that builds `--locked`.
 
 **Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
-**Plans:** 2/8 plans executed
+**Plans:** 7/8 plans executed
 
 Plans:
 **Wave 1**
@@ -574,7 +574,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 06.1-07-PLAN.md — regressors on the neuralprophet arm: the by-construction lag-free guarantee, the gappy-series refusal at lags, and the multiplicative refusal (wave 5)
+- [x] 06.1-07-PLAN.md — regressors on the neuralprophet arm: the by-construction lag-free guarantee, the gappy-series refusal at lags, and the multiplicative refusal (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
