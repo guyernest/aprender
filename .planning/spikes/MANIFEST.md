@@ -50,6 +50,31 @@ The real work is regressors on both models, events on NeuralProphet, and proving
 - The public entry point is `forecast(&ForecastArgs)`. `fitted_forecast` does not exist at HEAD or
   at the pinned tag — the CR names an API the crate does not ship (recorded 2026-09-20).
 
+### llm-decision-classifier
+Evaluate Kev (https://github.com/jaredpalmer/kev, Apache-2.0), the open replica of the Jev decision
+model, as a classifier family in aprender alongside SetFit. Kev is a Qwen3.5 base plus a rank-16 LoRA
+and a pointer head that scores each option's `</opt>` hidden state against the question's `<decide>`
+hidden state; it answers yes/no (`noul`), `choice` and `score` questions with calibrated
+probabilities and never generates text. Upstream aprender (`paiml/aprender`) already runs the
+Qwen3.5 Gated-DeltaNet hybrid on CPU and CUDA, but our fork is 280 commits behind it (2026-09-23),
+and upstream's `Qwen35Model` is GGUF, token-at-a-time and logits-only: no hidden-state readout and no
+training path through DeltaNet.
+
+**Requirements:**
+- **Few-shot steering is the product.** The business supplies a handful of labelled examples
+  (SetFit's 8–64 per class regime) to add its own knowledge and bias; massive datasets are out of
+  scope. Zero-shot Kev with `criteria` descriptions is the baseline few-shot must beat, since it
+  already carries some steering (recorded 2026-09-23).
+- **Training may stay in Python; inference must be Rust on aprender.** Fine-tuning is a back-office
+  process whose only output is weights; the served path (speed, security, AWS Lambda) is Rust.
+  Rust-side training is a bonus, not a requirement (decided 2026-09-23 at spike alignment).
+- **The Python-to-Rust weight handoff is part of the contract**: a Kev checkpoint (adapter + head)
+  must export to an artifact the Rust inference path loads, with probability parity to Python fp32.
+- **Qwen3.5 support comes from upstream, not a fork-local re-port.** Sync `paiml/aprender` first
+  (spike 016) and extend its `Qwen35Model` rather than writing a second implementation (OPS-03).
+- **Lambda is the deployment target**: size, memory, cold start and latency are measured against
+  Lambda limits, not assumed.
+
 ## Spikes
 
 | # | Idea | Name | Type | Validates | Verdict | Tags |
@@ -68,3 +93,4 @@ The real work is regressors on both models, events on NeuralProphet, and proving
 | 012 | forecast-exogenous-inputs | no-arg-bitwise-invariance | standard | Given eight door cases across both models, growths, holidays and AR lags, when the regressor plumbing is present but no new argument is passed, then every deterministic `ForecastResponse` field is bit-identical — and the signature saying so is proven able to fail | VALIDATED ✓ (8/8 repeat calls bit-identical; mutation proof detects 1-ULP yhat/trend changes and an extra component key; zero-regressor plumbing bit-identical to untouched `predict` on 3 datasets. Bands not in the mechanism test. Found: NP refuses freq != D, which answers CR P5 Q3 and voids spike 014's premise) | invariance, determinism, delivery-gate, mutation-proof |
 | 013 | forecast-exogenous-inputs | np-events-autograd | standard | Given NP-lite's `forward()`, when an additive `Linear(E,1)` event block is trained jointly on the f32 autograd, then a known synthetic event effect is recovered, fixed-seed runs are bit-identical, and the D-10 train-cost bound is measured against real work | VALIDATED ✓ (block composes without forking NpModel; all 6 weights recover the planted +8.0 within 5.8%, train loss 6.8x lower; seed 42 bit-identical twice, seed 43 differs; tape +5 fixed, no leak. **DEFECT: `train_cost` has no event term — cost is linear in E and at E=1001 (MAX_HOLIDAY_COLUMNS) a request buys 7.6x the priced work**. Lag-free only; AR paths unmeasured) | neuralprophet, events, autograd, train-cost, determinism |
 | 014 | forecast-exogenous-inputs | np-gap-imputation-regressors | standard | Given a daily series with gaps, when a regressor is supplied on the caller's rows and NP trains on its imputed daily grid, then whether the imputed-day value is read is determined per `n_lags` and the forecast's sensitivity to the fill rule is measured | VALIDATED ✓ (RE-SCOPED after 012 refuted the W/MS premise. **Lag-free never reads it** — all 4 rules incl. a garbage probe are bit-identical. **Lagged reads all of it** — defensible rules differ by 10.5 on scale 35.3 (~30%), garbage flips both coefficient signs. The CR's `values.len() == ds.len() + horizon` does not cover NP's denser grid; refuse / require-grid-complete / impute-and-disclose) | neuralprophet, regressors, imputation, gaps, api-contract |
+| 015 | llm-decision-classifier | kev-vs-setfit-few-shot | standard | Given the SetFit tasks at 8–64 shots/class, when SetFit, zero-shot Kev (0.8B/4B) and Kev with bias / head / LoRA adaptation are scored on identical rows, then we know whether few-shot Kev beats SetFit | PARTIAL ⚠ (Kev wins 0–16 shots on both tasks; Kev-4B zero-shot 0.607 beats SetFit@64 0.561 on stance and +3 floats of bias → 0.642; SetFit wins emotion at 32+ shots, 0.705 vs 0.577 @64; 0.8B is only SetFit-level; head adapters train in seconds on CPU; LoRA r2 works on MPS) | kev, setfit, few-shot, benchmark |
