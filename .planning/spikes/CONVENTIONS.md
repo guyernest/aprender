@@ -124,3 +124,31 @@ Patterns and stack choices established across spike sessions. New spikes follow 
   measure; `uv run --python 3.12 --with huggingface_hub` for weight downloads.
 - Avoid: `aprender::nn::loss::SmoothL1Loss` (no gradient); `FISTA` for f64 problems (f32, fixed step); relying on
   `Instant::now()` deltas being non-zero on Apple Silicon (41.67 ns ticks).
+
+## Decision-model spikes (idea `llm-decision-classifier`, 015–020)
+
+- **Python oracles that ship their own lockfile run inside their vendored checkout**, not via `uv run --with`:
+  Kev (`jaredpalmer/kev` @ `7405b72`) lives at `015-kev-vs-setfit-few-shot/vendor/kev` (gitignored) and every
+  Kev-side tool is `cd vendor/kev && uv run python ../../tools/<x>.py`. Its torch fp32 CPU path is the parity oracle;
+  its MLX bf16 path is only for fast feature extraction.
+- **Compare to SetFit on PAIRED rows**: replay the committed `benchmarks/tweeteval-stance/selections/sK-seedS/`
+  manifests (`train:N` = HF row N, verified 587/587 + 280/280) and score with the benchmark's own metric (F_avg).
+  A task `apr setfit` cannot ingest uses Python `setfit` with `train-config.json`'s knobs, flagged as a stand-in.
+- **Every few-shot recipe is declared before a test score is read**; when the author's recipe fits a different data
+  regime (Kev's README recipe = 12 optimizer steps at 16 shots) declare a second one up front and report both.
+- **Upstream-dependent Rust spikes build against a local merge worktree**: `../aprender-016-upstream-sync` on branch
+  `spike/016-upstream-sync` (never pushed), spike crates path-depend on its crates and share
+  `CARGO_TARGET_DIR=<repo>/target`. Every change made there is also saved as `<spike>/upstream-*.patch`.
+- **Model handoff chain** (017): PEFT `merge_and_unload()` in fp32 → `Qwen3_5ForCausalLM.save_pretrained` →
+  llama.cpp `convert_hf_to_gguf.py --outtype f32` (shallow clone in `vendor/llama.cpp`, run with
+  `uv run --python 3.12 --with ./gguf-py --with "transformers>=5" --with torch …`) → upstream `Qwen35Model`.
+  Oracle fixtures carry token ids, readout offsets and hidden states, so the tokenizer is a separate rung.
+- **When a sampling profile says "idle", time the phases**: `sample` blamed thread caps (61 % `__psynch_cvwait`);
+  thread-local phase timers showed a single-threaded loop was the real limit (020). Serial work shows up as other
+  threads waiting, not as its own hot symbol.
+- **Lambda proxy** (019): fresh process per run, `RAYON_NUM_THREADS=6`, an RSS-per-step timeline via `ps -o rss=`,
+  peak from `/usr/bin/time -l`, steady state as p50/p95 over ≥ 5 rounds. State the two things it cannot measure
+  (Graviton vs local CPU, cold container-image reads) as estimates with their arithmetic.
+- **zsh traps hit here**: `"$r:crates/…"` applies the `:c` modifier (write `"${r}:crates/…"`); unquoted `$VAR` holding
+  a list is ONE word (`${=VAR}` or a `while read` loop); `/bin/bash` is 3.2 (use `#!/opt/homebrew/bin/bash` for
+  associative arrays).
