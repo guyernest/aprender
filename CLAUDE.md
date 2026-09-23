@@ -473,13 +473,15 @@ Clippy's lint set is **not monotonic**: the #2370 tree is clean on 1.93/1.96/1.9
 - `docs/BEATS.md` - the public beat scoreboard. Gated against `contracts/` by
   `crates/aprender-core/tests/readme_contract.rs`
 
-## Spike Findings (forecasting stack)
+## Spike Findings (forecasting stack, LLM decision classifier)
 
 - **Spike findings for aprender** (implementation patterns, constraints, gotchas) → `Skill("spike-findings-aprender")`
 
-Fourteen VALIDATED spikes (Prophet / NeuralProphet ports, stateless `forecast` MCP servers, Chronos
-zero-shot ports and server, NEON GEMM kernel, and exogenous inputs — external regressors, events,
-and the no-argument bitwise-invariance release gate) are packaged as implementation blueprints in
+Spikes on the forecasting stack (Prophet / NeuralProphet ports, stateless `forecast` MCP servers,
+Chronos zero-shot ports and server, NEON GEMM kernel, and exogenous inputs — external regressors,
+events, and the no-argument bitwise-invariance release gate) and on the Kev / Qwen3.5 decision
+classifier (few-shot vs SetFit, upstream sync, Python→GGUF→Rust handoff, batched prefill, Lambda and
+Lambda Managed Instances deployment) are packaged as implementation blueprints in
 `.claude/skills/spike-findings-aprender/`. The wrapped spike list is the skill's own
 `## Processed Spikes` section — re-derive the count from there, don't trust this sentence. Load the
 skill before building any of that; the raw experiments stay in `.planning/spikes/` (`MANIFEST.md`,

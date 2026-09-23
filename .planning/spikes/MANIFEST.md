@@ -79,6 +79,10 @@ training path through DeltaNet.
   (Rust head training) is dropped because training stays in Python (decided 2026-09-23).
 - **Lambda is measured by a local proxy** (6 threads, 10 GB cap), not a real AWS deploy, for this session
   (decided 2026-09-23).
+- **Lambda Managed Instances is the intended host for Qwen-sized models** (Kev-4B and further Qwen-based
+  models), alongside the existing smaller Rust MCP servers on AWS (recorded 2026-09-23 at wrap-up). LMI lifts
+  the per-function ceiling from 10 GB / ~6 vCPU to 32 GB / 16 vCPU (Graviton4 available), removes per-request
+  cold starts and serves requests concurrently in one Rust process. Nothing on LMI has been measured yet.
 
 ## Spikes
 

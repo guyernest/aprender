@@ -1,5 +1,78 @@
 # Spike Wrap-Up Summary
 
+## Session 3 — 2026-09-23
+
+**Spikes processed:** 5 (015 PARTIAL, 016 VALIDATED, 017 VALIDATED, 020 VALIDATED, 019 PARTIAL); 018 was dropped before it was built
+**Idea:** `llm-decision-classifier`
+**Feature areas:** Kev few-shot evaluation · Upstream sync · Qwen3.5 decision inference in Rust · LLM classifier on Lambda / Lambda Managed Instances
+**Skill output:** `./.claude/skills/spike-findings-aprender/` (SKILL.md now 3 ideas, 14 references, sources for 19 spikes)
+
+### Processed Spikes
+
+| # | Name | Type | Verdict | Feature Area |
+|---|------|------|---------|--------------|
+| 015 | kev-vs-setfit-few-shot | standard | PARTIAL | Kev few-shot evaluation (`kev-few-shot-evaluation.md`) |
+| 016 | upstream-sync-qwen35 | standard | VALIDATED | Upstream sync (`upstream-sync.md`) |
+| 017 | kev-rust-forward-parity | standard | VALIDATED | Qwen3.5 decision inference (`qwen35-decision-inference.md`) |
+| 020 | qwen35-batched-prefill | standard | VALIDATED | Qwen3.5 decision inference (`qwen35-decision-inference.md`) |
+| 019 | kev-lambda-inference | standard | PARTIAL | LLM classifier deployment (`llm-classifier-lambda-deployment.md`) |
+
+### Key Findings
+
+**Kev complements SetFit (015).** Kev wins at 0–16 shots on both tasks. On stance, Kev-4B zero-shot
+(F_avg 0.607) already beats SetFit trained on 64 shots (0.561), and 8 shots of per-class bias (3
+floats) lift it to 0.642. SetFit wins emotion at 32+ shots (0.705 vs 0.577 at 64): Kev's
+frozen-backbone adapters plateau, while SetFit's contrastive fine-tune keeps scaling. 0.8B is only
+SetFit-level, so the gains need 4B, which is 5× slower and 100× bigger. The strongest adapters (bias,
+head_ft) train in seconds on CPU on top of unchanged released weights. head_ft is over-confident
+(ECE up to 0.37) until its temperature is refit.
+
+**The upstream sync is tractable (016).** 280 commits produced 34 conflicts, resolved by five rules
+plus three fixes that only `cargo check` surfaces. Upstream's `--features setfit` sweep fixed contract
+commands of ours that had been running zero tests. The one red test (a stale SetFit golden) is
+already red on the un-merged fork, as a control worktree proved. The merge `895c654de` is local and
+not pushed.
+
+**The handoff works with off-the-shelf tools (017).** PEFT fp32 merge → llama.cpp converter → upstream
+`Qwen35Model` with a hidden-state readout → 40-line pointer head. Probabilities match to 1.5e-6 and
+argmax is 12/12 on the first run. It needed two upstream patches, one of them an upstream-worthy
+defect: llama.cpp counts the MTP block in `block_count`, so every freshly converted Qwen3.5 GGUF fails
+to load. As shipped, token-at-a-time costs 79 ms per token, 5–7 s per decision.
+
+**The batched prefill makes Kev servable on CPU (020).** Projections run as one GEMM per layer over
+the row, with W borrowed zero-copy as the GEMM's A operand. An 87-token decision drops from 6.6 s to
+**0.36 s on 6 threads** (18×) with parity unchanged. The decisive fix was running the DeltaNet
+recurrence **in parallel per head**, found by phase timers after a sampling profile blamed trueno's
+thread cap. The prefill is F32-only; a BF16 GEMM is needed for 4B.
+
+**Kev-0.8B fits default Lambda; Kev-4B does not (019).** The binary is 1.4 MB and the weights 3 GB;
+steady RSS is 3.9 GB (7.1 GB transient); the first decision completes 0.82 s after process start, and
+short decisions take 0.2–0.4 s on 6 M4 threads (est. 1–1.5 s on Graviton2). Kev-4B needs 16.8 GB f32,
+which exceeds the 10 GB ceiling. Cheap loader wins: skip the unused 1 GB `lm_head`; don't keep both
+the mmap and owned copies (−2.9 GB).
+
+**Lambda Managed Instances, added at wrap-up on the user's direction.** LMI lifts the ceiling to
+32 GB / 16 vCPU with Graviton4, has no per-request cold starts, and runs concurrent requests in one
+Rust process. That makes Kev-4B f32 placeable, but only after the loader fixes, because the as-built
+~2.35× load transient would be ~39 GB. It costs always-on capacity (min 3 environments) plus a 15 %
+management fee, so the small MCP servers stay on scale-to-zero Lambda. Nothing on LMI is measured.
+
+### Open Items Surfaced (not spiked)
+
+- **Build before 4B**: BF16 prefill GEMM; zero-copy F32 loading and skipping the tied `lm_head`; a
+  state-prefix cache (a 3-question ticket pays the state 3×); a Rust Qwen tokenizer with Kev's
+  `<|x|>` → `<¦x¦>` escaping.
+- **Deploy spike on LMI**: a real Graviton4 capacity provider with Kev-0.8B, then 4B. Measure init
+  weight load from S3, decision latency per vCPU setting, and per-environment concurrency vs throttles.
+  Settle the unverified items: packaging limit, `/tmp` size, Function URL ingress, pmcp.run support.
+- **Business-shaped evaluation**: support routing with policy criteria, where Kev's descriptions should
+  matter more than on academic sets.
+- **Upstream contributions (checkpoints)**: the MTP `nextn_predict_layers` loader fix; the batched
+  prefill (time-to-first-token for `apr run`/`apr chat` on the hybrid); regenerate the stale SetFit
+  golden on the fork before the real sync PR.
+
+---
+
 ## Session 2 — 2026-09-20
 
 **Spikes processed:** 4 (011–014, all VALIDATED)

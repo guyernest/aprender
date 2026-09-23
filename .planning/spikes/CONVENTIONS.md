@@ -25,7 +25,7 @@ Patterns and stack choices established across spike sessions. New spikes follow 
   `tools/oracle.py` dumps a ladder (scaling → features → embeddings → hidden rows → quantiles, model AND pipeline
   outputs, timings) plus edge probes into one `fixtures/*_fixture.json`; the driver prints one ladder table.
 - **Wrapped findings live in `.claude/skills/spike-findings-aprender/`** (`/gsd-spike --wrap-up`, 2026-09-05
-  for 001–010, 2026-09-20 for 011–014): one reference per feature area plus `sources/NNN-*/` (README, Cargo.toml,
+  for 001–010, 2026-09-20 for 011–014, 2026-09-23 for 015–020): one reference per feature area plus `sources/NNN-*/` (README, Cargo.toml,
   build.rs, src/, tools/, tests/, static/, RUN-OUTPUT, results, baseline.json, PR.md). Fixtures, `models/`,
   `report*.html`, `*.log` and any oversized chart-feeding `results.json` (011's is 256 KB) are NOT copied — cite
   `.planning/spikes/NNN-*/` from the reference instead. SKILL.md groups Requirements **by idea key** once more
@@ -149,6 +149,13 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - **Lambda proxy** (019): fresh process per run, `RAYON_NUM_THREADS=6`, an RSS-per-step timeline via `ps -o rss=`,
   peak from `/usr/bin/time -l`, steady state as p50/p95 over ≥ 5 rounds. State the two things it cannot measure
   (Graviton vs local CPU, cold container-image reads) as estimates with their arithmetic.
+- **Two deployment targets for AWS (user direction, 2026-09-23):** small Rust MCP servers (SetFit, Chronos-Bolt,
+  forecast) stay on default Lambda, where they scale to zero. Qwen-sized models target **Lambda Managed Instances**:
+  32 GB / 16 vCPU, arm64 / Graviton4, no per-request cold start, concurrent requests in one process via
+  `run_concurrent`. A deployment spike states which one it proxies. The 019 proxy (6 threads, 10 GB) is the
+  default-Lambda envelope; an LMI proxy is `RAYON_NUM_THREADS` = the function's vCPU with a 32 GB cap.
+- **Separate documented facts from projections in deployment findings**: cite the AWS doc URL and the date read for
+  every platform limit, and mark every latency on hardware we have not run as *est.* with its arithmetic.
 - **zsh traps hit here**: `"$r:crates/…"` applies the `:c` modifier (write `"${r}:crates/…"`); unquoted `$VAR` holding
   a list is ONE word (`${=VAR}` or a `while read` loop); `/bin/bash` is 3.2 (use `#!/opt/homebrew/bin/bash` for
   associative arrays).

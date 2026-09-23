@@ -1,6 +1,6 @@
 ---
 name: spike-findings-aprender
-description: Implementation blueprint from spike experiments. Requirements, proven patterns, and verified knowledge for building aprender's time-series forecasting stack (Prophet, NeuralProphet, Chronos ports; stateless forecast MCP servers; exogenous inputs — regressors and events; NEON GEMM kernel). Auto-loaded during implementation work.
+description: Implementation blueprint from spike experiments. Requirements, proven patterns, and verified knowledge for building aprender's time-series forecasting stack (Prophet, NeuralProphet, Chronos ports; stateless forecast MCP servers; exogenous inputs — regressors and events; NEON GEMM kernel) and its Qwen3.5 LLM decision classifier (Kev few-shot vs SetFit, upstream sync, Python→GGUF→Rust handoff, batched prefill, Lambda / Lambda Managed Instances deployment). Auto-loaded during implementation work.
 ---
 
 <context>
@@ -23,8 +23,17 @@ under `prophet-forecast-mcp`. Two of the change request's four premises were ref
 pinned tag (`aprender-forecast-v0.63.0` = `fdf6b1802`) before any spike was built. The real work is
 regressors on both models, events on NeuralProphet, and proving a tag bump is safe.
 
+**Idea `llm-decision-classifier`** — Evaluate Kev (github.com/jaredpalmer/kev, Apache-2.0), the open
+replica of the Jev decision model, as a classifier family in aprender alongside SetFit. Kev is a
+Qwen3.5 base plus a rank-16 LoRA and a pointer head that scores each option's `</opt>` hidden state
+against the question's `<decide>` hidden state; it answers yes/no (`noul`), `choice` and `score`
+questions with calibrated probabilities and never generates text. Upstream aprender (`paiml/aprender`)
+already runs the Qwen3.5 Gated-DeltaNet hybrid on CPU and CUDA, but the fork was 280 commits behind it
+(2026-09-23), and upstream's `Qwen35Model` is GGUF, token-at-a-time and logits-only.
+
 Spike sessions wrapped: 2026-09-03 → 2026-09-05 (spikes 001–010, `prophet-forecast-mcp`);
-2026-09-20 (spikes 011–014, `forecast-exogenous-inputs`). All 14 VALIDATED.
+2026-09-20 (spikes 011–014, `forecast-exogenous-inputs`); 2026-09-23 (spikes 015–017, 019, 020,
+`llm-decision-classifier` — 3 VALIDATED, 2 PARTIAL; spike 018 was dropped before it was built).
 </context>
 
 <requirements>
@@ -66,6 +75,27 @@ below honours the requirements of the idea it belongs to. Grouped by idea key.
 - **One tag per release**; the consumer bumps one line plus the lock entry and builds `--locked`.
 - The public entry point is **`forecast(&ForecastArgs)`**. `fitted_forecast` does not exist at HEAD
   or at the pinned tag — the CR names an API the crate does not ship (recorded 2026-09-20).
+
+### Idea `llm-decision-classifier`
+
+- **Few-shot steering is the product.** The business supplies a handful of labelled examples
+  (SetFit's 8–64 per class regime) to add its own knowledge and bias; massive datasets are out of
+  scope. Zero-shot Kev with `criteria` descriptions is the baseline few-shot must beat.
+- **Training may stay in Python; inference must be Rust on aprender.** Fine-tuning is a back-office
+  process whose only output is weights; the served path (speed, security, AWS Lambda) is Rust.
+  Rust-side training is a bonus, not a requirement (decided 2026-09-23).
+- **The Python-to-Rust weight handoff is part of the contract**: a Kev checkpoint (adapter + head)
+  must export to an artifact the Rust inference path loads, with probability parity to Python fp32.
+- **Qwen3.5 support comes from upstream, not a fork-local re-port.** Sync `paiml/aprender` first and
+  extend its `Qwen35Model` rather than writing a second implementation (OPS-03).
+- **Lambda is the deployment target**: size, memory, cold start and latency are measured against
+  Lambda limits, not assumed.
+- **Kev needs a batched prefill before it is servable on CPU** (token-at-a-time is 5–7 s per
+  decision). Rust head training (spike 018) was dropped because training stays in Python.
+- **Lambda was measured by a local proxy** (6 threads, 10 GB cap), not a real AWS deploy, for the
+  2026-09-23 session.
+- **Lambda Managed Instances is the intended host for Qwen-sized models**, alongside the existing
+  smaller Rust MCP servers (recorded 2026-09-23 at wrap-up). Nothing on LMI is measured yet.
 </requirements>
 
 <findings_index>
@@ -84,6 +114,11 @@ below honours the requirements of the idea it belongs to. Grouped by idea key.
 | **NeuralProphet exogenous inputs (events, regressors)** | `references/neuralprophet-exogenous-inputs.md` | Events compose as one `Linear(E,1)` beside `NpModel` and recover a planted effect to 5.8 % — but **`train_cost` has no event term**: at `MAX_HOLIDAY_COLUMNS` a request buys **7.6×** the priced work. Lag-free never reads an imputed-day regressor value; **lagged reads all of it** (~30 % of scale) |
 | **No-argument bitwise invariance gate** | `references/no-argument-invariance-gate.md` | The consumer's tag-bump gate is **free**, because regressor columns append: 8/8 bit-identical, plumbing inert at zero regressors on 3 datasets, and the signature is mutation-proven to detect 1 ULP |
 
+| **Kev few-shot evaluation (vs SetFit)** | `references/kev-few-shot-evaluation.md` | **Kev wins at 0–16 shots, SetFit at 32+ on lexical tasks.** Kev-4B zero-shot (0.607) beats SetFit@64 (0.561) on stance, and 3 floats of `bias` lift it to 0.642. SetFit wins emotion at 64 shots, 0.705 vs 0.577. 0.8B is only SetFit-level. head_ft needs a refit temperature (ECE up to 0.37) |
+| **Upstream sync** | `references/upstream-sync.md` | 280 commits resolve as 34 conflicts by 5 rules plus 3 `cargo check`-only fixes. The one red SetFit golden is already red on the fork, as a control worktree proved. Merge `895c654de` is local, not pushed |
+| **Qwen3.5 decision inference in Rust** | `references/qwen35-decision-inference.md` | PEFT merge → llama.cpp GGUF → upstream `Qwen35Model` + hidden readout + 40-line head gives **probs to 1.5e-6, 12/12**. The MTP `block_count` loader defect hits every fresh GGUF. A batched prefill (GEMM projections, **DeltaNet per head in parallel**) takes an 87-token decision from 6.6 s to **0.36 s on 6 threads**. F32-only |
+| **LLM classifier on Lambda / Lambda Managed Instances** | `references/llm-classifier-lambda-deployment.md` | Kev-0.8B fits default Lambda: 1.4 MB binary + 3 GB weights, first decision 0.82 s, 0.2–0.4 s on M4 (est. 1–1.5 s Graviton2). Kev-4B does not. **LMI (32 GB / 16 vCPU, no cold starts, concurrent Rust) fits 4B only after the loader fixes.** Keep small servers on scale-to-zero Lambda |
+
 ## Source Files
 
 Original spike source files are preserved in `sources/NNN-spike-name/` (README.md, Cargo.toml,
@@ -92,7 +127,9 @@ RUN-OUTPUT*.md, results*.json, baseline.json, PR.md, BENCH.md).
 Not copied, to keep the skill small: parity fixtures (`fixtures/*.json`, ~10 MB, committed under
 `.planning/spikes/NNN-*/fixtures/`), model weights (`models/`, gitignored — download from the Hub),
 `report*.html`, raw `*.log` files, and spike 011's 256 KB `results.json` (chart-feeding data for its
-`report.py`) — all still in `.planning/spikes/`.
+`report.py`) — all still in `.planning/spikes/`. For 015–020, these are also left out: the
+frozen-feature `runs/*.npz` (~200 MB), `vendor/kev` and `vendor/llama.cpp` checkouts, the
+GGUF/safetensors models (up to 3 GB each), and spike 017's 3.3 MB `kev-0.8b_fixture.json`.
 
 ## Conventions
 
@@ -118,4 +155,9 @@ Follow it for new spikes and for porting spike code into crates.
 - 012-no-arg-bitwise-invariance
 - 013-np-events-autograd
 - 014-np-gap-imputation-regressors
+- 015-kev-vs-setfit-few-shot
+- 016-upstream-sync-qwen35
+- 017-kev-rust-forward-parity
+- 019-kev-lambda-inference
+- 020-qwen35-batched-prefill
 </metadata>
