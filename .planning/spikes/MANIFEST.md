@@ -74,6 +74,11 @@ training path through DeltaNet.
   (spike 016) and extend its `Qwen35Model` rather than writing a second implementation (OPS-03).
 - **Lambda is the deployment target**: size, memory, cold start and latency are measured against
   Lambda limits, not assumed.
+- **Kev needs a batched prefill before it is servable on CPU** (spike 017): upstream's token-at-a-time
+  Qwen3.5 path costs 5–7 s per decision. Spike 020 prototypes it before 019 measures Lambda; spike 018
+  (Rust head training) is dropped because training stays in Python (decided 2026-09-23).
+- **Lambda is measured by a local proxy** (6 threads, 10 GB cap), not a real AWS deploy, for this session
+  (decided 2026-09-23).
 
 ## Spikes
 
@@ -96,3 +101,4 @@ training path through DeltaNet.
 | 015 | llm-decision-classifier | kev-vs-setfit-few-shot | standard | Given the SetFit tasks at 8–64 shots/class, when SetFit, zero-shot Kev (0.8B/4B) and Kev with bias / head / LoRA adaptation are scored on identical rows, then we know whether few-shot Kev beats SetFit | PARTIAL ⚠ (Kev wins 0–16 shots on both tasks; Kev-4B zero-shot 0.607 beats SetFit@64 0.561 on stance and +3 floats of bias → 0.642; SetFit wins emotion at 32+ shots, 0.705 vs 0.577 @64; 0.8B is only SetFit-level; head adapters train in seconds on CPU; LoRA r2 works on MPS) | kev, setfit, few-shot, benchmark |
 | 016 | llm-decision-classifier | upstream-sync-qwen35 | standard | Given the fork is 280 commits behind paiml/aprender, when upstream/main is merged in a worktree, then conflicts are enumerated, the workspace builds, and forecast/SetFit/Qwen3.5 suites stay green | VALIDATED ✓ (34 conflicts, 5 rules + 3 one-line semantic fixes; upstream now 0.69/0.70; 4305 tests pass; the one red SetFit golden is already red on the fork HEAD, proven by a control worktree; merge committed locally 895c654de, not pushed) | upstream, merge, qwen3.5 |
 | 017 | llm-decision-classifier | kev-rust-forward-parity | standard | Given Kev-0.8B trained in Python, LoRA merged and exported to GGUF, when a decision row runs through upstream's Qwen35Model + a hidden-state readout + the pointer head in Rust, then probabilities match Python fp32 to ~1e-5 and CPU latency is measured | VALIDATED ✓ (probs 1.5e-6, 12/12 argmax, PEFT merge → llama.cpp converter → upstream loader; 2 upstream patches incl. an MTP block_count defect; BUT 79 ms/token token-at-a-time = 5–7 s per decision, dtype buys ≤1.8×; batched-prefill GEMM bound 0.73 s @85 tok on 14 cores) | kev, qwen3.5, parity, latency |
+| 020 | llm-decision-classifier | qwen35-batched-prefill | standard | Given upstream's Qwen3.5 CPU forward is token-at-a-time, when each layer's projections run as one GEMM over the row and only the mixers per token, then parity holds and a short decision drops below 1 s on 6 threads | VALIDATED ✓ (85-token decision 6.6 s → 0.36 s on 6 threads, 18×; 915 tokens 73 → 3.9 s; parity vs torch unchanged 1.3e-6, 12/12; key fix was parallelising the DeltaNet recurrence per head, found by phase timers after a profile misled; F32-only — BF16 GEMM needed for 4B) | qwen3.5, prefill, gemm, performance |
