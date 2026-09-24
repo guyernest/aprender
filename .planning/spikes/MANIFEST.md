@@ -84,6 +84,23 @@ training path through DeltaNet.
   the per-function ceiling from 10 GB / ~6 vCPU to 32 GB / 16 vCPU (Graviton4 available), removes per-request
   cold starts and serves requests concurrently in one Rust process. Nothing on LMI has been measured yet.
 
+### mcp-model-hosting-aws
+Host aprender's Rust models on AWS as thin, stateless pmcp MCP servers that AI agents call — small models
+(SetFit, Chronos-Bolt, forecasters) and the multi-GB Qwen-based decision models (Kev and successors) alike — and
+choose, per model, between default Lambda, ECS on Fargate scaled to zero, and Lambda Managed Instances on measured
+cold start, latency and idle cost rather than on assumptions. Extends `llm-decision-classifier` (Kev is the
+test model) and the pmcp.run deployment of the forecast servers.
+
+**Requirements:**
+- **Every model is wrapped as an MCP server on the pmcp SDK** (`~/Development/mcp/sdk/rust-mcp-sdk`) so it
+  integrates with AI agents; the thin one-model-per-server rule holds (recorded 2026-09-23).
+- **Idle cost matters**: 24/7 capacity x 3 AZs + the 15 % LMI fee is the cost to beat; scale-to-zero is preferred
+  when its cold start is acceptable, and the cold start is measured, not assumed (2026-09-23).
+- **Candidate hosts are default Lambda, ECS on Fargate (scale to zero) and Lambda Managed Instances**; the
+  decision is per model and may differ between small and large models (2026-09-23).
+- Measured in us-east-1 (where pmcp.run deploys), arm64, all resources tagged `spike=021-023` and torn down or
+  left idle-free after measuring.
+
 ## Spikes
 
 | # | Idea | Name | Type | Validates | Verdict | Tags |
@@ -107,3 +124,6 @@ training path through DeltaNet.
 | 017 | llm-decision-classifier | kev-rust-forward-parity | standard | Given Kev-0.8B trained in Python, LoRA merged and exported to GGUF, when a decision row runs through upstream's Qwen35Model + a hidden-state readout + the pointer head in Rust, then probabilities match Python fp32 to ~1e-5 and CPU latency is measured | VALIDATED ✓ (probs 1.5e-6, 12/12 argmax, PEFT merge → llama.cpp converter → upstream loader; 2 upstream patches incl. an MTP block_count defect; BUT 79 ms/token token-at-a-time = 5–7 s per decision, dtype buys ≤1.8×; batched-prefill GEMM bound 0.73 s @85 tok on 14 cores) | kev, qwen3.5, parity, latency |
 | 020 | llm-decision-classifier | qwen35-batched-prefill | standard | Given upstream's Qwen3.5 CPU forward is token-at-a-time, when each layer's projections run as one GEMM over the row and only the mixers per token, then parity holds and a short decision drops below 1 s on 6 threads | VALIDATED ✓ (85-token decision 6.6 s → 0.36 s on 6 threads, 18×; 915 tokens 73 → 3.9 s; parity vs torch unchanged 1.3e-6, 12/12; key fix was parallelising the DeltaNet recurrence per head, found by phase timers after a profile misled; F32-only — BF16 GEMM needed for 4B) | qwen3.5, prefill, gemm, performance |
 | 019 | llm-decision-classifier | kev-lambda-inference | standard | Given the Rust Kev path (017 + 020), when it runs as a Lambda would (6 threads, 10,240 MB), then size, peak memory, cold start and latency are measured against Lambda limits | PARTIAL ⚠ (0.8B fits: 1.4 MB binary + 3 GB f32 weights, 3.9 GB steady / 7.1 GB transient, first decision 0.82 s from process start, 185–375 ms per short decision on 6 M4 threads, est. 1–1.5 s on Graviton2; 4B does not fit — 16.8 GB f32, BF16 GEMM missing, est. 6–9 s/decision on Lambda CPU; unused 1 GB lm_head and mmap copies are cheap wins) | kev, lambda, memory, latency |
+| 021 | mcp-model-hosting-aws | kev-mcp-default-lambda | comparison | Given Kev-0.8B as a stateless pmcp MCP server on arm64 Lambda (10,240 MB), when tools/call hits a cold environment, then the init -> weights -> first-decision timeline and Graviton latency are measured for weights baked into the image vs streamed from S3 | PARTIAL ⚠ (S3: cold 42.8–43.2 s, 37.7 s of it the S3 download capped at ~80 MB/s per environment regardless of parallelism; warm 1.13–1.16 s on Graviton2 (once Graviton3); baked image 800 s first, 309 s second — 794 s reading 3 GB through the lazy image store; parity 4.8e-7) | lambda, cold-start, mcp, graviton |
+| 022 | mcp-model-hosting-aws | kev-mcp-fargate-scale-from-zero | comparison | Given the same server as an arm64 Fargate task (8 vCPU / 16 GB), when started from zero, then RunTask -> pulled -> started -> weights -> first MCP answer is measured for S3 vs baked weights | VALIDATED ✓ (S3: first answer 22–30 s, of which 13–21 s is provisioning; S3 674–789 MB/s = 3 GB in ~4 s; warm 0.51 s G4 / 0.64 s G3; baked image 95–105 s (2.4 GB pull + unpack 75–81 s); weights never go in the image) | fargate, ecs, scale-to-zero, cold-start |
+| 023 | mcp-model-hosting-aws | lmi-minimum-footprint | standard | Given an arm64 LMI capacity provider and the Kev function (16 GB / 8 vCPU), when published and scaled to min=max=1, then the instances run, time to Active, warm latency and whether one instance suffices are measured | VALIDATED ✓ (one instance IS possible after the first publish — 3 -> 1 in ~5 min; but 8-vCPU envs land on c9g.8xlarge (32 vCPU / 64 GB): default 3 hosts = 96 vCPU; warm 0.34 s, S3 875–962 MB/s, no request-path cold start; LMI hosts hidden from DescribeInstances without IncludeManagedResources; a failed first publish wedged its provider; /tmp 512 MB default; us-east-1c refused) | lambda-managed-instances, cost, graviton |

@@ -159,3 +159,28 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - **zsh traps hit here**: `"$r:crates/…"` applies the `:c` modifier (write `"${r}:crates/…"`); unquoted `$VAR` holding
   a list is ONE word (`${=VAR}` or a `while read` loop); `/bin/bash` is 3.2 (use `#!/opt/homebrew/bin/bash` for
   associative arrays).
+
+## Cloud deployment spikes (idea `mcp-model-hosting-aws`, 021–023)
+
+- **One crate, every host.** A model-server spike builds one library (the pmcp tool + load timeline) with two bins:
+  `bootstrap` (Lambda/LMI loopback shim, the `aprender-mcp-chronos-lambda` pattern) and `server` (container: load,
+  THEN bind :8080). The difference between hosts is then the host, not the code.
+- **Every response carries its own forensics**: load timeline (ms since process start + RSS per step), host facts
+  (`/proc/cpuinfo` CPU part → Graviton generation, `available_parallelism`, rayon threads, cgroup/memory), parity
+  vs the oracle, `first_call_in_process`. Client-side wall time is measured around the whole call; Lambda's REPORT
+  tail (`LogType=Tail`, default Lambda only) adds Init Duration and Max Memory Used.
+- **Cross-build for Graviton on the laptop**: `cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.34`
+  (glibc floor 2.34 for `provided.al2023`; check with `strings bin | grep -oE 'GLIBC_2\.[0-9]+'`). AWS SDK crates
+  newer than the pinned rustc: `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo update`.
+- **Never move multi-GB artifacts over the laptop uplink twice** (it is ~3.7 MB/s here; default `aws s3 cp`
+  dropped connections — use `max_concurrent_requests = 2`, `multipart_chunksize = 16MB` in a TEMP
+  `AWS_CONFIG_FILE`, never the user's config). Upload weights to S3 once; build images **inside AWS**
+  (CodeBuild ARM_CONTAINER, privileged, source zip from S3; `--provenance=false` locally for Lambda images).
+- **Weights live in S3 and are pulled with parallel ranged GETs + per-part retry** (16 x 64 MB), never baked into
+  an image: measured 7–18x worse on Lambda and 4x worse on Fargate.
+- **AWS resources**: us-east-1, tag `spike=<range>`, least-privilege roles scoped to the spike bucket/repo, SG
+  ingress from the one client IP (`checkip.amazonaws.com`), no public Lambda URL (invoke with an API-GW v2 event),
+  and a `tools/teardown.sh`. Anything that bills while idle (LMI) is torn down in-session; LMI hosts are only
+  visible with `DescribeInstances(IncludeManagedResources=True)`.
+- **Vary one input before naming a cap**: the Lambda S3 ceiling was believed only after 16 x 64 MB and 32 x 32 MB
+  both landed at 72–80 MB/s; and a changed row index invalidates a latency comparison (021 run 2 did both — rerun).
