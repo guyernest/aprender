@@ -1,18 +1,18 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: "06.1"
-current_phase_name: "Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)"
+current_phase: 8
+current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
 stopped_at: Phase 8 context gathered
-last_updated: "2026-09-25T19:21:38.715Z"
+last_updated: "2026-09-25T20:40:50.240Z"
 last_activity: 2026-09-21
 last_activity_desc: Phase 06.1 execution started
-state_head: bb732af13c15c3cfc2bda64649244fabf8628d6b
+state_head: 643501f4fe54e71f3d995645c9dc9283a01a695f
 progress:
   total_phases: 9
   completed_phases: 1
-  total_plans: 92
+  total_plans: 104
   completed_plans: 92
 milestone_name: milestone
 ---
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 06.1 (Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)) — EXECUTING
+Phase: 8 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — READY TO EXECUTE
 Plan: 2 of 8
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
