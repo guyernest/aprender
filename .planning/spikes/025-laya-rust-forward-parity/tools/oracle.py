@@ -80,7 +80,7 @@ with torch.no_grad():
                 arr.tofile(HERE / "fixtures" / "laya-en_ladder.bin")
                 ladder = {"n_tokens": len(it["ids"]), "d": arr.shape[1], "blocks": ["emb"] + [f"layer{i}" for i in range(len(enc.layers))] + ["final"] + [f"head{i}" for i in range(len(model.head.layers))]}
                 ladder_written = True
-        records.append({"state": state if isinstance(state, str) else json.dumps(state), "rows": rows})
+        records.append({"state": state if isinstance(state, str) else json.dumps(state), "rows": rows, "questions": qs})
         print(ri, [(r["qid"], len(r["ids"]), [round(x, 4) for x in r["probs"]], round(r["torch_cpu_ms"])) for r in rows], flush=True)
 
 fx = {"model": f"convaiinnovations/laya@{REV}", "max_len": cfg.get("max_len"), "head_max_len": cfg.get("head_max_len"),

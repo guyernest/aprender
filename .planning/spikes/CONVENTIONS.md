@@ -184,3 +184,21 @@ Patterns and stack choices established across spike sessions. New spikes follow 
   visible with `DescribeInstances(IncludeManagedResources=True)`.
 - **Vary one input before naming a cap**: the Lambda S3 ceiling was believed only after 16 x 64 MB and 32 x 32 MB
   both landed at 72–80 MB/s; and a changed row index invalidates a latency comparison (021 run 2 did both — rerun).
+
+## Alternative-base spikes (024–026: Laya vs Kev)
+
+- **A new base model is compared on the previous spike's exact rows, seeds and metric code**: copy the helpers
+  VERBATIM into `tools/fewshot015.py`-style modules (015's script ran at import time, so it could not be imported),
+  replay the committed SetFit selections, and fill the same table columns.
+- **Capture frozen features with forward hooks on the model's OWN inference path** (`Agent.predict`), then prove the
+  hooks with a recompute check (024: probabilities from hooked logits match the API to its 4-dp rounding).
+- **When a frozen-feature adapter does not move (std 0 across seeds), diagnose on TRAIN data before reporting**:
+  train accuracy after fitting at lr 1e-4/1e-3/1e-2. If the head cannot fit the shots, the recipe is structurally
+  wrong for that architecture (Laya's shared marker scorer), and a new adaptation must be pre-declared before its
+  first test score — as 015's LoRA r2 and 024's full-FT r1/r2 were.
+- **torch CPU timings on Apple Silicon are AMX (Accelerate), not a CPU baseline**: ~1 TFLOP/s on 6 threads. Compare a
+  Rust port against Rust, and project to Graviton from a Rust number (Graviton2 ≈ 3.2–3.3x slower than an M4 at 6
+  threads, measured twice: Kev 021, Laya 026).
+- **Every numeric identity ships a mutation that must break it** (025: local window 63/65 must break layer 1 only).
+- **Serverless sizing**: Lambda bills GB-seconds and scales vCPU with memory, so for a CPU-bound model the
+  largest function (10,240 MB) costs the same per decision and is fastest (026: 4 GB = same GB-s, 2.4x slower).
