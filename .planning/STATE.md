@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: "06.1"
 current_phase_name: "Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)"
 status: executing
-stopped_at: "Completed 06.1-08-PLAN.md (SC6 sweep run and recorded; one BLOCKER: the SC2 invariance gate is red under the --workspace --lib build CI runs)"
-last_updated: "2026-09-22T05:15:54.657Z"
+stopped_at: Phase 8 context gathered
+last_updated: "2026-09-25T19:21:38.715Z"
 last_activity: 2026-09-21
 last_activity_desc: Phase 06.1 execution started
-state_head: c04bd76eea16538a70253c56e3b86925cbfeff01
+state_head: bb732af13c15c3cfc2bda64649244fabf8628d6b
 progress:
-  total_phases: 8
+  total_phases: 9
   completed_phases: 1
   total_plans: 92
-  completed_plans: 91
+  completed_plans: 92
 milestone_name: milestone
 ---
 
@@ -486,12 +486,13 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-22T05:15:24.574Z
-Stopped at: Completed 06.1-08-PLAN.md (SC6 sweep run and recorded; one BLOCKER: the SC2 invariance gate is red under the --workspace --lib build CI runs)
-Resume file: None
+Last session: 2026-09-25T19:21:38.484Z
+Stopped at: Phase 8 context gathered
+Resume file: .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-CONTEXT.md
 
 ## Accumulated Context
 
 ### Roadmap Evolution
 
 - Phase 7 added: Tier-Resolved Door Limits — CR-01 disposition (UAT item 4, decided 2026-09-07): door bounds become a resolved profile, not hard constants, so one binary serves four deployment envelopes
+- Phase 8 added (2026-09-25): Laya Decision Model — local fine-tune and thin MCP server, productising spikes 024–026; independent track
