@@ -551,7 +551,7 @@ re-deriving the shape.
      touched contract, the forecast server e2e tests, and a tag cut that builds `--locked`.
 
 **Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
-**Plans:** 7/8 plans executed
+**Plans:** 8/8 plans executed
 
 Plans:
 **Wave 1**
@@ -578,7 +578,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 06.1-08-PLAN.md — the READMEs and the advertised tool description, the coverage declaration, and the SC6 all-gates-green sweep ending in a pristine-worktree `--locked` build (wave 6)
+- [x] 06.1-08-PLAN.md — the READMEs and the advertised tool description, the coverage declaration, and the SC6 all-gates-green sweep ending in a pristine-worktree `--locked` build (wave 6)
 
 ### Phase 7: Tier-Resolved Door Limits
 
@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 12 plans in 9 waves
+**Plans:** 12 plans in 10 waves
 
 Plans:
 **Wave 1**
@@ -676,13 +676,16 @@ Plans:
 **Wave 7** *(blocked on Wave 6 completion)*
 
 - [ ] 08-07-PLAN.md — `aprender-mcp-decide-lambda`: bootstrap loopback, in-memory S3 loader with sha256 pin, probe, deploy template
-- [ ] 08-09-PLAN.md — pack CLI with Rust gate policy + full eval re-score, full-model parity vs spike 025, laya-stance-16.apr
+- [ ] 08-09-PLAN.md — pack/verify CLI: gate recomputed in Rust from verified probabilities (artifact + base re-scores), full eval re-score, full-model parity vs spike 025, laya-stance-16.apr
 
 **Wave 8** *(blocked on Wave 7 completion)*
 
-- [ ] 08-10-PLAN.md — cargo-pmcp wrong-package decision (checkpoint) + fail-closed, identity-checked deploy recipes proven offline
-- [ ] 08-12-PLAN.md — CI-edit checkpoint, CLAUDE.md D-16 exception row, bindings implemented, tightened audit, CI-equivalent run
+- [ ] 08-10-PLAN.md — cargo-pmcp wrong-package decision (checkpoint, resolver executed on this workspace) + fail-closed, identity-checked deploy recipes, per-sample cold verify, containment teardown — proven offline
 
 **Wave 9** *(blocked on Wave 8 completion)*
 
-- [ ] 08-11-PLAN.md — live pmcp.run deploy behind a go/no-go checkpoint; cold maximal-request accepted-region proof
+- [ ] 08-11-PLAN.md — live pmcp.run deploy behind a go/no-go checkpoint; cold first-POST maximal requests (both shapes, every sample) accepted-region proof
+
+**Wave 10** *(blocked on Wave 9 completion)*
+
+- [ ] 08-12-PLAN.md — CI-edit checkpoint (targets + strict audit), CLAUDE.md D-16 exception row, bindings implemented (live row per 08-11's outcome), tightened audit, focused/full/excluded CI-equivalent run
