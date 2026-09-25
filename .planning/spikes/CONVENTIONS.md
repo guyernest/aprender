@@ -25,7 +25,7 @@ Patterns and stack choices established across spike sessions. New spikes follow 
   `tools/oracle.py` dumps a ladder (scaling → features → embeddings → hidden rows → quantiles, model AND pipeline
   outputs, timings) plus edge probes into one `fixtures/*_fixture.json`; the driver prints one ladder table.
 - **Wrapped findings live in `.claude/skills/spike-findings-aprender/`** (`/gsd-spike --wrap-up`, 2026-09-05
-  for 001–010, 2026-09-20 for 011–014, 2026-09-23 for 015–020): one reference per feature area plus `sources/NNN-*/` (README, Cargo.toml,
+  for 001–010, 2026-09-20 for 011–014, 2026-09-23 for 015–020, 2026-09-25 for 021–026): one reference per feature area plus `sources/NNN-*/` (README, Cargo.toml,
   build.rs, src/, tools/, tests/, static/, RUN-OUTPUT, results, baseline.json, PR.md). Fixtures, `models/`,
   `report*.html`, `*.log` and any oversized chart-feeding `results.json` (011's is 256 KB) are NOT copied — cite
   `.planning/spikes/NNN-*/` from the reference instead. SKILL.md groups Requirements **by idea key** once more

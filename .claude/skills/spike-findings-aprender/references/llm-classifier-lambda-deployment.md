@@ -1,5 +1,15 @@
 # LLM Classifier Deployment on AWS Lambda (default Lambda vs Lambda Managed Instances)
 
+> **Superseded in part by measurement (spikes 021–023, 026, 2026-09-24/25) — read `aws-mcp-model-hosting.md` first.**
+> Corrections to this page's doc-derived projections:
+> - LMI does **not** force 3 hosts: after a successful first publish, `min = max = 1` runs **one** host. But an
+>   8-vCPU function landed on a **`c9g.8xlarge` (32 vCPU / 64 GB)**, so even one host is large.
+> - Default Lambda S3 bandwidth is capped at **~80–95 MB/s per environment**: Kev-0.8B's measured cold start is
+>   **43 s**. Weights baked into a Lambda image are far worse (800 s / 309 s).
+> - Measured Graviton2 Kev-0.8B decision: **1.13–1.16 s**, inside the 1–1.5 s estimate below. Lambda also served
+>   Graviton3.
+> - **Laya** (spike 026) fits default Lambda comfortably: 12 s cold, 0.75 s warm, 3.5 GB peak.
+
 Where a Qwen-based decision model (Kev and the Qwen models expected after it) runs on AWS, next to
 the small Rust MCP servers. Spike 019 measured the model against **default** Lambda with a local
 proxy. Lambda Managed Instances (LMI) was added at wrap-up (2026-09-23) because it removes the limit

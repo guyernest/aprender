@@ -1,6 +1,6 @@
 ---
 name: spike-findings-aprender
-description: Implementation blueprint from spike experiments. Requirements, proven patterns, and verified knowledge for building aprender's time-series forecasting stack (Prophet, NeuralProphet, Chronos ports; stateless forecast MCP servers; exogenous inputs — regressors and events; NEON GEMM kernel) and its Qwen3.5 LLM decision classifier (Kev few-shot vs SetFit, upstream sync, Python→GGUF→Rust handoff, batched prefill, Lambda / Lambda Managed Instances deployment). Auto-loaded during implementation work.
+description: Implementation blueprint from spike experiments. Requirements, proven patterns, and verified knowledge for building aprender's time-series forecasting stack (Prophet, NeuralProphet, Chronos ports; stateless forecast MCP servers; exogenous inputs — regressors and events; NEON GEMM kernel) and its Qwen3.5 LLM decision classifier (Kev few-shot vs SetFit, upstream sync, Python→GGUF→Rust handoff, batched prefill, Lambda / Lambda Managed Instances deployment; Laya ModernBERT decision model — full fine-tune quality, Rust port, Lambda) and measured AWS hosting for Rust model MCP servers (default Lambda vs Fargate scale-to-zero vs Lambda Managed Instances). Auto-loaded during implementation work.
 ---
 
 <context>
@@ -31,9 +31,16 @@ questions with calibrated probabilities and never generates text. Upstream apren
 already runs the Qwen3.5 Gated-DeltaNet hybrid on CPU and CUDA, but the fork was 280 commits behind it
 (2026-09-23), and upstream's `Qwen35Model` is GGUF, token-at-a-time and logits-only.
 
+**Idea `mcp-model-hosting-aws`** — Host aprender's Rust models on AWS as thin, stateless pmcp MCP servers that AI
+agents call — small models (SetFit, Chronos-Bolt, forecasters) and the multi-GB Qwen-based decision models alike —
+and choose, per model, between default Lambda, ECS on Fargate scaled to zero, and Lambda Managed Instances on
+measured cold start, latency and idle cost rather than on assumptions.
+
 Spike sessions wrapped: 2026-09-03 → 2026-09-05 (spikes 001–010, `prophet-forecast-mcp`);
 2026-09-20 (spikes 011–014, `forecast-exogenous-inputs`); 2026-09-23 (spikes 015–017, 019, 020,
-`llm-decision-classifier` — 3 VALIDATED, 2 PARTIAL; spike 018 was dropped before it was built).
+`llm-decision-classifier` — 3 VALIDATED, 2 PARTIAL; spike 018 was dropped before it was built);
+2026-09-25 (spikes 021–023 `mcp-model-hosting-aws` — 1 PARTIAL, 2 VALIDATED; 024–026 `llm-decision-classifier`
+(Laya) — 3 VALIDATED).
 </context>
 
 <requirements>
@@ -95,7 +102,22 @@ below honours the requirements of the idea it belongs to. Grouped by idea key.
 - **Lambda was measured by a local proxy** (6 threads, 10 GB cap), not a real AWS deploy, for the
   2026-09-23 session.
 - **Lambda Managed Instances is the intended host for Qwen-sized models**, alongside the existing
-  smaller Rust MCP servers (recorded 2026-09-23 at wrap-up). Nothing on LMI is measured yet.
+  smaller Rust MCP servers (recorded 2026-09-23 at wrap-up). Spike 023 has since measured it; see
+  `aws-mcp-model-hosting.md`.
+- **Laya (github.com/NandhaKishorM/laya, Apache-2.0) is evaluated as an alternative base to Kev**: an encoder-only
+  ModernBERT-large (421M) decision model with the same `choice`/`score`/`noul` types and `/v1/systemone` wire. The
+  English root and `typed-decisions` checkpoints are in scope (multilingual is not). Build order 024 → 025 → 026
+  (decided 2026-09-25).
+
+### Idea `mcp-model-hosting-aws`
+
+- **Every model is wrapped as an MCP server on the pmcp SDK** (`~/Development/mcp/sdk/rust-mcp-sdk`) so it
+  integrates with AI agents; the thin one-model-per-server rule holds (recorded 2026-09-23).
+- **Idle cost matters**: 24/7 capacity × 3 AZs + the 15 % LMI fee is the cost to beat; scale-to-zero is preferred
+  when its cold start is acceptable, and the cold start is measured, not assumed (2026-09-23).
+- **Candidate hosts are default Lambda, ECS on Fargate (scale to zero) and Lambda Managed Instances**; the
+  decision is per model and may differ between small and large models (2026-09-23).
+- Measured in us-east-1 (where pmcp.run deploys), arm64, all resources tagged and torn down or left idle-free.
 </requirements>
 
 <findings_index>
@@ -119,6 +141,10 @@ below honours the requirements of the idea it belongs to. Grouped by idea key.
 | **Qwen3.5 decision inference in Rust** | `references/qwen35-decision-inference.md` | PEFT merge → llama.cpp GGUF → upstream `Qwen35Model` + hidden readout + 40-line head gives **probs to 1.5e-6, 12/12**. The MTP `block_count` loader defect hits every fresh GGUF. A batched prefill (GEMM projections, **DeltaNet per head in parallel**) takes an 87-token decision from 6.6 s to **0.36 s on 6 threads**. F32-only |
 | **LLM classifier on Lambda / Lambda Managed Instances** | `references/llm-classifier-lambda-deployment.md` | Kev-0.8B fits default Lambda: 1.4 MB binary + 3 GB weights, first decision 0.82 s, 0.2–0.4 s on M4 (est. 1–1.5 s Graviton2). Kev-4B does not. **LMI (32 GB / 16 vCPU, no cold starts, concurrent Rust) fits 4B only after the loader fixes.** Keep small servers on scale-to-zero Lambda |
 
+| **AWS hosting for Rust model MCP servers (measured)** | `references/aws-mcp-model-hosting.md` | Cold start is bytes ÷ bandwidth. **Default Lambda caps S3 at ~80–95 MB/s** (Kev 3 GB: 43 s; Laya 0.84 GB: 12 s); Fargate pulls at 675–790 MB/s but spends 13–21 s provisioning (Kev: 22–30 s); **never bake weights into an image** (Lambda 800 s, Fargate 4×). LMI has no request-path cold start and the fastest CPU (0.34 s), but bills whole `c9g.8xlarge` hosts: 1 possible, 3 by default; its hosts are hidden from default `DescribeInstances` |
+| **Laya decision model (quality, adaptation)** | `references/laya-decision-model.md` | **A full fine-tune (Laya's notebook optimiser, 2–10 min on a laptop GPU) beats SetFit on stance (0.538 / 0.608 @16 / 64) and ties emotion (0.697 vs 0.705)**. Kev-4B got 0.577 on emotion. Zero-shot ≈ Kev-0.8B. Head-only adapters cannot move its shared marker scorer. Per-tenant artifact = a full 0.84 GB checkpoint; fine-tuned runs are over-confident |
+| **Laya inference in Rust** | `references/laya-rust-inference.md` | ModernBERT + head + scorer + builder in ~400 lines on `gemm_blis`: **probs 3.8e-6, ids 14/14 on the first run**; the local window is \|i−j\| ≤ 64 (proven by mutation). Safetensors and tokenizer load directly. 1.6× faster than Rust Kev-0.8B. **Spike code: aprender has no ModernBERT**, so the in-tree port, contract and CI tests are build work |
+
 ## Source Files
 
 Original spike source files are preserved in `sources/NNN-spike-name/` (README.md, Cargo.toml,
@@ -129,7 +155,9 @@ Not copied, to keep the skill small: parity fixtures (`fixtures/*.json`, ~10 MB,
 `report*.html`, raw `*.log` files, and spike 011's 256 KB `results.json` (chart-feeding data for its
 `report.py`) — all still in `.planning/spikes/`. For 015–020, these are also left out: the
 frozen-feature `runs/*.npz` (~200 MB), `vendor/kev` and `vendor/llama.cpp` checkouts, the
-GGUF/safetensors models (up to 3 GB each), and spike 017's 3.3 MB `kev-0.8b_fixture.json`.
+GGUF/safetensors models (up to 3 GB each), and spike 017's 3.3 MB `kev-0.8b_fixture.json`. For 021–026, these are
+also left out: Cargo.locks, `report.html`, spike 025's 936 KB parity fixture and 20 MB ladder, the 024 `.npz`
+features and `vendor/laya`.
 
 ## Conventions
 
@@ -160,4 +188,10 @@ Follow it for new spikes and for porting spike code into crates.
 - 017-kev-rust-forward-parity
 - 019-kev-lambda-inference
 - 020-qwen35-batched-prefill
+- 021-kev-mcp-default-lambda
+- 022-kev-mcp-fargate-scale-from-zero
+- 023-lmi-minimum-footprint
+- 024-laya-vs-kev-few-shot
+- 025-laya-rust-forward-parity
+- 026-laya-mcp-default-lambda
 </metadata>

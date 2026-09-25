@@ -1,5 +1,60 @@
 # Spike Wrap-Up Summary
 
+## Session 4 — 2026-09-25
+
+**Spikes processed:** 6. 021 PARTIAL; 022, 023 VALIDATED (`mcp-model-hosting-aws`); 024, 025, 026 VALIDATED (`llm-decision-classifier`, Laya)
+**Feature areas:** AWS hosting for Rust model MCP servers · Laya decision model · Laya inference in Rust
+**Skill output:** `./.claude/skills/spike-findings-aprender/` (SKILL.md now 3 ideas, 17 references, sources for 25 spikes)
+
+### Processed Spikes
+
+| # | Name | Type | Verdict | Feature Area |
+|---|------|------|---------|--------------|
+| 021 | kev-mcp-default-lambda | comparison | PARTIAL | AWS hosting (`aws-mcp-model-hosting.md`) |
+| 022 | kev-mcp-fargate-scale-from-zero | comparison | VALIDATED | AWS hosting |
+| 023 | lmi-minimum-footprint | standard | VALIDATED | AWS hosting |
+| 024 | laya-vs-kev-few-shot | comparison | VALIDATED | Laya decision model (`laya-decision-model.md`) |
+| 025 | laya-rust-forward-parity | standard | VALIDATED | Laya inference in Rust (`laya-rust-inference.md`) |
+| 026 | laya-mcp-default-lambda | standard | VALIDATED | AWS hosting + Laya inference |
+
+### Key Findings
+
+**Cold start is bytes ÷ bandwidth, and the platform sets the bandwidth (021–023, 026).** The same instrumented pmcp
+server ran on every host:
+- Default Lambda caps S3 at ~80–95 MB/s per environment, so Kev-0.8B (3 GB) takes 43 s cold and Laya (0.84 GB) 12 s.
+- Fargate pulls at 675–790 MB/s but spends 13–21 s provisioning every wake-up (Kev: 22–30 s).
+- Weights baked into images are 7–18× worse on Lambda (800 s / 309 s via the lazy image store) and 4× worse on
+  Fargate.
+
+**LMI is fast but bills whole hosts (023).**
+- There's no request-path cold start, and it's the fastest CPU measured (c9g Neoverse-V3: 0.34 s for Kev).
+- An 8-vCPU function got 32-vCPU `c9g.8xlarge` hosts, three by default. **One is possible** after a first
+  successful publish.
+- LMI hosts are hidden from default `DescribeInstances`, and a failed first publish wedged its capacity provider.
+
+**Laya is the better few-shot base, with a different adaptation shape (024).**
+- A full fine-tune beats SetFit on stance (0.538 / 0.608 vs 0.512 / 0.561 at 16 / 64) and ties it on emotion (0.697
+  vs 0.705), where Kev-4B got 0.577.
+- Zero-shot it is only Kev-0.8B level, and head-only adapters cannot move its shared marker scorer (train accuracy
+  0.52–0.55 at any lr).
+- Per-tenant artifact: a full 0.84 GB checkpoint. Every fine-tuned run is over-confident.
+
+**Laya ports cleanly to Rust (025–026).**
+- ~400 lines on `gemm_blis`; probabilities to 3.8e-6 and ids 14/14 on the first run; the window rule proven by
+  mutation.
+- 1.6× faster than Rust Kev-0.8B; on Lambda, 0.75 s warm on Graviton2 at ≈ $0.0001 per decision.
+- It is spike code: aprender has no ModernBERT.
+
+### Open Items Surfaced (not spiked)
+- **Productise Laya in-tree**: choose a home (realizar-first → `aprender-serve` unless an exception is argued),
+  workspace lints, a contract, CI tests from the ladder/tokenizer/mutation rungs, a fine-tuned checkpoint, and the
+  typed-decisions and multilingual variants.
+- **Batch a request's questions into one pass** (3-question ticket: 3.8 s on G2); refit temperature after FT.
+- **MCP Task front door + Fargate worker** for multi-GB models; LMI with several models packed on one provider.
+- Land the spike-016 upstream sync (the trueno build every Rust spike since 017 depends on is local-only).
+
+---
+
 ## Session 3 — 2026-09-23
 
 **Spikes processed:** 5 (015 PARTIAL, 016 VALIDATED, 017 VALIDATED, 020 VALIDATED, 019 PARTIAL); 018 was dropped before it was built

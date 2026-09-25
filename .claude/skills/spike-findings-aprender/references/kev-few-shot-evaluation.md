@@ -1,5 +1,9 @@
 # Kev Decision Model: Few-Shot Evaluation and Adaptation
 
+> **Since spike 024: a fully fine-tuned Laya (0.84 GB) beats SetFit on stance and ties it on emotion.** Every Kev
+> variant loses emotion to SetFit, and only Kev-4B stays ahead on stance. Read `laya-decision-model.md` before
+> choosing a base. Kev keeps the strongest *zero-shot* and *cheap-adapter* results.
+
 Where Kev (Qwen3.5 + LoRA + pointer head) beats SetFit, which adaptation recipe to ship, and how to
 calibrate it. Kev sits **next to** SetFit, not in place of it.
 
