@@ -632,3 +632,57 @@ ownership all stand. The invariant strengthens:
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 7 to break down)
+
+### Phase 8: Laya Decision Model: Local Fine-Tune and Thin MCP Server
+
+**Goal:** Productise spikes 024–026: a user can fine-tune Laya (ModernBERT-large decision model) on their own
+8–64 labelled shots locally, calibrate it, convert it to .apr, and serve it through a thin, task-bound `classify` MCP server — in-tree,
+linted, contracted and CI-tested — live on pmcp.run (default Lambda) the way the SetFit and Chronos servers are.
+ModernBERT lands as a reusable aprender-core model; the decision layer is a method-neutral `aprender-decide`
+crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
+**Requirements**: TBD
+**Depends on:** none of Phases 1–7 functionally — an independent track, like Phase 6. Reuses the thin-server
+template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
+**Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
+`laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
+**Plans:** 12 plans in 9 waves
+
+Plans:
+**Wave 1**
+
+- [ ] 08-01-PLAN.md — four contracts declared before any run (gate thresholds, classify bounds, parity bars, decide-apr-v1 schema) + blocking contract-audit-phase8
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 08-02-PLAN.md — package-legitimacy checkpoint, pinned uv back office, tiny ModernBERT + tiny Laya fixtures from Laya's own code
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 08-03-PLAN.md — ModernBERT encoder in aprender-core (prefix-aware .apr loader, window mutation, CI-listed tests)
+- [ ] 08-08-PLAN.md — `just laya-train`: fine-tune, calibration, fail-closed gate, seed policy; TweetEval stance demo run
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 08-04-PLAN.md — `aprender-decide` crate: DecisionMethod seam, order-preserving task parser, Laya head/scorer/builder/temperature
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 08-05-PLAN.md — decide-apr-v1 artifact: packer, bounded load ladder, probes, identity, private constructor, determinism
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 08-06-PLAN.md — `aprender-mcp-decide` stdio server: one task-bound `classify` tool, contract-owned bounds, identity in every response
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 08-07-PLAN.md — `aprender-mcp-decide-lambda`: bootstrap loopback, in-memory S3 loader with sha256 pin, probe, deploy template
+- [ ] 08-09-PLAN.md — pack CLI with Rust gate policy + full eval re-score, full-model parity vs spike 025, laya-stance-16.apr
+
+**Wave 8** *(blocked on Wave 7 completion)*
+
+- [ ] 08-10-PLAN.md — cargo-pmcp wrong-package decision (checkpoint) + fail-closed, identity-checked deploy recipes proven offline
+- [ ] 08-12-PLAN.md — CI-edit checkpoint, CLAUDE.md D-16 exception row, bindings implemented, tightened audit, CI-equivalent run
+
+**Wave 9** *(blocked on Wave 8 completion)*
+
+- [ ] 08-11-PLAN.md — live pmcp.run deploy behind a go/no-go checkpoint; cold maximal-request accepted-region proof
