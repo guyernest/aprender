@@ -278,8 +278,6 @@ pub enum ResolveError {
     },
     /// The bounded read refused (over cap on the stream, or an I/O error).
     Read(ArtifactError),
-    /// This source kind is not available in this build.
-    Unsupported(&'static str),
     /// The S3 download refused (no length, over cap, a failing part, a short body, or
     /// the overall deadline).
     S3(s3::S3LoadError),
@@ -311,7 +309,6 @@ impl ResolveError {
             Self::Io { .. } => "io",
             Self::TooLarge { .. } => "too_large",
             Self::Read(_) => "read",
-            Self::Unsupported(_) => "unsupported",
             Self::S3(e) => e.kind(),
             Self::HashMismatch { .. } => "hash_mismatch",
             Self::Load(_) => "load",
@@ -334,7 +331,6 @@ impl fmt::Display for ResolveError {
                 "artifact {what} {observed} bytes is over the decide-apr-v1 cap {cap}"
             ),
             Self::Read(e) => write!(f, "bounded read refused: {e}"),
-            Self::Unsupported(what) => write!(f, "model source {what} is not available"),
             Self::S3(e) => write!(f, "{e}"),
             Self::HashMismatch { expected, actual } => write!(
                 f,
@@ -547,8 +543,12 @@ pub async fn resolve_from_fetcher<F: s3::RangeFetcher + ?Sized>(
     cap: u64,
     policy: &s3::DownloadPolicy,
 ) -> Result<(Model, LoadTimeline), ResolveError> {
-    let _ = (fetcher, pin, cap, policy);
-    Err(ResolveError::Unsupported("s3"))
+    let t = Instant::now();
+    let bytes = s3::download_into_memory_with(fetcher, cap, policy)
+        .await
+        .map_err(ResolveError::S3)?;
+    let fetch_ms = ms_since(t);
+    verify_and_build("s3", bytes, Some(pin.clone()), fetch_ms).await
 }
 
 /// Resolve the served model from `source` under the contracted cap.
@@ -561,7 +561,20 @@ pub async fn resolve_model(source: &ModelSource) -> Result<(Model, LoadTimeline)
         ModelSource::Local { path, sha256 } => {
             resolve_local(path, sha256.as_ref(), contracted_cap()).await
         }
-        ModelSource::S3 { .. } => Err(ResolveError::Unsupported("s3")),
+        ModelSource::S3 {
+            bucket,
+            key,
+            sha256,
+        } => {
+            let fetcher = s3::S3Fetcher::from_default_config(bucket, key).await;
+            resolve_from_fetcher(
+                &fetcher,
+                sha256,
+                contracted_cap(),
+                &s3::DownloadPolicy::DEPLOYED,
+            )
+            .await
+        }
     }
 }
 

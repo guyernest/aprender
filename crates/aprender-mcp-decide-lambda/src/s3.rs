@@ -20,6 +20,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use futures::StreamExt as _;
+
 /// One ranged GET's size: 64 MiB (spike 021/026).
 pub const PART_BYTES: u64 = 64 * 1024 * 1024;
 /// Ranged GETs in flight at once.
@@ -199,8 +201,200 @@ pub async fn download_into_memory_with<F: RangeFetcher + ?Sized>(
     cap: u64,
     policy: &DownloadPolicy,
 ) -> Result<Vec<u8>, S3LoadError> {
-    let _ = (fetcher, cap, policy);
-    Ok(Vec::new())
+    let started = tokio::time::Instant::now();
+    match tokio::time::timeout(policy.deadline, download_within(fetcher, cap, policy)).await {
+        Ok(outcome) => outcome,
+        // Dropping the inner future cancels every in-flight part and frees the buffer.
+        Err(_) => Err(S3LoadError::DeadlineExceeded {
+            elapsed_ms: started.elapsed().as_millis(),
+        }),
+    }
+}
+
+async fn download_within<F: RangeFetcher + ?Sized>(
+    fetcher: &F,
+    cap: u64,
+    policy: &DownloadPolicy,
+) -> Result<Vec<u8>, S3LoadError> {
+    let length = content_length_with_retries(fetcher, policy)
+        .await?
+        .ok_or(S3LoadError::MissingLength)?;
+    // The cap is checked on the REPORTED length, before a byte is allocated.
+    if length > cap {
+        return Err(S3LoadError::TooLarge { length, cap });
+    }
+    let len = usize::try_from(length).map_err(|_| S3LoadError::TooLarge { length, cap })?;
+    let part = usize::try_from(policy.part_bytes.max(1)).unwrap_or(usize::MAX);
+    let mut buffer = vec![0u8; len];
+    {
+        let parts = buffer.chunks_mut(part).enumerate().map(|(index, slice)| {
+            let offset = (index as u64).saturating_mul(part as u64);
+            fill_part(fetcher, offset, slice, policy)
+        });
+        let mut in_flight = std::pin::pin!(
+            futures::stream::iter(parts).buffer_unordered(policy.concurrency.max(1))
+        );
+        while let Some(outcome) = in_flight.next().await {
+            // The first refusal wins; returning drops (cancels) the parts still running.
+            outcome?;
+        }
+    }
+    Ok(buffer)
+}
+
+async fn content_length_with_retries<F: RangeFetcher + ?Sized>(
+    fetcher: &F,
+    policy: &DownloadPolicy,
+) -> Result<Option<u64>, S3LoadError> {
+    let attempts = policy.retries.max(1);
+    let mut last = String::new();
+    for attempt in 1..=attempts {
+        match tokio::time::timeout(policy.attempt_timeout, fetcher.content_length()).await {
+            Ok(Ok(length)) => return Ok(length),
+            Ok(Err(e)) => last = e.0,
+            Err(_) => last = timed_out(policy),
+        }
+        if attempt < attempts {
+            tracing::warn!(attempt, error = %last, "retrying object length lookup");
+        }
+    }
+    Err(S3LoadError::Head {
+        attempts,
+        reason: last,
+    })
+}
+
+fn timed_out(policy: &DownloadPolicy) -> String {
+    format!(
+        "attempt timed out after {} ms",
+        policy.attempt_timeout.as_millis()
+    )
+}
+
+/// Fill one slice from its ranged GET: each attempt bounded by the attempt timeout, up
+/// to `retries` attempts; a body that does not fill the range exactly is refused.
+async fn fill_part<F: RangeFetcher + ?Sized>(
+    fetcher: &F,
+    offset: u64,
+    dest: &mut [u8],
+    policy: &DownloadPolicy,
+) -> Result<(), S3LoadError> {
+    let expected = dest.len();
+    let attempts = policy.retries.max(1);
+    let mut last = String::new();
+    for attempt in 1..=attempts {
+        match tokio::time::timeout(policy.attempt_timeout, fetcher.fetch_range(offset, dest)).await
+        {
+            Ok(Ok(got)) if got == expected => return Ok(()),
+            Ok(Ok(got)) => {
+                return Err(S3LoadError::ShortBody {
+                    offset,
+                    expected,
+                    got,
+                })
+            }
+            Ok(Err(e)) => last = e.0,
+            Err(_) => last = timed_out(policy),
+        }
+        if attempt < attempts {
+            tracing::warn!(offset, attempt, error = %last, "retrying part");
+        }
+    }
+    Err(S3LoadError::PartFailed {
+        offset,
+        attempts,
+        last_error: last,
+    })
+}
+
+/// The production fetcher: `head_object` for the length, ranged `get_object` streamed
+/// straight into the caller's slice.
+#[derive(Debug, Clone)]
+pub struct S3Fetcher {
+    client: aws_sdk_s3::Client,
+    bucket: String,
+    key: String,
+}
+
+impl S3Fetcher {
+    /// A fetcher over `client` for one object.
+    #[must_use]
+    pub fn new(client: aws_sdk_s3::Client, bucket: &str, key: &str) -> Self {
+        Self {
+            client,
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+        }
+    }
+
+    /// A fetcher using the default AWS credential and region chain (the Lambda role).
+    pub async fn from_default_config(bucket: &str, key: &str) -> Self {
+        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+        Self::new(aws_sdk_s3::Client::new(&config), bucket, key)
+    }
+}
+
+impl RangeFetcher for S3Fetcher {
+    fn content_length(&self) -> FetchFuture<'_, Option<u64>> {
+        Box::pin(async move {
+            let head = self
+                .client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(&self.key)
+                .send()
+                .await
+                .map_err(|e| {
+                    FetchError(format!(
+                        "head_object: {}",
+                        aws_sdk_s3::error::DisplayErrorContext(&e)
+                    ))
+                })?;
+            // A negative length is as unusable as none; never read either as 0.
+            Ok(head.content_length().and_then(|n| u64::try_from(n).ok()))
+        })
+    }
+
+    fn fetch_range<'a>(&'a self, start: u64, dest: &'a mut [u8]) -> FetchFuture<'a, usize> {
+        Box::pin(async move {
+            if dest.is_empty() {
+                return Ok(0);
+            }
+            let last = start.saturating_add(dest.len() as u64 - 1);
+            let object = self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(&self.key)
+                .range(format!("bytes={start}-{last}"))
+                .send()
+                .await
+                .map_err(|e| {
+                    FetchError(format!(
+                        "get_object: {}",
+                        aws_sdk_s3::error::DisplayErrorContext(&e)
+                    ))
+                })?;
+            let mut body = object.body;
+            let mut written = 0usize;
+            while let Some(chunk) = body
+                .try_next()
+                .await
+                .map_err(|e| FetchError(format!("body: {e}")))?
+            {
+                let end = written + chunk.len();
+                let Some(slot) = dest.get_mut(written..end) else {
+                    return Err(FetchError(format!(
+                        "body longer than the {}-byte range",
+                        dest.len()
+                    )));
+                };
+                slot.copy_from_slice(&chunk);
+                written = end;
+            }
+            Ok(written)
+        })
+    }
 }
 
 #[cfg(test)]
