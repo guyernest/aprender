@@ -2304,6 +2304,91 @@ bindings:
   signature: 'fn forward(&self, ids: &[u32]) -> Tensor'
   status: pending
   notes: 'Window 63/65 must fail the first local layer while the first global layer passes. Implemented by plan 08-03.'
+# ---- Phase 8, plan 08-01: decide-apr-v1 (the decision-model artifact and the D-05 task schema) ----
+- contract: decide-apr-v1.yaml
+  equation: task_order_is_label_index
+  module_path: aprender_decide::task
+  function: parse_task
+  signature: 'fn parse_task(bytes: &[u8]) -> Result<Task, TaskError>'
+  status: pending
+  notes: 'Order-preserving map visitor; labels in document order under both serde_json backings. Implemented by plan 08-04.'
+- contract: decide-apr-v1.yaml
+  equation: marker_preservation
+  module_path: aprender_decide::task
+  function: check_markers
+  signature: 'fn check_markers(task: &Task, tokenizer: &Tokenizer, agent: &AgentConfig) -> Result<(), TaskError>'
+  status: pending
+  notes: 'Refuse only marker LOSS after Layas option shrink, checked once at task load. Implemented by plan 08-04.'
+- contract: decide-apr-v1.yaml
+  equation: single_manifest_key
+  module_path: aprender_decide::artifact
+  function: load_verified
+  signature: 'fn load_verified(bytes: &[u8]) -> Result<VerifiedDecider, LoadError>'
+  status: pending
+  notes: 'Ladder rung 3. Implemented by plan 08-05.'
+- contract: decide-apr-v1.yaml
+  equation: blob_integrity
+  module_path: aprender_decide::artifact
+  function: load_verified
+  signature: 'fn load_verified(bytes: &[u8]) -> Result<VerifiedDecider, LoadError>'
+  status: pending
+  notes: 'Ladder rung 4 (blob sha256 before any weight is installed). Implemented by plan 08-05.'
+- contract: decide-apr-v1.yaml
+  equation: tensor_set_derived
+  module_path: aprender_decide::artifact
+  function: load_verified
+  signature: 'fn load_verified(bytes: &[u8]) -> Result<VerifiedDecider, LoadError>'
+  status: pending
+  notes: 'Ladder rung 4 (architecture-derived tensor set, per-entry size). Implemented by plan 08-05.'
+- contract: decide-apr-v1.yaml
+  equation: bounded_read_and_index_extent
+  module_path: aprender_decide::artifact
+  function: read_decide_apr_bytes_bounded
+  signature: 'fn read_decide_apr_bytes_bounded<R: Read>(reader: R, declared_len: u64) -> Result<Vec<u8>, LoadError>'
+  status: pending
+  notes: 'Ladder rungs 1-2: bounded read at cap + 1, then tensor_count <= max_tensor_count and the index-extent bound before any index allocation (reader_impl.rs:95 finding; 08-05 also fixes the apr-format reader capacity). Implemented by plan 08-05.'
+- contract: decide-apr-v1.yaml
+  equation: probe_replay
+  module_path: aprender_decide::artifact
+  function: load_verified
+  signature: 'fn load_verified(bytes: &[u8]) -> Result<VerifiedDecider, LoadError>'
+  status: pending
+  notes: 'Ladder rung 7: replay against the stored PYTHON probe values (probes.json), NaN-visible. Implemented by plan 08-05.'
+- contract: decide-apr-v1.yaml
+  equation: artifact_identity
+  module_path: aprender_decide::artifact
+  function: load_verified
+  signature: 'fn load_verified(bytes: &[u8]) -> Result<VerifiedDecider, LoadError>'
+  status: pending
+  notes: 'D-11: artifact_sha256 = whole-file sha256, recipe_id = recipe blob sha256. Implemented by plan 08-05.'
+- contract: decide-apr-v1.yaml
+  equation: determinism
+  module_path: aprender_decide::pack
+  function: pack_run_dir
+  signature: 'fn pack_run_dir(run: &Path, data: &Path) -> Result<Vec<u8>, PackError>'
+  status: pending
+  notes: 'Byte-identical packs across processes and serde_json backings; no timestamp. Implemented by plan 08-05.'
+- contract: decide-apr-v1.yaml
+  equation: size_cap
+  module_path: aprender_decide::artifact
+  function: read_decide_apr_bytes_bounded
+  signature: 'fn read_decide_apr_bytes_bounded<R: Read>(reader: R, declared_len: u64) -> Result<Vec<u8>, LoadError>'
+  status: pending
+  notes: 'max_artifact_bytes = 1.25 GiB, refused at cap + 1. Implemented by plan 08-05.'
+- contract: decide-apr-v1.yaml
+  equation: private_mint
+  module_path: aprender_decide::artifact
+  function: load_verified
+  signature: 'fn load_verified(bytes: &[u8]) -> Result<VerifiedDecider, LoadError>'
+  status: pending
+  notes: 'The only minting path; trybuild compile-fail proves no second one. Implemented by plan 08-05.'
+- contract: decide-apr-v1.yaml
+  equation: deploy_eligible
+  module_path: aprender_decide::verify
+  function: verify_run
+  signature: 'fn verify_run(apr: &Path, run: &Path, data: &Path, base: &Path) -> Result<DeployEligible, VerifyError>'
+  status: pending
+  notes: 'Deployable only when pack_laya verify accepts the exact file (full ladder, production variant, base and input hashes, split, full re-score, recomputed gate). Implemented by plan 08-09.'
 critical_path:
 - softmax
 - rmsnorm
