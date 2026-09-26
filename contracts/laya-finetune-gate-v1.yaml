@@ -1,0 +1,430 @@
+contract: laya-finetune-gate
+metadata:
+  version: 1.0.0
+  created: '2026-09-25'
+  author: PAIML Engineering
+  kind: kernel
+  description: >
+    THE TRAINING-SIDE CLAIMS of the Laya decision model (Phase 8, D-03..D-08) and the D-19 demo
+    cell: the device rule, the declared base, the fine-tune recipe, the task and training-row
+    inputs, the calibration fit, the pre-declared quality gate and the seed policy — plus the
+    schemas of every file a training run writes, so the Python writer (`scripts/laya_train`) and
+    the Rust reader/verifier (`aprender-decide`, `deny_unknown_fields`) implement ONE schema.
+
+    DECLARED BEFORE ANY RUN IS READ (D-07). Every threshold here is committed in plan 08-01, before
+    any `models/decide/` run directory exists; the trainer and the verifier READ them from this
+    file at run time and never write them as literals. A threshold chosen after seeing a result is
+    not a gate. Moving one after a run has been read is a `pv diff`-visible claims change that
+    invalidates the recorded evidence.
+
+    THE GATE IS DECIDED ON RECOMPUTED METRICS, NOT REPORTED ONES. A gate report is a file a
+    training run wrote; an edited report must not pass. So the metrics that DECIDE pass are
+    recomputed in Rust (plan 08-09) from `eval-probs.json` and `zero-shot-probs.json`, after every
+    probability in those files has been verified within laya-parity-v1 `pack_rescore_probs_abs` of
+    the Rust re-score of the packed artifact and of the declared base respectively (argmax exact).
+    A reported metric further than `gate_metric_recompute_abs` from its recomputation, or a reported
+    `pass` that disagrees with the recomputed one, is refused. The zero-shot probabilities are
+    RETAINED as a file for exactly this reason: a baseline that exists only as a reported number can
+    be edited.
+
+    THE ECE IS THE HOUSE ECE (OPS-03). `ece_top_label` is aprender-core's
+    `calibration::expected_calibration_error_top_label` (contracts/calibration-v1.yaml), floor
+    binning with a top-bin clamp. Recorded deviation: spike 024's `fewshot015.metrics` bins
+    right-closed, `(lo, hi]`; the two differ only for a confidence exactly on a bin edge. One Rust
+    ECE implementation outweighs byte-matching an informational spike number.
+
+    TWO RECIPE VARIANTS, ONE DEPLOYABLE. `production` is the only variant that can be packed for
+    serving, verified or deployed. `synthetic-fixture` exists so the lifecycle can be exercised on a
+    tiny synthetic base in tests; it is structurally loadable and REFUSED by every
+    pack-for-serving, verify and deploy path (`synthetic_not_deployable`).
+
+    PROVABILITY HONESTY. `cargo-kani` is not installed in this repository and there is not one
+    `#[kani::proof]` harness anywhere under `crates/`. The `kani_harnesses:` entries are DECLARED and
+    NOT EXECUTED; each names the runnable test that is the actual evidence.
+
+    ANNOTATION HONESTY. `#[contract]` is METADATA-ONLY in this repository (see setfit-apr-v1). The
+    enforcement mechanism for everything below is the named test, never the annotation.
+
+    BINDING HONESTY, AND STAGED TEST REFERENCES. Every equation Rust can re-verify is bound to the
+    RUST verifier (`aprender_decide::verify`), because Rust lib tests are what CI runs; the
+    Python-only training equations are bound to the `laya-train-selftest` justfile recipe and say in
+    their binding notes that the recipe runs locally, not in CI. All are `status: pending` except
+    `ece_top_label`, whose implementation already exists. No falsification test below cites a test
+    that does not exist yet (CI's strict-binding gate starts a new contract at zero): each carries a
+    prose `implemented_by:`, and the implementing plan adds the `test:` / `test_harness:` line in the
+    same commit as the test.
+  references:
+    - '.claude/skills/spike-findings-aprender/references/laya-decision-model.md — full fine-tune quality (spike 024) and the recipe this contract fixes.'
+    - '.claude/skills/spike-findings-aprender/sources/024-laya-vs-kev-few-shot/tools/ft_laya.py — the recipe (AdamW 2.5e-5 / 1.0e-4, cosine to 1e-6, batch 8, clip 1.0, proper reward 0.75 / 1.0).'
+    - '.claude/skills/spike-findings-aprender/sources/024-laya-vs-kev-few-shot/tools/fewshot015.py — the spike metrics (macro-F1, F_avg over against/favor, 15-bin ECE).'
+    - 'contracts/calibration-v1.yaml and crates/aprender-core/src/calibration.rs — expected_calibration_error_top_label, the house ECE; frozen cases scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json.'
+    - 'contracts/tweet-eval-stance-benchmark-v1.yaml — dataset identity, F_avg and the seed set the demo cell uses.'
+    - 'benchmarks/tweeteval-stance/selections/s16-seed13/selection-manifest.json — the D-19 demo selection (label_names none, against, favor; 16 shots/class; root_seed 13).'
+    - 'Laya @ 4066d5d laya/common.py:376-377 — TEMP_MIN 0.5 / TEMP_MAX 5.0, applied by clamp_temperature at every load (RESEARCH Pitfall 6).'
+    - 'Guo et al. (2017), On Calibration of Modern Neural Networks — temperature scaling by NLL.'
+  depends_on:
+    - calibration-v1
+    - tweet-eval-stance-benchmark-v1
+    - laya-parity-v1
+
+# FLAT scalars only (the decide-tool-boundary-v1 rule): every value here is read by one key
+# lookup, and no nested value exists that nothing validates. Every structured declaration is a
+# TOP-LEVEL key beside this block (the `door_surface:` precedent in forecast-tool-boundary-v1).
+constants:
+  # ---- the gate (D-07), RESEARCH A6 / A7 ----
+  gate_min_macro_f1_margin: 0.05
+  gate_max_ece: 0.10
+  # How far a REPORTED metric may differ from the one Rust recomputes (plan 08-09).
+  gate_metric_recompute_abs: 1.0e-5
+  ece_bins: 15
+  # ---- calibration (D-06), Laya's TEMP_MIN / TEMP_MAX (Pitfall 6) and RESEARCH A9 ----
+  calibration_temp_min: 0.5
+  calibration_temp_max: 5.0
+  calibration_slice_fraction: 0.25
+  calibration_slice_min_per_class: 2
+  # ---- seeds (D-08) ----
+  declared_seed: 13
+
+# ---------------------------------------------------------------------------------------------
+# Structured declarations. Top-level keys: pv's `Contract` is not deny_unknown_fields, so these
+# validate and are read by the trainer and the Rust verifier by name.
+# ---------------------------------------------------------------------------------------------
+
+seed_policy:
+  declared_seed: 13
+  variance_seeds: [13, 17, 23]
+  rule: 'The shipped checkpoint is ALWAYS the declared seed. Other seeds are run only to report variance (`variance-report.json`), never to select a checkpoint. gate-report `seeds.label` is the literal string "single seed" when one seed ran, else "mean ± sd over N seeds".'
+
+recipe:
+  # D-04: fixed to the spike-024 values. Any change is a new recipe_id.
+  optimizer: adamw
+  encoder_lr: 2.5e-5
+  head_lr: 1.0e-4
+  eta_min: 1.0e-6
+  weight_decay: 0.01
+  grad_clip: 1.0
+  batch_size: 8
+  proper_reward_w_sph: 0.75
+  proper_reward_w_rps: 1.0
+  loss: 'cross_entropy + (-proper_reward(softmax(z / T), onehot, w_sph, w_rps)).mean()'
+  epochs_at_most_16_per_class: 12
+  epochs_above_16_min: 4
+  epochs_above_16_max: 12
+  schedule: 'cosine annealing from each group lr to eta_min over epochs * ceil(n_fit / batch_size) steps'
+  epoch_rule: 'shots_per_class <= 16 -> 12 epochs; above 16 -> an epoch count in [4, 12] declared in recipe.json before training'
+
+recipe_variants:
+  production:
+    base: 'must equal the base: block below (repo, revision, checkpoint, sha256)'
+    shots_epochs_seed: 'per the recipe rules; seed == declared_seed for the shipped checkpoint'
+    deployable: true
+    note: 'The ONLY variant that can be packed for serving, verified by pack_laya verify, or deployed.'
+  synthetic-fixture:
+    base: 'checkpoint `tiny-synthetic` with its own sha256 recorded in recipe.json'
+    shots_epochs_seed: 'shots and epochs may be 0 (or 1 for the lifecycle self-test); any seed'
+    deployable: false
+    note: 'Structurally loadable for tests (plan 08-02 fixtures); REFUSED by every pack-for-serving, verify and deploy path (equation synthetic_not_deployable).'
+
+base:
+  # D-04: the declared base, pinned.
+  family: laya
+  repo: convaiinnovations/laya
+  revision: 55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851
+  checkpoint: en-root
+  model_safetensors_sha256: 891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c
+  laya_git: 4066d5d5fbf08b66c6757ddeedbd797bd7655bc0
+
+# D-03: the first available device in this order is used; the device actually used is read back
+# from the model parameters (equation device_recorded). CPU is allowed and FLAGGED.
+device_order: [mps, cuda, cpu]
+
+demo:
+  # D-19, RESEARCH Open Q4 resolution.
+  dataset: 'TweetEval stance_abortion'
+  criteria_order: [none, against, favor]
+  shots_per_class: 16
+  epochs: 12
+  declared_seed: 13
+  variance_seeds: [13, 17, 23]
+  selection: benchmarks/tweeteval-stance/selections/s16-seed13/selection-manifest.json
+  eval_split: test
+  eval_rows: 280
+  spike_baseline_f_avg: '0.538 ± 0.017 (spike 024, 16 shots/class) — INFORMATIONAL, explicitly NOT a gate'
+  note: 'The 25 % calibration slice leaves 12 fit shots/class (16 - 4), so an F_avg below the spike''s is expected (RESEARCH A9). The gate is gate_pass, not this number.'
+
+run_dir_layout:
+  # The ONE layout the fixture generator (08-02), the trainer (08-08) and the packer
+  # (08-05 / 08-09) all use.
+  data_dir:
+    - task.json
+    - train.jsonl
+    - eval.jsonl
+  run_dir:
+    - 'checkpoint/model.safetensors (F16 weights; the `temperature` buffer F32)'
+    - 'checkpoint/rl_agent_config.json (calibrated T written into temperature_by_options[bucket])'
+    - checkpoint/encoder/config.json
+    - checkpoint/tokenizer/tokenizer.json
+    - 'checkpoint/tokenizer/tokenizer_config.json (written ALREADY in the form Laya''s _fix_tokenizer_config produces — tokenizer_class: PreTrainedTokenizerFast — because Laya''s loader otherwise REWRITES it in place, changing a hashed input after the fact)'
+    - 'task.json (byte copy of the data dir''s)'
+    - recipe.json
+    - gate-report.json
+    - eval-probs.json
+    - zero-shot-probs.json
+    - probes.json
+    - 'variance-report.json (only when more than one seed ran)'
+
+recipe_json_schema:
+  # Written BEFORE any eval score exists (equation recipe_before_scores). recipe_id is the sha256
+  # of the exact recipe.json file bytes — one definition; the Rust side never re-serializes.
+  variant: 'string: "production" | "synthetic-fixture"'
+  optimizer: 'string: "adamw"'
+  encoder_lr: 'number: recipe.encoder_lr'
+  head_lr: 'number: recipe.head_lr'
+  eta_min: 'number: recipe.eta_min'
+  weight_decay: 'number: recipe.weight_decay'
+  grad_clip: 'number: recipe.grad_clip'
+  batch_size: 'integer: recipe.batch_size'
+  proper_reward_w_sph: 'number: recipe.proper_reward_w_sph'
+  proper_reward_w_rps: 'number: recipe.proper_reward_w_rps'
+  schedule: 'string: "cosine"'
+  shots_per_class: 'integer >= 0 (production: >= 1)'
+  epochs: 'integer >= 0 (production: per recipe.epoch_rule)'
+  seed: 'integer (production shipped checkpoint: == declared_seed)'
+  base: 'object {family, repo, revision, checkpoint, sha256} (production: == base block)'
+
+gate_report_schema:
+  schema: 'string: "laya-gate-report-v1"'
+  pass: 'boolean — must equal the Rust recomputation (gate_pass)'
+  thresholds: 'object {min_macro_f1_margin, max_ece, ece_bins} — must equal this file''s constants, else the report is refused (D-07 fail-closed)'
+  zero_shot: 'object {macro_f1, f_avg, ece, n}'
+  fine_tuned: 'object {macro_f1, f_avg, ece_pre, ece_post, nll, n}'
+  margin: 'number: fine_tuned.macro_f1 - zero_shot.macro_f1'
+  calibration: 'object {bucket, t_fitted, t_applied, clamp_hit, slice_size, slice_ids, slice_ids_sha256} — slice_ids is the SORTED list of 0-based train.jsonl row indices in the calibration slice (indices only, never text), so the Rust verifier re-derives disjointness from it'
+  seeds: 'object {declared, n, label} — label is the literal "single seed" when n == 1, else "mean ± sd over N seeds"'
+  device_used: 'string: read from the model parameters after the move'
+  device_is_cpu: boolean
+  torch_version: string
+  recipe_id: 'string: sha256 hex of recipe.json bytes'
+  inputs_sha256: 'object {task_json, train_jsonl, eval_jsonl, base_model, tokenizer_json}'
+  eval_probs_sha256: string
+  zero_shot_probs_sha256: string
+  probes_sha256: string
+  f_avg_rule: 'f_avg may be null for non-stance tasks'
+
+eval_probs_schema:
+  # The SAME schema serves eval-probs.json (fine-tuned, calibrated) and zero-shot-probs.json (the
+  # declared base on the same rows). No eval TEXT is ever written, so no tweet text reaches an
+  # artifact.
+  rows: 'array of {row: integer (0-based eval.jsonl index), text_sha256: string, probabilities: array of K numbers in criteria order}'
+  labels: 'array of criteria names in task.json order'
+
+probes_json_schema:
+  # For each decide-apr-v1 probe input, in order, computed by Laya's OWN predict path on the F16
+  # reload, through the decide-apr-v1 synthetic probe task.
+  probes: 'array of {input_index: integer, tokens: integer (built-row length), label: string, probabilities_f32_hex: array of K strings (f32 bit patterns, 8 hex digits each)}'
+
+equations:
+
+  gate_pass:
+    formula: 'pass == ((ft.macro_f1 - zs.macro_f1 >= gate_min_macro_f1_margin) AND (ft.ece_post <= gate_max_ece)), where ft and zs are RECOMPUTED in Rust from eval-probs.json and zero-shot-probs.json against the eval labels'
+    domain: 'a run dir whose eval-probs.json and zero-shot-probs.json have each been verified within laya-parity-v1 pack_rescore_probs_abs of the Rust re-score of the packed artifact and of the declared base (argmax exact)'
+    codomain: 'accept (pass recorded) or a typed refusal naming the failed clause'
+    invariants:
+      - 'thresholds are READ from this file; a report whose `thresholds` differ from the constants is refused (D-07, fail-closed)'
+      - 'a reported metric further than gate_metric_recompute_abs from its Rust recomputation is refused; a reported `pass` disagreeing with the recomputed one is refused — recomputing pass from REPORTED metrics would let an edited report pass'
+      - 'the gate compares against the zero-shot DECLARED BASE on the SAME eval rows, not against a remembered number'
+      - 'the ECE is ece_post, computed with the APPLIED temperature (calibration_fit_bounded)'
+    preconditions:
+      - 'split_disjointness holds for the run'
+
+  ece_top_label:
+    formula: 'conf_i = max_k p_ik; pred_i = argmax_k p_ik; bin(i) = min(floor(conf_i * ece_bins), ece_bins - 1); ECE = sum_b (n_b / N) * |acc_b - conf_b|'
+    domain: 'N rows of K probabilities (rows sum to 1) with true labels'
+    codomain: 'ECE in [0, 1]'
+    invariants:
+      - 'THE HOUSE DEFINITION: aprender-core calibration::expected_calibration_error_top_label (contracts/calibration-v1.yaml), frozen cases scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json'
+      - 'recorded deviation: spike 024 binned right-closed (lo, hi]; the two differ only for a confidence exactly on a bin edge. One Rust ECE implementation (OPS-03) outweighs byte-matching an informational spike number'
+      - 'the Python trainer reports with the same floor binning; the Rust verifier is the authority'
+
+  calibration_fit_bounded:
+    formula: 'T_fitted = argmin_{T in [calibration_temp_min, calibration_temp_max]} NLL(softmax(z / T), y) over the calibration slice; T_applied = clamp(T_fitted, calibration_temp_min, calibration_temp_max); clamp_hit = (T_fitted at a bound)'
+    domain: 'the fine-tuned model''s logits on the calibration slice (F16 reload)'
+    codomain: 'T_applied written into rl_agent_config.json temperature_by_options[bucket]; clamp_hit recorded'
+    invariants:
+      - 'Laya''s loader clamps T to [0.5, 5.0] at every load (Pitfall 6), so a T outside the range would be served as the bound; fitting within the range makes the reported and served T identical'
+      - 'ece_post is computed with T_APPLIED; if the clamp is hit and ECE still fails, the gate fails — the fail-closed design'
+      - 'the calibration slice is stratified, seeded, at least calibration_slice_fraction of the shots and at least calibration_slice_min_per_class rows per class (D-06, RESEARCH A9)'
+
+  split_disjointness:
+    formula: 'normsha(eval) ∩ normsha(train) = ∅ AND calib ⊂ train AND fit = train \ calib AND forall group g of train rows with equal normsha: g ⊂ fit OR g ⊂ calib AND forall g: |labels(g)| == 1, where normsha(t) = sha256(collapse_ws(trim(NFC(t))))'
+    domain: 'data dir train.jsonl / eval.jsonl and gate-report calibration.slice_ids'
+    codomain: 'accept, or a typed refusal naming the overlap or the conflicting group'
+    invariants:
+      - 'text-disjoint, not merely row-disjoint: duplicates in the shots form ONE group that lands wholly in fit or wholly in calibration'
+      - 'a group whose copies carry different labels is REFUSED, not resolved'
+      - 'the calibration slice is stratified and seeded (declared_seed), per D-06'
+      - 'the Rust verifier re-derives all of this from slice_ids (row indices only) and the data dir, plan 08-09'
+
+  declared_seed_ships:
+    formula: 'shipped_checkpoint.seed == seed_policy.declared_seed'
+    domain: 'a run dir, possibly with variance seeds'
+    codomain: 'the declared-seed checkpoint in run_dir/checkpoint'
+    invariants:
+      - 'never the best seed on eval: choosing the best of N on the eval split is selection on the test set (D-08)'
+      - 'variance seeds produce variance-report.json only'
+
+  recipe_before_scores:
+    formula: 'mtime_order: write(recipe.json) precedes every eval score; recipe_id = sha256(recipe.json bytes)'
+    domain: 'a training run'
+    codomain: 'recipe.json on disk and its recipe_id, before any score exists'
+    invariants:
+      - 'D-04: the recipe is fixed before the run is judged, so it cannot be tuned against eval'
+      - 'recipe_id is the sha256 of the exact file bytes; the Rust side never re-serializes to compute it'
+
+  device_recorded:
+    formula: 'device_used = device_of(next(model.parameters())) AFTER the move; device_is_cpu = (device_used == "cpu")'
+    domain: 'a training run on the first available device of device_order'
+    codomain: 'gate-report device_used and device_is_cpu'
+    invariants:
+      - 'read from the model parameters, NEVER from an env var or from the requested device (D-03, CLAUDE.md Verification #2: prove the mechanism engaged)'
+      - 'CPU is allowed and FLAGGED'
+
+  f16_reload_scoring:
+    formula: 'forall artefact a in {gate metrics, calibration fit, eval-probs.json, zero-shot-probs.json, probes.json}: a is computed on a checkpoint saved as F16 and RELOADED in fp32'
+    domain: 'a training run after fine-tuning'
+    codomain: 'every scored file describes the model that is served'
+    invariants:
+      - 'Pitfall 5: training leaves fp32 weights while D-17 serves F16; scoring the fp32 weights would describe a model that is never served'
+      - 'the zero-shot baseline is the declared base loaded the same way'
+
+  synthetic_not_deployable:
+    formula: 'recipe.variant == "synthetic-fixture" implies refuse(pack_for_serving) AND refuse(verify) AND refuse(deploy)'
+    domain: 'any run dir or artifact'
+    codomain: 'a typed refusal naming the variant'
+    invariants:
+      - 'the synthetic variant is structurally loadable for tests and never eligible for serving'
+      - 'a production recipe whose base differs from the base block is refused the same way'
+
+proof_obligations:
+
+  - type: bound
+    property: 'Gate thresholds are read from this contract and a report carrying other thresholds is refused'
+    formal: 'forall report r: r.thresholds != (gate_min_macro_f1_margin, gate_max_ece, ece_bins) implies refuse(r)'
+    applies_to: all
+
+  - type: soundness
+    property: 'pass is decided on recomputed metrics from verified probabilities'
+    formal: 'forall run: accepted_pass(run) == gate(recompute(verified(eval_probs)), recompute(verified(zero_shot_probs)))'
+    applies_to: all
+
+  - type: bound
+    property: 'The applied temperature is within Laya''s clamp range'
+    formal: 'calibration_temp_min <= T_applied <= calibration_temp_max'
+    applies_to: all
+
+  - type: independence
+    property: 'Eval, fit and calibration are text-disjoint'
+    formal: 'normsha(eval) ∩ normsha(train) = ∅ AND no normsha group spans fit and calib'
+    applies_to: all
+
+  - type: invariant
+    property: 'The shipped checkpoint is the declared seed'
+    formal: 'shipped.seed == declared_seed'
+    applies_to: all
+
+  - type: safety
+    property: 'A synthetic-fixture run is never deployable'
+    formal: 'variant == synthetic-fixture implies not deploy_eligible'
+    applies_to: all
+
+falsification_tests:
+
+  - id: FALSIFY-LAYA-GATE-001
+    rule: 'The gate is recomputed from verified probabilities and an edited report is refused'
+    prediction: 'Editing fine_tuned.macro_f1 in gate-report.json by more than gate_metric_recompute_abs, or flipping `pass`, makes the Rust verifier refuse the run naming the field; the untouched report is accepted.'
+    implemented_by: 'plan 08-09 (aprender_decide::verify gate tests); the test: line is added in that plan''s commit'
+    if_fails: 'The gate trusts reported numbers: an edited report can make an undeployable model deployable.'
+
+  - id: FALSIFY-LAYA-GATE-002
+    rule: 'A report whose thresholds differ from this contract is refused'
+    prediction: 'A gate-report.json with thresholds.max_ece = 0.2 is refused naming thresholds, even though every metric is otherwise consistent.'
+    implemented_by: 'plan 08-09 (aprender_decide::verify gate tests)'
+    if_fails: 'The thresholds are no longer the contract''s: a gate chosen after seeing a result can pass (D-07).'
+
+  - id: FALSIFY-LAYA-GATE-003
+    rule: 'The ECE matches the house definition on the frozen cases'
+    prediction: 'The verifier''s ECE equals aprender::calibration::expected_calibration_error_top_label on every case of scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json, and the Python trainer''s ECE matches within gate_metric_recompute_abs on the synthetic fixture.'
+    implemented_by: 'plans 08-08 (Python self-test) and 08-09 (Rust verifier)'
+    if_fails: 'Two ECE implementations disagree, so the reported and recomputed gate can differ on the same probabilities.'
+
+  - id: FALSIFY-LAYA-GATE-004
+    rule: 'The calibration fit stays in [0.5, 5.0] and records the clamp'
+    prediction: 'On a synthetic memorised model whose NLL-optimal T exceeds 5, t_fitted == 5.0, clamp_hit == true and ece_post is computed with T = 5.0.'
+    implemented_by: 'plan 08-08 (just laya-train-selftest)'
+    if_fails: 'The reported T is not the served T (Pitfall 6): the gate ECE describes a different model.'
+
+  - id: FALSIFY-LAYA-GATE-005
+    rule: 'Split disjointness is text-level and conflicting duplicates are refused'
+    prediction: 'A train.jsonl with the same normalized text under two labels is refused; one with duplicate same-label rows keeps them in one side; an eval row equal to a train row after NFC/trim/whitespace collapse is refused.'
+    implemented_by: 'plans 08-08 (Python split) and 08-09 (aprender_decide::verify check_split)'
+    if_fails: 'Calibration or eval leaks training text, so the measured calibration and gate are optimistic.'
+
+  - id: FALSIFY-LAYA-GATE-006
+    rule: 'recipe.json is written before any score and the declared seed ships'
+    prediction: 'The self-test observes recipe.json on disk before the first eval score is computed, and with variance seeds 13/17/23 the shipped checkpoint is seed 13 even when another seed scores higher.'
+    implemented_by: 'plan 08-08 (just laya-train-selftest)'
+    if_fails: 'The recipe or the shipped seed was chosen after reading eval (D-04 / D-08).'
+
+  - id: FALSIFY-LAYA-GATE-007
+    rule: 'The device is read from the parameters and every score comes from the F16 reload'
+    prediction: 'Forcing the CPU path yields device_used == "cpu" and device_is_cpu == true regardless of any env var; the eval probabilities equal those of a separate F16 reload within pack_rescore_probs_abs.'
+    implemented_by: 'plan 08-08 (just laya-train-selftest)'
+    if_fails: 'The report labels a run by intent rather than mechanism, or scores a model that is never served (Pitfall 5).'
+
+  - id: FALSIFY-LAYA-GATE-008
+    rule: 'A synthetic-fixture run is refused by pack-for-serving, verify and deploy'
+    prediction: 'pack_laya verify on a synthetic-fixture run dir refuses naming the variant; the same run is accepted by the structural loader used in tests.'
+    implemented_by: 'plan 08-09 (aprender_decide::verify verify_run)'
+    if_fails: 'A zero-epoch fixture on a tiny synthetic base can be served as a decision model.'
+
+kani_harnesses:
+
+  # DECLARED, NOT EXECUTED. cargo-kani is not installed in this repository and no
+  # #[kani::proof] harness exists anywhere under crates/.
+  - id: KANI-LAYA-GATE-001
+    obligation: 'The ECE bin index is always in range'
+    property: 'forall conf in [0, 1], forall n_bins in 1..=ece_bins: 0 <= min(floor(conf * n_bins), n_bins - 1) < n_bins'
+    bound: 15
+    strategy: stub_float
+    harness: 'NOT EXECUTED — the evidence is the frozen-case suite of aprender-core calibration (expected_calibration_error_top_label against scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json), including the saturated conf = 1 row'
+
+  - id: KANI-LAYA-GATE-002
+    obligation: 'The applied temperature is within Laya''s clamp range'
+    property: 'forall T_fitted: calibration_temp_min <= clamp(T_fitted) <= calibration_temp_max'
+    bound: 8
+    strategy: stub_float
+    harness: 'NOT EXECUTED — the evidence will be the calibration clamp case in just laya-train-selftest (plan 08-08) and the Rust verifier''s t_applied range check (plan 08-09)'
+
+qa_gate:
+  id: F-LAYA-GATE-001
+  name: 'Laya fine-tune gate and recipe contract'
+  description: >
+    The blocking gate for the training-side claims. The Rust-reverifiable equations (gate_pass,
+    split_disjointness, synthetic_not_deployable, ece_top_label) run in CI through aprender-decide
+    lib tests once plan 08-09 lands them; the Python-only equations run LOCALLY through
+    `just laya-train-selftest` (plan 08-08) and are marked so in their binding rows.
+  checks:
+    - 'contract schema validity (pv validate, zero errors) and non-zero pv status counts'
+    - 'constants flat; seed_policy, recipe, recipe_variants, base, demo, run_dir_layout and the four schemas are top-level keys'
+    - 'gate thresholds read from this file; mismatching thresholds refused'
+    - 'pass decided on recomputed metrics from verified probabilities; edited reports refused'
+    - 'house ECE on the frozen cases'
+    - 'calibration clamp recorded and applied'
+    - 'text-disjoint split with conflicting duplicates refused'
+    - 'declared seed ships; recipe before scores; device from parameters; F16-reload scoring'
+    - 'synthetic-fixture refused by pack-for-serving, verify and deploy'
+  pass_criteria: 'FALSIFY-LAYA-GATE-001..008 pass, each observed RED under its induced negative; this file is committed before any models/decide/ run directory exists.'
+  falsification: >
+    Change constants.gate_max_ece alone and every recorded gate report must be refused by the
+    verifier for carrying the old thresholds — the thresholds are read from here, never from the
+    report.

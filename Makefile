@@ -1937,7 +1937,9 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/neuralprophet-parity-v1.yaml \
              contracts/chronos-bolt-parity-v1.yaml \
              contracts/forecast-tool-boundary-v1.yaml \
-             contracts/decide-tool-boundary-v1.yaml
+             contracts/decide-tool-boundary-v1.yaml \
+             contracts/laya-finetune-gate-v1.yaml \
+             contracts/laya-parity-v1.yaml
 
 # The two Phase 2 contracts, audited as a BLOCKING tier3 gate by
 # `contract-audit-phase2` below. Deliberately a separate, narrower list than
@@ -2029,7 +2031,9 @@ PHASE6_CONTRACTS := contracts/forecast-tool-boundary-v1.yaml \
 #     falsified by the packer and loader tests.
 # Folding the gate into the tool boundary would make one contract whose equations no single
 # falsification run can evaluate.
-PHASE8_CONTRACTS := contracts/decide-tool-boundary-v1.yaml
+PHASE8_CONTRACTS := contracts/decide-tool-boundary-v1.yaml \
+                    contracts/laya-finetune-gate-v1.yaml \
+                    contracts/laya-parity-v1.yaml
 
 # NOTE (plan 02-01, D-24): $(CONTRACTS) is an EXPLICIT HARDCODED LIST, not a glob
 # over contracts/*.yaml. A contract file that merely EXISTS in contracts/ is
