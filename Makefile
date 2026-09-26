@@ -2184,6 +2184,40 @@ contract-audit-phase3: ## Audit Phase 3 binding coverage (BLOCKING, wired into t
 	fi; \
 	echo "Phase 3 binding audit: every equation is bound"
 
+# The pending-tolerant phase binding audit, ONE body for contract-audit-phase4 and
+# contract-audit-phase8 (they were verbatim copies). Arguments: $(1) the contract list,
+# $(2) the list variable's NAME for the empty-list message, $(3) the phase label.
+# Every load-bearing detail documented on contract-audit-phase4 below lives here once:
+# `set +e` around the audit (.SHELLFLAGS is -e -c), `status=$$?` on its own line (never
+# through a pipe, CLAUDE.md rule 1), and the `audited` counter that refuses an empty list.
+define audit_phase_bindings_pending_ok
+	@echo "Auditing binding coverage for the Phase $(3) contracts..."
+	@unbound=""; \
+	audited=0; \
+	for contract in $(1); do \
+		echo "  $$contract"; \
+		audited=$$((audited + 1)); \
+		set +e; \
+		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+		status=$$?; \
+		set -e; \
+		if [ "$$status" -ne 0 ]; then \
+			unbound="$$unbound $$contract"; \
+		fi; \
+	done; \
+	if [ "$$audited" -eq 0 ]; then \
+		echo "FAIL: $(2) is empty — this gate audited nothing and would have reported success."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$unbound" ]; then \
+		echo "FAIL: unbound equations remain in:$$unbound"; \
+		echo "Every equation of a Phase $(3) contract needs an entry in $(BINDING)."; \
+		echo "An equation still being written belongs there as 'status: pending', not absent."; \
+		exit 1; \
+	fi; \
+	echo "Phase $(3) binding audit: $$audited contract(s) audited, every equation is bound"
+endef
+
 # Phase 4's twin of contract-audit-phase2/phase3, for the same reason both exist:
 # `contract-validate` checks contract SHAPE and says nothing about whether an
 # equation is bound to any implementation, so setfit-apr-v1.yaml could be "valid"
@@ -2220,31 +2254,7 @@ contract-audit-phase3: ## Audit Phase 3 binding coverage (BLOCKING, wired into t
 # on a real difference, not merely observed passing. A gate that has only ever been
 # seen passing is not evidence.
 contract-audit-phase4: ## Audit Phase 4 binding coverage (BLOCKING, wired into tier3)
-	@echo "Auditing binding coverage for the Phase 4 contracts..."
-	@unbound=""; \
-	audited=0; \
-	for contract in $(PHASE4_CONTRACTS); do \
-		echo "  $$contract"; \
-		audited=$$((audited + 1)); \
-		set +e; \
-		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
-		status=$$?; \
-		set -e; \
-		if [ "$$status" -ne 0 ]; then \
-			unbound="$$unbound $$contract"; \
-		fi; \
-	done; \
-	if [ "$$audited" -eq 0 ]; then \
-		echo "FAIL: PHASE4_CONTRACTS is empty — this gate audited nothing and would have reported success."; \
-		exit 1; \
-	fi; \
-	if [ -n "$$unbound" ]; then \
-		echo "FAIL: unbound equations remain in:$$unbound"; \
-		echo "Every equation of a Phase 4 contract needs an entry in $(BINDING)."; \
-		echo "An equation still being written belongs there as 'status: pending', not absent."; \
-		exit 1; \
-	fi; \
-	echo "Phase 4 binding audit: $$audited contract(s) audited, every equation is bound"
+	$(call audit_phase_bindings_pending_ok,$(PHASE4_CONTRACTS),PHASE4_CONTRACTS,4)
 
 # Phase 5's twin of contract-audit-phase2/3/4, for the same reason all three exist:
 # `contract-validate` checks contract SHAPE and says nothing about whether an equation is
@@ -2502,7 +2512,8 @@ contract-audit-phase6: ## Audit Phase 6 binding coverage + source resolution (BL
 	echo "Phase 6 source resolution: resolved $$resolved Phase 6 binding rows to definition sites"; \
 	echo "Phase 6 binding audit: $$audited contract(s) audited, zero BIND- findings"
 
-# Phase 8's twin of contract-audit-phase4, COPIED from it rather than from phase5/6, because
+# Phase 8's twin of contract-audit-phase4 — the SAME canned recipe (audit_phase_bindings_pending_ok),
+# the phase-4 form rather than phase5/6, because
 # Phase 8 is in phase 4's position: plan 08-01 commits all four Phase 8 contracts BEFORE any
 # code that implements them exists (D-07). So every equation is registered `status: pending`
 # in $(BINDING), which `pv audit` reports as BIND-004, a WARNING — this gate PASSES on it. A
@@ -2510,8 +2521,8 @@ contract-audit-phase6: ## Audit Phase 6 binding coverage + source resolution (BL
 # and refuses "not tracked at all". Plan 08-12 tightens it to refuse ANY BIND- line (the
 # phase5/6 form) once every Phase 8 binding has been flipped by the plan that lands its code.
 #
-# THE `set +e` AND THE `status=$$?` ON ITS OWN LINE ARE BOTH LOAD-BEARING (copied from
-# contract-audit-phase4): this Makefile sets `.SHELLFLAGS := -e -c`, so a failing
+# THE `set +e` AND THE `status=$$?` ON ITS OWN LINE ARE BOTH LOAD-BEARING (in the shared
+# recipe): this Makefile sets `.SHELLFLAGS := -e -c`, so a failing
 # `$(PV_BIN) audit` would abort the recipe before the status could be read, and the status is
 # read from `$$?` directly, NEVER through a pipe (CLAUDE.md Verification rule 1). The `audited`
 # counter and the empty-list FAIL keep the gate from passing over nothing.
@@ -2520,31 +2531,7 @@ contract-audit-phase6: ## Audit Phase 6 binding coverage + source resolution (BL
 # decide-tool-boundary-v1 binding row, ran this target and saw rc != 0 with a FAIL line, then
 # restored the row and saw rc 0. The rc values are in 08-01-SUMMARY.md.
 contract-audit-phase8: ## Audit Phase 8 binding coverage (BLOCKING, wired into tier3)
-	@echo "Auditing binding coverage for the Phase 8 contracts..."
-	@unbound=""; \
-	audited=0; \
-	for contract in $(PHASE8_CONTRACTS); do \
-		echo "  $$contract"; \
-		audited=$$((audited + 1)); \
-		set +e; \
-		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
-		status=$$?; \
-		set -e; \
-		if [ "$$status" -ne 0 ]; then \
-			unbound="$$unbound $$contract"; \
-		fi; \
-	done; \
-	if [ "$$audited" -eq 0 ]; then \
-		echo "FAIL: PHASE8_CONTRACTS is empty — this gate audited nothing and would have reported success."; \
-		exit 1; \
-	fi; \
-	if [ -n "$$unbound" ]; then \
-		echo "FAIL: unbound equations remain in:$$unbound"; \
-		echo "Every equation of a Phase 8 contract needs an entry in $(BINDING)."; \
-		echo "An equation still being written belongs there as 'status: pending', not absent."; \
-		exit 1; \
-	fi; \
-	echo "Phase 8 binding audit: $$audited contract(s) audited, every equation is bound"
+	$(call audit_phase_bindings_pending_ok,$(PHASE8_CONTRACTS),PHASE8_CONTRACTS,8)
 
 
 # ============================================================================
