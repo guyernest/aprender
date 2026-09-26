@@ -1291,3 +1291,35 @@ laya-fixtures:
     set -euo pipefail
     uv run --project scripts/laya_train --frozen python scripts/laya_train/metrics.py --selftest
     uv run --project scripts/laya_train --frozen python scripts/laya_train/fixtures.py
+
+# TweetEval stance demo data (D-19): data/decide/tweet-stance-16/{task.json,train.jsonl,eval.jsonl}
+# from the s16-seed13 selection, every shot verified against the manifest's exact_hash.
+# Output is under the root-anchored, gitignored /data/ — tweet text is never committed.
+laya-prepare-stance:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for f in data/tweet-eval-stance/train.jsonl data/tweet-eval-stance/test.jsonl; do
+        test -f "$f" || {
+            echo "ERROR: $f is missing — fetch the local dataset first:" >&2
+            echo "       apr data tweet-eval-stance --output data/tweet-eval-stance" >&2
+            exit 1
+        }
+    done
+    uv run --project scripts/laya_train --frozen python scripts/laya_train/prepare_stance.py
+
+# Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl), calibrate and gate into
+# the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused. Extra args pass through
+# (--epochs E above 16 shots/class, --seeds N, --device mps|cuda|cpu).
+laya-train data out *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f "{{data}}/task.json" || { echo "ERROR: {{data}}/task.json does not exist" >&2; exit 2; }
+    uv run --project scripts/laya_train --frozen python scripts/laya_train/train.py \
+        --data "{{data}}" --out "{{out}}" {{args}}
+
+# The tracer's thin slice: a real train -> F16 save -> complete dir -> reload -> calibrate -> gate on
+# the committed tiny checkpoint, on CPU in seconds (synthetic-fixture variant). Prints LIFECYCLE OK.
+laya-train-lifecycle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv run --project scripts/laya_train --frozen python scripts/laya_train/lifecycle.py
