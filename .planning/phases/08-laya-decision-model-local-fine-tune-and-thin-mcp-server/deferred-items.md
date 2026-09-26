@@ -96,3 +96,26 @@ not fixed by it.
 - **Also:** `.planning/WINDOWS.md` still refuses every append (`Ledger entry 24 has invalid status:
   "resolved"`), so this unrun-verify item is recorded here instead of the ledger.
 - **Why not fixed here:** same reason as D-ITEM-08-01-A.
+
+## From plan 08-06
+
+### D-ITEM-08-06-A: D-ITEM-08-01-A re-measured; the strict-binding PASS line is still unreachable
+
+- **Found during:** 08-06 Task 2 verify 1 (`bash scripts/check_contract_test_binding.sh`).
+- **Symptom:** unchanged: rc=1, `VACUOUS: strict-test-binding gate was SKIPPED (contract validation failed)`,
+  because `contracts/spectral-indices-v1.yaml` has no `kani_harnesses:`.
+- **Measured around it** (temporary lifted copy `contracts-lift-0806/`, deleted after the runs): 644 refs
+  resolved (622 at 08-05 plus exactly this plan's 22: 20 `aprender-mcp-decide` legs for TOOL-001..008 and the
+  two `aprender-decide` stance-order legs TOOL-004 binds), **0 dangling in decide-tool-boundary-v1**; the other
+  44 dangling refs are identical to D-ITEM-08-01-A. Two mutated binding names
+  (`bounds_match_contract_mutant_zz`, `admission_refuses_over_pending_mutant_zz`) were both flagged, so the
+  resolver discriminates on this contract.
+- **Why not fixed here:** same reason as D-ITEM-08-01-A.
+
+### D-ITEM-08-06-B: README's layout tree still says "(82 crates total)"
+
+- **Found during:** 08-06 Task 1 (README crate count).
+- **Symptom:** README.md line 224 (`└── ... (82 crates total)`) disagrees with the gated metrics row, which this
+  plan moved 88 -> 89 from `cargo metadata --no-deps`. `readme_contract` only checks the metrics row, so the
+  tree line has drifted unnoticed across several phases.
+- **Why not fixed here:** pre-existing drift in prose no gate reads; the plan scoped the edit to the gated count.

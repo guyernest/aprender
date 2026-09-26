@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-05-PLAN.md (08-08 still halted at its human decision)
-last_updated: "2026-09-26T02:50:16.403Z"
+stopped_at: Completed 08-06-PLAN.md (08-08 still halted at its human decision)
+last_updated: "2026-09-26T03:44:00.268Z"
 last_activity: 2026-09-25
 last_activity_desc: Phase 08 execution started
-state_head: 6acb90553144b155be837183fd3ae2b19e32a0ae
+state_head: 4eb91e840e15b92a67412c1284abb748580745da
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 104
-  completed_plans: 98
+  completed_plans: 99
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 6 of 12
+Plan: 7 of 12
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -219,6 +219,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P03 | 26min | 2 tasks | 10 files |
 | Phase 08 P04 | 24min | 2 tasks | 16 files |
 | Phase 08 P05 | 38min | 3 tasks | 19 files |
+| Phase 08 P06 | 21 min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -394,6 +395,9 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-05: decide-apr-v1 manifest gains a variant field and stores blobs as an array of {name, sha256}; contract updated, schema_version stays 1
 - [Phase 08]: 08-05: the trybuild private-mint proof is two cases, because rustc skips the privacy pass after a type error and hid E0451
 - [Phase 08]: 08-05: apr-format caps the tensor-index reservation at remaining/20 for every APR consumer, not only decide
+- [Phase 08]: 08-06: FALSIFY-MONO-011 DEPLOYMENT_UNIT_BASELINE raised 7 -> 8 for aprender-mcp-decide under CONTEXT D-15 (D-15's 'no baseline change is expected' was wrong: the register length is the ratcheted quantity); 08-07's lambda takes it to 9 — needs human confirmation
+- [Phase 08]: 08-06: ClassifyService::served is the only public handler constructor and pins ClassifyLimits::CONTRACTED; tokenizer error detail is withheld from responses (may quote caller text)
+- [Phase 08]: 08-06: TOOL-004 binds aprender-decide stance order under both serde backings plus aprender-mcp-decide's response order; KANI-DECIDE-TOOL-001 evidence is the bound_order_is_count_bytes_tokens proptest
 
 ### Pending Todos
 
@@ -505,8 +509,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-26T02:50:16.227Z
-Stopped at: Completed 08-05-PLAN.md (08-08 still halted at its human decision)
+Last session: 2026-09-26T03:43:39.218Z
+Stopped at: Completed 08-06-PLAN.md (08-08 still halted at its human decision)
 Resume file: None
 
 ## Accumulated Context
