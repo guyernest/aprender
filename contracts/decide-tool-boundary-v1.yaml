@@ -1,0 +1,314 @@
+contract: decide-tool-boundary
+metadata:
+  version: 1.0.0
+  created: '2026-09-25'
+  author: PAIML Engineering
+  kind: kernel
+  description: >
+    THE TOOL BOUNDARY both decision MCP servers are held to: `aprender-mcp-decide` (stdio, local
+    .apr path only) and `aprender-mcp-decide-lambda` (pmcp.run default Lambda, the .apr fetched
+    from S3 at cold start). One `classify` tool, bound to ONE task (the artifact's task.json, D-09),
+    taking a LIST of texts whose maximum is owned by THIS file and priced against the Lambda
+    envelope (D-10), returning the argmax label plus ordered per-label probabilities plus the
+    artifact identity (D-11), and flagging every text whose token count exceeded the room Laya's
+    builder leaves for the state (D-12). The Rust constants are asserted EQUAL to this file at test
+    time (`test_support::constant_u64`), never duplicated as literals.
+
+    WHY A TOKEN BUDGET AND NOT ONLY A COUNT (RESEARCH Pitfall 4). pmcp.run fronts the function with
+    an API Gateway HTTP API whose 30 s integration timeout cannot be raised. A count-only list bound
+    is either useless (set low enough that eight 512-token rows fit a cold start, it forbids eight
+    tweets) or unsafe (set for tweets, eight full-window rows blow the cap). So the boundary carries
+    three bounds checked in order: a COUNT (before anything), a per-text BYTE length (before
+    tokenization, so a long text cannot buy tokenizer CPU), and a TOKEN BUDGET over the built Laya
+    rows (after tokenization, before any forward). The token count of a text is the length of its
+    BUILT Laya row — the ids the forward actually consumes, at most `row_max_tokens` (512) per text —
+    and the budget is the SUM over the request. A legal request is therefore at most two full-window
+    rows or eight short ones.
+
+    THE BUDGET IS DERIVED, NOT CHOSEN. Spike 026 measured, on default Lambda (10 240 MB, Graviton2):
+    cold start 11.3-12.0 s, and 5.6 s for one 512-token row, i.e. 11 ms per built token at 512. The
+    probe replay every cold load performs costs 2 probes x `probe_max_row_tokens` (48,
+    decide-apr-v1) x 11 ms = 1056 ms, declared UP to `probe_budget_ms` 1100. With a 4 000 ms margin
+    the room left for inference is 30000 - 12000 - 1100 - 4000 = 12900 ms, which buys
+    12900 / 11 = 1172 tokens; the contract declares that DOWN to 1024 (two full 512-token rows). The
+    11 ms/token price was measured on 512-token rows, so it already prices the CONCENTRATED shape
+    whose attention cost is largest (two 512-token rows carry 4x the summed squared length of eight
+    128-token rows). The live accepted-region probe measures BOTH shapes rather than trusting the
+    per-token price for either (`accepted_region_cold`).
+
+    REFUSE, NEVER DEFAULT, NEVER ECHO. Every refusal is `pmcp::Error::validation`, names this
+    contract file and the constant key it enforces, reports the OBSERVED value, and never echoes the
+    offending text (ASVS V7: an oversized string reflected back re-materialises the bytes the bound
+    refuses and puts attacker-controlled content in logs).
+
+    PROVABILITY HONESTY. `cargo-kani` is not installed in this repository and there is not one
+    `#[kani::proof]` harness anywhere under `crates/`. The `kani_harnesses:` entry below is DECLARED
+    and NOT EXECUTED; it names the runnable proptest that is the actual evidence (Phase 2 decision
+    in STATE.md). Nothing here should be read as a machine-checked proof.
+
+    ANNOTATION HONESTY. The `#[contract]` attribute in this repository is METADATA-ONLY (see
+    setfit-apr-v1): no precondition or postcondition is injected into the annotated function. The
+    enforcement mechanism for everything below is the named test, never the annotation.
+
+    BINDING HONESTY, AND STAGED TEST REFERENCES. This contract is committed BEFORE either server
+    exists (plan 08-01; D-07's claims-gate philosophy — a bound chosen after seeing a result is not
+    a bound). Every equation is registered in `contracts/aprender/binding.yaml` with
+    `status: pending` (a BIND-004 warning `make contract-audit-phase8` tolerates; a MISSING row is
+    BIND-001 and fails it). Likewise no falsification test below cites a Rust test that does not
+    exist yet: CI's strict-binding gate (`scripts/check_contract_test_binding.sh`) starts a new
+    contract at ZERO dangling references, so each entry carries a prose `implemented_by:` naming the
+    plan, and the plan that writes the test adds its `test:` line in the same commit as the test.
+    The live cold probe carries the gate's explicit deferred-live marker `LIVE-PENDING`.
+  references:
+    - 'Model Context Protocol specification 2025-06-18, `tools/call` and `tools/list`.'
+    - 'crates/.pmcp/deploy.toml.template:51 — the API Gateway HTTP API 30 s integration timeout that cannot be raised.'
+    - 'pmcp 2.19.3 src/server/limits.rs:46,49 — DEFAULT_MAX_REQUEST_BYTES 4 MiB, DEFAULT_MAX_TOOL_ARGS_BYTES 1 MiB (the transport ceiling this boundary sits inside).'
+    - '.claude/skills/spike-findings-aprender/sources/026-laya-mcp-default-lambda/ — cold 11.3-12.0 s, 94-token tweet 0.75 s, 512-token row 5.6 s on Graviton2 default Lambda.'
+    - '.claude/skills/spike-findings-aprender/references/laya-rust-inference.md — the Laya row builder, markers and right truncation.'
+    - 'contracts/decide-apr-v1.yaml — the artifact this boundary serves; probe_max_row_tokens and the task.json schema.'
+    - 'contracts/forecast-tool-boundary-v1.yaml — the thin-server boundary precedent this file follows.'
+  depends_on:
+    - decide-apr-v1
+
+# Machine-readable mirror of the boundary numbers. FLAT integer scalars only, so
+# `test_support::constant_u64("decide-tool-boundary-v1", key)` reads every one of them and no
+# nested value can exist that nothing validates (pv's `Contract` struct does not type
+# `constants:` at all). The Rust constants in aprender-mcp-decide are ASSERTED EQUAL to these.
+constants:
+  # ---- the three request bounds, checked in this order ----
+  classify_min_texts: 1
+  classify_max_texts: 8
+  # UTF-8 BYTES per text, checked BEFORE tokenization so a long text cannot buy tokenizer CPU.
+  # 16 KiB is ~32x the longest text a 512-token row can consume; a text past it is refused, not
+  # truncated, because the tokenizer would have to see all of it to find the 512th token.
+  classify_max_text_bytes: 16384
+  # Sum of BUILT Laya row lengths over the request, checked after tokenization and before any
+  # forward. Derivation (all constants below): (30000 - 12000 - 1100 - 4000) / 11 = 1172 tokens,
+  # declared DOWN to 1024 = 2 x row_max_tokens.
+  classify_max_total_tokens: 1024
+  # Laya's max_len: the most tokens one built row can hold. Cross-reference only; the artifact's
+  # own agent config is the authority for the value the forward uses.
+  row_max_tokens: 512
+  # ---- admission (per process) ----
+  classify_max_in_flight: 1
+  classify_max_pending: 4
+  # ---- the envelope the token budget is priced against ----
+  api_gateway_timeout_ms: 30000
+  # spike 026: 11.3-12.0 s cold start on default Lambda 10 240 MB (download + sha256 + ladder).
+  cold_start_budget_ms: 12000
+  # DERIVED: 2 probes x probe_max_row_tokens (48, decide-apr-v1) x 11 ms = 1056 ms, declared UP.
+  probe_budget_ms: 1100
+  margin_ms: 4000
+  # spike 026: 5.6 s / 512 tokens on Graviton2, rounded up to a whole millisecond.
+  g2_ms_per_token_at_512: 11
+
+equations:
+
+  classify_count_bound:
+    formula: 'accept(req) requires classify_min_texts <= len(req.texts) <= classify_max_texts'
+    domain: 'untrusted JSON-RPC `tools/call classify` arguments to aprender-mcp-decide or aprender-mcp-decide-lambda'
+    codomain: 'either the next bound is checked, or a pmcp::Error::validation naming classify_max_texts (or classify_min_texts) and the observed count'
+    invariants:
+      - 'checked FIRST, before any text is read, so an oversized list costs one length comparison'
+      - 'the Rust constants are asserted EQUAL to constants.classify_min_texts / classify_max_texts by the contract-mirror test (FALSIFY-DECIDE-TOOL-007) — the contract is the source, the code is the mirror'
+      - 'N = classify_max_texts is accepted and N + 1 is refused by the same message; an empty list is refused naming classify_min_texts'
+    preconditions:
+      - 'the arguments deserialized under deny_unknown_fields, i.e. every key was known'
+
+  classify_text_bytes_bound:
+    formula: 'accept(req) requires forall t in req.texts: len_utf8_bytes(t) <= classify_max_text_bytes'
+    domain: 'each element of req.texts, an arbitrary-length String on both transports'
+    codomain: 'either tokenization proceeds, or a validation refusal naming the text INDEX, its observed byte length, the key classify_max_text_bytes and its value — never the text'
+    invariants:
+      - 'checked BEFORE tokenization: the tokenizer must read a whole text to find where 512 tokens end, so a byte bound is the only bound that can stop a long text from buying tokenizer CPU'
+      - 'on BYTES, not chars: String::len is bytes and bytes are what the tokenizer walks'
+      - 'the bound is independent of the token budget: a text inside it may still build to 512 tokens and be truncated (truncation_flag)'
+    preconditions:
+      - 'classify_count_bound holds, so at most classify_max_texts byte lengths are read'
+
+  classify_token_budget:
+    formula: 'accept(req) requires sum(len(build_row(task, t)) for t in req.texts) <= classify_max_total_tokens, where classify_max_total_tokens <= floor((api_gateway_timeout_ms - cold_start_budget_ms - probe_budget_ms - margin_ms) / g2_ms_per_token_at_512) = floor((30000 - 12000 - 1100 - 4000) / 11) = 1172'
+    domain: 'the built Laya rows of an admitted request (task prefix + markers + state, right-truncated to row_max_tokens)'
+    codomain: 'either the forward runs, or a validation refusal naming classify_max_total_tokens, the observed sum and the per-text built lengths — never the texts'
+    invariants:
+      - 'the unit is the BUILT ROW length — the ids the forward actually consumes, at most row_max_tokens per text — not the raw token count of the text, so a truncated text counts 512, not its raw length'
+      - 'checked after tokenization and BEFORE any forward: a refused request costs tokenization only'
+      - '1024 is the declared value, DOWN from the derived 1172: the remainder is headroom for Graviton-generation variance, which spike 026 measured as a ~1.5x lottery'
+      - 'the price is per token at 512, i.e. it already charges the concentrated shape whose attention cost is largest; the per-token price is NOT trusted for either shape — accepted_region_cold measures both live'
+      - 'exactly-at the budget is accepted and one token over is refused (FALSIFY-DECIDE-TOOL-003)'
+    preconditions:
+      - 'classify_text_bytes_bound holds for every text, so tokenization is bounded'
+
+  classify_admission:
+    formula: 'running(p) <= classify_max_in_flight AND running(p) + waiting(p) <= classify_max_pending for every process p; a request arriving when running + waiting == classify_max_pending is refused immediately'
+    domain: 'concurrent classify requests reaching one server process (stdio or one Lambda instance)'
+    codomain: 'either an admission slot (the computation runs or waits in a bounded queue), or an immediate validation refusal naming classify_max_pending'
+    invariants:
+      - 'never queued without bound: the (classify_max_pending + 1)th concurrent request is refused at arrival, not parked'
+      - 'tokenization runs INSIDE the admitted blocking section, never on the async handler path, so admission counts all per-request CPU work'
+      - 'a caller that disconnects while its computation runs does NOT free the slot early: the slot is released only when the blocking work finishes, so admission counts real CPU work rather than live connections'
+      - 'classify_max_in_flight = 1 because one forward already uses every core the GEMM can reach; a second concurrent forward only lengthens both'
+
+  classify_response_shape:
+    formula: 'resp.labels == task.criteria_names_in_document_order AND forall r in resp.results: r.label == resp.labels[argmax(r.probabilities)] AND len(r.probabilities) == K AND |sum(r.probabilities) - 1| <= 1e-6 AND r has fields {label, probabilities, tokens, truncated} AND resp.model has fields {artifact_sha256, recipe_id, method, base}'
+    domain: 'a request that passed every bound and admission'
+    codomain: 'one JSON object: top-level `labels` array, `results` array (one per input text, in input order), `model` identity object'
+    invariants:
+      - 'probabilities are an ARRAY in the order of top-level `labels`, NEVER a map keyed by label: map iteration order depends on whether serde_json/preserve_order is enabled, which pmcp 2.19.3 turns on for every binary linking it while a library tested alone gets key-sorted maps (RESEARCH Pitfall 2)'
+      - 'labels order equals the artifact task.json criteria order under BOTH serde_json map backings (FALSIFY-DECIDE-TOOL-004)'
+      - 'model identity is D-11: artifact_sha256 = sha256 of the whole .apr file bytes, recipe_id = sha256 of the recipe.json blob bytes (decide-apr-v1 identity)'
+      - '`tokens` is the built-row length the budget charged for that text'
+
+  truncation_flag:
+    formula: 'r.truncated == (len(tokenize(t)) > state_room(task)), where state_room(task) = row_max_tokens - len(task_prefix_with_markers(task))'
+    domain: 'each text of an admitted request, with the artifact task'
+    codomain: 'a boolean per result'
+    invariants:
+      - 'reproduces Laya''s RIGHT truncation: the state is cut from the end to fit the room the builder leaves after the task prefix and markers'
+      - 'a text exactly filling the room is not truncated; one token more is (D-12)'
+      - 'the flag is informational and never a refusal: truncation is Laya''s own semantics, served faithfully'
+
+  refusal_names_bound:
+    formula: 'forall refusal e: e.kind == pmcp::Error::validation AND e.message contains "decide-tool-boundary-v1" AND e.message contains the violated constant key AND forall t in req.texts with len(t) > 0: t is not a substring of e.message'
+    domain: 'every refusal the classify tool can produce'
+    codomain: 'a validation-class error whose message names the fix and carries no caller text'
+    invariants:
+      - 'the caller''s fault stays the caller''s fault: an internal code on any bound refusal is a defect'
+      - 'never echoes the offending text (ASVS V7): reflecting an oversized string re-materialises the refused bytes and puts attacker-controlled content into logs'
+      - 'reports OBSERVED values (count, byte length, token sum, index) so the caller learns exactly what to reduce'
+
+  accepted_region_cold:
+    formula: 'forall shape in {CONCENTRATED, DISTRIBUTED}, forall recorded cold sample s of shape: wall_ms(s) < api_gateway_timeout_ms, where CONCENTRATED = ceil(classify_max_total_tokens / row_max_tokens) = 2 texts of classify_max_text_bytes each (truncated to 2 x 512 built tokens) and DISTRIBUTED = classify_max_texts = 8 texts whose built rows total the largest value <= classify_max_total_tokens'
+    domain: 'one HTTP request: a maximal legal `tools/call classify` arriving as the FIRST POST at a COLD default-Lambda instance of aprender-mcp-decide-lambda on pmcp.run'
+    codomain: 'a successful classify response inside the API Gateway cap, for every recorded cold sample of both shapes'
+    invariants:
+      - 'the unit is ONE HTTP request. A stateless client''s `initialize` may land on a different, already-warm instance, so the cold instance pays download + sha256 + load ladder + probe replay + inference inside the `tools/call` itself; that request is the worst legal one and the guarantee is stated for it'
+      - 'CONCENTRATED — the fewest texts that reach the budget: largest attention cost (quadratic in row length) and largest tokenizer input. DISTRIBUTED — classify_max_texts texts: largest per-row overhead. BOTH must hold; neither is inferred from the other'
+      - 'a sample counts as COLD only with independent evidence that the request performed the model load: the server''s load log line correlated to the probe''s request id. A sample without that evidence is warm and does not count toward this claim'
+      - 'EVERY recorded cold sample must pass — a best-of-N is not an accepted region (the Phase 7 accepted-region lesson: a limit is only as good as the worst request it admits)'
+      - 'falsified LIVE by plan 08-11 (`just laya-deploy-verify`); the maximal request is built by aprender_mcp_decide_lambda::probe::build_maximal_request (plan 08-07); the binding flips from pending only on 08-11''s evidence (plan 08-12)'
+    preconditions:
+      - 'the deployed artifact passed decide-apr-v1 deploy_eligibility'
+
+proof_obligations:
+
+  - type: bound
+    property: 'The server Rust bounds are equal to the contract constants, not merely similar to them'
+    formal: 'MIN_TEXTS == constants.classify_min_texts AND MAX_TEXTS == constants.classify_max_texts AND MAX_TEXT_BYTES == constants.classify_max_text_bytes AND MAX_TOTAL_TOKENS == constants.classify_max_total_tokens AND MAX_IN_FLIGHT == constants.classify_max_in_flight AND MAX_PENDING == constants.classify_max_pending'
+    applies_to: all
+
+  - type: bound
+    property: 'The declared token budget does not exceed the budget derived from the Lambda envelope'
+    formal: 'classify_max_total_tokens * g2_ms_per_token_at_512 + cold_start_budget_ms + probe_budget_ms + margin_ms <= api_gateway_timeout_ms'
+    applies_to: all
+
+  - type: invariant
+    property: 'Every accepted request satisfies all three request bounds, checked in order count -> bytes -> tokens'
+    formal: 'forall req: accepted(req) implies classify_count_bound(req) AND classify_text_bytes_bound(req) AND classify_token_budget(req)'
+    applies_to: all
+
+  - type: ordering
+    property: 'Response probabilities are ordered by the task criteria, never by map iteration'
+    formal: 'forall resp, i: resp.results[i].probabilities[k] is the probability of resp.labels[k], and resp.labels == task.criteria in document order'
+    applies_to: all
+
+  - type: bound
+    property: 'Admission never exceeds the pending bound'
+    formal: 'forall t: running(t) + waiting(t) <= classify_max_pending AND running(t) <= classify_max_in_flight'
+    applies_to: all
+
+  - type: safety
+    property: 'No refusal message contains caller text'
+    formal: 'forall req, e = refuse(req): forall t in req.texts, len(t) > 0: not substring(t, e.message)'
+    applies_to: all
+
+falsification_tests:
+
+  - id: FALSIFY-DECIDE-TOOL-001
+    rule: 'The count bound admits N = classify_max_texts and refuses N + 1 and 0'
+    prediction: 'A request of 8 short texts is classified; 9 texts and an empty list are refused with validation errors naming classify_max_texts and classify_min_texts respectively.'
+    implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests); the test: line is added in that plan''s commit'
+    if_fails: 'The count bound is off by one or absent, so a request the token budget was never priced for reaches the forward.'
+
+  - id: FALSIFY-DECIDE-TOOL-002
+    rule: 'A text over classify_max_text_bytes is refused before tokenization'
+    prediction: 'A 16385-byte text is refused naming classify_max_text_bytes and its index; a 16384-byte text is tokenized (and truncated). A multi-byte text whose char count fits but whose byte length does not is refused.'
+    implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests)'
+    if_fails: 'The byte check moved after tokenization, or counts chars: a long text now buys tokenizer CPU the budget never priced.'
+
+  - id: FALSIFY-DECIDE-TOOL-003
+    rule: 'The token budget accepts exactly-at and refuses one over'
+    prediction: 'Texts whose built rows sum to exactly 1024 are classified; a request summing to 1025 is refused naming classify_max_total_tokens, the observed sum and the per-text lengths, before any forward runs.'
+    implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests)'
+    if_fails: 'The budget counts raw tokens instead of built-row tokens, or is checked after the forward: the 30 s cap is no longer priced.'
+
+  - id: FALSIFY-DECIDE-TOOL-004
+    rule: 'Response labels order equals task.json criteria order under both serde_json map backings'
+    prediction: 'With serde_json/preserve_order on and off, a task whose criteria are not in alphabetical order (none, against, favor) yields labels [none, against, favor] and probabilities in that order.'
+    implemented_by: 'plans 08-04 (order-preserving task parse) and 08-06 (response shape); test: lines added there'
+    if_fails: 'A map backing reordered the labels: every probability is now attributed to the wrong label and the argmax label may be wrong (RESEARCH Pitfall 2).'
+
+  - id: FALSIFY-DECIDE-TOOL-005
+    rule: 'The truncation flag reproduces Laya''s right truncation'
+    prediction: 'A text longer than the state room returns truncated = true and tokens = row_max_tokens; a text exactly filling the room returns truncated = false.'
+    implemented_by: 'plan 08-06 (classify_response tests)'
+    if_fails: 'The flag is computed from raw text length or the wrong room: callers cannot tell which answers were made on a cut text (D-12).'
+
+  - id: FALSIFY-DECIDE-TOOL-006
+    rule: 'Every refusal names the contract key and omits the caller text'
+    prediction: 'For each refusal class, the validation message contains "decide-tool-boundary-v1" and the violated key, and does not contain the (distinctive) text sent.'
+    implemented_by: 'plan 08-06 (refusal tests)'
+    if_fails: 'A refusal echoes caller text (ASVS V7) or leaves the caller guessing which bound fired.'
+
+  - id: FALSIFY-DECIDE-TOOL-007
+    rule: 'Every Rust boundary constant equals this file'
+    prediction: 'The contract-mirror test reads every constants: key via test_support::constant_u64 and finds each equal to its Rust constant; changing one YAML value alone turns it red naming the key.'
+    implemented_by: 'plan 08-06 (contract-mirror test)'
+    if_fails: 'A bound changed in exactly one place: the published boundary and the served one disagree.'
+
+  - id: FALSIFY-DECIDE-TOOL-008
+    rule: 'Admission refuses the (pending + 1)th concurrent request and releases a slot only when its blocking work ends'
+    prediction: 'With classify_max_pending held busy, one more request is refused immediately naming classify_max_pending; a caller dropped mid-computation keeps its slot until the blocking work finishes.'
+    implemented_by: 'plan 08-06 (try_admit tests)'
+    if_fails: 'Requests queue without bound, or a disconnect frees a slot whose CPU work is still running: admission no longer counts real work.'
+
+  - id: FALSIFY-DECIDE-TOOL-009
+    rule: 'The maximal legal classify completes under the API Gateway cap on a cold instance, for both shapes and every cold sample'
+    prediction: 'Every recorded cold sample of the CONCENTRATED (2 x 16384-byte texts) and DISTRIBUTED (8 texts, <= 1024 built tokens) shapes, each proven cold by its load log line, completes under 30000 ms as the instance''s first POST.'
+    test: 'LIVE-PENDING — falsified live by plan 08-11 (just laya-deploy-verify); no unit-test surface: it needs a cold pmcp.run Lambda'
+    if_fails: 'The token budget admits a request the envelope cannot serve cold: lower classify_max_total_tokens (re-deriving it here first) or move the tier, never raise the margin after the fact.'
+
+kani_harnesses:
+
+  # DECLARED, NOT EXECUTED. cargo-kani is not installed in this repository and no
+  # #[kani::proof] harness exists anywhere under crates/. The entry names the runnable,
+  # identically bounded test that is the ACTUAL evidence.
+  - id: KANI-DECIDE-TOOL-001
+    obligation: 'Every accepted request satisfies all three request bounds, checked in order count -> bytes -> tokens'
+    property: 'forall n <= classify_max_texts + 1, forall byte lengths <= classify_max_text_bytes + 1, forall built lengths <= row_max_tokens: precheck accepts iff count, bytes and token-sum bounds all hold, and the first failing bound in order is the one named'
+    bound: 9
+    strategy: bounded_int
+    harness: 'NOT EXECUTED — the evidence will be the runnable proptest over the same predicate in aprender-mcp-decide (plan 08-06), which draws counts, byte lengths and built-row lengths across each boundary'
+
+qa_gate:
+  id: F-DECIDE-TOOL-001
+  name: 'Decision classify tool boundary gate'
+  description: >
+    The blocking gate for the classify tool boundary. Every correctness check is unit-falsifiable
+    and runs in CI once plan 08-06 lands its tests; the accepted-region check is LIVE and is run by
+    plan 08-11 against a cold pmcp.run instance, never by a libtest assertion. Until then every
+    binding is `pending` and `make contract-audit-phase8` tolerates exactly that.
+  checks:
+    - 'contract schema validity (pv validate, zero errors) and non-zero pv status counts'
+    - 'every Rust boundary constant asserted EQUAL to this file'
+    - 'count, byte and token-budget bounds each refuse one past and accept exactly-at'
+    - 'response labels and probabilities ordered by task.json under both serde_json backings'
+    - 'truncation flag on an over-room text'
+    - 'every refusal validation-class, naming the key, omitting the text'
+    - 'admission refuses pending + 1 and holds a slot until its blocking work ends'
+    - 'LIVE, NOT IN CI: both maximal shapes complete cold under 30 s for every proven-cold sample (plan 08-11)'
+  pass_criteria: 'FALSIFY-DECIDE-TOOL-001..008 pass on every host and each has been observed RED under an induced negative; FALSIFY-DECIDE-TOOL-009 has live evidence for both shapes with every cold sample under api_gateway_timeout_ms.'
+  falsification: >
+    Change constants.classify_max_total_tokens alone (touching no Rust) and the contract-mirror test
+    must go red naming the key; revert and it goes green. Raise the budget past the derivation and
+    the second proof obligation is violated on paper before any deploy can violate it live.

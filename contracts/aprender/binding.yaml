@@ -2106,6 +2106,66 @@ bindings:
   signature: 'fn forecast(args: &ForecastArgs) -> Result<ForecastResponse, ForecastError>'
   status: implemented
   notes: 'The default seed is a CONTRACT value, so an unseeded request is still reproducible.'
+# ---- Phase 8, plan 08-01: decide-tool-boundary-v1 (the classify tool boundary) ----
+# Every row is `status: pending`: 08-01 commits the contract BEFORE aprender-mcp-decide exists
+# (D-07). pending is BIND-004, a WARNING `make contract-audit-phase8` tolerates; a MISSING row is
+# BIND-001 and fails it. Each row is flipped to `implemented` by the plan named in its notes.
+- contract: decide-tool-boundary-v1.yaml
+  equation: classify_count_bound
+  module_path: aprender_mcp_decide
+  function: precheck
+  signature: 'fn precheck(task: &Task, tokenizer: &Tokenizer, texts: &[String]) -> Result<Vec<BuiltRow>, pmcp::Error>'
+  status: pending
+  notes: 'First of the three request bounds, checked before any text is read. Implemented by plan 08-06.'
+- contract: decide-tool-boundary-v1.yaml
+  equation: classify_text_bytes_bound
+  module_path: aprender_mcp_decide
+  function: precheck
+  signature: 'fn precheck(task: &Task, tokenizer: &Tokenizer, texts: &[String]) -> Result<Vec<BuiltRow>, pmcp::Error>'
+  status: pending
+  notes: 'Per-text UTF-8 byte bound, checked BEFORE tokenization. Implemented by plan 08-06.'
+- contract: decide-tool-boundary-v1.yaml
+  equation: classify_token_budget
+  module_path: aprender_mcp_decide
+  function: precheck
+  signature: 'fn precheck(task: &Task, tokenizer: &Tokenizer, texts: &[String]) -> Result<Vec<BuiltRow>, pmcp::Error>'
+  status: pending
+  notes: 'Sum of BUILT Laya row lengths <= 1024, checked after tokenization and before any forward. Implemented by plan 08-06.'
+- contract: decide-tool-boundary-v1.yaml
+  equation: classify_admission
+  module_path: aprender_mcp_decide
+  function: try_admit
+  signature: 'fn try_admit(&self) -> Result<AdmissionPermit, pmcp::Error>'
+  status: pending
+  notes: 'In-flight 1 / pending 4 per process; the permit is released only when the blocking work ends. Implemented by plan 08-06.'
+- contract: decide-tool-boundary-v1.yaml
+  equation: classify_response_shape
+  module_path: aprender_mcp_decide
+  function: classify_response
+  signature: 'fn classify_response(decider: &VerifiedDecider, rows: &[BuiltRow]) -> ClassifyResponse'
+  status: pending
+  notes: 'labels ARRAY in task.json order, probabilities arrays in that order, model identity (D-11). Implemented by plan 08-06.'
+- contract: decide-tool-boundary-v1.yaml
+  equation: truncation_flag
+  module_path: aprender_mcp_decide
+  function: classify_response
+  signature: 'fn classify_response(decider: &VerifiedDecider, rows: &[BuiltRow]) -> ClassifyResponse'
+  status: pending
+  notes: 'truncated == token count exceeded the state room Laya''s builder leaves (D-12). Implemented by plan 08-06.'
+- contract: decide-tool-boundary-v1.yaml
+  equation: refusal_names_bound
+  module_path: aprender_mcp_decide
+  function: precheck
+  signature: 'fn precheck(task: &Task, tokenizer: &Tokenizer, texts: &[String]) -> Result<Vec<BuiltRow>, pmcp::Error>'
+  status: pending
+  notes: 'Every bound refusal is pmcp::Error::validation naming the contract file and key, never echoing caller text. Implemented by plan 08-06.'
+- contract: decide-tool-boundary-v1.yaml
+  equation: accepted_region_cold
+  module_path: aprender_mcp_decide_lambda::probe
+  function: build_maximal_request
+  signature: 'fn build_maximal_request(shape: MaximalShape) -> serde_json::Value'
+  status: pending
+  notes: 'The maximal-request builder (CONCENTRATED and DISTRIBUTED shapes) lands in plan 08-07; the claim itself is falsified LIVE by plan 08-11 (just laya-deploy-verify) against a cold pmcp.run instance, and plan 08-12 flips this row only on 08-11''s evidence.'
 critical_path:
 - softmax
 - rmsnorm

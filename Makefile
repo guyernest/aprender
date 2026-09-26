@@ -57,7 +57,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 contract-audit-phase6 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests setfit-bench-door-probe setfit-bench-door-probe-build lint-current check-wasm32
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 contract-audit-phase6 contract-audit-phase8 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests setfit-bench-door-probe setfit-bench-door-probe-build lint-current check-wasm32
 
 # Default target
 all: tier2
@@ -378,6 +378,13 @@ tier3:
 # ANY BIND- line as Phase 5's does, and ALSO resolves every row to a real definition site —
 # see the target's comment block for why zero BIND- findings is not that proof.
 	@$(MAKE) contract-audit-phase6
+# Phase 8's equivalent, wired here for the reason the five lines above exist: a target outside
+# the tiers is a target that stops being run. Scoped to $(PHASE8_CONTRACTS). Like Phase 4's it
+# tolerates `status: pending` (BIND-004) and refuses a missing entry (BIND-001), because 08-01
+# commits the four Phase 8 contracts BEFORE the code and the runs that answer to them. Its RED
+# and GREEN states were both measured with the status captured directly, never through a pipe.
+# Plan 08-12 tightens it to refuse any BIND- line. See the target's own comment block.
+	@$(MAKE) contract-audit-phase8
 # TRN-06's AUTHORITATIVE reproducibility claim (D-16) and D-13's GEMM control, wired
 # here for the reason the three lines above exist: a target outside the tiers is a
 # target that stops being run. Both were run STANDALONE first with the status captured
@@ -1929,7 +1936,8 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/prophet-parity-v1.yaml \
              contracts/neuralprophet-parity-v1.yaml \
              contracts/chronos-bolt-parity-v1.yaml \
-             contracts/forecast-tool-boundary-v1.yaml
+             contracts/forecast-tool-boundary-v1.yaml \
+             contracts/decide-tool-boundary-v1.yaml
 
 # The two Phase 2 contracts, audited as a BLOCKING tier3 gate by
 # `contract-audit-phase2` below. Deliberately a separate, narrower list than
@@ -2002,6 +2010,26 @@ PHASE6_CONTRACTS := contracts/forecast-tool-boundary-v1.yaml \
                     contracts/prophet-parity-v1.yaml \
                     contracts/neuralprophet-parity-v1.yaml \
                     contracts/chronos-bolt-parity-v1.yaml
+
+# The Phase 8 contracts, audited as a BLOCKING tier3 gate by `contract-audit-phase8` below.
+# Same narrowing rationale as PHASE2..6_CONTRACTS: scoped to what this phase OWNS, because the
+# repo-wide `contract-audit` is vacuous (see that target's comment block).
+#
+# FOUR ENTRIES, AND LIKE PHASE 6 THAT IS NOT A DEPARTURE FROM Ph1 D-23: the count that matters is
+# contracts EDITED, which is zero. Plan 08-01 commits all four BEFORE any training run, parity run
+# or deploy reads a result (D-07: a threshold chosen after seeing a result is not a gate). They
+# are four because they are four DIFFERENT falsification surfaces, the Phase 6 argument:
+#   - decide-tool-boundary-v1: the SERVING surface (classify bounds priced to the 30 s API
+#     Gateway cap, admission, response shape), falsified by server tests and a live cold probe;
+#   - laya-finetune-gate-v1: the TRAINING surface (recipe, calibration, gate thresholds, seed
+#     policy, run-dir schemas), falsified by the trainer self-test and the Rust gate verifier;
+#   - laya-parity-v1: the NUMERIC surface (torch -> .apr -> Rust tolerances), falsified against
+#     the Laya oracle fixtures;
+#   - decide-apr-v1: the ARTIFACT surface (schema, load ladder, probes, identity, task schema),
+#     falsified by the packer and loader tests.
+# Folding the gate into the tool boundary would make one contract whose equations no single
+# falsification run can evaluate.
+PHASE8_CONTRACTS := contracts/decide-tool-boundary-v1.yaml
 
 # NOTE (plan 02-01, D-24): $(CONTRACTS) is an EXPLICIT HARDCODED LIST, not a glob
 # over contracts/*.yaml. A contract file that merely EXISTS in contracts/ is
@@ -2467,6 +2495,50 @@ contract-audit-phase6: ## Audit Phase 6 binding coverage + source resolution (BL
 	fi; \
 	echo "Phase 6 source resolution: resolved $$resolved Phase 6 binding rows to definition sites"; \
 	echo "Phase 6 binding audit: $$audited contract(s) audited, zero BIND- findings"
+
+# Phase 8's twin of contract-audit-phase4, COPIED from it rather than from phase5/6, because
+# Phase 8 is in phase 4's position: plan 08-01 commits all four Phase 8 contracts BEFORE any
+# code that implements them exists (D-07). So every equation is registered `status: pending`
+# in $(BINDING), which `pv audit` reports as BIND-004, a WARNING — this gate PASSES on it. A
+# MISSING entry stays BIND-001, an ERROR — this gate FAILS on it. It tolerates "not written yet"
+# and refuses "not tracked at all". Plan 08-12 tightens it to refuse ANY BIND- line (the
+# phase5/6 form) once every Phase 8 binding has been flipped by the plan that lands its code.
+#
+# THE `set +e` AND THE `status=$$?` ON ITS OWN LINE ARE BOTH LOAD-BEARING (copied from
+# contract-audit-phase4): this Makefile sets `.SHELLFLAGS := -e -c`, so a failing
+# `$(PV_BIN) audit` would abort the recipe before the status could be read, and the status is
+# read from `$$?` directly, NEVER through a pipe (CLAUDE.md Verification rule 1). The `audited`
+# counter and the empty-list FAIL keep the gate from passing over nothing.
+#
+# The induced failure mode was OBSERVED, not assumed: plan 08-01 deleted one
+# decide-tool-boundary-v1 binding row, ran this target and saw rc != 0 with a FAIL line, then
+# restored the row and saw rc 0. The rc values are in 08-01-SUMMARY.md.
+contract-audit-phase8: ## Audit Phase 8 binding coverage (BLOCKING, wired into tier3)
+	@echo "Auditing binding coverage for the Phase 8 contracts..."
+	@unbound=""; \
+	audited=0; \
+	for contract in $(PHASE8_CONTRACTS); do \
+		echo "  $$contract"; \
+		audited=$$((audited + 1)); \
+		set +e; \
+		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+		status=$$?; \
+		set -e; \
+		if [ "$$status" -ne 0 ]; then \
+			unbound="$$unbound $$contract"; \
+		fi; \
+	done; \
+	if [ "$$audited" -eq 0 ]; then \
+		echo "FAIL: PHASE8_CONTRACTS is empty — this gate audited nothing and would have reported success."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$unbound" ]; then \
+		echo "FAIL: unbound equations remain in:$$unbound"; \
+		echo "Every equation of a Phase 8 contract needs an entry in $(BINDING)."; \
+		echo "An equation still being written belongs there as 'status: pending', not absent."; \
+		exit 1; \
+	fi; \
+	echo "Phase 8 binding audit: $$audited contract(s) audited, every equation is bound"
 
 
 # ============================================================================
