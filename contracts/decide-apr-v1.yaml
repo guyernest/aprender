@@ -369,8 +369,8 @@ falsification_tests:
   - id: FALSIFY-DECIDE-APR-007
     rule: 'Task criteria order survives both serde_json backings'
     prediction: 'A task with criteria (none, against, favor) parses to labels [none, against, favor] with preserve_order on and off.'
-    implemented_by: 'plan 08-04 (aprender_decide::task order tests); run standalone (preserve_order=OFF) and with -p aprender-mcp-setfit (preserve_order=ON), each run printing its backing via task::tests::serde_backing_canary'
-    test: 'cargo test -p aprender-decide --lib task::tests::stance_order_none_against_favor && cargo test -p aprender-decide -p aprender-mcp-setfit --lib task::tests::stance_order_none_against_favor'
+    implemented_by: 'plan 08-04 (aprender_decide::task order tests); run standalone (preserve_order=OFF) and with the test-only serde-preserve-order feature (preserve_order=ON), each leg printing its backing via task::tests::serde_backing_canary'
+    test: 'cargo test -p aprender-decide --lib task::tests::serde_backing_canary -- --nocapture && cargo test -p aprender-decide --lib task::tests::stance_order_none_against_favor && cargo test -p aprender-decide --features serde-preserve-order --lib task::tests::serde_backing_canary -- --nocapture && cargo test -p aprender-decide --features serde-preserve-order --lib task::tests::stance_order_none_against_favor'
     if_fails: 'Labels are attributed by map iteration order: every probability can be attributed to the wrong label.'
 
   - id: FALSIFY-DECIDE-APR-008

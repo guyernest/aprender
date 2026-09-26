@@ -18,6 +18,12 @@ readme = "README.md"
 name = "aprender_decide"
 path = "src/lib.rs"
 
+[features]
+# TEST-ONLY: turns on serde_json's insertion-ordered map so FALSIFY-DECIDE-APR-007's ON
+# leg is selected explicitly rather than by feature unification with another crate.
+# Never enable it in a shipped build (see the serde_json NOTE below).
+serde-preserve-order = ["serde_json/preserve_order"]
+
 [dependencies]
 # The reusable ModernBERT encoder and its primitives (D-13, OPS-03): Linear,
 # layer_norm, gelu_exact, attention and the prefix-aware `.apr` loader. Default
