@@ -914,6 +914,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "aprender-mcp-decide-lambda"
+version = "0.63.0"
+dependencies = [
+ "aprender-decide",
+ "aprender-mcp-decide",
+ "lambda_http",
+ "once_cell",
+ "pmcp",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aprender-mcp-forecast"
 version = "0.63.0"
 dependencies = [

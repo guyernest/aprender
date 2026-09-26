@@ -63,9 +63,10 @@ members = [
     "crates/aprender-mcp-forecast",
     "crates/aprender-mcp-chronos",
     "crates/aprender-mcp-chronos-lambda",
-    # Phase 8: method-neutral decision models (Laya on ModernBERT) + the thin decide MCP server (D-15)
+    # Phase 8: method-neutral decision models (Laya on ModernBERT) + the thin decide MCP server and its Lambda runtime (D-15)
     "crates/aprender-decide",
     "crates/aprender-mcp-decide",
+    "crates/aprender-mcp-decide-lambda",
     # --- APR-MONO Phase 2f: satellite repos (main crates) ---
     "crates/aprender-profile",
     "crates/aprender-profile-core",

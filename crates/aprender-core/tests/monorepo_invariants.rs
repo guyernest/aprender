@@ -318,6 +318,7 @@ fn test_no_unauthorized_binaries() {
         "aprender-mcp-chronos",         // Chronos-Bolt server (Phase 6 D-06; created in plan 06-07)
         "aprender-mcp-chronos-lambda",  // Chronos-Bolt AWS Lambda custom runtime (bootstrap)
         "aprender-mcp-decide",          // Laya decision server (Phase 8 D-15)
+        "aprender-mcp-decide-lambda",   // its AWS Lambda custom runtime (bootstrap) (Phase 8 D-15)
     ]
     .into();
 
@@ -432,9 +433,10 @@ fn test_no_unauthorized_binaries() {
     // that needs it.
     //
     // 7 -> 8: `aprender-mcp-decide`, authorized by Phase 8 CONTEXT D-15 (recorded at
-    // discuss-phase, before the crate existed). D-15 also authorizes
-    // `aprender-mcp-decide-lambda` (plan 08-07), which will take this to 9.
-    const DEPLOYMENT_UNIT_BASELINE: usize = 8;
+    // discuss-phase, before the crate existed).
+    // 8 -> 9: `aprender-mcp-decide-lambda` (plan 08-07), its Lambda `bootstrap`, which
+    // the same D-15 decision names as the pmcp.run deployment unit.
+    const DEPLOYMENT_UNIT_BASELINE: usize = 9;
     assert!(
         deployment_unit_bins.len() <= DEPLOYMENT_UNIT_BASELINE,
         "FALSIFY-MONO-011: the thin-MCP deployment-unit register grew to {} \

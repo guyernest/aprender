@@ -1,0 +1,53 @@
+[package]
+name = "aprender-mcp-decide-lambda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AWS Lambda loopback wrapper for the thin Laya decide MCP server (pmcp.run deployment, weights from S3)"
+readme = "README.md"
+# A deployment unit (Phase 8 D-15), never a library: registered in FALSIFY-MONO-011's
+# deployment_unit_bins, which requires publish = false.
+publish = false
+
+# AWS Lambda's Custom Runtime API requires the binary to be named `bootstrap`
+# exactly — a platform constant, not a choice. `cargo pmcp deploy` finds the
+# deployable by this name.
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[lib]
+name = "aprender_mcp_decide_lambda"
+path = "src/lib.rs"
+
+[dependencies]
+# The server crate owns the tool surface, the bounds and the load doors; this crate is
+# a transport shim over build_server + load_model_from_bytes (the chronos-lambda shape).
+aprender-mcp-decide = { path = "../aprender-mcp-decide" }
+# A NORMAL dependency, not a dev one: the local-file source reads through
+# `artifact::read_decide_apr_bytes_bounded` and the S3 loader caps on
+# `ArtifactLimits::CONTRACTED` in library code.
+aprender-decide = { path = "../aprender-decide" }
+pmcp = { version = "2.19", features = ["streamable-http", "schema-generation"] }
+
+lambda_http = "0.13"
+tokio = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+once_cell = "1.19"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The sha256 pin (APRENDER_DECIDE_SHA256) is checked on the downloaded bytes BEFORE
+# the load ladder parses anything.
+sha2 = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
