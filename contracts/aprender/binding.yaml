@@ -2227,6 +2227,13 @@ bindings:
   status: pending
   notes: 'Python-only: every scored file computed on the F16-saved checkpoint reloaded in fp32 (Pitfall 5). The recipe runs LOCALLY (just laya-train-selftest), not in CI. Implemented by plan 08-08.'
 - contract: laya-finetune-gate-v1.yaml
+  equation: early_stopping_train_side
+  module_path: justfile
+  function: laya-train-selftest
+  signature: 'just recipe: laya-train-selftest'
+  status: pending
+  notes: 'Python-only: early stopping on calibration-slice NLL at the bounded fitted T, best epoch restored, decided before any eval score (declared 2026-09-25 after the fixed_epochs demo gate failure). The recipe runs LOCALLY (just laya-train-selftest), not in CI. Implemented by plan 08-08.'
+- contract: laya-finetune-gate-v1.yaml
   equation: synthetic_not_deployable
   module_path: aprender_decide::verify
   function: verify_run

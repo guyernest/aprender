@@ -1,6 +1,6 @@
 contract: laya-finetune-gate
 metadata:
-  version: 1.0.0
+  version: 1.1.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -16,6 +16,11 @@ metadata:
     file at run time and never write them as literals. A threshold chosen after seeing a result is
     not a gate. Moving one after a run has been read is a `pv diff`-visible claims change that
     invalidates the recorded evidence.
+
+    AMENDMENT 1.1.0 (2026-09-25, after the D-19 fixed_epochs demo FAILED the gate on ECE). Additive
+    only: a second declared stopping rule (`early_stopping`), the optional recipe.json field that
+    names it, and the equation / test that bind it. No threshold, calibration bound, seed, data
+    rule or schema field of 1.0.0 moved; the failing fixed_epochs run remains valid evidence.
 
     THE GATE IS DECIDED ON RECOMPUTED METRICS, NOT REPORTED ONES. A gate report is a file a
     training run wrote; an edited report must not pass. So the metrics that DECIDE pass are
@@ -112,6 +117,47 @@ recipe:
   epochs_above_16_max: 12
   schedule: 'cosine annealing from each group lr to eta_min over epochs * ceil(n_fit / batch_size) steps'
   epoch_rule: 'shots_per_class <= 16 -> 12 epochs; above 16 -> an epoch count in [4, 12] declared in recipe.json before training'
+  # How training stops. Two declared stopping rules over the SAME loop and values above:
+  #   fixed_epochs    run exactly `epochs` epochs and ship the last (the spike-024 recipe; recipe.json
+  #                   carries no `early_stopping` key). D-19 demo run with it: recipe_id
+  #                   d0f4e40d39425e68d503f557f4f660eb9a73a4fb258da01f777b6f49362bcf20, GATE FAIL
+  #                   (margin 0.1299 passes; ece_post 0.3773 > gate_max_ece, T clamped at 5.0).
+  #   early_stopping  the `early_stopping:` block below; `epochs` becomes the MAXIMUM.
+  # The default for production runs is early_stopping (declared 2026-09-25, see that block's history).
+  stopping_rules: [fixed_epochs, early_stopping]
+  stopping_default: early_stopping
+
+early_stopping:
+  # D-04 / D-07 discipline. DECLARED 2026-09-25, AFTER the fixed_epochs demo run's gate report was read
+  # (recipe_id d0f4e40d…: GATE FAIL on ECE because 12 epochs memorise the shots, ce_last 0.0) and
+  # BEFORE any early-stopping run existed. It is therefore informed by that one result and is recorded
+  # as a NEW declared recipe (a new recipe_id), never as a tweak of the old one. The gate thresholds,
+  # the calibration bounds, the seeds and the data are UNCHANGED; the fixed_epochs run stays a valid,
+  # identifiable fail-closed test vector. One declared attempt: if this recipe also fails the gate,
+  # the run halts for a human decision rather than trying another rule.
+  name: early-stopping-calibration-nll-v1
+  max_epochs: 'the recipe epoch count (epochs_at_most_16_per_class = 12 at <= 16 shots/class; the declared --epochs above 16); recipe.json `epochs` records this MAXIMUM'
+  monitor: calibration_nll_at_fitted_t
+  monitor_formula: 'm_e = mean_i -log softmax(z_i / T*_e)[y_i] over the CALIBRATION slice rows i, where z are the model''s logits after epoch e and T*_e = fit_temperature(z, y, calibration_temp_min, calibration_temp_max) (equation calibration_fit_bounded) — the NLL the served, bounded temperature can reach'
+  monitor_why: 'The gate fails a model the bounded temperature cannot calibrate (T capped at 5.0). NLL at the best servable T measures exactly that, and it is a proper score; ECE over 12 rows in 15 bins is too coarse to rank epochs.'
+  mode: min
+  eval_every_epochs: 1
+  eval_point: 'after the last optimizer and scheduler step of each epoch'
+  first_candidate_epoch: 1
+  first_candidate_why: 'epoch 0 is the untrained base, which is the zero-shot baseline itself (margin 0); it is never a candidate'
+  patience_epochs: 3
+  min_delta: 0.001
+  improvement_rule: 'epoch e improves iff m_e < m_best - min_delta (strict); a non-finite m_e never improves'
+  stop_rule: 'stop after epoch e when e - best_epoch >= patience_epochs, or at max_epochs'
+  restore: best
+  restore_rule: 'the weights after best_epoch are restored (an exact copy taken when that epoch improved), then saved F16 as the shipped checkpoint'
+  tie_break: earliest
+  tie_break_rule: 'a later epoch must beat the best by MORE than min_delta, so among epochs within min_delta of each other the earliest is kept'
+  schedule: 'UNCHANGED: cosine over max_epochs * ceil(n_fit / batch_size) steps, as fixed_epochs; stopping truncates it, it is never re-planned'
+  monitor_precision: 'fp32 weights in eval mode on the training device, no grad, batched by recipe.batch_size with the training collate — a SELECTION signal only. Every REPORTED score (calibration fit, gate metrics, eval / zero-shot / probe files) is still computed on the F16 reload (f16_reload_scoring); T*_e is not the reported t_fitted.'
+  data_rule: 'The calibration slice is the SAME text-group-disjoint slice (split_disjointness, declared_seed) used for the temperature fit, and the ONLY data the monitor reads. It is used twice (stopping and T); both uses are train-side. eval.jsonl NEVER influences stopping, the restored epoch or T: the trainer never passes eval rows to training, and no eval probability is computed before the checkpoint is fixed (enforced by an ordering assertion in train.py: the stopping record and checkpoint/model.safetensors precede eval-probs.json).'
+  record: 'checkpoint/rl_agent_config.json `training.stopping` {rule, monitor, per_epoch [{epoch, monitor, t_star}], best_epoch, epochs_run, reason} — provenance Laya and the Rust AgentConfig reader ignore; the gate-report schema is unchanged'
+  recipe_json_field: 'recipe.json `early_stopping` {monitor, mode, eval_every_epochs, first_candidate_epoch, patience_epochs, min_delta, restore, tie_break}, copied from this block before training — so the recipe_id differs from every fixed_epochs recipe_id'
 
 recipe_variants:
   production:
@@ -144,6 +190,10 @@ demo:
   criteria_order: [none, against, favor]
   shots_per_class: 16
   epochs: 12
+  # The demo's stopping rule. fixed_epochs was run first (recipe_id d0f4e40d…, GATE FAIL, kept as a
+  # fail-closed test vector); the demo of record uses early_stopping (the early_stopping block, max 12).
+  stopping: early_stopping
+  superseded_run: 'fixed_epochs, recipe_id d0f4e40d39425e68d503f557f4f660eb9a73a4fb258da01f777b6f49362bcf20: margin 0.1299, ece_post 0.3773, t_applied 5.0 (clamp_hit) — GATE FAIL'
   declared_seed: 13
   variance_seeds: [13, 17, 23]
   selection: benchmarks/tweeteval-stance/selections/s16-seed13/selection-manifest.json
@@ -188,9 +238,10 @@ recipe_json_schema:
   proper_reward_w_rps: 'number: recipe.proper_reward_w_rps'
   schedule: 'string: "cosine"'
   shots_per_class: 'integer >= 0 (production: >= 1)'
-  epochs: 'integer >= 0 (production: per recipe.epoch_rule)'
+  epochs: 'integer >= 0 (production: per recipe.epoch_rule; under early_stopping this is the MAXIMUM)'
   seed: 'integer (production shipped checkpoint: == declared_seed)'
   base: 'object {family, repo, revision, checkpoint, sha256} (production: == base block)'
+  early_stopping: 'OPTIONAL object {monitor, mode, eval_every_epochs, first_candidate_epoch, patience_epochs, min_delta, restore, tie_break} equal to the early_stopping block; ABSENT = fixed_epochs. No other optional key exists.'
 
 gate_report_schema:
   schema: 'string: "laya-gate-report-v1"'
@@ -297,6 +348,18 @@ equations:
       - 'Pitfall 5: training leaves fp32 weights while D-17 serves F16; scoring the fp32 weights would describe a model that is never served'
       - 'the zero-shot baseline is the declared base loaded the same way'
 
+  early_stopping_train_side:
+    formula: 'best_epoch = min { e in [first_candidate_epoch, epochs_run] : m_e < min_{first_candidate_epoch <= j < e} m_j - min_delta (vacuous for e = first_candidate_epoch) AND no later epoch improves on m_e }, m_e = calibration_nll_at_fitted_t on the CALIBRATION slice; stop when e - best_epoch >= patience_epochs or e == max_epochs; shipped weights = weights after best_epoch'
+    domain: 'a training run whose recipe.json carries the `early_stopping` object (the early_stopping block)'
+    codomain: 'the restored best-epoch weights and the training.stopping record in rl_agent_config.json, both fixed BEFORE any eval probability exists'
+    invariants:
+      - 'the monitor reads the calibration slice only; eval.jsonl rows never reach the training function, the monitor, the restored epoch or the temperature fit'
+      - 'no eval probability is computed before the stopping record and the checkpoint are on disk (ordering assertion in train.py; mtime(checkpoint/model.safetensors) <= mtime(eval-probs.json))'
+      - 'epoch 0 (the untrained base) is never a candidate; ties go to the earliest epoch; a non-finite monitor never improves'
+      - 'the cosine schedule is the fixed_epochs one over max_epochs; stopping truncates it'
+    preconditions:
+      - 'split_disjointness holds for the run (the calibration slice is text-group-disjoint from fit)'
+
   synthetic_not_deployable:
     formula: 'recipe.variant == "synthetic-fixture" implies refuse(pack_for_serving) AND refuse(verify) AND refuse(deploy)'
     domain: 'any run dir or artifact'
@@ -330,6 +393,11 @@ proof_obligations:
   - type: invariant
     property: 'The shipped checkpoint is the declared seed'
     formal: 'shipped.seed == declared_seed'
+    applies_to: all
+
+  - type: independence
+    property: 'Early stopping, the restored epoch and the temperature are chosen without eval data'
+    formal: 'best_epoch, t_applied = f(train fit rows, calibration slice) AND eval-probs computed after the checkpoint is fixed'
     applies_to: all
 
   - type: safety
@@ -387,6 +455,12 @@ falsification_tests:
     implemented_by: 'plan 08-09 (aprender_decide::verify verify_run)'
     if_fails: 'A zero-epoch fixture on a tiny synthetic base can be served as a decision model.'
 
+  - id: FALSIFY-LAYA-GATE-009
+    rule: 'Early stopping is decided on the calibration slice alone, before any eval score, and restores the best epoch'
+    prediction: 'On a synthetic monitor trace the rule picks the earliest epoch within min_delta of the minimum, stops patience_epochs after it, and never picks epoch 0 or a non-finite epoch; a real early-stopping run logs its STOP line before CHECKPOINT COMPLETE and SCORING START, and checkpoint/model.safetensors is not newer than eval-probs.json.'
+    implemented_by: 'plan 08-08 (just laya-train-selftest)'
+    if_fails: 'The shipped epoch was chosen with eval data or after eval was scored (D-04 / D-07), or the restored weights are not the best epoch.'
+
 kani_harnesses:
 
   # DECLARED, NOT EXECUTED. cargo-kani is not installed in this repository and no
@@ -422,8 +496,9 @@ qa_gate:
     - 'calibration clamp recorded and applied'
     - 'text-disjoint split with conflicting duplicates refused'
     - 'declared seed ships; recipe before scores; device from parameters; F16-reload scoring'
+    - 'early stopping decided on the calibration slice before any eval score; best epoch restored'
     - 'synthetic-fixture refused by pack-for-serving, verify and deploy'
-  pass_criteria: 'FALSIFY-LAYA-GATE-001..008 pass, each observed RED under its induced negative; this file is committed before any models/decide/ run directory exists.'
+  pass_criteria: 'FALSIFY-LAYA-GATE-001..009 pass, each observed RED under its induced negative; this file is committed before any models/decide/ run directory exists.'
   falsification: >
     Change constants.gate_max_ece alone and every recorded gate report must be refused by the
     verifier for carrying the old thresholds — the thresholds are read from here, never from the
