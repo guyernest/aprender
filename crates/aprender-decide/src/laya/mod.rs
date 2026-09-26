@@ -457,6 +457,64 @@ impl Laya {
         tap("m_opts", &m);
         Ok(self.scorer.forward(&m, markers.len())?)
     }
+
+    /// Score one built `choice` row whose marker count must be `k`, at temperature `t`.
+    fn score_choice_row(
+        &self,
+        ids: &[u32],
+        markers: &[usize],
+        truncated: bool,
+        k: usize,
+        t: f32,
+    ) -> Result<Decision, DecideError> {
+        if markers.len() != k {
+            return Err(LayaError::RowMarkerCount {
+                expected: k,
+                observed: markers.len(),
+            }
+            .into());
+        }
+        let z = self.forward_row(ids, markers, QType::Choice, |_, _| {})?;
+        let probabilities = temperature::softmax_t(&z, t);
+        Ok(Decision {
+            label_index: argmax(&probabilities),
+            probabilities,
+            tokens: ids.len(),
+            truncated,
+        })
+    }
+
+    /// Score `texts` against ANOTHER `choice` task with this model's weights, at that
+    /// task's own bucket temperature — the task this model was loaded for is untouched.
+    ///
+    /// This exists for the decide-apr-v1 probes, which run the contract's synthetic
+    /// probe task (`probe_policy.probe_task`) rather than the served task, without
+    /// loading (and widening) the weights a second time.
+    ///
+    /// # Errors
+    ///
+    /// [`LayaError::RowMarkerCount`] when `task`'s built row loses a marker, or a
+    /// builder / forward refusal.
+    pub fn classify_for_task(
+        &self,
+        task: &Task,
+        texts: &[String],
+    ) -> Result<Vec<Decision>, DecideError> {
+        let options = task.render_options();
+        let t = temperature::temperature_for(&self.agent, QType::Choice, options.len());
+        texts
+            .iter()
+            .map(|text| {
+                let row = self.builder.build(
+                    text,
+                    QType::Choice.name(),
+                    task.instructions(),
+                    &options,
+                )?;
+                self.score_choice_row(&row.ids, &row.markers, row.truncated, options.len(), t)
+            })
+            .collect()
+    }
 }
 
 /// Index of the first maximum (numpy `argmax`); NaN never wins.
@@ -491,21 +549,13 @@ impl DecisionMethod for Laya {
     fn classify_prepared(&self, rows: &[PreparedRow]) -> Result<Vec<Decision>, DecideError> {
         rows.iter()
             .map(|r| {
-                if r.markers.len() != self.options.len() {
-                    return Err(LayaError::RowMarkerCount {
-                        expected: self.options.len(),
-                        observed: r.markers.len(),
-                    }
-                    .into());
-                }
-                let z = self.forward_row(&r.ids, &r.markers, QType::Choice, |_, _| {})?;
-                let probabilities = temperature::softmax_t(&z, self.temperature);
-                Ok(Decision {
-                    label_index: argmax(&probabilities),
-                    probabilities,
-                    tokens: r.ids.len(),
-                    truncated: r.truncated,
-                })
+                self.score_choice_row(
+                    &r.ids,
+                    &r.markers,
+                    r.truncated,
+                    self.options.len(),
+                    self.temperature,
+                )
             })
             .collect()
     }

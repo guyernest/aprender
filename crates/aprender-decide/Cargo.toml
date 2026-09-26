@@ -37,10 +37,13 @@ sha2 = { workspace = true }
 # The head's residual adds, as core's encoder does them.
 rayon = { workspace = true }
 provable-contracts-macros = { workspace = true }
+# The PACK path (`pack::PackInputs::from_run_dir`) reads the run dir's
+# model.safetensors as raw bytes. Library code, so a normal dependency; the SERVED
+# path reads only .apr (servers never call `pack`), so the SafeTensors carve-out
+# stays scoped to pack time.
+safetensors = { workspace = true }
 
 [dev-dependencies]
-# Test-side reader of the tiny Laya checkpoint's raw F16 bytes.
-safetensors = { workspace = true }
 # Test-side reader of contract YAML constants and tolerances.
 serde_yaml = { workspace = true }
 # The oracle's ladder blocks are f32le_base64 (plan 08-02 fixture encoding).

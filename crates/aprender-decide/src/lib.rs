@@ -25,10 +25,21 @@
 //! it is aprender-core's reusable `aprender::models::modernbert` (D-13), and Laya's
 //! head and scorer reuse its `Linear`, `layer_norm`, `gelu_exact` and `attention`.
 //!
+//! # The served model
+//!
+//! A deployed decision model is ONE `decide-apr-v1` `.apr` (D-17; [`artifact`]), packed
+//! from a Laya run dir by [`pack`]. The only way to a model a server may classify with
+//! is [`Decider::load_bytes`] / [`Decider::load_path`], which run the whole load ladder;
+//! [`Decider`] has private fields and no other constructor. Every [`Decider`] carries
+//! its [`ModelIdentity`] (D-11): the sha256 of the whole file and the recipe_id.
+//!
 //! Contracts: `contracts/laya-parity-v1.yaml` (the torch -> .apr -> Rust parity
-//! ladder) and `contracts/decide-apr-v1.yaml` (the task schema and marker rule).
+//! ladder) and `contracts/decide-apr-v1.yaml` (the task schema, marker rule, artifact
+//! and load ladder).
 
+pub mod artifact;
 pub mod laya;
+pub mod pack;
 pub mod task;
 
 #[cfg(test)]
@@ -36,7 +47,9 @@ pub(crate) mod test_support;
 
 use std::fmt;
 
+pub use artifact::{ArtifactError, BaseDecl, Manifest};
 pub use laya::LayaError;
+pub use pack::{pack_run_dir, PackError, PackInputs};
 pub use task::{Criterion, Task, TaskError};
 
 use aprender::models::modernbert::ModernBertError;
@@ -162,5 +175,118 @@ pub trait DecisionMethod: Send + Sync {
     fn classify(&self, texts: &[String]) -> Result<Vec<Decision>, DecideError> {
         let rows = self.prepare(texts)?;
         self.classify_prepared(&rows)
+    }
+}
+
+/// The identity every classify response carries (D-11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelIdentity {
+    /// sha256 of the WHOLE `.apr` file bytes.
+    pub artifact_sha256: String,
+    /// sha256 of the `decide.recipe_json` blob (== the run dir's `recipe.json`).
+    pub recipe_id: String,
+    /// The decision method (`laya`).
+    pub method: String,
+    /// The declared base as a display string (`laya-en-root@55cf4c4e`).
+    pub base: String,
+    /// The declared base (D-04), as recorded in the manifest.
+    pub base_decl: BaseDecl,
+}
+
+/// A decision model that passed every rung of the decide-apr-v1 load ladder.
+///
+/// Its fields are private and it has no public constructor: [`Decider::load_bytes`]
+/// and [`Decider::load_path`] are the only doors, and both run the whole ladder
+/// (decide-apr-v1 rung 8, proven by the trybuild case `tests/ui/decider_struct_literal.rs`).
+pub struct Decider {
+    method: Box<dyn DecisionMethod>,
+    identity: ModelIdentity,
+    manifest: Manifest,
+}
+
+impl fmt::Debug for Decider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Decider")
+            .field("identity", &self.identity)
+            .field("labels", &self.manifest.labels)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Decider {
+    /// Verify `bytes` through the whole decide-apr-v1 ladder (size cap first).
+    ///
+    /// # Errors
+    ///
+    /// An [`ArtifactError`] naming the rung that refused.
+    pub fn load_bytes(bytes: &[u8]) -> Result<Self, ArtifactError> {
+        artifact::load_verified(bytes)
+    }
+
+    /// Open `path`, refuse it by its metadata length before reading, read it bounded
+    /// (rung 1), then run the ladder.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::Read`] for an I/O failure, otherwise the refusing rung.
+    pub fn load_path(path: impl AsRef<std::path::Path>) -> Result<Self, ArtifactError> {
+        let io = |e: std::io::Error| ArtifactError::Read {
+            reason: e.to_string(),
+        };
+        let file = std::fs::File::open(path.as_ref()).map_err(io)?;
+        let declared = file.metadata().map_err(io)?.len();
+        let bytes = artifact::read_decide_apr_bytes_bounded(file, Some(declared))?;
+        Self::load_bytes(&bytes)
+    }
+
+    /// The model identity (D-11).
+    #[must_use]
+    pub fn identity(&self) -> &ModelIdentity {
+        &self.identity
+    }
+
+    /// The verified manifest.
+    #[must_use]
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// The task every decision answers.
+    #[must_use]
+    pub fn task(&self) -> &Task {
+        self.method.task()
+    }
+
+    /// Labels in task criteria order (the label index).
+    #[must_use]
+    pub fn labels(&self) -> Vec<&str> {
+        self.method.task().labels()
+    }
+
+    /// Tokenize and build each text's row (price a request before scoring it).
+    ///
+    /// # Errors
+    ///
+    /// The method's refusal.
+    pub fn prepare(&self, texts: &[String]) -> Result<Vec<PreparedRow>, DecideError> {
+        self.method.prepare(texts)
+    }
+
+    /// Score rows from [`Decider::prepare`].
+    ///
+    /// # Errors
+    ///
+    /// The method's refusal.
+    pub fn classify_prepared(&self, rows: &[PreparedRow]) -> Result<Vec<Decision>, DecideError> {
+        self.method.classify_prepared(rows)
+    }
+
+    /// Prepare then score.
+    ///
+    /// # Errors
+    ///
+    /// The method's refusal.
+    pub fn classify(&self, texts: &[String]) -> Result<Vec<Decision>, DecideError> {
+        self.method.classify(texts)
     }
 }
