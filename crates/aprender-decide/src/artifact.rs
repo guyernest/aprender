@@ -94,8 +94,9 @@ pub const MAX_ARTIFACT_BYTES: u64 = 1_342_177_280;
 /// decide-apr-v1 `constants.max_tensor_count`.
 pub const MAX_TENSOR_COUNT: u32 = 4096;
 /// The smallest encodable tensor-index entry: u16 name length + u8 dtype + u8 ndim +
-/// u64 offset + u64 size (decide-apr-v1 `constants.min_index_entry_bytes`).
-pub const MIN_INDEX_ENTRY_BYTES: u64 = 20;
+/// u64 offset + u64 size (decide-apr-v1 `constants.min_index_entry_bytes`). The value
+/// is apr-format's own (the reader's index-capacity bound), widened to u64 here.
+pub const MIN_INDEX_ENTRY_BYTES: u64 = aprender::format::v2::MIN_INDEX_ENTRY_BYTES as u64;
 /// A probe row longer than this is refused at pack (decide-apr-v1
 /// `constants.probe_max_row_tokens`).
 pub const PROBE_MAX_ROW_TOKENS: usize = 48;
@@ -150,6 +151,16 @@ pub struct AgentDecl {
     pub max_len: usize,
     /// Head + options budget.
     pub head_max_len: usize,
+}
+
+impl From<&AgentConfig> for AgentDecl {
+    fn from(a: &AgentConfig) -> Self {
+        Self {
+            head_layers: a.head_layers,
+            max_len: a.max_len,
+            head_max_len: a.head_max_len,
+        }
+    }
 }
 
 /// One `manifest.blobs` entry.
@@ -650,18 +661,22 @@ pub fn artifact_sha256_hex(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
 
-fn dtype_name(d: TensorDType) -> String {
-    format!("{d:?}")
-}
-
 /// Bytes per element for the dtypes this artifact carries; `None` for any other.
 fn dtype_width(d: TensorDType) -> Option<u64> {
-    match d {
-        TensorDType::F32 => Some(4),
-        TensorDType::F16 => Some(2),
-        TensorDType::U8 => Some(1),
-        _ => None,
+    matches!(d, TensorDType::F32 | TensorDType::F16 | TensorDType::U8)
+        .then(|| d.bytes_per_element() as u64)
+}
+
+/// `observed <= cap`, or the rung-1 / pack refusal naming `what`.
+fn over_cap(what: &'static str, observed: u64, cap: u64) -> Result<(), ArtifactError> {
+    if observed > cap {
+        return Err(ArtifactError::ArtifactTooLarge {
+            what,
+            observed,
+            cap,
+        });
     }
+    Ok(())
 }
 
 /// `product(shape) x width`, exact: `Some(0)` whenever any dimension is 0 (even after
@@ -776,8 +791,8 @@ fn check_dtype(
     } else {
         Err(ArtifactError::DtypeMismatch {
             name: name.to_string(),
-            expected: dtype_name(expected),
-            observed: dtype_name(observed),
+            expected: format!("{expected:?}"),
+            observed: format!("{observed:?}"),
         })
     }
 }
@@ -811,8 +826,9 @@ fn parse_agent_config(bytes: &[u8]) -> Result<AgentConfig, ArtifactError> {
     })
 }
 
-/// NaN-visible `delta <= bound`: a NaN on either side never passes.
-fn within(delta: f64, bound: f64) -> bool {
+/// NaN-visible `delta <= bound`: a NaN on either side never passes. The crate's one
+/// definition (the parity tests use it through `test_support`).
+pub(crate) fn within(delta: f64, bound: f64) -> bool {
     matches!(
         delta.partial_cmp(&bound),
         Some(Ordering::Less | Ordering::Equal)
@@ -855,28 +871,31 @@ fn run_probes(laya: &Laya) -> Result<Vec<RustProbe>, ArtifactError> {
     Ok(probes)
 }
 
+/// Pack: the first Rust probe row over `cap` tokens is refused as
+/// [`ArtifactError::ProbeRowOverBudget`], before any comparison.
+fn check_probe_budget(rust: &[RustProbe], cap: usize) -> Result<(), ArtifactError> {
+    match rust.iter().position(|r| r.tokens > cap) {
+        Some(index) => Err(ArtifactError::ProbeRowOverBudget {
+            index,
+            tokens: rust[index].tokens,
+            cap,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Compare Rust probes with stored expectations; `err(index, component)` builds the
 /// refusal (pack: `ProbeDisagreesWithOracle`; load: `ProbeMismatch`). The row budget
-/// is checked first, before any comparison.
+/// is checked first, before any comparison (at pack [`check_probe_budget`] has already
+/// refused an over-budget row with its own error).
 fn compare_probes(
     rust: &[RustProbe],
     stored: &[ProbeRecord],
     cap: usize,
-    budget_is_pack_refusal: bool,
     err: fn(usize, &'static str) -> ArtifactError,
 ) -> Result<(), ArtifactError> {
-    for (index, r) in rust.iter().enumerate() {
-        if r.tokens > cap {
-            return Err(if budget_is_pack_refusal {
-                ArtifactError::ProbeRowOverBudget {
-                    index,
-                    tokens: r.tokens,
-                    cap,
-                }
-            } else {
-                err(index, "tokens")
-            });
-        }
+    if let Some(index) = rust.iter().position(|r| r.tokens > cap) {
+        return Err(err(index, "tokens"));
     }
     if stored.len() != rust.len() {
         return Err(err(stored.len().min(rust.len()), "count"));
@@ -964,7 +983,7 @@ pub(crate) fn write_decide_apr_within(
 
     // (3) THE TASK (D-05): document order is the label index.
     let task = Task::from_slice(&inputs.task_json).map_err(ArtifactError::Task)?;
-    let labels: Vec<String> = task.labels().iter().map(|l| (*l).to_string()).collect();
+    let labels = task.owned_labels();
 
     // (4) PROBES: the Rust result is CHECKED against probes.json, never stored.
     check_pack_probes(inputs, task, limits)?;
@@ -977,14 +996,7 @@ pub(crate) fn write_decide_apr_within(
 
     // (6) THE CONTAINER. Nothing was written before this point.
     let bytes = write_container(inputs, manifest_json)?;
-    let observed = bytes.len() as u64;
-    if observed > limits.max_artifact_bytes {
-        return Err(ArtifactError::ArtifactTooLarge {
-            what: "packed",
-            observed,
-            cap: limits.max_artifact_bytes,
-        });
-    }
+    over_cap("packed", bytes.len() as u64, limits.max_artifact_bytes)?;
     Ok(bytes)
 }
 
@@ -997,9 +1009,7 @@ fn check_pack_probes(
 ) -> Result<(), ArtifactError> {
     let weights = {
         let mut w = AprV2Writer::new(AprV2Metadata::default());
-        for t in &inputs.tensors {
-            w.add_tensor(t.name.clone(), t.dtype, t.shape.clone(), t.bytes.clone());
-        }
+        add_weights(&mut w, inputs);
         w.write().map_err(|e| ArtifactError::Write {
             reason: e.to_string(),
         })?
@@ -1017,13 +1027,27 @@ fn check_pack_probes(
     )
     .map_err(|e| ArtifactError::Rebuild(e.into()))?;
     let rust = run_probes(&laya)?;
+    check_probe_budget(&rust, limits.probe_max_row_tokens)?;
     compare_probes(
         &rust,
         &inputs.probes,
         limits.probe_max_row_tokens,
-        true,
         |index, component| ArtifactError::ProbeDisagreesWithOracle { index, component },
     )
+}
+
+/// Every checkpoint weight as its raw bytes, in `inputs` order (the probe container
+/// and the artifact itself write the SAME tensors the same way).
+fn add_weights(w: &mut AprV2Writer, inputs: &PackInputs) {
+    for CheckpointTensor {
+        name,
+        dtype,
+        shape,
+        bytes,
+    } in &inputs.tensors
+    {
+        w.add_tensor(name.clone(), *dtype, shape.clone(), bytes.clone());
+    }
 }
 
 fn blob_bytes(inputs: &PackInputs) -> [(&'static str, &[u8]); 6] {
@@ -1046,11 +1070,7 @@ fn build_manifest(inputs: &PackInputs, agent: &AgentConfig, labels: Vec<String>)
         variant: inputs.recipe.variant.clone(),
         base: inputs.recipe.base.clone(),
         labels,
-        agent: AgentDecl {
-            head_layers: agent.head_layers,
-            max_len: agent.max_len,
-            head_max_len: agent.head_max_len,
-        },
+        agent: AgentDecl::from(agent),
         blobs: blob_bytes(inputs)
             .iter()
             .map(|(name, bytes)| BlobHash {
@@ -1085,15 +1105,7 @@ fn write_container(inputs: &PackInputs, manifest_json: String) -> Result<Vec<u8>
         serde_json::Value::String(manifest_json),
     );
     let mut w = AprV2Writer::new(metadata);
-    for CheckpointTensor {
-        name,
-        dtype,
-        shape,
-        bytes,
-    } in &inputs.tensors
-    {
-        w.add_tensor(name.clone(), *dtype, shape.clone(), bytes.clone());
-    }
+    add_weights(&mut w, inputs);
     for (name, bytes) in blob_bytes(inputs) {
         w.add_tensor(name, TensorDType::U8, vec![bytes.len()], bytes.to_vec());
     }
@@ -1133,13 +1145,7 @@ pub(crate) fn read_bounded_within<R: std::io::Read>(
     use std::io::Read as _;
     let cap = limits.max_artifact_bytes;
     if let Some(declared) = declared_len {
-        if declared > cap {
-            return Err(ArtifactError::ArtifactTooLarge {
-                what: "declared_length",
-                observed: declared,
-                cap,
-            });
-        }
+        over_cap("declared_length", declared, cap)?;
     }
     let reserve = usize::try_from(declared_len.unwrap_or(0).min(cap)).unwrap_or(0);
     let mut bytes = Vec::with_capacity(reserve);
@@ -1149,27 +1155,8 @@ pub(crate) fn read_bounded_within<R: std::io::Read>(
         .map_err(|e| ArtifactError::Read {
             reason: e.to_string(),
         })?;
-    let observed = bytes.len() as u64;
-    if observed > cap {
-        return Err(ArtifactError::ArtifactTooLarge {
-            what: "stream",
-            observed,
-            cap,
-        });
-    }
+    over_cap("stream", bytes.len() as u64, cap)?;
     Ok(bytes)
-}
-
-fn check_in_memory_length(bytes: &[u8], limits: &ArtifactLimits) -> Result<(), ArtifactError> {
-    let observed = bytes.len() as u64;
-    if observed > limits.max_artifact_bytes {
-        return Err(ArtifactError::ArtifactTooLarge {
-            what: "input_bytes",
-            observed,
-            cap: limits.max_artifact_bytes,
-        });
-    }
-    Ok(())
 }
 
 // ===========================================================================
@@ -1290,7 +1277,7 @@ fn open_within<'a>(
     bytes: &'a [u8],
     limits: &ArtifactLimits,
 ) -> Result<(AprV2ReaderRef<'a>, Manifest), ArtifactError> {
-    check_in_memory_length(bytes, limits)?;
+    over_cap("input_bytes", bytes.len() as u64, limits.max_artifact_bytes)?;
     rung2_header(bytes)?;
     let reader = AprV2ReaderRef::from_bytes(bytes).map_err(|e| ArtifactError::Container {
         reason: e.to_string(),
@@ -1314,10 +1301,10 @@ pub fn inspect_manifest(bytes: &[u8]) -> Result<Manifest, ArtifactError> {
 // Rung 4: structure
 // ===========================================================================
 
-/// The verified blobs rung 4 hands on.
+/// The verified blobs rung 4 hands on, with the task it already parsed.
 struct Blobs<'a> {
     tokenizer: &'a [u8],
-    task: &'a [u8],
+    task: Task,
     encoder_config: &'a [u8],
     agent_config: &'a [u8],
 }
@@ -1326,44 +1313,38 @@ fn rung4_structure<'r>(
     reader: &'r AprV2ReaderRef<'_>,
     manifest: &Manifest,
 ) -> Result<Blobs<'r>, ArtifactError> {
-    // (a) Blobs first: present, U8, sized, and hashing to the manifest — before any
-    //     config they carry is trusted to derive the weight set.
+    // (a) Blobs first: present and hashing to the manifest — before any config they
+    //     carry is trusted to derive the weight set. Their dtype / size / bounds are
+    //     checked with every other entry in (c); a hash over the in-bounds bytes is
+    //     what makes the configs trustworthy here.
     let names: Vec<&str> = manifest.blobs.iter().map(|b| b.name.as_str()).collect();
     if names != BLOB_TENSORS {
         return Err(ArtifactError::ManifestBlobs {
             observed: names.iter().map(|n| (*n).to_string()).collect(),
         });
     }
-    let mut blob = BTreeMap::new();
-    for b in &manifest.blobs {
-        let entry = reader
-            .get_tensor(&b.name)
-            .ok_or_else(|| ArtifactError::MissingTensor {
+    // In BLOB_TENSORS order (just checked equal to the manifest's).
+    let mut data: [&[u8]; 6] = [&[]; 6];
+    for (slot, b) in data.iter_mut().zip(&manifest.blobs) {
+        if reader.get_tensor(&b.name).is_none() {
+            return Err(ArtifactError::MissingTensor {
+                name: b.name.clone(),
+            });
+        }
+        *slot = reader
+            .get_tensor_data(&b.name)
+            .ok_or_else(|| ArtifactError::DataOutOfBounds {
                 name: b.name.clone(),
             })?;
-        check_dtype(&b.name, TensorDType::U8, entry.dtype)?;
-        check_size(&b.name, &entry.shape, entry.dtype, entry.size)?;
-        let data =
-            reader
-                .get_tensor_data(&b.name)
-                .ok_or_else(|| ArtifactError::DataOutOfBounds {
-                    name: b.name.clone(),
-                })?;
-        if sha256_hex(data) != b.sha256 {
+        if sha256_hex(slot) != b.sha256 {
             return Err(ArtifactError::BlobHashMismatch {
                 blob: b.name.clone(),
             });
         }
-        blob.insert(b.name.as_str(), data);
     }
-    let get = |n: &str| blob.get(n).copied().unwrap_or_default();
-    let blobs = Blobs {
-        tokenizer: get(TOKENIZER_BLOB),
-        task: get(TASK_BLOB),
-        encoder_config: get(ENCODER_CONFIG_BLOB),
-        agent_config: get(AGENT_CONFIG_BLOB),
-    };
-    let recipe_sha = sha256_hex(get(RECIPE_BLOB));
+    let [tokenizer, task_bytes, encoder_config_bytes, agent_config_bytes, recipe, _gate_report] =
+        data;
+    let recipe_sha = sha256_hex(recipe);
     if recipe_sha != manifest.recipe_id {
         return Err(ArtifactError::RecipeIdMismatch {
             manifest: manifest.recipe_id.clone(),
@@ -1372,15 +1353,9 @@ fn rung4_structure<'r>(
     }
 
     // (b) The weight set, derived from the verified configs.
-    let encoder_config = parse_encoder_config(blobs.encoder_config)?;
-    let agent = parse_agent_config(blobs.agent_config)?;
-    if manifest.agent
-        != (AgentDecl {
-            head_layers: agent.head_layers,
-            max_len: agent.max_len,
-            head_max_len: agent.head_max_len,
-        })
-    {
+    let encoder_config = parse_encoder_config(encoder_config_bytes)?;
+    let agent = parse_agent_config(agent_config_bytes)?;
+    if manifest.agent != AgentDecl::from(&agent) {
         return Err(ArtifactError::AgentMismatch);
     }
     let mut expected = expected_weights(&encoder_config, &agent);
@@ -1409,15 +1384,20 @@ fn rung4_structure<'r>(
     }
 
     // (d) The task blob's labels ARE the manifest labels (D-05).
-    let task = Task::from_slice(blobs.task).map_err(ArtifactError::Task)?;
-    let task_labels: Vec<String> = task.labels().iter().map(|l| (*l).to_string()).collect();
+    let task = Task::from_slice(task_bytes).map_err(ArtifactError::Task)?;
+    let task_labels = task.owned_labels();
     if task_labels != manifest.labels {
         return Err(ArtifactError::LabelsDisagreeWithTask {
             manifest: manifest.labels.clone(),
             task: task_labels,
         });
     }
-    Ok(blobs)
+    Ok(Blobs {
+        tokenizer,
+        task,
+        encoder_config: encoder_config_bytes,
+        agent_config: agent_config_bytes,
+    })
 }
 
 // ===========================================================================
@@ -1465,14 +1445,13 @@ pub(crate) fn load_verified_within(
     // Rung 5.
     rung5_finite(&reader)?;
     // Rung 6: F16 widened to f32 by core's loader over the zero-copy reader.
-    let task = Task::from_slice(blobs.task).map_err(ArtifactError::Task)?;
     let laya = Laya::from_parts(
         &reader,
         "",
         blobs.encoder_config,
         blobs.agent_config,
         blobs.tokenizer,
-        task,
+        blobs.task,
     )
     .map_err(|e| ArtifactError::Rebuild(e.into()))?;
     // Rung 7: replay against the stored PYTHON values.
@@ -1481,7 +1460,6 @@ pub(crate) fn load_verified_within(
         &rust,
         &manifest.probes,
         limits.probe_max_row_tokens,
-        false,
         |index, component| ArtifactError::ProbeMismatch { index, component },
     )?;
     // Rung 8: mint.

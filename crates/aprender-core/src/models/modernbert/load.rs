@@ -119,7 +119,15 @@ pub fn expected_modernbert_tensor_names(config: &ModernBertConfig, prefix: &str)
 }
 
 /// Load, shape-check, widen and finiteness-check one tensor.
-fn load_tensor(
+///
+/// Public so a model built ON the encoder (Laya's decision head, `aprender-decide`)
+/// loads its own tensors through this one path rather than a copy of it.
+///
+/// # Errors
+///
+/// [`ModernBertLoadError`] naming `name`: missing, a stored shape other than `shape`,
+/// a dtype that cannot be widened (or truncated data), or a non-finite value.
+pub fn load_tensor(
     reader: &AprV2ReaderRef<'_>,
     name: &str,
     shape: &[usize],
@@ -141,8 +149,8 @@ fn load_tensor(
         dtype: format!("{:?}", entry.dtype),
     };
     let data = reader.get_tensor_as_f32(name).ok_or_else(undecodable)?;
-    // Shapes were validated against the config, whose products are checked_mul-proven.
-    if data.len() != shape.iter().product::<usize>() {
+    // Checked product: a caller's shape need not come from a checked_mul-proven config.
+    if Some(data.len()) != shape.iter().try_fold(1usize, |a, &b| a.checked_mul(b)) {
         return Err(undecodable());
     }
     if !data.iter().all(|v| v.is_finite()) {

@@ -78,8 +78,9 @@ fn parse_metadata_section(
 
 /// The smallest encodable tensor-index entry, in bytes, as `TensorIndexEntry::from_bytes`
 /// reads it: u16 name length + u8 dtype + u8 ndim + u64 offset + u64 size (an empty
-/// name and zero dimensions).
-const MIN_INDEX_ENTRY_BYTES: usize = 20;
+/// name and zero dimensions). Public: a caller bounding the index extent BEFORE any
+/// reader runs (aprender-decide's rung 2) uses this one definition.
+pub const MIN_INDEX_ENTRY_BYTES: usize = 20;
 
 /// The tensor-index vector's initial capacity: the declared `tensor_count`, but never
 /// more entries than the `remaining` index bytes could encode.

@@ -190,6 +190,12 @@ impl Task {
         self.criteria.iter().map(|c| c.name.as_str()).collect()
     }
 
+    /// [`Self::labels`] as owned strings (the manifest's `labels` shape).
+    #[must_use]
+    pub fn owned_labels(&self) -> Vec<String> {
+        self.criteria.iter().map(|c| c.name.clone()).collect()
+    }
+
     /// The option texts in label-index order: `"name: description"`, or `"name"`
     /// when there is no description (Laya `render_options` for `choice`).
     #[must_use]

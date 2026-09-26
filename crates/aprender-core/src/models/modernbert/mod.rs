@@ -70,7 +70,7 @@ pub use embeddings::ModernBertEmbeddings;
 pub use encoder::ModernBertEncoder;
 pub use gemm::Linear;
 pub use layer::{attention, gelu_exact, layer_norm, rope_rotate_half, ModernBertLayer};
-pub use load::{expected_modernbert_tensor_names, ModernBertLoadError};
+pub use load::{expected_modernbert_tensor_names, load_tensor, ModernBertLoadError};
 
 use std::fmt;
 

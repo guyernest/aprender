@@ -5,7 +5,6 @@ use crate::laya::Laya;
 use crate::Task;
 use aprender::format::v2::{AprV2Metadata, AprV2ReaderRef, AprV2Writer, TensorDType};
 use base64::Engine as _;
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 /// `(name, dtype, shape, raw little-endian bytes)` as stored in the checkpoint.
@@ -140,13 +139,8 @@ pub(crate) fn constant_f64(contract: &str, key: &str) -> f64 {
         .unwrap_or_else(|| panic!("{contract} constants.{key}"))
 }
 
-/// NaN-visible `delta <= bound`: a NaN on either side never passes.
-pub(crate) fn within(delta: f64, bound: f64) -> bool {
-    matches!(
-        delta.partial_cmp(&bound),
-        Some(Ordering::Less | Ordering::Equal)
-    )
-}
+/// NaN-visible `delta <= bound`: the crate's one definition, in `artifact`.
+pub(crate) use crate::artifact::within;
 
 /// `max |a - b|` in f64; NaN-propagating, and NaN on a length mismatch.
 pub(crate) fn max_abs(a: &[f32], b: &[f32]) -> f64 {

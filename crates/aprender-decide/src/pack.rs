@@ -30,12 +30,7 @@ use std::path::{Path, PathBuf};
 /// Lowercase-hex sha256 of `bytes`.
 #[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().fold(String::with_capacity(64), |mut s, b| {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// One checkpoint tensor exactly as stored: raw little-endian bytes, never re-rounded.
