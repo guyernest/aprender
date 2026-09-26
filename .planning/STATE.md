@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-02-PLAN.md
-last_updated: "2026-09-26T00:55:28.307Z"
+stopped_at: Completed 08-03-PLAN.md
+last_updated: "2026-09-26T01:25:08.178Z"
 last_activity: 2026-09-25
 last_activity_desc: Phase 08 execution started
-state_head: e031eec8ef96ca95b10704a1c73e12b7acf9b5df
+state_head: 42a901d7d57e5272ee3db3b6a64aabd22ccbcbf2
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 104
-  completed_plans: 94
+  completed_plans: 95
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 3 of 12
+Plan: 4 of 12
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -216,6 +216,7 @@ pending F-10 in Phase 5.)
 | Phase 06.1 P08 | 1h 20m | 3 tasks | 7 files |
 | Phase 08 P01 | 17min | 3 tasks | 8 files |
 | Phase 08 P02 | 15min | 2 tasks | 27 files |
+| Phase 08 P03 | 26min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -381,6 +382,9 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-01: classify token budget 1024 built-row tokens, derived DOWN from (30000-12000-1100-4000)/11 = 1172; probe_budget_ms 1100 = 2 x 48 x 11 ms
 - [Phase 08]: 08-01: Laya gate pass decided on Rust-recomputed metrics from probabilities verified against Rust re-scores; reported metrics checked, never trusted; ECE is the house top-label ECE
 - [Phase 08]: 08-01: probes use a contract-resident synthetic K=2 task and store Python F16-reload values; task refusal is marker LOSS after Laya's shrink, never raw option length
+- [Phase 08]: 08-03: modernbert primitives (Linear::forward, layer_norm, attention, rope_rotate_half) return Result with typed ModernBertError; aprender-decide consumers propagate with the question-mark operator — no primitive may index-panic on a bad buffer from an untrusted .apr or a caller
+- [Phase 08]: 08-03: layer_norm rounds the configured norm_eps to f32 before widening, as torch CPU LayerNorm casts eps to the f32 accumulation type — keeps spike-025 numerics bit-identical while honouring norm_eps
+- [Phase 08]: 08-03: the plan clippy gate is not vacuous despite the pre-existing arm64 unreachable_code error; an induced needless_return in modernbert is still reported (base count 1) — ptr_arg probes are invalid on pub fns because of avoid-breaking-exported-api
 
 ### Pending Todos
 
@@ -491,8 +495,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-26T00:55:28.144Z
-Stopped at: Completed 08-02-PLAN.md
+Last session: 2026-09-26T01:24:42.728Z
+Stopped at: Completed 08-03-PLAN.md
 Resume file: None
 
 ## Accumulated Context
