@@ -38,7 +38,7 @@ pmcp = { version = "2.19", features = ["streamable-http", "schema-generation"] }
 # aws-sdk-s3 needs rustc 1.94.1 and rust-toolchain.toml pins 1.93.0.
 aws-config = "1"
 aws-sdk-s3 = "1"
-# Bounded concurrency (`buffer_unordered`) over disjoint BORROWED slices of the one
+# Bounded concurrency (a FuturesUnordered) over disjoint BORROWED slices of the one
 # pre-sized buffer — no 'static spawn, so no per-part copy.
 futures = { workspace = true }
 

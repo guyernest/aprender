@@ -227,16 +227,27 @@ async fn download_within<F: RangeFetcher + ?Sized>(
     let part = usize::try_from(policy.part_bytes.max(1)).unwrap_or(usize::MAX);
     let mut buffer = vec![0u8; len];
     {
-        let parts = buffer.chunks_mut(part).enumerate().map(|(index, slice)| {
-            let offset = (index as u64).saturating_mul(part as u64);
-            fill_part(fetcher, offset, slice, policy)
-        });
-        let mut in_flight = std::pin::pin!(
-            futures::stream::iter(parts).buffer_unordered(policy.concurrency.max(1))
-        );
-        while let Some(outcome) = in_flight.next().await {
-            // The first refusal wins; returning drops (cancels) the parts still running.
-            outcome?;
+        // A hand-rolled bounded FuturesUnordered rather than
+        // `stream::iter(..).map(closure).buffer_unordered(n)`: the closure form makes
+        // rustc unable to prove the Lambda handler's future `Send` for every lifetime
+        // (the "implementation of Send is not general enough" limitation), which the
+        // lib tests alone never exercise.
+        let concurrency = policy.concurrency.max(1);
+        let mut parts = buffer.chunks_mut(part);
+        let mut offset = 0u64;
+        let mut in_flight = futures::stream::FuturesUnordered::new();
+        loop {
+            while in_flight.len() < concurrency {
+                let Some(slice) = parts.next() else { break };
+                let at = offset;
+                offset = offset.saturating_add(slice.len() as u64);
+                in_flight.push(fill_part(fetcher, at, slice, policy));
+            }
+            match in_flight.next().await {
+                // The first refusal wins; returning drops (cancels) the parts in flight.
+                Some(outcome) => outcome?,
+                None => break,
+            }
         }
     }
     Ok(buffer)

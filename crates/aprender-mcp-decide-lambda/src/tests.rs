@@ -93,6 +93,22 @@ async fn loopback_cold_first_call_is_served_without_initialize() {
     assert_eq!(sample.load_header, None);
 }
 
+/// The bootstrap's handler awaits `resolve_model`, and lambda_http requires that future
+/// to be `Send` for every lifetime. `cargo test --lib` never builds the bin, so this
+/// pins the property where the lib tests run.
+#[test]
+fn resolve_model_future_is_send() {
+    fn assert_send<T: Send>(_: &T) {}
+    let source = ModelSource::S3 {
+        bucket: "b".into(),
+        key: "k".into(),
+        sha256: Sha256Pin::parse(&"a".repeat(64)).expect("pin"),
+    };
+    let future = resolve_model(&source);
+    assert_send(&future);
+    drop(future);
+}
+
 #[test]
 fn server_config_is_stateless() {
     let config = server_config();
