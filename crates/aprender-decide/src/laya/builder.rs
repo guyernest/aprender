@@ -46,6 +46,15 @@ pub struct BuiltRow {
     pub truncated: bool,
 }
 
+/// The state-independent head of a row — `[CLS] head [SEP] [MASK] opt0 ... [SEP]` and
+/// its marker positions — built once per (question type, instructions, options) and
+/// completed per text by [`Builder::finish`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowPrefix {
+    ids: Vec<u32>,
+    markers: Vec<usize>,
+}
+
 /// Laya's request builder over a byte-identical `tokenizer.json`.
 pub struct Builder {
     tok: Tokenizer,
@@ -135,6 +144,16 @@ impl Builder {
         ins: &str,
         options: &[String],
     ) -> Result<BuiltRow, LayaError> {
+        self.finish(&self.prefix(t, ins, options)?, state)
+    }
+
+    /// The state-independent part of [`Self::build`]: head, option markers and options
+    /// (with the shrink), ending in the second `[SEP]`.
+    ///
+    /// # Errors
+    ///
+    /// [`LayaError::Tokenizer`] when the tokenizer refuses a text.
+    pub fn prefix(&self, t: &str, ins: &str, options: &[String]) -> Result<RowPrefix, LayaError> {
         let mt = self.mask_token.as_str();
         let ins = ins.replace(mt, " ");
         let head_ids = self.enc(&format!("{t} question: {ins}"))?;
@@ -173,8 +192,20 @@ impl Builder {
             ids.extend(o);
         }
         ids.push(self.sep);
+        Ok(RowPrefix { ids, markers })
+    }
+
+    /// Complete `prefix` with `state` (right-truncated to the room before `max_len`),
+    /// exactly as [`Self::build`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`LayaError::Tokenizer`] when the tokenizer refuses the state.
+    pub fn finish(&self, prefix: &RowPrefix, state: &str) -> Result<BuiltRow, LayaError> {
+        let mut ids = prefix.ids.clone();
+        let mut markers = prefix.markers.clone();
         let room = self.max_len.saturating_sub(ids.len() + 1);
-        let state_ids = self.enc(&state.replace(mt, " "))?;
+        let state_ids = self.enc(&state.replace(self.mask_token.as_str(), " "))?;
         // The untruncated row is prefix + state + the closing [SEP].
         let truncated = ids.len() + state_ids.len() + 1 > self.max_len;
         ids.extend(state_ids.into_iter().take(room));

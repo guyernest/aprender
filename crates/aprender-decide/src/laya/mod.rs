@@ -37,7 +37,7 @@ use aprender::models::modernbert::{
     load_tensor, Linear, ModernBertConfig, ModernBertConfigError, ModernBertEncoder,
     ModernBertLoadError,
 };
-use builder::Builder;
+use builder::{Builder, RowPrefix};
 use head::{head_geometry, HeadLayer};
 use rayon::prelude::*;
 use scorer::Scorer;
@@ -276,6 +276,8 @@ pub struct Laya {
     builder: Builder,
     agent: AgentConfig,
     task: Task,
+    /// The task's state-independent row head, built once at load.
+    row_prefix: RowPrefix,
     options: Vec<String>,
     temperature: f32,
 }
@@ -306,7 +308,8 @@ impl Laya {
         // Tokenizer and marker rule first: they are cheap and refuse before any weight.
         let builder = Builder::from_bytes(tokenizer_bytes, agent.max_len, agent.head_max_len)?;
         let options = task.render_options();
-        let probe = builder.build("", QType::Choice.name(), task.instructions(), &options)?;
+        let row_prefix = builder.prefix(QType::Choice.name(), task.instructions(), &options)?;
+        let probe = builder.finish(&row_prefix, "")?;
         if probe.markers.len() != options.len() {
             return Err(LayaError::MarkersLost {
                 criteria: options.len(),
@@ -351,6 +354,7 @@ impl Laya {
             builder,
             agent,
             task,
+            row_prefix,
             options,
             temperature,
         })
@@ -456,15 +460,13 @@ impl Laya {
     ) -> Result<Vec<Decision>, DecideError> {
         let options = task.render_options();
         let t = temperature::temperature_for(&self.agent, QType::Choice, options.len());
+        let prefix = self
+            .builder
+            .prefix(QType::Choice.name(), task.instructions(), &options)?;
         texts
             .iter()
             .map(|text| {
-                let row = self.builder.build(
-                    text,
-                    QType::Choice.name(),
-                    task.instructions(),
-                    &options,
-                )?;
+                let row = self.builder.finish(&prefix, text)?;
                 self.score_choice_row(&row.ids, &row.markers, row.truncated, options.len(), t)
             })
             .collect()
@@ -485,12 +487,7 @@ impl DecisionMethod for Laya {
         texts
             .iter()
             .map(|t| {
-                let row = self.builder.build(
-                    t,
-                    QType::Choice.name(),
-                    self.task.instructions(),
-                    &self.options,
-                )?;
+                let row = self.builder.finish(&self.row_prefix, t)?;
                 Ok(PreparedRow {
                     ids: row.ids,
                     markers: row.markers,

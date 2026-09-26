@@ -63,6 +63,52 @@ pub fn gelu_exact(x: f32) -> f32 {
     (0.5 * x * batuta_common::math::erfc_precise(-x / std::f64::consts::SQRT_2)) as f32
 }
 
+/// RoPE `inv_freq = 1 / theta^(2p / hd)` for `p < hd / 2`, narrowed to f32 (torch order).
+pub(crate) fn rope_inv_freq(theta: f64, hd: usize) -> Vec<f32> {
+    (0..hd / 2)
+        .map(|p| (1.0 / theta.powf((2 * p) as f64 / hd as f64)) as f32)
+        .collect()
+}
+
+/// The `[l, hd / 2]` sin / cos table of one RoPE theta: `angle = pos * inv_freq` in f32,
+/// then `sin_cos` — the exact values a per-head evaluation computes, built once.
+#[derive(Debug, Clone)]
+pub(crate) struct RopeTable {
+    half: usize,
+    sin: Vec<f32>,
+    cos: Vec<f32>,
+}
+
+impl RopeTable {
+    pub(crate) fn new(inv_freq: &[f32], l: usize) -> Self {
+        let half = inv_freq.len();
+        let (mut sin, mut cos) = (Vec::with_capacity(l * half), Vec::with_capacity(l * half));
+        for pos in 0..l {
+            for &f in inv_freq {
+                let (s, c) = (pos as f32 * f).sin_cos();
+                sin.push(s);
+                cos.push(c);
+            }
+        }
+        Self { half, sin, cos }
+    }
+
+    /// Rotate every `2 * half`-wide head of `row` (position `pos`) in place:
+    /// `(x_p, x_{p+hd/2}) -> (x_p cos - x_{p+hd/2} sin, x_{p+hd/2} cos + x_p sin)`.
+    pub(crate) fn rotate_heads(&self, row: &mut [f32], pos: usize) {
+        let half = self.half;
+        let s = &self.sin[pos * half..(pos + 1) * half];
+        let c = &self.cos[pos * half..(pos + 1) * half];
+        for v in row.chunks_exact_mut(2 * half) {
+            for p in 0..half {
+                let (a, b) = (v[p], v[p + half]);
+                v[p] = a * c[p] - b * s[p];
+                v[p + half] = b * c[p] + a * s[p];
+            }
+        }
+    }
+}
+
 /// Rotate-half RoPE in place on `[l, heads * hd]`, position = row index.
 ///
 /// torch order: `inv_freq = 1 / theta^(2p / hd)` narrowed to f32, `angle = pos * inv_freq`
@@ -78,6 +124,16 @@ pub fn rope_rotate_half(
     hd: usize,
     theta: f64,
 ) -> Result<(), ModernBertError> {
+    check_rope_geometry(heads, hd)?;
+    check_len("rope.x", x.len(), &[l, heads, hd])?;
+    let table = RopeTable::new(&rope_inv_freq(theta, hd), l);
+    x.par_chunks_mut(heads * hd)
+        .enumerate()
+        .for_each(|(pos, row)| table.rotate_heads(row, pos));
+    Ok(())
+}
+
+fn check_rope_geometry(heads: usize, hd: usize) -> Result<(), ModernBertError> {
     if hd == 0 || hd % 2 != 0 || heads == 0 {
         return Err(ModernBertError::InputShape {
             what: "rope.head_dim",
@@ -85,26 +141,6 @@ pub fn rope_rotate_half(
             observed: hd,
         });
     }
-    check_len("rope.x", x.len(), &[l, heads, hd])?;
-    let half = hd / 2;
-    let inv: Vec<f32> = (0..half)
-        .map(|p| (1.0 / theta.powf((2 * p) as f64 / hd as f64)) as f32)
-        .collect();
-    x.par_chunks_mut(heads * hd)
-        .enumerate()
-        .take(l)
-        .for_each(|(pos, row)| {
-            for h in 0..heads {
-                let v = &mut row[h * hd..(h + 1) * hd];
-                for (p, &f) in inv.iter().enumerate() {
-                    let ang = pos as f32 * f;
-                    let (s, c) = ang.sin_cos();
-                    let (a, b) = (v[p], v[p + half]);
-                    v[p] = a * c - b * s;
-                    v[p + half] = b * c + a * s;
-                }
-            }
-        });
     Ok(())
 }
 
@@ -147,6 +183,23 @@ pub fn attention(
     check_len("attention.q", q.len(), &[l, heads, hd])?;
     check_len("attention.k", k.len(), &[l, heads, hd])?;
     check_len("attention.v", v.len(), &[l, heads, hd])?;
+    Ok(attention_strided(q, k, v, heads * hd, l, heads, hd, window))
+}
+
+/// [`attention`] over operands whose row `i` starts at `i * stride` (`stride >= heads *
+/// hd`), so q / k / v can be read in place from a fused `[l, 3d]` projection. Callers
+/// have checked every operand holds `(l - 1) * stride + heads * hd` values.
+#[allow(clippy::too_many_arguments)]
+fn attention_strided(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    stride: usize,
+    l: usize,
+    heads: usize,
+    hd: usize,
+    window: Option<usize>,
+) -> Vec<f32> {
     let d = heads * hd;
     let scale = 1.0 / (hd as f32).sqrt();
     let mut out = vec![0.0f32; l * d];
@@ -154,11 +207,11 @@ pub fn attention(
         let (lo, hi) = key_range(i, l, window);
         let mut s = vec![0.0f32; hi - lo];
         for h in 0..heads {
-            let qi = &q[i * d + h * hd..i * d + (h + 1) * hd];
+            let qi = &q[i * stride + h * hd..i * stride + (h + 1) * hd];
             let mut mx = f32::NEG_INFINITY;
             for (jj, sv) in s.iter_mut().enumerate() {
                 let j = lo + jj;
-                let kj = &k[j * d + h * hd..j * d + (h + 1) * hd];
+                let kj = &k[j * stride + h * hd..j * stride + (h + 1) * hd];
                 *sv = qi.iter().zip(kj).map(|(a, b)| a * b).sum::<f32>() * scale;
                 mx = mx.max(*sv);
             }
@@ -170,13 +223,13 @@ pub fn attention(
             let oh = &mut o[h * hd..(h + 1) * hd];
             for (jj, &w) in s.iter().enumerate() {
                 let j = lo + jj;
-                let vj = &v[j * d + h * hd..j * d + (h + 1) * hd];
+                let vj = &v[j * stride + h * hd..j * stride + (h + 1) * hd];
                 let w = w / z;
                 oh.iter_mut().zip(vj).for_each(|(a, b)| *a += w * b);
             }
         }
     });
-    Ok(out)
+    out
 }
 
 /// One ModernBERT encoder layer: pre-norm attention (layer 0 has no `attn_norm`) and
@@ -232,44 +285,60 @@ impl ModernBertLayer {
         config: &ModernBertConfig,
         window: usize,
     ) -> Result<(), ModernBertError> {
-        let d = config.hidden_size();
-        let heads = config.num_attention_heads();
         let hd = config.head_dim();
-        let eps = config.norm_eps();
-        check_len("layer.x", x.len(), &[l, d])?;
-        let xn = match &self.attn_norm {
-            Some(w) => layer_norm(x, d, w, None, eps)?,
-            None => x.to_vec(),
-        };
-        let qkv = self.wqkv.forward(&xn, l)?;
-        check_len("layer.qkv", qkv.len(), &[l, 3, d])?;
-        let (mut q, mut k, mut v) = (
-            vec![0.0f32; l * d],
-            vec![0.0f32; l * d],
-            vec![0.0f32; l * d],
-        );
-        for i in 0..l {
-            let r = &qkv[i * 3 * d..(i + 1) * 3 * d];
-            q[i * d..(i + 1) * d].copy_from_slice(&r[..d]);
-            k[i * d..(i + 1) * d].copy_from_slice(&r[d..2 * d]);
-            v[i * d..(i + 1) * d].copy_from_slice(&r[2 * d..]);
-        }
+        check_rope_geometry(config.num_attention_heads(), hd)?;
         let theta = if self.global {
             config.rope_theta_global()
         } else {
             config.rope_theta_local()
         };
-        rope_rotate_half(&mut q, l, heads, hd, theta)?;
-        rope_rotate_half(&mut k, l, heads, hd, theta)?;
-        let a = attention(
-            &q,
-            &k,
-            &v,
+        let rope = RopeTable::new(&rope_inv_freq(theta, hd), l);
+        self.forward_with_rope(x, l, config, window, &rope)
+    }
+
+    /// [`Self::forward`] with this layer's RoPE table (its theta, `l` positions) built
+    /// by the caller, so an encoder builds each theta's table once per row.
+    pub(crate) fn forward_with_rope(
+        &self,
+        x: &mut [f32],
+        l: usize,
+        config: &ModernBertConfig,
+        window: usize,
+        rope: &RopeTable,
+    ) -> Result<(), ModernBertError> {
+        let d = config.hidden_size();
+        let heads = config.num_attention_heads();
+        let hd = config.head_dim();
+        let eps = config.norm_eps();
+        check_len("layer.x", x.len(), &[l, d])?;
+        check_rope_geometry(heads, hd)?;
+        check_len("rope.x", heads * hd, &[d])?;
+        let normed;
+        let xn: &[f32] = match &self.attn_norm {
+            Some(w) => {
+                normed = layer_norm(x, d, w, None, eps)?;
+                &normed
+            }
+            None => x,
+        };
+        let mut qkv = self.wqkv.forward(xn, l)?;
+        check_len("layer.qkv", qkv.len(), &[l, 3, d])?;
+        // q = qkv[.., 0..d], k = qkv[.., d..2d], v = qkv[.., 2d..3d]: RoPE on q and k in
+        // place (they are adjacent, so one pass over each row's first 2d values), then
+        // attention reads all three with row stride 3d — no split copies.
+        qkv.par_chunks_mut(3 * d)
+            .enumerate()
+            .for_each(|(pos, row)| rope.rotate_heads(&mut row[..2 * d], pos));
+        let a = attention_strided(
+            &qkv,
+            &qkv[d..],
+            &qkv[2 * d..],
+            3 * d,
             l,
             heads,
             hd,
             if self.global { None } else { Some(window) },
-        )?;
+        );
         let a = self.wo.forward(&a, l)?;
         check_len("layer.attn_out", a.len(), &[l, d])?;
         x.par_iter_mut()

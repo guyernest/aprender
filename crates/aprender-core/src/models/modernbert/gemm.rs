@@ -8,27 +8,16 @@
 use super::{check_len, ModernBertError};
 use rayon::prelude::*;
 
-/// `[rows, cols]` -> `[cols, rows]`, 32x32 tiles, parallel over output bands (spike 020).
-fn transpose(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    const T: usize = 32;
+/// `[rows, cols]` -> `[cols, rows]` through `trueno::blis::transpose` (values moved,
+/// never computed, so the result is bit-exact whatever kernel it picks).
+fn transpose(src: &[f32], rows: usize, cols: usize) -> Result<Vec<f32>, ModernBertError> {
     let mut dst = vec![0.0f32; rows * cols];
     if rows == 0 || cols == 0 {
-        return dst;
+        return Ok(dst);
     }
-    dst.par_chunks_mut(T * rows)
-        .enumerate()
-        .for_each(|(bi, band)| {
-            let c0 = bi * T;
-            let cn = band.len() / rows;
-            for r0 in (0..rows).step_by(T) {
-                for c in 0..cn {
-                    for r in r0..(r0 + T).min(rows) {
-                        band[c * rows + r] = src[r * cols + c0 + c];
-                    }
-                }
-            }
-        });
-    dst
+    trueno::blis::transpose::transpose(rows, cols, src, &mut dst)
+        .map_err(|e| ModernBertError::Gemm(e.to_string()))?;
+    Ok(dst)
 }
 
 /// A dense layer: `w` is `[out, inp]` row-major exactly as stored, `b` an optional
@@ -62,7 +51,7 @@ impl Linear {
         if m == 0 || n == 0 {
             return Ok(Vec::new());
         }
-        let xt = transpose(x, m, k);
+        let xt = transpose(x, m, k)?;
         let mut ct = vec![0.0f32; n * m];
         let bands = (rayon::current_num_threads() * 2).max(1);
         let band = n.div_ceil(bands).next_multiple_of(8).max(8);
@@ -74,7 +63,7 @@ impl Linear {
                 trueno::blis::gemm_blis(rows, m, k, &self.w[r0 * k..(r0 + rows) * k], &xt, c, None)
                     .map_err(|e| ModernBertError::Gemm(e.to_string()))
             })?;
-        let mut y = transpose(&ct, n, m);
+        let mut y = transpose(&ct, n, m)?;
         if let Some(b) = &self.b {
             y.par_chunks_mut(n)
                 .for_each(|r| r.iter_mut().zip(b).for_each(|(v, bb)| *v += bb));
