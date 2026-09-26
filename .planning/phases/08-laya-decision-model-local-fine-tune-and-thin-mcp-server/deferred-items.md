@@ -58,3 +58,25 @@ not fixed by it.
 - **Also found:** `.planning/WINDOWS.md` refuses every append (`Ledger entry 24 has invalid status:
   "resolved"`), so this plan's deviation could not be recorded there. That was not caused by 08-03 and
   is not fixed here.
+
+## From plan 08-04
+
+### D-ITEM-08-04-A: D-ITEM-08-01-A re-measured; the strict-binding PASS line is still unreachable
+
+- **Found during:** 08-04 Task 1 and Task 2 verify (`bash scripts/check_contract_test_binding.sh`).
+- **Symptom:** unchanged: rc=1, `VACUOUS: strict-test-binding gate was SKIPPED`, because
+  `contracts/spectral-indices-v1.yaml` has no `kani_harnesses:`.
+- **Measured around it** (temporary lifted copy `contracts-lift-0804/`, deleted after each run): 593 refs
+  resolved (589 after Task 1 — 587 at 08-03 plus the two laya-parity-v1 bindings — and 4 more from the
+  decide-apr-v1 legs), **0 dangling in laya-parity-v1 and decide-apr-v1**; the other 15 contracts and 44
+  dangling refs are identical to D-ITEM-08-01-A. Mutated binding names were flagged in both Phase 8
+  contracts, so the resolver discriminates.
+- **Why not fixed here:** same reason as D-ITEM-08-01-A.
+
+### D-ITEM-08-04-B: `cargo fmt --all -- --check` fails on files from `fdf6b1802`
+
+- **Found during:** 08-04 final checks.
+- **Symptom:** diffs in `crates/aprender-image/src/{lib,spectral,tests}.rs` and
+  `crates/aprender-mcp-chronos/{build.rs,src/lib.rs}` — all from `fdf6b1802` (the commit behind
+  D-ITEM-08-01-A). `cargo fmt -p aprender-decide -- --check` exits 0.
+- **Why not fixed here:** out of scope (other phases' crates); a one-line `cargo fmt` in its own change.
