@@ -1274,3 +1274,20 @@ forecast-np-regressor-calibration points="" lags="" epochs="":
     fi
     grep -m1 '^NP REG CAL FIT: ' "$LOG"
     echo "  NP REGRESSOR CALIBRATION OK: $checked points swept on release, slope fitted"
+
+# ---------------------------------------------------------------------------
+# Phase 8: the Laya back office (scripts/laya_train, a pinned uv project, D-02).
+#
+# Laptop-only: CI never installs this project's torch stack. The Rust side
+# re-derives what CI must check (plan 08-09), and whether the torch-free
+# Python self-tests also run in CI is decided at plan 08-12's CI checkpoint.
+# `--frozen` everywhere: the committed uv.lock (human-verified pins, plan 08-02
+# Task 1) is what runs, never a fresh resolution.
+# ---------------------------------------------------------------------------
+
+# Regenerate the two tiny synthetic CI fixtures from Laya's / transformers' own code (byte-identical on re-run).
+laya-fixtures:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv run --project scripts/laya_train --frozen python scripts/laya_train/metrics.py --selftest
+    uv run --project scripts/laya_train --frozen python scripts/laya_train/fixtures.py
