@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 1/12 plans executed in 10 waves
+**Plans:** 2/12 plans executed in 10 waves
 
 Plans:
 **Wave 1**
@@ -654,7 +654,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 08-02-PLAN.md — package-legitimacy checkpoint, pinned uv back office, tiny ModernBERT + tiny Laya fixtures from Laya's own code
+- [x] 08-02-PLAN.md — package-legitimacy checkpoint, pinned uv back office, tiny ModernBERT + tiny Laya fixtures from Laya's own code
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
