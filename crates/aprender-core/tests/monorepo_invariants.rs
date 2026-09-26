@@ -317,6 +317,7 @@ fn test_no_unauthorized_binaries() {
         "aprender-mcp-forecast",        // Prophet/NeuralProphet forecast server (Phase 6 D-06)
         "aprender-mcp-chronos",         // Chronos-Bolt server (Phase 6 D-06; created in plan 06-07)
         "aprender-mcp-chronos-lambda",  // Chronos-Bolt AWS Lambda custom runtime (bootstrap)
+        "aprender-mcp-decide",          // Laya decision server (Phase 8 D-15)
     ]
     .into();
 
@@ -429,7 +430,11 @@ fn test_no_unauthorized_binaries() {
     // binary being minted. Raising this number is a phase-CONTEXT decision
     // (the human gate at 06-02 Task 1), never an edit made alongside the crate
     // that needs it.
-    const DEPLOYMENT_UNIT_BASELINE: usize = 7;
+    //
+    // 7 -> 8: `aprender-mcp-decide`, authorized by Phase 8 CONTEXT D-15 (recorded at
+    // discuss-phase, before the crate existed). D-15 also authorizes
+    // `aprender-mcp-decide-lambda` (plan 08-07), which will take this to 9.
+    const DEPLOYMENT_UNIT_BASELINE: usize = 8;
     assert!(
         deployment_unit_bins.len() <= DEPLOYMENT_UNIT_BASELINE,
         "FALSIFY-MONO-011: the thin-MCP deployment-unit register grew to {} \

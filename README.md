@@ -40,7 +40,7 @@ publishing — all backed by YAML provable contracts that fail CI on drift.
 
 | Metric | Count | Source of truth |
 |-------:|------:|---|
-| Workspace crates | **88** workspace crates | `cargo metadata --no-deps` (NOT `ls crates/` — 5 top-level `crates/` entries are `exclude`d in the root `Cargo.toml` and 3 have no `Cargo.toml` at all; a directory is not a crate) |
+| Workspace crates | **89** workspace crates | `cargo metadata --no-deps` (NOT `ls crates/` — 5 top-level `crates/` entries are `exclude`d in the root `Cargo.toml` and 3 have no `Cargo.toml` at all; a directory is not a crate) |
 | Provable contracts | **1795** provable contracts | `find contracts/ -name '*.yaml'` |
 | CLI commands | **110** CLI commands | `apr --help` |
 | Book CLI chapters | **112** chapters | `ls book/src/cli/*.md` |

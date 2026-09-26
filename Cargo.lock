@@ -898,6 +898,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aprender-mcp-decide"
+version = "0.63.0"
+dependencies = [
+ "aprender-decide",
+ "pmcp",
+ "proptest",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "aprender-mcp-forecast"
 version = "0.63.0"
 dependencies = [
