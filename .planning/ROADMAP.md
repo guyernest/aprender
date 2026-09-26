@@ -645,12 +645,12 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 12 plans in 10 waves
+**Plans:** 1/12 plans executed in 10 waves
 
 Plans:
 **Wave 1**
 
-- [ ] 08-01-PLAN.md — four contracts declared before any run (gate thresholds, classify bounds, parity bars, decide-apr-v1 schema) + blocking contract-audit-phase8
+- [x] 08-01-PLAN.md — four contracts declared before any run (gate thresholds, classify bounds, parity bars, decide-apr-v1 schema) + blocking contract-audit-phase8
 
 **Wave 2** *(blocked on Wave 1 completion)*
 

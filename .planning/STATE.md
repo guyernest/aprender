@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 08
-current_phase_name: laya-decision-model-local-fine-tune-and-thin-mcp-server
+current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Phase 8 context gathered
-last_updated: "2026-09-25T22:52:20.210Z"
-last_activity: 2026-09-21
-last_activity_desc: Phase 06.1 execution started
-state_head: 798373df33e6a9bf965ccaf01ab0fe4869b90fd7
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-09-26T00:26:17.273Z"
+last_activity: 2026-09-25
+last_activity_desc: Phase 08 execution started
+state_head: c254e2d4bcbb8adbf37fc8f99b2c755af3b643f8
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 104
-  completed_plans: 92
+  completed_plans: 93
 milestone_name: milestone
 ---
 
@@ -24,12 +24,12 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-07)
 
 **Core value:** A small labeled dataset can produce an accurate, fast, reproducible classifier that trains and runs entirely through Aprender's native Rust and APR lifecycle.
-**Current focus:** Phase 06.1 — Forecast exogenous inputs: Prophet regressors, NeuralProphet events, and tier-safe cost bounds (INSERTED)
+**Current focus:** Phase 08 — Laya Decision Model: Local Fine-Tune and Thin MCP Server
 
 ## Current Position
 
-Phase: 08 (laya-decision-model-local-fine-tune-and-thin-mcp-server) — READY TO EXECUTE
-Plan: 2 of 8
+Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
+Plan: 2 of 12
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-21 — Phase 06.1 execution started
+Last activity: 2026-09-25 — Phase 08 execution started
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -214,6 +214,7 @@ pending F-10 in Phase 5.)
 | Phase 06.1 P01 | 95 | 3 tasks | 14 files |
 | Phase 06.1 P04 | 78m | 3 tasks | 1 files |
 | Phase 06.1 P08 | 1h 20m | 3 tasks | 7 files |
+| Phase 08 P01 | 17min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -376,6 +377,9 @@ Recent decisions affecting current work:
 - [Phase 06.1]: The SC2 no-argument invariance gate is red under the --workspace --lib build CI runs and green under -p aprender-forecast; the variable is cargo feature unification, isolated to apr-cli by one-variable control
 - [Phase 06.1]: The AR-absorption caution reaches FOUR surfaces, because schemars supplies the input SCHEMA and nothing supplies the tool-level description an MCP client reads in tools/list
 - [Phase 06.1]: The compatibility promise is published as SCOPED to JSON/MCP callers, with both halves observed by a compile probe rather than asserted
+- [Phase 08]: 08-01: classify token budget 1024 built-row tokens, derived DOWN from (30000-12000-1100-4000)/11 = 1172; probe_budget_ms 1100 = 2 x 48 x 11 ms
+- [Phase 08]: 08-01: Laya gate pass decided on Rust-recomputed metrics from probabilities verified against Rust re-scores; reported metrics checked, never trusted; ECE is the house top-label ECE
+- [Phase 08]: 08-01: probes use a contract-resident synthetic K=2 task and store Python F16-reload values; task refusal is marker LOSS after Laya's shrink, never raw option length
 
 ### Pending Todos
 
@@ -486,9 +490,9 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-25T19:21:38.484Z
-Stopped at: Phase 8 context gathered
-Resume file: .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-CONTEXT.md
+Last session: 2026-09-26T00:26:17.112Z
+Stopped at: Completed 08-01-PLAN.md
+Resume file: None
 
 ## Accumulated Context
 
