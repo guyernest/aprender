@@ -119,3 +119,32 @@ not fixed by it.
   plan moved 88 -> 89 from `cargo metadata --no-deps`. `readme_contract` only checks the metrics row, so the
   tree line has drifted unnoticed across several phases.
 - **Why not fixed here:** pre-existing drift in prose no gate reads; the plan scoped the edit to the gated count.
+
+## From plan 08-07
+
+### D-ITEM-08-07-A: the bootstrap handler has not run under a Lambda runtime
+
+- **Found during:** 08-07 final verification.
+- **What is proven locally:** every piece the handler composes. That covers the stateless loopback
+  (identity, cold-first and both maximal shapes over real HTTP), the S3 loader through an injected
+  fetcher, `LoadOnce` re-arming after a failure, and the probe-id filter and load-evidence strings.
+  The `bootstrap` bin compiles for aarch64 (zigbuild, glibc 2.34), and `resolve_model_future_is_send`
+  pins the `Send` property lambda_http needs.
+- **What is not:** `main.rs::handler` itself. That includes the 503-on-failed-load path, the
+  `x-decide-load` header on a proxied response, and the `decide.load` line in CloudWatch. No
+  Lambda runtime emulator (`cargo lambda watch`) was run, and a live deploy belongs to 08-10 and 08-11.
+- **Also:** `.planning/WINDOWS.md` still refuses every append (`Ledger entry 24 has invalid status:
+  "resolved"`), so this unrun-verify item is recorded here instead.
+
+### D-ITEM-08-07-B: a per-crate deploy root builds the wrong `*-lambda` package
+
+- **Found during:** 08-07 Task 3, while writing `.pmcp/deploy.toml.template`.
+- **Symptom:** cargo-pmcp 0.24.2's `find_lambda_package_dir` tries `<deploy-root>/{server}-lambda`
+  first, then falls back to the first workspace `*-lambda` package with a `bootstrap` bin. With
+  `crates/aprender-mcp-decide-lambda` as the root, the first branch cannot match. In
+  workspace-member order, `cargo metadata --no-deps` lists `aprender-mcp-setfit-lambda` first
+  (measured), and in alphabetical order `aprender-mcp-chronos-lambda` comes first. Either way,
+  `cargo pmcp deploy --manifest-path crates/aprender-mcp-decide-lambda` would ship another server's
+  binary.
+- **Owner:** plan 08-10 (its resolver-proof task and deploy-root decision already cover it). The
+  template now documents the trap instead of prescribing the per-crate command.
