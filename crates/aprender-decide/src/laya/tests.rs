@@ -1,0 +1,172 @@
+//! Laya parity against its own oracle on the tiny fixture (plan 08-02), bars from
+//! `contracts/laya-parity-v1.yaml` read at test time.
+
+use super::{LayaError, QType};
+use crate::test_support::{
+    f32_b64, f32_list, fixture_apr, fixture_task, load_laya, max_abs, oracle, string_list,
+    tolerance, u32_list, usize_list, within,
+};
+use crate::{DecisionMethod, Task};
+
+fn qtype(v: &serde_json::Value) -> QType {
+    let i = usize::try_from(v.as_u64().expect("qtype")).expect("qtype fits usize");
+    QType::from_index(i).expect("known qtype")
+}
+
+/// FALSIFY-LAYA-PARITY-001 / -003 on the tiny fixture: tiny checkpoint -> in-memory
+/// `.apr` -> `Laya::from_parts` on core ModernBERT -> built rows exact, logits and
+/// probabilities within the contract bars, argmax exact, the truncation and
+/// injection rows reproduced, and the `many` marker-loss question refused at load.
+#[test]
+fn tiny_parity() {
+    let logits_bar = tolerance("logits_abs");
+    let probs_bar = tolerance("probs_abs");
+    let o = oracle();
+    let apr = fixture_apr();
+    let laya = load_laya(&apr, fixture_task()).expect("the fixture task loads");
+    let b = laya.builder();
+    let rows = o["rows"].as_array().expect("oracle rows");
+    assert!(!rows.is_empty(), "oracle has rows");
+
+    let (mut worst_logit, mut worst_prob) = (0.0f64, 0.0f64);
+    let (mut saw_truncated, mut saw_injection, mut saw_shrunk) = (false, false, false);
+    let mut team_probs: Vec<(String, Vec<f32>)> = Vec::new();
+    for (ri, r) in rows.iter().enumerate() {
+        let state = r["state"].as_str().expect("state");
+        let t = r["t"].as_str().expect("t");
+        let options = string_list(&r["options"]);
+        let built = b
+            .build(state, t, r["ins"].as_str().expect("ins"), &options)
+            .expect("row builds");
+        assert_eq!(built.ids, u32_list(&r["ids"]), "row {ri}: ids exact");
+        assert_eq!(
+            built.markers,
+            usize_list(&r["markers"]),
+            "row {ri}: markers exact"
+        );
+        assert_eq!(built.tokens, built.ids.len());
+        let want_trunc = r["truncated"].as_bool().expect("truncated");
+        assert_eq!(built.truncated, want_trunc, "row {ri}: truncated flag");
+        saw_truncated |= want_trunc;
+        saw_injection |= state.contains("[SEP]") && state.contains("[MASK]");
+        saw_shrunk |= r["options_shrunk"].as_bool().expect("options_shrunk");
+
+        let q = qtype(&r["qtype"]);
+        let mut blocks: Vec<(String, Vec<f32>)> = Vec::new();
+        let z = laya
+            .forward_row(&built.ids, &built.markers, q, |n, x| {
+                blocks.push((n.to_string(), x.to_vec()));
+            })
+            .expect("forward");
+        let ladder: Vec<String> = ["final", "head0", "head1"]
+            .iter()
+            .map(|n| {
+                let got = &blocks.iter().find(|(bn, _)| bn == n).expect("tapped").1;
+                format!("{n}={:.2e}", max_abs(got, &f32_b64(&r["ladder"][*n])))
+            })
+            .collect();
+        let m = &blocks
+            .iter()
+            .find(|(bn, _)| bn == "m_opts")
+            .expect("m_opts")
+            .1;
+        let dm = max_abs(m, &f32_b64(&r["m_opts"]));
+
+        let dz = max_abs(&z, &f32_list(&r["logits"]));
+        let temp = super::temperature::temperature_for(
+            laya.agent_config(),
+            q,
+            usize::try_from(r["k"].as_u64().expect("k")).expect("k fits"),
+        );
+        assert_eq!(
+            f64::from(temp),
+            f64::from(r["temperature"].as_f64().expect("temperature") as f32),
+            "row {ri}: bucket temperature"
+        );
+        let p = super::temperature::softmax_t(&z, temp);
+        let dp = max_abs(&p, &f32_list(&r["probabilities"]));
+        println!(
+            "row {ri} ({}): tokens {} {} m_opts={dm:.2e} logits={dz:.2e} probs={dp:.2e} ARCH={}",
+            r["qid"].as_str().unwrap_or("?"),
+            built.tokens,
+            ladder.join(" "),
+            std::env::consts::ARCH
+        );
+        assert!(
+            within(dz, logits_bar),
+            "row {ri}: logits max|d| {dz} > {logits_bar}"
+        );
+        assert!(
+            within(dp, probs_bar),
+            "row {ri}: probs max|d| {dp} > {probs_bar}"
+        );
+        let want_arg = usize::try_from(r["argmax"].as_u64().expect("argmax")).expect("fits");
+        assert_eq!(super::argmax(&p), want_arg, "row {ri}: argmax exact");
+        worst_logit = worst_logit.max(dz);
+        worst_prob = worst_prob.max(dp);
+        if r["qid"] == "team" {
+            team_probs.push((state.to_string(), p));
+        }
+    }
+    assert!(saw_truncated, "the oracle exercises the over-window row");
+    assert!(
+        saw_injection,
+        "the oracle exercises the [MASK]/[SEP] injection row"
+    );
+    assert!(saw_shrunk, "the oracle exercises the option shrink");
+    println!(
+        "tiny_parity: {} rows, max|d| logits {worst_logit:.3e} (bar {logits_bar:e}), \
+         probs {worst_prob:.3e} (bar {probs_bar:e}), ARCH={}",
+        rows.len(),
+        std::env::consts::ARCH
+    );
+
+    // The task path: classify(texts) through the seam equals the per-row results.
+    let texts: Vec<String> = team_probs.iter().map(|(s, _)| s.clone()).collect();
+    let decisions = laya.classify(&texts).expect("classify");
+    assert_eq!(decisions.len(), texts.len());
+    for ((_, p), d) in team_probs.iter().zip(&decisions) {
+        assert_eq!(
+            &d.probabilities, p,
+            "classify equals the per-row probabilities"
+        );
+        assert_eq!(d.label_index, super::argmax(p));
+    }
+    assert!(
+        decisions.iter().any(|d| d.truncated),
+        "the over-window team row is served truncated (D-12)"
+    );
+
+    // The `many` question: Laya's ids and SHORTER marker list reproduced, and the
+    // 16-criteria task refused at load with the oracle's marker count.
+    let ml = &o["marker_loss"];
+    let built = b
+        .build(
+            ml["state"].as_str().expect("state"),
+            ml["t"].as_str().expect("t"),
+            ml["ins"].as_str().expect("ins"),
+            &string_list(&ml["options"]),
+        )
+        .expect("many builds");
+    let want_markers = usize_list(&ml["markers"]);
+    assert_eq!(built.ids, u32_list(&ml["ids"]), "many: ids exact");
+    assert_eq!(built.markers, want_markers, "many: markers exact");
+    let criteria = usize::try_from(ml["criteria"].as_u64().expect("criteria")).expect("fits");
+    assert!(
+        want_markers.len() < criteria,
+        "the oracle recorded a marker loss"
+    );
+    let many = Task::from_slice(
+        &serde_json::to_vec(&ml["question"]).expect("serialise the many question"),
+    )
+    .expect("many task parses");
+    assert_eq!(many.criteria().len(), criteria);
+    let err = load_laya(&apr, many).expect_err("marker loss refused at load");
+    assert_eq!(
+        err,
+        LayaError::MarkersLost {
+            criteria,
+            markers: want_markers.len()
+        }
+    );
+}

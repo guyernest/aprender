@@ -1,0 +1,50 @@
+[package]
+name = "aprender-decide"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Method-neutral decision models (Laya first) over aprender-core"
+keywords = ["classification", "decision", "laya", "modernbert", "aprender"]
+categories = ["science"]
+readme = "README.md"
+
+# Library only. There is deliberately NO [[bin]] and no src/main.rs: serving is a
+# transport concern of the thin decide servers (D-15), and FALSIFY-MONO-011 allows
+# binaries only on the listed crates.
+[lib]
+name = "aprender_decide"
+path = "src/lib.rs"
+
+[dependencies]
+# The reusable ModernBERT encoder and its primitives (D-13, OPS-03): Linear,
+# layer_norm, gelu_exact, attention and the prefix-aware `.apr` loader. Default
+# features, so `parallel` (and with it `models::modernbert`) is on.
+aprender = { path = "../aprender-core", version = "0.63.0", package = "aprender-core" }
+# Byte-identical tokenizer.json via Tokenizer::from_bytes (0.23.1, the pin Laya's
+# Python side runs).
+tokenizers = { workspace = true }
+serde = { workspace = true }
+# NOTE: `preserve_order` is deliberately NOT enabled here. Criteria order is the
+# label index (D-05) and is read with an order-preserving MapAccess visitor from the
+# raw bytes, which holds under BOTH map backings. Enabling the feature on this crate
+# would unify it workspace-wide and silently change other crates' map behaviour in
+# any build that includes this one (RESEARCH Pitfall 2).
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+# The head's residual adds, as core's encoder does them.
+rayon = { workspace = true }
+provable-contracts-macros = { workspace = true }
+
+[dev-dependencies]
+# Test-side reader of the tiny Laya checkpoint's raw F16 bytes.
+safetensors = { workspace = true }
+# Test-side reader of contract YAML constants and tolerances.
+serde_yaml = { workspace = true }
+# The oracle's ladder blocks are f32le_base64 (plan 08-02 fixture encoding).
+base64 = { workspace = true }
+
+[lints]
+workspace = true

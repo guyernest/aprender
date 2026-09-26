@@ -175,7 +175,8 @@ falsification_tests:
   - id: FALSIFY-LAYA-PARITY-001
     rule: 'Ids and markers are exact on every fixture row'
     prediction: '14/14 spike-025 rows (and every 08-02 tiny-fixture row) produce identical ids and marker positions.'
-    implemented_by: 'plan 08-04 (aprender_decide::laya builder tests); the test: line is added in that plan''s commit'
+    implemented_by: 'plan 08-04 (aprender_decide::laya builder tests); tiny Laya fixture from plan 08-02, every oracle row plus the `many` marker-loss question'
+    test: 'cargo test -p aprender-decide --lib laya::tests::tiny_parity'
     if_fails: 'The builder diverged — check the [MASK] replacement, the option shrink and the right truncation before any numeric rung.'
 
   - id: FALSIFY-LAYA-PARITY-002
@@ -188,7 +189,8 @@ falsification_tests:
   - id: FALSIFY-LAYA-PARITY-003
     rule: 'Logits, probabilities and argmax agree on every fixture row'
     prediction: 'logits <= 1.0e-4, probabilities <= 1.0e-5 (spike 025: 3.8e-6), argmax exact; measured max|delta| and ARCH printed.'
-    implemented_by: 'plans 08-04 and 08-09 (aprender_decide::laya scorer tests)'
+    implemented_by: 'plans 08-04 and 08-09 (aprender_decide::laya scorer tests); 08-04 binds the tiny Laya fixture rung (head, scorer, temperature, probabilities)'
+    test: 'cargo test -p aprender-decide --lib laya::tests::tiny_parity'
     if_fails: 'Green final norm with red logits: the head (type embedding, 2 TransformerEncoderLayer norm_first, relu FFN) or the scorer; red probs with green logits: the temperature bucket or clamp.'
 
   - id: FALSIFY-LAYA-PARITY-004
