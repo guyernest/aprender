@@ -22,7 +22,13 @@ afterwards), then asserts:
     `early_stopping` object and its rl_agent_config.json `training.stopping` record names a best epoch
     in [first_candidate_epoch, epochs_run]; fixed_epochs (1 epoch) logs no STOP and its recipe.json has
     no `early_stopping` key (the 1.0.0 bytes); in both, mtime recipe.json <= checkpoint/model.safetensors
-    <= eval-probs.json (no eval probability before the checkpoint is fixed).
+    <= eval-probs.json (no eval probability before the checkpoint is fixed);
+  * the seed policy (FALSIFY-LAYA-GATE-006): `--seeds 3` (fixed_epochs, 1 epoch) trains seeds 13, 17, 23,
+    writes variance-report.json (n 3, per-seed rows in that order, mean/sd), leaves exactly ONE
+    model.safetensors and no per-seed temp dir, labels the gate report "mean ± sd over 3 seeds", judges
+    the gate on seed 13's metrics, and ships a checkpoint BYTE-IDENTICAL to the single-seed run's (the
+    declared seed ships whatever the other seeds score) under an unchanged recipe.json; `--seeds 0` and
+    `--seeds` beyond the contract's variance_seeds are refused before any model loads.
 
 The gate outcome itself is not asserted (a 1-3 epoch tiny model is not expected to pass): exit 0 or 3.
 Prints LIFECYCLE OK.
@@ -73,16 +79,68 @@ def main():
     try:
         for stopping, epochs in (("early_stopping", 3), ("fixed_epochs", 1)):
             run_one(tmp / stopping, tiny_sha, stopping, epochs, Agent)
+        check_seed_refusals(tmp, tiny_sha)
+        single = tmp / "fixed_epochs"
+        multi = tmp / "fixed_epochs-seeds3"
+        run_one(multi, tiny_sha, "fixed_epochs", 1, Agent, seeds=3)
+        check_variance_run(single, multi)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("LIFECYCLE OK")
 
 
-def run_one(out, tiny_sha, stopping, epochs, Agent):
+def train_cmd(out, tiny_sha, stopping, epochs, extra=()):
+    return [sys.executable, str(HERE / "train.py"), "--data", str(TINY / "data"), "--out", str(out),
+            "--variant", "synthetic-fixture", "--base", str(TINY / "checkpoint"), "--base-sha256", tiny_sha,
+            "--epochs", str(epochs), "--stopping", stopping, "--device", "cpu"] + list(extra)
+
+
+def check_seed_refusals(tmp, tiny_sha):
+    """--seeds outside [1, len(variance_seeds)] is refused (exit 2) before any model loads or any file is written."""
+    n_max = len(contract.seed_policy()["variance_seeds"])
+    for n in (0, n_max + 1):
+        out = tmp / ("refused-seeds-%d" % n)
+        proc = subprocess.run(train_cmd(out, tiny_sha, "fixed_epochs", 1, ["--seeds", str(n)]),
+                              capture_output=True, text=True, env=dict(os.environ))
+        if proc.returncode != 2 or "REFUSED seeds" not in proc.stderr or (out.exists() and any(out.iterdir())):
+            fail("--seeds %d was not refused before training (exit %d): %s" % (n, proc.returncode, proc.stderr[-300:]))
+    print("seed refusals: --seeds 0 and --seeds %d refused (exit 2, nothing written)" % (n_max + 1))
+
+
+def check_variance_run(single, multi):
+    """FALSIFY-LAYA-GATE-006 on the tiny fixture: variance seeds report, the declared seed ships."""
+    seeds = [int(s) for s in contract.seed_policy()["variance_seeds"]][:3]
+    declared = int(contract.seed_policy()["declared_seed"])
+    vr = json.loads((multi / "variance-report.json").read_text())
+    if vr.get("n") != 3 or [r["seed"] for r in vr["per_seed"]] != seeds or vr.get("declared_seed") != declared:
+        fail("variance-report.json n / per_seed seeds / declared_seed: %s" % {k: vr.get(k) for k in ("n", "declared_seed")})
+    for key in ("macro_f1", "f_avg", "ece_post"):
+        if key not in vr["mean"] or key not in vr["sd"]:
+            fail("variance-report.json has no mean/sd for %s" % key)
+    shipped = sorted(str(q.relative_to(multi)) for q in multi.rglob("model.safetensors"))
+    if shipped != ["checkpoint/model.safetensors"]:
+        fail("a --seeds 3 run must keep exactly one checkpoint (the declared seed's), found %s" % shipped)
+    leftovers = sorted(q.name for q in multi.iterdir() if q.name.startswith(".variance-seed-"))
+    if leftovers:
+        fail("per-seed temp dirs were not deleted: %s" % leftovers)
+    rep = json.loads((multi / "gate-report.json").read_text())
+    if rep["seeds"] != {"declared": declared, "n": 3, "label": contract.seeds_label(3)}:
+        fail("gate report seeds block %s" % rep["seeds"])
+    row13 = vr["per_seed"][0]
+    if (rep["fine_tuned"]["macro_f1"], rep["fine_tuned"]["ece_post"]) != (row13["macro_f1"], row13["ece_post"]):
+        fail("the gate was not judged on the declared seed's metrics")
+    if (multi / "recipe.json").read_bytes() != (single / "recipe.json").read_bytes():
+        fail("--seeds changed recipe.json (and so the recipe_id)")
+    if tree_sha256(multi / "checkpoint") != tree_sha256(single / "checkpoint"):
+        fail("the --seeds 3 run shipped a checkpoint that differs from the single-seed run's: the declared seed "
+             "did not ship")
+    print("variance[seeds 13/17/23]: one checkpoint kept, byte-identical to the single-seed run's; label %r; "
+          "mean macro_f1 %.4f sd %.4f" % (rep["seeds"]["label"], vr["mean"]["macro_f1"], vr["sd"]["macro_f1"]))
+
+
+def run_one(out, tiny_sha, stopping, epochs, Agent, seeds=1):
     """One train.py run in `out`, then every assertion of the module docstring."""
-    cmd = [sys.executable, str(HERE / "train.py"), "--data", str(TINY / "data"), "--out", str(out),
-           "--variant", "synthetic-fixture", "--base", str(TINY / "checkpoint"), "--base-sha256", tiny_sha,
-           "--epochs", str(epochs), "--stopping", stopping, "--device", "cpu"]
+    cmd = train_cmd(out, tiny_sha, stopping, epochs, ["--seeds", str(seeds)] if seeds != 1 else [])
     proc = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ))
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
@@ -141,8 +199,10 @@ def run_one(out, tiny_sha, stopping, epochs, Agent):
         fail("gate report thresholds differ from the contract")
     if report["device_used"] != "cpu" or report["device_is_cpu"] is not True:
         fail("forced --device cpu was not recorded as device_used cpu / device_is_cpu true")
-    if report["seeds"] != {"declared": 13, "n": 1, "label": "single seed"}:
+    if seeds == 1 and report["seeds"] != {"declared": 13, "n": 1, "label": "single seed"}:
         fail("gate report seeds block %s" % report["seeds"])
+    if seeds == 1 and (out / "variance-report.json").exists():
+        fail("a single-seed run wrote variance-report.json")
     s = report["calibration"]["slice_ids"]
     if s != sorted(set(s)) or len(s) != report["calibration"]["slice_size"]:
         fail("calibration.slice_ids is not a sorted, duplicate-free list of slice_size")
@@ -156,8 +216,8 @@ def run_one(out, tiny_sha, stopping, epochs, Agent):
         Agent(str(out / "checkpoint"), device="cpu", expected_sha256={"model.safetensors": before["model.safetensors"]})
     if tree_sha256(out / "checkpoint") != before:
         fail("a further reload changed a checkpoint file")
-    print("lifecycle[%s]: exit %d, %d checkpoint files unchanged across reload, gate pass=%s"
-          % (stopping, proc.returncode, len(before), report["pass"]))
+    print("lifecycle[%s, seeds %d]: exit %d, %d checkpoint files unchanged across reload, gate pass=%s"
+          % (stopping, seeds, proc.returncode, len(before), report["pass"]))
 
 
 if __name__ == "__main__":

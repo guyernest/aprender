@@ -18,6 +18,7 @@ No torch import (module level or anywhere): `python gate.py --selftest` runs wit
         contract (contract.thresholds()), pass = margin >= min_macro_f1_margin AND ece_post <= max_ece.
         Returns the metric blocks of the gate report. A non-finite metric can never pass.
 """
+import json
 import math
 import sys
 from pathlib import Path
@@ -155,6 +156,219 @@ def evaluate_gate(zs_probs, ft_probs, ft_probs_pre, y, f_avg_labels=None):
     return {"pass": passed, "thresholds": th, "zero_shot": zs, "fine_tuned": ft, "margin": margin}
 
 
+# ------------------------------------------------------------------------------------------ self-test
+
+# The D-19 demo's two FAILING runs (laya-finetune-gate-v1 1.2.0 `demo.fail_closed_vectors`), their
+# REPORTED numbers copied exactly from each gate-report.json. They are fail-closed test vectors: the
+# gate must decide FAIL on them, on the ece_post clause alone (the margin clause passes in both).
+FAIL_CLOSED_VECTORS = (
+    {"name": "fixed_epochs", "run_dir": "models/decide/tweet-stance-16-fixed-epochs",
+     "recipe_id": "d0f4e40d39425e68d503f557f4f660eb9a73a4fb258da01f777b6f49362bcf20",
+     "zs_macro_f1": 0.34021730836081837, "ft_macro_f1": 0.4701016893133163, "ece_post": 0.37732241111142295,
+     "t_applied": 5.0, "clamp_hit": True},
+    {"name": "early_stopping", "run_dir": "models/decide/tweet-stance-16",
+     "recipe_id": "3d4b91daf86772bcb23e5342c2dff4bb6467f5d9f254f7833ac7f61a8f2f5375",
+     "zs_macro_f1": 0.34021730836081837, "ft_macro_f1": 0.4458312929908441, "ece_post": 0.2224078384893281,
+     "t_applied": 3.143624512876524, "clamp_hit": False},
+)
+DEMO_DATA_DIR = "data/decide/tweet-stance-16"
+
+
+def _fabricated(zs_f1, ft_f1, ece_post, th=None, passed=None):
+    r = {"thresholds": dict(contract.thresholds()) if th is None else th,
+         "zero_shot": {"macro_f1": zs_f1}, "fine_tuned": {"macro_f1": ft_f1, "ece_post": ece_post}}
+    if passed is not None:
+        r["pass"] = passed
+    return r
+
+
+def _recompute_run_dir(vec, case):
+    """Recompute a fail-closed vector's gate from its probability files and the demo eval labels.
+    Local evidence only (both dirs are gitignored); absent -> an explicit SKIP line, never a pass."""
+    import data  # torch-free
+    repo = contract.REPO
+    run, data_dir = repo / vec["run_dir"], repo / DEMO_DATA_DIR
+    need = [run / f for f in ("gate-report.json", "recipe.json", "eval-probs.json", "zero-shot-probs.json",
+                              "task.json")] + [data_dir / "eval.jsonl"]
+    missing = [str(q.relative_to(repo)) for q in need if not q.is_file()]
+    if missing:
+        print("  SKIP run-dir recompute [%s]: %s not present (gitignored local evidence)"
+              % (vec["name"], ", ".join(missing)))
+        return
+    rep = json.loads((run / "gate-report.json").read_text())
+    tag = "[%s] " % vec["name"]
+    case(tag + "recipe_id == sha256(recipe.json) == the vector's",
+         data.sha256_file(run / "recipe.json") == rep["recipe_id"] == vec["recipe_id"])
+    case(tag + "probability files and eval.jsonl match the report's sha256s",
+         data.sha256_file(run / "eval-probs.json") == rep["eval_probs_sha256"]
+         and data.sha256_file(run / "zero-shot-probs.json") == rep["zero_shot_probs_sha256"]
+         and data.sha256_file(data_dir / "eval.jsonl") == rep["inputs_sha256"]["eval_jsonl"])
+    task = data.load_task(run / "task.json")
+    rows = data.load_rows(data_dir / "eval.jsonl", task, "eval")
+    y = np.array([lab for _, lab in rows])
+
+    def probs(name):
+        obj = json.loads((run / name).read_text())
+        ok = (obj["labels"] == task["labels"] and [r["row"] for r in obj["rows"]] == list(range(len(rows)))
+              and all(r["text_sha256"] == data.exact_sha256(t) for r, (t, _) in zip(obj["rows"], rows)))
+        case(tag + "%s rows align with eval.jsonl (index + text sha256)" % name, ok)
+        return np.array([r["probabilities"] for r in obj["rows"]], dtype=np.float64)
+    ft, zs = probs("eval-probs.json"), probs("zero-shot-probs.json")
+    labels = task["labels"]
+    fav = [labels.index("against"), labels.index("favor")] if "against" in labels and "favor" in labels else None
+    g = evaluate_gate(zs, ft, ft, y, fav)
+    tol = float(contract.constants()["gate_metric_recompute_abs"])
+    deltas = [abs(g["zero_shot"]["macro_f1"] - rep["zero_shot"]["macro_f1"]),
+              abs(g["fine_tuned"]["macro_f1"] - rep["fine_tuned"]["macro_f1"]),
+              abs(g["fine_tuned"]["ece_post"] - rep["fine_tuned"]["ece_post"]), abs(g["margin"] - rep["margin"])]
+    case(tag + "recomputed macro_f1 (zs, ft), ece_post, margin within gate_metric_recompute_abs",
+         max(deltas) <= tol, "max |d| = %.3g (tol %g)" % (max(deltas), tol))
+    case(tag + "gate recomputed from the probability files decides FAIL",
+         g["pass"] is False and rep["pass"] is False,
+         "margin=%.4f ece_post=%.4f" % (g["margin"], g["fine_tuned"]["ece_post"]))
+
+
+def selftest():
+    failures = []
+
+    def case(name, ok, detail=""):
+        print("  %-4s %-74s %s" % ("ok" if ok else "FAIL", name, detail))
+        if not ok:
+            failures.append(name)
+
+    th = contract.thresholds()
+    print("gate decision on fabricated reports (thresholds from the contract: %s):" % th)
+    # 0.55 - 0.5 = 0.050000000000000044 in f64 (the same subtraction the Rust verifier does).
+    for name, zs, ft, ece, want in (
+            ("margin 0.049 fails", 0.5, 0.549, 0.05, False),
+            ("margin 0.05 with ECE 0.10 passes (both bounds inclusive)", 0.5, 0.55, 0.10, True),
+            ("ECE 0.1001 fails", 0.5, 0.55, 0.1001, False),
+            ("margin NaN fails", float("nan"), 0.55, 0.05, False),
+            ("ECE NaN fails", 0.5, 0.55, float("nan"), False),
+            ("ECE +inf fails", 0.5, 0.55, float("inf"), False)):
+        try:
+            got = verify_report(_fabricated(zs, ft, ece))["pass"]
+            case(name, got is want, "pass=%s" % got)
+        except GateError as e:
+            case(name, False, "unexpected refusal: %s" % e)
+    for name, mutate in (
+            ("thresholds.max_ece 0.2 refused", lambda t: t.update(max_ece=0.2)),
+            ("thresholds.min_macro_f1_margin 0.0 refused", lambda t: t.update(min_macro_f1_margin=0.0)),
+            ("thresholds.ece_bins 10 refused", lambda t: t.update(ece_bins=10)),
+            ("thresholds missing a key refused", lambda t: t.pop("ece_bins")),
+            ("thresholds with an extra key refused", lambda t: t.update(min_f_avg=0.5))):
+        t = dict(th)
+        mutate(t)
+        try:
+            verify_report(_fabricated(0.5, 0.9, 0.01, t))
+            case(name, False, "accepted")
+        except GateError as e:
+            case(name, str(e).startswith("REFUSED thresholds"), str(e)[:90])
+    try:
+        verify_report(_fabricated(0.5, 0.9, 0.5, passed=True))
+        case("reported pass=true on failing metrics refused", False, "accepted")
+    except GateError as e:
+        case("reported pass=true on failing metrics refused", str(e).startswith("REFUSED pass"), str(e)[:90])
+
+    print("fail-closed vectors: the two FAILING D-19 demo runs (contract demo.fail_closed_vectors):")
+    listed = " ".join(contract.demo().get("fail_closed_vectors", []))
+    for v in FAIL_CLOSED_VECTORS:
+        tag = "[%s] " % v["name"]
+        case(tag + "recipe_id is listed in the contract's fail_closed_vectors", v["recipe_id"] in listed)
+        out = verify_report(_fabricated(v["zs_macro_f1"], v["ft_macro_f1"], v["ece_post"]))
+        case(tag + "decides FAIL on the ece_post clause alone (margin passes)",
+             out["pass"] is False and out["failed"] == ["ece_post"],
+             "margin=%.4f ece_post=%.4f failed=%s" % (out["margin"], v["ece_post"], out["failed"]))
+        try:
+            verify_report(_fabricated(v["zs_macro_f1"], v["ft_macro_f1"], v["ece_post"], passed=True))
+            case(tag + "the same report with pass flipped to true is refused", False, "accepted")
+        except GateError as e:
+            case(tag + "the same report with pass flipped to true is refused", True, str(e)[:70])
+        _recompute_run_dir(v, case)
+
+    print("evaluate_gate on probabilities:")
+    y = np.array([0, 1, 2, 0, 1, 2])
+    good = np.eye(3)[y] * 0.9 + 0.1 / 3
+    chance = np.full((6, 3), 1 / 3)
+    g = evaluate_gate(chance, good, good, y)
+    case("confident-correct vs chance passes", g["pass"] is True,
+         "margin=%.4f ece=%.4f" % (g["margin"], g["fine_tuned"]["ece_post"]))
+    g = evaluate_gate(good, good, good, y)
+    case("equal models fail (margin 0)", g["pass"] is False and g["margin"] == 0.0)
+    try:
+        evaluate_gate(chance, np.full((6, 3), np.nan), good, y)
+        case("NaN probabilities refused", False, "accepted")
+    except ValueError as e:
+        case("NaN probabilities refused", True, str(e)[:70])
+
+    print("bounded temperature fit (FALSIFY-LAYA-GATE-004):")
+    c = contract.constants()
+    lo, hi = float(c["calibration_temp_min"]), float(c["calibration_temp_max"])
+    rng = np.random.RandomState(0)
+    yy = rng.randint(0, 3, size=40)        # memorised and confidently wrong half the time: optimum T >> 5
+    wrong = (yy + 1) % 3
+    zz = np.where(rng.rand(40)[:, None] < 0.5, 20.0 * np.eye(3)[yy], 20.0 * np.eye(3)[wrong])
+    tf, ta, hit = fit_temperature(zz, yy, lo, hi)
+    case("optimum T > 5 -> t_fitted = t_applied = 5.0, clamp_hit", tf == hi and ta == hi and hit,
+         "t=%s clamp=%s" % (tf, hit))
+    zz = 0.3 * np.eye(3)[yy]               # always right and under-confident: optimum T < 0.5
+    tf, ta, hit = fit_temperature(zz, yy, lo, hi)
+    case("optimum T < 0.5 -> t_fitted = t_applied = 0.5, clamp_hit", tf == lo and ta == lo and hit,
+         "t=%s clamp=%s" % (tf, hit))
+    zz = rng.randn(60, 3) * 2.0 + 1.5 * np.eye(3)[rng.randint(0, 3, 60)]
+    yy = zz.argmax(1).copy()
+    yy[:15] = (yy[:15] + 1) % 3
+    tf, ta, hit = fit_temperature(zz, yy, lo, hi)
+    grid = np.linspace(lo, hi, 45001)
+    tg = float(grid[int(np.argmin([metrics.nll(softmax(zz, t), yy) for t in grid]))])
+    case("interior optimum matches a 1e-4 grid, no clamp", (not hit) and abs(tf - tg) <= 2e-4 and ta == tf,
+         "t=%.6f grid=%.6f" % (tf, tg))
+
+    print("early stopping on a synthetic calibration-monitor trace (FALSIFY-LAYA-GATE-009):")
+    decl = contract.early_stopping_decl()
+    md = float(decl["min_delta"])
+    st = EarlyStopper(decl, 12)
+    case("epoch 0 (the untrained base) is never evaluated", not st.evaluates(0) and st.evaluates(1))
+    trace = [0.90, 0.80, 0.80 - md / 2, 0.80 - md * 0.8, 0.85, 0.70]
+    stopped_at = None
+    for e, m in enumerate(trace, 1):
+        _, stop = st.update(e, m)
+        if stop:
+            stopped_at = e
+            break
+    rec = st.record(stopped_at)
+    case("earliest epoch within min_delta of the minimum is kept (epoch 2, not 3 or 4)", rec["best_epoch"] == 2,
+         "best_epoch=%s" % rec["best_epoch"])
+    case("stops patience_epochs after the best epoch (at 2 + %d), never sees epoch 6" % decl["patience_epochs"],
+         stopped_at == 2 + int(decl["patience_epochs"]) and rec["reason"] == "patience",
+         "stopped_at=%s reason=%s" % (stopped_at, rec["reason"]))
+    st = EarlyStopper(decl, 12)
+    st.update(1, float("nan"))
+    st.update(2, 0.5)
+    rec = st.record(2)
+    case("a non-finite monitor never improves", rec["best_epoch"] == 2 and rec["per_epoch"][0]["monitor"] is None)
+    st = EarlyStopper(decl, 12)
+    for e in range(1, 4):
+        st.update(e, float("nan"))
+    try:
+        st.record(3)
+        case("no finite monitor at all -> refused, nothing to restore", False, "accepted")
+    except ValueError:
+        case("no finite monitor at all -> refused, nothing to restore", True)
+    st = EarlyStopper(decl, 2)
+    st.update(1, 0.9)
+    _, stop = st.update(2, 0.8)
+    case("an improving run stops at max_epochs", stop and st.record(2)["reason"] == "max_epochs")
+
+    if failures:
+        print("GATE SELFTEST FAILED: %s" % ", ".join(failures))
+        return 1
+    print("GATE SELFTEST OK")
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        sys.exit(selftest())
     print("usage: python gate.py --selftest", file=sys.stderr)
     sys.exit(2)
