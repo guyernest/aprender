@@ -40,3 +40,21 @@ not fixed by it.
 - **Not caused by 08-01**, unrelated to contracts. FALSIFY-README-002 (contract count) was ALSO
   failing before 08-01 (README said 1778 in two prose lines against 1791 on disk); 08-01 fixed that
   one because it moves the contract count, and it now passes at 1795.
+
+## From plan 08-03
+
+### D-ITEM-08-03-A: D-ITEM-08-01-A re-measured; still blocks the strict-binding PASS line
+
+- **Found during:** 08-03 Task 1 and Task 2 verify (`bash scripts/check_contract_test_binding.sh`).
+- **Symptom:** unchanged: rc=1, `VACUOUS: strict-test-binding gate was SKIPPED (contract validation failed)`,
+  because `contracts/spectral-indices-v1.yaml` has no `kani_harnesses:`.
+- **Measured around it:** `pv lint --strict-test-binding` was run on a temporary copy of `contracts/` with
+  the skip lifted. The copy was a sibling dir inside the repo, because the source scan is rooted at the
+  contract dir's parent, and it was deleted right after. Result: 587 refs resolved (585 at 08-01, plus
+  this plan's two bindings), and `laya-parity-v1` has **0** dangling references. The other 15 contracts
+  and 44 dangling references are identical to D-ITEM-08-01-A. A mutated binding (`tiny_parity_mutant_zz`)
+  was reported dangling in the same run, so the resolver discriminates.
+- **Why not fixed here:** same reason as D-ITEM-08-01-A. The fix belongs to other phases' contracts.
+- **Also found:** `.planning/WINDOWS.md` refuses every append (`Ledger entry 24 has invalid status:
+  "resolved"`), so this plan's deviation could not be recorded there. That was not caused by 08-03 and
+  is not fixed here.
