@@ -210,3 +210,127 @@ impl Task {
         &self.sha256
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Task, TaskError};
+
+    fn labels(json: &str) -> Vec<String> {
+        Task::from_slice(json.as_bytes())
+            .expect("task parses")
+            .labels()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Reports which `serde_json::Map` backing this build compiled. It never fails:
+    /// it is the evidence that a run exercised the backing it claims (CLAUDE.md
+    /// Verification #2 — prove the mechanism engaged).
+    #[test]
+    fn serde_backing_canary() {
+        let map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"b":1,"a":2}"#).expect("parse canary map");
+        let insertion_ordered = map.keys().next().map(String::as_str) == Some("b");
+        println!(
+            "serde_json backing: preserve_order={}",
+            if insertion_ordered { "ON" } else { "OFF" }
+        );
+    }
+
+    /// Document order, deliberately NOT sorted order, is the label index.
+    #[test]
+    fn order_is_document_order() {
+        let got = labels(
+            r#"{"type":"choice","instructions":"q","criteria":{"zeta":"z","alpha":"a","mid":null}}"#,
+        );
+        assert_eq!(got, ["zeta", "alpha", "mid"]);
+    }
+
+    /// FALSIFY-DECIDE-APR-007's own prediction: the stance demo order.
+    #[test]
+    fn stance_order_none_against_favor() {
+        let got = labels(
+            r#"{"type":"choice","instructions":"stance","criteria":{"none":"","against":"opposes","favor":"supports"}}"#,
+        );
+        assert_eq!(got, ["none", "against", "favor"]);
+    }
+
+    #[test]
+    fn render_options_name_or_name_colon_description() {
+        let t = Task::from_slice(
+            br#"{"type":"choice","instructions":"q","criteria":{"b":"bee","a":"","c":null}}"#,
+        )
+        .expect("task parses");
+        assert_eq!(t.render_options(), ["b: bee", "a", "c"]);
+        assert_eq!(t.instructions(), "q");
+    }
+
+    #[test]
+    fn refuses_non_choice_type() {
+        let e =
+            Task::from_slice(br#"{"type":"score","instructions":"q","criteria":{"a":"","b":""}}"#)
+                .expect_err("score refused");
+        assert_eq!(e, TaskError::UnsupportedType("score".into()));
+    }
+
+    #[test]
+    fn refuses_one_criterion() {
+        let e = Task::from_slice(br#"{"type":"choice","instructions":"q","criteria":{"a":"x"}}"#)
+            .expect_err("one criterion refused");
+        assert_eq!(e, TaskError::TooFewCriteria(1));
+    }
+
+    #[test]
+    fn refuses_duplicate_criterion() {
+        let e = Task::from_slice(
+            br#"{"type":"choice","instructions":"q","criteria":{"a":"x","b":"y","a":"z"}}"#,
+        )
+        .expect_err("duplicate refused");
+        assert_eq!(e, TaskError::DuplicateCriterion("a".into()));
+    }
+
+    #[test]
+    fn refuses_empty_name() {
+        let e = Task::from_slice(
+            br#"{"type":"choice","instructions":"q","criteria":{"a":"x","":"y"}}"#,
+        )
+        .expect_err("empty name refused");
+        assert_eq!(e, TaskError::EmptyCriterionName { index: 1 });
+    }
+
+    #[test]
+    fn refuses_unknown_top_level_key() {
+        let e = Task::from_slice(
+            br#"{"type":"choice","instructions":"q","criteria":{"a":"","b":""},"labels":{}}"#,
+        )
+        .expect_err("unknown key refused");
+        assert!(
+            matches!(e, TaskError::Parse(ref m) if m.contains("labels")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn refuses_non_string_description() {
+        let e =
+            Task::from_slice(br#"{"type":"choice","instructions":"q","criteria":{"a":1,"b":""}}"#)
+                .expect_err("numeric description refused");
+        assert!(matches!(e, TaskError::Parse(_)), "{e}");
+    }
+
+    /// The sha256 is of the exact bytes, so a reformatted task is a different task.
+    #[test]
+    fn sha256_is_of_the_raw_bytes() {
+        let a =
+            Task::from_slice(br#"{"type":"choice","instructions":"q","criteria":{"a":"","b":""}}"#)
+                .expect("a");
+        let b = Task::from_slice(
+            br#"{ "type":"choice","instructions":"q","criteria":{"a":"","b":""}}"#,
+        )
+        .expect("b");
+        assert_eq!(a.labels(), b.labels());
+        assert_ne!(a.sha256(), b.sha256());
+        assert_eq!(a.sha256().len(), 64);
+    }
+}

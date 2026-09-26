@@ -91,3 +91,31 @@ impl HeadLayer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::head_geometry;
+    use crate::LayaError;
+
+    /// Laya `common.py:165`: `nhead = max(1, d // 64)`, `hd = d / nhead`.
+    #[test]
+    fn nhead_rule() {
+        assert_eq!(head_geometry(32).expect("d=32"), (1, 32));
+        assert_eq!(head_geometry(64).expect("d=64"), (1, 64));
+        assert_eq!(head_geometry(768).expect("d=768"), (12, 64));
+        assert_eq!(head_geometry(1024).expect("d=1024"), (16, 64));
+    }
+
+    /// A d the rule does not divide is refused, never mis-sliced.
+    #[test]
+    fn head_does_not_divide() {
+        assert_eq!(
+            head_geometry(129),
+            Err(LayaError::HeadDoesNotDivide { d: 129, nhead: 2 })
+        );
+        assert_eq!(
+            head_geometry(0),
+            Err(LayaError::HeadDoesNotDivide { d: 0, nhead: 1 })
+        );
+    }
+}

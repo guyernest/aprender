@@ -214,7 +214,7 @@ kani_harnesses:
     property: 'within(d, b) is false whenever either argument is NaN, for all f32 and f64 inputs, in both argument positions'
     bound: 8
     strategy: stub_float
-    harness: 'NOT EXECUTED — the evidence will be the exhaustive NaN-position unit test of aprender-decide''s within helper (plan 08-04). Kani cannot reason about f32 semantics without stubbing, which would prove a property about the stub'
+    harness: 'NOT EXECUTED — the evidence is the NaN-position unit test of aprender-decide''s within helper, every pair of 10 special values (both NaN signs, f32 NaN widened, infinities, signed zeros, the bound) in both argument positions, `cargo test -p aprender-decide --lib test_support::tests::within_is_nan_visible` (plan 08-04). Kani cannot reason about f32 semantics without stubbing, which would prove a property about the stub'
 
   - id: KANI-LAYA-PARITY-002
     obligation: 'The local window predicate is |i - j| <= local_half_window, inclusive'

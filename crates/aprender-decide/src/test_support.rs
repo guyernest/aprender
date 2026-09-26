@@ -133,6 +133,13 @@ pub(crate) fn tolerance(equation: &str) -> f64 {
         .unwrap_or_else(|| panic!("laya-parity-v1 equations.{equation}.float_tolerance"))
 }
 
+/// `constants.<key>` of `contracts/<contract>` as f64.
+pub(crate) fn constant_f64(contract: &str, key: &str) -> f64 {
+    contract_yaml(contract)["constants"][key]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{contract} constants.{key}"))
+}
+
 /// NaN-visible `delta <= bound`: a NaN on either side never passes.
 pub(crate) fn within(delta: f64, bound: f64) -> bool {
     matches!(
@@ -154,4 +161,36 @@ pub(crate) fn max_abs(a: &[f32], b: &[f32]) -> f64 {
             m.max(d)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::within;
+
+    /// KANI-LAYA-PARITY-001's evidence: `within` is false whenever either argument is
+    /// NaN, in both positions, against every special value; and it is exactly `<=`
+    /// on ordinary values.
+    #[test]
+    fn within_is_nan_visible() {
+        let specials = [
+            f64::NAN,
+            -f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -0.0,
+            1e-5,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::from(f32::NAN),
+        ];
+        for &a in &specials {
+            for &b in &specials {
+                let want = !a.is_nan() && !b.is_nan() && a <= b;
+                assert_eq!(within(a, b), want, "within({a}, {b})");
+            }
+        }
+        assert!(within(1e-5, 1e-5), "the bound itself passes");
+        assert!(!within(1.000_000_1e-5, 1e-5), "just over the bound fails");
+    }
 }

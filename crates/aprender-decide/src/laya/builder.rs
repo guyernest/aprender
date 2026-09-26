@@ -194,3 +194,122 @@ impl Builder {
 fn to_isize(n: usize) -> isize {
     isize::try_from(n).unwrap_or(isize::MAX)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Builder;
+    use crate::test_support::read;
+    use crate::LayaError;
+
+    const MAX_LEN: usize = 64;
+    const HEAD_MAX_LEN: usize = 32;
+
+    fn builder() -> Builder {
+        Builder::from_bytes(
+            &read("checkpoint/tokenizer/tokenizer.json"),
+            MAX_LEN,
+            HEAD_MAX_LEN,
+        )
+        .expect("fixture tokenizer")
+    }
+
+    fn opts(n: usize, text: &str) -> Vec<String> {
+        (0..n).map(|i| format!("option{i}: {text}")).collect()
+    }
+
+    /// Long options leave < 16 head tokens, so each is cut to
+    /// max(4, (head_max_len - 16) / K) tokens, its marker included.
+    #[test]
+    fn many_options_shrink_evenly() {
+        let b = builder();
+        let k = 6;
+        let row = b
+            .build(
+                "s",
+                "choice",
+                "q",
+                &opts(k, "a long descriptive option text that will not fit"),
+            )
+            .expect("build");
+        assert_eq!(row.markers.len(), k, "all markers kept");
+        let per = 4usize.max((HEAD_MAX_LEN - 16) / k);
+        for w in row.markers.windows(2) {
+            assert_eq!(w[1] - w[0], per, "each option shrunk to {per} tokens");
+        }
+        assert!(
+            row.markers.iter().all(|&m| row.ids[m] == b.mask),
+            "markers are [MASK]"
+        );
+    }
+
+    /// The head keeps at least 8 tokens even when the options eat the whole budget.
+    #[test]
+    fn head_keeps_at_least_eight_tokens() {
+        let b = builder();
+        let ins = "a very long instruction that tokenizes into many more than eight tokens here";
+        let row = b
+            .build(
+                "s",
+                "choice",
+                ins,
+                &opts(8, "long long long long long long text"),
+            )
+            .expect("build");
+        // [CLS] head.. [SEP] then the first marker.
+        let head_tokens = row.markers[0] - 2;
+        assert!(head_tokens >= 8, "head kept {head_tokens} tokens");
+        assert_eq!(row.ids[0], b.cls);
+        assert_eq!(row.ids[row.markers[0] - 1], b.sep);
+    }
+
+    /// Markers never point at or past max_len, and the row never exceeds it.
+    #[test]
+    fn markers_stay_below_max_len() {
+        let b = builder();
+        let row = b.build("s", "choice", "q", &opts(20, "x")).expect("build");
+        assert!(row.ids.len() <= MAX_LEN);
+        assert!(row.markers.len() < 20, "some markers were dropped");
+        assert!(row.markers.iter().all(|&m| m < MAX_LEN));
+    }
+
+    /// D-12: an over-window state is cut to the room and flagged; a short one is not.
+    #[test]
+    fn truncation_flag() {
+        let b = builder();
+        let o = opts(2, "x");
+        let short = b
+            .build("a short message", "choice", "q", &o)
+            .expect("short");
+        assert!(!short.truncated);
+        assert_eq!(*short.ids.last().expect("row"), b.sep);
+        let long = "word ".repeat(200);
+        let row = b.build(&long, "choice", "q", &o).expect("long");
+        assert!(row.truncated);
+        assert_eq!(row.ids.len(), MAX_LEN);
+        assert_eq!(row.tokens, MAX_LEN);
+        assert_eq!(*row.ids.last().expect("row"), b.sep, "closing [SEP] kept");
+    }
+
+    /// A literal [MASK] in caller text becomes a space; it can never add a marker.
+    #[test]
+    fn mask_in_state_is_replaced() {
+        let b = builder();
+        let o = opts(2, "x");
+        let row = b
+            .build("yes [MASK] no [MASK]", "choice", "q", &o)
+            .expect("build");
+        let masks = row.ids.iter().filter(|&&t| t == b.mask).count();
+        assert_eq!(masks, 2, "only the two option markers are [MASK]");
+    }
+
+    #[test]
+    fn refuses_a_tokenizer_without_mask() {
+        let text = String::from_utf8(read("checkpoint/tokenizer/tokenizer.json")).expect("utf8");
+        let bytes = text.replace("[MASK]", "[MASQ]").into_bytes();
+        let e = Builder::from_bytes(&bytes, MAX_LEN, HEAD_MAX_LEN).expect_err("refused");
+        assert_eq!(e, LayaError::MissingSpecialToken("[MASK]".into()));
+        let e =
+            Builder::from_bytes(b"not a tokenizer", MAX_LEN, HEAD_MAX_LEN).expect_err("refused");
+        assert!(matches!(e, LayaError::Tokenizer(_)), "{e}");
+    }
+}

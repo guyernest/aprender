@@ -170,3 +170,117 @@ fn tiny_parity() {
         }
     );
 }
+
+/// Review finding (FALSIFY-DECIDE-APR-010, served half): the fixture task's options
+/// tokenize far beyond head_max_len, yet it LOADS, keeps all 3 markers and builds
+/// Laya's own ids on every shrink row.
+#[test]
+fn shrunk_task_is_served() {
+    let o = oracle();
+    let task = fixture_task();
+    let laya = load_laya(&fixture_apr(), task.clone()).expect("a shrunk task loads");
+    let b = laya.builder();
+    let options = task.render_options();
+    let raw: usize = options
+        .iter()
+        .map(|opt| {
+            let empty = b
+                .build("", "choice", "q", std::slice::from_ref(opt))
+                .expect("one");
+            empty.ids.len() - empty.markers[0] - 2
+        })
+        .sum();
+    println!(
+        "rendered options: {raw} tokens against head_max_len {}",
+        b.head_max_len()
+    );
+    assert!(
+        raw > b.head_max_len(),
+        "the options really exceed head_max_len"
+    );
+    let rows: Vec<&serde_json::Value> = o["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter(|r| r["qid"] == "team" && r["options_shrunk"] == true)
+        .collect();
+    assert!(!rows.is_empty(), "oracle has shrink rows for the task");
+    for r in rows {
+        let prepared = laya
+            .prepare(&[r["state"].as_str().expect("state").to_string()])
+            .expect("prepare");
+        assert_eq!(prepared[0].markers().len(), 3, "all markers kept");
+        assert_eq!(
+            prepared[0].ids(),
+            u32_list(&r["ids"]).as_slice(),
+            "Laya's ids"
+        );
+        assert_eq!(prepared[0].markers(), usize_list(&r["markers"]).as_slice());
+    }
+}
+
+/// A JSON string literal for `s`.
+fn quote(s: &str) -> String {
+    serde_json::to_string(s).expect("a str serialises")
+}
+
+/// FALSIFY-DECIDE-APR-010, refused half: the 16-criteria task loses markers at
+/// max_len 64 and is refused at load with the oracle's marker count.
+#[test]
+fn marker_loss_is_refused_at_load() {
+    let ml = &oracle()["marker_loss"];
+    let names = string_list(&ml["options"]);
+    let criteria: Vec<String> = names
+        .iter()
+        .map(|o| {
+            let (name, desc) = o.split_once(": ").expect("name: description");
+            format!("{}:{}", quote(name), quote(desc))
+        })
+        .collect();
+    let doc = format!(
+        r#"{{"type":"choice","instructions":{},"criteria":{{{}}}}}"#,
+        quote(ml["ins"].as_str().expect("ins")),
+        criteria.join(",")
+    );
+    let task = Task::from_slice(doc.as_bytes()).expect("many parses");
+    assert_eq!(
+        task.render_options(),
+        names,
+        "document order reproduces Laya's options"
+    );
+    let err = load_laya(&fixture_apr(), task).expect_err("refused");
+    assert_eq!(
+        err,
+        LayaError::MarkersLost {
+            criteria: 16,
+            markers: usize_list(&ml["markers"]).len()
+        }
+    );
+}
+
+/// A row whose marker count is not the task's is refused, never scored.
+#[test]
+fn foreign_rows_are_refused() {
+    let laya = load_laya(&fixture_apr(), fixture_task()).expect("loads");
+    let mut rows = laya.prepare(&["hello".to_string()]).expect("prepare");
+    rows[0].markers.pop();
+    let e = laya.classify_prepared(&rows).expect_err("refused");
+    assert_eq!(
+        e,
+        crate::DecideError::Laya(LayaError::RowMarkerCount {
+            expected: 3,
+            observed: 2
+        })
+    );
+    let ids = rows[0].ids().to_vec();
+    let e = laya
+        .forward_row(&ids, &[ids.len()], QType::Choice, |_, _| {})
+        .expect_err("out of range");
+    assert_eq!(
+        e,
+        crate::DecideError::Laya(LayaError::MarkerOutOfRange {
+            marker: ids.len(),
+            tokens: ids.len()
+        })
+    );
+}
