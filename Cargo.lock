@@ -719,6 +719,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "tokenizers 0.23.1",
+ "trybuild",
 ]
 
 [[package]]

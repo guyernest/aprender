@@ -48,6 +48,9 @@ safetensors = { workspace = true }
 serde_yaml = { workspace = true }
 # The oracle's ladder blocks are f32le_base64 (plan 08-02 fixture encoding).
 base64 = { workspace = true }
+# tests/ui.rs: compile-fail proof that Decider has no second minting path
+# (decide-apr-v1 rung 8, FALSIFY-DECIDE-APR-006).
+trybuild = { workspace = true }
 
 [lints]
 workspace = true

@@ -362,7 +362,8 @@ falsification_tests:
   - id: FALSIFY-DECIDE-APR-006
     rule: 'The verified decider has no second minting path'
     prediction: 'A trybuild compile-fail case constructing VerifiedDecider outside the ladder fails to compile.'
-    implemented_by: 'plan 08-05 (trybuild compile-fail test)'
+    implemented_by: 'plan 08-05 (trybuild compile-fail test): tests/ui/decider_struct_literal.rs tries a struct literal and a Decider::new; dark in CI until plan 08-12 adds --test ui for this package'
+    test: 'cargo test -p aprender-decide --test ui decider_has_no_second_minting_path'
     if_fails: 'Some consumer can classify with an unverified model.'
 
   - id: FALSIFY-DECIDE-APR-007
