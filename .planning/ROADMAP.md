@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 6/12 plans executed in 10 waves (08-08 HALTED at its gate decision)
+**Plans:** 7/12 plans executed in 10 waves (08-08 HALTED at its gate decision)
 
 Plans:
 **Wave 1**
@@ -675,7 +675,7 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 08-07-PLAN.md — `aprender-mcp-decide-lambda`: bootstrap loopback, in-memory S3 loader with sha256 pin, probe, deploy template
+- [x] 08-07-PLAN.md — `aprender-mcp-decide-lambda`: bootstrap loopback, in-memory S3 loader with sha256 pin, probe, deploy template
 - [ ] 08-09-PLAN.md — pack/verify CLI: gate recomputed in Rust from verified probabilities (artifact + base re-scores), full eval re-score, full-model parity vs spike 025, laya-stance-16.apr
 
 **Wave 8** *(blocked on Wave 7 completion)*
