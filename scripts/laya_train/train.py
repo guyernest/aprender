@@ -1,7 +1,7 @@
 """Fine-tune Laya on a user's shots, calibrate, and gate -- the local back office (D-01..D-08).
 
     uv run --project scripts/laya_train --frozen python scripts/laya_train/train.py \
-        --data DIR --out DIR [--epochs E] [--device mps|cuda|cpu]
+        --data DIR --out DIR [--epochs E] [--stopping early_stopping|fixed_epochs] [--device mps|cuda|cpu]
     (or: just laya-train <data dir> <run dir> [args])
 
     --variant synthetic-fixture --base CKPT_DIR --base-sha256 HEX --epochs E
@@ -18,7 +18,10 @@ The run, in order (every value from contracts/laya-finetune-gate-v1.yaml via con
      expected_sha256={"model.safetensors": <sha>} (the mapping laya.revisions.verify_digests requires),
      and record the device READ BACK from the parameters (Laya silently falls back to CPU, D-03).
   4. split fit / calibration by normalized-text GROUP (seeded, stratified), build rows with Laya's own
-     Agent._encode_state, and run the spike-024 ft_laya.py loop.
+     Agent._encode_state, and run the spike-024 ft_laya.py loop. Under the contract's default
+     `early_stopping` rule (1.1.0) `epochs` is the maximum: after every epoch the CALIBRATION slice's
+     NLL at the bounded fitted T is the monitor, the best epoch's weights are restored and STOP is
+     logged. eval.jsonl rows never reach this step (the training function is never given them).
   5. write the COMPLETE checkpoint dir (F16 weights with an F32 temperature, rl_agent_config.json,
      encoder/, tokenizer/ with tokenizer_config.json already in Laya's fixed form) and print
      CHECKPOINT COMPLETE -- before anything reloads it.
@@ -29,6 +32,10 @@ The run, in order (every value from contracts/laya-finetune-gate-v1.yaml via con
   7. zero-shot: the declared base on eval.jsonl -> zero-shot-probs.json; fine-tuned -> eval-probs.json;
      probes on the decide-apr-v1 probe task -> probes.json.
   8. gate.evaluate_gate -> gate-report.json; GATE PASS (exit 0) or GATE FAIL (exit 3).
+
+Ordering (asserted, not assumed): RECIPE WRITTEN < STOP < CHECKPOINT COMPLETE < SCORING START, and
+recipe.json <= checkpoint/model.safetensors <= eval-probs.json by mtime -- no eval probability exists
+before the stopping decision and the shipped weights are fixed.
 
 Logs carry counts, hashes and timings only -- never input text.
 """
@@ -235,9 +242,29 @@ class Base:
         return self._dir
 
 
-def train_seed(seed, base, requested, question, fit_rows, k, epochs):
-    """The spike-024 ft_laya.py loop on Laya's own rows; returns (model, info)."""
+def calibration_logits(model, items, k, pad, dev, bs):
+    """fp32 logits[:, :k] on the calibration rows, eval mode, no grad, the training collate (the
+    early-stopping SELECTION signal; every reported score still comes from the F16 reload)."""
+    was_training = model.training
+    model.eval()
+    out = []
+    with torch.no_grad():
+        for b in range(0, len(items), bs):
+            ids_t, att, mpos, mm, qt = (x.to(dev) for x in collate(items[b:b + bs], pad))
+            z, _ = model(ids_t, att, mpos, mm, qt)
+            out.append(z[:, :k].float().cpu().numpy())
+    if was_training:
+        model.train()
+    return np.concatenate(out).astype(np.float64)
+
+
+def train_seed(seed, base, requested, question, fit_rows, k, epochs, stopping="fixed_epochs", calib_rows=None):
+    """The spike-024 ft_laya.py loop on Laya's own rows; returns (agent, info).
+
+    `calib_rows` (train-side, the calibration slice) is read ONLY by the early-stopping monitor. This
+    function is never given eval rows, so eval cannot influence the stopping epoch or the weights."""
     rc = contract.recipe()
+    c = contract.constants()
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -265,8 +292,16 @@ def train_seed(seed, base, requested, question, fit_rows, k, epochs):
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps), eta_min=float(rc["eta_min"]))
     pad, dev = agent.tok.pad_token_id, agent.device
     losses = []
+    stopper, best_state, calib_items, yc = None, None, None, None
+    if stopping == "early_stopping":
+        if not calib_rows:
+            raise RuntimeError("early_stopping needs the calibration slice rows")
+        stopper = gate.EarlyStopper(contract.early_stopping_decl(), epochs)
+        calib_items = [agent._encode_state(t, ["q"], internal)[0] for t, _ in calib_rows]
+        yc = np.array([y for _, y in calib_rows], dtype=np.int64)
+    steps_run, epochs_run = 0, 0
     t0 = time.time()
-    for _ in range(epochs):
+    for epoch in range(1, epochs + 1):
         order = list(range(len(items)))
         random.shuffle(order)
         for b in range(0, len(order), bs):
@@ -287,15 +322,37 @@ def train_seed(seed, base, requested, question, fit_rows, k, epochs):
             opt.step()
             sched.step()
             losses.append(float(ce.item()))
+            steps_run += 1
+        epochs_run = epoch
+        if stopper is not None and stopper.evaluates(epoch):
+            zc = calibration_logits(model, calib_items, k, pad, dev, bs)
+            m, t_star = gate.calibration_monitor(zc, yc, c["calibration_temp_min"], c["calibration_temp_max"])
+            improved, stop = stopper.update(epoch, m, t_star)
+            if improved:        # an exact copy of this epoch's weights (restore: best)
+                best_state = {n: v.detach().to("cpu", copy=True) for n, v in model.state_dict().items()}
+            log("EPOCH seed=%d epoch=%d ce_last=%.4f calib_nll_at_t*=%.6f t*=%s best_epoch=%s%s"
+                % (seed, epoch, losses[-1], m, "%.4f" % t_star if t_star is not None else "nan",
+                   stopper.best_epoch, " improved" if improved else ""))
+            if stop:
+                break
     if dev.type == "mps":
         torch.mps.synchronize()
     train_s = time.time() - t0
+    stop_record = None
+    if stopper is not None:
+        stop_record = stopper.record(epochs_run)
+        model.load_state_dict(best_state)
+        log("STOP seed=%d rule=early_stopping best_epoch=%d best_calib_nll=%.6f epochs_run=%d reason=%s"
+            % (seed, stop_record["best_epoch"], stop_record["best_monitor"], epochs_run, stop_record["reason"]))
+        del best_state
     model.eval()
     info = {"seed": seed, "device_requested": requested, "device_used": device_used, "epochs": epochs,
-            "steps": steps, "fit_rows": len(items), "train_seconds": round(train_s, 1), "loss_temperature": t_loss,
-            "ce_first": round(losses[0], 4) if losses else None, "ce_last": round(losses[-1], 4) if losses else None}
-    log("TRAIN seed=%d fit_rows=%d epochs=%d steps=%d seconds=%.1f ce_first=%s ce_last=%s"
-        % (seed, len(items), epochs, steps, train_s, info["ce_first"], info["ce_last"]))
+            "stopping": stopping, "steps": steps_run, "steps_planned": steps, "epochs_run": epochs_run,
+            "fit_rows": len(items), "train_seconds": round(train_s, 1), "loss_temperature": t_loss,
+            "ce_first": round(losses[0], 4) if losses else None, "ce_last": round(losses[-1], 4) if losses else None,
+            "stopping_record": stop_record}
+    log("TRAIN seed=%d fit_rows=%d epochs=%d epochs_run=%d steps=%d/%d seconds=%.1f ce_first=%s ce_last=%s"
+        % (seed, len(items), epochs, epochs_run, steps_run, steps, train_s, info["ce_first"], info["ce_last"]))
     return agent, info
 
 
@@ -343,9 +400,10 @@ def score_rows(agent, rows, question):
     return np.array(P, dtype=np.float32), np.array(Z, dtype=np.float32)
 
 
-def calibrate_and_score(ck, sha_before, calib_rows, eval_rows, question, k):
+def calibrate_and_score(ck, sha_before, calib_rows, eval_rows, question, k, stopping):
     """F16 reload -> calibration fit -> T written -> reload again -> eval probabilities."""
     c = contract.constants()
+    assert_checkpoint_fixed(ck, stopping)
     agent = reload_checked(ck, sha_before)
     bucket = temp_bucket(QTYPES["choice"], k)
     t_pre = agent.temperature_by_options.get(bucket, agent.temperature[QTYPES["choice"]])
@@ -361,10 +419,31 @@ def calibrate_and_score(ck, sha_before, calib_rows, eval_rows, question, k):
     agent = reload_checked(ck, sha_cal)
     if agent.temperature_by_options.get(bucket) != t_applied:
         raise RuntimeError("the reloaded checkpoint does not apply T %r to %s" % (t_applied, bucket))
+    assert_checkpoint_fixed(ck, stopping)
     P, Z = score_rows(agent, eval_rows, question)
     pre = gate.softmax(Z, t_pre)
     calib = {"bucket": bucket, "t_pre": t_pre, "t_fitted": t_fit, "t_applied": t_applied, "clamp_hit": clamp_hit}
     return agent, P, pre, calib, sha_cal
+
+
+def assert_checkpoint_fixed(ck, stopping):
+    """Before ANY eval probability: the shipped weights and (early_stopping) the stopping record are on
+    disk. The eval set can then not have influenced the epoch, the weights or T."""
+    if not (ck / "model.safetensors").is_file():
+        raise RuntimeError("eval scoring requested before checkpoint/model.safetensors exists")
+    training = json.loads((ck / "rl_agent_config.json").read_bytes()).get("training", {})
+    if stopping == "early_stopping" and not (training.get("stopping") or {}).get("best_epoch"):
+        raise RuntimeError("eval scoring requested before the early-stopping record is in the checkpoint")
+
+
+def assert_eval_after_checkpoint(out, ck):
+    """mtime order recipe.json <= checkpoint/model.safetensors <= eval-probs.json (recipe_before_scores,
+    early_stopping_train_side)."""
+    t_recipe, t_ck, t_eval = ((p).stat().st_mtime_ns for p in
+                              (out / "recipe.json", ck / "model.safetensors", out / "eval-probs.json"))
+    if not (t_recipe <= t_ck <= t_eval):
+        raise RuntimeError("ordering violated: mtime recipe.json %d, model.safetensors %d, eval-probs.json %d"
+                           % (t_recipe, t_ck, t_eval))
 
 
 def eval_probs_obj(labels, eval_rows, P):
@@ -395,6 +474,8 @@ def parse_args(argv):
     ap.add_argument("--data", required=True, help="data dir: task.json, train.jsonl, eval.jsonl")
     ap.add_argument("--out", required=True, help="run dir to create (must not exist or be empty)")
     ap.add_argument("--epochs", type=int, default=None)
+    ap.add_argument("--stopping", choices=("early_stopping", "fixed_epochs"), default=None,
+                    help="stopping rule (default: the contract's recipe.stopping_default)")
     ap.add_argument("--device", choices=("mps", "cuda", "cpu"), default=None,
                     help="force a device (default: the contract's device_order, first available)")
     ap.add_argument("--variant", choices=("production", "synthetic-fixture"), default="production")
@@ -423,6 +504,7 @@ def main(argv=None):
         epochs = None
         shots_per_class = max(data.class_counts(train_rows, len(task["labels"])))
         epochs = contract.resolve_epochs(args.variant, shots_per_class, args.epochs)
+        stopping = contract.resolve_stopping(args.stopping)
     except (data.DataError, contract.RecipeError) as e:
         refuse(str(e))
     base = Base(args)
@@ -435,22 +517,25 @@ def main(argv=None):
 
     # 2. recipe first
     out.mkdir(parents=True, exist_ok=True)
-    recipe = contract.recipe_json(args.variant, shots_per_class, epochs, seed, base.block)
+    recipe = contract.recipe_json(args.variant, shots_per_class, epochs, seed, base.block, stopping)
     recipe_bytes = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode("utf-8")
     (out / "recipe.json").write_bytes(recipe_bytes)
     recipe_id = sha256_bytes(recipe_bytes)
-    log("RECIPE WRITTEN %s" % recipe_id)
+    log("RECIPE WRITTEN %s stopping=%s epochs%s=%d" % (recipe_id, stopping, "_max" if stopping == "early_stopping"
+                                                        else "", epochs))
 
     # 3-4. device, train
     requested = request_device(args.device)
     fit_rows = [train_rows[i] for i in fit_ids]
     calib_rows = [train_rows[i] for i in calib_ids]
-    agent, info = train_seed(seed, base, requested, question, fit_rows, k, epochs)
+    agent, info = train_seed(seed, base, requested, question, fit_rows, k, epochs, stopping, calib_rows)
 
     # 5. complete checkpoint before any reload
     ck = out / "checkpoint"
     provenance = {"fine_tuned_from": base.block, "recipe_id": recipe_id, "seed": seed, "epochs": epochs,
                   "steps": info["steps"], "fit_rows": info["fit_rows"], "device_used": info["device_used"]}
+    if info["stopping_record"] is not None:
+        provenance["stopping"] = info["stopping_record"]
     sha_before = write_checkpoint(agent, base.directory(), ck, provenance)
     del agent
     if torch.backends.mps.is_available():
@@ -459,10 +544,11 @@ def main(argv=None):
 
     # 6. reload, calibrate, reload, score
     log("SCORING START")
-    agent, P_ft, P_pre, calib, _ = calibrate_and_score(ck, sha_before, calib_rows, eval_rows, question, k)
+    agent, P_ft, P_pre, calib, _ = calibrate_and_score(ck, sha_before, calib_rows, eval_rows, question, k, stopping)
     log("CALIBRATION bucket=%s t_pre=%.6f t_fitted=%.6f t_applied=%.6f clamp_hit=%s slice=%d"
         % (calib["bucket"], calib["t_pre"], calib["t_fitted"], calib["t_applied"], calib["clamp_hit"], len(slice_ids)))
     write_json(out / "eval-probs.json", eval_probs_obj(labels, eval_rows, P_ft))
+    assert_eval_after_checkpoint(out, ck)
     write_json(out / "probes.json", probes_obj(agent))
     del agent
 

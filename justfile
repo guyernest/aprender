@@ -1309,7 +1309,8 @@ laya-prepare-stance:
 
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl), calibrate and gate into
 # the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused. Extra args pass through
-# (--epochs E above 16 shots/class, --seeds N, --device mps|cuda|cpu).
+# (--epochs E above 16 shots/class, --stopping early_stopping|fixed_epochs, --seeds N,
+# --device mps|cuda|cpu). The default stopping rule is the contract's (early_stopping, 1.1.0).
 laya-train data out *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1318,7 +1319,8 @@ laya-train data out *args:
         --data "{{data}}" --out "{{out}}" {{args}}
 
 # The tracer's thin slice: a real train -> F16 save -> complete dir -> reload -> calibrate -> gate on
-# the committed tiny checkpoint, on CPU in seconds (synthetic-fixture variant). Prints LIFECYCLE OK.
+# the committed tiny checkpoint, on CPU in seconds (synthetic-fixture variant), once per declared
+# stopping rule (early_stopping, fixed_epochs). Prints LIFECYCLE OK.
 laya-train-lifecycle:
     #!/usr/bin/env bash
     set -euo pipefail

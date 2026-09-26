@@ -10,6 +10,9 @@ No torch import (module level or anywhere): `python gate.py --selftest` runs wit
         the bound and clamp_hit is true. T_applied = clamp(T_fitted) (identical inside the interval),
         which is what Laya's loader would serve anyway (Pitfall 6).
 
+    EarlyStopper(decl, max_epochs), calibration_monitor(z, y, t_min, t_max)
+        the `early_stopping` rule (laya-finetune-gate-v1 1.1.0) on calibration-slice logits only.
+
     evaluate_gate(zs_probs, ft_probs, ft_probs_pre, y, calibration, f_avg_labels)
         macro-F1 / F_avg / house top-label ECE / NLL through metrics.py, thresholds READ from the
         contract (contract.thresholds()), pass = margin >= min_macro_f1_margin AND ece_post <= max_ece.
@@ -66,6 +69,65 @@ def fit_temperature(z, y, t_min, t_max, iters=200):
     t_applied = min(t_max, max(t_min, t_fit))
     clamp_hit = bool(t_fit <= t_min or t_fit >= t_max)
     return float(t_fit), float(t_applied), clamp_hit
+
+
+class EarlyStopper:
+    """laya-finetune-gate-v1 `early_stopping` / equation early_stopping_train_side, torch-free.
+
+    Fed one calibration-slice monitor value per evaluated epoch (never an eval number). Epoch e
+    improves iff m_e is finite and m_e < m_best - min_delta (strict, so ties keep the EARLIEST
+    epoch); epochs before first_candidate_epoch (epoch 0 = the untrained base) are never candidates.
+    Stops when e - best_epoch >= patience_epochs, or at max_epochs."""
+
+    def __init__(self, decl, max_epochs):
+        if (decl["monitor"], decl["mode"], decl["restore"], decl["tie_break"]) != (
+                "calibration_nll_at_fitted_t", "min", "best", "earliest"):
+            raise ValueError("EarlyStopper implements monitor calibration_nll_at_fitted_t, mode min, restore best, "
+                             "tie_break earliest; the recipe declares %s" % (decl,))
+        self.every = int(decl["eval_every_epochs"])
+        self.first = int(decl["first_candidate_epoch"])
+        self.patience = int(decl["patience_epochs"])
+        self.min_delta = float(decl["min_delta"])
+        self.max_epochs = int(max_epochs)
+        if self.every < 1 or self.first < 1 or self.patience < 1 or self.min_delta < 0.0:
+            raise ValueError("early_stopping needs eval_every_epochs, first_candidate_epoch, patience_epochs >= 1 "
+                             "and min_delta >= 0")
+        self.best_epoch, self.best = None, math.inf
+        self.trace = []
+        self.reason = None
+
+    def evaluates(self, epoch):
+        return epoch >= self.first and (epoch % self.every == 0 or epoch == self.max_epochs)
+
+    def update(self, epoch, monitor, t_star=None):
+        """Record epoch `epoch`; returns (improved, stop)."""
+        m = float(monitor)
+        improved = math.isfinite(m) and m < self.best - self.min_delta
+        if improved:
+            self.best, self.best_epoch = m, int(epoch)
+        self.trace.append({"epoch": int(epoch), "monitor": m if math.isfinite(m) else None, "t_star": t_star})
+        anchor = self.best_epoch if self.best_epoch is not None else self.first - 1
+        if epoch >= self.max_epochs:
+            self.reason = "max_epochs"
+        elif epoch - anchor >= self.patience:
+            self.reason = "patience"
+        return improved, self.reason is not None
+
+    def record(self, epochs_run):
+        if self.best_epoch is None:
+            raise ValueError("early stopping saw no finite calibration monitor value; nothing to restore")
+        return {"rule": "early_stopping", "monitor": "calibration_nll_at_fitted_t", "per_epoch": list(self.trace),
+                "best_epoch": self.best_epoch, "best_monitor": self.best, "epochs_run": int(epochs_run),
+                "reason": self.reason or "max_epochs"}
+
+
+def calibration_monitor(z, y, t_min, t_max):
+    """(m, T*) = (NLL at the bounded fitted temperature, that temperature) -- `early_stopping.monitor`."""
+    z = np.asarray(z, dtype=np.float64)
+    if not np.isfinite(z).all():
+        return float("nan"), None
+    _, t_star, _ = fit_temperature(z, y, t_min, t_max)
+    return metrics.nll(softmax(z, t_star), y), t_star
 
 
 def _finite(x):

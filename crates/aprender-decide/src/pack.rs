@@ -80,6 +80,33 @@ pub struct Recipe {
     pub seed: i64,
     /// The declared base (D-04).
     pub base: BaseDecl,
+    /// The early-stopping rule (laya-finetune-gate-v1 1.1.0 `early_stopping`); absent for the
+    /// `fixed_epochs` rule, in which case `epochs` is exact rather than a maximum.
+    #[serde(default)]
+    pub early_stopping: Option<EarlyStoppingDecl>,
+}
+
+/// `recipe.json` `early_stopping` (laya-finetune-gate-v1 `early_stopping` block), copied into
+/// the recipe before training so the recipe_id names the stopping rule.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EarlyStoppingDecl {
+    /// `calibration_nll_at_fitted_t`.
+    pub monitor: String,
+    /// `min`.
+    pub mode: String,
+    /// Epochs between monitor evaluations.
+    pub eval_every_epochs: u64,
+    /// The first epoch that may be restored (epoch 0 is the untrained base).
+    pub first_candidate_epoch: u64,
+    /// Epochs without improvement before stopping.
+    pub patience_epochs: u64,
+    /// The improvement an epoch must exceed.
+    pub min_delta: f64,
+    /// `best`.
+    pub restore: String,
+    /// `earliest`.
+    pub tie_break: String,
 }
 
 /// `gate-report.json` `thresholds`.
@@ -541,6 +568,40 @@ mod tests {
             "{e}"
         );
         std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// The early-stopping recipe (laya-finetune-gate-v1 1.1.0): `early_stopping` is the ONE
+    /// optional recipe.json key. Absent = fixed_epochs (every pre-1.1.0 run dir still parses);
+    /// present = a strictly-typed object; an unknown key inside it is still refused.
+    #[test]
+    fn recipe_early_stopping_is_optional_and_strict() {
+        let fixed = std::fs::read_to_string(fixture_dir().join("recipe.json")).expect("recipe");
+        let r: super::Recipe = serde_json::from_str(&fixed).expect("fixed_epochs recipe parses");
+        assert_eq!(r.early_stopping, None);
+
+        let es = r#""early_stopping":{"eval_every_epochs":1,"first_candidate_epoch":1,"min_delta":0.001,"mode":"min","monitor":"calibration_nll_at_fitted_t","patience_epochs":3,"restore":"best","tie_break":"earliest"},"#;
+        let with = fixed.replacen('{', &format!("{{{es}"), 1);
+        let r: super::Recipe = serde_json::from_str(&with).expect("early_stopping recipe parses");
+        let got = r.early_stopping.expect("early_stopping present");
+        assert_eq!(got.monitor, "calibration_nll_at_fitted_t");
+        assert_eq!(got.mode, "min");
+        assert_eq!(
+            (
+                got.eval_every_epochs,
+                got.first_candidate_epoch,
+                got.patience_epochs
+            ),
+            (1, 1, 3)
+        );
+        assert!((got.min_delta - 0.001).abs() < 1e-15);
+        assert_eq!(
+            (got.restore.as_str(), got.tie_break.as_str()),
+            ("best", "earliest")
+        );
+
+        let bad = with.replacen("\"mode\"", "\"extra\":1,\"mode\"", 1);
+        let e = serde_json::from_str::<super::Recipe>(&bad).expect_err("unknown nested key");
+        assert!(e.to_string().contains("extra"), "{e}");
     }
 
     #[test]

@@ -29,8 +29,8 @@ def gate_contract():
     """The parsed laya-finetune-gate-v1 contract: `constants`, `seed_policy`, `recipe`, `base`, `demo`,
     `device_order`, `run_dir_layout` and the four schema blocks, exactly as committed."""
     c = _load(GATE_CONTRACT)
-    for key in ("constants", "seed_policy", "recipe", "base", "demo", "device_order", "run_dir_layout",
-                "recipe_json_schema", "gate_report_schema", "eval_probs_schema", "probes_json_schema"):
+    for key in ("constants", "seed_policy", "recipe", "early_stopping", "base", "demo", "device_order",
+                "run_dir_layout", "recipe_json_schema", "gate_report_schema", "eval_probs_schema", "probes_json_schema"):
         if key not in c:
             raise KeyError("%s has no top-level %r block" % (GATE_CONTRACT.relative_to(REPO), key))
     return c
@@ -115,16 +115,55 @@ def resolve_epochs(variant, shots_per_class, epochs_arg):
     return int(epochs_arg)
 
 
-def recipe_json(variant, shots_per_class, epochs, seed, base_block):
-    """The recipe.json object in `recipe_json_schema` order of keys (serialized sort_keys anyway)."""
+# The recipe.json `early_stopping` object: exactly these keys, copied from the contract block.
+EARLY_STOPPING_KEYS = ("monitor", "mode", "eval_every_epochs", "first_candidate_epoch", "patience_epochs",
+                       "min_delta", "restore", "tie_break")
+
+
+def stopping_rules():
+    return list(recipe()["stopping_rules"])
+
+
+def stopping_default():
+    return str(recipe()["stopping_default"])
+
+
+def early_stopping_decl():
+    """The recipe.json `early_stopping` object (laya-finetune-gate-v1 1.1.0 `early_stopping` block)."""
+    es = gate_contract()["early_stopping"]
+    out = {k: es[k] for k in EARLY_STOPPING_KEYS}
+    for k in ("eval_every_epochs", "first_candidate_epoch", "patience_epochs"):
+        out[k] = int(out[k])
+    out["min_delta"] = float(out["min_delta"])
+    return out
+
+
+def resolve_stopping(arg):
+    """`fixed_epochs` or `early_stopping` (the contract default when `arg` is None)."""
+    rule = stopping_default() if arg is None else arg
+    if rule not in stopping_rules():
+        raise RecipeError("REFUSED stopping: %r is not one of %s" % (rule, stopping_rules()))
+    return rule
+
+
+def recipe_json(variant, shots_per_class, epochs, seed, base_block, stopping="fixed_epochs"):
+    """The recipe.json object in `recipe_json_schema` order of keys (serialized sort_keys anyway).
+
+    fixed_epochs carries no `early_stopping` key, so its bytes -- and recipe_id -- are exactly the
+    1.0.0 recipe's; early_stopping adds the contract's object and `epochs` becomes the maximum."""
     r = recipe()
-    return {
+    out = {
         "variant": variant, "optimizer": r["optimizer"], "encoder_lr": r["encoder_lr"], "head_lr": r["head_lr"],
         "eta_min": r["eta_min"], "weight_decay": r["weight_decay"], "grad_clip": r["grad_clip"],
         "batch_size": int(r["batch_size"]), "proper_reward_w_sph": r["proper_reward_w_sph"],
         "proper_reward_w_rps": r["proper_reward_w_rps"], "schedule": "cosine",
         "shots_per_class": int(shots_per_class), "epochs": int(epochs), "seed": int(seed), "base": base_block,
     }
+    if stopping == "early_stopping":
+        out["early_stopping"] = early_stopping_decl()
+    elif stopping != "fixed_epochs":
+        raise RecipeError("REFUSED stopping: %r is not one of %s" % (stopping, stopping_rules()))
+    return out
 
 
 def production_base_block():
