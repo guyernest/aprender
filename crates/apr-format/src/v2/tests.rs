@@ -453,3 +453,64 @@ fn test_flags_all_bits() {
 // SEVERED `get_tensor_as_f32` + `dequantize_q4` + the core-only `test_factory`,
 // so it moved to `aprender-core/src/format/v2_dequant_tests/` where the
 // `AprV2DequantExt` extension lives. The leaf keeps only pure-container tests.
+
+// ============================================================================
+// Forged tensor_count (decide-apr-v1 FALSIFY-DECIDE-APR-009, reader_impl.rs index
+// reservation): the index vector may never be reserved for more entries than the
+// index bytes can hold.
+// ============================================================================
+
+#[test]
+fn index_capacity_is_bounded_by_the_index_bytes() {
+    use super::reader_impl::index_capacity;
+    assert_eq!(index_capacity(u32::MAX, 100), 5);
+    assert_eq!(index_capacity(3, 10_000), 3);
+    assert_eq!(index_capacity(0, 0), 0);
+    assert_eq!(index_capacity(7, 19), 0);
+    assert_eq!(index_capacity(7, 20), 1);
+    assert_eq!(index_capacity(u32::MAX, usize::MAX), u32::MAX as usize);
+}
+
+/// A 64-byte header with a VALID CRC declaring `tensor_count` entries, valid metadata,
+/// and an index region that holds only three 20-byte entries.
+fn forged_tensor_count_file(tensor_count: u32) -> Vec<u8> {
+    let meta = AprV2Metadata::new("forged").to_json().expect("metadata json");
+    let tensor_index_offset = HEADER_SIZE_V2 + align_up(meta.len(), 64);
+    let data_offset = tensor_index_offset + 72;
+    let mut h = AprV2Header::new();
+    h.flags = h.flags.with(AprV2Flags::LAYOUT_ROW_MAJOR);
+    h.tensor_count = tensor_count;
+    h.metadata_offset = HEADER_SIZE_V2 as u64;
+    h.metadata_size = meta.len() as u32;
+    h.tensor_index_offset = tensor_index_offset as u64;
+    h.data_offset = data_offset as u64;
+    h.update_checksum();
+    let mut data = vec![0u8; data_offset];
+    data[..HEADER_SIZE_V2].copy_from_slice(&h.to_bytes());
+    data[HEADER_SIZE_V2..HEADER_SIZE_V2 + meta.len()].copy_from_slice(&meta);
+    data
+}
+
+#[test]
+fn forged_tensor_count_is_refused_by_both_readers() {
+    let data = forged_tensor_count_file(u32::MAX);
+    assert!(
+        AprV2Header::from_bytes(&data)
+            .expect("header parses")
+            .verify_checksum(),
+        "the forged header carries a valid CRC"
+    );
+    let start = std::time::Instant::now();
+    assert!(matches!(
+        AprV2Reader::from_bytes(&data),
+        Err(V2FormatError::InvalidTensorIndex(_))
+    ));
+    assert!(matches!(
+        AprV2ReaderRef::from_bytes(&data),
+        Err(V2FormatError::InvalidTensorIndex(_))
+    ));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "refused promptly"
+    );
+}

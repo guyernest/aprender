@@ -76,6 +76,11 @@ fn parse_metadata_section(
     AprV2Metadata::from_json(slice)
 }
 
+/// The tensor-index vector's initial capacity.
+pub(super) fn index_capacity(tensor_count: u32, _remaining: usize) -> usize {
+    tensor_count as usize
+}
+
 /// Parse and bounds-check the tensor index section (FALSIFY-PARSE-001).
 ///
 /// `tensor_index_offset` is attacker-controllable; previously it was used
@@ -92,7 +97,8 @@ fn parse_tensor_index_section(
         V2FormatError::InvalidTensorIndex("tensor_index_offset exceeds usize".to_string())
     })?;
 
-    let mut tensor_index = Vec::with_capacity(tensor_count as usize);
+    let remaining_index_bytes = data.len().saturating_sub(pos);
+    let mut tensor_index = Vec::with_capacity(index_capacity(tensor_count, remaining_index_bytes));
     for _ in 0..tensor_count {
         // `data.get(pos..)` returns None only when pos > data.len(); pos == len
         // yields an empty slice, which TensorIndexEntry::from_bytes rejects

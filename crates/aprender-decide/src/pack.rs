@@ -485,3 +485,75 @@ pub fn pack_run_dir(run_dir: &Path, data_dir: &Path) -> Result<Vec<u8>, PackErro
     let inputs = PackInputs::from_run_dir(run_dir, data_dir)?;
     Ok(artifact::write_decide_apr(&inputs)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{PackError, PackInputs};
+    use crate::test_support::fixture_dir;
+    use std::path::{Path, PathBuf};
+
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create dir");
+        for entry in std::fs::read_dir(from).expect("read dir") {
+            let entry = entry.expect("dir entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("file type").is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy file");
+            }
+        }
+    }
+
+    /// A private copy of the tiny run dir, so a test can corrupt one file.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("decide-0805-{name}-{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("clear scratch");
+        }
+        copy_dir(&fixture_dir(), &dir);
+        dir
+    }
+
+    fn append(path: &Path, extra: &[u8]) {
+        let mut bytes = std::fs::read(path).expect("read");
+        bytes.extend_from_slice(extra);
+        std::fs::write(path, bytes).expect("write");
+    }
+
+    #[test]
+    fn task_copy_must_match() {
+        let dir = scratch("task-copy");
+        append(&dir.join("task.json"), b" ");
+        let e = PackInputs::from_run_dir(&dir, &dir.join("data")).expect_err("copy differs");
+        assert_eq!(e, PackError::TaskCopyDiffers);
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn report_hash_must_match() {
+        let dir = scratch("probes-hash");
+        append(&dir.join("probes.json"), b"\n");
+        let e = PackInputs::from_run_dir(&dir, &dir.join("data")).expect_err("hash differs");
+        assert!(
+            matches!(&e, PackError::ReportHashMismatch { what: "probes_sha256", .. }),
+            "{e}"
+        );
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn unknown_recipe_key_is_refused() {
+        let dir = scratch("recipe-key");
+        let path = dir.join("recipe.json");
+        let text = std::fs::read_to_string(&path).expect("recipe");
+        let text = text.replacen('{', "{\n  \"extra\": 1,", 1);
+        std::fs::write(&path, text).expect("write recipe");
+        let e = PackInputs::from_run_dir(&dir, &dir.join("data")).expect_err("unknown key");
+        assert!(
+            matches!(&e, PackError::Schema { file: "recipe.json", reason } if reason.contains("extra")),
+            "{e}"
+        );
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+}

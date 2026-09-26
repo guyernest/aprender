@@ -1476,4 +1476,8 @@ pub(crate) fn load_verified_within(
 }
 
 #[cfg(test)]
+mod determinism;
+#[cfg(test)]
+mod ladder;
+#[cfg(test)]
 mod tests;
