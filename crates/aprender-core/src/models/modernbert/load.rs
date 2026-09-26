@@ -1,0 +1,212 @@
+//! ModernBERT weight loading from APR v2 (prefix-aware).
+//!
+//! Tensor names are the HF ModernBERT names under a caller-supplied prefix — `""` for
+//! a plain HF ModernBERT, `"encoder."` for Laya's encoder copy:
+//!
+//! ```text
+//! {prefix}embeddings.tok_embeddings.weight      [vocab, d]
+//! {prefix}embeddings.norm.weight                [d]
+//! {prefix}layers.{i}.attn_norm.weight           [d]           (i >= 1; layer 0 is Identity)
+//! {prefix}layers.{i}.attn.Wqkv.weight           [3d, d]
+//! {prefix}layers.{i}.attn.Wo.weight             [d, d]
+//! {prefix}layers.{i}.mlp_norm.weight            [d]
+//! {prefix}layers.{i}.mlp.Wi.weight              [2 * intermediate, d]
+//! {prefix}layers.{i}.mlp.Wo.weight              [d, intermediate]
+//! {prefix}final_norm.weight                     [d]
+//! ```
+//!
+//! The `.apr` bytes are untrusted: a missing tensor, a shape that disagrees with the
+//! config, an undecodable dtype and a non-finite value are each refused BY NAME with a
+//! [`ModernBertLoadError`]. Widening is `AprV2DequantExt::get_tensor_as_f32` — the one
+//! F16 path in the workspace, no hand-written f16 code here.
+
+use super::{Linear, ModernBertConfig, ModernBertEmbeddings, ModernBertEncoder, ModernBertLayer};
+use crate::format::v2::AprV2ReaderRef;
+use crate::format::AprV2DequantExt;
+use std::fmt;
+
+/// Why a ModernBERT `.apr` was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModernBertLoadError {
+    /// A required tensor is absent.
+    MissingTensor {
+        /// Full (prefixed) tensor name.
+        name: String,
+    },
+    /// A tensor's stored shape disagrees with the config.
+    ShapeMismatch {
+        /// Full (prefixed) tensor name.
+        name: String,
+        /// Shape the config implies.
+        expected: Vec<usize>,
+        /// Shape stored in the file.
+        observed: Vec<usize>,
+    },
+    /// A tensor's dtype cannot be widened to f32, or its data is truncated.
+    Undecodable {
+        /// Full (prefixed) tensor name.
+        name: String,
+        /// The stored dtype.
+        dtype: String,
+    },
+    /// A tensor holds a NaN or an infinity.
+    NonFinite {
+        /// Full (prefixed) tensor name.
+        name: String,
+    },
+}
+
+impl fmt::Display for ModernBertLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingTensor { name } => write!(f, "modernbert load: missing tensor {name}"),
+            Self::ShapeMismatch {
+                name,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "modernbert load: tensor {name} has shape {observed:?}, config implies {expected:?}"
+            ),
+            Self::Undecodable { name, dtype } => write!(
+                f,
+                "modernbert load: tensor {name} ({dtype}) cannot be widened to f32"
+            ),
+            Self::NonFinite { name } => {
+                write!(f, "modernbert load: tensor {name} holds a non-finite value")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ModernBertLoadError {}
+
+/// `(name, shape)` for every tensor the encoder needs, in load order.
+fn expected_tensors(config: &ModernBertConfig, prefix: &str) -> Vec<(String, Vec<usize>)> {
+    let d = config.hidden_size();
+    let inter = config.intermediate_size();
+    let mut t = vec![
+        (
+            format!("{prefix}embeddings.tok_embeddings.weight"),
+            vec![config.vocab_size(), d],
+        ),
+        (format!("{prefix}embeddings.norm.weight"), vec![d]),
+    ];
+    for i in 0..config.num_hidden_layers() {
+        let p = format!("{prefix}layers.{i}.");
+        if i > 0 {
+            t.push((format!("{p}attn_norm.weight"), vec![d]));
+        }
+        t.push((format!("{p}attn.Wqkv.weight"), vec![3 * d, d]));
+        t.push((format!("{p}attn.Wo.weight"), vec![d, d]));
+        t.push((format!("{p}mlp_norm.weight"), vec![d]));
+        t.push((format!("{p}mlp.Wi.weight"), vec![2 * inter, d]));
+        t.push((format!("{p}mlp.Wo.weight"), vec![d, inter]));
+    }
+    t.push((format!("{prefix}final_norm.weight"), vec![d]));
+    t
+}
+
+/// The canonical tensor names a ModernBERT `.apr` must contain for `config`, under
+/// `prefix` (`""` for plain HF, `"encoder."` for Laya). This is the import/load
+/// contract, mirroring `expected_bert_tensor_names`.
+#[must_use]
+pub fn expected_modernbert_tensor_names(config: &ModernBertConfig, prefix: &str) -> Vec<String> {
+    expected_tensors(config, prefix)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// Load, shape-check, widen and finiteness-check one tensor.
+fn load_tensor(
+    reader: &AprV2ReaderRef<'_>,
+    name: &str,
+    shape: &[usize],
+) -> Result<Vec<f32>, ModernBertLoadError> {
+    let entry = reader
+        .get_tensor(name)
+        .ok_or_else(|| ModernBertLoadError::MissingTensor {
+            name: name.to_string(),
+        })?;
+    if entry.shape != shape {
+        return Err(ModernBertLoadError::ShapeMismatch {
+            name: name.to_string(),
+            expected: shape.to_vec(),
+            observed: entry.shape.clone(),
+        });
+    }
+    let undecodable = || ModernBertLoadError::Undecodable {
+        name: name.to_string(),
+        dtype: format!("{:?}", entry.dtype),
+    };
+    let data = reader.get_tensor_as_f32(name).ok_or_else(undecodable)?;
+    // Shapes were validated against the config, whose products are checked_mul-proven.
+    if data.len() != shape.iter().product::<usize>() {
+        return Err(undecodable());
+    }
+    if !data.iter().all(|v| v.is_finite()) {
+        return Err(ModernBertLoadError::NonFinite {
+            name: name.to_string(),
+        });
+    }
+    Ok(data)
+}
+
+impl ModernBertEncoder {
+    /// Load a ModernBERT encoder from an APR v2 reader, with every tensor name under
+    /// `prefix`.
+    ///
+    /// # Errors
+    ///
+    /// [`ModernBertLoadError`] naming the tensor for a missing tensor, a shape that
+    /// disagrees with `config`, an undecodable dtype or a non-finite value.
+    #[provable_contracts_macros::contract("laya-parity-v1", equation = "embeddings_abs")]
+    pub fn from_apr(
+        reader: &AprV2ReaderRef<'_>,
+        prefix: &str,
+        config: &ModernBertConfig,
+    ) -> Result<Self, ModernBertLoadError> {
+        let mut tensors = expected_tensors(config, prefix).into_iter();
+        let mut next = || -> Result<(Vec<f32>, Vec<usize>), ModernBertLoadError> {
+            // expected_tensors yields exactly the sequence consumed below.
+            let (name, shape) =
+                tensors
+                    .next()
+                    .ok_or_else(|| ModernBertLoadError::MissingTensor {
+                        name: format!("{prefix}<load order exhausted>"),
+                    })?;
+            let data = load_tensor(reader, &name, &shape)?;
+            Ok((data, shape))
+        };
+        let lin = |(w, s): (Vec<f32>, Vec<usize>)| Linear {
+            w,
+            b: None,
+            out: s[0],
+            inp: s[1],
+        };
+        let d = config.hidden_size();
+        let tok = next()?.0;
+        let emb_norm = next()?.0;
+        let embeddings = ModernBertEmbeddings::from_parts(tok, emb_norm, config.vocab_size(), d);
+        let mut layers = Vec::with_capacity(config.num_hidden_layers());
+        for (i, &global) in config.layer_is_global().iter().enumerate() {
+            let attn_norm = if i == 0 { None } else { Some(next()?.0) };
+            let wqkv = lin(next()?);
+            let wo = lin(next()?);
+            let mlp_norm = next()?.0;
+            let wi = lin(next()?);
+            let wo_mlp = lin(next()?);
+            layers.push(ModernBertLayer::from_parts(
+                attn_norm, wqkv, wo, mlp_norm, wi, wo_mlp, global,
+            ));
+        }
+        let final_norm = next()?.0;
+        Ok(Self::from_parts(
+            config.clone(),
+            embeddings,
+            layers,
+            final_norm,
+        ))
+    }
+}

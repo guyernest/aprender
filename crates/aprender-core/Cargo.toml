@@ -221,6 +221,9 @@ half = { workspace = true }  # IEEE f16 oracle for the convert_report f32_to_f16
 # so the plain `cargo test --test gemm_thread_determinism` build needs this
 # dev-dependency. Workspace-pinned: no new external package enters the tree.
 sha2 = { workspace = true }
+# Plan 08-03: the modernbert tests read the tiny fixture's raw F16 bytes from
+# model.safetensors (already locked at 0.4.5; the runtime dep is optional).
+safetensors = "0.4"
 
 [features]
 default = ["parallel"]

@@ -181,7 +181,8 @@ falsification_tests:
   - id: FALSIFY-LAYA-PARITY-002
     rule: 'Embeddings, every encoder layer and the final norm agree on the ladder row'
     prediction: 'embeddings <= 1.0e-5 abs, every layer <= 1.0e-3 relative rms, final norm <= 1.0e-4 abs; the test prints each measured value and ARCH.'
-    implemented_by: 'plan 08-03 (aprender::models::modernbert ladder tests)'
+    implemented_by: 'plan 08-03 (aprender::models::modernbert ladder tests); tiny HF fixture from plan 08-02, the embeddings / per-layer / final-norm rungs of one test'
+    test: 'cargo test -p aprender-core --lib models::modernbert::tests::tiny_parity'
     if_fails: 'Read the first red layer: global vs local tells RoPE theta from window; layer 0 red with embeddings green points at the Identity attn_norm.'
 
   - id: FALSIFY-LAYA-PARITY-003
