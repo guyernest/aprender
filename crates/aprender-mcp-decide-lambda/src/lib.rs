@@ -36,6 +36,7 @@ use pmcp::server::streamable_http_server::{StreamableHttpServer, StreamableHttpS
 use sha2::{Digest, Sha256};
 
 pub mod probe;
+pub mod s3;
 
 /// S3 object URI of the served artifact (`s3://bucket/key`).
 pub const ENV_S3_URI: &str = "APRENDER_DECIDE_S3_URI";
@@ -279,6 +280,9 @@ pub enum ResolveError {
     Read(ArtifactError),
     /// This source kind is not available in this build.
     Unsupported(&'static str),
+    /// The S3 download refused (no length, over cap, a failing part, a short body, or
+    /// the overall deadline).
+    S3(s3::S3LoadError),
     /// sha256 of the bytes is not the pin — refused before the ladder parsed anything.
     HashMismatch {
         /// The pinned value.
@@ -308,6 +312,7 @@ impl ResolveError {
             Self::TooLarge { .. } => "too_large",
             Self::Read(_) => "read",
             Self::Unsupported(_) => "unsupported",
+            Self::S3(e) => e.kind(),
             Self::HashMismatch { .. } => "hash_mismatch",
             Self::Load(_) => "load",
             Self::IdentityMismatch { .. } => "identity_mismatch",
@@ -330,6 +335,7 @@ impl fmt::Display for ResolveError {
             ),
             Self::Read(e) => write!(f, "bounded read refused: {e}"),
             Self::Unsupported(what) => write!(f, "model source {what} is not available"),
+            Self::S3(e) => write!(f, "{e}"),
             Self::HashMismatch { expected, actual } => write!(
                 f,
                 "artifact sha256 {actual} is not the pinned {expected}; refused before parsing"
@@ -527,6 +533,22 @@ fn read_local_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, ResolveError> {
         });
     }
     Ok(bytes)
+}
+
+/// Resolve an artifact fetched by `fetcher` (S3 in production, an in-memory fetcher in
+/// tests): download into memory under `cap` and `policy`, then the pin, then the ladder.
+///
+/// # Errors
+///
+/// [`ResolveError::S3`], [`ResolveError::HashMismatch`] or [`ResolveError::Load`].
+pub async fn resolve_from_fetcher<F: s3::RangeFetcher + ?Sized>(
+    fetcher: &F,
+    pin: &Sha256Pin,
+    cap: u64,
+    policy: &s3::DownloadPolicy,
+) -> Result<(Model, LoadTimeline), ResolveError> {
+    let _ = (fetcher, pin, cap, policy);
+    Err(ResolveError::Unsupported("s3"))
 }
 
 /// Resolve the served model from `source` under the contracted cap.

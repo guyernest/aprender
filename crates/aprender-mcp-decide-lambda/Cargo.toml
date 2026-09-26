@@ -33,6 +33,15 @@ aprender-mcp-decide = { path = "../aprender-mcp-decide" }
 aprender-decide = { path = "../aprender-decide" }
 pmcp = { version = "2.19", features = ["streamable-http", "schema-generation"] }
 
+# The cold-start S3 fetch (D-18). `= "1"` resolves to the ALREADY-LOCKED 1.8.18 /
+# 1.137.0 that aprender-setfit-train-lambda uses. Never `cargo update` these: newer
+# aws-sdk-s3 needs rustc 1.94.1 and rust-toolchain.toml pins 1.93.0.
+aws-config = "1"
+aws-sdk-s3 = "1"
+# Bounded concurrency (`buffer_unordered`) over disjoint BORROWED slices of the one
+# pre-sized buffer — no 'static spawn, so no per-part copy.
+futures = { workspace = true }
+
 lambda_http = "0.13"
 tokio = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -48,6 +57,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `start_paused` clocks for the ATTEMPT_TIMEOUT / DOWNLOAD_DEADLINE tests.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

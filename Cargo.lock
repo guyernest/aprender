@@ -919,6 +919,9 @@ version = "0.63.0"
 dependencies = [
  "aprender-decide",
  "aprender-mcp-decide",
+ "aws-config",
+ "aws-sdk-s3",
+ "futures",
  "lambda_http",
  "once_cell",
  "pmcp",

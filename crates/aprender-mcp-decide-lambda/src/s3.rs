@@ -1,0 +1,594 @@
+//! The cold-start loader (D-18): the artifact goes from S3 straight into ONE pre-sized
+//! in-memory buffer.
+//!
+//! Lambda's scratch disk is 512 MB and cargo-pmcp cannot raise it (RESEARCH Pitfall 3),
+//! so the ~0.85 GB artifact never touches a filesystem path. The object is split into
+//! disjoint [`PART_BYTES`] slices of that buffer, each filled by its own ranged GET, with
+//! at most [`CONCURRENCY`] in flight and up to [`RETRIES`] attempts per part. Every
+//! attempt is bounded by [`ATTEMPT_TIMEOUT`] and the whole download by
+//! [`DOWNLOAD_DEADLINE`]: attempt counts alone would let one stalled part hold the load
+//! lock indefinitely. 25 s is the 30 s gateway cap minus ~5 s of sha + build; past it
+//! the caller already has its 504, so the only useful outcome is to release the lock
+//! for the next request.
+//!
+//! A missing content length is refused (never read as 0), and a length over the
+//! decide-apr-v1 cap is refused BEFORE the buffer is allocated. The pin is checked by
+//! the caller ([`crate::resolve_from_fetcher`]) before any parse.
+
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
+
+/// One ranged GET's size: 64 MiB (spike 021/026).
+pub const PART_BYTES: u64 = 64 * 1024 * 1024;
+/// Ranged GETs in flight at once.
+pub const CONCURRENCY: usize = 16;
+/// Attempts per part (and for the length lookup).
+pub const RETRIES: u32 = 5;
+/// One attempt's bound; a slower attempt is cut and retried.
+pub const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(8);
+/// The whole download's bound (the 30 s gateway cap minus sha + build).
+pub const DOWNLOAD_DEADLINE: Duration = Duration::from_secs(25);
+
+/// A boxed, `Send` fetch future (object-safe, so `dyn RangeFetcher` works too).
+pub type FetchFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, FetchError>> + Send + 'a>>;
+
+/// A transport failure from one fetch attempt (retried).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchError(pub String);
+
+impl fmt::Display for FetchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A source of byte ranges of one object.
+pub trait RangeFetcher: Send + Sync {
+    /// The object's length, or `None` when the store did not report one.
+    fn content_length(&self) -> FetchFuture<'_, Option<u64>>;
+
+    /// Fill `dest` from the object's bytes `[start, start + dest.len())` (the inclusive
+    /// range `start..=start + dest.len() - 1`), returning how many bytes were written.
+    /// Writing straight into the caller's slice is what keeps the download to one buffer.
+    fn fetch_range<'a>(&'a self, start: u64, dest: &'a mut [u8]) -> FetchFuture<'a, usize>;
+}
+
+/// The download's sizes and bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadPolicy {
+    /// Bytes per ranged GET.
+    pub part_bytes: u64,
+    /// Parts in flight at once.
+    pub concurrency: usize,
+    /// Attempts per part.
+    pub retries: u32,
+    /// One attempt's bound.
+    pub attempt_timeout: Duration,
+    /// The whole download's bound.
+    pub deadline: Duration,
+}
+
+impl DownloadPolicy {
+    /// What the deployed Lambda uses.
+    pub const DEPLOYED: Self = Self {
+        part_bytes: PART_BYTES,
+        concurrency: CONCURRENCY,
+        retries: RETRIES,
+        attempt_timeout: ATTEMPT_TIMEOUT,
+        deadline: DOWNLOAD_DEADLINE,
+    };
+}
+
+/// Why the download was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S3LoadError {
+    /// The length lookup kept failing.
+    Head {
+        /// Attempts made.
+        attempts: u32,
+        /// The last failure.
+        reason: String,
+    },
+    /// The store reported no content length (never treated as 0).
+    MissingLength,
+    /// The length is over the cap; refused before the buffer was allocated.
+    TooLarge {
+        /// The reported length.
+        length: u64,
+        /// The cap.
+        cap: u64,
+    },
+    /// A part failed every attempt.
+    PartFailed {
+        /// The part's first byte.
+        offset: u64,
+        /// Attempts made.
+        attempts: u32,
+        /// The last failure.
+        last_error: String,
+    },
+    /// A part's body did not fill its range exactly.
+    ShortBody {
+        /// The part's first byte.
+        offset: u64,
+        /// The range length.
+        expected: usize,
+        /// Bytes received.
+        got: usize,
+    },
+    /// The whole download ran past [`DOWNLOAD_DEADLINE`] and was abandoned.
+    DeadlineExceeded {
+        /// Time spent before it was abandoned.
+        elapsed_ms: u128,
+    },
+}
+
+impl S3LoadError {
+    /// A short stable name for the failure class.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Head { .. } => "s3_head",
+            Self::MissingLength => "s3_missing_length",
+            Self::TooLarge { .. } => "s3_too_large",
+            Self::PartFailed { .. } => "s3_part_failed",
+            Self::ShortBody { .. } => "s3_short_body",
+            Self::DeadlineExceeded { .. } => "s3_deadline",
+        }
+    }
+}
+
+impl fmt::Display for S3LoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Head { attempts, reason } => {
+                write!(f, "object length lookup failed after {attempts} attempts: {reason}")
+            }
+            Self::MissingLength => write!(f, "the object reported no content length"),
+            Self::TooLarge { length, cap } => write!(
+                f,
+                "object is {length} bytes, over the decide-apr-v1 cap {cap}; refused before allocating"
+            ),
+            Self::PartFailed {
+                offset,
+                attempts,
+                last_error,
+            } => write!(
+                f,
+                "part at byte {offset} failed {attempts} attempts; last: {last_error}"
+            ),
+            Self::ShortBody {
+                offset,
+                expected,
+                got,
+            } => write!(
+                f,
+                "part at byte {offset} returned {got} bytes for a {expected}-byte range"
+            ),
+            Self::DeadlineExceeded { elapsed_ms } => write!(
+                f,
+                "download abandoned at its deadline after {elapsed_ms} ms"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for S3LoadError {}
+
+/// Download the object into one in-memory buffer under the DEPLOYED policy.
+///
+/// # Errors
+///
+/// An [`S3LoadError`] naming the refusal.
+pub async fn download_into_memory<F: RangeFetcher + ?Sized>(
+    fetcher: &F,
+    cap: u64,
+) -> Result<Vec<u8>, S3LoadError> {
+    download_into_memory_with(fetcher, cap, &DownloadPolicy::DEPLOYED).await
+}
+
+/// Download under an explicit `policy` (tests shrink the part size).
+///
+/// # Errors
+///
+/// An [`S3LoadError`] naming the refusal.
+pub async fn download_into_memory_with<F: RangeFetcher + ?Sized>(
+    fetcher: &F,
+    cap: u64,
+    policy: &DownloadPolicy,
+) -> Result<Vec<u8>, S3LoadError> {
+    let _ = (fetcher, cap, policy);
+    Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::tests::tiny_bytes;
+    use crate::{
+        parse_s3_uri, resolve_from_fetcher, resolve_local, sha256_hex, LoadOnce, Model,
+        ResolveError, Sha256Pin, SourceError,
+    };
+
+    /// When a fetch attempt hangs (to exercise the timeouts on a paused clock).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Stall {
+        Never,
+        Always,
+        FirstAttemptAt(u64),
+    }
+
+    /// An in-memory object with fault injection; records attempts per part.
+    struct MemFetcher {
+        data: Vec<u8>,
+        length: Option<u64>,
+        failures_before_success: HashMap<u64, u32>,
+        short_at: Option<u64>,
+        stall: Stall,
+        attempts: Mutex<HashMap<u64, u32>>,
+    }
+
+    impl MemFetcher {
+        fn new(data: Vec<u8>) -> Self {
+            let length = Some(data.len() as u64);
+            Self {
+                data,
+                length,
+                failures_before_success: HashMap::new(),
+                short_at: None,
+                stall: Stall::Never,
+                attempts: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn attempts_at(&self, offset: u64) -> u32 {
+            self.attempts
+                .lock()
+                .expect("attempts lock")
+                .get(&offset)
+                .copied()
+                .unwrap_or(0)
+        }
+
+        fn total_attempts(&self) -> u32 {
+            self.attempts.lock().expect("attempts lock").values().sum()
+        }
+    }
+
+    impl RangeFetcher for MemFetcher {
+        fn content_length(&self) -> FetchFuture<'_, Option<u64>> {
+            Box::pin(async move { Ok(self.length) })
+        }
+
+        fn fetch_range<'a>(&'a self, start: u64, dest: &'a mut [u8]) -> FetchFuture<'a, usize> {
+            Box::pin(async move {
+                let attempt = {
+                    let mut map = self.attempts.lock().expect("attempts lock");
+                    let n = map.entry(start).or_insert(0);
+                    *n += 1;
+                    *n
+                };
+                let stalls = match self.stall {
+                    Stall::Never => false,
+                    Stall::Always => true,
+                    Stall::FirstAttemptAt(at) => at == start && attempt == 1,
+                };
+                if stalls {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+                if let Some(&fails) = self.failures_before_success.get(&start) {
+                    if attempt <= fails {
+                        return Err(FetchError(format!("injected failure {attempt}")));
+                    }
+                }
+                let from = usize::try_from(start).expect("offset fits");
+                let mut n = dest.len();
+                if self.short_at == Some(start) {
+                    n -= 1;
+                }
+                dest[..n].copy_from_slice(&self.data[from..from + n]);
+                Ok(n)
+            })
+        }
+    }
+
+    /// 4-byte parts: a 14-byte object is 3.5 parts (offsets 0, 4, 8, 12).
+    const SMALL: DownloadPolicy = DownloadPolicy {
+        part_bytes: 4,
+        concurrency: 2,
+        ..DownloadPolicy::DEPLOYED
+    };
+
+    fn object() -> Vec<u8> {
+        (0u8..14)
+            .map(|b| b.wrapping_mul(17).wrapping_add(3))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn download_ok_reassembles_an_uneven_object_byte_exact() {
+        let fetcher = MemFetcher::new(object());
+        let bytes = download_into_memory_with(&fetcher, 1_000, &SMALL)
+            .await
+            .expect("download");
+        assert_eq!(bytes, object());
+        for offset in [0, 4, 8, 12] {
+            assert_eq!(fetcher.attempts_at(offset), 1, "offset {offset}");
+        }
+        assert_eq!(fetcher.total_attempts(), 4);
+    }
+
+    #[tokio::test]
+    async fn transient_part_failure_is_retried_and_recorded() {
+        let mut fetcher = MemFetcher::new(object());
+        fetcher.failures_before_success.insert(8, 2);
+        let bytes = download_into_memory_with(&fetcher, 1_000, &SMALL)
+            .await
+            .expect("two failures then success");
+        assert_eq!(bytes, object());
+        assert_eq!(fetcher.attempts_at(8), 3);
+    }
+
+    #[tokio::test]
+    async fn persistent_part_failure_is_refused_after_five_attempts() {
+        let mut fetcher = MemFetcher::new(object());
+        fetcher.failures_before_success.insert(4, RETRIES);
+        let err = download_into_memory_with(&fetcher, 1_000, &SMALL)
+            .await
+            .expect_err("a part that keeps failing is refused");
+        match err {
+            S3LoadError::PartFailed {
+                offset,
+                attempts,
+                last_error,
+            } => {
+                assert_eq!((offset, attempts), (4, 5));
+                assert!(last_error.contains("injected failure 5"), "{last_error}");
+            }
+            other => panic!("expected PartFailed, got {other:?}"),
+        }
+        assert_eq!(fetcher.attempts_at(4), RETRIES);
+    }
+
+    #[tokio::test]
+    async fn short_body_is_refused_with_its_range() {
+        let mut fetcher = MemFetcher::new(object());
+        fetcher.short_at = Some(8);
+        let err = download_into_memory_with(&fetcher, 1_000, &SMALL)
+            .await
+            .expect_err("short body");
+        assert_eq!(
+            err,
+            S3LoadError::ShortBody {
+                offset: 8,
+                expected: 4,
+                got: 3
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_length_is_refused_never_read_as_zero() {
+        let mut fetcher = MemFetcher::new(object());
+        fetcher.length = None;
+        let err = download_into_memory_with(&fetcher, 1_000, &SMALL)
+            .await
+            .expect_err("missing length");
+        assert_eq!(err, S3LoadError::MissingLength);
+        assert_eq!(fetcher.total_attempts(), 0, "no range was fetched");
+    }
+
+    #[tokio::test]
+    async fn over_cap_length_is_refused_before_allocating() {
+        let mut fetcher = MemFetcher::new(object());
+        fetcher.length = Some(11);
+        let err = download_into_memory_with(&fetcher, 10, &SMALL)
+            .await
+            .expect_err("over cap");
+        assert_eq!(
+            err,
+            S3LoadError::TooLarge {
+                length: 11,
+                cap: 10
+            }
+        );
+        assert_eq!(fetcher.total_attempts(), 0);
+
+        // u64::MAX under the contracted cap: allocating first would abort the process.
+        fetcher.length = Some(u64::MAX);
+        let cap = crate::contracted_cap();
+        let err = download_into_memory(&fetcher, cap)
+            .await
+            .expect_err("over cap");
+        assert_eq!(
+            err,
+            S3LoadError::TooLarge {
+                length: u64::MAX,
+                cap
+            }
+        );
+        assert_eq!(fetcher.total_attempts(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_abandons_stalled_parts() {
+        let mut fetcher = MemFetcher::new(object());
+        fetcher.stall = Stall::Always;
+        let policy = DownloadPolicy {
+            part_bytes: 4,
+            concurrency: 2,
+            ..DownloadPolicy::DEPLOYED
+        };
+        let started = tokio::time::Instant::now();
+        let err = download_into_memory_with(&fetcher, 1_000, &policy)
+            .await
+            .expect_err("stalled parts are abandoned");
+        let waited = started.elapsed();
+        match err {
+            S3LoadError::DeadlineExceeded { elapsed_ms } => {
+                assert!(
+                    (25_000..26_000).contains(&elapsed_ms),
+                    "abandoned at {elapsed_ms} ms"
+                );
+            }
+            other => panic!("expected DeadlineExceeded, got {other:?}"),
+        }
+        assert!(waited >= DOWNLOAD_DEADLINE && waited < DOWNLOAD_DEADLINE + ATTEMPT_TIMEOUT);
+        // Each stalled attempt was cut at ATTEMPT_TIMEOUT and retried: 8, 16, 24 s -> 4
+        // attempts on each of the first two parts before the 25 s deadline.
+        assert_eq!(fetcher.attempts_at(0), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_attempt_is_cut_at_attempt_timeout_and_retried() {
+        let mut fetcher = MemFetcher::new(object());
+        fetcher.stall = Stall::FirstAttemptAt(0);
+        let started = tokio::time::Instant::now();
+        let bytes = download_into_memory_with(&fetcher, 1_000, &SMALL)
+            .await
+            .expect("the retry succeeds");
+        assert_eq!(bytes, object());
+        assert_eq!(fetcher.attempts_at(0), 2);
+        let waited = started.elapsed();
+        assert!(
+            waited >= ATTEMPT_TIMEOUT && waited < ATTEMPT_TIMEOUT + Duration::from_secs(1),
+            "{waited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hash_mismatch_is_refused_before_the_ladder_runs() {
+        let tiny = tiny_bytes().to_vec();
+        let right = Sha256Pin::parse(&sha256_hex(&tiny)).expect("pin");
+        let wrong = Sha256Pin::parse(&"0".repeat(64)).expect("pin");
+        let policy = DownloadPolicy {
+            part_bytes: 4096,
+            ..DownloadPolicy::DEPLOYED
+        };
+
+        // The real artifact with the right pin loads, and serves that identity.
+        let fetcher = MemFetcher::new(tiny.clone());
+        let (model, timeline) =
+            resolve_from_fetcher(&fetcher, &right, crate::contracted_cap(), &policy)
+                .await
+                .expect("pinned tiny artifact resolves from the fetcher");
+        assert_eq!(model.identity().artifact_sha256, right.as_str());
+        assert_eq!(timeline.source, "s3");
+        assert_eq!(timeline.bytes, tiny.len() as u64);
+
+        // The real artifact under a wrong pin is refused.
+        let err = resolve_from_fetcher(&fetcher, &wrong, crate::contracted_cap(), &policy)
+            .await
+            .expect_err("wrong pin");
+        assert!(matches!(err, ResolveError::HashMismatch { .. }), "{err:?}");
+
+        // Garbage under a wrong pin is a HASH refusal, not a ladder one: the ladder
+        // never ran. The same garbage under its own hash reaches the ladder, which
+        // refuses it — so the order is pin first, then parse.
+        let garbage = vec![7u8; 100];
+        let fetcher = MemFetcher::new(garbage.clone());
+        let err = resolve_from_fetcher(&fetcher, &wrong, crate::contracted_cap(), &policy)
+            .await
+            .expect_err("wrong pin on garbage");
+        assert!(matches!(err, ResolveError::HashMismatch { .. }), "{err:?}");
+        let own = Sha256Pin::parse(&sha256_hex(&garbage)).expect("pin");
+        let err = resolve_from_fetcher(&fetcher, &own, crate::contracted_cap(), &policy)
+            .await
+            .expect_err("garbage reaches the ladder");
+        assert!(matches!(err, ResolveError::Load(_)), "{err:?}");
+    }
+
+    #[test]
+    fn uri_parse_accepts_s3_and_refuses_the_rest() {
+        assert_eq!(
+            parse_s3_uri("s3://bucket/decide/srv/abc.apr"),
+            Ok(("bucket".to_string(), "decide/srv/abc.apr".to_string()))
+        );
+        for bad in [
+            "https://bucket.s3.amazonaws.com/decide/abc.apr",
+            "s3://bucket",
+            "s3://bucket/",
+            "s3:///key",
+            "bucket/key",
+        ] {
+            assert!(
+                matches!(parse_s3_uri(bad), Err(SourceError::BadS3Uri { .. })),
+                "{bad} must be refused"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_after_failure_rearms_the_load_lock() {
+        let slot: LoadOnce<Model> = LoadOnce::new();
+        let tiny = tiny_bytes().to_vec();
+        let pin = Sha256Pin::parse(&sha256_hex(&tiny)).expect("pin");
+        let policy = DownloadPolicy {
+            part_bytes: 4096,
+            ..DownloadPolicy::DEPLOYED
+        };
+
+        let mut failing = MemFetcher::new(tiny.clone());
+        failing.failures_before_success.insert(0, RETRIES);
+        let first = slot
+            .get_or_try_load(|| async {
+                resolve_from_fetcher(&failing, &pin, crate::contracted_cap(), &policy)
+                    .await
+                    .map(|(m, _)| m)
+            })
+            .await;
+        assert!(
+            matches!(first, Err(ResolveError::S3(S3LoadError::PartFailed { .. }))),
+            "{:?}",
+            first.err()
+        );
+        assert!(slot.get().is_none(), "a failed load leaves the slot empty");
+
+        let good = MemFetcher::new(tiny);
+        let (model, performed) = slot
+            .get_or_try_load(|| async {
+                resolve_from_fetcher(&good, &pin, crate::contracted_cap(), &policy)
+                    .await
+                    .map(|(m, _)| m)
+            })
+            .await
+            .expect("the second load succeeds");
+        assert!(performed);
+        assert_eq!(model.identity().artifact_sha256, pin.as_str());
+
+        let (_, performed) = slot
+            .get_or_try_load(|| async {
+                Err::<Model, ResolveError>(ResolveError::Join("never".into()))
+            })
+            .await
+            .expect("loaded value is reused");
+        assert!(!performed, "only the loading call reports performed_load");
+    }
+
+    #[tokio::test]
+    async fn local_bounded_refuses_by_metadata_before_reading() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big.apr");
+        let cap = 1_024u64;
+        let file = std::fs::File::create(&path).expect("create");
+        file.set_len(cap + 1).expect("sparse length");
+        drop(file);
+        let err = resolve_local(&path, None, cap)
+            .await
+            .expect_err("over the (shrunk) cap");
+        match err {
+            ResolveError::TooLarge {
+                what,
+                observed,
+                cap: c,
+            } => assert_eq!((what, observed, c), ("declared_length", cap + 1, cap)),
+            other => panic!("expected TooLarge from metadata, got {other:?}"),
+        }
+    }
+}
