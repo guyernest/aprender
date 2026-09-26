@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-03-PLAN.md
-last_updated: "2026-09-26T01:25:08.178Z"
+stopped_at: 08-08 halted at tracer gate (GATE FAIL on ECE); awaiting human decision
+last_updated: "2026-09-26T01:40:43.892Z"
 last_activity: 2026-09-25
 last_activity_desc: Phase 08 execution started
-state_head: 42a901d7d57e5272ee3db3b6a64aabd22ccbcbf2
+state_head: 04a4fda8c7e3f97d4846d2d8dcb4198b5e4ea0aa
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 104
-  completed_plans: 95
+  completed_plans: 96
 milestone_name: milestone
 ---
 
@@ -478,6 +478,7 @@ Recent decisions affecting current work:
 - RESOLVED (06.1-03, wave 2): regressor_prior_scale_min stays at 1e-153. The ~1e-7 usability-floor hypothesis was REFUTED by a 5-shape x 12-decade release campaign: at 1e-7 the seasonal series contributes 2.8e-12 relative to yhat, as negligible as at 1e-9 — so a floor there would refuse requests behaving exactly like ones it accepts — and there is no cliff, contribution decaying continuously and saturating between 1e-4 and 1e-2, shape-dependently, because prior_scale is a regularisation STRENGTH and shrinking the coefficient is what it is for. D-21 is instead closed at the OUTCOME: when a fitted coefficient is exactly zero (the optimiser starts at zero, so that means L-BFGS never moved it) the response says so. Threshold-free, shape-independent, and it refuses nothing previously accepted. See 06.1-03-SUMMARY.md.
 - Verify t2c in 06.1-04-PLAN.md cannot see an #[ignore] added to part A or part B (it anchors bodies at fn, and the attribute precedes fn). Measured green on a gated part A. The in-tree Rust test invariance::parts_a_and_b_are_unconditional is the real guard; a later plan should replace the python body with a call to it.
 - SC2 no-argument invariance gate (crates/aprender-forecast/src/invariance.rs:718) is RED under cargo nextest run --workspace --lib, the invocation CI runs; green under -p aprender-forecast. Deterministic, hash-stable, flipped by adding apr-cli to the package set. See 06.1 deferred-items.md item 5.
+- 08-08 halted: TweetEval stance demo FAILS the pre-declared gate on ECE (ece_post 0.377 > 0.10; margin 0.130 passes). Calibration hit Laya's T max 5.0 (clamp_hit); a memorised 12-epoch model needs T ~20-50. Human decision needed: declare a new recipe (e.g. fewer epochs) before re-running, change the servable calibration (laya-parity change), or re-scope D-07/D-18. Nothing was adjusted; 08-08 Task 2 not started.
 
 ### Roadmap Evolution
 
@@ -495,9 +496,9 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-26T01:24:42.728Z
-Stopped at: Completed 08-03-PLAN.md
-Resume file: None
+Last session: 2026-09-26T01:40:43.720Z
+Stopped at: 08-08 halted at tracer gate (GATE FAIL on ECE); awaiting human decision
+Resume file: .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-08-SUMMARY.md
 
 ## Accumulated Context
 
