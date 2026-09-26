@@ -655,3 +655,7 @@ pub fn build_server(model: Arc<Model>, name: &str, version: &str) -> pmcp::Resul
         )
         .build()
 }
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // serde_json::json! / schema_for! expand to .unwrap()
+mod tests;

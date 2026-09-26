@@ -228,48 +228,56 @@ falsification_tests:
     rule: 'The count bound admits N = classify_max_texts and refuses N + 1 and 0'
     prediction: 'A request of 8 short texts is classified; 9 texts and an empty list are refused with validation errors naming classify_max_texts and classify_min_texts respectively.'
     implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests); the test: line is added in that plan''s commit'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::empty_texts_refused_naming_min_texts && cargo test -p aprender-mcp-decide --lib tests::nine_texts_refused_naming_max_texts && cargo test -p aprender-mcp-decide --lib tests::eight_texts_accepted_and_classified'
     if_fails: 'The count bound is off by one or absent, so a request the token budget was never priced for reaches the forward.'
 
   - id: FALSIFY-DECIDE-TOOL-002
     rule: 'A text over classify_max_text_bytes is refused before tokenization'
     prediction: 'A 16385-byte text is refused naming classify_max_text_bytes and its index; a 16384-byte text is tokenized (and truncated). A multi-byte text whose char count fits but whose byte length does not is refused.'
     implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests)'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::oversized_text_refused_without_echo && cargo test -p aprender-mcp-decide --lib tests::multibyte_text_over_byte_limit_refused && cargo test -p aprender-mcp-decide --lib tests::text_at_byte_limit_is_tokenized_and_truncated'
     if_fails: 'The byte check moved after tokenization, or counts chars: a long text now buys tokenizer CPU the budget never priced.'
 
   - id: FALSIFY-DECIDE-TOOL-003
     rule: 'The token budget accepts exactly-at and refuses one over'
     prediction: 'Texts whose built rows sum to exactly 1024 are classified; a request summing to 1025 is refused naming classify_max_total_tokens, the observed sum and the per-text lengths, before any forward runs.'
     implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests)'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::token_budget_accepts_exactly_at && cargo test -p aprender-mcp-decide --lib tests::token_budget_refuses_one_over'
     if_fails: 'The budget counts raw tokens instead of built-row tokens, or is checked after the forward: the 30 s cap is no longer priced.'
 
   - id: FALSIFY-DECIDE-TOOL-004
     rule: 'Response labels order equals task.json criteria order under both serde_json map backings'
     prediction: 'With serde_json/preserve_order on and off, a task whose criteria are not in alphabetical order (none, against, favor) yields labels [none, against, favor] and probabilities in that order.'
     implemented_by: 'plans 08-04 (order-preserving task parse) and 08-06 (response shape); test: lines added there'
+    test: 'cargo test -p aprender-decide --lib task::tests::stance_order_none_against_favor && cargo test -p aprender-decide --features serde-preserve-order --lib task::tests::stance_order_none_against_favor && cargo test -p aprender-mcp-decide --lib tests::response_labels_follow_task_order'
     if_fails: 'A map backing reordered the labels: every probability is now attributed to the wrong label and the argmax label may be wrong (RESEARCH Pitfall 2).'
 
   - id: FALSIFY-DECIDE-TOOL-005
     rule: 'The truncation flag reproduces Laya''s right truncation'
     prediction: 'A text longer than the state room returns truncated = true and tokens = row_max_tokens; a text exactly filling the room returns truncated = false.'
     implemented_by: 'plan 08-06 (classify_response tests)'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::truncation_flag_flips_one_past_the_room && cargo test -p aprender-mcp-decide --lib tests::long_text_truncated_short_text_not'
     if_fails: 'The flag is computed from raw text length or the wrong room: callers cannot tell which answers were made on a cut text (D-12).'
 
   - id: FALSIFY-DECIDE-TOOL-006
     rule: 'Every refusal names the contract key and omits the caller text'
     prediction: 'For each refusal class, the validation message contains "decide-tool-boundary-v1" and the violated key, and does not contain the (distinctive) text sent.'
     implemented_by: 'plan 08-06 (refusal tests)'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::every_refusal_names_key_without_text && cargo test -p aprender-mcp-decide --lib tests::oversized_text_refused_without_echo'
     if_fails: 'A refusal echoes caller text (ASVS V7) or leaves the caller guessing which bound fired.'
 
   - id: FALSIFY-DECIDE-TOOL-007
     rule: 'Every Rust boundary constant equals this file'
     prediction: 'The contract-mirror test reads every constants: key via test_support::constant_u64 and finds each equal to its Rust constant; changing one YAML value alone turns it red naming the key.'
     implemented_by: 'plan 08-06 (contract-mirror test)'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::bounds_match_contract'
     if_fails: 'A bound changed in exactly one place: the published boundary and the served one disagree.'
 
   - id: FALSIFY-DECIDE-TOOL-008
     rule: 'Admission refuses the (pending + 1)th concurrent request and releases a slot only when its blocking work ends'
     prediction: 'With classify_max_pending held busy, one more request is refused immediately naming classify_max_pending; a caller dropped mid-computation keeps its slot until the blocking work finishes.'
     implemented_by: 'plan 08-06 (try_admit tests)'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::admission_refuses_over_pending && cargo test -p aprender-mcp-decide --lib tests::admission_slot_held_until_blocking_ends && cargo test -p aprender-mcp-decide --lib tests::admission_waiting_cancel_frees_pending && cargo test -p aprender-mcp-decide --lib tests::admission_limits_match_contract'
     if_fails: 'Requests queue without bound, or a disconnect frees a slot whose CPU work is still running: admission no longer counts real work.'
 
   - id: FALSIFY-DECIDE-TOOL-009
@@ -288,7 +296,7 @@ kani_harnesses:
     property: 'forall n <= classify_max_texts + 1, forall byte lengths <= classify_max_text_bytes + 1, forall built lengths <= row_max_tokens: precheck accepts iff count, bytes and token-sum bounds all hold, and the first failing bound in order is the one named'
     bound: 9
     strategy: bounded_int
-    harness: 'NOT EXECUTED — the evidence will be the runnable proptest over the same predicate in aprender-mcp-decide (plan 08-06), which draws counts, byte lengths and built-row lengths across each boundary'
+    harness: 'NOT EXECUTED — the evidence is the runnable proptest over the same predicate, `cargo test -p aprender-mcp-decide --lib tests::bound_order_is_count_bytes_tokens` (plan 08-06), which draws counts 0..=9, byte lengths 0..=33 and built-row lengths 0..=20 against a shrunk instance (32 bytes, 64 tokens) and asserts the first failing bound in order is the one named'
 
 qa_gate:
   id: F-DECIDE-TOOL-001
