@@ -80,3 +80,19 @@ not fixed by it.
   `crates/aprender-mcp-chronos/{build.rs,src/lib.rs}` — all from `fdf6b1802` (the commit behind
   D-ITEM-08-01-A). `cargo fmt -p aprender-decide -- --check` exits 0.
 - **Why not fixed here:** out of scope (other phases' crates); a one-line `cargo fmt` in its own change.
+
+## From plan 08-05
+
+### D-ITEM-08-05-A: D-ITEM-08-01-A re-measured; the strict-binding PASS line is still unreachable
+
+- **Found during:** 08-05 Task 2 verify 2 (`bash scripts/check_contract_test_binding.sh`).
+- **Symptom:** unchanged: rc=1, `VACUOUS: strict-test-binding gate was SKIPPED`, because
+  `contracts/spectral-indices-v1.yaml` has no `kani_harnesses:`.
+- **Measured around it** (temporary lifted copy `contracts-lift-0805/`, deleted after each run): 622 refs
+  resolved (593 at 08-04, plus 28 decide-apr-v1 legs for FALSIFY-001/002/003/004/005/008/009/011 in the
+  GREEN commit, plus FALSIFY-006 in the trybuild commit), **0 dangling in decide-apr-v1 and
+  laya-parity-v1**; the other 44 dangling refs are identical to D-ITEM-08-01-A. Two mutated binding names
+  (`nan_weight_mutant_zz`, `index_capacity_mutant_zz`) were both flagged, so the resolver discriminates.
+- **Also:** `.planning/WINDOWS.md` still refuses every append (`Ledger entry 24 has invalid status:
+  "resolved"`), so this unrun-verify item is recorded here instead of the ledger.
+- **Why not fixed here:** same reason as D-ITEM-08-01-A.
