@@ -429,3 +429,313 @@ pub async fn run_cold_first(
         load_header: call.load_header,
     })
 }
+
+// ===========================================================================
+// The maximal legal request (decide-tool-boundary-v1 `accepted_region_cold`)
+// ===========================================================================
+
+/// Which maximal legal request to build. Attention cost grows with the square of row
+/// length, so two full rows cost more than eight short ones of the same total; the
+/// accepted region is claimed for BOTH shapes and neither is inferred from the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MaximalShape {
+    /// The fewest texts that reach the token budget, each `max_text_bytes` long and
+    /// truncated to a full row: the largest attention cost and tokenizer input.
+    Concentrated,
+    /// `max_texts` texts whose built rows total the budget: the largest per-row overhead.
+    Distributed,
+}
+
+impl MaximalShape {
+    /// The shape's CLI / report name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Concentrated => "concentrated",
+            Self::Distributed => "distributed",
+        }
+    }
+}
+
+impl std::str::FromStr for MaximalShape {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "concentrated" => Ok(Self::Concentrated),
+            "distributed" => Ok(Self::Distributed),
+            other => Err(format!(
+                "unknown shape {other:?}: use concentrated or distributed"
+            )),
+        }
+    }
+}
+
+/// Why a maximal request could not be built.
+#[derive(Debug)]
+pub enum MaximalError {
+    /// The model refused to tokenize the synthetic text.
+    Prepare(aprender_decide::DecideError),
+    /// The limits admit no request at all (e.g. `max_texts == 0`).
+    EmptyLimits,
+}
+
+impl std::fmt::Display for MaximalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Prepare(e) => write!(f, "the model refused the synthetic text: {e}"),
+            Self::EmptyLimits => write!(f, "the limits admit no request"),
+        }
+    }
+}
+
+impl std::error::Error for MaximalError {}
+
+/// One synthetic unit: plain ASCII (so any byte cut is a char boundary), no dataset text.
+const UNIT: &str = "probe ";
+
+/// A synthetic text of `units` repetitions of [`UNIT`], at most `max_bytes` long.
+fn synthetic(units: usize, max_bytes: usize) -> String {
+    let mut text = UNIT.repeat(units);
+    text.truncate(max_bytes);
+    text
+}
+
+/// A synthetic text exactly `bytes` long (the largest tokenizer input the byte bound
+/// admits).
+fn synthetic_exact(bytes: usize) -> String {
+    let mut text = UNIT.repeat(bytes / UNIT.len() + 1);
+    text.truncate(bytes);
+    text
+}
+
+fn row_tokens(model: &crate::Model, text: &str) -> Result<(usize, bool), MaximalError> {
+    let rows = model
+        .prepare(&[text.to_string()])
+        .map_err(MaximalError::Prepare)?;
+    Ok(rows
+        .first()
+        .map_or((0, false), |r| (r.tokens(), r.truncated())))
+}
+
+/// The largest unit count whose built row is at most `target` tokens, and that row's
+/// length. Row length is non-decreasing in the unit count, so this is a binary search.
+fn largest_within(
+    model: &crate::Model,
+    target: usize,
+    max_bytes: usize,
+) -> Result<(usize, usize), MaximalError> {
+    let (mut lo, mut lo_tokens) = (0usize, row_tokens(model, "")?.0);
+    let mut hi = max_bytes / UNIT.len();
+    if lo_tokens > target {
+        return Ok((0, lo_tokens));
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        let (tokens, _) = row_tokens(model, &synthetic(mid, max_bytes))?;
+        if tokens <= target {
+            lo = mid;
+            lo_tokens = tokens;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Ok((lo, lo_tokens))
+}
+
+/// Build the maximal LEGAL request of `shape` under `limits`, sized with the model's
+/// own tokenizer and row builder (`prepare`). Returns the texts and their built-row
+/// token total. Synthetic text only.
+///
+/// CONCENTRATED is `min(ceil(max_total_tokens / max_len), max_texts)` texts: all but
+/// the last are `max_text_bytes` long and truncated to a full row; the last is too when
+/// the budget is a whole number of rows, and otherwise is sized to the remainder, so the
+/// total is the largest value not over the budget. For Laya-en (max_len 512, budget
+/// 1024) that is 2 full rows. DISTRIBUTED is `max_texts` texts whose built rows total
+/// the largest value not over the budget.
+///
+/// # Errors
+///
+/// [`MaximalError`] if the model refuses the synthetic text or the limits admit nothing.
+pub fn build_maximal_request(
+    model: &crate::Model,
+    limits: &aprender_mcp_decide::ClassifyLimits,
+    shape: MaximalShape,
+) -> Result<(Vec<String>, usize), MaximalError> {
+    if limits.max_texts == 0 || limits.max_total_tokens == 0 {
+        return Err(MaximalError::EmptyLimits);
+    }
+    let budget = limits.max_total_tokens;
+    let max_bytes = limits.max_text_bytes;
+    let texts = match shape {
+        MaximalShape::Concentrated => {
+            let max_len = model.manifest().agent.max_len.max(1);
+            let count = budget.div_ceil(max_len).min(limits.max_texts);
+            let full = synthetic_exact(max_bytes);
+            let (full_tokens, _) = row_tokens(model, &full)?;
+            let mut texts = vec![full; count];
+            let over = (full_tokens * count).saturating_sub(budget);
+            if over > 0 {
+                // The budget is not a whole number of rows: the last text fills only
+                // the remainder.
+                let room = full_tokens.saturating_sub(over);
+                let (units, _) = largest_within(model, room, max_bytes)?;
+                if let Some(last) = texts.last_mut() {
+                    *last = synthetic(units, max_bytes);
+                }
+            }
+            texts
+        }
+        MaximalShape::Distributed => {
+            let count = limits.max_texts;
+            let mut units = Vec::with_capacity(count);
+            let mut tokens = Vec::with_capacity(count);
+            for i in 0..count {
+                let share = budget / count + usize::from(i < budget % count);
+                let (u, t) = largest_within(model, share, max_bytes)?;
+                units.push(u);
+                tokens.push(t);
+            }
+            // Second pass: hand any slack (rows land a token or two under their share)
+            // to the texts in order, never exceeding the budget.
+            for i in 0..count {
+                let others: usize = tokens.iter().sum::<usize>() - tokens[i];
+                let room = budget.saturating_sub(others);
+                let (u, t) = largest_within(model, room, max_bytes)?;
+                if t <= room && t >= tokens[i] {
+                    units[i] = u;
+                    tokens[i] = t;
+                }
+            }
+            units.iter().map(|&u| synthetic(u, max_bytes)).collect()
+        }
+    };
+    let total = model
+        .prepare(&texts)
+        .map_err(MaximalError::Prepare)?
+        .iter()
+        .map(aprender_decide::PreparedRow::tokens)
+        .sum();
+    Ok((texts, total))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use aprender_mcp_decide::{check_token_budget, precheck, ClassifyArgs, ClassifyLimits};
+
+    use super::*;
+    use crate::tests::{serve, tiny_bytes, tiny_model};
+
+    /// Limits the tiny fixture (rows of at most 64 tokens) can reach: two full rows.
+    const SHRUNK: ClassifyLimits = ClassifyLimits {
+        max_texts: 4,
+        max_text_bytes: 2_048,
+        max_total_tokens: 128,
+        ..ClassifyLimits::CONTRACTED
+    };
+
+    fn rows(model: &crate::Model, texts: &[String]) -> Vec<aprender_decide::PreparedRow> {
+        model.prepare(texts).expect("prepare")
+    }
+
+    fn assert_legal(limits: &ClassifyLimits, texts: &[String], total: usize) {
+        let args = ClassifyArgs {
+            texts: texts.to_vec(),
+        };
+        precheck(limits, &args).expect("the maximal request passes precheck");
+        let per_text: Vec<usize> = rows(&tiny_model(), texts)
+            .iter()
+            .map(aprender_decide::PreparedRow::tokens)
+            .collect();
+        assert_eq!(per_text.iter().sum::<usize>(), total);
+        check_token_budget(limits, &per_text).expect("the maximal request fits the budget");
+    }
+
+    #[test]
+    fn maximal_concentrated_is_full_rows_of_max_byte_texts() {
+        let model = tiny_model();
+        assert_eq!(model.manifest().agent.max_len, 64);
+        let (texts, total) =
+            build_maximal_request(&model, &SHRUNK, MaximalShape::Concentrated).expect("build");
+        assert_eq!(texts.len(), 2, "ceil(128 / 64) texts");
+        assert!(texts.iter().all(|t| t.len() == SHRUNK.max_text_bytes));
+        assert!(rows(&model, &texts).iter().all(|r| r.truncated()));
+        assert!(total <= SHRUNK.max_total_tokens && total + 8 >= SHRUNK.max_total_tokens);
+        assert_legal(&SHRUNK, &texts, total);
+    }
+
+    #[test]
+    fn maximal_concentrated_sizes_the_last_text_to_an_uneven_budget() {
+        let model = tiny_model();
+        let limits = ClassifyLimits {
+            max_total_tokens: 100,
+            ..SHRUNK
+        };
+        let (texts, total) =
+            build_maximal_request(&model, &limits, MaximalShape::Concentrated).expect("build");
+        assert_eq!(texts.len(), 2);
+        assert_eq!(texts[0].len(), limits.max_text_bytes);
+        assert!(texts[1].len() < limits.max_text_bytes);
+        assert!(total <= 100 && total + 8 >= 100, "total {total}");
+        assert_legal(&limits, &texts, total);
+    }
+
+    #[test]
+    fn maximal_distributed_fills_max_texts_to_the_budget() {
+        let model = tiny_model();
+        let (texts, total) =
+            build_maximal_request(&model, &SHRUNK, MaximalShape::Distributed).expect("build");
+        assert_eq!(texts.len(), SHRUNK.max_texts);
+        assert!(total <= SHRUNK.max_total_tokens && total + 8 >= SHRUNK.max_total_tokens);
+        assert_legal(&SHRUNK, &texts, total);
+    }
+
+    #[test]
+    fn shape_names_round_trip() {
+        for shape in [MaximalShape::Concentrated, MaximalShape::Distributed] {
+            assert_eq!(shape.as_str().parse::<MaximalShape>(), Ok(shape));
+        }
+        assert!("both".parse::<MaximalShape>().is_err());
+    }
+
+    #[test]
+    fn labels_in_order_requires_first_occurrences_in_order() {
+        let labels = ["a1".to_string(), "b2".to_string()];
+        assert!(labels_in_order("x a1 y b2", &labels));
+        assert!(!labels_in_order("x b2 y a1", &labels));
+        assert!(!labels_in_order("x a1 y", &labels));
+        assert!(!labels_in_order("anything", &[]));
+    }
+
+    #[test]
+    fn rpc_body_parses_json_and_sse() {
+        let json = parse_rpc_body("application/json", r#"{"id":1}"#).expect("json");
+        assert_eq!(json["id"], 1);
+        let sse = parse_rpc_body("text/event-stream", "event: message\ndata: {\"id\":2}\n\n")
+            .expect("sse");
+        assert_eq!(sse["id"], 2);
+        assert!(parse_rpc_body("application/json", "not json").is_err());
+    }
+
+    /// Both maximal shapes, built under the SERVED (contracted) limits, are served as the
+    /// first and only POST to a fresh stateless loopback server — the request plan 08-11
+    /// times on cold Lambda instances.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn loopback_maximal_requests_are_served_cold_first() {
+        let model = tiny_model();
+        for shape in [MaximalShape::Concentrated, MaximalShape::Distributed] {
+            let (texts, total) =
+                build_maximal_request(&model, &ClassifyLimits::CONTRACTED, shape).expect("build");
+            let url = serve(Arc::clone(&model)).await;
+            let sample = run_cold_first(&url, None, &texts, &new_probe_id())
+                .await
+                .unwrap_or_else(|e| panic!("{} request refused: {e}", shape.as_str()));
+            assert_eq!(sample.tokens_total, total, "{}", shape.as_str());
+            assert_eq!(sample.texts, texts.len());
+            assert_eq!(sample.artifact_sha256, crate::sha256_hex(tiny_bytes()));
+        }
+    }
+}

@@ -1,0 +1,95 @@
+# TEMPLATE for the Laya decide MCP server's pmcp.run deploy config (Phase 8 D-15, D-18).
+#
+# This file is tracked. The `deploy.toml` beside it is GENERATED from it by
+# `just laya-deploy-config` and is gitignored, because the artifact bucket's name
+# embeds the AWS account id. cargo-pmcp reads the generated file.
+#
+# THE PACKAGE-RESOLUTION TRAP. cargo-pmcp picks the package to build in
+# `find_lambda_package_dir`: first `<deploy-root>/{server_name}-lambda`, then the FIRST
+# `*-lambda` workspace package with a `bootstrap` binary. With this crate's own
+# directory as the deploy root the first branch cannot match, and the fallback's first
+# hit is NOT this crate in either plausible order (workspace-member order puts
+# aprender-mcp-setfit-lambda first, alphabetical order aprender-mcp-chronos-lambda), so
+# a plain `cargo pmcp deploy --manifest-path crates/aprender-mcp-decide-lambda` would
+# build and ship ANOTHER server's binary under this name without a warning. Plan 08-10 decides
+# the deploy root (and probes the resolver) before anything is deployed. The tell that
+# the right binary shipped is the GET health body, which names
+# `aprender-mcp-decide-lambda`.
+#
+# THE DEPLOY FLOW (plan 08-10; nothing in plan 08-07 touches AWS):
+#   1. pack the trained artifact and upload it content-addressed:
+#        s3://<bucket>/decide/<server>/<sha256>.apr
+#   2. just laya-deploy-config   # fills the UNSET values below into ./deploy.toml
+#   3. cargo pmcp deploy --manifest-path <the deploy root plan 08-10 settles>
+#   4. grant the function's role s3:GetObject on that one key
+#   5. probe the endpoint (examples/probe.rs): identity, then the cold maximal requests
+#
+# The weights are NEVER baked into the package (spikes 021/026: 7-18x worse cold start).
+# They are fetched from S3 at cold start straight into memory: Lambda's /tmp is 512 MB
+# and cargo-pmcp cannot raise it, so a 0.85 GB artifact cannot be staged there.
+
+[target]
+type = "pmcp-run"
+version = "1.0.0"
+
+[aws]
+region = "us-east-1"
+
+[server]
+# Replaced by `just laya-deploy-config`. The pmcp.run server id is also the name the
+# bootstrap reports (PMCP_SERVER_ID).
+name = "UNSET-run-just-laya-deploy-config"
+# D-18: the maximum default-Lambda memory, because memory buys vCPUs (up to 6 at
+# 10,240 MB). A CPU-bound model below that is slower at the same cost per request
+# (aws-mcp-model-hosting.md). Peak RSS is the artifact bytes plus the widened f32
+# model, ~2.6 GB of the 10 GB.
+memory_mb = 10240
+# Matches the API Gateway HTTP API's own 30-second integration timeout, which cannot be
+# raised. A larger number would only be a longer wait for a response the gateway has
+# already given up on. The loader's DOWNLOAD_DEADLINE (25 s) sits inside it.
+timeout_seconds = 30
+
+# `just laya-deploy-config` replaces the UNSET values with the uploaded object's URI and
+# its sha256. The sha256 is the pin: the bootstrap refuses any bytes that do not hash to
+# it BEFORE the load ladder parses them, and every classify response reports it as
+# `model.artifact_sha256`. Hand-editing the generated file is how the pin and the object
+# drift apart; regenerate instead.
+[environment]
+RUST_LOG = "info"
+APRENDER_DECIDE_S3_URI = "UNSET-run-just-laya-deploy-config"
+APRENDER_DECIDE_SHA256 = "UNSET-run-just-laya-deploy-config"
+
+[secrets]
+
+# The value here is a placeholder: `just laya-deploy-config` sets it from the decision
+# taken at plan 08-11's checkpoint. Do not deploy an open function by default without
+# that decision (ASVS V2): an unauthenticated 10 GB function is a cost-amplification
+# vector, since every call can buy a cold start and seconds of 6-vCPU compute.
+[auth]
+enabled = false
+provider = "none"
+callback_urls = []
+
+[auth.dcr]
+enabled = true
+public_client_patterns = ["claude", "desktop", "cursor", "mcp-inspector", "chatgpt"]
+default_scopes = ["openid", "email", "mcp/read"]
+allowed_scopes = ["openid", "email", "profile", "mcp/read", "mcp/write"]
+
+[observability]
+log_retention_days = 30
+enable_xray = true
+create_dashboard = true
+
+[observability.alarms]
+error_threshold = 10
+# A warm classify of the maximal request is seconds; a cold one pays the download and
+# the ladder inside the same request. Past this the request is near the gateway cap.
+latency_threshold_ms = 20000
+
+# No [assets]: the function carries no model. The artifact is the S3 object named above.
+
+[composition]
+tier = "foundation"
+allow_composition = true
+internal_only = false
