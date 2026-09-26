@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: 08-08 halted at tracer gate (GATE FAIL on ECE); awaiting human decision
-last_updated: "2026-09-26T01:40:43.892Z"
+stopped_at: Completed 08-04-PLAN.md (08-08 still halted at its human decision)
+last_updated: "2026-09-26T02:08:17.543Z"
 last_activity: 2026-09-25
 last_activity_desc: Phase 08 execution started
-state_head: 04a4fda8c7e3f97d4846d2d8dcb4198b5e4ea0aa
+state_head: a5580be41b2b68a715359a6a193a2d671621fc8a
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 104
-  completed_plans: 96
+  completed_plans: 97
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 4 of 12
+Plan: 5 of 12
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -217,6 +217,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P01 | 17min | 3 tasks | 8 files |
 | Phase 08 P02 | 15min | 2 tasks | 27 files |
 | Phase 08 P03 | 26min | 2 tasks | 10 files |
+| Phase 08 P04 | 24min | 2 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -385,6 +386,9 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-03: modernbert primitives (Linear::forward, layer_norm, attention, rope_rotate_half) return Result with typed ModernBertError; aprender-decide consumers propagate with the question-mark operator — no primitive may index-panic on a bad buffer from an untrusted .apr or a caller
 - [Phase 08]: 08-03: layer_norm rounds the configured norm_eps to f32 before widening, as torch CPU LayerNorm casts eps to the f32 accumulation type — keeps spike-025 numerics bit-identical while honouring norm_eps
 - [Phase 08]: 08-03: the plan clippy gate is not vacuous despite the pre-existing arm64 unreachable_code error; an induced needless_return in modernbert is still reported (base count 1) — ptr_arg probes are invalid on pub fns because of avoid-breaking-exported-api
+- [Phase 08]: 08-04: aprender-decide criteria order is read from raw bytes by an order-preserving visitor; the crate never enables serde_json/preserve_order, and both backings are observed (standalone OFF, -p aprender-mcp-setfit ON)
+- [Phase 08]: 08-04: Laya::from_parts refuses MarkersLost once at load (empty-state build); options longer than head_max_len are shrunk as Laya does and served
+- [Phase 08]: 08-04: contract test: lines must cite concrete test fns - pv's strict-binding resolver reads the last :: segment, so a module filter like --lib task:: is invisible (a mutated name was not flagged)
 
 ### Pending Todos
 
@@ -496,9 +500,9 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-26T01:40:43.720Z
-Stopped at: 08-08 halted at tracer gate (GATE FAIL on ECE); awaiting human decision
-Resume file: .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-08-SUMMARY.md
+Last session: 2026-09-26T02:08:17.375Z
+Stopped at: Completed 08-04-PLAN.md (08-08 still halted at its human decision)
+Resume file: None
 
 ## Accumulated Context
 
