@@ -1,6 +1,6 @@
 contract: laya-finetune-gate
 metadata:
-  version: 1.1.0
+  version: 1.2.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -21,6 +21,13 @@ metadata:
     only: a second declared stopping rule (`early_stopping`), the optional recipe.json field that
     names it, and the equation / test that bind it. No threshold, calibration bound, seed, data
     rule or schema field of 1.0.0 moved; the failing fixed_epochs run remains valid evidence.
+
+    AMENDMENT 1.2.0 (2026-09-26, after the D-19 early_stopping demo ALSO failed the gate on ECE).
+    Records the demo's outcome of record, nothing else: the D-19 demo FAILED the unchanged gate under
+    both declared recipe_ids, and by user decision (2026-09-26, option 3) both runs are kept as
+    FAIL-CLOSED TEST VECTORS that pack/verify must refuse (`demo.fail_closed_vectors`). The D-18 live
+    deploy of the stance model is DEFERRED until a declared run passes this gate. No threshold,
+    calibration bound, seed, recipe value, data rule or schema field moved; `gate_max_ece` stays 0.10.
 
     THE GATE IS DECIDED ON RECOMPUTED METRICS, NOT REPORTED ONES. A gate report is a file a
     training run wrote; an edited report must not pass. So the metrics that DECIDE pass are
@@ -191,7 +198,8 @@ demo:
   shots_per_class: 16
   epochs: 12
   # The demo's stopping rule. fixed_epochs was run first (recipe_id d0f4e40d…, GATE FAIL, kept as a
-  # fail-closed test vector); the demo of record uses early_stopping (the early_stopping block, max 12).
+  # fail-closed test vector); the second declared attempt used early_stopping (the early_stopping
+  # block, max 12) and also FAILED (recipe_id 3d4b91da…). See `outcome` below (1.2.0).
   stopping: early_stopping
   superseded_run: 'fixed_epochs, recipe_id d0f4e40d39425e68d503f557f4f660eb9a73a4fb258da01f777b6f49362bcf20: margin 0.1299, ece_post 0.3773, t_applied 5.0 (clamp_hit) — GATE FAIL'
   declared_seed: 13
@@ -201,6 +209,17 @@ demo:
   eval_rows: 280
   spike_baseline_f_avg: '0.538 ± 0.017 (spike 024, 16 shots/class) — INFORMATIONAL, explicitly NOT a gate'
   note: 'The 25 % calibration slice leaves 12 fit shots/class (16 - 4), so an F_avg below the spike''s is expected (RESEARCH A9). The gate is gate_pass, not this number.'
+  # ---- D-19 OUTCOME OF RECORD (1.2.0; user decision 2026-09-26, option 3: re-scope D-07/D-18 for the demo) ----
+  # Recorded AFTER both runs were read. It changes no threshold: it states what the unchanged gate
+  # decided and what downstream plans must do with those runs.
+  outcome: gate_fail
+  outcome_rule: 'The D-19 demo FAILED gate_pass under BOTH declared recipe_ids on the same data (task/train/eval sha256 identical), seed 13, base above. In both runs the margin clause passes and the ece_post clause fails. There is NO passing demo run; a passing demo is PENDING the calibration spike (pass_pending).'
+  fail_closed_vectors:
+    - 'fixed_epochs: recipe_id d0f4e40d39425e68d503f557f4f660eb9a73a4fb258da01f777b6f49362bcf20, run dir models/decide/tweet-stance-16-fixed-epochs/ (gitignored) — zs macro_f1 0.3402, ft macro_f1 0.4701, margin 0.1299 (pass), ece_post 0.3773 (FAIL > 0.10), t_fitted = t_applied = 5.0, clamp_hit true'
+    - 'early_stopping: recipe_id 3d4b91daf86772bcb23e5342c2dff4bb6467f5d9f254f7833ac7f61a8f2f5375, run dir models/decide/tweet-stance-16/ (gitignored) — best epoch 4 of 12 (stopped at 7), zs macro_f1 0.3402, ft macro_f1 0.4458, margin 0.1056 (pass), ece_post 0.2224 (FAIL > 0.10), t_fitted = t_applied = 3.1436, clamp_hit false'
+  fail_closed_rule: 'Both runs are FAIL-CLOSED TEST VECTORS. pack-for-serving and `pack_laya verify` (plan 08-09) MUST refuse each of them with the gate recomputed in Rust from eval-probs.json / zero-shot-probs.json reproducing FAIL on the ece_post clause; nothing is packed for serving, uploaded or deployed from either. The Python gate self-test (just laya-train-selftest) decides FAIL on both reports'' numbers.'
+  deploy: 'DEFERRED. The D-18 live pmcp.run deploy of the stance model does not happen until a DECLARED run passes this gate unchanged. Plan 08-11 needs a scope decision at its go/no-go checkpoint.'
+  pass_pending: '.planning/todos/pending/spike-laya-calibration-slice-and-temperature-cap.md — measures calibration slice size (e.g. the s64-seed13 cell) and the served temperature cap before any third attempt. Whatever it recommends is declared in this file BEFORE that run is read (D-07); gate_max_ece does not move.'
 
 run_dir_layout:
   # The ONE layout the fixture generator (08-02), the trainer (08-08) and the packer
