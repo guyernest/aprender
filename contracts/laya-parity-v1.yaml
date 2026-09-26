@@ -195,6 +195,7 @@ falsification_tests:
     rule: 'The window mutation fails the first local layer and not the first global one'
     prediction: 'WINDOW 63 and 65 each push the first local layer past 1.0e-3 relative rms while layer 0 (global) stays green.'
     implemented_by: 'plan 08-03 (aprender::models::modernbert window mutation test)'
+    test: 'cargo test -p aprender-core --lib models::modernbert::tests::window_mutation'
     if_fails: 'Either the window is wrong or the rung no longer discriminates; in both cases the local-attention claim is unproven.'
 
   - id: FALSIFY-LAYA-PARITY-005
@@ -218,7 +219,7 @@ kani_harnesses:
     property: 'forall i, j < row_max_tokens: in_window(i, j) iff |i - j| <= 64'
     bound: 512
     strategy: bounded_int
-    harness: 'NOT EXECUTED — the evidence will be an exhaustive 512 x 512 enumeration test of the mask predicate in aprender::models::modernbert (plan 08-03), backed numerically by the window mutation rung'
+    harness: 'NOT EXECUTED — the evidence is the exhaustive 512 x 512 enumeration test of the mask predicate, `cargo test -p aprender-core --lib models::modernbert::layer::tests::window_predicate_exhaustive_512` (plan 08-03), backed numerically by the window mutation rung'
 
 qa_gate:
   id: F-LAYA-PARITY-001

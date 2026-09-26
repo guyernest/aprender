@@ -210,3 +210,110 @@ impl ModernBertEncoder {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{expected_modernbert_tensor_names, ModernBertLoadError};
+    use crate::models::modernbert::test_support::{
+        fixture_config, fixture_tensors, load, write_apr, RawTensor,
+    };
+
+    /// The import/load contract names exactly the fixture's tensors (plain HF, no
+    /// prefix), and the prefix is prepended verbatim.
+    #[test]
+    fn expected_names_match_the_hf_fixture() {
+        let cfg = fixture_config();
+        let mut want = expected_modernbert_tensor_names(&cfg, "");
+        want.sort();
+        let got: Vec<String> = fixture_tensors().into_iter().map(|t| t.0).collect();
+        assert_eq!(want, got);
+        assert!(expected_modernbert_tensor_names(&cfg, "encoder.")
+            .iter()
+            .all(|n| n.starts_with("encoder.")));
+        assert!(
+            !want.contains(&"layers.0.attn_norm.weight".to_string()),
+            "layer 0 is Identity"
+        );
+    }
+
+    fn without(name: &str) -> Vec<RawTensor> {
+        fixture_tensors()
+            .into_iter()
+            .filter(|t| t.0 != name)
+            .collect()
+    }
+
+    #[test]
+    fn refuses_missing_tensor_by_name() {
+        let cfg = fixture_config();
+        let missing = "layers.1.mlp.Wi.weight";
+        let err = load(&write_apr(&without(missing), ""), "", &cfg).expect_err("refused");
+        assert_eq!(
+            err,
+            ModernBertLoadError::MissingTensor {
+                name: missing.to_string()
+            }
+        );
+        // Under a prefix the refusal names the full prefixed tensor.
+        let err =
+            load(&write_apr(&without(missing), "encoder."), "encoder.", &cfg).expect_err("refused");
+        assert_eq!(
+            err,
+            ModernBertLoadError::MissingTensor {
+                name: format!("encoder.{missing}")
+            }
+        );
+    }
+
+    #[test]
+    fn refuses_shape_mismatch() {
+        let cfg = fixture_config();
+        let name = "layers.0.attn.Wo.weight";
+        let tensors: Vec<RawTensor> = fixture_tensors()
+            .into_iter()
+            .map(|(n, s, raw)| {
+                if n == name {
+                    (n, vec![16, 64], raw)
+                } else {
+                    (n, s, raw)
+                }
+            })
+            .collect();
+        let err = load(&write_apr(&tensors, ""), "", &cfg).expect_err("refused");
+        assert_eq!(
+            err,
+            ModernBertLoadError::ShapeMismatch {
+                name: name.to_string(),
+                expected: vec![32, 32],
+                observed: vec![16, 64],
+            }
+        );
+    }
+
+    /// A NaN (F16 bit pattern 0x7E00) and an infinity (0x7C00) injected into one weight
+    /// are each refused by name at load.
+    #[test]
+    fn refuses_non_finite() {
+        let cfg = fixture_config();
+        let name = "layers.2.mlp.Wo.weight";
+        for bits in [0x7E00u16, 0x7C00u16] {
+            let tensors: Vec<RawTensor> = fixture_tensors()
+                .into_iter()
+                .map(|(n, s, mut raw)| {
+                    if n == name {
+                        raw[10..12].copy_from_slice(&bits.to_le_bytes());
+                    }
+                    (n, s, raw)
+                })
+                .collect();
+            let err = load(&write_apr(&tensors, ""), "", &cfg).expect_err("refused");
+            assert_eq!(
+                err,
+                ModernBertLoadError::NonFinite {
+                    name: name.to_string()
+                },
+                "f16 bits {bits:#06x}"
+            );
+        }
+    }
+}

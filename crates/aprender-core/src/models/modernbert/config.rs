@@ -403,3 +403,202 @@ impl ModernBertConfig {
         &self.layer_is_global
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ModernBertConfig, ModernBertConfigError};
+    use serde_json::{json, Value};
+
+    /// The tiny fixture's config as a JSON value, for per-test mutation.
+    fn base() -> Value {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/modernbert_tiny/config.json"),
+        )
+        .expect("read modernbert_tiny/config.json");
+        serde_json::from_slice(&bytes).expect("config json")
+    }
+
+    fn parse(v: &Value) -> Result<ModernBertConfig, ModernBertConfigError> {
+        ModernBertConfig::from_json_bytes(&serde_json::to_vec(v).expect("serialize"))
+    }
+
+    fn with(mutate: impl FnOnce(&mut Value)) -> Result<ModernBertConfig, ModernBertConfigError> {
+        let mut v = base();
+        mutate(&mut v);
+        parse(&v)
+    }
+
+    #[test]
+    fn parses_the_tiny_fixture() {
+        let c = parse(&base()).expect("fixture config is supported");
+        assert_eq!(
+            (c.vocab_size(), c.hidden_size(), c.intermediate_size()),
+            (512, 32, 64)
+        );
+        assert_eq!(
+            (c.num_hidden_layers(), c.num_attention_heads(), c.head_dim()),
+            (3, 2, 16)
+        );
+        assert_eq!((c.local_attention(), c.window()), (8, 4));
+        assert_eq!(c.layer_is_global(), &[true, false, false]);
+        assert!((c.rope_theta_global() - 160_000.0).abs() < 1e-9);
+        assert!((c.rope_theta_local() - 10_000.0).abs() < 1e-9);
+        assert!((c.norm_eps() - 1e-5).abs() < 1e-18);
+    }
+
+    /// Every structural violation is refused with the matching typed error naming the
+    /// field, before any shape is derived — the nine refusals of the supported domain.
+    #[test]
+    fn config_domain() {
+        use ModernBertConfigError as E;
+        let cases: Vec<(&str, Box<dyn FnOnce(&mut Value)>, E)> = vec![
+            (
+                "zero hidden_size",
+                Box::new(|v| v["hidden_size"] = json!(0)),
+                E::ZeroDimension {
+                    field: "hidden_size",
+                },
+            ),
+            (
+                "zero num_attention_heads",
+                Box::new(|v| v["num_attention_heads"] = json!(0)),
+                E::ZeroDimension {
+                    field: "num_attention_heads",
+                },
+            ),
+            (
+                "heads do not divide hidden",
+                Box::new(|v| {
+                    v["hidden_size"] = json!(30);
+                    v["num_attention_heads"] = json!(4);
+                }),
+                E::HeadsDoNotDivideHidden {
+                    hidden_size: 30,
+                    num_attention_heads: 4,
+                },
+            ),
+            (
+                "odd head dim",
+                Box::new(|v| {
+                    v["hidden_size"] = json!(6);
+                    v["num_attention_heads"] = json!(2);
+                }),
+                E::OddHeadDim { head_dim: 3 },
+            ),
+            (
+                "odd local_attention",
+                Box::new(|v| v["local_attention"] = json!(7)),
+                E::OddLocalAttention { local_attention: 7 },
+            ),
+            (
+                "zero global_attn_every_n_layers",
+                Box::new(|v| v["global_attn_every_n_layers"] = json!(0)),
+                E::ZeroDimension {
+                    field: "global_attn_every_n_layers",
+                },
+            ),
+            (
+                "layer_types one short",
+                Box::new(|v| v["layer_types"] = json!(["full_attention", "sliding_attention"])),
+                E::LayerTypesLength {
+                    expected: 3,
+                    observed: 2,
+                },
+            ),
+            (
+                "unknown layer type",
+                Box::new(|v| {
+                    v["layer_types"] =
+                        json!(["full_attention", "chunked_attention", "sliding_attention"]);
+                }),
+                E::UnknownLayerType {
+                    layer: 1,
+                    value: "chunked_attention".to_string(),
+                },
+            ),
+            (
+                "vocab_size x hidden_size overflows usize",
+                Box::new(|v| v["vocab_size"] = json!(1u64 << 60)),
+                E::DimensionOverflow {
+                    field: "vocab_size x hidden_size",
+                },
+            ),
+        ];
+        assert_eq!(cases.len(), 9, "the nine refusals of the supported domain");
+        for (label, mutate, want) in cases {
+            let got = with(mutate);
+            assert_eq!(got, Err(want), "{label}");
+        }
+    }
+
+    /// `norm_eps` and the thetas must be finite and positive.
+    #[test]
+    fn config_domain_eps_and_theta() {
+        assert_eq!(
+            with(|v| v["norm_eps"] = json!(0.0)),
+            Err(ModernBertConfigError::BadNormEps { value: 0.0 })
+        );
+        assert_eq!(
+            with(|v| v["rope_parameters"]["full_attention"]["rope_theta"] = json!(-1.0)),
+            Err(ModernBertConfigError::BadTheta {
+                field: "rope_parameters.full_attention.rope_theta",
+                value: -1.0
+            })
+        );
+    }
+
+    /// `layer_types` must agree with `i % global_attn_every_n_layers == 0`; without
+    /// `layer_types` the modulo rule alone decides.
+    #[test]
+    fn layer_types_agree() {
+        let got = with(|v| {
+            v["layer_types"] = json!([
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention"
+            ]);
+        });
+        assert_eq!(
+            got,
+            Err(ModernBertConfigError::LayerTypesDisagree { layer: 0 })
+        );
+        let fallback = with(|v| {
+            v.as_object_mut().expect("object").remove("layer_types");
+            v["num_hidden_layers"] = json!(7);
+        })
+        .expect("modulo fallback");
+        assert_eq!(
+            fallback.layer_is_global(),
+            &[true, false, false, true, false, false, true]
+        );
+    }
+
+    /// Unsupported features are refused by name, never silently ignored.
+    #[test]
+    fn unsupported_config() {
+        assert_eq!(
+            with(|v| v["norm_bias"] = json!(true)),
+            Err(ModernBertConfigError::UnsupportedBias { field: "norm_bias" })
+        );
+        assert_eq!(
+            with(|v| {
+                v["rope_parameters"]
+                    .as_object_mut()
+                    .expect("rope_parameters")
+                    .remove("sliding_attention");
+            }),
+            Err(ModernBertConfigError::MissingTheta {
+                field: "rope_parameters.sliding_attention.rope_theta"
+            })
+        );
+        let err = with(|v| {
+            v.as_object_mut().expect("object").remove("hidden_size");
+        })
+        .expect_err("missing hidden_size");
+        assert!(
+            matches!(&err, ModernBertConfigError::Json(m) if m.contains("hidden_size")),
+            "{err:?}"
+        );
+    }
+}

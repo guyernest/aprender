@@ -297,3 +297,67 @@ impl ModernBertLayer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{attention, gelu_exact, key_range, layer_norm};
+    use crate::models::modernbert::ModernBertError;
+
+    /// `gelu_exact` matches `0.5 * x * (1 + erf(x / sqrt 2))` to 1e-7. Reference values
+    /// are Python `math.erf` in f64 (the f32 result's own rounding is <= 8.4e-8 here).
+    #[test]
+    fn gelu_exact_reference() {
+        let cases = [
+            (-3.0f32, -0.004_049_694_094_890_31_f64),
+            (-1.0, -0.158_655_253_931_457_07),
+            (-0.5, -0.154_268_769_362_993_47),
+            (0.0, 0.0),
+            (0.5, 0.345_731_230_637_006_5),
+            (1.0, 0.841_344_746_068_542_9),
+            (3.0, 2.995_950_305_905_11),
+        ];
+        for (x, want) in cases {
+            let got = f64::from(gelu_exact(x));
+            let d = (got - want).abs();
+            assert!(
+                d <= 1e-7,
+                "gelu_exact({x}) = {got}, reference {want}, |d| = {d:e}"
+            );
+        }
+    }
+
+    /// KANI-LAYA-PARITY-002's evidence: exhaustive over i, j < 512 with the Laya
+    /// half-window 64, the attended key range is exactly `|i - j| <= 64`, inclusive.
+    #[test]
+    fn window_predicate_exhaustive_512() {
+        let (l, w) = (512usize, 64usize);
+        for i in 0..l {
+            let (lo, hi) = key_range(i, l, Some(w));
+            for j in 0..l {
+                assert_eq!(lo <= j && j < hi, i.abs_diff(j) <= w, "i={i} j={j}");
+            }
+            assert_eq!(key_range(i, l, None), (0, l));
+        }
+    }
+
+    /// The reusable primitives refuse inconsistent buffers with a typed error.
+    #[test]
+    fn primitives_refuse_bad_shapes() {
+        assert!(matches!(
+            layer_norm(&[1.0, 2.0, 3.0], 2, &[1.0, 1.0], None, 1e-5),
+            Err(ModernBertError::InputShape { .. })
+        ));
+        assert!(matches!(
+            layer_norm(&[1.0, 2.0], 0, &[], None, 1e-5),
+            Err(ModernBertError::InputShape { .. })
+        ));
+        let q = vec![0.0f32; 8];
+        assert!(matches!(
+            attention(&q, &q, &q[..6], 2, 2, 2, None),
+            Err(ModernBertError::InputShape {
+                what: "attention.v",
+                ..
+            })
+        ));
+    }
+}

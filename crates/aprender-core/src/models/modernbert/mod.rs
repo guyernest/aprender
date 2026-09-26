@@ -351,9 +351,10 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::{
-        fixture_encoder, max_abs, oracle_rows, rel_rms, run_taps, tolerance, within,
+        config_bytes, fixture_config, fixture_encoder, fixture_tensors, load, max_abs, oracle_json,
+        oracle_rows, rel_rms, run_taps, tolerance, within, write_apr,
     };
-    use super::ModernBertError;
+    use super::{ModernBertConfig, ModernBertError, ModernBertLoadError};
 
     /// FALSIFY-LAYA-PARITY-002 on the tiny fixture: a plain HF ModernBERT
     /// (F16 safetensors -> in-memory .apr -> prefix "" load -> forward) matches the
@@ -404,6 +405,128 @@ mod tests {
                 "row {ri}: forward returns the final-norm block"
             );
         }
+    }
+
+    /// FALSIFY-LAYA-PARITY-004: the local window is `|i - j| <= local_attention / 2`
+    /// inclusive. Mutating it to w-1 or w+1 pushes the FIRST local layer past the
+    /// per-layer bar while the FIRST global layer still passes.
+    #[test]
+    fn window_mutation() {
+        let bar = tolerance("per_layer_rel_rms");
+        let mut encoder = fixture_encoder();
+        let cfg = encoder.config().clone();
+        let w = cfg.window();
+        let oracle = oracle_json();
+        let recorded = oracle["window_mutation"]["half_window"]
+            .as_u64()
+            .expect("oracle window_mutation.half_window");
+        assert_eq!(w as u64, recorded, "config window agrees with the oracle's");
+        let first_global = cfg
+            .layer_is_global()
+            .iter()
+            .position(|&g| g)
+            .expect("a global layer");
+        let first_local = cfg
+            .layer_is_global()
+            .iter()
+            .position(|&g| !g)
+            .expect("a local layer");
+        assert!(
+            first_global < first_local,
+            "the mutation must not reach the global layer first"
+        );
+        let rows = oracle_rows();
+        println!(
+            "modernbert window_mutation on ARCH={} (w={w}, bar {bar:.1e})",
+            std::env::consts::ARCH
+        );
+        for mutated in [w - 1, w + 1] {
+            encoder.set_window_override(Some(mutated));
+            for (ri, row) in rows.iter().enumerate() {
+                let (_, taps) = run_taps(&encoder, &row.ids);
+                let g_name = format!("layer{first_global}");
+                let l_name = format!("layer{first_local}");
+                let g = rel_rms(&taps[first_global + 1].1, row.block(&g_name));
+                let l = rel_rms(&taps[first_local + 1].1, row.block(&l_name));
+                println!(
+                    "window {mutated} row {ri}: {g_name} rel_rms {g:.3e}, {l_name} rel_rms {l:.3e}"
+                );
+                assert!(
+                    within(g, bar),
+                    "window {mutated} row {ri}: {g_name} should still pass, got {g:e}"
+                );
+                assert!(
+                    matches!(l.partial_cmp(&bar), Some(std::cmp::Ordering::Greater)),
+                    "window {mutated} row {ri}: {l_name} should exceed {bar:e}, got {l:e}"
+                );
+            }
+        }
+        encoder.set_window_override(None);
+        let (_, taps) = run_taps(&encoder, &rows[0].ids);
+        let l = rel_rms(
+            &taps[first_local + 1].1,
+            rows[0].block(&format!("layer{first_local}")),
+        );
+        assert!(
+            within(l, bar),
+            "override cleared restores the true window: {l:e}"
+        );
+    }
+
+    /// The same tensors under prefix `encoder.` (Laya's layout) load with that prefix and
+    /// give bit-identical output to prefix `""`.
+    #[test]
+    fn prefix_reuse() {
+        let cfg = fixture_config();
+        let tensors = fixture_tensors();
+        let plain = load(&write_apr(&tensors, ""), "", &cfg).expect("plain load");
+        let prefixed_apr = write_apr(&tensors, "encoder.");
+        let prefixed = load(&prefixed_apr, "encoder.", &cfg).expect("prefixed load");
+        for row in oracle_rows() {
+            let (a, ta) = run_taps(&plain, &row.ids);
+            let (b, tb) = run_taps(&prefixed, &row.ids);
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&a), bits(&b), "final output bit-identical");
+            for ((na, va), (nb, vb)) in ta.iter().zip(&tb) {
+                assert_eq!(na, nb);
+                assert_eq!(bits(va), bits(vb), "{na} bit-identical");
+            }
+        }
+        // The prefix is load-bearing: the prefixed file does not load as plain HF.
+        match load(&prefixed_apr, "", &cfg) {
+            Err(ModernBertLoadError::MissingTensor { name }) => {
+                assert_eq!(name, "embeddings.tok_embeddings.weight");
+            }
+            other => panic!("expected MissingTensor, got {other:?}"),
+        }
+    }
+
+    /// `norm_eps` is used, not parsed and ignored: 1e-1 moves the final norm by more
+    /// than the final-norm bar relative to the fixture's 1e-5.
+    #[test]
+    fn norm_eps_honoured() {
+        let bar = tolerance("final_norm_abs");
+        let mut cfg_json: serde_json::Value =
+            serde_json::from_slice(&config_bytes()).expect("config json");
+        cfg_json["norm_eps"] = serde_json::json!(1e-1);
+        let big_eps = ModernBertConfig::from_json_bytes(
+            &serde_json::to_vec(&cfg_json).expect("serialize config"),
+        )
+        .expect("eps 1e-1 is supported");
+        assert!((big_eps.norm_eps() - 1e-1).abs() < 1e-12);
+        let tensors = fixture_tensors();
+        let apr = write_apr(&tensors, "");
+        let base = load(&apr, "", &fixture_config()).expect("base load");
+        let moved = load(&apr, "", &big_eps).expect("eps load");
+        let ids = &oracle_rows()[0].ids;
+        let (a, _) = run_taps(&base, ids);
+        let (b, _) = run_taps(&moved, ids);
+        let d = max_abs(&a, &b);
+        println!("norm_eps 1e-5 vs 1e-1: final max|delta| {d:.3e} (bar {bar:.1e})");
+        assert!(
+            matches!(d.partial_cmp(&bar), Some(std::cmp::Ordering::Greater)),
+            "a changed norm_eps must change the output by more than {bar:e}, got {d:e}"
+        );
     }
 
     /// An out-of-vocab id and an empty row are typed errors, never index panics.
