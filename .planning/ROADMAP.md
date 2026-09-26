@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 4/12 plans executed in 10 waves (08-08 HALTED at its gate decision)
+**Plans:** 5/12 plans executed in 10 waves (08-08 HALTED at its gate decision)
 
 Plans:
 **Wave 1**
@@ -667,7 +667,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 08-05-PLAN.md — decide-apr-v1 artifact: packer, bounded load ladder, probes, identity, private constructor, determinism
+- [x] 08-05-PLAN.md — decide-apr-v1 artifact: packer, bounded load ladder, probes, identity, private constructor, determinism
 
 **Wave 6** *(blocked on Wave 5 completion)*
 

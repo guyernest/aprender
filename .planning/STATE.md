@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-04-PLAN.md (08-08 still halted at its human decision)
-last_updated: "2026-09-26T02:08:17.543Z"
+stopped_at: Completed 08-05-PLAN.md (08-08 still halted at its human decision)
+last_updated: "2026-09-26T02:50:16.403Z"
 last_activity: 2026-09-25
 last_activity_desc: Phase 08 execution started
-state_head: a5580be41b2b68a715359a6a193a2d671621fc8a
+state_head: 6acb90553144b155be837183fd3ae2b19e32a0ae
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 104
-  completed_plans: 97
+  completed_plans: 98
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 5 of 12
+Plan: 6 of 12
 Status: Ready to execute
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
@@ -218,6 +218,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P02 | 15min | 2 tasks | 27 files |
 | Phase 08 P03 | 26min | 2 tasks | 10 files |
 | Phase 08 P04 | 24min | 2 tasks | 16 files |
+| Phase 08 P05 | 38min | 3 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -389,6 +390,10 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-04: aprender-decide criteria order is read from raw bytes by an order-preserving visitor; the crate never enables serde_json/preserve_order, and both backings are observed (standalone OFF, -p aprender-mcp-setfit ON)
 - [Phase 08]: 08-04: Laya::from_parts refuses MarkersLost once at load (empty-state build); options longer than head_max_len are shrunk as Laya does and served
 - [Phase 08]: 08-04: contract test: lines must cite concrete test fns - pv's strict-binding resolver reads the last :: segment, so a module filter like --lib task:: is invisible (a mutated name was not flagged)
+- [Phase 08]: 08-05: Laya probes run via Laya::classify_for_task on the already-loaded weights (no second widening of the checkpoint per cold start)
+- [Phase 08]: 08-05: decide-apr-v1 manifest gains a variant field and stores blobs as an array of {name, sha256}; contract updated, schema_version stays 1
+- [Phase 08]: 08-05: the trybuild private-mint proof is two cases, because rustc skips the privacy pass after a type error and hid E0451
+- [Phase 08]: 08-05: apr-format caps the tensor-index reservation at remaining/20 for every APR consumer, not only decide
 
 ### Pending Todos
 
@@ -500,8 +505,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-26T02:08:17.375Z
-Stopped at: Completed 08-04-PLAN.md (08-08 still halted at its human decision)
+Last session: 2026-09-26T02:50:16.227Z
+Stopped at: Completed 08-05-PLAN.md (08-08 still halted at its human decision)
 Resume file: None
 
 ## Accumulated Context
