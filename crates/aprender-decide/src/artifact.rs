@@ -664,10 +664,15 @@ fn dtype_width(d: TensorDType) -> Option<u64> {
     }
 }
 
-/// `product(shape) x width` in checked arithmetic; `None` on overflow or an unknown
-/// dtype (KANI-DECIDE-APR-003's rule).
+/// `product(shape) x width`, exact: `Some(0)` whenever any dimension is 0 (even after
+/// a dimension whose running product would overflow), otherwise checked arithmetic
+/// with `None` when the size exceeds u64. `None` for a dtype this artifact does not
+/// carry (KANI-DECIDE-APR-003's rule).
 pub(crate) fn expected_bytes(shape: &[usize], dtype: TensorDType) -> Option<u64> {
     let width = dtype_width(dtype)?;
+    if shape.contains(&0) {
+        return Some(0);
+    }
     shape
         .iter()
         .try_fold(width, |acc, &d| acc.checked_mul(u64::try_from(d).ok()?))

@@ -76,9 +76,21 @@ fn parse_metadata_section(
     AprV2Metadata::from_json(slice)
 }
 
-/// The tensor-index vector's initial capacity.
-pub(super) fn index_capacity(tensor_count: u32, _remaining: usize) -> usize {
-    tensor_count as usize
+/// The smallest encodable tensor-index entry, in bytes, as `TensorIndexEntry::from_bytes`
+/// reads it: u16 name length + u8 dtype + u8 ndim + u64 offset + u64 size (an empty
+/// name and zero dimensions).
+const MIN_INDEX_ENTRY_BYTES: usize = 20;
+
+/// The tensor-index vector's initial capacity: the declared `tensor_count`, but never
+/// more entries than the `remaining` index bytes could encode.
+///
+/// `tensor_count` comes from the header, and the header CRC covers only the header, so
+/// a small file with a valid CRC can declare `u32::MAX` entries. Reserving that many
+/// up front would request hundreds of GB before the first entry is parsed. The parse
+/// loop still iterates `tensor_count` times and fails on the first entry the bytes
+/// cannot hold, so a valid file behaves exactly as before.
+pub(super) fn index_capacity(tensor_count: u32, remaining: usize) -> usize {
+    (tensor_count as usize).min(remaining / MIN_INDEX_ENTRY_BYTES)
 }
 
 /// Parse and bounds-check the tensor index section (FALSIFY-PARSE-001).

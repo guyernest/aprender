@@ -107,10 +107,11 @@ manifest:
     schema: 'string: "decide-apr-v1"'
     schema_version: 'integer: 1'
     method: 'string: "laya" (the only method this version knows)'
+    variant: 'string: the recipe variant ("production" | "synthetic-fixture"), copied from recipe.json so every reader sees it; deployability is deploy_eligibility (08-09 verify), never this field'
     base: 'object {family, checkpoint, repo, revision, sha256} — D-04 declared base'
     labels: 'ARRAY of criterion names in task.json document order'
     agent: 'object {head_layers, max_len, head_max_len}'
-    blobs: 'object {blob tensor name -> sha256 hex}'
+    blobs: 'array of {name, sha256} in blob_tensors order — an ARRAY, not a map keyed by blob name, so the manifest bytes do not depend on the serde_json map backing'
     recipe_id: 'string: sha256 hex of the decide.recipe_json blob bytes'
     calibration: 'object {bucket, t_fitted, t_applied, clamp_hit, slice_ids_sha256}'
     gate: 'object {pass, margin, ece_post, report_sha256}'
@@ -275,7 +276,7 @@ equations:
       - 'derived from the Laya-en tensor set (~0.85 GB), not inherited from setfit-apr-v1''s 1 GiB'
 
   private_mint:
-    formula: 'the only path to a VerifiedDecider value is load_verified (rungs 1..8)'
+    formula: 'the only path to a Decider value (aprender_decide::Decider, the verified decider) is load_verified (rungs 1..8), reached through Decider::load_bytes / Decider::load_path'
     domain: 'the aprender-decide public API'
     codomain: 'a compile-time guarantee'
     invariants:
@@ -327,30 +328,35 @@ falsification_tests:
     rule: 'Each load-ladder rung refuses its own induced negative, naming the rung'
     prediction: 'Header CRC flip, wrong model_type, two custom keys, an unknown manifest key, schema_version 2, an unknown method, a blob hash mismatch, a wrong tensor size, a NaN weight and a perturbed probe are each refused at their own rung.'
     implemented_by: 'plan 08-05 (aprender_decide::artifact ladder tests); the test: line is added in that plan''s commit'
+    test: 'cargo test -p aprender-decide --lib artifact::ladder::header_crc_flip && cargo test -p aprender-decide --lib artifact::ladder::wrong_model_type && cargo test -p aprender-decide --lib artifact::ladder::two_custom_keys && cargo test -p aprender-decide --lib artifact::ladder::unknown_manifest_key && cargo test -p aprender-decide --lib artifact::ladder::schema_version_2 && cargo test -p aprender-decide --lib artifact::ladder::unknown_method && cargo test -p aprender-decide --lib artifact::ladder::tokenizer_blob_hash && cargo test -p aprender-decide --lib artifact::ladder::size_mismatch && cargo test -p aprender-decide --lib artifact::ladder::nan_weight && cargo test -p aprender-decide --lib artifact::ladder::probe_mismatch'
     if_fails: 'A rung does not bite, so an artifact inconsistent in that respect reaches classification.'
 
   - id: FALSIFY-DECIDE-APR-002
     rule: 'Packing is byte-deterministic across processes'
     prediction: 'Two separate processes packing the same inputs produce files with the same sha256.'
     implemented_by: 'plan 08-05 (pack determinism test)'
+    test: 'cargo test -p aprender-decide --lib artifact::determinism::golden_sha && cargo test -p aprender-decide --lib artifact::determinism::same_process_twice'
     if_fails: 'A timestamp, host field or map-ordered field entered the artifact; identity (D-11) is no longer a function of the inputs.'
 
   - id: FALSIFY-DECIDE-APR-003
     rule: 'Packing is byte-deterministic across serde_json map backings'
     prediction: 'The pack built with serde_json/preserve_order and the one built without produce identical bytes.'
-    implemented_by: 'plan 08-05 (dual-backing determinism test)'
+    implemented_by: 'plan 08-05 (dual-backing determinism test): the same golden_sha run standalone (preserve_order=OFF) and with -p aprender-mcp-setfit (preserve_order=ON), each run printing its backing via artifact::determinism::backing_canary'
+    test: 'cargo test -p aprender-decide --lib artifact::determinism::golden_sha && cargo test -p aprender-decide -p aprender-mcp-setfit --lib artifact::determinism::golden_sha'
     if_fails: 'The manifest serialises a map, so its bytes depend on the build graph (Pitfall 2).'
 
   - id: FALSIFY-DECIDE-APR-004
     rule: 'Pack then load recovers every tensor and blob exactly'
     prediction: 'Every F16 weight''s bytes, the F32 temperature and each blob round-trip byte-identical against the run dir.'
     implemented_by: 'plan 08-05 (pack-unpack closure test)'
+    test: 'cargo test -p aprender-decide --lib artifact::tests::pack_unpack_closure'
     if_fails: 'Weights were re-rounded through f32, or a blob was re-serialised instead of copied.'
 
   - id: FALSIFY-DECIDE-APR-005
     rule: 'artifact_sha256 equals the whole-file sha256 and recipe_id the recipe blob sha256'
     prediction: 'The loader''s reported identity equals shasum -a 256 of the file and of the run dir recipe.json.'
     implemented_by: 'plan 08-05 (identity test)'
+    test: 'cargo test -p aprender-decide --lib artifact::tests::tiny_roundtrip && cargo test -p aprender-decide --lib artifact::tests::load_path_door'
     if_fails: 'The identity reported to callers is not the identity of the served bytes (D-11).'
 
   - id: FALSIFY-DECIDE-APR-006
@@ -370,12 +376,14 @@ falsification_tests:
     rule: 'The size cap refuses cap + 1 before allocation'
     prediction: 'A declared length of max_artifact_bytes + 1 is refused with zero bytes read; a lying stream is cut at cap + 1 (limit-injected helper, no 1.25 GiB allocation).'
     implemented_by: 'plan 08-05 (bounded read tests)'
+    test: 'cargo test -p aprender-decide --lib artifact::ladder::declared_length_over_cap && cargo test -p aprender-decide --lib artifact::ladder::read_over_cap && cargo test -p aprender-decide --lib artifact::ladder::in_memory_over_cap'
     if_fails: 'A hostile file can exhaust memory before any rung runs.'
 
   - id: FALSIFY-DECIDE-APR-009
     rule: 'A forged header whose tensor_count exceeds the index extent is refused before any index allocation'
     prediction: 'A small file with a valid header CRC and tensor_count = u32::MAX (or 4097) is refused at rung 2, and the reader allocates nothing proportional to the declared count.'
     implemented_by: 'plan 08-05 (index extent tests, incl. the apr-format with_capacity fix)'
+    test: 'cargo test -p aprender-decide --lib artifact::ladder::tensor_count_over_cap && cargo test -p aprender-decide --lib artifact::ladder::index_extent_too_small && cargo test -p apr-format --lib v2::tests::forged_tensor_count_is_refused_by_both_readers && cargo test -p apr-format --lib v2::tests::index_capacity_is_bounded_by_the_index_bytes'
     if_fails: 'A tiny file can demand a multi-hundred-GB allocation (reader_impl.rs:95).'
 
   - id: FALSIFY-DECIDE-APR-010
@@ -389,6 +397,7 @@ falsification_tests:
     rule: 'Probe expectations are Python values and every load replays them'
     prediction: 'The stored probe bits equal probes.json; perturbing one stored probability by 2e-5 makes load refuse at rung 7; a probe row over 48 tokens is refused at pack.'
     implemented_by: 'plans 08-05 (pack / replay) and 08-09 (probes.json from the trainer)'
+    test: 'cargo test -p aprender-decide --lib artifact::determinism::no_rust_floats_in_manifest && cargo test -p aprender-decide --lib artifact::ladder::probe_mismatch && cargo test -p aprender-decide --lib artifact::ladder::probe_row_over_budget && cargo test -p aprender-decide --lib artifact::ladder::probe_disagrees_with_oracle'
     if_fails: 'Artifact bytes depend on the packing machine, or a corrupted model loads silently.'
 
   - id: FALSIFY-DECIDE-APR-012
@@ -406,21 +415,21 @@ kani_harnesses:
     property: 'forall tensor_count, tensor_index_offset, data_offset, file_len (u32 / u64, checked arithmetic): rung2_accepts implies tensor_count <= 4096 AND tensor_count * 20 <= data_offset - tensor_index_offset <= file_len'
     bound: 16
     strategy: bounded_int
-    harness: 'NOT EXECUTED — the evidence will be the bounded proptest over the rung-2 predicate in aprender_decide::artifact (plan 08-05), including overflow edges'
+    harness: 'NOT EXECUTED — the evidence is artifact::ladder::rung2_predicate_exhaustive (plan 08-05): check_index_extent over every combination of 9 counts x 10 offsets^3 edge values, incl. u32::MAX / u64::MAX overflow edges, against a u128 reference'
 
   - id: KANI-DECIDE-APR-002
     obligation: 'An artifact larger than max_artifact_bytes is refused before the reader allocates it'
     property: 'forall declared_len and stream length: bytes_read <= cap + 1'
     bound: 16
     strategy: bounded_int
-    harness: 'NOT EXECUTED — the evidence will be the limit-injected bounded-read test (plan 08-05), as in setfit-apr-v1 KANI-APR-002'
+    harness: 'NOT EXECUTED — the evidence is artifact::ladder::read_over_cap and artifact::ladder::declared_length_over_cap (plan 08-05): limit-injected, incl. an endless stream cut at cap + 1, as in setfit-apr-v1 KANI-APR-002'
 
   - id: KANI-DECIDE-APR-003
     obligation: 'Every tensor index entry size equals product(shape) * dtype width'
     property: 'forall shapes of length <= 4 with bounded dims and dtype in {F16, F32, U8}: structural check accepts iff size matches'
     bound: 4
     strategy: bounded_int
-    harness: 'NOT EXECUTED — the evidence will be the bounded proptest over the rung-4 size rule (plan 08-05)'
+    harness: 'NOT EXECUTED — the evidence is artifact::ladder::size_rule_exhaustive (plan 08-05): every shape of rank <= 4 over 7 edge dims (incl. 0, 2^32, usize::MAX) x {F16, F32, U8} against an exact u128 reference'
 
 qa_gate:
   id: F-DECIDE-APR-001
