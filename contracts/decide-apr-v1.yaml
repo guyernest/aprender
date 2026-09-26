@@ -363,7 +363,7 @@ falsification_tests:
     rule: 'Task criteria order survives both serde_json backings'
     prediction: 'A task with criteria (none, against, favor) parses to labels [none, against, favor] with preserve_order on and off.'
     implemented_by: 'plan 08-04 (aprender_decide::task order tests); run standalone (preserve_order=OFF) and with -p aprender-mcp-setfit (preserve_order=ON), each run printing its backing via task::tests::serde_backing_canary'
-    test: 'cargo test -p aprender-decide --lib task::'
+    test: 'cargo test -p aprender-decide --lib task::tests::stance_order_none_against_favor && cargo test -p aprender-decide -p aprender-mcp-setfit --lib task::tests::stance_order_none_against_favor'
     if_fails: 'Labels are attributed by map iteration order: every probability can be attributed to the wrong label.'
 
   - id: FALSIFY-DECIDE-APR-008
@@ -382,7 +382,7 @@ falsification_tests:
     rule: 'Marker loss is refused while a merely shrunk task is served'
     prediction: 'A task whose options exceed head_max_len but keep all K markers after Laya''s shrink is served; a task that loses a marker is refused at load naming the lost markers.'
     implemented_by: 'plan 08-04 (aprender_decide::laya marker tests: laya::tests::shrunk_task_is_served and laya::tests::marker_loss_is_refused_at_load)'
-    test: 'cargo test -p aprender-decide --lib laya::'
+    test: 'cargo test -p aprender-decide --lib laya::tests::shrunk_task_is_served && cargo test -p aprender-decide --lib laya::tests::marker_loss_is_refused_at_load'
     if_fails: 'Either a task the reference serves is refused (inference semantics changed), or a task with a missing marker scores the wrong positions.'
 
   - id: FALSIFY-DECIDE-APR-011
