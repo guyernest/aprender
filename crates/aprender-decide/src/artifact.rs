@@ -678,7 +678,12 @@ pub(crate) fn expected_bytes(shape: &[usize], dtype: TensorDType) -> Option<u64>
         .try_fold(width, |acc, &d| acc.checked_mul(u64::try_from(d).ok()?))
 }
 
-fn check_size(name: &str, shape: &[usize], dtype: TensorDType, observed: u64) -> Result<(), ArtifactError> {
+fn check_size(
+    name: &str,
+    shape: &[usize],
+    dtype: TensorDType,
+    observed: u64,
+) -> Result<(), ArtifactError> {
     match expected_bytes(shape, dtype) {
         Some(expected) if expected == observed => Ok(()),
         expected => Err(ArtifactError::SizeMismatch {
@@ -761,7 +766,11 @@ fn check_name_set<'a>(
     Ok(())
 }
 
-fn check_dtype(name: &str, expected: TensorDType, observed: TensorDType) -> Result<(), ArtifactError> {
+fn check_dtype(
+    name: &str,
+    expected: TensorDType,
+    observed: TensorDType,
+) -> Result<(), ArtifactError> {
     if expected == observed {
         Ok(())
     } else {
@@ -837,7 +846,9 @@ fn run_probes(laya: &Laya) -> Result<Vec<RustProbe>, ArtifactError> {
         .into_iter()
         .map(|d| RustProbe {
             tokens: d.tokens,
-            label: labels.get(d.label_index).map_or_else(String::new, |l| (*l).to_string()),
+            label: labels
+                .get(d.label_index)
+                .map_or_else(String::new, |l| (*l).to_string()),
             probabilities: d.probabilities,
         })
         .collect();
@@ -941,7 +952,11 @@ pub(crate) fn write_decide_apr_within(
     }
 
     // (2) EVERY WEIGHT FINITE.
-    if let Some(t) = inputs.tensors.iter().find(|t| !all_finite(t.dtype, &t.bytes)) {
+    if let Some(t) = inputs
+        .tensors
+        .iter()
+        .find(|t| !all_finite(t.dtype, &t.bytes))
+    {
         return Err(ArtifactError::NonFiniteWeight {
             name: t.name.clone(),
         });
@@ -1205,7 +1220,10 @@ pub fn check_index_extent(
 fn rung2_header(bytes: &[u8]) -> Result<(), ArtifactError> {
     if bytes.len() < HEADER_SIZE_V2 {
         return Err(ArtifactError::Header {
-            reason: format!("{} bytes is shorter than the {HEADER_SIZE_V2}-byte header", bytes.len()),
+            reason: format!(
+                "{} bytes is shorter than the {HEADER_SIZE_V2}-byte header",
+                bytes.len()
+            ),
         });
     }
     let header = AprV2Header::from_bytes(bytes).map_err(|e| ArtifactError::Header {
@@ -1325,11 +1343,12 @@ fn rung4_structure<'r>(
             })?;
         check_dtype(&b.name, TensorDType::U8, entry.dtype)?;
         check_size(&b.name, &entry.shape, entry.dtype, entry.size)?;
-        let data = reader
-            .get_tensor_data(&b.name)
-            .ok_or_else(|| ArtifactError::DataOutOfBounds {
-                name: b.name.clone(),
-            })?;
+        let data =
+            reader
+                .get_tensor_data(&b.name)
+                .ok_or_else(|| ArtifactError::DataOutOfBounds {
+                    name: b.name.clone(),
+                })?;
         if sha256_hex(data) != b.sha256 {
             return Err(ArtifactError::BlobHashMismatch {
                 blob: b.name.clone(),
@@ -1410,11 +1429,12 @@ fn rung5_finite(reader: &AprV2ReaderRef<'_>) -> Result<(), ArtifactError> {
         if entry.dtype == TensorDType::U8 {
             continue;
         }
-        let data = reader
-            .get_tensor_data(&entry.name)
-            .ok_or_else(|| ArtifactError::DataOutOfBounds {
-                name: entry.name.clone(),
-            })?;
+        let data =
+            reader
+                .get_tensor_data(&entry.name)
+                .ok_or_else(|| ArtifactError::DataOutOfBounds {
+                    name: entry.name.clone(),
+                })?;
         if !all_finite(entry.dtype, data) {
             return Err(ArtifactError::NonFiniteWeight {
                 name: entry.name.clone(),

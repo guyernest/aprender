@@ -94,10 +94,16 @@ fn pack_unpack_closure() {
     let r = AprV2ReaderRef::from_bytes(&bytes).expect("open packed");
     let checkpoint = crate::test_support::checkpoint_tensors();
     for (name, dtype, shape, raw) in &checkpoint {
-        let e = r.get_tensor(name).unwrap_or_else(|| panic!("{name} packed"));
+        let e = r
+            .get_tensor(name)
+            .unwrap_or_else(|| panic!("{name} packed"));
         assert_eq!(&e.dtype, dtype, "{name}: dtype");
         assert_eq!(&e.shape, shape, "{name}: shape");
-        assert_eq!(r.get_tensor_data(name), Some(raw.as_slice()), "{name}: bytes");
+        assert_eq!(
+            r.get_tensor_data(name),
+            Some(raw.as_slice()),
+            "{name}: bytes"
+        );
     }
     let blobs = [
         (super::TOKENIZER_BLOB, "checkpoint/tokenizer/tokenizer.json"),
@@ -108,9 +114,15 @@ fn pack_unpack_closure() {
         (super::GATE_REPORT_BLOB, "gate-report.json"),
     ];
     for (blob, file) in blobs {
-        let e = r.get_tensor(blob).unwrap_or_else(|| panic!("{blob} packed"));
+        let e = r
+            .get_tensor(blob)
+            .unwrap_or_else(|| panic!("{blob} packed"));
         assert_eq!(e.dtype, aprender::format::v2::TensorDType::U8, "{blob}: U8");
-        assert_eq!(r.get_tensor_data(blob), Some(read(file).as_slice()), "{blob} == {file}");
+        assert_eq!(
+            r.get_tensor_data(blob),
+            Some(read(file).as_slice()),
+            "{blob} == {file}"
+        );
     }
     assert_eq!(
         r.tensor_names().len(),
@@ -136,7 +148,10 @@ fn load_path_door() {
     let d = Decider::load_path(&path).expect("load_path");
     assert_eq!(d.identity().artifact_sha256, sha256_hex(&bytes));
     let missing = Decider::load_path(dir.join("absent.apr")).expect_err("absent file");
-    assert!(matches!(missing, super::ArtifactError::Read { .. }), "{missing}");
+    assert!(
+        matches!(missing, super::ArtifactError::Read { .. }),
+        "{missing}"
+    );
     std::fs::remove_dir_all(&dir).expect("clean up");
 }
 
@@ -152,7 +167,10 @@ fn contract_mirror() {
     let c = crate::test_support::contract_yaml("decide-apr-v1.yaml");
     let k = &c["constants"];
     assert_eq!(k["max_artifact_bytes"].as_u64(), Some(MAX_ARTIFACT_BYTES));
-    assert_eq!(k["max_tensor_count"].as_u64(), Some(u64::from(MAX_TENSOR_COUNT)));
+    assert_eq!(
+        k["max_tensor_count"].as_u64(),
+        Some(u64::from(MAX_TENSOR_COUNT))
+    );
     assert_eq!(
         k["probe_max_row_tokens"].as_u64(),
         Some(PROBE_MAX_ROW_TOKENS as u64)
@@ -161,7 +179,10 @@ fn contract_mirror() {
         k["probe_probabilities_abs"].as_f64(),
         Some(PROBE_PROBABILITIES_ABS)
     );
-    assert_eq!(k["min_index_entry_bytes"].as_u64(), Some(MIN_INDEX_ENTRY_BYTES));
+    assert_eq!(
+        k["min_index_entry_bytes"].as_u64(),
+        Some(MIN_INDEX_ENTRY_BYTES)
+    );
     assert_eq!(
         k["schema_version"].as_u64(),
         Some(u64::from(ARTIFACT_SCHEMA_VERSION))
@@ -235,5 +256,8 @@ fn contract_mirror() {
         .map(String::as_str)
         .collect();
     got.sort_unstable();
-    assert_eq!(got, want, "manifest fields == decide-apr-v1 manifest.fields");
+    assert_eq!(
+        got, want,
+        "manifest fields == decide-apr-v1 manifest.fields"
+    );
 }

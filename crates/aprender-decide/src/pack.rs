@@ -536,7 +536,13 @@ mod tests {
         append(&dir.join("probes.json"), b"\n");
         let e = PackInputs::from_run_dir(&dir, &dir.join("data")).expect_err("hash differs");
         assert!(
-            matches!(&e, PackError::ReportHashMismatch { what: "probes_sha256", .. }),
+            matches!(
+                &e,
+                PackError::ReportHashMismatch {
+                    what: "probes_sha256",
+                    ..
+                }
+            ),
             "{e}"
         );
         std::fs::remove_dir_all(&dir).expect("clean up");

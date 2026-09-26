@@ -363,7 +363,12 @@ fn missing_tensor() {
 #[test]
 fn extra_tensor() {
     let b = repack(&packed(), |_, t| {
-        t.push(("rogue.weight".to_string(), TensorDType::F16, vec![1], vec![0, 0]));
+        t.push((
+            "rogue.weight".to_string(),
+            TensorDType::F16,
+            vec![1],
+            vec![0, 0],
+        ));
     });
     assert_eq!(
         refuse(&b),
@@ -397,7 +402,11 @@ fn size_mismatch() {
 #[test]
 fn size_rule_exhaustive() {
     let dims = [0usize, 1, 2, 3, 7, 1 << 32, usize::MAX];
-    let dtypes = [(TensorDType::F16, 2u128), (TensorDType::F32, 4), (TensorDType::U8, 1)];
+    let dtypes = [
+        (TensorDType::F16, 2u128),
+        (TensorDType::F32, 4),
+        (TensorDType::U8, 1),
+    ];
     let mut shapes: Vec<Vec<usize>> = vec![vec![]];
     for rank in 1..=4usize {
         let mut next = Vec::new();
@@ -423,7 +432,11 @@ fn size_rule_exhaustive() {
                     .try_fold(width, |a, &d| a.checked_mul(d as u128))
                     .and_then(|v| u64::try_from(v).ok())
             };
-            assert_eq!(expected_bytes(shape, dtype), reference, "{shape:?} {dtype:?}");
+            assert_eq!(
+                expected_bytes(shape, dtype),
+                reference,
+                "{shape:?} {dtype:?}"
+            );
             if let Some(size) = reference {
                 assert!(check_size("t", shape, dtype, size).is_ok());
                 assert!(check_size("t", shape, dtype, size.wrapping_add(1)).is_err());
@@ -434,7 +447,11 @@ fn size_rule_exhaustive() {
             checked += 1;
         }
     }
-    assert_eq!(expected_bytes(&[2], TensorDType::BF16), None, "no other dtype");
+    assert_eq!(
+        expected_bytes(&[2], TensorDType::BF16),
+        None,
+        "no other dtype"
+    );
     println!("size_rule_exhaustive: {checked} cases");
 }
 

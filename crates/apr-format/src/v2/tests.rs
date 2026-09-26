@@ -474,7 +474,9 @@ fn index_capacity_is_bounded_by_the_index_bytes() {
 /// A 64-byte header with a VALID CRC declaring `tensor_count` entries, valid metadata,
 /// and an index region that holds only three 20-byte entries.
 fn forged_tensor_count_file(tensor_count: u32) -> Vec<u8> {
-    let meta = AprV2Metadata::new("forged").to_json().expect("metadata json");
+    let meta = AprV2Metadata::new("forged")
+        .to_json()
+        .expect("metadata json");
     let tensor_index_offset = HEADER_SIZE_V2 + align_up(meta.len(), 64);
     let data_offset = tensor_index_offset + 72;
     let mut h = AprV2Header::new();
