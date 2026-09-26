@@ -25,7 +25,6 @@ No torch import (module level or anywhere): `python data.py --selftest` runs wit
 
 Every refusal is a DataError whose message starts `REFUSED <rule>:` so the rule is named.
 """
-import hashlib
 import json
 import math
 import sys
@@ -33,6 +32,9 @@ import unicodedata
 from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import sha256_bytes, sha256_file  # noqa: E402,F401  (re-exported: data.sha256_file)
 
 # Unicode White_Space (the property Rust's char::is_whitespace / str::split_whitespace use).
 _WHITE_SPACE = frozenset(
@@ -48,18 +50,6 @@ class DataError(ValueError):
     def __init__(self, rule, detail):
         super().__init__("REFUSED %s: %s" % (rule, detail))
         self.rule = rule
-
-
-def sha256_bytes(b):
-    return hashlib.sha256(b).hexdigest()
-
-
-def sha256_file(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def normalize(text):

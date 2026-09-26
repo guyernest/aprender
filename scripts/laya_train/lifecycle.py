@@ -21,7 +21,6 @@ afterwards), then asserts:
 The gate outcome itself is not asserted (a 1-epoch tiny model is not expected to pass): exit 0 or 3.
 Prints LIFECYCLE OK.
 """
-import hashlib
 import json
 import os
 import shutil
@@ -34,6 +33,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import contract  # noqa: E402
+from common import sha256_bytes, sha256_file, tree_sha256  # noqa: E402
 
 REPO = contract.REPO
 TINY = REPO / "crates" / "aprender-decide" / "tests" / "fixtures" / "laya_tiny"
@@ -44,14 +44,9 @@ def fail(msg):
     sys.exit(1)
 
 
-def tree(root):
-    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in sorted(Path(root).rglob("*")) if p.is_file()}
-
-
 def main():
     tiny_sha = json.loads((TINY / "recipe.json").read_text())["base"]["sha256"]
-    if hashlib.sha256((TINY / "checkpoint" / "model.safetensors").read_bytes()).hexdigest() != tiny_sha:
+    if sha256_file(TINY / "checkpoint" / "model.safetensors") != tiny_sha:
         fail("the tiny checkpoint's model.safetensors does not match its recorded sha256")
 
     # The digest mapping against the REAL API (T-08-08-01): right sha loads, wrong sha is refused.
@@ -100,7 +95,7 @@ def main():
         report = json.loads((out / "gate-report.json").read_text())
         if sorted(report) != sorted(k for k in contract.gate_contract()["gate_report_schema"] if k != "f_avg_rule"):
             fail("gate-report.json keys %s differ from gate_report_schema" % sorted(report))
-        if report["recipe_id"] != hashlib.sha256(recipe_bytes).hexdigest():
+        if report["recipe_id"] != sha256_bytes(recipe_bytes):
             fail("gate report recipe_id is not the sha256 of recipe.json")
         if report["thresholds"] != contract.thresholds():
             fail("gate report thresholds differ from the contract")
@@ -113,13 +108,13 @@ def main():
             fail("calibration.slice_ids is not a sorted, duplicate-free list of slice_size")
         for name, key in (("eval-probs.json", "eval_probs_sha256"), ("zero-shot-probs.json", "zero_shot_probs_sha256"),
                           ("probes.json", "probes_sha256")):
-            if hashlib.sha256((out / name).read_bytes()).hexdigest() != report[key]:
+            if sha256_file(out / name) != report[key]:
                 fail("%s sha256 differs from the report's %s" % (name, key))
-        before = tree(out / "checkpoint")
+        before = tree_sha256(out / "checkpoint")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             Agent(str(out / "checkpoint"), device="cpu", expected_sha256={"model.safetensors": before["model.safetensors"]})
-        if tree(out / "checkpoint") != before:
+        if tree_sha256(out / "checkpoint") != before:
             fail("a further reload changed a checkpoint file")
         print("lifecycle: exit %d, %d checkpoint files unchanged across reload, gate pass=%s"
               % (proc.returncode, len(before), report["pass"]))

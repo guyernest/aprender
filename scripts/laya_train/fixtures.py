@@ -39,7 +39,6 @@ Encoding notes (for the Rust readers, plans 08-03 / 08-04 / 08-05):
     `json.dumps(slice_ids, separators=(",", ":"))`, e.g. b"[1,4,6,7,10,11]".
 """
 import base64
-import hashlib
 import json
 import os
 import sys
@@ -50,8 +49,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
-import yaml  # noqa: E402
-from safetensors.torch import load_file, save_file  # noqa: E402
+from safetensors.torch import load_file  # noqa: E402
 from tokenizers import AddedToken, Tokenizer, decoders, models, normalizers, pre_tokenizers, processors, trainers  # noqa: E402
 from transformers import AutoConfig, AutoModel, ModernBertConfig  # noqa: E402
 import transformers  # noqa: E402
@@ -63,7 +61,9 @@ from laya.common import DecisionModel, QTYPES, build_sequence, encode_text, rend
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import metrics  # noqa: E402
+import contract  # noqa: E402
+import gate  # noqa: E402
+from common import f32_hex_list, f32_list, save_f16, sha256_bytes, sha256_file, write_bytes, write_json  # noqa: E402
 
 REPO = HERE.parents[1]
 SEED = 20260925
@@ -72,11 +72,7 @@ MB_DIR = REPO / "crates" / "aprender-core" / "tests" / "fixtures" / "modernbert_
 LT_DIR = REPO / "crates" / "aprender-decide" / "tests" / "fixtures" / "laya_tiny"
 MAX_DIR_BYTES = 1 << 20
 
-GATE = yaml.safe_load((REPO / "contracts" / "laya-finetune-gate-v1.yaml").read_text())
-DECIDE = yaml.safe_load((REPO / "contracts" / "decide-apr-v1.yaml").read_text())
-PROBE_TASK = {k: DECIDE["probe_policy"]["probe_task"][k] for k in ("type", "instructions", "criteria")}
-PROBE_INPUTS = list(DECIDE["probe_policy"]["inputs"])
-PROBE_MAX_ROW_TOKENS = int(DECIDE["constants"]["probe_max_row_tokens"])
+PROBE_TASK, PROBE_INPUTS, PROBE_MAX_ROW_TOKENS = contract.probe_policy()
 
 # ---- tiny geometry (shared by both fixtures) ----
 VOCAB, HIDDEN, INTER, LAYERS, HEADS, LOCAL = 512, 32, 64, 3, 2, 8
@@ -153,37 +149,6 @@ MANY_ROW = ("many", "Which colour did the customer mention?", {
 
 # ------------------------------------------------------------------------------------------ helpers
 
-def sha256_bytes(b):
-    return hashlib.sha256(b).hexdigest()
-
-
-def sha256_file(path):
-    return sha256_bytes(Path(path).read_bytes())
-
-
-def write_bytes(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-
-
-def write_json(path, obj, compact=False):
-    text = (json.dumps(obj, ensure_ascii=False, separators=(",", ":")) if compact
-            else json.dumps(obj, ensure_ascii=False, indent=2))
-    write_bytes(path, (text + "\n").encode("utf-8"))
-
-
-def f32_list(t):
-    """Exact f32 values as JSON numbers (the f64 repr of each f32)."""
-    return [float(x) for x in np.asarray(t, dtype=np.float32).reshape(-1)]
-
-
-def f32_hex_list(t):
-    """One f32 bit pattern per value, 8 hex digits (big-endian), the decide-apr-v1 probe convention."""
-    h = np.ascontiguousarray(np.asarray(t, dtype=np.float32).reshape(-1)).astype(">f4").tobytes().hex()
-    return [h[i:i + 8] for i in range(0, len(h), 8)]
-
-
 def f32_b64(t):
     """Standard padded base64 of the little-endian f32 bytes, row-major."""
     return base64.b64encode(np.ascontiguousarray(np.asarray(t, dtype=np.float32).reshape(-1)).astype("<f4").tobytes()).decode("ascii")
@@ -230,13 +195,6 @@ def randomize_norms(model, gen):
                 mod.weight.uniform_(0.5, 1.5, generator=gen)
                 if mod.bias is not None:
                     mod.bias.uniform_(-0.1, 0.1, generator=gen)
-
-
-def save_f16(state_dict, path, keep_f32=()):
-    out = {k: v.detach().to(torch.float32 if k in keep_f32 else torch.float16).contiguous().cpu()
-           for k, v in state_dict.items()}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    save_file(out, str(path), metadata={"format": "pt"})
 
 
 class Ladder:
@@ -401,7 +359,7 @@ def jsonl_bytes(rows):
 
 def calibration_slice():
     """Seeded, stratified synthetic slice of the train rows: max(min_per_class, ceil(fraction * n_c)) per class."""
-    c = GATE["constants"]
+    c = contract.constants()
     frac, min_pc = float(c["calibration_slice_fraction"]), int(c["calibration_slice_min_per_class"])
     rng = np.random.RandomState(SEED)
     ids = []
@@ -502,7 +460,7 @@ def build_laya_tiny():
         model.temperature.copy_(torch.tensor(TEMPERATURE))
     if model.head.layers[0].self_attn.num_heads != 1:
         fail("laya_tiny: expected Laya's head to get nhead = max(1, 32 // 64) = 1")
-    save_f16(model.state_dict(), ck / "model.safetensors", keep_f32=("temperature",))
+    save_f16(model.state_dict(), ck / "model.safetensors")
     del model, encoder
 
     # Data dir (D-05) and its byte copy in the run dir.
@@ -514,19 +472,9 @@ def build_laya_tiny():
 
     # recipe.json BEFORE any score (laya-finetune-gate-v1 recipe_before_scores), declared synthetic.
     model_sha = sha256_file(ck / "model.safetensors")
-    r = GATE["recipe"]
-    recipe = {
-        "variant": "synthetic-fixture",
-        "optimizer": r["optimizer"], "encoder_lr": r["encoder_lr"], "head_lr": r["head_lr"], "eta_min": r["eta_min"],
-        "weight_decay": r["weight_decay"], "grad_clip": r["grad_clip"], "batch_size": r["batch_size"],
-        "proper_reward_w_sph": r["proper_reward_w_sph"], "proper_reward_w_rps": r["proper_reward_w_rps"],
-        "schedule": "cosine",
-        "shots_per_class": 0,
-        "epochs": 0,
-        "seed": SEED,
-        "base": {"family": "laya", "repo": "synthetic", "revision": "fixtures.py-seed-%d" % SEED,
-                 "checkpoint": "tiny-synthetic", "sha256": model_sha},
-    }
+    recipe = contract.recipe_json("synthetic-fixture", 0, 0, SEED, {
+        "family": "laya", "repo": "synthetic", "revision": "fixtures.py-seed-%d" % SEED,
+        "checkpoint": "tiny-synthetic", "sha256": model_sha})
     write_json(LT_DIR / "recipe.json", recipe)
 
     # ---- RELOAD through Laya's own loader; nothing it reads may change on disk ----
@@ -608,20 +556,13 @@ def build_laya_tiny():
     write_json(LT_DIR / "eval-probs.json", eval_probs)
     write_json(LT_DIR / "zero-shot-probs.json", eval_probs)
 
-    # ---- gate-report.json: metrics.py on the synthetic eval rows; zero-shot == fine-tuned, so no gate ran ----
-    c = GATE["constants"]
-    bins = int(c["ece_bins"])
+    # ---- gate-report.json: gate.evaluate_gate on the synthetic eval rows; zero-shot == fine-tuned, so no gate ran ----
+    c = contract.constants()
     y = np.array([labels.index(lab) for _, lab in EVAL])
     P = np.array([f32_list(p) for p in P])               # exactly the probabilities written above
-    Z = np.array(Z)
-    P_pre = np.exp(Z - Z.max(1, keepdims=True))
-    P_pre /= P_pre.sum(1, keepdims=True)                 # T = 1: before any calibration
-    zs = {"macro_f1": metrics.macro_f1(P, y), "f_avg": None, "ece": metrics.ece_top_label(P, y, bins), "n": len(y)}
-    ft = {"macro_f1": metrics.macro_f1(P, y), "f_avg": None, "ece_pre": metrics.ece_top_label(P_pre, y, bins),
-          "ece_post": metrics.ece_top_label(P, y, bins), "nll": metrics.nll(P, y), "n": len(y)}
-    margin = ft["macro_f1"] - zs["macro_f1"]
-    passed = bool(margin >= float(c["gate_min_macro_f1_margin"]) and ft["ece_post"] <= float(c["gate_max_ece"]))
-    if margin != 0.0 or passed:
+    P_pre = gate.softmax(np.array(Z), 1.0)               # T = 1: before any calibration
+    g = gate.evaluate_gate(P, P, P_pre, y)
+    if g["margin"] != 0.0 or g["pass"]:
         fail("laya_tiny: zero-shot and fine-tuned are the same model, so margin must be 0.0 and pass false")
     bucket = temp_bucket(QTYPES["choice"], len(labels))
     t_applied = agent.temperature_by_options[bucket]
@@ -629,12 +570,11 @@ def build_laya_tiny():
     slice_ids = calibration_slice()
     report = {
         "schema": "laya-gate-report-v1",
-        "pass": passed,
-        "thresholds": {"min_macro_f1_margin": c["gate_min_macro_f1_margin"], "max_ece": c["gate_max_ece"],
-                       "ece_bins": bins},
-        "zero_shot": zs,
-        "fine_tuned": ft,
-        "margin": margin,
+        "pass": g["pass"],
+        "thresholds": g["thresholds"],
+        "zero_shot": g["zero_shot"],
+        "fine_tuned": g["fine_tuned"],
+        "margin": g["margin"],
         # No calibration was fitted for the fixture: t_fitted is the checkpoint's configured temperature.
         "calibration": {"bucket": bucket, "t_fitted": agent.temperature_by_options_raw[bucket], "t_applied": t_applied,
                         "clamp_hit": not (t_min < t_applied < t_max), "slice_size": len(slice_ids),

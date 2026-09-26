@@ -46,6 +46,7 @@ re-run `just laya-fixtures` — every committed fixture is a numerical artifact 
 | File | Purpose |
 |------|---------|
 | `metrics.py` | numpy-only (no torch import): `macro_f1`, `f_avg`, `ece_top_label` (the HOUSE top-label ECE — floor binning, `aprender::calibration::expected_calibration_error_top_label`), `nll`, and `--selftest` (hand cases plus a replay of every frozen case in `scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json` to 1e-6). Shared by `fixtures.py` and the 08-08 gate. |
+| `common.py` | Torch-free at import: the shared hashing (`sha256_bytes`, streaming `sha256_file`, `tree_sha256`), JSON / f32 serialization (`write_json`, `f32_list`, `f32_hex_list`) and the ONE F16 checkpoint policy `save_f16` (`temperature` kept F32) used by `fixtures.py`, `train.py` and `lifecycle.py`. |
 | `fixtures.py` | Writes `crates/aprender-core/tests/fixtures/modernbert_tiny/` and `crates/aprender-decide/tests/fixtures/laya_tiny/` (see below). |
 
 ## The two fixtures

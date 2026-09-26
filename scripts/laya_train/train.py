@@ -33,7 +33,6 @@ The run, in order (every value from contracts/laya-finetune-gate-v1.yaml via con
 Logs carry counts, hashes and timings only -- never input text.
 """
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -49,7 +48,6 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
-from safetensors.torch import save_file  # noqa: E402
 
 import laya.agent as laya_agent  # noqa: E402
 from laya import Agent  # noqa: E402
@@ -58,6 +56,7 @@ from laya.common import QTYPES, proper_reward, temp_bucket  # noqa: E402
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import contract  # noqa: E402
+from common import f32_hex_list, f32_list, save_f16, sha256_bytes, tree_sha256, write_json  # noqa: E402
 import data  # noqa: E402
 import gate  # noqa: E402
 
@@ -72,24 +71,6 @@ def log(msg):
 def refuse(msg):
     print(msg if msg.startswith("REFUSED") else "REFUSED " + msg, file=sys.stderr, flush=True)
     sys.exit(EXIT_REFUSED)
-
-
-def f32_list(t):
-    return [float(x) for x in np.asarray(t, dtype=np.float32).reshape(-1)]
-
-
-def f32_hex_list(t):
-    h = np.ascontiguousarray(np.asarray(t, dtype=np.float32).reshape(-1)).astype(">f4").tobytes().hex()
-    return [h[i:i + 8] for i in range(0, len(h), 8)]
-
-
-def write_json(path, obj):
-    Path(path).write_bytes((json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
-
-
-def tree_sha256(root):
-    root = Path(root)
-    return {str(p.relative_to(root)): data.sha256_file(p) for p in sorted(root.rglob("*")) if p.is_file()}
 
 
 # ------------------------------------------------------------------------------------------ Laya glue
@@ -321,10 +302,7 @@ def train_seed(seed, base, requested, question, fit_rows, k, epochs):
 def write_checkpoint(agent, base_dir, ck, provenance):
     """The COMPLETE checkpoint dir, before anything reloads it; returns {relpath: sha256}."""
     ck.mkdir(parents=True)
-    sd = agent.model.state_dict()
-    out = {name: t.detach().to(torch.float32 if name == "temperature" else torch.float16).contiguous().cpu()
-           for name, t in sd.items()}
-    save_file(out, str(ck / "model.safetensors"), metadata={"format": "pt"})
+    save_f16(agent.model.state_dict(), ck / "model.safetensors")
     cfg = json.loads((base_dir / "rl_agent_config.json").read_bytes())
     cfg["training"] = provenance            # Laya reads head/len/temperature keys; this is provenance only
     write_json(ck / "rl_agent_config.json", cfg)
@@ -379,7 +357,7 @@ def calibrate_and_score(ck, sha_before, calib_rows, eval_rows, question, k):
     cfg = json.loads(cfg_path.read_bytes())
     cfg.setdefault("temperature_by_options", {})[bucket] = t_applied
     write_json(cfg_path, cfg)
-    sha_cal = tree_sha256(ck)
+    sha_cal = {**sha_before, "rl_agent_config.json": data.sha256_file(cfg_path)}   # the only file rewritten
     agent = reload_checked(ck, sha_cal)
     if agent.temperature_by_options.get(bucket) != t_applied:
         raise RuntimeError("the reloaded checkpoint does not apply T %r to %s" % (t_applied, bucket))
@@ -460,7 +438,7 @@ def main(argv=None):
     recipe = contract.recipe_json(args.variant, shots_per_class, epochs, seed, base.block)
     recipe_bytes = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode("utf-8")
     (out / "recipe.json").write_bytes(recipe_bytes)
-    recipe_id = hashlib.sha256(recipe_bytes).hexdigest()
+    recipe_id = sha256_bytes(recipe_bytes)
     log("RECIPE WRITTEN %s" % recipe_id)
 
     # 3-4. device, train
