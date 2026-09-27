@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: HALTED 08-09 at the tracer (RescoreDrift before ece_post; user decision needed on the re-score bar vs the Rust port)
-last_updated: "2026-09-27T01:19:23.349Z"
-last_activity: 2026-09-25
-last_activity_desc: Phase 08 execution started
-state_head: d4980e1b997e2e969ceb5263d6e75b712c16ef4b
+stopped_at: Completed 08-09-PLAN.md (option A)
+last_updated: "2026-09-27T03:47:39.310Z"
+last_activity: 2026-09-27
+last_activity_desc: 08-09 completed under option A (both demo vectors refused by pack and verify)
+state_head: 87c957bfff37e80df29f25df344da7b1bdb7fa64
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 104
-  completed_plans: 100
+  completed_plans: 101
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 9 of 12 (08-01..08-08 complete; 08-09 HALTED at its tracer — status: halted, NOT complete)
-Status: BLOCKED on a user decision — 08-09's just laya-pack refuses the early_stopping vector with RescoreDrift (zero-shot row 49, 1.028e-5 > 1e-5) before the ece_post clause; the fixed_epochs checkpoint drifts to 5.48e-5. Options in 08-09-SUMMARY.md Next Phase Readiness
+Plan: 10 of 12 (08-01..08-09 complete; next: 08-10)
+Status: Ready to execute 08-10 — 08-09 completed under user decision option A (2026-09-26): early_stopping refused GateFailed[ece_post] exit 3, fixed_epochs refused RescoreDrift fine_tuned exit 2, by pack and by verify, nothing written
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-25 — Phase 08 execution started
+Last activity: 2026-09-27 — 08-09 completed under option A (both demo vectors refused by pack and verify; full-model parity 14/14)
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -222,6 +222,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P06 | 21 min | 2 tasks | 11 files |
 | Phase 08 P07 | 24min | 3 tasks | 14 files |
 | Phase 08 P08 | 42min | 2 tasks | 11 files |
+| Phase 08 P09 | 45 min | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -406,6 +407,9 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-08 OPTION 3 (user, 2026-09-26): the D-19 stance demo's outcome of record is GATE FAIL under both declared recipes (fixed_epochs d0f4e40d ece_post 0.3773 T clamped 5.0; early_stopping 3d4b91da ece_post 0.2224 T 3.14; margin passes both). Both run dirs (models/decide/tweet-stance-16-fixed-epochs, models/decide/tweet-stance-16) are FAIL-CLOSED TEST VECTORS that 08-09 pack/verify must refuse; the D-18 live stance deploy is DEFERRED until a declared run passes. Recorded in laya-finetune-gate-v1 1.2.0 demo.*; gate_max_ece, T bounds, seeds and data unchanged; no further recipe tried
 - [Phase 08]: 08-08: the same recipe and seed on MPS is not bitwise reproducible (the 3-seed variance run's seed-13 leg under recipe 3d4b91da gave ece_post 0.2202 vs the recorded 0.2224); a fail-closed vector is identified by its run-dir files and recipe_id, never by re-running it. Variance over seeds 13/17/23: macro_f1 0.451 +- 0.023, F_avg 0.480 +- 0.014, ece_post 0.226 +- 0.115; no seed passes
 - [Phase 08]: 08-08: --seeds N keeps the data and the calibration split fixed (declared seed 13); variance seeds vary only the training RNG, run in deleted temp dirs, and the declared seed's checkpoint (byte-identical to a single-seed run's) is the only one kept
+- [Phase 08]: 08-09 OPTION A (user, 2026-09-26): pack_rescore_probs_abs stays 1e-5; early_stopping 3d4b91da is the vector that demonstrates GateFailed[ece_post] (exit 3, rescore 6.7e-6 / zs 6.8e-6, argmax 280/280); fixed_epochs d0f4e40d is refused with RescoreDrift which=fine_tuned row=59 max_abs=4.667e-5 (exit 2, nothing written) because torch's own fp32 is up to 3.7e-5 from a float64 reference on it. FALSIFY-LAYA-GATE-010 (laya-finetune-gate-v1 1.3.0) binds the per-vector refusal; demo.fail_closed_rule prose left unchanged (D-ITEM-08-09-C)
+- [Phase 08]: 08-09: the stdio server real-model leg is DEFERRED (D-ITEM-08-09-A, user approval): no artifact pack_laya verify accepts exists; verify_path on real-weights bytes (all eight rungs) and full-model parity (ids 14/14, |dp| 3.841e-6) cover the gap until the first eligible artifact
+- [Phase 08]: 08-09: pack_laya verify is the ONLY deploy-eligibility check (exact file, full ladder, manifest bound to run/data dirs, every pack check re-run); inspect is identity-only; pack-fixture writes only synthetic-fixture artifacts (models/decide/selftest/laya_tiny.apr, golden 37d65159, refused by verify) for 08-10
 
 ### Pending Todos
 
@@ -502,7 +506,7 @@ Recent decisions affecting current work:
 - Verify t2c in 06.1-04-PLAN.md cannot see an #[ignore] added to part A or part B (it anchors bodies at fn, and the attribute precedes fn). Measured green on a gated part A. The in-tree Rust test invariance::parts_a_and_b_are_unconditional is the real guard; a later plan should replace the python body with a call to it.
 - SC2 no-argument invariance gate (crates/aprender-forecast/src/invariance.rs:718) is RED under cargo nextest run --workspace --lib, the invocation CI runs; green under -p aprender-forecast. Deterministic, hash-stable, flipped by adding apr-cli to the package set. See 06.1 deferred-items.md item 5.
 - 08-09..08-12 revised for option 3 (commit 2b75c14dc, 2026-09-26): 08-09 refuses both demo vectors; 08-10 offline-only; 08-11 records HOLD; D-18 live deploy deferred to the post-spike re-run.
-- 08-09 HALTED at its tracer (stop rule, user approval 3): just laya-pack refuses the early_stopping vector 3d4b91da with RescoreDrift which=zero_shot row=49 max_abs=1.028e-5 (bar 1e-5), not on ece_post. Read-only measurement: the fixed_epochs checkpoint's fine-tuned re-score drifts to 5.48e-5 (17/280 rows > 1e-5; ~1.8e-3 in logits, outside logits_abs); the Rust port is bitwise deterministic and both sides score on CPU fp32, so this is not MPS. Recomputed gate would be clauses=[ece_post] alone for both. USER DECISION NEEDED: (1) investigate the port with the parity ladder on the outlier rows (recommended), (2) re-declare pack_rescore_probs_abs, or (3) accept RescoreDrift as the vectors' refusal. No tolerance widened. Code d7031c319, SUMMARY d4980e1b9 (status: halted).
+- RESOLVED 2026-09-27 (was: 08-09 HALTED at its tracer on RescoreDrift zero_shot row 49 1.028e-5): debug session laya-rescore-drift fixed the RoPE inv_freq rounding (8e55e0bed); user decision option A keeps pack_rescore_probs_abs 1e-5, early_stopping 3d4b91da demonstrates GateFailed[ece_post] (exit 3), fixed_epochs d0f4e40d is refused with RescoreDrift fine_tuned row 59 4.667e-5 (exit 2). 08-09 complete (87c957bff). OPEN CONCERN, queued not acted on: the 1e-5 bar has ~1.5x headroom on early_stopping and the ladder final block 1.09x; x86_64 unmeasured (D-ITEM-08-09-B, spike-laya-calibration-slice-and-temperature-cap todo).
 
 ### Roadmap Evolution
 
@@ -520,9 +524,9 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-27T01:19:13.367Z
-Stopped at: HALTED 08-09 at the tracer (RescoreDrift before ece_post; user decision needed on the re-score bar vs the Rust port)
-Resume file: .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-09-SUMMARY.md
+Last session: 2026-09-27T03:47:22.598Z
+Stopped at: Completed 08-09-PLAN.md (option A)
+Resume file: None
 
 ## Accumulated Context
 
