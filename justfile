@@ -1647,8 +1647,9 @@ laya-build-bootstrap:
 # the config's pin and content-addressed key, (4) resolver proof present, naming the decide
 # package, for the installed cargo-pmcp, (5) ELIGIBILITY: `just laya-verify` accepts the exact
 # file, (6) the S3 object has the local size. DRY_RUN=1 stops after (6) with DRY-RUN OK. Live:
-# touch -> DEPLOYING -> cargo pmcp deploy (crates root, swapped) -> compile-log, health-body and
-# identity assertions; any identity failure runs `just laya-teardown` (containment).
+# touch -> DEPLOYING -> cargo pmcp deploy (crates root, swapped) -> compile-log, edge-health
+# serverId and live identity-probe assertions; any identity failure runs `just laya-teardown`
+# (containment).
 laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1769,23 +1770,73 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     # S3 GET, and a policy not yet visible reads as a 403 load failure -- which the check
     # below would misreport as an identity failure and contain. (plan 08-17)
     sleep "${LAYA_GRANT_PROPAGATION_S:-20}"
-    HEALTH="$(curl -fsS --max-time 30 "$ENDPOINT")" || contain "GET $ENDPOINT failed"
-    python3 -c 'import json, sys; b = json.loads(sys.argv[1]); sys.exit(0 if b.get("package") == "aprender-mcp-decide-lambda" and b.get("server") == sys.argv[2] else 1)' "$HEALTH" "$SERVER" \
-        || contain "the health body does not name the decide server: $HEALTH"
+    # Edge health (D-ITEM-08-17-A). No GET reaches the bootstrap on pmcp.run: the edge answers
+    # GET /mcp itself (405) and serves /health as platform JSON with no package field. So this
+    # step proves only that the edge routes <server>: /health must name it as serverId. Package
+    # identity is the probe's job below -- a POST tools/call that must return artifact_sha256
+    # == H with the labels in order, which a wrong binary under this name cannot answer.
+    HEALTH_URL="$(just _laya-edge-health-url "$ENDPOINT")" || contain "cannot derive the edge health URL from $ENDPOINT"
+    LOGGED_HEALTH="$(sed -n 's/^ *health_endpoint: "\(.*\)"$/\1/p' "$LOG" | head -n 1)"
+    [ -z "$LOGGED_HEALTH" ] || [ "$LOGGED_HEALTH" = "$HEALTH_URL" ] \
+        || contain "cargo pmcp reported health_endpoint $LOGGED_HEALTH, but $ENDPOINT derives $HEALTH_URL"
+    HEALTH="$(curl -fsS --max-time 30 "$HEALTH_URL")" || contain "GET $HEALTH_URL failed"
+    printf '%s\n' "$HEALTH" > "models/decide/deploy-health-$SERVER.json"
+    just _laya-edge-health-check "$HEALTH" "$SERVER" \
+        || contain "the edge health body at $HEALTH_URL does not name $SERVER as serverId: $HEALTH"
+    echo "  edge health: $HEALTH_URL names serverId $SERVER"
     set +e
     cargo run --release -p aprender-mcp-decide-lambda --example probe -- \
         --url "$ENDPOINT" --apr "$APR" --expect-sha256 "$H" > "models/decide/deploy-probe-$SERVER.log" 2>&1
     prc=$?
     set -e
     [ "$prc" -eq 0 ] || contain "the identity probe failed (log: models/decide/deploy-probe-$SERVER.log)"
-    echo "DEPLOYED $SERVER at $ENDPOINT: compile log, health body and live identity (sha256 $H) name the decide server"
+    echo "DEPLOYED $SERVER at $ENDPOINT: compile log, edge health serverId and live identity (sha256 $H) name the decide server"
     echo "  next: just laya-deploy-verify $APR $SERVER $PROFILE    (re-run just laya-grant after any pmcp.run redeploy)"
+
+# The pmcp.run edge health URL for an MCP endpoint: https://<host>/mcp -> https://<host>/health.
+# Anything else is refused (exit 2), so a changed endpoint shape fails closed instead of probing
+# an unrelated URL. Pure: no network. Exercised by laya-deploy-selftest's EDGE HEALTH table.
+[positional-arguments]
+_laya-edge-health-url endpoint:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 - "$1" <<'PY'
+    import re, sys
+    m = re.fullmatch(r"(https://[A-Za-z0-9.-]+)/mcp", sys.argv[1])
+    if not m:
+        print(f"REFUSED edge-health-url: {sys.argv[1]!r} is not https://<host>/mcp", file=sys.stderr)
+        sys.exit(2)
+    print(m.group(1) + "/health")
+    PY
+
+# Accept an edge /health body only when it is a JSON object whose serverId is exactly <server>.
+# No package field is asserted: the edge body has none (D-ITEM-08-17-A); package identity is the
+# live identity probe's. Pure: no network. Exercised by laya-deploy-selftest's EDGE HEALTH table.
+[positional-arguments]
+_laya-edge-health-check body server:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 - "$1" "$2" <<'PY'
+    import json, sys
+    body, server = sys.argv[1], sys.argv[2]
+    try:
+        b = json.loads(body)
+    except ValueError:
+        print("REFUSED edge-health: the body is not JSON", file=sys.stderr)
+        sys.exit(1)
+    got = b.get("serverId") if isinstance(b, dict) else None
+    if got != server:
+        print(f"REFUSED edge-health: serverId is {got!r}, not {server!r}", file=sys.stderr)
+        sys.exit(1)
+    print(f"edge-health ok: serverId {server}")
+    PY
 
 # Prove every deploy refusal OFFLINE on the synthetic tiny artifact (the only one 08-09 writes),
 # DRY_RUN=1 throughout, with `aws` shadowed by a recorder that must stay empty. Cases: placeholder,
 # sha-pin, resolver-proof, deploy-eligibility, upload-eligibility (the last two from laya-verify:
 # SyntheticNotDeployable); the crates-root swap restored byte-identical on success, forced
-# failure, SIGTERM and an absent root; resolver proof; bootstrap build. The positive dry run is
+# failure, SIGTERM and an absent root; the edge-health step's URL and body tables and its wiring
+# into laya-deploy (D-ITEM-08-17-A); resolver proof; bootstrap build. The positive dry run is
 # armed only by LAYA_ELIGIBLE_APR/_RUN/_DATA/_BASE naming an artifact laya-verify accepts.
 laya-deploy-selftest:
     #!/usr/bin/env bash
@@ -1908,6 +1959,54 @@ laya-deploy-selftest:
         echo "SWAP 4 absent-root: exit 0, the decide config was installed and nothing is left behind"
     else
         fail "SWAP 4 absent-root: exit $rc, left: $(ls -A "$ST/root-absent" | tr '\n' ' ')"
+    fi
+    # EDGE HEALTH (D-ITEM-08-17-A): the live health step, as a must-accept / must-refuse table
+    # over the two pure helpers laya-deploy calls. No network: the bodies are the ones measured
+    # on pmcp.run on 2026-09-27 (decide, chronos, the edge's 405 error) plus the bootstrap's own
+    # body, which carries package/server but no serverId and so must NOT pass.
+    EP="https://aprender-mcp-decide.us-east.true-mcp.com/mcp"
+    url_case() {
+        local want="$1" in="$2" expect="${3:-}" got rc
+        set +e; got="$(just _laya-edge-health-url "$in" 2> /dev/null)"; rc=$?; set -e
+        if [ "$want" = accept ] && [ "$rc" -eq 0 ] && [ "$got" = "$expect" ]; then
+            echo "EDGE HEALTH url accept: $in -> $got"
+        elif [ "$want" = refuse ] && [ "$rc" -ne 0 ] && [ -z "$got" ]; then
+            echo "EDGE HEALTH url refuse: '$in' (exit $rc)"
+        else
+            fail "EDGE HEALTH url $want '$in': exit $rc, got '$got'"
+        fi
+    }
+    url_case accept "$EP" "https://aprender-mcp-decide.us-east.true-mcp.com/health"
+    url_case refuse "https://aprender-mcp-decide.us-east.true-mcp.com/mcp/"
+    url_case refuse "https://aprender-mcp-decide.us-east.true-mcp.com/health"
+    url_case refuse "http://aprender-mcp-decide.us-east.true-mcp.com/mcp"
+    url_case refuse "https://aprender-mcp-decide.us-east.true-mcp.com/x/mcp"
+    url_case refuse ""
+    body_case() {
+        local want="$1" name="$2" body="$3" rc
+        set +e; just _laya-edge-health-check "$body" aprender-mcp-decide > /dev/null 2>&1; rc=$?; set -e
+        if { [ "$want" = accept ] && [ "$rc" -eq 0 ]; } || { [ "$want" = refuse ] && [ "$rc" -ne 0 ]; }; then
+            echo "EDGE HEALTH body $want: $name (exit $rc)"
+        else
+            fail "EDGE HEALTH body $want $name: exit $rc"
+        fi
+    }
+    body_case accept decide-edge '{"status":"healthy","serverId":"aprender-mcp-decide","serverName":"aprender-mcp-decide","hasDeployment":true}'
+    body_case refuse chronos-edge '{"status":"healthy","serverId":"chronos-forecaster","serverName":"chronos-forecaster","hasDeployment":true}'
+    body_case refuse bootstrap-body '{"package":"aprender-mcp-decide-lambda","server":"aprender-mcp-decide"}'
+    body_case refuse edge-405 '{"jsonrpc":"2.0","error":{"code":-32600,"message":"SSE streams are not offered at this endpoint. Use POST /mcp."},"id":null}'
+    body_case refuse prefix-server '{"serverId":"aprender-mcp-decide-2"}'
+    body_case refuse not-an-object '["aprender-mcp-decide"]'
+    body_case refuse not-json '<html>503</html>'
+    body_case refuse empty ''
+    # Wiring: laya-deploy calls both helpers and never GETs the /mcp endpoint itself.
+    DEPLOY_BODY="$(just --show laya-deploy)"
+    if printf '%s' "$DEPLOY_BODY" | grep -q 'just _laya-edge-health-url "\$ENDPOINT"' \
+        && printf '%s' "$DEPLOY_BODY" | grep -q 'just _laya-edge-health-check "\$HEALTH" "\$SERVER"' \
+        && ! printf '%s' "$DEPLOY_BODY" | grep -q 'curl [^|]*"\$ENDPOINT"'; then
+        echo "EDGE HEALTH wiring: laya-deploy checks \$HEALTH_URL's serverId and never GETs \$ENDPOINT"
+    else
+        fail "EDGE HEALTH wiring: laya-deploy does not call both helpers, or still GETs \$ENDPOINT"
     fi
     # Positive dry run: armed only by a real artifact that laya-verify itself must accept.
     if [ -n "${LAYA_ELIGIBLE_APR:-}${LAYA_ELIGIBLE_RUN:-}${LAYA_ELIGIBLE_DATA:-}${LAYA_ELIGIBLE_BASE:-}" ]; then
