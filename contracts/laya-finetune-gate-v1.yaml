@@ -1,6 +1,6 @@
 contract: laya-finetune-gate
 metadata:
-  version: 1.2.0
+  version: 1.3.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -491,6 +491,13 @@ falsification_tests:
     test_harness: 'just laya-train-selftest'
     if_fails: 'The shipped epoch was chosen with eval data or after eval was scored (D-04 / D-07), or the restored weights are not the best epoch.'
 
+  - id: FALSIFY-LAYA-GATE-010
+    rule: 'The D-19 demo runs are refused by pack and by verify on the exact bytes, each with its documented refusal, writing nothing'
+    prediction: 'For each demo.fail_closed_vectors entry, identified by sha256(recipe.json): pack-for-serving and pack_laya verify on a transient low-level pack of the same run refuse with the SAME documented refusal and write nothing. early_stopping 3d4b91daf86772bcb23e5342c2dff4bb6467f5d9f254f7833ac7f61a8f2f5375: GateFailed naming ONLY the ece_post clause (exit 3), after all 280 eval rows of the packed bytes and of the base re-score within pack_rescore_probs_abs with argmax 280/280, the recomputed ece_post within gate_metric_recompute_abs of the reported 0.2224 and the margin clause passing; the verify-side artifact sha256 equals the pack-side one. fixed_epochs d0f4e40d39425e68d503f557f4f660eb9a73a4fb258da01f777b6f49362bcf20: RescoreDrift on the FINE-TUNED re-score (exit 2), the same first row and max_abs on both paths; its gate is not reached. User decision option A (2026-09-26, debug session laya-rescore-drift): pack_rescore_probs_abs stays 1.0e-5, and torch''s own fp32 probabilities for this checkpoint are up to 3.7e-5 from a float64 reference, so no fp32 port meets the bar on it; the refusal is still fail-closed. A vector with no declared refusal fails the test.'
+    implemented_by: 'plan 08-09 (tests/fail_closed_vectors.rs; armed by LAYA_MODEL_DIR + LAYA_FAIL_CLOSED_VECTORS=1 with the gitignored run dirs, SKIP elsewhere, so CI compiles it only)'
+    test: 'cargo test -p aprender-decide --release --test fail_closed_vectors demo_vectors_are_refused_fail_closed'
+    if_fails: 'A demo run that failed the gate could be packed, verified as eligible or served; or it is refused for a reason nobody declared (for example a re-score bar that a 1-ULP toolchain change moved), which is fail-closed but no longer demonstrates the rule. Never widen a tolerance to restore the expected refusal: record the new refusal and decide it (see the calibration spike todo).'
+
 kani_harnesses:
 
   # DECLARED, NOT EXECUTED. cargo-kani is not installed in this repository and no
@@ -528,7 +535,7 @@ qa_gate:
     - 'declared seed ships; recipe before scores; device from parameters; F16-reload scoring'
     - 'early stopping decided on the calibration slice before any eval score; best epoch restored'
     - 'synthetic-fixture refused by pack-for-serving, verify and deploy'
-  pass_criteria: 'FALSIFY-LAYA-GATE-001..009 pass, each observed RED under its induced negative; this file is committed before any models/decide/ run directory exists.'
+  pass_criteria: 'FALSIFY-LAYA-GATE-001..010 pass, each observed RED under its induced negative; this file is committed before any models/decide/ run directory exists.'
   falsification: >
     Change constants.gate_max_ece alone and every recorded gate report must be refused by the
     verifier for carrying the old thresholds — the thresholds are read from here, never from the

@@ -148,3 +148,69 @@ not fixed by it.
   binary.
 - **Owner:** plan 08-10 (its resolver-proof task and deploy-root decision already cover it). The
   template now documents the trap instead of prescribing the per-crate command.
+
+## From plan 08-09
+
+### D-ITEM-08-09-A: the stdio server's real-model leg is DEFERRED (user approval, 2026-09-26)
+
+- status: open
+- **Not run:** `APR_MCP_E2E_DECIDE_MODEL=<real .apr> cargo test -p aprender-mcp-decide --release --test e2e_stdio`,
+  test `a_real_decide_model_classifies_over_live_stdio` (crates/aprender-mcp-decide/tests/e2e_stdio.rs).
+  It would assert one tool, the served identity equal to the file's sha256 (D-11), K probabilities
+  summing to 1, and labels from the task, over live stdio MCP.
+- **Why:** no artifact that `pack_laya verify` accepts exists (option 3: both D-19 demo runs are
+  fail-closed vectors). decide-apr-v1 knows only `production` and `synthetic-fixture`, so a base
+  en-root evidence pack has no honest variant. Serving a low-level pack of a fail-closed vector would
+  contradict `demo.fail_closed_rule`. The leg is not run on a stand-in.
+- **What covers the gap meanwhile:**
+  - the tiny-fixture stdio leg in the same test file;
+  - `verify_path` loading real-weights bytes from a FILE through `Decider::load_path` (all eight
+    rungs, probe replay) with the 280-row re-scores, in `tests/fail_closed_vectors.rs`;
+  - full-model parity on the English root, `tests/laya_parity.rs` (ids 14/14, max |dp| 3.841e-6).
+- **What re-arms it:** the first artifact `just laya-verify` accepts. That needs the calibration spike
+  (`.planning/todos/pending/spike-laya-calibration-slice-and-temperature-cap.md`) and then a declared
+  run that passes the gate unchanged.
+- **Alternatives that need a user decision:** (1) amend `demo.fail_closed_rule` to allow a local,
+  never-uploaded serve of a vector; or (2) add a non-production evidence variant. Option 2 is a
+  decide-apr-v1 / laya-finetune-gate-v1 schema change, and D-17 makes it costly.
+
+### D-ITEM-08-09-B: the 1e-5 re-score bar is fragile on real checkpoints (queued, not acted on)
+
+- status: open
+- **Found during:** the 08-09 tracer halt and debug session `.planning/debug/resolved/laya-rescore-drift.md`.
+- **Facts:**
+  - `pack_rescore_probs_abs` 1e-5 sits at the fp32 noise floor of real Laya checkpoints. Against a
+    float64 reference, torch's own fp32 is up to 3.7e-5 off on fixed_epochs (13 rows).
+  - early_stopping and the base re-score at 6.7e-6 / 6.8e-6, about 1.5x headroom. One 1-ULP codegen
+    change (`__sincosf_stret` fusion lost in 71e2306e5) once consumed that headroom.
+  - x86_64 (Lambda) has never been measured.
+- **Related headroom seen in 08-09:** the full-model ladder's `final` block measured 9.155e-5
+  against `final_norm_abs` 1e-4 (1.09x). Spike 025 measured 3.05e-5 there before the RoPE fix.
+  Every other ladder block and the 14-row probabilities keep more than 2.5x headroom.
+- **Owner:** the calibration spike todo (section "Added 2026-09-26: is the 1e-5 re-score bar above fp32
+  noise"). User decision option A keeps the bar, and nothing is changed here.
+
+### D-ITEM-08-09-C: `demo.fail_closed_rule` prose still says both vectors fail on the ece_post clause
+
+- status: open
+- **What:** laya-finetune-gate-v1 `demo.fail_closed_rule` says pack and verify MUST refuse each vector
+  "with the gate recomputed in Rust ... reproducing FAIL on the ece_post clause". Under option A,
+  fixed_epochs refuses earlier, with RescoreDrift (still fail-closed, nothing written).
+  FALSIFY-LAYA-GATE-010 (1.3.0) states the per-vector refusal and is the bound test.
+- **Why not changed here:** the plan forbids moving any `demo` value, and the user's option A kept
+  contract text other than GATE-010 unchanged. Whether to align the prose with GATE-010 is a one-line
+  user call.
+
+### D-ITEM-08-09-D: D-ITEM-08-01-A re-measured; the strict-binding PASS line is still unreachable
+
+- status: open
+- **Symptom:** unchanged: `VACUOUS: strict-test-binding gate was SKIPPED`, because
+  `contracts/spectral-indices-v1.yaml` has no `kani_harnesses:`.
+- **Measured around it** (temporary lifted copy, deleted after each run):
+  - Task 2: 658 references resolved (644 at 08-06, plus this plan's 14 verify bindings).
+  - Task 3: 661 (plus FALSIFY-LAYA-GATE-010 and the two FALSIFY-LAYA-PARITY-001/-003 legs). A
+    mutated GATE-010 binding (`demo_vectors_are_refused_fail_closed_mutant_zz`) was flagged
+    dangling in the same kind of run, so the resolver discriminates.
+  - No Phase 8 contract dangles. The only FAIL lines are the two pre-existing contracts
+    (chronos-bolt-parity-v1, setfit-encoder-conformance-v1).
+- **Why not fixed here:** same reason as D-ITEM-08-01-A.
