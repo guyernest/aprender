@@ -21,7 +21,9 @@
 //! SafeTensors carve-out in CLAUDE.md is not widened.
 
 use crate::artifact::{self, ArtifactError, BaseDecl, InputsSha256, ProbeRecord};
-use aprender::format::v2::TensorDType;
+use crate::laya::{Laya, LayaError};
+use crate::Task;
+use aprender::format::v2::{AprV2Metadata, AprV2ReaderRef, AprV2Writer, TensorDType};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -257,6 +259,11 @@ pub struct PackInputs {
     pub gate_report: GateReport,
     /// Parsed `probes.json`: Laya's OWN probe probabilities (Python values).
     pub probes: Vec<ProbeRecord>,
+    /// `eval-probs.json`, byte-exact (hash-checked against the report; plan 08-09's verifier
+    /// validates and re-scores it).
+    pub eval_probs_json: Vec<u8>,
+    /// `zero-shot-probs.json`, byte-exact (hash-checked against the report).
+    pub zero_shot_probs_json: Vec<u8>,
     /// Input hashes recomputed from the data dir, tokenizer and declared base.
     pub inputs_sha256: InputsSha256,
 }
@@ -305,6 +312,9 @@ pub enum PackError {
     },
     /// The artifact writer refused.
     Artifact(ArtifactError),
+    /// A checkpoint could not be rebuilt into a Laya model for scoring
+    /// ([`load_checkpoint_for_scoring`]).
+    Rebuild(LayaError),
 }
 
 impl fmt::Display for PackError {
@@ -333,6 +343,7 @@ impl fmt::Display for PackError {
                 "pack: gate report records {what} = {recorded}, the file hashes to {observed}"
             ),
             Self::Artifact(e) => write!(f, "pack: {e}"),
+            Self::Rebuild(e) => write!(f, "pack: rebuild for scoring: {e}"),
         }
     }
 }
@@ -491,6 +502,8 @@ impl PackInputs {
             recipe,
             gate_report,
             probes: probes.probes,
+            eval_probs_json: eval_probs,
+            zero_shot_probs_json: zero_shot_probs,
             inputs_sha256,
         })
     }
@@ -506,6 +519,50 @@ impl PackInputs {
 pub fn pack_run_dir(run_dir: &Path, data_dir: &Path) -> Result<Vec<u8>, PackError> {
     let inputs = PackInputs::from_run_dir(run_dir, data_dir)?;
     Ok(artifact::write_decide_apr(&inputs)?)
+}
+
+/// Build an in-memory Laya scorer from a checkpoint DIRECTORY (`model.safetensors`,
+/// `encoder/config.json`, `rl_agent_config.json`, `tokenizer/tokenizer.json` — the layout of
+/// both a run dir's `checkpoint/` and the declared base snapshot), bound to `task`.
+///
+/// Every tensor goes through the SAME F16 path the packer uses: raw bytes into an in-memory
+/// `.apr`, widened by core's loader. This is the back-office zero-shot scorer of plan 08-09's
+/// verifier (the declared base re-scored against `zero-shot-probs.json`). It returns a
+/// [`Laya`], never a [`crate::Decider`]: nothing built here is servable, and no load ladder,
+/// probe replay or manifest applies to it.
+///
+/// # Errors
+///
+/// [`PackError::Read`] for a missing file, [`PackError::SafeTensors`] /
+/// [`PackError::UnsupportedDtype`] for the weights, [`PackError::Artifact`] for the in-memory
+/// container, and [`PackError::Rebuild`] when Laya refuses the parts.
+pub fn load_checkpoint_for_scoring(checkpoint_dir: &Path, task: Task) -> Result<Laya, PackError> {
+    let tensors = read_checkpoint_tensors(&read_file(checkpoint_dir, "model.safetensors")?)?;
+    let apr = {
+        let mut w = AprV2Writer::new(AprV2Metadata::default());
+        for t in tensors {
+            w.add_tensor(t.name, t.dtype, t.shape, t.bytes);
+        }
+        w.write().map_err(|e| {
+            PackError::Artifact(ArtifactError::Write {
+                reason: e.to_string(),
+            })
+        })?
+    };
+    let reader = AprV2ReaderRef::from_bytes(&apr).map_err(|e| {
+        PackError::Artifact(ArtifactError::Container {
+            reason: e.to_string(),
+        })
+    })?;
+    Laya::from_parts(
+        &reader,
+        "",
+        &read_file(checkpoint_dir, "encoder/config.json")?,
+        &read_file(checkpoint_dir, "rl_agent_config.json")?,
+        &read_file(checkpoint_dir, "tokenizer/tokenizer.json")?,
+        task,
+    )
+    .map_err(PackError::Rebuild)
 }
 
 #[cfg(test)]

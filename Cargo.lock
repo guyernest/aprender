@@ -718,8 +718,10 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "tempfile",
  "tokenizers 0.23.1",
  "trybuild",
+ "unicode-normalization",
 ]
 
 [[package]]

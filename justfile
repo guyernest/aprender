@@ -1339,3 +1339,14 @@ laya-train-selftest:
     done
     uv run --project scripts/laya_train --frozen python scripts/laya_train/lifecycle.py
     echo "LAYA TRAIN SELFTEST OK"
+
+# Pack a Laya run dir FOR SERVING (plan 08-09, D-07 fail-closed in Rust): production variant, the
+# contract's base, input hashes, split, a Rust re-score of every eval row from the packed bytes and
+# from <base>, and the gate RECOMPUTED from those verified probabilities -- all before anything is
+# written. Exit 0 = PACKED, 3 = gate failed, 2 = any other refusal; a refusal writes nothing. The
+# policy is read from the contracts; no argument or env var overrides it.
+laya-pack run data base out:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec cargo run --release -p aprender-decide --example pack_laya -- \
+        pack --run "{{run}}" --data "{{data}}" --base "{{base}}" --out "{{out}}"

@@ -33,6 +33,11 @@
 //! [`Decider`] has private fields and no other constructor. Every [`Decider`] carries
 //! its [`ModelIdentity`] (D-11): the sha256 of the whole file and the recipe_id.
 //!
+//! Whether a run (or the exact file packed from it) may be SERVED is [`verify`]'s decision
+//! alone (decide-apr-v1 `deploy_eligibility`): it re-scores every eval row from the packed
+//! bytes and the declared base, and decides the laya-finetune-gate-v1 gate on metrics it
+//! recomputes itself. [`pack`] applies no policy.
+//!
 //! Contracts: `contracts/laya-parity-v1.yaml` (the torch -> .apr -> Rust parity
 //! ladder) and `contracts/decide-apr-v1.yaml` (the task schema, marker rule, artifact
 //! and load ladder).
@@ -41,6 +46,7 @@ pub mod artifact;
 pub mod laya;
 pub mod pack;
 pub mod task;
+pub mod verify;
 
 #[cfg(test)]
 pub(crate) mod test_support;
