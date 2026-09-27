@@ -138,6 +138,12 @@ not fixed by it.
 
 ### D-ITEM-08-07-B: a per-crate deploy root builds the wrong `*-lambda` package
 
+- status: resolved
+- **Resolved by:** plan 08-10 (user decision shared-crates-root, 2026-09-26). `just laya-deploy`
+  deploys from `crates` with server `aprender-mcp-decide`, and `just laya-resolver-proof` executed
+  cargo-pmcp 0.24.3's own resolver on this workspace: root `crates` -> `crates/aprender-mcp-decide-lambda`;
+  the per-crate root -> `crates/aprender-mcp-chronos-lambda` (the trap, confirmed). The durable
+  upstream fix is D-ITEM-08-10-B.
 - **Found during:** 08-07 Task 3, while writing `.pmcp/deploy.toml.template`.
 - **Symptom:** cargo-pmcp 0.24.2's `find_lambda_package_dir` tries `<deploy-root>/{server}-lambda`
   first, then falls back to the first workspace `*-lambda` package with a `bootstrap` bin. With
@@ -214,3 +220,57 @@ not fixed by it.
   - No Phase 8 contract dangles. The only FAIL lines are the two pre-existing contracts
     (chronos-bolt-parity-v1, setfit-encoder-conformance-v1).
 - **Why not fixed here:** same reason as D-ITEM-08-01-A.
+
+## From plan 08-10
+
+### D-ITEM-08-10-A: one decide model per workspace under the shared-crates-root deploy
+
+- status: open
+- **What:** cargo-pmcp resolves `<root>/<server>-lambda` first, so the deploy from `crates` works only
+  with server name `aprender-mcp-decide`, the package stem. `laya-deploy-config` and `laya-deploy`
+  refuse any other name. A second decide model, such as a second task, cannot deploy from this
+  workspace without revisiting the 08-10 decision.
+- **Also shared:** `crates/.pmcp/` and `crates/deploy/` belong to the setfit training server.
+  `_laya-crates-root-swap` backs them up and restores them byte-identically. The selftest proves
+  this on success, forced failure, SIGTERM and an absent root. A SIGKILL mid-deploy cannot run
+  the trap, so it leaves the backup at `models/decide/swap-backup/crates`, and the next swap
+  refuses until a human restores from it.
+- **Owner:** D-ITEM-08-10-B removes the constraint.
+
+### D-ITEM-08-10-B: fix the resolver upstream in cargo-pmcp (recommended future SDK work, not done)
+
+- status: open
+- **What:** in `find_lambda_package_dir`, when `project_root` is itself a package whose name ends in
+  `-lambda` and has a `bootstrap` bin, return it before `find_workspace_lambda_package_dir`. This
+  makes `--manifest-path crates/<pkg>-lambda` correct for every server. It also protects the
+  chronos and setfit deploys from the same class of bug, and it removes the config swap.
+- **Why not done here:** the user chose shared-crates-root. The SDK checkout is an external repo on
+  an unrelated branch with uncommitted work, so this plan only read it (`git archive` into a
+  scratch dir).
+
+### D-ITEM-08-10-C: the live halves of the deploy recipes have never run against AWS
+
+- status: open
+- **Kind:** unrun-verify. The live deploy is deferred by option 3.
+- **Proven offline:** `bash -n` passes on every recipe body. The refusals are proven on the
+  synthetic artifact: placeholder, sha-pin, resolver-proof, deploy-eligibility and
+  upload-eligibility. An aws recorder with a positive control counted 0 AWS calls. The
+  `laya-deploy-verify` DRY_RUN plan was built from the artifact, also with 0 AWS calls.
+  `laya-verify` precedes the first AWS call in `laya-deploy` and `laya-upload`.
+- **Assumptions only a live run can check:**
+  - The pmcp.run function name equals the server id. `pmcp-train-grant` relies on the same.
+  - cargo-pmcp writes `[deployment] endpoint` to `crates/.pmcp/deployment.toml`, which the swap
+    copies to `models/decide/deploy-<server>.state/`.
+  - A GET on that `/mcp` endpoint reaches the bootstrap's health branch, which may not hold with
+    auth on.
+  - The `Compiling` lines of `cargo lambda build` land in the redirected deploy log.
+  - `LoggingConfig.LogGroup` names the function's log group.
+- **Owner:** the first post-spike deploy. Plan 08-11 records HOLD.
+
+### D-ITEM-08-10-D: `auth=on` sets only `[auth] enabled`
+
+- status: open
+- **What:** `laya-deploy-config <apr> on` sets `enabled = true` and leaves `provider = "none"` from
+  the template. The provider that pairs with an authenticated pmcp.run function is plan 08-11's
+  auth decision. It is not assumed here.
+
