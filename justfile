@@ -1350,3 +1350,28 @@ laya-pack run data base out:
     set -euo pipefail
     exec cargo run --release -p aprender-decide --example pack_laya -- \
         pack --run "{{run}}" --data "{{data}}" --base "{{base}}" --out "{{out}}"
+
+# Deployment eligibility of the EXACT file <apr> (decide-apr-v1 deploy_eligibility; plan 08-09): the full
+# load ladder, the manifest bound to <run>/<data>, then every `laya-pack` check on those bytes. Prints
+# one JSON line with deploy_eligible only on accept; exit 3 = gate failed, 2 = any other refusal. This
+# is the ONLY eligibility check the deploy recipes use; the policy is read from the contracts.
+laya-verify apr run data base:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec cargo run --release -p aprender-decide --example pack_laya -- \
+        verify "{{apr}}" --run "{{run}}" --data "{{data}}" --base "{{base}}"
+
+# Identity of a decide .apr (bounded/header/manifest rungs): sha256, recipe_id, base, variant, labels
+# and the embedded gate summary. Makes NO eligibility claim -- that is `just laya-verify`.
+laya-inspect file:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec cargo run --release -p aprender-decide --example pack_laya -- inspect "{{file}}"
+
+# Write a synthetic-fixture test artifact (the ONLY variant it writes; every verify refuses it).
+# Any other variant is refused with exit 2 and nothing written.
+laya-pack-fixture run data out:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec cargo run --release -p aprender-decide --example pack_laya -- \
+        pack-fixture --run "{{run}}" --data "{{data}}" --out "{{out}}"

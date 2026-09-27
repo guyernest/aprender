@@ -204,6 +204,7 @@ falsification_tests:
     rule: 'The packed artifact re-scores every eval row within 1e-5 of the Python F16 reload'
     prediction: 'pack and verify re-score all eval rows (and the base on the zero-shot rows) within 1.0e-5 with argmax exact; one perturbed probability in eval-probs.json is refused naming the row.'
     implemented_by: 'plan 08-09 (aprender_decide verify / pack tests)'
+    test: 'cargo test -p aprender-decide --lib verify::tests::rescore_drift_fine_tuned && cargo test -p aprender-decide --lib verify::tests::rescore_drift_zero_shot'
     if_fails: 'The served model and the gated model differ; the gate describes something that is not deployed.'
 
 kani_harnesses:

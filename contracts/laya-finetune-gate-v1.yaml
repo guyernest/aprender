@@ -429,20 +429,23 @@ falsification_tests:
   - id: FALSIFY-LAYA-GATE-001
     rule: 'The gate is recomputed from verified probabilities and an edited report is refused'
     prediction: 'Editing fine_tuned.macro_f1 in gate-report.json by more than gate_metric_recompute_abs, or flipping `pass`, makes the Rust verifier refuse the run naming the field; the untouched report is accepted.'
-    implemented_by: 'plan 08-09 (aprender_decide::verify gate tests); the test: line is added in that plan''s commit'
+    implemented_by: 'plan 08-09 (aprender_decide::verify gate tests: an edited fine-tuned F1, a flipped pass, and a forged zero-shot baseline)'
+    test: 'cargo test -p aprender-decide --lib verify::tests::forged_report && cargo test -p aprender-decide --lib verify::tests::pass_disagrees && cargo test -p aprender-decide --lib verify::tests::forged_baseline'
     if_fails: 'The gate trusts reported numbers: an edited report can make an undeployable model deployable.'
 
   - id: FALSIFY-LAYA-GATE-002
     rule: 'A report whose thresholds differ from this contract is refused'
     prediction: 'A gate-report.json with thresholds.max_ece = 0.2 is refused naming thresholds, even though every metric is otherwise consistent.'
     implemented_by: 'plan 08-09 (aprender_decide::verify gate tests)'
+    test: 'cargo test -p aprender-decide --lib verify::tests::threshold_mismatch'
     if_fails: 'The thresholds are no longer the contract''s: a gate chosen after seeing a result can pass (D-07).'
 
   - id: FALSIFY-LAYA-GATE-003
     rule: 'The ECE matches the house definition on the frozen cases'
     prediction: 'The verifier''s ECE equals aprender::calibration::expected_calibration_error_top_label on every case of scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json, and the Python trainer''s ECE matches within gate_metric_recompute_abs on the synthetic fixture.'
-    implemented_by: 'plans 08-08 (Python half: metrics.py --selftest replays every frozen house case to 1e-6, inside just laya-train-selftest) and 08-09 (Rust verifier; its test: line is added in that plan''s commit)'
+    implemented_by: 'plans 08-08 (Python half: metrics.py --selftest replays every frozen house case to 1e-6, inside just laya-train-selftest) and 08-09 (Rust verifier: recompute_metrics is bit-identical to the house ECE on every frozen case, and within gate_metric_recompute_abs of the frozen reference)'
     test_harness: 'just laya-train-selftest'
+    test: 'cargo test -p aprender-decide --lib verify::tests::recompute_matches_house_ece_cases'
     if_fails: 'Two ECE implementations disagree, so the reported and recomputed gate can differ on the same probabilities.'
 
   - id: FALSIFY-LAYA-GATE-004
@@ -455,8 +458,9 @@ falsification_tests:
   - id: FALSIFY-LAYA-GATE-005
     rule: 'Split disjointness is text-level and conflicting duplicates are refused'
     prediction: 'A train.jsonl with the same normalized text under two labels is refused; one with duplicate same-label rows keeps them in one side; an eval row equal to a train row after NFC/trim/whitespace collapse is refused.'
-    implemented_by: 'plans 08-08 (Python half: data.py --selftest, inside just laya-train-selftest) and 08-09 (aprender_decide::verify check_split; its test: line is added in that plan''s commit)'
+    implemented_by: 'plans 08-08 (Python half: data.py --selftest, inside just laya-train-selftest) and 08-09 (aprender_decide::verify check_split)'
     test_harness: 'just laya-train-selftest'
+    test: 'cargo test -p aprender-decide --lib verify::tests::split_overlap && cargo test -p aprender-decide --lib verify::tests::conflicting_labels && cargo test -p aprender-decide --lib verify::tests::slice_splits_group'
     if_fails: 'Calibration or eval leaks training text, so the measured calibration and gate are optimistic.'
 
   - id: FALSIFY-LAYA-GATE-006
@@ -477,6 +481,7 @@ falsification_tests:
     rule: 'A synthetic-fixture run is refused by pack-for-serving, verify and deploy'
     prediction: 'pack_laya verify on a synthetic-fixture run dir refuses naming the variant; the same run is accepted by the structural loader used in tests.'
     implemented_by: 'plan 08-09 (aprender_decide::verify verify_run)'
+    test: 'cargo test -p aprender-decide --lib verify::tests::synthetic_refused'
     if_fails: 'A zero-epoch fixture on a tiny synthetic base can be served as a decision model.'
 
   - id: FALSIFY-LAYA-GATE-009

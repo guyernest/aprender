@@ -1,7 +1,10 @@
 //! `pack_laya` — the back-office pack / verify CLI for Laya decision models (plan 08-09).
 //!
 //! ```text
-//! pack_laya pack --run DIR --data DIR --base DIR --out FILE
+//! pack_laya pack         --run DIR --data DIR --base DIR --out FILE
+//! pack_laya verify FILE  --run DIR --data DIR --base DIR
+//! pack_laya inspect FILE
+//! pack_laya pack-fixture --run DIR --data DIR --out FILE
 //! ```
 //!
 //! `pack` verifies the run BEFORE anything is written (`aprender_decide::verify::pack_for_serving`):
@@ -12,6 +15,17 @@
 //! `PACKED <path> sha256=<H> rescore_max_abs=<x> zs_rescore_max_abs=<y> argmax=<n>/<n>`.
 //! A refusal prints ONE `REFUSED <Variant> <detail> (nothing written)` line.
 //!
+//! `verify` is decide-apr-v1 `deploy_eligibility`, the ONLY eligibility check: it loads the
+//! EXACT file through the full load ladder, binds its manifest to the run and data dirs, and
+//! re-runs every `pack` check on those bytes (`verify::verify_path`). On accept it prints one
+//! JSON line carrying `deploy_eligible`; on refusal the same `REFUSED ...` line as `pack`.
+//!
+//! `inspect` runs the bounded / header / manifest rungs and prints identity only — it has no
+//! eligibility field and makes no eligibility claim.
+//!
+//! `pack-fixture` writes ONLY `synthetic-fixture` artifacts (`verify::pack_fixture`), which
+//! every `verify` refuses; any other variant is refused with nothing written.
+//!
 //! Exit codes (the scripts/laya_train convention): 0 accepted, 3 the recomputed gate failed,
 //! 2 every other refusal (including a usage error).
 //!
@@ -21,11 +35,14 @@
 //! `contracts/laya-parity-v1.yaml`, at run time. The CLI accepts only the path arguments above
 //! and reads no environment variable: there is no way to hand it another policy.
 
+use aprender_decide::artifact;
 use aprender_decide::verify::{self, VerifyError, VerifyPolicy};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: pack_laya pack --run DIR --data DIR --base DIR --out FILE";
+const USAGE: &str = "usage: pack_laya pack --run DIR --data DIR --base DIR --out FILE \
+                     | verify FILE --run DIR --data DIR --base DIR | inspect FILE \
+                     | pack-fixture --run DIR --data DIR --out FILE";
 
 /// A contract file from the workspace root (resolved from this crate's manifest dir at
 /// compile time — never from the environment).
@@ -122,6 +139,12 @@ impl Args {
     }
 }
 
+/// A JSON object from ordered pairs (serde_json's `json!` object form expands to `unwrap`,
+/// which this workspace bans).
+fn obj(pairs: Vec<(&str, serde_json::Value)>) -> serde_json::Value {
+    serde_json::Value::Object(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+
 fn refused(e: &VerifyError) -> ExitCode {
     println!("REFUSED {} {e} (nothing written)", e.variant_name());
     ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(2))
@@ -155,11 +178,105 @@ fn cmd_pack(a: &Args) -> Result<ExitCode, String> {
     )
 }
 
+fn cmd_verify(a: &Args) -> Result<ExitCode, String> {
+    if a.out.is_some() {
+        return Err("verify takes no --out".into());
+    }
+    let apr = Args::need(a.operand.as_ref(), "the FILE operand")?;
+    let run = Args::need(a.run.as_ref(), "--run")?;
+    let data = Args::need(a.data.as_ref(), "--data")?;
+    let base = Args::need(a.base.as_ref(), "--base")?;
+    let policy = policy()?;
+    Ok(
+        match verify::verify_path(&apr, &run, &data, &base, &policy) {
+            Ok(r) => {
+                let line = obj(vec![
+                    ("artifact_sha256", r.artifact_sha256.into()),
+                    ("deploy_eligible", r.deploy_eligible.into()),
+                    (
+                        "recomputed",
+                        obj(vec![
+                            ("zs_macro_f1", r.recomputed.zs_macro_f1.into()),
+                            ("ft_macro_f1", r.recomputed.ft_macro_f1.into()),
+                            ("ece_post", r.recomputed.ece_post.into()),
+                            ("margin", r.recomputed.margin.into()),
+                        ]),
+                    ),
+                    ("rescore_max_abs", r.rescore_max_abs.into()),
+                    ("zs_rescore_max_abs", r.zs_rescore_max_abs.into()),
+                    ("argmax", format!("{}/{}", r.argmax_agree, r.n).into()),
+                ]);
+                println!("{line}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => refused(&e),
+        },
+    )
+}
+
+fn cmd_inspect(a: &Args) -> Result<ExitCode, String> {
+    if a.run.is_some() || a.data.is_some() || a.base.is_some() || a.out.is_some() {
+        return Err("inspect takes only the FILE operand".into());
+    }
+    let apr = Args::need(a.operand.as_ref(), "the FILE operand")?;
+    let bytes = std::fs::read(&apr).map_err(|e| format!("{}: {e}", apr.display()))?;
+    Ok(match artifact::inspect_manifest(&bytes) {
+        Ok(m) => {
+            let line = obj(vec![
+                (
+                    "artifact_sha256",
+                    artifact::artifact_sha256_hex(&bytes).into(),
+                ),
+                ("recipe_id", m.recipe_id.into()),
+                ("method", m.method.into()),
+                ("base", m.base.display().into()),
+                ("variant", m.variant.into()),
+                ("labels", m.labels.into()),
+                (
+                    "embedded_gate",
+                    obj(vec![
+                        ("pass", m.gate.pass.into()),
+                        ("margin", m.gate.margin.into()),
+                        ("ece_post", m.gate.ece_post.into()),
+                    ]),
+                ),
+                ("schema_version", m.schema_version.into()),
+            ]);
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => refused(&VerifyError::Artifact(e)),
+    })
+}
+
+fn cmd_pack_fixture(a: &Args) -> Result<ExitCode, String> {
+    if a.operand.is_some() || a.base.is_some() {
+        return Err("pack-fixture takes only --run, --data and --out".into());
+    }
+    let run = Args::need(a.run.as_ref(), "--run")?;
+    let data = Args::need(a.data.as_ref(), "--data")?;
+    let out = Args::need(a.out.as_ref(), "--out")?;
+    Ok(match verify::pack_fixture(&run, &data, &out) {
+        Ok(sha) => {
+            println!(
+                "PACKED-FIXTURE {} sha256={sha} variant={} (not deployable)",
+                out.display(),
+                verify::SYNTHETIC_FIXTURE_VARIANT
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => refused(&e),
+    })
+}
+
 fn run(argv: &[String]) -> Result<ExitCode, String> {
     let (cmd, rest) = argv.split_first().ok_or(USAGE)?;
     let args = Args::parse(rest)?;
     match cmd.as_str() {
         "pack" => cmd_pack(&args),
+        "verify" => cmd_verify(&args),
+        "inspect" => cmd_inspect(&args),
+        "pack-fixture" => cmd_pack_fixture(&args),
         other => Err(format!("unknown subcommand {other}; {USAGE}")),
     }
 }
