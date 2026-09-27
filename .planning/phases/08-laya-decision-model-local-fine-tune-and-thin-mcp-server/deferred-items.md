@@ -438,7 +438,7 @@ not fixed by it.
 
 ### D-ITEM-08-17-B: pmcp.run invokes the function before laya-grant can run
 
-- status: open
+- status: open (blocking 08-17 since resume attempt 2)
 - **What:** CloudWatch shows one invocation at 21:12:10Z, right after the deploy and before the grant.
   pmcp.run made it, not the recipe. The load failed at the S3 length lookup (no policy yet), and
   `LoadOnce` re-armed, so the instance is not poisoned. Whatever the platform learned from that call
@@ -451,7 +451,19 @@ not fixed by it.
 - **Durable fix:** declare the S3 read in the deploy config's `[iam]` (the pmcp-declared policy the
   platform applies at create time), so the role can read the weights before the first call. This needs a
   check that cargo-pmcp 0.24.3 renders `[iam]` for pmcp-run without a preserved stack.ts.
-- **Owner:** a later deploy-recipe plan.
+- **Proven decisive on 2026-09-27 (08-17 resume attempt 2):**
+  - The redeploy's own pre-grant platform call came at 22:16:47Z, and the load failed the same way.
+  - pmcp.run then marked the server as being in an error state. The edge answered the identity
+    probe's first POST with `503 {"code":-32004,"message":"Server is in error state"}` and never
+    invoked the function.
+  - A second POST a minute later got the same answer, so the state is sticky.
+  - The edge `/health` kept reporting `healthy`.
+  - So on pmcp.run, a grant that follows the deploy can never reach the identity probe. This is no
+    longer a later-plan item. It blocks 08-17.
+- **Also measured:** the redeploy kept the execution role name of the first deploy. A grant applied
+  before `cargo pmcp deploy` would therefore exist when the platform call runs. That option is
+  untested: a stack update might drop an out-of-band policy.
+- **Owner:** the 08-17 resume. The human chooses the fix (see the 08-17 SUMMARY checkpoint).
 
 ### D-ITEM-08-17-C: the sha256 pin runs sha2's SOFTWARE backend on aarch64
 

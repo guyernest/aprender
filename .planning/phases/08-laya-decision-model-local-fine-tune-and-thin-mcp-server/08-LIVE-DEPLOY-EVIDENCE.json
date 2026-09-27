@@ -58,10 +58,34 @@
     "pv_validate_decide_tool_boundary": "0 errors; pv diff suggested major, applied (2.0.0)"
   },
   "sequence": [
-    {"step": "just laya-weights-bucket dev ze-kasher-dev", "rc": 0, "at": "2026-09-27T20:57:33Z", "result": "bucket created: private (all public access blocked), SSE-S3, tagged"},
-    {"step": "just laya-upload <apr> <run> <data> <base> aprender-mcp-decide dev ze-kasher-dev", "rc": 0, "result": "laya-verify accepted first; uploaded 846196868 bytes to the content-addressed key, head-object size checked"},
-    {"step": "just laya-deploy-config <apr> off aprender-mcp-decide dev ze-kasher-dev", "rc": 0, "result": "memory_mb 3008, timeout 30, auth enabled false, provider none"},
-    {"step": "just laya-deploy <apr> <run> <data> <base> aprender-mcp-decide dev ze-kasher-dev", "rc": 1, "at": "2026-09-27T21:05:30Z..21:12:41Z", "result": "eligibility ok; resolver proof ok; cargo pmcp deploy --regenerate-stack --no-post-deploy-test --no-oauth rc 0; compile log ok; grant applied; GET health failed with HTTP 405; contained"}
+    {
+      "step": "just laya-weights-bucket dev ze-kasher-dev",
+      "rc": 0,
+      "at": "2026-09-27T20:57:33Z",
+      "result": "bucket created: private (all public access blocked), SSE-S3, tagged"
+    },
+    {
+      "step": "just laya-upload <apr> <run> <data> <base> aprender-mcp-decide dev ze-kasher-dev",
+      "rc": 0,
+      "result": "laya-verify accepted first; uploaded 846196868 bytes to the content-addressed key, head-object size checked"
+    },
+    {
+      "step": "just laya-deploy-config <apr> off aprender-mcp-decide dev ze-kasher-dev",
+      "rc": 0,
+      "result": "memory_mb 3008, timeout 30, auth enabled false, provider none"
+    },
+    {
+      "step": "just laya-deploy <apr> <run> <data> <base> aprender-mcp-decide dev ze-kasher-dev",
+      "rc": 1,
+      "at": "2026-09-27T21:05:30Z..21:12:41Z",
+      "result": "eligibility ok; resolver proof ok; cargo pmcp deploy --regenerate-stack --no-post-deploy-test --no-oauth rc 0; compile log ok; grant applied; GET health failed with HTTP 405; contained"
+    },
+    {
+      "step": "just laya-deploy <apr> <run> <data> <base> aprender-mcp-decide dev ze-kasher-dev (resume attempt 2, after the pmcp.run login)",
+      "rc": 1,
+      "at": "2026-09-27T22:10:50Z..22:17:41Z",
+      "result": "eligibility ok; deploy rc 0; compile log ok; grant applied; edge /health serverId ok; identity probe refused by the edge (503 -32004 'Server is in error state', set by pmcp.run's pre-grant post-deploy call); contained"
+    }
   ],
   "compile_log_identity": {
     "ok": true,
@@ -84,7 +108,7 @@
   "labels": null,
   "containment": {
     "reserved_concurrent_executions": 0,
-    "verified": "aws lambda get-function-concurrency read 0 after the recipe's own check",
+    "verified": "aws lambda get-function-concurrency read 0 after the recipe's own check (21:12Z run) and again at 22:18:08Z (resume attempt 2)",
     "grant_removed": "the inline decide-weights policy (env dev) is absent from the execution role (list-role-policies: pmcp-declared, PmcpCompositionPolicy only)",
     "left_in_place_for_the_human": "the pmcp.run deployment, the function and the S3 object; laya-teardown prints destroy / s3 rm / resume commands and runs none of them"
   },
@@ -103,9 +127,9 @@
   "shared_root_restored": "RESTORED crates byte-identical (state sha256 7c6f25eb46e83347d66e32a9e0cfae39c5556c58383dab2c109b3c061773aa03); git status --porcelain crates/.pmcp crates/deploy empty",
   "cold_samples_status": "not taken: Task 3 runs only after an identity-ok deploy (plan 08-17); accepted_region_cold stays LIVE-PENDING",
   "resume_requires_human": [
-    "choose a replacement for the unrealizable health-body check (see the SUMMARY checkpoint options)",
-    "approve lifting the containment: aws lambda delete-function-concurrency --function-name aprender-mcp-decide (laya-teardown prints it as the human's call)",
-    "then re-run just laya-deploy (redeploy, re-grant, identity probe) and Task 3 (just laya-deploy-verify)"
+    "choose how the S3 read exists before pmcp.run's post-deploy call (SUMMARY checkpoint: pre-grant in laya-deploy, [iam] in the deploy config, or a model-free initialize/tools/list in the bootstrap), or stop at deploy-refused",
+    "approve lifting the containment again: aws lambda delete-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide",
+    "then re-run just laya-deploy (needs a live pmcp.run login), the warm identity classify and Task 3 (just laya-deploy-verify ... 2)"
   ],
   "resume": {
     "decided_by": "human",
@@ -127,6 +151,44 @@
       "confirm": "a read-only `cargo pmcp deploy outputs` got the same UnauthorizedException, so the cached pmcp.run login no longer refreshes on its own (it did on the first run)",
       "shared_root_restored": "RESTORED crates byte-identical (state sha256 7c6f25eb46e83347d66e32a9e0cfae39c5556c58383dab2c109b3c061773aa03) on both calls"
     },
-    "blocked_on": "authentication gate: the human runs `cargo pmcp deploy login` (browser OAuth to pmcp.run); then the continuation re-runs just laya-deploy, the warm identity classify and Task 3"
+    "blocked_on": "a human decision (blocking-human): how to get the weights grant in place BEFORE pmcp.run's post-deploy call (see the SUMMARY checkpoint options), plus approval to lift the containment again",
+    "auth_gate_cleared": "the user ran `cargo pmcp deploy login --target-type pmcp-run` at about 22:10Z (token valid to 23:10:14Z); active target dev = profile ze-kasher-dev, us-east-1",
+    "redeploy_attempt_2": {
+      "at": "2026-09-27T22:10:50Z..22:17:41Z",
+      "command": "just laya-deploy models/decide/laya-stance-64.apr models/decide/laya-stance-64 data/decide/tweet-stance-64 <base> aprender-mcp-decide dev ze-kasher-dev",
+      "rc": 1,
+      "reached": [
+        "eligibility ok: laya-verify accepted the artifact, sha256 H",
+        "cargo pmcp deploy --regenerate-stack --no-post-deploy-test --no-oauth rc 0: 'Deployment completed successfully', deployment_id dep_1790547363088_a3d2572f, oauth_enabled false; function LastModified 22:16:34Z, MemorySize 3008, arm64, Active/Successful",
+        "compile log identity ok (the recipe's check passed: aprender-mcp-decide-lambda and no other *-lambda package)",
+        "laya-grant applied the decide-weights policy on the execution role, then the 20 s IAM propagation wait",
+        "edge health ok: GET https://aprender-mcp-decide.us-east.true-mcp.com/health -> serverId aprender-mcp-decide (the 3115c690e check, first live pass)"
+      ],
+      "refusal": "IDENTITY FAILURE: the identity probe failed (log: models/decide/deploy-probe-aprender-mcp-decide.log) -- containing (reserved concurrency 0, grant removed)",
+      "probe_error": "probe_id=probe-18d94d6c898037b8-125d1: initialize: HTTP 503: {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32004,\"message\":\"Server is in error state\"},\"id\":null}",
+      "diagnosis": {
+        "what_failed": "the pmcp.run EDGE refused the probe's first POST; the request never reached the function, so this is not an identity mismatch, an OOM or a probe-replay refusal -- no model load has happened on Lambda yet",
+        "evidence": [
+          "CloudWatch (/aws/lambda/aprender-mcp-decide, 22:14Z onward) holds exactly ONE invocation: 22:16:47Z, 13 s after the function update and BEFORE laya-grant. It is pmcp.run's own post-deploy call (the recipe passes --no-post-deploy-test). The load failed at the S3 object-length lookup after 5 attempts (no policy yet): 'bootstrap: decide.load failed probe_id=none'. REPORT: durationMs 170.883, maxMemoryUsedMB 37, initDurationMs 66.656, memorySizeMB 3008",
+          "no invocation for the probe's initialize: the edge answered 503 -32004 'Server is in error state' itself",
+          "the state is sticky: one diagnostic POST initialize at 22:18:34Z (function already contained) got the same 503 -32004 body, with no invocation",
+          "the edge /health still returns 200 {status healthy, serverId aprender-mcp-decide, hasDeployment true} at 22:18:08Z: /health does not reflect the MCP route's error state"
+        ],
+        "root_cause": "D-ITEM-08-17-B, now proven decisive: pmcp.run calls the function once right after every deploy, before any out-of-band grant can exist, records the failed model load as the server's state, and then refuses every MCP POST at the edge. The grant-after-deploy order in laya-deploy can therefore never reach the identity probe on pmcp.run",
+        "execution_role": "the redeploy kept the SAME execution role name as the 21:12Z deploy (read from both deploys' grant output), so a grant applied BEFORE `cargo pmcp deploy` would exist when the platform's post-deploy call runs (untested)"
+      },
+      "containment": {
+        "reserved_concurrent_executions": 0,
+        "verified_at": "2026-09-27T22:18:08Z (get-function-concurrency read 0; list-role-policies: pmcp-declared, PmcpCompositionPolicy only -- the decide-weights policy is removed)"
+      },
+      "shared_root_restored": "RESTORED crates byte-identical (state sha256 7c6f25eb46e83347d66e32a9e0cfae39c5556c58383dab2c109b3c061773aa03, exit 0); git status --porcelain crates/.pmcp crates/deploy empty",
+      "not_run": "the warm identity classify, Task 3 (just laya-deploy-verify ... 2) and the admin-UI call: each needs a server the edge will route to. FALSIFY-DECIDE-TOOL-009 stays LIVE-PENDING; no cold sample, Max Memory Used under load, or probe-replay evidence exists yet",
+      "teardown_commands": {
+        "note": "printed by laya-teardown and run by NONE of this plan's steps; the bucket name carries the account id and is written here as <weights-bucket>",
+        "remove_deployment": "just _laya-crates-root-swap crates crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml models/decide/destroy-aprender-mcp-decide.state cargo pmcp deploy destroy --manifest-path crates",
+        "remove_weights": "aws s3 rm --profile ze-kasher-dev --recursive s3://<weights-bucket>/decide/aprender-mcp-decide/",
+        "resume_serving_instead": "aws lambda delete-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide"
+      }
+    }
   }
 }

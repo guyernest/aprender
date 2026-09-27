@@ -20,7 +20,7 @@ affects: [08-17 continuation, 08-18, 08-12, decide deploy recipes, pmcp.run edge
 actuals:
   tokens: 10951    # chars/4 over the realized diff a90a5cd41..371c6bfe7 (43803 chars); this SUMMARY excluded
   tasks: 2         # Task 1 recorded (answered by the user) and Task 2 executed to a contained refusal; Task 3 skipped by the plan's own rule
-  commits: 3       # MEASURED: git rev-list --count a90a5cd41..HEAD before this SUMMARY commit
+  commits: 7       # MEASURED: git rev-list --count a90a5cd41..HEAD before the resume-attempt-2 SUMMARY commit
 plan_head_before: a90a5cd41e91a3d1b153da91d104e5fba6e3822f
 
 tech-stack:
@@ -51,6 +51,7 @@ key-decisions:
   - "USER DECISION 2026-09-27: memory 3,008 MB, not 10,240 MB. The account is capped at 3 GB until AWS Support approves more; profile ze-kasher-dev"
   - "The 3,008 MB budget is an extrapolation from spike 026's Graviton2 anchors (10,240 and 4,096 MB), scaled by vCPU. Per-token uses the larger anchor (40 ms). The fixed cold cost uses the nearer anchor (4,096 MB), because it refutes the 10 GB anchor for the load term. A software sha256 pass is priced explicitly (4521 ms). The result: 120 tokens and 2 texts"
   - "The GET health-body check in laya-deploy is unrealizable through the pmcp.run edge. A 405 from the edge is a recipe-assumption failure, not a model identity failure. Per the user's failure rule, the contained deploy is recorded as deploy-refused and the plan stops for the human's resume decision"
+  - "Resume attempt 2: grant-after-deploy cannot work on pmcp.run. The platform's own post-deploy call fails the model load before the grant exists, and the edge then refuses every MCP POST with 503 -32004 'Server is in error state' (D-ITEM-08-17-B, now proven). The outcome stays deploy-refused (contained), and the fix is a human choice"
 
 patterns-established:
   - "Budget tiers: re-deriving a door bound for a new memory size changes the contract first, then the Rust mirror, then the deploy memory, in one commit, before any AWS call"
@@ -98,8 +99,11 @@ coverage:
       - kind: other
         ref: "just laya-deploy -> rc 1: GET health 405 at the pmcp.run edge -> contained (reserved concurrency 0 verified)"
         status: fail
+      - kind: other
+        ref: "resume attempt 2, just laya-deploy -> rc 1: edge /health serverId ok, then the identity probe's initialize got 503 -32004 'Server is in error state' from the edge -> contained (reserved concurrency 0 verified 22:18:08Z)"
+        status: fail
     human_judgment: true
-    rationale: "Refused and contained by the recipe's unrealizable health check (D-ITEM-08-17-A). Resuming needs a human choice of the replacement check and approval to lift the containment"
+    rationale: "Refused and contained twice. First by the unrealizable GET health check (D-ITEM-08-17-A, fixed in 3115c690e). Then by pmcp.run's sticky error state after its own pre-grant post-deploy call (D-ITEM-08-17-B). Resuming needs a human choice of how the S3 read exists before that call, plus approval to lift the containment"
   - id: D5
     description: "Cold accepted region of both maximal shapes at 3,008 MB, with CloudWatch Max Memory Used and init duration per sample (D-10)"
     requirement: "D-10"
@@ -113,6 +117,8 @@ status: halted
 ---
 
 # Phase 8 Plan 17: Go/No-Go and Live Decide Deploy Summary
+
+**Resume attempt 2 (22:10-22:18Z) was refused and contained too. After the login, the redeploy passed eligibility, compile identity, the grant and the new edge `/health` serverId check. The identity probe's first POST then got `503 Server is in error state` from the pmcp.run edge, and never reached the function. pmcp.run had called the function itself 13 s after the update, before the grant existed. The load failed, and the platform kept that error. No model load has run on Lambda yet, so there are no cold samples. See the checkpoint at the end.**
 
 **The classify budget is now priced for the 3,008 MB tier the account allows: 120 built tokens and 2 texts, extrapolated term by term from spike 026, in contract 2.0.0. The gated stance model deployed to pmcp.run at 3,008 MB with its sha256 pin, and the compile log names only the decide package. laya-deploy then contained it. Its GET health check can never reach the function, because the pmcp.run edge answers GET `/mcp` itself with 405. The function is throttled to reserved concurrency 0 and the grant is removed. Resuming needs a human choice.**
 
@@ -229,6 +235,8 @@ Skipped. It runs only after an identity-ok deploy, and the plan's rule is that "
 2. **laya-deploy pre-grant fixes** — `b30f437da` (fix)
 3. **Task 2: the deploy-refused evidence record and deferred items** — `371c6bfe7` (feat)
 4. **Resume: laya-deploy checks the edge /health serverId** — `3115c690e` (fix)
+5. **Resume attempt 1 record (auth gate)** — `f8073e5f5` (docs)
+6. **Resume attempt 2 record (edge error state, re-contained)** — the docs commit that carries this section
 
 ## Deviations from Plan
 
@@ -270,7 +278,7 @@ Skipped. It runs only after an identity-ok deploy, and the plan's rule is that "
 |------|------|-------------|
 | threat_flag: open-endpoint | 08-LIVE-DEPLOY-EVIDENCE.json | `aprender-mcp-decide` exists on pmcp.run with auth off (user-accepted). It is currently throttled to reserved concurrency 0, so no invocation runs |
 
-## CHECKPOINT: human decision needed to resume (blocking-human)
+## First checkpoint (resolved: the user chose option 1)
 
 - **Where things stand.** The function is live but contained: reserved concurrency 0, grant removed. The S3 object is in place.
 - **What failed.** The 08-10 health-body check cannot pass on pmcp.run, because the edge answers every GET itself.
@@ -308,18 +316,100 @@ Skipped. It runs only after an identity-ok deploy, and the plan's rule is that "
   - Nothing was uploaded, and no AWS resource changed. The shared root was restored byte-identically.
   - A read-only `cargo pmcp deploy outputs` gets the same error. It refreshed the token on the first run, but it does not now.
 - **Blocked on the human:** run `cargo pmcp deploy login --target-type pmcp-run` (browser OAuth). The continuation then re-runs `just laya-deploy`, the warm identity classify and Task 3.
+- **Resolved at about 22:10Z:** the user logged in. The token is valid until 23:10:14Z, and the active target is `dev` (ze-kasher-dev, us-east-1).
+
+## Resume attempt 2 (2026-09-27, 22:10:50Z-22:17:41Z): refused at the edge, contained
+
+`just laya-deploy models/decide/laya-stance-64.apr models/decide/laya-stance-64 data/decide/tweet-stance-64 <base> aprender-mcp-decide dev ze-kasher-dev` exited 1.
+
+| Step | Result |
+|---|---|
+| Eligibility | ok: `laya-verify` accepted the artifact, sha256 H |
+| `cargo pmcp deploy --regenerate-stack --no-post-deploy-test --no-oauth` | rc 0. Deployment `dep_1790547363088_a3d2572f`, oauth off. The function was updated at 22:16:34Z: 3008 MB, arm64, Active/Successful |
+| Compile log identity | ok: `aprender-mcp-decide-lambda`, and no other `*-lambda` package |
+| `laya-grant` + 20 s IAM wait | applied |
+| Edge health (`3115c690e`, its first live run) | ok: `/health` names serverId `aprender-mcp-decide` |
+| Identity probe | **refused:** `initialize: HTTP 503 {"code":-32004,"message":"Server is in error state"}` (probe_id `probe-18d94d6c898037b8-125d1`) |
+| Containment | reserved concurrency 0 and the grant removed, both verified read-only at 22:18:08Z |
+| Shared root | restored byte-identical (`7c6f25eb…`); porcelain empty |
+
+**Diagnosis. It was measured read-only, plus one diagnostic POST made while the function was contained.**
+- **CloudWatch holds exactly one invocation after the redeploy,** at 22:16:47Z. It came 13 s after the update and before the grant, so it is pmcp.run's own post-deploy call (the recipe passes `--no-post-deploy-test`).
+  - The load failed at the S3 object-length lookup after 5 attempts: `decide.load failed probe_id=none`.
+  - REPORT: durationMs 170.9, Max Memory Used 37 MB, Init Duration 66.7 ms, memorySize 3008.
+- **The probe's initialize has no invocation.** The edge answered 503 -32004 itself.
+- **The error state is sticky.** A POST initialize at 22:18:34Z got the same 503 body, again with no invocation.
+- **The edge `/health` still says healthy** (200, serverId, hasDeployment true). So `/health` does not show the MCP route's error state.
+- **Cause (D-ITEM-08-17-B, now proven decisive).** pmcp.run invokes the function after every deploy, before an out-of-band grant can exist. It keeps the failed load as the server's state and refuses MCP traffic at the edge. The grant-after-deploy order therefore can never reach the identity probe on pmcp.run.
+- **Not a model failure.** This is not an identity mismatch, an OOM or a probe-replay refusal. No model load has run on Lambda.
+- **The redeploy kept the first deploy's execution role name.** So a grant applied before `cargo pmcp deploy` would already exist when the platform makes its call. This is untested.
+
+**Not run:**
+- The warm identity classify.
+- Task 3 (`just laya-deploy-verify ... 2`): no cold samples, no Max Memory Used under load, and no comparison with the 17000 ms / 40 ms per token / ~350 MB headroom extrapolations.
+- The admin-UI call.
+
+Each of these needs a server the edge will route to. FALSIFY-DECIDE-TOOL-009 stays LIVE-PENDING.
+
+**Teardown commands.** They are recorded in the evidence, and none has been run:
+- Destroy the deployment: `just _laya-crates-root-swap crates crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml models/decide/destroy-aprender-mcp-decide.state cargo pmcp deploy destroy --manifest-path crates`
+- Remove the weights: `aws s3 rm --profile ze-kasher-dev --recursive s3://<weights-bucket>/decide/aprender-mcp-decide/`
+- Or resume serving: `aws lambda delete-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide`
+
+## CHECKPOINT: human decision needed to resume (blocking-human)
+
+**Where things stand:**
+- The function is deployed and contained: reserved concurrency 0, grant removed.
+- The S3 object is in place.
+- pmcp.run holds the server in an error state.
+
+**What is needed:** the S3 read must exist before pmcp.run's post-deploy call. The fix changes how the weights permission reaches the role, so it is the human's choice. Every option except 4 then needs:
+- a redeploy (a live pmcp.run login), which also clears the error state if the platform's call succeeds;
+- lifting the containment again, which is your call.
+
+**Options:**
+1. **Declare the S3 read in the deploy config's `[iam]`** (recommended; the durable fix in D-ITEM-08-17-B).
+   - cargo-pmcp's pmcp-run path runs a fail-closed IAM validator, and `--regenerate-stack` renders `[iam]` into stack.ts. This was read in the 0.24.2 source. 0.24.3, the installed version, is not in the local registry and still needs checking.
+   - The policy then exists at create time.
+   - `laya-deploy-config` would emit a `[[iam.statements]]` scoped to `decide/aprender-mcp-decide/*`, and `laya-grant` becomes a check.
+2. **Pre-grant in `laya-deploy`:** run `laya-grant` before `cargo pmcp deploy` when the function already exists, and re-grant after it.
+   - This is the smallest recipe change, and the role name survived the redeploy.
+   - Risks: a stack update might drop an out-of-band policy, and a first deploy still has no role to grant to.
+3. **Make the bootstrap answer `initialize`/`tools/list` without loading the model,** and load it lazily on `tools/call`.
+   - This changes crate source, and so the plan's no-source-edit check.
+   - The platform's call would then succeed with no grant at all.
+4. **Stop at deploy-refused.** Tear down with the commands above, and let 08-18 record the refusal.
+
+**After options 1-3, the continuation:**
+1. Commits the change and re-runs `just laya-deploy-selftest` offline.
+2. Lifts the containment.
+3. Re-runs `just laya-deploy`.
+4. Takes the warm identity classify, keeping it to 2 texts and 120 tokens or fewer.
+5. Runs Task 3 (`just laya-deploy-verify ... 2`), taking Max Memory Used and Init Duration per sample with `cw_report.py`.
+6. Makes the admin-UI call.
 
 ## Next Phase Readiness
 
 - **ROADMAP and STATE stay at 15/18,** with a blocker, because this plan is halted.
-- **The artifact, bucket object, config and resolver proof are all in place,** so a resume is one recipe change plus lifting the containment.
+- **The artifact, bucket object, config and resolver proof are all in place.** The `/health` serverId check is proven live. A resume is one grant-ordering change, a redeploy under a live pmcp.run login, and lifting the containment.
 
 ---
 *Phase: 08-laya-decision-model-local-fine-tune-and-thin-mcp-server*
-*Completed: 2026-09-27 (halted at deploy-refused)*
+*Completed: 2026-09-27 (halted at deploy-refused; resume attempt 2 refused at the pmcp.run edge and contained)*
 
 ## Self-Check: PASSED
 
 - Files exist: 08-LIVE-DEPLOY-EVIDENCE.json, contracts/decide-tool-boundary-v1.yaml (2.0.0), crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml.template (memory_mb 3008).
 - Commits exist: 968d73e99, b30f437da, 371c6bfe7.
 - Adapted Task 2 verify: rc 0, with no bucket prefix, no account id, reserved=0, no source diff after the amendment, and an empty shared root. Task 3 verify: "Task 3 skipped on deploy-refused".
+
+### Self-Check (resume attempt 2): PASSED
+
+- The adapted Task 2 verify passed:
+  - The evidence parses as `deploy-refused` / `deploy-auth-off-accept-risk` with memory 3008 and sha H.
+  - There is no bucket prefix and no 12-digit run in it.
+  - The live account id (read with sts, never written) is absent from the evidence, this SUMMARY and deferred-items.md.
+  - `reserved=0`.
+  - `git diff --quiet 968d73e99` over contracts/ and the three decide crates' src/ is clean.
+  - The `crates/.pmcp` and `crates/deploy` porcelain is empty.
+- The Task 3 verify rule holds: there are no `cold_samples` on a refused branch.
