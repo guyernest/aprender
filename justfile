@@ -1739,10 +1739,20 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
             || echo "ERROR: containment failed -- throttle it by hand: aws lambda put-function-concurrency --function-name $SERVER --reserved-concurrent-executions 0" >&2
         exit 1
     }
-    echo "DEPLOYING $SERVER"
+    # --no-post-deploy-test: cargo-pmcp's own suite (warmup, connectivity, conformance) runs
+    # BEFORE the scoped grant below, and every MCP request to this server loads the model
+    # from S3 first, so the suite could only observe a 403 load failure and exit 3 before
+    # the grant and before this recipe's identity chain (health body, identity probe after
+    # the grant) -- which is the verification this server is held to. (plan 08-17)
+    # --no-oauth when the config says [auth] enabled = false: the human's auth-off decision
+    # made explicit on the command line, not only in the file.
+    AUTH_ON="$(python3 -c 'import sys, tomllib; print(str(tomllib.load(open(sys.argv[1], "rb"))["auth"]["enabled"]).lower())' "$CFG")"
+    OAUTH_FLAG=()
+    [ "$AUTH_ON" = "true" ] || OAUTH_FLAG=(--no-oauth)
+    echo "DEPLOYING $SERVER (auth enabled=$AUTH_ON)"
     set +e
     just _laya-crates-root-swap crates "$CFG" "$SNAP" \
-        cargo pmcp deploy --manifest-path crates --regenerate-stack --no-color > "$LOG" 2>&1
+        cargo pmcp deploy --manifest-path crates --regenerate-stack --no-post-deploy-test ${OAUTH_FLAG[@]+"${OAUTH_FLAG[@]}"} --no-color > "$LOG" 2>&1
     rc=$?
     set -e
     if [ "$rc" -ne 0 ]; then
@@ -1755,6 +1765,10 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     ENDPOINT="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$SNAP/deployment.toml" 2>/dev/null)" \
         || contain "no endpoint in $SNAP/deployment.toml"
     just laya-grant "$SERVER" "$ENV" "$PROFILE"
+    # IAM is eventually consistent: the identity probe's first request is the cold load's
+    # S3 GET, and a policy not yet visible reads as a 403 load failure -- which the check
+    # below would misreport as an identity failure and contain. (plan 08-17)
+    sleep "${LAYA_GRANT_PROPAGATION_S:-20}"
     HEALTH="$(curl -fsS --max-time 30 "$ENDPOINT")" || contain "GET $ENDPOINT failed"
     python3 -c 'import json, sys; b = json.loads(sys.argv[1]); sys.exit(0 if b.get("package") == "aprender-mcp-decide-lambda" and b.get("server") == sys.argv[2] else 1)' "$HEALTH" "$SERVER" \
         || contain "the health body does not name the decide server: $HEALTH"
