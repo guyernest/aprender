@@ -2303,7 +2303,14 @@ bindings:
   function: verify_run
   signature: 'fn verify_run(apr: &Path, run: &Path, data: &Path, base: &Path) -> Result<DeployEligible, VerifyError>'
   status: pending
-  notes: 'Rust re-score of every eval row of the PACKED artifact (and of the base on the zero-shot rows) within 1e-5, argmax exact, at pack and verify time. Implemented by plan 08-09.'
+  notes: 'Rust re-score of every eval row of the PACKED artifact (and of the base on the zero-shot rows) within bound(c, s), floor 1e-5 (laya-parity-v1 A1), argmax exact, at pack and verify time. Implemented by plan 08-09.'
+- contract: laya-parity-v1.yaml
+  equation: rescore_noise_reference
+  module_path: aprender_decide::verify
+  function: rescore_bounds
+  signature: 'pending: fn rescore_bounds (plan 08-15)'
+  status: pending
+  notes: 'A1 (2026-09-27): noise(c, s) = max |p_torch32 - p_f64| per checkpoint and set, from the hash-bound rescore-noise.json record. Plan 08-14 writes the record (train.py float64 forward, control 0.0, every row); plan 08-15 RECOMPUTES it in Rust and derives bound(c, s) = max(floor, k x noise), refusing an edited, mismatched, over-ceiling or argmax-flipping record.'
 - contract: laya-parity-v1.yaml
   equation: window_mutation
   module_path: aprender::models::modernbert

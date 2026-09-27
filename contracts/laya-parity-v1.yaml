@@ -1,6 +1,6 @@
 contract: laya-parity
 metadata:
-  version: 1.0.0
+  version: 2.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -39,6 +39,25 @@ metadata:
     `status: pending` until the plan landing its rung flips it; no falsification test cites a test
     that does not exist yet (staged binding — `implemented_by:` prose until the implementing plan
     adds `test:`).
+
+    AMENDMENT (A1, 2026-09-27, user decision option 1, declared BEFORE any s64 gate run). The
+    pack/verify re-score bar `pack_rescore_probs_abs` was fitted from 14 BASE-model rows (spike
+    025) and sits below the fp32 noise floor of real fine-tuned checkpoints. Spike 028 measured it:
+    the only gate-passing spike-027 checkpoint (s64-es12-seed17-rep) was refused RescoreDrift at
+    1.445e-5 on row 189, while torch's OWN fp32 answer on that row was 6.27e-5 from a float64
+    forward of the same model and Rust's was 4.83e-5 — Rust was the MORE accurate side, and the
+    model was refused for torch's rounding, not for a Rust defect. The bar is therefore now
+    NOISE-REFERENCED: bound(c, s) = max(1.0e-5, pack_rescore_noise_k x noise(c, s)) per checkpoint
+    c and per scored set s, where noise(c, s) is torch fp32's own distance from float64 on that set
+    (equation rescore_noise_reference). Why k = 4: the ratio Rust-error / torch-error (|rust - f64|
+    over |torch32 - f64|) measured 0.24 to 1.59 over 11 checkpoint x set x T cells, and k_needed =
+    |rust - torch32| / |torch32 - f64| peaked at 1.18 (1.26 on the debug session's fixed-epochs
+    checkpoint), so k = 4 leaves at least 3.2x margin on every measured checkpoint. Argmax stays
+    EXACT. The 1.0e-5 literal still governs every FIXTURE row (probs_abs, the tiny fixtures, the
+    spike-025 14 rows) and remains the FLOOR of the real-row bar; no `float_tolerance` value in
+    this file moved. `final_norm_abs` and `logits_abs` are scoped FIXTURE-ONLY (their values kept),
+    because spike 028 measured torch's own fp32 error on real rows far above both. x86_64 remains
+    UNMEASURED (qa_gate).
   references:
     - '.claude/skills/spike-findings-aprender/references/laya-rust-inference.md — the semantics table (embeddings, local window, MLP, head, scorer, builder) and the parity ladder.'
     - '.claude/skills/spike-findings-aprender/sources/025-laya-rust-forward-parity/ — oracle.py, the fixture and the measured ladder.'
@@ -49,7 +68,12 @@ metadata:
     - decide-apr-v1
 
 # FLAT scalars only. The tolerances themselves are each equation's `float_tolerance`, read from
-# there at test time; these are the structural numbers the rungs are keyed on.
+# there at test time; these are the structural numbers the rungs are keyed on. The ONLY two
+# tolerance-like values kept here are the A1 (2026-09-27) noise multiplier and ceiling of the
+# pack/verify re-score bar: the bar's FLOOR stays `equations.pack_rescore_probs_abs.float_tolerance`
+# (1.0e-5), which pack_laya's policy() already reads. Both sides (scripts/laya_train/contract.py,
+# plan 08-14; aprender_decide::verify / pack_laya policy(), plan 08-15) READ these at run time;
+# neither writes them as a literal.
 constants:
   row_max_tokens: 512
   head_max_len: 192
@@ -59,6 +83,15 @@ constants:
   head_layers: 2
   spike025_fixture_rows: 14
   spike025_ladder_row_tokens: 158
+  # A1: bound(c, s) = max(floor, k x noise(c, s)). k = 4 because k_needed peaked at 1.18 measured
+  # (1.26 on the debug session's fixed-epochs checkpoint), leaving >= 3.2x margin everywhere (spike 028).
+  pack_rescore_noise_k: 4
+  # A1 CEILING (planner's declared value, flagged for the user's review; approved 2026-09-27). The
+  # largest torch32-vs-float64 noise measured on any real checkpoint and set is 6.27e-5 (spike 028,
+  # seed17-rep, test row 189), so k x noise reached at most 2.5e-4. 1.0e-3 admits noise up to 4x
+  # the worst measured and REFUSES any derived bound above it, as either an ill-conditioned
+  # checkpoint or a fabricated float64 record (fail-closed: a human looks). It only ever refuses.
+  pack_rescore_bound_max_abs: 1.0e-3
 
 equations:
 
@@ -99,19 +132,22 @@ equations:
 
   logits_abs:
     formula: 'max_{r,k} |z_rust(r)[k] - z_oracle(r)[k]| <= 1.0e-4'
-    domain: 'every fixture row, scorer logits before temperature'
+    domain: 'FIXTURE-ONLY: the spike-025 14 rows and the 08-02 tiny-fixture rows, scorer logits before temperature'
     codomain: 'agreement within the bar'
     float_tolerance: 1.0e-4
     invariants:
       - 'the rung before probs_abs: a red logits rung with green head layers points at the scorer MLP (LayerNorm -> Linear -> GELU(erf) -> Linear)'
+      - 'FIXTURE-ONLY (A1, 2026-09-27): NOT a real-row bar and gates nothing at pack/verify. Spike 028 measured torch''s OWN fp32 logits against a float64 forward of the same model on real fine-tuned eval rows at up to 2.8e-3 (s64-r1-seed13, held-out 459 rows, |z| up to 20; 7.9e-4 on the 280 test rows), i.e. 28x this bar with no Rust involved. Extending it to real rows requires making it RELATIVE (like per_layer_rel_rms) or noise-referenced like pack_rescore_probs_abs; the value is unchanged'
 
   final_norm_abs:
     formula: 'max |final_norm_rust - final_norm_oracle| <= 1.0e-4 on the 158-token ladder row'
-    domain: 'the encoder output after the final LayerNorm'
+    domain: 'FIXTURE-ONLY: the 158-token spike-025 ladder row (and the 08-02 tiny HF fixture), the encoder output after the final LayerNorm'
     codomain: 'agreement within the bar'
     float_tolerance: 1.0e-4
     invariants:
       - 'the encoder''s last rung; the head is only meaningful above a green final norm'
+      - 'FIXTURE-ONLY (A1, 2026-09-27): NOT a real-row bar and gates nothing at pack/verify. Spike 028 measured torch''s OWN fp32 final norm against a float64 forward on real fine-tuned eval rows at up to 4.6e-2 (26 to 90 % of rows over 1e-4), driven by outlier channels 195 and 963 (values 4 to 12 at token rms about 1) of non-marker tokens, while per-row relative rms stayed <= 1.8e-4. Extending it to real rows requires making it RELATIVE (like per_layer_rel_rms) or noise-referenced like pack_rescore_probs_abs; the value is unchanged'
+      - 'KNOWN FRAGILITY, left unchanged: the fixture headroom is 1.09x (9.155e-5 measured against 1.0e-4, plan 08-09, D-ITEM-08-09-B, now superseded by A1 for real rows). A toolchain or libm change that moves this one row by 1e-5 turns the rung red without a real defect'
 
   embeddings_abs:
     formula: 'max |LayerNorm(tok_embeddings(ids))_rust - _oracle| <= 1.0e-5 on the 158-token ladder row'
@@ -131,14 +167,33 @@ equations:
       - 'the first red layer localises the defect: global layers (every 3rd from 0, RoPE theta 160k) vs local layers (theta 10k, windowed)'
 
   pack_rescore_probs_abs:
-    formula: 'forall eval row r: |p_rust_packed(r)[k] - p_python_f16_reload(r)[k]| <= 1.0e-5 AND argmax equal'
-    domain: 'every eval row, Rust re-score of the PACKED .apr against eval-probs.json (and of the declared base against zero-shot-probs.json)'
-    codomain: 'agreement, or a refused pack / verify naming the row'
+    formula: 'for each checkpoint c in {fine_tuned (the Decider loaded from the PACKED bytes), zero_shot (the declared base)} and the scored set s = the gate eval rows: bound(c, s) = max(float_tolerance, pack_rescore_noise_k x noise(c, s)) with noise(c, s) from rescore_noise_reference; forall r in s, k: |p_rust(r)[k] - p_torch32(r)[k]| <= bound(c, s) AND argmax(p_rust(r)) == argmax(p_torch32(r))'
+    domain: 'every eval row, Rust re-score of the PACKED .apr against eval-probs.json (and of the declared base against zero-shot-probs.json); p_torch32 = the Python F16-reload probabilities stored in those files'
+    codomain: 'agreement within bound(c, s), or a refused pack / verify naming the row, the observed max and the bound used'
     float_tolerance: 1.0e-5
     invariants:
-      - 'runs at PACK and VERIFY time, not at every load (the load-time check is decide-apr-v1 probe replay)'
+      - 'float_tolerance (1.0e-5) is the FLOOR of bound(c, s) since A1 (2026-09-27); the key and value are unchanged and pack_laya policy() keeps reading it'
+      - 'DERIVED, NEVER REPORTED: bound(c, s) is derived in Rust from pack_rescore_noise_k and the floor read from THIS file and from noise(c, s) RECOMPUTED by Rust from the stored float64 record; a bound or noise value reported by the run dir is only cross-checked (a mismatch is refused), never used'
+      - 'ABSENT-RECORD RULE: a run whose gate report carries no rescore_noise_sha256 is held to the floor (1.0e-5) for BOTH sets, so omitting the record can only tighten the check, never loosen it'
+      - 'CEILING RULE: bound(c, s) > pack_rescore_bound_max_abs (1.0e-3) is REFUSED — an ill-conditioned checkpoint or a fabricated record; fail-closed, a human looks'
+      - 'argmax compared EXACTLY (spike 028: 0 flips over 3 pairs x 3,236 row scorings)'
+      - 'the refusal names the row, the observed max and the bound used'
+      - 'SCOPE: only the (checkpoint, set) pairs pack re-scores carry a bound — fine_tuned and zero_shot on the gate eval set. The shift probe and the non-shipped seeds are never re-scored (laya-finetune-gate-v1 1.4.0 eval_set.shift_probe_rule, seed_policy.retention_rule)'
+      - 'runs at PACK and VERIFY time, not at every load (the load-time check is decide-apr-v1 probe replay at probe_probabilities_abs, unchanged)'
       - 'this is what makes the gate''s probabilities describe the served model end to end (laya-finetune-gate-v1 gate_pass)'
-      - 'argmax compared EXACTLY'
+
+  rescore_noise_reference:
+    formula: 'noise(c, s) = max over r in s and k of |p_torch32(r)[k] - p_f64(r)[k]|, where p_torch32 are EXACTLY the probabilities in the scored file (eval-probs.json for fine_tuned, zero-shot-probs.json for zero_shot) widened to f64, and p_f64(r) = softmax(z_f64(r) / T) computed in float64, z_f64 being the logits of the SAME F16-reloaded checkpoint cast to float64 and forwarded from torch''s own ids and markers, T the temperature the scorer applied'
+    domain: 'the two (checkpoint, set) pairs pack re-scores: fine_tuned (the shipped checkpoint) and zero_shot (the declared base), each on the gate eval rows; written by train.py at scoring time into rescore-noise.json (laya-finetune-gate-v1 rescore_noise_schema) and hash-bound by gate-report rescore_noise_sha256'
+    codomain: 'a non-negative f64 per (c, s), recomputed bit-for-bit in Rust, or a refused record naming the field'
+    invariants:
+      - 'the record stores EVERY row''s p_f64, so Rust recomputes the max bit-for-bit: both sides take the max of exact f64 differences of the same stored numbers; any difference from the reported max_abs or bound is refused'
+      - 'CONTROL: a manual fp32 forward on the first min(5, n) rows must reproduce the Scorer''s logits EXACTLY (max |dz| == 0.0), or no record is written and the run is refused — otherwise the float64 path would describe another model'
+      - 'argmax(p_f64(r)) == argmax(p_torch32(r)) on every row, else Rust refuses the record'
+      - 'a record missing a row, repeating a row, or covering a set other than the two above is refused'
+      - 'CAVEAT (carried from .planning/debug/resolved/laya-rescore-drift.md): the float64 model keeps transformers'' f32 RoPE inv_freq buffer, so p_f64 is exact arithmetic over torch''s f32 RoPE tables, not an exact answer to the real-number model'
+      - 'CAVEAT (spike 028 surprise): fp32 error is partly CORRELATED — on s64-es12-seed23-rep test row 97 Rust and torch agree to 3.7e-6 while both sit 3.7e-5 from float64 — so |Rust - torch| can understate both errors. bound(c, s) is a noise-referenced TOLERANCE, not a proof of exactness'
+
 
   window_mutation:
     formula: 'the local window is |i - j| <= local_attention / 2 inclusive; with the window mutated to local_half_window - 1 or local_half_window + 1, per_layer_rel_rms at the FIRST local layer exceeds its bar while the FIRST global layer still passes'
@@ -168,6 +223,11 @@ proof_obligations:
   - type: soundness
     property: 'The window rung discriminates: an off-by-one window fails the first local layer only'
     formal: 'window in {63, 65} implies rel_rms(first_local) > 1.0e-3 AND rel_rms(first_global) <= 1.0e-3'
+    applies_to: all
+
+  - type: bound
+    property: 'The pack/verify re-score bar is noise-referenced, floored, ceilinged and never loosened by omission (A1)'
+    formal: 'forall (c, s): 1.0e-5 <= bound(c, s) = max(1.0e-5, pack_rescore_noise_k x noise_rust(c, s)) <= pack_rescore_bound_max_abs, noise_rust recomputed from the stored float64 record; no record implies bound(c, s) = 1.0e-5'
     applies_to: all
 
 falsification_tests:
@@ -202,10 +262,16 @@ falsification_tests:
 
   - id: FALSIFY-LAYA-PARITY-005
     rule: 'The packed artifact re-scores every eval row within 1e-5 of the Python F16 reload'
-    prediction: 'pack and verify re-score all eval rows (and the base on the zero-shot rows) within 1.0e-5 with argmax exact; one perturbed probability in eval-probs.json is refused naming the row.'
+    prediction: 'pack and verify re-score all eval rows (and the base on the zero-shot rows) within bound(c, s) of pack_rescore_probs_abs — max(1.0e-5, pack_rescore_noise_k x noise(c, s)), and exactly the 1.0e-5 floor when the run carries no rescore-noise.json record (A1) — with argmax exact; one perturbed probability in eval-probs.json beyond that bound is refused naming the row, the observed max and the bound used.'
     implemented_by: 'plan 08-09 (aprender_decide verify / pack tests)'
     test: 'cargo test -p aprender-decide --lib verify::tests::rescore_drift_fine_tuned && cargo test -p aprender-decide --lib verify::tests::rescore_drift_zero_shot'
     if_fails: 'The served model and the gated model differ; the gate describes something that is not deployed.'
+
+  - id: FALSIFY-LAYA-PARITY-006
+    rule: 'The pack/verify bar is noise-referenced, recomputed from the record, and cannot be inflated by editing it'
+    prediction: 'A rescore-noise.json whose reported noise (max_abs) or bound is edited is refused naming the field; a record whose sha256 differs from gate-report rescore_noise_sha256 is refused; a record whose RECOMPUTED bound exceeds pack_rescore_bound_max_abs is refused; a record in which argmax(p_f64) differs from argmax(p_torch32) on any row is refused; a record missing a row is refused; with no record the 1.0e-5 floor applies to both sets; a probability perturbation between the floor and the recorded bound is ACCEPTED with the record and REFUSED without it; the Python writer records the control (0.0) and every row.'
+    implemented_by: 'staged binding (A1, 2026-09-27): plan 08-14 — the Python rescore-noise.json writer, exercised inside `just laya-train-selftest` (control 0.0, every row, argmax agreement); plan 08-15 — aprender_decide::verify tests (rescore_bounds recompute, every refusal above, the accept-with / refuse-without pair). Each implementing plan adds `test:` / `test_harness:` in the same commit as its tests.'
+    if_fails: 'Either the bar can be loosened by the run dir it judges, or a real drift above the recorded noise is waved through; in both cases the re-score no longer ties the served model to the gated one.'
 
 kani_harnesses:
 
@@ -238,9 +304,11 @@ qa_gate:
     - 'embeddings, per-layer relative rms and final norm within their bars'
     - 'logits and probabilities within their bars; argmax exact'
     - 'window mutation fails the first local layer only'
-    - 'pack/verify re-score of every eval row within 1e-5'
+    - 'pack/verify re-score of every eval row within the noise-referenced bound(c, s) = max(1.0e-5, pack_rescore_noise_k x noise(c, s)), noise recomputed in Rust from the hash-bound rescore-noise.json float64 record; the 1.0e-5 floor alone when the run carries no record; a bound above pack_rescore_bound_max_abs refused; argmax exact (A1)'
+    - 'fixture rows (probs_abs, the tiny fixtures, the spike-025 14 rows) keep the 1.0e-5 literal; logits_abs and final_norm_abs are FIXTURE-ONLY'
     - 'measured max|delta| and ARCH printed; first x86_64 value recorded here'
-  pass_criteria: 'FALSIFY-LAYA-PARITY-001..005 pass on aarch64 and x86_64, each observed RED under an induced negative (the window mutation is itself one).'
+    - 'x86_64: UNMEASURED (risk). Every A1 number is aarch64 (Apple M4 Pro, NEON 8x6 BLIS, Apple libm sinf/cosf). Pack and verify run on the dev box; the deploy target is Lambda arm64 (Graviton), so the deploy direction is aarch64 to aarch64 — but Linux glibc sinf/cosf differ from Apple libm, and a 1-ULP sincos change has flipped a row before (.planning/debug/resolved/laya-rescore-drift.md). On Lambda only decide-apr-v1''s two-probe replay at probe_probabilities_abs runs, so a cross-libm probe mismatch would REFUSE the load (fail-closed). The settle-it measurement is spike 028''s x86 procedure (.planning/spikes/028-laya-packability-noise-floor, "x86_64: unmeasured (risk)") against the committed float64 logits, needing no torch on the host; the first x86_64 value is recorded here when measured (deferred-items D-ITEM-08-13-A)'
+  pass_criteria: 'FALSIFY-LAYA-PARITY-001..006 pass on aarch64 and x86_64 (x86_64 unmeasured as of A1), each observed RED under an induced negative (the window mutation is itself one).'
   falsification: >
     Mutate the local window by one in either direction: FALSIFY-LAYA-PARITY-004 must go red at the
     first local layer and green at the first global layer. If it does not, the ladder has stopped

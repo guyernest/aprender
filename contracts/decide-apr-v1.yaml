@@ -198,8 +198,9 @@ deploy_eligibility:
     - 'base sha256 equal to the manifest''s declared base'
     - 'data-dir hashes equal to the manifest''s inputs_sha256'
     - 'split re-verification (laya-finetune-gate-v1 split_disjointness)'
-    - 'Rust re-score of every eval row — fine-tuned from the artifact, zero-shot from the base — within pack_rescore_probs_abs'
+    - 'Rust re-score of every eval row — fine-tuned from the artifact, zero-shot from the base — within the noise-referenced bound(c, s) of laya-parity-v1 pack_rescore_probs_abs (floor 1.0e-5 when the run carries no rescore-noise.json record)'
     - 'the gate recomputed from those verified probabilities (laya-finetune-gate-v1 gate_pass)'
+    - 'the seed-selection rule re-derived from the per-seed probability files (laya-finetune-gate-v1 seed_policy, 1.4.0)'
   inspect: '`inspect` reports identity only; embedded report fields alone NEVER make an artifact eligible'
 
 equations:
