@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 7/12 plans executed in 10 waves (08-08 HALTED at its gate decision)
+**Plans:** 8/12 plans executed in 10 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; D-18 live stance deploy deferred pending the calibration spike)
 
 Plans:
 **Wave 1**
@@ -659,7 +659,7 @@ Plans:
 **Wave 3** *(blocked on Wave 2 completion)*
 
 - [x] 08-03-PLAN.md — ModernBERT encoder in aprender-core (prefix-aware .apr loader, window mutation, CI-listed tests)
-- [ ] 08-08-PLAN.md — `just laya-train`: fine-tune, calibration, fail-closed gate, seed policy; TweetEval stance demo run
+- [x] 08-08-PLAN.md — `just laya-train`: fine-tune, calibration, fail-closed gate, seed policy; TweetEval stance demo run
 
 **Wave 4** *(blocked on Wave 3 completion)*
 

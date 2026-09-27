@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "08-08 halted again: early_stopping recipe (3d4b91da) fails ECE 0.222 > 0.10; human decision needed"
-last_updated: "2026-09-26T05:42:41.735Z"
+stopped_at: "Completed 08-08-PLAN.md (option 3: demo GATE FAIL recorded as fail-closed vectors; D-18 deploy deferred)"
+last_updated: "2026-09-27T00:12:52.037Z"
 last_activity: 2026-09-25
 last_activity_desc: Phase 08 execution started
-state_head: d787f0e817cb4afa565e9f853af9636a45e643e5
+state_head: a0ba4b7d82a0f9fac70fd2d80e2273a93848285b
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 104
-  completed_plans: 99
+  completed_plans: 100
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 8 of 12 (08-07 complete; 08-08 HALTED at its human decision — 08-09..08-12 blocked on it)
-Status: Blocked on the 08-08 human decision
+Plan: 9 of 12 (08-01..08-08 complete; 08-08 closed under option 3 — demo GATE FAIL recorded as fail-closed vectors, D-18 deploy deferred)
+Status: Ready for 08-09, which needs a replan first (its Task 1 precondition requires a passing demo gate report)
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -221,6 +221,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P05 | 38min | 3 tasks | 19 files |
 | Phase 08 P06 | 21 min | 2 tasks | 11 files |
 | Phase 08 P07 | 24min | 3 tasks | 14 files |
+| Phase 08 P08 | 42min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -402,8 +403,13 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-07: FALSIFY-MONO-011 DEPLOYMENT_UNIT_BASELINE 8 -> 9 for aprender-mcp-decide-lambda under D-15 (same pattern as 08-06's 7 -> 8); needs human confirmation
 - [Phase 08]: 08-07: S3 cold-start loader writes each ranged GET straight into a disjoint slice of one pre-sized buffer (RangeFetcher::fetch_range(start, &mut [u8])); a hand-rolled bounded FuturesUnordered replaces buffer_unordered(closure), which broke the lambda_http handler's Send bound
 - [Phase 08]: 08-07: the decide deploy template does NOT prescribe --manifest-path crates/aprender-mcp-decide-lambda: cargo-pmcp's resolver would ship another *-lambda binary from that root; 08-10 settles the deploy root
+- [Phase 08]: 08-08 OPTION 3 (user, 2026-09-26): the D-19 stance demo's outcome of record is GATE FAIL under both declared recipes (fixed_epochs d0f4e40d ece_post 0.3773 T clamped 5.0; early_stopping 3d4b91da ece_post 0.2224 T 3.14; margin passes both). Both run dirs (models/decide/tweet-stance-16-fixed-epochs, models/decide/tweet-stance-16) are FAIL-CLOSED TEST VECTORS that 08-09 pack/verify must refuse; the D-18 live stance deploy is DEFERRED until a declared run passes. Recorded in laya-finetune-gate-v1 1.2.0 demo.*; gate_max_ece, T bounds, seeds and data unchanged; no further recipe tried
+- [Phase 08]: 08-08: the same recipe and seed on MPS is not bitwise reproducible (the 3-seed variance run's seed-13 leg under recipe 3d4b91da gave ece_post 0.2202 vs the recorded 0.2224); a fail-closed vector is identified by its run-dir files and recipe_id, never by re-running it. Variance over seeds 13/17/23: macro_f1 0.451 +- 0.023, F_avg 0.480 +- 0.014, ece_post 0.226 +- 0.115; no seed passes
+- [Phase 08]: 08-08: --seeds N keeps the data and the calibration split fixed (declared seed 13); variance seeds vary only the training RNG, run in deleted temp dirs, and the declared seed's checkpoint (byte-identical to a single-seed run's) is the only one kept
 
 ### Pending Todos
+
+- [Phase 8 — QUEUED 2026-09-26 by the 08-08 option-3 decision]: `.planning/todos/pending/spike-laya-calibration-slice-and-temperature-cap.md` (`/gsd-spike`). Before any third Laya stance gate attempt: measure whether a larger calibration slice (the s64-seed13 cell, 48-row slice) and/or a higher served temperature cap can bring ece_post under 0.10, over seeds 13/17/23. Whatever it recommends is declared in laya-finetune-gate-v1 BEFORE that run is read; gate_max_ece does not move; a cap change touches laya-parity-v1 and the Rust clamp and is the user's call. The D-18 live stance deploy waits on a passing declared run.
 
 - [Phase 2 — CLOSED BY 02-09, the policy held]: DATA-01 through DATA-06 were deliberately left
   UNCHECKED after 02-01 and 02-02, because those plans shipped a crate of `//!`-doc stubs and
@@ -495,7 +501,7 @@ Recent decisions affecting current work:
 - RESOLVED (06.1-03, wave 2): regressor_prior_scale_min stays at 1e-153. The ~1e-7 usability-floor hypothesis was REFUTED by a 5-shape x 12-decade release campaign: at 1e-7 the seasonal series contributes 2.8e-12 relative to yhat, as negligible as at 1e-9 — so a floor there would refuse requests behaving exactly like ones it accepts — and there is no cliff, contribution decaying continuously and saturating between 1e-4 and 1e-2, shape-dependently, because prior_scale is a regularisation STRENGTH and shrinking the coefficient is what it is for. D-21 is instead closed at the OUTCOME: when a fitted coefficient is exactly zero (the optimiser starts at zero, so that means L-BFGS never moved it) the response says so. Threshold-free, shape-independent, and it refuses nothing previously accepted. See 06.1-03-SUMMARY.md.
 - Verify t2c in 06.1-04-PLAN.md cannot see an #[ignore] added to part A or part B (it anchors bodies at fn, and the attribute precedes fn). Measured green on a gated part A. The in-tree Rust test invariance::parts_a_and_b_are_unconditional is the real guard; a later plan should replace the python body with a call to it.
 - SC2 no-argument invariance gate (crates/aprender-forecast/src/invariance.rs:718) is RED under cargo nextest run --workspace --lib, the invocation CI runs; green under -p aprender-forecast. Deterministic, hash-stable, flipped by adding apr-cli to the package set. See 06.1 deferred-items.md item 5.
-- 08-08 halted (2nd time, 2026-09-26): the stance demo FAILS the gate under BOTH declared recipes. fixed_epochs (recipe_id d0f4e40d, run dir models/decide/tweet-stance-16-fixed-epochs): ece_post 0.377, T clamped at 5.0. early_stopping (contract 1.1.0, declared+committed ed19f783a before the run; recipe_id 3d4b91da, run dir models/decide/tweet-stance-16): best epoch 4/12, margin 0.106 passes, ece_post 0.222 > 0.10, T 3.14 unclamped. Measured: the eval-oracle best servable T (<=5) still gives ECE 0.113, and the 12-row calibration slice cannot rank epochs (monitor SE 0.22 vs 0.07 epoch deltas) or estimate T (3.14 vs oracle ~7.5). One declared attempt only, so nothing further was tried. Human decision: a larger calibration slice via a new declared demo cell (e.g. s64-seed13), a laya-parity change to the served T range (alone insufficient), or re-scoping D-07/D-18. Task 2 not started.
+- 08-09 / 08-11 need scope changes before they run (2026-09-26, follows the 08-08 option-3 decision). 08-09's Task 1 precondition requires models/decide/tweet-stance-16/gate-report.json with pass: true, which is unmet by design; its demo leg must instead REFUSE both fail-closed vectors (models/decide/tweet-stance-16 = 3d4b91da, models/decide/tweet-stance-16-fixed-epochs = d0f4e40d) on the Rust-recomputed ece_post, and no laya-stance-16.apr exists for its PACKED / deploy_eligible / stdio real-model legs (the spike-025 LAYA_MODEL_DIR parity leg is independent). 08-11 deploys laya-stance-16.apr: its go/no-go needs a scope decision (hold is the option consistent with option 3). See 08-08-SUMMARY.md 'Next Phase Readiness'.
 
 ### Roadmap Evolution
 
@@ -513,9 +519,9 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-26T05:42:41.438Z
-Stopped at: 08-08 halted again: early_stopping recipe (3d4b91da) fails ECE 0.222 > 0.10; human decision needed
-Resume file: .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-08-SUMMARY.md
+Last session: 2026-09-27T00:12:37.371Z
+Stopped at: Completed 08-08-PLAN.md (option 3: demo GATE FAIL recorded as fail-closed vectors; D-18 deploy deferred)
+Resume file: None
 
 ## Accumulated Context
 
