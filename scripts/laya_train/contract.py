@@ -14,6 +14,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 GATE_CONTRACT = REPO / "contracts" / "laya-finetune-gate-v1.yaml"
 DECIDE_CONTRACT = REPO / "contracts" / "decide-apr-v1.yaml"
+PARITY_CONTRACT = REPO / "contracts" / "laya-parity-v1.yaml"
 
 _CACHE = {}
 
@@ -43,6 +44,21 @@ def gate_contract():
 
 def decide_contract():
     return _load(DECIDE_CONTRACT)
+
+
+def parity_contract():
+    return _load(PARITY_CONTRACT)
+
+
+def noise_policy():
+    """(k, floor, ceiling) of the A1 re-score bar, read from laya-parity-v1 (plan 08-13):
+    k = constants.pack_rescore_noise_k, floor = equations.pack_rescore_probs_abs.float_tolerance,
+    ceiling = constants.pack_rescore_bound_max_abs. bound = max(floor, k x noise); the trainer only
+    RECORDS the noise, the Rust verifier derives and enforces the bound (plan 08-15)."""
+    p = parity_contract()
+    return (int(p["constants"]["pack_rescore_noise_k"]),
+            float(p["equations"]["pack_rescore_probs_abs"]["float_tolerance"]),
+            float(p["constants"]["pack_rescore_bound_max_abs"]))
 
 
 def constants():
@@ -76,15 +92,62 @@ def device_order():
     return list(gate_contract()["device_order"])
 
 
-def run_dir_files():
-    """The run_dir_layout entries as relative paths (the prose after the first space dropped),
-    without the conditional variance-report.json."""
+def run_dir_files(seeds=(13,), has_shift=False):
+    """The run_dir_layout entries a run with `seeds` (the list resolve_seeds returned) and, when
+    `has_shift`, a data-dir shift.jsonl must hold, as relative paths (the prose after the first space
+    dropped). The CONDITIONAL entries are decided by the rule their own prose states, never by name:
+    `(only when more than one seed ran)` and a `<s>` path template (one file per gate seed) hold only
+    when more than one seed ran -- a single-seed run keeps the 1.x layout --, and `(only with
+    shift.jsonl)` only with a shift probe. An entry with an `(only ...)` condition this function does
+    not know is refused, so a new conditional file cannot silently become required or optional."""
+    multi = len(list(seeds)) > 1
     out = []
     for entry in gate_contract()["run_dir_layout"]["run_dir"]:
-        path = str(entry).split(" ", 1)[0]
-        if path != "variance-report.json":
-            out.append(path)
+        path, _, prose = str(entry).partition(" ")
+        if "(only" in prose:
+            if "only when more than one seed ran" in prose:
+                keep = multi
+            elif "only with shift.jsonl" in prose:
+                keep = bool(has_shift)
+            else:
+                raise KeyError("run_dir_layout entry %r carries a condition contract.run_dir_files does not know"
+                               % (entry,))
+            if not keep:
+                continue
+        if "<s>" in path:
+            if multi:
+                out.extend(path.replace("<s>", str(int(s))) for s in seeds)
+            continue
+        out.append(path)
     return out
+
+
+# The rule each OPTIONAL key of recipe_json_schema / gate_report_schema is written under, by the 1.4.0
+# trainer (the contract's own "OPTIONAL ... REQUIRED when / present exactly when" wording). A key the
+# contract marks OPTIONAL that is not listed here is refused by expected_keys (fail-closed).
+_OPTIONAL_KEY_RULES = {
+    "early_stopping": lambda stopping, n, shift: stopping == "early_stopping",
+    "seed_selection": lambda stopping, n, shift: n > 1,
+    "rescore_noise_sha256": lambda stopping, n, shift: True,      # every 1.4.0 run writes the record
+    "shift_probe": lambda stopping, n, shift: bool(shift),
+}
+
+
+def expected_keys(schema, stopping, n_seeds, has_shift):
+    """The exact top-level key set of recipe.json (`recipe_json_schema`) or gate-report.json
+    (`gate_report_schema`) for a run: every schema key, minus rule notes (`*_rule`), minus each key
+    marked OPTIONAL whose rule does not hold for this run."""
+    out = []
+    for key, desc in gate_contract()[schema].items():
+        if key.endswith("_rule"):
+            continue
+        if str(desc).startswith("OPTIONAL"):
+            if key not in _OPTIONAL_KEY_RULES:
+                raise KeyError("%s.%s is OPTIONAL but contract.expected_keys has no rule for it" % (schema, key))
+            if not _OPTIONAL_KEY_RULES[key](stopping, int(n_seeds), has_shift):
+                continue
+        out.append(key)
+    return sorted(out)
 
 
 class RecipeError(ValueError):
@@ -151,11 +214,14 @@ def resolve_stopping(arg):
     return rule
 
 
-def recipe_json(variant, shots_per_class, epochs, seed, base_block, stopping="fixed_epochs"):
+def recipe_json(variant, shots_per_class, epochs, seed, base_block, stopping="fixed_epochs", seed_selection=None):
     """The recipe.json object in `recipe_json_schema` order of keys (serialized sort_keys anyway).
 
     fixed_epochs carries no `early_stopping` key, so its bytes -- and recipe_id -- are exactly the
-    1.0.0 recipe's; early_stopping adds the contract's object and `epochs` becomes the maximum."""
+    1.0.0 recipe's; early_stopping adds the contract's object and `epochs` becomes the maximum.
+    `seed_selection` (1.4.0, A3) is written only when given -- the trainer passes
+    seed_selection_decl() for every three-seed run, so for every production run -- and a single-seed
+    run keeps the 1.x bytes (the legacy rule)."""
     r = recipe()
     out = {
         "variant": variant, "optimizer": r["optimizer"], "encoder_lr": r["encoder_lr"], "head_lr": r["head_lr"],
@@ -168,6 +234,11 @@ def recipe_json(variant, shots_per_class, epochs, seed, base_block, stopping="fi
         out["early_stopping"] = early_stopping_decl()
     elif stopping != "fixed_epochs":
         raise RecipeError("REFUSED stopping: %r is not one of %s" % (stopping, stopping_rules()))
+    if seed_selection is not None:
+        if seed_selection != seed_selection_decl():
+            raise RecipeError("REFUSED seeds: seed_selection %r is not the contract's %r"
+                              % (seed_selection, seed_selection_decl()))
+        out["seed_selection"] = seed_selection
     return out
 
 
@@ -177,23 +248,48 @@ def production_base_block():
             "sha256": b["model_safetensors_sha256"]}
 
 
-def resolve_seeds(n):
-    """The seeds a run trains, per seed_policy (D-08): the first `n` of `variance_seeds` (default 1), the
-    declared seed FIRST. Only the declared seed's checkpoint is ever kept; the rest report variance."""
+def seed_selection_decl():
+    """The recipe.json `seed_selection` object (1.4.0, A3), copied from seed_policy."""
+    sp = seed_policy()
+    return {"policy": str(sp["selection"]), "seeds": [int(s) for s in sp["variance_seeds"]],
+            "rank_scale": int(sp["rank_scale"]), "tie_break": str(sp["tie_break"])}
+
+
+def resolve_seeds(n, variant="production"):
+    """The seeds a run trains, per seed_policy (D-08 as amended by A3, 1.4.0), the declared seed FIRST.
+
+    production: exactly seed_policy.production_seeds_required seeds (the default when --seeds is
+    omitted); any other --seeds is REFUSED -- a single MPS draw is not a gate run (spike 027).
+    synthetic-fixture: 1 (the default; the legacy single-seed rule, the declared seed ships) or
+    production_seeds_required (the median rule). Any other N is refused: the median rule needs an odd N
+    and no legacy multi-seed variant is written any more."""
     sp = seed_policy()
     pool = [int(s) for s in sp["variance_seeds"]]
     declared = int(sp["declared_seed"])
+    need = int(sp["production_seeds_required"])
     if not pool or pool[0] != declared:
         raise RecipeError("REFUSED seeds: seed_policy.variance_seeds %s must start with the declared seed %d"
                           % (pool, declared))
+    if need != len(pool):
+        raise RecipeError("REFUSED seeds: seed_policy.production_seeds_required %d != len(variance_seeds %s)"
+                          % (need, pool))
+    if variant == "production":
+        n = need if n is None else int(n)
+        if n != need:
+            raise RecipeError("REFUSED seeds: production trains exactly seed_policy.production_seeds_required = %d "
+                              "seeds %s and ships the median-ECE seed (A3); --seeds %d is not accepted"
+                              % (need, pool, n))
+        return pool[:need]
     n = 1 if n is None else int(n)
-    if not 1 <= n <= len(pool):
-        raise RecipeError("REFUSED seeds: --seeds %d is outside [1, %d] (seed_policy.variance_seeds %s)"
-                          % (n, len(pool), pool))
+    if n not in (1, need):
+        raise RecipeError("REFUSED seeds: --seeds %d; synthetic-fixture trains 1 seed (legacy rule, seed %d ships) "
+                          "or %d seeds %s (median-ECE rule)" % (n, declared, need, pool))
     return pool[:n]
 
 
 def seeds_label(n):
+    """gate-report seeds.label: the literal the contract declares under BOTH seed rules
+    (seed_policy.rule, gate_report_schema.seeds)."""
     return "single seed" if n == 1 else "mean ± sd over %d seeds" % n
 
 

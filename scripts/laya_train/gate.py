@@ -172,6 +172,31 @@ def verify_report(report):
     return {"pass": passed, "margin": margin, "failed": failed}
 
 
+def rank_key(ece_post, rank_scale):
+    """seed_policy.rank_rule: floor(ece_post x rank_scale) as an int. rank_scale is the INTEGER the
+    contract declares (10000), multiplied in, never a division by a float grid step. A non-finite
+    ece_post has no rank and is refused (it would otherwise sort arbitrarily)."""
+    x = float(ece_post)
+    if not math.isfinite(x):
+        raise GateError("REFUSED seeds: ece_post %r is not finite, so it has no rank key" % (ece_post,))
+    return int(math.floor(x * int(rank_scale)))
+
+
+def select_median_seed(rows, rank_scale):
+    """The SHIPPED seed under seed_policy.selection median_ece (A3): rows carry `seed` and `ece_post`;
+    ordered by (rank_key ascending, seed ascending) -- tie_break smaller_seed --, the seed at 0-based
+    index (N - 1) // 2. An empty or even N, or a repeated seed, is refused (no median to ship)."""
+    rows = list(rows)
+    n = len(rows)
+    if n == 0 or n % 2 == 0:
+        raise GateError("REFUSED seeds: the median rule needs an odd, non-empty number of seeds, got %d" % n)
+    seeds = [int(r["seed"]) for r in rows]
+    if len(set(seeds)) != n:
+        raise GateError("REFUSED seeds: a seed appears more than once in %s" % seeds)
+    order = sorted(rows, key=lambda r: (rank_key(r["ece_post"], rank_scale), int(r["seed"])))
+    return int(order[(n - 1) // 2]["seed"])
+
+
 def evaluate_gate(zs_probs, ft_probs, ft_probs_pre, y, f_avg_labels=None):
     """The metric blocks, margin and pass of a gate report (thresholds from the contract)."""
     th = contract.thresholds()

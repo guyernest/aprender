@@ -32,17 +32,23 @@ The run, in order (every value from contracts/laya-finetune-gate-v1.yaml via con
      path with the saved temperature (f16_reload_scoring, Pitfall 5).
   7. zero-shot: the declared base on eval.jsonl -> zero-shot-probs.json; fine-tuned -> eval-probs.json;
      probes on the decide-apr-v1 probe task -> probes.json.
-  8. gate.evaluate_gate -> gate-report.json; GATE PASS (exit 0) or GATE FAIL (exit 3).
+  8. gate.evaluate_gate; under the median rule, gate.select_median_seed picks the shipped seed.
+  9. the float64 re-score noise record (A1, laya-parity-v1 rescore_noise_reference) of the shipped
+     checkpoint and the base -> rescore-noise.json; a manual fp32 forward that does not reproduce the
+     Scorer's logits exactly refuses the run (exit 2) with no record and no gate report.
+ 10. gate-report.json (rescore_noise_sha256 binds the record); GATE PASS (exit 0) or GATE FAIL (exit 3).
 
-Seeds (D-08, seed_policy): one declared seed (13) by default, and the gate report says `single seed`.
-`--seeds N` trains the first N of `variance_seeds` (13, 17, 23), the declared seed FIRST and exactly as
-a single-seed run. Each other seed runs steps 4-7 on the SAME data, split and recipe in a temporary
-`<out>/.variance-seed-<s>/` that is deleted as soon as its metrics are recorded, so the declared seed's
-checkpoint is the only one left. The seed varies the training RNG (torch / random / numpy: init of the
-head, batch shuffle), not the data or the calibration slice. `variance-report.json` carries per-seed
-rows and mean +- sd (sample sd, ddof 1) of macro_f1, f_avg, ece_post and margin; it is INFORMATION.
-The gate is judged on the declared seed, which is the shipped model; the label becomes
-"mean ± sd over N seeds". recipe.json does not change with N (the recipe_id is the declared run's).
+Seeds (D-08 as amended by A3, laya-finetune-gate-v1 1.4.0 seed_policy). PRODUCTION trains exactly the
+three gate seeds (13, 17, 23; `--seeds` other than 3 is refused before anything is written) on the SAME
+data, split and recipe, each in `<out>/seeds/seed-<s>/` (steps 4-7). Only after every seed's checkpoint
+is fixed are they ranked by (floor(ece_post x rank_scale), seed) and the MEDIAN seed ships: its
+checkpoint becomes `<out>/checkpoint`, the other two checkpoints are deleted, every seed's
+`seeds/seed-<s>/eval-probs.json` is kept and hash-bound in gate-report `seeds.per_seed`, and the gate
+passes only if the shipped seed passes BOTH clauses. recipe.json carries `seed_selection`. The median
+is selected WITH eval labels (seed_policy.honesty); variance-report.json (mean +- sample sd) is
+information. The seed varies the training RNG (torch / random / numpy: head init, batch shuffle), not
+the data or the calibration slice. The synthetic-fixture variant also accepts `--seeds 1` (its default):
+the LEGACY single-seed rule, no `seed_selection`, the declared seed ships, label `single seed`.
 
 Ordering (asserted, not assumed): RECIPE WRITTEN < STOP < CHECKPOINT COMPLETE < SCORING START, and
 recipe.json <= checkpoint/model.safetensors <= eval-probs.json by mtime -- no eval probability exists
@@ -51,6 +57,7 @@ before the stopping decision and the shipped weights are fixed.
 Logs carry counts, hashes and timings only -- never input text.
 """
 import argparse
+import gc
 import json
 import math
 import os
@@ -447,14 +454,13 @@ def assert_checkpoint_fixed(ck, stopping):
         raise RuntimeError("eval scoring requested before the early-stopping record is in the checkpoint")
 
 
-def assert_eval_after_checkpoint(out, ck):
+def assert_eval_after_checkpoint(recipe_path, ck, eval_path):
     """mtime order recipe.json <= checkpoint/model.safetensors <= eval-probs.json (recipe_before_scores,
-    early_stopping_train_side)."""
-    t_recipe, t_ck, t_eval = ((p).stat().st_mtime_ns for p in
-                              (out / "recipe.json", ck / "model.safetensors", out / "eval-probs.json"))
+    early_stopping_train_side) -- for the shipped run dir and for every seeds/seed-<s>/ of a median run."""
+    t_recipe, t_ck, t_eval = (Path(p).stat().st_mtime_ns for p in (recipe_path, ck / "model.safetensors", eval_path))
     if not (t_recipe <= t_ck <= t_eval):
-        raise RuntimeError("ordering violated: mtime recipe.json %d, model.safetensors %d, eval-probs.json %d"
-                           % (t_recipe, t_ck, t_eval))
+        raise RuntimeError("ordering violated: mtime recipe.json %d, %s %d, %s %d"
+                           % (t_recipe, ck / "model.safetensors", t_ck, eval_path, t_eval))
 
 
 def eval_probs_obj(labels, eval_rows, P):
@@ -476,6 +482,105 @@ def probes_obj(agent):
         probes.append({"input_index": i, "tokens": n, "label": labels[int(np.argmax(p))],
                        "probabilities_f32_hex": f32_hex_list(p)})
     return {"probes": probes}
+
+
+# ------------------------------------------------------------------------------------------ A1 noise record
+
+def manual_logits(model, item):
+    """One built row through the model by hand -- encoder -> type embedding -> head layers -> marker
+    gather -> scorer, batch 1, no padding (spike 028 torch_triad `run`) -- in the model's own dtype.
+    In fp32 it must reproduce the Scorer's logits EXACTLY (the control); cast to float64 it is the
+    reference of laya-parity-v1 rescore_noise_reference."""
+    n = len(item["ids"])
+    dev = next(model.parameters()).device
+    with torch.no_grad():
+        ids = torch.tensor([item["ids"]], dtype=torch.long, device=dev)
+        h = model.encoder(input_ids=ids,
+                          attention_mask=torch.ones(1, n, dtype=torch.long, device=dev)).last_hidden_state
+        h = h + model.type_emb(torch.tensor([item["qtype"]], device=dev))[:, None, :]
+        if model.head is not None:
+            pad = torch.zeros(1, n, dtype=torch.bool, device=dev)
+            for layer in model.head.layers:
+                h = layer(h, src_key_padding_mask=pad)
+        idx = torch.tensor([item["markers"]], device=dev)[:, :, None].expand(-1, -1, h.size(-1))
+        z = model.scorer(torch.gather(h, 1, idx)).squeeze(-1)[0]
+    return z.cpu().numpy()
+
+
+def rescore_noise_set(agent, which, rows, question, probs_path, labels, k_mult, floor):
+    """(set record | None, control max |dz|, control rows) for one (checkpoint, eval set) pair.
+
+    p32 are EXACTLY the probabilities written to `probs_path`, widened to float64. The manual fp32
+    forward must reproduce the Scorer's logits bit for bit on the first min(5, n) rows; otherwise None
+    is returned (the caller refuses) and the model is left in fp32. Then the SAME model is cast to
+    float64, every row forwarded from Laya's own ids / markers, p_f64 = softmax(z_f64 / T) in float64
+    at the temperature the Scorer applied. max_abs = max |p32 - p_f64| over rows and components.
+    CONSUMES the agent: its model is float64 afterwards."""
+    written = json.loads(Path(probs_path).read_text())
+    if written["labels"] != list(labels) or [r["row"] for r in written["rows"]] != list(range(len(rows))):
+        raise RuntimeError("%s does not hold one row per eval row in order under %s" % (probs_path, labels))
+    p32 = np.array([r["probabilities"] for r in written["rows"]], dtype=np.float64)
+    k = len(labels)
+    internal = {"q": Agent._to_internal(question)}
+    items = [agent._encode_state(t, ["q"], internal)[0] for t, _ in rows]
+    if any(len(it["markers"]) != k for it in items) or len({it["qtype"] for it in items}) != 1:
+        raise RuntimeError("an eval row does not carry one marker per criterion under one question type")
+    qt = items[0]["qtype"]
+    t_applied = float(agent.temperature_by_options.get(temp_bucket(qt, k), agent.temperature[qt]))
+    sc = Scorer(agent)
+    ctrl_rows = list(range(min(5, len(rows))))
+    dz = []
+    for i in ctrl_rows:
+        _, z_sc, _ = sc.score(rows[i][0], question)
+        z_man = manual_logits(agent.model, items[i])[:k]
+        dz.append(float(np.abs(z_man.astype(np.float64) - np.asarray(z_sc, dtype=np.float64)).max()))
+    ctrl = float(np.max(dz))                       # NaN propagates: a NaN control is not 0.0
+    if not ctrl == 0.0:
+        return None, ctrl, ctrl_rows
+    m64 = agent.model.to(torch.float64).eval()
+    P64 = np.stack([gate.softmax(manual_logits(m64, it)[None, :k].astype(np.float64), t_applied)[0]
+                    for it in items])
+    max_abs = float(np.abs(p32 - P64).max())
+    rec = {"which": which, "scored": "eval", "t_applied": t_applied, "n": len(rows),
+           "argmax_agree": int((P64.argmax(1) == p32.argmax(1)).sum()), "max_abs": max_abs,
+           "bound": max(floor, k_mult * max_abs),
+           "rows": [{"row": i, "probabilities_f64": [float(v) for v in P64[i]]} for i in range(len(rows))]}
+    return rec, ctrl, ctrl_rows
+
+
+def write_noise_record(out, base, eval_rows, question, labels):
+    """rescore-noise.json (laya-finetune-gate-v1 rescore_noise_schema, laya-parity-v1 A1) for the shipped
+    checkpoint (a fresh reload of <out>/checkpoint) and the declared base, each over every eval row; k and
+    the floor READ from laya-parity-v1. A non-zero control refuses the run (exit 2) with no record and
+    no gate report. The trainer only records: the Rust verifier derives and enforces the bound."""
+    k_mult, floor, ceiling = contract.noise_policy()
+    ck = out / "checkpoint"
+
+    def base_fp32():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return load_for_scoring(base.src, base.digest, base.revision)
+    sets, ctrl_rows = [], None
+    for which, load, name in (("fine_tuned", lambda: reload_checked(ck, tree_sha256(ck)), "eval-probs.json"),
+                              ("zero_shot", base_fp32, "zero-shot-probs.json")):
+        agent = load()
+        rec, ctrl, ctrl_rows = rescore_noise_set(agent, which, eval_rows, question, out / name, labels, k_mult, floor)
+        del agent
+        gc.collect()
+        if rec is None:
+            refuse("REFUSED noise-control: the manual fp32 forward differs from the Scorer's logits for %s "
+                   "(max |dz| %r on rows %s); a float64 record would describe another model, so none is written"
+                   % (which, ctrl, ctrl_rows))
+        log("NOISE which=%s max_abs=%.6e bound=%.6e argmax=%d/%d t_applied=%.6f"
+            % (which, rec["max_abs"], rec["bound"], rec["argmax_agree"], rec["n"], rec["t_applied"]))
+        if rec["bound"] > ceiling or rec["argmax_agree"] < rec["n"]:
+            log("WARN pack will refuse: %s bound %.6e (ceiling %g), argmax agree %d/%d -- recorded, not decided here"
+                % (which, rec["bound"], ceiling, rec["argmax_agree"], rec["n"]))
+        sets.append(rec)
+    write_json(out / "rescore-noise.json", {
+        "schema": "laya-rescore-noise-v1", "reference": "float64", "k": k_mult, "floor_abs": floor,
+        "control_max_abs": 0.0, "control_rows": ctrl_rows, "sets": sets})
+    return data.sha256_file(out / "rescore-noise.json")
 
 
 class SeedRun:
@@ -520,8 +625,9 @@ def variance_row(seed, g, calib, info):
             "train_seconds": info["train_seconds"]}
 
 
-def variance_report(declared, seeds, rows, recipe_id, zero_shot):
-    """variance-report.json: per-seed rows and mean / sample sd (ddof 1). INFORMATION, never a selection."""
+def variance_report(declared, seeds, rows, recipe_id, zero_shot, shipped):
+    """variance-report.json: per-seed rows and mean / sample sd (ddof 1). INFORMATION: the shipped seed was
+    chosen by the median rule (seed_policy.selection) before this report exists; nothing here selects."""
     def stat(key, fn):
         vals = [r[key] for r in rows]
         if any(v is None or not math.isfinite(v) for v in vals):
@@ -530,8 +636,9 @@ def variance_report(declared, seeds, rows, recipe_id, zero_shot):
     keys = ("macro_f1", "f_avg", "ece_post", "margin")
     return {"schema": "laya-variance-report-v1", "declared_seed": declared, "seeds": list(seeds), "n": len(seeds),
             "label": contract.seeds_label(len(seeds)), "recipe_id": recipe_id,
-            "note": "information only: the gate is judged on the declared seed, whose checkpoint is the only one "
-                    "kept and the one that ships (D-08); the other seeds never select a checkpoint",
+            "note": "information only: seed %d ships as the median-ECE seed of %s (seed_policy.selection %s, A3); "
+                    "the gate is judged on that seed alone, and mean / sd never select anything"
+                    % (shipped, list(seeds), contract.seed_selection_decl()["policy"]),
             "sd_ddof": 1, "zero_shot": zero_shot, "per_seed": rows,
             "mean": {k: stat(k, np.mean) for k in keys},
             "sd": {k: stat(k, lambda a: a.std(ddof=1)) for k in keys}}
@@ -547,7 +654,8 @@ def parse_args(argv):
     ap.add_argument("--stopping", choices=("early_stopping", "fixed_epochs"), default=None,
                     help="stopping rule (default: the contract's recipe.stopping_default)")
     ap.add_argument("--seeds", type=int, default=None,
-                    help="variance report over the first N contract variance_seeds (declared seed first; only it ships)")
+                    help="production: exactly the contract's production_seeds_required (default); the median-ECE "
+                         "seed ships (A3). synthetic-fixture: 1 (default, legacy rule) or that number")
     ap.add_argument("--device", choices=("mps", "cuda", "cpu"), default=None,
                     help="force a device (default: the contract's device_order, first available)")
     ap.add_argument("--variant", choices=("production", "synthetic-fixture"), default="production")
@@ -564,8 +672,9 @@ def main(argv=None):
     seed = int(sp["declared_seed"])
     data_dir, out = Path(args.data), Path(args.out)
 
-    # 1. data
+    # 1. data (and every recipe refusal, before any model loads or any file is written)
     try:
+        seeds = contract.resolve_seeds(args.seeds, args.variant)
         task = data.load_task(data_dir / "task.json")
         train_rows = data.load_rows(data_dir / "train.jsonl", task, "train")
         eval_rows = data.load_rows(data_dir / "eval.jsonl", task, "eval")
@@ -577,7 +686,6 @@ def main(argv=None):
         shots_per_class = max(data.class_counts(train_rows, len(task["labels"])))
         epochs = contract.resolve_epochs(args.variant, shots_per_class, args.epochs)
         stopping = contract.resolve_stopping(args.stopping)
-        seeds = contract.resolve_seeds(args.seeds)
     except (data.DataError, contract.RecipeError) as e:
         refuse(str(e))
     base = Base(args)
@@ -585,67 +693,115 @@ def main(argv=None):
         refuse("REFUSED out-dir: %s exists and is not empty; a run dir is written once" % out)
     labels, k = task["labels"], len(task["labels"])
     question = data.laya_question(task)
-    log("DATA task=%s K=%d train=%d eval=%d shots_per_class=%d fit=%d calibration=%d"
-        % (data_dir / "task.json", k, len(train_rows), len(eval_rows), shots_per_class, len(fit_ids), len(calib_ids)))
+    log("DATA task=%s K=%d train=%d eval=%d shots_per_class=%d fit=%d calibration=%d seeds=%s"
+        % (data_dir / "task.json", k, len(train_rows), len(eval_rows), shots_per_class, len(fit_ids), len(calib_ids),
+           ",".join(str(s) for s in seeds)))
 
-    # 2. recipe first
+    # 2. recipe first (seed_selection whenever three seeds run -- every production run, A3)
+    selection = contract.seed_selection_decl() if len(seeds) > 1 else None
     out.mkdir(parents=True, exist_ok=True)
-    recipe = contract.recipe_json(args.variant, shots_per_class, epochs, seed, base.block, stopping)
+    recipe = contract.recipe_json(args.variant, shots_per_class, epochs, seed, base.block, stopping, selection)
     recipe_bytes = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode("utf-8")
     (out / "recipe.json").write_bytes(recipe_bytes)
     recipe_id = sha256_bytes(recipe_bytes)
     log("RECIPE WRITTEN %s stopping=%s epochs%s=%d" % (recipe_id, stopping, "_max" if stopping == "early_stopping"
                                                         else "", epochs))
 
-    # 3-6. device, train, complete checkpoint, reload, calibrate, reload, score -- the declared seed
     requested = request_device(args.device)
     fit_rows = [train_rows[i] for i in fit_ids]
     calib_rows = [train_rows[i] for i in calib_ids]
     ck = out / "checkpoint"
     run = SeedRun(base, requested, question, fit_rows, calib_rows, eval_rows, k, epochs, stopping, recipe_id)
-    agent, P_ft, P_pre, calib, info = run.train_and_score(seed, ck)
-    write_json(out / "eval-probs.json", eval_probs_obj(labels, eval_rows, P_ft))
-    assert_eval_after_checkpoint(out, ck)
-    write_json(out / "probes.json", probes_obj(agent))
-    del agent
-
-    # 7. zero-shot: the declared base, loaded the same way
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        zs_agent = load_for_scoring(base.src, base.digest, base.revision)
-    P_zs, _ = score_rows(zs_agent, eval_rows, question)
-    del zs_agent
-    write_json(out / "zero-shot-probs.json", eval_probs_obj(labels, eval_rows, P_zs))
-    (out / "task.json").write_bytes((data_dir / "task.json").read_bytes())
-
-    # 8. gate on exactly the probabilities written
     y = np.array([lab for _, lab in eval_rows])
     as64 = lambda P: np.array([f32_list(r) for r in P], dtype=np.float64)  # noqa: E731
     demo = contract.demo()
     f_avg_labels = None
     if labels == list(demo["criteria_order"]):
         f_avg_labels = [labels.index("against"), labels.index("favor")]
-    g = gate.evaluate_gate(as64(P_zs), as64(P_ft), P_pre, y, f_avg_labels)
 
-    # D-08: the other variance seeds, each in a temp dir deleted once its metrics are recorded
-    per_seed = [variance_row(seed, g, calib, info)]
-    for s_other in seeds[1:]:
-        tmp = out / (".variance-seed-%d" % s_other)
-        try:
-            a_other, P_o, P_o_pre, cal_o, info_o = run.train_and_score(s_other, tmp / "checkpoint")
-            del a_other
-            g_o = gate.evaluate_gate(as64(P_zs), as64(P_o), P_o_pre, y, f_avg_labels)
-            per_seed.append(variance_row(s_other, g_o, cal_o, info_o))
-            log("VARIANCE seed=%d macro_f1=%.4f ece_post=%.4f margin=%.4f pass=%s (information only)"
-                % (s_other, g_o["fine_tuned"]["macro_f1"], g_o["fine_tuned"]["ece_post"], g_o["margin"], g_o["pass"]))
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-    if len(seeds) > 1:
-        vr = variance_report(seed, seeds, per_seed, recipe_id, g["zero_shot"])
+    def score_zero_shot():
+        """7. zero-shot: the declared base on eval.jsonl, loaded the same way; task.json copied."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            zs_agent = load_for_scoring(base.src, base.digest, base.revision)
+        P, _ = score_rows(zs_agent, eval_rows, question)
+        del zs_agent
+        write_json(out / "zero-shot-probs.json", eval_probs_obj(labels, eval_rows, P))
+        (out / "task.json").write_bytes((data_dir / "task.json").read_bytes())
+        return P
+
+    if len(seeds) == 1:
+        # 3-8, LEGACY single-seed rule (synthetic-fixture only since 1.4.0): the declared seed ships.
+        agent, P_ft, P_pre, calib, info = run.train_and_score(seed, ck)
+        write_json(out / "eval-probs.json", eval_probs_obj(labels, eval_rows, P_ft))
+        assert_eval_after_checkpoint(out / "recipe.json", ck, out / "eval-probs.json")
+        write_json(out / "probes.json", probes_obj(agent))
+        del agent
+        P_zs = score_zero_shot()
+        g = gate.evaluate_gate(as64(P_zs), as64(P_ft), P_pre, y, f_avg_labels)
+        seeds_block = {"declared": seed, "n": 1, "label": contract.seeds_label(1)}
+    else:
+        # 3-8, MEDIAN rule (A3): every seed trains in seeds/seed-<s>/ on the same data, split and recipe; each
+        # seed's checkpoint and stopping record exist before its eval probabilities (asserted per seed).
+        runs = {}
+        for s in seeds:
+            sdir = out / "seeds" / ("seed-%d" % s)
+            ck_s = sdir / "checkpoint"
+            agent, P_s, P_s_pre, cal_s, info_s = run.train_and_score(s, ck_s)
+            del agent
+            gc.collect()
+            write_json(sdir / "eval-probs.json", eval_probs_obj(labels, eval_rows, P_s))
+            assert_eval_after_checkpoint(out / "recipe.json", ck_s, sdir / "eval-probs.json")
+            runs[s] = {"P": P_s, "P_pre": P_s_pre, "calib": cal_s, "info": info_s,
+                       "model_sha": data.sha256_file(ck_s / "model.safetensors"),
+                       "probs_sha": data.sha256_file(sdir / "eval-probs.json")}
+        P_zs = score_zero_shot()
+        # Selection reads eval only now, after every seed's checkpoint is fixed (A3).
+        rank_scale = selection["rank_scale"]
+        per_seed, var_rows = [], []
+        for s in seeds:
+            r = runs[s]
+            r["g"] = g_s = gate.evaluate_gate(as64(P_zs), as64(r["P"]), r["P_pre"], y, f_avg_labels)
+            ft = g_s["fine_tuned"]
+            try:
+                rk = gate.rank_key(ft["ece_post"], rank_scale)
+            except gate.GateError as e:
+                refuse("%s (seed %d)" % (e, s))
+            per_seed.append({"seed": s, "macro_f1": ft["macro_f1"], "f_avg": ft["f_avg"], "ece_post": ft["ece_post"],
+                             "margin": g_s["margin"], "pass": g_s["pass"], "t_applied": r["calib"]["t_applied"],
+                             "rank_key": rk, "eval_probs_sha256": r["probs_sha"],
+                             "model_safetensors_sha256": r["model_sha"]})
+            var_rows.append(variance_row(s, g_s, r["calib"], r["info"]))
+            log("SEED seed=%d macro_f1=%.4f ece_post=%.6f margin=%.4f pass=%s rank_key=%d"
+                % (s, ft["macro_f1"], ft["ece_post"], g_s["margin"], g_s["pass"], rk))
+        shipped = gate.select_median_seed(per_seed, rank_scale)
+        log("MEDIAN seeds=%s rank_keys=%s shipped=%d (policy %s, tie_break %s)"
+            % (",".join(str(r["seed"]) for r in per_seed), ",".join(str(r["rank_key"]) for r in per_seed), shipped,
+               selection["policy"], selection["tie_break"]))
+        os.replace(out / "seeds" / ("seed-%d" % shipped) / "checkpoint", ck)
+        for s in seeds:
+            if s != shipped:
+                shutil.rmtree(out / "seeds" / ("seed-%d" % s) / "checkpoint")
+                log("DELETED seed=%d checkpoint" % s)
+        shutil.copyfile(out / "seeds" / ("seed-%d" % shipped) / "eval-probs.json", out / "eval-probs.json")
+        assert_eval_after_checkpoint(out / "recipe.json", ck, out / "eval-probs.json")
+        if data.sha256_file(ck / "model.safetensors") != runs[shipped]["model_sha"]:
+            raise RuntimeError("the shipped checkpoint's model.safetensors changed when it moved to checkpoint/")
+        agent = reload_checked(ck, tree_sha256(ck))
+        write_json(out / "probes.json", probes_obj(agent))
+        del agent
+        g, calib, info = runs[shipped]["g"], runs[shipped]["calib"], runs[shipped]["info"]
+        vr = variance_report(seed, seeds, var_rows, recipe_id, g["zero_shot"], shipped)
         write_json(out / "variance-report.json", vr)
         fmt_ms = lambda key: "n/a" if vr["mean"][key] is None else "%.4f ± %.4f" % (vr["mean"][key], vr["sd"][key])  # noqa: E731
-        log("VARIANCE %s: macro_f1 %s | f_avg %s | ece_post %s | margin %s -- the gate is judged on seed %d"
-            % (vr["label"], fmt_ms("macro_f1"), fmt_ms("f_avg"), fmt_ms("ece_post"), fmt_ms("margin"), seed))
+        log("VARIANCE %s: macro_f1 %s | f_avg %s | ece_post %s | margin %s -- information; seed %d ships (median)"
+            % (vr["label"], fmt_ms("macro_f1"), fmt_ms("f_avg"), fmt_ms("ece_post"), fmt_ms("margin"), shipped))
+        seeds_block = {"declared": seed, "n": len(seeds), "label": contract.seeds_label(len(seeds)),
+                       "policy": selection["policy"], "shipped": shipped, "per_seed": per_seed}
+
+    # A1: the float64 re-score noise record of the shipped checkpoint and the base (after the gate is decided).
+    noise_sha = write_noise_record(out, base, eval_rows, question, labels)
+
     report = {
         "schema": "laya-gate-report-v1",
         "pass": g["pass"],
@@ -656,7 +812,7 @@ def main(argv=None):
         "calibration": {"bucket": calib["bucket"], "t_fitted": calib["t_fitted"], "t_applied": calib["t_applied"],
                         "clamp_hit": calib["clamp_hit"], "slice_size": len(slice_ids), "slice_ids": slice_ids,
                         "slice_ids_sha256": slice_sha},
-        "seeds": {"declared": seed, "n": len(seeds), "label": contract.seeds_label(len(seeds))},
+        "seeds": seeds_block,
         "device_used": info["device_used"],
         "device_is_cpu": info["device_used"] == "cpu",
         "torch_version": torch.__version__,
@@ -669,6 +825,7 @@ def main(argv=None):
         "eval_probs_sha256": data.sha256_file(out / "eval-probs.json"),
         "zero_shot_probs_sha256": data.sha256_file(out / "zero-shot-probs.json"),
         "probes_sha256": data.sha256_file(out / "probes.json"),
+        "rescore_noise_sha256": noise_sha,
     }
     write_json(out / "gate-report.json", report)
 
@@ -681,9 +838,9 @@ def main(argv=None):
            g["thresholds"]["min_macro_f1_margin"], g["thresholds"]["max_ece"]))
     if f_avg_labels is not None and args.variant == "production":
         log("INFO spike 024 baseline F_avg @%d: %s" % (demo["shots_per_class"], demo["spike_baseline_f_avg"]))
-    log("SEEDS %s | device_used=%s torch=%s train_seconds=%s total_seconds=%.1f"
-        % (report["seeds"]["label"], info["device_used"], torch.__version__, info["train_seconds"],
-           time.time() - t_start))
+    log("SEEDS %s | shipped=%s device_used=%s torch=%s train_seconds=%s total_seconds=%.1f"
+        % (report["seeds"]["label"], report["seeds"].get("shipped", seed), info["device_used"], torch.__version__,
+           info["train_seconds"], time.time() - t_start))
     if report["pass"]:
         log("GATE PASS")
         return EXIT_PASS
