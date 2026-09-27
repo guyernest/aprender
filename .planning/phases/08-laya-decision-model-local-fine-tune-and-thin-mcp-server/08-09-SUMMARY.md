@@ -2,22 +2,25 @@
 phase: 08-laya-decision-model-local-fine-tune-and-thin-mcp-server
 plan: 09
 subsystem: decision-model-verification
-tags: [laya, aprender-decide, verify, gate, fail-closed, rescore, parity, ece, macro-f1, pack, halted]
+tags: [laya, aprender-decide, verify, gate, fail-closed, rescore, parity, ece, macro-f1, pack, option-a]
 
 requires:
   - phase: 08-laya-decision-model-local-fine-tune-and-thin-mcp-server
-    provides: "08-05 packer (PackInputs::from_run_dir, write_decide_apr, Decider::load_bytes/load_path); 08-08 the two fail-closed demo vectors and laya-finetune-gate-v1 1.2.0 demo block"
+    provides: "08-05 packer (PackInputs::from_run_dir, write_decide_apr, Decider::load_bytes/load_path); 08-08 the two fail-closed demo vectors and laya-finetune-gate-v1 1.2.0 demo block; debug session laya-rescore-drift (RoPE inv_freq fix 8e55e0bed)"
 provides:
   - "aprender_decide::verify (VerifyPolicy, verify_run, pack_for_serving, verify_path, fixture_bytes, pack_fixture, check_variant, check_base, check_inputs, check_split, validate_probs, rescore, recompute_metrics, check_gate, VerifyError with exit_code)"
   - "aprender_decide::pack::load_checkpoint_for_scoring (back-office zero-shot scorer, never a Decider)"
-  - "examples/pack_laya.rs `pack` subcommand and `just laya-pack` (policy read from the contracts at run time)"
-  - "MEASURED finding: the Rust port re-scores real Laya checkpoints outside laya-parity-v1 pack_rescore_probs_abs (1e-5) on some of the 280 eval rows"
-affects: [08-09 continuation, 08-10, 08-11, 08-12, laya-parity-v1]
+  - "examples/pack_laya.rs pack / verify / inspect / pack-fixture; just laya-pack / laya-verify / laya-inspect / laya-pack-fixture (policy read from the contracts at run time, no override)"
+  - "tests/laya_parity.rs full_model_reproduces_spike_025_fixture (LAYA_MODEL_DIR-gated)"
+  - "tests/fail_closed_vectors.rs demo_vectors_are_refused_fail_closed (LAYA_MODEL_DIR + LAYA_FAIL_CLOSED_VECTORS=1)"
+  - "FALSIFY-LAYA-GATE-010 (per-vector refusal); laya-finetune-gate-v1 1.3.0; concrete test: bindings for GATE-001/002/003/005/008, DECIDE-APR-012, LAYA-PARITY-001/003/005"
+  - "models/decide/selftest/laya_tiny.apr (gitignored synthetic-fixture test artifact, golden 37d65159…, refused by verify) for 08-10"
+affects: [08-10, 08-11, 08-12, laya-parity-v1, laya-finetune-gate-v1, decide-apr-v1, calibration spike]
 
 actuals:
-  tokens: 18324    # chars/4 over the realized diff aad9a7951..d7031c319 (73297 chars)
-  tasks: 0         # Task 1 (tracer) code landed but its real-vector verify failed the stop rule; Tasks 2-3 not started
-  commits: 1       # MEASURED: git rev-list --count aad9a7951..HEAD before this SUMMARY commit
+  tokens: 45250    # chars/4 over the realized plan diff aad9a7951..HEAD for crates/aprender-decide, contracts, justfile, Cargo.lock, 08-09-PLAN.md, deferred-items.md (181001 chars; the debug session's aprender-core layer.rs change excluded)
+  tasks: 3
+  commits: 9       # MEASURED: git rev-list --count aad9a7951..HEAD before this SUMMARY commit. It includes the three debug-session commits (8e55e0bed, eee452b2a, f3e9c8087) that landed between the halt and this continuation
 plan_head_before: aad9a795107b88c1c5375fc1f953ae3a8eb58f5d
 
 tech-stack:
@@ -26,194 +29,314 @@ tech-stack:
     - "The gate is decided on metrics RECOMPUTED in Rust from probability files that were first validated row by row and re-scored in Rust"
     - "pack_for_serving writes only after verification, atomically (temp file in the target dir + rename)"
     - "VerifyError::exit_code(): 3 for GateFailed, 2 for every other refusal (the scripts/laya_train convention)"
+    - "A fail-closed vector carries a DECLARED refusal keyed by its full recipe_id; an undeclared refusal fails the test (the stop rule, as code)"
+    - "Lib tests that landed GREEN because the code came first are proven by mutating each guarded check (11/11 killed)"
 
 key-files:
   created:
     - crates/aprender-decide/src/verify.rs
     - crates/aprender-decide/src/verify/tests.rs
     - crates/aprender-decide/examples/pack_laya.rs
+    - crates/aprender-decide/tests/laya_parity.rs
+    - crates/aprender-decide/tests/fail_closed_vectors.rs
   modified:
     - crates/aprender-decide/src/pack.rs
     - crates/aprender-decide/src/lib.rs
     - crates/aprender-decide/Cargo.toml
     - Cargo.lock
     - justfile
+    - contracts/laya-finetune-gate-v1.yaml
+    - contracts/laya-parity-v1.yaml
+    - contracts/decide-apr-v1.yaml
+    - .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-09-PLAN.md
+    - .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/deferred-items.md
 
 key-decisions:
-  - "USER APPROVAL 1 (2026-09-26): the stdio server real-model leg is DEFERRED (D-ITEM-08-09-A); there is no honest real-weights artifact to serve. Not yet written to deferred-items.md: that is Task 3, which did not start."
-  - "USER APPROVAL 2 (2026-09-26): adding FALSIFY-LAYA-GATE-010 to laya-finetune-gate-v1, with the version bump pv diff suggests. Not yet applied (Task 3)."
-  - "USER APPROVAL 3 (2026-09-26): stop rule. A vector refused for any reason other than ece_post (for example RescoreDrift) means STOP and return a checkpoint. Never widen a tolerance. APPLIED: the early_stopping vector was refused with RescoreDrift on the zero-shot side, so this plan halted at its tracer. pack_rescore_probs_abs is unchanged at 1e-5."
-  - "The fixed_epochs vector was NOT run through just laya-pack (that is Task 2's CLI control). Its drift was measured read-only by a throwaway diagnostic: it would be refused at the FINE-TUNED re-score (17 rows over 1e-5, max 5.48e-5), before the zero-shot one."
+  - "USER DECISION option A (2026-09-26): pack_rescore_probs_abs stays 1e-5. early_stopping (3d4b91da) demonstrates GateFailed[ece_post], exit 3. fixed_epochs (d0f4e40d) is refused with RescoreDrift which=fine_tuned, exit 2, nothing written. FALSIFY-LAYA-GATE-010 states the per-vector refusal. No tolerance, threshold or demo value moved."
+  - "USER APPROVAL: the stdio server's real-model leg is DEFERRED (D-ITEM-08-09-A); no artifact pack_laya verify accepts exists."
+  - "USER APPROVAL: FALSIFY-LAYA-GATE-010 added; laya-finetune-gate-v1 1.2.0 -> 1.3.0 as pv diff suggests (minor). pv diff reports decide-apr-v1 and laya-parity-v1 identical (test: lines only), so they stay 1.0.0."
+  - "Task 3's test is named demo_vectors_are_refused_fail_closed, not ..._on_the_ece_clause, because one vector is no longer refused on that clause."
+  - "demo.fail_closed_rule prose was NOT edited (the plan forbids moving demo values). It still says both vectors fail on ece_post; D-ITEM-08-09-C records it for a user call."
 
-requirements-completed: []   # Halted: none of D-06, D-07, D-11, D-12, D-17, D-19 is completed by this plan yet
+requirements-completed: [D-06, D-07, D-11, D-12, D-17, D-19]
 
 coverage:
   - id: D1
-    description: "Rust verifier accept path on the tiny fixture: production-variant copy under a TEST-ONLY permissive policy verifies, both re-scores within 1e-5, argmax 9/9, the recomputed ece_post matches the report"
+    description: "Rust verifier accept path on the tiny fixture: a production-variant copy under a TEST-ONLY permissive policy verifies, both re-scores within 1e-5, argmax 9/9, the recomputed ece_post matches the report"
     requirement: D-07
     verification:
       - kind: unit
-        ref: "cargo test -p aprender-decide --lib verify::tests::tiny_verify_roundtrip -> 1 passed"
+        ref: "crates/aprender-decide/src/verify/tests.rs#tiny_verify_roundtrip"
         status: pass
     human_judgment: false
   - id: D2
-    description: "Early_stopping fail-closed vector refused by just laya-pack on the recomputed ece_post clause (the plan's tracer verify 2)"
+    description: "Every verify refusal on the tiny fixture (26 verify::tests incl. both review forgeries, margin-only clause set, write-nothing, house ECE, fixture-only writer + golden, verify_path on the exact file); 11 check mutants killed"
+    requirement: D-07
+    verification:
+      - kind: unit
+        ref: "cargo test -p aprender-decide --lib verify:: -> 26 passed"
+        status: pass
+    human_judgment: false
+  - id: D3
+    description: "early_stopping fail-closed vector refused by just laya-pack on the recomputed ece_post clause alone, argmax 280/280, nothing written"
     requirement: D-19
     verification:
       - kind: integration
-        ref: "just laya-pack models/decide/tweet-stance-16 data/decide/tweet-stance-16 <base> models/decide/fail-closed-check.apr -> rc 2, REFUSED RescoreDrift which=zero_shot row=49 max_abs=1.028e-5"
-        status: fail
+        ref: "just laya-pack models/decide/tweet-stance-16 data/decide/tweet-stance-16 <base> models/decide/fail-closed-check.apr -> rc 3, REFUSED GateFailed clauses=[ece_post]"
+        status: pass
+    human_judgment: false
+  - id: D4
+    description: "fixed_epochs fail-closed vector refused by just laya-pack with its documented refusal (option A), nothing written"
+    requirement: D-19
+    verification:
+      - kind: integration
+        ref: "just laya-pack models/decide/tweet-stance-16-fixed-epochs ... -> rc 2, REFUSED RescoreDrift which=fine_tuned row=59"
+        status: pass
+    human_judgment: false
+  - id: D5
+    description: "CLI controls: pack-fixture reproduces golden 37d65159…; laya-verify refuses the synthetic artifact (exit 2); laya-inspect is identity-only"
+    requirement: D-11
+    verification:
+      - kind: integration
+        ref: "just laya-pack-fixture / laya-verify / laya-inspect on crates/aprender-decide/tests/fixtures/laya_tiny"
+        status: pass
+    human_judgment: false
+  - id: D6
+    description: "Full-model parity on the English root against the spike-025 fixture (ids 14/14, argmax 14/14, max |dp| 3.841e-6, 512-token row truncated, 32 ladder blocks within bars)"
+    requirement: D-17
+    verification:
+      - kind: integration
+        ref: "LAYA_MODEL_DIR=<snapshot> LAYA_LADDER_BIN=<ladder> cargo test -p aprender-decide --release --test laya_parity full_model_reproduces_spike_025_fixture"
+        status: pass
+    human_judgment: false
+  - id: D7
+    description: "Both vectors refused by pack AND by verify on the exact bytes, each with its documented refusal (FALSIFY-LAYA-GATE-010), 2/2"
+    requirement: D-07
+    verification:
+      - kind: integration
+        ref: "LAYA_FAIL_CLOSED_VECTORS=1 LAYA_MODEL_DIR=<snapshot> cargo test -p aprender-decide --release --test fail_closed_vectors demo_vectors_are_refused_fail_closed"
+        status: pass
+    human_judgment: false
+  - id: D8
+    description: "Stdio server real-model leg (E2E-DECIDE-PMCP-001 real) — deferred as D-ITEM-08-09-A"
+    verification: []
     human_judgment: true
-    rationale: "The stop rule fired. The vector IS refused and nothing was written, so fail-closed holds, but the refusal is RescoreDrift, not ece_post. Resolving it needs a user decision (see Next Phase Readiness)."
+    rationale: "Not run by design: no artifact pack_laya verify accepts exists (option 3). The user approved the deferral; the verifier should confirm D-ITEM-08-09-A's coverage argument."
 
-duration: 21min
+duration: 45min
 completed: 2026-09-27
-status: halted
+status: complete
 ---
 
-# Phase 8 Plan 09: Rust Gate Verifier and Fail-Closed Pack Summary (HALTED at the tracer)
+# Phase 8 Plan 09: Rust Gate Verifier and Fail-Closed Pack Summary
 
-**The Rust verifier and `just laya-pack` exist and refuse the early_stopping demo vector, writing nothing. The refusal is a re-score drift, not the ece_post clause: the Rust port re-scores one of the base's 280 eval rows at 1.028e-5 against the 1e-5 bar. The fixed_epochs checkpoint drifts much further (up to 5.48e-5). The stop rule the user set applies, so the plan halted after its tracer. No tolerance was widened.**
+**`just laya-pack` and `pack_laya verify` decide the D-07 gate in Rust. The metrics are recomputed from probability files that are first re-scored row by row from the packed bytes and from the declared base. Both D-19 demo runs are refused and nothing is written. early_stopping refuses on the recomputed ece_post clause alone (exit 3). fixed_epochs refuses on its fine-tuned re-score (exit 2), as user decision option A documents. The real English root reproduces spike 025 through the `.apr` path: ids 14/14, max |dp| 3.841e-6.**
 
-## Outcome: stop rule fired (user approval 3)
+## Performance
 
-`just laya-pack models/decide/tweet-stance-16 data/decide/tweet-stance-16 <base> models/decide/fail-closed-check.apr` (the early_stopping vector, recipe_id `3d4b91da…`):
+- **Duration:** 45 min total. The first session took 21 min and halted at the tracer. This continuation took 24 min, from 2026-09-27T03:20:39Z to 03:44:51Z.
+- **Tasks:** 3 of 3.
+- **Files:** 5 created, 10 modified (see key-files).
+
+## Resume from the halt
+
+- The first execution stopped at the Task 1 stop rule (d4980e1b9). The early_stopping vector was refused with `RescoreDrift which=zero_shot row=49 1.028e-5`, not with `GateFailed[ece_post]`.
+- Debug session `.planning/debug/resolved/laya-rescore-drift.md` found two causes:
+  - **A port defect, now fixed.** Rust single-rounded RoPE `inv_freq` from f64, where torch double-rounds in f32. The fix is 8e55e0bed, pinned by `rope_inv_freq_is_torch_bitwise`.
+  - **The bar sits at the fp32 noise floor.** On real checkpoints, the 1e-5 re-score bar is inside fp32 rounding noise.
+- The user chose **option A**. The bar stays. early_stopping demonstrates the gate path, and fixed_epochs is recorded as a RescoreDrift refusal.
+- This continuation re-ran the tracer on HEAD. The plan's expectations for fixed_epochs were amended in `1ed27cc95` (plan-only commit).
+
+## Measured outcomes
+
+### Task 1 tracer: early_stopping vector (re-run on HEAD, 142 s)
 
 ```
-REFUSED RescoreDrift which=zero_shot row=49 max_abs=0.000010281801223754883 (nothing written)
+REFUSED GateFailed clauses=[ece_post] zs_macro_f1=0.34021732211112976 ft_macro_f1=0.445831298828125 margin=0.10561397671699524 ece_post=0.22240783274173737 rescore_max_abs=0.000006735324859619141 zs_rescore_max_abs=0.0000068247318267822266 argmax=280/280 packed_sha256=e397228192960328e974c657baad37daa3401f31beabfec07fb71995e387e217 (nothing written)
+error: Recipe `laya-pack` failed with exit code 3
+```
+
+| metric | recomputed in Rust | reported (gate-report.json) |
+|---|---|---|
+| zs macro-F1 | 0.3402173 | 0.3402 |
+| ft macro-F1 | 0.4458313 | 0.4458 |
+| margin | 0.1056140 (passes, >= 0.05) | 0.1056 |
+| ece_post | 0.2224078 (FAILS, > 0.10) | 0.2224 |
+
+- The re-score maxima are 6.74e-6 for the fine-tuned model and 6.82e-6 for zero-shot. Both are within 1e-5, and argmax agrees on 280/280.
+- `models/decide/fail-closed-check.apr` is absent, and the `models/decide` listing is byte-identical before and after.
+
+### Task 2 control (d): fixed_epochs vector (85 s)
+
+```
+REFUSED RescoreDrift which=fine_tuned row=59 max_abs=0.00004667043685913086 (nothing written)
 error: Recipe `laya-pack` failed with exit code 2
-rc=2 wall=184s
 ```
 
-- `models/decide/fail-closed-check.apr` does not exist, and the `models/decide` listing is byte-identical before and after (`cmp` of `ls -a`). Nothing was written.
-- The fine-tuned re-score, from the PACKED bytes through the full decide-apr-v1 ladder, passed first. Then the zero-shot re-score of the declared base refused row 49.
-- The plan expected exit 3 with `clauses=[ece_post]`. That did not happen, so the plan's `<verify>` 2 fails. Per the plan's stop rule and user approval 3, execution stopped. `pack_rescore_probs_abs`, the thresholds and the `demo` block are unchanged.
+- This is option A's documented refusal, and nothing was written.
+- The gate is not reached. The report records ece_post 0.3773, T clamped at 5.0 and margin 0.1299, and the first session's read-only diagnostic recomputed the same verdict (ece_post-only FAIL).
 
-## Measurements (read-only, throwaway diagnostic, not committed)
+### Task 2 CLI controls (a)-(c)
 
-A scratch example (`examples/zz_diag_0809.rs`, deleted before commit) used the committed public API only: `PackInputs::from_run_dir`, `write_decide_apr`, `Decider::load_bytes`, `pack::load_checkpoint_for_scoring`, `verify::validate_probs`, `verify::recompute_metrics`. It re-scored all 280 eval rows of both vectors. Wall time 261 s, aarch64 (Apple M4), release build.
+```
+PACKED-FIXTURE models/decide/selftest/laya_tiny.apr sha256=37d65159b2be0fa091aa840cd56c1a84b73c0bcd9e2df5906d1f8218f5448561 variant=synthetic-fixture (not deployable)
+REFUSED SyntheticNotDeployable recipe variant "synthetic-fixture" is not deployable (nothing written)      # just laya-verify, exit 2
+{"artifact_sha256":"37d65159…","base":"laya-tiny-synthetic@fixtures","embedded_gate":{"ece_post":0.008166154225667355,"margin":0.0,"pass":false},"labels":["shipping","billing","account"],"method":"laya","recipe_id":"7478c6f2…","schema_version":1,"variant":"synthetic-fixture"}   # just laya-inspect: no eligibility/policy field
+```
 
-| re-score | max \|dp\| | p99 | p50 | rows > 1e-5 | rows > 5e-6 | argmax |
-|---|---|---|---|---|---|---|
-| early_stopping fine-tuned (packed bytes) | 6.26e-6 | 5.60e-6 | 5.96e-7 | **0** | 5 | 280/280 |
-| zero-shot base (T 1.7601519), shared by both vectors | **1.028e-5** | 4.41e-6 | 7.15e-7 | **1** (row 49) | 2 | 280/280 |
-| fixed_epochs fine-tuned (packed bytes, T 5.0) | **5.48e-5** | 2.78e-5 | 5.96e-8 | **17** | 29 | 280/280 |
+### Task 3: full-model parity (release, aarch64 Apple M4, 14.7 s test time, load 2.26 s)
 
-Worst rows:
-- zero-shot row 49 (96 tokens): Rust `[0.3628886, 0.33185735, 0.30525407]` vs file `[0.3628963, 0.33184707, 0.30525666]`.
-- fixed_epochs row 147 (80 tokens): Rust `[0.013181239, 0.79504085, 0.19177793]` vs file `[0.013177763, 0.7950957, 0.19172655]`.
+```
+ids 14/14; argmax 14/14; max |dp| 3.841e-6 (bar 1e-5); max |dlogit| 2.146e-5 (bar 1e-4); truncated rows 1; ARCH aarch64
+ladder emb: max_abs 9.537e-7 ... ladder layer27: max_abs 9.961e-2 rel_rms 2.145e-6 ... ladder final: max_abs 9.155e-5 ... ladder head1: rel_rms 6.384e-7
+ladder: 32 blocks within bars
+```
 
-Facts that bound the cause:
-- **The Rust side is deterministic.** Two zero-shot re-scores in one process are bitwise identical.
-- **It is not MPS vs CPU.** Training ran on mps:0, but `train.py load_for_scoring` scores every file on CPU in fp32 over the F16 reload (`agent.model.float()`, device asserted `cpu`). Both sides of the comparison are CPU fp32 over the same F16 weights.
-- **The two probability files are identical across vectors.** `zero-shot-probs.json` is byte-identical in both run dirs (sha256 `3c55bdd7…`). The fixed_epochs vector would therefore also fail at the zero-shot row 49, but its fine-tuned re-score refuses first.
-- **The drift is a tail, not a bias.** The median |dp| is 6e-7 (early_stopping, zero-shot) and 6e-8 (fixed_epochs), but a few rows reach 5.5x the bar. Spike 025's 3.8e-6 was measured on 14 rows. On real, fine-tuned 280-row sets the tail exceeds 1e-5.
-- **Converted to logits** (dp ≈ p(1-p) dz / T):
-  - zero-shot row 49 is about 7.7e-5, inside laya-parity-v1 `logits_abs` 1e-4;
-  - fixed_epochs row 147 is about 1.8e-3, well outside it.
-  - So the fixed_epochs drift is not just probability-space amplification.
-- **If the re-score bar had held, the gate verdict would be exactly the one the contract predicts.** Metrics recomputed in Rust from the files match the reports within 1e-5:
-  - early_stopping: zs macro-F1 0.3402173 (reported 0.34021731), ft 0.4458313 (reported 0.44583129), margin 0.1056140 (pass), ece_post 0.2224078 (reported 0.22240784; FAIL > 0.10);
-  - fixed_epochs: ft 0.4701017, margin 0.1298844 (pass), ece_post 0.3773223 (reported 0.37732241; FAIL).
-  - Both would be `clauses=[ece_post]` alone. The verdict logic is not what blocks the rule's demonstration; the re-score bar is.
+- The 512-token row reports `truncated == true` (D-12). The fixture sha256 `ebf9d94e…` equals the value laya-parity-v1 records.
+- The largest per-row |dp| is 3.84e-6 (the 512-token billing row). Spike 025 measured 3.80e-6 on the same fixture.
+- The ladder `final` block has little headroom: 9.155e-5 against `final_norm_abs` 1e-4, only 1.09x. See D-ITEM-08-09-B.
 
-**Consequence beyond the vectors:** a 1e-5 full-eval re-score bar that a 12-epoch real checkpoint misses by 5.5x would also block any FUTURE gate-passing run at `pack`. That makes it a D-17 / D-18 blocker, not only a demo-vector detail.
+### Task 3: both vectors, by pack and by verify on the exact bytes (release, 413 s)
 
-## Accomplishments (Task 1 code, committed)
+```
+VECTOR d0f4e40d pack: REFUSED RescoreDrift which=fine_tuned row=59 max_abs=0.00004667043685913086
+VECTOR d0f4e40d verify: REFUSED RescoreDrift which=fine_tuned row=59 max_abs=0.00004667043685913086
+VECTOR 3d4b91da pack: REFUSED GateFailed clauses=[ece_post] ... argmax=280/280 packed_sha256=e397228192960328e974c657baad37daa3401f31beabfec07fb71995e387e217
+VECTOR 3d4b91da verify: REFUSED GateFailed clauses=[ece_post] ... argmax=280/280 packed_sha256=e397228192960328e974c657baad37daa3401f31beabfec07fb71995e387e217
+FAIL-CLOSED VECTORS REFUSED 2/2 (413 s, ARCH aarch64)
+```
 
-- `aprender_decide::verify`. The whole design in the plan, on the current API:
-  - variant, base (contract and on disk), input hashes, the `check_split` mirror of `data.py` (NFC, White_Space collapse, groups, conflicting labels, slice ids / size / sha256 / per-class minimum / group integrity), and `validate_probs` (coverage, unique indices, text sha256, K finite values in [0, 1] summing to 1 within 1e-5);
-  - `rescore` (NaN-visible, first drifting row + overall max, exact argmax);
-  - `recompute_metrics` (aprender-core `f1_score(Average::Macro)` and `expected_calibration_error_top_label`, OPS-03);
-  - `check_gate` (thresholds, then reported-vs-recomputed metrics and row counts, then pass agreement; returns the failed clauses);
-  - `verify_run`, `pack_for_serving` (packs from the already-read inputs, verifies, then writes atomically), `verify_path` (`Decider::load_path`, manifest bound to the run and data dirs), `fixture_bytes` / `pack_fixture`.
-- `pack::load_checkpoint_for_scoring`: base checkpoint dir -> in-memory `.apr` -> `Laya` (never a `Decider`).
-- `examples/pack_laya.rs pack`:
-  - The policy comes from laya-finetune-gate-v1 and laya-parity-v1 at run time.
-  - The only arguments are `--run/--data/--base/--out`, and no environment variable is read.
-  - Output is `PACKED …` or one `REFUSED <Variant> … (nothing written)` line, and the exit code is `exit_code()`.
-- `just laya-pack`: exec passes the example's exit status through unchanged.
+- For early_stopping, the verify-side sha equals the pack-side sha and the sha of the written scratch file.
+- For fixed_epochs, the error carries no sha, so the test compares the row and bitwise max_abs across the two paths instead.
+- The scratch TempDir is removed, and the `models/decide` listing is unchanged.
+
+## Accomplishments
+
+- **`aprender_decide::verify`** is the D-07 policy in a CI-tested library, in this order:
+  - variant, then base (contract and on disk), then input hashes;
+  - `check_split`, which mirrors `data.py`;
+  - `validate_probs`;
+  - the two 280-row re-scores;
+  - the house macro-F1 and ECE;
+  - the recomputed gate.
+- **`pack_laya` subcommands**, each a thin wrapper that holds no policy:
+  - `pack` writes only on accept.
+  - `verify` is the only eligibility check, run on the exact file.
+  - `inspect` reports identity only.
+  - `pack-fixture` writes synthetic-fixture artifacts only.
+  - The policy is read from the contracts at run time. There is no argument or environment override.
+- **26 `verify::tests`** cover every plan-named `VerifyError`. `argmax_drift`, `verify_path_accepts_exact_file` and `verify_path_manifest_mismatch` go beyond the plan's list.
+- **Real-weights evidence without a serving artifact:** full-model parity, plus both vectors refused on both paths (FALSIFY-LAYA-GATE-010).
 
 ## Task Commits
 
-1. **Task 1 (tracer): verifier + `pack` + `just laya-pack`** - `d7031c319` (feat). Its real-vector verify failed the stop rule (above).
-2. **Task 2:** not started.
-3. **Task 3:** not started.
+1. **Task 1 (tracer): verifier + `pack` + `just laya-pack`**: `d7031c319` (feat). The halt docs are `d4980e1b9` and `4ff5b02e4`. The tracer verify re-ran on HEAD and passed, with no code change needed after the 8e55e0bed RoPE fix.
+2. **Plan amendment (option A):** `1ed27cc95` (docs).
+3. **Task 2: subcommands, 25 new tests, bindings:** `9bdaebb95` (feat).
+4. **Task 3: parity + vectors tests, GATE-010, deferrals:** `42bf7c47f` (test).
+
+The debug session's own commits (8e55e0bed fix, eee452b2a, f3e9c8087) fall inside the measured range but are not this plan's.
 
 ## Verification run
 
 | check | result |
 |---|---|
-| Task 1 verify 1: `cargo test -p aprender-decide --lib verify::tests::tiny_verify_roundtrip` (via `rtk proxy`) | PASS, `test result: ok. 1 passed; 0 failed` |
-| Task 1 verify 2: `just laya-pack` on the early_stopping vector | **FAIL (stop rule)**: rc 2, `REFUSED RescoreDrift which=zero_shot row=49`, nothing written |
-| `cargo test -p aprender-decide --lib` | 68 passed, 0 failed |
-| `cargo clippy -p aprender-decide --all-targets --no-deps -- -D warnings` | rc 0 |
+| T1 verify 1: `verify::tests::tiny_verify_roundtrip` | PASS |
+| T1 verify 2: `just laya-pack` early_stopping | PASS: rc 3, `clauses=[ece_post]`, argmax 280/280, ece_post within 1e-5 of 0.2224, margin >= 0.05, nothing written |
+| T2 verify 1: `cargo test -p aprender-decide --lib verify::` | PASS: 26 ok (>= 23), including all 8 named tests |
+| T2 verify 2: CLI controls (a)-(d) | PASS: golden sha; verify exit 2 SyntheticNotDeployable; inspect identity-only; fixed_epochs rc 2 `RescoreDrift which=fine_tuned`, nothing written |
+| T2 verify 3: pv validate x3, strict binding, clippy | PASS: 0 errors each. Guard VACUOUS; the lifted copy resolved 658 refs, and only the two pre-existing contracts FAIL. `cargo clippy -p aprender-decide --all-targets --no-deps -- -D warnings` rc 0 |
+| T3 verify 1: armed parity | PASS: `ids 14/14`, 1 passed, no SKIP |
+| T3 verify 2: armed vectors | PASS: 2/2, all four VECTOR lines, listing unchanged |
+| T3 verify 3: unarmed SKIPs, pv validate, greps, strict binding | PASS: both print SKIP and pass. The lifted copy resolved 661 refs. A mutated GATE-010 name was flagged dangling, so the resolver discriminates |
+| Mutation check of the Task 2 lib tests | 11/11 mutants of guarded checks killed by their named test (variant, threshold, reported-metric, pass agreement, ece clause, split overlap, conflicting labels, slice group, rescore tol, fixture-only writer, write-after-verify order) |
+| `cargo test -p aprender-decide --lib` | 93 passed, 0 failed |
 | `cargo fmt -p aprender-decide -- --check` | rc 0 |
-| acceptance grep: `expected_calibration_error_top_label` / `Average::Macro` in verify.rs; `pack_rescore_probs_abs` / `model_safetensors_sha256` in pack_laya.rs | all >= 1 |
+| acceptance greps | `expected_calibration_error_top_label` 3, `Average::Macro` 2 (verify.rs); `pack_rescore_probs_abs` 2, `model_safetensors_sha256` 2, `gate_policy_ok` 0 (pack_laya.rs) |
 
 ## Decisions Made
 
-- The three user approvals are recorded in `key-decisions`. Approval 3 (the stop rule) is the one exercised.
-- **`VerifyPolicy` gained `calibration_slice_min_per_class`.** `check_split`'s per-class slice minimum needs it, and it is read from laya-finetune-gate-v1 `constants` like every other policy value (not a literal).
-- **`PackInputs` now carries `eval_probs_json` / `zero_shot_probs_json` bytes.** The plan's `verify_run(inputs, packed, data, base, policy)` has no run-dir argument, so the probability files travel in the inputs that `from_run_dir` already hash-checks.
-- **`check_gate` returns the failed clauses.** The caller builds `GateFailed` with the re-score evidence, so the evidence is never defaulted.
-- **`rescore` takes the model's classify closure.** `Decider` and `Laya` share no trait, so it takes `|t| decider.classify(t)` or `|t| base.classify(t)` rather than a model value.
+- The option A and approval decisions are recorded in `key-decisions`.
+- **Per-vector expectations live in the test, keyed by the full recipe_id.** The contract's vector strings carry no refusal field, and parsing FALSIFY prose would be fragile. A contract vector with no entry fails the test, so a new vector cannot pass without a declared refusal.
+- **The parity test builds the model through `pack::load_checkpoint_for_scoring`.** That is the verifier's own F16 `.apr` path (OPS-03), used instead of a second loader. It binds record 0's `department` choice task, because the rows carry their own questions.
+- **The ladder rung checks head0 and head1 against `per_layer_rel_rms`.** The contract names no separate head bar.
+- **`json!` object literals were replaced by an explicit `Map` builder.** `json!` expands to `unwrap`, which this workspace bans.
+- **Earlier choices carried over from the first session:**
+  - `VerifyPolicy.calibration_slice_min_per_class` is read from the contract.
+  - `PackInputs` carries the probability-file bytes.
+  - `check_gate` returns the failed clauses.
+  - `rescore` takes a classify closure.
 
 ## Deviations from Plan
 
 ### Auto-fixed Issues
 
-**1. [Rule 3 - Blocking] `PackError::ReportHashMismatch` fires before `check_inputs`**
-- **Found during:** Task 1 design.
-- **Issue:** `PackInputs::from_run_dir` already refuses a data file whose hash differs from the report. So the plan's `InputHashMismatch { file: eval_jsonl }` would surface as a `PackError`.
-- **Fix:** `From<PackError> for VerifyError` maps `ReportHashMismatch` to `InputHashMismatch` with the file named (`eval_jsonl`, `eval_probs_json`, …). Other pack errors stay `VerifyError::Pack`.
-- **Committed in:** `d7031c319`.
+**1. [Rule 3 - Blocking] `PackError::ReportHashMismatch` fires before `check_inputs`** (first session, `d7031c319`)
+- It is mapped to `InputHashMismatch` naming the file. `input_hash_mismatch` asserts `file: eval_jsonl`.
 
-**2. [Rule 2 - Missing critical] The slice check needs the contract's per-class minimum and "leave a fit row"**
-- **Fix:** `calibration_slice_min_per_class` in `VerifyPolicy`, read from the contract. `check_slice_classes` also refuses a class whose every row is in the slice (the Python split refuses the same).
-- **Committed in:** `d7031c319`.
+**2. [Rule 2 - Missing critical] The slice check needs the contract's per-class minimum** (first session, `d7031c319`)
 
-**3. [Stop rule, user approval 3] Tracer halted**
-- **Found during:** Task 1 verify 2.
-- **Issue:** refused with RescoreDrift, not ece_post.
-- **Action:** stopped. No tolerance widened, no threshold or `demo` value moved, no re-run or re-train of either vector.
+**3. [Rule 3 - Blocking] clippy `disallowed_methods` on `serde_json::json!` objects** (Task 2, `9bdaebb95`)
+- **Issue:** the object form expands to `.unwrap()`.
+- **Fix:** an `obj()` Map builder in the example, and explicit Maps in the tests.
+
+**4. [User decision - option A] fixed_epochs refuses with RescoreDrift, not `clauses=[ece_post]`** (plan amended in `1ed27cc95`)
+- **Plan changes:** Task 2 (d), Task 3's test and its name, GATE-010, the verifies and the criteria now assert the per-vector refusal.
+- **Verification:** the stop rule still applies to any other refusal. The test panics with `STOP RULE: an undocumented refusal`.
+
+**5. [Scope] Three tests beyond the plan's 22 behaviours** (Task 2)
+- The new tests are `argmax_drift`, `verify_path_accepts_exact_file` and `verify_path_manifest_mismatch`.
+- `ArgmaxDrift` is a plan-named variant with no behaviour test, and Task 3 relies on `verify_path`.
+
+**6. [TDD note] Task 2's lib tests landed GREEN.**
+- `tdd="true"`, but the library was already written in Task 1, so there was no RED phase.
+- In place of RED, each test's discriminating power was shown by mutating its guarded check: 11/11 were killed.
+- `workflow.tdd_mode` is false, so the TDD gate is advisory.
 
 ---
 
-**Total deviations:** 2 auto-fixed (1 blocking, 1 missing critical) and 1 halt. **Impact:** the halt blocks Tasks 2 and 3 until the user decides how the re-score bar and the Rust port relate on real checkpoints.
+**Total deviations:** 3 auto-fixed (2 blocking, 1 missing critical), 1 user-decided scope change, 1 scope addition and 1 TDD note. **Impact:** the plan is complete. The fixed_epochs refusal differs from the original expectation by decision, and it is still fail-closed.
 
 ## Issues Encountered
 
-- The rtk hook rewrites `cargo test` output ("cargo test: 1 passed"). All recorded test results come from `rtk proxy cargo test`, whose output carries the literal `test result:` line.
+- The rtk hook rewrites `cargo test`, `git diff` and `grep -h` output. Test results were read through `rtk proxy`, and the diff size was measured with `/usr/bin/git`.
+- `cargo fmt` reflowed the two new test files AFTER the armed release runs compiled them. The change is formatting only, so the measured runs used semantically identical source. The unarmed runs and clippy used the formatted files.
+- The main checkout contains `models/decide/tweet-stance-16-var/`, which this plan did not create. It was not touched.
 
 ## Known Stubs
 
-None. The code is complete for Task 1's scope. Tasks 2-3 (verify / inspect / pack-fixture subcommands, the 22 refusal tests, the contract bindings, the parity and vector tests, D-ITEM-08-09-A) are unstarted, not stubbed.
+None.
+
+## Threat Flags
+
+None. No new surface outside the plan's threat model. `verify` / `inspect` / `pack-fixture` are the planned T-08-09-06/08 mitigations.
+
+## Deferred (deferred-items.md "From plan 08-09")
+
+- **D-ITEM-08-09-A:** the stdio real-model leg is deferred. It lists what covers the gap, what re-arms the leg, and two alternatives that each need a user decision.
+- **D-ITEM-08-09-B:** the 1e-5 bar is fragile (about 1.5x headroom; a 1-ULP codegen change consumed it once; x86_64 never measured), and the ladder `final` block has 1.09x headroom. This is queued in `.planning/todos/pending/spike-laya-calibration-slice-and-temperature-cap.md` (section "Added 2026-09-26"). Not acted on.
+- **D-ITEM-08-09-C:** `demo.fail_closed_rule` prose still says both vectors fail on ece_post. It needs a one-line user call.
+- **D-ITEM-08-09-D:** D-ITEM-08-01-A was re-measured: 658 refs, then 661, with no Phase 8 contract dangling.
 
 ## User Setup Required
 
 None.
 
-## Next Phase Readiness (DECISION NEEDED)
+## Next Phase Readiness
 
-The user must choose how to treat the Rust-vs-torch re-score tail on real checkpoints. Options, with the measured facts above:
-
-1. **Investigate the port first (recommended).**
-   - Run the laya-parity-v1 ladder (embeddings, per-layer relative rms, final norm, head, logits) with a torch oracle dump for the outlier rows: fixed_epochs row 147 (|dp| 5.48e-5, about 1.8e-3 in logits, outside `logits_abs`) and zero-shot row 49.
-   - The ladder localizes which op drifts. Candidates: GELU erf precision (RESEARCH A11's erfc_precise swap), attention softmax / accumulation order, LayerNorm, the local window on longer rows.
-   - Fix the port so every eval row fits 1e-5. This keeps the D-17 literal, and the rest of 08-09 then runs unchanged.
-2. **Re-declare `pack_rescore_probs_abs`.** This is a laya-parity-v1 claims change (`pv diff`-visible) to a bar justified by a measured full-eval tail. It is the "widen a tolerance" the user forbade without a decision, and it changes what D-17 promises.
-3. **Accept RescoreDrift as the vectors' refusal.** Amend `demo.fail_closed_rule` to "refused, with the drift or the gate named", and bind FALSIFY-LAYA-GATE-010 to that. Fail-closed still holds. But this leaves the 1e-5 bar unreachable for any real run (fixed_epochs misses it by 5.5x), so D-18 stays blocked until 1 or 2 happens anyway.
-
-Nothing downstream should assume `just laya-pack` can accept a real checkpoint until this is resolved. 08-10's selftest artifact (pack-fixture, Task 2) is unaffected in principle, but Task 2 has not run.
+- **08-10:**
+  - `models/decide/selftest/laya_tiny.apr` exists (gitignored, golden `37d65159…`), and `just laya-verify` refuses it.
+  - `just laya-verify` is the eligibility check the deploy recipes use. It exits 0 only on accept.
+  - The accept path runs in CI on the tiny fixture only.
+- **D-18 deploy stays deferred.** No real artifact is eligible. The first one needs the calibration spike and then a declared run that passes. Per D-ITEM-08-09-B, such a run may still hit the 1e-5 re-score bar on a high-temperature checkpoint, so the spike must settle the bar question before that run is read.
+- **08-12:** `laya_parity` and `fail_closed_vectors` are dark in CI: they compile and SKIP. Wiring them is 08-12's decision.
 
 ---
 *Phase: 08-laya-decision-model-local-fine-tune-and-thin-mcp-server*
-*Halted: 2026-09-27 (tracer stop rule; user approval 3)*
+*Completed: 2026-09-27*
 
 ## Self-Check: PASSED
 
-- Created files exist: `crates/aprender-decide/src/verify.rs`, `crates/aprender-decide/src/verify/tests.rs`, `crates/aprender-decide/examples/pack_laya.rs`.
-- Commit `d7031c319` is in history. It deletes no tracked file (`git diff --diff-filter=D HEAD~1 HEAD` empty).
-- `models/decide/fail-closed-check.apr` is absent. `models/decide/tweet-stance-16*` run dirs were not modified: nothing writes to them, and `ls -a` is unchanged.
-- The throwaway diagnostic example is deleted and not in any commit.
+- Created files exist: verify.rs, verify/tests.rs, examples/pack_laya.rs, tests/laya_parity.rs, tests/fail_closed_vectors.rs.
+- Commits d7031c319, 1ed27cc95, 9bdaebb95 and 42bf7c47f are in history. None of the task commits deletes a tracked file.
+- `models/decide/fail-closed-check.apr` is absent. The vector run dirs were not modified: only the scratch TempDirs and the gitignored `models/decide/selftest/` were written.
