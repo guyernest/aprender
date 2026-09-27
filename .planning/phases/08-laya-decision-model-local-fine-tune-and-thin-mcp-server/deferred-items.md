@@ -260,6 +260,11 @@ not fixed by it.
 ### D-ITEM-08-10-C: the live halves of the deploy recipes have never run against AWS
 
 - status: open
+- **Partly measured by plan 08-17 (2026-09-27, live):** bucket, upload, deploy-config and the
+  `cargo pmcp deploy` half of laya-deploy ran. Confirmed: function name == server id; `[deployment]
+  endpoint` lands in deployment.toml; the `Compiling` lines land in the redirected log; `LoggingConfig.LogGroup`
+  names `/aws/lambda/aprender-mcp-decide`. REFUTED: a GET on the endpoint does not reach the bootstrap
+  (D-ITEM-08-17-A). Still unrun: the identity probe, laya-deploy-verify and a live laya-teardown resume.
 - **Kind:** unrun-verify. The live deploy is deferred by option 3.
 - **Proven offline:** `bash -n` passes on every recipe body. The refusals are proven on the
   synthetic artifact: placeholder, sha-pin, resolver-proof, deploy-eligibility and
@@ -402,3 +407,59 @@ not fixed by it.
   1.x run dir `models/decide/tweet-stance-16-var` is a real legacy multi-seed run the verifier can use.
   Otherwise, a contract edit that retires the clause.
 - **Owner:** plan 08-15 / plan 08-12's binding sweep.
+
+## From plan 08-17
+
+### D-ITEM-08-17-A: laya-deploy's health-body check cannot reach the function through pmcp.run
+
+- status: open
+- **Found during:** 08-17 Task 2, the first live `just laya-deploy` (2026-09-27). It refused and contained a
+  correctly built function (reserved concurrency 0, grant removed): `08-LIVE-DEPLOY-EVIDENCE.json`
+  `outcome: deploy-refused`.
+- **What:** the recipe GETs `[deployment] endpoint` (`.../mcp`) and expects the bootstrap's health body
+  naming `aprender-mcp-decide-lambda`. The pmcp.run edge answers that GET itself with 405
+  (`"SSE streams are not offered at this endpoint. Use POST /mcp."`), and the separate `/health` URL is
+  also answered by the platform (`{"status":"healthy","serverId":...,"hasDeployment":true}`, no package
+  field). Measured identically on the live chronos-forecaster endpoint. No GET reaches the bootstrap, so
+  the check can never pass on pmcp.run.
+- **What still proves identity:** the compile-log check (passed) and the live identity probe, a POST
+  `tools/call` returning `model.artifact_sha256 == H` plus the task's labels in order. The probe is
+  realizable through the edge; the wrong-binary threat the health body guarded (chronos under this name)
+  cannot answer it.
+- **Options for the human (the resume checkpoint):** (1) replace the health GET with the edge's `/health`
+  `serverId == <server>` check and let the identity probe carry package identity; (2) reach the bootstrap
+  directly with `aws lambda invoke` and a synthetic GET event, bypassing the edge; (3) drop the health
+  step. Resuming also needs `aws lambda delete-function-concurrency`, which laya-teardown leaves to the
+  human.
+- **Owner:** the 08-17 continuation after the human's choice.
+
+### D-ITEM-08-17-B: pmcp.run invokes the function before laya-grant can run
+
+- status: open
+- **What:** CloudWatch shows one invocation at 21:12:10Z, right after the deploy and before the grant.
+  pmcp.run made it, not the recipe. The load failed at the S3 length lookup (no policy yet), and
+  `LoadOnce` re-armed, so the instance is not poisoned. Whatever the platform learned from that call
+  (schema discovery or health) saw a load failure. Every redeploy repeats this, because the role is
+  created by the deploy and the grant can only follow it.
+- **Also fixed in this plan:** `laya-deploy` now passes `--no-post-deploy-test`, because cargo-pmcp's own
+  suite would hit the same pre-grant 403 and exit 3 before the recipe's identity chain. It also sleeps
+  `LAYA_GRANT_PROPAGATION_S` (default 20 s) after the grant, so IAM propagation is not misread as an
+  identity failure (commit b30f437da).
+- **Durable fix:** declare the S3 read in the deploy config's `[iam]` (the pmcp-declared policy the
+  platform applies at create time), so the role can read the weights before the first call. This needs a
+  check that cargo-pmcp 0.24.3 renders `[iam]` for pmcp-run without a preserved stack.ts.
+- **Owner:** a later deploy-recipe plan.
+
+### D-ITEM-08-17-C: the sha256 pin runs sha2's SOFTWARE backend on aarch64
+
+- status: open
+- **What:** the workspace depends on `sha2 = "0.10"` without the `asm` feature. On aarch64, sha2 0.10.9
+  then compiles only the software compressor (`src/sha256.rs`: the aarch64 intrinsics backend is gated
+  on `feature = "asm"`). Measured 618-624 MB/s (1370 ms for the 846 MB artifact) on an Apple M4. The
+  3,008 MB tier prices this at 4521 ms of the 17000 ms cold budget (x3.3 for Graviton2). Graviton2 and
+  later have the SHA-2 extensions, so the `asm` feature (or another hasher) could return most of that to
+  the token budget.
+- **Why not done here:** it changes the dependency graph of every crate that uses sha2. A re-derived budget
+  must follow a measured cold sample, not a projection.
+- **Owner:** a perf plan after the first live cold samples (their `sha_ms` is the measurement).
+

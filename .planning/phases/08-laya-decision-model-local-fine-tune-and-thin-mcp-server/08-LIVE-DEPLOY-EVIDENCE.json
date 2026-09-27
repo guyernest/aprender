@@ -1,0 +1,110 @@
+{
+  "outcome": "deploy-refused",
+  "decided_by": "human",
+  "decided_by_who": "the user (project owner), answering the 08-17 Task 1 blocking-human go/no-go",
+  "decided_on": "2026-09-27",
+  "option": "deploy-auth-off-accept-risk",
+  "auth": {
+    "enabled": false,
+    "provider": "none",
+    "mechanism": "[auth] enabled = false from `just laya-deploy-config <apr> off`, and `--no-oauth` on the cargo pmcp deploy command line; pmcp.run reported oauthEnabled=false and 'No authentication required'",
+    "risk_acceptance": "The user explicitly accepts the cost-amplification risk of an open function (RESEARCH Security Domain V2: any caller can buy a cold start and seconds of multi-vCPU compute). Matches the live chronos precedent, which also ships auth off."
+  },
+  "memory_decision": {
+    "memory_mb": 3008,
+    "why": "the account is capped at 3 GB; AWS Support has not approved more. 10,240 MB (the plan's original setting) remains the target tier",
+    "contract_amendment": "decide-tool-boundary-v1 2.0.0 (commit 968d73e99): lambda_memory_mb 3008, classify_max_total_tokens 120, classify_max_texts 2, cold_start_budget_ms 17000, probe_budget_ms 3900, tier_ms_per_token_at_512 40; margin_ms 4000 and api_gateway_timeout_ms 30000 unchanged. Committed before any AWS call."
+  },
+  "server": "aprender-mcp-decide",
+  "endpoint": "https://aprender-mcp-decide.us-east.true-mcp.com/mcp",
+  "s3_key": "decide/aprender-mcp-decide/24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a.apr",
+  "s3_object_bytes": 846196868,
+  "artifact_sha256": "24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a",
+  "gate_run_evidence": ".planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-GATE-RUN-EVIDENCE.json",
+  "memory_mb": 3008,
+  "function_configuration": {
+    "memory_size_mb": 3008,
+    "timeout_s": 30,
+    "architecture": "arm64",
+    "runtime": "provided.al2023",
+    "ephemeral_storage_mb": 512,
+    "sha256_pin_equals_artifact": true,
+    "log_group": "/aws/lambda/aprender-mcp-decide"
+  },
+  "cargo_pmcp_version": "0.24.3",
+  "resolver_proof": "models/decide/resolver-proof.txt (gitignored; crates/aprender-mcp-decide-lambda, cargo-pmcp 0.24.3, sdk e0561f8c9086)",
+  "readiness": {
+    "measured_on": "2026-09-27, read-only, before the first write",
+    "A10": {
+      "status": "confirmed",
+      "fact": "profile ze-kasher-dev resolves (an IAM user principal; the account id was shown in the session only and is not recorded here), and pmcp.run functions are visible in it (228 functions, e.g. chronos-forecaster, pmcp-server). cargo pmcp resolves the shared `crates` root to target `dev` = profile ze-kasher-dev, us-east-1"
+    },
+    "A2": {
+      "status": "3008 confirmed; 10240 not available",
+      "fact": "the largest MemorySize of any existing function is 3008 (2 functions); get-account-settings reports no memory ceiling field (AccountLimit: code sizes and ConcurrentExecutions 1000 only). The deploy created aprender-mcp-decide at MemorySize 3008 and it reads back Active / Successful: a 3,008 MB function is accepted"
+    },
+    "decide_function_absent": {
+      "status": "confirmed",
+      "fact": "no function whose name contains decide or laya existed before the deploy"
+    }
+  },
+  "precondition_gates": {
+    "commit": "968d73e99 (the tier amendment); the deploy itself ran on b30f437da, which changes only justfile's laya-deploy",
+    "make_contract_audit_phase8": 0,
+    "strict_binding_guard": "VACUOUS as-is (D-ITEM-08-01-A); lifted copy rc 0: Resolved 684 test references, only chronos-bolt-parity-v1 (9) and setfit-encoder-conformance-v1 (8) dangle",
+    "cargo_test_decide_three_crates_lib": 0,
+    "laya_deploy_selftest": "0 (DEPLOY SELFTEST OK, AWS CALLS: 0), re-run on b30f437da also 0",
+    "laya_verify": "0, deploy_eligible true, sha256 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a",
+    "pv_validate_decide_tool_boundary": "0 errors; pv diff suggested major, applied (2.0.0)"
+  },
+  "sequence": [
+    {"step": "just laya-weights-bucket dev ze-kasher-dev", "rc": 0, "at": "2026-09-27T20:57:33Z", "result": "bucket created: private (all public access blocked), SSE-S3, tagged"},
+    {"step": "just laya-upload <apr> <run> <data> <base> aprender-mcp-decide dev ze-kasher-dev", "rc": 0, "result": "laya-verify accepted first; uploaded 846196868 bytes to the content-addressed key, head-object size checked"},
+    {"step": "just laya-deploy-config <apr> off aprender-mcp-decide dev ze-kasher-dev", "rc": 0, "result": "memory_mb 3008, timeout 30, auth enabled false, provider none"},
+    {"step": "just laya-deploy <apr> <run> <data> <base> aprender-mcp-decide dev ze-kasher-dev", "rc": 1, "at": "2026-09-27T21:05:30Z..21:12:41Z", "result": "eligibility ok; resolver proof ok; cargo pmcp deploy --regenerate-stack --no-post-deploy-test --no-oauth rc 0; compile log ok; grant applied; GET health failed with HTTP 405; contained"}
+  ],
+  "compile_log_identity": {
+    "ok": true,
+    "fact": "exactly one `Compiling aprender-mcp-decide-lambda` line and no other `*-lambda` package in models/decide/deploy-aprender-mcp-decide.log"
+  },
+  "health_body_ok": false,
+  "refusal": "IDENTITY FAILURE: GET https://aprender-mcp-decide.us-east.true-mcp.com/mcp failed -- containing (reserved concurrency 0, grant removed); curl: (56) The requested URL returned error: 405",
+  "refusal_diagnosis": {
+    "what_failed": "the recipe's health-body check, not the served model: the GET never reached the function",
+    "evidence": [
+      "the bootstrap answers EVERY GET with 200 and a body naming its package, so a 405 cannot come from it",
+      "the pmcp.run edge answers GET /mcp itself: {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"SSE streams are not offered at this endpoint. Use POST /mcp.\"},\"id\":null} with 405, identically for the live chronos-forecaster endpoint",
+      "the edge's separate /health URL (printed by cargo pmcp) is also answered by the platform, not the bootstrap: chronos-forecaster /health returns 200 {\"status\":\"healthy\",\"serverId\":\"chronos-forecaster\",\"serverName\":\"chronos-forecaster\",\"hasDeployment\":true}, with no package field",
+      "CloudWatch shows one invocation only (21:12:10Z), a POST made by pmcp.run itself right after the deploy and before the grant; the GET health request produced no invocation"
+    ],
+    "consequence": "the package-naming health-body check is unrealizable through the pmcp.run edge on either path; the live identity probe (a POST tools/call returning artifact_sha256 == H) and the compile log remain realizable"
+  },
+  "identity_matches": null,
+  "identity_not_reached": "the live identity probe runs after the health check and never ran",
+  "labels": null,
+  "containment": {
+    "reserved_concurrent_executions": 0,
+    "verified": "aws lambda get-function-concurrency read 0 after the recipe's own check",
+    "grant_removed": "the inline decide-weights policy (env dev) is absent from the execution role (list-role-policies: pmcp-declared, PmcpCompositionPolicy only)",
+    "left_in_place_for_the_human": "the pmcp.run deployment, the function and the S3 object; laya-teardown prints destroy / s3 rm / resume commands and runs none of them"
+  },
+  "pre_grant_platform_invocation": {
+    "at": "2026-09-27T21:12:10Z",
+    "fact": "pmcp.run invoked the function once right after the deploy, before laya-grant ran; the load failed at the S3 object-length lookup (5 attempts; the policy did not exist yet) and LoadOnce re-armed. Lambda REPORT: durationMs 159, maxMemoryUsedMB 37, initDurationMs 67, memorySizeMB 3008",
+    "implication": "whatever the platform learns from that call (schema discovery or health) saw a load failure; a redeploy re-triggers it before any grant"
+  },
+  "live_assumptions": {
+    "function_name_equals_server_id": "confirmed (laya-grant and get-function found aprender-mcp-decide)",
+    "deployment_toml_endpoint": "confirmed (models/decide/deploy-aprender-mcp-decide.state/deployment.toml carries [deployment] endpoint)",
+    "get_on_endpoint_reaches_bootstrap_health": "REFUTED: the edge answers GET /mcp with 405 and /health with platform JSON; no GET reaches the bootstrap",
+    "compile_lines_in_redirected_log": "confirmed",
+    "logging_config_names_log_group": "confirmed (/aws/lambda/aprender-mcp-decide)"
+  },
+  "shared_root_restored": "RESTORED crates byte-identical (state sha256 7c6f25eb46e83347d66e32a9e0cfae39c5556c58383dab2c109b3c061773aa03); git status --porcelain crates/.pmcp crates/deploy empty",
+  "cold_samples_status": "not taken: Task 3 runs only after an identity-ok deploy (plan 08-17); accepted_region_cold stays LIVE-PENDING",
+  "resume_requires_human": [
+    "choose a replacement for the unrealizable health-body check (see the SUMMARY checkpoint options)",
+    "approve lifting the containment: aws lambda delete-function-concurrency --function-name aprender-mcp-decide (laya-teardown prints it as the human's call)",
+    "then re-run just laya-deploy (redeploy, re-grant, identity probe) and Task 3 (just laya-deploy-verify)"
+  ]
+}
