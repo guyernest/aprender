@@ -1517,6 +1517,13 @@ laya-deploy-config apr auth server="aprender-mcp-decide" env="dev" profile="ze-k
         if text.count(marker) != 1:
             sys.exit(f"{template}: expected exactly one placeholder for {key}; restore the template")
         text = text.replace(marker, f'{key} = "{value}"')
+    # The stack-declared weights read: s3:GetObject on this server's prefix in the URI's bucket.
+    bucket = uri[len("s3://"):].split("/", 1)[0]
+    arn = f"arn:aws:s3:::{bucket}/decide/{server}/*"
+    rmarker = f"resources = [{unset}]"
+    if text.count(rmarker) != 1:
+        sys.exit(f"{template}: expected exactly one [[iam.statements]] resources placeholder; restore the template")
+    text = text.replace(rmarker, f'resources = ["{arn}"]')
     text, n = re.subn(r"(\[auth\]\nenabled = )(true|false)", r"\g<1>" + auth, text)
     if n != 1:
         sys.exit(f"{template}: no '[auth]' + 'enabled =' pair to set")
@@ -1527,10 +1534,48 @@ laya-deploy-config apr auth server="aprender-mcp-decide" env="dev" profile="ze-k
     assert cfg["environment"]["APRENDER_DECIDE_S3_URI"] == uri
     assert cfg["environment"]["APRENDER_DECIDE_SHA256"] == sha
     assert cfg["auth"]["enabled"] is (auth == "true")
+    assert cfg["iam"]["statements"][0]["resources"] == [arn]
     open(out, "w").write(text)
-    print(f"  server   {server}\n  s3 uri   {uri}\n  sha256   {sha}\n  auth     {auth}")
+    print(f"  server   {server}\n  s3 uri   {uri}\n  sha256   {sha}\n  auth     {auth}\n  iam      Allow s3:GetObject {arn}")
     PY
+    just _laya-iam-check "$DIR/deploy.toml" || { rm -f "$DIR/deploy.toml"; echo "ERROR: the generated config failed the iam check; removed it" >&2; exit 1; }
     echo "  wrote $DIR/deploy.toml (gitignored) for env=$ENV"
+
+# The decide config's [iam] must be EXACTLY one statement: Allow, actions ["s3:GetObject"],
+# resources ["arn:aws:s3:::<bucket-of-APRENDER_DECIDE_S3_URI>/decide/<server.name>/*"], and no
+# other [iam] key (tables/buckets sugar). Anything broader (s3:*, a bucket-wide `*`, a second
+# statement, ListBucket) is refused (exit 1). Pure: no network. Called by laya-deploy-config and
+# laya-deploy; exercised by laya-deploy-selftest's IAM table.
+[positional-arguments]
+_laya-iam-check cfg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 - "$1" <<'PY'
+    import sys, tomllib
+    try:
+        c = tomllib.load(open(sys.argv[1], "rb"))
+    except Exception as e:
+        print(f"REFUSED iam: {sys.argv[1]} does not parse ({e})", file=sys.stderr); sys.exit(1)
+    def refuse(msg):
+        print(f"REFUSED iam: {msg}", file=sys.stderr); sys.exit(1)
+    server = c.get("server", {}).get("name", "")
+    uri = c.get("environment", {}).get("APRENDER_DECIDE_S3_URI", "")
+    if not uri.startswith("s3://") or "/" not in uri[5:]:
+        refuse(f"APRENDER_DECIDE_S3_URI {uri!r} is not an s3:// object URI")
+    bucket = uri[5:].split("/", 1)[0]
+    want = {"effect": "Allow", "actions": ["s3:GetObject"], "resources": [f"arn:aws:s3:::{bucket}/decide/{server}/*"]}
+    iam = c.get("iam")
+    if not isinstance(iam, dict):
+        refuse("no [iam] section: the weights read would not be in the stack")
+    if set(iam) != {"statements"}:
+        refuse(f"[iam] carries {sorted(set(iam) - {'statements'})}; only [[iam.statements]] is allowed")
+    st = iam["statements"]
+    if not isinstance(st, list) or len(st) != 1:
+        refuse(f"expected exactly one [[iam.statements]], found {len(st) if isinstance(st, list) else st!r}")
+    if st[0] != want:
+        refuse(f"the statement is {st[0]!r}, not the scoped read {want!r}")
+    print(f"iam ok: Allow s3:GetObject {want['resources'][0]} and nothing else")
+    PY
 
 # Run <cmd> with the decide config installed ALONE at the shared deploy root <root>: its
 # `.pmcp/{deploy,deployment}.toml`, `.pmcp/active-target` and `deploy/` (setfit-train's
@@ -1685,6 +1730,8 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
         s3://*/decide/"$SERVER"/"$H".apr) ;;
         *) refuse sha-pin "APRENDER_DECIDE_S3_URI $CFG_URI is not the content-addressed key decide/$SERVER/$H.apr" ;;
     esac
+    # (3b) the stack-declared weights read: exactly s3:GetObject on decide/$SERVER/* and nothing broader
+    IAMLOG="$(just _laya-iam-check "$CFG" 2>&1)" || refuse iam "$(printf '%s' "$IAMLOG" | grep -m 1 '^REFUSED' | sed 's/^REFUSED iam: //')"
     # (4) the resolver proof for the installed cargo-pmcp
     [ -f "$PROOF" ] || refuse resolver-proof "$PROOF does not exist -- run: just laya-resolver-proof <sdk> <commit> <scratch>"
     [ "$(head -n 1 "$PROOF")" = "$EXPECT_PKG" ] || refuse resolver-proof "$PROOF names '$(head -n 1 "$PROOF")', not $EXPECT_PKG"
@@ -1735,16 +1782,16 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     SNAP="models/decide/deploy-$SERVER.state"
     rm -rf "$SNAP"
     contain() {
-        echo "IDENTITY FAILURE: $1 -- containing (reserved concurrency 0, grant removed)" >&2
+        echo "IDENTITY FAILURE: $1 -- containing (reserved concurrency 0)" >&2
         just laya-teardown "$SERVER" "$ENV" "$PROFILE" \
             || echo "ERROR: containment failed -- throttle it by hand: aws lambda put-function-concurrency --function-name $SERVER --reserved-concurrent-executions 0" >&2
         exit 1
     }
-    # --no-post-deploy-test: cargo-pmcp's own suite (warmup, connectivity, conformance) runs
-    # BEFORE the scoped grant below, and every MCP request to this server loads the model
-    # from S3 first, so the suite could only observe a 403 load failure and exit 3 before
-    # the grant and before this recipe's identity chain (health body, identity probe after
-    # the grant) -- which is the verification this server is held to. (plan 08-17)
+    # --no-post-deploy-test: this recipe's identity chain (edge health serverId, then a live
+    # identity probe) is the verification this server is held to, not cargo-pmcp's suite.
+    # The weights read is now IN THE STACK ([[iam.statements]], checked at (3b)), so the
+    # function never runs without it -- the out-of-band grant it replaces arrived after
+    # pmcp.run's own post-deploy invocation had already failed the load. (plan 08-17)
     # --no-oauth when the config says [auth] enabled = false: the human's auth-off decision
     # made explicit on the command line, not only in the file.
     AUTH_ON="$(python3 -c 'import sys, tomllib; print(str(tomllib.load(open(sys.argv[1], "rb"))["auth"]["enabled"]).lower())' "$CFG")"
@@ -1765,11 +1812,8 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     [ -z "$OTHER" ] || contain "the compile log also builds $OTHER"
     ENDPOINT="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$SNAP/deployment.toml" 2>/dev/null)" \
         || contain "no endpoint in $SNAP/deployment.toml"
-    just laya-grant "$SERVER" "$ENV" "$PROFILE"
-    # IAM is eventually consistent: the identity probe's first request is the cold load's
-    # S3 GET, and a policy not yet visible reads as a 403 load failure -- which the check
-    # below would misreport as an identity failure and contain. (plan 08-17)
-    sleep "${LAYA_GRANT_PROPAGATION_S:-20}"
+    # Read-only: the stack put the scoped read on the role before the function existed.
+    just laya-grant "$SERVER" "$ENV" "$PROFILE" || contain "the function's role does not carry the stack-declared scoped weights read"
     # Edge health (D-ITEM-08-17-A). No GET reaches the bootstrap on pmcp.run: the edge answers
     # GET /mcp itself (405) and serves /health as platform JSON with no package field. So this
     # step proves only that the edge routes <server>: /health must name it as serverId. Package
@@ -1791,7 +1835,7 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     set -e
     [ "$prc" -eq 0 ] || contain "the identity probe failed (log: models/decide/deploy-probe-$SERVER.log)"
     echo "DEPLOYED $SERVER at $ENDPOINT: compile log, edge health serverId and live identity (sha256 $H) name the decide server"
-    echo "  next: just laya-deploy-verify $APR $SERVER $PROFILE    (re-run just laya-grant after any pmcp.run redeploy)"
+    echo "  next: just laya-deploy-verify $APR $SERVER $PROFILE"
 
 # The pmcp.run edge health URL for an MCP endpoint: https://<host>/mcp -> https://<host>/health.
 # Anything else is refused (exit 2), so a changed endpoint shape fails closed instead of probing
@@ -2008,6 +2052,94 @@ laya-deploy-selftest:
     else
         fail "EDGE HEALTH wiring: laya-deploy does not call both helpers, or still GETs \$ENDPOINT"
     fi
+    # IAM (08-17 option 1): the generated config carries the scoped weights read IN THE STACK and
+    # nothing broader. must-accept / must-refuse table over _laya-iam-check, then laya-deploy's own
+    # refusal of a broadened config. Each variant is the regenerated config with ONE edit.
+    regen iam
+    iam_variant() {
+        python3 - "$CFG" "$CASES/iam-$1.toml" "$1" <<'PY'
+    import re, sys
+    src, out, kind = sys.argv[1:4]
+    t = open(src).read()
+    def sub(pat, rep):
+        global t
+        t, n = re.subn(pat, rep, t, count=1, flags=re.M)
+        assert n == 1, (kind, pat)
+    if kind == "s3-star":
+        sub(r'^actions = \["s3:GetObject"\]$', 'actions = ["s3:*"]')
+    elif kind == "list-too":
+        sub(r'^actions = \["s3:GetObject"\]$', 'actions = ["s3:GetObject", "s3:ListBucket"]')
+    elif kind == "bucket-wide":
+        sub(r'^resources = \["arn:aws:s3:::([^/"]+)/decide/[^"]*"\]$', r'resources = ["arn:aws:s3:::\1/*"]')
+    elif kind == "star-resource":
+        sub(r'^resources = \["arn:aws:s3:::[^"]*"\]$', 'resources = ["*"]')
+    elif kind == "other-server":
+        sub(r'^resources = \["arn:aws:s3:::([^/"]+)/decide/[^"]*"\]$', r'resources = ["arn:aws:s3:::\1/decide/*"]')
+    elif kind == "two-statements":
+        t += '\n[[iam.statements]]\neffect = "Allow"\nactions = ["s3:GetObject"]\nresources = ["arn:aws:s3:::other/x"]\n'
+    elif kind == "bucket-sugar":
+        t += '\n[[iam.buckets]]\nname = "other"\npermissions = ["read"]\n'
+    elif kind == "no-iam":
+        t = t[: t.index("[[iam.statements]]")]
+    elif kind != "as-generated":
+        sys.exit(f"unknown variant {kind}")
+    open(out, "w").write(t)
+    PY
+    }
+    iam_case() {
+        local want="$1" kind="$2" rc
+        iam_variant "$kind"
+        set +e; just _laya-iam-check "$CASES/iam-$kind.toml" > "$CASES/iam-$kind.log" 2>&1; rc=$?; set -e
+        if { [ "$want" = accept ] && [ "$rc" -eq 0 ]; } || { [ "$want" = refuse ] && [ "$rc" -ne 0 ] && grep -q '^REFUSED iam:' "$CASES/iam-$kind.log"; }; then
+            echo "IAM config $want: $kind ($(head -n 1 "$CASES/iam-$kind.log" | cut -c 1-160))"
+        else
+            fail "IAM config $want $kind: exit $rc (log: $CASES/iam-$kind.log)"
+        fi
+    }
+    iam_case accept as-generated
+    if python3 -c 'import sys, tomllib; c = tomllib.load(open(sys.argv[1], "rb")); s = c["iam"]["statements"]; sys.exit(0 if s == [{"effect": "Allow", "actions": ["s3:GetObject"], "resources": ["arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*"]}] and set(c["iam"]) == {"statements"} else 1)' "$CFG"; then
+        echo "IAM config literal: exactly [Allow s3:GetObject arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*]"
+    else
+        fail "IAM config literal: the generated [iam] is not exactly the scoped read"
+    fi
+    for k in s3-star list-too bucket-wide star-resource other-server two-statements bucket-sugar no-iam; do iam_case refuse "$k"; done
+    cp "$CASES/iam-s3-star.toml" "$CFG"
+    expect_refused 6 iam-broadened 'REFUSED iam:' deploy_tiny
+    regen 7
+    # GRANT: the read-only role check, over policy documents shaped like `aws iam get-role-policy`.
+    GB="dry-run-bucket"
+    SCOPED='{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*"}'
+    XRAY='{"Effect":"Allow","Action":["xray:PutTraceSegments","xray:PutTelemetryRecords"],"Resource":"*"}'
+    grant_case() {
+        local want="$1" name="$2" docs="$3" rc
+        set +e; just _laya-grant-check "$docs" "$GB" aprender-mcp-decide aprender-decide-weights-dev > "$CASES/grant-$name.log" 2>&1; rc=$?; set -e
+        if { [ "$want" = accept ] && [ "$rc" -eq 0 ]; } || { [ "$want" = refuse ] && [ "$rc" -ne 0 ] && grep -q '^REFUSED grant:' "$CASES/grant-$name.log"; }; then
+            echo "GRANT $want: $name"
+        else
+            fail "GRANT $want $name: exit $rc (log: $CASES/grant-$name.log)"
+        fi
+    }
+    grant_case accept stack-declared "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$XRAY,$SCOPED]}}]"
+    grant_case refuse absent "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$XRAY]}}]"
+    grant_case refuse no-policies '[]'
+    grant_case refuse s3-star "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"arn:aws:s3:::other/*\"}]}}]"
+    grant_case refuse bucket-wide "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/*\"}]}}]"
+    grant_case refuse legacy-still-on "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED]}},{\"name\":\"aprender-decide-weights-dev\",\"document\":{\"Statement\":[$SCOPED]}}]"
+    grant_case refuse not-json 'nope'
+    # Wiring: laya-grant only READS IAM, and laya-deploy runs the config check and the role check.
+    GRANT_BODY="$(just --show laya-grant)"
+    if printf '%s' "$GRANT_BODY" | grep -q 'just _laya-grant-check' \
+        && ! printf '%s' "$GRANT_BODY" | grep -Eq 'aws iam (put|delete|attach|detach|create)'; then
+        echo "GRANT wiring: laya-grant reads the role's policies and writes nothing"
+    else
+        fail "GRANT wiring: laya-grant does not call _laya-grant-check, or still writes IAM"
+    fi
+    if printf '%s' "$DEPLOY_BODY" | grep -q 'just _laya-iam-check "\$CFG"' \
+        && printf '%s' "$DEPLOY_BODY" | grep -q 'just laya-grant "\$SERVER" "\$ENV" "\$PROFILE" || contain'; then
+        echo "IAM wiring: laya-deploy checks the config's [iam] and contains when the role lacks the stack grant"
+    else
+        fail "IAM wiring: laya-deploy does not run _laya-iam-check and the contained laya-grant check"
+    fi
     # Positive dry run: armed only by a real artifact that laya-verify itself must accept.
     if [ -n "${LAYA_ELIGIBLE_APR:-}${LAYA_ELIGIBLE_RUN:-}${LAYA_ELIGIBLE_DATA:-}${LAYA_ELIGIBLE_BASE:-}" ]; then
         if [ -n "${LAYA_ELIGIBLE_APR:-}" ] && [ -n "${LAYA_ELIGIBLE_RUN:-}" ] && [ -n "${LAYA_ELIGIBLE_DATA:-}" ] && [ -n "${LAYA_ELIGIBLE_BASE:-}" ]; then
@@ -2160,12 +2292,62 @@ laya-grant server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
     ROLE="${ROLE_ARN##*/}"
     ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
     BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
-    POLICY="$(python3 -c 'import json, sys; b, s = sys.argv[1:3]; print(json.dumps({"Version": "2012-10-17", "Statement": [{"Sid": "ReadDecideWeights", "Effect": "Allow", "Action": "s3:GetObject", "Resource": f"arn:aws:s3:::{b}/decide/{s}/*"}, {"Sid": "ListDecidePrefix", "Effect": "Allow", "Action": "s3:ListBucket", "Resource": f"arn:aws:s3:::{b}", "Condition": {"StringLike": {"s3:prefix": [f"decide/{s}/*"]}}}]}))' "$BUCKET" "$SERVER")"
-    aws iam put-role-policy --profile "$P" --role-name "$ROLE" \
-        --policy-name "aprender-decide-weights-${ENV}" --policy-document "$POLICY"
-    echo "  granted on role: $ROLE"
-    echo "  policy:          aprender-decide-weights-${ENV} (GetObject decide/$SERVER/*, ListBucket s3:prefix decide/$SERVER/*)"
-    echo "  re-run after any pmcp.run redeploy: a platform stack update may drop an out-of-band policy"
+    # Every inline policy on the role, as one JSON list of {name, document}. Read-only calls only.
+    DOCS="["
+    SEP=""
+    for NAME in $(aws iam list-role-policies --profile "$P" --role-name "$ROLE" --query 'PolicyNames[]' --output text); do
+        DOC="$(aws iam get-role-policy --profile "$P" --role-name "$ROLE" --policy-name "$NAME" --query PolicyDocument --output json)"
+        DOCS="$DOCS$SEP{\"name\": \"$NAME\", \"document\": $DOC}"
+        SEP=","
+    done
+    DOCS="$DOCS]"
+    just _laya-grant-check "$DOCS" "$BUCKET" "$SERVER" "aprender-decide-weights-${ENV}" \
+        | sed "s/$BUCKET/<weights-bucket>/g"
+    echo "  role: $ROLE"
+
+# Decide whether a role's inline policies (<docs>: a JSON list of {name, document}) carry the
+# stack-declared weights read: some Allow statement whose Action is exactly s3:GetObject and whose
+# Resource is exactly arn:aws:s3:::<bucket>/decide/<server>/*. Refuses (exit 1) when it is absent,
+# when any statement grants s3:* or s3:GetObject bucket-wide, or when the legacy out-of-band policy
+# <legacy> is still attached (08-17 option 1 retired it; the stack is the only grant). Pure: no
+# network. Exercised by laya-deploy-selftest's GRANT table.
+[positional-arguments]
+_laya-grant-check docs bucket server legacy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 - "$1" "$2" "$3" "$4" <<'PY'
+    import json, sys
+    docs, bucket, server, legacy = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    def refuse(msg):
+        print(f"REFUSED grant: {msg}", file=sys.stderr); sys.exit(1)
+    try:
+        pols = json.loads(docs)
+    except ValueError:
+        refuse("the policy list is not JSON")
+    want = f"arn:aws:s3:::{bucket}/decide/{server}/*"
+    listify = lambda v: v if isinstance(v, list) else [v]
+    found = None
+    for p in pols:
+        if p.get("name") == legacy:
+            refuse(f"the legacy out-of-band policy {legacy} is still on the role; the stack is the only grant")
+        for s in listify(p.get("document", {}).get("Statement", [])):
+            if s.get("Effect") != "Allow":
+                continue
+            acts, res = listify(s.get("Action", [])), listify(s.get("Resource", []))
+            s3acts = [a for a in acts if a.lower().startswith("s3:") or a == "*"]
+            if not s3acts:
+                continue
+            if any(a in ("*", "s3:*") for a in s3acts):
+                refuse(f"{p.get('name')} grants {s3acts} -- broader than s3:GetObject")
+            broad = [r for r in res if r in ("*", f"arn:aws:s3:::{bucket}/*", f"arn:aws:s3:::{bucket}", "arn:aws:s3:::*")]
+            if broad:
+                refuse(f"{p.get('name')} grants {s3acts} on {broad} -- broader than decide/{server}/*")
+            if acts == ["s3:GetObject"] and res == [want]:
+                found = p.get("name")
+    if not found:
+        refuse(f"no inline policy grants exactly s3:GetObject on {want}")
+    print(f"grant ok: policy {found} (stack-declared) allows s3:GetObject on {want} and nothing broader")
+    PY
 
 # Measure decide-tool-boundary-v1 accepted_region_cold LIVE (the post-spike deploy; not this phase).
 # Per cold sample: bump DECIDE_COLD_BUMP in the function config (a config change retires every
@@ -2335,11 +2517,17 @@ laya-teardown server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
     echo "  CONTAINED: $SERVER reserved concurrency 0 (no invocation runs, warm instances included)"
     ROLE_ARN="$(aws lambda get-function --profile "$P" --function-name "$SERVER" --query Configuration.Role --output text)"
     ROLE="${ROLE_ARN##*/}"
+    # Only the LEGACY out-of-band policy (pre-08-17-option-1 laya-grant wrote it) is deleted, by its
+    # exact name. The stack-declared weights read (cargo-pmcp's default policy, e.g. `pmcp-declared`)
+    # is stack-managed and is NEVER touched here: deleting it would be drift the next deploy
+    # silently re-creates. It stays attached while contained, and grants nothing usable: with
+    # reserved concurrency 0 no invocation runs. `cargo pmcp deploy destroy` (below) removes it.
     if aws iam delete-role-policy --profile "$P" --role-name "$ROLE" --policy-name "aprender-decide-weights-${ENV}" 2>/dev/null; then
-        echo "  removed policy aprender-decide-weights-${ENV} from $ROLE"
+        echo "  removed LEGACY out-of-band policy aprender-decide-weights-${ENV} from $ROLE"
     else
-        echo "  no policy aprender-decide-weights-${ENV} on $ROLE (already removed)"
+        echo "  no legacy policy aprender-decide-weights-${ENV} on $ROLE (expected since 08-17 option 1)"
     fi
+    echo "  stack-declared weights read left in place (stack-managed; inert at reserved concurrency 0)"
     ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
     echo "  NOT RUN -- the human's call:"
     echo "    remove the deployment (the decide config must be at the shared root while it runs):"

@@ -21,7 +21,7 @@
 #        s3://<bucket>/decide/<server>/<sha256>.apr
 #   2. just laya-deploy-config   # fills the UNSET values below into ./deploy.toml
 #   3. cargo pmcp deploy --manifest-path <the deploy root plan 08-10 settles>
-#   4. grant the function's role s3:GetObject on that one key
+#   4. verify the stack-declared s3:GetObject below is on the function's role (read-only)
 #   5. probe the endpoint (examples/probe.rs): identity, then the cold maximal requests
 #
 # The weights are NEVER baked into the package (spikes 021/026: 7-18x worse cold start).
@@ -99,3 +99,16 @@ latency_threshold_ms = 20000
 tier = "foundation"
 allow_composition = true
 internal_only = false
+
+# THE WEIGHTS READ, declared IN THE STACK (plan 08-17, option 1). cargo-pmcp renders
+# `[[iam.statements]]` into the execution role's default policy, and the Lambda function
+# DependsOn that policy, so the grant exists before the function's FIRST invocation --
+# including pmcp.run's own post-deploy call, which ran before the old out-of-band
+# `put-role-policy` grant, failed the S3 load, and left the edge refusing MCP POSTs
+# ("Server is in error state"). s3:GetObject ONLY, on this server's content-addressed
+# prefix ONLY: no s3:*, no ListBucket, no bucket-wide `*`. `just laya-deploy-config` fills
+# the ARN; `_laya-iam-check` refuses any config that carries anything broader.
+[[iam.statements]]
+effect = "Allow"
+actions = ["s3:GetObject"]
+resources = ["UNSET-run-just-laya-deploy-config"]
