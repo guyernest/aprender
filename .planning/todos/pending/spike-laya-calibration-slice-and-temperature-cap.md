@@ -43,6 +43,27 @@ Evidence (gitignored): `models/decide/tweet-stance-16-fixed-epochs/gate-report.j
 - If a cap change is needed, what is the smallest one? How does upstream Laya justify 5.0,
   and would a change be acceptable upstream?
 
+## Added 2026-09-26: is the 1e-5 re-score bar above fp32 noise for real checkpoints?
+
+The debug session `laya-rescore-drift` (`.planning/debug/resolved/`) found that
+`pack_rescore_probs_abs` 1e-5 (and `logits_abs` 1e-4), fitted from spike 025's 14 base-model
+rows, sits at the fp32 rounding-noise floor on real fine-tuned checkpoints:
+
+- Against a float64 reference of the same model, torch's own stored fp32 probabilities are
+  up to 3.71e-5 off on the fixed-epochs checkpoint (13 rows > 1e-5; 52 rows > 1e-4 in logits).
+  Rust's error is statistically the same size as torch's, layer by layer.
+- After the RoPE `inv_freq` fix, early_stopping and zero-shot pass with only about 1.5x headroom
+  (torch is 7.9e-6 to 9.5e-6 from exact). A one-ULP codegen change once flipped zero-shot row 49.
+- x86_64 has not been measured.
+- The fixed-epochs vector is refused on `RescoreDrift` (user option A), not on the gate.
+
+This matters here because this spike exists to produce a gate-passing run, and pack must then
+accept that run. Measure, on each candidate checkpoint, the Rust-vs-torch and
+torch-vs-float64 re-score tails over the full eval set, on aarch64 and on x86_64. If the bar would
+refuse a passing model, bring a contract amendment to the user, for example a bar defined as a
+multiple of the per-checkpoint torch-fp32-vs-float64 error. It must be declared before any gate
+run is read. It is a tolerance change, and the user has not yet approved one.
+
 ## Constraints
 
 - A spike is not a gate run. Declare whatever it recommends in `laya-finetune-gate-v1`
