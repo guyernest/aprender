@@ -7,13 +7,18 @@ No torch import (module level or anywhere): `python data.py --selftest` runs wit
                                DOCUMENT ORDER is the label index (parsed with object_pairs_hook=list
                                so both order and duplicates are observable); >= 2 unique names; each
                                description a string or null.
-    load_rows(path, task)      train.jsonl / eval.jsonl, decide-apr-v1 `train_row_schema`: exactly
-                               {text: string, label: <criterion NAME>}; unknown names and keys refused.
+    load_rows(path, task, role)
+                               train.jsonl / eval.jsonl / shift.jsonl (role train | eval | shift),
+                               decide-apr-v1 `train_row_schema`: exactly {text: string, label:
+                               <criterion NAME>}; unknown names and keys refused.
     normalized_sha256(text)    sha256 of `nfc-trim-ws-v1` (aprender-contrastive-data hash.rs): NFC, trim,
                                collapse every Unicode White_Space run to one U+0020 -- the Rust
                                `split_whitespace` set, NOT Python's str.split() (which also splits on
                                U+001C..U+001F).
-    refuse_overlap(train, ev)  an eval text whose normalized hash is a train hash is refused.
+    refuse_overlap(train, ev, role="eval")
+                               an eval (or shift) text whose normalized hash is a train hash is refused.
+    in_distribution_heldout(validation, train_pool, shot_ids, excluded_ids, group_member_ids, shots)
+                               laya-finetune-gate-v1 `eval_set.demo_rule` (A2, 1.4.0) as a pure function.
     group_train(rows)          train rows grouped by normalized hash; a group whose copies carry
                                different labels is refused (row-disjoint is not text-disjoint).
     calibration_split(rows, fraction, min_per_class, seed, labels)
@@ -42,6 +47,7 @@ _WHITE_SPACE = frozenset(
     + [chr(c) for c in range(0x2000, 0x200B)] + [" ", " ", " ", " ", "　"])
 TASK_KEYS = ("type", "instructions", "criteria")
 ROW_KEYS = ("text", "label")
+ROW_ROLES = ("train", "eval", "shift")
 
 
 class DataError(ValueError):
@@ -130,7 +136,9 @@ def laya_question(task):
 # ------------------------------------------------------------------------------------------ rows
 
 def load_rows(path, task, role):
-    """[(text, label_index)] from a jsonl file; `role` names the file in refusals."""
+    """[(text, label_index)] from a jsonl file; `role` (train | eval | shift) names the file in refusals."""
+    if role not in ROW_ROLES:
+        raise ValueError("load_rows role %r is not one of %s" % (role, ROW_ROLES))
     path = Path(path)
     if not path.is_file():
         raise DataError("%s-missing" % role, "%s does not exist (%s.jsonl is required)" % (path, role))
@@ -166,12 +174,45 @@ def load_rows(path, task, role):
     return rows
 
 
-def refuse_overlap(train, ev):
+def refuse_overlap(train, ev, role="eval"):
+    """An `role` row (eval, or the shift probe) whose normalized text equals a train text is refused."""
     train_hashes = {normalized_sha256(t) for t, _ in train}
     hits = [i for i, (t, _) in enumerate(ev) if normalized_sha256(t) in train_hashes]
     if hits:
-        raise DataError("eval-train-overlap", "%d eval row(s) equal a train text after NFC/trim/whitespace "
-                        "collapse (eval.jsonl rows %s)" % (len(hits), hits[:10]))
+        raise DataError("%s-train-overlap" % role, "%d %s row(s) equal a train text after NFC/trim/whitespace "
+                        "collapse (%s.jsonl rows %s)" % (len(hits), role, role, hits[:10]))
+
+
+def in_distribution_heldout(validation, train_pool, shot_ids, excluded_ids, group_member_ids, shots):
+    """laya-finetune-gate-v1 `eval_set.demo_rule` (A2, 1.4.0), torch-free and I/O-free.
+
+    `validation` and `train_pool` are [(id, text, label)] in source file order; `shot_ids` the selection's
+    ordered_examples ids; `excluded_ids` its exclusions.excluded_train_ids; `group_member_ids` every
+    exclusions.groups[*].members entry as a (split, id) pair; `shots` the [(text, label)] shots.
+    Validation rows first, then train rows, each in file order; a row is dropped when its id is a shot,
+    in excluded_ids, or (split, id) is a group member. A remaining row whose nfc-trim-ws-v1 text equals a
+    shot's is REFUSED (DataError heldout-shot-overlap), never silently dropped. Duplicates by normalized
+    text are dropped keeping the FIRST occurrence. Returns [(text, label)]."""
+    shot_ids, excluded_ids = set(shot_ids), set(excluded_ids)
+    members = {(str(sp), str(i)) for sp, i in group_member_ids}
+    kept = []
+    for split, rows in (("validation", validation), ("train", train_pool)):
+        for rid, text, label in rows:
+            if rid in shot_ids or rid in excluded_ids or (split, str(rid)) in members:
+                continue
+            kept.append((split, rid, text, label))
+    shot_norm = {normalized_sha256(t) for t, _ in shots}
+    hits = [(sp, rid) for sp, rid, t, _ in kept if normalized_sha256(t) in shot_norm]
+    if hits:
+        raise DataError("heldout-shot-overlap", "%d held-out row(s) equal a shot after NFC/trim/whitespace collapse "
+                        "(%s)" % (len(hits), hits[:10]))
+    seen, out = set(), []
+    for _, _, text, label in kept:
+        h = normalized_sha256(text)
+        if h not in seen:
+            seen.add(h)
+            out.append((text, label))
+    return out
 
 
 def group_train(rows):

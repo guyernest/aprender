@@ -11,8 +11,9 @@
 
 The run, in order (every value from contracts/laya-finetune-gate-v1.yaml via contract.py):
 
-  1. validate the data dir (data.py): task.json, train.jsonl, and a REQUIRED eval.jsonl; eval text
-     overlapping train (NFC/trim/whitespace-normalized) is refused; conflicting train duplicates refused.
+  1. validate the data dir (data.py): task.json, train.jsonl, a REQUIRED eval.jsonl and an OPTIONAL
+     shift.jsonl; eval or shift text overlapping train (NFC/trim/whitespace-normalized) is refused;
+     conflicting train duplicates refused.
   2. resolve the recipe, write <out>/recipe.json (sort_keys, compact) and print RECIPE WRITTEN <sha256>
      BEFORE any model scores anything (recipe_before_scores, D-04).
   3. request the device mps -> cuda -> cpu, load Laya's own Agent on the pinned base with
@@ -36,7 +37,10 @@ The run, in order (every value from contracts/laya-finetune-gate-v1.yaml via con
   9. the float64 re-score noise record (A1, laya-parity-v1 rescore_noise_reference) of the shipped
      checkpoint and the base -> rescore-noise.json; a manual fp32 forward that does not reproduce the
      Scorer's logits exactly refuses the run (exit 2) with no record and no gate report.
- 10. gate-report.json (rescore_noise_sha256 binds the record); GATE PASS (exit 0) or GATE FAIL (exit 3).
+ 10. with shift.jsonl, the shift probe (A2) -- scored only now, with a fresh reload of the shipped
+     checkpoint and the base -> shift-probs.json / shift-zero-shot-probs.json, gate-report `shift_probe`
+     with gate_clause false. It never touches `pass`, the per-seed rows or the exit code.
+ 11. gate-report.json (rescore_noise_sha256 binds the record); GATE PASS (exit 0) or GATE FAIL (exit 3).
 
 Seeds (D-08 as amended by A3, laya-finetune-gate-v1 1.4.0 seed_policy). PRODUCTION trains exactly the
 three gate seeds (13, 17, 23; `--seeds` other than 3 is refused before anything is written) on the SAME
@@ -84,6 +88,7 @@ import contract  # noqa: E402
 from common import f32_hex_list, f32_list, save_f16, sha256_bytes, tree_sha256, write_json  # noqa: E402
 import data  # noqa: E402
 import gate  # noqa: E402
+import metrics  # noqa: E402
 
 EXIT_PASS, EXIT_REFUSED, EXIT_GATE_FAIL = 0, 2, 3
 BASE_FILES = ("rl_agent_config.json", "model.safetensors", "tokenizer/*", "encoder/*")
@@ -583,6 +588,41 @@ def write_noise_record(out, base, eval_rows, question, labels):
     return data.sha256_file(out / "rescore-noise.json")
 
 
+def score_shift_probe(out, base, shift_rows, question, labels, f_avg_labels):
+    """laya-finetune-gate-v1 eval_set.shift_probe_rule (A2): the shipped checkpoint (a fresh reload, at its
+    applied T) and the declared base on shift.jsonl -> shift-probs.json / shift-zero-shot-probs.json
+    (eval_probs_schema), macro-F1, F_avg and house ECE through metrics.py on exactly the written
+    probabilities. Returns the gate-report `shift_probe` block, `gate_clause` false."""
+    ck = out / "checkpoint"
+    bins = int(contract.thresholds()["ece_bins"])
+    y = np.array([lab for _, lab in shift_rows])
+    as64 = lambda P: np.array([f32_list(r) for r in P], dtype=np.float64)  # noqa: E731
+    agent = reload_checked(ck, tree_sha256(ck))
+    P_ft, _ = score_rows(agent, shift_rows, question)
+    del agent
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        zs_agent = load_for_scoring(base.src, base.digest, base.revision)
+    P_zs, _ = score_rows(zs_agent, shift_rows, question)
+    del zs_agent
+    gc.collect()
+    write_json(out / "shift-probs.json", eval_probs_obj(labels, shift_rows, P_ft))
+    write_json(out / "shift-zero-shot-probs.json", eval_probs_obj(labels, shift_rows, P_zs))
+    ft_P, zs_P = as64(P_ft), as64(P_zs)
+    fav = lambda P: None if f_avg_labels is None else metrics.f_avg(P, y, list(f_avg_labels))  # noqa: E731
+    zs = {"macro_f1": metrics.macro_f1(zs_P, y), "f_avg": fav(zs_P), "ece": metrics.ece_top_label(zs_P, y, bins)}
+    ft = {"macro_f1": metrics.macro_f1(ft_P, y), "f_avg": fav(ft_P), "ece_post": metrics.ece_top_label(ft_P, y, bins)}
+    probe = {"gate_clause": False, "n": len(shift_rows), "zero_shot": zs, "fine_tuned": ft,
+             "margin": ft["macro_f1"] - zs["macro_f1"],
+             "probs_sha256": data.sha256_file(out / "shift-probs.json"),
+             "zero_shot_probs_sha256": data.sha256_file(out / "shift-zero-shot-probs.json")}
+    fmt = lambda v: "null" if v is None else "%.4f" % v  # noqa: E731
+    log("SHIFT PROBE n=%d ft macro_f1=%s f_avg=%s ece_post=%s | zs macro_f1=%s ece=%s | margin=%s "
+        "(reported, not a gate clause)" % (len(shift_rows), fmt(ft["macro_f1"]), fmt(ft["f_avg"]), fmt(ft["ece_post"]),
+                                          fmt(zs["macro_f1"]), fmt(zs["ece"]), fmt(probe["margin"])))
+    return probe
+
+
 class SeedRun:
     """Steps 4-6 for one seed on fixed data, split, recipe and base: train -> COMPLETE checkpoint dir ->
     reload -> calibrate -> reload -> eval probabilities. Used for the declared seed and every variance seed."""
@@ -679,6 +719,10 @@ def main(argv=None):
         train_rows = data.load_rows(data_dir / "train.jsonl", task, "train")
         eval_rows = data.load_rows(data_dir / "eval.jsonl", task, "eval")
         data.refuse_overlap(train_rows, eval_rows)
+        shift_rows = None
+        if (data_dir / "shift.jsonl").is_file():      # the OPTIONAL shift probe (A2): reported, never a gate clause
+            shift_rows = data.load_rows(data_dir / "shift.jsonl", task, "shift")
+            data.refuse_overlap(train_rows, shift_rows, "shift")
         fit_ids, calib_ids, slice_ids, slice_sha = data.calibration_split(
             train_rows, c["calibration_slice_fraction"], c["calibration_slice_min_per_class"], seed,
             len(task["labels"]))
@@ -693,9 +737,9 @@ def main(argv=None):
         refuse("REFUSED out-dir: %s exists and is not empty; a run dir is written once" % out)
     labels, k = task["labels"], len(task["labels"])
     question = data.laya_question(task)
-    log("DATA task=%s K=%d train=%d eval=%d shots_per_class=%d fit=%d calibration=%d seeds=%s"
-        % (data_dir / "task.json", k, len(train_rows), len(eval_rows), shots_per_class, len(fit_ids), len(calib_ids),
-           ",".join(str(s) for s in seeds)))
+    log("DATA task=%s K=%d train=%d eval=%d shift=%s shots_per_class=%d fit=%d calibration=%d seeds=%s"
+        % (data_dir / "task.json", k, len(train_rows), len(eval_rows), "none" if shift_rows is None else len(shift_rows),
+           shots_per_class, len(fit_ids), len(calib_ids), ",".join(str(s) for s in seeds)))
 
     # 2. recipe first (seed_selection whenever three seeds run -- every production run, A3)
     selection = contract.seed_selection_decl() if len(seeds) > 1 else None
@@ -802,6 +846,12 @@ def main(argv=None):
     # A1: the float64 re-score noise record of the shipped checkpoint and the base (after the gate is decided).
     noise_sha = write_noise_record(out, base, eval_rows, question, labels)
 
+    # A2: the shift probe, scored only now -- after the gate, the median and the noise record -- and never read
+    # by `pass`, the per-seed rows or the exit code.
+    shift_probe = None
+    if shift_rows is not None:
+        shift_probe = score_shift_probe(out, base, shift_rows, question, labels, f_avg_labels)
+
     report = {
         "schema": "laya-gate-report-v1",
         "pass": g["pass"],
@@ -827,6 +877,9 @@ def main(argv=None):
         "probes_sha256": data.sha256_file(out / "probes.json"),
         "rescore_noise_sha256": noise_sha,
     }
+    if shift_probe is not None:
+        report["inputs_sha256"]["shift_jsonl"] = data.sha256_file(data_dir / "shift.jsonl")
+        report["shift_probe"] = shift_probe
     write_json(out / "gate-report.json", report)
 
     zs, ft = g["zero_shot"], g["fine_tuned"]

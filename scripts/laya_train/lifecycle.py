@@ -37,8 +37,13 @@ afterwards), then asserts:
     one row per eval row in order, max_abs recomputed from the written files bit for bit, bound ==
     max(floor, k x max_abs), argmax agreement recomputed, sha256 equal to the gate report's.
 
-With LAYA_LIFECYCLE_KEEP=<dir>, the three-seed run dir is copied to <dir>/run and its data dir to
-<dir>/data (plan 08-15's cross-language reader test parses exactly what this writer wrote).
+  * the A2 shift probe: the same three-seed run with a shift.jsonl added to its data dir decides an
+    IDENTICAL gate (pass, margin, zero_shot, fine_tuned, calibration, seeds), carries `shift_probe`
+    (gate_clause false) and the two hash-bound shift files; a shift row equal to a train row is refused.
+
+With LAYA_LIFECYCLE_KEEP=<dir>, the three-seed SHIFT run dir (every 1.4.0 file, shift probe included) is
+copied to <dir>/run and its data dir to <dir>/data (plan 08-15's cross-language reader test parses
+exactly what this writer wrote).
 
 The gate outcome itself is not asserted (a 1-3 epoch tiny model is not expected to pass): exit 0 or 3.
 Prints LIFECYCLE OK.
@@ -94,7 +99,8 @@ def main():
         multi = tmp / "fixed_epochs-seeds3"
         run_one(multi, tiny_sha, "fixed_epochs", 1, Agent, seeds=3)
         check_median_run(single, multi)
-        keep_run(multi, TINY / "data")
+        shift_run, shift_data = check_shift_probe(tmp, tiny_sha, multi, Agent)
+        keep_run(shift_run, shift_data)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("LIFECYCLE OK")
@@ -142,6 +148,50 @@ def check_seed_refusals(tmp, tiny_sha):
              % (proc.returncode, proc.stderr[-300:]))
     print("seed refusals: synthetic --seeds 0 / 2 / %d and production --seeds 1 refused (exit 2, nothing written)"
           % (n_max + 1))
+
+
+def check_shift_probe(tmp, tiny_sha, without, Agent):
+    """A2 on the tiny fixture: a data dir with shift.jsonl (the tiny eval rows, text-disjoint from train)
+    runs the SAME three-seed recipe as `without` (the tiny data dir, byte-identical otherwise); the gate is
+    identical -- pass, margin, zero_shot, fine_tuned, calibration, seeds -- and only the shift run carries
+    shift_probe (gate_clause false) and the two shift files. A shift row equal to a train row is refused
+    (exit 2) before anything is written. Returns (the shift run dir, its data dir)."""
+    data_dir = tmp / "data-shift"
+    shutil.copytree(TINY / "data", data_dir)
+    (data_dir / "shift.jsonl").write_bytes((TINY / "data" / "eval.jsonl").read_bytes())
+    out = tmp / "fixed_epochs-seeds3-shift"
+    with_rep = run_one(out, tiny_sha, "fixed_epochs", 1, Agent, seeds=3, data_dir=data_dir)
+    without_rep = json.loads((without / "gate-report.json").read_text())
+    for key in ("pass", "margin", "zero_shot", "fine_tuned", "calibration", "seeds", "recipe_id", "eval_probs_sha256",
+                "zero_shot_probs_sha256", "rescore_noise_sha256"):
+        if with_rep[key] != without_rep[key]:
+            fail("the shift probe changed the gate: %s differs with and without shift.jsonl" % key)
+    probe = with_rep["shift_probe"]
+    if probe.get("gate_clause") is not False or "shift_probe" in without_rep:
+        fail("shift_probe must carry gate_clause false and appear only with shift.jsonl")
+    for name, key in (("shift-probs.json", "probs_sha256"), ("shift-zero-shot-probs.json", "zero_shot_probs_sha256")):
+        if sha256_file(out / name) != probe[key] or (without / name).exists():
+            fail("%s is not bound by shift_probe.%s, or the run without shift.jsonl wrote it" % (name, key))
+    if with_rep["inputs_sha256"]["shift_jsonl"] != sha256_file(data_dir / "shift.jsonl"):
+        fail("inputs_sha256.shift_jsonl is not the sha256 of shift.jsonl")
+    if probe["n"] != len((data_dir / "shift.jsonl").read_text().splitlines()):
+        fail("shift_probe.n %s is not the shift.jsonl row count" % probe["n"])
+    bad = tmp / "data-shift-overlap"
+    shutil.copytree(data_dir, bad)
+    first_train = (TINY / "data" / "train.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    (bad / "shift.jsonl").write_text((data_dir / "shift.jsonl").read_text(encoding="utf-8") + first_train + "\n",
+                                     encoding="utf-8")
+    refused = tmp / "refused-shift-overlap"
+    proc = subprocess.run(train_cmd(refused, tiny_sha, "fixed_epochs", 1, ["--seeds", "3"], bad),
+                          capture_output=True, text=True, env=dict(os.environ))
+    if proc.returncode != 2 or "REFUSED shift-train-overlap" not in proc.stderr or refused.exists():
+        fail("a shift.jsonl row equal to a train row was not refused before anything was written (exit %d): %s"
+             % (proc.returncode, proc.stderr[-300:]))
+    print("shift probe: gate identical with and without shift.jsonl (pass=%s, margin %.4f); shift_probe n %d "
+          "ft macro_f1 %.4f ece_post %.4f, gate_clause false; a shift row equal to a train row refused (exit 2)"
+          % (with_rep["pass"], with_rep["margin"], probe["n"], probe["fine_tuned"]["macro_f1"],
+             probe["fine_tuned"]["ece_post"]))
+    return out, data_dir
 
 
 def _ck_tree_modulo_recipe_id(ck):

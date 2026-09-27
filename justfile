@@ -1292,26 +1292,34 @@ laya-fixtures:
     uv run --project scripts/laya_train --frozen python scripts/laya_train/metrics.py --selftest
     uv run --project scripts/laya_train --frozen python scripts/laya_train/fixtures.py
 
-# TweetEval stance demo data (D-19): data/decide/tweet-stance-16/{task.json,train.jsonl,eval.jsonl}
-# from the s16-seed13 selection, every shot verified against the manifest's exact_hash.
+# TweetEval stance demo data (D-19 as amended by A2, laya-finetune-gate-v1 1.4.0). cell s64 (default, the
+# contract's demo_s64) -> data/decide/tweet-stance-64: the 192 s64-seed13 shots, eval.jsonl built BY RULE
+# (eval_set.demo_rule, asserted 459 rows [111, 291, 57]) and shift.jsonl (the 280 test rows, the shift
+# probe). cell s16 -> data/decide/tweet-stance-16, the 1.2.0 demo data, byte-identical. Every shot verified
+# against the manifest's exact_hash; an existing dir is never overwritten with different bytes.
 # Output is under the root-anchored, gitignored /data/ — tweet text is never committed.
-laya-prepare-stance:
+laya-prepare-stance cell="s64":
     #!/usr/bin/env bash
     set -euo pipefail
-    for f in data/tweet-eval-stance/train.jsonl data/tweet-eval-stance/test.jsonl; do
+    need="data/tweet-eval-stance/train.jsonl data/tweet-eval-stance/test.jsonl"
+    if [ "{{cell}}" = "s64" ]; then need="$need data/tweet-eval-stance/validation.jsonl"; fi
+    for f in $need; do
         test -f "$f" || {
             echo "ERROR: $f is missing — fetch the local dataset first:" >&2
             echo "       apr data tweet-eval-stance --output data/tweet-eval-stance" >&2
             exit 1
         }
     done
-    uv run --project scripts/laya_train --frozen python scripts/laya_train/prepare_stance.py
+    uv run --project scripts/laya_train --frozen python scripts/laya_train/prepare_stance.py --cell "{{cell}}"
 
-# Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl), calibrate and gate into
-# the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused. Extra args pass through
-# (--epochs E above 16 shots/class, --stopping early_stopping|fixed_epochs, --seeds N for a variance
-# report over the first N contract variance_seeds -- only the declared seed ships --,
-# --device mps|cuda|cpu). The default stopping rule is the contract's (early_stopping, 1.1.0).
+# Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl + an OPTIONAL shift.jsonl),
+# calibrate and gate into the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused.
+# Production (laya-finetune-gate-v1 1.4.0) trains the three gate seeds 13/17/23 and ships the MEDIAN-ECE
+# seed (A3; --seeds other than 3 is refused), writes the float64 re-score noise record rescore-noise.json
+# (A1), and scores an optional shift.jsonl as a REPORTED probe after the gate is decided (A2, never a
+# gate clause). Extra args pass through (--epochs E above 16 shots/class, --stopping
+# early_stopping|fixed_epochs, --device mps|cuda|cpu). The default stopping rule is the contract's
+# (early_stopping, 1.1.0).
 laya-train data out *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1328,8 +1336,9 @@ laya-train-lifecycle:
     uv run --project scripts/laya_train --frozen python scripts/laya_train/lifecycle.py
 
 # Every Python-side training claim of laya-finetune-gate-v1, locally (CI never installs the torch stack):
-# the torch-free self-tests (metrics, data refusals + split, gate decision + the two fail-closed demo
-# vectors + T clamp + early stopping), then the torch lifecycle (both stopping rules, --seeds 3). Each
+# the torch-free self-tests (metrics, data refusals + split + the held-out rule, gate decision + the two
+# fail-closed demo vectors + T clamp + early stopping + the median rule), then the torch lifecycle (both
+# stopping rules, the legacy single seed, the three-seed median run, the noise record, the shift probe). Each
 # step's status is checked directly; the recipe stops at the first failure. Prints LAYA TRAIN SELFTEST OK.
 laya-train-selftest:
     #!/usr/bin/env bash
