@@ -1828,12 +1828,28 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     just _laya-edge-health-check "$HEALTH" "$SERVER" \
         || contain "the edge health body at $HEALTH_URL does not name $SERVER as serverId: $HEALTH"
     echo "  edge health: $HEALTH_URL names serverId $SERVER"
-    set +e
-    cargo run --release -p aprender-mcp-decide-lambda --example probe -- \
-        --url "$ENDPOINT" --apr "$APR" --expect-sha256 "$H" > "models/decide/deploy-probe-$SERVER.log" 2>&1
-    prc=$?
-    set -e
-    [ "$prc" -eq 0 ] || contain "the identity probe failed (log: models/decide/deploy-probe-$SERVER.log)"
+    # The edge settles AFTER cargo-pmcp reports success: on 2026-09-27 pmcp.run's own post-deploy
+    # invocation loaded the model (24.6 s, success) and the edge still answered POST /mcp with 503
+    # "Server is in error state" for under a minute, then forwarded. So THAT refusal, and only
+    # that one, is retried (bounded); any other probe failure contains at once. (plan 08-17)
+    PLOG="models/decide/deploy-probe-$SERVER.log"
+    TRIES="${LAYA_EDGE_SETTLE_TRIES:-8}"
+    t=1
+    while :; do
+        set +e
+        cargo run --release -p aprender-mcp-decide-lambda --example probe -- \
+            --url "$ENDPOINT" --apr "$APR" --expect-sha256 "$H" > "$PLOG" 2>&1
+        prc=$?
+        set -e
+        [ "$prc" -eq 0 ] && break
+        if grep -q 'Server is in error state' "$PLOG" && [ "$t" -lt "$TRIES" ]; then
+            echo "  edge not settled (503 Server is in error state), attempt $t/$TRIES; retrying in 15 s" >&2
+            t=$((t + 1))
+            sleep 15
+            continue
+        fi
+        contain "the identity probe failed after $t attempt(s) (log: $PLOG)"
+    done
     echo "DEPLOYED $SERVER at $ENDPOINT: compile log, edge health serverId and live identity (sha256 $H) name the decide server"
     echo "  next: just laya-deploy-verify $APR $SERVER $PROFILE"
 
@@ -2139,6 +2155,13 @@ laya-deploy-selftest:
         echo "IAM wiring: laya-deploy checks the config's [iam] and contains when the role lacks the stack grant"
     else
         fail "IAM wiring: laya-deploy does not run _laya-iam-check and the contained laya-grant check"
+    fi
+    if printf '%s' "$DEPLOY_BODY" | grep -qF "grep -q 'Server is in error state'" \
+        && printf '%s' "$DEPLOY_BODY" | grep -qF '[ "$t" -lt "$TRIES" ]' \
+        && printf '%s' "$DEPLOY_BODY" | grep -qF 'contain "the identity probe failed after'; then
+        echo "EDGE SETTLE wiring: only the edge's 503 error-state refusal is retried (bounded); any other probe failure contains"
+    else
+        fail "EDGE SETTLE wiring: laya-deploy's identity probe retry is missing or unbounded"
     fi
     # Positive dry run: armed only by a real artifact that laya-verify itself must accept.
     if [ -n "${LAYA_ELIGIBLE_APR:-}${LAYA_ELIGIBLE_RUN:-}${LAYA_ELIGIBLE_DATA:-}${LAYA_ELIGIBLE_BASE:-}" ]; then
