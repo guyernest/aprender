@@ -16,7 +16,8 @@ afterwards), then asserts:
     sha256 is the gate report's recipe_id; the gate report parses in the contract schema;
   * the digest MAPPING is Laya's real API: the tiny base loads with {"model.safetensors": <its sha>}
     and a wrong sha is refused by Laya's own ValueError;
-  * forcing --device cpu is recorded as device_used "cpu" / device_is_cpu true;
+  * forcing --device cpu is recorded as device_used "cpu" / device_is_cpu true, and eval-probs.json equals
+    a SEPARATE F16 reload's re-score of every eval row within laya-parity-v1 pack_rescore_probs_abs;
   * BOTH declared stopping rules run: early_stopping (the contract default, max 3 epochs here) logs
     EPOCH lines and a STOP line before CHECKPOINT COMPLETE, its recipe.json carries the contract's
     `early_stopping` object and its rl_agent_config.json `training.stopping` record names a best epoch
@@ -211,13 +212,31 @@ def run_one(out, tiny_sha, stopping, epochs, Agent, seeds=1):
         if sha256_file(out / name) != report[key]:
             fail("%s sha256 differs from the report's %s" % (name, key))
     before = tree_sha256(out / "checkpoint")
+    import data                                   # torch-free
+    import train                                  # imports torch + laya (already loaded by main)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        Agent(str(out / "checkpoint"), device="cpu", expected_sha256={"model.safetensors": before["model.safetensors"]})
+        agent = train.load_for_scoring(out / "checkpoint", before["model.safetensors"])
     if tree_sha256(out / "checkpoint") != before:
         fail("a further reload changed a checkpoint file")
-    print("lifecycle[%s, seeds %d]: exit %d, %d checkpoint files unchanged across reload, gate pass=%s"
-          % (stopping, seeds, proc.returncode, len(before), report["pass"]))
+    # FALSIFY-LAYA-GATE-007 (second half): the written eval probabilities are what a SEPARATE F16 reload of
+    # the shipped checkpoint computes through Laya's own predict path, within pack_rescore_probs_abs.
+    task = data.load_task(out / "task.json")
+    rows = data.load_rows(TINY / "data" / "eval.jsonl", task, "eval")
+    P_again, _ = train.score_rows(agent, rows, data.laya_question(task))
+    written = json.loads((out / "eval-probs.json").read_text())["rows"]
+    tol = float(contract.load_yaml(contract.REPO / "contracts" / "laya-parity-v1.yaml")
+                ["equations"]["pack_rescore_probs_abs"]["float_tolerance"])
+    dp = max(abs(float(a) - float(b)) for r, pr in zip(written, P_again) for a, b in zip(r["probabilities"], pr))
+    same_argmax = all(max(range(len(pr)), key=lambda j: pr[j]) == max(range(len(r["probabilities"])),
+                      key=lambda j: r["probabilities"][j]) for r, pr in zip(written, P_again))
+    if len(written) != len(rows) or dp > tol or not same_argmax:
+        fail("eval-probs.json differs from a separate F16 reload: max |dp| %.3g (tol %g), argmax equal %s"
+             % (dp, tol, same_argmax))
+    del agent
+    print("lifecycle[%s, seeds %d]: exit %d, %d checkpoint files unchanged across reload, separate-reload "
+          "re-score max |dp| %.3g over %d rows, gate pass=%s"
+          % (stopping, seeds, proc.returncode, len(before), dp, len(rows), report["pass"]))
 
 
 if __name__ == "__main__":

@@ -1309,7 +1309,8 @@ laya-prepare-stance:
 
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl), calibrate and gate into
 # the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused. Extra args pass through
-# (--epochs E above 16 shots/class, --stopping early_stopping|fixed_epochs, --seeds N,
+# (--epochs E above 16 shots/class, --stopping early_stopping|fixed_epochs, --seeds N for a variance
+# report over the first N contract variance_seeds -- only the declared seed ships --,
 # --device mps|cuda|cpu). The default stopping rule is the contract's (early_stopping, 1.1.0).
 laya-train data out *args:
     #!/usr/bin/env bash
@@ -1325,3 +1326,16 @@ laya-train-lifecycle:
     #!/usr/bin/env bash
     set -euo pipefail
     uv run --project scripts/laya_train --frozen python scripts/laya_train/lifecycle.py
+
+# Every Python-side training claim of laya-finetune-gate-v1, locally (CI never installs the torch stack):
+# the torch-free self-tests (metrics, data refusals + split, gate decision + the two fail-closed demo
+# vectors + T clamp + early stopping), then the torch lifecycle (both stopping rules, --seeds 3). Each
+# step's status is checked directly; the recipe stops at the first failure. Prints LAYA TRAIN SELFTEST OK.
+laya-train-selftest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for m in metrics data gate; do
+        uv run --project scripts/laya_train --frozen python "scripts/laya_train/$m.py" --selftest
+    done
+    uv run --project scripts/laya_train --frozen python scripts/laya_train/lifecycle.py
+    echo "LAYA TRAIN SELFTEST OK"

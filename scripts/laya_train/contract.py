@@ -25,6 +25,11 @@ def _load(path):
     return _CACHE[key]
 
 
+def load_yaml(path):
+    """Any committed contract, parsed once (e.g. laya-parity-v1 tolerances for the lifecycle re-score)."""
+    return _load(path)
+
+
 def gate_contract():
     """The parsed laya-finetune-gate-v1 contract: `constants`, `seed_policy`, `recipe`, `base`, `demo`,
     `device_order`, `run_dir_layout` and the four schema blocks, exactly as committed."""
@@ -170,6 +175,22 @@ def production_base_block():
     b = base()
     return {"family": b["family"], "repo": b["repo"], "revision": b["revision"], "checkpoint": b["checkpoint"],
             "sha256": b["model_safetensors_sha256"]}
+
+
+def resolve_seeds(n):
+    """The seeds a run trains, per seed_policy (D-08): the first `n` of `variance_seeds` (default 1), the
+    declared seed FIRST. Only the declared seed's checkpoint is ever kept; the rest report variance."""
+    sp = seed_policy()
+    pool = [int(s) for s in sp["variance_seeds"]]
+    declared = int(sp["declared_seed"])
+    if not pool or pool[0] != declared:
+        raise RecipeError("REFUSED seeds: seed_policy.variance_seeds %s must start with the declared seed %d"
+                          % (pool, declared))
+    n = 1 if n is None else int(n)
+    if not 1 <= n <= len(pool):
+        raise RecipeError("REFUSED seeds: --seeds %d is outside [1, %d] (seed_policy.variance_seeds %s)"
+                          % (n, len(pool), pool))
+    return pool[:n]
 
 
 def seeds_label(n):

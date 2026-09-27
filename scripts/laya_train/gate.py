@@ -17,6 +17,19 @@ No torch import (module level or anywhere): `python gate.py --selftest` runs wit
         macro-F1 / F_avg / house top-label ECE / NLL through metrics.py, thresholds READ from the
         contract (contract.thresholds()), pass = margin >= min_macro_f1_margin AND ece_post <= max_ece.
         Returns the metric blocks of the gate report. A non-finite metric can never pass.
+
+    verify_report(report) -> {pass, margin, failed}
+        re-decides gate_pass from a report's REPORTED metrics under the contract's thresholds: a report
+        whose `thresholds` differ from the contract (value, missing or extra key) is refused, and so is a
+        reported `pass` that disagrees with the re-decided one. This is the Python-side decision rule and
+        what the self-test's fail-closed vectors run through. It is NOT the forgery defence: a rule applied
+        to reported numbers passes an edited report, so the Rust verifier (plan 08-09) recomputes every
+        metric from verified probabilities before deciding.
+
+    python gate.py --selftest    fabricated reports, threshold refusals, the two FAILING D-19 demo runs
+                                 (contract demo.fail_closed_vectors) decided FAIL -- and, when the
+                                 gitignored run dirs are present, recomputed from their probability
+                                 files -- the bounded T fit and the early-stopping rule. numpy + pyyaml.
 """
 import json
 import math
@@ -133,6 +146,30 @@ def calibration_monitor(z, y, t_min, t_max):
 
 def _finite(x):
     return x is not None and isinstance(x, float) and math.isfinite(x)
+
+
+class GateError(ValueError):
+    """A refused gate report; the message starts `REFUSED <field>:`."""
+
+
+def verify_report(report):
+    """Re-decide gate_pass from a report's reported metrics (see the module docstring for the limits)."""
+    th = contract.thresholds()
+    got = report.get("thresholds")
+    if (not isinstance(got, dict) or sorted(got) != sorted(th)
+            or any(float(got[k]) != float(th[k]) for k in th)):
+        raise GateError("REFUSED thresholds: the report carries %r, the contract declares %r (D-07: thresholds "
+                        "are read from the contract, never from a report)" % (got, th))
+    margin = float(report["fine_tuned"]["macro_f1"]) - float(report["zero_shot"]["macro_f1"])
+    ece = float(report["fine_tuned"]["ece_post"])
+    failed = [clause for clause, ok in (
+        ("margin", _finite(margin) and margin >= float(th["min_macro_f1_margin"])),
+        ("ece_post", _finite(ece) and ece <= float(th["max_ece"]))) if not ok]
+    passed = not failed
+    if "pass" in report and report["pass"] is not passed:
+        raise GateError("REFUSED pass: the report says pass=%r but its metrics decide %r (failed: %s)"
+                        % (report["pass"], passed, failed or "none"))
+    return {"pass": passed, "margin": margin, "failed": failed}
 
 
 def evaluate_gate(zs_probs, ft_probs, ft_probs_pre, y, f_avg_labels=None):

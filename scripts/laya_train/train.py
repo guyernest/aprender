@@ -1,7 +1,8 @@
 """Fine-tune Laya on a user's shots, calibrate, and gate -- the local back office (D-01..D-08).
 
     uv run --project scripts/laya_train --frozen python scripts/laya_train/train.py \
-        --data DIR --out DIR [--epochs E] [--stopping early_stopping|fixed_epochs] [--device mps|cuda|cpu]
+        --data DIR --out DIR [--epochs E] [--stopping early_stopping|fixed_epochs] [--seeds N]
+        [--device mps|cuda|cpu]
     (or: just laya-train <data dir> <run dir> [args])
 
     --variant synthetic-fixture --base CKPT_DIR --base-sha256 HEX --epochs E
@@ -32,6 +33,16 @@ The run, in order (every value from contracts/laya-finetune-gate-v1.yaml via con
   7. zero-shot: the declared base on eval.jsonl -> zero-shot-probs.json; fine-tuned -> eval-probs.json;
      probes on the decide-apr-v1 probe task -> probes.json.
   8. gate.evaluate_gate -> gate-report.json; GATE PASS (exit 0) or GATE FAIL (exit 3).
+
+Seeds (D-08, seed_policy): one declared seed (13) by default, and the gate report says `single seed`.
+`--seeds N` trains the first N of `variance_seeds` (13, 17, 23), the declared seed FIRST and exactly as
+a single-seed run. Each other seed runs steps 4-7 on the SAME data, split and recipe in a temporary
+`<out>/.variance-seed-<s>/` that is deleted as soon as its metrics are recorded, so the declared seed's
+checkpoint is the only one left. The seed varies the training RNG (torch / random / numpy: init of the
+head, batch shuffle), not the data or the calibration slice. `variance-report.json` carries per-seed
+rows and mean +- sd (sample sd, ddof 1) of macro_f1, f_avg, ece_post and margin; it is INFORMATION.
+The gate is judged on the declared seed, which is the shipped model; the label becomes
+"mean ± sd over N seeds". recipe.json does not change with N (the recipe_id is the declared run's).
 
 Ordering (asserted, not assumed): RECIPE WRITTEN < STOP < CHECKPOINT COMPLETE < SCORING START, and
 recipe.json <= checkpoint/model.safetensors <= eval-probs.json by mtime -- no eval probability exists
@@ -467,6 +478,65 @@ def probes_obj(agent):
     return {"probes": probes}
 
 
+class SeedRun:
+    """Steps 4-6 for one seed on fixed data, split, recipe and base: train -> COMPLETE checkpoint dir ->
+    reload -> calibrate -> reload -> eval probabilities. Used for the declared seed and every variance seed."""
+
+    def __init__(self, base, requested, question, fit_rows, calib_rows, eval_rows, k, epochs, stopping, recipe_id):
+        self.base, self.requested, self.question = base, requested, question
+        self.fit_rows, self.calib_rows, self.eval_rows = fit_rows, calib_rows, eval_rows
+        self.k, self.epochs, self.stopping, self.recipe_id = k, epochs, stopping, recipe_id
+
+    def train_and_score(self, seed, ck):
+        agent, info = train_seed(seed, self.base, self.requested, self.question, self.fit_rows, self.k,
+                                 self.epochs, self.stopping, self.calib_rows)
+        provenance = {"fine_tuned_from": self.base.block, "recipe_id": self.recipe_id, "seed": seed,
+                      "epochs": self.epochs, "steps": info["steps"], "fit_rows": info["fit_rows"],
+                      "device_used": info["device_used"]}
+        if info["stopping_record"] is not None:
+            provenance["stopping"] = info["stopping_record"]
+        sha_before = write_checkpoint(agent, self.base.directory(), ck, provenance)
+        del agent
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        log("CHECKPOINT COMPLETE seed=%d %d files (model.safetensors %s)"
+            % (seed, len(sha_before), sha_before["model.safetensors"]))
+        log("SCORING START seed=%d" % seed)
+        agent, P_ft, P_pre, calib, _ = calibrate_and_score(ck, sha_before, self.calib_rows, self.eval_rows,
+                                                           self.question, self.k, self.stopping)
+        log("CALIBRATION seed=%d bucket=%s t_pre=%.6f t_fitted=%.6f t_applied=%.6f clamp_hit=%s slice=%d"
+            % (seed, calib["bucket"], calib["t_pre"], calib["t_fitted"], calib["t_applied"], calib["clamp_hit"],
+               len(self.calib_rows)))
+        return agent, P_ft, P_pre, calib, info
+
+
+def variance_row(seed, g, calib, info):
+    ft = g["fine_tuned"]
+    st = info["stopping_record"] or {}
+    return {"seed": seed, "macro_f1": ft["macro_f1"], "f_avg": ft["f_avg"], "ece_pre": ft["ece_pre"],
+            "ece_post": ft["ece_post"], "nll": ft["nll"], "margin": g["margin"], "pass": g["pass"],
+            "t_fitted": calib["t_fitted"], "t_applied": calib["t_applied"], "clamp_hit": calib["clamp_hit"],
+            "epochs_run": info["epochs_run"], "best_epoch": st.get("best_epoch"), "device_used": info["device_used"],
+            "train_seconds": info["train_seconds"]}
+
+
+def variance_report(declared, seeds, rows, recipe_id, zero_shot):
+    """variance-report.json: per-seed rows and mean / sample sd (ddof 1). INFORMATION, never a selection."""
+    def stat(key, fn):
+        vals = [r[key] for r in rows]
+        if any(v is None or not math.isfinite(v) for v in vals):
+            return None
+        return float(fn(np.array(vals, dtype=np.float64)))
+    keys = ("macro_f1", "f_avg", "ece_post", "margin")
+    return {"schema": "laya-variance-report-v1", "declared_seed": declared, "seeds": list(seeds), "n": len(seeds),
+            "label": contract.seeds_label(len(seeds)), "recipe_id": recipe_id,
+            "note": "information only: the gate is judged on the declared seed, whose checkpoint is the only one "
+                    "kept and the one that ships (D-08); the other seeds never select a checkpoint",
+            "sd_ddof": 1, "zero_shot": zero_shot, "per_seed": rows,
+            "mean": {k: stat(k, np.mean) for k in keys},
+            "sd": {k: stat(k, lambda a: a.std(ddof=1)) for k in keys}}
+
+
 # ------------------------------------------------------------------------------------------ main
 
 def parse_args(argv):
@@ -476,6 +546,8 @@ def parse_args(argv):
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--stopping", choices=("early_stopping", "fixed_epochs"), default=None,
                     help="stopping rule (default: the contract's recipe.stopping_default)")
+    ap.add_argument("--seeds", type=int, default=None,
+                    help="variance report over the first N contract variance_seeds (declared seed first; only it ships)")
     ap.add_argument("--device", choices=("mps", "cuda", "cpu"), default=None,
                     help="force a device (default: the contract's device_order, first available)")
     ap.add_argument("--variant", choices=("production", "synthetic-fixture"), default="production")
@@ -505,6 +577,7 @@ def main(argv=None):
         shots_per_class = max(data.class_counts(train_rows, len(task["labels"])))
         epochs = contract.resolve_epochs(args.variant, shots_per_class, args.epochs)
         stopping = contract.resolve_stopping(args.stopping)
+        seeds = contract.resolve_seeds(args.seeds)
     except (data.DataError, contract.RecipeError) as e:
         refuse(str(e))
     base = Base(args)
@@ -524,29 +597,13 @@ def main(argv=None):
     log("RECIPE WRITTEN %s stopping=%s epochs%s=%d" % (recipe_id, stopping, "_max" if stopping == "early_stopping"
                                                         else "", epochs))
 
-    # 3-4. device, train
+    # 3-6. device, train, complete checkpoint, reload, calibrate, reload, score -- the declared seed
     requested = request_device(args.device)
     fit_rows = [train_rows[i] for i in fit_ids]
     calib_rows = [train_rows[i] for i in calib_ids]
-    agent, info = train_seed(seed, base, requested, question, fit_rows, k, epochs, stopping, calib_rows)
-
-    # 5. complete checkpoint before any reload
     ck = out / "checkpoint"
-    provenance = {"fine_tuned_from": base.block, "recipe_id": recipe_id, "seed": seed, "epochs": epochs,
-                  "steps": info["steps"], "fit_rows": info["fit_rows"], "device_used": info["device_used"]}
-    if info["stopping_record"] is not None:
-        provenance["stopping"] = info["stopping_record"]
-    sha_before = write_checkpoint(agent, base.directory(), ck, provenance)
-    del agent
-    if torch.backends.mps.is_available():
-        torch.mps.empty_cache()
-    log("CHECKPOINT COMPLETE %d files (model.safetensors %s)" % (len(sha_before), sha_before["model.safetensors"]))
-
-    # 6. reload, calibrate, reload, score
-    log("SCORING START")
-    agent, P_ft, P_pre, calib, _ = calibrate_and_score(ck, sha_before, calib_rows, eval_rows, question, k, stopping)
-    log("CALIBRATION bucket=%s t_pre=%.6f t_fitted=%.6f t_applied=%.6f clamp_hit=%s slice=%d"
-        % (calib["bucket"], calib["t_pre"], calib["t_fitted"], calib["t_applied"], calib["clamp_hit"], len(slice_ids)))
+    run = SeedRun(base, requested, question, fit_rows, calib_rows, eval_rows, k, epochs, stopping, recipe_id)
+    agent, P_ft, P_pre, calib, info = run.train_and_score(seed, ck)
     write_json(out / "eval-probs.json", eval_probs_obj(labels, eval_rows, P_ft))
     assert_eval_after_checkpoint(out, ck)
     write_json(out / "probes.json", probes_obj(agent))
@@ -569,6 +626,26 @@ def main(argv=None):
     if labels == list(demo["criteria_order"]):
         f_avg_labels = [labels.index("against"), labels.index("favor")]
     g = gate.evaluate_gate(as64(P_zs), as64(P_ft), P_pre, y, f_avg_labels)
+
+    # D-08: the other variance seeds, each in a temp dir deleted once its metrics are recorded
+    per_seed = [variance_row(seed, g, calib, info)]
+    for s_other in seeds[1:]:
+        tmp = out / (".variance-seed-%d" % s_other)
+        try:
+            a_other, P_o, P_o_pre, cal_o, info_o = run.train_and_score(s_other, tmp / "checkpoint")
+            del a_other
+            g_o = gate.evaluate_gate(as64(P_zs), as64(P_o), P_o_pre, y, f_avg_labels)
+            per_seed.append(variance_row(s_other, g_o, cal_o, info_o))
+            log("VARIANCE seed=%d macro_f1=%.4f ece_post=%.4f margin=%.4f pass=%s (information only)"
+                % (s_other, g_o["fine_tuned"]["macro_f1"], g_o["fine_tuned"]["ece_post"], g_o["margin"], g_o["pass"]))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    if len(seeds) > 1:
+        vr = variance_report(seed, seeds, per_seed, recipe_id, g["zero_shot"])
+        write_json(out / "variance-report.json", vr)
+        fmt_ms = lambda key: "n/a" if vr["mean"][key] is None else "%.4f ± %.4f" % (vr["mean"][key], vr["sd"][key])  # noqa: E731
+        log("VARIANCE %s: macro_f1 %s | f_avg %s | ece_post %s | margin %s -- the gate is judged on seed %d"
+            % (vr["label"], fmt_ms("macro_f1"), fmt_ms("f_avg"), fmt_ms("ece_post"), fmt_ms("margin"), seed))
     report = {
         "schema": "laya-gate-report-v1",
         "pass": g["pass"],
@@ -579,7 +656,7 @@ def main(argv=None):
         "calibration": {"bucket": calib["bucket"], "t_fitted": calib["t_fitted"], "t_applied": calib["t_applied"],
                         "clamp_hit": calib["clamp_hit"], "slice_size": len(slice_ids), "slice_ids": slice_ids,
                         "slice_ids_sha256": slice_sha},
-        "seeds": {"declared": seed, "n": 1, "label": contract.seeds_label(1)},
+        "seeds": {"declared": seed, "n": len(seeds), "label": contract.seeds_label(len(seeds))},
         "device_used": info["device_used"],
         "device_is_cpu": info["device_used"] == "cpu",
         "torch_version": torch.__version__,

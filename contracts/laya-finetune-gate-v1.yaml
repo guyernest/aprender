@@ -441,31 +441,36 @@ falsification_tests:
   - id: FALSIFY-LAYA-GATE-003
     rule: 'The ECE matches the house definition on the frozen cases'
     prediction: 'The verifier''s ECE equals aprender::calibration::expected_calibration_error_top_label on every case of scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json, and the Python trainer''s ECE matches within gate_metric_recompute_abs on the synthetic fixture.'
-    implemented_by: 'plans 08-08 (Python self-test) and 08-09 (Rust verifier)'
+    implemented_by: 'plans 08-08 (Python half: metrics.py --selftest replays every frozen house case to 1e-6, inside just laya-train-selftest) and 08-09 (Rust verifier; its test: line is added in that plan''s commit)'
+    test_harness: 'just laya-train-selftest'
     if_fails: 'Two ECE implementations disagree, so the reported and recomputed gate can differ on the same probabilities.'
 
   - id: FALSIFY-LAYA-GATE-004
     rule: 'The calibration fit stays in [0.5, 5.0] and records the clamp'
     prediction: 'On a synthetic memorised model whose NLL-optimal T exceeds 5, t_fitted == 5.0, clamp_hit == true and ece_post is computed with T = 5.0.'
-    implemented_by: 'plan 08-08 (just laya-train-selftest)'
+    implemented_by: 'plan 08-08 (gate.py --selftest bounded-fit cases, inside just laya-train-selftest)'
+    test_harness: 'just laya-train-selftest'
     if_fails: 'The reported T is not the served T (Pitfall 6): the gate ECE describes a different model.'
 
   - id: FALSIFY-LAYA-GATE-005
     rule: 'Split disjointness is text-level and conflicting duplicates are refused'
     prediction: 'A train.jsonl with the same normalized text under two labels is refused; one with duplicate same-label rows keeps them in one side; an eval row equal to a train row after NFC/trim/whitespace collapse is refused.'
-    implemented_by: 'plans 08-08 (Python split) and 08-09 (aprender_decide::verify check_split)'
+    implemented_by: 'plans 08-08 (Python half: data.py --selftest, inside just laya-train-selftest) and 08-09 (aprender_decide::verify check_split; its test: line is added in that plan''s commit)'
+    test_harness: 'just laya-train-selftest'
     if_fails: 'Calibration or eval leaks training text, so the measured calibration and gate are optimistic.'
 
   - id: FALSIFY-LAYA-GATE-006
     rule: 'recipe.json is written before any score and the declared seed ships'
     prediction: 'The self-test observes recipe.json on disk before the first eval score is computed, and with variance seeds 13/17/23 the shipped checkpoint is seed 13 even when another seed scores higher.'
-    implemented_by: 'plan 08-08 (just laya-train-selftest)'
+    implemented_by: 'plan 08-08 (lifecycle.py: log + mtime order, and a --seeds 3 run whose shipped checkpoint is byte-identical to the single-seed run''s, inside just laya-train-selftest)'
+    test_harness: 'just laya-train-selftest'
     if_fails: 'The recipe or the shipped seed was chosen after reading eval (D-04 / D-08).'
 
   - id: FALSIFY-LAYA-GATE-007
     rule: 'The device is read from the parameters and every score comes from the F16 reload'
     prediction: 'Forcing the CPU path yields device_used == "cpu" and device_is_cpu == true regardless of any env var; the eval probabilities equal those of a separate F16 reload within pack_rescore_probs_abs.'
-    implemented_by: 'plan 08-08 (just laya-train-selftest)'
+    implemented_by: 'plan 08-08 (lifecycle.py: forced --device cpu recorded as cpu, and eval-probs.json re-scored by a separate F16 reload within pack_rescore_probs_abs, inside just laya-train-selftest)'
+    test_harness: 'just laya-train-selftest'
     if_fails: 'The report labels a run by intent rather than mechanism, or scores a model that is never served (Pitfall 5).'
 
   - id: FALSIFY-LAYA-GATE-008
@@ -477,7 +482,8 @@ falsification_tests:
   - id: FALSIFY-LAYA-GATE-009
     rule: 'Early stopping is decided on the calibration slice alone, before any eval score, and restores the best epoch'
     prediction: 'On a synthetic monitor trace the rule picks the earliest epoch within min_delta of the minimum, stops patience_epochs after it, and never picks epoch 0 or a non-finite epoch; a real early-stopping run logs its STOP line before CHECKPOINT COMPLETE and SCORING START, and checkpoint/model.safetensors is not newer than eval-probs.json.'
-    implemented_by: 'plan 08-08 (just laya-train-selftest)'
+    implemented_by: 'plan 08-08 (gate.py --selftest synthetic monitor trace; lifecycle.py STOP-before-SCORING and mtime order; inside just laya-train-selftest)'
+    test_harness: 'just laya-train-selftest'
     if_fails: 'The shipped epoch was chosen with eval data or after eval was scored (D-04 / D-07), or the restored weights are not the best epoch.'
 
 kani_harnesses:
@@ -496,7 +502,7 @@ kani_harnesses:
     property: 'forall T_fitted: calibration_temp_min <= clamp(T_fitted) <= calibration_temp_max'
     bound: 8
     strategy: stub_float
-    harness: 'NOT EXECUTED — the evidence will be the calibration clamp case in just laya-train-selftest (plan 08-08) and the Rust verifier''s t_applied range check (plan 08-09)'
+    harness: 'NOT EXECUTED — the evidence is the calibration clamp cases in just laya-train-selftest (gate.py --selftest, plan 08-08) and will also be the Rust verifier''s t_applied range check (plan 08-09)'
 
 qa_gate:
   id: F-LAYA-GATE-001
