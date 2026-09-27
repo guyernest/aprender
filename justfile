@@ -1810,6 +1810,11 @@ laya-deploy-selftest:
     chmod +x "$ST/shim/aws"
     export PATH="$(pwd -P)/$ST/shim:$PATH"
     [ "$(command -v aws)" = "$(pwd -P)/$ST/shim/aws" ] || { echo "ERROR: the aws recorder is not first on PATH" >&2; exit 1; }
+    # Positive control: a zero count means nothing only if the recorder demonstrably records.
+    set +e; aws recorder-control > /dev/null 2>&1; crc=$?; set -e
+    [ "$crc" -eq 97 ] && [ "$(wc -l < "$REC" | tr -d ' ')" -eq 1 ] || { echo "ERROR: the aws recorder did not record its control call (exit $crc)" >&2; exit 1; }
+    : > "$REC"
+    echo "AWS RECORDER: control call recorded and cleared"
     # Set-up: the synthetic artifact and a consistent config for it.
     just laya-pack-fixture "$T" "$T/data" "$A" > "$CASES/0-fixture.log" 2>&1 || { tail -5 "$CASES/0-fixture.log" >&2; exit 1; }
     grep -q "sha256=$GOLDEN" "$CASES/0-fixture.log" || { echo "ERROR: laya-pack-fixture did not reproduce the golden $GOLDEN" >&2; exit 1; }
@@ -1846,10 +1851,8 @@ laya-deploy-selftest:
     expect_refused 3 resolver-proof 'REFUSED resolver-proof:' deploy_tiny
     mv "$BK/proof.moved" "$PROOF"
     expect_refused 4 deploy-eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' deploy_tiny
-    if just --summary | tr ' ' '\n' | grep -qx 'laya-upload'; then
-        expect_refused 5 upload-eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' \
-            just laya-upload "$A" "$T" "$T/data" "$T/checkpoint"
-    fi
+    expect_refused 5 upload-eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' \
+        just laya-upload "$A" "$T" "$T/data" "$T/checkpoint"
     # The shared-root swap: the setfit-train state comes back byte-identical on every path.
     SNAP="$ST/snap"
     swap_case() {
@@ -1925,3 +1928,300 @@ laya-deploy-selftest:
         echo "DEPLOY SELFTEST FAILED ($FAILS failed checks)" >&2
         exit 1
     fi
+
+# Create (if absent) the decide weights bucket aprender-decide-weights-<account>-<env> in us-east-1
+# and (re)assert its posture on every run: all public access blocked, SSE-S3 default encryption,
+# tags project=aprender component=decide-weights env=<env>. No lifecycle expiry: objects are
+# content-addressed (decide/<server>/<sha256>.apr) and immutable; a new model is a new key.
+laya-weights-bucket env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="{{ trim_start_match(env, "env=") }}"
+    case "$ENV" in
+        dev|prod) ;;
+        *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
+    esac
+    P="{{profile}}"
+    ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
+    BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
+    if aws s3api head-bucket --profile "$P" --bucket "$BUCKET" 2>/dev/null; then
+        echo "  exists:  $BUCKET"
+    else
+        # us-east-1 takes no LocationConstraint.
+        aws s3api create-bucket --profile "$P" --region us-east-1 --bucket "$BUCKET" > /dev/null
+        echo "  created: $BUCKET"
+    fi
+    aws s3api put-public-access-block --profile "$P" --bucket "$BUCKET" \
+        --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+    aws s3api put-bucket-encryption --profile "$P" --bucket "$BUCKET" \
+        --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+    aws s3api put-bucket-tagging --profile "$P" --bucket "$BUCKET" \
+        --tagging "TagSet=[{Key=project,Value=aprender},{Key=component,Value=decide-weights},{Key=env,Value=$ENV}]"
+    echo "  private, SSE-S3, tagged: s3://$BUCKET (region us-east-1)"
+
+# Upload <apr> content-addressed to s3://aprender-decide-weights-<account>-<env>/decide/<server>/<sha256>.apr.
+# `just laya-verify` on the exact file runs FIRST and must accept it before any AWS call (sts
+# included): nothing leaves this machine that the Rust verifier did not accept. The key's hash is
+# verify's artifact_sha256; the upload is checked by head-object size and is idempotent.
+laya-upload apr run data base server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    APR="{{apr}}"
+    SERVER="{{server}}"
+    ENV="{{ trim_start_match(env, "env=") }}"
+    P="{{profile}}"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    sha256() { if command -v rtk >/dev/null 2>&1; then rtk proxy shasum -a 256 "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "'$ENV' is not a known environment (expected dev or prod)" ;;
+    esac
+    [ -f "$APR" ] || refuse artifact "$APR does not exist"
+    H_LOCAL="$(sha256 "$APR")"
+    # ELIGIBILITY FIRST -- the Rust verifier on the exact file (decide-apr-v1 deploy_eligibility).
+    mkdir -p models/decide
+    VLOG="models/decide/eligibility-upload-$SERVER.log"
+    set +e
+    just laya-verify "$APR" "{{run}}" "{{data}}" "{{base}}" > "$VLOG" 2>&1
+    vrc=$?
+    set -e
+    if [ "$vrc" -ne 0 ]; then
+        refuse eligibility "$(grep -m 1 '^REFUSED' "$VLOG" || echo "laya-verify exited $vrc (log: $VLOG)")" "$vrc"
+    fi
+    H="$(python3 - "$VLOG" <<'PY'
+    import json, sys
+    lines = [l for l in open(sys.argv[1]) if l.startswith("{")]
+    v = json.loads(lines[-1])
+    if v.get("deploy_eligible") is not True:
+        sys.exit(1)
+    print(v["artifact_sha256"])
+    PY
+    )" || refuse eligibility "laya-verify exited 0 without deploy_eligible true (log: $VLOG)"
+    [ "$H" = "$H_LOCAL" ] || refuse eligibility "laya-verify accepted sha256 $H but $APR hashes to $H_LOCAL"
+    KEY="decide/$SERVER/$H.apr"
+    SIZE="$(wc -c < "$APR" | tr -d ' ')"
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        echo "DRY-RUN: would upload $APR ($SIZE bytes) to s3://aprender-decide-weights-<account>-$ENV/$KEY"
+        exit 0
+    fi
+    ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
+    BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
+    head_size() { aws s3api head-object --profile "$P" --bucket "$BUCKET" --key "$KEY" --query ContentLength --output text 2>/dev/null || true; }
+    if [ "$(head_size)" = "$SIZE" ]; then
+        echo "  already uploaded (content-addressed, $SIZE bytes): s3://$BUCKET/$KEY"
+        exit 0
+    fi
+    aws s3 cp --profile "$P" --only-show-errors --sse AES256 "$APR" "s3://$BUCKET/$KEY"
+    REMOTE="$(head_size)"
+    [ "$REMOTE" = "$SIZE" ] || { echo "ERROR: s3://$BUCKET/$KEY is '$REMOTE' bytes after the upload, $APR is $SIZE" >&2; exit 1; }
+    echo "UPLOADED s3://$BUCKET/$KEY ($SIZE bytes, sha256 $H)"
+
+# Grant the deployed decide function read access to its OWN weights prefix only: an inline role
+# policy aprender-decide-weights-<env> with s3:GetObject on decide/<server>/* and s3:ListBucket
+# conditioned on that prefix (without ListBucket a missing key reads 403, not 404). The role is
+# discovered from the function (pmcp.run owns it). Idempotent; RE-RUN after any pmcp.run redeploy.
+laya-grant server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SERVER="{{server}}"
+    ENV="{{ trim_start_match(env, "env=") }}"
+    P="{{profile}}"
+    case "$ENV" in
+        dev|prod) ;;
+        *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
+    esac
+    ROLE_ARN="$(aws lambda get-function --profile "$P" --function-name "$SERVER" \
+        --query Configuration.Role --output text 2>/dev/null)" || {
+        echo "ERROR: no Lambda named '$SERVER' -- deploy it first: just laya-deploy ..." >&2
+        exit 1
+    }
+    ROLE="${ROLE_ARN##*/}"
+    ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
+    BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
+    POLICY="$(python3 -c 'import json, sys; b, s = sys.argv[1:3]; print(json.dumps({"Version": "2012-10-17", "Statement": [{"Sid": "ReadDecideWeights", "Effect": "Allow", "Action": "s3:GetObject", "Resource": f"arn:aws:s3:::{b}/decide/{s}/*"}, {"Sid": "ListDecidePrefix", "Effect": "Allow", "Action": "s3:ListBucket", "Resource": f"arn:aws:s3:::{b}", "Condition": {"StringLike": {"s3:prefix": [f"decide/{s}/*"]}}}]}))' "$BUCKET" "$SERVER")"
+    aws iam put-role-policy --profile "$P" --role-name "$ROLE" \
+        --policy-name "aprender-decide-weights-${ENV}" --policy-document "$POLICY"
+    echo "  granted on role: $ROLE"
+    echo "  policy:          aprender-decide-weights-${ENV} (GetObject decide/$SERVER/*, ListBucket s3:prefix decide/$SERVER/*)"
+    echo "  re-run after any pmcp.run redeploy: a platform stack update may drop an out-of-band policy"
+
+# Measure decide-tool-boundary-v1 accepted_region_cold LIVE (the post-spike deploy; not this phase).
+# Per cold sample: bump DECIDE_COLD_BUMP in the function config (a config change retires every
+# warm environment) and wait for LastUpdateStatus=Successful; send the maximal request as the
+# instance's FIRST POST (`probe --cold-first --maximal <shape> --probe-id <uuid>`); require identity
+# and < 30000 ms; then find the server's `decide.load performed_load=true probe_id=<uuid>` line in
+# CloudWatch -- no line, not cold (fail closed). >= <samples> per shape, alternating CONCENTRATED
+# and DISTRIBUTED, EVERY one < 30000 ms; then an identity probe (labels in order) and 5 warm calls.
+# Evidence: models/decide/deploy-evidence-<server>.json. The env bump is out-of-band drift the next
+# `laya-deploy` resets. DRY_RUN=1 sizes both shapes from <apr> offline and prints the plan.
+laya-deploy-verify apr server="aprender-mcp-decide" profile="ze-kasher-dev" samples="2":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    APR="{{apr}}"
+    SERVER="{{server}}"
+    P="{{profile}}"
+    N="{{samples}}"
+    CAP_MS=30000
+    [ -f "$APR" ] || { echo "ERROR: $APR does not exist" >&2; exit 2; }
+    case "$N" in
+        ''|*[!0-9]*) echo "ERROR: samples must be a whole number >= 2 (got '$N')" >&2; exit 2 ;;
+    esac
+    [ "$N" -ge 2 ] || { echo "ERROR: samples must be >= 2 per shape (accepted_region_cold)" >&2; exit 2; }
+    cargo build --release -q -p aprender-mcp-decide-lambda --example probe
+    TD="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+    PROBE="$TD/release/examples/probe"
+    # Size both shapes from the local artifact under ClassifyLimits::CONTRACTED (no network).
+    for shape in concentrated distributed; do
+        "$PROBE" --plan-only --apr "$APR" --maximal "$shape" > "models/decide/plan-$shape.json" \
+            || { echo "ERROR: cannot build the $shape maximal request for $APR" >&2; exit 1; }
+    done
+    H="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["artifact_sha256"])' models/decide/plan-concentrated.json)"
+    SHAPES=()
+    for _ in $(seq 1 "$N"); do SHAPES+=(concentrated distributed); done
+    STATE="models/decide/deploy-$SERVER.state/deployment.toml"
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        ENDPOINT="<endpoint from $STATE>"
+        echo "DRY-RUN laya-deploy-verify $SERVER: artifact sha256 $H, ${#SHAPES[@]} cold samples, cap $CAP_MS ms each"
+        for shape in concentrated distributed; do
+            python3 -c 'import json, sys; p = json.load(open(sys.argv[1])); print("  shape %s: %s texts, %s tokens planned, max text %s bytes" % (p["shape"], p["texts"], p["tokens_planned"], p["max_text_bytes"]))' "models/decide/plan-$shape.json"
+        done
+        i=0
+        for shape in "${SHAPES[@]}"; do
+            i=$((i + 1))
+            echo "  sample $i $shape:"
+            echo "    1. aws lambda update-function-configuration --function-name $SERVER (+ DECIDE_COLD_BUMP=<utc timestamp>, other variables kept); aws lambda wait function-updated; LastUpdateStatus must be Successful"
+            echo "    2. probe --url $ENDPOINT --apr $APR --expect-sha256 $H --cold-first --maximal $shape --probe-id <fresh uuid>  (first POST, no initialize; identity and elapsed_ms < $CAP_MS required)"
+            echo "    3. aws logs filter-log-events on the function's log group over the sample window: 'decide.load performed_load=true probe_id=<uuid>' required, else the sample is NOT cold (fail closed); x-decide-load header recorded"
+        done
+        echo "  then: probe --url $ENDPOINT --apr $APR --expect-sha256 $H (initialize, tools/list: labels in order, identity), and 5 warm single-text calls (p50/max)"
+        echo "  evidence -> models/decide/deploy-evidence-$SERVER.json (per cold sample: shape, tokens_total, elapsed_ms, load_ms, probe_id, cold_evidence cloudwatch, graviton)"
+        echo "DRY-RUN: stopped before the network (no AWS call, no HTTP request)"
+        exit 0
+    fi
+    [ -f "$STATE" ] || { echo "ERROR: $STATE does not exist -- it is written by just laya-deploy" >&2; exit 2; }
+    ENDPOINT="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$STATE")"
+    LOG_GROUP="$(aws lambda get-function-configuration --profile "$P" --function-name "$SERVER" --query LoggingConfig.LogGroup --output text)"
+    case "$LOG_GROUP" in ''|None) LOG_GROUP="/aws/lambda/$SERVER" ;; esac
+    EVID="$(mktemp -d)"
+    trap 'rm -rf "$EVID"' EXIT
+    FAILS=0
+    i=0
+    for shape in "${SHAPES[@]}"; do
+        i=$((i + 1))
+        # 1. a fresh environment: a configuration change retires every warm one.
+        VARS="$(aws lambda get-function-configuration --profile "$P" --function-name "$SERVER" --query Environment.Variables --output json)"
+        NEWENV="$(python3 -c 'import json, sys, time; v = json.loads(sys.argv[1]) or {}; v["DECIDE_COLD_BUMP"] = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + sys.argv[2]; print(json.dumps({"Variables": v}))' "$VARS" "$i")"
+        aws lambda update-function-configuration --profile "$P" --function-name "$SERVER" --environment "$NEWENV" > /dev/null
+        aws lambda wait function-updated --profile "$P" --function-name "$SERVER"
+        ST="$(aws lambda get-function-configuration --profile "$P" --function-name "$SERVER" --query LastUpdateStatus --output text)"
+        [ "$ST" = "Successful" ] || { echo "ERROR: sample $i: LastUpdateStatus is $ST" >&2; exit 1; }
+        # 2. the maximal request as the instance's FIRST POST.
+        PID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+        T0="$(python3 -c 'import time; print(int(time.time() * 1000) - 5000)')"
+        set +e
+        "$PROBE" --url "$ENDPOINT" --apr "$APR" --expect-sha256 "$H" --cold-first --maximal "$shape" --probe-id "$PID" \
+            > "$EVID/sample-$i.json" 2> "$EVID/sample-$i.err"
+        prc=$?
+        set -e
+        [ "$prc" -eq 0 ] || { echo "FAIL sample $i $shape: probe exited $prc ($(tail -1 "$EVID/sample-$i.err"))" >&2; FAILS=$((FAILS + 1)); continue; }
+        # 3. the server's own load line for THIS probe id, or the sample is not cold.
+        LINE=""
+        for _ in $(seq 1 30); do
+            LINE="$(aws logs filter-log-events --profile "$P" --log-group-name "$LOG_GROUP" --start-time "$T0" \
+                --filter-pattern "\"probe_id=$PID\"" --query 'events[].message' --output text 2>/dev/null \
+                | tr '\t' '\n' | grep "decide.load performed_load=true probe_id=$PID" | head -n 1 || true)"
+            [ -n "$LINE" ] && break
+            sleep 2
+        done
+        printf '%s\n' "$LINE" > "$EVID/sample-$i.log"
+        python3 - "$EVID/sample-$i.json" "$EVID/sample-$i.log" "$shape" "$CAP_MS" "$i" <<'PY' || FAILS=$((FAILS + 1))
+    import json, re, sys
+    sample, logline, shape, cap, i = sys.argv[1], open(sys.argv[2]).read().strip(), sys.argv[3], int(sys.argv[4]), sys.argv[5]
+    s = json.loads([l for l in open(sample) if l.startswith("{")][-1])
+    problems = []
+    if not s.get("identity_matches"):
+        problems.append("identity mismatch")
+    if s.get("elapsed_ms", cap) >= cap:
+        problems.append(f"elapsed {s.get('elapsed_ms')} ms >= {cap}")
+    if "performed_load=true" not in logline:
+        problems.append("no performed_load=true line in CloudWatch for this probe id: NOT a cold sample")
+    status = "ok" if not problems else "FAIL " + "; ".join(problems)
+    print(f"sample {i} {shape}: elapsed {s.get('elapsed_ms')} ms, tokens {s.get('tokens_total')}, header {s.get('load_header')}, {status}")
+    sys.exit(0 if not problems else 1)
+    PY
+    done
+    # Labels in order + identity, then 5 warm single-text calls.
+    "$PROBE" --url "$ENDPOINT" --apr "$APR" --expect-sha256 "$H" > "$EVID/identity.json" 2> "$EVID/identity.err" \
+        || { echo "FAIL identity probe ($(tail -1 "$EVID/identity.err"))" >&2; FAILS=$((FAILS + 1)); }
+    for w in 1 2 3 4 5; do
+        "$PROBE" --url "$ENDPOINT" --apr "$APR" --expect-sha256 "$H" --cold-first > "$EVID/warm-$w.json" 2> "$EVID/warm-$w.err" \
+            || { echo "FAIL warm call $w" >&2; FAILS=$((FAILS + 1)); }
+    done
+    python3 - "$EVID" "$SERVER" "$H" "${#SHAPES[@]}" "models/decide/deploy-evidence-$SERVER.json" <<'PY'
+    import glob, json, os, re, statistics, sys
+    d, server, sha, n, out = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
+    def last_json(p):
+        try:
+            return json.loads([l for l in open(p) if l.startswith("{")][-1])
+        except (OSError, IndexError, ValueError):
+            return None
+    samples = []
+    for i in range(1, n + 1):
+        s = last_json(f"{d}/sample-{i}.json")
+        line = open(f"{d}/sample-{i}.log").read().strip() if os.path.exists(f"{d}/sample-{i}.log") else ""
+        kv = dict(re.findall(r"(\w+)=(\S+)", line))
+        samples.append({
+            "shape": s and s.get("shape"), "tokens_total": s and s.get("tokens_total"),
+            "elapsed_ms": s and s.get("elapsed_ms"), "load_ms": kv.get("load_ms"),
+            "probe_id": s and s.get("probe_id"), "load_header": s and s.get("load_header"),
+            "cold_evidence": "cloudwatch" if kv.get("performed_load") == "true" else None,
+            "graviton": kv.get("graviton"), "log_line": line or None,
+        })
+    warm = [w["elapsed_ms"][-1] if isinstance(w.get("elapsed_ms"), list) else w.get("elapsed_ms")
+            for w in (last_json(p) for p in sorted(glob.glob(f"{d}/warm-*.json"))) if w]
+    ident = last_json(f"{d}/identity.json")
+    ev = {"server": server, "artifact_sha256": sha, "cap_ms": 30000, "cold_samples": samples,
+          "identity": ident, "warm_ms": warm,
+          "warm_p50_ms": statistics.median(warm) if warm else None, "warm_max_ms": max(warm) if warm else None}
+    json.dump(ev, open(out, "w"), indent=2)
+    print(f"  evidence -> {out}")
+    PY
+    if [ "$FAILS" -eq 0 ]; then
+        echo "DEPLOY VERIFY OK $SERVER: ${#SHAPES[@]} cold samples (both shapes), every one < $CAP_MS ms with CloudWatch cold evidence"
+    else
+        echo "DEPLOY VERIFY FAILED $SERVER: $FAILS failed checks" >&2
+        exit 1
+    fi
+
+# CONTAINMENT FIRST: throttle <server> to reserved concurrency 0 (every invocation is refused at
+# once, warm instances included; undo with `aws lambda delete-function-concurrency`), verify it,
+# then delete the inline weights policy. The bucket stays (idle-free). Removing the deployment and
+# the object is the human's call: the commands are PRINTED, never run.
+laya-teardown server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SERVER="{{server}}"
+    ENV="{{ trim_start_match(env, "env=") }}"
+    P="{{profile}}"
+    case "$ENV" in
+        dev|prod) ;;
+        *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
+    esac
+    aws lambda put-function-concurrency --profile "$P" --function-name "$SERVER" --reserved-concurrent-executions 0 > /dev/null
+    GOT="$(aws lambda get-function-concurrency --profile "$P" --function-name "$SERVER" --query ReservedConcurrentExecutions --output text)"
+    [ "$GOT" = "0" ] || { echo "ERROR: reserved concurrency of $SERVER reads '$GOT', not 0 -- it may still be serving" >&2; exit 1; }
+    echo "  CONTAINED: $SERVER reserved concurrency 0 (no invocation runs, warm instances included)"
+    ROLE_ARN="$(aws lambda get-function --profile "$P" --function-name "$SERVER" --query Configuration.Role --output text)"
+    ROLE="${ROLE_ARN##*/}"
+    if aws iam delete-role-policy --profile "$P" --role-name "$ROLE" --policy-name "aprender-decide-weights-${ENV}" 2>/dev/null; then
+        echo "  removed policy aprender-decide-weights-${ENV} from $ROLE"
+    else
+        echo "  no policy aprender-decide-weights-${ENV} on $ROLE (already removed)"
+    fi
+    ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
+    echo "  NOT RUN -- the human's call:"
+    echo "    remove the deployment (the decide config must be at the shared root while it runs):"
+    echo "      just _laya-crates-root-swap crates crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml models/decide/destroy-$SERVER.state cargo pmcp deploy destroy --manifest-path crates"
+    echo "    remove the weights:"
+    echo "      aws s3 rm --profile $P --recursive s3://aprender-decide-weights-${ACCOUNT}-${ENV}/decide/$SERVER/"
+    echo "    or resume serving instead: aws lambda delete-function-concurrency --profile $P --function-name $SERVER"
