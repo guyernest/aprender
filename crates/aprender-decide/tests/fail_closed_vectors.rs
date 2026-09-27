@@ -103,6 +103,21 @@ fn policy() -> VerifyPolicy {
             .as_str()
             .expect("contract base.model_safetensors_sha256")
             .to_string(),
+        seed_selection_policy: gate["seed_policy"]["selection"]
+            .as_str()
+            .expect("contract seed_policy.selection")
+            .to_string(),
+        seed_selection_seeds: gate["seed_policy"]["variance_seeds"]
+            .as_sequence()
+            .expect("contract seed_policy.variance_seeds")
+            .iter()
+            .map(|s| s.as_i64().expect("seed"))
+            .collect(),
+        seed_rank_scale: f64_at(&gate, &["seed_policy", "rank_scale"]),
+        seed_tie_break: gate["seed_policy"]["tie_break"]
+            .as_str()
+            .expect("contract seed_policy.tie_break")
+            .to_string(),
     }
 }
 

@@ -453,6 +453,15 @@ pub struct PackInputs {
     /// `rescore-noise.json`, byte-exact and hash-checked, present exactly when the report names
     /// it (`rescore_noise_sha256`); the verifier's `rescore_bounds` parses and recomputes it.
     pub rescore_noise_json: Option<Vec<u8>>,
+    /// sha256 of `checkpoint/model.safetensors` (the shipped seed's per_seed row must name it).
+    pub checkpoint_sha256: String,
+    /// `(seed, seeds/seed-<s>/eval-probs.json)` for every `seeds.per_seed` row, in row order,
+    /// each hash-checked against its row (empty for a report without per_seed).
+    pub seed_eval_probs: Vec<(i64, Vec<u8>)>,
+    /// `shift-probs.json`, hash-checked, present exactly when the report carries `shift_probe`.
+    pub shift_probs_json: Option<Vec<u8>>,
+    /// `shift-zero-shot-probs.json`, hash-checked, present exactly with `shift_probe`.
+    pub shift_zero_shot_probs_json: Option<Vec<u8>>,
     /// Input hashes recomputed from the data dir, tokenizer and declared base.
     pub inputs_sha256: InputsSha256,
 }
@@ -499,6 +508,16 @@ pub enum PackError {
         /// Recomputed from the file.
         observed: String,
     },
+    /// A `seeds/seed-<s>/eval-probs.json` disagrees with its `seeds.per_seed` row's
+    /// `eval_probs_sha256` (1.4.0, A3).
+    SeedProbsHashMismatch {
+        /// The seed.
+        seed: i64,
+        /// Recorded in the per_seed row.
+        recorded: String,
+        /// Recomputed from the file.
+        observed: String,
+    },
     /// The artifact writer refused.
     Artifact(ArtifactError),
     /// A checkpoint could not be rebuilt into a Laya model for scoring
@@ -530,6 +549,14 @@ impl fmt::Display for PackError {
             } => write!(
                 f,
                 "pack: gate report records {what} = {recorded}, the file hashes to {observed}"
+            ),
+            Self::SeedProbsHashMismatch {
+                seed,
+                recorded,
+                observed,
+            } => write!(
+                f,
+                "pack: seeds/seed-{seed}/eval-probs.json hashes to {observed}, its per_seed row records {recorded}"
             ),
             Self::Artifact(e) => write!(f, "pack: {e}"),
             Self::Rebuild(e) => write!(f, "pack: rebuild for scoring: {e}"),
@@ -610,8 +637,9 @@ impl PackInputs {
     ///
     /// Refuses when the run-dir `task.json` differs from the data dir's, when the gate
     /// report's `recipe_id`, `inputs_sha256`, `eval_probs_sha256`,
-    /// `zero_shot_probs_sha256`, `probes_sha256` or (when present) `rescore_noise_sha256`
-    /// disagree with the files, or when any
+    /// `zero_shot_probs_sha256`, `probes_sha256` or (when present) `rescore_noise_sha256`,
+    /// a `seeds.per_seed` row's `eval_probs_sha256` or the `shift_probe` file hashes disagree
+    /// with the files, or when any
     /// JSON file carries a field its contract schema does not declare.
     ///
     /// # Errors
@@ -663,6 +691,33 @@ impl PackInputs {
             }
             None => None,
         };
+        let mut seed_eval_probs = Vec::new();
+        for row in gate_report.seeds.per_seed.iter().flatten() {
+            let bytes = read_file(run_dir, &format!("seeds/seed-{}/eval-probs.json", row.seed))?;
+            let observed = sha256_hex(&bytes);
+            if observed != row.eval_probs_sha256 {
+                return Err(PackError::SeedProbsHashMismatch {
+                    seed: row.seed,
+                    recorded: row.eval_probs_sha256.clone(),
+                    observed,
+                });
+            }
+            seed_eval_probs.push((row.seed, bytes));
+        }
+        let (shift_probs_json, shift_zero_shot_probs_json) = match &gate_report.shift_probe {
+            Some(probe) => {
+                let ft = read_file(run_dir, "shift-probs.json")?;
+                check_hash("shift_probe.probs_sha256", &probe.probs_sha256, &ft)?;
+                let zs = read_file(run_dir, "shift-zero-shot-probs.json")?;
+                check_hash(
+                    "shift_probe.zero_shot_probs_sha256",
+                    &probe.zero_shot_probs_sha256,
+                    &zs,
+                )?;
+                (Some(ft), Some(zs))
+            }
+            None => (None, None),
+        };
         let recorded = &gate_report.inputs_sha256;
         check_hash("inputs_sha256.task_json", &recorded.task_json, &data_task)?;
         check_hash("inputs_sha256.train_jsonl", &recorded.train_jsonl, &train)?;
@@ -687,8 +742,9 @@ impl PackInputs {
             tokenizer_json: sha256_hex(&tokenizer),
         };
 
-        let tensors =
-            read_checkpoint_tensors(&read_file(run_dir, "checkpoint/model.safetensors")?)?;
+        let model = read_file(run_dir, "checkpoint/model.safetensors")?;
+        let checkpoint_sha256 = sha256_hex(&model);
+        let tensors = read_checkpoint_tensors(&model)?;
         Ok(Self {
             tensors,
             encoder_config,
@@ -703,6 +759,10 @@ impl PackInputs {
             eval_probs_json: eval_probs,
             zero_shot_probs_json: zero_shot_probs,
             rescore_noise_json,
+            checkpoint_sha256,
+            seed_eval_probs,
+            shift_probs_json,
+            shift_zero_shot_probs_json,
             inputs_sha256,
         })
     }

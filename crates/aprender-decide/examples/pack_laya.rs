@@ -15,7 +15,9 @@
 //! `PACKED <path> sha256=<H> rescore_max_abs=<x> zs_rescore_max_abs=<y> rescore_bound=<b>
 //! zs_rescore_bound=<b> noise=<v|null> zs_noise=<v|null> argmax=<n>/<n>` — each re-score's bound
 //! is laya-parity-v1 A1's `max(floor, k x noise)`, derived from `rescore-noise.json`, or the floor
-//! (noise `null`) when the run carries no record.
+//! (noise `null`) when the run carries no record — and `shipped_seed=<s>`, the median-ECE seed
+//! verify re-derived from the per-seed files (laya-finetune-gate-v1 1.4.0). A run whose recipe
+//! carries no `seed_selection` is refused `SeedPolicyMissing` after its re-scores and gate.
 //! A refusal prints ONE `REFUSED <Variant> <detail> (nothing written)` line.
 //!
 //! `verify` is decide-apr-v1 `deploy_eligibility`, the ONLY eligibility check: it loads the
@@ -33,8 +35,9 @@
 //! 2 every other refusal (including a usage error).
 //!
 //! THE POLICY IS NOT AN ARGUMENT. Thresholds, `ece_bins`, `gate_metric_recompute_abs`,
-//! `calibration_slice_min_per_class` and the base sha256 are read from
-//! `contracts/laya-finetune-gate-v1.yaml`, and the re-score floor `pack_rescore_probs_abs`, the
+//! `calibration_slice_min_per_class`, the base sha256 and the `seed_policy` (selection, seeds,
+//! rank_scale, tie_break) are read from `contracts/laya-finetune-gate-v1.yaml`, and the
+//! re-score floor `pack_rescore_probs_abs`, the
 //! noise multiplier `pack_rescore_noise_k` and the ceiling `pack_rescore_bound_max_abs` from
 //! `contracts/laya-parity-v1.yaml`, at run time. The CLI accepts only the path arguments above
 //! and reads no environment variable: there is no way to hand it another policy.
@@ -80,6 +83,15 @@ fn u64_at(v: &serde_yaml::Value, keys: &[&str]) -> Result<u64, String> {
     })
 }
 
+fn str_at(v: &serde_yaml::Value, keys: &[&str]) -> Result<String, String> {
+    at(v, keys).as_str().map(str::to_string).ok_or_else(|| {
+        format!(
+            "contract value {} is missing or not a string",
+            keys.join(".")
+        )
+    })
+}
+
 /// The verify policy, read from the contracts (never literals).
 fn policy() -> Result<VerifyPolicy, String> {
     let gate = contract("laya-finetune-gate-v1.yaml")?;
@@ -101,6 +113,18 @@ fn policy() -> Result<VerifyPolicy, String> {
             .as_str()
             .ok_or("contract value base.model_safetensors_sha256 is missing")?
             .to_string(),
+        seed_selection_policy: str_at(&gate, &["seed_policy", "selection"])?,
+        seed_selection_seeds: at(&gate, &["seed_policy", "variance_seeds"])
+            .as_sequence()
+            .ok_or("contract value seed_policy.variance_seeds is missing")?
+            .iter()
+            .map(|s| {
+                s.as_i64()
+                    .ok_or_else(|| "seed_policy.variance_seeds holds a non-integer".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        seed_rank_scale: f64_at(&gate, &["seed_policy", "rank_scale"])?,
+        seed_tie_break: str_at(&gate, &["seed_policy", "tie_break"])?,
     })
 }
 
@@ -170,7 +194,7 @@ fn cmd_pack(a: &Args) -> Result<ExitCode, String> {
             Ok(r) => {
                 println!(
                     "PACKED {} sha256={} rescore_max_abs={} zs_rescore_max_abs={} rescore_bound={} \
-                     zs_rescore_bound={} noise={} zs_noise={} argmax={}/{}",
+                     zs_rescore_bound={} noise={} zs_noise={} shipped_seed={} argmax={}/{}",
                     out.display(),
                     r.artifact_sha256,
                     r.rescore_max_abs,
@@ -179,6 +203,7 @@ fn cmd_pack(a: &Args) -> Result<ExitCode, String> {
                     r.zs_rescore_bound,
                     verify::opt_f64(r.noise),
                     verify::opt_f64(r.zs_noise),
+                    verify::opt_i64(r.shipped_seed),
                     r.argmax_agree,
                     r.n
                 );
@@ -219,6 +244,7 @@ fn cmd_verify(a: &Args) -> Result<ExitCode, String> {
                     ("zs_rescore_bound", r.zs_rescore_bound.into()),
                     ("noise", r.noise.into()),
                     ("zs_noise", r.zs_noise.into()),
+                    ("shipped_seed", r.shipped_seed.into()),
                     ("argmax", format!("{}/{}", r.argmax_agree, r.n).into()),
                 ]);
                 println!("{line}");

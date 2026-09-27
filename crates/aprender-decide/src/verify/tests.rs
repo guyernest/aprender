@@ -57,7 +57,26 @@ fn contract_policy_tiny_base() -> VerifyPolicy {
         calibration_slice_min_per_class: constant_f64(gate, "calibration_slice_min_per_class")
             as u64,
         base_sha256: tiny_base_sha(),
+        seed_selection_policy: seed_policy_str("selection"),
+        seed_selection_seeds: contract_yaml(gate)["seed_policy"]["variance_seeds"]
+            .as_sequence()
+            .expect("seed_policy.variance_seeds")
+            .iter()
+            .map(|s| s.as_i64().expect("seed"))
+            .collect(),
+        seed_rank_scale: contract_yaml(gate)["seed_policy"]["rank_scale"]
+            .as_f64()
+            .expect("seed_policy.rank_scale"),
+        seed_tie_break: seed_policy_str("tie_break"),
     }
+}
+
+/// `seed_policy.<key>` of laya-finetune-gate-v1 as a string.
+fn seed_policy_str(key: &str) -> String {
+    contract_yaml("laya-finetune-gate-v1.yaml")["seed_policy"][key]
+        .as_str()
+        .unwrap_or_else(|| panic!("seed_policy.{key}"))
+        .to_string()
 }
 
 /// TEST-ONLY permissive policy: margin 0, max_ece 1, tiny base. The fixture's fine-tuned and
@@ -121,6 +140,94 @@ impl Run {
                 r["rescore_noise_sha256"] = h.into();
             }
         });
+        self.sync_shift();
+        self.sync_seeds();
+    }
+
+    /// Re-derive the shift probe's hashes when the copy carries one (the trainer's job).
+    fn sync_shift(&self) {
+        if !self.path("shift-probs.json").exists() {
+            return;
+        }
+        let (sp, sz) = (
+            sha(&self.path("shift-probs.json")),
+            sha(&self.path("shift-zero-shot-probs.json")),
+        );
+        let shift = self.data().join("shift.jsonl");
+        let sj = shift.exists().then(|| sha(&shift));
+        self.edit_json("gate-report.json", |r| {
+            r["shift_probe"]["probs_sha256"] = sp.into();
+            r["shift_probe"]["zero_shot_probs_sha256"] = sz.into();
+            if let Some(h) = sj {
+                r["inputs_sha256"]["shift_jsonl"] = h.into();
+            }
+        });
+    }
+
+    /// Re-derive `seeds.per_seed` the way the trainer writes it: the shipped seed's file IS
+    /// eval-probs.json, and every row's metrics, margin (against the current zero-shot file),
+    /// pass (the report's thresholds), rank key and hashes are recomputed from its file. A file
+    /// the verifier would refuse is left for the verifier to refuse.
+    fn sync_seeds(&self) {
+        let report = read_json(&self.path("gate-report.json"));
+        if report["seeds"]["per_seed"].is_null() {
+            return;
+        }
+        let shipped = report["seeds"]["shipped"].as_i64().expect("shipped");
+        std::fs::copy(
+            self.path("eval-probs.json"),
+            self.path(&format!("seeds/seed-{shipped}/eval-probs.json")),
+        )
+        .expect("copy the shipped seed's file");
+        let Ok(data) = read_data_dir(&self.data()) else {
+            return;
+        };
+        let labels = data.task.owned_labels();
+        let y: Vec<usize> = data.eval.iter().map(|r| r.label).collect();
+        let k = labels.len();
+        let th = &report["thresholds"];
+        let (min_margin, max_ece) = (
+            th["min_macro_f1_margin"].as_f64().expect("margin"),
+            th["max_ece"].as_f64().expect("max_ece"),
+        );
+        let bins = th["ece_bins"].as_u64().expect("bins") as usize;
+        let scale = read_json(&self.path("recipe.json"))["seed_selection"]["rank_scale"]
+            .as_f64()
+            .expect("rank_scale");
+        let Ok(zs) = validate_probs(
+            ProbsWhich::ZeroShot,
+            &std::fs::read(self.path("zero-shot-probs.json")).expect("zs"),
+            &data.eval,
+            &labels,
+        ) else {
+            return;
+        };
+        let zs_f1 = recompute_metrics(&zs, &y, k, bins).macro_f1;
+        let ckpt = sha(&self.path("checkpoint/model.safetensors"));
+        let t_applied = report["calibration"]["t_applied"].clone();
+        self.edit_json("gate-report.json", |r| {
+            for row in r["seeds"]["per_seed"].as_array_mut().expect("per_seed") {
+                let seed = row["seed"].as_i64().expect("seed");
+                let file = self.path(&format!("seeds/seed-{seed}/eval-probs.json"));
+                let bytes = std::fs::read(&file).expect("seed file");
+                row["eval_probs_sha256"] = sha256_hex(&bytes).into();
+                if seed == shipped {
+                    row["model_safetensors_sha256"] = ckpt.clone().into();
+                    row["t_applied"] = t_applied.clone();
+                }
+                let Ok(p) = validate_probs(ProbsWhich::Seed(seed), &bytes, &data.eval, &labels)
+                else {
+                    continue;
+                };
+                let m = recompute_metrics(&p, &y, k, bins);
+                let margin = m.macro_f1 - zs_f1;
+                row["macro_f1"] = m.macro_f1.into();
+                row["ece_post"] = m.ece.into();
+                row["margin"] = margin.into();
+                row["pass"] = (margin >= min_margin && m.ece <= max_ece).into();
+                row["rank_key"] = ((m.ece * scale).floor() as i64).into();
+            }
+        });
     }
 
     fn inputs(&self) -> PackInputs {
@@ -142,9 +249,122 @@ fn synthetic_copy() -> Run {
     Run { _tmp: tmp, dir }
 }
 
-/// A production-variant copy whose report thresholds are `policy`'s and whose reported pass
-/// is `pass`, every hash recomputed.
+/// A production copy under the 1.4.0 median rule (the default every accept path uses): seeds
+/// 13 / 17 / 23 whose files give ECEs low / high / mid, seed 23 shipped (its file IS
+/// eval-probs.json), so 23 is the median.
 fn production_copy(policy: &VerifyPolicy, pass: bool) -> Run {
+    seed_copy(
+        policy,
+        pass,
+        [
+            (13, SeedFile::Flatten),
+            (17, SeedFile::Sharpen(0.05)),
+            (23, SeedFile::Shipped),
+        ],
+        23,
+    )
+}
+
+/// How a seed's `eval-probs.json` is derived from the shipped one.
+#[derive(Debug, Clone, Copy)]
+enum SeedFile {
+    /// The shipped seed: a copy of `eval-probs.json`.
+    Shipped,
+    /// Halfway to uniform: argmax kept, confidence (and, here, ECE) lower.
+    Flatten,
+    /// `d` of mass moved onto each row's argmax: argmax kept, confidence (and ECE) higher.
+    Sharpen(f64),
+}
+
+/// A three-seed production copy under `policy`'s seed selection: `files` says how each seed's
+/// file is derived, `shipped` which seed the report ships. The per_seed rows are derived by
+/// `rehash` exactly as the trainer derives them.
+fn seed_copy(policy: &VerifyPolicy, pass: bool, files: [(i64, SeedFile); 3], shipped: i64) -> Run {
+    let run = legacy_copy(policy, pass);
+    let seeds = policy.seed_selection_seeds.clone();
+    assert_eq!(
+        files.iter().map(|f| f.0).collect::<Vec<_>>(),
+        seeds,
+        "the copy's seeds are the contract's"
+    );
+    run.edit_json("recipe.json", |r| {
+        r["seed"] = seeds[0].into();
+        r["seed_selection"] = obj(vec![
+            ("policy", policy.seed_selection_policy.clone().into()),
+            ("rank_scale", policy.seed_rank_scale.into()),
+            ("seeds", Value::from(seeds.clone())),
+            ("tie_break", policy.seed_tie_break.clone().into()),
+        ]);
+    });
+    let base = read_json(&run.path("eval-probs.json"));
+    for (seed, how) in files {
+        let mut v = base.clone();
+        for row in v["rows"].as_array_mut().expect("rows") {
+            let p: Vec<f64> = row["probabilities"]
+                .as_array()
+                .expect("p")
+                .iter()
+                .map(|x| x.as_f64().expect("p"))
+                .collect();
+            let k = p.len() as f64;
+            let a = (0..p.len()).fold(0, |m, i| if p[i] > p[m] { i } else { m });
+            let q: Vec<f64> = match how {
+                SeedFile::Shipped => p,
+                SeedFile::Flatten => p.iter().map(|x| 0.5 * x + 0.5 / k).collect(),
+                SeedFile::Sharpen(d) => p
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| if i == a { x + d } else { x - d / (k - 1.0) })
+                    .collect(),
+            };
+            // Stored as exact f32 values, as the trainer writes them.
+            row["probabilities"] =
+                Value::from(q.iter().map(|&x| f64::from(x as f32)).collect::<Vec<f64>>());
+        }
+        let dir = run.path(&format!("seeds/seed-{seed}"));
+        std::fs::create_dir_all(&dir).expect("seed dir");
+        write_json(&dir.join("eval-probs.json"), &v);
+    }
+    let per_seed: Vec<Value> = seeds
+        .iter()
+        .map(|&s| {
+            obj(vec![
+                ("seed", s.into()),
+                ("macro_f1", 0.0.into()),
+                ("f_avg", Value::Null),
+                ("ece_post", 0.0.into()),
+                ("margin", 0.0.into()),
+                ("pass", false.into()),
+                ("t_applied", 1.0.into()),
+                ("rank_key", 0.into()),
+                ("eval_probs_sha256", "".into()),
+                (
+                    "model_safetensors_sha256",
+                    sha256_hex(format!("seed-{s}").as_bytes()).into(),
+                ),
+            ])
+        })
+        .collect();
+    run.edit_json("gate-report.json", |r| {
+        r["seeds"] = obj(vec![
+            ("declared", seeds[0].into()),
+            ("n", seeds.len().into()),
+            (
+                "label",
+                format!("median-ECE seed of {} seeds", seeds.len()).into(),
+            ),
+            ("policy", policy.seed_selection_policy.clone().into()),
+            ("shipped", shipped.into()),
+            ("per_seed", Value::Array(per_seed)),
+        ]);
+    });
+    run.rehash();
+    run
+}
+
+/// A LEGACY (1.x) production copy: no seed_selection, single declared seed; report thresholds
+/// are `policy`'s and the reported pass is `pass`, every hash recomputed.
+fn legacy_copy(policy: &VerifyPolicy, pass: bool) -> Run {
     let run = synthetic_copy();
     run.edit_json("recipe.json", |r| r["variant"] = PRODUCTION_VARIANT.into());
     run.edit_json("gate-report.json", |r| {
@@ -164,6 +384,7 @@ fn tiny_verify_roundtrip() {
     let run = production_copy(&policy, true);
     let report = run.verify(&policy).expect("the production copy verifies");
     assert!(report.deploy_eligible);
+    assert_eq!(report.shipped_seed, Some(23), "the median seed ships");
     assert_eq!(report.n, 9);
     assert_eq!(report.argmax_agree, 9, "argmax exact on every eval row");
     assert!(
@@ -1186,4 +1407,313 @@ fn noise_k_mismatch() {
             "{field}: {e:?}"
         );
     }
+}
+
+// ===========================================================================
+// Plan 08-15 Task 2: the median-seed re-derivation (A3), the legacy refusal order, and the
+// shift probe (A2)
+// ===========================================================================
+
+/// The copy's data dir, read.
+fn data_of(run: &Run) -> DataDir {
+    read_data_dir(&run.data()).expect("data dir")
+}
+
+#[test]
+fn seed_median_ships() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let rep = read_json(&run.path("gate-report.json"));
+    let keys: Vec<i64> = rep["seeds"]["per_seed"]
+        .as_array()
+        .expect("per_seed")
+        .iter()
+        .map(|r| r["rank_key"].as_i64().expect("key"))
+        .collect();
+    assert!(
+        keys[0] < keys[2] && keys[2] < keys[1],
+        "13 low, 23 mid, 17 high: {keys:?}"
+    );
+    let got = check_seed_selection(&run.inputs(), &data_of(&run), &policy).expect("median");
+    assert_eq!(got, Some(23));
+    let report = run.verify(&policy).expect("the median copy verifies");
+    assert_eq!(report.shipped_seed, Some(23));
+}
+
+#[test]
+fn seed_shipped_not_median() {
+    // Files consistent with shipping 13 (13's file IS eval-probs.json), but 13 has the LOWEST
+    // ECE: the median is 17.
+    let policy = permissive_policy();
+    let run = seed_copy(
+        &policy,
+        true,
+        [
+            (13, SeedFile::Shipped),
+            (17, SeedFile::Sharpen(0.05)),
+            (23, SeedFile::Sharpen(0.1)),
+        ],
+        13,
+    );
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(&e, VerifyError::SeedPolicyViolated { field: "shipped", why }
+            if why.contains("13") && why.contains("17")),
+        "{e:?}"
+    );
+    assert_eq!(e.exit_code(), 2);
+}
+
+#[test]
+fn seed_tie_break_smaller_seed() {
+    let scale = permissive_policy().seed_rank_scale;
+    // 0.10009 and 0.10001 share rank key 1000: 13 ranks before 23, so the order is 17, 13, 23.
+    let rows = [(13, 0.10009), (17, 0.05), (23, 0.10001)];
+    assert_eq!(select_median_seed(&rows, scale).expect("median"), 13);
+    // The tie decides the median: 13 and 23 share 1000 below 17's 2000 -> 13, 23, 17.
+    let rows = [(23, 0.10001), (13, 0.10009), (17, 0.2)];
+    assert_eq!(select_median_seed(&rows, scale).expect("median"), 23);
+    // Distinct keys: the middle ECE ships regardless of seed order.
+    let rows = [(13, 0.15), (17, 0.05), (23, 0.12)];
+    assert_eq!(select_median_seed(&rows, scale).expect("median"), 23);
+    // No median to ship: an even or empty N, a repeated seed, a non-finite ECE.
+    for bad in [
+        vec![(13, 0.1), (17, 0.2)],
+        vec![],
+        vec![(13, 0.1), (13, 0.2), (17, 0.3)],
+        vec![(13, f64::NAN), (17, 0.2), (23, 0.3)],
+    ] {
+        let e = select_median_seed(&bad, scale).expect_err("refused");
+        assert!(
+            matches!(e, VerifyError::SeedPolicyViolated { .. }),
+            "{bad:?}: {e:?}"
+        );
+    }
+}
+
+#[test]
+fn seed_probs_hash_mismatch() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    shift_prob(&run, "seeds/seed-17/eval-probs.json", 1, 0, 1e-3);
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::Pack(PackError::SeedProbsHashMismatch { seed: 17, .. })
+        ),
+        "{e:?}"
+    );
+    assert!(
+        e.to_string().contains("seeds/seed-17/eval-probs.json"),
+        "{e}"
+    );
+}
+
+#[test]
+fn seed_metric_forged() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    run.edit_json("gate-report.json", |r| {
+        let row = &mut r["seeds"]["per_seed"][1];
+        let e = row["ece_post"].as_f64().expect("ece_post");
+        row["ece_post"] = (e + 1e-3).into();
+    });
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            e,
+            VerifyError::ReportedMetricMismatch {
+                seed: Some(17),
+                field: "per_seed.ece_post",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn seed_checkpoint_not_shipped() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    run.edit_json("gate-report.json", |r| {
+        r["seeds"]["per_seed"][2]["model_safetensors_sha256"] =
+            sha256_hex(b"another checkpoint").into();
+    });
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::SeedPolicyViolated {
+                field: "model_safetensors_sha256",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn seed_policy_mismatch() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    run.edit_json("recipe.json", |r| {
+        r["seed_selection"]["rank_scale"] = 1000.into();
+    });
+    run.rehash();
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::SeedPolicyMismatch {
+                field: "rank_scale",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+}
+
+/// A LEGACY run whose gate passes is refused SeedPolicyMissing — and only after the re-scores:
+/// the same copy with a drifted probability is refused RescoreDrift instead.
+#[test]
+fn legacy_policy_refused_after_gate_pass() {
+    let policy = permissive_policy();
+    let run = legacy_copy(&policy, true);
+    assert_eq!(run.inputs().recipe.seed_selection, None);
+    let e = expect_err(run.verify(&policy));
+    assert_eq!(e, VerifyError::SeedPolicyMissing);
+    assert_eq!(e.exit_code(), 2);
+    shift_prob(&run, "eval-probs.json", 3, 0, 2e-5);
+    run.rehash();
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            e,
+            VerifyError::RescoreDrift {
+                which: ProbsWhich::FineTuned,
+                ..
+            }
+        ),
+        "the re-scores come first: {e:?}"
+    );
+}
+
+/// A LEGACY run whose gate FAILS keeps reporting GateFailed (exit 3), never SeedPolicyMissing.
+#[test]
+fn legacy_gate_fail_keeps_gate_failed() {
+    let policy = contract_policy_tiny_base();
+    let run = legacy_copy(&policy, false);
+    let e = expect_err(run.verify(&policy));
+    assert_eq!(e.exit_code(), 3, "{e:?}");
+    assert!(
+        matches!(&e, VerifyError::GateFailed(g) if g.clauses == vec![GateClause::Margin]),
+        "{e:?}"
+    );
+}
+
+/// Add a shift probe the way the trainer does: shift.jsonl (here the eval rows), both shift
+/// probability files, and a shift_probe block whose metrics are recomputed from them.
+fn add_shift_probe(run: &Run, policy: &VerifyPolicy) {
+    std::fs::copy(
+        run.data().join("eval.jsonl"),
+        run.data().join("shift.jsonl"),
+    )
+    .expect("shift.jsonl");
+    std::fs::copy(run.path("eval-probs.json"), run.path("shift-probs.json")).expect("shift ft");
+    std::fs::copy(
+        run.path("zero-shot-probs.json"),
+        run.path("shift-zero-shot-probs.json"),
+    )
+    .expect("shift zs");
+    let (_, ft, zs) = validated(run);
+    let data = data_of(run);
+    let y: Vec<usize> = data.eval.iter().map(|r| r.label).collect();
+    let k = data.task.owned_labels().len();
+    let bins = policy.ece_bins as usize;
+    let (f, z) = (
+        recompute_metrics(&ft, &y, k, bins),
+        recompute_metrics(&zs, &y, k, bins),
+    );
+    run.edit_json("gate-report.json", |r| {
+        r["shift_probe"] = obj(vec![
+            ("gate_clause", false.into()),
+            ("n", y.len().into()),
+            (
+                "zero_shot",
+                obj(vec![
+                    ("macro_f1", z.macro_f1.into()),
+                    ("f_avg", Value::Null),
+                    ("ece", z.ece.into()),
+                ]),
+            ),
+            (
+                "fine_tuned",
+                obj(vec![
+                    ("macro_f1", f.macro_f1.into()),
+                    ("f_avg", Value::Null),
+                    ("ece_post", f.ece.into()),
+                ]),
+            ),
+            ("margin", (f.macro_f1 - z.macro_f1).into()),
+            ("probs_sha256", "".into()),
+            ("zero_shot_probs_sha256", "".into()),
+        ]);
+        r["inputs_sha256"]["shift_jsonl"] = "".into();
+    });
+    run.rehash();
+}
+
+#[test]
+fn shift_probe_metric_forged() {
+    let policy = permissive_policy();
+    let plain = production_copy(&policy, true);
+    let without = plain.verify(&policy).expect("verifies without a probe");
+    let run = production_copy(&policy, true);
+    add_shift_probe(&run, &policy);
+    check_shift_probe(&run.inputs(), &data_of(&run), &policy).expect("the probe recomputes");
+    let with = run.verify(&policy).expect("verifies with the probe");
+    assert_eq!(
+        with.recomputed, without.recomputed,
+        "the probe never moves the gate"
+    );
+    assert_eq!(with.deploy_eligible, without.deploy_eligible);
+    run.edit_json("gate-report.json", |r| {
+        let e = r["shift_probe"]["fine_tuned"]["ece_post"]
+            .as_f64()
+            .expect("ece_post");
+        r["shift_probe"]["fine_tuned"]["ece_post"] = (e + 0.01).into();
+    });
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::ShiftProbeMismatch {
+                field: "shift_probe.fine_tuned.ece_post",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    assert_eq!(e.exit_code(), 2);
+}
+
+#[test]
+fn shift_file_missing() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    add_shift_probe(&run, &policy);
+    std::fs::remove_file(run.data().join("shift.jsonl")).expect("remove shift.jsonl");
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::ShiftProbeMismatch {
+                field: "shift_jsonl",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
 }

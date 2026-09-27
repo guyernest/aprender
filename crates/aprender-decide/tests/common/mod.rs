@@ -38,6 +38,19 @@ pub fn str_at(v: &serde_yaml::Value, keys: &[&str]) -> String {
         .to_string()
 }
 
+/// A list of integers at `keys`.
+pub fn seeds_at(v: &serde_yaml::Value, keys: &[&str]) -> Vec<i64> {
+    at(v, keys)
+        .as_sequence()
+        .unwrap_or_else(|| panic!("contract value {}", keys.join(".")))
+        .iter()
+        .map(|s| {
+            s.as_i64()
+                .unwrap_or_else(|| panic!("{}: not an integer", keys.join(".")))
+        })
+        .collect()
+}
+
 /// The contract policy: laya-finetune-gate-v1 constants, base and seed policy; laya-parity-v1
 /// floor, noise multiplier and ceiling.
 pub fn policy() -> VerifyPolicy {
@@ -58,5 +71,9 @@ pub fn policy() -> VerifyPolicy {
         calibration_slice_min_per_class: f64_at(&gate, &c("calibration_slice_min_per_class"))
             as u64,
         base_sha256: str_at(&gate, &["base", "model_safetensors_sha256"]),
+        seed_selection_policy: str_at(&gate, &["seed_policy", "selection"]),
+        seed_selection_seeds: seeds_at(&gate, &["seed_policy", "variance_seeds"]),
+        seed_rank_scale: f64_at(&gate, &["seed_policy", "rank_scale"]),
+        seed_tie_break: str_at(&gate, &["seed_policy", "tie_break"]),
     }
 }

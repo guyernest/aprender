@@ -28,6 +28,15 @@
 //!    [`recompute_metrics`]) on those verified probabilities, and decides the gate on the
 //!    recomputed values ([`check_gate`]).
 //!
+//! Under laya-finetune-gate-v1 1.4.0 the cheap checks also RE-DERIVE the shipped seed
+//! ([`check_seed_selection`], A3: every seed's metrics recomputed from its hash-bound
+//! probability file, the median-ECE seed by the declared rank key and tie-break, the shipped
+//! checkpoint and eval file bound by sha256) and RECOMPUTE the reported shift probe
+//! ([`check_shift_probe`], A2: never re-scored, never a gate clause). A run whose recipe carries
+//! no `seed_selection` is refused [`VerifyError::SeedPolicyMissing`] — but only AFTER the
+//! re-scores and the gate, so a legacy run whose gate fails still reports
+//! [`VerifyError::GateFailed`].
+//!
 //! The policy — thresholds, tolerances, the base sha256 — is passed in as a [`VerifyPolicy`]:
 //! the library stays YAML-free, and the only caller that builds one outside tests
 //! (`examples/pack_laya.rs`) reads every value from the contracts at run time.
@@ -88,6 +97,14 @@ pub struct VerifyPolicy {
     pub calibration_slice_min_per_class: u64,
     /// laya-finetune-gate-v1 `base.model_safetensors_sha256`.
     pub base_sha256: String,
+    /// laya-finetune-gate-v1 `seed_policy.selection` (`median_ece`, A3).
+    pub seed_selection_policy: String,
+    /// laya-finetune-gate-v1 `seed_policy.variance_seeds` (13, 17, 23).
+    pub seed_selection_seeds: Vec<i64>,
+    /// laya-finetune-gate-v1 `seed_policy.rank_scale`.
+    pub seed_rank_scale: f64,
+    /// laya-finetune-gate-v1 `seed_policy.tie_break` (`smaller_seed`).
+    pub seed_tie_break: String,
 }
 
 /// Which probability file (and which model re-scores it).
@@ -97,14 +114,23 @@ pub enum ProbsWhich {
     FineTuned,
     /// `zero-shot-probs.json`, re-scored by the declared base.
     ZeroShot,
+    /// `seeds/seed-<s>/eval-probs.json` (1.4.0): recomputed, never re-scored.
+    Seed(i64),
+    /// `shift-probs.json` (1.4.0 shift probe): recomputed, never re-scored.
+    ShiftFineTuned,
+    /// `shift-zero-shot-probs.json` (1.4.0 shift probe): recomputed, never re-scored.
+    ShiftZeroShot,
 }
 
 impl fmt::Display for ProbsWhich {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::FineTuned => "fine_tuned",
-            Self::ZeroShot => "zero_shot",
-        })
+        match self {
+            Self::FineTuned => f.write_str("fine_tuned"),
+            Self::ZeroShot => f.write_str("zero_shot"),
+            Self::Seed(s) => write!(f, "seed_{s}"),
+            Self::ShiftFineTuned => f.write_str("shift_fine_tuned"),
+            Self::ShiftZeroShot => f.write_str("shift_zero_shot"),
+        }
     }
 }
 
@@ -207,6 +233,8 @@ pub struct VerifyReport {
     pub noise: Option<f64>,
     /// The recomputed zero-shot noise, `None` without a record.
     pub zs_noise: Option<f64>,
+    /// The re-derived shipped (median) seed; always `Some` for an accepted run (1.4.0).
+    pub shipped_seed: Option<i64>,
     /// Fine-tuned argmax agreement.
     pub argmax_agree: usize,
     /// Eval rows.
@@ -236,6 +264,8 @@ pub struct GateFailure {
     pub noise: Option<f64>,
     /// The recomputed zero-shot noise, `None` without a record.
     pub zs_noise: Option<f64>,
+    /// The re-derived shipped seed; `None` for a legacy run.
+    pub shipped_seed: Option<i64>,
     /// Fine-tuned argmax agreement.
     pub argmax_agree: usize,
     /// Eval rows.
@@ -402,7 +432,9 @@ pub enum VerifyError {
     },
     /// A reported metric is further than `gate_metric_recompute_abs` from its recomputation.
     ReportedMetricMismatch {
-        /// The report field (`fine_tuned.macro_f1`, ...).
+        /// The seed, for a `seeds.per_seed` field (1.4.0); `None` for a top-level field.
+        seed: Option<i64>,
+        /// The report field (`fine_tuned.macro_f1`, `per_seed.ece_post`, ...).
         field: &'static str,
         /// The report's value.
         reported: f64,
@@ -427,6 +459,34 @@ pub enum VerifyError {
     },
     /// The recomputed gate FAILED (the only variant with exit code 3).
     GateFailed(Box<GateFailure>),
+    /// The report's seed selection is not the one the files support (A3): a non-median
+    /// `shipped`, a per_seed row that does not bind the shipped checkpoint or eval file, a rank
+    /// key or pass that differs from its recomputation, or a malformed seeds block.
+    SeedPolicyViolated {
+        /// The report field.
+        field: &'static str,
+        /// What is wrong, naming the seeds.
+        why: String,
+    },
+    /// recipe.json `seed_selection` differs from the contract's `seed_policy` (A3).
+    SeedPolicyMismatch {
+        /// `policy`, `seeds`, `rank_scale` or `tie_break`.
+        field: &'static str,
+        /// The recipe's value.
+        recipe: String,
+        /// The contract's value.
+        contract: String,
+    },
+    /// A legacy run (no `seed_selection`) whose gate PASSED: never deploy-eligible under 1.4.0
+    /// (`seed_policy.legacy_rule`). Decided after the re-scores and the gate.
+    SeedPolicyMissing,
+    /// The shift probe differs from its recomputation or is malformed (A2).
+    ShiftProbeMismatch {
+        /// The report field or file.
+        field: &'static str,
+        /// What is wrong.
+        why: String,
+    },
 }
 
 impl VerifyError {
@@ -469,6 +529,10 @@ impl VerifyError {
             Self::ThresholdMismatch { .. } => "ThresholdMismatch",
             Self::PassDisagrees { .. } => "PassDisagrees",
             Self::GateFailed(_) => "GateFailed",
+            Self::SeedPolicyViolated { .. } => "SeedPolicyViolated",
+            Self::SeedPolicyMismatch { .. } => "SeedPolicyMismatch",
+            Self::SeedPolicyMissing => "SeedPolicyMissing",
+            Self::ShiftProbeMismatch { .. } => "ShiftProbeMismatch",
         }
     }
 }
@@ -476,6 +540,12 @@ impl VerifyError {
 /// An optional f64 as the CLI prints it (`null` when absent).
 #[must_use]
 pub fn opt_f64(v: Option<f64>) -> String {
+    v.map_or_else(|| "null".to_string(), |x| x.to_string())
+}
+
+/// An optional seed as the CLI prints it (`null` when absent).
+#[must_use]
+pub fn opt_i64(v: Option<i64>) -> String {
     v.map_or_else(|| "null".to_string(), |x| x.to_string())
 }
 
@@ -494,7 +564,7 @@ impl fmt::Display for GateFailure {
             f,
             "clauses=[{}] zs_macro_f1={} ft_macro_f1={} margin={} ece_post={} \
              rescore_max_abs={} zs_rescore_max_abs={} rescore_bound={} zs_rescore_bound={} \
-             noise={} zs_noise={} argmax={}/{} packed_sha256={}",
+             noise={} zs_noise={} shipped_seed={} argmax={}/{} packed_sha256={}",
             clause_list(&self.clauses),
             r.zs_macro_f1,
             r.ft_macro_f1,
@@ -506,6 +576,7 @@ impl fmt::Display for GateFailure {
             self.zs_rescore_bound,
             opt_f64(self.noise),
             opt_f64(self.zs_noise),
+            opt_i64(self.shipped_seed),
             self.argmax_agree,
             self.n,
             self.artifact_sha256
@@ -608,10 +679,16 @@ impl fmt::Display for VerifyError {
             ),
             Self::ArgmaxDrift { which, row } => write!(f, "which={which} row={row}"),
             Self::ReportedMetricMismatch {
+                seed,
                 field,
                 reported,
                 recomputed,
-            } => write!(f, "field={field} reported={reported} recomputed={recomputed}"),
+            } => {
+                if let Some(s) = seed {
+                    write!(f, "seed={s} ")?;
+                }
+                write!(f, "field={field} reported={reported} recomputed={recomputed}")
+            }
             Self::ThresholdMismatch {
                 field,
                 report,
@@ -622,6 +699,21 @@ impl fmt::Display for VerifyError {
                 recomputed,
             } => write!(f, "reported pass={reported} recomputed pass={recomputed}"),
             Self::GateFailed(g) => write!(f, "{g}"),
+            Self::SeedPolicyViolated { field, why } | Self::ShiftProbeMismatch { field, why } => {
+                write!(f, "field={field}: {why}")
+            }
+            Self::SeedPolicyMismatch {
+                field,
+                recipe,
+                contract,
+            } => write!(
+                f,
+                "recipe.json seed_selection.{field} is {recipe}, the contract's seed_policy says {contract}"
+            ),
+            Self::SeedPolicyMissing => f.write_str(
+                "recipe.json carries no seed_selection: a legacy (1.x) run is never deploy-eligible \
+                 under laya-finetune-gate-v1 1.4.0 (seed_policy.legacy_rule); its re-scores and gate passed",
+            ),
         }
     }
 }
@@ -642,6 +734,8 @@ fn hash_file_name(what: &str) -> &'static str {
         "inputs_sha256.tokenizer_json" => "tokenizer_json",
         "inputs_sha256.base_model" => "base_model",
         "rescore_noise_sha256" => "rescore_noise_json",
+        "shift_probe.probs_sha256" => "shift_probs_json",
+        "shift_probe.zero_shot_probs_sha256" => "shift_zero_shot_probs_json",
         _ => "unknown",
     }
 }
@@ -699,9 +793,12 @@ pub struct DataDir {
     pub train: Vec<DataRow>,
     /// `eval.jsonl`.
     pub eval: Vec<DataRow>,
+    /// `shift.jsonl`, the OPTIONAL 1.4.0 shift probe (A2); `None` when the file is absent.
+    pub shift: Option<Vec<DataRow>>,
     task_bytes: Vec<u8>,
     train_bytes: Vec<u8>,
     eval_bytes: Vec<u8>,
+    shift_bytes: Option<Vec<u8>>,
 }
 
 fn read_path(path: &Path) -> Result<Vec<u8>, VerifyError> {
@@ -740,7 +837,8 @@ fn parse_rows(
     Ok(rows)
 }
 
-/// Read and parse `task.json`, `train.jsonl` and `eval.jsonl`.
+/// Read and parse `task.json`, `train.jsonl`, `eval.jsonl` and, when present, the optional
+/// `shift.jsonl` (1.4.0; hash-checked by [`check_shift_probe`] when the report names it).
 ///
 /// # Errors
 ///
@@ -759,13 +857,25 @@ pub fn read_data_dir(data_dir: &Path) -> Result<DataDir, VerifyError> {
     let labels = task.labels();
     let train = parse_rows("train_jsonl", &train_bytes, &labels)?;
     let eval = parse_rows("eval_jsonl", &eval_bytes, &labels)?;
+    let shift_path = data_dir.join("shift.jsonl");
+    let shift_bytes = if shift_path.exists() {
+        Some(read_path(&shift_path)?)
+    } else {
+        None
+    };
+    let shift = shift_bytes
+        .as_deref()
+        .map(|b| parse_rows("shift_jsonl", b, &labels))
+        .transpose()?;
     Ok(DataDir {
         task,
         train,
         eval,
+        shift,
         task_bytes,
         train_bytes,
         eval_bytes,
+        shift_bytes,
     })
 }
 
@@ -1542,15 +1652,45 @@ fn metric_close(
     recomputed: f64,
     tol: f64,
 ) -> Result<(), VerifyError> {
+    metric_close_for(None, field, reported, recomputed, tol)
+}
+
+/// [`metric_close`] naming the seed of a `seeds.per_seed` field.
+fn metric_close_for(
+    seed: Option<i64>,
+    field: &'static str,
+    reported: f64,
+    recomputed: f64,
+    tol: f64,
+) -> Result<(), VerifyError> {
     if within((reported - recomputed).abs(), tol) {
         Ok(())
     } else {
         Err(VerifyError::ReportedMetricMismatch {
+            seed,
             field,
             reported,
             recomputed,
         })
     }
+}
+
+/// The report's thresholds equal the contract's, bit for bit (D-07). Called by [`check_gate`]
+/// and, since the per-seed pass verdicts are recomputed under the contract's thresholds, once
+/// more before [`check_seed_selection`].
+///
+/// # Errors
+///
+/// [`VerifyError::ThresholdMismatch`] naming the threshold.
+pub fn check_thresholds(report: &GateReport, policy: &VerifyPolicy) -> Result<(), VerifyError> {
+    let t = &report.thresholds;
+    threshold_eq(
+        "min_macro_f1_margin",
+        t.min_macro_f1_margin,
+        policy.min_macro_f1_margin,
+    )?;
+    threshold_eq("max_ece", t.max_ece, policy.max_ece)?;
+    threshold_eq("ece_bins", t.ece_bins as f64, policy.ece_bins as f64)
 }
 
 /// `a >= b`, NaN-visible (a NaN fails).
@@ -1575,14 +1715,7 @@ pub fn check_gate(
     n: usize,
     policy: &VerifyPolicy,
 ) -> Result<Vec<GateClause>, VerifyError> {
-    let t = &report.thresholds;
-    threshold_eq(
-        "min_macro_f1_margin",
-        t.min_macro_f1_margin,
-        policy.min_macro_f1_margin,
-    )?;
-    threshold_eq("max_ece", t.max_ece, policy.max_ece)?;
-    threshold_eq("ece_bins", t.ece_bins as f64, policy.ece_bins as f64)?;
+    check_thresholds(report, policy)?;
     let tol = policy.metric_recompute_abs;
     let r = recomputed;
     metric_close("zero_shot.n", report.zero_shot.n as f64, n as f64, 0.0)?;
@@ -1625,6 +1758,422 @@ pub fn check_gate(
 }
 
 // ===========================================================================
+// The seed selection (A3) and the shift probe (A2), laya-finetune-gate-v1 1.4.0
+// ===========================================================================
+
+fn seed_violated(field: &'static str, why: String) -> VerifyError {
+    VerifyError::SeedPolicyViolated { field, why }
+}
+
+/// `seed_policy.rank_rule`: `floor(ece_post x rank_scale)` as an integer. A non-finite ECE (or
+/// key) has no rank and is refused.
+///
+/// # Errors
+///
+/// [`VerifyError::SeedPolicyViolated`] naming the seed.
+pub fn rank_key(seed: i64, ece_post: f64, rank_scale: f64) -> Result<i64, VerifyError> {
+    let key = (ece_post * rank_scale).floor();
+    if !key.is_finite() || key.abs() >= i64::MAX as f64 {
+        return Err(seed_violated(
+            "per_seed.ece_post",
+            format!("seed {seed}: ece_post {ece_post} has no rank key"),
+        ));
+    }
+    Ok(key as i64)
+}
+
+/// The SHIPPED seed under `seed_policy.selection` `median_ece`: `rows` are `(seed, ece_post)`,
+/// ordered by (`rank_key` ascending, seed ascending — `tie_break` `smaller_seed`); the seed at
+/// 0-based index `(N - 1) / 2`. The mirror of `scripts/laya_train/gate.py`
+/// `select_median_seed`; this one is authoritative.
+///
+/// # Errors
+///
+/// [`VerifyError::SeedPolicyViolated`] for an empty or even N, a repeated seed or a
+/// non-finite ECE (no median to ship).
+pub fn select_median_seed(rows: &[(i64, f64)], rank_scale: f64) -> Result<i64, VerifyError> {
+    let n = rows.len();
+    if n == 0 || n % 2 == 0 {
+        return Err(seed_violated(
+            "per_seed",
+            format!("the median rule needs an odd, non-empty number of seeds, got {n}"),
+        ));
+    }
+    let mut seeds: Vec<i64> = rows.iter().map(|r| r.0).collect();
+    seeds.sort_unstable();
+    if seeds.windows(2).any(|w| w[0] == w[1]) {
+        return Err(seed_violated(
+            "per_seed",
+            format!("a seed appears more than once in {seeds:?}"),
+        ));
+    }
+    // (rank_key ascending, seed ascending): tie_break smaller_seed.
+    let mut keyed = rows
+        .iter()
+        .map(|&(seed, ece)| rank_key(seed, ece, rank_scale).map(|k| (k, seed)))
+        .collect::<Result<Vec<_>, _>>()?;
+    keyed.sort_unstable();
+    Ok(keyed[(n - 1) / 2].1)
+}
+
+/// recipe.json `seed_selection` equals the contract's `seed_policy`.
+fn check_seed_decl(
+    decl: &pack::SeedSelectionDecl,
+    policy: &VerifyPolicy,
+) -> Result<(), VerifyError> {
+    let mismatch = |field, recipe: String, contract: String| {
+        Err(VerifyError::SeedPolicyMismatch {
+            field,
+            recipe,
+            contract,
+        })
+    };
+    if decl.policy != policy.seed_selection_policy {
+        return mismatch(
+            "policy",
+            format!("{:?}", decl.policy),
+            format!("{:?}", policy.seed_selection_policy),
+        );
+    }
+    if decl.seeds != policy.seed_selection_seeds {
+        return mismatch(
+            "seeds",
+            format!("{:?}", decl.seeds),
+            format!("{:?}", policy.seed_selection_seeds),
+        );
+    }
+    if decl.rank_scale.to_bits() != policy.seed_rank_scale.to_bits() {
+        return mismatch(
+            "rank_scale",
+            decl.rank_scale.to_string(),
+            policy.seed_rank_scale.to_string(),
+        );
+    }
+    if decl.tie_break != policy.seed_tie_break {
+        return mismatch(
+            "tie_break",
+            format!("{:?}", decl.tie_break),
+            format!("{:?}", policy.seed_tie_break),
+        );
+    }
+    Ok(())
+}
+
+/// The seeds block's structure: declared seed, policy, n, the per_seed seeds in order, and
+/// the shipped row binding the shipped checkpoint and the top-level eval file. Returns
+/// `(per_seed, shipped)`.
+fn check_seeds_block<'a>(
+    inputs: &'a PackInputs,
+    decl: &pack::SeedSelectionDecl,
+) -> Result<(&'a [pack::PerSeedRow], i64), VerifyError> {
+    let sb = &inputs.gate_report.seeds;
+    let declared = decl.seeds.first().copied();
+    if declared != Some(inputs.recipe.seed) || sb.declared != inputs.recipe.seed {
+        return Err(seed_violated(
+            "declared",
+            format!(
+                "recipe seed {}, report seeds.declared {}, first gate seed {declared:?} must be one seed",
+                inputs.recipe.seed, sb.declared
+            ),
+        ));
+    }
+    if sb.policy.as_deref() != Some(decl.policy.as_str()) {
+        return Err(seed_violated(
+            "seeds.policy",
+            format!("{:?}, the recipe declares {:?}", sb.policy, decl.policy),
+        ));
+    }
+    let per = sb
+        .per_seed
+        .as_deref()
+        .ok_or_else(|| seed_violated("per_seed", "absent under seed_selection".into()))?;
+    let seeds: Vec<i64> = per.iter().map(|r| r.seed).collect();
+    if seeds != decl.seeds || sb.n != seeds.len() as u64 {
+        return Err(seed_violated(
+            "per_seed",
+            format!(
+                "seeds {seeds:?} (n {}), the recipe declares {:?}",
+                sb.n, decl.seeds
+            ),
+        ));
+    }
+    let shipped = sb
+        .shipped
+        .ok_or_else(|| seed_violated("shipped", "absent under seed_selection".into()))?;
+    let row = per.iter().find(|r| r.seed == shipped).ok_or_else(|| {
+        seed_violated(
+            "shipped",
+            format!("seed {shipped} is not one of the gate seeds {seeds:?}"),
+        )
+    })?;
+    if row.eval_probs_sha256 != inputs.gate_report.eval_probs_sha256 {
+        return Err(seed_violated(
+            "eval_probs_sha256",
+            format!(
+                "the shipped seed {shipped}'s per_seed eval_probs_sha256 {} is not the report's eval-probs.json {}",
+                row.eval_probs_sha256, inputs.gate_report.eval_probs_sha256
+            ),
+        ));
+    }
+    if row.model_safetensors_sha256 != inputs.checkpoint_sha256 {
+        return Err(seed_violated(
+            "model_safetensors_sha256",
+            format!(
+                "the shipped seed {shipped}'s per_seed model sha256 {} is not checkpoint/model.safetensors {}",
+                row.model_safetensors_sha256, inputs.checkpoint_sha256
+            ),
+        ));
+    }
+    Ok((per, shipped))
+}
+
+/// laya-finetune-gate-v1 1.4.0 `seed_selection_median`, RE-DERIVED from the files.
+///
+/// `Ok(None)` for a legacy recipe (no `seed_selection`; its report must carry no seed
+/// selection either) — [`verify_run`] refuses such a run [`VerifyError::SeedPolicyMissing`]
+/// only after its gate. For a recipe with `seed_selection`: the declaration equals the
+/// contract's; the seeds block names the declared seeds in order and ships one of them; the
+/// shipped row binds `checkpoint/model.safetensors` and `eval-probs.json` by sha256; every
+/// seed's `seeds/seed-<s>/eval-probs.json` (hash-bound by [`PackInputs::from_run_dir`]) is
+/// validated and its macro-F1, ECE and margin (against the shared zero-shot baseline)
+/// RECOMPUTED with the house functions, each reported value within `metric_recompute_abs`, its
+/// pass and rank key equal to the recomputation (a rank key Python and Rust disagree on — an
+/// ECE on a grid line — is refused rather than guessed, `why_quantized`); and `shipped` must be
+/// the median of the RECOMPUTED ECEs ([`select_median_seed`]). Returns the shipped seed.
+///
+/// # Errors
+///
+/// [`VerifyError::SeedPolicyMismatch`], [`VerifyError::SeedPolicyViolated`],
+/// [`VerifyError::ReportedMetricMismatch`] (naming the seed), or a probability-file refusal.
+#[provable_contracts_macros::contract("laya-finetune-gate-v1", equation = "seed_selection_median")]
+pub fn check_seed_selection(
+    inputs: &PackInputs,
+    data: &DataDir,
+    policy: &VerifyPolicy,
+) -> Result<Option<i64>, VerifyError> {
+    let sb = &inputs.gate_report.seeds;
+    let Some(decl) = &inputs.recipe.seed_selection else {
+        if sb.policy.is_some() || sb.shipped.is_some() || sb.per_seed.is_some() {
+            return Err(seed_violated(
+                "seeds",
+                "the report carries a seed selection the recipe does not declare".into(),
+            ));
+        }
+        return Ok(None);
+    };
+    check_seed_decl(decl, policy)?;
+    let (per, shipped) = check_seeds_block(inputs, decl)?;
+    let labels = data.task.owned_labels();
+    let y: Vec<usize> = data.eval.iter().map(|r| r.label).collect();
+    let (k, bins, tol) = (
+        labels.len(),
+        policy.ece_bins as usize,
+        policy.metric_recompute_abs,
+    );
+    let zs = validate_probs(
+        ProbsWhich::ZeroShot,
+        &inputs.zero_shot_probs_json,
+        &data.eval,
+        &labels,
+    )?;
+    let zs_f1 = recompute_metrics(&zs, &y, k, bins).macro_f1;
+    let mut eces = Vec::with_capacity(per.len());
+    for (row, (seed, bytes)) in per.iter().zip(&inputs.seed_eval_probs) {
+        if row.seed != *seed {
+            return Err(seed_violated(
+                "per_seed.seed",
+                format!("row seed {} read with seed {seed}'s file", row.seed),
+            ));
+        }
+        let probs = validate_probs(ProbsWhich::Seed(*seed), bytes, &data.eval, &labels)?;
+        let m = recompute_metrics(&probs, &y, k, bins);
+        let margin = m.macro_f1 - zs_f1;
+        let s = Some(*seed);
+        metric_close_for(s, "per_seed.macro_f1", row.macro_f1, m.macro_f1, tol)?;
+        metric_close_for(s, "per_seed.ece_post", row.ece_post, m.ece, tol)?;
+        metric_close_for(s, "per_seed.margin", row.margin, margin, tol)?;
+        let pass = at_least(margin, policy.min_macro_f1_margin) && within(m.ece, policy.max_ece);
+        if pass != row.pass {
+            return Err(seed_violated(
+                "per_seed.pass",
+                format!(
+                    "seed {seed}: reported pass={} recomputed pass={pass}",
+                    row.pass
+                ),
+            ));
+        }
+        let key = rank_key(*seed, m.ece, decl.rank_scale)?;
+        if key != row.rank_key {
+            return Err(seed_violated(
+                "per_seed.rank_key",
+                format!(
+                    "seed {seed}: reported rank_key {} but floor({} x {}) = {key}; refused rather than guessed (seed_policy.why_quantized)",
+                    row.rank_key, m.ece, decl.rank_scale
+                ),
+            ));
+        }
+        eces.push((*seed, m.ece));
+    }
+    if eces.len() != per.len() {
+        return Err(seed_violated(
+            "per_seed",
+            format!("{} per_seed rows but {} seed files", per.len(), eces.len()),
+        ));
+    }
+    let median = select_median_seed(&eces, decl.rank_scale)?;
+    if shipped != median {
+        return Err(seed_violated(
+            "shipped",
+            format!(
+                "the report ships seed {shipped}, but the median-ECE seed of the recomputed per-seed ECEs is seed {median}"
+            ),
+        ));
+    }
+    Ok(Some(shipped))
+}
+
+fn shift_mismatch(field: &'static str, why: String) -> VerifyError {
+    VerifyError::ShiftProbeMismatch { field, why }
+}
+
+fn shift_close(
+    field: &'static str,
+    reported: f64,
+    recomputed: f64,
+    tol: f64,
+) -> Result<(), VerifyError> {
+    if within((reported - recomputed).abs(), tol) {
+        Ok(())
+    } else {
+        Err(shift_mismatch(
+            field,
+            format!("reported {reported}, recomputed {recomputed}"),
+        ))
+    }
+}
+
+/// laya-finetune-gate-v1 1.4.0 `shift_probe_reported`: when the report names a shift probe,
+/// `shift.jsonl` must exist and hash to `inputs_sha256.shift_jsonl`, share no normalized text
+/// with train.jsonl, and both shift probability files (hash-bound by
+/// [`PackInputs::from_run_dir`]) must validate against it; every reported shift metric is then
+/// RECOMPUTED and must agree within `metric_recompute_abs`. The probe is never re-scored and
+/// its numbers never reach [`check_gate`].
+///
+/// # Errors
+///
+/// [`VerifyError::ShiftProbeMismatch`] naming the field or file, or a probability-file refusal.
+#[provable_contracts_macros::contract("laya-finetune-gate-v1", equation = "shift_probe_reported")]
+pub fn check_shift_probe(
+    inputs: &PackInputs,
+    data: &DataDir,
+    policy: &VerifyPolicy,
+) -> Result<(), VerifyError> {
+    let r = &inputs.gate_report;
+    let (probe, recorded) = match (&r.shift_probe, &r.inputs_sha256.shift_jsonl) {
+        (None, None) => return Ok(()),
+        (Some(p), Some(h)) => (p, h),
+        _ => {
+            return Err(shift_mismatch(
+                "inputs_sha256.shift_jsonl",
+                "shift_probe and inputs_sha256.shift_jsonl must be present together".into(),
+            ))
+        }
+    };
+    if probe.gate_clause {
+        return Err(shift_mismatch(
+            "shift_probe.gate_clause",
+            "true: the shift probe is never a gate clause".into(),
+        ));
+    }
+    let (Some(rows), Some(bytes)) = (&data.shift, &data.shift_bytes) else {
+        return Err(shift_mismatch(
+            "shift_jsonl",
+            "the report names a shift probe but the data dir has no shift.jsonl".into(),
+        ));
+    };
+    let observed = sha256_hex(bytes);
+    if &observed != recorded {
+        return Err(shift_mismatch(
+            "shift_jsonl",
+            format!("shift.jsonl hashes to {observed}, the report records {recorded}"),
+        ));
+    }
+    let train: HashMap<String, usize> = data
+        .train
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(i, t)| (normalized_sha256(&t.text), i))
+        .collect();
+    if let Some((i, j)) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(i, row)| train.get(&normalized_sha256(&row.text)).map(|&j| (i, j)))
+    {
+        return Err(shift_mismatch(
+            "shift_jsonl",
+            format!("shift row {i} equals train row {j} after normalization"),
+        ));
+    }
+    shift_close("shift_probe.n", probe.n as f64, rows.len() as f64, 0.0)?;
+    let labels = data.task.owned_labels();
+    let missing = || {
+        shift_mismatch(
+            "shift_probe",
+            "a shift probability file was not read".into(),
+        )
+    };
+    let ft = validate_probs(
+        ProbsWhich::ShiftFineTuned,
+        inputs.shift_probs_json.as_deref().ok_or_else(missing)?,
+        rows,
+        &labels,
+    )?;
+    let zs = validate_probs(
+        ProbsWhich::ShiftZeroShot,
+        inputs
+            .shift_zero_shot_probs_json
+            .as_deref()
+            .ok_or_else(missing)?,
+        rows,
+        &labels,
+    )?;
+    let y: Vec<usize> = rows.iter().map(|r| r.label).collect();
+    let (k, bins, tol) = (
+        labels.len(),
+        policy.ece_bins as usize,
+        policy.metric_recompute_abs,
+    );
+    let f = recompute_metrics(&ft, &y, k, bins);
+    let z = recompute_metrics(&zs, &y, k, bins);
+    shift_close(
+        "shift_probe.zero_shot.macro_f1",
+        probe.zero_shot.macro_f1,
+        z.macro_f1,
+        tol,
+    )?;
+    shift_close("shift_probe.zero_shot.ece", probe.zero_shot.ece, z.ece, tol)?;
+    shift_close(
+        "shift_probe.fine_tuned.macro_f1",
+        probe.fine_tuned.macro_f1,
+        f.macro_f1,
+        tol,
+    )?;
+    shift_close(
+        "shift_probe.fine_tuned.ece_post",
+        probe.fine_tuned.ece_post,
+        f.ece,
+        tol,
+    )?;
+    shift_close(
+        "shift_probe.margin",
+        probe.margin,
+        f.macro_f1 - z.macro_f1,
+        tol,
+    )
+}
+
+// ===========================================================================
 // The pipeline
 // ===========================================================================
 
@@ -1636,10 +2185,12 @@ struct Checked {
     ft_probs: Vec<Vec<f32>>,
     zs_probs: Vec<Vec<f32>>,
     bounds: [RescoreBound; 2],
+    shipped_seed: Option<i64>,
 }
 
-/// Steps 1-4 of the module docs: variant, base, hashes, split, probability files, and the
-/// per-set re-score bounds (A1; files only, so they are derived before any model is built).
+/// Steps 1-4 of the module docs: variant, base, hashes, split, probability files, the per-set
+/// re-score bounds (A1), the thresholds, the re-derived seed selection (A3) and the shift probe
+/// (A2) — files only, so all of it is decided before any model is built.
 fn cheap_checks(
     inputs: &PackInputs,
     data_dir: &Path,
@@ -1672,6 +2223,9 @@ fn cheap_checks(
         &labels,
     )?;
     let bounds = rescore_bounds(inputs, &ft_probs, &zs_probs, policy)?;
+    check_thresholds(&inputs.gate_report, policy)?;
+    let shipped_seed = check_seed_selection(inputs, &data, policy)?;
+    check_shift_probe(inputs, &data, policy)?;
     Ok(Checked {
         texts: data.eval.iter().map(|r| r.text.clone()).collect(),
         labels: data.eval.iter().map(|r| r.label).collect(),
@@ -1679,6 +2233,7 @@ fn cheap_checks(
         ft_probs,
         zs_probs,
         bounds,
+        shipped_seed,
     })
 }
 
@@ -1733,10 +2288,16 @@ fn verify_loaded(
             zs_rescore_bound: zs_bound.bound,
             noise: ft_bound.noise,
             zs_noise: zs_bound.noise,
+            shipped_seed: checked.shipped_seed,
             argmax_agree: ft.argmax_agree,
             n,
             artifact_sha256,
         })));
+    }
+    // seed_policy.legacy_rule: AFTER the re-scores and the gate, so a legacy run whose gate
+    // fails still reports GateFailed (the 1.x fail-closed vectors keep their refusals).
+    if inputs.recipe.seed_selection.is_none() {
+        return Err(VerifyError::SeedPolicyMissing);
     }
     Ok(VerifyReport {
         artifact_sha256,
@@ -1746,6 +2307,7 @@ fn verify_loaded(
         zs_rescore_bound: zs_bound.bound,
         noise: ft_bound.noise,
         zs_noise: zs_bound.noise,
+        shipped_seed: checked.shipped_seed,
         argmax_agree: ft.argmax_agree,
         n,
         recomputed,

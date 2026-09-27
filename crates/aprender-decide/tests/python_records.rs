@@ -16,11 +16,18 @@
 //! It prints one `NOISE which=<set> rust=<noise> python=<reported> bound=<bound>` line per set:
 //! the noise Rust RECOMPUTES from the stored float64 rows and the torch probability file must
 //! equal the `max_abs` Python reported, and the derived bound Python's `bound`, to the bit.
+//!
+//! It then re-derives the seed selection (A3) from the per-seed probability files and prints
+//! `MEDIAN rust=<seed> python=<seed>`: Rust's median of its OWN recomputed ECEs must be the seed
+//! Python shipped. The shift probe (A2) the run carries must recompute within tolerance.
 
 mod common;
 
 use aprender_decide::pack::PackInputs;
-use aprender_decide::verify::{read_data_dir, rescore_bounds, validate_probs, ProbsWhich};
+use aprender_decide::verify::{
+    check_seed_selection, check_shift_probe, read_data_dir, rescore_bounds, validate_probs,
+    ProbsWhich,
+};
 use std::path::PathBuf;
 
 const ENV_RUN: &str = "LAYA_PY_RUN_DIR";
@@ -86,5 +93,27 @@ fn python_run_dir_records_match_rust() {
             "{}: bound",
             b.which
         );
+    }
+
+    // A3: the median re-derived in Rust from the per-seed files equals Python's shipped seed.
+    let python = inputs
+        .gate_report
+        .seeds
+        .shipped
+        .expect("a 1.4.0 three-seed Python run dir carries seeds.shipped");
+    let rust = check_seed_selection(&inputs, &d, &policy)
+        .unwrap_or_else(|e| panic!("Rust refuses Python's seed selection: {e}"))
+        .expect("the recipe carries seed_selection");
+    println!("MEDIAN rust={rust} python={python}");
+    assert_eq!(
+        rust, python,
+        "Rust's median differs from Python's shipped seed"
+    );
+
+    // A2: the shift probe, when the run carries one, recomputes within tolerance.
+    if inputs.gate_report.shift_probe.is_some() {
+        check_shift_probe(&inputs, &d, &policy)
+            .unwrap_or_else(|e| panic!("Rust refuses Python's shift probe: {e}"));
+        println!("SHIFT probe recomputed (gate_clause false)");
     }
 }
