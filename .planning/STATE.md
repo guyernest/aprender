@@ -4,11 +4,11 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Completed 08-08-PLAN.md (option 3: demo GATE FAIL recorded as fail-closed vectors; D-18 deploy deferred)"
-last_updated: "2026-09-27T00:12:52.037Z"
+stopped_at: HALTED 08-09 at the tracer (RescoreDrift before ece_post; user decision needed on the re-score bar vs the Rust port)
+last_updated: "2026-09-27T01:19:23.349Z"
 last_activity: 2026-09-25
 last_activity_desc: Phase 08 execution started
-state_head: a0ba4b7d82a0f9fac70fd2d80e2273a93848285b
+state_head: d4980e1b997e2e969ceb5263d6e75b712c16ef4b
 progress:
   total_phases: 9
   completed_phases: 1
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 9 of 12 (08-01..08-08 complete; 08-08 closed under option 3 — demo GATE FAIL recorded as fail-closed vectors, D-18 deploy deferred)
-Status: Ready for 08-09, which needs a replan first (its Task 1 precondition requires a passing demo gate report)
+Plan: 9 of 12 (08-01..08-08 complete; 08-09 HALTED at its tracer — status: halted, NOT complete)
+Status: BLOCKED on a user decision — 08-09's just laya-pack refuses the early_stopping vector with RescoreDrift (zero-shot row 49, 1.028e-5 > 1e-5) before the ece_post clause; the fixed_epochs checkpoint drifts to 5.48e-5. Options in 08-09-SUMMARY.md Next Phase Readiness
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -502,6 +502,7 @@ Recent decisions affecting current work:
 - Verify t2c in 06.1-04-PLAN.md cannot see an #[ignore] added to part A or part B (it anchors bodies at fn, and the attribute precedes fn). Measured green on a gated part A. The in-tree Rust test invariance::parts_a_and_b_are_unconditional is the real guard; a later plan should replace the python body with a call to it.
 - SC2 no-argument invariance gate (crates/aprender-forecast/src/invariance.rs:718) is RED under cargo nextest run --workspace --lib, the invocation CI runs; green under -p aprender-forecast. Deterministic, hash-stable, flipped by adding apr-cli to the package set. See 06.1 deferred-items.md item 5.
 - 08-09..08-12 revised for option 3 (commit 2b75c14dc, 2026-09-26): 08-09 refuses both demo vectors; 08-10 offline-only; 08-11 records HOLD; D-18 live deploy deferred to the post-spike re-run.
+- 08-09 HALTED at its tracer (stop rule, user approval 3): just laya-pack refuses the early_stopping vector 3d4b91da with RescoreDrift which=zero_shot row=49 max_abs=1.028e-5 (bar 1e-5), not on ece_post. Read-only measurement: the fixed_epochs checkpoint's fine-tuned re-score drifts to 5.48e-5 (17/280 rows > 1e-5; ~1.8e-3 in logits, outside logits_abs); the Rust port is bitwise deterministic and both sides score on CPU fp32, so this is not MPS. Recomputed gate would be clauses=[ece_post] alone for both. USER DECISION NEEDED: (1) investigate the port with the parity ladder on the outlier rows (recommended), (2) re-declare pack_rescore_probs_abs, or (3) accept RescoreDrift as the vectors' refusal. No tolerance widened. Code d7031c319, SUMMARY d4980e1b9 (status: halted).
 
 ### Roadmap Evolution
 
@@ -519,9 +520,9 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-27T00:12:37.371Z
-Stopped at: Completed 08-08-PLAN.md (option 3: demo GATE FAIL recorded as fail-closed vectors; D-18 deploy deferred)
-Resume file: None
+Last session: 2026-09-27T01:19:13.367Z
+Stopped at: HALTED 08-09 at the tracer (RescoreDrift before ece_post; user decision needed on the re-score bar vs the Rust port)
+Resume file: .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-09-SUMMARY.md
 
 ## Accumulated Context
 
