@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-11-PLAN.md (HOLD, hold-no-aws)
-last_updated: "2026-09-27T05:05:29.433Z"
+stopped_at: Completed 08-13-PLAN.md
+last_updated: "2026-09-27T17:04:03.505Z"
 last_activity: 2026-09-27
-last_activity_desc: 08-11 completed as a human-decided HOLD (hold-no-aws, zero AWS contact); 08-DEPLOY-EVIDENCE.json written for 08-12
-state_head: 14b463614a1c7ec06a4ef949b054245312a74403
+last_activity_desc: 08-13 completed - A1/A2/A3 declared in laya-parity-v1 2.0.0 and laya-finetune-gate-v1 AMENDMENT 1.4.0 (published 2.0.0) before any s64 data or run exists
+state_head: dd02a9b8486728476119790179095d7af0ffcd6b
 progress:
   total_phases: 9
   completed_phases: 1
-  total_plans: 104
-  completed_plans: 103
+  total_plans: 110
+  completed_plans: 104
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 12 of 12 (08-01..08-11 complete; next: 08-12)
-Status: Ready to execute 08-12 (Wave 10) — 08-11 closed the D-18 go/no-go as HOLD, decided by the user 2026-09-26 with no AWS call (hold-no-aws): 08-DEPLOY-EVIDENCE.json is the machine-checked hold record 08-12 reads (accepted_region_cold binds partial); D-ITEM-08-11-A preserves the live-deploy procedure; A2/A10 unmeasured; user direction: calibration spike, then a declared gate run
+Plan: 12 of 18 complete (08-01..08-11 and 08-13; next: 08-14, Wave 11; 08-12 close-out moved to Wave 16)
+Status: Ready to execute 08-14 (Wave 11) - 08-13 declared the user's option 1 (2026-09-27, spikes 027/028) before any run: A1 noise-referenced pack/verify bar max(1e-5, 4 x torch32-vs-f64 noise), ceiling 1.0e-3 (laya-parity-v1 2.0.0); A2 in-distribution 459-row eval set with the SemEval test split as a reported shift probe and A3 median-of-three seeds (laya-finetune-gate-v1 AMENDMENT 1.4.0, published 2.0.0); demo_s64 outcome pending; just laya-train-lifecycle red until 08-14 Task 1 (LIFECYCLE FAILED: run dir is missing rescore-noise.json)
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-27 — 08-11 completed: D-18 go/no-go closed as a human-decided HOLD (hold-no-aws, zero AWS contact), hold record 08-DEPLOY-EVIDENCE.json + D-ITEM-08-11-A
+Last activity: 2026-09-27 - 08-13 completed: A1/A2/A3 declared (fc0c1dd30, a3e155170, 56f888d62); no data/decide/tweet-stance-64 or models/decide/laya-stance-64 exists
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -225,6 +225,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P09 | 45 min | 3 tasks | 15 files |
 | Phase 08 P10 | 22 min | 2 tasks | 4 files |
 | Phase 08 P11 | 3min | 2 tasks | 2 files |
+| Phase 08 P13 | 11min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -416,6 +417,7 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-10: the shared root's setfit-train state (.pmcp/deploy.toml, deployment.toml, active-target AND deploy/ with its rendered stack.ts) is swapped out and restored byte-identically on every exit path (_laya-crates-root-swap); deploy/ must go too because cargo-pmcp PRESERVES an existing stack.ts, which would synthesize setfit-train's stack without the decide [environment]; laya-deploy passes --regenerate-stack
 - [Phase 08]: 08-10: laya-verify precedes the first AWS call in laya-deploy and laya-upload; the selftest proves placeholder, sha-pin, resolver-proof, deploy- and upload-eligibility refusals on the synthetic artifact with an aws recorder (positive control) at AWS CALLS 0; the live halves have never run (D-ITEM-08-10-C, option 3)
 - [Phase 08]: 08-11 D-18 go/no-go: HOLD with no AWS call (hold-no-aws), decided by the user 2026-09-26; 08-DEPLOY-EVIDENCE.json is the hold record 08-12 reads; D-ITEM-08-11-A preserves the live deploy; next: calibration spike, then a declared gate run
+- [Phase 08]: 08-13: user option 1 (2026-09-27) declared before any s64 run - laya-parity-v1 2.0.0 A1 bar max(1e-5, 4 x torch32-vs-f64 noise), ceiling 1.0e-3, absent record = floor; laya-finetune-gate-v1 AMENDMENT 1.4.0 published as 2.0.0 (pv diff major): A2 in-distribution eval set + reported shift probe, A3 median-ECE seed of 13/17/23 (floor(ece_post x 10000), ties to smaller seed, selected with eval labels)
 
 ### Pending Todos
 
@@ -530,8 +532,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-27T05:05:29.243Z
-Stopped at: Completed 08-11-PLAN.md (HOLD, hold-no-aws)
+Last session: 2026-09-27T17:03:37.291Z
+Stopped at: Completed 08-13-PLAN.md
 Resume file: None
 
 ## Accumulated Context

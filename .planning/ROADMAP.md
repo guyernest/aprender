@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 11/18 plans executed in 16 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; 08-11 complete: D-18 go/no-go recorded as a human-decided HOLD (hold-no-aws). Gap closure 08-13..08-18 added 2026-09-27 (user decision, option 1 from spikes 027/028): declare A1 noise-referenced pack bar + A2 in-distribution eval set + A3 median-of-three seed policy, wire them, ONE declared s64 gate run, then a human-approved live deploy; 08-12 close-out moves to Wave 16)
+**Plans:** 12/18 plans executed in 16 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; 08-11 complete: D-18 go/no-go recorded as a human-decided HOLD (hold-no-aws). Gap closure 08-13..08-18 added 2026-09-27 (user decision, option 1 from spikes 027/028): declare A1 noise-referenced pack bar + A2 in-distribution eval set + A3 median-of-three seed policy, wire them, ONE declared s64 gate run, then a human-approved live deploy; 08-12 close-out moves to Wave 16)
 
 Plans:
 **Wave 1**
@@ -688,7 +688,7 @@ Plans:
 
 **Wave 10** *(blocked on Wave 9 completion)*
 
-- [ ] 08-13-PLAN.md — gap closure: declare A1 (laya-parity-v1: pack bar max(1e-5, 4 x torch-vs-float64 noise), fixture-only final_norm/logits, x86_64 risk), A2 + A3 (laya-finetune-gate-v1 1.4.0: in-distribution eval set by rule, shift probe reported, median-of-three seeds; new demo_s64 cell) and the CONTEXT amendments BEFORE any run
+- [x] 08-13-PLAN.md — gap closure: declare A1 (laya-parity-v1: pack bar max(1e-5, 4 x torch-vs-float64 noise), fixture-only final_norm/logits, x86_64 risk), A2 + A3 (laya-finetune-gate-v1 1.4.0: in-distribution eval set by rule, shift probe reported, median-of-three seeds; new demo_s64 cell) and the CONTEXT amendments BEFORE any run
 
 **Wave 11** *(blocked on Wave 10 completion)*
 
