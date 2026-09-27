@@ -19,7 +19,11 @@
 //! 5. re-scores EVERY eval row in Rust ([`rescore`]): the fine-tuned model is the
 //!    [`Decider`] loaded from the PACKED bytes through the whole decide-apr-v1 ladder, the
 //!    zero-shot model is the declared base ([`crate::pack::load_checkpoint_for_scoring`]);
-//!    every probability must agree within `pack_rescore_probs_abs` with the argmax exact;
+//!    every probability must agree within its set's bound with the argmax exact. The bound is
+//!    laya-parity-v1 A1's `bound(c, s) = max(floor, k x noise(c, s))`, DERIVED here by
+//!    [`rescore_bounds`] from the hash-bound float64 record `rescore-noise.json` (noise
+//!    recomputed from its stored rows, reported values only cross-checked, a bound above the
+//!    contract ceiling refused), and exactly the floor when the run carries no record;
 //! 6. recomputes macro-F1 and ECE with aprender-core's ONE implementation of each (OPS-03,
 //!    [`recompute_metrics`]) on those verified probabilities, and decides the gate on the
 //!    recomputed values ([`check_gate`]).
@@ -72,8 +76,14 @@ pub struct VerifyPolicy {
     pub ece_bins: u64,
     /// laya-finetune-gate-v1 `constants.gate_metric_recompute_abs`.
     pub metric_recompute_abs: f64,
-    /// laya-parity-v1 `equations.pack_rescore_probs_abs.float_tolerance`.
+    /// laya-parity-v1 `equations.pack_rescore_probs_abs.float_tolerance`: the FLOOR of every
+    /// re-score bound, and the whole bound for a run without a noise record (A1).
     pub rescore_probs_abs: f64,
+    /// laya-parity-v1 `constants.pack_rescore_noise_k` (A1).
+    pub rescore_noise_k: f64,
+    /// laya-parity-v1 `constants.pack_rescore_bound_max_abs`: a derived bound above it is
+    /// refused (A1).
+    pub rescore_bound_max_abs: f64,
     /// laya-finetune-gate-v1 `constants.calibration_slice_min_per_class`.
     pub calibration_slice_min_per_class: u64,
     /// laya-finetune-gate-v1 `base.model_safetensors_sha256`.
@@ -169,6 +179,17 @@ pub struct RescoreStats {
     pub n: usize,
 }
 
+/// The re-score bound one (checkpoint, set) pair is held to (laya-parity-v1 A1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RescoreBound {
+    /// Which re-score.
+    pub which: ProbsWhich,
+    /// `noise(c, s)` RECOMPUTED from the float64 record; `None` without a record.
+    pub noise: Option<f64>,
+    /// `max(floor, k x noise)`, or the floor without a record.
+    pub bound: f64,
+}
+
 /// Evidence of an accepted run (decide-apr-v1 `deploy_eligibility`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifyReport {
@@ -178,6 +199,14 @@ pub struct VerifyReport {
     pub rescore_max_abs: f64,
     /// Zero-shot re-score maximum.
     pub zs_rescore_max_abs: f64,
+    /// The bound the fine-tuned re-score was held to (A1).
+    pub rescore_bound: f64,
+    /// The bound the zero-shot re-score was held to (A1).
+    pub zs_rescore_bound: f64,
+    /// The recomputed fine-tuned noise, `None` without a record.
+    pub noise: Option<f64>,
+    /// The recomputed zero-shot noise, `None` without a record.
+    pub zs_noise: Option<f64>,
     /// Fine-tuned argmax agreement.
     pub argmax_agree: usize,
     /// Eval rows.
@@ -199,6 +228,14 @@ pub struct GateFailure {
     pub rescore_max_abs: f64,
     /// Zero-shot re-score maximum.
     pub zs_rescore_max_abs: f64,
+    /// The bound the fine-tuned re-score was held to (A1).
+    pub rescore_bound: f64,
+    /// The bound the zero-shot re-score was held to (A1).
+    pub zs_rescore_bound: f64,
+    /// The recomputed fine-tuned noise, `None` without a record.
+    pub noise: Option<f64>,
+    /// The recomputed zero-shot noise, `None` without a record.
+    pub zs_noise: Option<f64>,
     /// Fine-tuned argmax agreement.
     pub argmax_agree: usize,
     /// Eval rows.
@@ -303,7 +340,7 @@ pub enum VerifyError {
         /// What is wrong.
         why: String,
     },
-    /// A Rust re-score differs from the file by more than `pack_rescore_probs_abs`.
+    /// A Rust re-score differs from the file by more than its set's bound (A1).
     RescoreDrift {
         /// Which re-score.
         which: ProbsWhich,
@@ -311,6 +348,50 @@ pub enum VerifyError {
         row: usize,
         /// The maximum over every row.
         max_abs: f64,
+        /// The bound used: the floor, or the noise-referenced bound.
+        bound: f64,
+    },
+    /// `rescore-noise.json` is malformed or disagrees with the contract (A1).
+    RescoreNoiseInvalid {
+        /// The set, when the defect is inside one.
+        which: Option<ProbsWhich>,
+        /// The 0-based position, when the defect is a row.
+        row: Option<usize>,
+        /// The record field.
+        field: &'static str,
+        /// What is wrong.
+        why: String,
+    },
+    /// A value `rescore-noise.json` REPORTS differs from its Rust recomputation (A1).
+    RescoreNoiseMismatch {
+        /// The set.
+        which: ProbsWhich,
+        /// `max_abs`, `bound` or `argmax_agree`.
+        field: &'static str,
+        /// The record's value.
+        reported: f64,
+        /// The Rust recomputation.
+        recomputed: f64,
+    },
+    /// The derived bound exceeds laya-parity-v1 `pack_rescore_bound_max_abs` (A1).
+    RescoreBoundCeiling {
+        /// The set.
+        which: ProbsWhich,
+        /// The derived bound.
+        bound: f64,
+        /// The contract ceiling.
+        ceiling: f64,
+    },
+    /// A float64 row's argmax differs from the stored float32 row's (A1).
+    NoiseArgmaxFlip {
+        /// The set.
+        which: ProbsWhich,
+        /// The 0-based eval row.
+        row: usize,
+        /// `argmax(p_torch32)`.
+        torch: usize,
+        /// `argmax(p_f64)`.
+        reference: usize,
     },
     /// A Rust re-score's argmax differs from the file's.
     ArgmaxDrift {
@@ -379,6 +460,10 @@ impl VerifyError {
             Self::ProbsRowCoverage { .. } => "ProbsRowCoverage",
             Self::ProbsInvalid { .. } => "ProbsInvalid",
             Self::RescoreDrift { .. } => "RescoreDrift",
+            Self::RescoreNoiseInvalid { .. } => "RescoreNoiseInvalid",
+            Self::RescoreNoiseMismatch { .. } => "RescoreNoiseMismatch",
+            Self::RescoreBoundCeiling { .. } => "RescoreBoundCeiling",
+            Self::NoiseArgmaxFlip { .. } => "NoiseArgmaxFlip",
             Self::ArgmaxDrift { .. } => "ArgmaxDrift",
             Self::ReportedMetricMismatch { .. } => "ReportedMetricMismatch",
             Self::ThresholdMismatch { .. } => "ThresholdMismatch",
@@ -386,6 +471,12 @@ impl VerifyError {
             Self::GateFailed(_) => "GateFailed",
         }
     }
+}
+
+/// An optional f64 as the CLI prints it (`null` when absent).
+#[must_use]
+pub fn opt_f64(v: Option<f64>) -> String {
+    v.map_or_else(|| "null".to_string(), |x| x.to_string())
 }
 
 fn clause_list(clauses: &[GateClause]) -> String {
@@ -402,7 +493,8 @@ impl fmt::Display for GateFailure {
         write!(
             f,
             "clauses=[{}] zs_macro_f1={} ft_macro_f1={} margin={} ece_post={} \
-             rescore_max_abs={} zs_rescore_max_abs={} argmax={}/{} packed_sha256={}",
+             rescore_max_abs={} zs_rescore_max_abs={} rescore_bound={} zs_rescore_bound={} \
+             noise={} zs_noise={} argmax={}/{} packed_sha256={}",
             clause_list(&self.clauses),
             r.zs_macro_f1,
             r.ft_macro_f1,
@@ -410,6 +502,10 @@ impl fmt::Display for GateFailure {
             r.ece_post,
             self.rescore_max_abs,
             self.zs_rescore_max_abs,
+            self.rescore_bound,
+            self.zs_rescore_bound,
+            opt_f64(self.noise),
+            opt_f64(self.zs_noise),
             self.argmax_agree,
             self.n,
             self.artifact_sha256
@@ -467,7 +563,49 @@ impl fmt::Display for VerifyError {
                 which,
                 row,
                 max_abs,
-            } => write!(f, "which={which} row={row} max_abs={max_abs}"),
+                bound,
+            } => write!(f, "which={which} row={row} max_abs={max_abs} bound={bound}"),
+            Self::RescoreNoiseInvalid {
+                which,
+                row,
+                field,
+                why,
+            } => {
+                write!(f, "rescore-noise.json")?;
+                if let Some(w) = which {
+                    write!(f, " set={w}")?;
+                }
+                if let Some(r) = row {
+                    write!(f, " row={r}")?;
+                }
+                write!(f, " field={field}: {why}")
+            }
+            Self::RescoreNoiseMismatch {
+                which,
+                field,
+                reported,
+                recomputed,
+            } => write!(
+                f,
+                "rescore-noise.json set={which} field={field} reported={reported} recomputed={recomputed}"
+            ),
+            Self::RescoreBoundCeiling {
+                which,
+                bound,
+                ceiling,
+            } => write!(
+                f,
+                "set={which} derived bound={bound} exceeds pack_rescore_bound_max_abs={ceiling}"
+            ),
+            Self::NoiseArgmaxFlip {
+                which,
+                row,
+                torch,
+                reference,
+            } => write!(
+                f,
+                "rescore-noise.json set={which} row={row}: argmax(p_f64)={reference} but argmax(p_torch32)={torch}"
+            ),
             Self::ArgmaxDrift { which, row } => write!(f, "which={which} row={row}"),
             Self::ReportedMetricMismatch {
                 field,
@@ -503,6 +641,7 @@ fn hash_file_name(what: &str) -> &'static str {
         "inputs_sha256.eval_jsonl" => "eval_jsonl",
         "inputs_sha256.tokenizer_json" => "tokenizer_json",
         "inputs_sha256.base_model" => "base_model",
+        "rescore_noise_sha256" => "rescore_noise_json",
         _ => "unknown",
     }
 }
@@ -731,7 +870,21 @@ pub fn check_inputs(inputs: &PackInputs, data: &DataDir) -> Result<(), VerifyErr
         "zero_shot_probs_json",
         &r.zero_shot_probs_sha256,
         &inputs.zero_shot_probs_json,
-    )
+    )?;
+    match (&r.rescore_noise_sha256, &inputs.rescore_noise_json) {
+        (Some(recorded), Some(bytes)) => hash_matches("rescore_noise_json", recorded, bytes),
+        (None, None) => Ok(()),
+        (Some(recorded), None) => Err(VerifyError::InputHashMismatch {
+            file: "rescore_noise_json",
+            recorded: recorded.clone(),
+            observed: "absent".into(),
+        }),
+        (None, Some(bytes)) => Err(VerifyError::InputHashMismatch {
+            file: "rescore_noise_json",
+            recorded: "absent".into(),
+            observed: sha256_hex(bytes),
+        }),
+    }
 }
 
 /// `nfc-trim-ws-v1`: NFC, then every Unicode White_Space run collapsed to one U+0020 with the
@@ -1008,7 +1161,7 @@ fn row_max_abs(a: &[f32], b: &[f32]) -> f64 {
 
 /// Re-score every eval row with `classify` (the model's own prepare + forward) and compare
 /// with the file's probabilities: every component within `tol` (NaN-visible) and the argmax
-/// exact (laya-parity-v1 `pack_rescore_probs_abs`).
+/// exact (laya-parity-v1 `pack_rescore_probs_abs`). `tol` is the set's [`RescoreBound`].
 ///
 /// # Errors
 ///
@@ -1034,6 +1187,7 @@ where
             which,
             row: decisions.len().min(probs.len()),
             max_abs: f64::NAN,
+            bound: tol,
         });
     }
     let mut max_abs = 0.0f64;
@@ -1061,6 +1215,7 @@ where
             which,
             row,
             max_abs,
+            bound: tol,
         });
     }
     if let Some(row) = first_argmax {
@@ -1071,6 +1226,280 @@ where
         argmax_agree,
         n: probs.len(),
     })
+}
+
+// ===========================================================================
+// The noise-referenced re-score bound (laya-parity-v1 A1)
+// ===========================================================================
+
+/// The float64 reference name `rescore-noise.json` must carry.
+const NOISE_REFERENCE: &str = "float64";
+/// The control forwards the first `min(CONTROL_ROWS, n)` eval rows.
+const CONTROL_ROWS: usize = 5;
+
+/// Index of the first maximum of an f64 row (numpy `argmax`); NaN never wins.
+fn argmax_f64(p: &[f64]) -> usize {
+    (0..p.len()).fold(0, |m, i| if p[i] > p[m] { i } else { m })
+}
+
+fn noise_invalid(
+    which: Option<ProbsWhich>,
+    row: Option<usize>,
+    field: &'static str,
+    why: String,
+) -> VerifyError {
+    VerifyError::RescoreNoiseInvalid {
+        which,
+        row,
+        field,
+        why,
+    }
+}
+
+/// The record-level fields: schema, reference, k and floor equal to the contract, the control
+/// exactly 0.0 on the first `min(5, n)` rows, and exactly the two sets in order.
+fn check_noise_header(
+    rec: &pack::RescoreNoise,
+    n: usize,
+    policy: &VerifyPolicy,
+) -> Result<(), VerifyError> {
+    let bad = |field, why| noise_invalid(None, None, field, why);
+    if rec.schema != pack::RESCORE_NOISE_SCHEMA {
+        return Err(bad(
+            "schema",
+            format!(
+                "{:?}, expected {:?}",
+                rec.schema,
+                pack::RESCORE_NOISE_SCHEMA
+            ),
+        ));
+    }
+    if rec.reference != NOISE_REFERENCE {
+        return Err(bad(
+            "reference",
+            format!("{:?}, expected {NOISE_REFERENCE:?}", rec.reference),
+        ));
+    }
+    if rec.k.to_bits() != policy.rescore_noise_k.to_bits() {
+        return Err(bad(
+            "k",
+            format!(
+                "{} but laya-parity-v1 pack_rescore_noise_k is {}",
+                rec.k, policy.rescore_noise_k
+            ),
+        ));
+    }
+    if rec.floor_abs.to_bits() != policy.rescore_probs_abs.to_bits() {
+        return Err(bad(
+            "floor_abs",
+            format!(
+                "{} but laya-parity-v1 pack_rescore_probs_abs is {}",
+                rec.floor_abs, policy.rescore_probs_abs
+            ),
+        ));
+    }
+    if rec.control_max_abs.to_bits() != 0.0f64.to_bits() {
+        return Err(bad(
+            "control_max_abs",
+            format!(
+                "{}: the manual fp32 forward must reproduce the Scorer exactly (0.0)",
+                rec.control_max_abs
+            ),
+        ));
+    }
+    let want: Vec<usize> = (0..n.min(CONTROL_ROWS)).collect();
+    if rec.control_rows != want {
+        return Err(bad(
+            "control_rows",
+            format!("{:?}, expected {want:?}", rec.control_rows),
+        ));
+    }
+    let names: Vec<&str> = rec.sets.iter().map(|s| s.which.as_str()).collect();
+    if names != ["fine_tuned", "zero_shot"] {
+        return Err(bad(
+            "sets",
+            format!("{names:?}, expected exactly [\"fine_tuned\", \"zero_shot\"]"),
+        ));
+    }
+    Ok(())
+}
+
+/// `noise(c, s)` of one set, RECOMPUTED: every eval row once and in order, `K` finite f64
+/// components in `[0, 1]` summing to 1, the float64 argmax equal to the stored float32 argmax,
+/// and the maximum of `|f64(p_torch32) - p_f64|` over every row and component.
+fn recompute_noise(
+    which: ProbsWhich,
+    set: &pack::NoiseSet,
+    probs: &[Vec<f32>],
+) -> Result<f64, VerifyError> {
+    let n = probs.len();
+    let bad = |row, field, why| noise_invalid(Some(which), row, field, why);
+    if set.scored != "eval" {
+        return Err(bad(
+            None,
+            "scored",
+            format!("{:?}, expected \"eval\"", set.scored),
+        ));
+    }
+    if set.n != n || set.rows.len() != n {
+        return Err(bad(
+            None,
+            "rows",
+            format!("n {} and {} rows for {n} eval rows", set.n, set.rows.len()),
+        ));
+    }
+    let mut noise = 0.0f64;
+    for (i, (r, p32)) in set.rows.iter().zip(probs).enumerate() {
+        if r.row != i {
+            return Err(bad(
+                Some(i),
+                "rows",
+                format!(
+                    "position {i} holds row {}: every eval row once, in order",
+                    r.row
+                ),
+            ));
+        }
+        let p64 = &r.probabilities_f64;
+        if p64.len() != p32.len() {
+            return Err(bad(
+                Some(i),
+                "probabilities_f64",
+                format!("{} components, the task has {}", p64.len(), p32.len()),
+            ));
+        }
+        if let Some(p) = p64
+            .iter()
+            .find(|p| !(p.is_finite() && (0.0..=1.0).contains(*p)))
+        {
+            return Err(bad(
+                Some(i),
+                "probabilities_f64",
+                format!("{p} is not a finite value in [0, 1]"),
+            ));
+        }
+        let sum: f64 = p64.iter().sum();
+        if !within((sum - 1.0).abs(), PROBS_ROW_SUM_ABS) {
+            return Err(bad(
+                Some(i),
+                "probabilities_f64",
+                format!("sum {sum}, not 1 within {PROBS_ROW_SUM_ABS}"),
+            ));
+        }
+        let (torch, reference) = (argmax(p32), argmax_f64(p64));
+        if torch != reference {
+            return Err(VerifyError::NoiseArgmaxFlip {
+                which,
+                row: i,
+                torch,
+                reference,
+            });
+        }
+        for (&a, &b) in p32.iter().zip(p64) {
+            let d = (f64::from(a) - b).abs();
+            noise = if d.is_nan() || noise.is_nan() {
+                f64::NAN
+            } else {
+                noise.max(d)
+            };
+        }
+    }
+    let agree = n as f64;
+    if (set.argmax_agree as f64).to_bits() != agree.to_bits() {
+        return Err(VerifyError::RescoreNoiseMismatch {
+            which,
+            field: "argmax_agree",
+            reported: set.argmax_agree as f64,
+            recomputed: agree,
+        });
+    }
+    Ok(noise)
+}
+
+/// laya-parity-v1 A1: the bound each re-score is held to, DERIVED in Rust.
+///
+/// Without a record (`rescore_noise_sha256` absent) both sets get the floor
+/// (`rescore_probs_abs`) — omitting the record can only tighten the check. With one, the
+/// record is parsed ([`pack::RescoreNoise`]), its header checked against the contract
+/// ([`VerifyPolicy::rescore_noise_k`], the floor, a 0.0 control), `noise(c, s)` RECOMPUTED from
+/// its stored float64 rows against the already-validated probability rows (`ft_probs`,
+/// `zs_probs`), the reported `max_abs` and `bound` required to equal the recomputation
+/// bit-for-bit, and `bound = max(floor, k x noise)` refused above
+/// [`VerifyPolicy::rescore_bound_max_abs`]. The reported numbers are never used.
+///
+/// # Errors
+///
+/// [`VerifyError::RescoreNoiseInvalid`] (malformed record, a field unequal to the contract, a
+/// missing or repeated row), [`VerifyError::NoiseArgmaxFlip`],
+/// [`VerifyError::RescoreNoiseMismatch`] (a reported value that differs from the
+/// recomputation) or [`VerifyError::RescoreBoundCeiling`].
+#[provable_contracts_macros::contract("laya-parity-v1", equation = "rescore_noise_reference")]
+pub fn rescore_bounds(
+    inputs: &PackInputs,
+    ft_probs: &[Vec<f32>],
+    zs_probs: &[Vec<f32>],
+    policy: &VerifyPolicy,
+) -> Result<[RescoreBound; 2], VerifyError> {
+    let floor = policy.rescore_probs_abs;
+    let Some(bytes) = inputs.rescore_noise_json.as_deref() else {
+        return Ok([
+            RescoreBound {
+                which: ProbsWhich::FineTuned,
+                noise: None,
+                bound: floor,
+            },
+            RescoreBound {
+                which: ProbsWhich::ZeroShot,
+                noise: None,
+                bound: floor,
+            },
+        ]);
+    };
+    let rec: pack::RescoreNoise = serde_json::from_slice(bytes)
+        .map_err(|e| noise_invalid(None, None, "json", e.to_string()))?;
+    check_noise_header(&rec, ft_probs.len(), policy)?;
+    let mut out = [ProbsWhich::FineTuned, ProbsWhich::ZeroShot].map(|which| RescoreBound {
+        which,
+        noise: None,
+        bound: floor,
+    });
+    for (slot, (set, probs)) in out
+        .iter_mut()
+        .zip(rec.sets.iter().zip([ft_probs, zs_probs]))
+    {
+        let which = slot.which;
+        let noise = recompute_noise(which, set, probs)?;
+        if set.max_abs.to_bits() != noise.to_bits() {
+            return Err(VerifyError::RescoreNoiseMismatch {
+                which,
+                field: "max_abs",
+                reported: set.max_abs,
+                recomputed: noise,
+            });
+        }
+        let bound = floor.max(policy.rescore_noise_k * noise);
+        if set.bound.to_bits() != bound.to_bits() {
+            return Err(VerifyError::RescoreNoiseMismatch {
+                which,
+                field: "bound",
+                reported: set.bound,
+                recomputed: bound,
+            });
+        }
+        if !within(bound, policy.rescore_bound_max_abs) {
+            return Err(VerifyError::RescoreBoundCeiling {
+                which,
+                bound,
+                ceiling: policy.rescore_bound_max_abs,
+            });
+        }
+        *slot = RescoreBound {
+            which,
+            noise: Some(noise),
+            bound,
+        };
+    }
+    Ok(out)
 }
 
 /// Macro-F1 and top-label ECE with aprender-core's ONE implementation of each (OPS-03).
@@ -1206,9 +1635,11 @@ struct Checked {
     task: Task,
     ft_probs: Vec<Vec<f32>>,
     zs_probs: Vec<Vec<f32>>,
+    bounds: [RescoreBound; 2],
 }
 
-/// Steps 1-4 of the module docs: variant, base, hashes, split, probability files.
+/// Steps 1-4 of the module docs: variant, base, hashes, split, probability files, and the
+/// per-set re-score bounds (A1; files only, so they are derived before any model is built).
 fn cheap_checks(
     inputs: &PackInputs,
     data_dir: &Path,
@@ -1240,12 +1671,14 @@ fn cheap_checks(
         &data.eval,
         &labels,
     )?;
+    let bounds = rescore_bounds(inputs, &ft_probs, &zs_probs, policy)?;
     Ok(Checked {
         texts: data.eval.iter().map(|r| r.text.clone()).collect(),
         labels: data.eval.iter().map(|r| r.label).collect(),
         task: data.task,
         ft_probs,
         zs_probs,
+        bounds,
     })
 }
 
@@ -1259,13 +1692,13 @@ fn verify_loaded(
     policy: &VerifyPolicy,
 ) -> Result<VerifyReport, VerifyError> {
     let artifact_sha256 = decider.identity().artifact_sha256.clone();
-    let tol = policy.rescore_probs_abs;
+    let [ft_bound, zs_bound] = checked.bounds;
     let ft = rescore(
         ProbsWhich::FineTuned,
         |t| decider.classify(t),
         &checked.texts,
         &checked.ft_probs,
-        tol,
+        ft_bound.bound,
     )?;
     drop(decider);
     let base = pack::load_checkpoint_for_scoring(base_dir, checked.task.clone())?;
@@ -1274,7 +1707,7 @@ fn verify_loaded(
         |t| base.classify(t),
         &checked.texts,
         &checked.zs_probs,
-        tol,
+        zs_bound.bound,
     )?;
     drop(base);
     let k = checked.task.criteria().len();
@@ -1296,6 +1729,10 @@ fn verify_loaded(
             recomputed,
             rescore_max_abs: ft.max_abs,
             zs_rescore_max_abs: zs.max_abs,
+            rescore_bound: ft_bound.bound,
+            zs_rescore_bound: zs_bound.bound,
+            noise: ft_bound.noise,
+            zs_noise: zs_bound.noise,
             argmax_agree: ft.argmax_agree,
             n,
             artifact_sha256,
@@ -1305,6 +1742,10 @@ fn verify_loaded(
         artifact_sha256,
         rescore_max_abs: ft.max_abs,
         zs_rescore_max_abs: zs.max_abs,
+        rescore_bound: ft_bound.bound,
+        zs_rescore_bound: zs_bound.bound,
+        noise: ft_bound.noise,
+        zs_noise: zs_bound.noise,
         argmax_agree: ft.argmax_agree,
         n,
         recomputed,

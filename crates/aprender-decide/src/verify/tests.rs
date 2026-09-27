@@ -52,6 +52,8 @@ fn contract_policy_tiny_base() -> VerifyPolicy {
         ece_bins: constant_f64(gate, "ece_bins") as u64,
         metric_recompute_abs: constant_f64(gate, "gate_metric_recompute_abs"),
         rescore_probs_abs: tolerance("pack_rescore_probs_abs"),
+        rescore_noise_k: constant_f64("laya-parity-v1.yaml", "pack_rescore_noise_k"),
+        rescore_bound_max_abs: constant_f64("laya-parity-v1.yaml", "pack_rescore_bound_max_abs"),
         calibration_slice_min_per_class: constant_f64(gate, "calibration_slice_min_per_class")
             as u64,
         base_sha256: tiny_base_sha(),
@@ -105,6 +107,8 @@ impl Run {
         let ep = sha(&self.path("eval-probs.json"));
         let zp = sha(&self.path("zero-shot-probs.json"));
         let pr = sha(&self.path("probes.json"));
+        let noise = self.path("rescore-noise.json");
+        let noise = noise.exists().then(|| sha(&noise));
         self.edit_json("gate-report.json", |r| {
             r["recipe_id"] = recipe_id.into();
             r["inputs_sha256"]["task_json"] = task.into();
@@ -113,6 +117,9 @@ impl Run {
             r["eval_probs_sha256"] = ep.into();
             r["zero_shot_probs_sha256"] = zp.into();
             r["probes_sha256"] = pr.into();
+            if let Some(h) = noise {
+                r["rescore_noise_sha256"] = h.into();
+            }
         });
     }
 
@@ -791,4 +798,392 @@ fn verify_path_manifest_mismatch() {
         &policy,
     ));
     assert_eq!(e, VerifyError::ManifestMismatch { field: "recipe_id" });
+}
+
+// ===========================================================================
+// Plan 08-15 Task 1: the noise-referenced re-score bound (laya-parity-v1 A1)
+// ===========================================================================
+
+/// A JSON object from ordered pairs (`json!`'s object form expands to `unwrap`).
+fn obj(pairs: Vec<(&str, Value)>) -> Value {
+    Value::Object(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+
+/// A probability file's rows exactly as the verifier reads them (JSON f64 -> f32).
+fn file_probs(run: &Run, file: &str) -> Vec<Vec<f32>> {
+    read_json(&run.path(file))["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| {
+            r["probabilities"]
+                .as_array()
+                .expect("probabilities")
+                .iter()
+                .map(|p| p.as_f64().expect("p") as f32)
+                .collect()
+        })
+        .collect()
+}
+
+/// A float64 reference equal to the file's CURRENT float32 rows widened (noise 0).
+fn f64_rows(run: &Run, file: &str) -> Vec<Vec<f64>> {
+    file_probs(run, file)
+        .iter()
+        .map(|r| r.iter().map(|&p| f64::from(p)).collect())
+        .collect()
+}
+
+/// Move `d` of mass INTO row `row`'s argmax component from the next one: the sum is kept and
+/// the argmax cannot flip.
+fn nudge(rows: &mut [Vec<f64>], row: usize, d: f64) {
+    let r = &mut rows[row];
+    let a = (0..r.len()).fold(0, |m, i| if r[i] > r[m] { i } else { m });
+    let b = (a + 1) % r.len();
+    r[a] += d;
+    r[b] -= d;
+}
+
+/// `max |f64(p32) - p64|`: what train.py records as `max_abs`, over the stored rows.
+fn noise_of(p32: &[Vec<f32>], p64: &[Vec<f64>]) -> f64 {
+    p32.iter()
+        .zip(p64)
+        .flat_map(|(a, b)| a.iter().zip(b).map(|(&x, &y)| (f64::from(x) - y).abs()))
+        .fold(0.0, f64::max)
+}
+
+/// Write `rescore-noise.json` the way train.py writes it: the float64 rows `ft` / `zs` against
+/// the copy's CURRENT probability files, `max_abs` and `bound = max(floor, k x max_abs)`
+/// reported, k / floor from `policy`, control 0.0 on rows 0..min(5, n); then rehash so the
+/// report names it. Returns the two noises.
+fn write_noise_record(
+    run: &Run,
+    policy: &VerifyPolicy,
+    ft: &[Vec<f64>],
+    zs: &[Vec<f64>],
+) -> [f64; 2] {
+    let files = ["eval-probs.json", "zero-shot-probs.json"];
+    let mut noises = [0.0; 2];
+    let mut sets = Vec::new();
+    for (i, (name, rows)) in ["fine_tuned", "zero_shot"].iter().zip([ft, zs]).enumerate() {
+        let p32 = file_probs(run, files[i]);
+        let noise = noise_of(&p32, rows);
+        noises[i] = noise;
+        let bound = policy.rescore_probs_abs.max(policy.rescore_noise_k * noise);
+        let json_rows: Vec<Value> = rows
+            .iter()
+            .enumerate()
+            .map(|(r, p)| {
+                obj(vec![
+                    ("row", r.into()),
+                    ("probabilities_f64", Value::from(p.clone())),
+                ])
+            })
+            .collect();
+        sets.push(obj(vec![
+            ("which", (*name).into()),
+            ("scored", "eval".into()),
+            ("t_applied", 1.0.into()),
+            ("n", rows.len().into()),
+            ("argmax_agree", rows.len().into()),
+            ("max_abs", noise.into()),
+            ("bound", bound.into()),
+            ("rows", Value::Array(json_rows)),
+        ]));
+    }
+    let n = ft.len();
+    let record = obj(vec![
+        ("schema", pack::RESCORE_NOISE_SCHEMA.into()),
+        ("reference", "float64".into()),
+        ("k", policy.rescore_noise_k.into()),
+        ("floor_abs", policy.rescore_probs_abs.into()),
+        ("control_max_abs", 0.0.into()),
+        (
+            "control_rows",
+            Value::from((0..n.min(5)).collect::<Vec<usize>>()),
+        ),
+        ("sets", Value::Array(sets)),
+    ]);
+    write_json(&run.path("rescore-noise.json"), &record);
+    run.rehash();
+    noises
+}
+
+/// A production copy carrying a noise record whose float64 rows equal its own files (noise 0).
+fn copy_with_record(policy: &VerifyPolicy) -> Run {
+    let run = production_copy(policy, true);
+    let (ft, zs) = (
+        f64_rows(&run, "eval-probs.json"),
+        f64_rows(&run, "zero-shot-probs.json"),
+    );
+    write_noise_record(&run, policy, &ft, &zs);
+    run
+}
+
+/// Both validated probability files of a copy, and its PackInputs.
+fn validated(run: &Run) -> (PackInputs, Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let inputs = run.inputs();
+    let data = read_data_dir(&run.data()).expect("data dir");
+    let labels = data.task.owned_labels();
+    let ft = validate_probs(
+        ProbsWhich::FineTuned,
+        &inputs.eval_probs_json,
+        &data.eval,
+        &labels,
+    )
+    .expect("ft probs");
+    let zs = validate_probs(
+        ProbsWhich::ZeroShot,
+        &inputs.zero_shot_probs_json,
+        &data.eval,
+        &labels,
+    )
+    .expect("zs probs");
+    (inputs, ft, zs)
+}
+
+#[test]
+fn noise_absent_uses_floor() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let (inputs, ft, zs) = validated(&run);
+    assert!(inputs.gate_report.rescore_noise_sha256.is_none());
+    assert!(inputs.rescore_noise_json.is_none());
+    let floor = policy.rescore_probs_abs;
+    let bounds = rescore_bounds(&inputs, &ft, &zs, &policy).expect("no record: the floor");
+    for (b, which) in bounds
+        .iter()
+        .zip([ProbsWhich::FineTuned, ProbsWhich::ZeroShot])
+    {
+        assert_eq!(
+            *b,
+            RescoreBound {
+                which,
+                noise: None,
+                bound: floor
+            }
+        );
+    }
+    let report = run.verify(&policy).expect("verifies at the floor");
+    assert_eq!(report.rescore_bound.to_bits(), floor.to_bits());
+    assert_eq!(report.zs_rescore_bound.to_bits(), floor.to_bits());
+    assert_eq!((report.noise, report.zs_noise), (None, None));
+}
+
+/// The behavioural proof that the bar moved only where a record justifies it: torch's file is
+/// 2e-5 from its own float64 answer on row 3 (the rest exact), so the recorded noise is 2e-5
+/// and the bound 4 x 2e-5; the Rust re-score (which reproduces the float64 side here) drifts
+/// 2e-5 from the file — ACCEPTED with the record, REFUSED at the 1e-5 floor without it.
+#[test]
+fn noise_bound_accepts_what_floor_refuses() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let (ft_ref, zs_ref) = (
+        f64_rows(&run, "eval-probs.json"),
+        f64_rows(&run, "zero-shot-probs.json"),
+    );
+    shift_prob(&run, "eval-probs.json", 3, 0, 2e-5);
+    let noise = write_noise_record(&run, &policy, &ft_ref, &zs_ref);
+    let floor = policy.rescore_probs_abs;
+    assert!(noise[0] > floor && noise[0] < 3e-5, "{noise:?}");
+    let want = floor.max(policy.rescore_noise_k * noise[0]);
+    let report = run
+        .verify(&policy)
+        .expect("accepted: drift inside the recorded bound");
+    assert!(
+        report.rescore_max_abs > floor,
+        "the drift is really beyond the floor: {report:?}"
+    );
+    assert!(within(report.rescore_max_abs, report.rescore_bound));
+    assert_eq!(report.rescore_bound.to_bits(), want.to_bits());
+    assert_eq!(report.noise.map(f64::to_bits), Some(noise[0].to_bits()));
+    assert_eq!(
+        report.zs_rescore_bound.to_bits(),
+        floor.to_bits(),
+        "zs noise 0"
+    );
+
+    // The same bytes with the record removed from the report: the floor, refused.
+    std::fs::remove_file(run.path("rescore-noise.json")).expect("remove record");
+    run.edit_json("gate-report.json", |r| {
+        r.as_object_mut()
+            .expect("report")
+            .remove("rescore_noise_sha256");
+    });
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(e, VerifyError::RescoreDrift { which: ProbsWhich::FineTuned, row: 3, bound, .. }
+            if bound.to_bits() == floor.to_bits()),
+        "{e:?}"
+    );
+    assert!(e.to_string().contains(&format!("bound={floor}")), "{e}");
+}
+
+/// A forger inflating the record: max_abs x10 with a consistent bound, or the bound alone.
+#[test]
+fn forged_noise_value() {
+    let policy = permissive_policy();
+    let run = copy_with_record(&policy);
+    let floor = policy.rescore_probs_abs;
+    run.edit_json("rescore-noise.json", |v| {
+        let m = v["sets"][0]["max_abs"].as_f64().expect("max_abs").max(1e-6) * 10.0;
+        v["sets"][0]["max_abs"] = m.into();
+        v["sets"][0]["bound"] = floor.max(policy.rescore_noise_k * m).into();
+    });
+    run.rehash();
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            e,
+            VerifyError::RescoreNoiseMismatch {
+                which: ProbsWhich::FineTuned,
+                field: "max_abs",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+
+    let run = copy_with_record(&policy);
+    run.edit_json("rescore-noise.json", |v| {
+        v["sets"][1]["bound"] = 5e-4.into()
+    });
+    run.rehash();
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            e,
+            VerifyError::RescoreNoiseMismatch {
+                which: ProbsWhich::ZeroShot,
+                field: "bound",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    assert_eq!(e.exit_code(), 2);
+}
+
+#[test]
+fn noise_hash_mismatch() {
+    let policy = permissive_policy();
+    let run = copy_with_record(&policy);
+    run.edit_json("rescore-noise.json", |v| {
+        v["sets"][0]["t_applied"] = 2.0.into()
+    });
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            e,
+            VerifyError::InputHashMismatch {
+                file: "rescore_noise_json",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn noise_bound_over_ceiling() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let (mut ft_ref, zs_ref) = (
+        f64_rows(&run, "eval-probs.json"),
+        f64_rows(&run, "zero-shot-probs.json"),
+    );
+    nudge(&mut ft_ref, 2, 3e-4);
+    let noise = write_noise_record(&run, &policy, &ft_ref, &zs_ref);
+    assert!(policy.rescore_noise_k * noise[0] > policy.rescore_bound_max_abs);
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(e, VerifyError::RescoreBoundCeiling { which: ProbsWhich::FineTuned, ceiling, .. }
+            if ceiling.to_bits() == policy.rescore_bound_max_abs.to_bits()),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn noise_argmax_flip() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let (mut ft_ref, zs_ref) = (
+        f64_rows(&run, "eval-probs.json"),
+        f64_rows(&run, "zero-shot-probs.json"),
+    );
+    // Swap row 2's top two components: the float64 row now names another label.
+    let r = &mut ft_ref[2];
+    let a = (0..r.len()).fold(0, |m, i| if r[i] > r[m] { i } else { m });
+    let b = (0..r.len()).filter(|&i| i != a).fold(usize::MAX, |m, i| {
+        if m == usize::MAX || r[i] > r[m] {
+            i
+        } else {
+            m
+        }
+    });
+    r.swap(a, b);
+    write_noise_record(&run, &policy, &ft_ref, &zs_ref);
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(e, VerifyError::NoiseArgmaxFlip { which: ProbsWhich::FineTuned, row: 2, torch, reference }
+            if torch == a && reference == b),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn noise_rows_incomplete() {
+    let policy = permissive_policy();
+    // A record missing its last row.
+    let run = copy_with_record(&policy);
+    run.edit_json("rescore-noise.json", |v| {
+        v["sets"][0]["rows"].as_array_mut().expect("rows").pop();
+    });
+    run.rehash();
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::RescoreNoiseInvalid {
+                which: Some(ProbsWhich::FineTuned),
+                field: "rows",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    // A record repeating row 0 in place of row 1.
+    let run = copy_with_record(&policy);
+    run.edit_json("rescore-noise.json", |v| {
+        v["sets"][1]["rows"][1]["row"] = 0.into();
+    });
+    run.rehash();
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::RescoreNoiseInvalid {
+                which: Some(ProbsWhich::ZeroShot),
+                row: Some(1),
+                field: "rows",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn noise_k_mismatch() {
+    let policy = permissive_policy();
+    for (field, value) in [("k", 3.0), ("floor_abs", 2e-5)] {
+        let run = copy_with_record(&policy);
+        run.edit_json("rescore-noise.json", |v| v[field] = value.into());
+        run.rehash();
+        let e = expect_err(run.verify(&policy));
+        assert!(
+            matches!(&e, VerifyError::RescoreNoiseInvalid { which: None, field: f, .. } if *f == field),
+            "{field}: {e:?}"
+        );
+    }
 }

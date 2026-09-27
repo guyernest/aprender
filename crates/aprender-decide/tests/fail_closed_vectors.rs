@@ -93,6 +93,8 @@ fn policy() -> VerifyPolicy {
             &parity,
             &["equations", "pack_rescore_probs_abs", "float_tolerance"],
         ),
+        rescore_noise_k: f64_at(&parity, &["constants", "pack_rescore_noise_k"]),
+        rescore_bound_max_abs: f64_at(&parity, &["constants", "pack_rescore_bound_max_abs"]),
         calibration_slice_min_per_class: f64_at(
             &gate,
             &["constants", "calibration_slice_min_per_class"],

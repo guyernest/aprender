@@ -86,6 +86,25 @@ pub struct Recipe {
     /// `fixed_epochs` rule, in which case `epochs` is exact rather than a maximum.
     #[serde(default)]
     pub early_stopping: Option<EarlyStoppingDecl>,
+    /// The median-ECE seed selection (laya-finetune-gate-v1 1.4.0 `seed_policy`, A3); ABSENT =
+    /// the legacy 1.x declared-seed rule, which is never deploy-eligible under 1.4.0.
+    #[serde(default)]
+    pub seed_selection: Option<SeedSelectionDecl>,
+}
+
+/// `recipe.json` `seed_selection` (laya-finetune-gate-v1 `recipe_json_schema.seed_selection`),
+/// equal to the contract's `seed_policy` and written before training.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeedSelectionDecl {
+    /// `median_ece` (`seed_policy.selection`).
+    pub policy: String,
+    /// The gate seeds, in order (`seed_policy.variance_seeds`).
+    pub seeds: Vec<i64>,
+    /// `seed_policy.rank_scale`.
+    pub rank_scale: f64,
+    /// `smaller_seed` (`seed_policy.tie_break`).
+    pub tie_break: String,
 }
 
 /// `recipe.json` `early_stopping` (laya-finetune-gate-v1 `early_stopping` block), copied into
@@ -176,7 +195,7 @@ pub struct GateCalibration {
 }
 
 /// `gate-report.json` `seeds`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateSeeds {
     /// The declared seed.
@@ -186,6 +205,107 @@ pub struct GateSeeds {
     /// `single seed`, `median-ECE seed of N seeds` (1.4.0 median rule) or the legacy
     /// multi-seed `mean ± sd over N seeds` (laya-finetune-gate-v1 `seed_policy.rule`).
     pub label: String,
+    /// `median_ece` under seed selection (1.4.0); absent for a legacy run.
+    #[serde(default)]
+    pub policy: Option<String>,
+    /// The shipped (median) seed under seed selection (1.4.0).
+    #[serde(default)]
+    pub shipped: Option<i64>,
+    /// Every gate seed's run, in seed order (1.4.0).
+    #[serde(default)]
+    pub per_seed: Option<Vec<PerSeedRow>>,
+}
+
+/// One `seeds.per_seed` row (laya-finetune-gate-v1 `gate_report_schema.seeds`, 1.4.0).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerSeedRow {
+    /// The seed.
+    pub seed: i64,
+    /// Macro-F1 on the gate eval rows.
+    pub macro_f1: f64,
+    /// Stance F_avg; `null` for non-stance tasks.
+    pub f_avg: Option<f64>,
+    /// ECE after that seed's own calibration.
+    pub ece_post: f64,
+    /// `macro_f1 - zero_shot.macro_f1`.
+    pub margin: f64,
+    /// That seed's run's gate verdict.
+    pub pass: bool,
+    /// That seed's applied temperature.
+    pub t_applied: f64,
+    /// `floor(ece_post x rank_scale)`.
+    pub rank_key: i64,
+    /// sha256 of `seeds/seed-<s>/eval-probs.json`.
+    pub eval_probs_sha256: String,
+    /// sha256 of that seed's `model.safetensors` (only the shipped one is kept).
+    pub model_safetensors_sha256: String,
+}
+
+/// `gate-report.json` `inputs_sha256`: the five hashes the artifact manifest also carries, plus
+/// the OPTIONAL 1.4.0 `shift_jsonl` (present exactly when the data dir carries `shift.jsonl`).
+/// A separate type from [`InputsSha256`] so the decide-apr-v1 manifest schema is untouched.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportInputsSha256 {
+    /// `task.json`.
+    pub task_json: String,
+    /// `train.jsonl`.
+    pub train_jsonl: String,
+    /// `eval.jsonl`.
+    pub eval_jsonl: String,
+    /// The declared base `model.safetensors`.
+    pub base_model: String,
+    /// `tokenizer.json`.
+    pub tokenizer_json: String,
+    /// `shift.jsonl` (1.4.0 shift probe).
+    #[serde(default)]
+    pub shift_jsonl: Option<String>,
+}
+
+/// `gate-report.json` `shift_probe` (1.4.0, A2): REPORTED, recomputed by the verifier, never
+/// re-scored and never a gate clause.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShiftProbe {
+    /// Always `false`: the probe is never a gate clause.
+    pub gate_clause: bool,
+    /// `shift.jsonl` rows.
+    pub n: u64,
+    /// The declared base on the shift rows.
+    pub zero_shot: ShiftZeroShot,
+    /// The shipped checkpoint on the shift rows.
+    pub fine_tuned: ShiftFineTuned,
+    /// `fine_tuned.macro_f1 - zero_shot.macro_f1` on the shift rows.
+    pub margin: f64,
+    /// sha256 of `shift-probs.json`.
+    pub probs_sha256: String,
+    /// sha256 of `shift-zero-shot-probs.json`.
+    pub zero_shot_probs_sha256: String,
+}
+
+/// `shift_probe.zero_shot`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShiftZeroShot {
+    /// Macro-F1.
+    pub macro_f1: f64,
+    /// Stance F_avg; `null` for non-stance tasks.
+    pub f_avg: Option<f64>,
+    /// Top-label ECE.
+    pub ece: f64,
+}
+
+/// `shift_probe.fine_tuned`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShiftFineTuned {
+    /// Macro-F1.
+    pub macro_f1: f64,
+    /// Stance F_avg; `null` for non-stance tasks.
+    pub f_avg: Option<f64>,
+    /// Top-label ECE at the shipped seed's applied T.
+    pub ece_post: f64,
 }
 
 /// `gate-report.json` (laya-finetune-gate-v1 `gate_report_schema`).
@@ -217,17 +337,82 @@ pub struct GateReport {
     /// sha256 of `recipe.json`.
     pub recipe_id: String,
     /// Input hashes.
-    pub inputs_sha256: InputsSha256,
+    pub inputs_sha256: ReportInputsSha256,
     /// sha256 of `eval-probs.json`.
     pub eval_probs_sha256: String,
     /// sha256 of `zero-shot-probs.json`.
     pub zero_shot_probs_sha256: String,
     /// sha256 of `probes.json`.
     pub probes_sha256: String,
+    /// sha256 of `rescore-noise.json` (1.4.0, laya-parity-v1 A1). ABSENT = the 1.0e-5 floor for
+    /// both re-scores; every 1.x report parses unchanged.
+    #[serde(default)]
+    pub rescore_noise_sha256: Option<String>,
+    /// The shift probe (1.4.0, A2); present exactly when the data dir carries `shift.jsonl`.
+    #[serde(default)]
+    pub shift_probe: Option<ShiftProbe>,
 }
 
 /// The gate report `schema` value this packer reads.
 pub const GATE_REPORT_SCHEMA: &str = "laya-gate-report-v1";
+
+/// The `rescore-noise.json` `schema` value (laya-finetune-gate-v1 `rescore_noise_schema`).
+pub const RESCORE_NOISE_SCHEMA: &str = "laya-rescore-noise-v1";
+
+/// `rescore-noise.json` (laya-finetune-gate-v1 `rescore_noise_schema`; laya-parity-v1
+/// `rescore_noise_reference`): torch's own float64 answer for every eval row of the shipped
+/// checkpoint and of the declared base. Only its stored ROWS are evidence — the verifier
+/// recomputes the noise and the bound from them and cross-checks the reported values.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RescoreNoise {
+    /// `laya-rescore-noise-v1`.
+    pub schema: String,
+    /// `float64`.
+    pub reference: String,
+    /// Copy of laya-parity-v1 `constants.pack_rescore_noise_k`.
+    pub k: f64,
+    /// Copy of laya-parity-v1 `pack_rescore_probs_abs.float_tolerance` (the floor).
+    pub floor_abs: f64,
+    /// `max |dz|` of the manual fp32 forward against the Scorer's logits; must be 0.0.
+    pub control_max_abs: f64,
+    /// The first `min(5, n)` eval rows the control forwarded.
+    pub control_rows: Vec<usize>,
+    /// Exactly `fine_tuned` then `zero_shot`.
+    pub sets: Vec<NoiseSet>,
+}
+
+/// One scored set of a [`RescoreNoise`] record.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoiseSet {
+    /// `fine_tuned` (the shipped checkpoint) or `zero_shot` (the declared base).
+    pub which: String,
+    /// `eval`.
+    pub scored: String,
+    /// The temperature the scorer applied.
+    pub t_applied: f64,
+    /// Eval rows.
+    pub n: usize,
+    /// Rows whose float64 argmax equals the stored float32 argmax (reported).
+    pub argmax_agree: usize,
+    /// Reported `max |p_torch32 - p_f64|` (cross-checked, never used).
+    pub max_abs: f64,
+    /// Reported `max(floor, k x max_abs)` (cross-checked, never used).
+    pub bound: f64,
+    /// Every eval row once, in order.
+    pub rows: Vec<NoiseRow>,
+}
+
+/// One float64 row of a [`NoiseSet`].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoiseRow {
+    /// 0-based eval row.
+    pub row: usize,
+    /// `softmax(z_f64 / T)` in criteria order.
+    pub probabilities_f64: Vec<f64>,
+}
 
 /// `probes.json` (laya-finetune-gate-v1 `probes_json_schema`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -265,6 +450,9 @@ pub struct PackInputs {
     pub eval_probs_json: Vec<u8>,
     /// `zero-shot-probs.json`, byte-exact (hash-checked against the report).
     pub zero_shot_probs_json: Vec<u8>,
+    /// `rescore-noise.json`, byte-exact and hash-checked, present exactly when the report names
+    /// it (`rescore_noise_sha256`); the verifier's `rescore_bounds` parses and recomputes it.
+    pub rescore_noise_json: Option<Vec<u8>>,
     /// Input hashes recomputed from the data dir, tokenizer and declared base.
     pub inputs_sha256: InputsSha256,
 }
@@ -422,7 +610,8 @@ impl PackInputs {
     ///
     /// Refuses when the run-dir `task.json` differs from the data dir's, when the gate
     /// report's `recipe_id`, `inputs_sha256`, `eval_probs_sha256`,
-    /// `zero_shot_probs_sha256` or `probes_sha256` disagree with the files, or when any
+    /// `zero_shot_probs_sha256`, `probes_sha256` or (when present) `rescore_noise_sha256`
+    /// disagree with the files, or when any
     /// JSON file carries a field its contract schema does not declare.
     ///
     /// # Errors
@@ -466,6 +655,14 @@ impl PackInputs {
             &gate_report.zero_shot_probs_sha256,
             &zero_shot_probs,
         )?;
+        let rescore_noise_json = match &gate_report.rescore_noise_sha256 {
+            Some(recorded) => {
+                let bytes = read_file(run_dir, "rescore-noise.json")?;
+                check_hash("rescore_noise_sha256", recorded, &bytes)?;
+                Some(bytes)
+            }
+            None => None,
+        };
         let recorded = &gate_report.inputs_sha256;
         check_hash("inputs_sha256.task_json", &recorded.task_json, &data_task)?;
         check_hash("inputs_sha256.train_jsonl", &recorded.train_jsonl, &train)?;
@@ -505,6 +702,7 @@ impl PackInputs {
             probes: probes.probes,
             eval_probs_json: eval_probs,
             zero_shot_probs_json: zero_shot_probs,
+            rescore_noise_json,
             inputs_sha256,
         })
     }

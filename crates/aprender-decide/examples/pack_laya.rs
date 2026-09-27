@@ -12,7 +12,10 @@
 //! both probability files, a Rust re-score of every eval row from the packed bytes and from
 //! the base, and the gate recomputed from those verified probabilities. Only an accepted run
 //! is written, atomically; it prints
-//! `PACKED <path> sha256=<H> rescore_max_abs=<x> zs_rescore_max_abs=<y> argmax=<n>/<n>`.
+//! `PACKED <path> sha256=<H> rescore_max_abs=<x> zs_rescore_max_abs=<y> rescore_bound=<b>
+//! zs_rescore_bound=<b> noise=<v|null> zs_noise=<v|null> argmax=<n>/<n>` — each re-score's bound
+//! is laya-parity-v1 A1's `max(floor, k x noise)`, derived from `rescore-noise.json`, or the floor
+//! (noise `null`) when the run carries no record.
 //! A refusal prints ONE `REFUSED <Variant> <detail> (nothing written)` line.
 //!
 //! `verify` is decide-apr-v1 `deploy_eligibility`, the ONLY eligibility check: it loads the
@@ -31,7 +34,8 @@
 //!
 //! THE POLICY IS NOT AN ARGUMENT. Thresholds, `ece_bins`, `gate_metric_recompute_abs`,
 //! `calibration_slice_min_per_class` and the base sha256 are read from
-//! `contracts/laya-finetune-gate-v1.yaml`, and `pack_rescore_probs_abs` from
+//! `contracts/laya-finetune-gate-v1.yaml`, and the re-score floor `pack_rescore_probs_abs`, the
+//! noise multiplier `pack_rescore_noise_k` and the ceiling `pack_rescore_bound_max_abs` from
 //! `contracts/laya-parity-v1.yaml`, at run time. The CLI accepts only the path arguments above
 //! and reads no environment variable: there is no way to hand it another policy.
 
@@ -90,6 +94,8 @@ fn policy() -> Result<VerifyPolicy, String> {
             &parity,
             &["equations", "pack_rescore_probs_abs", "float_tolerance"],
         )?,
+        rescore_noise_k: f64_at(&parity, &c("pack_rescore_noise_k"))?,
+        rescore_bound_max_abs: f64_at(&parity, &c("pack_rescore_bound_max_abs"))?,
         calibration_slice_min_per_class: u64_at(&gate, &c("calibration_slice_min_per_class"))?,
         base_sha256: at(&gate, &["base", "model_safetensors_sha256"])
             .as_str()
@@ -163,11 +169,16 @@ fn cmd_pack(a: &Args) -> Result<ExitCode, String> {
         match verify::pack_for_serving(&run, &data, &base, &out, &policy) {
             Ok(r) => {
                 println!(
-                    "PACKED {} sha256={} rescore_max_abs={} zs_rescore_max_abs={} argmax={}/{}",
+                    "PACKED {} sha256={} rescore_max_abs={} zs_rescore_max_abs={} rescore_bound={} \
+                     zs_rescore_bound={} noise={} zs_noise={} argmax={}/{}",
                     out.display(),
                     r.artifact_sha256,
                     r.rescore_max_abs,
                     r.zs_rescore_max_abs,
+                    r.rescore_bound,
+                    r.zs_rescore_bound,
+                    verify::opt_f64(r.noise),
+                    verify::opt_f64(r.zs_noise),
                     r.argmax_agree,
                     r.n
                 );
@@ -204,6 +215,10 @@ fn cmd_verify(a: &Args) -> Result<ExitCode, String> {
                     ),
                     ("rescore_max_abs", r.rescore_max_abs.into()),
                     ("zs_rescore_max_abs", r.zs_rescore_max_abs.into()),
+                    ("rescore_bound", r.rescore_bound.into()),
+                    ("zs_rescore_bound", r.zs_rescore_bound.into()),
+                    ("noise", r.noise.into()),
+                    ("zs_noise", r.zs_noise.into()),
                     ("argmax", format!("{}/{}", r.argmax_agree, r.n).into()),
                 ]);
                 println!("{line}");

@@ -38,7 +38,12 @@ serde = { workspace = true }
 # raw bytes, which holds under BOTH map backings. Enabling the feature on this crate
 # would unify it workspace-wide and silently change other crates' map behaviour in
 # any build that includes this one (RESEARCH Pitfall 2).
-serde_json = { workspace = true }
+# `float_roundtrip`: correctly rounded float parsing, so the float64 noise record
+# (rescore-noise.json) is read bit-for-bit as Python wrote it and verify's noise
+# recomputation matches the trainer's exactly (laya-parity-v1 rescore_noise_reference).
+# Already unified on in this workspace; declared here so the claim does not depend on
+# another crate's feature choice.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2 = { workspace = true }
 # The head's residual adds, as core's encoder does them.
 rayon = { workspace = true }
