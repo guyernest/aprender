@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 10/12 plans executed in 10 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; D-18 live stance deploy deferred pending the calibration spike)
+**Plans:** 11/12 plans executed in 10 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; 08-11 complete: D-18 go/no-go recorded as a human-decided HOLD (hold-no-aws); D-18 live stance deploy deferred pending the calibration spike)
 
 Plans:
 **Wave 1**
@@ -684,7 +684,7 @@ Plans:
 
 **Wave 9** *(blocked on Wave 8 completion)*
 
-- [ ] 08-11-PLAN.md — D-18 live stance deploy DEFERRED (option 3, 2026-09-26): HOLD go/no-go checkpoint + optional read-only AWS readiness, machine-checked hold record in 08-DEPLOY-EVIDENCE.json
+- [x] 08-11-PLAN.md — D-18 live stance deploy DEFERRED (option 3, 2026-09-26): HOLD go/no-go checkpoint + optional read-only AWS readiness, machine-checked hold record in 08-DEPLOY-EVIDENCE.json
 
 **Wave 10** *(blocked on Wave 9 completion)*
 

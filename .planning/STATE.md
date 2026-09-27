@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-10-PLAN.md (shared-crates-root)
-last_updated: "2026-09-27T04:20:34.000Z"
+stopped_at: Completed 08-11-PLAN.md (HOLD, hold-no-aws)
+last_updated: "2026-09-27T05:05:29.433Z"
 last_activity: 2026-09-27
-last_activity_desc: 08-10 completed under shared-crates-root (resolver executed on this workspace; deploy refusals proven offline, AWS CALLS 0)
-state_head: 09b048a7ac8811dc874fdba06639357355391752
+last_activity_desc: 08-11 completed as a human-decided HOLD (hold-no-aws, zero AWS contact); 08-DEPLOY-EVIDENCE.json written for 08-12
+state_head: 14b463614a1c7ec06a4ef949b054245312a74403
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 104
-  completed_plans: 102
+  completed_plans: 103
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 11 of 12 (08-01..08-10 complete; next: 08-11)
-Status: Ready to execute 08-11 (HOLD go/no-go) — 08-10 completed under user decision shared-crates-root (2026-09-26): cargo-pmcp 0.24.3 find_lambda_package_dir EXECUTED on this workspace returns crates/aprender-mcp-decide-lambda for root crates (per-crate root -> aprender-mcp-chronos-lambda); every deploy refusal proven offline on the synthetic artifact, AWS CALLS 0; nothing deployed
+Plan: 12 of 12 (08-01..08-11 complete; next: 08-12)
+Status: Ready to execute 08-12 (Wave 10) — 08-11 closed the D-18 go/no-go as HOLD, decided by the user 2026-09-26 with no AWS call (hold-no-aws): 08-DEPLOY-EVIDENCE.json is the machine-checked hold record 08-12 reads (accepted_region_cold binds partial); D-ITEM-08-11-A preserves the live-deploy procedure; A2/A10 unmeasured; user direction: calibration spike, then a declared gate run
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-27 — 08-10 completed under shared-crates-root (resolver proof, fail-closed deploy recipes, selftest AWS CALLS 0, setfit-train crates root restored byte-identical)
+Last activity: 2026-09-27 — 08-11 completed: D-18 go/no-go closed as a human-decided HOLD (hold-no-aws, zero AWS contact), hold record 08-DEPLOY-EVIDENCE.json + D-ITEM-08-11-A
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -224,6 +224,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P08 | 42min | 2 tasks | 11 files |
 | Phase 08 P09 | 45 min | 3 tasks | 15 files |
 | Phase 08 P10 | 22 min | 2 tasks | 4 files |
+| Phase 08 P11 | 3min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -414,6 +415,7 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-10 SHARED-CRATES-ROOT (user, 2026-09-26): the decide server deploys with `cargo pmcp deploy --manifest-path crates` and server name aprender-mcp-decide. cargo-pmcp 0.24.3's own find_lambda_package_dir, executed via `just laya-resolver-proof` on a git-archive of SDK e0561f8c9 (builder.rs unchanged since c04fb4ccb; the installed binary records no build commit), returns crates/aprender-mcp-decide-lambda; the per-crate root returns crates/aprender-mcp-chronos-lambda (Pitfall 1 confirmed). Limits: one decide model per workspace (D-ITEM-08-10-A); the upstream cargo-pmcp fix is recommended future SDK work, not done (D-ITEM-08-10-B)
 - [Phase 08]: 08-10: the shared root's setfit-train state (.pmcp/deploy.toml, deployment.toml, active-target AND deploy/ with its rendered stack.ts) is swapped out and restored byte-identically on every exit path (_laya-crates-root-swap); deploy/ must go too because cargo-pmcp PRESERVES an existing stack.ts, which would synthesize setfit-train's stack without the decide [environment]; laya-deploy passes --regenerate-stack
 - [Phase 08]: 08-10: laya-verify precedes the first AWS call in laya-deploy and laya-upload; the selftest proves placeholder, sha-pin, resolver-proof, deploy- and upload-eligibility refusals on the synthetic artifact with an aws recorder (positive control) at AWS CALLS 0; the live halves have never run (D-ITEM-08-10-C, option 3)
+- [Phase 08]: 08-11 D-18 go/no-go: HOLD with no AWS call (hold-no-aws), decided by the user 2026-09-26; 08-DEPLOY-EVIDENCE.json is the hold record 08-12 reads; D-ITEM-08-11-A preserves the live deploy; next: calibration spike, then a declared gate run
 
 ### Pending Todos
 
@@ -528,8 +530,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-27T04:20:34.000Z
-Stopped at: Completed 08-10-PLAN.md (shared-crates-root)
+Last session: 2026-09-27T05:05:29.243Z
+Stopped at: Completed 08-11-PLAN.md (HOLD, hold-no-aws)
 Resume file: None
 
 ## Accumulated Context
