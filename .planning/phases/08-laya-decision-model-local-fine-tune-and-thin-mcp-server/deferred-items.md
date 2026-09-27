@@ -259,7 +259,24 @@ not fixed by it.
 
 ### D-ITEM-08-10-C: the live halves of the deploy recipes have never run against AWS
 
-- status: open
+- status: superseded (08-18, 2026-09-27). This is NOT `resolved`: the rule is resolved only if every live
+  assumption was confirmed, and one was REFUTED. Nothing is left to measure live, because the refuted
+  check was replaced and the replacement passed live. The final record is `08-LIVE-DEPLOY-EVIDENCE.json`
+  (`final: true`, `outcome: deployed-passed`).
+- **08-18 final tally of the live assumptions (08-17, 2026-09-27):**
+  - Function name equals the server id: **confirmed.** `get-function` and `get-function-concurrency`
+    on `aprender-mcp-decide` answer.
+  - `[deployment] endpoint` lands in `deployment.toml`: **confirmed.**
+  - A GET on the endpoint reaches the bootstrap's health branch (auth off): **REFUTED.** The pmcp.run
+    edge answers GET `/mcp` with 405 and `/health` with platform JSON (D-ITEM-08-17-A). It was replaced by
+    the edge `/health` `serverId` check (`3115c690e`), which passed live on resume attempt 2 and on option 1.
+  - The `Compiling` lines land in the redirected deploy log: **confirmed.**
+  - `LoggingConfig.LogGroup` names `/aws/lambda/aprender-mcp-decide`: **confirmed.** 08-18 read it there.
+  - Previously unrun, now run live:
+    - the identity probe (22:56:52Z, identity == H);
+    - `laya-deploy-verify` (4 cold samples, DEPLOY VERIFY OK);
+    - containment inside `laya-deploy` (reserved concurrency 0, verified), and its resume with
+      `delete-function-concurrency`.
 - **Partly measured by plan 08-17 (2026-09-27, live):** bucket, upload, deploy-config and the
   `cargo pmcp deploy` half of laya-deploy ran. Confirmed: function name == server id; `[deployment]
   endpoint` lands in deployment.toml; the `Compiling` lines land in the redirected log; `LoggingConfig.LogGroup`
@@ -283,7 +300,12 @@ not fixed by it.
 
 ### D-ITEM-08-10-D: `auth=on` sets only `[auth] enabled`
 
-- status: open
+- status: resolved (08-18, 2026-09-27). The deploy option that ran was `deploy-auth-off-accept-risk`.
+  - Auth posture: **off.** The config has `[auth] enabled = false` and `provider = "none"`, and the
+    deploy passed `--no-oauth`. pmcp.run reported `oauthEnabled=false`.
+  - Provider: **none.**
+  - Risk: the user explicitly accepted the cost-amplification risk, as in the chronos precedent.
+  - Re-open condition: a future deploy with `auth=on` must still choose the provider that pairs with it.
 - **What:** `laya-deploy-config <apr> on` sets `enabled = true` and leaves `provider = "none"` from
   the template. The provider that pairs with an authenticated pmcp.run function is plan 08-11's
   auth decision. It is not assumed here.
@@ -293,7 +315,13 @@ not fixed by it.
 
 ### D-ITEM-08-11-A: the D-18 live deploy and the live `accepted_region_cold` falsification are DEFERRED (option 3; HOLD decided by the user, 2026-09-26)
 
-- status: open
+- status: resolved (08-18, 2026-09-27). The final live outcome is **deployed-passed**
+  (`08-LIVE-DEPLOY-EVIDENCE.json`, `final: true`).
+  - Server: `aprender-mcp-decide` on pmcp.run, at 3,008 MB arm64, pinned to H `24a44d7e…`.
+  - Identity == H through the edge.
+  - 4 `laya-deploy-verify` cold samples, 2 per maximal shape: 24168-29350 ms, all < 30000.
+  - Plan 08-12 binds `accepted_region_cold` from this record.
+  - The thin margin is carried by D-ITEM-08-17-E.
 - **Deferred:** two things. (1) The D-18 live deploy of a trained decision model on pmcp.run. (2) The
   live falsification of decide-tool-boundary-v1 `accepted_region_cold`, FALSIFY-DECIDE-TOOL-009, which
   stays `LIVE-PENDING`. The user decided HOLD at the 08-11 go/no-go checkpoint, choosing the
@@ -412,7 +440,10 @@ not fixed by it.
 
 ### D-ITEM-08-17-A: laya-deploy's health-body check cannot reach the function through pmcp.run
 
-- status: open
+- status: resolved (08-18, 2026-09-27). Its one pending condition was the live run of the replacement
+  step, and that is now met:
+  - the edge `/health` `serverId` check (`3115c690e`) passed live on resume attempt 2 and on option 1;
+  - the identity probe then proved identity == H through the edge at 22:56:52Z.
 - **Found during:** 08-17 Task 2, the first live `just laya-deploy` (2026-09-27). It refused and contained a
   correctly built function (reserved concurrency 0, grant removed): `08-LIVE-DEPLOY-EVIDENCE.json`
   `outcome: deploy-refused`.
@@ -483,6 +514,9 @@ not fixed by it.
 - **Why not done here:** it changes the dependency graph of every crate that uses sha2. A re-derived budget
   must follow a measured cold sample, not a projection.
 - **Owner:** a perf plan after the first live cold samples (their `sha_ms` is the measurement).
+- **Measured live (08-17/08-18):** `sha_ms` was 2655-3521 over 5 cold loads on Lambda (4 rule samples and
+  the external cold call): graviton2 about 3.5 s, graviton3 about 2.7 s. Recommended, not acted on
+  (a lever for D-ITEM-08-17-E).
 
 ### D-ITEM-08-17-D: pmcp.run keeps refusing MCP POSTs after its post-deploy invocation (platform finding)
 
@@ -509,6 +543,10 @@ not fixed by it.
   - The post-deploy call's timeout should be documented against the 30 s gateway cap.
   Until then, the decide recipe retries exactly this refusal, bounded (commit 743eb02ed).
 - **Owner:** the user (pmcp.run platform). Recommend only; do not act.
+- **08-18 (2026-09-27): still open, recommended, no action taken.** One more point belongs in the same
+  issue. An external cold call took 31.05 s end to end at the client, and the edge still answered 200
+  (its in-function duration was 28008 ms). So the edge's effective cutoff is not a strict 30.000 s from
+  the client, and it should be documented. See D-ITEM-08-17-E.
 
 ### D-ITEM-08-17-E: the 3 GB cold load runs 21.4-25.8 s, 650 ms under the gateway cap at worst
 
@@ -523,4 +561,60 @@ not fixed by it.
   cap, not compute and not memory.
 - **Owner:** 08-18 / 08-12. Candidates: the S3 part-size/concurrency and the 8 s attempt timeout,
   D-ITEM-08-17-C (software sha256, 2.7-3.5 s), and the 10 GB tier.
+- **External observation (orchestrator, 2026-09-27 about 23:10Z, from the user's laptop outside AWS):**
+  - **Cold call.** `POST https://aprender-mcp-decide.us-east.true-mcp.com/mcp`, a `tools/call classify`
+    of one stance tweet.
+    - HTTP 200 with a client-side `time_total` of **31.05 s**, and identity `24a44d7e…` == H.
+    - The client time exceeded 30 s, and the edge still answered 200. So the edge's effective cutoff is
+      not a strict 30.000 s measured from the client, and **a real remote client can see a cold call
+      land at or over 30 s**.
+  - **Warm call.** HTTP 200 in 2.16 s. "Every life deserves protection from conception. #prolife"
+    returned `against`, with probabilities none 0.072, against 0.835 and favor 0.094. That is correct
+    for the TweetEval abortion target (legalization of abortion).
+- **CloudWatch correlation (08-18, read-only, matched by time window; `probe_id=none`):**
+  - The cold invocation started at 23:10:11Z.
+  - `load_ms=26202`, the slowest measured, above all 4 rule samples. It split as download 15125,
+    sha 3521 and build 7468. 8 S3 part attempts timed out at 8 s and were retried.
+  - It ran on graviton2 and classified 67 tokens in 1791 ms.
+  - REPORT: 28008 ms, Max Memory Used 2482 MB, Init 64 ms, `success`.
+  - Client minus REPORT is about **3042 ms**. For the 4 rule samples the same gap was 753-785 ms, so
+    client overhead is not a constant ~0.8 s.
+  - The 2 warm invocations ran 1.80 s each in-function.
+- **Risk arithmetic, not a measurement.** A maximal 120-token cold call on that graviton2 environment
+  would run about 26202 + 120 x 26.8 = about 29418 ms in-function. That leaves about 580 ms under the
+  function's own 30 s timeout, and it comes to about 32.5 s at the client with this call's overhead.
+- **The label stays deployed-passed.** The plan's rule is defined on the `laya-deploy-verify` samples:
+  CloudWatch-proven cold, maximal, probe-id matched, and all < 30000 ms. The external call is not one of
+  them (it was non-maximal, with no probe id and a different client), and its in-function time was
+  itself under the cap. It is recorded as additional risk evidence, not a relabel. Note also that the
+  rule's `elapsed_ms` is client-side through the same edge, not in-AWS.
+- **Levers. These are recommendations only; none was acted on:**
+  1. The S3 download: 13.5-17.8 s at 3 GB (15.1 s on the external call), against about 9 s at 10 GB.
+     Tune part size, part concurrency and the 8 s attempt timeout.
+  2. sha2 `asm` (D-ITEM-08-17-C): about 4.5 s priced, 2.7-3.5 s measured.
+  3. Restore the 10,240 MB tier when AWS approves the limit (budget 1024 built tokens, 8 texts).
+  4. A warm floor, or an async MCP Task front door.
+- **Status: open.** The input to 08-12 is the label (deployed-passed) plus this margin risk.
+
+## From plan 08-18
+
+### D-ITEM-08-18-A: the decide endpoint is left RUNNING, open, by the user's decision
+
+- status: open (the user's call; nothing for an executor to do)
+- **Posture, verified read-only at 23:12:15Z on 2026-09-27:**
+  - `aprender-mcp-decide` has no reserved concurrency (`get-function-concurrency` returns none).
+  - Configuration: 3008 MB, arm64, Timeout 30, `Active` / `Successful`, pin == H.
+  - The edge `/health` returns 200 `serverId aprender-mcp-decide`.
+  - Auth is off, and the user accepted that risk. Every cold call buys about 25-28 s of 3 GB compute.
+- **Why it is not contained:** the user asked to keep it serving for the pmcp.run admin UI. 08-18
+  made no AWS write.
+- **What containment WOULD be:** `just laya-teardown aprender-mcp-decide dev ze-kasher-dev`. It sets
+  reserved concurrency 0, and `get-function-concurrency` must then read 0. Every invocation is refused,
+  warm instances included. The stack-declared weights read stays attached, where it is inert. Resume
+  with `aws lambda delete-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide`.
+- **Full removal (NOT run):**
+  - Destroy the deployment:
+    `just _laya-crates-root-swap crates crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml models/decide/destroy-aprender-mcp-decide.state cargo pmcp deploy destroy --manifest-path crates`
+  - Remove the weights: `aws s3 rm --profile ze-kasher-dev --recursive s3://<weights-bucket>/decide/aprender-mcp-decide/`
+- **Owner:** the user. Re-open trigger: cost, abuse, or a finished admin-UI test.
 

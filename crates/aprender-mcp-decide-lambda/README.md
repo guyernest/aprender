@@ -65,6 +65,75 @@ cargo run -p aprender-mcp-decide-lambda --example probe -- \
 A bearer token is read from `--bearer` or `APRENDER_DECIDE_PROBE_TOKEN`, and it is never
 printed.
 
+## Deployed
+
+Live on pmcp.run as **`aprender-mcp-decide`** since 2026-09-27. The outcome is
+`deployed-passed`. The record is
+`.planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-DEPLOY-EVIDENCE.json`.
+
+| | |
+|---|---|
+| Endpoint | `https://aprender-mcp-decide.us-east.true-mcp.com/mcp` (POST only) |
+| Auth | Off, by the owner's decision (the cost risk was accepted). No token or header is needed |
+| Tier | 3,008 MB, arm64 |
+| Task | Abortion stance (TweetEval abortion target, "legalization of abortion"), labels `none`, `against`, `favor` |
+| Model | `laya-stance-64.apr`, sha256 `24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a` |
+
+### Connecting an MCP client
+
+POST JSON-RPC to the endpoint. The server is stateless:
+- a bare `tools/call` works with no `initialize`;
+- a full client (`initialize` → `notifications/initialized` → `tools/list` → `tools/call`) works too.
+
+`GET /mcp` is answered by the pmcp.run edge with 405, not by this server. `GET /health` is the
+platform's answer, and it does not reflect whether MCP calls succeed.
+
+```
+POST https://aprender-mcp-decide.us-east.true-mcp.com/mcp
+content-type: application/json
+accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"classify","arguments":{"texts":["Every life deserves protection from conception. #prolife"]}}}
+```
+
+The tool result text is JSON:
+- `model`: `artifact_sha256`, `recipe_id`, `method`, `base`;
+- `labels`;
+- one entry in `results` per text: `label`, `probabilities` in label order, `tokens`, `truncated`.
+
+That tweet returned `against` (none 0.072, against 0.835, favor 0.094). An off-topic text reads `none`.
+
+### Identity check
+
+Every response carries `model.artifact_sha256`. It must equal
+`24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a`, the pin the function
+verifies before it parses a byte. `examples/probe.rs --expect-sha256 <that>` checks it, together
+with the single `classify` tool and the label order.
+
+### Limits on the 3 GB tier
+
+The door refuses anything over these limits (`contracts/decide-tool-boundary-v1.yaml` 2.0.0):
+- **2 texts** or fewer per call.
+- **120 built tokens** or fewer per call. One short tweet builds about 65-72 tokens, so two real
+  sentences often do not fit in one call.
+- **Cold call: about 25-31 s.** The first call after idle loads 846 MB from S3.
+  - The 4 verified cold samples measured 24.2-29.4 s at the client.
+  - An external cold call took 31.05 s end to end and still answered 200.
+  - Budget for a response near or over 30 s, and retry on a gateway timeout.
+- **Warm call: about 1.4-2.2 s.**
+
+The 10,240 MB target tier (1024 tokens, 8 texts) returns when the account's memory limit is raised.
+
+### Claim scope
+
+The served model passed laya-finetune-gate-v1. Its claim (`eval_set.claim`) is:
+
+> The gate now certifies margin and calibration on held-out data drawn like the tenant's shots.
+> It does NOT certify robustness to a shifted input population.
+
+It is in-distribution calibration, not shift robustness. On the SemEval-2016 test split, the reported
+shift probe measured ece_post 0.1896. That would fail the gate's 0.10 clause if it were one.
+
 ## Build
 
 ```bash
