@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 9/12 plans executed in 10 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; D-18 live stance deploy deferred pending the calibration spike)
+**Plans:** 10/12 plans executed in 10 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; D-18 live stance deploy deferred pending the calibration spike)
 
 Plans:
 **Wave 1**
@@ -680,7 +680,7 @@ Plans:
 
 **Wave 8** *(blocked on Wave 7 completion)*
 
-- [ ] 08-10-PLAN.md — cargo-pmcp wrong-package decision (checkpoint, resolver executed on this workspace) + fail-closed, identity-checked deploy recipes that refuse any non-eligible artifact — proven offline against the tiny fixture (AWS CALLS: 0)
+- [x] 08-10-PLAN.md — cargo-pmcp wrong-package decision (checkpoint, resolver executed on this workspace) + fail-closed, identity-checked deploy recipes that refuse any non-eligible artifact — proven offline against the tiny fixture (AWS CALLS: 0) (shared-crates-root: root crates -> crates/aprender-mcp-decide-lambda, cargo-pmcp 0.24.3 @ SDK e0561f8c9; setfit-train crates root restored byte-identical)
 
 **Wave 9** *(blocked on Wave 8 completion)*
 
