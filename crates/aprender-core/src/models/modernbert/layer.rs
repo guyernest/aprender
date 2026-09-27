@@ -63,10 +63,18 @@ pub fn gelu_exact(x: f32) -> f32 {
     (0.5 * x * batuta_common::math::erfc_precise(-x / std::f64::consts::SQRT_2)) as f32
 }
 
-/// RoPE `inv_freq = 1 / theta^(2p / hd)` for `p < hd / 2`, narrowed to f32 (torch order).
+/// RoPE `inv_freq[p]` for `p < hd / 2`, bit for bit as transformers computes it in f32:
+/// `1.0 / (theta ** (arange(0, hd, 2).float() / hd))` — the power rounded to f32 FIRST,
+/// then an f32 reciprocal. Rounding `1 / theta^(2p / hd)` once from f64 is off by one ULP
+/// on about a quarter of the frequencies, and `pos * inv_freq` carries that into every
+/// sin / cos of the row (debug session laya-rescore-drift).
 pub(crate) fn rope_inv_freq(theta: f64, hd: usize) -> Vec<f32> {
     (0..hd / 2)
-        .map(|p| (1.0 / theta.powf((2 * p) as f64 / hd as f64)) as f32)
+        .map(|p| {
+            let e = (2 * p) as f32 / hd as f32;
+            let pw = f64::from(theta as f32).powf(f64::from(e)) as f32;
+            1.0f32 / pw
+        })
         .collect()
 }
 
@@ -111,8 +119,9 @@ impl RopeTable {
 
 /// Rotate-half RoPE in place on `[l, heads * hd]`, position = row index.
 ///
-/// torch order: `inv_freq = 1 / theta^(2p / hd)` narrowed to f32, `angle = pos * inv_freq`
-/// in f32, `(x_p, x_{p+hd/2}) -> (x_p cos - x_{p+hd/2} sin, x_{p+hd/2} cos + x_p sin)`.
+/// torch order: `inv_freq = 1 / f32(theta^(2p / hd))` in f32 ([`rope_inv_freq`]),
+/// `angle = pos * inv_freq` in f32,
+/// `(x_p, x_{p+hd/2}) -> (x_p cos - x_{p+hd/2} sin, x_{p+hd/2} cos + x_p sin)`.
 ///
 /// # Errors
 ///
@@ -369,7 +378,7 @@ impl ModernBertLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::{attention, gelu_exact, key_range, layer_norm};
+    use super::{attention, gelu_exact, key_range, layer_norm, rope_inv_freq};
     use crate::models::modernbert::ModernBertError;
 
     /// `gelu_exact` matches `0.5 * x * (1 + erf(x / sqrt 2))` to 1e-7. Reference values
@@ -391,6 +400,72 @@ mod tests {
             assert!(
                 d <= 1e-7,
                 "gelu_exact({x}) = {got}, reference {want}, |d| = {d:e}"
+            );
+        }
+    }
+
+    /// transformers 5.17's `inv_freq = 1.0 / (base ** (arange(0, dim, 2).float() / dim))`
+    /// on torch 2.14 CPU, as f32 bit patterns (captured 2026-09-26, debug session
+    /// laya-rescore-drift). torch rounds the power to f32 and then takes an f32
+    /// reciprocal; the single-rounding `f32(1 / theta^e)` differs from these by one
+    /// ULP at 8 of 32 (theta 160000) and 10 of 32 (theta 10000) frequencies, which
+    /// puts up to ~32 ULP into the sin / cos tables of a 128-token row.
+    #[test]
+    fn rope_inv_freq_is_torch_bitwise() {
+        #[rustfmt::skip]
+        const CASES: [(f64, usize, &[u32]); 4] = [
+            (
+                160_000.0,
+                64,
+                &[
+                    0x3f80_0000, 0x3f30_0a3a, 0x3ef2_1c1f, 0x3ea6_7d01, 0x3e64_f92e, 0x3e1d_7475,
+                    0x3dd8_8cb4, 0x3d94_e963, 0x3d4c_cccd, 0x3d0c_d4fb, 0x3cc1_b019, 0x3c85_30ce,
+                    0x3c37_2dbf, 0x3bfb_ed88, 0x3bad_3d5e, 0x3b6e_4237, 0x3b23_d70a, 0x3ae1_54c5,
+                    0x3a9a_f347, 0x3a55_1ae3, 0x3a12_8aff, 0x39c9_8ad3, 0x398a_977e, 0x393e_9b60,
+                    0x3903_126f, 0x38b4_43d0, 0x3877_eba6, 0x382a_7be8, 0x37ea_77ff, 0x37a1_3bdc,
+                    0x375d_bf30, 0x3718_7c4d,
+                ],
+            ),
+            (
+                10_000.0,
+                64,
+                &[
+                    0x3f80_0000, 0x3f3f_f911, 0x3f0f_f59a, 0x3ed7_e89b, 0x3ea1_e89b, 0x3e72_d423,
+                    0x3e36_1887, 0x3e08_8d77, 0x3dcc_cccd, 0x3d99_940d, 0x3d66_55c2, 0x3d2c_ba15,
+                    0x3d01_86e3, 0x3cc2_434f, 0x3c91_ad39, 0x3c5a_7bf2, 0x3c23_d70a, 0x3bf5_b9b0,
+                    0x3bb8_449c, 0x3b8a_2e77, 0x3b4f_3e38, 0x3b1b_690d, 0x3ae9_1528, 0x3aae_c98e,
+                    0x3a83_126f, 0x3a44_948c, 0x3a13_6a16, 0x39dd_1725, 0x39a5_cb60, 0x3978_a815,
+                    0x393a_7753, 0x390b_d472,
+                ],
+            ),
+            (
+                160_000.0,
+                16,
+                &[
+                    0x3f80_0000, 0x3e64_f92e, 0x3d4c_cccd, 0x3c37_2dbf, 0x3b23_d70a, 0x3a12_8aff,
+                    0x3903_126f, 0x37ea_77ff,
+                ],
+            ),
+            (
+                10_000.0,
+                16,
+                &[
+                    0x3f80_0000, 0x3ea1_e89b, 0x3dcc_cccd, 0x3d01_86e3, 0x3c23_d70a, 0x3b4f_3e38,
+                    0x3a83_126f, 0x39a5_cb60,
+                ],
+            ),
+        ];
+        for (theta, hd, want) in CASES {
+            let got: Vec<u32> = rope_inv_freq(theta, hd)
+                .iter()
+                .map(|f| f.to_bits())
+                .collect();
+            let bad: Vec<usize> = (0..want.len())
+                .filter(|&p| got.get(p) != Some(&want[p]))
+                .collect();
+            assert!(
+                got.len() == want.len() && bad.is_empty(),
+                "theta {theta} hd {hd}: inv_freq differs from torch at p = {bad:?}"
             );
         }
     }
