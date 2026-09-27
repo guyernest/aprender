@@ -53,6 +53,30 @@ does not enable that feature.
 - `contracts/laya-parity-v1.yaml` — torch -> `.apr` -> Rust parity ladder
   (ids and markers exact, logits <= 1e-4, probabilities <= 1e-5, argmax exact)
 - `contracts/decide-apr-v1.yaml` — the task schema and the marker rule
+- `contracts/laya-finetune-gate-v1.yaml` — the fine-tune gate the verifier decides
+
+**Two different probability bars.** The FIXTURE bars are the parity ladder's: 1e-5 on
+probabilities and 1e-4 on logits, applied to fixture rows only (the spike-025 rows and the
+tiny fixtures). The PACK/VERIFY bar is separate: `pack_laya` re-scores every eval row of the
+packed artifact (and of the declared base) and holds each set to
+`max(1e-5, 4 x noise)`. Here `noise` is torch fp32's own distance from a float64 forward of the
+same checkpoint. `verify::rescore_bounds` recomputes it from the hash-bound
+`rescore-noise.json`, and a derived bound above the 1e-3 ceiling is refused. A run without that
+record is held to the 1e-5 floor, so omitting it can only tighten the check. Argmax stays exact.
+Every number behind the bar was measured on aarch64 (Apple M4). x86_64 is unmeasured
+(laya-parity-v1 `qa_gate`).
+
+**Seed selection.** A production run trains seeds 13, 17 and 23 and ships the median-ECE
+seed: rank key `floor(ece_post x 10000)`, ties to the smaller seed. `verify` does not trust the
+report's choice. `check_seed_selection` recomputes every seed's metrics from its hash-bound
+`seeds/seed-<s>/eval-probs.json`, re-derives the median, and binds the shipped checkpoint and
+eval file by sha256. A run without `seed_selection` (the 1.x rule) is never deploy-eligible, but
+it is refused `SeedPolicyMissing` only after its gate, so a failing legacy run still reports
+`GateFailed`.
+
+A passing gate certifies margin and calibration on held-out data drawn like the tenant's
+shots. It does not certify robustness to a shifted input population; see the gate contract's
+`eval_set.claim`. The optional shift probe is reported and recomputed, never gated.
 
 ## Tests
 

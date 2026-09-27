@@ -2209,9 +2209,9 @@ bindings:
   equation: seed_selection_median
   module_path: aprender_decide::verify
   function: check_seed_selection
-  signature: 'pending: plan 08-15'
-  status: pending
-  notes: 'A3 (1.4.0, 2026-09-27): the median-ECE seed ships by floor(ece_post x 10000), ties to the smaller seed; pass is the shipped seed''s pass. Rust re-derives it from seeds/seed-<s>/eval-probs.json (plan 08-15, authoritative); the Python selection is scripts/laya_train/gate.py select_median_seed (plan 08-14).'
+  signature: 'fn check_seed_selection(inputs: &PackInputs, data: &DataDir, policy: &VerifyPolicy) -> Result<Option<i64>, VerifyError>'
+  status: implemented
+  notes: 'A3 (1.4.0, 2026-09-27): the median-ECE seed ships by floor(ece_post x 10000), ties to the smaller seed; pass is the shipped seed''s pass. Rust re-derives it from seeds/seed-<s>/eval-probs.json (plan 08-15, authoritative: every seed recomputed, the median of the RECOMPUTED ECEs via select_median_seed, the shipped checkpoint and eval file bound by sha256; FALSIFY-LAYA-GATE-011 lib tests); the Python selection is scripts/laya_train/gate.py select_median_seed (plan 08-14).'
 - contract: laya-finetune-gate-v1.yaml
   equation: eval_set_in_distribution
   module_path: justfile
@@ -2223,9 +2223,9 @@ bindings:
   equation: shift_probe_reported
   module_path: aprender_decide::verify
   function: check_shift_probe
-  signature: 'pending: plan 08-15'
-  status: pending
-  notes: 'A2 (1.4.0, 2026-09-27): shift-probe metrics recomputed in Rust from hash-bound files, never re-scored, never a gate clause. Implemented by plan 08-15 (the Python writer lands in 08-14).'
+  signature: 'fn check_shift_probe(inputs: &PackInputs, data: &DataDir, policy: &VerifyPolicy) -> Result<(), VerifyError>'
+  status: implemented
+  notes: 'A2 (1.4.0, 2026-09-27): shift-probe metrics recomputed in Rust from hash-bound files, never re-scored, never a gate clause. Implemented by plan 08-15 (FALSIFY-LAYA-GATE-013 lib tests; the Python writer landed in 08-14).'
 - contract: laya-finetune-gate-v1.yaml
   equation: recipe_before_scores
   module_path: justfile
@@ -2324,14 +2324,14 @@ bindings:
   function: verify_run
   signature: 'fn verify_run(apr: &Path, run: &Path, data: &Path, base: &Path) -> Result<DeployEligible, VerifyError>'
   status: pending
-  notes: 'Rust re-score of every eval row of the PACKED artifact (and of the base on the zero-shot rows) within bound(c, s), floor 1e-5 (laya-parity-v1 A1), argmax exact, at pack and verify time. Implemented by plan 08-09.'
+  notes: 'Rust re-score of every eval row of the PACKED artifact (and of the base on the zero-shot rows) at pack and verify time, argmax exact. Since plan 08-15 each set is held to ITS OWN bound(c, s) = max(1e-5, pack_rescore_noise_k x noise(c, s)) from verify::rescore_bounds (laya-parity-v1 A1), the floor 1e-5 for both sets when the run carries no rescore-noise.json; RescoreDrift names the bound used. Implemented by plan 08-09; bound per set by plan 08-15.'
 - contract: laya-parity-v1.yaml
   equation: rescore_noise_reference
   module_path: aprender_decide::verify
   function: rescore_bounds
-  signature: 'pending: fn rescore_bounds (plan 08-15)'
-  status: pending
-  notes: 'A1 (2026-09-27): noise(c, s) = max |p_torch32 - p_f64| per checkpoint and set, from the hash-bound rescore-noise.json record. Plan 08-14 writes the record (train.py float64 forward, control 0.0, every row); plan 08-15 RECOMPUTES it in Rust and derives bound(c, s) = max(floor, k x noise), refusing an edited, mismatched, over-ceiling or argmax-flipping record.'
+  signature: 'fn rescore_bounds(inputs: &PackInputs, ft_probs: &[Vec<f32>], zs_probs: &[Vec<f32>], policy: &VerifyPolicy) -> Result<[RescoreBound; 2], VerifyError>'
+  status: implemented
+  notes: 'A1 (2026-09-27): noise(c, s) = max |p_torch32 - p_f64| per checkpoint and set, from the hash-bound rescore-noise.json record. Plan 08-14 writes the record (train.py float64 forward, control 0.0, every row); plan 08-15 RECOMPUTES it in Rust (bit-for-bit equal to Python''s on a lifecycle run dir, tests/python_records.rs) and derives bound(c, s) = max(floor, k x noise), refusing an edited, mismatched, over-ceiling or argmax-flipping record; no record = the floor. Evidence: FALSIFY-LAYA-PARITY-006 lib tests.'
 - contract: laya-parity-v1.yaml
   equation: window_mutation
   module_path: aprender::models::modernbert

@@ -27,6 +27,12 @@
 //!
 //! A contract vector with no entry in [`expected`] FAILS the test: a new vector needs a
 //! declared refusal before it can be accepted as fail-closed.
+//!
+//! UNDER laya-finetune-gate-v1 1.4.0 / laya-parity-v1 2.0.0 (plan 08-15) THE TABLE IS UNCHANGED.
+//! Neither run dir carries `rescore-noise.json`, so both re-scores are held to the A1 floor
+//! (`pack_rescore_probs_abs`, 1.0e-5), which this test ASSERTS and prints as the bound used; and
+//! neither recipe carries `seed_selection`, so the legacy rule applies, whose `SeedPolicyMissing`
+//! comes only after the gate and is never reached by either vector.
 
 use aprender_decide::artifact::artifact_sha256_hex;
 use aprender_decide::pack::pack_run_dir;
@@ -171,6 +177,19 @@ fn check_refusal(
     match (want, e) {
         (Expected::GateFailedEcePost, VerifyError::GateFailed(g)) => {
             assert_eq!(e.exit_code(), 3, "{side}");
+            let floor = policy.rescore_probs_abs.to_bits();
+            assert_eq!(
+                g.rescore_bound.to_bits(),
+                floor,
+                "{side}: no record -> floor"
+            );
+            assert_eq!(
+                g.zs_rescore_bound.to_bits(),
+                floor,
+                "{side}: no record -> floor"
+            );
+            assert_eq!((g.noise, g.zs_noise), (None, None), "{side}: no record");
+            assert_eq!(g.shipped_seed, None, "{side}: legacy recipe");
             assert_eq!(g.clauses, vec![GateClause::EcePost], "{side}: clause set");
             let reported = rep["fine_tuned"]["ece_post"].as_f64().expect("ece_post");
             assert!(
@@ -192,11 +211,17 @@ fn check_refusal(
             VerifyError::RescoreDrift {
                 which: ProbsWhich::FineTuned,
                 max_abs,
+                bound,
                 ..
             },
         ) => {
             assert_eq!(e.exit_code(), 2, "{side}");
-            assert!(*max_abs > policy.rescore_probs_abs, "{side}: max_abs");
+            assert_eq!(
+                bound.to_bits(),
+                policy.rescore_probs_abs.to_bits(),
+                "{side}: no record -> the floor is the bound used"
+            );
+            assert!(*max_abs > *bound, "{side}: max_abs");
         }
         (want, other) => panic!(
             "{side}: expected {want:?}, got {} {other} — STOP RULE: an undocumented refusal",
@@ -248,6 +273,18 @@ fn demo_vectors_are_refused_fail_closed() {
         );
         let rep = report(run);
         assert_eq!(rep["pass"], serde_json::Value::Bool(false), "{short}: pass");
+        // 1.4.0: no noise record (-> the floor) and no seed_selection (-> the legacy rule).
+        assert!(
+            rep.get("rescore_noise_sha256").is_none() && !run.join("rescore-noise.json").exists(),
+            "{short}: a 1.x vector carries no rescore-noise record"
+        );
+        let recipe: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(run.join("recipe.json")).expect("recipe.json"))
+                .expect("parse recipe.json");
+        assert!(
+            recipe.get("seed_selection").is_none(),
+            "{short}: a 1.x vector carries no seed_selection"
+        );
 
         // (2) pack_for_serving into a scratch dir: the documented refusal, nothing written.
         let out_dir = tempfile::TempDir::new().expect("tempdir");
@@ -255,6 +292,14 @@ fn demo_vectors_are_refused_fail_closed() {
             .expect_err("a fail-closed vector must never pack");
         let line = check_refusal("pack", want, &pack_err, &rep, &policy);
         println!("VECTOR {short} pack: {line}");
+        println!(
+            "VECTOR {short} bound used: fine_tuned={} zero_shot={} (the A1 floor: no rescore-noise.json)",
+            policy.rescore_probs_abs,
+            match &pack_err {
+                VerifyError::GateFailed(g) => g.zs_rescore_bound.to_string(),
+                _ => "not reached".to_string(),
+            }
+        );
         let left: Vec<_> = std::fs::read_dir(out_dir.path())
             .expect("read scratch dir")
             .collect();
