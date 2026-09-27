@@ -274,3 +274,66 @@ not fixed by it.
   the template. The provider that pairs with an authenticated pmcp.run function is plan 08-11's
   auth decision. It is not assumed here.
 
+
+## From plan 08-11
+
+### D-ITEM-08-11-A: the D-18 live deploy and the live `accepted_region_cold` falsification are DEFERRED (option 3; HOLD decided by the user, 2026-09-26)
+
+- status: open
+- **Deferred:** two things. (1) The D-18 live deploy of a trained decision model on pmcp.run. (2) The
+  live falsification of decide-tool-boundary-v1 `accepted_region_cold`, FALSIFY-DECIDE-TOOL-009, which
+  stays `LIVE-PENDING`. The user decided HOLD at the 08-11 go/no-go checkpoint, choosing the
+  `hold-no-aws` option. No AWS or pmcp.run call of any kind was made, read-only calls included.
+  The record is `08-DEPLOY-EVIDENCE.json` (`outcome: hold`, `decided_by: human`, `readiness: null`).
+- **Why:** the D-19 demo failed laya-finetune-gate-v1 under both declared recipes. Both runs are
+  fail-closed vectors (`d0f4e40d…` fixed_epochs, `3d4b91da…` early_stopping), and 08-09 refuses both.
+  No artifact passes `just laya-verify`, so 08-10's AWS-writing recipes would refuse anything that
+  exists in this phase.
+- **Next direction (user, 2026-09-26):** pursue a deployable model next to confirm the direction:
+  first the calibration spike, then a declared gate run. The procedure below is the path once a
+  declared run passes.
+- **Comes first:** `.planning/todos/pending/spike-laya-calibration-slice-and-temperature-cap.md`. Whatever
+  it recommends is declared in laya-finetune-gate-v1 BEFORE the next gate run is read (D-07).
+- **Re-open condition:** a DECLARED run passes laya-finetune-gate-v1 unchanged (gate_max_ece 0.10),
+  and `just laya-verify` prints `deploy_eligible true` on its exact `.apr`. The deploy is then a NEW
+  plan, not a re-run of 08-11.
+- **Decisions still open for that run:**
+  - **Auth posture.** Auth on was recommended for a 10 GB function (RESEARCH §Security Domain V2:
+    an open 10 GB function is a cost-amplification vector). `laya-deploy-config` takes `auth` as a
+    required argument, and the provider that pairs with `auth=on` is still undecided (D-ITEM-08-10-D).
+  - **Account and memory facts, still unmeasured.** hold-no-aws recorded no readiness facts.
+    - RESEARCH A10: the `ze-kasher-dev` profile resolves, and pmcp.run functions are visible in it.
+    - RESEARCH A2: pmcp.run accepts 10,240 MB.
+    - The account has not been checked for a function whose name contains `decide` or `laya`.
+    - Measure all three with read-only calls (`aws sts get-caller-identity`,
+      `aws lambda list-functions`, `aws lambda get-account-settings`) before that plan's first write.
+  - **The live-side assumptions of D-ITEM-08-10-C** (function name equals server id,
+    `[deployment] endpoint` location, GET health with auth on, compile-log capture, log-group
+    naming).
+- **Procedure it will follow, in order, with 08-10's recipes:**
+  1. `just laya-weights-bucket`
+  2. `just laya-upload <apr> <run> <data> <base> <server>`. This is gated by `laya-verify` before
+     any AWS call.
+  3. `just laya-deploy-config <apr> <auth>`, with the auth posture decided above.
+  4. `just laya-deploy <apr> <run> <data> <base> <server>`. The recipe runs these steps:
+     1. eligibility through `laya-verify`;
+     2. the resolver proof, pinned to the installed cargo-pmcp;
+     3. the deterministic compile-log identity check;
+     4. the scoped grant (`laya-grant`);
+     5. the GET health body naming the package;
+     6. the live identity probe.
+     On an identity failure, it runs containment (`laya-teardown`).
+  5. `just laya-deploy-verify <apr> <server>`. The cold-sample rules:
+     - bump the config before each cold sample;
+     - make the maximal `tools/call` the first POST;
+     - take at least 2 CONCENTRATED and 2 DISTRIBUTED samples;
+     - prove each one cold by CloudWatch `performed_load=true`;
+     - require every sample to be under 30000 ms.
+  6. On any breach, record the samples unaltered and stop at a blocking-human choice between
+     three responses:
+     - lower the contract-owned budget through a gap plan (D-10);
+     - defer while serving;
+     - defer and contain.
+- **Full pre-revision text:** `git show 59d9ed07f:.planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-11-PLAN.md`
+  (Tasks 2-4: deploy with identity asserted, both cold shapes on every sample, the exceeded-region
+  response, the outcome record).
