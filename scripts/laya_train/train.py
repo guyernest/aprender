@@ -840,7 +840,8 @@ def main(argv=None):
         fmt_ms = lambda key: "n/a" if vr["mean"][key] is None else "%.4f ± %.4f" % (vr["mean"][key], vr["sd"][key])  # noqa: E731
         log("VARIANCE %s: macro_f1 %s | f_avg %s | ece_post %s | margin %s -- information; seed %d ships (median)"
             % (vr["label"], fmt_ms("macro_f1"), fmt_ms("f_avg"), fmt_ms("ece_post"), fmt_ms("margin"), shipped))
-        seeds_block = {"declared": seed, "n": len(seeds), "label": contract.seeds_label(len(seeds)),
+        seeds_block = {"declared": seed, "n": len(seeds),
+                       "label": contract.seeds_label(len(seeds), selection["policy"]),
                        "policy": selection["policy"], "shipped": shipped, "per_seed": per_seed}
 
     # A1: the float64 re-score noise record of the shipped checkpoint and the base (after the gate is decided).

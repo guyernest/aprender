@@ -183,7 +183,8 @@ pub struct GateSeeds {
     pub declared: i64,
     /// Seeds run.
     pub n: u64,
-    /// `single seed` or `mean ± sd over N seeds`.
+    /// `single seed`, `median-ECE seed of N seeds` (1.4.0 median rule) or the legacy
+    /// multi-seed `mean ± sd over N seeds` (laya-finetune-gate-v1 `seed_policy.rule`).
     pub label: String,
 }
 

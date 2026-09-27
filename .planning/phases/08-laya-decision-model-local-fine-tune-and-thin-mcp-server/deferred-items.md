@@ -358,7 +358,15 @@ not fixed by it.
 
 ### D-ITEM-08-14-A: the plan's median seeds label disagrees with the contract
 
-- status: open
+- status: resolved
+- **Resolved 2026-09-27 (plan 08-15, before 08-16's declared run):** the contract now declares a label
+  that names what ships. laya-finetune-gate-v1 `seed_policy.rule` and `gate_report_schema.seeds`: gate-report
+  `seeds.label` is "single seed" for one seed, "median-ECE seed of N seeds" under seed selection, and the 1.x
+  literal "mean ± sd over N seeds" only for a legacy multi-seed run; variance-report.json keeps "mean ± sd over
+  N seeds" (that file does report the mean and sd). `contract.seeds_label(n, policy)`, train.py and
+  lifecycle.py `check_median_run` follow it. The Rust verifier does not read `seeds.label` (it re-derives the
+  shipped seed from the per-seed files instead), so nothing there had to change. pv diff: identical, no
+  version bump; `just laya-train-selftest` green; `just laya-fixtures` byte-identical.
 - **What:** 08-14-PLAN Task 1 asked `contract.seeds_label` to return "median-ECE seed of 3 seeds" for the
   median policy. laya-finetune-gate-v1 (as amended by 08-13) fixes the label in two places:
   `seed_policy.rule` ("Under both rules gate-report `seeds.label` is ... else \"mean ± sd over N seeds\"")
@@ -370,7 +378,13 @@ not fixed by it.
 
 ### D-ITEM-08-14-B: FALSIFY-LAYA-GATE-006's "legacy variance seeds" clause has no Python leg left
 
-- status: open
+- status: resolved
+- **Resolved 2026-09-27 (plan 08-15, before 08-16's declared run):** the clause is RETIRED in the
+  GATE-006 prediction with its reason recorded there. No code path can exercise it (no legacy multi-seed run
+  is written since 1.4.0, and a legacy run carries no per-seed record from which a verifier could tell which
+  seed shipped), and it decides nothing a verifier accepts (every legacy run is refused SeedPolicyMissing once
+  its gate passes, FALSIFY-LAYA-GATE-012). The prediction now claims what is tested: legacy single-seed ships
+  seed 13; the median run ships the median. `implemented_by` points at the retirement. pv diff: identical.
 - **What:** the GATE-006 prediction still says "with legacy variance seeds 13/17/23 the shipped
   checkpoint is seed 13 even when another seed scores higher". Since 08-14, every three-seed run carries
   `seed_selection` and ships the median, so the trainer no longer writes a legacy MULTI-seed run, and

@@ -215,7 +215,7 @@ def check_median_run(single, multi):
     if [r["seed"] for r in per] != seeds or sb.get("n") != len(seeds) or sb.get("policy") != decl["policy"]:
         fail("gate report seeds block: per_seed seeds %s, n %s, policy %s" % ([r.get("seed") for r in per],
                                                                               sb.get("n"), sb.get("policy")))
-    if sb.get("label") != contract.seeds_label(len(seeds)) or sb.get("declared") != seeds[0]:
+    if sb.get("label") != contract.seeds_label(len(seeds), decl["policy"]) or sb.get("declared") != seeds[0]:
         fail("gate report seeds label / declared %s" % {k: sb.get(k) for k in ("label", "declared")})
     for r in per:
         if r["rank_key"] != gate.rank_key(r["ece_post"], decl["rank_scale"]):

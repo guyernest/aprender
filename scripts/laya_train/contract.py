@@ -287,10 +287,18 @@ def resolve_seeds(n, variant="production"):
     return pool[:n]
 
 
-def seeds_label(n):
-    """gate-report seeds.label: the literal the contract declares under BOTH seed rules
-    (seed_policy.rule, gate_report_schema.seeds)."""
-    return "single seed" if n == 1 else "mean ± sd over %d seeds" % n
+def seeds_label(n, policy=None):
+    """The seeds label literal the contract declares (seed_policy.rule, gate_report_schema.seeds): "single seed"
+    for one seed; "median-ECE seed of N seeds" for gate-report seeds.label under the median rule (policy
+    "median_ece": ONE seed ships, never a mean); otherwise "mean ± sd over N seeds" -- a legacy multi-seed gate
+    report, and variance-report.json under both rules (that file does report the mean and sd)."""
+    if n == 1:
+        return "single seed"
+    if policy == "median_ece":
+        return "median-ECE seed of %d seeds" % n
+    if policy is not None:
+        raise ValueError("seeds_label: unknown seed policy %r" % (policy,))
+    return "mean ± sd over %d seeds" % n
 
 
 def probe_policy():

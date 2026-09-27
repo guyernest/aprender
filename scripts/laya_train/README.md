@@ -125,8 +125,9 @@ gate passes only if that seed passes BOTH clauses; the other two are reported in
 (`seed_policy.honesty`): the median is selected WITH eval labels.** Median-of-3 is not best-of-3 — the
 shipped ECE is the middle draw, not the minimum — but it is a selection on the gate eval set and is
 recorded as one; it was chosen because spike 027 measured MPS training as not bitwise reproducible
-(one replicate turned a FAIL into a PASS). The seeds label stays the contract's literal, `mean ± sd over
-3 seeds`. The synthetic-fixture variant also runs the **legacy** rule with `--seeds 1` (its default): no
+(one replicate turned a FAIL into a PASS). The gate-report seeds label is the contract's literal `median-ECE seed of 3
+seeds` (one seed ships, never a mean); `variance-report.json` keeps `mean ± sd over 3 seeds`, because it
+does report the mean and sd. The synthetic-fixture variant also runs the **legacy** rule with `--seeds 1` (its default): no
 `seed_selection`, label `single seed`, the declared seed 13 ships — such a run is never deploy-eligible
 under 1.4.0 (`seed_policy.legacy_rule`).
 
