@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-15-PLAN.md
-last_updated: "2026-09-27T18:05:00.717Z"
+stopped_at: Completed 08-16-PLAN.md
+last_updated: "2026-09-27T18:52:42.827Z"
 last_activity: 2026-09-27
-last_activity_desc: 08-15 completed - Rust verifier enforces A1/A2/A3 (noise-referenced bound recomputed bit-for-bit from the float64 record, median seed re-derived, shift probe recomputed, SeedPolicyMissing after the gate); both 1.x vectors keep their refusals on real weights; D-ITEM-08-14-A/B resolved
-state_head: 755df9bdd4aa19e49a2573030b952889ffef262d
+last_activity_desc: 08-16 completed - the ONE declared s64 gate run PASSED the unchanged gate (median seed 17 of 13/17/23, margin 0.2217, ece_post 0.0443 on 459 in-distribution rows); models/decide/laya-stance-64.apr sha256 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a deploy_eligible true, stdio real-model leg passed, FALSIFY-LAYA-GATE-014 armed green
+state_head: 07cfaee06cfa04ebd5dd13026520985f89d631bc
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 110
-  completed_plans: 106
+  completed_plans: 107
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 14 of 18 complete (08-01..08-11, 08-13, 08-14 and 08-15; next: 08-16, Wave 13 - the ONE declared s64 gate run; 08-12 close-out moved to Wave 16)
-Status: Ready to execute 08-16 (Wave 13) - 08-15 made the Rust verifier enforce A1/A2/A3 (3cfa83e1b, 6389ec3d5, 3ef728427; SUMMARY 755df9bdd): verify::rescore_bounds derives max(1e-5, 4 x noise) per set from rescore-noise.json (noise recomputed, equal to Python's to the bit on a LAYA_LIFECYCLE_KEEP run dir), floor without a record, ceiling 1e-3 refused; check_seed_selection re-derives the median-ECE seed from the per-seed files (MEDIAN rust=23 python=23) and binds the shipped checkpoint/eval file by sha256; check_shift_probe recomputes the probe (never gated); SeedPolicyMissing comes only after the gate; the 1.x vectors refuse unchanged on real weights at the floor (d0f4e40d RescoreDrift row 59 exit 2, 3d4b91da GateFailed[ece_post] exit 3, 2/2); parity ids 14/14 max |dp| 3.841e-6; tests/demo_run.rs (FALSIFY-LAYA-GATE-014) SKIPs until 08-16 records demo_s64.outcome; D-ITEM-08-14-A/B resolved by contract text (c99761825: seeds.label 'median-ECE seed of N seeds', GATE-006 legacy multi-seed clause retired); models/decide/laya-stance-64 still absent (08-16's one declared run)
+Plan: 15 of 18 complete (08-01..08-11 and 08-13..08-16; next: 08-17, the deploy go/no-go behind the user; 08-12 close-out in Wave 16)
+Status: Ready for 08-17 (user go/no-go) - 08-16 ran the ONE declared demo_s64 run (820d82732; SUMMARY 07cfaee06): just laya-train ... --seeds 3 --epochs 12 on mps:0, rc 0 GATE PASS, recipe 6a5489af..., all three seeds pass (13: margin 0.1439 ece 0.0850; 17: 0.2217 / 0.0443; 23: 0.2478 / 0.0372), median seed 17 ships; noise bounds 3.34e-5 / 5.98e-5 (fine-tuned re-score 1.13e-5: above the 1e-5 floor, within A1); PACKED + laya-verify deploy_eligible true on sha 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a (846196868 bytes), laya-inspect production none/against/favor, stdio real-model leg passed (D-ITEM-08-09-A resolved); demo_s64.outcome gate_pass + outcome_record and 08-GATE-RUN-EVIDENCE.json recorded (pv diff identical, no bump); FALSIFY-LAYA-GATE-014 armed green; claim is in-distribution only (shift probe ece_post 0.1896, reported, not a gate clause); D-ITEM-08-11-A re-open condition met; NO AWS contact
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-27 - 08-15 completed: Rust verifier for A1/A2/A3 (c99761825, 3cfa83e1b, 6389ec3d5, 3ef728427, SUMMARY 755df9bdd); no models/decide/laya-stance-64 exists
+Last activity: 2026-09-27 - 08-16 completed: the one declared s64 gate run PASSED; deploy-eligible artifact 24a44d7e... (820d82732, SUMMARY 07cfaee06)
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -228,6 +228,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P13 | 11min | 3 tasks | 6 files |
 | Phase 08 P14 | 18 min | 3 tasks | 12 files |
 | Phase 08 P15 | 36min | 3 tasks | 18 files |
+| Phase 08 P16 | 43min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -426,6 +427,7 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-15: D-ITEM-08-14-A/B settled by contract text before 08-16 - gate-report seeds.label is 'median-ECE seed of N seeds' under seed selection; GATE-006's legacy multi-seed clause retired with its reason; pv diff identical, no bump
 - [Phase 08]: 08-15: why_quantized implemented as refuse when Rust's rank key of the recomputed ECE differs from Python's reported rank_key (not within 1e-5 of a grid line, which would refuse about 20% of seeds)
 - [Phase 08]: 08-15: SeedPolicyMissing decided after the re-scores and the gate; ThresholdMismatch now fires before the re-scores (check_thresholds precedes the seed check)
+- [Phase 08]: 08-16: the one declared s64 gate run PASSED the unchanged gate (median seed 17, margin 0.2217, ece_post 0.0443 on 459 in-distribution rows); artifact 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a deploy_eligible, stdio leg passed; claim is in-distribution only (shift probe ece_post 0.1896, not a gate clause)
 
 ### Pending Todos
 
@@ -540,8 +542,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-27T18:05:00.505Z
-Stopped at: Completed 08-15-PLAN.md
+Last session: 2026-09-27T18:52:42.635Z
+Stopped at: Completed 08-16-PLAN.md
 Resume file: None
 
 ## Accumulated Context
