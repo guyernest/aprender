@@ -159,7 +159,14 @@ not fixed by it.
 
 ### D-ITEM-08-09-A: the stdio server's real-model leg is DEFERRED (user approval, 2026-09-26)
 
-- status: open
+- status: resolved
+- **Resolved 2026-09-27 (plan 08-16):** the one declared demo_s64 run passed the unchanged gate
+  (gate_pass), and `just laya-verify` printed `deploy_eligible true` on
+  `models/decide/laya-stance-64.apr` (sha256 `24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a`).
+  `a_real_decide_model_classifies_over_live_stdio` then passed on that exact file over live stdio: one
+  tool, served identity `24a44d7e…` equal to the file's sha256 (D-11), K probabilities summing to 1,
+  labels from the task. Record: `08-GATE-RUN-EVIDENCE.json` `e2e_stdio`. Invocation note: the env var
+  must be an ABSOLUTE path, because `cargo test` runs the test with the crate dir as its cwd.
 - **Not run:** `APR_MCP_E2E_DECIDE_MODEL=<real .apr> cargo test -p aprender-mcp-decide --release --test e2e_stdio`,
   test `a_real_decide_model_classifies_over_live_stdio` (crates/aprender-mcp-decide/tests/e2e_stdio.rs).
   It would assert one tool, the served identity equal to the file's sha256 (D-11), K probabilities
@@ -299,6 +306,7 @@ not fixed by it.
 - **Re-open condition:** a DECLARED run passes laya-finetune-gate-v1 unchanged (gate_max_ece 0.10),
   and `just laya-verify` prints `deploy_eligible true` on its exact `.apr`. The deploy is then a NEW
   plan, not a re-run of 08-11.
+- re-open condition MET by plan 08-16 (gate_pass, deploy_eligible true; artifact sha256 `24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a`); owner: plans 08-17/08-18
 - **Decisions still open for that run:**
   - **Auth posture.** Auth on was recommended for a 10 GB function (RESEARCH §Security Domain V2:
     an open 10 GB function is a cost-amplification vector). `laya-deploy-config` takes `auth` as a

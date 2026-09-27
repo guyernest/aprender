@@ -295,10 +295,40 @@ demo_s64:
   spike_baseline_f_avg: '0.608 ± 0.050 (spike 024, 64 shots/class, on the TEST split) — INFORMATIONAL'
   spike_expectation: 'spike 027, same recipe family on the in-distribution set: margin about 0.27 ± 0.04, ECE about 0.057 ± 0.010 — measured on non-gate runs; INFORMATIONAL, never a gate'
   stop_rule: 'ONE declared run under this declaration. A GATE FAIL halts for a human decision; no retuning and no second attempt'
-  outcome: pending
+  outcome: gate_pass
   outcome_values: [pending, gate_pass, gate_fail, pack_refused, aborted]
   outcome_values_note: 'pack_refused = the gate passed but pack/verify refused the exact bytes; aborted = the run ended before gate-report.json existed, so no score was read'
-  outcome_record: pending
+  # ---- OUTCOME OF RECORD (written 2026-09-27 by plan 08-16, AFTER the one declared run was read).
+  # A record only: it copies what the unchanged gate decided. No threshold, bound, seed, recipe or
+  # data value moved (gate_max_ece 0.10, gate_min_macro_f1_margin 0.05, k 4, floor 1.0e-5).
+  outcome_rule: 'The one declared demo_s64 run PASSED the unchanged gate: the shipped (median-ECE) seed 17 has margin 0.2217 (>= 0.05) and ece_post 0.0443 (<= 0.10) on the 459-row in-distribution held-out set, and pack-for-serving and pack_laya verify accepted its exact bytes (deploy_eligible true). CLAIM SCOPE (eval_set.claim): this certifies margin and calibration on held-out data drawn like the tenant''s shots; it does NOT certify robustness to a shifted input population. Beside it, the reported shift probe (SemEval-2016 test split, 280 rows, not a gate clause): ft macro_f1 0.5175, ece_post 0.1896, margin 0.1773 - an ece_post that would fail the 0.10 clause if it were one.'
+  outcome_record:
+    recipe_id: 6a5489afa3462f566b8b12e932a0e35f93d384bea6f37e3154d06ebc186d6f3b
+    run_dir: models/decide/laya-stance-64
+    data_dir: data/decide/tweet-stance-64
+    device_used: 'mps:0'
+    torch_version: 2.14.0
+    shipped_seed: 17
+    per_seed:
+      - {seed: 13, margin: 0.14388969585454808, ece_post: 0.08497409908859817, t_applied: 1.6897854727120853, pass: true}
+      - {seed: 17, margin: 0.22166308511207017, ece_post: 0.044250346606593244, t_applied: 3.4278388080139597, pass: true}
+      - {seed: 23, margin: 0.2478447080838196, ece_post: 0.03715086230005836, t_applied: 4.780707112249848, pass: true}
+    zero_shot_macro_f1: 0.40915946798299746
+    ft_macro_f1: 0.6308225530950676
+    margin: 0.22166308511207017
+    ece_post: 0.044250346606593244
+    failed_clauses: []
+    noise:
+      fine_tuned: {max_abs: 8.33931784072206e-06, bound: 3.335727136288824e-05}
+      zero_shot: {max_abs: 1.495515496430233e-05, bound: 5.982061985720932e-05}
+    rescore_max_abs: 1.1324882507324219e-05
+    zs_rescore_max_abs: 7.3462724685668945e-06
+    rescore_note: 'the fine-tuned re-score max_abs 1.13e-5 is ABOVE the 1.0e-5 absent-record floor and within the noise-referenced bound 3.34e-5 (laya-parity-v1 2.0.0 A1, declared in 08-13 before this run): under the 1.x bar this run would have been refused RescoreDrift'
+    artifact_sha256: 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a
+    artifact_bytes: 846196868
+    shift_probe: {n: 280, ft_macro_f1: 0.5174913481736713, ece_post: 0.18961836482797348, margin: 0.1772740398128529, gate_clause: false}
+    decided_by: gate
+    recorded_on: '2026-09-27'
   outcome_writer: 'plan 08-16 writes outcome and outcome_record after the one declared run; pack/verify must then decide exactly that outcome on the run''s exact bytes (FALSIFY-LAYA-GATE-014)'
 
 run_dir_layout:
