@@ -2204,7 +2204,28 @@ bindings:
   function: laya-train-selftest
   signature: 'just recipe: laya-train-selftest'
   status: pending
-  notes: 'Python-only: the shipped checkpoint is the declared seed, variance seeds report only. The recipe runs LOCALLY (just laya-train-selftest), not in CI. Implemented by plan 08-08.'
+  notes: 'Python-only, LEGACY scope since laya-finetune-gate-v1 1.4.0 (published 2.0.0): a recipe.json without seed_selection ships the declared seed, variance seeds report only; production runs ship the median seed (seed_selection_median). The recipe runs LOCALLY (just laya-train-selftest), not in CI. Implemented by plan 08-08.'
+- contract: laya-finetune-gate-v1.yaml
+  equation: seed_selection_median
+  module_path: aprender_decide::verify
+  function: check_seed_selection
+  signature: 'pending: plan 08-15'
+  status: pending
+  notes: 'A3 (1.4.0, 2026-09-27): the median-ECE seed ships by floor(ece_post x 10000), ties to the smaller seed; pass is the shipped seed''s pass. Rust re-derives it from seeds/seed-<s>/eval-probs.json (plan 08-15, authoritative); the Python selection is scripts/laya_train/gate.py select_median_seed (plan 08-14).'
+- contract: laya-finetune-gate-v1.yaml
+  equation: eval_set_in_distribution
+  module_path: justfile
+  function: laya-train-selftest
+  signature: 'just recipe: laya-train-selftest'
+  status: pending
+  notes: 'A2 (1.4.0, 2026-09-27): Python-only rule (the demo_s64 held-out set: 459 rows, [111, 291, 57], shot overlap refused), plan 08-14. The recipe runs LOCALLY (just laya-train-selftest), not in CI.'
+- contract: laya-finetune-gate-v1.yaml
+  equation: shift_probe_reported
+  module_path: aprender_decide::verify
+  function: check_shift_probe
+  signature: 'pending: plan 08-15'
+  status: pending
+  notes: 'A2 (1.4.0, 2026-09-27): shift-probe metrics recomputed in Rust from hash-bound files, never re-scored, never a gate clause. Implemented by plan 08-15 (the Python writer lands in 08-14).'
 - contract: laya-finetune-gate-v1.yaml
   equation: recipe_before_scores
   module_path: justfile
