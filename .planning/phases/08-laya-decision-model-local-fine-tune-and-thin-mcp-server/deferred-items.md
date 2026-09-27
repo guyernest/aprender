@@ -353,3 +353,30 @@ not fixed by it.
   "x86_64: unmeasured (risk)") against the committed float64 logits in its `results/triad/*.json`; no
   torch is needed on the host. Record the first x86_64 value in laya-parity-v1.
 - **Owner:** a later x86 CI run.
+
+## From plan 08-14
+
+### D-ITEM-08-14-A: the plan's median seeds label disagrees with the contract
+
+- status: open
+- **What:** 08-14-PLAN Task 1 asked `contract.seeds_label` to return "median-ECE seed of 3 seeds" for the
+  median policy. laya-finetune-gate-v1 (as amended by 08-13) fixes the label in two places:
+  `seed_policy.rule` ("Under both rules gate-report `seeds.label` is ... else \"mean ± sd over N seeds\"")
+  and `gate_report_schema.seeds`. The contract wins, so a 1.4.0 median run reports
+  `mean ± sd over 3 seeds`. The shipped seed and policy are carried by `seeds.policy` / `seeds.shipped`.
+- **Settles it:** plan 08-15's Rust reader accepts the contract's literal. If a different label is
+  wanted, it takes a contract amendment declared before 08-16's run, not a trainer change.
+- **Owner:** plan 08-15 (reader), or a human decision before 08-16.
+
+### D-ITEM-08-14-B: FALSIFY-LAYA-GATE-006's "legacy variance seeds" clause has no Python leg left
+
+- status: open
+- **What:** the GATE-006 prediction still says "with legacy variance seeds 13/17/23 the shipped
+  checkpoint is seed 13 even when another seed scores higher". Since 08-14, every three-seed run carries
+  `seed_selection` and ships the median, so the trainer no longer writes a legacy MULTI-seed run, and
+  the lifecycle cannot exercise that clause. 08-14 corrected GATE-006 `implemented_by` to say so. The
+  prediction text is unchanged, because changing it would change what the contract claims.
+- **Settles it:** 08-15's Rust legacy-rule tests (a recipe.json without `seed_selection`). The gitignored
+  1.x run dir `models/decide/tweet-stance-16-var` is a real legacy multi-seed run the verifier can use.
+  Otherwise, a contract edit that retires the clause.
+- **Owner:** plan 08-15 / plan 08-12's binding sweep.
