@@ -438,7 +438,13 @@ not fixed by it.
 
 ### D-ITEM-08-17-B: pmcp.run invokes the function before laya-grant can run
 
-- status: open (blocking 08-17 since resume attempt 2)
+- status: CLOSED 2026-09-27 (08-17 option 1, commits 52a12d777 and 743eb02ed). The S3 read is a
+  `[[iam.statements]]` entry in the deploy config (Allow s3:GetObject on
+  `arn:aws:s3:::<weights-bucket>/decide/aprender-mcp-decide/*`, nothing else). cargo-pmcp 0.24.3 renders it
+  into the role's default policy `pmcp-declared`, and the function DependsOn that policy. pmcp.run's own
+  post-deploy call then LOADED the model (22:55:16Z, load_ms 24554, status success). `laya-grant` is now a
+  read-only check, and the propagation sleep is gone.
+- history (status before the close): open (blocking 08-17 since resume attempt 2)
 - **What:** CloudWatch shows one invocation at 21:12:10Z, right after the deploy and before the grant.
   pmcp.run made it, not the recipe. The load failed at the S3 length lookup (no policy yet), and
   `LoadOnce` re-armed, so the instance is not poisoned. Whatever the platform learned from that call
@@ -477,4 +483,44 @@ not fixed by it.
 - **Why not done here:** it changes the dependency graph of every crate that uses sha2. A re-derived budget
   must follow a measured cold sample, not a projection.
 - **Owner:** a perf plan after the first live cold samples (their `sha_ms` is the measurement).
+
+### D-ITEM-08-17-D: pmcp.run keeps refusing MCP POSTs after its post-deploy invocation (platform finding)
+
+- status: open. This is a platform issue for the user's own pmcp.run. It is not aprender work, and nothing was
+  done about it here.
+- **What:** the pmcp.run edge makes its own post-deploy call to a new function. When that call fails,
+  the edge answers every later `POST /mcp` with `503 {"code":-32004,"message":"Server is in error state"}`
+  and never invokes the function. `GET /health` keeps reporting `{"status":"healthy", ...}` the whole time.
+- **Measured both ways on 2026-09-27:**
+  - **Failed load** (08-17 resume attempt 2, grant not yet in place): the 503 was sticky. It was still
+    there at 22:18:34Z, about 2 minutes after the platform call. Only containment stopped it.
+  - **Successful load** (option 1): the post-deploy call took 24.6 s and returned `success`, and 5
+    follow-up calls succeeded in 1.5-3 ms. The edge still answered 503 at about 22:55:25Z. By 22:56:09Z
+    it was forwarding again (a throttled 500 while contained). The identity probe passed at 22:56:52Z
+    with no redeploy.
+- **Why it matters:**
+  - `/health` cannot see the MCP route's state, so a health-based readiness check passes while every
+    MCP call fails.
+  - For a model server whose first call is a 20+ s cold load, one slow or failed first call can take
+    the server offline at the edge. On a failed load that lasts until something outside the edge clears it.
+- **Recommendation:** open a pmcp.run platform issue:
+  - `/health` should report the error state.
+  - The state should clear once an invocation succeeds, or have a documented TTL or reset.
+  - The post-deploy call's timeout should be documented against the 30 s gateway cap.
+  Until then, the decide recipe retries exactly this refusal, bounded (commit 743eb02ed).
+- **Owner:** the user (pmcp.run platform). Recommend only; do not act.
+
+### D-ITEM-08-17-E: the 3 GB cold load runs 21.4-25.8 s, 650 ms under the gateway cap at worst
+
+- status: open (input to 08-18 and 08-12)
+- **What:** all four cold samples passed (< 30000 ms), which makes the outcome deployed-passed. But:
+  - The worst sample was 29350 ms end-to-end.
+  - load_ms was 21411-25813 against the contract's 17000 ms 3 GB extrapolation.
+  - download_ms was 13494-17831. Parts timed out at 8000 ms and were retried.
+- **Where the budget went:** classify compute came in UNDER its own extrapolation: about 26 ms/token on
+  graviton2 and about 16-17 ms/token on graviton3, against 40. Max Memory Used was 2481-2483 MB, a
+  measured headroom of about 525 MB against the ~350 MB projected. So the S3 download is what uses up the
+  cap, not compute and not memory.
+- **Owner:** 08-18 / 08-12. Candidates: the S3 part-size/concurrency and the 8 s attempt timeout,
+  D-ITEM-08-17-C (software sha256, 2.7-3.5 s), and the 10 GB tier.
 
