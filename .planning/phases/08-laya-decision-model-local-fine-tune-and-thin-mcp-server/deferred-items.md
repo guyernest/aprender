@@ -182,7 +182,8 @@ not fixed by it.
 
 ### D-ITEM-08-09-B: the 1e-5 re-score bar is fragile on real checkpoints (queued, not acted on)
 
-- status: open
+- status: superseded
+- **Superseded by:** laya-parity-v1 A1 (plan 08-13, declared 2026-09-27); implemented by 08-14/08-15.
 - **Found during:** the 08-09 tracer halt and debug session `.planning/debug/resolved/laya-rescore-drift.md`.
 - **Facts:**
   - `pack_rescore_probs_abs` 1e-5 sits at the fp32 noise floor of real Laya checkpoints. Against a
@@ -198,7 +199,8 @@ not fixed by it.
 
 ### D-ITEM-08-09-C: `demo.fail_closed_rule` prose still says both vectors fail on the ece_post clause
 
-- status: open
+- status: resolved
+- **Resolved by:** plan 08-13 rewrote laya-finetune-gate-v1 `demo.fail_closed_rule` to agree with FALSIFY-LAYA-GATE-010 (early_stopping GateFailed[ece_post] exit 3; fixed_epochs RescoreDrift exit 2), under the user's 2026-09-27 instruction to keep both vectors.
 - **What:** laya-finetune-gate-v1 `demo.fail_closed_rule` says pack and verify MUST refuse each vector
   "with the gate recomputed in Rust ... reproducing FAIL on the ece_post clause". Under option A,
   fixed_epochs refuses earlier, with RescoreDrift (still fail-closed, nothing written).
@@ -337,3 +339,17 @@ not fixed by it.
 - **Full pre-revision text:** `git show 59d9ed07f:.planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-11-PLAN.md`
   (Tasks 2-4: deploy with identity asserted, both cold shapes on every sample, the exceeded-region
   response, the outcome record).
+
+## From plan 08-13
+
+### D-ITEM-08-13-A: x86_64 re-score parity is unmeasured
+
+- status: open
+- **What:** x86_64 re-score parity is unmeasured (laya-parity-v1 A1 `qa_gate` risk). Every A1 number is
+  aarch64 (Apple M4 Pro, NEON 8x6 BLIS, Apple libm). The deploy direction is aarch64 to aarch64 (Lambda
+  arm64), but glibc `sinf`/`cosf` differ from Apple libm, and on Lambda only the two-probe replay at
+  `probe_probabilities_abs` runs, so a cross-libm mismatch would refuse the load (fail-closed).
+- **Settles it:** spike 028's x86 procedure (`.planning/spikes/028-laya-packability-noise-floor/README.md`,
+  "x86_64: unmeasured (risk)") against the committed float64 logits in its `results/triad/*.json`; no
+  torch is needed on the host. Record the first x86_64 value in laya-parity-v1.
+- **Owner:** a later x86 CI run.

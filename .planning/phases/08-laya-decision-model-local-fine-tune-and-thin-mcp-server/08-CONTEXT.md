@@ -49,9 +49,11 @@ Not in this phase: a training MCP server, Kev/Jev ports, multilingual or `typed-
 - **D-07:** **Fail-closed gate.** The report must show (a) the fine-tuned model beats zero-shot Laya on `eval.jsonl`
   and (b) post-calibration ECE is under a **declared** ceiling. The deploy recipe **refuses** an artifact without a
   passing report. Thresholds are declared in a contract before any run is read (Phase 5 claims-gate philosophy).
+  — **Amended 2026-09-27 (user, option 1 from spikes 027/028):** the gate's eval set is in-distribution held-out data defined by rule, and the SemEval test split is a reported shift probe, never a gate clause (A2). The gate certifies calibration on data like the shots, NOT robustness to shifted input; this set was chosen after the test split failed the gate twice (spike 027 measured the SemEval train-to-test shift as the cause). Thresholds unchanged (ECE <= 0.10, margin >= 0.05, T in [0.5, 5.0]). See laya-finetune-gate-v1 1.4.0 (published 2.0.0) `eval_set`.
 - **D-08:** **One declared seed by default; `--seeds N` produces a variance report** (mean ± sd). The report states
   "single seed" plainly when N = 1 (spike 024 saw 0.545–0.679 across seeds at 64 shots). The shipped model is always
   the declared seed — **never the best seed on eval**.
+  — **Amended 2026-09-27 (user, option 1 from spikes 027/028):** production runs evaluate the gate over seeds 13/17/23 and ship the median-ECE seed (rank floor(ece_post x 10000), ties to the smaller seed); the gate passes only if that seed passes both clauses, and all three runs are reported. This supersedes "the shipped model is always the declared seed" for production runs (a legacy run without `seed_selection` keeps the declared-seed rule and is never deploy-eligible). The median is selected WITH eval labels and the contract says so: median, not best (A3). See laya-finetune-gate-v1 1.4.0 (published 2.0.0) `seed_policy`.
 
 ### MCP tool surface
 - **D-09:** The predict server exposes a **task-bound `classify`** tool: the question and labels come from the
@@ -88,11 +90,13 @@ Not in this phase: a training MCP server, Kev/Jev ports, multilingual or `typed-
   The .apr also carries (or its manifest references) `task.json`, recipe, calibrated temperatures, gate report and
   sha256 of every input file. An APR schema contract is written in the shape of `contracts/setfit-apr-v1.yaml`.
   — **Reversibility:** costly — the APR schema for ModernBERT/decision artifacts becomes the on-disk format every later method and deployed model reads.
+  — **Amended 2026-09-27 (user, option 1 from spikes 027/028):** the pack/verify re-score bar is max(1e-5, 4 x the per-checkpoint, per-set torch-fp32-vs-float64 noise), recomputed in Rust from a hash-bound float64 record (rescore-noise.json; no record = the 1e-5 floor; a bound above 1.0e-3 refused); argmax stays exact. The 1e-5 literal stays for fixture rows (the spike-025 fixture and the tiny fixtures); final_norm_abs / logits_abs are scoped fixture-only with values unchanged; x86_64 is recorded as unmeasured (A1; spike 028 showed the fixed 1e-5 bar refused the only gate-passing checkpoint for torch's own fp32 rounding). See laya-parity-v1 A1 (2.0.0).
 - **D-18:** **Live pmcp.run deploy of one trained model** on default Lambda at 10,240 MB, weights fetched from S3
   at cold start (never baked into the image — spike 026 / `aws-mcp-model-hosting.md`), verified by a real
   `classify` call. The live deploy itself is a **human checkpoint** (outward-facing).
 - **D-19:** The demo model is **TweetEval stance** at 16 or 64 shots/class — spike baselines exist to sanity-check
   the gate (full FT F_avg 0.538 ± 0.017 @16, 0.608 ± 0.050 @64; SetFit 0.512 / 0.561).
+  — **Amended 2026-09-27 (user, option 1 from spikes 027/028):** the demo cell moves from 16 to 64 shots/class (s64-seed13, early stopping with at most 12 epochs, three seeds under the median rule), gated on the 459-row in-distribution held-out set ([111, 291, 57]) with the 280 test rows as the reported shift probe; one declared run, a gate fail halts for a human. The s16 runs stay as the recorded 1.2.0 outcome (gate_fail) and as the verifier's two fail-closed vectors. See laya-finetune-gate-v1 `demo_s64`.
 
 ### Claude's Discretion
 - Exact file layout of the uv project and just recipe names.
