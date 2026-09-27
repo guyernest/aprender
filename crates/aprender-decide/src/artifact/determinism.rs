@@ -2,9 +2,10 @@
 //! and serde_json map backings, and the manifest stores only Python probe values.
 //!
 //! The dual-backing proof is the verify, not one test: this module runs standalone
-//! (`preserve_order=OFF`) and with `-p aprender-mcp-setfit` (pmcp enables
-//! `serde_json/preserve_order`, so `=ON`), and `golden_sha` must pass in both against
-//! the same committed hash. `backing_canary` prints which backing each run compiled.
+//! (`preserve_order=OFF`) and with the test-only `serde-preserve-order` feature
+//! (`serde_json/preserve_order`, so `=ON`, selected explicitly rather than by feature
+//! unification with another crate), and `golden_sha` must pass in both against the same
+//! committed hash. `backing_canary` prints which backing each run compiled.
 
 use super::tests::{fixture_probes, pack_tiny};
 use super::{artifact_sha256_hex, inspect_manifest, PROBE_INPUTS, PROBE_TASK};

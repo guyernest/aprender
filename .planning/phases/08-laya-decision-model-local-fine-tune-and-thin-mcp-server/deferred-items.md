@@ -618,3 +618,62 @@ not fixed by it.
   - Remove the weights: `aws s3 rm --profile ze-kasher-dev --recursive s3://<weights-bucket>/decide/aprender-mcp-decide/`
 - **Owner:** the user. Re-open trigger: cost, abuse, or a finished admin-UI test.
 
+## Phase 8 close-out — open work
+
+Written by plan 08-12 (D-18) from the two outcome records: `08-GATE-RUN-EVIDENCE.json` (`outcome:
+gate_pass`, `deploy_eligible: true`, sha256 `24a44d7e…`) and `08-LIVE-DEPLOY-EVIDENCE.json` (`final:
+true`, `outcome: deployed-passed`). One line per item that is still open, with what re-opens or
+closes it. Nothing below is implied done.
+
+- **D-ITEM-08-01-A** (and its re-measures 08-03-A, 08-04-A, 08-05-A, 08-06-A, 08-09-D): the
+  strict-test-binding guard is still VACUOUS (`spectral-indices-v1.yaml` has no `kani_harnesses:`).
+  Every Phase 8 verify used the lifted-copy measurement, in which no Phase 8 contract dangles and only
+  chronos-bolt-parity-v1 and setfit-encoder-conformance-v1 do. Closes when a change adds the Kani
+  section there and fixes or re-cites the 17 pre-existing dangling references (never by raising the
+  baseline).
+- **D-ITEM-08-13-A:** x86_64 re-score parity is unmeasured; every parity number is aarch64. Closes on
+  the first x86_64 value recorded in laya-parity-v1 (spike 028's procedure). Re-opens as a blocker if
+  the decide server is ever deployed on x86_64.
+- **D-ITEM-08-17-E:** the 3 GB cold path is 650 ms under the gateway cap at worst (29350 ms), and an
+  external cold call took 31.05 s at the client. Levers in the item (S3 part size and timeout, sha2
+  `asm`, the 10,240 MB tier, a warm floor). Re-opens `accepted_region_cold` if any cold sample at this
+  tier reaches 30000 ms.
+- **D-ITEM-08-17-C:** the sha256 pin runs sha2's software backend on aarch64 (2.7-3.5 s per cold load).
+  Owner: a perf plan; the measured `sha_ms` is its baseline.
+- **D-ITEM-08-17-D:** pmcp.run platform finding (sticky edge error state that `/health` cannot see; the
+  edge's effective cutoff is undocumented). The user's to raise upstream; recommend only.
+- **D-ITEM-08-18-A:** the decide endpoint is left RUNNING with auth off, by the user's decision. Re-open
+  trigger: cost, abuse, or a finished admin-UI test (containment: `just laya-teardown`).
+- **D-ITEM-08-10-A / D-ITEM-08-10-B:** one decide model per workspace under the shared-crates-root
+  deploy, until cargo-pmcp's resolver is fixed upstream (08-10-B). Open as 08-18 left them.
+  D-ITEM-08-10-C is superseded (one live assumption refuted and replaced, the replacement passed live)
+  and D-ITEM-08-10-D is resolved (auth off, provider none, risk accepted); a future `auth=on` deploy
+  re-opens 08-10-D's provider choice.
+- **CI wiring (plan 08-12 Task 1, blocking-human):** until the human decides, the six integration
+  targets (`-p aprender-decide --test ui`, `--test laya_parity`, `--test fail_closed_vectors`,
+  `--test demo_run`, `--test python_records`, `-p aprender-mcp-decide --test e2e_stdio`), the strict
+  `make contract-audit-phase8` (tier3 only; CI does not run tier3) and the torch-free Python
+  self-tests are DARK in CI. Plan 08-12 Task 3 records the decision here.
+- **D-ITEM-08-12-A (new, follow-up):** `crates/aprender-decide/src/verify.rs` is 2454 lines, one
+  module holding every gate, re-score, seed and shift check. Not split in 08-12 (the plan does not
+  require it, and a split would move every binding row this plan just resolved). Owner: a refactor
+  plan, which must re-run `make contract-audit-phase8` after moving any bound function.
+- **Pre-existing, not Phase 8's code, still open:** D-ITEM-08-01-B (README claims 110 CLI commands, the
+  registry lists 111; re-measured 2026-09-27), D-ITEM-08-04-B (`cargo fmt --all -- --check` still fails
+  only on the `fdf6b1802` files in aprender-image and aprender-mcp-chronos), D-ITEM-08-06-B (README's
+  layout tree still says "(82 crates total)"), and `.planning/WINDOWS.md` refusing appends (08-03-A).
+- **D-ITEM-08-07-A:** no longer open in substance. The bootstrap handler ran under the real Lambda
+  runtime in 08-17/08-18 (the `decide.load` line in CloudWatch, the `x-decide-load` header on every
+  cold sample, the identity probe), and its failed-load path ran live too (22:16:47Z, `decide.load
+  failed` before the grant, 08-17 resume attempt 2; the HTTP status of that platform call was not
+  observed). Left without a status line by 08-07; recorded closed here.
+
+Resolved by the records and therefore not open: D-ITEM-08-11-A (deployed-passed; plan 08-12 bound
+`accepted_region_cold` implemented and FALSIFY-DECIDE-TOOL-009 names its live harness and evidence),
+D-ITEM-08-09-A (08-16's gate_pass ran the stdio real-model leg), D-ITEM-08-17-A and -B, and
+D-ITEM-08-09-B/-C, D-ITEM-08-14-A/-B as their own status lines say. There is no D-ITEM-08-16-A: the
+declared run passed.
+
+The calibration-spike todo (`.planning/todos/pending/spike-laya-calibration-slice-and-temperature-cap.md`)
+is ANSWERED by spikes 027/028 and amendments A1-A3 (declared in 08-13, run in 08-16); the workflow
+moves the todo file, not this plan.

@@ -342,8 +342,8 @@ falsification_tests:
   - id: FALSIFY-DECIDE-APR-003
     rule: 'Packing is byte-deterministic across serde_json map backings'
     prediction: 'The pack built with serde_json/preserve_order and the one built without produce identical bytes.'
-    implemented_by: 'plan 08-05 (dual-backing determinism test): the same golden_sha run standalone (preserve_order=OFF) and with -p aprender-mcp-setfit (preserve_order=ON), each run printing its backing via artifact::determinism::backing_canary'
-    test: 'cargo test -p aprender-decide --lib artifact::determinism::golden_sha && cargo test -p aprender-decide -p aprender-mcp-setfit --lib artifact::determinism::golden_sha'
+    implemented_by: 'plan 08-05 (dual-backing determinism test): the same golden_sha run standalone (preserve_order=OFF) and with the test-only serde-preserve-order feature (preserve_order=ON), each run printing its backing via artifact::determinism::backing_canary. Plan 08-12 moved the ON leg off `-p aprender-mcp-setfit` feature unification onto the explicit feature, as FALSIFY-DECIDE-APR-007 does'
+    test: 'cargo test -p aprender-decide --lib artifact::determinism::golden_sha && cargo test -p aprender-decide --features serde-preserve-order --lib artifact::determinism::golden_sha'
     if_fails: 'The manifest serialises a map, so its bytes depend on the build graph (Pitfall 2).'
 
   - id: FALSIFY-DECIDE-APR-004

@@ -199,6 +199,7 @@ the crate count run the command in the Project Overview table, don't trust a num
 | CUDA/GPU Inference | Never | Primary | Kernels |
 | SetFit Classification Inference | **Primary** (aprender-core: loader + `VerifiedSetFitModel::classify`) | HTTP transport ONLY (route/`AppState`/readiness — calls core) | Compute |
 | Time-Series Forecasting (Prophet / NeuralProphet fit+predict, Chronos-Bolt zero-shot) | **Primary** (`crates/aprender-forecast`; thin pmcp servers `crates/aprender-mcp-forecast` and `crates/aprender-mcp-chronos` are transport only) | Never | Compute (`blis::gemm_blis`, NEON 8x6 kernel) |
+| Decision-Model Classification (Laya on a ModernBERT encoder; Kev/Jev later) | **Primary** (`crates/aprender-decide` on `crates/aprender-core/src/models/modernbert`; thin servers `crates/aprender-mcp-decide` and `crates/aprender-mcp-decide-lambda` are transport only) | Never | Compute (`blis::gemm_blis`) |
 
 **The SetFit row is a deliberate, documented EXCEPTION (Phase 4 D-09), not drift.**
 Realizar-first exists because core's LLM inference was ~750x slower than realizar's
@@ -234,6 +235,43 @@ transport already validated. A server that grew its own numerics would be the dr
 row does not licence. `crates/aprender-mcp-setfit/` is the template both follow. Tolerances
 and the tool boundary: `contracts/forecast-tool-boundary-v1.yaml`,
 `contracts/chronos-bolt-parity-v1.yaml`.
+
+**The Decision-model row is a third deliberate EXCEPTION (Phase 8 D-16), argued like the
+two above.** Realizar-first is a performance argument about LLM kernels (core's LLM inference
+~750x slower than realizar's). It does not reach here: Laya is a 421M-parameter bidirectional
+ModernBERT encoder with a small scoring head, with no generation, no KV cache and no LLM
+kernels. Its ONLY parity-proven implementation is the in-tree port of spike 025
+(`crates/aprender-decide` on the reusable encoder in `crates/aprender-core/src/models/modernbert`),
+so serving a second port through realizar would violate OPS-03 (one implementation per
+operation) and re-open the parity fixtures. `contracts/laya-parity-v1.yaml` holds two bars,
+and both are stated here: the FIXTURE bar keeps served probabilities within 1e-5 of torch fp32
+on the spike-025 rows (measured 3.841e-6 through the `.apr` path, plan 08-09); the PACK/VERIFY
+re-score bar is max(1e-5, 4 x the per-checkpoint float64-referenced torch noise) (amendment A1,
+plan 08-13). Every one of those numbers is aarch64; x86_64 is unmeasured.
+
+What this row may claim is read from two records and nothing else. The one declared gate run
+passed: a TweetEval abortion-stance model (`demo_s64` in `contracts/laya-finetune-gate-v1.yaml`,
+plan 08-16) beat zero-shot macro-F1 by 0.222 with post-calibration ECE 0.044 against the 0.10
+bar, the median of three seeds. Claim scope, quoted from that contract's `eval_set.claim`: "The
+gate now certifies margin and calibration on held-out data drawn like the tenant's shots. It
+does NOT certify robustness to a shifted input population." It is in-distribution calibration,
+not shift robustness: this eval set was chosen after the SemEval-2016 test split failed the gate
+(spike 027), and that split is kept as a reported shift probe, where the same model's ECE is
+0.1896. The model is live on pmcp.run as `aprender-mcp-decide` (plans 08-17/08-18, final
+outcome deployed-passed), on the 3 GB tier only: 3,008 MB, at most 2 texts and 120 built tokens
+per call. The 10,240 MB tier (1024 tokens, 8 texts) is the target once AWS raises the account
+limit. The cold margin is thin, not comfortable: the worst verified cold sample took 29.35 s at
+the client against the 30 s gateway cap, and an external cold call took 31.05 s end to end
+(D-ITEM-08-17-E); warm calls take about 1.4-2.2 s. Records: `08-GATE-RUN-EVIDENCE.json` and
+`08-LIVE-DEPLOY-EVIDENCE.json` in the Phase 8 planning directory.
+
+The served artifact is `.apr` (`contracts/decide-apr-v1.yaml`), so the SafeTensors carve-out
+above is NOT widened: safetensors is read only by the back-office packer (`aprender_decide::pack`,
+driven by `crates/aprender-decide/examples/pack_laya.rs`), never by a server. The thin servers
+own transport and the boundary in `contracts/decide-tool-boundary-v1.yaml`, exactly as the
+forecast servers do. Training stays in Python (`scripts/laya_train`, gated by
+`contracts/laya-finetune-gate-v1.yaml`), and Rust re-derives that gate from the packed bytes
+before anything is deployable.
 
 ```rust
 // WRONG - bypasses realizar, 0.3 tok/s

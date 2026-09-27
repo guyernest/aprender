@@ -379,11 +379,11 @@ tier3:
 # see the target's comment block for why zero BIND- findings is not that proof.
 	@$(MAKE) contract-audit-phase6
 # Phase 8's equivalent, wired here for the reason the five lines above exist: a target outside
-# the tiers is a target that stops being run. Scoped to $(PHASE8_CONTRACTS). Like Phase 4's it
-# tolerates `status: pending` (BIND-004) and refuses a missing entry (BIND-001), because 08-01
-# commits the four Phase 8 contracts BEFORE the code and the runs that answer to them. Its RED
-# and GREEN states were both measured with the status captured directly, never through a pipe.
-# Plan 08-12 tightens it to refuse any BIND- line. See the target's own comment block.
+# the tiers is a target that stops being run. Scoped to $(PHASE8_CONTRACTS). Since plan 08-12 it
+# is Phase 6's form: it refuses ANY BIND- line (the only admissible one is the single
+# PHASE8_LIVE_EXEMPT line, empty since the live outcome is deployed-passed) and resolves every
+# row to a definition site. NOTE: CI does not run tier3, so this is a CI gate only if the CI
+# docker chain names it. See the target's own comment block.
 	@$(MAKE) contract-audit-phase8
 # TRN-06's AUTHORITATIVE reproducibility claim (D-16) and D-13's GEMM control, wired
 # here for the reason the three lines above exist: a target outside the tiers is a
@@ -2184,8 +2184,8 @@ contract-audit-phase3: ## Audit Phase 3 binding coverage (BLOCKING, wired into t
 	fi; \
 	echo "Phase 3 binding audit: every equation is bound"
 
-# The pending-tolerant phase binding audit, ONE body for contract-audit-phase4 and
-# contract-audit-phase8 (they were verbatim copies). Arguments: $(1) the contract list,
+# The pending-tolerant phase binding audit, ONE body for contract-audit-phase4 and (until plan
+# 08-12 tightened it to the phase6 form) contract-audit-phase8. Arguments: $(1) the contract list,
 # $(2) the list variable's NAME for the empty-list message, $(3) the phase label.
 # Every load-bearing detail documented on contract-audit-phase4 below lives here once:
 # `set +e` around the audit (.SHELLFLAGS is -e -c), `status=$$?` on its own line (never
@@ -2512,26 +2512,179 @@ contract-audit-phase6: ## Audit Phase 6 binding coverage + source resolution (BL
 	echo "Phase 6 source resolution: resolved $$resolved Phase 6 binding rows to definition sites"; \
 	echo "Phase 6 binding audit: $$audited contract(s) audited, zero BIND- findings"
 
-# Phase 8's twin of contract-audit-phase4 — the SAME canned recipe (audit_phase_bindings_pending_ok),
-# the phase-4 form rather than phase5/6, because
-# Phase 8 is in phase 4's position: plan 08-01 commits all four Phase 8 contracts BEFORE any
-# code that implements them exists (D-07). So every equation is registered `status: pending`
-# in $(BINDING), which `pv audit` reports as BIND-004, a WARNING — this gate PASSES on it. A
-# MISSING entry stays BIND-001, an ERROR — this gate FAILS on it. It tolerates "not written yet"
-# and refuses "not tracked at all". Plan 08-12 tightens it to refuse ANY BIND- line (the
-# phase5/6 form) once every Phase 8 binding has been flipped by the plan that lands its code.
+# THE ONE LIVE EXEMPTION contract-audit-phase8 may carry (plan 08-12, D-17/D-18). It holds either
+# NOTHING or exactly `decide-tool-boundary-v1.yaml:accepted_region_cold`, the only Phase 8 equation
+# whose falsification is LIVE (a cold pmcp.run Lambda, `just laya-deploy-verify`), never a libtest.
+# It is populated exactly when the FINAL live record
+# (.planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-DEPLOY-EVIDENCE.json,
+# `final: true`) is NOT deployed-passed; the row is then `status: partial` (BIND-002) and the open
+# work is D-ITEM-08-11-A in that phase's deferred-items.md. When set, the audit admits ONLY that
+# equation's BIND-002 line (printed as `EXEMPT (live, see deferred-items.md): ...`) and still fails
+# on every other BIND- line, a BIND-004 for the same equation included.
+# EMPTY since plan 08-12: the final live outcome is deployed-passed (4 proven-cold samples at
+# 3 008 MB, max 29 350 ms < 30 000 ms), so accepted_region_cold is bound `implemented`.
+PHASE8_LIVE_EXEMPT :=
+
+# Phase 8's twin of contract-audit-phase6: refuses ANY BIND- line AND resolves every Phase 8 row
+# to a definition site. Plan 08-12 tightened it from the pending-tolerant phase-4 form
+# (audit_phase_bindings_pending_ok, which plan 08-01 used while the four contracts were committed
+# ahead of their code, D-07). Every Phase 8 binding is now `implemented` with a signature copied
+# from source, so a BIND-004 here means an equation REGRESSED to pending or a new one was added
+# untracked, and tolerating it would tolerate exactly what the gate is for.
 #
-# THE `set +e` AND THE `status=$$?` ON ITS OWN LINE ARE BOTH LOAD-BEARING (in the shared
-# recipe): this Makefile sets `.SHELLFLAGS := -e -c`, so a failing
-# `$(PV_BIN) audit` would abort the recipe before the status could be read, and the status is
-# read from `$$?` directly, NEVER through a pipe (CLAUDE.md Verification rule 1). The `audited`
-# counter and the empty-list FAIL keep the gate from passing over nothing.
+# WHAT THIS ADDS TO `pv audit`, AND WHY. `pv audit` matches a row by contract filename and equation
+# and trusts `status`; it never opens `module_path` (contract-audit-phase5/6 record the measurement:
+# a nonexistent `function` passed it). So after the audits, every Phase 8 row is resolved
+# FILE-SCOPED: its module_path maps (case map below) to a file or directory, and the function's
+# last `::` segment must have a `fn <name>` definition there. For a `Type::method` row the file must
+# ALSO carry an `impl ... Type` block (inherent or `impl Trait for Type`), and the `fn` is looked for
+# only in the files that do. That scope is the FILE, not the impl block: a method bound to a type
+# with no impl in that module fails, but one bound to the wrong type of the SAME file still
+# resolves. A `justfile` row resolves to its recipe header. Any unresolvable row FAILS.
 #
-# The induced failure mode was OBSERVED, not assumed: plan 08-01 deleted one
-# decide-tool-boundary-v1 binding row, ran this target and saw rc != 0 with a FAIL line, then
-# restored the row and saw rc 0. The rc values are in 08-01-SUMMARY.md.
-contract-audit-phase8: ## Audit Phase 8 binding coverage (BLOCKING, wired into tier3)
-	$(call audit_phase_bindings_pending_ok,$(PHASE8_CONTRACTS),PHASE8_CONTRACTS,8)
+# THE LOAD-BEARING DETAILS are copied from contract-audit-phase6 for the same reasons: `.SHELLFLAGS`
+# is `-e -c`, so `set +e` brackets the audit and `status=$$?` is read on its own line, never through
+# a pipe (CLAUDE.md rule 1); an empty $(PHASE8_CONTRACTS), a log with no `Total equations:` summary,
+# and a resolver that resolved ZERO rows all FAIL rather than pass over nothing. The BIND- count and
+# the exemption filter are awk over the captured log file, not a pipe whose status is read.
+#
+# INDUCED FAILURES, OBSERVED BEFORE THIS WAS TRUSTED (plan 08-12; rc values in 08-12-SUMMARY.md):
+# (1) one row's function renamed to a symbol that does not exist -> RESOLVE- line and FAIL, and a
+#     `Type::method` row given a type with no impl under its module -> RESOLVE- line and FAIL;
+# (2) PHASE8_LIVE_EXEMPT populated and ANOTHER Phase 8 row set to `partial` -> its BIND-002 line is
+#     counted and the gate FAILS, while the exempt equation's own line would have been admitted.
+# Both reverted, then green.
+contract-audit-phase8: ## Audit Phase 8 binding coverage + source resolution (BLOCKING, wired into tier3)
+	@echo "Auditing binding coverage for the Phase 8 contracts..."
+	@mkdir -p target
+	@exempt_raw="$(strip $(PHASE8_LIVE_EXEMPT))"; \
+	exempt_line=""; \
+	if [ -n "$$exempt_raw" ]; then \
+		if [ "$$exempt_raw" != "decide-tool-boundary-v1.yaml:accepted_region_cold" ]; then \
+			echo "FAIL: PHASE8_LIVE_EXEMPT='$$exempt_raw'. It may hold only"; \
+			echo "decide-tool-boundary-v1.yaml:accepted_region_cold (the one LIVE equation), or nothing."; \
+			exit 1; \
+		fi; \
+		exempt_line="BIND-002: Equation '$${exempt_raw##*:}' in $${exempt_raw%%:*} is partially implemented"; \
+		echo "PHASE8_LIVE_EXEMPT is set: admitting only the partial-implementation finding for $$exempt_raw (D-ITEM-08-11-A)"; \
+	fi; \
+	unbound=""; \
+	warned=""; \
+	audited=0; \
+	for contract in $(PHASE8_CONTRACTS); do \
+		echo "  $$contract"; \
+		audited=$$((audited + 1)); \
+		log="target/contract-audit-phase8-$$audited.log"; \
+		set +e; \
+		$(PV_BIN) audit "$$contract" --binding $(BINDING) > "$$log" 2>&1; \
+		status=$$?; \
+		set -e; \
+		awk -v x="$$exempt_line" 'x != "" && index($$0, x) { print "EXEMPT (live, see deferred-items.md): " $$0; next } { print }' "$$log"; \
+		if [ "$$status" -ne 0 ]; then \
+			unbound="$$unbound $$contract"; \
+		fi; \
+		if ! grep -q 'Total equations:' "$$log"; then \
+			echo "FAIL: $$log carries no 'Total equations:' summary, so its BIND- count is not"; \
+			echo "evidence of anything. The audit did not run, or its output format moved."; \
+			exit 1; \
+		fi; \
+		found=$$(awk -v x="$$exempt_line" '/BIND-/ && !(x != "" && index($$0, x)) { n++ } END { print n + 0 }' "$$log"); \
+		if [ "$$found" -ne 0 ]; then \
+			warned="$$warned $$contract($$found)"; \
+		fi; \
+	done; \
+	if [ "$$audited" -eq 0 ]; then \
+		echo "FAIL: PHASE8_CONTRACTS is empty — this gate audited nothing and would have reported success."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$unbound" ]; then \
+		echo "FAIL: unbound equations remain in:$$unbound"; \
+		echo "Every equation of a Phase 8 contract needs an entry in $(BINDING)."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$warned" ]; then \
+		echo "FAIL: BIND- findings remain in:$$warned"; \
+		echo "Every Phase 8 equation is implemented as of plan 08-12, so a BIND- line here means one"; \
+		echo "has REGRESSED (pending/partial/not_implemented) or a new equation was added without a"; \
+		echo "binding entry. The only admissible line is the PHASE8_LIVE_EXEMPT BIND-002, when set."; \
+		exit 1; \
+	fi; \
+	echo "Resolving every Phase 8 binding row to a definition site..."; \
+	rows="target/contract-audit-phase8-rows.txt"; \
+	awk -v want=" $(notdir $(PHASE8_CONTRACTS)) " ' \
+		/^- contract:/ { c=$$3; e=""; m=""; f=""; next } \
+		/^  equation:/ { e=$$2; next } \
+		/^  module_path:/ { m=$$2; next } \
+		/^  function:/ { f=$$2; \
+			if (c != "" && index(want, " " c " ") > 0) print c, e, m, f; \
+			next } \
+	' $(BINDING) > "$$rows"; \
+	resolved=0; \
+	unresolvable=0; \
+	while read -r c e m f; do \
+		name="$${f##*::}"; \
+		ty=""; \
+		case "$$f" in *::*) ty="$${f%::*}" ;; esac; \
+		case "$$m" in \
+			justfile) file="justfile" ;; \
+			aprender::models::modernbert|aprender::models::modernbert::*) file="crates/aprender-core/src/models/modernbert" ;; \
+			aprender::calibration) file="crates/aprender-core/src/calibration.rs" ;; \
+			aprender_decide::laya) file="crates/aprender-decide/src/laya/mod.rs" ;; \
+			aprender_decide::laya::*) file="crates/aprender-decide/src/laya/$${m#aprender_decide::laya::}.rs" ;; \
+			aprender_decide::*) file="crates/aprender-decide/src/$${m#aprender_decide::}.rs" ;; \
+			aprender_decide) file="crates/aprender-decide/src/lib.rs" ;; \
+			aprender_mcp_decide_lambda::*) file="crates/aprender-mcp-decide-lambda/src/$${m#aprender_mcp_decide_lambda::}.rs" ;; \
+			aprender_mcp_decide_lambda) file="crates/aprender-mcp-decide-lambda/src/lib.rs" ;; \
+			aprender_mcp_decide) file="crates/aprender-mcp-decide/src/lib.rs" ;; \
+			*) file="" ;; \
+		esac; \
+		if [ -z "$$file" ] || [ ! -e "$$file" ]; then \
+			echo "RESOLVE- $$c $$e $$m::$$f (module_path maps to no file)"; \
+			unresolvable=$$((unresolvable + 1)); \
+			continue; \
+		fi; \
+		if [ "$$file" = "justfile" ]; then \
+			if grep -Eq "^$$name([[:space:]][^:]*)?:" justfile; then \
+				resolved=$$((resolved + 1)); \
+			else \
+				echo "RESOLVE- $$c $$e $$m::$$f (no recipe header in justfile)"; \
+				unresolvable=$$((unresolvable + 1)); \
+			fi; \
+			continue; \
+		fi; \
+		if [ -n "$$ty" ]; then \
+			hits=$$(grep -rlE "^[[:space:]]*impl([[:space:]]*<[^>]*>)?[[:space:]]+([^{;]*[[:space:]]for[[:space:]]+)?$$ty([[:space:]]|<|\{|$$)" "$$file" || true); \
+		else \
+			hits=$$(grep -rlE "(^|[^[:alnum:]_])fn[[:space:]]+$$name[[:space:]]*[(<]" "$$file" || true); \
+		fi; \
+		if [ -z "$$hits" ]; then \
+			if [ -n "$$ty" ]; then why="no impl block for type '$$ty'"; else why="no fn '$$name'"; fi; \
+			echo "RESOLVE- $$c $$e $$m::$$f ($$why under $$file)"; \
+			unresolvable=$$((unresolvable + 1)); \
+			continue; \
+		fi; \
+		if grep -Eq "(^|[^[:alnum:]_])fn[[:space:]]+$$name[[:space:]]*[(<]" $$hits; then \
+			resolved=$$((resolved + 1)); \
+		else \
+			echo "RESOLVE- $$c $$e $$m::$$f (no definition site for fn '$$name' in $$hits)"; \
+			unresolvable=$$((unresolvable + 1)); \
+		fi; \
+	done < "$$rows"; \
+	if [ "$$unresolvable" -ne 0 ]; then \
+		echo "FAIL: $$unresolvable Phase 8 binding row(s) name a function with no definition site"; \
+		echo "in the file their module_path names. pv audit CANNOT see this — it matches"; \
+		echo "filename and equation and trusts 'status', so those rows passed the audit above."; \
+		echo "Fix the ROW (module_path / function / signature from source), never the contract."; \
+		exit 1; \
+	fi; \
+	if [ "$$resolved" -eq 0 ]; then \
+		echo "FAIL: the resolver resolved ZERO Phase 8 binding rows, so it proved nothing."; \
+		echo "Either $(BINDING) carries no Phase 8 rows, or the awk extraction stopped matching"; \
+		echo "the file's shape. A resolver that resolves nothing must not pass vacuously."; \
+		exit 1; \
+	fi; \
+	echo "Phase 8 source resolution: resolved $$resolved Phase 8 binding rows to definition sites"; \
+	echo "Phase 8 binding audit: $$audited contract(s) audited, no binding finding outside PHASE8_LIVE_EXEMPT='$$exempt_raw'"
 
 
 # ============================================================================

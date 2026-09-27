@@ -1,6 +1,6 @@
 contract: laya-finetune-gate
 metadata:
-  version: 2.0.0
+  version: 3.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -50,6 +50,14 @@ metadata:
     recipe value or early-stopping value moved: gate_max_ece 0.10, gate_min_macro_f1_margin 0.05,
     T in [0.5, 5.0]. Every key an existing reader consumes keeps its name and 1.x meaning; the
     amendments are added beside them.
+
+    TEXT ALIGNMENT 3.0.0 (plan 08-12, 2026-09-27, AFTER the 08-16 gate run; no value moved). The
+    `seed_policy.why_quantized` text and one `seed_selection_median` invariant said an ece_post
+    "within the recompute tolerance of a grid line" is refused. Plan 08-15 implemented the rule the
+    rationale actually needs: a seed is refused when its rank_key recomputed from the Rust ece_post
+    differs from the rank_key Python reported. The text now says that. No threshold, formula, seed,
+    schema field or recorded outcome changed; `pv diff` classifies any invariant edit MAJOR, so this
+    is published as 3.0.0, and the 1.4.0 naming above is unchanged.
 
     THE GATE IS DECIDED ON RECOMPUTED METRICS, NOT REPORTED ONES. A gate report is a file a
     training run wrote; an edited report must not pass. So the metrics that DECIDE pass are
@@ -140,7 +148,7 @@ seed_policy:
   report_rule: 'all three runs are reported, in gate-report `seeds.per_seed` (seed order) and in variance-report.json; a non-median seed''s numbers never enter gate_pass'
   retention_rule: 'every seed trains in `seeds/seed-<s>/`; after selection the median seed''s checkpoint becomes `checkpoint/` and the others'' checkpoints are deleted; every seed''s `seeds/seed-<s>/eval-probs.json` is kept and hash-bound (per_seed eval_probs_sha256); the non-shipped seeds are RECOMPUTED in Rust from those files but NOT re-scored'
   honesty: 'the median is selected WITH eval labels. Median-of-3 is not best-of-3: the shipped run''s ECE is the middle draw, not the minimum, so the report is not optimistically biased the way a best-seed choice is — but it IS a selection on the gate eval set and is recorded as one. Chosen because spike 027 measured MPS training as not bitwise reproducible: one replicate turned a FAIL into a PASS, ECE moving by up to 0.048'
-  why_quantized: 'Python and Rust compute the same ECE from the same probabilities to well under 1e-12; ranking on the 1e-4 grid makes both sides order the seeds identically except for a value within that distance of a grid line, which Rust refuses rather than guesses'
+  why_quantized: 'Python and Rust compute the same ECE from the same probabilities to well under 1e-12; ranking on the 1e-4 grid makes both sides order the seeds identically unless the two ECEs of one seed fall on opposite sides of a grid line. Rust therefore recomputes rank_key(s) from its own ece_post and refuses any seed whose recomputed rank_key differs from the rank_key Python reported (gate-report seeds.per_seed[].rank_key) rather than guessing; a value merely near a grid line whose two keys agree is accepted, because reading "near" as within gate_metric_recompute_abs (1e-5) of a 1e-4 grid line would refuse about 20 % of honest seeds (text aligned by plan 08-12 to the rule plan 08-15 implemented, verify::check_seed_selection)'
   legacy_rule: 'a recipe.json without `seed_selection` is judged under the 1.x rule — the declared seed ships — and is NEVER deploy-eligible under 1.4.0: verify refuses it with SeedPolicyMissing, but only AFTER the re-scores and the gate, so a legacy run whose gate fails still reports GateFailed'
 
 eval_set:
@@ -484,7 +492,7 @@ equations:
     invariants:
       - 'Rust RE-DERIVES the selection from the per-seed eval-probs files (recomputed ece_post per seed) and refuses a report whose `shipped` differs, whose shipped seed''s eval_probs_sha256 differs from the top-level eval_probs_sha256, or whose checkpoint/model.safetensors sha256 differs from the shipped seed''s model_safetensors_sha256'
       - 'production requires EXACTLY the three seeds of variance_seeds (production_seeds_required)'
-      - 'a recomputed ece_post within the recompute tolerance of a rank_scale grid line is refused rather than guessed (why_quantized)'
+      - 'a seed whose rank_key recomputed from the Rust ece_post differs from its reported per_seed rank_key is refused rather than guessed; agreeing keys are accepted however close the value sits to a rank_scale grid line (why_quantized)'
       - 'the median is selected WITH eval labels and is recorded as a selection on the gate eval set (seed_policy.honesty); median, never best'
       - 'the non-shipped seeds are recomputed but never re-scored (seed_policy.retention_rule)'
 
