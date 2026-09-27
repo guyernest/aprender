@@ -704,7 +704,7 @@ Plans:
 
 **Wave 14** *(blocked on Wave 13 completion)*
 
-- [ ] 08-17-PLAN.md — gap closure: D-18 go/no-go (blocking-human: AWS approval, auth posture + provider, memory) -> read-only readiness -> live deploy with identity == H -> cold accepted region of both shapes -> 08-LIVE-DEPLOY-EVIDENCE.json
+- [ ] 08-17-PLAN.md — gap closure: D-18 go/no-go (blocking-human: AWS approval, auth posture + provider, memory) -> read-only readiness -> live deploy with identity == H -> cold accepted region of both shapes -> 08-LIVE-DEPLOY-EVIDENCE.json **HALTED 2026-09-27 at deploy-refused (contained):** user chose auth off (risk accepted) at 3,008 MB; decide-tool-boundary-v1 2.0.0 re-priced the budget (120 tokens / 2 texts); the function deployed and was contained when laya-deploy's GET health check hit the pmcp.run edge's 405 (D-ITEM-08-17-A); awaiting the human's resume decision (08-17-SUMMARY.md)
 
 **Wave 15** *(blocked on Wave 14 completion)*
 

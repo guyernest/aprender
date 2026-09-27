@@ -4,11 +4,11 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-16-PLAN.md
-last_updated: "2026-09-27T18:52:42.827Z"
+stopped_at: 08-17 halted at deploy-refused (contained); awaiting human resume decision
+last_updated: "2026-09-27T21:18:28.798Z"
 last_activity: 2026-09-27
-last_activity_desc: 08-16 completed - the ONE declared s64 gate run PASSED the unchanged gate (median seed 17 of 13/17/23, margin 0.2217, ece_post 0.0443 on 459 in-distribution rows); models/decide/laya-stance-64.apr sha256 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a deploy_eligible true, stdio real-model leg passed, FALSIFY-LAYA-GATE-014 armed green
-state_head: 07cfaee06cfa04ebd5dd13026520985f89d631bc
+last_activity_desc: 08-17 HALTED at deploy-refused - decide-tool-boundary-v1 2.0.0 re-priced for 3,008 MB (120 tokens / 2 texts, 968d73e99); aprender-mcp-decide deployed to pmcp.run at 3,008 MB then contained (reserved concurrency 0) because laya-deploy's GET health check cannot reach the function through the pmcp.run edge (405); awaiting the human's resume decision. Previously: 08-16 completed - the ONE declared s64 gate run PASSED the unchanged gate (median seed 17 of 13/17/23, margin 0.2217, ece_post 0.0443 on 459 in-distribution rows); models/decide/laya-stance-64.apr sha256 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a deploy_eligible true, stdio real-model leg passed, FALSIFY-LAYA-GATE-014 armed green
+state_head: 0349200a86e4cee9c336664ab7c41e4796e6bc8c
 progress:
   total_phases: 9
   completed_phases: 1
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
 Plan: 15 of 18 complete (08-01..08-11 and 08-13..08-16; next: 08-17, the deploy go/no-go behind the user; 08-12 close-out in Wave 16)
-Status: Ready for 08-17 (user go/no-go) - 08-16 ran the ONE declared demo_s64 run (820d82732; SUMMARY 07cfaee06): just laya-train ... --seeds 3 --epochs 12 on mps:0, rc 0 GATE PASS, recipe 6a5489af..., all three seeds pass (13: margin 0.1439 ece 0.0850; 17: 0.2217 / 0.0443; 23: 0.2478 / 0.0372), median seed 17 ships; noise bounds 3.34e-5 / 5.98e-5 (fine-tuned re-score 1.13e-5: above the 1e-5 floor, within A1); PACKED + laya-verify deploy_eligible true on sha 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a (846196868 bytes), laya-inspect production none/against/favor, stdio real-model leg passed (D-ITEM-08-09-A resolved); demo_s64.outcome gate_pass + outcome_record and 08-GATE-RUN-EVIDENCE.json recorded (pv diff identical, no bump); FALSIFY-LAYA-GATE-014 armed green; claim is in-distribution only (shift probe ece_post 0.1896, reported, not a gate clause); D-ITEM-08-11-A re-open condition met; NO AWS contact
+Status: 08-17 HALTED at deploy-refused (contained; 08-LIVE-DEPLOY-EVIDENCE.json, SUMMARY 0349200a8) - user chose deploy-auth-off-accept-risk at 3,008 MB; the tier amendment (968d73e99) and laya-deploy pre-grant fixes (b30f437da) landed; the deploy reached pmcp.run (compile log = decide package, MemorySize 3008) and was contained when the GET health check hit the edge's 405 (D-ITEM-08-17-A); resume needs the human's choice of replacement check + approval to lift the containment. Earlier: 08-16 ran the ONE declared demo_s64 run (820d82732; SUMMARY 07cfaee06): just laya-train ... --seeds 3 --epochs 12 on mps:0, rc 0 GATE PASS, recipe 6a5489af..., all three seeds pass (13: margin 0.1439 ece 0.0850; 17: 0.2217 / 0.0443; 23: 0.2478 / 0.0372), median seed 17 ships; noise bounds 3.34e-5 / 5.98e-5 (fine-tuned re-score 1.13e-5: above the 1e-5 floor, within A1); PACKED + laya-verify deploy_eligible true on sha 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a (846196868 bytes), laya-inspect production none/against/favor, stdio real-model leg passed (D-ITEM-08-09-A resolved); demo_s64.outcome gate_pass + outcome_record and 08-GATE-RUN-EVIDENCE.json recorded (pv diff identical, no bump); FALSIFY-LAYA-GATE-014 armed green; claim is in-distribution only (shift probe ece_post 0.1896, reported, not a gate clause); D-ITEM-08-11-A re-open condition met; NO AWS contact
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -525,6 +525,7 @@ Recent decisions affecting current work:
 - SC2 no-argument invariance gate (crates/aprender-forecast/src/invariance.rs:718) is RED under cargo nextest run --workspace --lib, the invocation CI runs; green under -p aprender-forecast. Deterministic, hash-stable, flipped by adding apr-cli to the package set. See 06.1 deferred-items.md item 5.
 - 08-09..08-12 revised for option 3 (commit 2b75c14dc, 2026-09-26): 08-09 refuses both demo vectors; 08-10 offline-only; 08-11 records HOLD; D-18 live deploy deferred to the post-spike re-run.
 - RESOLVED 2026-09-27 (was: 08-09 HALTED at its tracer on RescoreDrift zero_shot row 49 1.028e-5): debug session laya-rescore-drift fixed the RoPE inv_freq rounding (8e55e0bed); user decision option A keeps pack_rescore_probs_abs 1e-5, early_stopping 3d4b91da demonstrates GateFailed[ece_post] (exit 3), fixed_epochs d0f4e40d is refused with RescoreDrift fine_tuned row 59 4.667e-5 (exit 2). 08-09 complete (87c957bff). OPEN CONCERN, queued not acted on: the 1e-5 bar has ~1.5x headroom on early_stopping and the ladder final block 1.09x; x86_64 unmeasured (D-ITEM-08-09-B, spike-laya-calibration-slice-and-temperature-cap todo).
+- 08-17 HALTED at deploy-refused (2026-09-27): aprender-mcp-decide deployed to pmcp.run at 3,008 MB (decide-tool-boundary-v1 2.0.0: 120 tokens / 2 texts), then CONTAINED by laya-deploy (reserved concurrency 0, grant removed) because its GET health check cannot reach the function through the pmcp.run edge (405 on GET /mcp; /health is platform JSON) - D-ITEM-08-17-A. Human must choose the replacement check (recommended: edge /health serverId + the identity probe) and approve delete-function-concurrency; then re-run just laya-deploy and Task 3 (cold samples). See 08-17-SUMMARY.md checkpoint.
 
 ### Roadmap Evolution
 
@@ -542,9 +543,9 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-27T18:52:42.635Z
-Stopped at: Completed 08-16-PLAN.md
-Resume file: None
+Last session: 2026-09-27T21:18:28.603Z
+Stopped at: 08-17 halted at deploy-refused (contained); awaiting human resume decision
+Resume file: .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-17-SUMMARY.md
 
 ## Accumulated Context
 
