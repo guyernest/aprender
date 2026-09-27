@@ -228,6 +228,7 @@ Skipped. It runs only after an identity-ok deploy, and the plan's rule is that "
 1. **The 3,008 MB tier amendment** — `968d73e99` (feat)
 2. **laya-deploy pre-grant fixes** — `b30f437da` (fix)
 3. **Task 2: the deploy-refused evidence record and deferred items** — `371c6bfe7` (feat)
+4. **Resume: laya-deploy checks the edge /health serverId** — `3115c690e` (fix)
 
 ## Deviations from Plan
 
@@ -286,6 +287,27 @@ Skipped. It runs only after an identity-ok deploy, and the plan's rule is that "
 3. Re-runs `just laya-deploy`, which redeploys, re-grants and runs the identity probe.
 4. Takes the warm identity classify.
 5. Runs Task 3 (`just laya-deploy-verify ... 2`) at the new 3 GB budget.
+
+## Resume attempt 1 (2026-09-27): blocked on a pmcp.run auth gate
+
+- **User decision:** option 1 above, and the user approved lifting the containment.
+- **Recipe change, committed before any AWS write (`3115c690e`):**
+  - The health step now derives `https://<host>/health` from the endpoint and cross-checks cargo pmcp's logged `health_endpoint`. It requires `serverId == aprender-mcp-decide` and asserts no package field.
+  - The identity probe still carries package identity.
+  - The logic lives in two pure helpers, `_laya-edge-health-url` and `_laya-edge-health-check`.
+  - `laya-deploy-selftest` drives both through a must-accept/must-refuse table: 6 URL cases, plus 8 body cases that include the measured decide, chronos and 405 bodies and the bootstrap's own body. It also checks the wiring, and re-mutating the wiring (an `$ENDPOINT` GET, or a dropped check) turns that check red.
+  - Selftest result: DEPLOY SELFTEST OK, AWS CALLS: 0.
+- **Containment was already lifted when this continuation started.** CloudTrail shows `DeleteFunctionConcurrency` at 21:54:40Z by the profile's own IAM user. It was read back, not re-run. Current state:
+  - Reserved concurrency is unset.
+  - The grant is absent, so any invocation fails the S3 load fast.
+  - No invocation was logged between the lift and 22:08Z.
+  - The edge `/health` already returns `serverId aprender-mcp-decide`.
+- **The re-run of `just laya-deploy` (22:01-22:06Z) exited 1 at an auth gate:**
+  - Eligibility and compile passed.
+  - It then stopped at pmcp.run's `Failed to get upload URLs`, with `UnauthorizedException: Valid authorization header not provided.`
+  - Nothing was uploaded, and no AWS resource changed. The shared root was restored byte-identically.
+  - A read-only `cargo pmcp deploy outputs` gets the same error. It refreshed the token on the first run, but it does not now.
+- **Blocked on the human:** run `cargo pmcp deploy login --target-type pmcp-run` (browser OAuth). The continuation then re-runs `just laya-deploy`, the warm identity classify and Task 3.
 
 ## Next Phase Readiness
 

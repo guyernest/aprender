@@ -4,7 +4,7 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: 08-17 halted at deploy-refused (contained); awaiting human resume decision
+stopped_at: 08-17 resume blocked on a pmcp.run auth gate (cargo pmcp deploy login); containment lifted, grant absent
 last_updated: "2026-09-27T21:18:28.798Z"
 last_activity: 2026-09-27
 last_activity_desc: 08-17 HALTED at deploy-refused - decide-tool-boundary-v1 2.0.0 re-priced for 3,008 MB (120 tokens / 2 texts, 968d73e99); aprender-mcp-decide deployed to pmcp.run at 3,008 MB then contained (reserved concurrency 0) because laya-deploy's GET health check cannot reach the function through the pmcp.run edge (405); awaiting the human's resume decision. Previously: 08-16 completed - the ONE declared s64 gate run PASSED the unchanged gate (median seed 17 of 13/17/23, margin 0.2217, ece_post 0.0443 on 459 in-distribution rows); models/decide/laya-stance-64.apr sha256 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a deploy_eligible true, stdio real-model leg passed, FALSIFY-LAYA-GATE-014 armed green
@@ -525,7 +525,7 @@ Recent decisions affecting current work:
 - SC2 no-argument invariance gate (crates/aprender-forecast/src/invariance.rs:718) is RED under cargo nextest run --workspace --lib, the invocation CI runs; green under -p aprender-forecast. Deterministic, hash-stable, flipped by adding apr-cli to the package set. See 06.1 deferred-items.md item 5.
 - 08-09..08-12 revised for option 3 (commit 2b75c14dc, 2026-09-26): 08-09 refuses both demo vectors; 08-10 offline-only; 08-11 records HOLD; D-18 live deploy deferred to the post-spike re-run.
 - RESOLVED 2026-09-27 (was: 08-09 HALTED at its tracer on RescoreDrift zero_shot row 49 1.028e-5): debug session laya-rescore-drift fixed the RoPE inv_freq rounding (8e55e0bed); user decision option A keeps pack_rescore_probs_abs 1e-5, early_stopping 3d4b91da demonstrates GateFailed[ece_post] (exit 3), fixed_epochs d0f4e40d is refused with RescoreDrift fine_tuned row 59 4.667e-5 (exit 2). 08-09 complete (87c957bff). OPEN CONCERN, queued not acted on: the 1e-5 bar has ~1.5x headroom on early_stopping and the ladder final block 1.09x; x86_64 unmeasured (D-ITEM-08-09-B, spike-laya-calibration-slice-and-temperature-cap todo).
-- 08-17 HALTED at deploy-refused (2026-09-27): aprender-mcp-decide deployed to pmcp.run at 3,008 MB (decide-tool-boundary-v1 2.0.0: 120 tokens / 2 texts), then CONTAINED by laya-deploy (reserved concurrency 0, grant removed) because its GET health check cannot reach the function through the pmcp.run edge (405 on GET /mcp; /health is platform JSON) - D-ITEM-08-17-A. Human must choose the replacement check (recommended: edge /health serverId + the identity probe) and approve delete-function-concurrency; then re-run just laya-deploy and Task 3 (cold samples). See 08-17-SUMMARY.md checkpoint.
+- 08-17 HALTED at deploy-refused (2026-09-27): aprender-mcp-decide deployed to pmcp.run at 3,008 MB (decide-tool-boundary-v1 2.0.0: 120 tokens / 2 texts), then CONTAINED by laya-deploy (reserved concurrency 0, grant removed) because its GET health check cannot reach the function through the pmcp.run edge (405 on GET /mcp; /health is platform JSON) - D-ITEM-08-17-A. Human must choose the replacement check (recommended: edge /health serverId + the identity probe) and approve delete-function-concurrency; then re-run just laya-deploy and Task 3 (cold samples). See 08-17-SUMMARY.md checkpoint. RESUME (2026-09-27): user chose option 1 and approved the lift; recipe fix 3115c690e (edge /health serverId + identity probe; selftest AWS CALLS 0); containment lifted 21:54:40Z (CloudTrail, profile's IAM user); the re-run of just laya-deploy stopped at pmcp.run UnauthorizedException before any upload (no AWS change; grant still absent, so every invocation fails the S3 load). BLOCKED: human runs `cargo pmcp deploy login --target-type pmcp-run`, then the continuation re-runs just laya-deploy, the warm identity classify and Task 3.
 
 ### Roadmap Evolution
 
@@ -544,7 +544,7 @@ Items acknowledged and carried forward from project scope:
 ## Session Continuity
 
 Last session: 2026-09-27T21:18:28.603Z
-Stopped at: 08-17 halted at deploy-refused (contained); awaiting human resume decision
+Stopped at: 08-17 resume blocked on a pmcp.run auth gate (cargo pmcp deploy login); containment lifted, grant absent
 Resume file: .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-17-SUMMARY.md
 
 ## Accumulated Context

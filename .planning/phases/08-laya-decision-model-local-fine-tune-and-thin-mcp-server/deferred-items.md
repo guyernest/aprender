@@ -432,6 +432,9 @@ not fixed by it.
   step. Resuming also needs `aws lambda delete-function-concurrency`, which laya-teardown leaves to the
   human.
 - **Owner:** the 08-17 continuation after the human's choice.
+- **Progress (2026-09-27):** the human chose option 1. The recipe was replaced in `3115c690e` (edge
+  `/health` `serverId`, offline case table in `laya-deploy-selftest`, AWS CALLS 0). The live run of the
+  new step is still pending: the resume re-deploy stopped earlier, at a pmcp.run login gate.
 
 ### D-ITEM-08-17-B: pmcp.run invokes the function before laya-grant can run
 

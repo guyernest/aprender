@@ -106,5 +106,27 @@
     "choose a replacement for the unrealizable health-body check (see the SUMMARY checkpoint options)",
     "approve lifting the containment: aws lambda delete-function-concurrency --function-name aprender-mcp-decide (laya-teardown prints it as the human's call)",
     "then re-run just laya-deploy (redeploy, re-grant, identity probe) and Task 3 (just laya-deploy-verify)"
-  ]
+  ],
+  "resume": {
+    "decided_by": "human",
+    "decided_on": "2026-09-27",
+    "decision": "option 1: replace the GET health body with the edge /health serverId check; the identity probe carries package identity. Lifting the containment approved explicitly",
+    "recipe_change_commit": "3115c690e (committed before any AWS write of the resume; laya-deploy-selftest: DEPLOY SELFTEST OK, AWS CALLS: 0)",
+    "edge_health_now": "GET https://aprender-mcp-decide.us-east.true-mcp.com/health -> 200 {\"status\":\"healthy\",\"serverId\":\"aprender-mcp-decide\",\"serverName\":\"aprender-mcp-decide\",\"hasDeployment\":true} (2026-09-27T21:59Z)",
+    "containment_lifted": {
+      "at": "2026-09-27T21:54:40Z",
+      "by": "the profile's own IAM user, before this continuation started (CloudTrail DeleteFunctionConcurrency20171031 on aprender-mcp-decide); the continuation read it back rather than re-running it",
+      "reserved_concurrency_now": "unset (get-function-concurrency returns none)",
+      "grant_now": "absent (list-role-policies: pmcp-declared, PmcpCompositionPolicy only), so any invocation fails the S3 load fast; no invocation logged between the lift and 22:08Z"
+    },
+    "redeploy_attempt": {
+      "at": "2026-09-27T22:01:33Z..22:06:03Z",
+      "rc": 1,
+      "reached": "eligibility ok (laya-verify, sha256 H); compile ok (aprender-mcp-decide-lambda only); CloudFormation rendered with MemorySize 3008",
+      "stopped_at": "cargo pmcp deploy: 'Failed to get upload URLs' -- pmcp.run GraphQL UnauthorizedException 'Valid authorization header not provided.' Nothing was uploaded and no AWS resource changed; the grant, health and identity steps never ran",
+      "confirm": "a read-only `cargo pmcp deploy outputs` got the same UnauthorizedException, so the cached pmcp.run login no longer refreshes on its own (it did on the first run)",
+      "shared_root_restored": "RESTORED crates byte-identical (state sha256 7c6f25eb46e83347d66e32a9e0cfae39c5556c58383dab2c109b3c061773aa03) on both calls"
+    },
+    "blocked_on": "authentication gate: the human runs `cargo pmcp deploy login` (browser OAuth to pmcp.run); then the continuation re-runs just laya-deploy, the warm identity classify and Task 3"
+  }
 }
