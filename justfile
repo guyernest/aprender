@@ -1375,3 +1375,553 @@ laya-pack-fixture run data out:
     set -euo pipefail
     exec cargo run --release -p aprender-decide --example pack_laya -- \
         pack-fixture --run "{{run}}" --data "{{data}}" --out "{{out}}"
+
+# ---------------------------------------------------------------------------
+# Laya decide server: fail-closed deploy to pmcp.run (plan 08-10, D-07, D-11, D-18)
+#
+# DEPLOY ROOT (user decision 2026-09-26, shared-crates-root): `cargo pmcp deploy
+# --manifest-path crates` with server name `aprender-mcp-decide`. cargo-pmcp's
+# `find_lambda_package_dir` returns `<root>/<server>-lambda` when it exists, BEFORE its
+# workspace-wide search, so this root resolves to crates/aprender-mcp-decide-lambda by
+# construction. The per-crate root (`--manifest-path crates/aprender-mcp-decide-lambda`)
+# misses that branch and falls through to the FIRST `*-lambda` package with a `bootstrap`
+# bin, which is aprender-mcp-chronos-lambda: the Chronos binary would ship under the decide
+# name, healthy-looking (RESEARCH Pitfall 1). `just laya-resolver-proof` EXECUTES that
+# resolver on this workspace; `laya-deploy` refuses without its proof.
+#
+# Limits of this choice: the server name is forced to the package stem, so ONE decide model
+# per workspace; and `crates/.pmcp/` + `crates/deploy/` belong to the setfit training server,
+# so `laya-deploy` swaps them out and restores them byte-identically on every exit path
+# (`_laya-crates-root-swap`, proven by `laya-deploy-selftest`). The durable fix is upstream:
+# in cargo-pmcp, return the project root when it is itself a `*-lambda` package with a
+# `bootstrap` bin (recommended future SDK work, not done here).
+#
+# Nothing here writes to AWS unless `just laya-verify` accepted the exact file first.
+# ---------------------------------------------------------------------------
+
+# Execute cargo-pmcp's own `find_lambda_package_dir` on THIS workspace (root `crates`, server
+# `aprender-mcp-decide`) from a `git archive` of <sdk> at <commit> unpacked under <work> (a
+# scratch dir; the SDK checkout is only read). The source version must equal the installed
+# `cargo pmcp --version`. Writes models/decide/resolver-proof.txt, which `laya-deploy` requires.
+laya-resolver-proof sdk commit work:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SDK="{{sdk}}"
+    WORK="{{work}}"
+    REPO="$(pwd -P)"
+    PROOF="models/decide/resolver-proof.txt"
+    EXPECT="crates/aprender-mcp-decide-lambda"
+    INJECT="scripts/laya_deploy/cargo_pmcp_resolver_proof.rs"
+    TEST="deployment::builder::aprender_resolver_proof::aprender_decide_resolves_from_shared_crates_root"
+    git -C "$SDK" rev-parse --git-dir >/dev/null 2>&1 || { echo "ERROR: $SDK is not a git checkout" >&2; exit 2; }
+    FULL="$(git -C "$SDK" rev-parse --verify "{{commit}}^{commit}")"
+    SRC_VER="$(git -C "$SDK" show "$FULL:cargo-pmcp/Cargo.toml" \
+        | python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])')"
+    INST_VER="$(cargo pmcp --version | awk '{print $2}')"
+    if [ "$SRC_VER" != "$INST_VER" ]; then
+        echo "REFUSED version: cargo-pmcp at $FULL is $SRC_VER but the installed tool is $INST_VER;" >&2
+        echo "        prove the resolver of the version that will deploy" >&2
+        exit 2
+    fi
+    BUILDER_LAST="$(git -C "$SDK" log -1 --format=%H "$FULL" -- cargo-pmcp/src/deployment/builder.rs)"
+    DEST="$WORK/rust-mcp-sdk-${FULL:0:12}"
+    rm -rf "$DEST"
+    mkdir -p "$DEST"
+    git -C "$SDK" archive --format=tar "$FULL" | tar -x -C "$DEST"
+    cat "$INJECT" >> "$DEST/cargo-pmcp/src/deployment/builder.rs"
+    # The SDK gitignores Cargo.lock, so the archive has none: seed it with the checkout's
+    # (a read-only copy) and record the cargo_metadata version the resolver ran with.
+    [ -f "$SDK/Cargo.lock" ] && cp "$SDK/Cargo.lock" "$DEST/Cargo.lock"
+    LOG="$WORK/resolver-proof-test.log"
+    set +e
+    (cd "$DEST" && APRENDER_WORKSPACE="$REPO" CARGO_TARGET_DIR="$WORK/target" \
+        cargo test -p cargo-pmcp --bin cargo-pmcp aprender_resolver_proof -- --nocapture) \
+        > "$LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        tail -30 "$LOG" >&2
+        echo "ERROR: the resolver test exited $rc (log: $LOG)" >&2
+        exit 1
+    fi
+    grep -q 'test result: ok. 1 passed' "$LOG" || { echo "ERROR: the filter did not run exactly one test (log: $LOG)" >&2; exit 1; }
+    RESOLVED="$(sed -n 's/^RESOLVED root=crates server=aprender-mcp-decide -> //p' "$LOG" | head -n 1)"
+    CONTROL="$(sed -n 's/^CONTROL root=[^ ]* server=aprender-mcp-decide -> //p' "$LOG" | head -n 1)"
+    test "$RESOLVED" = "$EXPECT" || { echo "ERROR: the resolver returned '$RESOLVED', not $EXPECT" >&2; exit 1; }
+    mkdir -p models/decide
+    {
+        echo "$RESOLVED"
+        echo "test=$TEST"
+        echo "command=cargo test -p cargo-pmcp --bin cargo-pmcp aprender_resolver_proof -- --nocapture"
+        echo "cargo_metadata_crate=$(python3 -c 'import sys, tomllib; print(next(p["version"] for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "cargo_metadata"))' "$DEST/Cargo.lock")"
+        echo "cargo_pmcp_version=$INST_VER"
+        echo "sdk_commit=$FULL"
+        echo "builder_rs_last_commit=$BUILDER_LAST"
+        echo "deploy_root=crates"
+        echo "server=aprender-mcp-decide"
+        echo "control_per_crate_root=$CONTROL"
+        echo "proven_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$PROOF"
+    echo "RESOLVER PROOF: $RESOLVED (control: root $EXPECT -> $CONTROL)"
+    echo "  cargo-pmcp $INST_VER, source $FULL (builder.rs last changed in $BUILDER_LAST)"
+    echo "  wrote $PROOF (gitignored)"
+
+# Write the gitignored crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml from its tracked
+# template for <apr>: server name, s3://<bucket>/decide/<server>/<sha256>.apr, the sha256 pin,
+# and [auth] enabled from <auth> (on|off, the plan 08-11 decision). LOCAL ONLY: eligibility is
+# enforced by the recipes that write to AWS. DRY_RUN=1 uses the literal bucket dry-run-bucket.
+laya-deploy-config apr auth server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    APR="{{apr}}"
+    SERVER="{{server}}"
+    ENV="{{ trim_start_match(env, "env=") }}"
+    case "$ENV" in
+        dev|prod) ;;
+        *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
+    esac
+    case "{{auth}}" in
+        on) AUTH=true ;;
+        off) AUTH=false ;;
+        *) echo "ERROR: auth must be on or off, got '{{auth}}'" >&2; exit 2 ;;
+    esac
+    # shared-crates-root: only this name resolves to the decide package (see the section header).
+    test "$SERVER" = "aprender-mcp-decide" || { echo "ERROR: server must be aprender-mcp-decide under the shared-crates-root deploy (got '$SERVER')" >&2; exit 2; }
+    test -f "$APR" || { echo "ERROR: $APR does not exist" >&2; exit 2; }
+    sha256() { if command -v rtk >/dev/null 2>&1; then rtk proxy shasum -a 256 "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
+    H="$(sha256 "$APR")"
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        BUCKET="dry-run-bucket"
+    else
+        ACCOUNT="$(aws sts get-caller-identity --profile "{{profile}}" --query Account --output text)"
+        BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
+    fi
+    DIR="crates/aprender-mcp-decide-lambda/.pmcp"
+    python3 - "$DIR/deploy.toml.template" "$DIR/deploy.toml" "$SERVER" \
+        "s3://$BUCKET/decide/$SERVER/$H.apr" "$H" "$AUTH" <<'PY'
+    import re, sys, tomllib
+    template, out, server, uri, sha, auth = sys.argv[1:7]
+    text = open(template).read()
+    unset = '"UNSET-run-just-laya-deploy-config"'
+    for key, value in (("name", server), ("APRENDER_DECIDE_S3_URI", uri), ("APRENDER_DECIDE_SHA256", sha)):
+        marker = f"{key} = {unset}"
+        if text.count(marker) != 1:
+            sys.exit(f"{template}: expected exactly one placeholder for {key}; restore the template")
+        text = text.replace(marker, f'{key} = "{value}"')
+    text, n = re.subn(r"(\[auth\]\nenabled = )(true|false)", r"\g<1>" + auth, text)
+    if n != 1:
+        sys.exit(f"{template}: no '[auth]' + 'enabled =' pair to set")
+    if "UNSET-run-just-laya-deploy-config" in text:
+        sys.exit("a placeholder remains after substitution; refusing to write")
+    cfg = tomllib.loads(text)
+    assert cfg["server"]["name"] == server
+    assert cfg["environment"]["APRENDER_DECIDE_S3_URI"] == uri
+    assert cfg["environment"]["APRENDER_DECIDE_SHA256"] == sha
+    assert cfg["auth"]["enabled"] is (auth == "true")
+    open(out, "w").write(text)
+    print(f"  server   {server}\n  s3 uri   {uri}\n  sha256   {sha}\n  auth     {auth}")
+    PY
+    echo "  wrote $DIR/deploy.toml (gitignored) for env=$ENV"
+
+# Run <cmd> with the decide config installed ALONE at the shared deploy root <root>: its
+# `.pmcp/{deploy,deployment}.toml`, `.pmcp/active-target` and `deploy/` (setfit-train's
+# rendered stack.ts and bootstrap) are backed up, removed, and restored on EXIT, INT, TERM
+# and HUP, then checked byte-identical by sha256 (exit 70 and the backup kept if not).
+# `deploy/` goes too: cargo-pmcp PRESERVES an existing deploy/lib/stack.ts, so the decide
+# deploy would otherwise synthesize setfit-train's stack. cargo-pmcp's decide-side
+# deployment.toml and stack.ts are copied to <snap> first. A leftover backup refuses.
+[positional-arguments]
+_laya-crates-root-swap root cfg snap +cmd:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ROOT="$1"; CFG="$2"; SNAP="$3"; shift 3
+    STATE=(.pmcp/deploy.toml .pmcp/deployment.toml .pmcp/active-target deploy)
+    test -d "$ROOT" || { echo "REFUSED swap: deploy root $ROOT is not a directory" >&2; exit 2; }
+    test -f "$CFG" || { echo "REFUSED swap: decide config $CFG does not exist" >&2; exit 2; }
+    BK="models/decide/swap-backup/$(printf '%s' "$ROOT" | tr '/.' '__')"
+    if [ -e "$BK" ]; then
+        echo "REFUSED swap: $BK exists -- an earlier swap of $ROOT did not finish restoring." >&2
+        echo "        Compare it with $ROOT, restore by hand, then remove it." >&2
+        exit 2
+    fi
+    digest() {
+        local e
+        for e in "${STATE[@]}"; do
+            if [ -e "$ROOT/$e" ]; then
+                (cd "$ROOT" && find "$e" -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256)
+            else
+                echo "absent $e"
+            fi
+        done | shasum -a 256 | awk '{print $1}'
+    }
+    BEFORE="$(digest)"
+    PMCP_EXISTED=0; [ -d "$ROOT/.pmcp" ] && PMCP_EXISTED=1
+    mkdir -p "$BK"
+    for e in "${STATE[@]}"; do
+        if [ -e "$ROOT/$e" ]; then
+            mkdir -p "$BK/$(dirname "$e")"
+            cp -Rp "$ROOT/$e" "$BK/$e"
+            echo "present $e"
+        else
+            echo "absent $e"
+        fi
+    done > "$BK/MANIFEST"
+    restore() {
+        local rc=$? state e after
+        set +e
+        trap - EXIT INT TERM HUP
+        mkdir -p "$SNAP"
+        for e in .pmcp/deployment.toml deploy/lib/stack.ts; do
+            [ -f "$ROOT/$e" ] && cp -p "$ROOT/$e" "$SNAP/$(basename "$e")"
+        done
+        while read -r state e; do
+            rm -rf "${ROOT:?}/$e"
+            [ "$state" = "present" ] && cp -Rp "$BK/$e" "$ROOT/$e"
+        done < "$BK/MANIFEST"
+        [ "$PMCP_EXISTED" = "1" ] || rmdir "$ROOT/.pmcp" 2>/dev/null
+        after="$(digest)"
+        if [ "$after" != "$BEFORE" ]; then
+            echo "ERROR: $ROOT was NOT restored byte-identically (state sha256 $BEFORE -> $after); backup kept at $BK" >&2
+            exit 70
+        fi
+        rm -rf "$BK"
+        echo "RESTORED $ROOT byte-identical (state sha256 $after, exit $rc)" >&2
+        exit "$rc"
+    }
+    trap restore EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    for e in "${STATE[@]}"; do rm -rf "${ROOT:?}/$e"; done
+    mkdir -p "$ROOT/.pmcp"
+    cp "$CFG" "$ROOT/.pmcp/deploy.toml"
+    echo "SWAPPED $ROOT: decide config installed alone (backup $BK)" >&2
+    set +e
+    "$@"
+    rc=$?
+    set -e
+    exit "$rc"
+
+# Cross-compile the decide bootstrap for Lambda arm64 and prove it: rebuilt now (the output is
+# newer than the build's start), an aarch64 ELF, and carrying `aprender-mcp-decide-lambda` (08-07
+# found a stale bootstrap from another crate at this path). A BUILD check, never resolver evidence.
+laya-build-bootstrap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ulimit -n 65536 || echo "WARNING: could not raise the fd limit; a link may fail with ProcessFdQuotaExceeded" >&2
+    command -v cargo-zigbuild >/dev/null || { echo "ERROR: cargo-zigbuild is not installed" >&2; exit 1; }
+    TD="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+    OUT="$TD/{{target}}/release/bootstrap"
+    STAMP="$(mktemp)"
+    trap 'rm -f "$STAMP"' EXIT
+    sleep 1
+    # A cached build relinks nothing, so "newer than the start" needs the package to rebuild.
+    touch crates/aprender-mcp-decide-lambda/src/main.rs
+    set +e
+    cargo zigbuild --release --target {{target}}.2.34 -p aprender-mcp-decide-lambda --bin bootstrap
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || { echo "ERROR: cargo zigbuild exited $rc" >&2; exit "$rc"; }
+    [ -f "$OUT" ] || { echo "ERROR: $OUT does not exist after the build" >&2; exit 1; }
+    [ "$OUT" -nt "$STAMP" ] || { echo "ERROR: $OUT is older than this build -- not the binary just built" >&2; exit 1; }
+    FT="$(file "$OUT")"
+    case "$FT" in
+        *"ARM aarch64"*) ;;
+        *) echo "ERROR: not an aarch64 binary: $FT" >&2; exit 1 ;;
+    esac
+    NAMED="$(strings "$OUT" | grep -c 'aprender-mcp-decide-lambda' || true)"
+    [ "${NAMED:-0}" -gt 0 ] || { echo "ERROR: $OUT does not name aprender-mcp-decide-lambda -- a stale bootstrap from another crate" >&2; exit 1; }
+    echo "BOOTSTRAP aarch64 OK $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes)"
+
+# Deploy <apr> as the decide server, FAIL-CLOSED. Refusals, each `REFUSED <check>: ...` before
+# any AWS call: (1) generated config present, (2) no placeholder left, (3) local sha256 ==
+# the config's pin and content-addressed key, (4) resolver proof present, naming the decide
+# package, for the installed cargo-pmcp, (5) ELIGIBILITY: `just laya-verify` accepts the exact
+# file, (6) the S3 object has the local size. DRY_RUN=1 stops after (6) with DRY-RUN OK. Live:
+# touch -> DEPLOYING -> cargo pmcp deploy (crates root, swapped) -> compile-log, health-body and
+# identity assertions; any identity failure runs `just laya-teardown` (containment).
+laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    APR="{{apr}}"
+    SERVER="{{server}}"
+    ENV="{{ trim_start_match(env, "env=") }}"
+    PROFILE="{{profile}}"
+    CFG="crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml"
+    PROOF="models/decide/resolver-proof.txt"
+    EXPECT_PKG="crates/aprender-mcp-decide-lambda"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    sha256() { if command -v rtk >/dev/null 2>&1; then rtk proxy shasum -a 256 "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "'$ENV' is not a known environment (expected dev or prod)" ;;
+    esac
+    [ "$SERVER" = "aprender-mcp-decide" ] || refuse server "only aprender-mcp-decide resolves to the decide package from the crates root (got '$SERVER')"
+    [ -f "$APR" ] || refuse artifact "$APR does not exist"
+    # (1) the generated config
+    [ -f "$CFG" ] || refuse config "$CFG does not exist -- generate it: just laya-deploy-config <apr> <on|off>"
+    # (2) no placeholder left
+    if grep -q 'UNSET-run-just-laya-deploy-config' "$CFG"; then
+        refuse placeholder "$CFG still holds an UNSET placeholder -- regenerate it with just laya-deploy-config"
+    fi
+    # (3) the pin: the config names THIS file, by content
+    H="$(sha256 "$APR")"
+    FIELDS="$(python3 -c 'import sys, tomllib; c = tomllib.load(open(sys.argv[1], "rb")); e = c["environment"]; print(c["server"]["name"], e["APRENDER_DECIDE_S3_URI"], e["APRENDER_DECIDE_SHA256"])' "$CFG" 2>/dev/null)" \
+        || refuse config "$CFG does not parse as the decide deploy config"
+    read -r CFG_NAME CFG_URI CFG_SHA <<< "$FIELDS"
+    [ "$CFG_NAME" = "$SERVER" ] || refuse config "the config deploys '$CFG_NAME', not $SERVER"
+    [ "$CFG_SHA" = "$H" ] || refuse sha-pin "APRENDER_DECIDE_SHA256 in $CFG is $CFG_SHA but $APR hashes to $H"
+    case "$CFG_URI" in
+        s3://*/decide/"$SERVER"/"$H".apr) ;;
+        *) refuse sha-pin "APRENDER_DECIDE_S3_URI $CFG_URI is not the content-addressed key decide/$SERVER/$H.apr" ;;
+    esac
+    # (4) the resolver proof for the installed cargo-pmcp
+    [ -f "$PROOF" ] || refuse resolver-proof "$PROOF does not exist -- run: just laya-resolver-proof <sdk> <commit> <scratch>"
+    [ "$(head -n 1 "$PROOF")" = "$EXPECT_PKG" ] || refuse resolver-proof "$PROOF names '$(head -n 1 "$PROOF")', not $EXPECT_PKG"
+    PROVEN_VER="$(sed -n 's/^cargo_pmcp_version=//p' "$PROOF")"
+    INSTALLED_VER="$(cargo pmcp --version 2>/dev/null | awk '{print $2}' || true)"
+    if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$PROVEN_VER" ]; then
+        refuse resolver-proof "the proof is for cargo-pmcp ${PROVEN_VER:-?}, the installed tool is ${INSTALLED_VER:-absent}; re-run just laya-resolver-proof"
+    fi
+    # (5) ELIGIBILITY -- the Rust verifier on the exact file (decide-apr-v1 deploy_eligibility),
+    # never `inspect`, and nothing below reaches AWS unless it accepted.
+    mkdir -p models/decide
+    VLOG="models/decide/eligibility-$SERVER.log"
+    set +e
+    just laya-verify "$APR" "{{run}}" "{{data}}" "{{base}}" > "$VLOG" 2>&1
+    vrc=$?
+    set -e
+    if [ "$vrc" -ne 0 ]; then
+        refuse eligibility "$(grep -m 1 '^REFUSED' "$VLOG" || echo "laya-verify exited $vrc (log: $VLOG)")" "$vrc"
+    fi
+    python3 - "$VLOG" "$H" <<'PY' || refuse eligibility "laya-verify exited 0 without deploy_eligible true for sha256 $H (log: $VLOG)"
+    import json, sys
+    lines = [l for l in open(sys.argv[1]) if l.startswith("{")]
+    v = json.loads(lines[-1])
+    sys.exit(0 if v.get("deploy_eligible") is True and v.get("artifact_sha256") == sys.argv[2] else 1)
+    PY
+    echo "  eligible: laya-verify accepted $APR (sha256 $H)"
+    # (6) the uploaded object
+    BK_KEY="${CFG_URI#s3://}"
+    BUCKET="${BK_KEY%%/*}"
+    KEY="${BK_KEY#*/}"
+    SIZE="$(wc -c < "$APR" | tr -d ' ')"
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        echo "DRY-RUN: skipping the head-object check of s3://$BUCKET/$KEY (expected ContentLength $SIZE)"
+        just laya-build-bootstrap
+        echo "RESOLVER PROOF: $(head -n 1 "$PROOF")"
+        echo "DRY-RUN OK $SERVER (sha256 $H; nothing deployed)"
+        exit 0
+    fi
+    REMOTE="$(aws s3api head-object --profile "$PROFILE" --bucket "$BUCKET" --key "$KEY" \
+        --query ContentLength --output text 2>/dev/null)" \
+        || refuse s3-object "s3://$BUCKET/$KEY is absent -- upload it: just laya-upload $APR {{run}} {{data}} {{base}}"
+    [ "$REMOTE" = "$SIZE" ] || refuse s3-object "s3://$BUCKET/$KEY is $REMOTE bytes, $APR is $SIZE"
+    # Live. The touch makes the decide package ALWAYS recompile, so its absence from the log
+    # means cargo-pmcp built something else (a cached build prints no Compiling line).
+    ulimit -n 65536 || echo "WARNING: could not raise the fd limit; a link may fail with ProcessFdQuotaExceeded" >&2
+    touch crates/aprender-mcp-decide-lambda/src/main.rs
+    LOG="models/decide/deploy-$SERVER.log"
+    SNAP="models/decide/deploy-$SERVER.state"
+    rm -rf "$SNAP"
+    contain() {
+        echo "IDENTITY FAILURE: $1 -- containing (reserved concurrency 0, grant removed)" >&2
+        just laya-teardown "$SERVER" "$ENV" "$PROFILE" \
+            || echo "ERROR: containment failed -- throttle it by hand: aws lambda put-function-concurrency --function-name $SERVER --reserved-concurrent-executions 0" >&2
+        exit 1
+    }
+    echo "DEPLOYING $SERVER"
+    set +e
+    just _laya-crates-root-swap crates "$CFG" "$SNAP" \
+        cargo pmcp deploy --manifest-path crates --regenerate-stack --no-color > "$LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        echo "ERROR: the deploy exited $rc (log: $LOG). If it created the function, contain it: just laya-teardown $SERVER $ENV $PROFILE" >&2
+        exit "$rc"
+    fi
+    grep -q 'Compiling aprender-mcp-decide-lambda ' "$LOG" || contain "the compile log does not name aprender-mcp-decide-lambda"
+    OTHER="$(grep -oE 'Compiling [A-Za-z0-9_-]+-lambda ' "$LOG" | grep -v 'aprender-mcp-decide-lambda' | sort -u | tr '\n' ' ' || true)"
+    [ -z "$OTHER" ] || contain "the compile log also builds $OTHER"
+    ENDPOINT="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$SNAP/deployment.toml" 2>/dev/null)" \
+        || contain "no endpoint in $SNAP/deployment.toml"
+    just laya-grant "$SERVER" "$ENV" "$PROFILE"
+    HEALTH="$(curl -fsS --max-time 30 "$ENDPOINT")" || contain "GET $ENDPOINT failed"
+    python3 -c 'import json, sys; b = json.loads(sys.argv[1]); sys.exit(0 if b.get("package") == "aprender-mcp-decide-lambda" and b.get("server") == sys.argv[2] else 1)' "$HEALTH" "$SERVER" \
+        || contain "the health body does not name the decide server: $HEALTH"
+    set +e
+    cargo run --release -p aprender-mcp-decide-lambda --example probe -- \
+        --url "$ENDPOINT" --apr "$APR" --expect-sha256 "$H" > "models/decide/deploy-probe-$SERVER.log" 2>&1
+    prc=$?
+    set -e
+    [ "$prc" -eq 0 ] || contain "the identity probe failed (log: models/decide/deploy-probe-$SERVER.log)"
+    echo "DEPLOYED $SERVER at $ENDPOINT: compile log, health body and live identity (sha256 $H) name the decide server"
+    echo "  next: just laya-deploy-verify $APR $SERVER $PROFILE    (re-run just laya-grant after any pmcp.run redeploy)"
+
+# Prove every deploy refusal OFFLINE on the synthetic tiny artifact (the only one 08-09 writes),
+# DRY_RUN=1 throughout, with `aws` shadowed by a recorder that must stay empty. Cases: placeholder,
+# sha-pin, resolver-proof, deploy-eligibility, upload-eligibility (the last two from laya-verify:
+# SyntheticNotDeployable); the crates-root swap restored byte-identical on success, forced
+# failure, SIGTERM and an absent root; resolver proof; bootstrap build. The positive dry run is
+# armed only by LAYA_ELIGIBLE_APR/_RUN/_DATA/_BASE naming an artifact laya-verify accepts.
+laya-deploy-selftest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DRY_RUN=1
+    T="crates/aprender-decide/tests/fixtures/laya_tiny"
+    ST="models/decide/selftest"
+    A="$ST/laya_tiny.apr"
+    CASES="$ST/cases"
+    CFG="crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml"
+    PROOF="models/decide/resolver-proof.txt"
+    GOLDEN="37d65159b2be0fa091aa840cd56c1a84b73c0bcd9e2df5906d1f8218f5448561"
+    FAILS=0
+    fail() { echo "FAIL $1" >&2; FAILS=$((FAILS + 1)); }
+    sha_or_absent() { if [ -f "$1" ]; then shasum -a 256 "$1" | awk '{print $1}'; else echo absent; fi; }
+    rm -rf "$CASES" "$ST/snap" "$ST/root-absent"
+    mkdir -p "$CASES" "$ST/shim"
+    # Keep a pre-existing generated decide config and the resolver proof; restore both on EXIT.
+    BK="$(mktemp -d "$ST/bk.XXXXXX")"
+    [ -f "$CFG" ] && cp -p "$CFG" "$BK/decide-deploy.toml"
+    cp -p "$PROOF" "$BK/resolver-proof.txt" 2>/dev/null || true
+    cleanup() {
+        if [ -f "$BK/decide-deploy.toml" ]; then cp -p "$BK/decide-deploy.toml" "$CFG"; else rm -f "$CFG"; fi
+        [ -f "$BK/resolver-proof.txt" ] && cp -p "$BK/resolver-proof.txt" "$PROOF"
+        rm -rf "$BK"
+    }
+    trap cleanup EXIT
+    # The shared deploy root's state (setfit-train's), before anything runs.
+    ROOT_TOML_BEFORE="$(sha_or_absent crates/.pmcp/deploy.toml)"
+    root_digest() {
+        local e
+        for e in .pmcp/deploy.toml .pmcp/deployment.toml .pmcp/active-target deploy; do
+            if [ -e "crates/$e" ]; then
+                (cd crates && find "$e" -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256)
+            else
+                echo "absent $e"
+            fi
+        done | shasum -a 256 | awk '{print $1}'
+    }
+    ROOT_BEFORE="$(root_digest)"
+    # The aws recorder: first on PATH, appends its argv, never reaches AWS.
+    REC="$(pwd -P)/$ST/aws-calls.log"
+    : > "$REC"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\necho "aws recorder: the selftest never reaches AWS" >&2\nexit 97\n' "$REC" > "$ST/shim/aws"
+    chmod +x "$ST/shim/aws"
+    export PATH="$(pwd -P)/$ST/shim:$PATH"
+    [ "$(command -v aws)" = "$(pwd -P)/$ST/shim/aws" ] || { echo "ERROR: the aws recorder is not first on PATH" >&2; exit 1; }
+    # Set-up: the synthetic artifact and a consistent config for it.
+    just laya-pack-fixture "$T" "$T/data" "$A" > "$CASES/0-fixture.log" 2>&1 || { tail -5 "$CASES/0-fixture.log" >&2; exit 1; }
+    grep -q "sha256=$GOLDEN" "$CASES/0-fixture.log" || { echo "ERROR: laya-pack-fixture did not reproduce the golden $GOLDEN" >&2; exit 1; }
+    regen() { just laya-deploy-config "$A" off > "$CASES/config-$1.log" 2>&1 || { tail -5 "$CASES/config-$1.log" >&2; exit 1; }; }
+    regen setup
+    [ -f "$PROOF" ] || { echo "ERROR: $PROOF is missing -- run just laya-resolver-proof first" >&2; exit 1; }
+    # One refusal case: non-zero AND the expected reason, or it is a FAIL.
+    expect_refused() {
+        local n="$1" name="$2" pat="$3" log rc reason
+        shift 3
+        log="$CASES/$n-$name.log"
+        set +e
+        "$@" > "$log" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ] && grep -Eq "$pat" "$log"; then
+            reason="$(grep -Eo "$pat.*" "$log" | head -n 1 | cut -c 1-300)"
+            echo "CASE $n $name: REFUSED as expected ($reason)"
+        else
+            fail "CASE $n $name: rc=$rc, expected a refusal matching '$pat' (log: $log)"
+            tail -5 "$log" >&2
+        fi
+    }
+    deploy_tiny() { just laya-deploy "$A" "$T" "$T/data" "$T/checkpoint"; }
+    # Each mutation leaves VALID TOML, so the refusal is the check under test, not a parse error.
+    mutate() { python3 -c 'import re, sys; p, key, value = sys.argv[1:4]; t = open(p).read(); t, n = re.subn(r"^(" + key + r" = )\"[^\"]*\"$", lambda m: m.group(1) + chr(34) + value + chr(34), t, count=1, flags=re.M); assert n == 1, key; open(p, "w").write(t)' "$CFG" "$1" "$2"; }
+    mutate APRENDER_DECIDE_S3_URI UNSET-run-just-laya-deploy-config
+    expect_refused 1 placeholder 'REFUSED placeholder:' deploy_tiny
+    regen 2
+    mutate APRENDER_DECIDE_SHA256 0000000000000000000000000000000000000000000000000000000000000000
+    expect_refused 2 sha-pin 'REFUSED sha-pin:' deploy_tiny
+    regen 3
+    mv "$PROOF" "$BK/proof.moved"
+    expect_refused 3 resolver-proof 'REFUSED resolver-proof:' deploy_tiny
+    mv "$BK/proof.moved" "$PROOF"
+    expect_refused 4 deploy-eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' deploy_tiny
+    if just --summary | tr ' ' '\n' | grep -qx 'laya-upload'; then
+        expect_refused 5 upload-eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' \
+            just laya-upload "$A" "$T" "$T/data" "$T/checkpoint"
+    fi
+    # The shared-root swap: the setfit-train state comes back byte-identical on every path.
+    SNAP="$ST/snap"
+    swap_case() {
+        local n="$1" name="$2" want="$3" rc
+        shift 3
+        set +e
+        just _laya-crates-root-swap "$@" > "$CASES/swap-$n-$name.log" 2>&1
+        rc=$?
+        set -e
+        local now; now="$(root_digest)"
+        if [ "$rc" -eq "$want" ] && [ "$now" = "$ROOT_BEFORE" ] && grep -q '^RESTORED ' "$CASES/swap-$n-$name.log" \
+            && [ ! -e models/decide/swap-backup/crates ]; then
+            echo "SWAP $n $name: exit $rc, crates root restored byte-identical (state sha256 $now)"
+        else
+            fail "SWAP $n $name: exit $rc (want $want), state $now vs $ROOT_BEFORE (log: $CASES/swap-$n-$name.log)"
+        fi
+    }
+    # 1: the decide config is in place ALONE while the command runs (deploy/ cleared), then restored.
+    swap_case 1 success 0 crates "$CFG" "$SNAP" \
+        sh -c 'cmp -s crates/.pmcp/deploy.toml "$1" && test ! -e crates/deploy && test ! -e crates/.pmcp/deployment.toml' _ "$CFG"
+    swap_case 2 forced-failure 1 crates "$CFG" "$SNAP" false
+    swap_case 3 sigterm 143 crates "$CFG" "$SNAP" sh -c 'kill -TERM "$PPID"'
+    # 4: a root with no prior state gets none back.
+    mkdir -p "$ST/root-absent"
+    set +e
+    just _laya-crates-root-swap "$ST/root-absent" "$CFG" "$SNAP" test -f "$ST/root-absent/.pmcp/deploy.toml" > "$CASES/swap-4-absent-root.log" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ] && [ -z "$(ls -A "$ST/root-absent")" ]; then
+        echo "SWAP 4 absent-root: exit 0, the decide config was installed and nothing is left behind"
+    else
+        fail "SWAP 4 absent-root: exit $rc, left: $(ls -A "$ST/root-absent" | tr '\n' ' ')"
+    fi
+    # Positive dry run: armed only by a real artifact that laya-verify itself must accept.
+    if [ -n "${LAYA_ELIGIBLE_APR:-}${LAYA_ELIGIBLE_RUN:-}${LAYA_ELIGIBLE_DATA:-}${LAYA_ELIGIBLE_BASE:-}" ]; then
+        if [ -n "${LAYA_ELIGIBLE_APR:-}" ] && [ -n "${LAYA_ELIGIBLE_RUN:-}" ] && [ -n "${LAYA_ELIGIBLE_DATA:-}" ] && [ -n "${LAYA_ELIGIBLE_BASE:-}" ]; then
+            just laya-deploy-config "$LAYA_ELIGIBLE_APR" off > "$CASES/positive-config.log" 2>&1 || fail "positive: laya-deploy-config"
+            set +e
+            just laya-deploy "$LAYA_ELIGIBLE_APR" "$LAYA_ELIGIBLE_RUN" "$LAYA_ELIGIBLE_DATA" "$LAYA_ELIGIBLE_BASE" > "$CASES/positive.log" 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ] && grep -q '^DRY-RUN OK' "$CASES/positive.log"; then
+                grep '^DRY-RUN OK' "$CASES/positive.log"
+            else
+                fail "positive dry run: exit $rc without DRY-RUN OK (log: $CASES/positive.log)"
+            fi
+        else
+            fail "positive dry run: set ALL of LAYA_ELIGIBLE_APR/_RUN/_DATA/_BASE, or none"
+        fi
+    else
+        echo "SKIP positive dry run: no deploy-eligible artifact (laya-finetune-gate-v1 demo.outcome gate_fail; set LAYA_ELIGIBLE_APR/_RUN/_DATA/_BASE to arm)"
+    fi
+    # Independent checks: the resolver proof on file, and the bootstrap build.
+    RP="$(head -n 1 "$PROOF")"
+    echo "RESOLVER PROOF: $RP ($(sed -n 's/^cargo_pmcp_version=/cargo-pmcp /p' "$PROOF"), sdk $(sed -n 's/^sdk_commit=//p' "$PROOF" | cut -c 1-12))"
+    [ "$RP" = "crates/aprender-mcp-decide-lambda" ] || fail "resolver proof names $RP"
+    if just laya-build-bootstrap > "$CASES/bootstrap.log" 2>&1 && grep -q '^BOOTSTRAP aarch64 OK' "$CASES/bootstrap.log"; then
+        grep '^BOOTSTRAP aarch64 OK' "$CASES/bootstrap.log"
+    else
+        fail "laya-build-bootstrap (log: $CASES/bootstrap.log)"
+    fi
+    ROOT_TOML_AFTER="$(sha_or_absent crates/.pmcp/deploy.toml)"
+    ROOT_AFTER="$(root_digest)"
+    echo "CRATES ROOT: crates/.pmcp/deploy.toml sha256 before=$ROOT_TOML_BEFORE after=$ROOT_TOML_AFTER; state sha256 before=$ROOT_BEFORE after=$ROOT_AFTER"
+    [ "$ROOT_TOML_BEFORE" = "$ROOT_TOML_AFTER" ] && [ "$ROOT_BEFORE" = "$ROOT_AFTER" ] || fail "the shared crates root changed"
+    CALLS="$(wc -l < "$REC" | tr -d ' ')"
+    MARKERS="$(cat "$CASES"/*.log | grep -c '^DEPLOYING' || true)"
+    echo "AWS CALLS: $CALLS"
+    echo "DEPLOY MARKERS: $MARKERS"
+    if [ "$FAILS" -eq 0 ] && [ "$CALLS" -eq 0 ] && [ "$MARKERS" -eq 0 ]; then
+        echo "DEPLOY SELFTEST OK"
+    else
+        echo "DEPLOY SELFTEST FAILED ($FAILS failed checks)" >&2
+        exit 1
+    fi
