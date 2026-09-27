@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-13-PLAN.md
-last_updated: "2026-09-27T17:04:03.505Z"
+stopped_at: Completed 08-14-PLAN.md
+last_updated: "2026-09-27T17:24:58.724Z"
 last_activity: 2026-09-27
-last_activity_desc: 08-13 completed - A1/A2/A3 declared in laya-parity-v1 2.0.0 and laya-finetune-gate-v1 AMENDMENT 1.4.0 (published 2.0.0) before any s64 data or run exists
-state_head: dd02a9b8486728476119790179095d7af0ffcd6b
+last_activity_desc: 08-14 completed - A1/A2/A3 wired into the Python back office (median-ECE seed, float64 rescore-noise record, s64 data by rule, shift probe) and proven on the tiny CPU checkpoint; no production run
+state_head: e2b69877a5c45bac676d0d949266613307464d67
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 110
-  completed_plans: 104
+  completed_plans: 105
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 12 of 18 complete (08-01..08-11 and 08-13; next: 08-14, Wave 11; 08-12 close-out moved to Wave 16)
-Status: Ready to execute 08-14 (Wave 11) - 08-13 declared the user's option 1 (2026-09-27, spikes 027/028) before any run: A1 noise-referenced pack/verify bar max(1e-5, 4 x torch32-vs-f64 noise), ceiling 1.0e-3 (laya-parity-v1 2.0.0); A2 in-distribution 459-row eval set with the SemEval test split as a reported shift probe and A3 median-of-three seeds (laya-finetune-gate-v1 AMENDMENT 1.4.0, published 2.0.0); demo_s64 outcome pending; just laya-train-lifecycle red until 08-14 Task 1 (LIFECYCLE FAILED: run dir is missing rescore-noise.json)
+Plan: 13 of 18 complete (08-01..08-11, 08-13 and 08-14; next: 08-15, Wave 12; 08-12 close-out moved to Wave 16)
+Status: Ready to execute 08-15 (Wave 12) - 08-14 wired A1/A2/A3 into scripts/laya_train (4f5ada981, de58feea6, 24cea2a63): production trains seeds 13/17/23 and ships the median-ECE seed; every run writes rescore-noise.json behind a manual-fp32 control (exit 2 on mismatch); data/decide/tweet-stance-64 built by rule (459 rows [111, 291, 57] + 280 shift rows, byte-identical to spike 028's held-out set); shift probe reported with gate_clause false and proven not to move the gate; just laya-train-selftest GREEN; LAYA_LIFECYCLE_KEEP exports a full 1.4.0 run dir for 08-15; models/decide/laya-stance-64 not created (08-16's one declared run); open: D-ITEM-08-14-A (seeds label) and -B (GATE-006 legacy clause) for 08-15
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-27 - 08-13 completed: A1/A2/A3 declared (fc0c1dd30, a3e155170, 56f888d62); no data/decide/tweet-stance-64 or models/decide/laya-stance-64 exists
+Last activity: 2026-09-27 - 08-14 completed: A1/A2/A3 wired into the Python back office (4f5ada981, de58feea6, 24cea2a63, SUMMARY e2b69877a); data/decide/tweet-stance-64 exists by rule; no models/decide/laya-stance-64 exists
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -226,6 +226,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P10 | 22 min | 2 tasks | 4 files |
 | Phase 08 P11 | 3min | 2 tasks | 2 files |
 | Phase 08 P13 | 11min | 3 tasks | 6 files |
+| Phase 08 P14 | 18 min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -418,6 +419,9 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-10: laya-verify precedes the first AWS call in laya-deploy and laya-upload; the selftest proves placeholder, sha-pin, resolver-proof, deploy- and upload-eligibility refusals on the synthetic artifact with an aws recorder (positive control) at AWS CALLS 0; the live halves have never run (D-ITEM-08-10-C, option 3)
 - [Phase 08]: 08-11 D-18 go/no-go: HOLD with no AWS call (hold-no-aws), decided by the user 2026-09-26; 08-DEPLOY-EVIDENCE.json is the hold record 08-12 reads; D-ITEM-08-11-A preserves the live deploy; next: calibration spike, then a declared gate run
 - [Phase 08]: 08-13: user option 1 (2026-09-27) declared before any s64 run - laya-parity-v1 2.0.0 A1 bar max(1e-5, 4 x torch32-vs-f64 noise), ceiling 1.0e-3, absent record = floor; laya-finetune-gate-v1 AMENDMENT 1.4.0 published as 2.0.0 (pv diff major): A2 in-distribution eval set + reported shift probe, A3 median-ECE seed of 13/17/23 (floor(ece_post x 10000), ties to smaller seed, selected with eval labels)
+- [Phase 08]: Median-ECE seed rank key is floor(ece_post x rank_scale) read from the contract; seeds.label stays the contract literal 'mean ± sd over 3 seeds' (D-ITEM-08-14-A)
+- [Phase 08]: Every Laya run writes rescore-noise.json only after a manual fp32 forward reproduces the Scorer's logits exactly; otherwise exit 2, no record, no gate report
+- [Phase 08]: data/decide/tweet-stance-64 built by eval_set.demo_rule: 459 rows [111, 291, 57] + 280 shift rows; byte-identical to spike 028's held-out set
 
 ### Pending Todos
 
@@ -532,8 +536,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-27T17:03:37.291Z
-Stopped at: Completed 08-13-PLAN.md
+Last session: 2026-09-27T17:24:58.531Z
+Stopped at: Completed 08-14-PLAN.md
 Resume file: None
 
 ## Accumulated Context
