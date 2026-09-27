@@ -250,7 +250,27 @@ fn the_tiny_decide_server_classifies_over_live_stdio() {
         .iter()
         .map(|r| r["state"].as_str().expect("state"))
         .collect();
-    let out = payload(&client.call(serde_json::json!({ "texts": texts })));
+    // The SERVED count bound is tier policy (decide-tool-boundary-v1: 2 texts at 3 008 MB),
+    // so the rows go in contract-sized batches; each fixture row is at most 64 tokens, and
+    // two of them fit the budget. The results are re-joined in input order.
+    let batch = aprender_mcp_decide::ClassifyLimits::CONTRACTED.max_texts;
+    let outs: Vec<serde_json::Value> = texts
+        .chunks(batch)
+        .map(|chunk| payload(&client.call(serde_json::json!({ "texts": chunk }))))
+        .collect();
+    let mut out = outs[0].clone();
+    for later in &outs[1..] {
+        assert_eq!(later["model"], out["model"], "one identity across batches");
+        assert_eq!(
+            later["labels"], out["labels"],
+            "one label order across batches"
+        );
+    }
+    out["results"] = serde_json::Value::Array(
+        outs.iter()
+            .flat_map(|o| o["results"].as_array().expect("results").clone())
+            .collect(),
+    );
 
     assert_eq!(
         out["model"]["artifact_sha256"].as_str(),
@@ -334,12 +354,25 @@ fn a_real_decide_model_classifies_over_live_stdio() {
     assert_eq!(tools.len(), 1, "one model, one tool: {tools:?}");
     assert_eq!(tools[0]["name"], aprender_mcp_decide::TOOL_NAME);
 
-    let out = payload(&client.call(serde_json::json!({
-        "texts": [
-            "I think this policy is a terrible idea and should be scrapped.",
-            "The weather in Lisbon was lovely this weekend."
-        ]
+    // One text per call: at the 3 008 MB tier two real sentences exceed the 120-token
+    // budget together (each builds to about 70 tokens), and this leg proves the served
+    // model, not the batch bound.
+    let mut out = payload(&client.call(serde_json::json!({
+        "texts": ["I think this policy is a terrible idea and should be scrapped."]
     })));
+    let second = payload(&client.call(serde_json::json!({
+        "texts": ["The weather in Lisbon was lovely this weekend."]
+    })));
+    assert_eq!(second["model"], out["model"], "one identity across calls");
+    let mut results = out["results"].as_array().expect("results").clone();
+    results.extend(
+        second["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .cloned(),
+    );
+    out["results"] = serde_json::Value::Array(results);
     assert_eq!(
         out["model"]["artifact_sha256"].as_str(),
         Some(sha256_file(&model).as_str()),

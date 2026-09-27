@@ -39,11 +39,17 @@ region = "us-east-1"
 # Replaced by `just laya-deploy-config`. The pmcp.run server id is also the name the
 # bootstrap reports (PMCP_SERVER_ID).
 name = "UNSET-run-just-laya-deploy-config"
-# D-18: the maximum default-Lambda memory, because memory buys vCPUs (up to 6 at
-# 10,240 MB). A CPU-bound model below that is slower at the same cost per request
-# (aws-mcp-model-hosting.md). Peak RSS is the artifact bytes plus the widened f32
-# model, ~2.6 GB of the 10 GB.
-memory_mb = 10240
+# THE TIER. contracts/decide-tool-boundary-v1.yaml prices its token budget for ONE
+# memory size, `lambda_memory_mb`, and a test asserts this value equals it
+# (FALSIFY-DECIDE-TOOL-007): Lambda sells CPU in proportion to memory, so another size
+# silently re-prices every request. Change the contract first, then this line.
+# 3008 MB (~1.7 vCPU) is the ceiling of the account this deploys to until AWS Support
+# approves more; the budget there is 2 texts / 120 built tokens. D-18's target is the
+# maximum, 10240 MB (6 vCPU, budget 8 texts / 1024 tokens), because memory buys vCPUs
+# and the cost per request is flat (aws-mcp-model-hosting.md). Peak RSS is the
+# artifact bytes plus the widened f32 model: 2.60-2.65 GB measured locally, about
+# 350 MB under 3008 MB before Linux/Lambda overhead, which is unmeasured.
+memory_mb = 3008
 # Matches the API Gateway HTTP API's own 30-second integration timeout, which cannot be
 # raised. A larger number would only be a longer wait for a response the gateway has
 # already given up on. The loader's DOWNLOAD_DEADLINE (25 s) sits inside it.
@@ -63,8 +69,8 @@ APRENDER_DECIDE_SHA256 = "UNSET-run-just-laya-deploy-config"
 
 # The value here is a placeholder: `just laya-deploy-config` sets it from the decision
 # taken at plan 08-11's checkpoint. Do not deploy an open function by default without
-# that decision (ASVS V2): an unauthenticated 10 GB function is a cost-amplification
-# vector, since every call can buy a cold start and seconds of 6-vCPU compute.
+# that decision (ASVS V2): an unauthenticated multi-GB function is a cost-amplification
+# vector, since every call can buy a cold start and seconds of multi-vCPU compute.
 [auth]
 enabled = false
 provider = "none"

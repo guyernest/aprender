@@ -26,7 +26,7 @@ The server advertises exactly one tool:
 
 | Tool | Arguments | Returns |
 |------|-----------|---------|
-| `classify` | `texts: [string]` — 1..=8 texts, each at most 16384 UTF-8 bytes, at most 1024 model tokens over the request. Nothing else (`deny_unknown_fields`). | `model` {`artifact_sha256`, `recipe_id`, `method`, `base`}, `labels` (task order), and `results`, one per text in input order: `label`, `probabilities` (calibrated, one per label in `labels` order — an array, never a map), `tokens`, `truncated`. |
+| `classify` | `texts: [string]` — 1..=2 texts, each at most 16384 UTF-8 bytes, at most 120 model tokens over the request (the 3,008 MB Lambda tier of `contracts/decide-tool-boundary-v1.yaml`; 8 texts / 1024 tokens at the 10,240 MB target tier). Nothing else (`deny_unknown_fields`). | `model` {`artifact_sha256`, `recipe_id`, `method`, `base`}, `labels` (task order), and `results`, one per text in input order: `label`, `probabilities` (calibrated, one per label in `labels` order — an array, never a map), `tokens`, `truncated`. |
 
 The tool description is built from the artifact: its question, its labels in
 order, and the bounds. Each element of `texts` is ONE complete document; a text

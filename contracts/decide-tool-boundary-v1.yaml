@@ -1,6 +1,6 @@
 contract: decide-tool-boundary
 metadata:
-  version: 1.0.0
+  version: 2.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -22,19 +22,66 @@ metadata:
     tokenization, so a long text cannot buy tokenizer CPU), and a TOKEN BUDGET over the built Laya
     rows (after tokenization, before any forward). The token count of a text is the length of its
     BUILT Laya row — the ids the forward actually consumes, at most `row_max_tokens` (512) per text —
-    and the budget is the SUM over the request. A legal request is therefore at most two full-window
-    rows or eight short ones.
+    and the budget is the SUM over the request.
 
-    THE BUDGET IS DERIVED, NOT CHOSEN. Spike 026 measured, on default Lambda (10 240 MB, Graviton2):
-    cold start 11.3-12.0 s, and 5.6 s for one 512-token row, i.e. 11 ms per built token at 512. The
-    probe replay every cold load performs costs 2 probes x `probe_max_row_tokens` (48,
-    decide-apr-v1) x 11 ms = 1056 ms, declared UP to `probe_budget_ms` 1100. With a 4 000 ms margin
-    the room left for inference is 30000 - 12000 - 1100 - 4000 = 12900 ms, which buys
-    12900 / 11 = 1172 tokens; the contract declares that DOWN to 1024 (two full 512-token rows). The
-    11 ms/token price was measured on 512-token rows, so it already prices the CONCENTRATED shape
-    whose attention cost is largest (two 512-token rows carry 4x the summed squared length of eight
-    128-token rows). The live accepted-region probe measures BOTH shapes rather than trusting the
-    per-token price for either (`accepted_region_cold`).
+    THE BUDGET IS TIER POLICY, NOT A CONSTANT OF THE MODEL (v2.0.0). Every envelope number below is
+    priced for ONE Lambda memory size, `lambda_memory_mb`, because Lambda sells CPU in proportion to
+    memory (1 vCPU per 1 769 MB, 6 vCPU at 10 240 MB) and the forward is CPU-bound. Deploying at
+    another size silently re-prices every request, so the deploy template's `memory_mb` is asserted
+    EQUAL to `lambda_memory_mb` (FALSIFY-DECIDE-TOOL-007). v1.0.0 priced the 10 240 MB tier. v2.0.0
+    prices 3 008 MB, the ceiling of the account this deploys to until AWS Support approves more.
+
+    THE 3 008 MB TIER IS AN EXTRAPOLATION, SHOWN HERE SO THE LIVE SAMPLES CAN FALSIFY EACH TERM.
+    Nothing was ever measured at 3 008 MB. Spike 026 measured the same Laya-en weights on default
+    Lambda arm64 at 10 240 MB (6 vCPU) and 4 096 MB (4096 / 1769 = 2.315 vCPU), three forced cold
+    starts each, raw records in .planning/spikes/026-laya-mcp-default-lambda/results/. 3 008 MB is
+    3008 / 1769 = 1.700 vCPU. Graviton2 records only (the one Graviton3 record is faster).
+      (a) Per built token at 512, the budget's DIVISOR, so under-pricing it multiplies:
+          10 240 MB: max 5660 ms / 512 = 11.05 ms, x 6 / 1.700      = 39.0 ms;
+           4 096 MB: max 12501 ms / 512 = 24.42 ms, x 2.315 / 1.700 = 33.3 ms.
+          The LARGER anchor, rounded up: `tier_ms_per_token_at_512` = 40.
+      (b) The fixed cold cost of the one HTTP request, per term:
+          - gateway + client overhead (client wall - Lambda duration), not memory-scaled: max 895 ms;
+          - process start to S3 download done (846 MB, 16 x 64 MiB ranged GETs), measured flat
+            between 10 240 MB (9100-9151 ms) and 4 096 MB (9035-9222 ms): max 9222 ms;
+          - the sha256 pin over 846 MB, which spike 026's server never computed: sha2 0.10.9 is
+            built without its `asm` feature, so aarch64 runs the SOFTWARE backend; 1370 ms on an
+            Apple M4 (measured 2026-09-27 on laya-stance-64.apr, 618-624 MB/s) x 3.3 (spike 026's
+            measured Graviton2 / M4 ratio) = 4521 ms, single-threaded so not vCPU-scaled;
+          - download done to engine ready (parse + F16 -> F32 widen): 4 096 MB max 1675 ms
+            x 2.315 / 1.700 = 2281 ms. The 10 240 MB anchor (1303 ms x 6 / 1.700 = 4598 ms) is NOT
+            used for this term because the 4 096 MB measurement refutes it: scaled to 4 096 MB it
+            predicts 1303 x 6 / 2.315 = 3377 ms against 1675 ms measured. The load is mostly
+            single-threaded, and linear scaling from the nearest tier already over-prices it.
+          Sum 895 + 9222 + 4521 + 2281 = 16919 ms, declared UP to `cold_start_budget_ms` 17000.
+      (c) The probe replay every cold load performs: 2 probes x `probe_max_row_tokens` (48,
+          decide-apr-v1) x 40 ms = 3840 ms, declared UP to `probe_budget_ms` 3900.
+      (d) Room for inference: 30000 - 17000 - 3900 - 4000 (`margin_ms`, unchanged) = 5100 ms, which
+          buys 5100 / 40 = 127 tokens, declared DOWN to `classify_max_total_tokens` 120.
+      (e) The count bound must be reachable inside the budget. A built row is never shorter than
+          the task prefix plus markers: 57 tokens for the served stance task (measured with
+          `probe --plan-only --maximal distributed` on laya-stance-64.apr: 8 empty texts plan to
+          456 tokens). floor(120 / 57) = 2, so `classify_max_texts` = 2. Eight texts would be
+          admitted by the count and always refused by the budget, and the DISTRIBUTED maximal
+          request would not be a legal request.
+    Consequences at this tier: a legal request is one text of at most 120 built tokens (about 63
+    tokens of state, a tweet) or two very short ones; a text long enough to be truncated (a row of
+    512) is always refused by the budget, so `truncated: true` is unreachable here. Peak RSS of the
+    served model measured locally is 2.60-2.65 GB (load plus 2 x 390 tokens), about 350 MB under
+    3 008 MB; spike 026 reported Lambda Max Memory Used 3.4-3.65 GB for its own implementation.
+    Linux/Lambda memory overhead is unmeasured: an OOM at load is a deploy refusal, never a bound.
+
+    THE TARGET TIER. 10 240 MB is the intended host once AWS approves it. Its v1.0.0 derivation,
+    measured rather than extrapolated: cold start 12000 ms (spike 026: 11.3-12.0 s to the first
+    answer), probe 2 x 48 x 11 = 1056 ms declared 1100, per token 11 ms (5.6 s / 512), room
+    30000 - 12000 - 1100 - 4000 = 12900 ms = 1172 tokens declared 1024 (two full 512-token rows),
+    classify_max_texts 8. Restoring it is a re-derivation here plus the memory change in the deploy
+    template, never an edit of one number.
+
+    The per-token price is taken on 512-token rows, so it already prices the CONCENTRATED shape
+    whose attention cost is largest. The live accepted-region probe measures BOTH shapes rather than
+    trusting the per-token price for either (`accepted_region_cold`), and every term of (b) is
+    logged per cold sample (`decide.load ... download_ms sha_ms build_ms`), so a miss names its term.
 
     REFUSE, NEVER DEFAULT, NEVER ECHO. Every refusal is `pmcp::Error::validation`, names this
     contract file and the constant key it enforces, reports the OBSERVED value, and never echoes the
@@ -77,30 +124,45 @@ metadata:
 constants:
   # ---- the three request bounds, checked in this order ----
   classify_min_texts: 1
-  classify_max_texts: 8
+  # 3 008 MB tier: floor(classify_max_total_tokens / 57) = floor(120 / 57), where 57 is the
+  # shortest built row of the served stance task (description (e)). 10 240 MB tier: 8.
+  classify_max_texts: 2
   # UTF-8 BYTES per text, checked BEFORE tokenization so a long text cannot buy tokenizer CPU.
   # 16 KiB is ~32x the longest text a 512-token row can consume; a text past it is refused, not
   # truncated, because the tokenizer would have to see all of it to find the 512th token.
   classify_max_text_bytes: 16384
   # Sum of BUILT Laya row lengths over the request, checked after tokenization and before any
-  # forward. Derivation (all constants below): (30000 - 12000 - 1100 - 4000) / 11 = 1172 tokens,
-  # declared DOWN to 1024 = 2 x row_max_tokens.
-  classify_max_total_tokens: 1024
+  # forward. Derivation (all constants below): (30000 - 17000 - 3900 - 4000) / 40 = 127 tokens,
+  # declared DOWN to 120. 10 240 MB tier: (30000 - 12000 - 1100 - 4000) / 11 = 1172, declared 1024.
+  classify_max_total_tokens: 120
   # Laya's max_len: the most tokens one built row can hold. Cross-reference only; the artifact's
   # own agent config is the authority for the value the forward uses.
   row_max_tokens: 512
+  # The SHORTEST built row of the served stance task (laya-stance-64.apr): task prefix + markers
+  # with an empty state. Measured, not derived: `probe --plan-only --maximal distributed` plans 8
+  # empty texts to 456 tokens. classify_max_texts x this <= classify_max_total_tokens, and the
+  # maximal-request builder refuses to emit a DISTRIBUTED request the budget would refuse.
+  served_task_min_row_tokens: 57
   # ---- admission (per process) ----
   classify_max_in_flight: 1
   classify_max_pending: 4
   # ---- the envelope the token budget is priced against ----
+  # The Lambda memory size EVERY number below is priced for (description: tier policy). The
+  # deploy template's memory_mb is asserted equal to it. Target tier once AWS approves: 10240.
+  lambda_memory_mb: 3008
   api_gateway_timeout_ms: 30000
-  # spike 026: 11.3-12.0 s cold start on default Lambda 10 240 MB (download + sha256 + ladder).
-  cold_start_budget_ms: 12000
-  # DERIVED: 2 probes x probe_max_row_tokens (48, decide-apr-v1) x 11 ms = 1056 ms, declared UP.
-  probe_budget_ms: 1100
+  # EXTRAPOLATED for 3 008 MB (description (b)): 895 overhead + 9222 download + 4521 sha256 +
+  # 2281 build = 16919 ms, declared UP. 10 240 MB tier (measured): 12000.
+  cold_start_budget_ms: 17000
+  # DERIVED: 2 probes x probe_max_row_tokens (48, decide-apr-v1) x 40 ms = 3840 ms, declared UP.
+  # 10 240 MB tier: 2 x 48 x 11 = 1056, declared 1100.
+  probe_budget_ms: 3900
   margin_ms: 4000
-  # spike 026: 5.6 s / 512 tokens on Graviton2, rounded up to a whole millisecond.
-  g2_ms_per_token_at_512: 11
+  # ms per BUILT token on 512-token rows AT lambda_memory_mb (v1.0.0 named it
+  # g2_ms_per_token_at_512 and it held only for 10 240 MB). EXTRAPOLATED for 3 008 MB: the larger
+  # of the two vCPU-scaled Graviton2 anchors, 39.0 (10 240 MB) and 33.3 (4 096 MB), rounded up.
+  # 10 240 MB tier (measured): 11.
+  tier_ms_per_token_at_512: 40
 
 equations:
 
@@ -127,13 +189,15 @@ equations:
       - 'classify_count_bound holds, so at most classify_max_texts byte lengths are read'
 
   classify_token_budget:
-    formula: 'accept(req) requires sum(len(build_row(task, t)) for t in req.texts) <= classify_max_total_tokens, where classify_max_total_tokens <= floor((api_gateway_timeout_ms - cold_start_budget_ms - probe_budget_ms - margin_ms) / g2_ms_per_token_at_512) = floor((30000 - 12000 - 1100 - 4000) / 11) = 1172'
+    formula: 'accept(req) requires sum(len(build_row(task, t)) for t in req.texts) <= classify_max_total_tokens, where classify_max_total_tokens <= floor((api_gateway_timeout_ms - cold_start_budget_ms - probe_budget_ms - margin_ms) / tier_ms_per_token_at_512) = floor((30000 - 17000 - 3900 - 4000) / 40) = 127 at lambda_memory_mb 3008'
     domain: 'the built Laya rows of an admitted request (task prefix + markers + state, right-truncated to row_max_tokens)'
     codomain: 'either the forward runs, or a validation refusal naming classify_max_total_tokens, the observed sum and the per-text built lengths — never the texts'
     invariants:
       - 'the unit is the BUILT ROW length — the ids the forward actually consumes, at most row_max_tokens per text — not the raw token count of the text, so a truncated text counts 512, not its raw length'
       - 'checked after tokenization and BEFORE any forward: a refused request costs tokenization only'
-      - '1024 is the declared value, DOWN from the derived 1172: the remainder is headroom for Graviton-generation variance, which spike 026 measured as a ~1.5x lottery'
+      - '120 is the declared value, DOWN from the derived 127: the remainder is headroom for Graviton-generation variance, which spike 026 measured as a ~1.5x lottery. The whole derivation is an EXTRAPOLATION to 3 008 MB from the 10 240 MB and 4 096 MB measurements (description); the live cold samples falsify it term by term'
+      - 'the budget is priced for lambda_memory_mb and for no other size: the 10 240 MB tier (budget 1024, classify_max_texts 8) is restored only by re-deriving it here and changing the deploy memory with it'
+      - 'classify_max_texts x (the served task''s shortest built row) <= classify_max_total_tokens: a count the budget can never admit is not a bound, it is a lie in the tool description'
       - 'the price is per token at 512, i.e. it already charges the concentrated shape whose attention cost is largest; the per-token price is NOT trusted for either shape — accepted_region_cold measures both live'
       - 'exactly-at the budget is accepted and one token over is refused (FALSIFY-DECIDE-TOOL-003)'
     preconditions:
@@ -178,15 +242,16 @@ equations:
       - 'reports OBSERVED values (count, byte length, token sum, index) so the caller learns exactly what to reduce'
 
   accepted_region_cold:
-    formula: 'forall shape in {CONCENTRATED, DISTRIBUTED}, forall recorded cold sample s of shape: wall_ms(s) < api_gateway_timeout_ms, where CONCENTRATED = ceil(classify_max_total_tokens / row_max_tokens) = 2 texts of classify_max_text_bytes each (truncated to 2 x 512 built tokens) and DISTRIBUTED = classify_max_texts = 8 texts whose built rows total the largest value <= classify_max_total_tokens'
-    domain: 'one HTTP request: a maximal legal `tools/call classify` arriving as the FIRST POST at a COLD default-Lambda instance of aprender-mcp-decide-lambda on pmcp.run'
+    formula: 'forall shape in {CONCENTRATED, DISTRIBUTED}, forall recorded cold sample s of shape: wall_ms(s) < api_gateway_timeout_ms, where CONCENTRATED = min(ceil(classify_max_total_tokens / row_max_tokens), classify_max_texts) texts, all but the last full rows of classify_max_text_bytes and the last sized so the built rows total the largest value <= classify_max_total_tokens (at 3 008 MB: 1 text of 120 built tokens; at 10 240 MB: 2 texts of 16384 bytes truncated to 2 x 512), and DISTRIBUTED = classify_max_texts texts whose built rows total the largest value <= classify_max_total_tokens (at 3 008 MB: 2 texts of 60 built tokens)'
+    domain: 'one HTTP request: a maximal legal `tools/call classify` arriving as the FIRST POST at a COLD default-Lambda instance of aprender-mcp-decide-lambda on pmcp.run, deployed at lambda_memory_mb'
     codomain: 'a successful classify response inside the API Gateway cap, for every recorded cold sample of both shapes'
     invariants:
       - 'the unit is ONE HTTP request. A stateless client''s `initialize` may land on a different, already-warm instance, so the cold instance pays download + sha256 + load ladder + probe replay + inference inside the `tools/call` itself; that request is the worst legal one and the guarantee is stated for it'
       - 'CONCENTRATED — the fewest texts that reach the budget: largest attention cost (quadratic in row length) and largest tokenizer input. DISTRIBUTED — classify_max_texts texts: largest per-row overhead. BOTH must hold; neither is inferred from the other'
+      - 'the claim holds only for the tier it was measured at: samples taken at a memory size other than lambda_memory_mb say nothing about this contract'
       - 'a sample counts as COLD only with independent evidence that the request performed the model load: the server''s load log line correlated to the probe''s request id. A sample without that evidence is warm and does not count toward this claim'
       - 'EVERY recorded cold sample must pass — a best-of-N is not an accepted region (the Phase 7 accepted-region lesson: a limit is only as good as the worst request it admits)'
-      - 'falsified LIVE by plan 08-11 (`just laya-deploy-verify`); the maximal request is built by aprender_mcp_decide_lambda::probe::build_maximal_request (plan 08-07); the binding flips from pending only on 08-11''s evidence (plan 08-12)'
+      - 'falsified LIVE by plan 08-17 (`just laya-deploy-verify`; the procedure was 08-11''s until its HOLD); the maximal request is built by aprender_mcp_decide_lambda::probe::build_maximal_request (plan 08-07); the binding flips from pending only on that live evidence (plan 08-12)'
     preconditions:
       - 'the deployed artifact passed decide-apr-v1 deploy_eligibility'
 
@@ -199,7 +264,7 @@ proof_obligations:
 
   - type: bound
     property: 'The declared token budget does not exceed the budget derived from the Lambda envelope'
-    formal: 'classify_max_total_tokens * g2_ms_per_token_at_512 + cold_start_budget_ms + probe_budget_ms + margin_ms <= api_gateway_timeout_ms'
+    formal: 'classify_max_total_tokens * tier_ms_per_token_at_512 + cold_start_budget_ms + probe_budget_ms + margin_ms <= api_gateway_timeout_ms (at 3 008 MB: 120 x 40 + 17000 + 3900 + 4000 = 29700 <= 30000)'
     applies_to: all
 
   - type: invariant
@@ -226,9 +291,9 @@ falsification_tests:
 
   - id: FALSIFY-DECIDE-TOOL-001
     rule: 'The count bound admits N = classify_max_texts and refuses N + 1 and 0'
-    prediction: 'A request of 8 short texts is classified; 9 texts and an empty list are refused with validation errors naming classify_max_texts and classify_min_texts respectively.'
-    implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests); the test: line is added in that plan''s commit'
-    test: 'cargo test -p aprender-mcp-decide --lib tests::empty_texts_refused_naming_min_texts && cargo test -p aprender-mcp-decide --lib tests::nine_texts_refused_naming_max_texts && cargo test -p aprender-mcp-decide --lib tests::eight_texts_accepted_and_classified'
+    prediction: 'A request of classify_max_texts (2) short texts is classified; classify_max_texts + 1 (3) texts and an empty list are refused with validation errors naming classify_max_texts and classify_min_texts respectively.'
+    implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests); renamed from the 8/9-text names by the v2.0.0 tier amendment (plan 08-17) so the names hold at every tier'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::empty_texts_refused_naming_min_texts && cargo test -p aprender-mcp-decide --lib tests::one_over_max_texts_refused_naming_max_texts && cargo test -p aprender-mcp-decide --lib tests::max_texts_accepted_and_classified'
     if_fails: 'The count bound is off by one or absent, so a request the token budget was never priced for reaches the forward.'
 
   - id: FALSIFY-DECIDE-TOOL-002
@@ -240,7 +305,7 @@ falsification_tests:
 
   - id: FALSIFY-DECIDE-TOOL-003
     rule: 'The token budget accepts exactly-at and refuses one over'
-    prediction: 'Texts whose built rows sum to exactly 1024 are classified; a request summing to 1025 is refused naming classify_max_total_tokens, the observed sum and the per-text lengths, before any forward runs.'
+    prediction: 'Texts whose built rows sum to exactly classify_max_total_tokens are classified; a request summing to one more is refused naming classify_max_total_tokens, the observed sum and the per-text lengths, before any forward runs.'
     implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests)'
     test: 'cargo test -p aprender-mcp-decide --lib tests::token_budget_accepts_exactly_at && cargo test -p aprender-mcp-decide --lib tests::token_budget_refuses_one_over'
     if_fails: 'The budget counts raw tokens instead of built-row tokens, or is checked after the forward: the 30 s cap is no longer priced.'
@@ -267,11 +332,11 @@ falsification_tests:
     if_fails: 'A refusal echoes caller text (ASVS V7) or leaves the caller guessing which bound fired.'
 
   - id: FALSIFY-DECIDE-TOOL-007
-    rule: 'Every Rust boundary constant equals this file'
-    prediction: 'The contract-mirror test reads every constants: key via test_support::constant_u64 and finds each equal to its Rust constant; changing one YAML value alone turns it red naming the key.'
-    implemented_by: 'plan 08-06 (contract-mirror test)'
-    test: 'cargo test -p aprender-mcp-decide --lib tests::bounds_match_contract'
-    if_fails: 'A bound changed in exactly one place: the published boundary and the served one disagree.'
+    rule: 'Every Rust boundary constant, and the deployed Lambda memory, equals this file'
+    prediction: 'The contract-mirror test reads every bound key via test_support::constant_u64 and finds each equal to its Rust constant; the tier test finds the deploy template''s memory_mb equal to lambda_memory_mb and the token budget inside the envelope; changing one YAML value alone turns a test red naming the key.'
+    implemented_by: 'plan 08-06 (contract-mirror test); the tier test by the v2.0.0 amendment (plan 08-17)'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::bounds_match_contract && cargo test -p aprender-mcp-decide --lib tests::token_budget_fits_the_envelope && cargo test -p aprender-mcp-decide --lib tests::max_texts_fit_the_budget_at_the_shortest_row && cargo test -p aprender-mcp-decide-lambda --lib tests::deploy_memory_is_the_contract_tier && cargo test -p aprender-mcp-decide-lambda --lib probe::tests::maximal_distributed_refuses_a_count_the_budget_cannot_admit'
+    if_fails: 'A bound changed in exactly one place: the published boundary and the served one disagree, or the function runs at a memory size the budget was never priced for.'
 
   - id: FALSIFY-DECIDE-TOOL-008
     rule: 'Admission refuses the (pending + 1)th concurrent request and releases a slot only when its blocking work ends'
@@ -282,8 +347,8 @@ falsification_tests:
 
   - id: FALSIFY-DECIDE-TOOL-009
     rule: 'The maximal legal classify completes under the API Gateway cap on a cold instance, for both shapes and every cold sample'
-    prediction: 'Every recorded cold sample of the CONCENTRATED (2 x 16384-byte texts) and DISTRIBUTED (8 texts, <= 1024 built tokens) shapes, each proven cold by its load log line, completes under 30000 ms as the instance''s first POST.'
-    test: 'LIVE-PENDING — falsified live by plan 08-11 (just laya-deploy-verify); no unit-test surface: it needs a cold pmcp.run Lambda'
+    prediction: 'At lambda_memory_mb 3008, every recorded cold sample of the CONCENTRATED (1 text, 120 built tokens) and DISTRIBUTED (2 texts, <= 120 built tokens) shapes, each proven cold by its load log line, completes under 30000 ms as the instance''s first POST.'
+    test: 'LIVE-PENDING — falsified live by plan 08-17 (just laya-deploy-verify); no unit-test surface: it needs a cold pmcp.run Lambda'
     if_fails: 'The token budget admits a request the envelope cannot serve cold: lower classify_max_total_tokens (re-deriving it here first) or move the tier, never raise the margin after the fact.'
 
 kani_harnesses:
@@ -296,7 +361,7 @@ kani_harnesses:
     property: 'forall n <= classify_max_texts + 1, forall byte lengths <= classify_max_text_bytes + 1, forall built lengths <= row_max_tokens: precheck accepts iff count, bytes and token-sum bounds all hold, and the first failing bound in order is the one named'
     bound: 9
     strategy: bounded_int
-    harness: 'NOT EXECUTED — the evidence is the runnable proptest over the same predicate, `cargo test -p aprender-mcp-decide --lib tests::bound_order_is_count_bytes_tokens` (plan 08-06), which draws counts 0..=9, byte lengths 0..=33 and built-row lengths 0..=20 against a shrunk instance (32 bytes, 64 tokens) and asserts the first failing bound in order is the one named'
+    harness: 'NOT EXECUTED — the evidence is the runnable proptest over the same predicate, `cargo test -p aprender-mcp-decide --lib tests::bound_order_is_count_bytes_tokens` (plan 08-06), which draws counts 0..=9, byte lengths 0..=33 and built-row lengths 0..=20 against a shrunk instance (8 texts, 32 bytes, 64 tokens; the count is pinned so the token branch stays reachable at every tier) and asserts the first failing bound in order is the one named'
 
 qa_gate:
   id: F-DECIDE-TOOL-001
@@ -304,7 +369,7 @@ qa_gate:
   description: >
     The blocking gate for the classify tool boundary. Every correctness check is unit-falsifiable
     and runs in CI once plan 08-06 lands its tests; the accepted-region check is LIVE and is run by
-    plan 08-11 against a cold pmcp.run instance, never by a libtest assertion. Until then every
+    plan 08-17 against a cold pmcp.run instance, never by a libtest assertion. Until then every
     binding is `pending` and `make contract-audit-phase8` tolerates exactly that.
   checks:
     - 'contract schema validity (pv validate, zero errors) and non-zero pv status counts'
@@ -314,7 +379,7 @@ qa_gate:
     - 'truncation flag on an over-room text'
     - 'every refusal validation-class, naming the key, omitting the text'
     - 'admission refuses pending + 1 and holds a slot until its blocking work ends'
-    - 'LIVE, NOT IN CI: both maximal shapes complete cold under 30 s for every proven-cold sample (plan 08-11)'
+    - 'LIVE, NOT IN CI: both maximal shapes complete cold under 30 s for every proven-cold sample, at lambda_memory_mb (plan 08-17)'
   pass_criteria: 'FALSIFY-DECIDE-TOOL-001..008 pass on every host and each has been observed RED under an induced negative; FALSIFY-DECIDE-TOOL-009 has live evidence for both shapes with every cold sample under api_gateway_timeout_ms.'
   falsification: >
     Change constants.classify_max_total_tokens alone (touching no Rust) and the contract-mirror test

@@ -2130,7 +2130,7 @@ bindings:
   function: precheck
   signature: 'fn precheck(task: &Task, tokenizer: &Tokenizer, texts: &[String]) -> Result<Vec<BuiltRow>, pmcp::Error>'
   status: pending
-  notes: 'Sum of BUILT Laya row lengths <= 1024, checked after tokenization and before any forward. Implemented by plan 08-06.'
+  notes: 'Sum of BUILT Laya row lengths <= classify_max_total_tokens (120 at the 3 008 MB tier since v2.0.0; 1024 at 10 240 MB), checked after tokenization and before any forward. Implemented by plan 08-06.'
 - contract: decide-tool-boundary-v1.yaml
   equation: classify_admission
   module_path: aprender_mcp_decide

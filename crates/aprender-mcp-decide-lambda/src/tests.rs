@@ -237,3 +237,49 @@ async fn local_source_resolves_the_tiny_fixture_with_its_pin() {
     assert_eq!(timeline.bytes, tiny_bytes().len() as u64);
     assert_eq!(timeline.artifact_sha256, pin.as_str());
 }
+
+// ---------------------------------------------------------------- the deployed tier
+
+/// The one line `<indent><key><sep><integer>` of `text`, parsed. Panics naming the key and
+/// the file when it is absent or appears more than once, so a renamed key fails loudly.
+fn single_integer(text: &str, key: &str, sep: &str, file: &str) -> u64 {
+    let hits: Vec<u64> = text
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix(key)?.strip_prefix(sep))
+        .map(|v| {
+            v.trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("{file}: {key} is not an integer ({e})"))
+        })
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "{file}: expected exactly one `{key}{sep}` line"
+    );
+    hits[0]
+}
+
+/// FALSIFY-DECIDE-TOOL-007 (tier): the memory the deploy template gives the function is
+/// the memory decide-tool-boundary-v1 priced its token budget for. Lambda sells CPU in
+/// proportion to memory, so any other size silently re-prices every request.
+#[test]
+fn deploy_memory_is_the_contract_tier() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let contract_path = root.join("../../contracts/decide-tool-boundary-v1.yaml");
+    let template_path = root.join(".pmcp/deploy.toml.template");
+    let contract = std::fs::read_to_string(&contract_path).expect("read the contract");
+    let template = std::fs::read_to_string(&template_path).expect("read the deploy template");
+    let tier = single_integer(
+        &contract,
+        "lambda_memory_mb",
+        ": ",
+        "decide-tool-boundary-v1",
+    );
+    let memory = single_integer(&template, "memory_mb", " = ", "deploy.toml.template");
+    assert_eq!(
+        memory, tier,
+        "deploy.toml.template memory_mb {memory} != decide-tool-boundary-v1 lambda_memory_mb {tier}: \
+         re-derive the budget for the new tier in the contract first"
+    );
+}

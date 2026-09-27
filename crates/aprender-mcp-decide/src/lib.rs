@@ -100,12 +100,14 @@ pub struct ClassifyLimits {
 }
 
 impl ClassifyLimits {
-    /// The contracted bounds (`contracts/decide-tool-boundary-v1.yaml` `constants`).
+    /// The contracted bounds (`contracts/decide-tool-boundary-v1.yaml` `constants`), priced
+    /// for the contract's `lambda_memory_mb` tier (3 008 MB since v2.0.0: at most 2 texts and
+    /// 120 built tokens; the 10 240 MB target tier is 8 and 1024). The contract derives them.
     pub const CONTRACTED: Self = Self {
         min_texts: 1,
-        max_texts: 8,
+        max_texts: 2,
         max_text_bytes: 16_384,
-        max_total_tokens: 1_024,
+        max_total_tokens: 120,
         max_in_flight: 1,
         max_pending: 4,
     };

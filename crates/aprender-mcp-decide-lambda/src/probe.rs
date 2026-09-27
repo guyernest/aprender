@@ -479,6 +479,18 @@ pub enum MaximalError {
     Prepare(aprender_decide::DecideError),
     /// The limits admit no request at all (e.g. `max_texts == 0`).
     EmptyLimits,
+    /// The built request is over the budget the limits declare, so the server would refuse
+    /// it: the count bound is not reachable inside the budget for this task (its shortest
+    /// built row times `max_texts` exceeds `max_total_tokens`). A maximal request that is
+    /// not legal measures nothing (decide-tool-boundary-v1 `served_task_min_row_tokens`).
+    OverBudget {
+        /// The shape that could not be built legally.
+        shape: MaximalShape,
+        /// Built-row tokens of the closest request the builder found.
+        total: usize,
+        /// The budget it had to fit.
+        budget: usize,
+    },
 }
 
 impl std::fmt::Display for MaximalError {
@@ -486,6 +498,16 @@ impl std::fmt::Display for MaximalError {
         match self {
             Self::Prepare(e) => write!(f, "the model refused the synthetic text: {e}"),
             Self::EmptyLimits => write!(f, "the limits admit no request"),
+            Self::OverBudget {
+                shape,
+                total,
+                budget,
+            } => write!(
+                f,
+                "the {} request builds to {total} tokens, over the budget {budget}: the count \
+                 bound is not reachable inside the budget for this task",
+                shape.as_str()
+            ),
         }
     }
 }
@@ -551,13 +573,16 @@ fn largest_within(
 /// CONCENTRATED is `min(ceil(max_total_tokens / max_len), max_texts)` texts: all but
 /// the last are `max_text_bytes` long and truncated to a full row; the last is too when
 /// the budget is a whole number of rows, and otherwise is sized to the remainder, so the
-/// total is the largest value not over the budget. For Laya-en (max_len 512, budget
-/// 1024) that is 2 full rows. DISTRIBUTED is `max_texts` texts whose built rows total
-/// the largest value not over the budget.
+/// total is the largest value not over the budget. For Laya-en (max_len 512) at the
+/// 3 008 MB tier (budget 120) that is ONE text of 120 built tokens; at the 10 240 MB tier
+/// (budget 1024) it was 2 full rows. DISTRIBUTED is `max_texts` texts whose built rows
+/// total the largest value not over the budget.
 ///
 /// # Errors
 ///
-/// [`MaximalError`] if the model refuses the synthetic text or the limits admit nothing.
+/// [`MaximalError`] if the model refuses the synthetic text, the limits admit nothing,
+/// or the closest request of `shape` is still over the budget
+/// ([`MaximalError::OverBudget`]: the server would refuse it, so it is never returned).
 pub fn build_maximal_request(
     model: &crate::Model,
     limits: &aprender_mcp_decide::ClassifyLimits,
@@ -617,6 +642,13 @@ pub fn build_maximal_request(
         .iter()
         .map(aprender_decide::PreparedRow::tokens)
         .sum();
+    if total > budget {
+        return Err(MaximalError::OverBudget {
+            shape,
+            total,
+            budget,
+        });
+    }
     Ok((texts, total))
 }
 
@@ -691,6 +723,44 @@ mod tests {
         assert_eq!(texts.len(), SHRUNK.max_texts);
         assert!(total <= SHRUNK.max_total_tokens && total + 8 >= SHRUNK.max_total_tokens);
         assert_legal(&SHRUNK, &texts, total);
+    }
+
+    /// A count the budget cannot admit at the task's shortest row is refused by the builder,
+    /// never returned as a "maximal" request the server would refuse.
+    #[test]
+    fn maximal_distributed_refuses_a_count_the_budget_cannot_admit() {
+        let model = tiny_model();
+        let (shortest, _) = row_tokens(&model, "").expect("the empty text builds");
+        assert!(
+            shortest > 1,
+            "the tiny task's shortest row is {shortest} tokens"
+        );
+        // Four texts need at least 4 x shortest tokens; one fewer can never be met.
+        let limits = ClassifyLimits {
+            max_texts: 4,
+            max_total_tokens: 4 * shortest - 1,
+            ..SHRUNK
+        };
+        match build_maximal_request(&model, &limits, MaximalShape::Distributed) {
+            Err(MaximalError::OverBudget {
+                shape,
+                total,
+                budget,
+            }) => {
+                assert_eq!(shape, MaximalShape::Distributed);
+                assert_eq!(budget, limits.max_total_tokens);
+                assert!(total > budget, "{total} > {budget}");
+            }
+            other => panic!("expected OverBudget, got {other:?}"),
+        }
+        // At exactly 4 x shortest the same count is legal again.
+        let limits = ClassifyLimits {
+            max_total_tokens: 4 * shortest,
+            ..limits
+        };
+        let (texts, total) =
+            build_maximal_request(&model, &limits, MaximalShape::Distributed).expect("legal");
+        assert_legal(&limits, &texts, total);
     }
 
     #[test]

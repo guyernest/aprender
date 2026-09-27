@@ -130,7 +130,7 @@ fn bounds_match_contract() {
 #[test]
 fn token_budget_fits_the_envelope() {
     let tokens = constant_u64(TOOL_CONTRACT, "classify_max_total_tokens");
-    let per_token = constant_u64(TOOL_CONTRACT, "g2_ms_per_token_at_512");
+    let per_token = constant_u64(TOOL_CONTRACT, "tier_ms_per_token_at_512");
     let spent = tokens * per_token
         + constant_u64(TOOL_CONTRACT, "cold_start_budget_ms")
         + constant_u64(TOOL_CONTRACT, "probe_budget_ms")
@@ -140,6 +140,23 @@ fn token_budget_fits_the_envelope() {
         spent <= cap,
         "budget {tokens} tokens costs {spent} ms > {cap} ms"
     );
+}
+
+/// The count bound is reachable inside the budget: `classify_max_texts` rows of the
+/// served task's SHORTEST built row fit `classify_max_total_tokens`. A larger count would
+/// be admitted by precheck and always refused by the budget (v2.0.0, 3 008 MB tier:
+/// 2 x 57 = 114 <= 120; 8 texts would need 456).
+#[test]
+fn max_texts_fit_the_budget_at_the_shortest_row() {
+    let texts = constant_u64(TOOL_CONTRACT, "classify_max_texts");
+    let min_row = constant_u64(TOOL_CONTRACT, "served_task_min_row_tokens");
+    let budget = constant_u64(TOOL_CONTRACT, "classify_max_total_tokens");
+    assert!(
+        texts * min_row <= budget,
+        "{texts} texts x {min_row}-token rows = {} > budget {budget}",
+        texts * min_row
+    );
+    assert!(min_row > 0 && min_row <= constant_u64(TOOL_CONTRACT, "row_max_tokens"));
 }
 
 /// FALSIFY-DECIDE-TOOL-008 (sizing): admission is sized from the contract.
@@ -164,7 +181,10 @@ async fn served_service_uses_contracted_limits() {
     );
     // Behavioural, not just a field read: the served call refuses the contracted N+1.
     let over = vec!["x"; ClassifyLimits::CONTRACTED.max_texts + 1];
-    let error = service.call(args(&over)).await.expect_err("9 texts");
+    let error = service
+        .call(args(&over))
+        .await
+        .expect_err("max_texts + 1 texts");
     assert_names_key(&validation_message(&error), "classify_max_texts");
 }
 
@@ -185,22 +205,26 @@ fn empty_texts_refused_naming_min_texts() {
     assert_names_key(&validation_message(&error), "classify_min_texts");
 }
 
-/// FALSIFY-DECIDE-TOOL-001: N + 1 = 9 texts is refused naming classify_max_texts.
+/// FALSIFY-DECIDE-TOOL-001: N + 1 = classify_max_texts + 1 texts is refused naming
+/// classify_max_texts and the observed count. The count comes from the contract, so the
+/// test holds at every tier (v1.0.0's 9 texts at 10 240 MB, 3 at 3 008 MB).
 #[test]
-fn nine_texts_refused_naming_max_texts() {
-    let error = precheck(&ClassifyLimits::CONTRACTED, &args(&["x"; 9])).expect_err("9 texts");
+fn one_over_max_texts_refused_naming_max_texts() {
+    let n = constant_usize("classify_max_texts") + 1;
+    let error = precheck(&ClassifyLimits::CONTRACTED, &args(&vec!["x"; n])).expect_err("N + 1");
     let message = validation_message(&error);
     assert_names_key(&message, "classify_max_texts");
     assert!(
-        message.contains("9 texts"),
+        message.contains(&format!("{n} texts")),
         "reports the observed count: {message}"
     );
 }
 
-/// FALSIFY-DECIDE-TOOL-001: N = 8 short texts pass every bound and are classified.
+/// FALSIFY-DECIDE-TOOL-001: N = classify_max_texts short texts pass every bound and are
+/// classified by the SERVED service (contracted limits, the budget included).
 #[tokio::test]
-async fn eight_texts_accepted_and_classified() {
-    let texts = [
+async fn max_texts_accepted_and_classified() {
+    let pool = [
         "My parcel is late.",
         "I was charged twice.",
         "I cannot log in.",
@@ -210,9 +234,12 @@ async fn eight_texts_accepted_and_classified() {
         "The courier lost it.",
         "Update my profile.",
     ];
+    let n = constant_usize("classify_max_texts");
+    assert!(n <= pool.len(), "the pool covers classify_max_texts {n}");
+    let texts = &pool[..n];
     assert_eq!(texts.len(), ClassifyLimits::CONTRACTED.max_texts);
     let response = ClassifyService::served(model())
-        .call(args(&texts))
+        .call(args(texts))
         .await
         .expect("the maximal legal count is accepted");
     assert_eq!(response.results.len(), texts.len());
@@ -308,9 +335,9 @@ async fn token_budget_accepts_exactly_at() {
 }
 
 /// FALSIFY-DECIDE-TOOL-003 and -006: one token over is refused naming the key, the
-/// observed sum and the per-text lengths, never the texts. The contracted 1024 cannot
-/// be crossed by the tiny fixture's <= 64-token rows, so the budget is shrunk instead
-/// of weakening the contracted value.
+/// observed sum and the per-text lengths, never the texts. The budget is shrunk to the
+/// fixture's own sum minus one, so the test pins the exactly-at edge at any contracted
+/// value instead of depending on the tier's number.
 #[tokio::test]
 async fn token_budget_refuses_one_over() {
     let texts = budget_texts();
@@ -364,7 +391,11 @@ proptest! {
     fn bound_order_is_count_bytes_tokens(
         rows in proptest::collection::vec((0usize..=33, 0usize..=20), 0..=9),
     ) {
+        // Every field that shapes the draw is pinned here, not inherited from CONTRACTED:
+        // with the 3 008 MB tier's 2 texts, 2 x 20 built tokens never reaches 64 and the
+        // token branch of the order would go untested.
         let limits = ClassifyLimits {
+            max_texts: 8,
             max_text_bytes: 32,
             max_total_tokens: 64,
             ..ClassifyLimits::CONTRACTED
@@ -673,14 +704,18 @@ fn input_schema_is_strict() {
 #[tokio::test]
 async fn response_labels_follow_task_order() {
     let model = model();
+    let texts = [
+        "My parcel never arrived.",
+        "Why was I billed twice?",
+        "I cannot reset my password.",
+    ];
+    // As many as the SERVED count bound admits (tier policy: 2 at 3 008 MB).
+    let n = texts.len().min(ClassifyLimits::CONTRACTED.max_texts);
     let response = ClassifyService::served(Arc::clone(&model))
-        .call(args(&[
-            "My parcel never arrived.",
-            "Why was I billed twice?",
-            "I cannot reset my password.",
-        ]))
+        .call(args(&texts[..n]))
         .await
         .expect("classified");
+    assert_eq!(response.results.len(), n);
     assert_eq!(response.labels, ["shipping", "billing", "account"]);
     assert_eq!(response.labels, model.task().owned_labels());
     for (i, r) in response.results.iter().enumerate() {
@@ -784,14 +819,31 @@ fn tool_description_lists_labels_in_order_with_guidance() {
             .unwrap_or_else(|| panic!("description lacks {label} after byte {last}"));
         last += at + label.len();
     }
+    // The bounds are read from the contract, so the description is checked at the tier
+    // the contract prices (a stale literal here once hid a tier change).
+    let bounds = [
+        format!(
+            "{}..={} texts",
+            constant_u64(TOOL_CONTRACT, "classify_min_texts"),
+            constant_u64(TOOL_CONTRACT, "classify_max_texts")
+        ),
+        format!(
+            "{} UTF-8 bytes",
+            constant_u64(TOOL_CONTRACT, "classify_max_text_bytes")
+        ),
+        format!(
+            "{} model tokens",
+            constant_u64(TOOL_CONTRACT, "classify_max_total_tokens")
+        ),
+    ];
     for phrase in [
         "ONE complete document",
         "NEVER split",
         "never join",
         "truncated: true",
-        "1..=8 texts",
-        "16384 UTF-8 bytes",
-        "1024 model tokens",
+        bounds[0].as_str(),
+        bounds[1].as_str(),
+        bounds[2].as_str(),
         TOOL_CONTRACT,
     ] {
         assert!(
