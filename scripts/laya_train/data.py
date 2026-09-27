@@ -276,6 +276,34 @@ DEMO_RECORDED_SLICE = [1, 8, 11, 12, 23, 24, 25, 26, 41, 43, 45, 47]
 DEMO_RECORDED_SLICE_SHA256 = "0640137d67666af226d719823648bbfdc2fc6310476ae0fa93d7c6aac37802e4"
 
 
+def _demo_rule_on_local_data(case):
+    """The demo_rule on the REAL pinned splits (FALSIFY-LAYA-GATE-013): prepare_stance's s64 cell must rebuild
+    exactly demo_s64.eval_rows rows with eval_class_counts. Local evidence only (the dataset is gitignored):
+    absent -> an explicit SKIP line, never a pass. Counts only; no text is printed."""
+    import contract
+    repo = contract.REPO
+    src = repo / "data" / "tweet-eval-stance"
+    need = [src / n for n in ("train.jsonl", "validation.jsonl", "test.jsonl")]
+    missing = [str(q.relative_to(repo)) for q in need if not q.is_file()]
+    if missing:
+        print("  SKIP demo_rule on the pinned splits: %s not present (gitignored local dataset)" % ", ".join(missing))
+        return
+    import prepare_stance                          # torch-free
+    decl = contract.gate_contract()["demo_s64"]
+    name = "demo_rule on the pinned splits: %s rows, class counts %s" % (decl["eval_rows"], list(decl["eval_class_counts"]))
+    try:
+        files, summary = prepare_stance.build("s64")
+    except SystemExit:                             # prepare_stance.fail() printed PREPARE FAILED: <why> above
+        case(name, False, "prepare_stance refused the s64 cell (PREPARE FAILED above)")
+        return
+    rows = [json.loads(ln) for ln in files["eval.jsonl"].decode("utf-8").splitlines()]
+    order = list(decl["criteria_order"])
+    got = [sum(1 for r in rows if r["label"] == lab) for lab in order]
+    case(name, len(rows) == int(decl["eval_rows"]) and got == [int(x) for x in decl["eval_class_counts"]],
+         "%d rows %s, shift %s, eval sha256 %s..." % (len(rows), got, summary["shift"],
+                                                     sha256_bytes(files["eval.jsonl"])[:16]))
+
+
 def selftest():
     """Every data refusal over temporary files, plus split determinism / stratification / text-disjointness
     and the recipe epoch rule. numpy + pyyaml only (no torch)."""
@@ -383,6 +411,31 @@ def selftest():
         in_slice += int(True in side)
     case("a text duplicated 3x lands wholly on one side, over 50 seeds",
          len(group) == 3 and sides == {1} and 0 < in_slice < 50, "group in slice for %d/50 seeds" % in_slice)
+
+    print("in-distribution held-out rule (eval_set.demo_rule, A2, FALSIFY-LAYA-GATE-013) on a synthetic manifest:")
+    shots = [("shot a", "none"), ("shot b", "against")]
+    shot_ids = ["train:0", "train:1"]
+    excluded = ["train:3"]
+    members = [("train", "train:3"), ("validation", "validation:3")]      # the real manifest's group shape
+    val = [("validation:0", "val zero", "none"), ("validation:1", "val one", "against"),
+           ("validation:2", "dup  text", "favor"), ("validation:3", "group partner", "against")]
+    pool = [("train:0", "shot a", "none"), ("train:1", "shot b", "against"), ("train:2", " dup text ", "none"),
+            ("train:3", "excluded row", "favor"), ("train:4", "train four", "favor"), ("train:5", "train five", "none")]
+    held = in_distribution_heldout(val, pool, shot_ids, excluded, members, shots)
+    texts = [normalize(t) for t, _ in held]
+    case("a shot's row is dropped (by id), never re-used as eval", "shot a" not in texts and "shot b" not in texts)
+    case("an excluded_train_ids row is dropped", "excluded row" not in texts)
+    case("a validation row that is an exclusion-group member is dropped", "group partner" not in texts)
+    case("a duplicate by normalized text is kept once, the validation copy (label) winning",
+         texts.count("dup text") == 1 and dict((normalize(t), lab) for t, lab in held)["dup text"] == "favor")
+    case("order: validation rows first, then train rows, each in file order",
+         texts == ["val zero", "val one", "dup text", "train four", "train five"], str(texts))
+    labs = ["none", "against", "favor"]
+    case("the resulting class counts", [sum(1 for _, x in held if x == lab) for lab in labs] == [2, 1, 2])
+    expect("a held-out row whose normalized text equals a shot is REFUSED, not dropped", "heldout-shot-overlap",
+           lambda: in_distribution_heldout(val + [("validation:9", "  Shot  b", "none"), ("validation:8", " shot\tb ", "none")],
+                                           pool, shot_ids, excluded, members, shots))
+    _demo_rule_on_local_data(case)
 
     print("recipe epoch rule (contract.resolve_epochs):")
 

@@ -2204,7 +2204,7 @@ bindings:
   function: laya-train-selftest
   signature: 'just recipe: laya-train-selftest'
   status: pending
-  notes: 'Python-only, LEGACY scope since laya-finetune-gate-v1 1.4.0 (published 2.0.0): a recipe.json without seed_selection ships the declared seed, variance seeds report only; production runs ship the median seed (seed_selection_median). The recipe runs LOCALLY (just laya-train-selftest), not in CI. Implemented by plan 08-08.'
+  notes: 'Python-only, LEGACY scope since laya-finetune-gate-v1 1.4.0 (published 2.0.0): a recipe.json without seed_selection ships the declared seed; production runs ship the median seed (seed_selection_median). Legacy single-seed rule + the median rule are both exercised by the lifecycle (plan 08-14): lifecycle.py run_one asserts seed 13 ships with no seed_selection on the single-seed runs, check_median_run the median on the three-seed run. The recipe runs LOCALLY (just laya-train-selftest), not in CI. Implemented by plan 08-08; status flipped by plan 08-12.'
 - contract: laya-finetune-gate-v1.yaml
   equation: seed_selection_median
   module_path: aprender_decide::verify
@@ -2217,8 +2217,8 @@ bindings:
   module_path: justfile
   function: laya-train-selftest
   signature: 'just recipe: laya-train-selftest'
-  status: pending
-  notes: 'A2 (1.4.0, 2026-09-27): Python-only rule (the demo_s64 held-out set: 459 rows, [111, 291, 57], shot overlap refused), plan 08-14. The recipe runs LOCALLY (just laya-train-selftest), not in CI.'
+  status: implemented
+  notes: 'A2 (1.4.0, 2026-09-27): Python-only rule, implemented by plan 08-14 as scripts/laya_train/data.py in_distribution_heldout (the demo_s64 held-out set: validation then train rows minus shots, excluded ids and exclusion-group members; shot overlap refused; first duplicate kept; 459 rows, [111, 291, 57]), used by prepare_stance.py --cell s64 and pinned by data.py --selftest (synthetic-manifest cases plus the rebuild from the pinned splits when present). The recipe runs LOCALLY (just laya-train-selftest), not in CI.'
 - contract: laya-finetune-gate-v1.yaml
   equation: shift_probe_reported
   module_path: aprender_decide::verify

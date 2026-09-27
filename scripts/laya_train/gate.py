@@ -18,10 +18,15 @@ No torch import (module level or anywhere): `python gate.py --selftest` runs wit
         contract (contract.thresholds()), pass = margin >= min_macro_f1_margin AND ece_post <= max_ece.
         Returns the metric blocks of the gate report. A non-finite metric can never pass.
 
+    rank_key(ece_post, rank_scale), select_median_seed(rows, rank_scale)
+        seed_policy.rank_rule (A3, 1.4.0): floor(ece_post x rank_scale) as an int, ordered by (rank_key,
+        seed); the shipped seed is the middle of an odd N. rank_scale is read from the contract.
+
     verify_report(report) -> {pass, margin, failed}
         re-decides gate_pass from a report's REPORTED metrics under the contract's thresholds: a report
         whose `thresholds` differ from the contract (value, missing or extra key) is refused, and so is a
-        reported `pass` that disagrees with the re-decided one. This is the Python-side decision rule and
+        reported `pass` that disagrees with the re-decided one. Under seeds.policy median_ece the shipped
+        seed is re-derived from the report's per_seed rows and the top-level pass must be that row's. This is the Python-side decision rule and
         what the self-test's fail-closed vectors run through. It is NOT the forgery defence: a rule applied
         to reported numbers passes an edited report, so the Rust verifier (plan 08-09) recomputes every
         metric from verified probabilities before deciding.
@@ -169,6 +174,18 @@ def verify_report(report):
     if "pass" in report and report["pass"] is not passed:
         raise GateError("REFUSED pass: the report says pass=%r but its metrics decide %r (failed: %s)"
                         % (report["pass"], passed, failed or "none"))
+    seeds = report.get("seeds") or {}
+    if seeds.get("policy") == contract.seed_selection_decl()["policy"]:
+        # A3: the shipped seed is re-derived from the report's own per_seed rows, and the gate is that seed's.
+        per = seeds.get("per_seed") or []
+        median = select_median_seed(per, contract.seed_selection_decl()["rank_scale"])
+        if seeds.get("shipped") != median:
+            raise GateError("REFUSED seeds: the report ships seed %r, the median-ECE seed of its per_seed rows is %d"
+                            % (seeds.get("shipped"), median))
+        row = [r for r in per if int(r["seed"]) == median][0]
+        if row.get("pass") is not passed:
+            raise GateError("REFUSED seeds: the top-level gate decides pass=%r but the shipped seed %d's row says %r "
+                            "(the pass rule reads only the shipped seed)" % (passed, median, row.get("pass")))
     return {"pass": passed, "margin": margin, "failed": failed}
 
 
@@ -347,6 +364,68 @@ def selftest():
         except GateError as e:
             case(tag + "the same report with pass flipped to true is refused", True, str(e)[:70])
         _recompute_run_dir(v, case)
+
+    print("median-ECE seed selection (seed_policy A3, FALSIFY-LAYA-GATE-011; rank_scale from the contract):")
+    scale = contract.seed_selection_decl()["rank_scale"]
+
+    def rows_of(*pairs):
+        return [{"seed": sd, "ece_post": e} for sd, e in pairs]
+
+    for name, rows, want in (
+            ("distinct ECEs 0.15 / 0.05 / 0.12 -> the 0.12 seed (23) ships", rows_of((13, 0.15), (17, 0.05), (23, 0.12)), 23),
+            ("rank-key tie 0.10009 / 0.10001 (both key %d): smaller seed first -> 17 ships"
+             % rank_key(0.10001, scale), rows_of((13, 0.10009), (17, 0.10001), (23, 0.2)), 17),
+            ("exact tie on all three -> seed order -> 17 ships", rows_of((13, 0.08), (17, 0.08), (23, 0.08)), 17),
+            ("the median can be the declared seed 13", rows_of((13, 0.07), (17, 0.03), (23, 0.09)), 13)):
+        try:
+            got = select_median_seed(rows, scale)
+            case(name, got == want, "shipped=%s" % got)
+        except GateError as e:
+            case(name, False, "unexpected refusal: %s" % e)
+    case("rank_key(0.10001) == rank_key(0.10009) == floor(x * scale), an int",
+         rank_key(0.10001, scale) == rank_key(0.10009, scale) == int(math.floor(0.10001 * scale))
+         and isinstance(rank_key(0.1, scale), int))
+    for name, rows in (("a NaN ece_post is refused", rows_of((13, float("nan")), (17, 0.05), (23, 0.12))),
+                       ("an infinite ece_post is refused", rows_of((13, float("inf")), (17, 0.05), (23, 0.12))),
+                       ("N = 2 is refused (no median)", rows_of((13, 0.05), (17, 0.12))),
+                       ("N = 0 is refused", []),
+                       ("a repeated seed is refused", rows_of((13, 0.05), (13, 0.12), (23, 0.2)))):
+        try:
+            select_median_seed(rows, scale)
+            case(name, False, "accepted")
+        except GateError as e:
+            case(name, str(e).startswith("REFUSED seeds"), str(e)[:80])
+
+    def median_report(shipped, top_pass=None):
+        """seed 17 (median, margin 0.10 but ECE 0.12: FAILS), seed 23 (ECE 0.05: PASSES), seed 13 (ECE 0.15)."""
+        per = [{"seed": 13, "macro_f1": 0.60, "ece_post": 0.15, "pass": False},
+               {"seed": 17, "macro_f1": 0.60, "ece_post": 0.12, "pass": False},
+               {"seed": 23, "macro_f1": 0.62, "ece_post": 0.05, "pass": True}]
+        top = [r for r in per if r["seed"] == shipped][0]
+        rep = _fabricated(0.5, top["macro_f1"], top["ece_post"], passed=top["pass"] if top_pass is None else top_pass)
+        rep["seeds"] = {"policy": contract.seed_selection_decl()["policy"], "shipped": shipped, "per_seed": per}
+        return rep
+    try:
+        out = verify_report(median_report(17))
+        case("a failing median fails the gate even when another seed passes", out["pass"] is False,
+             "pass=%s failed=%s" % (out["pass"], out["failed"]))
+    except GateError as e:
+        case("a failing median fails the gate even when another seed passes", False, "unexpected refusal: %s" % e)
+    for name, rep in (("a report shipping the passing non-median seed (23) is refused", median_report(23)),
+                      ("a report whose seeds.shipped is edited to 13 is refused", median_report(13))):
+        try:
+            verify_report(rep)
+            case(name, False, "accepted")
+        except GateError as e:
+            case(name, str(e).startswith("REFUSED seeds"), str(e)[:80])
+    rep = median_report(17)
+    rep["seeds"]["per_seed"][1]["pass"] = True
+    try:
+        verify_report(rep)
+        case("a shipped row whose pass disagrees with the top-level gate is refused", False, "accepted")
+    except GateError as e:
+        case("a shipped row whose pass disagrees with the top-level gate is refused",
+             str(e).startswith("REFUSED seeds"), str(e)[:80])
 
     print("evaluate_gate on probabilities:")
     y = np.array([0, 1, 2, 0, 1, 2])

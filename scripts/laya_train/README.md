@@ -10,15 +10,16 @@ project owns training and the reference numbers. There is no `apr` subcommand fo
 | Recipe | What it does |
 |--------|--------------|
 | `just laya-fixtures` | `metrics.py --selftest`, then `fixtures.py`: regenerates the two tiny synthetic CI fixtures. Prints each file's sha256 and size and ends with `FIXTURES OK`. A re-run is byte-identical. |
-| `just laya-prepare-stance` | The D-19 demo data: `data/decide/tweet-stance-16/{task.json,train.jsonl,eval.jsonl}` from the `s16-seed13` selection (48 shots, every one verified against the manifest's `exact_hash`) and all 280 TweetEval stance_abortion test rows. Needs `apr data tweet-eval-stance --output data/tweet-eval-stance` first. Output is under the root-anchored, gitignored `/data/`. |
-| `just laya-train <data> <out> [args]` | Fine-tune, calibrate and gate (below). Exit **0** = GATE PASS, **3** = GATE FAIL, **2** = input refused. Args: `--epochs E` (only above 16 shots/class, in [4, 12]), `--stopping early_stopping\|fixed_epochs` (default: the contract's `early_stopping`), `--seeds N`, `--device mps\|cuda\|cpu`. |
-| `just laya-train-lifecycle` | A real train -> F16 save -> complete dir -> reload -> calibrate -> gate on the committed tiny checkpoint, on CPU in seconds: both stopping rules, the `--seeds` refusals and a `--seeds 3` run. Prints `LIFECYCLE OK`. |
-| `just laya-train-selftest` | `metrics.py`, `data.py` and `gate.py --selftest` (numpy + pyyaml only), then the lifecycle. Prints `METRICS SELFTEST OK`, `DATA SELFTEST OK`, `GATE SELFTEST OK`, `LIFECYCLE OK`, `LAYA TRAIN SELFTEST OK`. The `test_harness` of FALSIFY-LAYA-GATE-003..007 and 009. |
+| `just laya-prepare-stance [cell]` | The demo data. `cell` = **`s64`** (default, the contract's `demo_s64`, D-19 as amended by A2): `data/decide/tweet-stance-64/` with the 192 `s64-seed13` shots, `eval.jsonl` built **by rule** (`eval_set.demo_rule`, asserted 459 rows, class counts [111, 291, 57]) and `shift.jsonl` (the 280 TweetEval stance_abortion test rows, the shift probe). `s16`: `data/decide/tweet-stance-16/`, the 1.2.0 demo data (48 shots, the 280 test rows as `eval.jsonl`), byte-identical to every earlier run. Every shot is verified against the manifest's `exact_hash`; an existing dir is never overwritten with different bytes (a re-run is a no-op). Needs `apr data tweet-eval-stance --output data/tweet-eval-stance` first. Output is under the root-anchored, gitignored `/data/`. |
+| `just laya-train <data> <out> [args]` | Fine-tune, calibrate and gate (below). Exit **0** = GATE PASS, **3** = GATE FAIL, **2** = input refused. Production trains the **three gate seeds** 13 / 17 / 23 and ships the median-ECE seed (`--seeds` defaults to 3 and any other value is refused), writes the float64 noise record, and scores an optional `shift.jsonl` as a reported probe. Args: `--epochs E` (only above 16 shots/class, in [4, 12]), `--stopping early_stopping\|fixed_epochs` (default: the contract's `early_stopping`), `--device mps\|cuda\|cpu`. |
+| `just laya-train-lifecycle` | A real train -> F16 save -> complete dir -> reload -> calibrate -> gate on the committed tiny checkpoint, on CPU in seconds: both stopping rules on the legacy single seed, the seed refusals, a three-seed median run, the noise record on every run, and the shift probe's gate invariance. Prints `LIFECYCLE OK`. With `LAYA_LIFECYCLE_KEEP=<dir>` it copies the three-seed shift run to `<dir>/run` and its data dir to `<dir>/data` (plan 08-15's Rust reader test). |
+| `just laya-train-selftest` | `metrics.py`, `data.py` and `gate.py --selftest` (numpy + pyyaml only), then the lifecycle. Prints `METRICS SELFTEST OK`, `DATA SELFTEST OK`, `GATE SELFTEST OK`, `LIFECYCLE OK`, `LAYA TRAIN SELFTEST OK`. The `test_harness` of FALSIFY-LAYA-GATE-003..007, 009, 011 and 013 and of FALSIFY-LAYA-PARITY-006 (the Python halves). |
 
 All recipes use `uv run --project scripts/laya_train --frozen`, so the committed `uv.lock` is what
 runs — never a fresh resolution. Every threshold, recipe value, seed, stopping rule and the base pin
 is read at run time from `contracts/laya-finetune-gate-v1.yaml` through `contract.py`; no script holds
-one as a literal (D-04, D-07).
+one as a literal (D-04, D-07). The noise multiplier, the re-score floor and the ceiling are read the same
+way from `contracts/laya-parity-v1.yaml`.
 
 ## Pins
 
@@ -52,49 +53,82 @@ re-run `just laya-fixtures` — every committed fixture is a numerical artifact 
 | `metrics.py` | numpy-only (no torch import): `macro_f1`, `f_avg`, `ece_top_label` (the HOUSE top-label ECE — floor binning, `aprender::calibration::expected_calibration_error_top_label`), `nll`, and `--selftest` (hand cases plus a replay of every frozen case in `scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json` to 1e-6). Shared by `fixtures.py` and the 08-08 gate. |
 | `common.py` | Torch-free at import: the shared hashing (`sha256_bytes`, streaming `sha256_file`, `tree_sha256`), JSON / f32 serialization (`write_json`, `f32_list`, `f32_hex_list`) and the ONE F16 checkpoint policy `save_f16` (`temperature` kept F32) used by `fixtures.py`, `train.py` and `lifecycle.py`. |
 | `fixtures.py` | Writes `crates/aprender-core/tests/fixtures/modernbert_tiny/` and `crates/aprender-decide/tests/fixtures/laya_tiny/` (see below). |
-| `contract.py` | The ONE reader of `laya-finetune-gate-v1` (and the probe task of `decide-apr-v1`): thresholds, recipe, base, seed policy, epoch rule (`resolve_epochs`), stopping rule (`resolve_stopping`), seeds (`resolve_seeds`), the `recipe.json` object. No torch. |
-| `data.py` | `task.json` / `*.jsonl` validation, normalized-text (`nfc-trim-ws-v1`) overlap refusal, conflicting-duplicate refusal, and the seeded, stratified, text-GROUP-disjoint calibration split returning sorted `slice_ids` + their sha256. `--selftest`. No torch. |
-| `prepare_stance.py` | Writes the D-19 demo data dir (never commits tweet text; logs counts only). |
+| `contract.py` | The ONE reader of `laya-finetune-gate-v1` (and the probe task of `decide-apr-v1`, and the A1 noise constants of `laya-parity-v1`, `noise_policy`): thresholds, recipe, base, seed policy (`resolve_seeds`, `seed_selection_decl`), epoch rule (`resolve_epochs`), stopping rule (`resolve_stopping`), the `recipe.json` object, and the run-dir file list / report key sets decided by the contract's own conditional wording (`run_dir_files`, `expected_keys`). No torch. |
+| `data.py` | `task.json` / `*.jsonl` validation, normalized-text (`nfc-trim-ws-v1`) overlap refusal (eval and shift), conflicting-duplicate refusal, the seeded, stratified, text-GROUP-disjoint calibration split returning sorted `slice_ids` + their sha256, and `in_distribution_heldout` (the `eval_set.demo_rule` as a pure function). `--selftest`. No torch. |
+| `prepare_stance.py` | Writes a demo data dir, `--cell s64\|s16 --out DIR` (never commits tweet text; logs counts and sha256s only). |
 | `train.py` | The CLI behind `just laya-train` (steps below). |
-| `gate.py` | The bounded NLL temperature fit, the early-stopping rule (`EarlyStopper`), `evaluate_gate` (thresholds from the contract, non-finite never passes) and `verify_report` (re-decides a report under the contract's thresholds; refuses mismatched thresholds and a `pass` its metrics contradict). `--selftest`. No torch. |
+| `gate.py` | The bounded NLL temperature fit, the early-stopping rule (`EarlyStopper`), `evaluate_gate` (thresholds from the contract, non-finite never passes), the median rule (`rank_key`, `select_median_seed`) and `verify_report` (re-decides a report under the contract's thresholds; refuses mismatched thresholds, a `pass` its metrics contradict, and under `median_ece` a `shipped` seed that is not the median of its own `per_seed` rows). `--selftest`. No torch. |
 | `lifecycle.py` | `just laya-train-lifecycle`: runs `train.py` as a subprocess on the tiny fixture and asserts every ordering, hash, schema, seed and re-score rule listed in its docstring. |
 
-## Training (`just laya-train`, plan 08-08)
+## Training (`just laya-train`, plans 08-08 and 08-14)
 
 In order, every value from the contract:
 
-1. **Validate** the data dir. `eval.jsonl` is required.
+1. **Validate** the data dir. `eval.jsonl` is required; `shift.jsonl` is optional (the shift probe). An
+   eval or shift text equal to a train text after normalization is refused.
 2. **Write `recipe.json` first** (`sort_keys`, compact) and print `RECIPE WRITTEN <recipe_id>`, where
-   `recipe_id` = sha256 of those bytes — before any model scores anything (D-04).
+   `recipe_id` = sha256 of those bytes — before any model scores anything (D-04). A three-seed run
+   (every production run) carries `seed_selection` {policy, seeds, rank_scale, tie_break}.
 3. **Device**: request mps -> cuda -> cpu, load Laya's own `Agent` on the pinned base with
    `expected_sha256={"model.safetensors": <sha>}`, and record the device READ BACK from the parameters
    (Laya falls back to CPU silently; CPU is flagged). D-03.
-4. **Train** with the spike-024 loop on `fit` rows built by `Agent._encode_state`. Under
+4. **Train**, per seed, with the spike-024 loop on `fit` rows built by `Agent._encode_state`. Under
    `early_stopping` (the default) the calibration slice's NLL at the bounded fitted T is the monitor
    after every epoch, the best epoch is restored and `STOP` is logged. Eval rows never reach training.
 5. **Write the COMPLETE checkpoint dir** (F16 weights with an F32 `temperature`, `rl_agent_config.json`,
    `encoder/`, `tokenizer/` with `tokenizer_config.json` already in Laya's fixed form) and print
-   `CHECKPOINT COMPLETE`, before anything reloads it.
+   `CHECKPOINT COMPLETE`, before anything reloads it. Three-seed runs write it to
+   `seeds/seed-<s>/checkpoint/`.
 6. **Reload** in fp32 on CPU (checkpoint sha256s asserted unchanged), print `SCORING START`, fit T by
-   NLL in [0.5, 5.0] on the calibration slice (`clamp_hit` recorded), write T, reload again.
-7. **Score** eval (`eval-probs.json`), the declared base on eval (`zero-shot-probs.json`) and the
-   decide-apr-v1 probes (`probes.json`) — all on F16 reloads, text hashes only, never text.
-8. **Gate**: pass iff `ft.macro_f1 - zs.macro_f1 >= 0.05` AND `ece_post <= 0.10` (contract
-   constants) -> `gate-report.json`, `GATE PASS` (0) / `GATE FAIL` (3).
+   NLL in [0.5, 5.0] on the calibration slice (`clamp_hit` recorded), write T, reload again, and score
+   eval -> that seed's `eval-probs.json` (`seeds/seed-<s>/eval-probs.json` for three seeds). Each seed's
+   checkpoint and stopping record exist before its eval probabilities (asserted).
+7. **Zero-shot**: the declared base on eval (`zero-shot-probs.json`), once.
+8. **Median selection** (three seeds, A3): only after every seed's checkpoint is fixed, each seed's gate is
+   evaluated against the shared zero-shot baseline, the seeds are ranked by (floor(ece_post x 10000),
+   seed) and the MEDIAN ships: `MEDIAN seeds=13,17,23 rank_keys=... shipped=<s>` is logged, its checkpoint
+   becomes `checkpoint/`, the other two checkpoints are deleted (`DELETED seed=<s> checkpoint`), its
+   eval probabilities are copied byte for byte to `eval-probs.json`, and `probes.json` comes from a
+   reload of `checkpoint/`. (A single-seed synthetic run skips this: seed 13 ships.)
+9. **Noise record** (A1, laya-parity-v1 `rescore_noise_reference`): for the shipped checkpoint and the
+   base, a manual fp32 forward must reproduce the Scorer's logits EXACTLY on the first min(5, n) rows
+   (else `REFUSED noise-control`, exit 2, no record, no gate report); then the same model is cast to
+   float64 and every eval row is re-scored at the applied T. `rescore-noise.json` stores every row's
+   float64 probabilities, `max_abs` over exactly the written float32 values, `bound = max(floor, k x
+   max_abs)` and the argmax agreement, with k and the floor copied from the contract. `NOISE which=...`
+   is logged, and a `WARN pack will refuse` line when the bound exceeds the ceiling or an argmax
+   differs — the trainer records, the Rust verifier decides.
+10. **Shift probe** (A2, only with `shift.jsonl`), scored only now — after the gate, the median and the
+    noise record — with a fresh reload of the shipped checkpoint and the base: `shift-probs.json`,
+    `shift-zero-shot-probs.json` and gate-report `shift_probe` {gate_clause: false, ...}. `SHIFT PROBE
+    ... (reported, not a gate clause)` is logged. It never touches `pass`, the per-seed rows or the exit
+    code (the lifecycle proves the gate identical with and without it).
+11. **Gate**: pass iff the SHIPPED seed has `ft.macro_f1 - zs.macro_f1 >= 0.05` AND `ece_post <= 0.10`
+    (contract constants) -> `gate-report.json` (`rescore_noise_sha256` binds the record), `GATE PASS`
+    (0) / `GATE FAIL` (3).
 
 **Run dir** (`run_dir_layout`): `checkpoint/{model.safetensors, rl_agent_config.json, encoder/,
-tokenizer/}`, `task.json`, `recipe.json`, `gate-report.json`, `eval-probs.json`,
-`zero-shot-probs.json`, `probes.json`, and `variance-report.json` when `--seeds N > 1`. A run dir is
-written once: a non-empty `--out` is refused.
+tokenizer/}` (exactly ONE `model.safetensors` in the whole dir), `task.json`, `recipe.json`,
+`gate-report.json`, `eval-probs.json`, `zero-shot-probs.json`, `probes.json`, `rescore-noise.json`;
+with three seeds also `variance-report.json` and `seeds/seed-<s>/eval-probs.json` for 13, 17 and 23;
+with `shift.jsonl` also `shift-probs.json` and `shift-zero-shot-probs.json`. A run dir is written
+once: a non-empty `--out` is refused.
 
-**Seeds (D-08).** One declared seed (13) by default; the report says `single seed`. `--seeds N`
-(1 <= N <= 3) trains the first N of `variance_seeds` (13, 17, 23), the declared seed first and exactly
-as a single-seed run; each other seed runs in `<out>/.variance-seed-<s>/`, deleted once its metrics are
-recorded. The seed varies the training RNG, not the data or the calibration slice.
-`variance-report.json` (`laya-variance-report-v1`) holds per-seed rows and mean / sample sd (ddof 1) of
-`macro_f1`, `f_avg`, `ece_post` and `margin` — information only. The gate is judged on seed 13, whose
-checkpoint is the only one kept; the label becomes `mean ± sd over N seeds`; `recipe.json` (and the
-recipe_id) does not change with N.
+**Seeds (D-08 as amended by A3, laya-finetune-gate-v1 1.4.0 `seed_policy`).** Production trains exactly
+`production_seeds_required` = 3 seeds, `variance_seeds` 13, 17, 23, on the SAME data, calibration split
+and recipe; the seed varies only the training RNG (head init, batch shuffle). The shipped seed is the
+**median** by `rank_rule`: rank_key = floor(ece_post x `rank_scale` 10000) as an integer, order by
+(rank_key ascending, seed ascending) — `tie_break: smaller_seed` — and ship index (N - 1) / 2 = 1. The
+gate passes only if that seed passes BOTH clauses; the other two are reported in gate-report
+`seeds.per_seed` (each row hash-bound to its `seeds/seed-<s>/eval-probs.json` and its
+`model_safetensors_sha256`) and in `variance-report.json`, and never enter `pass`. **Honesty
+(`seed_policy.honesty`): the median is selected WITH eval labels.** Median-of-3 is not best-of-3 — the
+shipped ECE is the middle draw, not the minimum — but it is a selection on the gate eval set and is
+recorded as one; it was chosen because spike 027 measured MPS training as not bitwise reproducible
+(one replicate turned a FAIL into a PASS). The seeds label stays the contract's literal, `mean ± sd over
+3 seeds`. The synthetic-fixture variant also runs the **legacy** rule with `--seeds 1` (its default): no
+`seed_selection`, label `single seed`, the declared seed 13 ships — such a run is never deploy-eligible
+under 1.4.0 (`seed_policy.legacy_rule`).
 
 **Refusals** (exit 2, message `REFUSED <rule>: ...`):
 
@@ -106,21 +140,51 @@ recipe_id) does not change with N.
 | `train-row-label` / `eval-row-label` | a label that is not a criterion NAME (an index is refused too) |
 | `train-row-unknown-key` / `*-row-schema` | a row key outside `{text, label}`, a blank or non-object line |
 | `eval-missing` | no `eval.jsonl` (D-06) |
-| `eval-train-overlap` | an eval text equal to a train text after NFC / trim / whitespace collapse |
+| `eval-train-overlap` / `shift-train-overlap` | an eval (or shift) text equal to a train text after NFC / trim / whitespace collapse |
 | `train-conflicting-labels` | two train rows with the same normalized text and different labels |
 | `train-class-too-small` | a class too small to give a calibration slice of `calibration_slice_min_per_class` and keep a fit row |
 | `epochs` | `--epochs` at <= 16 shots/class (fixed to 12), or missing / outside [4, 12] above 16 |
-| `stopping` / `seeds` | an unknown stopping rule / `--seeds` outside [1, 3] |
+| `stopping` / `seeds` | an unknown stopping rule / production `--seeds` other than 3; synthetic `--seeds` other than 1 or 3; a non-finite `ece_post` (no rank key) |
+| `noise-control` | the manual fp32 forward does not reproduce the Scorer's logits exactly (no noise record, no gate report) |
 | `base` | `--base` without `--variant synthetic-fixture` (production always uses the contract base) |
 | `out-dir` | a non-empty `--out` |
+
+## What the gate certifies (1.4.0)
+
+laya-finetune-gate-v1 `eval_set.claim`, quoted verbatim:
+
+> The gate now certifies margin and calibration on held-out data drawn like the tenant's shots. It does NOT certify robustness to a shifted input population.
+
+This eval set was chosen **after** the SemEval-2016 test split failed the gate twice (the s16 record
+below). Spike 027 (`.planning/spikes/027-laya-calibration-slice-and-tcap`) measured the cause as the
+SemEval train-to-test shift, not the recipe: the same s64 early-stopping checkpoints at their own
+slice-fitted T scored ECE 0.051 to 0.069 on 459 in-distribution held-out rows and 0.096 to 0.139 on the
+test split. The contract records the change as a claims change, not a tuning step (`eval_set.history`).
+
+For the demo (`demo_s64`) the eval set is a rule, not a file someone picked: TweetEval stance_abortion
+`validation` rows then `train` rows, minus every s64-seed13 shot, every excluded train id and every
+exclusion-group member, shot text overlap refused, duplicates dropped keeping the first — 459 rows,
+[111, 291, 57]. `just laya-prepare-stance` rebuilds it and refuses anything else, and `data.py
+--selftest` rebuilds it again from the pinned splits when they are present.
+
+**The shift probe.** The 1.x eval set — the 280 SemEval test rows — stays visible as `shift.jsonl`. It
+is scored with the shipped checkpoint and the base only after the gate is decided and reported in
+`shift_probe` with `gate_clause: false`: the number a reader needs to see how the model does on a
+shifted population, never a number the gate reads. The Rust verifier recomputes its metrics from the
+hash-bound probability files (plan 08-15).
+
+## The s16 demo record (history, 1.2.0)
 
 **The D-19 demo's recorded outcome is GATE FAIL** (contract 1.2.0 `demo.outcome`). Both declared
 recipes pass the margin and fail `ece_post`: `fixed_epochs` (recipe_id `d0f4e40d…`, ECE 0.377, T
 clamped at 5.0) and `early_stopping` (`3d4b91da…`, ECE 0.222, T 3.14). Their gitignored run dirs
 (`models/decide/tweet-stance-16-fixed-epochs/`, `models/decide/tweet-stance-16/`) are FAIL-CLOSED
 TEST VECTORS: `gate.py --selftest` decides FAIL on both and, when the dirs are present, recomputes it
-from their probability files; pack/verify (plan 08-09) must refuse both. No stance model is deployed
-until a declared run passes (see `.planning/todos/pending/spike-laya-calibration-slice-and-temperature-cap.md`).
+from their probability files; pack/verify (plan 08-09) must refuse both. Their FAIL was measured on
+the SemEval test split, the 1.x eval set (`demo.vectors_scope`).
+
+The demo is superseded by `demo_s64` (1.4.0): 64 shots per class, the in-distribution eval set above,
+three seeds with the median shipped, ONE declared run (plan 08-16), outcome pending.
 
 ## The two fixtures
 
