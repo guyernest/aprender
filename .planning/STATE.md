@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: 08-17 COMPLETE (deployed-passed): option 1 put the decide S3 read in the stack ([[iam.statements]] s3:GetObject on decide/aprender-mcp-decide/* only; 52a12d777); pmcp.run's post-deploy call loaded the model; identity == H through the edge; 4 cold samples 24.2-29.4 s (< 30 s cap, 650 ms margin), Max Memory 2481-2483 MB, Init 56-66 ms; function left RUNNING; edge 503 settle retry 743eb02ed
-last_updated: "2026-09-27T23:10:00.000Z"
+stopped_at: "08-18 COMPLETE: live record FINAL, outcome deployed-passed (4 laya-deploy-verify samples < 30 s, max 29350); external cold call 31.05 s HTTP 200 (CloudWatch REPORT 28008 ms, load 26202) recorded as risk evidence in D-ITEM-08-17-E, not a relabel; function RUNNING by user decision (D-ITEM-08-18-A); README Deployed section. Next: 08-12 close-out (accepted_region_cold implemented, PHASE8_LIVE_EXEMPT empty)"
+last_updated: "2026-09-27T23:17:53.392Z"
 last_activity: 2026-09-27
-last_activity_desc: 08-17 COMPLETE (deployed-passed): option 1 put the decide S3 read in the stack ([[iam.statements]] s3:GetObject on decide/aprender-mcp-decide/* only; 52a12d777); pmcp.run's post-deploy call loaded the model; identity == H through the edge; 4 cold samples 24.2-29.4 s (< 30 s cap, 650 ms margin), Max Memory 2481-2483 MB, Init 56-66 ms; function left RUNNING; edge 503 settle retry 743eb02ed. Next: 08-18 (records the live outcome; D-ITEM-08-17-E cold margin), then 08-12 close-out
-state_head: 0349200a86e4cee9c336664ab7c41e4796e6bc8c
+last_activity_desc: "08-18 COMPLETE: live record FINAL, outcome deployed-passed (4 laya-deploy-verify samples < 30 s, max 29350); external cold call 31.05 s HTTP 200 (CloudWatch REPORT 28008 ms, load 26202) recorded as risk evidence in D-ITEM-08-17-E, not a relabel; function RUNNING by user decision (D-ITEM-08-18-A); README Deployed section. Next: 08-12 close-out (accepted_region_cold implemented, PHASE8_LIVE_EXEMPT empty)"
+state_head: de7d649d54ca553928d4fdfe9444d994d722c3a8
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 110
-  completed_plans: 108
+  completed_plans: 109
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 16 of 18 complete (08-01..08-11 and 08-13..08-17; next: 08-18, then 08-12 close-out in Wave 16)
-Status: 08-17 COMPLETE (deployed-passed): option 1 put the decide S3 read in the stack ([[iam.statements]] s3:GetObject on decide/aprender-mcp-decide/* only; 52a12d777); pmcp.run's post-deploy call loaded the model; identity == H through the edge; 4 cold samples 24.2-29.4 s (< 30 s cap, 650 ms margin), Max Memory 2481-2483 MB, Init 56-66 ms; function left RUNNING; edge 503 settle retry 743eb02ed. Earlier: 08-17 halted twice at deploy-refused (GET health 405, D-ITEM-08-17-A; pmcp.run pre-grant post-deploy error state, D-ITEM-08-17-B, now closed). Platform finding D-ITEM-08-17-D (pmcp.run error state invisible to /health) recommended as a pmcp.run issue
+Plan: 17 of 18 complete (08-01..08-11 and 08-13..08-18; next: 08-12 close-out in Wave 16)
+Status: 08-18 COMPLETE: live record FINAL, outcome deployed-passed (4 laya-deploy-verify samples < 30 s, max 29350); external cold call 31.05 s HTTP 200 (CloudWatch REPORT 28008 ms, load 26202) recorded as risk evidence in D-ITEM-08-17-E, not a relabel; function RUNNING by user decision (D-ITEM-08-18-A); README Deployed section. Next: 08-12 close-out (accepted_region_cold implemented, PHASE8_LIVE_EXEMPT empty). Earlier: 08-17 deployed-passed on the option-1 resume (S3 read in the stack, 52a12d777; edge 503 settle retry 743eb02ed)
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -229,6 +229,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P14 | 18 min | 3 tasks | 12 files |
 | Phase 08 P15 | 36min | 3 tasks | 18 files |
 | Phase 08 P16 | 43min | 2 tasks | 3 files |
+| Phase 08 P18 | 6 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -428,6 +429,9 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-15: why_quantized implemented as refuse when Rust's rank key of the recomputed ECE differs from Python's reported rank_key (not within 1e-5 of a grid line, which would refuse about 20% of seeds)
 - [Phase 08]: 08-15: SeedPolicyMissing decided after the re-scores and the gate; ThresholdMismatch now fires before the re-scores (check_thresholds precedes the seed check)
 - [Phase 08]: 08-16: the one declared s64 gate run PASSED the unchanged gate (median seed 17, margin 0.2217, ece_post 0.0443 on 459 in-distribution rows); artifact 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a deploy_eligible, stdio leg passed; claim is in-distribution only (shift probe ece_post 0.1896, not a gate clause)
+- [Phase 08]: 08-18: live record FINAL deployed-passed; the external 31.05 s client-time cold call (HTTP 200, in-function 28008 ms) is risk evidence in D-ITEM-08-17-E, not a relabel, because the rule is defined on the laya-deploy-verify samples
+- [Phase 08]: 08-18: decide function left RUNNING with auth off by user decision (D-ITEM-08-18-A); containment recorded, not run; 0 AWS writes
+- [Phase 08]: 08-18: laya-deploy-verify elapsed_ms is client-side through the edge (client minus REPORT 753-785 ms), and the external curl showed about 3042 ms, so the contract's 895 ms gateway+client term does not bound client overhead
 
 ### Pending Todos
 
@@ -543,8 +547,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-27T21:18:28.603Z
-Stopped at: Completed 08-17-PLAN.md (deployed-passed; function RUNNING for the admin UI)
+Last session: 2026-09-27T23:17:44.597Z
+Stopped at: 08-18 COMPLETE: live record FINAL, outcome deployed-passed (4 laya-deploy-verify samples < 30 s, max 29350); external cold call 31.05 s HTTP 200 (CloudWatch REPORT 28008 ms, load 26202) recorded as risk evidence in D-ITEM-08-17-E, not a relabel; function RUNNING by user decision (D-ITEM-08-18-A); README Deployed section. Next: 08-12 close-out (accepted_region_cold implemented, PHASE8_LIVE_EXEMPT empty)
 Resume file: None
 
 ## Accumulated Context
