@@ -44,6 +44,8 @@ replan (Round 1, REVIEWS 798373df3): 12 plans in 10 waves — 08-12 moved to Wav
 deploy 08-11. Rows keyed by plan/task and decision. The "Wave" column is the plan's wave (there is
 no Wave 0 / plan 00: what RESEARCH called Wave 0 is plans 08-01 (Wave 1) and 08-02 (Wave 2)).
 
+> **Revised 2026-09-26 (option 3, commit 2b75c14dc):** the stance demo failed the gate under both declared recipes, so rows 08-09 T1, 08-10 T2/T3 and 08-11 T2/T3-T4 below describe the original passing-demo scope. The authoritative verify commands are in the revised 08-09..08-12 PLAN.md files: 08-09 T1 asserts `REFUSED GateFailed clauses=[ece_post]` with no artifact written; 08-10 proves refusals offline (`AWS CALLS: 0`); 08-11 records a HOLD in `08-DEPLOY-EVIDENCE.json`; the live-deploy rows are deferred to the post-spike re-run (`.planning/todos/pending/spike-laya-calibration-slice-and-temperature-cap.md`).
+
 | Plan/Task | Wave | Decision | Behavior | Threat Ref | Test Type | Automated Command | File Exists | Status |
 |-----------|------|----------|----------|------------|-----------|-------------------|-------------|--------|
 | 08-01 T1-T3 | 1 | D-07/D-10/D-17 | FOUR contracts (`decide-tool-boundary-v1`, `laya-finetune-gate-v1`, `laya-parity-v1`, `decide-apr-v1`) validated, flat `constants:`, staged test bindings, audited before any run | T-08-01-01/08 | contract gate | `pv validate` x4; `make contract-audit-phase8`; `bash scripts/check_contract_test_binding.sh` | ❌ | ⬜ pending |

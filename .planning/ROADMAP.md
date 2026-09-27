@@ -676,15 +676,15 @@ Plans:
 **Wave 7** *(blocked on Wave 6 completion)*
 
 - [x] 08-07-PLAN.md — `aprender-mcp-decide-lambda`: bootstrap loopback, in-memory S3 loader with sha256 pin, probe, deploy template
-- [ ] 08-09-PLAN.md — pack/verify CLI: gate recomputed in Rust from verified probabilities (artifact + base re-scores), full eval re-score, full-model parity vs spike 025, laya-stance-16.apr
+- [ ] 08-09-PLAN.md — pack/verify CLI: gate recomputed in Rust from verified probabilities; both failing stance-demo run dirs REFUSED on ece_post (fail-closed vectors, option 3), no artifact written; full-model parity vs spike 025
 
 **Wave 8** *(blocked on Wave 7 completion)*
 
-- [ ] 08-10-PLAN.md — cargo-pmcp wrong-package decision (checkpoint, resolver executed on this workspace) + fail-closed, identity-checked deploy recipes, per-sample cold verify, containment teardown — proven offline
+- [ ] 08-10-PLAN.md — cargo-pmcp wrong-package decision (checkpoint, resolver executed on this workspace) + fail-closed, identity-checked deploy recipes that refuse any non-eligible artifact — proven offline against the tiny fixture (AWS CALLS: 0)
 
 **Wave 9** *(blocked on Wave 8 completion)*
 
-- [ ] 08-11-PLAN.md — live pmcp.run deploy behind a go/no-go checkpoint; cold first-POST maximal requests (both shapes, every sample) accepted-region proof
+- [ ] 08-11-PLAN.md — D-18 live stance deploy DEFERRED (option 3, 2026-09-26): HOLD go/no-go checkpoint + optional read-only AWS readiness, machine-checked hold record in 08-DEPLOY-EVIDENCE.json
 
 **Wave 10** *(blocked on Wave 9 completion)*
 
