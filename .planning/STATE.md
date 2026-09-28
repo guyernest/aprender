@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 08
-current_phase_name: laya-decision-model-local-fine-tune-and-thin-mcp-server
+current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "08-12 COMPLETE (18/18): D-16 row, 44 bindings implemented, strict audit; CI gains -p aprender-decide --test ui and -p aprender-mcp-decide --test e2e_stdio (user option A narrowed); just laya-verify-suite local-only (OK, 903 s); contract cycle laya-parity-v1 -> decide-apr-v1 fixed (7d5c65f4b). Next: phase 8 verification"
-last_updated: "2026-09-28T07:15:49.480Z"
-last_activity: 2026-09-27
-last_activity_desc: "08-18 COMPLETE: live record FINAL, outcome deployed-passed (4 laya-deploy-verify samples < 30 s, max 29350); external cold call 31.05 s HTTP 200 (CloudWatch REPORT 28008 ms, load 26202) recorded as risk evidence in D-ITEM-08-17-E, not a relabel; function RUNNING by user decision (D-ITEM-08-18-A); README Deployed section. Next: 08-12 close-out (accepted_region_cold implemented, PHASE8_LIVE_EXEMPT empty)"
-state_head: 1367c40abf19d871a761b072ff7b94c912e69e6d
+stopped_at: Completed 08-19-PLAN.md (manifest-to-blob bindings at rung 4, decide-apr-v1 2.0.0)
+last_updated: "2026-09-28T15:59:16.393Z"
+last_activity: 2026-09-28
+last_activity_desc: Phase 08 execution started
+state_head: ae7de80b4513a1dcf58cb23793867abf7cff3ce4
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 110
+  completed_plans: 111
 milestone_name: milestone
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 
 ## Current Position
 
-Phase: 08 (laya-decision-model-local-fine-tune-and-thin-mcp-server) — READY TO EXECUTE
-Plan: 18 of 18 complete (08-01..08-18; 08-12 close-out done in Wave 16) — ready for phase verification
-Status: 08-12 COMPLETE: D-16 row in CLAUDE.md, 44 Phase 8 bindings implemented (accepted_region_cold from the deployed-passed record), strict contract-audit-phase8; CI gains -p aprender-decide --test ui and -p aprender-mcp-decide --test e2e_stdio (user: option A narrowed); Python-parity suite local-only via just laya-verify-suite (OK, 903 s); contract cycle laya-parity-v1 -> decide-apr-v1 fixed (7d5c65f4b). Open: D-ITEM-08-12-B/-C/-D (15 ENOSPC FULL failures uncontrolled; 6.0 GiB leaked TempDirs in $TMPDIR for the user)
+Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
+Plan: 19 of 32 complete (08-01..08-19) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-19 COMPLETE (class A load side: 53 manifest leaves bound at rung 4, decide-apr-v1 2.0.0); next 08-20
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -44,7 +44,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-27 - 08-16 completed: the one declared s64 gate run PASSED; deploy-eligible artifact 24a44d7e... (820d82732, SUMMARY 07cfaee06)
+Last activity: 2026-09-28 — Phase 08 execution started
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -231,6 +231,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P16 | 43min | 2 tasks | 3 files |
 | Phase 08 P18 | 6 min | 2 tasks | 3 files |
 | Phase 08 P12 | 86min | 3 tasks | 14 files |
+| Phase 08 P19 | 24 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -433,6 +434,9 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-18: live record FINAL deployed-passed; the external 31.05 s client-time cold call (HTTP 200, in-function 28008 ms) is risk evidence in D-ITEM-08-17-E, not a relabel, because the rule is defined on the laya-deploy-verify samples
 - [Phase 08]: 08-18: decide function left RUNNING with auth off by user decision (D-ITEM-08-18-A); containment recorded, not run; 0 AWS writes
 - [Phase 08]: 08-18: laya-deploy-verify elapsed_ms is client-side through the edge (client minus REPORT 753-785 ms), and the external curl showed about 3042 ms, so the contract's 895 ms gateway+client term does not bound client overhead
+- [Phase 08]: 08-19: decide-apr-v1 bumped 1.0.0 -> 2.0.0 (pv diff: major, blob_integrity formula changed), not the plan's 1.1.0
+- [Phase 08]: 08-19: rung 4 (e) binds all 53 manifest leaves; the sweep forges ONE binding at a time (59 bindings) so a two-source leaf cannot lose either comparison unnoticed; 23/23 comparisons mutation-verified
+- [Phase 08]: 08-19: verify_checks[2] states what check_base enforces today; field-by-field base equality at verify is plan 08-21, NOT checked yet
 
 ### Pending Todos
 
@@ -548,8 +552,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-28T00:45:57.839Z
-Stopped at: 08-12 COMPLETE (18/18): D-16 row, 44 bindings implemented, strict audit; CI gains -p aprender-decide --test ui and -p aprender-mcp-decide --test e2e_stdio (user option A narrowed); just laya-verify-suite local-only (OK, 903 s); contract cycle laya-parity-v1 -> decide-apr-v1 fixed (7d5c65f4b). Next: phase 8 verification
+Last session: 2026-09-28T15:58:54.871Z
+Stopped at: Completed 08-19-PLAN.md (manifest-to-blob bindings at rung 4, decide-apr-v1 2.0.0)
 Resume file: None
 
 ## Accumulated Context
