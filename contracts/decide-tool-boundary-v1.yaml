@@ -1,6 +1,6 @@
 contract: decide-tool-boundary
 metadata:
-  version: 3.0.0
+  version: 4.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -41,6 +41,13 @@ metadata:
     against the 17 000 ms extrapolation (the S3 download dominates), so the margin is 650 ms at
     worst, and one external cold call took 31.05 s at the client (D-ITEM-08-17-E). `pv diff`
     classifies the invariant edit MAJOR, hence 3.0.0.
+
+    v4.0.0 (plan 08-23, 2026-09-28; no constant moved). `classify_count_bound` said the count was
+    checked "FIRST, before any text is read", which was false: pmcp built a JSON tree and
+    parse_args built a Vec<String> before precheck counted (V5-c: 3M empty texts cost 764 MB RSS
+    on stdio). The count is now checked on the parsed JSON array before any element is
+    materialised, and the invariant says exactly that, naming what still precedes it (pmcp's
+    frame parse). `pv diff` classifies the invariant edit MAJOR, hence 4.0.0.
 
     THE 3 008 MB TIER IS AN EXTRAPOLATION, SHOWN HERE SO THE LIVE SAMPLES CAN FALSIFY EACH TERM.
     Nothing was ever measured at 3 008 MB. Spike 026 measured the same Laya-en weights on default
@@ -182,11 +189,13 @@ equations:
     domain: 'untrusted JSON-RPC `tools/call classify` arguments to aprender-mcp-decide or aprender-mcp-decide-lambda'
     codomain: 'either the next bound is checked, or a pmcp::Error::validation naming classify_max_texts (or classify_min_texts) and the observed count'
     invariants:
-      - 'checked FIRST, before any text is read, so an oversized list costs one length comparison'
+      - 'checked on the PARSED JSON ARRAY before any element is materialised as a String (aprender_mcp_decide::parse_args, plan 08-23): an oversized `texts` list is refused naming classify_max_texts whatever its elements are (three numbers included), before the argument shape is deserialized, and costs no per-element allocation (V5-c)'
+      - 'what precedes it is the transport, not this bound: pmcp has already parsed the whole JSON-RPC frame into a JSON value. On stdio pmcp 2.19.3 has NO framing cap (untrusted_input_bounds frame_stdio, accepted); over HTTP StreamableHttpServerConfig::stateless() caps a request at 4 MiB (frame_http). So "an oversized list costs one length comparison" holds only for the work AFTER the frame parse'
+      - 'precheck repeats the same check with the same message (one helper, check_count) for callers of ClassifyService::call that never went through parse_args'
       - 'the Rust constants are asserted EQUAL to constants.classify_min_texts / classify_max_texts by the contract-mirror test (FALSIFY-DECIDE-TOOL-007) — the contract is the source, the code is the mirror'
       - 'N = classify_max_texts is accepted and N + 1 is refused by the same message; an empty list is refused naming classify_min_texts'
     preconditions:
-      - 'the arguments deserialized under deny_unknown_fields, i.e. every key was known'
+      - 'the arguments are a JSON object whose `texts` member is an array; any other shape (a non-array `texts`, a missing `texts`, an unknown key under deny_unknown_fields) is the shape refusal, which is checked AFTER the count and withholds serde''s message'
 
   classify_text_bytes_bound:
     formula: 'accept(req) requires forall t in req.texts: len_utf8_bytes(t) <= classify_max_text_bytes'
@@ -304,7 +313,7 @@ falsification_tests:
     rule: 'The count bound admits N = classify_max_texts and refuses N + 1 and 0'
     prediction: 'A request of classify_max_texts (2) short texts is classified; classify_max_texts + 1 (3) texts and an empty list are refused with validation errors naming classify_max_texts and classify_min_texts respectively.'
     implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests); renamed from the 8/9-text names by the v2.0.0 tier amendment (plan 08-17) so the names hold at every tier'
-    test: 'cargo test -p aprender-mcp-decide --lib tests::empty_texts_refused_naming_min_texts && cargo test -p aprender-mcp-decide --lib tests::one_over_max_texts_refused_naming_max_texts && cargo test -p aprender-mcp-decide --lib tests::max_texts_accepted_and_classified'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::empty_texts_refused_naming_min_texts && cargo test -p aprender-mcp-decide --lib tests::one_over_max_texts_refused_naming_max_texts && cargo test -p aprender-mcp-decide --lib tests::max_texts_accepted_and_classified && cargo test -p aprender-mcp-decide --lib tests::count_is_checked_before_element_shapes'
     if_fails: 'The count bound is off by one or absent, so a request the token budget was never priced for reaches the forward.'
 
   - id: FALSIFY-DECIDE-TOOL-002

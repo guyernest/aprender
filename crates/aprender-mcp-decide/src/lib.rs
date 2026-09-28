@@ -117,18 +117,11 @@ fn refusal(message: String) -> pmcp::Error {
     pmcp::Error::validation(message)
 }
 
-/// The cheap bounds, in contract order: COUNT, then per-text UTF-8 BYTES.
-///
-/// Runs on the async handler path. It takes no model, so it cannot tokenize — the
-/// token budget is checked by [`classify_blocking`] inside the admitted blocking
-/// section.
-///
-/// # Errors
-///
-/// `pmcp::Error::validation` naming the contract, the violated key and the observed
-/// value; never the text.
-pub fn precheck(limits: &ClassifyLimits, args: &ClassifyArgs) -> pmcp::Result<()> {
-    let n = args.texts.len();
+/// `classify_count_bound`: the ONE count check and its ONE refusal text, shared by
+/// [`parse_args`] (on the JSON array, before any element becomes a `String`) and
+/// [`precheck`] (for callers of [`ClassifyService::call`] that never went through
+/// `parse_args`), so the two messages cannot drift.
+fn check_count(limits: &ClassifyLimits, n: usize) -> pmcp::Result<()> {
     if n < limits.min_texts {
         return Err(refusal(format!(
             "{TOOL_NAME}: {n} texts is fewer than classify_min_texts {} ({CONTRACT}); \
@@ -142,6 +135,21 @@ pub fn precheck(limits: &ClassifyLimits, args: &ClassifyArgs) -> pmcp::Result<()
             limits.max_texts
         )));
     }
+    Ok(())
+}
+
+/// The cheap bounds, in contract order: COUNT, then per-text UTF-8 BYTES.
+///
+/// Runs on the async handler path. It takes no model, so it cannot tokenize — the
+/// token budget is checked by [`classify_blocking`] inside the admitted blocking
+/// section.
+///
+/// # Errors
+///
+/// `pmcp::Error::validation` naming the contract, the violated key and the observed
+/// value; never the text.
+pub fn precheck(limits: &ClassifyLimits, args: &ClassifyArgs) -> pmcp::Result<()> {
+    check_count(limits, args.texts.len())?;
     for (index, text) in args.texts.iter().enumerate() {
         let bytes = text.len();
         if bytes > limits.max_text_bytes {
@@ -642,15 +650,29 @@ pub fn load_model_from_hashed(
     Model::load_hashed(hashed).map_err(ModelLoadError::Artifact)
 }
 
-/// Deserialize the tool arguments, refusing a malformed shape WITHOUT serde's message: for a
-/// string where the list belongs, or an unknown key, serde quotes the offending value or key
-/// — caller text — which `refusal_names_bound` forbids (ASVS V7). The refusal names the
-/// contract and the one accepted shape instead.
+/// Deserialize the tool arguments, COUNT FIRST, refusing a malformed shape WITHOUT serde's
+/// message.
+///
+/// When `texts` is a JSON array, its length is checked against
+/// [`ClassifyLimits::CONTRACTED`] before anything is deserialized, so an oversized list is
+/// refused naming `classify_max_texts` whatever its elements are, and costs one length
+/// comparison instead of one `String` per element (V5-c). pmcp has already parsed the frame
+/// into this `Value` — on stdio without a framing cap (pmcp 2.19.3), over HTTP inside the
+/// stateless config's 4 MiB request cap — so the saving is the work AFTER that parse.
+///
+/// Only then is the strict shape deserialized: for a string where the list belongs, or an
+/// unknown key, serde quotes the offending value or key — caller text — which
+/// `refusal_names_bound` forbids (ASVS V7). The refusal names the contract and the one
+/// accepted shape instead.
 ///
 /// # Errors
 ///
-/// `pmcp::Error::validation` naming the contract; never the arguments.
+/// `pmcp::Error::validation` naming the contract (and, for the count, the violated key and
+/// the observed count); never the arguments.
 pub fn parse_args(args: serde_json::Value) -> pmcp::Result<ClassifyArgs> {
+    if let Some(texts) = args.get("texts").and_then(serde_json::Value::as_array) {
+        check_count(&ClassifyLimits::CONTRACTED, texts.len())?;
+    }
     serde_json::from_value(args).map_err(|_| {
         refusal(format!(
             "{TOOL_NAME}: the arguments must be exactly {{\"texts\": [string, ...]}} and nothing \

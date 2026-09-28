@@ -327,6 +327,20 @@ fn the_tiny_decide_server_classifies_over_live_stdio() {
         "the live server enforces the contracted count bound: {message}"
     );
 
+    // The count is checked on the JSON array BEFORE any element becomes a String
+    // (classify_count_bound, V5-c): classify_max_texts + 1 NON-strings are refused by their
+    // count over the real transport. Had the elements been deserialized first, the refusal
+    // would be the shape message, which does not name classify_max_texts.
+    let over = aprender_mcp_decide::ClassifyLimits::CONTRACTED.max_texts + 1;
+    let numbers: Vec<u64> = (0..over as u64).collect();
+    let message = refusal(&client.call(serde_json::json!({ "texts": numbers })));
+    assert!(
+        message.contains("classify_max_texts")
+            && message.contains("decide-tool-boundary-v1")
+            && !message.contains("deny_unknown_fields"),
+        "the live server refuses an oversized list by its count, before its shape: {message}"
+    );
+
     // Caller-supplied labels are a rejection, not a silently ignored knob (D-09).
     let strict = client.call(serde_json::json!({ "texts": ["a"], "labels": ["x", "y"] }));
     let refused =

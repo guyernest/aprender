@@ -721,6 +721,45 @@ fn malformed_arguments_are_refused_without_echo() {
     assert_eq!(ok.texts, ["a", "b"]);
 }
 
+/// decide-tool-boundary-v1 `classify_count_bound`: the COUNT is checked on the parsed JSON
+/// array before any element is materialised as a String. Three non-strings are refused naming
+/// classify_max_texts — had the elements been deserialized first, serde would have refused the
+/// shape instead. One non-string (a legal count) gets the shape refusal, and an empty array
+/// names classify_min_texts. The count refusal is precheck's own message, word for word.
+#[test]
+fn count_is_checked_before_element_shapes() {
+    let over = ClassifyLimits::CONTRACTED.max_texts + 1;
+    let numbers: Vec<serde_json::Value> = (0..over).map(serde_json::Value::from).collect();
+    let message = validation_message(
+        &parse_args(serde_json::json!({ "texts": numbers })).expect_err("N + 1 non-strings"),
+    );
+    assert_names_key(&message, "classify_max_texts");
+    assert!(
+        !message.contains("deny_unknown_fields"),
+        "the count must be refused before the element shape is read: {message}"
+    );
+    let strings = vec!["x"; over];
+    let via_precheck = validation_message(
+        &precheck(&ClassifyLimits::CONTRACTED, &args(&strings)).expect_err("N + 1 strings"),
+    );
+    assert_eq!(
+        message, via_precheck,
+        "parse_args and precheck share one count message"
+    );
+
+    let shape = validation_message(
+        &parse_args(serde_json::json!({ "texts": [1] })).expect_err("a number is not a text"),
+    );
+    assert!(
+        shape.contains("deny_unknown_fields") && shape.contains(TOOL_CONTRACT),
+        "a legal count of non-strings gets the shape refusal: {shape}"
+    );
+
+    let empty =
+        validation_message(&parse_args(serde_json::json!({ "texts": [] })).expect_err("empty"));
+    assert_names_key(&empty, "classify_min_texts");
+}
+
 /// decide-tool-boundary-v1 `classify_token_budget`: the contracted count must fit the budget
 /// for the SERVED task's shortest row, or the server refuses to build (instead of
 /// advertising a count every call at which is refused).
