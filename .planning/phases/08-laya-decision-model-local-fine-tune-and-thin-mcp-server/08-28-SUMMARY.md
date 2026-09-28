@@ -267,3 +267,9 @@ None - no external service configuration required.
 ---
 *Phase: 08-laya-decision-model-local-fine-tune-and-thin-mcp-server*
 *Completed: 2026-09-28*
+
+## Self-Check: PASSED
+
+- Commits found: 890b769e9, 5e91d2b10, d3de3e741, dfc682dc6 (SUMMARY)
+- Files found: lib.rs, tests.rs, e2e_stdio.rs, lambda tests.rs, decide-tool-boundary-v1.yaml, this SUMMARY
+- Re-run at close: `cargo test -p aprender-mcp-decide` (lib 32 + e2e 4, all ok), `cargo test -p aprender-mcp-decide-lambda --lib` (43 ok), clippy `-D warnings` clean on both crates, no module-wide allow in probe.rs, labels segment present, D-09 amendment present, `pv validate` 0 errors 0 warnings, `cargo fmt --check` clean

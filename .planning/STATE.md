@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Completed 08-29-PLAN.md (class E, Python half: typed contract reader with float noise k, Rust str::lines row split, row-encoding / early-stopping typed refusals, python_refusals 35-row table swept 42+5, laya-finetune-gate-v1 5.0.0 best-anchored early-stopping text)"
-last_updated: "2026-09-28T22:13:09.411Z"
+stopped_at: "Completed 08-28-PLAN.md (classify claim honesty: owner decision A-derive B-iserror; tier-derived truncation sentence, bound refusals as isError tool results measured on stdio + HTTP, refusal_names_bound 12-char minimum, admission restated to pmcp serial dispatch; decide-tool-boundary-v1 6.0.0; not deployed, plan 08-30 decides)"
+last_updated: "2026-09-28T22:45:22.267Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: 1c8ff55f00a85d2ed788693571ed4aeafc41b4c5
+state_head: dfc682dc6effe388a5a002559041a686a85eff91
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 120
+  completed_plans: 121
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 28 of 32 complete (08-01..08-27 and 08-29; 08-25 ran before 08-24 by wave order; 08-28 is open in Wave 19) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-29 COMPLETE (class E, Python half: contract.number is the one typed reader for every contract number (ContractValueError, REFUSED contract-value; noise k written as the float 4.0 Rust compares bit for bit, armed python_records NOISE x2 + MEDIAN 23/23); data.jsonl_lines == Rust str::lines (U+0085/2028/2029 one row); <role>-row-encoding refusals (invalid UTF-8, lone surrogate); EarlyStopper.record REFUSED early-stopping and train.py exit 2; laya-finetune-gate-v1 5.0.0 states ONE early-stopping rule, best-anchored, the rule of record (gate.py 24cea2a63; seed-17 trace replays 2/5/patience; [1.0,0.9993,0.9988] distinguishes 3/1/2); python_refusals 35 rows swept 42 in-process + 5 lifecycle, CLI boundary exit 2; five mutations RED; no threshold/constant/recipe/early_stopping value moved, recipe_id 6a5489af rebuilt); Phase 8 NOT complete; next 08-28 (Wave 19), then Waves 20-22
+Plan: 29 of 32 complete (08-01..08-29; 08-25 ran before 08-24 by wave order; Wave 19 done) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-28 COMPLETE (class D served-tool half; owner decision `A-derive B-iserror`, D-09 amendment 'gap round 08-28': the served description's truncation sentence is derived from the artifact's agent max_len vs classify_max_total_tokens (tiny fixture at the contracted tier byte-identical; Laya-en at 3 008 MB now says refused / send a shorter excerpt); every bound refusal is pmcp::Error::tool_rejected, measured on the wire as a successful tools/call result with isError true over live stdio and the Lambda HTTP loopback (was JSON-RPC -32603), model/internal failures stay -32603; refusal_names_bound quantifies over distinctive texts of >= refusal_echo_min_chars 12 (A4-7); classify_admission restated to pmcp 2.19.3's serial dispatch, pinned by pipelined_calls_are_serialized_not_refused; decide-tool-boundary-v1 6.0.0; 17 mutations RED, one survivor fixed; probe.rs untouched; NOTHING DEPLOYED — the live Lambda serves the old surface until plan 08-30); Phase 8 NOT complete; next Wave 20, then Waves 21-22
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -241,6 +241,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P26 | 41min | 3 tasks | 9 files |
 | Phase 08 P27 | 55min | 3 tasks | 12 files |
 | Phase 08 P29 | 25 min | 3 tasks | 9 files |
+| Phase 08 P28 | 22min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -460,6 +461,8 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-27: the f64 gate metrics are ADDED beside aprender-core's f32 f1_score / expected_calibration_error_top_label, never swapped in — the f32 bits are frozen by metrics::f32_bits_tests (committed alone); f_avg is recomputed by verify::check_f_avg under train.py's null rule, so all 5 f_avg run_field_bindings rows are bound (bound=91, expected_open=0)
 - [Phase 08]: 08-29: the early-stopping rule of record is best-anchored (m_e < m_best - min_delta), re-derived from the code that trained the 08-16 run (gate.py 24cea2a63); its seed-17 trace alone cannot separate the candidate rules, so contract text is corrected to the code, never the reverse (laya-finetune-gate-v1 5.0.0)
 - [Phase 08]: 08-29: every contract number the Python back office reads goes through contract.number (no coercion); rescore-noise.json k is written as a float, the value Rust compares bit for bit
+- [Phase 08]: 08-28: owner decision A-derive B-iserror (D-09 amendment 'gap round 08-28'): the served truncation sentence is derived from the artifact's agent max_len vs classify_max_total_tokens, and every bound refusal is pmcp::Error::tool_rejected (an isError tool result on the wire, measured over stdio and the Lambda HTTP loopback); model/internal failures stay JSON-RPC -32603; effective only at the next deploy (plan 08-30)
+- [Phase 08]: 08-28: refusal_names_bound quantifies over distinctive caller texts of at least refusal_echo_min_chars (12, a decide-tool-boundary-v1 constant the test reads); the old any-non-empty-text clause was unsatisfiable (A4-7)
 
 ### Pending Todos
 
@@ -575,8 +578,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-28T22:12:38.799Z
-Stopped at: Completed 08-29-PLAN.md (class E, Python half: typed contract reader with float noise k, Rust str::lines row split, row-encoding / early-stopping typed refusals, python_refusals 35-row table swept 42+5, laya-finetune-gate-v1 5.0.0 best-anchored early-stopping text)
+Last session: 2026-09-28T22:45:22.012Z
+Stopped at: Completed 08-28-PLAN.md (classify claim honesty: A-derive B-iserror implemented and pinned; decide-tool-boundary-v1 6.0.0; not deployed)
 Resume file: None
 
 ## Accumulated Context
