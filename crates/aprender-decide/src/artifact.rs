@@ -31,7 +31,7 @@
 //! # The ladder (load)
 //!
 //! 1. bounded read ([`read_decide_apr_bytes_bounded`]; in-memory length check)
-//! 2. header and index extent, BEFORE any index parser runs
+//! 2. header (APR v2 version, CRC, row-major) and index extent, BEFORE any index parser runs
 //! 3. `model_type`, exactly one custom key, the manifest (`deny_unknown_fields`)
 //! 4. structure: unique index names, blob hashes, the architecture-derived tensor set, per-entry sizes,
 //!    task labels == manifest labels, and every other manifest field equal to the
@@ -48,6 +48,7 @@ use crate::pack::{sha256_hex, CheckpointTensor, PackInputs};
 use crate::{DecideError, Decider, DecisionMethod, ModelIdentity, Task, TaskError};
 use aprender::format::v2::{
     AprV2Header, AprV2Metadata, AprV2ReaderRef, AprV2Writer, TensorDType, HEADER_SIZE_V2,
+    VERSION_V2,
 };
 use aprender::models::modernbert::{expected_modernbert_tensor_names, ModernBertConfig};
 use serde::{Deserialize, Serialize};
@@ -346,7 +347,8 @@ pub enum ArtifactError {
         /// The I/O error.
         reason: String,
     },
-    /// Rung 2: the 64-byte header did not parse (too short, bad magic or version).
+    /// Rung 2: the 64-byte header did not parse (too short, bad magic), or its version is not
+    /// APR v2's (`VERSION_V2`, checked by rung 2 itself: the container reader does not).
     Header {
         /// The container error.
         reason: String,
@@ -524,6 +526,12 @@ pub enum ArtifactError {
         /// `count`, `input_index`, `tokens`, `label`, `hex` or `probabilities`.
         component: &'static str,
     },
+    /// Rung 7: the model could not classify a probe during load-time replay (V9-b: a replay
+    /// failure, not a rebuild one — the model was already built at rung 6).
+    ProbeReplay {
+        /// The classify error.
+        reason: String,
+    },
     /// Rung 7: the replayed probe disagrees with the stored expectation.
     ProbeMismatch {
         /// Probe index.
@@ -575,7 +583,7 @@ impl ArtifactError {
             | Self::ManifestDisagreesWithBlob { .. } => "4 structural",
             Self::NonFiniteWeight { .. } => "5 non_finite_scan",
             Self::Rebuild(_) => "6 rebuild",
-            Self::ProbeMismatch { .. } => "7 probe_replay",
+            Self::ProbeReplay { .. } | Self::ProbeMismatch { .. } => "7 probe_replay",
             Self::ProbeRowOverBudget { .. }
             | Self::ProbeDisagreesWithOracle { .. }
             | Self::Write { .. } => "pack",
@@ -681,6 +689,7 @@ impl fmt::Display for ArtifactError {
                 f,
                 "probe {index}: the Rust {component} disagrees with probes.json"
             ),
+            Self::ProbeReplay { reason } => write!(f, "probe replay failed: {reason}"),
             Self::ProbeMismatch { index, component } => write!(
                 f,
                 "probe {index}: the replayed {component} disagrees with the stored expectation"
@@ -938,12 +947,17 @@ struct RustProbe {
 }
 
 /// Run the contract's synthetic probe task over [`PROBE_INPUTS`] with `laya`'s weights.
-fn run_probes(laya: &Laya) -> Result<Vec<RustProbe>, ArtifactError> {
+/// `classify_failed` names the refusal a classify error becomes: at pack the model is built
+/// and probed as one step ([`ArtifactError::Rebuild`]); at load it is [`replay_failure`].
+fn run_probes(
+    laya: &Laya,
+    classify_failed: fn(DecideError) -> ArtifactError,
+) -> Result<Vec<RustProbe>, ArtifactError> {
     let task = Task::from_slice(PROBE_TASK.as_bytes()).map_err(ArtifactError::Task)?;
     let texts: Vec<String> = PROBE_INPUTS.iter().map(|s| (*s).to_string()).collect();
     let decisions = laya
         .classify_for_task(&task, &texts)
-        .map_err(ArtifactError::Rebuild)?;
+        .map_err(classify_failed)?;
     let labels = task.labels();
     let probes = decisions
         .into_iter()
@@ -956,6 +970,14 @@ fn run_probes(laya: &Laya) -> Result<Vec<RustProbe>, ArtifactError> {
         })
         .collect();
     Ok(probes)
+}
+
+/// Load: a classify failure while replaying the probes is a rung-7 refusal (V9-b). The model
+/// was already rebuilt at rung 6; the replay is its first forward pass.
+fn replay_failure(e: DecideError) -> ArtifactError {
+    ArtifactError::ProbeReplay {
+        reason: e.to_string(),
+    }
 }
 
 /// Pack: the first Rust probe row over `cap` tokens is refused as
@@ -1113,7 +1135,7 @@ fn check_pack_probes(
         task,
     )
     .map_err(|e| ArtifactError::Rebuild(e.into()))?;
-    let rust = run_probes(&laya)?;
+    let rust = run_probes(&laya, ArtifactError::Rebuild)?;
     check_probe_budget(&rust, limits.probe_max_row_tokens)?;
     compare_probes(
         &rust,
@@ -1305,6 +1327,15 @@ fn rung2_header(bytes: &[u8]) -> Result<(), ArtifactError> {
     })?;
     if !header.verify_checksum() {
         return Err(ArtifactError::HeaderChecksum);
+    }
+    // V9-d: the container parses any version with v2's layout; only v2 is this schema's.
+    if header.version != VERSION_V2 {
+        return Err(ArtifactError::Header {
+            reason: format!(
+                "version {}.{}, expected APR v2 {}.{}",
+                header.version.0, header.version.1, VERSION_V2.0, VERSION_V2.1
+            ),
+        });
     }
     if !header.flags.is_layout_valid() {
         return Err(ArtifactError::ColumnMajor);
@@ -1709,8 +1740,8 @@ fn load_rungs(
         blobs.task,
     )
     .map_err(|e| ArtifactError::Rebuild(e.into()))?;
-    // Rung 7: replay against the stored PYTHON values.
-    let rust = run_probes(&laya)?;
+    // Rung 7: replay against the stored PYTHON values; a classify failure here is rung 7's.
+    let rust = run_probes(&laya, replay_failure)?;
     compare_probes(
         &rust,
         &manifest.probes,

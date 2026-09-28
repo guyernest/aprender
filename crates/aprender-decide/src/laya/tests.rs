@@ -284,3 +284,54 @@ fn foreign_rows_are_refused() {
         })
     );
 }
+
+/// V9-a / T-08-26-03: a tokenizer.json that declares truncation (max_length 4) and fixed
+/// padding builds EXACTLY the row the same tokenizer without those blocks builds, for a
+/// state far longer than 4 tokens. HF transformers passes truncation / padding per call,
+/// so a file's own block never silently cuts the state while the row reports its own
+/// `truncated` flag.
+#[test]
+fn tokenizer_truncation_and_padding_are_disabled() {
+    use super::builder::Builder;
+    let plain = crate::test_support::read("checkpoint/tokenizer/tokenizer.json");
+    let mut doc: serde_json::Value = serde_json::from_slice(&plain).expect("tokenizer JSON");
+    assert!(
+        doc["truncation"].is_null() && doc["padding"].is_null(),
+        "the fixture tokenizer declares neither block"
+    );
+    // (serde_json's `json!` object form expands to `unwrap`, which this workspace bans.)
+    doc["truncation"] = serde_json::from_str(
+        r#"{"direction": "Right", "max_length": 4, "strategy": "LongestFirst", "stride": 0}"#,
+    )
+    .expect("truncation block");
+    doc["padding"] = serde_json::from_str(
+        r#"{"strategy": {"Fixed": 40}, "direction": "Right", "pad_to_multiple_of": null,
+            "pad_id": 0, "pad_type_id": 0, "pad_token": "[PAD]"}"#,
+    )
+    .expect("padding block");
+    let injected = serde_json::to_vec(&doc).expect("serialise the injected tokenizer");
+    let (max_len, head_max_len) = (64, 32);
+    let a = Builder::from_bytes(&plain, max_len, head_max_len).expect("plain tokenizer");
+    let b = Builder::from_bytes(&injected, max_len, head_max_len).expect("injected tokenizer");
+    let options = vec!["alpha option".to_string(), "beta option".to_string()];
+    for state in [
+        "a short state",
+        "a state that is much longer than four tokens and still well inside the row",
+        &"word ".repeat(200),
+    ] {
+        let want = a
+            .build(state, "choice", "question", &options)
+            .expect("plain row");
+        let got = b
+            .build(state, "choice", "question", &options)
+            .expect("injected row");
+        assert!(
+            want.tokens > 4,
+            "the state is longer than the injected max_length"
+        );
+        assert_eq!(
+            got, want,
+            "the tokenizer file's truncation / padding leaked into the row"
+        );
+    }
+}

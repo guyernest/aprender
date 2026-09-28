@@ -55,7 +55,8 @@ pub struct RowPrefix {
     markers: Vec<usize>,
 }
 
-/// Laya's request builder over a byte-identical `tokenizer.json`.
+/// Laya's request builder over a byte-identical `tokenizer.json` (its own truncation and
+/// padding blocks disabled: the builder is the only thing that truncates).
 pub struct Builder {
     tok: Tokenizer,
     cls: u32,
@@ -90,8 +91,16 @@ impl Builder {
         max_len: usize,
         head_max_len: usize,
     ) -> Result<Self, LayaError> {
-        let tok = Tokenizer::from_bytes(tokenizer_bytes)
+        let mut tok = Tokenizer::from_bytes(tokenizer_bytes)
             .map_err(|e| LayaError::Tokenizer(e.to_string()))?;
+        // V9-a: a tokenizer.json may declare `truncation` / `padding` blocks, and
+        // `Tokenizer::from_bytes` keeps them, so every `encode` would silently cut (or pad) the
+        // state while `BuiltRow::truncated` reports only this builder's own cut. HF transformers
+        // passes truncation and padding PER CALL (Laya calls with neither), so the builder
+        // disables both on the tokenizer it encodes with; truncation is this builder's alone.
+        tok.with_truncation(None)
+            .map_err(|e| LayaError::Tokenizer(e.to_string()))?;
+        tok.with_padding(None);
         let id = |t: &str| {
             tok.token_to_id(t)
                 .ok_or_else(|| LayaError::MissingSpecialToken(t.to_string()))

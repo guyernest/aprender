@@ -249,6 +249,28 @@ fn index_past_end() {
     );
 }
 
+/// V9-d / T-08-26-06: a forged header (valid CRC) whose version is not APR v2's is refused
+/// at rung 2 naming the version. The container reader alone accepts the same bytes, so the
+/// refusal is provably rung 2's own.
+#[test]
+fn header_version_refused() {
+    for version in [(3u8, 0u8), (2, 1), (1, 0)] {
+        let mut b = packed();
+        forge_header(&mut b, |h| h.version = version);
+        let e = refuse(&b);
+        let named = format!("{}.{}", version.0, version.1);
+        assert!(
+            matches!(&e, ArtifactError::Header { reason } if reason.contains(&named)),
+            "{named}: {e}"
+        );
+        assert_eq!(e.rung(), "2 header_and_index_extent", "{named}");
+        assert!(
+            AprV2ReaderRef::from_bytes(&b).is_ok(),
+            "{named}: the container reader does not check the version itself"
+        );
+    }
+}
+
 /// Replace blob `name` with `new` AND re-pin its manifest sha256 — the artifact's author
 /// controls both, so the blob hash alone is not a bound on what the blob declares.
 fn swap_blob(bytes: &[u8], name: &str, new: Vec<u8>) -> Vec<u8> {
@@ -1360,6 +1382,84 @@ fn probe_mismatch() {
             index: 0,
             component: "probabilities",
         }
+    );
+    assert_eq!(e.rung(), "7 probe_replay");
+}
+
+/// Swap blob `name` for `new` (data AND its `[len]` shape) and re-pin its manifest sha256.
+fn swap_blob_sized(bytes: &[u8], name: &str, new: &[u8]) -> Vec<u8> {
+    let sha = crate::pack::sha256_hex(new);
+    let swapped = repack(bytes, |_, tensors| {
+        let t = tensors
+            .iter_mut()
+            .find(|t| t.0 == name)
+            .unwrap_or_else(|| panic!("blob {name}"));
+        t.2 = vec![new.len()];
+        t.3 = new.to_vec();
+    });
+    edit_manifest(&swapped, |m| {
+        for blob in m["blobs"].as_array_mut().expect("manifest blobs") {
+            if blob["name"] == name {
+                blob["sha256"] = Value::String(sha.clone());
+            }
+        }
+    })
+}
+
+/// V9-b: a classify failure during LOAD-time probe replay is a rung-7 refusal, not a
+/// rung-6 one. The forged tokenizer blob maps one token of probe input 0 to an id past the
+/// encoder's vocabulary: rung 6 only tokenizes the served task's (empty-state) prefix, so it
+/// rebuilds; the first forward is the replay, where core's embedding lookup refuses the id
+/// (`OutOfVocab`). Every digest bound to the tokenizer is re-pinned, and the control — the
+/// same coherent re-serialization with the id left alone — loads.
+#[test]
+fn probe_replay_failure_is_rung_7() {
+    let b = packed();
+    let r = AprV2ReaderRef::from_bytes(&b).expect("open the packed artifact");
+    let tok_bytes = r
+        .get_tensor_data(super::TOKENIZER_BLOB)
+        .expect("tokenizer blob")
+        .to_vec();
+    let encoder: Value = serde_json::from_slice(
+        r.get_tensor_data(super::ENCODER_CONFIG_BLOB)
+            .expect("encoder blob"),
+    )
+    .expect("encoder JSON");
+    let vocab_size = encoder["vocab_size"].as_u64().expect("vocab_size");
+    let tok = tokenizers::Tokenizer::from_bytes(&tok_bytes).expect("tokenizer");
+    let probe = tok
+        .encode(super::PROBE_INPUTS[0], false)
+        .expect("probe input 0 encodes");
+    let doc: Value = serde_json::from_slice(&tok_bytes).expect("tokenizer JSON");
+    let vocab = doc["model"]["vocab"].as_object().expect("BPE vocab");
+    let victim = probe
+        .get_tokens()
+        .iter()
+        .find(|t| vocab.contains_key(t.as_str()))
+        .expect("a vocab token in probe input 0")
+        .clone();
+    let far = vocab_size + 1000;
+    assert!(
+        vocab.values().all(|id| id.as_u64() != Some(far)),
+        "the forged id is unused"
+    );
+    let forged_tokenizer = |id: Option<u64>| -> Vec<u8> {
+        let mut d = doc.clone();
+        if let Some(id) = id {
+            d["model"]["vocab"][victim.as_str()] = Value::from(id);
+        }
+        let bytes = serde_json::to_vec(&d).expect("tokenizer re-serializes");
+        let sha = Value::from(crate::pack::sha256_hex(&bytes));
+        let swapped = swap_blob_sized(&b, super::TOKENIZER_BLOB, &bytes);
+        let pin = edits(&[("/inputs_sha256/tokenizer_json", sha)]);
+        forge(&swapped, &[], &pin, &pin)
+    };
+    load_verified(&forged_tokenizer(None))
+        .expect("control: the coherent re-serialized tokenizer loads");
+    let e = refuse(&forged_tokenizer(Some(far)));
+    assert!(
+        matches!(&e, ArtifactError::ProbeReplay { reason } if reason.contains("out of vocabulary")),
+        "{victim} -> {far}: {e}"
     );
     assert_eq!(e.rung(), "7 probe_replay");
 }

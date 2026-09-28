@@ -12,16 +12,30 @@
 //! that pushes `(name, description)` pairs in document order — the same order under
 //! both map backings (`tests::serde_backing_canary` records which backing a run had).
 //!
-//! Refusals ([`TaskError`]): a `type` other than `"choice"`, fewer than 2 criteria, a
-//! duplicate criterion name, an empty name, a non-string description, and any unknown
-//! top-level key (`deny_unknown_fields`). Nothing is defaulted.
+//! Refusals ([`TaskError`]): a `type` other than `"choice"`, fewer than 2 criteria, more than
+//! [`MAX_CRITERIA`] (refused while reading, before the entry is stored or compared), a
+//! duplicate criterion name (found with a set, so the scan is linear), an empty name, a
+//! non-string description, and any unknown top-level key (`deny_unknown_fields`). Nothing is
+//! defaulted.
 //!
 //! Contract: `contracts/decide-apr-v1.yaml` `task_json_schema` and
 //! `equations.task_order_is_label_index`.
 
-use serde::de::{Deserializer, MapAccess, Visitor};
+use serde::de::{Deserializer, Error as _, MapAccess, Visitor};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::fmt;
+
+/// The message the criteria visitor refuses an over-bound entry with. serde's own messages
+/// never start with it ("invalid type", "unknown field", ...), so [`Task::from_slice`] maps a
+/// data error that does back to the typed [`TaskError::TooManyCriteria`].
+const TOO_MANY_CRITERIA: &str = "decide-apr-v1 max_criteria exceeded";
+
+/// The most criteria a task may declare (decide-apr-v1 `constants.max_criteria`, asserted
+/// equal by `tests::max_criteria_matches_contract`; the derivation is the contract's).
+/// Refused while the criteria object is being read, before the entry that would exceed it
+/// is stored or compared, so a hostile task blob costs at most this many entries.
+pub const MAX_CRITERIA: usize = 510;
 
 /// One criterion: its name is the label; its description, when present, is rendered
 /// into the option text.
@@ -54,6 +68,11 @@ pub enum TaskError {
     /// The same criterion name appears twice; the second occurrence would silently
     /// shadow or shift a label.
     DuplicateCriterion(String),
+    /// More than [`MAX_CRITERIA`] criteria: refused while reading (V1-b).
+    TooManyCriteria {
+        /// The bound ([`MAX_CRITERIA`]).
+        max: usize,
+    },
     /// A criterion name is empty.
     EmptyCriterionName {
         /// Its position in document order.
@@ -77,6 +96,10 @@ impl fmt::Display for TaskError {
             Self::DuplicateCriterion(name) => {
                 write!(f, "task.json: criterion {name:?} appears more than once")
             }
+            Self::TooManyCriteria { max } => write!(
+                f,
+                "task.json: more than {max} criteria (decide-apr-v1 max_criteria)"
+            ),
             Self::EmptyCriterionName { index } => {
                 write!(f, "task.json: criterion {index} has an empty name")
             }
@@ -106,9 +129,16 @@ impl<'de> Deserialize<'de> for OrderedCriteria {
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut pairs: Vec<(String, Option<String>)> = Vec::new();
+                let mut seen: HashSet<String> = HashSet::new();
                 let mut first_duplicate = None;
                 while let Some((name, description)) = map.next_entry::<String, Option<String>>()? {
-                    if first_duplicate.is_none() && pairs.iter().any(|(n, _)| *n == name) {
+                    // V1-b: the entry that would exceed the bound is refused BEFORE it is stored
+                    // or compared, and the parse stops here — a hostile criteria object costs at
+                    // most MAX_CRITERIA entries.
+                    if pairs.len() == MAX_CRITERIA {
+                        return Err(A::Error::custom(TOO_MANY_CRITERIA));
+                    }
+                    if !seen.insert(name.clone()) && first_duplicate.is_none() {
                         first_duplicate = Some(name.clone());
                     }
                     pairs.push((name, description.filter(|d| !d.is_empty())));
@@ -140,8 +170,14 @@ impl Task {
     ///
     /// A [`TaskError`] for every refusal listed in the module docs.
     pub fn from_slice(bytes: &[u8]) -> Result<Self, TaskError> {
-        let doc: TaskDoc =
-            serde_json::from_slice(bytes).map_err(|e| TaskError::Parse(e.to_string()))?;
+        let doc: TaskDoc = serde_json::from_slice(bytes).map_err(|e| {
+            let message = e.to_string();
+            if e.is_data() && message.starts_with(TOO_MANY_CRITERIA) {
+                TaskError::TooManyCriteria { max: MAX_CRITERIA }
+            } else {
+                TaskError::Parse(message)
+            }
+        })?;
         if doc.kind != "choice" {
             return Err(TaskError::UnsupportedType(doc.kind));
         }
@@ -215,7 +251,64 @@ impl Task {
 
 #[cfg(test)]
 mod tests {
-    use super::{Task, TaskError};
+    use super::{Task, TaskError, MAX_CRITERIA};
+    use std::time::{Duration, Instant};
+
+    /// A choice task with `n` distinct criteria `c0 .. c{n-1}`.
+    fn task_with(n: usize) -> String {
+        let criteria: Vec<String> = (0..n).map(|i| format!(r#""c{i}":null"#)).collect();
+        format!(
+            r#"{{"type":"choice","instructions":"q","criteria":{{{}}}}}"#,
+            criteria.join(",")
+        )
+    }
+
+    /// V1-b / T-08-26-02: `max_criteria` criteria parse; one more is refused as the typed
+    /// `TooManyCriteria` while the criteria object is being read; and a 100 000-criteria task
+    /// is refused in under one second in a debug build. The timing is asserted BEFORE the
+    /// result, so an unbounded quadratic scan is caught by the clock, not only by the result.
+    #[test]
+    fn too_many_criteria_refused_while_reading() {
+        let at = Task::from_slice(task_with(MAX_CRITERIA).as_bytes()).expect("max_criteria parses");
+        assert_eq!(at.criteria().len(), MAX_CRITERIA);
+        let e = Task::from_slice(task_with(MAX_CRITERIA + 1).as_bytes())
+            .expect_err("max_criteria + 1 refused");
+        assert_eq!(e, TaskError::TooManyCriteria { max: MAX_CRITERIA });
+
+        let huge = task_with(100_000);
+        let started = Instant::now();
+        let result = Task::from_slice(huge.as_bytes());
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "a 100 000-criteria task took {elapsed:?} to refuse"
+        );
+        assert_eq!(
+            result.expect_err("100 000 criteria refused"),
+            TaskError::TooManyCriteria { max: MAX_CRITERIA }
+        );
+
+        // The count refusal wins over a duplicate that only appears past the bound: the entry
+        // that would exceed the bound is refused before it is compared with anything.
+        let past = task_with(MAX_CRITERIA).replace("}}", r#","c0":null}}"#);
+        assert_eq!(
+            Task::from_slice(past.as_bytes()).expect_err("over the bound"),
+            TaskError::TooManyCriteria { max: MAX_CRITERIA }
+        );
+    }
+
+    /// The code mirrors decide-apr-v1 `constants.max_criteria` (the contract is the source).
+    #[test]
+    fn max_criteria_matches_contract() {
+        let c = crate::test_support::contract_yaml("decide-apr-v1.yaml");
+        let declared = c["constants"]["max_criteria"]
+            .as_u64()
+            .expect("decide-apr-v1 constants.max_criteria");
+        assert_eq!(
+            MAX_CRITERIA as u64, declared,
+            "task::MAX_CRITERIA vs decide-apr-v1 constants.max_criteria"
+        );
+    }
 
     fn labels(json: &str) -> Vec<String> {
         Task::from_slice(json.as_bytes())
@@ -290,6 +383,17 @@ mod tests {
         )
         .expect_err("duplicate refused");
         assert_eq!(e, TaskError::DuplicateCriterion("a".into()));
+    }
+
+    /// The FIRST repeated name is named, found through the set whatever its distance from
+    /// the original.
+    #[test]
+    fn refuses_the_first_duplicate_criterion() {
+        let e = Task::from_slice(
+            br#"{"type":"choice","instructions":"q","criteria":{"a":"","b":"","c":"","b":"","a":""}}"#,
+        )
+        .expect_err("duplicates refused");
+        assert_eq!(e, TaskError::DuplicateCriterion("b".into()));
     }
 
     #[test]

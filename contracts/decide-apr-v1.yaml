@@ -80,6 +80,21 @@ constants:
   # The smallest encodable tensor-index entry: u16 name length + u8 dtype + u8 ndim + u64 offset
   # + u64 size = 20 bytes. Rung 2 bounds tensor_count x this by the index extent.
   min_index_entry_bytes: 20
+  # The most criteria a task.json may declare (task::MAX_CRITERIA; refused while the criteria
+  # object is read, before the entry is stored or compared: V1-b). Derivation, from the builder
+  # (laya::builder, Laya common.py build_sequence): every option's [MASK] marker occupies its OWN
+  # row position; position 0 is [CLS] and the head's closing [SEP] sits at position >= 1, so the
+  # first marker is at >= 2; only markers below max_len survive. A task with K > max_len - 2
+  # therefore loses a marker under ANY tokenizer, and is refused at load anyway (marker_rule).
+  # Over Laya-en's max_len 512 (the only served agent config): 512 - 2 = 510.
+  # NOT max_len / 4: the shrink cuts each option to max(4, (head_max_len - 16) / K) tokens but
+  # never lengthens a shorter one, so an option can keep 2 tokens ([MASK] + a one-token name).
+  # Measured on Laya-en's tokenizer (snapshot 55cf4c4e, max_len 512, head_max_len 192, plan
+  # 08-26): one-token names keep every marker up to K = 253 and lose one from K = 254; options
+  # of >= 4 tokens keep every marker up to K = 127. A bound of 128 would refuse K = 129..253
+  # tasks Laya serves. An artifact whose agent declares a larger max_len does not raise this
+  # bound: it is a constant on the task blob.
+  max_criteria: 510
   schema_version: 1
 
 # ---------------------------------------------------------------------------------------------
@@ -87,11 +102,12 @@ constants:
 # ---------------------------------------------------------------------------------------------
 task_json_schema:
   shape: '{type: "choice", instructions: string, criteria: object}, deny_unknown_fields'
-  criteria: 'object whose DOCUMENT ORDER is the label index; names unique; at least 2; each value a string or null (null or empty = name only)'
+  criteria: 'object whose DOCUMENT ORDER is the label index; names unique (found with a set: the duplicate scan is linear); at least 2 and at most max_criteria; each value a string or null (null or empty = name only)'
   parse_rule: 'criteria are read from the raw bytes with an order-preserving map visitor, NEVER via serde_json::Value / Map (pmcp 2.19.3 enables serde_json/preserve_order for every binary linking it while a library tested alone gets key-sorted maps — RESEARCH Pitfall 2). This is how "order is the label index" holds in every build shape'
   refusals:
     - 'type other than "choice"'
     - 'fewer than 2 criteria'
+    - 'more than max_criteria criteria (refused while reading: the entry that would exceed the bound is refused before it is stored or compared, and the parse stops; TaskError::TooManyCriteria)'
     - 'a duplicate criterion name'
     - 'MARKER LOSS: the built row keeps FEWER [MASK] markers than the task has criteria'
   marker_rule: 'Laya''s builder first SHRINKS option token sequences to fit head_max_len (common.py build_sequence: when the option budget falls below 16 each option is cut to max(4, (head_max_len - 16) / K) tokens) and keeps only markers below max_len. A task is refused ONLY when the built row keeps fewer markers than criteria — the exact spike-026 rule (markers.len() != opts.len(), lib.rs:233). Options that are merely longer than head_max_len are SHRUNK exactly as Laya does and SERVED, never refused: refusing on raw option length would reject tasks the reference serves, changing observable inference semantics'
@@ -303,13 +319,13 @@ load_ladder:
       rule: 'declared length checked against max_artifact_bytes before the reader is touched; the read is capped at max_artifact_bytes + 1 bytes'
     - rung: 2
       name: header_and_index_extent
-      rule: 'AprV2Header::from_bytes on the first 64 bytes BEFORE any index parser runs: magic, CRC, row-major flag; metadata_size <= max_metadata_bytes (the reader parses the declared section into a JSON tree); then tensor_count <= max_tensor_count AND, with checked arithmetic, tensor_count x min_index_entry_bytes <= data_offset - tensor_index_offset <= file length. Review finding verified at crates/apr-format/src/v2/reader_impl.rs:95: the reader reserved the index vector at the header''s declared count, so a small file with a valid header CRC could request a multi-hundred-GB allocation before any structural rung ran. Plan 08-05 also caps the reader''s capacity at what the index bytes can hold, for every APR consumer; this rung stays as the decide-specific bound'
+      rule: 'AprV2Header::from_bytes on the first 64 bytes BEFORE any index parser runs: magic, CRC, version == APR v2 (apr-format VERSION_V2 = 2.0; the container reader parses any version with the v2 layout, so rung 2 checks it: V9-d), row-major flag; metadata_size <= max_metadata_bytes (the reader parses the declared section into a JSON tree); then tensor_count <= max_tensor_count AND, with checked arithmetic, tensor_count x min_index_entry_bytes <= data_offset - tensor_index_offset <= file length. Review finding verified at crates/apr-format/src/v2/reader_impl.rs:95: the reader reserved the index vector at the header''s declared count, so a small file with a valid header CRC could request a multi-hundred-GB allocation before any structural rung ran. Plan 08-05 also caps the reader''s capacity at what the index bytes can hold, for every APR consumer; this rung stays as the decide-specific bound'
     - rung: 3
       name: manifest
       rule: 'model_type == "decide"; exactly one custom key; the manifest string parsed with deny_unknown_fields; schema_version == 1; method known'
     - rung: 4
       name: structural
-      rule: 'tensor set derived from the encoder config + agent config (names, dtype, per-entry byte size == product(shape) x dtype width); every blob sha256 matches manifest.blobs; task.json re-parsed and its labels equal manifest.labels; and every manifest field equals the value of the sha-bound source manifest.bindings names (base and variant: the recipe blob), refused as ManifestDisagreesWithBlob naming the field'
+      rule: 'every tensor-index name unique, checked with a set BEFORE any lookup by name (DuplicateTensor, WR-01 decide side; the apr-format reader also refuses a repeat at rung 3, plan 08-20); tensor set derived from the encoder config + agent config (names, dtype, per-entry byte size == product(shape) x dtype width); every blob sha256 matches manifest.blobs; task.json re-parsed and its labels equal manifest.labels; and every manifest field equals the value of the sha-bound source manifest.bindings names (base and variant: the recipe blob), refused as ManifestDisagreesWithBlob naming the field'
     - rung: 5
       name: non_finite_scan
       rule: 'every widened weight is finite'
@@ -318,7 +334,7 @@ load_ladder:
       rule: 'F16 widened to f32 through AprV2DequantExt::get_tensor_as_f32; the model is built'
     - rung: 7
       name: probe_replay
-      rule: 'every stored probe replayed; probabilities within probe_probabilities_abs (NaN-visible within), label exact'
+      rule: 'every stored probe replayed; probabilities within probe_probabilities_abs (NaN-visible within), label exact; a classify failure DURING replay (the rebuilt model''s first forward pass) is a rung-7 refusal (ProbeReplay), never rung 6''s (V9-b)'
     - rung: 8
       name: mint
       rule: 'the verified decider is minted by a private constructor reachable ONLY through this ladder; a trybuild compile-fail test proves no second minting path'
@@ -364,7 +380,7 @@ equations:
     codomain: 'an ordered label list, or a typed refusal'
     invariants:
       - 'read with an order-preserving map visitor, never serde_json::Value / Map (Pitfall 2)'
-      - 'refuses type != "choice", fewer than 2 criteria, duplicate names, unknown fields'
+      - 'refuses type != "choice", fewer than 2 criteria, more than max_criteria criteria (while reading), duplicate names, unknown fields'
 
   marker_preservation:
     formula: 'accept(task) iff len(markers(build_row(task, state = ""))) == K, where build_row applies Laya''s option shrink'
