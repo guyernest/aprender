@@ -1,6 +1,6 @@
 contract: decide-apr
 metadata:
-  version: 2.0.0
+  version: 3.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -371,6 +371,258 @@ deploy_eligibility:
     - 'the gate recomputed from those verified probabilities (laya-finetune-gate-v1 gate_pass)'
     - 'the seed-selection rule re-derived from the per-seed probability files (laya-finetune-gate-v1 seed_policy, 1.4.0)'
   inspect: '`inspect` reports identity only; embedded report fields alone NEVER make an artifact eligible'
+
+# ---------------------------------------------------------------------------------------------
+# CLASS B (untrusted-input bounds), ARTIFACT HALF (plan 08-26). Every size, count or config value a
+# decide-apr-v1 artifact supplies that sizes an allocation, a loop, a scan or a forward pass, with
+# the bound that is checked BEFORE it does. Enumerated by inspection of the ladder (artifact.rs),
+# core's ModernBERT config / loader / layer, the task parser (task.rs) and the row builder
+# (laya/builder.rs). `disposition`: enforced (a hostile case is refused, or the value is
+# overridden) or accepted (with the reason and the behaviour the sweep asserts). `owner_crate`: the
+# crate whose code enforces it; rows owned by aprender-decide are swept, by id, by
+# artifact::ladder::artifact_bounds_table_is_swept (a hostile case built from the packed tiny
+# artifact, refused with `refusal` at `rung`); rows owned by another crate name a test that must
+# exist in that crate (plan 08-31's ledger proves it runs).
+# ---------------------------------------------------------------------------------------------
+untrusted_input_bounds:
+  see_also: 'decide-tool-boundary-v1 untrusted_input_bounds: the REQUEST half (frame, argument shape, text count, text bytes, built-token budget), plans 08-23 / 08-24. This table is the ARTIFACT half: what a .apr file supplies.'
+  rows:
+    - id: file_length
+      bound: max_artifact_bytes
+      disposition: enforced
+      rung: 1
+      checked_by: 'artifact::read_bounded_within (declared length before the reader is touched; the read capped at cap + 1) and open_within (in-memory input_bytes)'
+      refusal: [ArtifactTooLarge]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::declared_length_over_cap && cargo test -p aprender-decide --lib artifact::ladder::read_over_cap && cargo test -p aprender-decide --lib artifact::ladder::in_memory_over_cap'
+    - id: header_version
+      bound: 'APR v2 (apr-format VERSION_V2 = 2.0)'
+      disposition: enforced
+      rung: 2
+      checked_by: 'artifact::rung2_header (the container reader parses any version with the v2 layout; V9-d)'
+      refusal: [Header]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::header_version_refused'
+    - id: metadata_size
+      bound: max_metadata_bytes
+      disposition: enforced
+      rung: 2
+      checked_by: 'artifact::rung2_header, before the reader parses the declared section into a JSON tree (40-50x its size); it therefore bounds every manifest array (labels, blobs, probes) the rung-3 parse builds'
+      refusal: [MetadataOverCap]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::metadata_over_cap'
+    - id: tensor_count
+      bound: max_tensor_count
+      disposition: enforced
+      rung: 2
+      checked_by: 'artifact::check_index_extent, before any index parser'
+      refusal: [TensorCountOverCap]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::tensor_count_over_cap'
+    - id: index_extent
+      bound: 'tensor_count x min_index_entry_bytes <= data_offset - tensor_index_offset <= file length (checked arithmetic)'
+      disposition: enforced
+      rung: 2
+      checked_by: 'artifact::check_index_extent'
+      refusal: [IndexExtentTooSmall, IndexPastEnd]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::index_extent_too_small && cargo test -p aprender-decide --lib artifact::ladder::index_past_end && cargo test -p aprender-decide --lib artifact::ladder::rung2_predicate_exhaustive'
+    - id: index_reservation
+      bound: 'min(tensor_count, index bytes / INDEX_RESERVE_UNIT_BYTES) in-memory entries'
+      disposition: enforced
+      rung: 3
+      checked_by: 'apr-format parse_tensor_index_section index_capacity (every APR consumer; plan 08-20)'
+      owner_crate: apr-format
+      test: 'cargo test -p apr-format --lib v2::tests::forged_tensor_count_reserves_nothing_proportional && cargo test -p apr-format --lib v2::tests::index_capacity_is_bounded_by_the_index_bytes'
+    - id: duplicate_names_reader
+      bound: 'tensor index names strictly increasing'
+      disposition: enforced
+      rung: 3
+      checked_by: 'apr-format parse_tensor_index_section (both readers; WR-01, plan 08-20). This is what refuses a repeated name at load today'
+      owner_crate: apr-format
+      test: 'cargo test -p apr-format --lib v2::tests::duplicate_tensor_names_are_refused_by_both_readers'
+    - id: duplicate_names_ladder
+      bound: 'every tensor index name unique (a set walk, independent of sort order)'
+      disposition: enforced
+      rung: 4
+      checked_by: 'artifact::first_repeated_tensor_name, called at the start of rung4_structure before any lookup by name (WR-01, decide side)'
+      refusal: [DuplicateTensor]
+      reachable_via_load: false
+      reachable_note: 'false while duplicate_names_reader holds: a hostile artifact is refused at rung 3 by the reader first, so a sweep case that loaded one would pass whether or not this check exists. The case calls the helper directly; duplicate_tensor_name_is_refused_at_load proves the load refusal names the tensor whichever rung gives it'
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::repeated_name_walk_names_the_first_repeat && cargo test -p aprender-decide --lib artifact::ladder::duplicate_tensor_name_is_refused_at_load'
+    - id: num_hidden_layers
+      bound: 1024
+      disposition: enforced
+      rung: 4
+      checked_by: 'aprender-core ModernBertConfig::from_json_bytes (MAX_NUM_HIDDEN_LAYERS), reached at rung 4 (b) through artifact::parse_encoder_config, BEFORE the per-layer tensor names are derived (ea940faec)'
+      refusal: [ConfigBlob]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::untrusted_layer_counts_are_bounded_before_derivation && cargo test -p aprender-core --lib models::modernbert::config::tests::layer_count_is_capped_before_allocation'
+    - id: head_layers
+      bound: 64
+      disposition: enforced
+      rung: 4
+      checked_by: 'laya::AgentConfig::from_json_bytes (MAX_HEAD_LAYERS), reached at rung 4 (b) through artifact::parse_agent_config, before the head tensor names are derived (ea940faec)'
+      refusal: [ConfigBlob]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::untrusted_layer_counts_are_bounded_before_derivation'
+    - id: activation_and_rope
+      bound: 'hidden_activation gelu; rope_type default; rope_scaling absent or null'
+      disposition: enforced
+      rung: 4
+      checked_by: 'aprender-core ModernBertConfig::from_json_bytes (UnsupportedActivation / UnsupportedRope), reached at rung 4 (b) (ea940faec)'
+      refusal: [ConfigBlob]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept && cargo test -p aprender-core --lib models::modernbert::config::tests::unsupported_forward_semantics_are_refused'
+    - id: encoder_dims
+      bound: 'vocab_size, hidden_size, intermediate_size, heads > 0; the products vocab x d, 3 x d x d and 2 x intermediate x d fit usize; every weight stored at EXACTLY its config shape'
+      disposition: enforced
+      rung: 6
+      checked_by: 'aprender-core ModernBertConfig::from_json_bytes (ZeroDimension / DimensionOverflow) and load_tensor (shape compared, then size, BEFORE any widening allocation); rung 4 (c) already bounds every stored entry by the file, so a config dimension cannot size an allocation the file does not hold'
+      owner_crate: aprender-core
+      test: 'cargo test -p aprender-core --lib models::modernbert::config::tests::config_domain && cargo test -p aprender-core --lib models::modernbert::load::tests::refuses_shape_mismatch'
+    - id: tensor_dtype
+      bound: 'F16 weights, F32 temperature, U8 blobs'
+      disposition: enforced
+      rung: 4
+      checked_by: 'artifact::rung4_structure (c) check_dtype against the architecture-derived set'
+      refusal: [DtypeMismatch]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept'
+    - id: load_tensor_dtype
+      bound: 'F16 / F32 only, payload EXACTLY product(shape) x width bytes'
+      disposition: enforced
+      rung: 6
+      checked_by: 'aprender-core modernbert::load_tensor (ea940faec): defence in depth behind tensor_dtype for every caller of core''s loader'
+      owner_crate: aprender-core
+      test: 'cargo test -p aprender-core --lib models::modernbert::load::tests::refuses_foreign_dtype_and_truncated_payload'
+    - id: tensor_entry_size
+      bound: 'entry size == product(shape) x dtype width (checked arithmetic)'
+      disposition: enforced
+      rung: 4
+      checked_by: 'artifact::check_size in rung4_structure (c)'
+      refusal: [SizeMismatch]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::size_mismatch && cargo test -p aprender-decide --lib artifact::ladder::size_rule_exhaustive'
+    - id: tensor_data_range
+      bound: 'data_offset + entry offset + entry size inside the file (checked arithmetic)'
+      disposition: enforced
+      rung: 4
+      checked_by: 'artifact::rung4_structure (a) and (c): get_tensor_data None -> DataOutOfBounds (the reader does not check data ranges at parse)'
+      refusal: [DataOutOfBounds]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept'
+    - id: tensor_name_set
+      bound: 'the index name set == the architecture-derived set; the scan is O(expected x observed) with expected <= 6 x 1024 + 12 x 64 + 20 names (6 per encoder layer minus layer 0''s attn_norm, 12 per head layer, 3 embedding / final norms, 11 type_emb / scorer / act_head, temperature, 6 blobs; bounded by num_hidden_layers and head_layers) and observed <= max_tensor_count'
+      disposition: enforced
+      rung: 4
+      checked_by: 'artifact::check_name_set in rung4_structure (b), after both layer counts are bounded'
+      refusal: [MissingTensor, UnexpectedTensor]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::missing_tensor && cargo test -p aprender-decide --lib artifact::ladder::extra_tensor'
+    - id: non_finite
+      bound: 'every F16 / F32 weight finite'
+      disposition: enforced
+      rung: 5
+      checked_by: 'artifact::rung5_finite on the raw bit patterns (no widening, no allocation)'
+      refusal: [NonFiniteWeight]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::nan_weight'
+    - id: criteria_count
+      bound: max_criteria
+      disposition: enforced
+      rung: 4
+      checked_by: 'task::OrderedCriteria visit_map (MAX_CRITERIA), while the criteria object is read and before the entry is stored or compared; duplicates found with a set (V1-b)'
+      refusal: ['Task(TooManyCriteria']
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib task::tests::too_many_criteria_refused_while_reading && cargo test -p aprender-decide --lib task::tests::max_criteria_matches_contract'
+    - id: probe_row_tokens
+      bound: probe_max_row_tokens
+      disposition: enforced
+      rung: 7
+      checked_by: 'artifact::run_probes: every probe row is BUILT and checked before any forward pass (plan 08-26), so the load-time replay, the only forward a load runs, is bounded whatever max_len or the tokenizer say; pack refuses the same row as ProbeRowOverBudget'
+      refusal: [ProbeMismatch]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::probe_row_budget_checked_before_replay_forward && cargo test -p aprender-decide --lib artifact::ladder::probe_row_over_budget'
+    - id: tokenizer_truncation_padding
+      bound: 'none honoured: the tokenizer file''s truncation and padding blocks are disabled per call'
+      disposition: enforced
+      rung: 6
+      checked_by: 'laya::builder::Builder::from_bytes (with_truncation(None), with_padding(None)); the builder is the only thing that truncates, and it reports it (D-12, V9-a)'
+      refusal: none
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib laya::tests::tokenizer_truncation_and_padding_are_disabled && cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept'
+    - id: inspect_read
+      bound: max_artifact_bytes
+      disposition: enforced
+      rung: 'pack_laya inspect'
+      checked_by: 'examples/pack_laya.rs cmd_inspect: read_decide_apr_bytes_bounded(file, Some(metadata length)), then inspect_manifest (rungs 1-4) (IN-02)'
+      refusal: [ArtifactTooLarge]
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::declared_length_over_cap && cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept'
+    - id: agent_max_len
+      bound: 'max_len >= 1 (AgentConfig); no upper bound'
+      disposition: accepted
+      rung: 4
+      checked_by: 'laya::AgentConfig::from_json_bytes (max_len > 0)'
+      reason: 'max_len sizes no allocation and no forward before another bound applies. The builder uses it only in saturating arithmetic, take() and truncate(); every forward row is bounded first: the load-time replay by probe_max_row_tokens (probe_row_tokens, checked before the forward), served rows by decide-tool-boundary-v1 built_tokens_total (checked after one tokenization, before any forward). A larger max_len serves longer rows only inside those budgets'
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept'
+    - id: agent_head_max_len
+      bound: 'none'
+      disposition: accepted
+      rung: 4
+      checked_by: 'laya::builder::Builder::prefix (saturating isize arithmetic)'
+      reason: 'head_max_len only decides the option shrink and the head keep length: saturating arithmetic (to_isize), then take(); options are capped at 48 tokens each and K at max_criteria, so the prefix it shapes is bounded by those, not by head_max_len'
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept'
+    - id: encoder_row_length
+      bound: 'the caller''s row (core public API)'
+      disposition: accepted
+      rung: 7
+      checked_by: 'aprender-core ModernBertEncoder::forward / ModernBertLayer::forward size by the caller''s ids (layer_row_length refuses empty and mis-sized rows)'
+      reason: 'core''s public forward has no row cap of its own: the caller bounds the row. On the decide path every row is bounded before the forward: replay rows by probe_max_row_tokens (probe_row_tokens), served rows by decide-tool-boundary-v1 built_tokens_total, and every built row by the builder''s max_len truncate'
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept'
+    - id: layer_row_length
+      bound: 'l >= 1 and x.len() == l x d (checked multiply), before RopeTable::new'
+      disposition: enforced
+      rung: 7
+      checked_by: 'aprender-core ModernBertLayer::forward / forward_with_rope (WR-04 / V10-b, plan 08-20)'
+      owner_crate: aprender-core
+      test: 'cargo test -p aprender-core --lib models::modernbert::layer::tests::layer_forward_empty_row_is_refused && cargo test -p aprender-core --lib models::modernbert::layer::tests::layer_forward_huge_l_is_refused_before_rope && cargo test -p aprender-core --lib models::modernbert::layer::tests::layer_forward_with_rope_empty_row_is_refused'
+    - id: token_ids
+      bound: 'every id < vocab_size'
+      disposition: enforced
+      rung: 7
+      checked_by: 'aprender-core ModernBertEmbeddings::forward (OutOfVocab, never an index panic); at load the replay''s refusal is ProbeReplay at rung 7 (probe_replay_failure_is_rung_7)'
+      owner_crate: aprender-core
+      test: 'cargo test -p aprender-core --lib models::modernbert::tests::forward_refuses_out_of_vocab_and_empty && cargo test -p aprender-decide --lib artifact::ladder::probe_replay_failure_is_rung_7'
+    - id: config_blob_parse
+      bound: 'the blob''s bytes (<= max_artifact_bytes); nesting <= serde_json''s recursion limit (128)'
+      disposition: accepted
+      rung: 4
+      checked_by: 'serde_json::from_slice for the encoder / agent config, task, recipe and gate-report blobs'
+      reason: 'each JSON blob is parsed in time and memory linear in its bytes, which the file cap bounds; serde_json refuses nesting past its recursion limit as an error, not a stack overflow. No count inside them sizes further work except the rows above (layer counts, criteria, max_len / head_max_len)'
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept'
+    - id: tokenizer_pipeline
+      bound: 'the blob''s bytes (<= max_artifact_bytes); the pipeline itself unbounded by the ladder'
+      disposition: accepted
+      rung: 6
+      checked_by: 'none in the ladder (HF tokenizers executes the blob''s normalizer / pre-tokenizer / model / added-token config); verify binds the blob to the pinned base tokenizer'
+      reason: 'a tokenizer.json is configuration the tokenizers crate executes: a normalizer can declare an expanding replacement, and bounding that needs an allowlist of pipeline components the ladder does not have. Accepted because deployability binds it: verify requires the base dir''s tokenizer/tokenizer.json to hash to laya-finetune-gate-v1 base.tokenizer_json_sha256 and to inputs_sha256.tokenizer_json, which rung 4 binds to the tokenizer.blob digest, so a DEPLOYED artifact runs exactly Laya-en''s pinned tokenizer. An artifact that was never verified runs whatever tokenizer it carries'
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept'
+    - id: run_dir_files
+      bound: 'none on the inputs; the packed product <= max_artifact_bytes'
+      disposition: accepted
+      rung: pack
+      checked_by: 'pack::PackInputs::from_run_dir reads the operator''s run and data dirs; write_decide_apr refuses a packed artifact over the cap'
+      reason: 'back office: the run dir, data dir and base dir are the operator''s own files on the operator''s machine (pack_laya pack / verify), never bytes a server receives. What pack WRITES is capped, so no artifact it produces can exceed what the load ladder accepts'
+      owner_crate: aprender-decide
+      test: 'cargo test -p aprender-decide --lib artifact::ladder::artifact_bounds_table_is_swept'
 
 equations:
 

@@ -148,6 +148,14 @@ impl AgentConfig {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Rows [`Laya::forward_row`] was entered for on this thread. Test-only: a bound that must
+    /// bite BEFORE any forward pass (the load-time probe row budget) is proven by this
+    /// counter not moving, since the refusal itself is the same before or after a forward.
+    pub(crate) static FORWARD_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The most decision-head layers an agent config may declare. Laya ships 2; the bound keeps
 /// the per-layer tensor names derived from an untrusted count from sizing an allocation.
 pub const MAX_HEAD_LAYERS: usize = 64;
@@ -406,6 +414,8 @@ impl Laya {
         qtype: QType,
         mut tap: impl FnMut(&str, &[f32]),
     ) -> Result<Vec<f32>, DecideError> {
+        #[cfg(test)]
+        FORWARD_ROWS.with(|n| n.set(n.get() + 1));
         let l = ids.len();
         if let Some(&marker) = markers.iter().find(|&&m| m >= l) {
             return Err(LayaError::MarkerOutOfRange { marker, tokens: l }.into());

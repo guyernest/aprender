@@ -269,12 +269,6 @@ mod tests {
     /// result, so an unbounded quadratic scan is caught by the clock, not only by the result.
     #[test]
     fn too_many_criteria_refused_while_reading() {
-        let at = Task::from_slice(task_with(MAX_CRITERIA).as_bytes()).expect("max_criteria parses");
-        assert_eq!(at.criteria().len(), MAX_CRITERIA);
-        let e = Task::from_slice(task_with(MAX_CRITERIA + 1).as_bytes())
-            .expect_err("max_criteria + 1 refused");
-        assert_eq!(e, TaskError::TooManyCriteria { max: MAX_CRITERIA });
-
         let huge = task_with(100_000);
         let started = Instant::now();
         let result = Task::from_slice(huge.as_bytes());
@@ -287,6 +281,12 @@ mod tests {
             result.expect_err("100 000 criteria refused"),
             TaskError::TooManyCriteria { max: MAX_CRITERIA }
         );
+
+        let at = Task::from_slice(task_with(MAX_CRITERIA).as_bytes()).expect("max_criteria parses");
+        assert_eq!(at.criteria().len(), MAX_CRITERIA);
+        let e = Task::from_slice(task_with(MAX_CRITERIA + 1).as_bytes())
+            .expect_err("max_criteria + 1 refused");
+        assert_eq!(e, TaskError::TooManyCriteria { max: MAX_CRITERIA });
 
         // The count refusal wins over a duplicate that only appears past the bound: the entry
         // that would exceed the bound is refused before it is compared with anything.

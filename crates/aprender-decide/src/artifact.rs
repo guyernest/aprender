@@ -947,13 +947,36 @@ struct RustProbe {
 }
 
 /// Run the contract's synthetic probe task over [`PROBE_INPUTS`] with `laya`'s weights.
-/// `classify_failed` names the refusal a classify error becomes: at pack the model is built
-/// and probed as one step ([`ArtifactError::Rebuild`]); at load it is [`replay_failure`].
+///
+/// Every probe row is BUILT and checked against `cap` (`probe_max_row_tokens`) before any
+/// forward pass: the replay is the only forward a load runs, and its cost must be bounded by
+/// the contract whatever the artifact's `max_len` or tokenizer say. `over_budget(index,
+/// tokens, cap)` names that refusal; `classify_failed` names the refusal a builder or classify
+/// error becomes: at pack the model is built and probed as one step
+/// ([`ArtifactError::Rebuild`]); at load it is [`replay_failure`].
 fn run_probes(
     laya: &Laya,
+    cap: usize,
+    over_budget: fn(usize, usize, usize) -> ArtifactError,
     classify_failed: fn(DecideError) -> ArtifactError,
 ) -> Result<Vec<RustProbe>, ArtifactError> {
     let task = Task::from_slice(PROBE_TASK.as_bytes()).map_err(ArtifactError::Task)?;
+    let builder = laya.builder();
+    let prefix = builder
+        .prefix(
+            QType::Choice.name(),
+            task.instructions(),
+            &task.render_options(),
+        )
+        .map_err(|e| classify_failed(e.into()))?;
+    for (index, text) in PROBE_INPUTS.iter().enumerate() {
+        let row = builder
+            .finish(&prefix, text)
+            .map_err(|e| classify_failed(e.into()))?;
+        if row.tokens > cap {
+            return Err(over_budget(index, row.tokens, cap));
+        }
+    }
     let texts: Vec<String> = PROBE_INPUTS.iter().map(|s| (*s).to_string()).collect();
     let decisions = laya
         .classify_for_task(&task, &texts)
@@ -980,23 +1003,10 @@ fn replay_failure(e: DecideError) -> ArtifactError {
     }
 }
 
-/// Pack: the first Rust probe row over `cap` tokens is refused as
-/// [`ArtifactError::ProbeRowOverBudget`], before any comparison.
-fn check_probe_budget(rust: &[RustProbe], cap: usize) -> Result<(), ArtifactError> {
-    match rust.iter().position(|r| r.tokens > cap) {
-        Some(index) => Err(ArtifactError::ProbeRowOverBudget {
-            index,
-            tokens: rust[index].tokens,
-            cap,
-        }),
-        None => Ok(()),
-    }
-}
-
 /// Compare Rust probes with stored expectations; `err(index, component)` builds the
 /// refusal (pack: `ProbeDisagreesWithOracle`; load: `ProbeMismatch`). The row budget
-/// is checked first, before any comparison (at pack [`check_probe_budget`] has already
-/// refused an over-budget row with its own error).
+/// is checked first, before any comparison ([`run_probes`] has already refused an
+/// over-budget row before the forward; this re-check is on the scored rows).
 fn compare_probes(
     rust: &[RustProbe],
     stored: &[ProbeRecord],
@@ -1135,8 +1145,12 @@ fn check_pack_probes(
         task,
     )
     .map_err(|e| ArtifactError::Rebuild(e.into()))?;
-    let rust = run_probes(&laya, ArtifactError::Rebuild)?;
-    check_probe_budget(&rust, limits.probe_max_row_tokens)?;
+    let rust = run_probes(
+        &laya,
+        limits.probe_max_row_tokens,
+        |index, tokens, cap| ArtifactError::ProbeRowOverBudget { index, tokens, cap },
+        ArtifactError::Rebuild,
+    )?;
     compare_probes(
         &rust,
         &inputs.probes,
@@ -1740,8 +1754,17 @@ fn load_rungs(
         blobs.task,
     )
     .map_err(|e| ArtifactError::Rebuild(e.into()))?;
-    // Rung 7: replay against the stored PYTHON values; a classify failure here is rung 7's.
-    let rust = run_probes(&laya, replay_failure)?;
+    // Rung 7: replay against the stored PYTHON values. Rows over probe_max_row_tokens are
+    // refused before any forward; a classify failure here is rung 7's.
+    let rust = run_probes(
+        &laya,
+        limits.probe_max_row_tokens,
+        |index, _, _| ArtifactError::ProbeMismatch {
+            index,
+            component: "tokens",
+        },
+        replay_failure,
+    )?;
     compare_probes(
         &rust,
         &manifest.probes,

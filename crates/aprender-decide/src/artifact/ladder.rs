@@ -1406,6 +1406,91 @@ fn swap_blob_sized(bytes: &[u8], name: &str, new: &[u8]) -> Vec<u8> {
     })
 }
 
+/// Blob `name` of `bytes` as JSON.
+fn blob_json(bytes: &[u8], name: &str) -> Value {
+    let r = AprV2ReaderRef::from_bytes(bytes).expect("open the artifact");
+    serde_json::from_slice(r.get_tensor_data(name).expect("blob")).expect("blob JSON")
+}
+
+/// A COHERENT forgery replacing the tokenizer blob with `doc`: the blob's manifest digest and
+/// both `inputs_sha256.tokenizer_json` pins (manifest and gate report) are re-pinned, so the
+/// only thing the ladder can object to is what the tokenizer DOES.
+fn with_tokenizer(bytes: &[u8], doc: &Value) -> Vec<u8> {
+    let new = serde_json::to_vec(doc).expect("tokenizer re-serializes");
+    let sha = Value::from(crate::pack::sha256_hex(&new));
+    let swapped = swap_blob_sized(bytes, super::TOKENIZER_BLOB, &new);
+    let pin = edits(&[("/inputs_sha256/tokenizer_json", sha)]);
+    forge(&swapped, &[], &pin, &pin)
+}
+
+/// A COHERENT forgery of one agent-config field: the blob swapped and re-pinned, and
+/// `manifest.agent.<field>` set to the same value.
+fn with_agent_field(bytes: &[u8], field: &str, value: Value) -> Vec<u8> {
+    let mut agent = blob_json(bytes, super::AGENT_CONFIG_BLOB);
+    agent[field] = value.clone();
+    let new = serde_json::to_vec(&agent).expect("agent re-serializes");
+    let swapped = swap_blob_sized(bytes, super::AGENT_CONFIG_BLOB, &new);
+    forge(
+        &swapped,
+        &[],
+        &[],
+        &edits(&[(&format!("/agent/{field}"), value)]),
+    )
+}
+
+/// Blob `name` rewritten by `edit` and re-pinned (its digest only): enough for a refusal the
+/// blob's own parse gives, which rung 4 (b) / (d) reach before the manifest bindings (e).
+fn with_blob_json(bytes: &[u8], name: &str, edit: impl FnOnce(&mut Value)) -> Vec<u8> {
+    let mut doc = blob_json(bytes, name);
+    edit(&mut doc);
+    swap_blob_sized(
+        bytes,
+        name,
+        &serde_json::to_vec(&doc).expect("blob re-serializes"),
+    )
+}
+
+/// The packed artifact with its tokenizer's merges removed (coherently re-pinned): every
+/// character is a token, so probe input 0's row (43 state tokens) is cut at the tiny
+/// max_len 64 — over probe_max_row_tokens — while the served task still keeps its markers.
+fn over_budget_probe_artifact() -> Vec<u8> {
+    let b = packed();
+    let mut doc = blob_json(&b, super::TOKENIZER_BLOB);
+    doc["model"]["merges"] = Value::Array(Vec::new());
+    with_tokenizer(&b, &doc)
+}
+
+/// The load-time replay checks every probe row against probe_max_row_tokens BEFORE any
+/// forward pass: an artifact whose tokenizer builds an over-budget probe row is refused at
+/// rung 7 naming the row, and `forward_row` was never entered. (The refusal alone is the same
+/// before or after a forward, so the forward counter is the observation.)
+#[test]
+fn probe_row_budget_checked_before_replay_forward() {
+    let forged = over_budget_probe_artifact();
+    crate::laya::FORWARD_ROWS.with(|n| n.set(0));
+    let e = refuse(&forged);
+    let forwards = crate::laya::FORWARD_ROWS.with(std::cell::Cell::get);
+    assert_eq!(
+        e,
+        ArtifactError::ProbeMismatch {
+            index: 0,
+            component: "tokens",
+        }
+    );
+    assert_eq!(e.rung(), "7 probe_replay");
+    assert_eq!(
+        forwards, 0,
+        "the over-budget probe row reached {forwards} forward pass(es) before the budget refused it"
+    );
+    // Control: the same counter moves on a load that replays (so it observes the forward).
+    crate::laya::FORWARD_ROWS.with(|n| n.set(0));
+    load_verified(&packed()).expect("control loads");
+    assert!(
+        crate::laya::FORWARD_ROWS.with(std::cell::Cell::get) >= super::PROBE_INPUTS.len(),
+        "the control's replay was counted"
+    );
+}
+
 /// V9-b: a classify failure during LOAD-time probe replay is a rung-7 refusal, not a
 /// rung-6 one. The forged tokenizer blob maps one token of probe input 0 to an id past the
 /// encoder's vocabulary: rung 6 only tokenizes the served task's (empty-state) prefix, so it
@@ -1448,11 +1533,7 @@ fn probe_replay_failure_is_rung_7() {
         if let Some(id) = id {
             d["model"]["vocab"][victim.as_str()] = Value::from(id);
         }
-        let bytes = serde_json::to_vec(&d).expect("tokenizer re-serializes");
-        let sha = Value::from(crate::pack::sha256_hex(&bytes));
-        let swapped = swap_blob_sized(&b, super::TOKENIZER_BLOB, &bytes);
-        let pin = edits(&[("/inputs_sha256/tokenizer_json", sha)]);
-        forge(&swapped, &[], &pin, &pin)
+        with_tokenizer(&b, &d)
     };
     load_verified(&forged_tokenizer(None))
         .expect("control: the coherent re-serialized tokenizer loads");
@@ -1462,6 +1543,502 @@ fn probe_replay_failure_is_rung_7() {
         "{victim} -> {far}: {e}"
     );
     assert_eq!(e.rung(), "7 probe_replay");
+}
+
+// ---------------------------------------------------------------------------
+// CLASS B, artifact half: decide-apr-v1 untrusted_input_bounds (plan 08-26)
+// ---------------------------------------------------------------------------
+
+/// A row value as text (a YAML string or number).
+fn row_text(row: &serde_yaml::Value, key: &str) -> String {
+    match &row[key] {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Every `.rs` file under `dir`, concatenated.
+fn rust_source(dir: &std::path::Path, out: &mut String) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            rust_source(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+        }
+    }
+}
+
+/// Every `&&`-joined `cargo test -p <crate> ... <path>::<name>` command names a `fn <name>(`
+/// in that crate's `src/` or `tests/`; the first one that does not is returned.
+fn missing_named_test(test: &str) -> Option<String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let commands: Vec<&str> = test.split("&&").map(str::trim).collect();
+    if commands.iter().any(|c| c.is_empty()) {
+        return Some(format!("an empty command in {test:?}"));
+    }
+    commands.into_iter().find_map(|cmd| {
+        let words: Vec<&str> = cmd.split_whitespace().collect();
+        let krate = words
+            .iter()
+            .position(|w| *w == "-p")
+            .and_then(|i| words.get(i + 1))?;
+        let name = words.last()?.rsplit("::").next()?;
+        let mut source = String::new();
+        for dir in ["src", "tests"] {
+            rust_source(&root.join("crates").join(krate).join(dir), &mut source);
+        }
+        (!source.contains(&format!("fn {name}("))).then(|| format!("{krate}: no fn {name}"))
+    })
+}
+
+/// The hostile case for an ENFORCED row owned by this crate: every refusal it provoked (an
+/// empty list for a row whose bound overrides the value instead of refusing it, after the case
+/// asserted the override). `None` for an id this test has no case for.
+#[allow(clippy::too_many_lines)] // one arm per contract row; the dispatch IS the table
+fn hostile_case(id: &str) -> Option<Vec<ArtifactError>> {
+    let b = packed();
+    let errors = match id {
+        "file_length" => {
+            let n = b.len() as u64;
+            vec![
+                read_decide_apr_bytes_bounded(Untouchable, Some(MAX_ARTIFACT_BYTES + 1))
+                    .expect_err("declared length over the cap"),
+                load_verified_within(&b, &ArtifactLimits::tiny(n - 1, PROBE_MAX_ROW_TOKENS))
+                    .expect_err("in-memory bytes over the cap"),
+            ]
+        }
+        "header_version" => {
+            let mut f = b.clone();
+            forge_header(&mut f, |h| h.version = (3, 0));
+            vec![refuse(&f)]
+        }
+        "metadata_size" => {
+            let mut f = b.clone();
+            forge_header(&mut f, |h| h.metadata_size = MAX_METADATA_BYTES + 1);
+            vec![refuse(&f)]
+        }
+        "tensor_count" => {
+            let mut f = b.clone();
+            forge_header(&mut f, |h| h.tensor_count = MAX_TENSOR_COUNT + 1);
+            vec![refuse(&f)]
+        }
+        "index_extent" => {
+            let h = header(&b);
+            let extent = h.data_offset - h.tensor_index_offset;
+            let declared = u32::try_from(extent / MIN_INDEX_ENTRY_BYTES + 1).expect("fits u32");
+            let (mut small, mut past) = (b.clone(), b.clone());
+            forge_header(&mut small, |h| h.tensor_count = declared);
+            let len = b.len() as u64;
+            forge_header(&mut past, |h| h.data_offset = len + 1);
+            vec![refuse(&small), refuse(&past)]
+        }
+        "duplicate_names_ladder" => {
+            let r = AprV2ReaderRef::from_bytes(&b).expect("open the packed artifact");
+            let mut names: Vec<&str> = r.tensor_index().iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(
+                super::first_repeated_tensor_name(names.iter().copied()),
+                None,
+                "the packed index is unique"
+            );
+            names.push(names[0]);
+            let name = super::first_repeated_tensor_name(names.iter().copied())
+                .expect("the appended repeat is found");
+            // reachable_via_load: false. A real duplicate is refused at rung 3 by the reader;
+            // if that ever stops, this row must load its hostile artifact instead.
+            let first = names[0].to_string();
+            let dup = repack(&b, |_, t| {
+                let copy = t.iter().find(|t| t.0 == first).cloned().expect("tensor");
+                t.push(copy);
+            });
+            assert_eq!(
+                refuse(&dup).rung(),
+                "3 manifest",
+                "duplicate_names_reader no longer refuses first: set reachable_via_load true and load the artifact here"
+            );
+            vec![ArtifactError::DuplicateTensor {
+                name: name.to_string(),
+            }]
+        }
+        "num_hidden_layers" => {
+            let over = aprender::models::modernbert::MAX_NUM_HIDDEN_LAYERS + 1;
+            let f = with_blob_json(&b, super::ENCODER_CONFIG_BLOB, |v| {
+                v.as_object_mut().expect("config").remove("layer_types");
+                v["num_hidden_layers"] = Value::from(over);
+            });
+            let e = refuse(&f);
+            assert!(e.to_string().contains(&(over - 1).to_string()), "{e}");
+            vec![e]
+        }
+        "head_layers" => {
+            let over = crate::laya::MAX_HEAD_LAYERS + 1;
+            let f = with_blob_json(&b, super::AGENT_CONFIG_BLOB, |v| {
+                v["head_layers"] = Value::from(over);
+            });
+            let e = refuse(&f);
+            assert!(e.to_string().contains(&(over - 1).to_string()), "{e}");
+            vec![e]
+        }
+        "activation_and_rope" => {
+            let relu = with_blob_json(&b, super::ENCODER_CONFIG_BLOB, |v| {
+                v["hidden_activation"] = Value::from("relu");
+            });
+            let scaled = with_blob_json(&b, super::ENCODER_CONFIG_BLOB, |v| {
+                v["rope_scaling"] = serde_json::from_str(r#"{"type": "linear", "factor": 2.0}"#)
+                    .expect("rope_scaling");
+            });
+            vec![refuse(&relu), refuse(&scaled)]
+        }
+        "tensor_dtype" => {
+            let f = repack(&b, |_, t| {
+                let e = t
+                    .iter_mut()
+                    .find(|t| t.0 == "scorer.1.bias")
+                    .expect("scorer.1.bias");
+                e.1 = TensorDType::F32;
+                e.3 = vec![0; e.3.len() * 2];
+            });
+            vec![refuse(&f)]
+        }
+        "tensor_entry_size" => {
+            let f = repack(&b, |_, t| {
+                let e = t
+                    .iter_mut()
+                    .find(|t| t.0 == "type_emb.weight")
+                    .expect("type_emb");
+                e.2 = vec![3, 31];
+            });
+            vec![refuse(&f)]
+        }
+        "tensor_data_range" => {
+            // Point the tokenizer blob's index entry past the end of the file (the header CRC
+            // covers only the header, so the index can be edited in place).
+            let mut f = b.clone();
+            let h = header(&f);
+            let (lo, hi) = (
+                usize::try_from(h.tensor_index_offset).expect("offset"),
+                usize::try_from(h.data_offset).expect("offset"),
+            );
+            let name = super::TOKENIZER_BLOB.as_bytes();
+            let mut pattern = u16::try_from(name.len())
+                .expect("short name")
+                .to_le_bytes()
+                .to_vec();
+            pattern.extend_from_slice(name);
+            let at = lo
+                + f[lo..hi]
+                    .windows(pattern.len())
+                    .position(|w| w == pattern)
+                    .expect("the tokenizer blob's index entry");
+            let ndim_at = at + pattern.len() + 1;
+            let offset_at = ndim_at + 1 + 8 * usize::from(f[ndim_at]);
+            let len = f.len() as u64;
+            f[offset_at..offset_at + 8].copy_from_slice(&len.to_le_bytes());
+            vec![refuse(&f)]
+        }
+        "tensor_name_set" => vec![
+            refuse(&repack(&b, |_, t| t.retain(|t| t.0 != "scorer.3.bias"))),
+            refuse(&repack(&b, |_, t| {
+                t.push(("rogue.weight".into(), TensorDType::F16, vec![1], vec![0, 0]));
+            })),
+        ],
+        "non_finite" => vec![refuse(&edit_tensor(&b, "scorer.1.weight", |d| {
+            d[..2].copy_from_slice(&0x7E00u16.to_le_bytes());
+        }))],
+        "criteria_count" => {
+            let n = crate::task::MAX_CRITERIA + 1;
+            let criteria: Vec<String> = (0..n).map(|i| format!(r#""c{i}":null"#)).collect();
+            let task = format!(
+                r#"{{"type":"choice","instructions":"q","criteria":{{{}}}}}"#,
+                criteria.join(",")
+            );
+            vec![refuse(&swap_blob_sized(
+                &b,
+                super::TASK_BLOB,
+                task.as_bytes(),
+            ))]
+        }
+        "probe_row_tokens" => {
+            let forged = over_budget_probe_artifact();
+            crate::laya::FORWARD_ROWS.with(|n| n.set(0));
+            let e = refuse(&forged);
+            assert_eq!(
+                crate::laya::FORWARD_ROWS.with(std::cell::Cell::get),
+                0,
+                "refused before any forward"
+            );
+            vec![e]
+        }
+        "tokenizer_truncation_padding" => {
+            let mut doc = blob_json(&b, super::TOKENIZER_BLOB);
+            doc["truncation"] = serde_json::from_str(
+                r#"{"direction": "Right", "max_length": 4, "strategy": "LongestFirst", "stride": 0}"#,
+            )
+            .expect("truncation block");
+            doc["padding"] = serde_json::from_str(
+                r#"{"strategy": {"Fixed": 40}, "direction": "Right", "pad_to_multiple_of": null,
+                    "pad_id": 0, "pad_type_id": 0, "pad_token": "[PAD]"}"#,
+            )
+            .expect("padding block");
+            let clean = load_verified(&b).expect("the packed artifact loads");
+            let forged = load_verified(&with_tokenizer(&b, &doc))
+                .expect("a tokenizer declaring truncation / padding loads, its blocks disabled");
+            let texts = vec!["a short text".to_string(), "word ".repeat(200)];
+            let want = clean.classify(&texts).expect("clean classify");
+            let got = forged.classify(&texts).expect("forged classify");
+            for (w, g) in want.iter().zip(&got) {
+                assert_eq!(
+                    (w.tokens, w.truncated, &w.probabilities),
+                    (g.tokens, g.truncated, &g.probabilities),
+                    "the tokenizer file's blocks changed a served decision"
+                );
+            }
+            Vec::new()
+        }
+        "inspect_read" => {
+            let src = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/pack_laya.rs"),
+            )
+            .expect("read pack_laya.rs");
+            let body = src
+                .split("fn cmd_inspect")
+                .nth(1)
+                .and_then(|rest| rest.split("\nfn ").next())
+                .expect("cmd_inspect");
+            assert!(
+                body.contains("read_decide_apr_bytes_bounded(")
+                    && body.contains("inspect_manifest("),
+                "inspect reads through the bounded rung-1 reader, then rungs 1-4"
+            );
+            assert!(
+                !src.contains("fs::read("),
+                "no unbounded whole-file read in pack_laya"
+            );
+            vec![
+                read_decide_apr_bytes_bounded(Untouchable, Some(MAX_ARTIFACT_BYTES + 1))
+                    .expect_err("inspect's reader refuses an over-cap file unread"),
+            ]
+        }
+        _ => return None,
+    };
+    Some(errors)
+}
+
+/// The documented behaviour of an ACCEPTED row owned by this crate, asserted; `false` for an
+/// id this test has no case for.
+fn accepted_case(id: &str) -> bool {
+    let b = packed();
+    match id {
+        "agent_max_len" => {
+            // A max_len far past Laya's loads: the replay rows are bounded by the probe budget,
+            // and a served row is as long as its text (the request half bounds it).
+            let d = load_verified(&with_agent_field(&b, "max_len", Value::from(1u64 << 40)))
+                .expect("a coherent artifact with max_len 2^40 loads");
+            let long = d.classify(&["word ".repeat(200)]).expect("classify");
+            assert!(
+                long[0].tokens > 64 && !long[0].truncated,
+                "the row is no longer cut at Laya's 64"
+            );
+        }
+        "agent_head_max_len" => {
+            load_verified(&with_agent_field(
+                &b,
+                "head_max_len",
+                Value::from(1u64 << 40),
+            ))
+            .expect("a coherent artifact with head_max_len 2^40 loads");
+        }
+        "encoder_row_length" => {
+            let laya = crate::test_support::load_laya(
+                &crate::test_support::fixture_apr(),
+                crate::test_support::fixture_task(),
+            )
+            .expect("the fixture loads");
+            let builder = laya.builder();
+            let row = builder
+                .build(
+                    &"word ".repeat(200),
+                    "choice",
+                    "q",
+                    &["a".into(), "b".into()],
+                )
+                .expect("row");
+            assert_eq!(
+                row.tokens,
+                builder.max_len(),
+                "every built row is cut at max_len"
+            );
+            assert!(row.truncated);
+        }
+        "config_blob_parse" => {
+            // A 200-deep value (past serde_json's recursion limit of 128) in the encoder config:
+            // under a key the config IGNORES it is skipped iteratively (no recursion, so no
+            // stack to overflow) and the artifact loads; inside a field parsed as a JSON value
+            // (rope_scaling) it is a typed ConfigBlob refusal naming the recursion limit.
+            let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+            let nest = |key: &str| -> Vec<u8> {
+                let f = with_blob_json(&b, super::ENCODER_CONFIG_BLOB, |v| {
+                    v[key] = Value::from("SEED");
+                });
+                let text = String::from_utf8(
+                    blob_json(&f, super::ENCODER_CONFIG_BLOB)
+                        .to_string()
+                        .into_bytes(),
+                )
+                .expect("utf8")
+                .replace(r#""SEED""#, &deep);
+                swap_blob_sized(&b, super::ENCODER_CONFIG_BLOB, text.as_bytes())
+            };
+            load_verified(&nest("x_ignored")).expect(
+                "an ignored deep value is skipped without recursion and the artifact loads",
+            );
+            let e = refuse(&nest("rope_scaling"));
+            assert!(
+                matches!(&e, ArtifactError::ConfigBlob { reason, .. } if reason.contains("recursion limit")),
+                "nesting past serde_json's limit is an error, not a stack overflow: {e}"
+            );
+        }
+        "tokenizer_pipeline" => {
+            let gate = crate::test_support::contract_yaml("laya-finetune-gate-v1.yaml");
+            let pin = gate["base"]["tokenizer_json_sha256"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                pin.len() == 64 && pin.bytes().all(|c| c.is_ascii_hexdigit()),
+                "the gate contract pins the base tokenizer"
+            );
+            let table = bindings_table();
+            assert!(
+                table["/inputs_sha256/tokenizer_json"]
+                    .sources
+                    .iter()
+                    .any(|s| s == "sha256:tokenizer.blob"),
+                "rung 4 binds inputs_sha256.tokenizer_json to the tokenizer blob digest"
+            );
+        }
+        "run_dir_files" => {
+            let e = write_decide_apr_within(
+                &inputs(),
+                &ArtifactLimits::tiny(1000, PROBE_MAX_ROW_TOKENS),
+            )
+            .expect_err("a packed product over the cap");
+            assert!(
+                matches!(e, ArtifactError::ArtifactTooLarge { what: "packed", .. }),
+                "{e}"
+            );
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// decide-apr-v1 `untrusted_input_bounds` (CLASS B, artifact half): every row owned by this
+/// crate is dispatched by id — an enforced row to a hostile case built from the packed tiny
+/// artifact, whose every refusal must be a variant the row names at the rung it names; an
+/// accepted row to its documented behaviour. Rows owned by another crate must name a test
+/// that exists there. An unknown id, an owned row without a case, a duplicate id or a missing
+/// field fails.
+#[test]
+fn artifact_bounds_table_is_swept() {
+    let c = crate::test_support::contract_yaml("decide-apr-v1.yaml");
+    let table = &c["untrusted_input_bounds"];
+    assert!(
+        table["see_also"]
+            .as_str()
+            .is_some_and(|s| s.contains("decide-tool-boundary-v1 untrusted_input_bounds")),
+        "see_also points at the request half"
+    );
+    let rows = table["rows"]
+        .as_sequence()
+        .expect("untrusted_input_bounds.rows");
+    let (mut swept, mut accepted, mut external) = (0usize, 0usize, 0usize);
+    let mut ids = BTreeSet::new();
+    let mut failures = Vec::new();
+    for row in rows {
+        let id = row_text(row, "id");
+        assert!(ids.insert(id.clone()), "duplicate row {id}");
+        for key in [
+            "bound",
+            "checked_by",
+            "owner_crate",
+            "test",
+            "disposition",
+            "rung",
+        ] {
+            if row_text(row, key).is_empty() {
+                failures.push(format!("{id}: no {key}"));
+            }
+        }
+        if let Some(missing) = missing_named_test(&row_text(row, "test")) {
+            failures.push(format!("{id}: {missing}"));
+        }
+        if row_text(row, "owner_crate") != "aprender-decide" {
+            external += 1;
+            continue;
+        }
+        match row_text(row, "disposition").as_str() {
+            "accepted" => {
+                if row_text(row, "reason").is_empty() {
+                    failures.push(format!("{id}: accepted without a reason"));
+                }
+                if !accepted_case(&id) {
+                    failures.push(format!(
+                        "{id}: accepted row without a documented-behaviour case"
+                    ));
+                }
+                accepted += 1;
+            }
+            "enforced" => {
+                let Some(errors) = hostile_case(&id) else {
+                    failures.push(format!("{id}: owned row without a hostile case"));
+                    continue;
+                };
+                let refusals: Vec<String> = match &row["refusal"] {
+                    serde_yaml::Value::Sequence(v) => v
+                        .iter()
+                        .filter_map(|r| r.as_str().map(str::to_string))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if row_text(row, "refusal") == "none" {
+                    if !errors.is_empty() {
+                        failures.push(format!("{id}: an overriding bound refused: {errors:?}"));
+                    }
+                } else if errors.is_empty() || refusals.is_empty() {
+                    failures.push(format!("{id}: no refusal provoked or named"));
+                }
+                let rung = row["rung"].as_u64();
+                for e in &errors {
+                    let debug = format!("{e:?}");
+                    if !refusals.iter().any(|r| debug.starts_with(r.as_str())) {
+                        failures.push(format!(
+                            "{id}: refused as {debug}, the row names {refusals:?}"
+                        ));
+                    }
+                    if let Some(rung) = rung {
+                        if rung_number(e) != rung {
+                            failures.push(format!(
+                                "{id}: refused at rung {} ({e}), the row names {rung}",
+                                e.rung()
+                            ));
+                        }
+                    }
+                }
+                swept += 1;
+            }
+            other => failures.push(format!("{id}: unknown disposition {other}")),
+        }
+    }
+    println!("ARTIFACT BOUNDS swept={swept} accepted={accepted} external={external}");
+    assert!(
+        failures.is_empty(),
+        "untrusted_input_bounds:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------
