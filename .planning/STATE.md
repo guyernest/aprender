@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "08-18 COMPLETE: live record FINAL, outcome deployed-passed (4 laya-deploy-verify samples < 30 s, max 29350); external cold call 31.05 s HTTP 200 (CloudWatch REPORT 28008 ms, load 26202) recorded as risk evidence in D-ITEM-08-17-E, not a relabel; function RUNNING by user decision (D-ITEM-08-18-A); README Deployed section. Next: 08-12 close-out (accepted_region_cold implemented, PHASE8_LIVE_EXEMPT empty)"
-last_updated: "2026-09-27T23:17:53.392Z"
+stopped_at: "08-12 COMPLETE (18/18): D-16 row, 44 bindings implemented, strict audit; CI gains -p aprender-decide --test ui and -p aprender-mcp-decide --test e2e_stdio (user option A narrowed); just laya-verify-suite local-only (OK, 903 s); contract cycle laya-parity-v1 -> decide-apr-v1 fixed (7d5c65f4b). Next: phase 8 verification"
+last_updated: "2026-09-28T00:45:58.039Z"
 last_activity: 2026-09-27
 last_activity_desc: "08-18 COMPLETE: live record FINAL, outcome deployed-passed (4 laya-deploy-verify samples < 30 s, max 29350); external cold call 31.05 s HTTP 200 (CloudWatch REPORT 28008 ms, load 26202) recorded as risk evidence in D-ITEM-08-17-E, not a relabel; function RUNNING by user decision (D-ITEM-08-18-A); README Deployed section. Next: 08-12 close-out (accepted_region_cold implemented, PHASE8_LIVE_EXEMPT empty)"
-state_head: de7d649d54ca553928d4fdfe9444d994d722c3a8
+state_head: 7d5c65f4b39c0b60eec4d0e1323286fb2c26cfe9
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 110
-  completed_plans: 109
+  completed_plans: 110
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 17 of 18 complete (08-01..08-11 and 08-13..08-18; next: 08-12 close-out in Wave 16)
-Status: 08-18 COMPLETE: live record FINAL, outcome deployed-passed (4 laya-deploy-verify samples < 30 s, max 29350); external cold call 31.05 s HTTP 200 (CloudWatch REPORT 28008 ms, load 26202) recorded as risk evidence in D-ITEM-08-17-E, not a relabel; function RUNNING by user decision (D-ITEM-08-18-A); README Deployed section. Next: 08-12 close-out (accepted_region_cold implemented, PHASE8_LIVE_EXEMPT empty). Earlier: 08-17 deployed-passed on the option-1 resume (S3 read in the stack, 52a12d777; edge 503 settle retry 743eb02ed)
+Plan: 18 of 18 complete (08-01..08-18; 08-12 close-out done in Wave 16) — ready for phase verification
+Status: 08-12 COMPLETE: D-16 row in CLAUDE.md, 44 Phase 8 bindings implemented (accepted_region_cold from the deployed-passed record), strict contract-audit-phase8; CI gains -p aprender-decide --test ui and -p aprender-mcp-decide --test e2e_stdio (user: option A narrowed); Python-parity suite local-only via just laya-verify-suite (OK, 903 s); contract cycle laya-parity-v1 -> decide-apr-v1 fixed (7d5c65f4b). Open: D-ITEM-08-12-B/-C/-D (15 ENOSPC FULL failures uncontrolled; 6.0 GiB leaked TempDirs in $TMPDIR for the user)
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -230,6 +230,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P15 | 36min | 3 tasks | 18 files |
 | Phase 08 P16 | 43min | 2 tasks | 3 files |
 | Phase 08 P18 | 6 min | 2 tasks | 3 files |
+| Phase 08 P12 | 86min | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -547,8 +548,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-27T23:17:44.597Z
-Stopped at: 08-18 COMPLETE: live record FINAL, outcome deployed-passed (4 laya-deploy-verify samples < 30 s, max 29350); external cold call 31.05 s HTTP 200 (CloudWatch REPORT 28008 ms, load 26202) recorded as risk evidence in D-ITEM-08-17-E, not a relabel; function RUNNING by user decision (D-ITEM-08-18-A); README Deployed section. Next: 08-12 close-out (accepted_region_cold implemented, PHASE8_LIVE_EXEMPT empty)
+Last session: 2026-09-28T00:45:57.839Z
+Stopped at: 08-12 COMPLETE (18/18): D-16 row, 44 bindings implemented, strict audit; CI gains -p aprender-decide --test ui and -p aprender-mcp-decide --test e2e_stdio (user option A narrowed); just laya-verify-suite local-only (OK, 903 s); contract cycle laya-parity-v1 -> decide-apr-v1 fixed (7d5c65f4b). Next: phase 8 verification
 Resume file: None
 
 ## Accumulated Context

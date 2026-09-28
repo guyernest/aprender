@@ -664,6 +664,25 @@ stays out of CI.
   - a make-free invocation of the same audit is wired in, for example a script the Makefile target
     and CI both call.
 
+### D-ITEM-08-12-D: 15 FULL-run failures could not be controlled on the base, because the disk was full
+
+- status: open
+- **What failed:** in the no-fail-fast FULL run at HEAD, 15 `aprender-qa-runner` tests failed with
+  `Os { code: 28, kind: StorageFull, message: "No space left on device" }`:
+  - 14 in `dimensional_check::dimensional_check_tests_tokenizer_dtype`;
+  - 1 in `layout_contract::tests`.
+  Each writes a TempDir holding a `model.safetensors` of up to about 1 GiB.
+- **Why they were not controlled:** the base-commit control could not run them safely with about
+  4 GiB free. A first full-workspace control was killed by its disk watchdog at 1 GiB free.
+- **Attribution by evidence, not by control:** Phase 8 changed no file under
+  `crates/aprender-qa-runner` (`git diff --name-only 59d9ed07f..HEAD` is empty for it), and the
+  failure is the host's free space.
+- **Host debris, left for the user:** the killed control leaked 22 `.tmp*` TempDirs in `$TMPDIR`,
+  6.0 GiB, all born at or after 17:27:31 on 2026-09-27. Removing them was refused by the
+  permission classifier, so they are still there.
+- **Closes when:** the same `-E` selection passes (or fails identically on 59d9ed07f) on a host
+  with at least 15 GiB free.
+
 ## Phase 8 close-out — open work
 
 Written by plan 08-12 (D-18) from the two outcome records: `08-GATE-RUN-EVIDENCE.json` (`outcome:
@@ -702,6 +721,13 @@ closes it. Nothing below is implied done.
     locally through `just laya-verify-suite` (**D-ITEM-08-12-B**).
   - Still tier3-only: `make contract-audit-phase8`, pending confirmation that the CI image has `make`
     or a make-free invocation (**D-ITEM-08-12-C**).
+- **D-ITEM-08-12-D:** 15 `aprender-qa-runner` FULL failures (ENOSPC) were not controlled on the
+  base, because the disk was full. There are also 6.0 GiB of leaked TempDirs for the user to remove.
+  Closes on a re-run with at least 15 GiB free.
+- **Fixed in 08-12, not open:** the contract dependency cycle
+  `decide-apr-v1 -> laya-finetune-gate-v1 -> laya-parity-v1 -> decide-apr-v1`, present since 08-01
+  (commit 7d5c65f4b). It made three `aprender-contracts-cli` tests fail at every Phase 8 commit, and
+  so `workspace-test` would have been red on push.
 - **D-ITEM-08-12-A (new, follow-up):** `crates/aprender-decide/src/verify.rs` is 2454 lines, one
   module holding every gate, re-score, seed and shift check. Not split in 08-12 (the plan does not
   require it, and a split would move every binding row this plan just resolved). Owner: a refactor
