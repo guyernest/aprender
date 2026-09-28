@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-19-PLAN.md (manifest-to-blob bindings at rung 4, decide-apr-v1 2.0.0)
-last_updated: "2026-09-28T15:59:16.393Z"
+stopped_at: "Completed 08-20-PLAN.md (class-B shared-reader bounds: duplicate names, in-memory index reservation, ModernBertLayer guards)"
+last_updated: "2026-09-28T16:17:43.184Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: ae7de80b4513a1dcf58cb23793867abf7cff3ce4
+state_head: 3cd90fa385b4719070ef02aac64159c91780563c
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 111
+  completed_plans: 112
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 19 of 32 complete (08-01..08-19) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-19 COMPLETE (class A load side: 53 manifest leaves bound at rung 4, decide-apr-v1 2.0.0); next 08-20
+Plan: 20 of 32 complete (08-01..08-20) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-20 COMPLETE (class B shared readers: APR v2 index strictly increasing, index reservation in in-memory units, ModernBertLayer empty/shape guards; 6 mutants RED; real-weights parity 3.841e-6); next 08-21
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -232,6 +232,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P18 | 6 min | 2 tasks | 3 files |
 | Phase 08 P12 | 86min | 3 tasks | 14 files |
 | Phase 08 P19 | 24 min | 3 tasks | 4 files |
+| Phase 08 P20 | 15min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -437,6 +438,7 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-19: decide-apr-v1 bumped 1.0.0 -> 2.0.0 (pv diff: major, blob_integrity formula changed), not the plan's 1.1.0
 - [Phase 08]: 08-19: rung 4 (e) binds all 53 manifest leaves; the sweep forges ONE binding at a time (59 bindings) so a two-source leaf cannot lose either comparison unnoticed; 23/23 comparisons mutation-verified
 - [Phase 08]: 08-19: verify_checks[2] states what check_base enforces today; field-by-field base equality at verify is plan 08-21, NOT checked yet
+- [Phase 08]: 08-20: shared APR v2 index must be strictly increasing (duplicate names refused by both readers); index reservation counted in in-memory entry units; class-B test hooks read back what was actually sized (Vec::capacity after allocation, RoPE-table counter) so sizing mutants turn RED
 
 ### Pending Todos
 
@@ -552,8 +554,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-28T15:58:54.871Z
-Stopped at: Completed 08-19-PLAN.md (manifest-to-blob bindings at rung 4, decide-apr-v1 2.0.0)
+Last session: 2026-09-28T16:17:42.987Z
+Stopped at: Completed 08-20-PLAN.md (class-B shared-reader bounds: duplicate names, in-memory index reservation, ModernBertLayer guards)
 Resume file: None
 
 ## Accumulated Context
