@@ -24,6 +24,9 @@ set shell := ["bash", "-uc"]
 # conformance suite, the apr-cli lifecycle suite and the train evidence suite
 # read — a bespoke name here would be a sixth notion of "where the encoder is".
 minilm_dir := env_var_or_default("APRENDER_MINILM_DIR", env_var("HOME") + "/.cache/aprender/minilm-l6-v2-1110a243")
+# The declared Laya base snapshot (laya-finetune-gate-v1 `base`, revision 55cf4c4e…). The SAME variable
+# the env-gated aprender-decide integration targets read, so one override arms both (plan 08-12).
+laya_model_dir := env_var_or_default("LAYA_MODEL_DIR", env_var("HOME") + "/.cache/huggingface/hub/models--convaiinnovations--laya/snapshots/55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851")
 target := "aarch64-unknown-linux-gnu"
 asset := "deploy-extensions/assets/trainer"
 
@@ -1279,8 +1282,9 @@ forecast-np-regressor-calibration points="" lags="" epochs="":
 # Phase 8: the Laya back office (scripts/laya_train, a pinned uv project, D-02).
 #
 # Laptop-only: CI never installs this project's torch stack. The Rust side
-# re-derives what CI must check (plan 08-09), and whether the torch-free
-# Python self-tests also run in CI is decided at plan 08-12's CI checkpoint.
+# re-derives what CI must check (plan 08-09). At plan 08-12's CI checkpoint the
+# user kept the torch-free Python self-tests and the four env-gated parity
+# targets OUT of CI; `just laya-verify-suite` runs all of them locally.
 # `--frozen` everywhere: the committed uv.lock (human-verified pins, plan 08-02
 # Task 1) is what runs, never a fresh resolution.
 # ---------------------------------------------------------------------------
@@ -1348,6 +1352,47 @@ laya-train-selftest:
     done
     uv run --project scripts/laya_train --frozen python scripts/laya_train/lifecycle.py
     echo "LAYA TRAIN SELFTEST OK"
+
+# The Python-parity / real-weights surface of Phase 8 in ONE local command. LOCAL ONLY, by the user's
+# decision at plan 08-12's CI checkpoint (2026-09-27): these legs need the 0.84 GB base snapshot, the
+# gitignored run dirs and the torch stack, none of which CI has, so in CI they could only SKIP. CI runs
+# the pure-Rust targets instead (`-p aprender-decide --test ui`, `-p aprender-mcp-decide --test e2e_stdio`).
+# Steps, stopping at the first failure:
+#   1. the torch-free Python self-tests: metrics.py, data.py, gate.py --selftest (numpy + pyyaml);
+#   2. laya_parity (LAYA_MODEL_DIR), fail_closed_vectors (+ LAYA_FAIL_CLOSED_VECTORS=1) and demo_run
+#      (+ LAYA_DEMO_RUN=1), ARMED against <model>;
+#   3. the torch lifecycle kept to a temp dir (LAYA_LIFECYCLE_KEEP), then python_records against it
+#      (LAYA_PY_RUN_DIR + LAYA_PY_DATA_DIR).
+# An armed Rust leg that prints a `SKIP:` line FAILS the recipe: here a SKIP means the leg measured
+# nothing. A missing <model> dir is a refusal, not a SKIP. <model> defaults to `laya_model_dir` above.
+# Prints LAYA VERIFY SUITE OK on success.
+# Phase 8 Python-parity + real-weights suite, LOCAL ONLY (not in CI): Python self-tests + 4 armed targets
+laya-verify-suite model=laya_model_dir:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    model="{{model}}"
+    test -f "$model/model.safetensors" || { echo "ERROR: $model/model.safetensors is missing (the declared Laya base snapshot)" >&2; exit 2; }
+    for m in metrics data gate; do
+        uv run --project scripts/laya_train --frozen python "scripts/laya_train/$m.py" --selftest
+    done
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    leg() {
+        name="$1"; shift
+        log="$work/$name.log"
+        if ! env "$@" cargo test -p aprender-decide --release --test "$name" -- --nocapture > "$log" 2>&1; then
+            cat "$log"; echo "FAIL: $name" >&2; return 1
+        fi
+        grep -Ev '^[[:space:]]*(Compiling|Finished|Running|Blocking|Doc-tests|Downloaded|Locking|Updating)( |$)|^$' "$log" || true
+        if grep -q '^SKIP:' "$log"; then echo "FAIL: $name is armed but printed SKIP (measured nothing)" >&2; return 1; fi
+        echo "LEG OK: $name"
+    }
+    leg laya_parity LAYA_MODEL_DIR="$model"
+    leg fail_closed_vectors LAYA_MODEL_DIR="$model" LAYA_FAIL_CLOSED_VECTORS=1
+    leg demo_run LAYA_MODEL_DIR="$model" LAYA_DEMO_RUN=1
+    LAYA_LIFECYCLE_KEEP="$work/keep" uv run --project scripts/laya_train --frozen python scripts/laya_train/lifecycle.py
+    leg python_records LAYA_PY_RUN_DIR="$work/keep/run" LAYA_PY_DATA_DIR="$work/keep/data"
+    echo "LAYA VERIFY SUITE OK"
 
 # Pack a Laya run dir FOR SERVING (plan 08-09, D-07 fail-closed in Rust): production variant, the
 # contract's base, input hashes, split, a Rust re-score of every eval row from the packed bytes and

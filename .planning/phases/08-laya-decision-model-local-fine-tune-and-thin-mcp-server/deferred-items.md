@@ -618,6 +618,52 @@ not fixed by it.
   - Remove the weights: `aws s3 rm --profile ze-kasher-dev --recursive s3://<weights-bucket>/decide/aprender-mcp-decide/`
 - **Owner:** the user. Re-open trigger: cost, abuse, or a finished admin-UI test.
 
+## From plan 08-12
+
+The CI checkpoint (Task 1) was answered on 2026-09-27: **option A, narrowed**. The user said:
+
+> "Option A. Regarding the make question, I'm not sure as the Aprender is designed for Rust, and our
+> addition of converting Python algorithm and verifying that it give the same results is something
+> that I've added only recently. Not sure that we need to have it as part of the CI, and we can bypass
+> them or protect them with a specific flag."
+
+Applied: ci.yml's integration step gained exactly `cargo test -p aprender-decide --test ui` and
+`cargo test -p aprender-mcp-decide --test e2e_stdio`, the two pure-Rust targets. Everything below
+stays out of CI.
+
+### D-ITEM-08-12-B: the Python-parity / real-weights suite is LOCAL ONLY, by the user's decision
+
+- status: open by design (the user's call, not a gap an executor should close)
+- **Not in CI:**
+  - the four env-gated targets `-p aprender-decide --test laya_parity`, `--test fail_closed_vectors`,
+    `--test demo_run` and `--test python_records`;
+  - the torch-free Python self-tests (`metrics.py`, `data.py`, `gate.py --selftest`);
+  - the torch lifecycle.
+- **What CI covers instead:** the Rust verifier's lib tests re-derive the gate metrics, split
+  disjointness, the synthetic-variant refusal and the A1/A3 refusals.
+- **How it runs:** `just laya-verify-suite` in one local command, behind the targets' existing env
+  flags (`LAYA_MODEL_DIR`, `LAYA_FAIL_CLOSED_VECTORS=1`, `LAYA_DEMO_RUN=1`, `LAYA_PY_RUN_DIR` +
+  `LAYA_PY_DATA_DIR`). The model dir defaults to the pinned snapshot `55cf4c4e…`. An armed leg that
+  prints `SKIP:` fails the recipe. The 2026-09-27 run's result is recorded in 08-12-SUMMARY.md.
+- **Re-open trigger:** a CI image that carries the base snapshot and the Python trainer, or the user
+  asking for the Python surface in CI.
+- **Obligation until then:** run `just laya-verify-suite` before changing `aprender_decide::{pack,verify,laya}`,
+  `scripts/laya_train` or `contracts/laya-*.yaml`.
+
+### D-ITEM-08-12-C: `make contract-audit-phase8` is still tier3-only, so it is NOT a CI gate
+
+- status: open
+- **Why:** CI does not run `make tier3` (ci.yml, #2512). No existing CI step invokes `make`, and
+  whether `make` exists in the `sovereign-ci:stable` image is unconfirmed, so the audit was
+  deliberately not added to the docker chain. The strict audit (any BIND- line refused, the single
+  `PHASE8_LIVE_EXEMPT` now empty, row-to-definition resolution) runs locally only, through
+  `make tier3` or directly.
+- **Closes when either:**
+  - the image is confirmed to have `make`, and `make contract-audit-phase8` is appended to the
+    integration chain (a CI-workflow change, so it needs a human check-in); or
+  - a make-free invocation of the same audit is wired in, for example a script the Makefile target
+    and CI both call.
+
 ## Phase 8 close-out — open work
 
 Written by plan 08-12 (D-18) from the two outcome records: `08-GATE-RUN-EVIDENCE.json` (`outcome:
@@ -649,11 +695,13 @@ closes it. Nothing below is implied done.
   D-ITEM-08-10-C is superseded (one live assumption refuted and replaced, the replacement passed live)
   and D-ITEM-08-10-D is resolved (auth off, provider none, risk accepted); a future `auth=on` deploy
   re-opens 08-10-D's provider choice.
-- **CI wiring (plan 08-12 Task 1, blocking-human):** until the human decides, the six integration
-  targets (`-p aprender-decide --test ui`, `--test laya_parity`, `--test fail_closed_vectors`,
-  `--test demo_run`, `--test python_records`, `-p aprender-mcp-decide --test e2e_stdio`), the strict
-  `make contract-audit-phase8` (tier3 only; CI does not run tier3) and the torch-free Python
-  self-tests are DARK in CI. Plan 08-12 Task 3 records the decision here.
+- **CI wiring (plan 08-12 Task 1, decided 2026-09-27: option A, narrowed by the user):**
+  - Now in CI: `-p aprender-decide --test ui` and `-p aprender-mcp-decide --test e2e_stdio`, on
+    ci.yml's integration line. The e2e real-model leg SKIPs there.
+  - Still dark, on purpose: the four env-gated parity targets and the Python self-tests. They run
+    locally through `just laya-verify-suite` (**D-ITEM-08-12-B**).
+  - Still tier3-only: `make contract-audit-phase8`, pending confirmation that the CI image has `make`
+    or a make-free invocation (**D-ITEM-08-12-C**).
 - **D-ITEM-08-12-A (new, follow-up):** `crates/aprender-decide/src/verify.rs` is 2454 lines, one
   module holding every gate, re-score, seed and shift check. Not split in 08-12 (the plan does not
   require it, and a split would move every binding row this plan just resolved). Owner: a refactor

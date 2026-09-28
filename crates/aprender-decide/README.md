@@ -84,4 +84,12 @@ shots. It does not certify robustness to a shifted input population; see the gat
 cargo test -p aprender-decide --lib                              # all lib tests
 cargo test -p aprender-decide --lib laya::tests::tiny_parity     # parity vs Laya's oracle
 cargo test -p aprender-decide -p aprender-mcp-setfit --lib task:: -- --nocapture  # preserve_order=ON shape
+cargo test -p aprender-decide --test ui                          # private-mint compile-fail proof (in CI)
+just laya-verify-suite                                           # Python parity + real weights (LOCAL ONLY)
 ```
+
+CI runs the lib tests and `--test ui` (plus `-p aprender-mcp-decide --test e2e_stdio`). The four
+env-gated targets `laya_parity`, `fail_closed_vectors`, `demo_run` and `python_records` need the
+Laya base snapshot, gitignored run dirs and the Python trainer. They are deliberately kept out of CI
+(user decision, plan 08-12) and would only print `SKIP` there. `just laya-verify-suite` arms all four
+and runs the Python self-tests; see `scripts/laya_train/README.md`.

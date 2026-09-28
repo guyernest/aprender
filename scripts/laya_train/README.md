@@ -14,6 +14,7 @@ project owns training and the reference numbers. There is no `apr` subcommand fo
 | `just laya-train <data> <out> [args]` | Fine-tune, calibrate and gate (below). Exit **0** = GATE PASS, **3** = GATE FAIL, **2** = input refused. Production trains the **three gate seeds** 13 / 17 / 23 and ships the median-ECE seed (`--seeds` defaults to 3 and any other value is refused), writes the float64 noise record, and scores an optional `shift.jsonl` as a reported probe. Args: `--epochs E` (only above 16 shots/class, in [4, 12]), `--stopping early_stopping\|fixed_epochs` (default: the contract's `early_stopping`), `--device mps\|cuda\|cpu`. |
 | `just laya-train-lifecycle` | A real train -> F16 save -> complete dir -> reload -> calibrate -> gate on the committed tiny checkpoint, on CPU in seconds: both stopping rules on the legacy single seed, the seed refusals, a three-seed median run, the noise record on every run, and the shift probe's gate invariance. Prints `LIFECYCLE OK`. With `LAYA_LIFECYCLE_KEEP=<dir>` it copies the three-seed shift run to `<dir>/run` and its data dir to `<dir>/data` (plan 08-15's Rust reader test). |
 | `just laya-train-selftest` | `metrics.py`, `data.py` and `gate.py --selftest` (numpy + pyyaml only), then the lifecycle. Prints `METRICS SELFTEST OK`, `DATA SELFTEST OK`, `GATE SELFTEST OK`, `LIFECYCLE OK`, `LAYA TRAIN SELFTEST OK`. The `test_harness` of FALSIFY-LAYA-GATE-003..007, 009, 011 and 013 and of FALSIFY-LAYA-PARITY-006 (the Python halves). |
+| `just laya-verify-suite [model]` | The whole Python-parity / real-weights surface in one **local-only** command (see "What CI does and does not run"): the three torch-free self-tests, then the four env-gated `aprender-decide` targets ARMED — `laya_parity` (`LAYA_MODEL_DIR`), `fail_closed_vectors` (+ `LAYA_FAIL_CLOSED_VECTORS=1`), `demo_run` (+ `LAYA_DEMO_RUN=1`) — then the lifecycle kept to a temp dir (`LAYA_LIFECYCLE_KEEP`) and `python_records` against it (`LAYA_PY_RUN_DIR` + `LAYA_PY_DATA_DIR`). `model` defaults to `$LAYA_MODEL_DIR`, else the pinned snapshot `~/.cache/huggingface/hub/models--convaiinnovations--laya/snapshots/55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851`; a missing snapshot is refused (exit 2). An armed leg that prints `SKIP:` fails the recipe, because there it measured nothing. Needs the gitignored run dirs (`models/decide/tweet-stance-16*`, `models/decide/laya-stance-64`) and data dirs. Prints `LAYA VERIFY SUITE OK`. |
 
 All recipes use `uv run --project scripts/laya_train --frozen`, so the committed `uv.lock` is what
 runs — never a fresh resolution. Every threshold, recipe value, seed, stopping rule and the base pin
@@ -238,9 +239,22 @@ not cover truncation / option shrink / all three qtypes, or if a fixture directo
 CI does **not** install this project's torch stack. The checks CI must enforce are re-derived in
 Rust instead (plan 08-09, `aprender_decide::verify`): the gate metrics recomputed from the
 probability files, split disjointness from `slice_ids` and the data dir, and the synthetic-variant
-refusal. Whether the torch-free self-tests (`metrics.py`, `data.py` and `gate.py --selftest`, which
-need only numpy + pyyaml) also run in CI is decided at plan 08-12's CI checkpoint — adding a Python
-toolchain to the CI image is a CI-workflow change, which needs a human check-in. The torch lifecycle
-runs locally only, through `just laya-train-selftest`. `gate.py --selftest`'s run-dir recompute needs
-the gitignored demo run dirs and prints an explicit `SKIP` where they are absent (e.g. in CI); the
-literal-number fail-closed cases run everywhere.
+refusal.
+
+**Decided at plan 08-12's CI checkpoint (user, 2026-09-27): the Python-parity surface stays
+local-only.** CI's integration step runs the two pure-Rust Phase 8 targets,
+`cargo test -p aprender-decide --test ui` (the private-mint compile-fail proof) and
+`cargo test -p aprender-mcp-decide --test e2e_stdio` (its tiny-fixture leg; the real-model leg SKIPs
+there). It does NOT run:
+
+- the torch-free self-tests (`metrics.py`, `data.py`, `gate.py --selftest`);
+- the torch lifecycle;
+- the four env-gated targets `laya_parity`, `fail_closed_vectors`, `demo_run` and `python_records`.
+
+Converting a Python algorithm and proving the Rust port gives the same results is a recent addition to a
+Rust-first project, so it is kept out of CI behind its existing env flags. In CI those four could only
+print SKIP: they need the 0.84 GB base snapshot and gitignored run dirs. Run all of it with
+**`just laya-verify-suite`** before any change to `aprender_decide::{pack,verify,laya}`, to
+`scripts/laya_train`, or to `contracts/laya-*.yaml`. `gate.py --selftest`'s run-dir recompute needs the
+gitignored demo run dirs and prints an explicit `SKIP` where they are absent; the literal-number
+fail-closed cases run everywhere. The open item is D-ITEM-08-12-B in the phase's `deferred-items.md`.
