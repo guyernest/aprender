@@ -348,7 +348,7 @@ deploy_eligibility:
   verify_checks:
     - 'the full load ladder'
     - 'recipe variant == production (laya-finetune-gate-v1 synthetic_not_deployable)'
-    - '(load, every door) the manifest''s base equals the embedded recipe blob''s base, field by field (rung 4, manifest.bindings); (verify, check_base) the recipe''s base.sha256 equals the laya-finetune-gate-v1 base pin and the base dir''s model.safetensors hashes to it, and the base tokenizer hashes to inputs_sha256.tokenizer_json. The recipe''s other base fields against that block, and the base dir''s remaining files against its pins, are plan 08-21 and are NOT checked yet'
+    - '(load, every door) the manifest''s base equals the embedded recipe blob''s base, field by field (rung 4, manifest.bindings); (verify, check_base, plan 08-21) the recipe''s base equals the laya-finetune-gate-v1 base block field by field (family, checkpoint, repo, revision, then sha256) and the base dir''s model.safetensors hashes to that sha256; (verify, the zero-shot load) the base dir''s encoder/config.json, rl_agent_config.json and tokenizer/tokenizer.json hash to that block''s pins on the exact bytes the baseline is built from, and the tokenizer also to inputs_sha256.tokenizer_json'
     - 'data-dir hashes equal to the manifest''s inputs_sha256'
     - 'split re-verification (laya-finetune-gate-v1 split_disjointness)'
     - 'Rust re-score of every eval row — fine-tuned from the artifact, zero-shot from the base — within the noise-referenced bound(c, s) of laya-parity-v1 pack_rescore_probs_abs (floor 1.0e-5 when the run carries no rescore-noise.json record)'

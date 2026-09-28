@@ -8,7 +8,8 @@
 //! ```
 //!
 //! `pack` verifies the run BEFORE anything is written (`aprender_decide::verify::pack_for_serving`):
-//! production variant, the contract's base (declared and on disk), input hashes, the split,
+//! production variant, the contract's recipe block, the contract's base (every declared identity
+//! field, and the base dir's files against the contract's pins), input hashes, the split,
 //! both probability files, a Rust re-score of every eval row from the packed bytes and from
 //! the base, and the gate recomputed from those verified probabilities. Only an accepted run
 //! is written, atomically; it prints

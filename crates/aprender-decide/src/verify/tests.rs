@@ -53,7 +53,8 @@ fn contract_policy() -> VerifyPolicy {
     )
 }
 
-/// The tiny fixture's own base block (its checkpoint IS its base), read from its recipe.json.
+/// The tiny fixture's own base block (its checkpoint IS its base), read from its recipe.json,
+/// with its base-dir file pins hashed from the fixture checkpoint.
 fn tiny_base_pins() -> BasePins {
     let r = read_json(&fixture_dir().join("recipe.json"));
     let b = &r["base"];
@@ -68,6 +69,9 @@ fn tiny_base_pins() -> BasePins {
         repo: s("repo"),
         revision: s("revision"),
         model_safetensors_sha256: s("sha256"),
+        encoder_config_sha256: sha(&fixture_dir().join("checkpoint/encoder/config.json")),
+        rl_agent_config_sha256: sha(&fixture_dir().join("checkpoint/rl_agent_config.json")),
+        tokenizer_json_sha256: sha(&fixture_dir().join("checkpoint/tokenizer/tokenizer.json")),
     }
 }
 
@@ -231,6 +235,16 @@ impl Run {
         });
     }
 
+    /// Append a train.jsonl row the way a tenant's data would carry it, and re-derive the
+    /// recipe's `shots_per_class` from the new train.jsonl as the trainer would (the epoch count
+    /// stays legal: the fixture is far below 16 shots/class), so only the rule under test can
+    /// refuse. The caller still reseals with `rehash`.
+    fn append_train(&self, line: &str) {
+        append_line(&self.data().join("train.jsonl"), line);
+        let shots = train_shots(self);
+        self.edit_json("recipe.json", |r| r["shots_per_class"] = shots.into());
+    }
+
     fn inputs(&self) -> PackInputs {
         PackInputs::from_run_dir(&self.dir, &self.data()).expect("run dir reads")
     }
@@ -363,12 +377,56 @@ fn seed_copy(policy: &VerifyPolicy, pass: bool, files: [(i64, SeedFile); 3], shi
     run
 }
 
+/// The contract's `early_stopping` block as recipe.json copies it (the trainer's default rule).
+fn early_stopping_json(policy: &VerifyPolicy) -> Value {
+    let es = &policy.recipe.early_stopping;
+    obj(vec![
+        ("eval_every_epochs", es.eval_every_epochs.into()),
+        ("first_candidate_epoch", es.first_candidate_epoch.into()),
+        ("min_delta", es.min_delta.into()),
+        ("mode", es.mode.clone().into()),
+        ("monitor", es.monitor.clone().into()),
+        ("patience_epochs", es.patience_epochs.into()),
+        ("restore", es.restore.clone().into()),
+        ("tie_break", es.tie_break.clone().into()),
+    ])
+}
+
+/// The largest class count of the copy's train.jsonl: what the trainer records as
+/// `shots_per_class`.
+fn train_shots(run: &Run) -> u64 {
+    let data = read_data_dir(&run.data()).expect("data dir");
+    let k = data.task.owned_labels().len();
+    (0..k)
+        .map(|c| data.train.iter().filter(|r| r.label == c).count() as u64)
+        .max()
+        .expect("classes")
+}
+
 /// A LEGACY (1.x) production copy: no seed_selection, single declared seed; report thresholds
-/// are `policy`'s and the reported pass is `pass`, every hash recomputed.
+/// are `policy`'s and the reported pass is `pass`, every hash recomputed. Its recipe is the one
+/// a production trainer writes: the contract's recipe values, `seed` the declared seed, the
+/// recipe's `shots_per_class` derived from train.jsonl with the epoch count the epoch rule
+/// requires for it, and the default `early_stopping` rule — made consistent with the rule by
+/// this helper, never by relaxing the rule.
 fn legacy_copy(policy: &VerifyPolicy, pass: bool) -> Run {
     let run = synthetic_copy();
-    run.edit_json("recipe.json", |r| r["variant"] = PRODUCTION_VARIANT.into());
+    let shots = train_shots(&run);
+    let c = &policy.recipe;
+    let epochs = if shots <= 16 {
+        c.epochs_at_most_16_per_class
+    } else {
+        c.epochs_above_16_max
+    };
+    run.edit_json("recipe.json", |r| {
+        r["variant"] = PRODUCTION_VARIANT.into();
+        r["seed"] = c.declared_seed.into();
+        r["shots_per_class"] = shots.into();
+        r["epochs"] = epochs.into();
+        r["early_stopping"] = early_stopping_json(policy);
+    });
     run.edit_json("gate-report.json", |r| {
+        r["seeds"]["declared"] = c.declared_seed.into();
         r["thresholds"]["min_macro_f1_margin"] = policy.min_macro_f1_margin.into();
         r["thresholds"]["max_ece"] = policy.max_ece.into();
         r["thresholds"]["ece_bins"] = policy.ece_bins.into();
@@ -525,14 +583,89 @@ fn base_mismatch_tokenizer() {
     let e = expect_err(verify_run(&inputs, &packed, &run.data(), &other, &policy));
     assert!(
         matches!(
-            e,
+            &e,
             VerifyError::BaseMismatch {
                 which: BaseWhich::BaseTokenizer,
+                expected,
+                ..
+            } if *expected == policy.base.tokenizer_json_sha256
+        ),
+        "the contract pin refuses first: {e:?}"
+    );
+    // A policy whose pin IS the other tokenizer: the run's inputs_sha256.tokenizer_json still
+    // refuses it (the tokenizer is bound to BOTH).
+    let moved = VerifyPolicy {
+        base: BasePins {
+            tokenizer_json_sha256: sha(&tok),
+            ..policy.base.clone()
+        },
+        ..policy.clone()
+    };
+    let e = expect_err(verify_run(&inputs, &packed, &run.data(), &other, &moved));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::BaseMismatch {
+                which: BaseWhich::BaseTokenizer,
+                expected,
+                ..
+            } if *expected == inputs.gate_report.inputs_sha256.tokenizer_json
+        ),
+        "the run binding refuses: {e:?}"
+    );
+}
+
+/// A base dir copy with `rel` changed by one appended newline (still valid JSON, so only the
+/// pin can refuse it), verified against `run`'s packed bytes.
+fn verify_with_edited_base_file(run: &Run, policy: &VerifyPolicy, rel: &str) -> VerifyError {
+    let other = run.path("other-base");
+    copy_dir(&run.base(), &other);
+    let f = other.join(rel);
+    let mut bytes = std::fs::read(&f).expect("read base file");
+    bytes.push(b'\n');
+    std::fs::write(&f, bytes).expect("write base file");
+    let inputs = run.inputs();
+    let packed = artifact::write_decide_apr(&inputs).expect("pack");
+    expect_err(verify_run(&inputs, &packed, &run.data(), &other, policy))
+}
+
+/// V6-c: the base dir's encoder/config.json is pinned by the contract; one byte off is refused
+/// naming it, and the zero-shot scorer is never built from it.
+#[test]
+fn base_encoder_config_unpinned_refused() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let e = verify_with_edited_base_file(&run, &policy, "encoder/config.json");
+    assert!(
+        matches!(
+            &e,
+            VerifyError::BaseMismatch {
+                which: BaseWhich::EncoderConfig,
                 ..
             }
         ),
         "{e:?}"
     );
+    assert!(e.to_string().contains("which=encoder_config"), "{e}");
+}
+
+/// V6-c: the base dir's rl_agent_config.json is pinned by the contract.
+#[test]
+fn base_agent_config_unpinned_refused() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let e = verify_with_edited_base_file(&run, &policy, "rl_agent_config.json");
+    assert!(
+        matches!(
+            &e,
+            VerifyError::BaseMismatch {
+                which: BaseWhich::AgentConfig,
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    assert!(e.to_string().contains("which=agent_config"), "{e}");
 }
 
 #[test]
@@ -612,6 +745,286 @@ fn policy_views_refuse_non_integer_ece_bins() {
     assert!(e.to_string().contains("ece_bins"), "{e}");
 }
 
+/// A production copy whose recipe.json got `edit` (then resealed), verified.
+fn verify_recipe_edit(edit: impl FnOnce(&mut Value)) -> Result<VerifyReport, VerifyError> {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    run.edit_json("recipe.json", edit);
+    run.rehash();
+    run.verify(&policy)
+}
+
+/// V6-d: recipe.json must equal the contract's recipe block — one case per field class (a
+/// float, the schedule literal, the seed, an early_stopping field, and shots_per_class against
+/// the data dir) — and an ABSENT early_stopping (the declared fixed_epochs rule) is accepted.
+#[test]
+fn recipe_block_differs_from_contract_refused() {
+    let cases: [(&str, fn(&mut Value)); 7] = [
+        ("encoder_lr", |r| {
+            r["encoder_lr"] = (r["encoder_lr"].as_f64().expect("lr") * 2.0).into();
+        }),
+        ("proper_reward_w_sph", |r| {
+            r["proper_reward_w_sph"] = 0.5.into()
+        }),
+        ("schedule", |r| r["schedule"] = "linear".into()),
+        ("seed", |r| r["seed"] = 17.into()),
+        ("early_stopping.min_delta", |r| {
+            r["early_stopping"]["min_delta"] = 0.002.into();
+        }),
+        ("early_stopping.patience_epochs", |r| {
+            r["early_stopping"]["patience_epochs"] = 4.into();
+        }),
+        ("shots_per_class", |r| {
+            let s = r["shots_per_class"].as_u64().expect("shots");
+            r["shots_per_class"] = (s + 1).into();
+        }),
+    ];
+    for (field, edit) in cases {
+        let e = expect_err(verify_recipe_edit(edit));
+        assert!(
+            matches!(&e, VerifyError::RecipeMismatch { field: f, .. } if *f == field),
+            "{field}: {e:?}"
+        );
+        assert!(
+            e.to_string().contains(&format!("recipe.json {field} is")),
+            "{e}"
+        );
+        assert_eq!(e.exit_code(), 2);
+    }
+    // Control: the fixed_epochs rule (no early_stopping key) is a declared rule, not a mismatch.
+    let report = verify_recipe_edit(|r| {
+        r.as_object_mut().expect("recipe").remove("early_stopping");
+    })
+    .expect("fixed_epochs verifies");
+    assert!(report.deploy_eligible);
+}
+
+/// The epoch rule: <= 16 shots/class -> exactly epochs_at_most_16_per_class; above 16 -> an
+/// epoch count in [epochs_above_16_min, epochs_above_16_max].
+#[test]
+fn recipe_epochs_break_the_rule_refused() {
+    let policy = permissive_policy();
+    let c = policy.recipe.clone();
+    let e = expect_err(verify_recipe_edit(move |r| {
+        r["epochs"] = (c.epochs_at_most_16_per_class - 1).into();
+    }));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::RecipeMismatch {
+                field: "epochs",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    let run = production_copy(&policy, true);
+    let honest = run.inputs().recipe;
+    check_recipe_block(&honest, &policy).expect("the honest copy's recipe");
+    let c = &policy.recipe;
+    let at = |shots: u64, epochs: u64| {
+        let mut r = honest.clone();
+        r.shots_per_class = shots;
+        r.epochs = epochs;
+        check_recipe_block(&r, &policy)
+    };
+    let fixed = c.epochs_at_most_16_per_class;
+    let (lo, hi) = (c.epochs_above_16_min, c.epochs_above_16_max);
+    for (shots, epochs, ok) in [
+        (16, fixed, true),
+        (16, fixed + 1, false),
+        (1, fixed - 1, false),
+        (17, lo, true),
+        (17, hi, true),
+        (64, lo - 1, false),
+        (64, hi + 1, false),
+    ] {
+        let got = at(shots, epochs);
+        assert_eq!(got.is_ok(), ok, "shots {shots} epochs {epochs}: {got:?}");
+        if let Err(e) = got {
+            assert!(
+                matches!(
+                    &e,
+                    VerifyError::RecipeMismatch {
+                        field: "epochs",
+                        ..
+                    }
+                ),
+                "{e:?}"
+            );
+        }
+    }
+}
+
+/// `n` distinct train rows per class of `k`, a disjoint eval, and a slice of `per_class[c]` rows
+/// of class `c` (its first rows), as check_split reads them.
+fn fraction_case(
+    k: usize,
+    n: usize,
+    per_class: &[usize],
+) -> (Vec<DataRow>, Vec<DataRow>, GateCalibration) {
+    let train: Vec<DataRow> = (0..k)
+        .flat_map(|c| {
+            (0..n).map(move |i| DataRow {
+                text: format!("train text {c} {i}"),
+                label: c,
+            })
+        })
+        .collect();
+    let eval: Vec<DataRow> = (0..k)
+        .map(|c| DataRow {
+            text: format!("eval text {c}"),
+            label: c,
+        })
+        .collect();
+    let ids: Vec<u64> = per_class
+        .iter()
+        .enumerate()
+        .flat_map(|(c, &m)| (0..m).map(move |i| (c * n + i) as u64))
+        .collect();
+    let calib = GateCalibration {
+        bucket: "choice:2".into(),
+        t_fitted: 1.0,
+        t_applied: 1.0,
+        clamp_hit: false,
+        slice_size: ids.len() as u64,
+        slice_ids_sha256: sha256_hex(serde_json::to_string(&ids).expect("ids").as_bytes()),
+        slice_ids: ids,
+    };
+    (train, eval, calib)
+}
+
+/// WR-08: at 16 rows per class the contract's fraction (0.25) needs 4 slice rows, above the
+/// per-class minimum (2): a slice of 3 in one class — which the minimum alone accepted — is
+/// refused naming the class and the need.
+#[test]
+fn slice_below_fraction_refused() {
+    let p = contract_policy();
+    let (n, k) = (16, 2);
+    let need = slice_need(
+        n,
+        p.calibration_slice_fraction,
+        p.calibration_slice_min_per_class,
+    );
+    assert!(
+        need > p.calibration_slice_min_per_class,
+        "the fraction decides here"
+    );
+    let short = usize::try_from(need).expect("need") - 1;
+    let (train, eval, calib) = fraction_case(k, n, &[short + 1, short]);
+    let e = check_split(
+        &train,
+        &eval,
+        &calib,
+        k,
+        p.calibration_slice_fraction,
+        p.calibration_slice_min_per_class,
+    )
+    .expect_err("one row below the fraction");
+    assert!(
+        matches!(&e, VerifyError::SliceInvalid { why }
+            if why.contains("class 1") && why.contains(&format!("need >= {need}"))),
+        "{e:?}"
+    );
+    // The same slice under the minimum alone (the pre-08-21 rule) was accepted.
+    check_split(
+        &train,
+        &eval,
+        &calib,
+        k,
+        0.0,
+        p.calibration_slice_min_per_class,
+    )
+    .expect("the minimum alone accepts it");
+}
+
+/// Exactly the need in every class is accepted.
+#[test]
+fn slice_at_fraction_accepted() {
+    let p = contract_policy();
+    let (n, k) = (16, 3);
+    let need = usize::try_from(slice_need(
+        n,
+        p.calibration_slice_fraction,
+        p.calibration_slice_min_per_class,
+    ))
+    .expect("need");
+    let (train, eval, calib) = fraction_case(k, n, &[need, need, need]);
+    check_split(
+        &train,
+        &eval,
+        &calib,
+        k,
+        p.calibration_slice_fraction,
+        p.calibration_slice_min_per_class,
+    )
+    .expect("exactly the need");
+}
+
+/// V8-c: a symlink planted where the temp file would be (the pre-08-21 name
+/// `.<out>.tmp-<pid>`, and every name the next calls could pick) is never followed: the victim
+/// is unchanged and the planted links are left alone.
+#[cfg(unix)]
+#[test]
+fn write_atomic_does_not_follow_a_planted_symlink() {
+    let dir = TempDir::new().expect("tempdir");
+    let victim = dir.path().join("victim.txt");
+    std::fs::write(&victim, b"precious").expect("victim");
+    let out = dir.path().join("v.apr");
+    let pid = std::process::id();
+    let next = WRITE_SEQ.load(AtomicOrdering::Relaxed);
+    let mut planted = vec![dir.path().join(format!(".v.apr.tmp-{pid}"))];
+    planted.extend((next..next + 64).map(|q| dir.path().join(format!(".v.apr.tmp-{pid}-{q}"))));
+    for link in &planted {
+        std::os::unix::fs::symlink(&victim, link).expect("plant symlink");
+    }
+    let result = write_atomic(&out, b"attacker-controlled bytes");
+    assert_eq!(
+        std::fs::read(&victim).expect("victim"),
+        b"precious",
+        "the victim must be unchanged ({result:?})"
+    );
+    for link in &planted {
+        assert!(
+            std::fs::symlink_metadata(link)
+                .expect("the planted link is still there")
+                .file_type()
+                .is_symlink(),
+            "{}",
+            link.display()
+        );
+    }
+    match result {
+        Ok(()) => assert_eq!(
+            std::fs::read(&out).expect("out"),
+            b"attacker-controlled bytes"
+        ),
+        Err(e) => assert!(matches!(e, VerifyError::Read { .. }), "{e:?}"),
+    }
+}
+
+/// V8-d: a ProbsRowCoverage refusal names WHICH probability file.
+#[test]
+fn probs_row_coverage_names_the_file() {
+    let policy = permissive_policy();
+    for (file, which, name) in [
+        ("eval-probs.json", ProbsWhich::FineTuned, "fine_tuned"),
+        ("zero-shot-probs.json", ProbsWhich::ZeroShot, "zero_shot"),
+    ] {
+        let run = production_copy(&policy, true);
+        run.edit_json(file, |v| {
+            v["rows"].as_array_mut().expect("rows").pop();
+        });
+        run.rehash();
+        let e = expect_err(run.verify(&policy));
+        assert!(
+            matches!(&e, VerifyError::ProbsRowCoverage { which: w, .. } if *w == which),
+            "{e:?}"
+        );
+        assert!(e.to_string().starts_with(&format!("{name}: ")), "{e}");
+    }
+}
+
 #[test]
 fn input_hash_mismatch() {
     let policy = permissive_policy();
@@ -671,7 +1084,7 @@ fn split_overlap() {
     let policy = permissive_policy();
     let run = production_copy(&policy, true);
     let (text, label) = jsonl_row(&run.data().join("eval.jsonl"), 1);
-    append_line(&run.data().join("train.jsonl"), &row_json(&text, &label));
+    run.append_train(&row_json(&text, &label));
     run.rehash();
     let e = expect_err(run.verify(&policy));
     assert!(
@@ -695,10 +1108,7 @@ fn conflicting_labels() {
     // Same normalized text (extra inner and outer whitespace), a different label.
     let spaced = format!("  {}  ", text.replacen(' ', "   ", 1));
     assert_ne!(spaced, text);
-    append_line(
-        &run.data().join("train.jsonl"),
-        &row_json(&spaced, "billing"),
-    );
+    run.append_train(&row_json(&spaced, "billing"));
     run.rehash();
     let e = expect_err(run.verify(&policy));
     assert!(
@@ -715,10 +1125,7 @@ fn slice_splits_group() {
     let (text, label) = jsonl_row(&run.data().join("train.jsonl"), 0);
     let ids = read_json(&run.path("gate-report.json"))["calibration"]["slice_ids"].clone();
     assert_eq!(ids[0], 0, "row 0 is a slice row");
-    append_line(
-        &run.data().join("train.jsonl"),
-        &row_json(&format!("{text} "), &label),
-    );
+    run.append_train(&row_json(&format!("{text} "), &label));
     run.rehash();
     let e = expect_err(run.verify(&policy));
     assert!(

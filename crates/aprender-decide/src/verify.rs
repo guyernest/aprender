@@ -7,10 +7,13 @@
 //! # What is recomputed, and from what
 //!
 //! A `gate-report.json` is a file a training run wrote, so an edited report must not pass.
-//! [`verify_run`] therefore:
+//! The pipeline both public doors run ([`pack_for_serving`] and [`verify_path`]: the cheap
+//! checks, then the re-scores and the gate on the loaded bytes) therefore:
 //!
-//! 1. refuses any variant but `production` ([`check_variant`]) and any base other than the
-//!    contract's, both as declared and as found on disk ([`check_base`]);
+//! 1. refuses any variant but `production` ([`check_variant`]), any recipe.json that differs
+//!    from the contract's recipe block ([`check_recipe_block`]), and any base other than the
+//!    contract's — every declared identity field, and the base dir's files against the
+//!    contract's pins ([`check_base`], and the zero-shot load);
 //! 2. re-hashes the data dir and the probability files against the report ([`check_inputs`]);
 //! 3. re-derives text-level split disjointness from the data dir and the report's `slice_ids`
 //!    ([`check_split`], the mirror of `scripts/laya_train/data.py`);
@@ -47,7 +50,7 @@
 //!
 //! # Writing
 //!
-//! [`pack_for_serving`] writes only after [`verify_run`] accepted the bytes, atomically (a
+//! [`pack_for_serving`] writes only after that pipeline accepted the bytes, atomically (a
 //! temp file in the target directory, then a rename). On any refusal nothing is created.
 //! [`fixture_bytes`] is the one other writer's source, and it produces only
 //! `synthetic-fixture` artifacts, which every verify refuses.
@@ -65,6 +68,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use unicode_normalization::UnicodeNormalization;
 
 /// The recipe variant that may be packed for serving, verified and deployed.
@@ -100,8 +104,15 @@ pub struct VerifyPolicy {
     pub rescore_bound_max_abs: f64,
     /// laya-finetune-gate-v1 `constants.calibration_slice_min_per_class`.
     pub calibration_slice_min_per_class: u64,
+    /// laya-finetune-gate-v1 `constants.calibration_slice_fraction`: every class keeps at least
+    /// `max(calibration_slice_min_per_class, ceil(fraction x n_class))` slice rows (WR-08, the
+    /// rule `scripts/laya_train/data.py` `calibration_split` applies).
+    pub calibration_slice_fraction: f64,
     /// laya-finetune-gate-v1 `base`: the declared base's identity and pins (D-04).
     pub base: BasePins,
+    /// laya-finetune-gate-v1 `recipe`, `early_stopping` and `seed_policy.declared_seed`: the
+    /// recipe block a production recipe.json must carry (D-04, V6-d).
+    pub recipe: RecipePins,
     /// laya-finetune-gate-v1 `seed_policy.selection` (`median_ece`, A3).
     pub seed_selection_policy: String,
     /// laya-finetune-gate-v1 `seed_policy.variance_seeds` (13, 17, 23).
@@ -127,6 +138,48 @@ pub struct BasePins {
     pub revision: String,
     /// `base.model_safetensors_sha256`.
     pub model_safetensors_sha256: String,
+    /// `base.encoder_config_sha256`: the base dir's `encoder/config.json`.
+    pub encoder_config_sha256: String,
+    /// `base.rl_agent_config_sha256`: the base dir's `rl_agent_config.json`.
+    pub rl_agent_config_sha256: String,
+    /// `base.tokenizer_json_sha256`: the base dir's `tokenizer/tokenizer.json`.
+    pub tokenizer_json_sha256: String,
+}
+
+/// laya-finetune-gate-v1 `recipe` (D-04), `early_stopping` and `seed_policy.declared_seed`: the
+/// values a production recipe.json must equal ([`check_recipe_block`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecipePins {
+    /// `recipe.optimizer`.
+    pub optimizer: String,
+    /// `recipe.encoder_lr`.
+    pub encoder_lr: f64,
+    /// `recipe.head_lr`.
+    pub head_lr: f64,
+    /// `recipe.eta_min`.
+    pub eta_min: f64,
+    /// `recipe.weight_decay`.
+    pub weight_decay: f64,
+    /// `recipe.grad_clip`.
+    pub grad_clip: f64,
+    /// `recipe.batch_size`.
+    pub batch_size: u64,
+    /// `recipe.proper_reward_w_sph`.
+    pub proper_reward_w_sph: f64,
+    /// `recipe.proper_reward_w_rps`.
+    pub proper_reward_w_rps: f64,
+    /// `recipe.schedule_literal`: the recipe.json `schedule` value.
+    pub schedule: String,
+    /// `recipe.epochs_at_most_16_per_class`.
+    pub epochs_at_most_16_per_class: u64,
+    /// `recipe.epochs_above_16_min`.
+    pub epochs_above_16_min: u64,
+    /// `recipe.epochs_above_16_max`.
+    pub epochs_above_16_max: u64,
+    /// `seed_policy.declared_seed`: recipe.json `seed` (the split seed and first gate seed).
+    pub declared_seed: i64,
+    /// The `early_stopping` block, as recipe.json must copy it when it declares the rule.
+    pub early_stopping: pack::EarlyStoppingDecl,
 }
 
 // ===========================================================================
@@ -146,6 +199,10 @@ pub struct GateContractView {
     pub base: BaseBlockView,
     /// `seed_policy`.
     pub seed_policy: SeedPolicyView,
+    /// `recipe`.
+    pub recipe: RecipeBlockView,
+    /// `early_stopping`.
+    pub early_stopping: EarlyStoppingBlockView,
 }
 
 /// laya-finetune-gate-v1 `constants` (the part the verifier reads).
@@ -161,6 +218,8 @@ pub struct GateConstantsView {
     pub gate_metric_recompute_abs: f64,
     /// `calibration_slice_min_per_class`.
     pub calibration_slice_min_per_class: u64,
+    /// `calibration_slice_fraction`.
+    pub calibration_slice_fraction: f64,
 }
 
 /// laya-finetune-gate-v1 `base`.
@@ -176,11 +235,71 @@ pub struct BaseBlockView {
     pub checkpoint: String,
     /// `model_safetensors_sha256`.
     pub model_safetensors_sha256: String,
+    /// `encoder_config_sha256`.
+    pub encoder_config_sha256: String,
+    /// `rl_agent_config_sha256`.
+    pub rl_agent_config_sha256: String,
+    /// `tokenizer_json_sha256`.
+    pub tokenizer_json_sha256: String,
+}
+
+/// laya-finetune-gate-v1 `recipe` (the part the verifier reads).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RecipeBlockView {
+    /// `optimizer`.
+    pub optimizer: String,
+    /// `encoder_lr`.
+    pub encoder_lr: f64,
+    /// `head_lr`.
+    pub head_lr: f64,
+    /// `eta_min`.
+    pub eta_min: f64,
+    /// `weight_decay`.
+    pub weight_decay: f64,
+    /// `grad_clip`.
+    pub grad_clip: f64,
+    /// `batch_size`.
+    pub batch_size: u64,
+    /// `proper_reward_w_sph`.
+    pub proper_reward_w_sph: f64,
+    /// `proper_reward_w_rps`.
+    pub proper_reward_w_rps: f64,
+    /// `schedule_literal`.
+    pub schedule_literal: String,
+    /// `epochs_at_most_16_per_class`.
+    pub epochs_at_most_16_per_class: u64,
+    /// `epochs_above_16_min`.
+    pub epochs_above_16_min: u64,
+    /// `epochs_above_16_max`.
+    pub epochs_above_16_max: u64,
+}
+
+/// laya-finetune-gate-v1 `early_stopping` (the fields recipe.json copies).
+#[derive(Debug, Clone, Deserialize)]
+pub struct EarlyStoppingBlockView {
+    /// `monitor`.
+    pub monitor: String,
+    /// `mode`.
+    pub mode: String,
+    /// `eval_every_epochs`.
+    pub eval_every_epochs: u64,
+    /// `first_candidate_epoch`.
+    pub first_candidate_epoch: u64,
+    /// `patience_epochs`.
+    pub patience_epochs: u64,
+    /// `min_delta`.
+    pub min_delta: f64,
+    /// `restore`.
+    pub restore: String,
+    /// `tie_break`.
+    pub tie_break: String,
 }
 
 /// laya-finetune-gate-v1 `seed_policy` (the part the verifier reads).
 #[derive(Debug, Clone, Deserialize)]
 pub struct SeedPolicyView {
+    /// `declared_seed`.
+    pub declared_seed: i64,
     /// `selection`.
     pub selection: String,
     /// `variance_seeds`.
@@ -231,6 +350,8 @@ impl VerifyPolicy {
         let c = &gate.constants;
         let b = &gate.base;
         let s = &gate.seed_policy;
+        let r = &gate.recipe;
+        let es = &gate.early_stopping;
         Self {
             min_macro_f1_margin: c.gate_min_macro_f1_margin,
             max_ece: c.gate_max_ece,
@@ -240,12 +361,42 @@ impl VerifyPolicy {
             rescore_noise_k: parity.constants.pack_rescore_noise_k,
             rescore_bound_max_abs: parity.constants.pack_rescore_bound_max_abs,
             calibration_slice_min_per_class: c.calibration_slice_min_per_class,
+            calibration_slice_fraction: c.calibration_slice_fraction,
             base: BasePins {
                 family: b.family.clone(),
                 checkpoint: b.checkpoint.clone(),
                 repo: b.repo.clone(),
                 revision: b.revision.clone(),
                 model_safetensors_sha256: b.model_safetensors_sha256.clone(),
+                encoder_config_sha256: b.encoder_config_sha256.clone(),
+                rl_agent_config_sha256: b.rl_agent_config_sha256.clone(),
+                tokenizer_json_sha256: b.tokenizer_json_sha256.clone(),
+            },
+            recipe: RecipePins {
+                optimizer: r.optimizer.clone(),
+                encoder_lr: r.encoder_lr,
+                head_lr: r.head_lr,
+                eta_min: r.eta_min,
+                weight_decay: r.weight_decay,
+                grad_clip: r.grad_clip,
+                batch_size: r.batch_size,
+                proper_reward_w_sph: r.proper_reward_w_sph,
+                proper_reward_w_rps: r.proper_reward_w_rps,
+                schedule: r.schedule_literal.clone(),
+                epochs_at_most_16_per_class: r.epochs_at_most_16_per_class,
+                epochs_above_16_min: r.epochs_above_16_min,
+                epochs_above_16_max: r.epochs_above_16_max,
+                declared_seed: s.declared_seed,
+                early_stopping: pack::EarlyStoppingDecl {
+                    monitor: es.monitor.clone(),
+                    mode: es.mode.clone(),
+                    eval_every_epochs: es.eval_every_epochs,
+                    first_candidate_epoch: es.first_candidate_epoch,
+                    patience_epochs: es.patience_epochs,
+                    min_delta: es.min_delta,
+                    restore: es.restore.clone(),
+                    tie_break: es.tie_break.clone(),
+                },
             },
             seed_selection_policy: s.selection.clone(),
             seed_selection_seeds: s.variance_seeds.clone(),
@@ -297,9 +448,14 @@ pub enum BaseWhich {
     Contract,
     /// The base dir's `model.safetensors` differs from the recipe's declared sha256.
     BaseDir,
-    /// The base dir's `tokenizer/tokenizer.json` differs from the run's
-    /// (`inputs_sha256.tokenizer_json`; the trainer copies the base tokenizer unchanged).
+    /// The base dir's `tokenizer/tokenizer.json` differs from the contract pin
+    /// (`base.tokenizer_json_sha256`) or from the run's (`inputs_sha256.tokenizer_json`; the
+    /// trainer copies the base tokenizer unchanged).
     BaseTokenizer,
+    /// The base dir's `encoder/config.json` differs from `base.encoder_config_sha256`.
+    EncoderConfig,
+    /// The base dir's `rl_agent_config.json` differs from `base.rl_agent_config_sha256`.
+    AgentConfig,
 }
 
 impl fmt::Display for BaseWhich {
@@ -312,6 +468,8 @@ impl fmt::Display for BaseWhich {
             Self::Contract => "contract",
             Self::BaseDir => "base_dir",
             Self::BaseTokenizer => "base_tokenizer",
+            Self::EncoderConfig => "encoder_config",
+            Self::AgentConfig => "agent_config",
         })
     }
 }
@@ -660,6 +818,17 @@ pub enum VerifyError {
         /// What is wrong.
         why: String,
     },
+    /// recipe.json differs from the contract's recipe block (D-04, V6-d): a recipe value, the
+    /// schedule literal, the seed, the epoch rule, an `early_stopping` field, or
+    /// `shots_per_class` against the data dir.
+    RecipeMismatch {
+        /// The recipe.json field (`encoder_lr`, `early_stopping.min_delta`, `epochs`, ...).
+        field: &'static str,
+        /// The recipe's value.
+        recipe: String,
+        /// What the contract (or the data dir) requires.
+        contract: String,
+    },
 }
 
 impl VerifyError {
@@ -707,6 +876,7 @@ impl VerifyError {
             Self::SeedPolicyMismatch { .. } => "SeedPolicyMismatch",
             Self::SeedPolicyMissing => "SeedPolicyMissing",
             Self::ShiftProbeMismatch { .. } => "ShiftProbeMismatch",
+            Self::RecipeMismatch { .. } => "RecipeMismatch",
         }
     }
 }
@@ -806,8 +976,8 @@ impl fmt::Display for VerifyError {
                 f,
                 "train rows {rows:?} carry one normalized text under different labels"
             ),
-            Self::SliceInvalid { why }
-            | Self::ProbsRowCoverage { why, .. } => write!(f, "{why}"),
+            Self::SliceInvalid { why } => write!(f, "{why}"),
+            Self::ProbsRowCoverage { which, why } => write!(f, "{which}: {why}"),
             Self::ProbsInvalid { which, row, why } => match row {
                 Some(r) => write!(f, "{which} row {r}: {why}"),
                 None => write!(f, "{which}: {why}"),
@@ -891,6 +1061,14 @@ impl fmt::Display for VerifyError {
             } => write!(
                 f,
                 "recipe.json seed_selection.{field} is {recipe}, the contract's seed_policy says {contract}"
+            ),
+            Self::RecipeMismatch {
+                field,
+                recipe,
+                contract,
+            } => write!(
+                f,
+                "recipe.json {field} is {recipe}, the contract requires {contract}"
             ),
             Self::SeedPolicyMissing => f.write_str(
                 "recipe.json carries no seed_selection: a legacy (1.x) run is never deploy-eligible \
@@ -1108,6 +1286,140 @@ pub fn check_variant(recipe: &Recipe) -> Result<(), VerifyError> {
     }
 }
 
+fn recipe_mismatch(field: &'static str, recipe: String, contract: String) -> VerifyError {
+    VerifyError::RecipeMismatch {
+        field,
+        recipe,
+        contract,
+    }
+}
+
+/// `recipe == contract`, bit for bit.
+fn recipe_f64(field: &'static str, recipe: f64, contract: f64) -> Result<(), VerifyError> {
+    if recipe.to_bits() == contract.to_bits() {
+        Ok(())
+    } else {
+        Err(recipe_mismatch(
+            field,
+            recipe.to_string(),
+            contract.to_string(),
+        ))
+    }
+}
+
+/// `recipe == contract` for a string or integer field.
+fn recipe_eq<T: PartialEq + fmt::Debug>(
+    field: &'static str,
+    recipe: &T,
+    contract: &T,
+) -> Result<(), VerifyError> {
+    if recipe == contract {
+        Ok(())
+    } else {
+        Err(recipe_mismatch(
+            field,
+            format!("{recipe:?}"),
+            format!("{contract:?}"),
+        ))
+    }
+}
+
+/// recipe.json equals the contract's recipe block (D-04, V6-d): `optimizer`, every learning
+/// rate, `eta_min`, `weight_decay`, `grad_clip`, `batch_size` and both reward weights (floats
+/// bit for bit), the `schedule` literal, `seed == seed_policy.declared_seed`, the epoch rule
+/// (`shots_per_class <= 16` -> exactly `epochs_at_most_16_per_class`; above 16 -> `epochs` in
+/// `[epochs_above_16_min, epochs_above_16_max]`), and — when recipe.json declares
+/// `early_stopping` — every field of it equal to the contract's `early_stopping` block (ABSENT is
+/// the declared `fixed_epochs` rule, allowed). Files only: decided before any model is built.
+///
+/// # Errors
+///
+/// [`VerifyError::RecipeMismatch`] naming the first field that differs.
+pub fn check_recipe_block(recipe: &Recipe, policy: &VerifyPolicy) -> Result<(), VerifyError> {
+    let c = &policy.recipe;
+    recipe_eq("optimizer", &recipe.optimizer, &c.optimizer)?;
+    recipe_f64("encoder_lr", recipe.encoder_lr, c.encoder_lr)?;
+    recipe_f64("head_lr", recipe.head_lr, c.head_lr)?;
+    recipe_f64("eta_min", recipe.eta_min, c.eta_min)?;
+    recipe_f64("weight_decay", recipe.weight_decay, c.weight_decay)?;
+    recipe_f64("grad_clip", recipe.grad_clip, c.grad_clip)?;
+    recipe_eq("batch_size", &recipe.batch_size, &c.batch_size)?;
+    recipe_f64(
+        "proper_reward_w_sph",
+        recipe.proper_reward_w_sph,
+        c.proper_reward_w_sph,
+    )?;
+    recipe_f64(
+        "proper_reward_w_rps",
+        recipe.proper_reward_w_rps,
+        c.proper_reward_w_rps,
+    )?;
+    recipe_eq("schedule", &recipe.schedule, &c.schedule)?;
+    recipe_eq("seed", &recipe.seed, &c.declared_seed)?;
+    let (lo, hi) = if recipe.shots_per_class <= 16 {
+        (c.epochs_at_most_16_per_class, c.epochs_at_most_16_per_class)
+    } else {
+        (c.epochs_above_16_min, c.epochs_above_16_max)
+    };
+    if !(lo..=hi).contains(&recipe.epochs) {
+        return Err(recipe_mismatch(
+            "epochs",
+            recipe.epochs.to_string(),
+            format!(
+                "an epoch count in [{lo}, {hi}] at {} shots/class (recipe.epoch_rule)",
+                recipe.shots_per_class
+            ),
+        ));
+    }
+    if let Some(es) = &recipe.early_stopping {
+        let c = &c.early_stopping;
+        recipe_eq("early_stopping.monitor", &es.monitor, &c.monitor)?;
+        recipe_eq("early_stopping.mode", &es.mode, &c.mode)?;
+        recipe_eq(
+            "early_stopping.eval_every_epochs",
+            &es.eval_every_epochs,
+            &c.eval_every_epochs,
+        )?;
+        recipe_eq(
+            "early_stopping.first_candidate_epoch",
+            &es.first_candidate_epoch,
+            &c.first_candidate_epoch,
+        )?;
+        recipe_eq(
+            "early_stopping.patience_epochs",
+            &es.patience_epochs,
+            &c.patience_epochs,
+        )?;
+        recipe_f64("early_stopping.min_delta", es.min_delta, c.min_delta)?;
+        recipe_eq("early_stopping.restore", &es.restore, &c.restore)?;
+        recipe_eq("early_stopping.tie_break", &es.tie_break, &c.tie_break)?;
+    }
+    Ok(())
+}
+
+/// recipe.json `shots_per_class` is what the trainer derives from the data dir: the largest
+/// class count of train.jsonl (`scripts/laya_train/train.py`), so the epoch rule is applied to
+/// the shots the run actually had.
+///
+/// # Errors
+///
+/// [`VerifyError::RecipeMismatch`] on `shots_per_class`.
+fn check_recipe_shots(recipe: &Recipe, train: &[DataRow], k: usize) -> Result<(), VerifyError> {
+    let shots = (0..k)
+        .map(|c| train.iter().filter(|r| r.label == c).count() as u64)
+        .max()
+        .unwrap_or(0);
+    if recipe.shots_per_class == shots {
+        Ok(())
+    } else {
+        Err(recipe_mismatch(
+            "shots_per_class",
+            recipe.shots_per_class.to_string(),
+            format!("{shots}, the largest class count of train.jsonl"),
+        ))
+    }
+}
+
 /// Streamed sha256 of a file (the base `model.safetensors` is 0.8 GB; the HF cache's symlink
 /// is followed).
 fn sha256_file(path: &Path) -> Result<String, VerifyError> {
@@ -1163,47 +1475,59 @@ pub fn check_base(
     Ok(())
 }
 
-/// The declared base as the zero-shot scorer, read ONCE and bound before it scores:
-/// `model.safetensors` must hash to the declared base sha256 — the very bytes that are built, so
-/// nothing can swap the file between [`check_base`]'s streamed hash and this load — and
-/// `tokenizer/tokenizer.json` must hash to the run's `inputs_sha256.tokenizer_json` (the
-/// trainer copies the base tokenizer into the checkpoint unchanged), so the baseline is not
-/// tokenized differently from the fine-tune it is compared with.
+/// One base-dir file's bytes against the sha256 it must have.
+fn base_file_matches(which: BaseWhich, bytes: &[u8], expected: &str) -> Result<(), VerifyError> {
+    let observed = sha256_hex(bytes);
+    if observed == expected {
+        Ok(())
+    } else {
+        Err(VerifyError::BaseMismatch {
+            which,
+            expected: expected.to_string(),
+            observed,
+        })
+    }
+}
+
+/// The declared base as the zero-shot scorer, read ONCE and bound before it scores: each of the
+/// four base-dir files is read once and those exact bytes are hashed and then built from, so
+/// nothing can swap a file between the hash and the load (V6-c). `model.safetensors` must hash to
+/// the declared (= contract) sha256, `encoder/config.json` and `rl_agent_config.json` to the
+/// contract's `base` pins, and `tokenizer/tokenizer.json` BOTH to the contract pin and to the
+/// run's `inputs_sha256.tokenizer_json` (the trainer copies the base tokenizer into the
+/// checkpoint unchanged), so the baseline is not tokenized differently from the fine-tune it is
+/// compared with.
 ///
 /// # Errors
 ///
-/// [`VerifyError::Read`], [`VerifyError::BaseMismatch`] (`base_dir` / `base_tokenizer`) or a
-/// [`VerifyError::Pack`] build refusal.
+/// [`VerifyError::Read`], [`VerifyError::BaseMismatch`] (`base_dir`, `encoder_config`,
+/// `agent_config`, `base_tokenizer`) or a [`VerifyError::Pack`] build refusal.
 fn load_declared_base(
     base_dir: &Path,
     task: Task,
     model_sha256: &str,
-    tokenizer_sha256: &str,
+    pins: &BasePins,
+    run_tokenizer_sha256: &str,
 ) -> Result<crate::laya::Laya, VerifyError> {
     let model = read_path(&base_dir.join("model.safetensors"))?;
-    let observed = sha256_hex(&model);
-    if observed != model_sha256 {
-        return Err(VerifyError::BaseMismatch {
-            which: BaseWhich::BaseDir,
-            expected: model_sha256.to_string(),
-            observed,
-        });
-    }
+    base_file_matches(BaseWhich::BaseDir, &model, model_sha256)?;
+    let encoder = read_path(&base_dir.join("encoder/config.json"))?;
+    base_file_matches(
+        BaseWhich::EncoderConfig,
+        &encoder,
+        &pins.encoder_config_sha256,
+    )?;
+    let agent = read_path(&base_dir.join("rl_agent_config.json"))?;
+    base_file_matches(BaseWhich::AgentConfig, &agent, &pins.rl_agent_config_sha256)?;
     let tokenizer = read_path(&base_dir.join("tokenizer/tokenizer.json"))?;
-    let observed = sha256_hex(&tokenizer);
-    if observed != tokenizer_sha256 {
-        return Err(VerifyError::BaseMismatch {
-            which: BaseWhich::BaseTokenizer,
-            expected: tokenizer_sha256.to_string(),
-            observed,
-        });
-    }
-    Ok(pack::scorer_from_parts(
-        &model,
-        &read_path(&base_dir.join("encoder/config.json"))?,
-        &read_path(&base_dir.join("rl_agent_config.json"))?,
+    base_file_matches(
+        BaseWhich::BaseTokenizer,
         &tokenizer,
-        task,
+        &pins.tokenizer_json_sha256,
+    )?;
+    base_file_matches(BaseWhich::BaseTokenizer, &tokenizer, run_tokenizer_sha256)?;
+    Ok(pack::scorer_from_parts(
+        &model, &encoder, &agent, &tokenizer, task,
     )?)
 }
 
@@ -1332,20 +1656,33 @@ fn check_slice_ids(calib: &GateCalibration, n_train: usize) -> Result<Vec<usize>
     Ok(ids)
 }
 
-/// Every class keeps at least `min_per_class` slice rows and at least one fit row.
+/// The slice rows a class of `in_class` train rows needs: `max(min_per_class,
+/// ceil(fraction x in_class))`, exactly as `scripts/laya_train/data.py` `calibration_split`
+/// computes it.
+fn slice_need(in_class: usize, fraction: f64, min_per_class: u64) -> u64 {
+    let by_fraction = (fraction * in_class as f64).ceil();
+    // A class count times a fraction <= 1 is a small non-negative integer after ceil.
+    min_per_class.max(by_fraction as u64)
+}
+
+/// Every class keeps at least `max(min_per_class, ceil(fraction x n_class))` slice rows (WR-08)
+/// and at least one fit row.
 fn check_slice_classes(
     ids: &[usize],
     train: &[DataRow],
     k: usize,
+    fraction: f64,
     min_per_class: u64,
 ) -> Result<(), VerifyError> {
     for c in 0..k {
         let in_class = train.iter().filter(|r| r.label == c).count();
         let in_slice = ids.iter().filter(|&&i| train[i].label == c).count();
-        if (in_slice as u64) < min_per_class || in_slice >= in_class {
+        let need = slice_need(in_class, fraction, min_per_class);
+        if (in_slice as u64) < need || in_slice >= in_class {
             return Err(slice_invalid(format!(
-                "class {c}: {in_slice} of {in_class} rows in the slice; need >= {min_per_class} \
-                 and at least one fit row"
+                "class {c}: {in_slice} of {in_class} rows in the slice; need >= {need} \
+                 (max(calibration_slice_min_per_class {min_per_class}, \
+                 ceil(calibration_slice_fraction {fraction} x {in_class}))) and at least one fit row"
             )));
         }
     }
@@ -1355,7 +1692,8 @@ fn check_slice_classes(
 /// laya-finetune-gate-v1 `split_disjointness`, re-derived from the data dir and the report's
 /// `slice_ids` (row indices only): no eval text equals a train text after normalization, no
 /// normalized train text carries two labels, and the calibration slice is well formed,
-/// stratified to the minimum and group-disjoint from the fit rows.
+/// stratified to `max(min_per_class, ceil(fraction x n_class))` per class and group-disjoint
+/// from the fit rows.
 ///
 /// # Errors
 ///
@@ -1367,6 +1705,7 @@ pub fn check_split(
     eval: &[DataRow],
     calib: &GateCalibration,
     k: usize,
+    fraction: f64,
     min_per_class: u64,
 ) -> Result<(), VerifyError> {
     let train_hash: HashMap<String, usize> = train
@@ -1387,7 +1726,7 @@ pub fn check_split(
     }
     let groups = group_train(train)?;
     let ids = check_slice_ids(calib, train.len())?;
-    check_slice_classes(&ids, train, k, min_per_class)?;
+    check_slice_classes(&ids, train, k, fraction, min_per_class)?;
     let in_slice = |i: &usize| ids.binary_search(i).is_ok();
     if let Some(g) = groups
         .iter()
@@ -2172,7 +2511,7 @@ fn check_seeds_block<'a>(
 /// laya-finetune-gate-v1 1.4.0 `seed_selection_median`, RE-DERIVED from the files.
 ///
 /// `Ok(None)` for a legacy recipe (no `seed_selection`; its report must carry no seed
-/// selection either) — [`verify_run`] refuses such a run [`VerifyError::SeedPolicyMissing`]
+/// selection either) — the pipeline refuses such a run [`VerifyError::SeedPolicyMissing`]
 /// only after its gate. For a recipe with `seed_selection`: the declaration equals the
 /// contract's; the seeds block names the declared seeds in order and ships one of them; the
 /// shipped row binds `checkpoint/model.safetensors` and `eval-probs.json` by sha256; every
@@ -2438,7 +2777,8 @@ struct Checked {
     shipped_seed: Option<i64>,
 }
 
-/// Steps 1-4 of the module docs: variant, base, hashes, split, probability files, the per-set
+/// Steps 1-4 of the module docs: variant, recipe block, base, hashes, shots, split, probability
+/// files, the per-set
 /// re-score bounds (A1), the thresholds, the re-derived seed selection (A3) and the shift probe
 /// (A2) — files only, so all of it is decided before any model is built.
 fn cheap_checks(
@@ -2448,17 +2788,20 @@ fn cheap_checks(
     policy: &VerifyPolicy,
 ) -> Result<Checked, VerifyError> {
     check_variant(&inputs.recipe)?;
+    check_recipe_block(&inputs.recipe, policy)?;
     check_base(base_dir, &inputs.recipe, policy)?;
     let data = read_data_dir(data_dir)?;
     check_inputs(inputs, &data)?;
     let labels = data.task.owned_labels();
     check_eval_coverage(&data.eval, &labels)?;
     let k = labels.len();
+    check_recipe_shots(&inputs.recipe, &data.train, k)?;
     check_split(
         &data.train,
         &data.eval,
         &inputs.gate_report.calibration,
         k,
+        policy.calibration_slice_fraction,
         policy.calibration_slice_min_per_class,
     )?;
     let ft_probs = validate_probs(
@@ -2511,6 +2854,7 @@ fn verify_loaded(
         base_dir,
         checked.task.clone(),
         &inputs.recipe.base.sha256,
+        &policy.base,
         &inputs.gate_report.inputs_sha256.tokenizer_json,
     )?;
     let zs = rescore(
@@ -2575,11 +2919,17 @@ fn verify_loaded(
 /// the order of the module docs: cheap checks first, the two full re-scores last, the
 /// fine-tuned one on [`Decider::load_bytes`] of `packed` — the whole ladder, probes included.
 ///
+/// NOT an eligibility door (WR-02): the bytes here are the caller's claim of what the run packs
+/// to, so it is test-only (`cfg(test)`, the unit tests' way to verify induced run copies). The
+/// only eligibility doors are [`pack_for_serving`] (packs the bytes itself) and [`verify_path`]
+/// (binds an existing file to a fresh pack of its run).
+///
 /// # Errors
 ///
 /// The first refusal, as a [`VerifyError`]; [`VerifyError::GateFailed`] (exit code 3) when
 /// every input verified and the recomputed gate failed.
-pub fn verify_run(
+#[cfg(test)]
+pub(crate) fn verify_run(
     inputs: &PackInputs,
     packed: &[u8],
     data_dir: &Path,
@@ -2591,8 +2941,18 @@ pub fn verify_run(
     verify_loaded(inputs, checked, decider, base_dir, policy)
 }
 
-/// Write `bytes` to `out` atomically: a temp file in `out`'s directory, then a rename. A
-/// failure removes the temp file.
+/// A process-wide counter that makes every [`write_atomic`] temp name unique.
+static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Fresh temp names [`write_atomic`] tries before giving up.
+const WRITE_TMP_ATTEMPTS: usize = 8;
+
+/// Write `bytes` to `out` atomically: a temp file in `out`'s directory, then a rename.
+///
+/// The temp file is opened `create_new` (O_CREAT | O_EXCL) under a per-call unique name (pid
+/// plus a process-wide counter), so an existing path or a planted symlink at that name is never
+/// followed or truncated (V8-c): an occupied name is skipped for the next, and after
+/// [`WRITE_TMP_ATTEMPTS`] occupied names the write is refused. On any failure only a file THIS
+/// call created is removed.
 fn write_atomic(out: &Path, bytes: &[u8]) -> Result<(), VerifyError> {
     let dir = match out.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -2605,19 +2965,44 @@ fn write_atomic(out: &Path, bytes: &[u8]) -> Result<(), VerifyError> {
     let name = out
         .file_name()
         .map_or_else(|| "out".into(), |n| n.to_string_lossy().into_owned());
-    let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
-    let result = std::fs::File::create(&tmp)
-        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
-        .and_then(|()| std::fs::rename(&tmp, out));
-    if let Err(e) = result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(io(out, e));
+    let mut last = None;
+    for _ in 0..WRITE_TMP_ATTEMPTS {
+        let seq = WRITE_SEQ.fetch_add(1, AtomicOrdering::Relaxed);
+        let tmp = dir.join(format!(".{name}.tmp-{}-{seq}", std::process::id()));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last = Some((tmp, e));
+                continue;
+            }
+            Err(e) => return Err(io(&tmp, e)),
+        };
+        // From here the temp file is ours: remove it (and only it) on any failure.
+        let result = file
+            .write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| {
+                drop(file);
+                std::fs::rename(&tmp, out)
+            });
+        if let Err(e) = result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(io(out, e));
+        }
+        return Ok(());
     }
-    Ok(())
+    Err(match last {
+        Some((tmp, e)) => io(&tmp, e),
+        None => io(out, std::io::Error::other("no temp name was tried")),
+    })
 }
 
 /// Pack a run dir FOR SERVING: read it, run the cheap checks, pack the bytes in memory,
-/// verify them ([`verify_run`]'s steps on those exact bytes), and ONLY on acceptance write
+/// verify them (the pipeline's steps on those exact bytes), and ONLY on acceptance write
 /// them to `out` atomically. On any refusal nothing is created in `out`'s directory.
 ///
 /// # Errors
@@ -2643,7 +3028,7 @@ pub fn pack_for_serving(
 /// it once (bounded, rung 1) and load those bytes through the whole ladder, require its
 /// manifest to describe the given run and data dirs (recipe_id, report sha256, input hashes,
 /// labels), require the file to BE the bytes that run packs to, then every step of
-/// [`verify_run`] with the fine-tuned re-score on that loaded file.
+/// the pipeline with the fine-tuned re-score on that loaded file.
 ///
 /// The byte binding is what makes the re-score sufficient: the re-score only exercises the
 /// weights the eval rows and probes reach, so without it a file whose unexercised weights
@@ -2654,7 +3039,7 @@ pub fn pack_for_serving(
 /// # Errors
 ///
 /// [`VerifyError::Artifact`] for a ladder refusal, [`VerifyError::ManifestMismatch`],
-/// [`VerifyError::ArtifactNotFromRun`], or any [`verify_run`] refusal.
+/// [`VerifyError::ArtifactNotFromRun`], or any refusal of the pipeline.
 pub fn verify_path(
     apr: &Path,
     run_dir: &Path,
