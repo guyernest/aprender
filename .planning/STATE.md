@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Completed 08-25-PLAN.md (probe identity: response_labels_match in ok(), exact labels-segment parse, check_token_budget shared, args_os exit 2, template comments; 5 mutations RED)"
-last_updated: "2026-09-28T19:34:16.412Z"
+stopped_at: "Completed 08-24-PLAN.md (Lambda shim: watch_loopback exit, POST-only load + 405, config-checked health 503, one CORS origin, too_large mapping, item-scoped allows, request rows swept; 10 mutations RED incl. V4-a)"
+last_updated: "2026-09-28T19:54:56.493Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: c30e1e8e66cf1bd89961c08721793c0bac2dea96
+state_head: 951c2b4d12958b2ac153620a0068d5374ec90c6f
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 116
+  completed_plans: 117
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 24 of 32 complete (08-01..08-23, 08-25; 08-25 ran before 08-24 by wave order) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-25 COMPLETE (deploy-evidence half of class A on the probe: ProbeReport.response_labels_match, ok() = AND of one-classify-tool, exact labels segment, response labels, sha256 (V12-a); labels_in_order parses the literal `The labels, in this order: [...]` segment (IN-03; the old walk accepted [billing, shipping, account] on the real tiny description via the criteria lines); build_maximal_request decides fit with check_token_budget and OverBudget carries the server's refusal (R6); probe example args_os, non-UTF-8 argv exit 2 (old build 101, V12-c); deploy.toml.template comments: POST identity probe is the tell, shared crates root (IN-04), non-comment lines cmp-identical; 5 mutations RED + 1 equivalent survivor recorded; 35/35 lib tests; no AWS); next 08-24
+Plan: 25 of 32 complete (08-01..08-25; 08-25 ran before 08-24 by wave order) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-24 COMPLETE (Lambda runtime shim: watch_loopback exits the process when the loopback task ends (WR-06, proven on a real loopback); route(): only POST loads, HEAD/PUT/DELETE/... 405 before LOADED (V4-c); health(): 200 ok:true only on a parsed APRENDER_DECIDE_* config, else 503 ok:false + config_error (A4-6); proxied_headers: one access-control-allow-origin (IN-06); map_bounded_read_error: rung-1 ArtifactTooLarge -> too_large, post-read branch deleted (V3-d, R2); OnceCell docs, lock-named test renamed (V3-c); crate-wide disallowed_methods allows gone, item-level only (planted unwraps in lib.rs/probe.rs/main.rs fail clippy; IN-05 Lambda half); lambda_request_rows_are_swept swept=2, frame_http exactly 413 with an at-bound 200 control; 10 mutations RED incl. V4-a fill_part resume; 42/42 lib tests; AWS calls 0, no redeploy); next 08-26
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -237,6 +237,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P22 | 102min | 3 tasks | 7 files |
 | Phase 08 P23 | 17min | 3 tasks | 7 files |
 | Phase 08 P25 | 12min | 3 tasks | 3 files |
+| Phase 08 P24 | 16min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -448,6 +449,8 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-23: decide-tool-boundary-v1 4.0.0 (pv diff MAJOR on the classify_count_bound invariant); served_fields and untrusted_input_bounds are top-level tables pv ignores and a crate test sweeps row by row (unknown id or row without a case fails)
 - [Phase 08]: 08-23: frame_stdio accepted (pmcp 2.19.3 has no stdio framing cap; local transport); the sweep asserts the count bound on a 100000-element parsed array and pins pmcp 2.19.3 in Cargo.lock so a bump re-opens it
 - [Phase 08]: 08-25: the deploy probe's ok() is the AND of four checks against the local artifact (one classify tool, exact labels segment, response labels, sha256); MaximalError::OverBudget carries the server's check_token_budget refusal verbatim (one budget function)
+- [Phase 08]: 08-24: the Lambda bootstrap's decisions are pure lib functions (route: only POST loads, 405 otherwise; health: 503 ok:false with config_error on an unparseable APRENDER_DECIDE_* config; proxied_headers: one CORS origin); a dead loopback exits the process via watch_loopback
+- [Phase 08]: 08-24: Lambda crate unwrap ban is crate-wide again (item-level json! allows only; planted unwraps in lib.rs, probe.rs, main.rs fail clippy); its two untrusted_input_bounds rows are swept by lambda_request_rows_are_swept (frame_http exactly 413 with an at-bound 200 control)
 
 ### Pending Todos
 
@@ -563,8 +566,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-28T19:34:16.212Z
-Stopped at: Completed 08-25-PLAN.md (probe identity: response_labels_match in ok(), exact labels-segment parse, check_token_budget shared, args_os exit 2, template comments; 5 mutations RED)
+Last session: 2026-09-28T19:54:56.293Z
+Stopped at: Completed 08-24-PLAN.md (Lambda shim: watch_loopback exit, POST-only load + 405, config-checked health 503, one CORS origin, too_large mapping, item-scoped allows, request rows swept; 10 mutations RED incl. V4-a)
 Resume file: None
 
 ## Accumulated Context
