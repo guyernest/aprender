@@ -3000,3 +3000,42 @@ fn f_avg_null_rule_enforced() {
         );
     }
 }
+
+/// Plan 08-27 mutation record, made a checked fact: the per-bin CONFIDENCE sums of the ECE are
+/// exact in f64 on every numeric case (each term is a float32 value >= 1/K widened, so its
+/// mantissa spans at most 24 bits and far fewer than 2^26 rows cannot round), which is why
+/// summing them sequentially instead of with fsum is an EQUIVALENT mutant, while the cross-bin
+/// TERM sum is not exact and must be fsum (mutants M8 / M9 turn the replay RED). If a later
+/// change feeds wider inputs, this test says the equivalence argument no longer holds.
+#[test]
+fn ece_bin_confidence_sums_are_exact_in_f64() {
+    let doc = numeric_cases();
+    let mut sets = 0usize;
+    let mut bin_sums = 0usize;
+    for case in doc["cases"].as_array().expect("cases") {
+        let bins = case["bins"].as_u64().expect("bins") as usize;
+        for key in ["probabilities_f32_hex", "zero_shot_probabilities_f32_hex"] {
+            let Some(rows) = case.get(key) else { continue };
+            sets += 1;
+            let mut per_bin: Vec<Vec<f64>> = vec![Vec::new(); bins];
+            for row in hex_rows(rows, key) {
+                let conf = f64::from(row[crate::laya::argmax(&row)]);
+                per_bin[((conf * bins as f64).floor() as usize).min(bins - 1)].push(conf);
+            }
+            for confs in per_bin.iter().filter(|c| !c.is_empty()) {
+                bin_sums += 1;
+                let seq = confs.iter().fold(0.0_f64, |a, b| a + b);
+                let exact = aprender::metrics::fsum(confs.iter().copied());
+                assert_eq!(
+                    seq.to_bits(),
+                    exact.to_bits(),
+                    "a bin confidence sum rounded"
+                );
+            }
+        }
+    }
+    assert!(
+        sets >= 23 && bin_sums > 100,
+        "{sets} sets, {bin_sums} bin sums"
+    );
+}
