@@ -751,3 +751,60 @@ declared run passed.
 The calibration-spike todo (`.planning/todos/pending/spike-laya-calibration-slice-and-temperature-cap.md`)
 is ANSWERED by spikes 027/028 and amendments A1-A3 (declared in 08-13, run in 08-16); the workflow
 moves the todo file, not this plan.
+
+## Gap round 08-19..08-32 (planned 2026-09-28)
+
+One class-wide round, by the user's decision: each defect CLASS gets an invariant (a `must_haves`
+truth), a checked-in enumeration of its whole surface, one sweeping test or gate, and a red-side
+(mutation) proof per bound. Owning plans:
+
+- **A, provenance binding:** 08-19 (load: every manifest leaf bound to its blob), 08-21 (verify: every
+  run-dir field bound or report-only), 08-23 (served fields), 08-25 (probe evidence), 08-27 (f_avg).
+- **B, untrusted-input bounds:** 08-20 (apr-format reader, ModernBERT layer), 08-26 (artifact table and
+  sweep), 08-23 (request table and sweep), 08-24 (Lambda-owned request rows).
+- **C, gate honesty:** 08-22 (`scripts/laya_gates.tsv`, `just laya-gates-selftest`).
+- **D, claim honesty:** 08-28 (classify tool claims), 08-31 (`scripts/laya_claims.tsv`, `just laya-claims-check`).
+- **E, Rust-Python agreement:** 08-27 (numeric), 08-29 (Python reader, rows, refusals).
+- Composition and CI: 08-32 (`just laya-gap-regression`; first CI run of Phase 8 code).
+
+Owner decisions taken inside the round (plan 08-31 records each outcome here): WR-03 and the V5-a
+wire-code side note (08-28), V4-b and any redeploy (08-30), D-14 publication (08-31). A "keep" or
+"defer" answer leaves the item below with its decision date.
+
+### Deferred at planning time (reason, re-open trigger)
+
+- **V13-e** (NFC Unicode 17 in Rust vs 15.1 in Python 3.13.7): fails closed (a Unicode 16/17 composition
+  pair makes Rust see an overlap Python did not, so verify refuses late; it never admits a leak). The fix
+  is pinning one Unicode version for both sides, a workspace dependency decision. Re-open on an honest run
+  refused for such a pair, or on any unicode-normalization / Python upgrade.
+- **V14-b** (PLAUSIBLE) and **CV3** (the contract-audit-phase8 resolver re-implements what `pv
+  verify-bindings` should do): extending pv is its own ticket (CLAUDE.md contract rule, option 2). The
+  shell resolver gains a must-match / must-not-match table in 08-22. Re-open when pv resolves module paths.
+- **R1** (`normalize_text` duplicates aprender-contrastive-data's normalized hash): quality only; reuse
+  would add a cross-crate dependency edge.
+- **R3 / AL6** (contract-audit-phase8 is a copy of the phase-6 target): a Makefile refactor spanning a
+  non-Phase-8 target.
+- **R4 / AL4** (third copy of the loopback proxy; an in-process router instead): architectural and shared
+  with the chronos and setfit Lambda crates; its own plan.
+- **R7** (fixtures.py re-implements `data.calibration_split`): regenerating the tiny fixture moves the
+  committed goldens (laya_tiny.apr.sha256) for no behaviour change.
+- **R8 remainder** (bucket naming x4, the duplicated eligibility parse in laya-upload): refactor only; the
+  sha256 helper part is fixed in 08-22.
+- **S2, S3, S5, S7, S8** (redundant re-hash in check_inputs, the lambda build_server alias, duplicated
+  report fields, write-only fields, hand-copied NaN-max): simplification only, no defect; a /simplify
+  follow-up.
+- **EF2..EF8** (per-element F16 widening, double finiteness scan, per-row forwards, full embedding widen,
+  double pack probe, verify materialising the checkpoint, base read twice): owner is the perf plan that
+  already owns D-ITEM-08-17-C / -E; re-open if any cold sample comes within 1 s of the 30 s cap.
+- **CV6** (twelve new functions above complexity 10): with D-ITEM-08-12-A (the verify.rs split).
+- **V2-a residual** (apr-format's MAX_METADATA_SIZE is unenforced for non-decide consumers): shared reader
+  policy that could refuse legitimate large-metadata APR files; the decide ladder bounds it at rung 2.
+- **Guard offenders that are not Phase 8's**, so the next CI run's red is attributed: hand-rolled argv in
+  aprender-mcp-chronos, aprender-mcp-forecast, aprender-mcp-setfit, aprender-mcp-setfit-train; cascade
+  TIERS missing aprender-contrastive-data. D-ITEM-08-01-A (strict-binding vacuity) stays open; the Phase 8
+  contracts' test references are checked by `just laya-claims-check` from 08-31.
+
+### Not open (refuted by the /code-review max verdicts)
+
+V8-a, V8-b, V12-d, V4-d, V9-c, V9-e, and the behaviour half of V14-d (its comment half is 08-31);
+raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.

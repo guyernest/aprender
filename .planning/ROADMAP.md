@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 18/18 plans executed in 16 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; 08-11 complete: D-18 go/no-go recorded as a human-decided HOLD (hold-no-aws). Gap closure 08-13..08-18 added 2026-09-27 (user decision, option 1 from spikes 027/028): declare A1 noise-referenced pack bar + A2 in-distribution eval set + A3 median-of-three seed policy, wire them, ONE declared s64 gate run, then a human-approved live deploy; 08-12 close-out moves to Wave 16)
+**Plans:** 18/32 plans executed; gap round 08-19..08-32 planned in waves 17-21 (2026-09-28). Executed history: 18 plans in 16 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; 08-11 complete: D-18 go/no-go recorded as a human-decided HOLD (hold-no-aws). Gap closure 08-13..08-18 added 2026-09-27 (user decision, option 1 from spikes 027/028): declare A1 noise-referenced pack bar + A2 in-distribution eval set + A3 median-of-three seed policy, wire them, ONE declared s64 gate run, then a human-approved live deploy; 08-12 close-out moves to Wave 16)
 
 Plans:
 **Wave 1**
@@ -713,3 +713,34 @@ Plans:
 **Wave 16** *(blocked on Wave 15 completion)*
 
 - [x] 08-12-PLAN.md — CI-edit checkpoint (six targets + strict audit), CLAUDE.md D-16 exception row (claims licensed by the gate-run and live-deploy records), bindings implemented (live row per the final live outcome), tightened audit, focused/full/excluded CI-equivalent run
+
+**Gap round 08-19..08-32** (added 2026-09-28 from 08-VERIFICATION gaps_found, 08-REVIEW and 08-CODE-REVIEW-FINDINGS; user decision: ONE class-wide round — each class A provenance / B input bounds / C gate honesty / D claim honesty / E Rust-Python agreement gets an invariant, a checked-in enumeration, a sweep and mutation proofs)
+
+**Wave 17** *(blocked on Wave 16 completion)*
+
+- [ ] 08-19-PLAN.md — class A load side: every manifest leaf bound to its sha-bound blob at rung 4 on every load door (CR-01 load side), leaf sweep vs a decide-apr-v1 table, deployed artifact re-verified
+- [ ] 08-20-PLAN.md — class B shared readers: apr-format refuses duplicate tensor names and bounds its index reservation (test that fails when reverted), ModernBertLayer empty/shape guards
+- [ ] 08-21-PLAN.md — class A verify side: one typed contract-to-policy mapping, base identity + base-file pins, recipe block, slice fraction, run-field table and sweep
+- [ ] 08-22-PLAN.md — class C: scripts/laya_gates.tsv + `just laya-gates-selftest`; SKIP/ladder verdict, IAM listing and grant honesty, one hash helper, resolver ERE case table, bootstrap intent
+- [ ] 08-23-PLAN.md — stdio server: count before materialising texts, clap argv, scoped lint allow, served-fields and request-bounds tables with sweeps
+- [ ] 08-25-PLAN.md — deploy probe: response labels bound to the artifact, exact labels segment, shared budget, args_os, template comments
+
+**Wave 18** *(blocked on Wave 17 completion)*
+
+- [ ] 08-24-PLAN.md — Lambda runtime: dead loopback exits, POST-only loads, one CORS origin, too_large mapping, honest OnceCell docs, Lambda request rows swept
+- [ ] 08-26-PLAN.md — class B artifact side: duplicate names at rung 4, criteria bound, tokenizer truncation off, header version, rung-7 replay, bounded inspect, contract table + sweep
+- [ ] 08-27-PLAN.md — class E numeric: f64 + exactly-rounded sums in aprender-core and metrics.py, frozen boundary cases replayed bit-for-bit by both, f_avg recomputed
+- [ ] 08-28-PLAN.md — classify tool claims: admission measured over stdio, owner decision on the truncation sentence (WR-03) and refusal wire code (V5-a), refusal formula fixed
+
+**Wave 19** *(blocked on Wave 18 completion)*
+
+- [ ] 08-29-PLAN.md — class E Python: typed contract reader, '\n'-only rows, REFUSED not tracebacks, early-stopping contract made one rule, python_refusals sweep
+- [ ] 08-30-PLAN.md — offline positive dry run of the hardened deploy path, owner decision on redeploy + cold measurement (V4-b), D-18 3,008 MB amendment
+
+**Wave 20** *(blocked on Wave 19 completion)*
+
+- [ ] 08-31-PLAN.md — class D: scripts/laya_claims.tsv + `just laya-claims-check`, pack-free load path, argmax/ui.rs, owner decision on aprender-decide publication (D-14), deferred-items final statuses
+
+**Wave 21** *(blocked on Wave 20 completion)*
+
+- [ ] 08-32-PLAN.md — `just laya-gap-regression` (all five class sweeps + phase regression + real artifact) and the first CI run of Phase 8 code (workspace-test green)
