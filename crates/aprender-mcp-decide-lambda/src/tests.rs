@@ -518,3 +518,126 @@ fn artifact_too_large_maps_to_too_large() {
     });
     assert_eq!(err.kind(), "read", "{err}");
 }
+
+// -------------------------------------------- class B: the request rows this crate owns
+
+const THIS_CRATE: &str = "aprender-mcp-decide-lambda";
+
+/// decide-tool-boundary-v1 `untrusted_input_bounds` rows owned by this crate.
+fn owned_request_rows() -> Vec<serde_yaml::Value> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contracts/decide-tool-boundary-v1.yaml");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    doc.get("untrusted_input_bounds")
+        .and_then(serde_yaml::Value::as_sequence)
+        .expect("decide-tool-boundary-v1 must define an `untrusted_input_bounds:` sequence")
+        .iter()
+        .filter(|row| {
+            row.get("owner_crate").and_then(serde_yaml::Value::as_str) == Some(THIS_CRATE)
+        })
+        .cloned()
+        .collect()
+}
+
+/// A row's `bound` as an integer; panics naming the row.
+fn row_bound(row: &serde_yaml::Value, id: &str) -> usize {
+    row.get("bound")
+        .and_then(serde_yaml::Value::as_u64)
+        .and_then(|b| usize::try_from(b).ok())
+        .unwrap_or_else(|| panic!("row {id}: `bound` must be an integer literal"))
+}
+
+/// A valid stateless `tools/call classify` frame padded with trailing JSON whitespace to
+/// exactly `len` bytes.
+fn classify_frame_of_len(len: usize) -> String {
+    let frame = format!(
+        r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"{}","arguments":{{"texts":["My parcel never arrived."]}}}}}}"#,
+        aprender_mcp_decide::TOOL_NAME
+    );
+    assert!(
+        frame.len() <= len,
+        "the frame itself is {} bytes",
+        frame.len()
+    );
+    let mut padded = frame;
+    padded.push_str(&" ".repeat(len - padded.len()));
+    padded
+}
+
+async fn post_frame(url: &str, body: String) -> (u16, String) {
+    let resp = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client")
+        .post(format!("{url}/"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(body)
+        .send()
+        .await
+        .expect("the loopback answers");
+    let status = resp.status().as_u16();
+    (status, resp.text().await.expect("a body"))
+}
+
+/// Class B, Lambda half: every `untrusted_input_bounds` row this crate owns is dispatched by
+/// id to a hostile case (an unknown id, or an owned row without a case, FAILS).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lambda_request_rows_are_swept() {
+    let rows = owned_request_rows();
+    assert!(!rows.is_empty(), "no rows owned by {THIS_CRATE}");
+    let mut swept = 0usize;
+    for row in &rows {
+        let id = row
+            .get("id")
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or_else(|| panic!("row {row:?} has no id"));
+        assert_eq!(
+            row.get("disposition").and_then(serde_yaml::Value::as_str),
+            Some("enforced"),
+            "{id}: a row this crate owns is enforced here"
+        );
+        let bound = row_bound(row, id);
+        match id {
+            "frame_http" => {
+                // The literal is the stateless config's cap, the one the bootstrap serves.
+                assert_eq!(bound, server_config().max_request_bytes, "{id}");
+                let url = serve(tiny_model()).await;
+                // Control: a frame of exactly the bound is read and classified.
+                let (status, body) = post_frame(&url, classify_frame_of_len(bound)).await;
+                assert_eq!(status, 200, "{id}: an at-bound frame is served: {body}");
+                assert!(body.contains("artifact_sha256"), "{id}: classified: {body}");
+                // Hostile: one byte over is refused with exactly 413, before any classify.
+                let (status, body) = post_frame(&url, classify_frame_of_len(bound + 1)).await;
+                assert_eq!(status, 413, "{id}: one byte over the bound: {body}");
+                assert!(
+                    !body.contains("artifact_sha256"),
+                    "{id}: no classify ran: {body}"
+                );
+            }
+            "probe_id_header" => {
+                assert_eq!(bound, PROBE_ID_MAX_LEN, "{id}");
+                let at = "a".repeat(bound);
+                assert_eq!(
+                    parse_probe_id(Some(&at)),
+                    Some(at.as_str()),
+                    "{id}: at the bound"
+                );
+                let over = "a".repeat(bound + 1);
+                assert_eq!(
+                    parse_probe_id(Some(&over)),
+                    None,
+                    "{id}: one over the bound"
+                );
+                for hostile in ["x\nperformed_load=true", "id=1", "a b", "é", ""] {
+                    assert_eq!(parse_probe_id(Some(hostile)), None, "{id}: {hostile:?}");
+                }
+            }
+            other => panic!("row {other} is owned by {THIS_CRATE} but has no case here"),
+        }
+        swept += 1;
+    }
+    println!("LAMBDA REQUEST BOUNDS swept={swept}");
+}
