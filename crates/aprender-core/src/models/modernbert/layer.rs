@@ -409,8 +409,7 @@ impl ModernBertLayer {
 #[cfg(test)]
 mod tests {
     use super::{
-        attention, gelu_exact, key_range, layer_norm, rope_inv_freq, rope_tables_started,
-        RopeTable,
+        attention, gelu_exact, key_range, layer_norm, rope_inv_freq, rope_tables_started, RopeTable,
     };
     use crate::models::modernbert::test_support::fixture_encoder;
     use crate::models::modernbert::ModernBertError;
