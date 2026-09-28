@@ -35,15 +35,19 @@
 //! 2 every other refusal (including a usage error).
 //!
 //! THE POLICY IS NOT AN ARGUMENT. Thresholds, `ece_bins`, `gate_metric_recompute_abs`,
-//! `calibration_slice_min_per_class`, the base sha256 and the `seed_policy` (selection, seeds,
+//! `calibration_slice_min_per_class`, the `base` block and the `seed_policy` (selection, seeds,
 //! rank_scale, tie_break) are read from `contracts/laya-finetune-gate-v1.yaml`, and the
 //! re-score floor `pack_rescore_probs_abs`, the
 //! noise multiplier `pack_rescore_noise_k` and the ceiling `pack_rescore_bound_max_abs` from
-//! `contracts/laya-parity-v1.yaml`, at run time. The CLI accepts only the path arguments above
-//! and reads no environment variable: there is no way to hand it another policy.
+//! `contracts/laya-parity-v1.yaml`, at run time, into the library's typed views and through
+//! its one mapping `VerifyPolicy::from_contract_views` (the tests use the same). The CLI
+//! accepts only the path arguments above and reads no environment variable: there is no way to
+//! hand it another policy.
 
 use aprender_decide::artifact;
-use aprender_decide::verify::{self, VerifyError, VerifyPolicy};
+use aprender_decide::verify::{
+    self, GateContractView, ParityContractView, VerifyError, VerifyPolicy,
+};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -52,8 +56,8 @@ const USAGE: &str = "usage: pack_laya pack --run DIR --data DIR --base DIR --out
                      | pack-fixture --run DIR --data DIR --out FILE";
 
 /// A contract file from the workspace root (resolved from this crate's manifest dir at
-/// compile time — never from the environment).
-fn contract(name: &str) -> Result<serde_yaml::Value, String> {
+/// compile time — never from the environment), parsed into the library's typed view.
+fn contract<T: serde::de::DeserializeOwned>(name: &str) -> Result<T, String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../contracts")
         .join(name);
@@ -61,71 +65,12 @@ fn contract(name: &str) -> Result<serde_yaml::Value, String> {
     serde_yaml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn at<'a>(v: &'a serde_yaml::Value, keys: &[&str]) -> &'a serde_yaml::Value {
-    keys.iter().fold(v, |v, k| &v[*k])
-}
-
-fn f64_at(v: &serde_yaml::Value, keys: &[&str]) -> Result<f64, String> {
-    at(v, keys).as_f64().ok_or_else(|| {
-        format!(
-            "contract value {} is missing or not a number",
-            keys.join(".")
-        )
-    })
-}
-
-fn u64_at(v: &serde_yaml::Value, keys: &[&str]) -> Result<u64, String> {
-    at(v, keys).as_u64().ok_or_else(|| {
-        format!(
-            "contract value {} is missing or not an integer",
-            keys.join(".")
-        )
-    })
-}
-
-fn str_at(v: &serde_yaml::Value, keys: &[&str]) -> Result<String, String> {
-    at(v, keys).as_str().map(str::to_string).ok_or_else(|| {
-        format!(
-            "contract value {} is missing or not a string",
-            keys.join(".")
-        )
-    })
-}
-
-/// The verify policy, read from the contracts (never literals).
+/// The verify policy, read from the contracts (never literals) through the library's ONE
+/// mapping, `VerifyPolicy::from_contract_views`.
 fn policy() -> Result<VerifyPolicy, String> {
-    let gate = contract("laya-finetune-gate-v1.yaml")?;
-    let parity = contract("laya-parity-v1.yaml")?;
-    let c = |k: &'static str| ["constants", k];
-    Ok(VerifyPolicy {
-        min_macro_f1_margin: f64_at(&gate, &c("gate_min_macro_f1_margin"))?,
-        max_ece: f64_at(&gate, &c("gate_max_ece"))?,
-        ece_bins: u64_at(&gate, &c("ece_bins"))?,
-        metric_recompute_abs: f64_at(&gate, &c("gate_metric_recompute_abs"))?,
-        rescore_probs_abs: f64_at(
-            &parity,
-            &["equations", "pack_rescore_probs_abs", "float_tolerance"],
-        )?,
-        rescore_noise_k: f64_at(&parity, &c("pack_rescore_noise_k"))?,
-        rescore_bound_max_abs: f64_at(&parity, &c("pack_rescore_bound_max_abs"))?,
-        calibration_slice_min_per_class: u64_at(&gate, &c("calibration_slice_min_per_class"))?,
-        base_sha256: at(&gate, &["base", "model_safetensors_sha256"])
-            .as_str()
-            .ok_or("contract value base.model_safetensors_sha256 is missing")?
-            .to_string(),
-        seed_selection_policy: str_at(&gate, &["seed_policy", "selection"])?,
-        seed_selection_seeds: at(&gate, &["seed_policy", "variance_seeds"])
-            .as_sequence()
-            .ok_or("contract value seed_policy.variance_seeds is missing")?
-            .iter()
-            .map(|s| {
-                s.as_i64()
-                    .ok_or_else(|| "seed_policy.variance_seeds holds a non-integer".to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        seed_rank_scale: f64_at(&gate, &["seed_policy", "rank_scale"])?,
-        seed_tie_break: str_at(&gate, &["seed_policy", "tie_break"])?,
-    })
+    let gate: GateContractView = contract("laya-finetune-gate-v1.yaml")?;
+    let parity: ParityContractView = contract("laya-parity-v1.yaml")?;
+    Ok(VerifyPolicy::from_contract_views(&gate, &parity))
 }
 
 /// The ONLY arguments any subcommand takes.

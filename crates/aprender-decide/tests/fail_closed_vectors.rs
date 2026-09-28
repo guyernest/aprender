@@ -34,12 +34,14 @@
 //! neither recipe carries `seed_selection`, so the legacy rule applies, whose `SeedPolicyMissing`
 //! comes only after the gate and is never reached by either vector.
 
+mod common;
+
 use aprender_decide::artifact::artifact_sha256_hex;
 use aprender_decide::pack::pack_run_dir;
 use aprender_decide::verify::{
     pack_for_serving, verify_path, GateClause, ProbsWhich, VerifyError, VerifyPolicy,
 };
-use sha2::{Digest, Sha256};
+use common::{contract, policy, workspace_root};
 use std::path::{Path, PathBuf};
 
 const ENV_MODEL: &str = "LAYA_MODEL_DIR";
@@ -69,64 +71,6 @@ fn expected(recipe_id: &str) -> Option<Expected> {
     }
 }
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn contract(name: &str) -> serde_yaml::Value {
-    let path = workspace_root().join("contracts").join(name);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
-    serde_yaml::from_str(&text).unwrap_or_else(|e| panic!("parse {name}: {e}"))
-}
-
-fn f64_at(v: &serde_yaml::Value, keys: &[&str]) -> f64 {
-    keys.iter()
-        .fold(v, |v, k| &v[*k])
-        .as_f64()
-        .unwrap_or_else(|| panic!("contract value {}", keys.join(".")))
-}
-
-/// The contract policy, read exactly as `examples/pack_laya.rs` reads it.
-fn policy() -> VerifyPolicy {
-    let gate = contract("laya-finetune-gate-v1.yaml");
-    let parity = contract("laya-parity-v1.yaml");
-    VerifyPolicy {
-        min_macro_f1_margin: f64_at(&gate, &["constants", "gate_min_macro_f1_margin"]),
-        max_ece: f64_at(&gate, &["constants", "gate_max_ece"]),
-        ece_bins: f64_at(&gate, &["constants", "ece_bins"]) as u64,
-        metric_recompute_abs: f64_at(&gate, &["constants", "gate_metric_recompute_abs"]),
-        rescore_probs_abs: f64_at(
-            &parity,
-            &["equations", "pack_rescore_probs_abs", "float_tolerance"],
-        ),
-        rescore_noise_k: f64_at(&parity, &["constants", "pack_rescore_noise_k"]),
-        rescore_bound_max_abs: f64_at(&parity, &["constants", "pack_rescore_bound_max_abs"]),
-        calibration_slice_min_per_class: f64_at(
-            &gate,
-            &["constants", "calibration_slice_min_per_class"],
-        ) as u64,
-        base_sha256: gate["base"]["model_safetensors_sha256"]
-            .as_str()
-            .expect("contract base.model_safetensors_sha256")
-            .to_string(),
-        seed_selection_policy: gate["seed_policy"]["selection"]
-            .as_str()
-            .expect("contract seed_policy.selection")
-            .to_string(),
-        seed_selection_seeds: gate["seed_policy"]["variance_seeds"]
-            .as_sequence()
-            .expect("contract seed_policy.variance_seeds")
-            .iter()
-            .map(|s| s.as_i64().expect("seed"))
-            .collect(),
-        seed_rank_scale: f64_at(&gate, &["seed_policy", "rank_scale"]),
-        seed_tie_break: gate["seed_policy"]["tie_break"]
-            .as_str()
-            .expect("contract seed_policy.tie_break")
-            .to_string(),
-    }
-}
-
 /// `(recipe_id, run dir)` of every `demo.fail_closed_vectors` entry.
 fn vectors() -> Vec<(String, PathBuf)> {
     let gate = contract("laya-finetune-gate-v1.yaml");
@@ -152,13 +96,6 @@ fn vectors() -> Vec<(String, PathBuf)> {
             (rid, workspace_root().join(dir.trim_end_matches('/')))
         })
         .collect()
-}
-
-fn sha256_file(p: &Path) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(std::fs::read(p).unwrap_or_else(|e| panic!("{}: {e}", p.display())))
-    )
 }
 
 fn report(run: &Path) -> serde_json::Value {
@@ -267,7 +204,7 @@ fn demo_vectors_are_refused_fail_closed() {
         );
         // (1) Identify the vector by its files.
         assert_eq!(
-            sha256_file(&run.join("recipe.json")),
+            artifact_sha256_hex(&std::fs::read(run.join("recipe.json")).expect("recipe.json")),
             *rid,
             "{short}: recipe_id"
         );

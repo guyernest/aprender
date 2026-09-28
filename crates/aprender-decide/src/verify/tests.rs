@@ -7,7 +7,7 @@
 //! `gate_failed_margin_only` and the real vectors run under.
 
 use super::*;
-use crate::test_support::{constant_f64, contract_yaml, fixture_dir, tolerance};
+use crate::test_support::{constant_f64, contract_yaml, fixture_dir};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -37,46 +37,47 @@ fn sha(path: &Path) -> String {
     sha256_hex(&std::fs::read(path).expect("read for sha"))
 }
 
-/// The tiny fixture's own base sha256 (its checkpoint IS its base).
-fn tiny_base_sha() -> String {
-    sha(&fixture_dir().join("checkpoint/model.safetensors"))
+/// `contracts/<name>` parsed into its typed view — the SAME views `examples/pack_laya.rs` and
+/// `tests/common` read.
+fn view<T: serde::de::DeserializeOwned>(name: &str) -> T {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../contracts/{name}"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+    serde_yaml::from_str(&text).unwrap_or_else(|e| panic!("parse {name} into its view: {e}"))
 }
 
-/// The CONTRACT policy (laya-finetune-gate-v1 constants + laya-parity-v1 tolerance), with the
-/// base swapped for the tiny one so the fixture can reach the gate.
-fn contract_policy_tiny_base() -> VerifyPolicy {
-    let gate = "laya-finetune-gate-v1.yaml";
-    VerifyPolicy {
-        min_macro_f1_margin: constant_f64(gate, "gate_min_macro_f1_margin"),
-        max_ece: constant_f64(gate, "gate_max_ece"),
-        ece_bins: constant_f64(gate, "ece_bins") as u64,
-        metric_recompute_abs: constant_f64(gate, "gate_metric_recompute_abs"),
-        rescore_probs_abs: tolerance("pack_rescore_probs_abs"),
-        rescore_noise_k: constant_f64("laya-parity-v1.yaml", "pack_rescore_noise_k"),
-        rescore_bound_max_abs: constant_f64("laya-parity-v1.yaml", "pack_rescore_bound_max_abs"),
-        calibration_slice_min_per_class: constant_f64(gate, "calibration_slice_min_per_class")
-            as u64,
-        base_sha256: tiny_base_sha(),
-        seed_selection_policy: seed_policy_str("selection"),
-        seed_selection_seeds: contract_yaml(gate)["seed_policy"]["variance_seeds"]
-            .as_sequence()
-            .expect("seed_policy.variance_seeds")
-            .iter()
-            .map(|s| s.as_i64().expect("seed"))
-            .collect(),
-        seed_rank_scale: contract_yaml(gate)["seed_policy"]["rank_scale"]
-            .as_f64()
-            .expect("seed_policy.rank_scale"),
-        seed_tie_break: seed_policy_str("tie_break"),
+/// The CONTRACT policy, through the library's one mapping (`from_contract_views`).
+fn contract_policy() -> VerifyPolicy {
+    VerifyPolicy::from_contract_views(
+        &view::<GateContractView>("laya-finetune-gate-v1.yaml"),
+        &view::<ParityContractView>("laya-parity-v1.yaml"),
+    )
+}
+
+/// The tiny fixture's own base block (its checkpoint IS its base), read from its recipe.json.
+fn tiny_base_pins() -> BasePins {
+    let r = read_json(&fixture_dir().join("recipe.json"));
+    let b = &r["base"];
+    let s = |k: &str| {
+        b[k].as_str()
+            .unwrap_or_else(|| panic!("base.{k}"))
+            .to_string()
+    };
+    BasePins {
+        family: s("family"),
+        checkpoint: s("checkpoint"),
+        repo: s("repo"),
+        revision: s("revision"),
+        model_safetensors_sha256: s("sha256"),
     }
 }
 
-/// `seed_policy.<key>` of laya-finetune-gate-v1 as a string.
-fn seed_policy_str(key: &str) -> String {
-    contract_yaml("laya-finetune-gate-v1.yaml")["seed_policy"][key]
-        .as_str()
-        .unwrap_or_else(|| panic!("seed_policy.{key}"))
-        .to_string()
+/// The CONTRACT policy with ONLY the base swapped for the tiny fixture's, so the fixture can
+/// reach the gate.
+fn contract_policy_tiny_base() -> VerifyPolicy {
+    VerifyPolicy {
+        base: tiny_base_pins(),
+        ..contract_policy()
+    }
 }
 
 /// TEST-ONLY permissive policy: margin 0, max_ece 1, tiny base. The fixture's fine-tuned and
@@ -417,7 +418,7 @@ fn tiny_verify_roundtrip() {
         .as_str()
         .expect("contract base sha")
         .to_string();
-    assert_ne!(real, policy.base_sha256);
+    assert_ne!(real, policy.base.model_safetensors_sha256);
 }
 
 // ===========================================================================
@@ -542,7 +543,10 @@ fn base_mismatch_contract() {
         .expect("contract base sha")
         .to_string();
     let policy = VerifyPolicy {
-        base_sha256: real,
+        base: BasePins {
+            model_safetensors_sha256: real,
+            ..tiny_base_pins()
+        },
         ..permissive_policy()
     };
     let run = production_copy(&policy, true);
@@ -557,6 +561,55 @@ fn base_mismatch_contract() {
         ),
         "{e:?}"
     );
+}
+
+/// V6-b: a run that declares another base REVISION while keeping the pinned sha256 is refused
+/// before any model is built — the `model.base` string it would serve is not the contract's.
+#[test]
+fn base_identity_mismatch_revision() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    run.edit_json("recipe.json", |r| {
+        let rev = r["base"]["revision"]
+            .as_str()
+            .expect("revision")
+            .to_string();
+        r["base"]["revision"] = format!("{rev}-other").into();
+    });
+    run.rehash();
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::BaseMismatch {
+                which: BaseWhich::Revision,
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    assert!(e.to_string().contains("which=revision"), "{e}");
+    assert_eq!(e.exit_code(), 2);
+}
+
+/// AL2 / V12-b: the typed view refuses a non-integer `ece_bins`, so no caller (the CLI, the
+/// integration tests, these tests) can read `15.0` as 15 while another refuses it.
+#[test]
+fn policy_views_refuse_non_integer_ece_bins() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/laya-finetune-gate-v1.yaml");
+    let text = std::fs::read_to_string(&path).expect("read gate contract");
+    let honest: GateContractView = serde_yaml::from_str(&text).expect("the contract parses");
+    assert_eq!(honest.constants.ece_bins, 15);
+    assert_eq!(
+        text.matches("\n  ece_bins: 15\n").count(),
+        1,
+        "one ece_bins line"
+    );
+    let forged = text.replace("\n  ece_bins: 15\n", "\n  ece_bins: 15.0\n");
+    let e = serde_yaml::from_str::<GateContractView>(&forged)
+        .expect_err("a non-integer ece_bins must not deserialize");
+    assert!(e.to_string().contains("ece_bins"), "{e}");
 }
 
 #[test]

@@ -39,9 +39,11 @@
 //! re-scores and the gate, so a legacy run whose gate fails still reports
 //! [`VerifyError::GateFailed`].
 //!
-//! The policy — thresholds, tolerances, the base sha256 — is passed in as a [`VerifyPolicy`]:
-//! the library stays YAML-free, and the only caller that builds one outside tests
-//! (`examples/pack_laya.rs`) reads every value from the contracts at run time.
+//! The policy — thresholds, tolerances, the base block — is passed in as a [`VerifyPolicy`]
+//! built by the ONE contract-to-policy mapping, [`VerifyPolicy::from_contract_views`], over the
+//! typed views [`GateContractView`] and [`ParityContractView`]: the library stays YAML-free
+//! (the caller parses the YAML into the views), and `examples/pack_laya.rs` and every test read
+//! the contracts through that same mapping at run time.
 //!
 //! # Writing
 //!
@@ -98,8 +100,8 @@ pub struct VerifyPolicy {
     pub rescore_bound_max_abs: f64,
     /// laya-finetune-gate-v1 `constants.calibration_slice_min_per_class`.
     pub calibration_slice_min_per_class: u64,
-    /// laya-finetune-gate-v1 `base.model_safetensors_sha256`.
-    pub base_sha256: String,
+    /// laya-finetune-gate-v1 `base`: the declared base's identity and pins (D-04).
+    pub base: BasePins,
     /// laya-finetune-gate-v1 `seed_policy.selection` (`median_ece`, A3).
     pub seed_selection_policy: String,
     /// laya-finetune-gate-v1 `seed_policy.variance_seeds` (13, 17, 23).
@@ -108,6 +110,149 @@ pub struct VerifyPolicy {
     pub seed_rank_scale: f64,
     /// laya-finetune-gate-v1 `seed_policy.tie_break` (`smaller_seed`).
     pub seed_tie_break: String,
+}
+
+/// laya-finetune-gate-v1 `base`: what a production run must declare as its base, and what the
+/// base dir must hold (D-04). Every identity field is compared with recipe.json `base`, so the
+/// `model.base` string an artifact serves is the contract's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BasePins {
+    /// `base.family`.
+    pub family: String,
+    /// `base.checkpoint`.
+    pub checkpoint: String,
+    /// `base.repo`.
+    pub repo: String,
+    /// `base.revision`.
+    pub revision: String,
+    /// `base.model_safetensors_sha256`.
+    pub model_safetensors_sha256: String,
+}
+
+// ===========================================================================
+// The contracts, as typed views (the ONE contract-to-policy mapping)
+// ===========================================================================
+
+/// laya-finetune-gate-v1, as much of it as the verifier reads. NOT `deny_unknown_fields`: the
+/// contract carries prose and other blocks; a view takes only what it needs, and every value it
+/// takes is typed, so a malformed one (a non-integer `ece_bins`) fails to deserialize for every
+/// caller alike. The caller parses the YAML (`serde_yaml`, a dev/example dependency) into this
+/// type; the library stays YAML-free.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GateContractView {
+    /// `constants`.
+    pub constants: GateConstantsView,
+    /// `base`.
+    pub base: BaseBlockView,
+    /// `seed_policy`.
+    pub seed_policy: SeedPolicyView,
+}
+
+/// laya-finetune-gate-v1 `constants` (the part the verifier reads).
+#[derive(Debug, Clone, Deserialize)]
+pub struct GateConstantsView {
+    /// `gate_min_macro_f1_margin`.
+    pub gate_min_macro_f1_margin: f64,
+    /// `gate_max_ece`.
+    pub gate_max_ece: f64,
+    /// `ece_bins` (an integer; `15.0` is refused).
+    pub ece_bins: u64,
+    /// `gate_metric_recompute_abs`.
+    pub gate_metric_recompute_abs: f64,
+    /// `calibration_slice_min_per_class`.
+    pub calibration_slice_min_per_class: u64,
+}
+
+/// laya-finetune-gate-v1 `base`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BaseBlockView {
+    /// `family`.
+    pub family: String,
+    /// `repo`.
+    pub repo: String,
+    /// `revision`.
+    pub revision: String,
+    /// `checkpoint`.
+    pub checkpoint: String,
+    /// `model_safetensors_sha256`.
+    pub model_safetensors_sha256: String,
+}
+
+/// laya-finetune-gate-v1 `seed_policy` (the part the verifier reads).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeedPolicyView {
+    /// `selection`.
+    pub selection: String,
+    /// `variance_seeds`.
+    pub variance_seeds: Vec<i64>,
+    /// `rank_scale`.
+    pub rank_scale: f64,
+    /// `tie_break`.
+    pub tie_break: String,
+}
+
+/// laya-parity-v1, as much of it as the verifier reads.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ParityContractView {
+    /// `constants`.
+    pub constants: ParityConstantsView,
+    /// `equations`.
+    pub equations: ParityEquationsView,
+}
+
+/// laya-parity-v1 `constants` (the part the verifier reads).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ParityConstantsView {
+    /// `pack_rescore_noise_k`.
+    pub pack_rescore_noise_k: f64,
+    /// `pack_rescore_bound_max_abs`.
+    pub pack_rescore_bound_max_abs: f64,
+}
+
+/// laya-parity-v1 `equations` (the part the verifier reads).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ParityEquationsView {
+    /// `pack_rescore_probs_abs`.
+    pub pack_rescore_probs_abs: ToleranceView,
+}
+
+/// An equation's `float_tolerance`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToleranceView {
+    /// `float_tolerance`.
+    pub float_tolerance: f64,
+}
+
+impl VerifyPolicy {
+    /// THE contract-to-policy mapping. `examples/pack_laya.rs` and every test build their
+    /// policy here, so no caller can verify under a mapping the CLI does not use.
+    #[must_use]
+    pub fn from_contract_views(gate: &GateContractView, parity: &ParityContractView) -> Self {
+        let c = &gate.constants;
+        let b = &gate.base;
+        let s = &gate.seed_policy;
+        Self {
+            min_macro_f1_margin: c.gate_min_macro_f1_margin,
+            max_ece: c.gate_max_ece,
+            ece_bins: c.ece_bins,
+            metric_recompute_abs: c.gate_metric_recompute_abs,
+            rescore_probs_abs: parity.equations.pack_rescore_probs_abs.float_tolerance,
+            rescore_noise_k: parity.constants.pack_rescore_noise_k,
+            rescore_bound_max_abs: parity.constants.pack_rescore_bound_max_abs,
+            calibration_slice_min_per_class: c.calibration_slice_min_per_class,
+            base: BasePins {
+                family: b.family.clone(),
+                checkpoint: b.checkpoint.clone(),
+                repo: b.repo.clone(),
+                revision: b.revision.clone(),
+                model_safetensors_sha256: b.model_safetensors_sha256.clone(),
+            },
+            seed_selection_policy: s.selection.clone(),
+            seed_selection_seeds: s.variance_seeds.clone(),
+            seed_rank_scale: s.rank_scale,
+            seed_tie_break: s.tie_break.clone(),
+        }
+    }
 }
 
 /// Which probability file (and which model re-scores it).
@@ -140,6 +285,14 @@ impl fmt::Display for ProbsWhich {
 /// Which side of the base check disagreed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseWhich {
+    /// The recipe's declared `base.family` differs from the contract's.
+    Family,
+    /// The recipe's declared `base.checkpoint` differs from the contract's.
+    Checkpoint,
+    /// The recipe's declared `base.repo` differs from the contract's.
+    Repo,
+    /// The recipe's declared `base.revision` differs from the contract's.
+    Revision,
     /// The recipe's declared base sha256 differs from the contract's.
     Contract,
     /// The base dir's `model.safetensors` differs from the recipe's declared sha256.
@@ -152,6 +305,10 @@ pub enum BaseWhich {
 impl fmt::Display for BaseWhich {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Family => "family",
+            Self::Checkpoint => "checkpoint",
+            Self::Repo => "repo",
+            Self::Revision => "revision",
             Self::Contract => "contract",
             Self::BaseDir => "base_dir",
             Self::BaseTokenizer => "base_tokenizer",
@@ -964,23 +1121,36 @@ fn sha256_file(path: &Path) -> Result<String, VerifyError> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// The declared base must be the contract's, and the base dir must hold exactly it.
+/// The declared base must be the contract's — every identity field (`family`, `checkpoint`,
+/// `repo`, `revision`, in that order, then `sha256`), so the `model.base` string an artifact
+/// serves is the contract's — and the base dir must hold exactly it.
 ///
 /// # Errors
 ///
-/// [`VerifyError::BaseMismatch`] naming `contract` (the recipe declares another base) or
-/// `base_dir` (the directory's `model.safetensors` is not the declared one).
+/// [`VerifyError::BaseMismatch`] naming the identity field (`family`, `checkpoint`, `repo`,
+/// `revision`), `contract` (the recipe declares another sha256) or `base_dir` (the directory's
+/// `model.safetensors` is not the declared one).
 pub fn check_base(
     base_dir: &Path,
     recipe: &Recipe,
     policy: &VerifyPolicy,
 ) -> Result<(), VerifyError> {
-    if recipe.base.sha256 != policy.base_sha256 {
-        return Err(VerifyError::BaseMismatch {
-            which: BaseWhich::Contract,
-            expected: policy.base_sha256.clone(),
-            observed: recipe.base.sha256.clone(),
-        });
+    let d = &recipe.base;
+    let p = &policy.base;
+    for (which, expected, observed) in [
+        (BaseWhich::Family, &p.family, &d.family),
+        (BaseWhich::Checkpoint, &p.checkpoint, &d.checkpoint),
+        (BaseWhich::Repo, &p.repo, &d.repo),
+        (BaseWhich::Revision, &p.revision, &d.revision),
+        (BaseWhich::Contract, &p.model_safetensors_sha256, &d.sha256),
+    ] {
+        if expected != observed {
+            return Err(VerifyError::BaseMismatch {
+                which,
+                expected: expected.clone(),
+                observed: observed.clone(),
+            });
+        }
     }
     let observed = sha256_file(&base_dir.join("model.safetensors"))?;
     if observed != recipe.base.sha256 {
