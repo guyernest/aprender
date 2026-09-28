@@ -60,6 +60,18 @@ Not in this phase: a training MCP server, Kev/Jev ports, multilingual or `typed-
   artifact's `task.json`; the caller sends only text. No generic `decide`/`/v1/systemone` surface — a fine-tuned
   model answers one question. One trained model per deployed server (thin-server rule).
   — **Reversibility:** costly — this is the published tool contract agents integrate against.
+  — **Amended 2026-09-28 (user, gap round 08-28):** truncation sentence A-derive; refusal wire shape B-iserror; takes effect at the next deploy (plan 08-30).
+  A-derive: the served description's truncation sentence is derived from the loaded artifact's
+  `manifest().agent.max_len` against the tier's `classify_max_total_tokens`. When a full-window row fits the
+  budget the sentence stays "Long texts are truncated by the model itself to its window, and each such result
+  reports `truncated: true`."; otherwise it says a text whose built row exceeds the budget is refused and to
+  send a shorter excerpt (WR-03: at 3 008 MB the budget is 120 and Laya-en's window is 512, so truncation is
+  unreachable). The `The labels, in this order: [` segment stays byte-identical (the Lambda probe parses it).
+  B-iserror: bound refusals (count, shape/unknown key, byte length, token budget, admission `Busy`, the
+  build-time served-task fit) are `pmcp::Error::tool_rejected`, which pmcp 2.19.3's tool dispatch sends as a
+  successful `CallToolResult { isError: true, content: [text] }` instead of JSON-RPC -32603; model and internal
+  failures stay -32603. Neither change reaches the live Lambda (RUNNING, D-ITEM-08-18-A) until plan 08-30's
+  redeploy decision.
 - **D-10:** `classify` accepts a **list of texts** with a **contract-owned maximum** (a tool-boundary contract in
   the shape of `contracts/forecast-tool-boundary-v1.yaml`). Per-row forwards are acceptable; batched GEMM is an
   optimisation, not a requirement.
