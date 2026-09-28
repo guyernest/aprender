@@ -182,6 +182,55 @@ constants:
   # 10 240 MB tier (measured): 11.
   tier_ms_per_token_at_512: 40
 
+# CLASS A (provenance binding, SERVED side; plan 08-23). Every field a classify response or
+# tools/list serves, with the sha-bound source it comes from. The LOAD side (every manifest
+# leaf bound at load to its source) is decide-apr-v1 `manifest.bindings` (plan 08-19); this
+# table says which of those bound values reaches the wire, and through what.
+# `path`: the JSON path in the served object, array indices generalised to [*]. `surface`:
+# `classify_response` (the tools/call payload) or `tools_list` (the tool description).
+# Enforced by `cargo test -p aprender-mcp-decide --lib tests::every_served_field_has_a_bound_source`:
+# the serialized response's leaf paths must EQUAL the classify_response rows (a served key
+# with no row, or a row the response no longer serves, fails), each model.* value must equal
+# its source (artifact_sha256 against an INDEPENDENT sha2 of the served bytes), and every
+# tools_list row must have a dispatcher case.
+served_fields:
+  - path: model.artifact_sha256
+    surface: classify_response
+    source: 'sha256 of the WHOLE served .apr file, computed by the decide-apr-v1 load ladder over the bytes it loaded and minted into ModelIdentity at rung 8 (decide-apr-v1 identity.artifact_sha256); the Lambda door takes it from HashedArtifact, the digest its S3 pin was checked against'
+  - path: model.recipe_id
+    surface: classify_response
+    source: 'manifest.recipe_id, bound at rung 4 to sha256 of the decide.recipe_json blob AND the decide.gate_report_json recipe_id (decide-apr-v1 manifest.bindings /recipe_id, plan 08-19)'
+  - path: model.method
+    surface: classify_response
+    source: 'manifest.method, bound at rung 3 to the constant METHOD_LAYA (decide-apr-v1 manifest.bindings /method)'
+  - path: model.base
+    surface: classify_response
+    source: 'manifest.base display string (family-checkpoint@first 8 chars of revision); manifest.base bound to the decide.recipe_json blob at rung 4 (decide-apr-v1 manifest.bindings /base/*, plan 08-19)'
+  - path: 'labels[*]'
+    surface: classify_response
+    source: 'the decide.task_json blob criteria names in document order (D-05, D-09), which manifest.labels must equal at rung 4 (decide-apr-v1 manifest.bindings /labels/[*])'
+  - path: 'results[*].label'
+    surface: classify_response
+    source: 'labels[argmax(probabilities)] (first on ties) — derived from the two rows above and below, never a separate value'
+  - path: 'results[*].probabilities[*]'
+    surface: classify_response
+    source: 'the Laya forward of the ladder-minted Decider: weights identified by the whole-file sha256 (model.artifact_sha256), scanned finite at rung 5 and rebuilt at rung 6; the applied temperature bound at rung 4 to the decide.agent_config blob (decide-apr-v1 manifest.bindings /calibration/t_applied); the forward re-proven against the recorded probes at rung 7 (decide-apr-v1 load_ladder)'
+  - path: 'results[*].tokens'
+    surface: classify_response
+    source: 'the built-row length Model::prepare returned for that text (the tokenizer.blob blob sha-bound at rung 4, the agent max_len bound at rung 4 to the decide.agent_config blob) — the exact number classify_token_budget charged'
+  - path: 'results[*].truncated'
+    surface: classify_response
+    source: 'Model::prepare''s truncation flag for that text: the state was cut to the room the row builder leaves (truncation_flag, D-12)'
+  - path: description.question
+    surface: tools_list
+    source: 'the decide.task_json blob instructions (D-09), via Model::task, never the caller'
+  - path: description.labels
+    surface: tools_list
+    source: 'the decide.task_json blob criteria names (and their descriptions) in document order, via Model::task'
+  - path: description.bounds
+    surface: tools_list
+    source: 'ClassifyLimits::CONTRACTED, asserted EQUAL to this file''s constants (FALSIFY-DECIDE-TOOL-007)'
+
 equations:
 
   classify_count_bound:

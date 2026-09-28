@@ -36,11 +36,6 @@
 //! reports the OBSERVED value, and never echoes caller text (ASVS V7). Input texts are
 //! never logged; counts and timings are.
 
-// schemars' JsonSchema derive and serde_json::json! both expand to .unwrap()
-// internally, and the derive's generated impl lands at file scope where a
-// struct-level allow cannot reach it. Same precedent as aprender-mcp-setfit.
-#![allow(clippy::disallowed_methods)]
-
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
@@ -50,8 +45,7 @@ use aprender_decide::artifact::read_decide_apr_bytes_bounded;
 use aprender_decide::{ArtifactError, DecideError, Decision, LayaError, PreparedRow};
 use pmcp::types::capabilities::ServerCapabilities;
 use pmcp::{Server, SimpleToolExt as _};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 // Transport crates (the Lambda wrapper) hold the loaded model in their state;
@@ -64,18 +58,35 @@ pub const TOOL_NAME: &str = "classify";
 /// The contract every bound and refusal here is named from.
 pub const CONTRACT: &str = "contracts/decide-tool-boundary-v1.yaml";
 
-/// The MCP argument surface of [`TOOL_NAME`] (D-09).
+pub use args::ClassifyArgs;
+
+/// The argument type and its schema derive — the ONLY place in this crate's non-test code
+/// where `clippy::disallowed_methods` is allowed (IN-05).
 ///
-/// `texts` is the ONLY field. The question and the labels are the served artifact's
-/// task; a caller-supplied `labels` (or any other key) is a rejection under
-/// `deny_unknown_fields`, never a silently ignored knob.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ClassifyArgs {
-    /// The ordered texts to classify; order is response order. One COMPLETE document
-    /// per element (a whole message, post or comment) — do not split one document
-    /// across elements, and do not join several documents into one.
-    pub texts: Vec<String>,
+/// schemars' `JsonSchema` derive expands to `.unwrap()` internally, and the generated impl
+/// lands at module scope where a struct-level allow cannot reach it. The allow therefore
+/// covers this module, which holds that one derive and nothing else, so an `.unwrap()`
+/// written anywhere else in the crate still fails `clippy -D warnings`. Re-exported at the
+/// crate root, so `aprender_mcp_decide::ClassifyArgs` is unchanged for the Lambda crate.
+mod args {
+    #![allow(clippy::disallowed_methods)]
+
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    /// The MCP argument surface of [`crate::TOOL_NAME`] (D-09).
+    ///
+    /// `texts` is the ONLY field. The question and the labels are the served artifact's
+    /// task; a caller-supplied `labels` (or any other key) is a rejection under
+    /// `deny_unknown_fields`, never a silently ignored knob.
+    #[derive(Debug, Clone, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct ClassifyArgs {
+        /// The ordered texts to classify; order is response order. One COMPLETE document
+        /// per element (a whole message, post or comment) — do not split one document
+        /// across elements, and do not join several documents into one.
+        pub texts: Vec<String>,
+    }
 }
 
 /// The request and admission bounds, mirrored from `decide-tool-boundary-v1`.

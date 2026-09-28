@@ -22,25 +22,24 @@ const SERVER_NAME: &str = "aprender-decide-classify";
 /// The model-path environment fallback.
 const ENV_MODEL: &str = "APRENDER_DECIDE_MODEL";
 
-fn model_path_from(mut args: std::env::Args) -> Result<PathBuf, String> {
-    let mut model: Option<PathBuf> = None;
-    let _argv0 = args.next();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--model" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| String::from("--model requires a path"))?;
-                model = Some(PathBuf::from(value));
-            }
-            other => {
-                return Err(format!(
-                    "unknown argument {other}; usage: aprender-mcp-decide --model <FILE>"
-                ));
-            }
-        }
-    }
-    model
+/// The runner's argv, declared (clap derive) rather than hand-parsed: an unknown flag or a
+/// `--model` without a value is a usage error (exit 2), never silently ignored.
+#[derive(Debug, clap::Parser)]
+#[command(
+    name = "aprender-mcp-decide",
+    version,
+    about = "Thin single-model MCP server (stdio): one task-bound `classify` tool over a \
+             verified decide-apr-v1 artifact"
+)]
+struct Cli {
+    /// The decide-apr-v1 `.apr` to serve. Falls back to $APRENDER_DECIDE_MODEL.
+    #[arg(long, value_name = "FILE")]
+    model: Option<PathBuf>,
+}
+
+/// `--model`, else the environment fallback, else the "no model" usage error.
+fn model_path(cli: Cli) -> Result<PathBuf, String> {
+    cli.model
         .or_else(|| std::env::var_os(ENV_MODEL).map(PathBuf::from))
         .ok_or_else(|| {
             format!("no model: pass --model <FILE> or set {ENV_MODEL} to a decide-apr-v1 artifact")
@@ -49,7 +48,9 @@ fn model_path_from(mut args: std::env::Args) -> Result<PathBuf, String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let model_path = match model_path_from(std::env::args()) {
+    // clap prints its own usage error and exits 2 (0 for --help / --version).
+    let cli = <Cli as clap::Parser>::parse();
+    let model_path = match model_path(cli) {
         Ok(path) => path,
         Err(message) => {
             eprintln!("error: {message}");

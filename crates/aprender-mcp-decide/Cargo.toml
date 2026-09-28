@@ -35,6 +35,8 @@ aprender-decide = { path = "../aprender-decide", version = "0.63.0" }
 pmcp = { version = "2.19", features = ["streamable-http", "schema-generation"] }
 # The JsonSchema derive on ClassifyArgs — same major pmcp's schema-generation uses.
 schemars = "1.0"
+# argv is declarative (clap derive), never hand-rolled: scripts/check_no_hand_rolled_parsers.sh.
+clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

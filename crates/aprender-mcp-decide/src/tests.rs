@@ -50,15 +50,48 @@ fn fixture_dir() -> std::path::PathBuf {
     repo_path("crates/aprender-decide/tests/fixtures/laya_tiny")
 }
 
-/// The tiny Laya fixture, packed by the production packer and loaded through the
-/// ladder once per test binary.
+/// The tiny Laya fixture, packed by the production packer once per test binary: the
+/// exact bytes [`model`] serves, kept so a test can hash them independently.
+fn tiny_bytes() -> &'static [u8] {
+    static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    BYTES.get_or_init(|| {
+        let dir = fixture_dir();
+        aprender_decide::pack_run_dir(&dir, &dir.join("data")).expect("pack tiny")
+    })
+}
+
+/// The tiny Laya fixture loaded through the ladder once per test binary.
 fn model() -> Arc<Model> {
     static MODEL: OnceLock<Arc<Model>> = OnceLock::new();
     Arc::clone(MODEL.get_or_init(|| {
-        let dir = fixture_dir();
-        let bytes = aprender_decide::pack_run_dir(&dir, &dir.join("data")).expect("pack tiny");
-        Arc::new(load_model_from_bytes(&bytes).expect("the ladder accepts the tiny fixture"))
+        Arc::new(load_model_from_bytes(tiny_bytes()).expect("the ladder accepts the tiny fixture"))
     }))
+}
+
+/// Lowercase hex sha256, computed HERE with sha2 — never by the code under test.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The rows of a top-level contract table (a YAML sequence of mappings).
+fn contract_rows(table: &str) -> Vec<serde_yaml::Value> {
+    contract_doc(TOOL_CONTRACT)
+        .get(table)
+        .and_then(serde_yaml::Value::as_sequence)
+        .unwrap_or_else(|| panic!("{TOOL_CONTRACT} must define a `{table}:` sequence"))
+        .clone()
+}
+
+/// A string field of a contract table row; panics naming the table, row and field.
+fn row_str<'a>(row: &'a serde_yaml::Value, table: &str, field: &str) -> &'a str {
+    row.get(field)
+        .and_then(serde_yaml::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| panic!("{table} row {row:?} must carry a non-empty `{field}`"))
 }
 
 /// The tiny fixture's `max_len` (the built-row window), from Laya's own oracle.
@@ -859,6 +892,207 @@ async fn response_labels_follow_task_order() {
     for key in ["label", "probabilities", "tokens", "truncated"] {
         assert!(keys.iter().any(|k| *k == key), "result lacks {key}");
     }
+}
+
+/// Every leaf path of a served JSON value, array indices generalised to `[*]`.
+fn leaf_paths(
+    value: &serde_json::Value,
+    prefix: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                leaf_paths(child, &path, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let path = format!("{prefix}[*]");
+            if items.is_empty() {
+                out.insert(path.clone());
+            }
+            for child in items {
+                leaf_paths(child, &path, out);
+            }
+        }
+        _ => {
+            out.insert(prefix.to_string());
+        }
+    }
+}
+
+/// decide-tool-boundary-v1 `served_fields` (CLASS A, served half): every field a classify
+/// response or tools/list serves is a row naming its sha-bound source, and the served value
+/// IS that source. The response's leaf paths must EQUAL the classify_response rows, so a new
+/// served key without a row (or a row for a key no longer served) fails here.
+#[tokio::test]
+async fn every_served_field_has_a_bound_source() {
+    let rows = contract_rows("served_fields");
+    let mut response_rows = std::collections::BTreeSet::new();
+    let mut list_rows = Vec::new();
+    for row in &rows {
+        let path = row_str(row, "served_fields", "path").to_string();
+        row_str(row, "served_fields", "source");
+        match row_str(row, "served_fields", "surface") {
+            "classify_response" => assert!(response_rows.insert(path.clone()), "duplicate {path}"),
+            "tools_list" => list_rows.push(path),
+            other => panic!("served_fields {path}: unknown surface {other}"),
+        }
+    }
+
+    // The response, served through the whole handler path over the tiny fixture: one short
+    // text and one over the window, so both values of `truncated` are served.
+    let model = model();
+    let texts = vec![
+        "Where is my parcel?".to_string(),
+        "The customer has written several times about the delayed parcel. ".repeat(20),
+    ];
+    let texts = texts[..texts.len().min(ClassifyLimits::CONTRACTED.max_texts)].to_vec();
+    let response = ClassifyService::served(Arc::clone(&model))
+        .call(ClassifyArgs {
+            texts: texts.clone(),
+        })
+        .await
+        .expect("classified");
+    let wire = serde_json::to_value(&response).expect("serializes");
+    let mut served = std::collections::BTreeSet::new();
+    leaf_paths(&wire, "", &mut served);
+    assert_eq!(
+        served, response_rows,
+        "the classify response's leaf paths must equal served_fields' classify_response rows"
+    );
+
+    // model.*: each value equals its source, computed independently where it can be.
+    let dir = fixture_dir();
+    assert_eq!(
+        wire["model"]["artifact_sha256"],
+        sha256_hex(tiny_bytes()).as_str(),
+        "artifact_sha256 is the sha256 of the served bytes (independent sha2)"
+    );
+    let recipe_bytes = std::fs::read(dir.join("recipe.json")).expect("read recipe.json");
+    assert_eq!(
+        wire["model"]["recipe_id"],
+        sha256_hex(&recipe_bytes).as_str(),
+        "recipe_id is the sha256 of recipe.json (independent sha2)"
+    );
+    let recipe: serde_json::Value = serde_json::from_slice(&recipe_bytes).expect("recipe json");
+    let base = &recipe["base"];
+    let revision: String = base["revision"]
+        .as_str()
+        .expect("base.revision")
+        .chars()
+        .take(8)
+        .collect();
+    let want_base = format!(
+        "{}-{}@{revision}",
+        base["family"].as_str().expect("base.family"),
+        base["checkpoint"].as_str().expect("base.checkpoint")
+    );
+    assert_eq!(
+        wire["model"]["base"],
+        want_base.as_str(),
+        "base from recipe.json"
+    );
+    assert_eq!(wire["model"]["method"], "laya", "the rung-3 constant");
+    let id = model.identity();
+    for (field, value) in [
+        ("artifact_sha256", &id.artifact_sha256),
+        ("recipe_id", &id.recipe_id),
+        ("method", &id.method),
+        ("base", &id.base),
+    ] {
+        assert_eq!(
+            wire["model"][field],
+            value.as_str(),
+            "model.{field} vs the Decider"
+        );
+    }
+
+    // labels and results: the task's labels, and each result field from its source.
+    let labels = model.task().owned_labels();
+    assert_eq!(response.labels, labels);
+    assert_eq!(response.labels, ["shipping", "billing", "account"]);
+    let prepared = model.prepare(&texts).expect("prepare");
+    assert_eq!(response.results.len(), texts.len());
+    let mut saw = (false, false);
+    for (i, (r, row)) in response.results.iter().zip(&prepared).enumerate() {
+        assert_eq!(
+            r.probabilities.len(),
+            labels.len(),
+            "result {i}: one per label"
+        );
+        let argmax = r.probabilities.iter().enumerate().fold(0, |best, (k, &p)| {
+            if p > r.probabilities[best] {
+                k
+            } else {
+                best
+            }
+        });
+        assert_eq!(
+            r.label, labels[argmax],
+            "result {i}: label = labels[argmax]"
+        );
+        assert_eq!(r.tokens, row.tokens(), "result {i}: tokens = the built row");
+        assert_eq!(
+            r.truncated,
+            row.truncated(),
+            "result {i}: truncated = prepare's flag"
+        );
+        if r.truncated {
+            saw.1 = true;
+        } else {
+            saw.0 = true;
+        }
+    }
+    if texts.len() > 1 {
+        assert!(saw.0 && saw.1, "both truncation values are served");
+    }
+
+    // tools/list: every row has a case, and the description serves its source.
+    let description = tool_description(&model);
+    let task = model.task();
+    for path in &list_rows {
+        match path.as_str() {
+            "description.question" => assert!(
+                description.contains(task.instructions()),
+                "the description serves the task question"
+            ),
+            "description.labels" => {
+                let mut last = 0usize;
+                for label in task.labels() {
+                    let at = description[last..]
+                        .find(label)
+                        .unwrap_or_else(|| panic!("description lacks {label} after byte {last}"));
+                    last += at + label.len();
+                }
+            }
+            "description.bounds" => {
+                let c = ClassifyLimits::CONTRACTED;
+                for phrase in [
+                    format!("{}..={} texts", c.min_texts, c.max_texts),
+                    format!("{} UTF-8 bytes", c.max_text_bytes),
+                    format!("{} model tokens", c.max_total_tokens),
+                ] {
+                    assert!(
+                        description.contains(&phrase),
+                        "description lacks {phrase:?}"
+                    );
+                }
+            }
+            other => panic!("served_fields tools_list row {other} has no case in this test"),
+        }
+    }
+    assert_eq!(list_rows.len(), 3, "question, labels, bounds");
+    println!(
+        "SERVED FIELDS classify_response={} tools_list={}",
+        response_rows.len(),
+        list_rows.len()
+    );
 }
 
 /// Grow a text one filler word at a time and return the built row at `words` words.

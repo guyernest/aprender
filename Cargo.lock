@@ -904,6 +904,7 @@ name = "aprender-mcp-decide"
 version = "0.63.0"
 dependencies = [
  "aprender-decide",
+ "clap",
  "pmcp",
  "proptest",
  "schemars 1.2.1",
