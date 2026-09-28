@@ -1,9 +1,10 @@
 //! A JSON-RPC probe for a live (or loopback) decide endpoint.
 //!
-//! It proves three things a deploy must show (D-11): the endpoint advertises exactly
-//! one `classify` tool, that tool's description names the artifact's labels in task
-//! order, and a call answers with the served file's sha256 — the identity pinned in
-//! the deploy config. [`run_cold_first`] sends the `tools/call` as the FIRST and only
+//! It proves four things a deploy must show (D-11), each against a value derived from the
+//! LOCAL artifact through the decide-apr-v1 ladder: the endpoint advertises exactly one
+//! `classify` tool, that tool's description names the artifact's labels in task order,
+//! a call answers with the artifact's labels in that order, and the call answers with
+//! the served file's sha256 — the identity pinned in the deploy config. [`run_cold_first`] sends the `tools/call` as the FIRST and only
 //! POST, the shape a cold container behind the gateway receives when the client's
 //! `initialize` landed elsewhere; the server's `x-decide-load` header and its
 //! `decide.load` log line (keyed by the probe id) say whether that request was cold.
@@ -85,8 +86,12 @@ pub struct ProbeReport {
     pub probe_id: String,
     /// `tools/list` returned exactly one tool, named `classify`.
     pub one_tool_named_classify: bool,
-    /// The tool description names every expected label, first occurrences in order.
+    /// The tool description's `The labels, in this order: [...]` segment is exactly the
+    /// expected labels (see [`labels_in_order`]).
     pub description_has_labels_in_order: bool,
+    /// The `tools/call` response's `labels` array equals the expected labels: same
+    /// length, same order (V12-a).
+    pub response_labels_match: bool,
     /// The call's `model.artifact_sha256` equals the expected sha256.
     pub identity_matches: bool,
     /// The identity the endpoint reported.
@@ -100,11 +105,14 @@ pub struct ProbeReport {
 }
 
 impl ProbeReport {
-    /// All three identity checks passed.
+    /// Every identity check passed: one `classify` tool, the description's labels, the
+    /// response's labels and the sha256. A report field that is deploy evidence and is
+    /// not in this AND would be a check the verdict ignores.
     #[must_use]
     pub fn ok(&self) -> bool {
         self.one_tool_named_classify
             && self.description_has_labels_in_order
+            && self.response_labels_match
             && self.identity_matches
     }
 }
@@ -332,7 +340,8 @@ fn tokens_and_truncated(payload: &Value) -> (usize, usize) {
 /// # Errors
 ///
 /// [`ProbeError`] for a transport failure, a non-2xx status or a malformed response.
-/// A WRONG identity is not an error: it is `identity_matches: false` in the report.
+/// A WRONG identity or label list is not an error: it is a false check in the report,
+/// and [`ProbeReport::ok`] is false.
 pub async fn run_identity_probe(
     url: &str,
     bearer: Option<&str>,
@@ -388,6 +397,7 @@ pub async fn run_identity_probe(
         probe_id: probe_id.to_string(),
         one_tool_named_classify,
         description_has_labels_in_order,
+        response_labels_match: labels.as_slice() == expected_labels,
         identity_matches: !artifact_sha256.is_empty() && artifact_sha256 == expected_sha256,
         artifact_sha256,
         labels,
@@ -769,6 +779,62 @@ mod tests {
             assert_eq!(shape.as_str().parse::<MaximalShape>(), Ok(shape));
         }
         assert!("both".parse::<MaximalShape>().is_err());
+    }
+
+    /// V12-a: the right sha with the wrong labels is not the right deploy. The loopback
+    /// serves the tiny fixture; the SAME endpoint passes against the artifact's labels and
+    /// fails against a reordering of them, on the response labels AND the description.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_fails_when_response_labels_differ() {
+        let model = tiny_model();
+        let sha = crate::tests::tiny_golden_sha256();
+        let labels = model.task().owned_labels();
+        let url = serve(Arc::clone(&model)).await;
+
+        let report = run_identity_probe(&url, None, sha, &labels, &new_probe_id())
+            .await
+            .expect("identity probe completes");
+        assert!(report.response_labels_match, "{report:?}");
+        assert!(report.ok(), "{report:?}");
+
+        let mut reordered = labels.clone();
+        reordered.swap(0, 1);
+        assert_ne!(reordered, labels);
+        let report = run_identity_probe(&url, None, sha, &reordered, &new_probe_id())
+            .await
+            .expect("identity probe completes");
+        assert!(report.one_tool_named_classify, "{report:?}");
+        assert!(report.identity_matches, "{report:?}");
+        assert!(!report.response_labels_match, "{report:?}");
+        assert!(!report.ok(), "{report:?}");
+    }
+
+    /// `ok()` is the AND of every check the report carries: each one alone, false, fails it.
+    #[test]
+    fn ok_requires_every_check() {
+        let all = ProbeReport {
+            probe_id: "p".to_string(),
+            one_tool_named_classify: true,
+            description_has_labels_in_order: true,
+            response_labels_match: true,
+            identity_matches: true,
+            artifact_sha256: String::new(),
+            labels: Vec::new(),
+            tokens_total: 0,
+            calls: Vec::new(),
+        };
+        assert!(all.ok());
+        let flips: [fn(&mut ProbeReport); 4] = [
+            |r| r.one_tool_named_classify = false,
+            |r| r.description_has_labels_in_order = false,
+            |r| r.response_labels_match = false,
+            |r| r.identity_matches = false,
+        ];
+        for (i, flip) in flips.iter().enumerate() {
+            let mut report = all.clone();
+            flip(&mut report);
+            assert!(!report.ok(), "check {i} false must fail ok()");
+        }
     }
 
     #[test]
