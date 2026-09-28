@@ -81,6 +81,16 @@ fn bar(c: &serde_yaml::Value, equation: &str) -> f64 {
         .unwrap_or_else(|| panic!("laya-parity-v1 equations.{equation}.float_tolerance"))
 }
 
+/// NaN-visible running maximum: once either side is NaN the result stays NaN. `f64::max`
+/// returns the non-NaN operand, so a plain `m.max(d)` fold drops a NaN seen earlier (A2-6).
+fn nan_max(m: f64, d: f64) -> f64 {
+    if m.is_nan() || d.is_nan() {
+        f64::NAN
+    } else {
+        m.max(d)
+    }
+}
+
 /// NaN-visible `delta <= bound` (the crate's `within` idiom).
 fn within(delta: f64, bound: f64) -> bool {
     !delta.is_nan() && !bound.is_nan() && delta <= bound
@@ -89,12 +99,7 @@ fn within(delta: f64, bound: f64) -> bool {
 fn max_abs(a: &[f32], b: &[f32]) -> f64 {
     assert_eq!(a.len(), b.len(), "length mismatch");
     a.iter().zip(b).fold(0.0f64, |m, (&x, &y)| {
-        let d = (f64::from(x) - f64::from(y)).abs();
-        if d.is_nan() || m.is_nan() {
-            f64::NAN
-        } else {
-            m.max(d)
-        }
+        nan_max(m, (f64::from(x) - f64::from(y)).abs())
     })
 }
 
@@ -160,7 +165,9 @@ fn ladder_rung(
         };
         assert!(ok, "ladder block {name} over its bar: abs {abs} rel {rel}");
     }
-    println!("ladder: {} blocks within bars", seen.len());
+    // Positive evidence for `just _laya-leg-verdict laya_parity` (plan 08-22): printed only
+    // after every tapped block passed its bar, so its absence means the rung did not run.
+    println!("MEASURED ladder {} blocks within bars", seen.len());
 }
 
 /// FALSIFY-LAYA-PARITY-001 / -003 on the real English root: the spike-025 14-row fixture.
@@ -241,11 +248,16 @@ fn full_model_reproduces_spike_025_fixture() {
                 .expect("forward");
             let p = softmax_t(&z, t);
             let dz = max_abs(&z, &row.logits);
+            assert_eq!(
+                p.len(),
+                row.probs.len(),
+                "rec {ri} {}: probability row length",
+                row.qid
+            );
             let dp = p
                 .iter()
                 .zip(&row.probs)
-                .map(|(a, b)| (f64::from(*a) - b).abs())
-                .fold(0.0f64, |m, d| if d.is_nan() { f64::NAN } else { m.max(d) });
+                .fold(0.0f64, |m, (a, b)| nan_max(m, (f64::from(*a) - b).abs()));
             let same = argmax(&p) == argmax(&row.probs);
             println!(
                 "rec {ri} {} ({}, {} tokens): |dz| {dz:.3e} |dp| {dp:.3e} argmax {}",
@@ -258,14 +270,23 @@ fn full_model_reproduces_spike_025_fixture() {
             assert!(within(dp, probs_bar), "rec {ri} {}: |dp| {dp}", row.qid);
             assert!(same, "rec {ri} {}: argmax", row.qid);
             argmax_ok += 1;
-            worst_z = worst_z.max(dz);
-            worst_p = worst_p.max(dp);
+            worst_z = nan_max(worst_z, dz);
+            worst_p = nan_max(worst_p, dp);
         }
     }
     assert_eq!(truncated_rows, 1, "exactly one 512-token truncation row");
     println!(
         "ids {ids_ok}/{n_rows}; argmax {argmax_ok}/{n_rows}; max |dp| {worst_p:.3e} (bar {probs_bar:e}); \
          max |dlogit| {worst_z:.3e} (bar {logits_bar:e}); truncated rows {truncated_rows}; ARCH {}",
+        std::env::consts::ARCH
+    );
+    // Positive evidence for `just _laya-leg-verdict laya_parity` (plan 08-22): printed only
+    // after every row passed, so a leg that measured nothing cannot produce them.
+    println!(
+        "MEASURED ids {ids_ok}/{n_rows} argmax {argmax_ok}/{n_rows} truncated {truncated_rows}"
+    );
+    println!(
+        "MEASURED probs max_abs {worst_p:.3e} bar {probs_bar:e} logits max_abs {worst_z:.3e} bar {logits_bar:e} ARCH {}",
         std::env::consts::ARCH
     );
 

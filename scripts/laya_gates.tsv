@@ -1,0 +1,2 @@
+gate_id	target	must_fail	must_pass	finding
+leg-verdict	just _laya-leg-verdict	canned SKIP-ladder log / libtest-prefixed SKIP log / missing MEASURED ladder / unknown leg name	canned full-evidence log for each of the four legs	V11-a,AL7,D3-1

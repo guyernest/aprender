@@ -1363,15 +1363,21 @@ laya-train-selftest:
 #      (+ LAYA_DEMO_RUN=1), ARMED against <model>;
 #   3. the torch lifecycle kept to a temp dir (LAYA_LIFECYCLE_KEEP), then python_records against it
 #      (LAYA_PY_RUN_DIR + LAYA_PY_DATA_DIR).
-# An armed Rust leg that prints a `SKIP:` line FAILS the recipe: here a SKIP means the leg measured
-# nothing. A missing <model> dir is a refusal, not a SKIP. <model> defaults to `laya_model_dir` above.
-# Prints LAYA VERIFY SUITE OK on success.
+# laya_parity runs with LAYA_LADDER_BIN (default: the MAIN checkout's gitignored spike-025 ladder
+# dump), so its ladder rung runs too. Each leg's verdict is `_laya-leg-verdict` (plan 08-22): a SKIP
+# ANYWHERE on a line fails it, and so does a missing POSITIVE evidence line (a leg must say what it
+# measured). A missing <model> dir or ladder dump is a refusal (exit 2), not a SKIP. <model> defaults
+# to `laya_model_dir` above. Prints LAYA VERIFY SUITE OK on success.
 # Phase 8 Python-parity + real-weights suite, LOCAL ONLY (not in CI): Python self-tests + 4 armed targets
 laya-verify-suite model=laya_model_dir:
     #!/usr/bin/env bash
     set -euo pipefail
     model="{{model}}"
     test -f "$model/model.safetensors" || { echo "ERROR: $model/model.safetensors is missing (the declared Laya base snapshot)" >&2; exit 2; }
+    # The ladder dump is gitignored and lives only in the MAIN checkout (a worktree has none).
+    MAIN="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)"
+    ladder="${LAYA_LADDER_BIN:-$MAIN/.planning/spikes/025-laya-rust-forward-parity/fixtures/laya-en_ladder.bin}"
+    test -f "$ladder" || { echo "ERROR: the ladder dump $ladder is missing (spike 025 tools/oracle.py regenerates it); the ladder rung would not run" >&2; exit 2; }
     for m in metrics data gate; do
         uv run --project scripts/laya_train --frozen python "scripts/laya_train/$m.py" --selftest
     done
@@ -1384,15 +1390,42 @@ laya-verify-suite model=laya_model_dir:
             cat "$log"; echo "FAIL: $name" >&2; return 1
         fi
         grep -Ev '^[[:space:]]*(Compiling|Finished|Running|Blocking|Doc-tests|Downloaded|Locking|Updating)( |$)|^$' "$log" || true
-        if grep -q '^SKIP:' "$log"; then echo "FAIL: $name is armed but printed SKIP (measured nothing)" >&2; return 1; fi
-        echo "LEG OK: $name"
+        just _laya-leg-verdict "$name" "$log" || return 1
     }
-    leg laya_parity LAYA_MODEL_DIR="$model"
+    leg laya_parity LAYA_MODEL_DIR="$model" LAYA_LADDER_BIN="$ladder"
     leg fail_closed_vectors LAYA_MODEL_DIR="$model" LAYA_FAIL_CLOSED_VECTORS=1
     leg demo_run LAYA_MODEL_DIR="$model" LAYA_DEMO_RUN=1
     LAYA_LIFECYCLE_KEEP="$work/keep" uv run --project scripts/laya_train --frozen python scripts/laya_train/lifecycle.py
     leg python_records LAYA_PY_RUN_DIR="$work/keep/run" LAYA_PY_DATA_DIR="$work/keep/data"
     echo "LAYA VERIFY SUITE OK"
+
+# The verdict of ONE laya-verify-suite leg over its log (plan 08-22; V11-a, AL7, D3-1). Pure: no cargo.
+# FAILS when any line carries the token SKIP ANYWHERE (libtest prefixes `test <name> ... ` onto the
+# first output line, and laya_parity prints `SKIP ladder rung: ...`, so a column-0 `^SKIP:` grep saw
+# neither), when the leg's POSITIVE evidence is absent, or when <name> is not a known leg. Prints
+# `LEG OK: <name>` otherwise. Row `leg-verdict` of scripts/laya_gates.tsv feeds it canned logs.
+[positional-arguments]
+_laya-leg-verdict name log:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    NAME="$1"; LOG="$2"
+    # Required positive evidence per leg: every ERE must match some line (anywhere on it).
+    case "$NAME" in
+        laya_parity) NEED=('MEASURED ids [0-9]+/[0-9]+' 'MEASURED probs max_abs [0-9]' 'MEASURED ladder [0-9]+ blocks within bars') ;;
+        fail_closed_vectors) NEED=('FAIL-CLOSED VECTORS REFUSED 2/2 ') ;;
+        demo_run) NEED=('DEMO OUTCOME [a-z_]+ decided on the exact bytes') ;;
+        python_records) NEED=('NOISE which=[^ ]+ rust=' 'MEDIAN rust=[0-9]+ python=[0-9]+') ;;
+        *) echo "FAIL: unknown leg '$NAME' (known: laya_parity fail_closed_vectors demo_run python_records)" >&2; exit 1 ;;
+    esac
+    [ -f "$LOG" ] || { echo "FAIL: $NAME: log $LOG does not exist" >&2; exit 1; }
+    if grep -n 'SKIP' "$LOG" > /dev/null; then
+        echo "FAIL: $NAME is armed but printed SKIP (measured nothing): $(grep -m 1 'SKIP' "$LOG" | cut -c 1-200)" >&2
+        exit 1
+    fi
+    for re in "${NEED[@]}"; do
+        grep -Eq "$re" "$LOG" || { echo "FAIL: $NAME printed no positive evidence matching '$re'" >&2; exit 1; }
+    done
+    echo "LEG OK: $NAME"
 
 # Pack a Laya run dir FOR SERVING (plan 08-09, D-07 fail-closed in Rust): production variant, the
 # contract's base, input hashes, split, a Rust re-score of every eval row from the packed bytes and
