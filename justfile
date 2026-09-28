@@ -2004,8 +2004,13 @@ _laya-edge-health-check body server:
 # sha-pin, resolver-proof, deploy-eligibility, upload-eligibility (the last two from laya-verify:
 # SyntheticNotDeployable); the crates-root swap restored byte-identical on success, forced
 # failure, SIGTERM and an absent root; the edge-health step's URL and body tables and its wiring
-# into laya-deploy (D-ITEM-08-17-A); resolver proof; bootstrap build. The positive dry run is
-# armed only by LAYA_ELIGIBLE_APR/_RUN/_DATA/_BASE naming an artifact laya-verify accepts.
+# into laya-deploy (D-ITEM-08-17-A); resolver proof; bootstrap build. The POSITIVE dry run (a full
+# `laya-deploy` DRY_RUN on an artifact `laya-verify` must accept; loads the multi-GB base, run it under
+# the host's real-weights lock) is ARMED BY DEFAULT when the deployed artifact
+# models/decide/laya-stance-64.apr, its run dir, data/decide/tweet-stance-64 and the pinned base
+# snapshot all exist in the MAIN checkout (plan 08-22, AL7). LAYA_ELIGIBLE_APR/_RUN/_DATA/_BASE (all
+# four) override the artifact; LAYA_DEPLOY_SELFTEST_POSITIVE=0 disarms it. A skipped positive run is
+# never reported as a bare OK: the last line is then `DEPLOY SELFTEST OK (positive dry run SKIPPED: <why>)`.
 laya-deploy-selftest:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2278,24 +2283,40 @@ laya-deploy-selftest:
     else
         fail "EDGE SETTLE wiring: laya-deploy's identity probe retry is missing or unbounded"
     fi
-    # Positive dry run: armed only by a real artifact that laya-verify itself must accept.
+    # Positive dry run (AL7): armed by default on the deployed artifact in the MAIN checkout, by an
+    # explicit LAYA_ELIGIBLE_* quadruple otherwise; laya-verify itself must accept the artifact.
+    POS_SKIPPED=""
+    P_APR=""; P_RUN=""; P_DATA=""; P_BASE=""
     if [ -n "${LAYA_ELIGIBLE_APR:-}${LAYA_ELIGIBLE_RUN:-}${LAYA_ELIGIBLE_DATA:-}${LAYA_ELIGIBLE_BASE:-}" ]; then
         if [ -n "${LAYA_ELIGIBLE_APR:-}" ] && [ -n "${LAYA_ELIGIBLE_RUN:-}" ] && [ -n "${LAYA_ELIGIBLE_DATA:-}" ] && [ -n "${LAYA_ELIGIBLE_BASE:-}" ]; then
-            just laya-deploy-config "$LAYA_ELIGIBLE_APR" off > "$CASES/positive-config.log" 2>&1 || fail "positive: laya-deploy-config"
-            set +e
-            just laya-deploy "$LAYA_ELIGIBLE_APR" "$LAYA_ELIGIBLE_RUN" "$LAYA_ELIGIBLE_DATA" "$LAYA_ELIGIBLE_BASE" > "$CASES/positive.log" 2>&1
-            rc=$?
-            set -e
-            if [ "$rc" -eq 0 ] && grep -q '^DRY-RUN OK' "$CASES/positive.log"; then
-                grep '^DRY-RUN OK' "$CASES/positive.log"
-            else
-                fail "positive dry run: exit $rc without DRY-RUN OK (log: $CASES/positive.log)"
-            fi
+            P_APR="$LAYA_ELIGIBLE_APR"; P_RUN="$LAYA_ELIGIBLE_RUN"; P_DATA="$LAYA_ELIGIBLE_DATA"; P_BASE="$LAYA_ELIGIBLE_BASE"
         else
             fail "positive dry run: set ALL of LAYA_ELIGIBLE_APR/_RUN/_DATA/_BASE, or none"
         fi
+    elif [ "${LAYA_DEPLOY_SELFTEST_POSITIVE:-1}" = "0" ]; then
+        POS_SKIPPED="disarmed by LAYA_DEPLOY_SELFTEST_POSITIVE=0"
     else
-        echo "SKIP positive dry run: no deploy-eligible artifact (laya-finetune-gate-v1 demo.outcome gate_fail; set LAYA_ELIGIBLE_APR/_RUN/_DATA/_BASE to arm)"
+        MAIN="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)"
+        P_APR="$MAIN/models/decide/laya-stance-64.apr"; P_RUN="$MAIN/models/decide/laya-stance-64"
+        P_DATA="$MAIN/data/decide/tweet-stance-64"; P_BASE="{{laya_model_dir}}"
+        for need in "$P_APR" "$P_RUN/gate-report.json" "$P_DATA/eval.jsonl" "$P_BASE/model.safetensors"; do
+            if [ ! -e "$need" ]; then POS_SKIPPED="the deployed artifact's inputs are absent ($need)"; P_APR=""; break; fi
+        done
+    fi
+    if [ -n "$P_APR" ]; then
+        echo "POSITIVE dry run armed: $P_APR"
+        just laya-deploy-config "$P_APR" off > "$CASES/positive-config.log" 2>&1 || fail "positive: laya-deploy-config"
+        set +e
+        just laya-deploy "$P_APR" "$P_RUN" "$P_DATA" "$P_BASE" > "$CASES/positive.log" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -eq 0 ] && grep -q '^DRY-RUN OK' "$CASES/positive.log"; then
+            grep '^DRY-RUN OK' "$CASES/positive.log"
+        else
+            fail "positive dry run: exit $rc without DRY-RUN OK (log: $CASES/positive.log)"
+        fi
+    elif [ -n "$POS_SKIPPED" ]; then
+        echo "SKIP positive dry run: $POS_SKIPPED"
     fi
     # Independent checks: the resolver proof on file, and the bootstrap build.
     RP="$(head -n 1 "$PROOF")"
@@ -2315,7 +2336,12 @@ laya-deploy-selftest:
     echo "AWS CALLS: $CALLS"
     echo "DEPLOY MARKERS: $MARKERS"
     if [ "$FAILS" -eq 0 ] && [ "$CALLS" -eq 0 ] && [ "$MARKERS" -eq 0 ]; then
-        echo "DEPLOY SELFTEST OK"
+        # Never the bare OK after a skipped positive run (AL7): the skip is part of the verdict.
+        if [ -n "$POS_SKIPPED" ]; then
+            echo "DEPLOY SELFTEST OK (positive dry run SKIPPED: $POS_SKIPPED)"
+        else
+            echo "DEPLOY SELFTEST OK"
+        fi
     else
         echo "DEPLOY SELFTEST FAILED ($FAILS failed checks)" >&2
         exit 1
@@ -2759,3 +2785,593 @@ laya-teardown server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
     echo "    remove the weights:"
     echo "      aws s3 rm --profile $P --recursive s3://aprender-decide-weights-${ACCOUNT}-${ENV}/decide/$SERVER/"
     echo "    or resume serving instead: aws lambda delete-function-concurrency --profile $P --function-name $SERVER"
+
+# ---------------------------------------------------------------------------
+# Class C, gate honesty (plan 08-22): every Phase 8 gate is a row of scripts/laya_gates.tsv, and every
+# row can be shown to fail. CLAUDE.md Verification Discipline 4/5/7: a gate that cannot fail is theater,
+# and guard regexes ship a case table.
+# ---------------------------------------------------------------------------
+
+# Sweep scripts/laya_gates.tsv (or $LAYA_GATES_TSV): for each row run its MUST-FAIL case (non-zero
+# with the expected message) and its MUST-PASS case (exit 0 with the expected evidence). FIRST, before
+# any case: the verdict classifier's case table, then the DRIFT CHECK over EVERY recipe, private ones
+# included (`just --dump --dump-format json`; `just --summary` hides `_laya-*`, so the enumeration must
+# contain `_laya-iam-check` or it fails). A laya/_laya recipe is a GATE when its body has `exit 1|2|3`
+# (or `exit(N)`), FAIL, `exec` (its status is another program's) or a verdict token; each gate must be
+# a row target or a `not-a-gate` row, and a `not-a-gate` row is refused (`DRIFT: <recipe> prints a
+# verdict and cannot be not-a-gate`) when the recipe prints a verdict or execs. An unknown gate_id
+# fails before any case runs. `external:<08-NN>` rows (only parser-guard, cascade-guard) name the plan
+# that owns the offender and run their case when one is given. DRY_RUN=1 is exported and `aws` is a
+# recorder that must stay unused: AWS CALLS: 0 (AWS-touching cases run against a PATH-shimmed fake aws).
+# The default sweep runs ONE real-weights leg (the default-armed deploy selftest: laya-verify of the
+# deployed artifact), so run it under the host's real-weights lock; LAYA_GATES_FULL=1 adds the FULL
+# tier (the armed laya-verify-suite, a real repack, a DRY_RUN upload, the real resolver proof), and
+# without it the OK line names what it did not run. LAYA_GATES_ONLY=<id,id> runs only those rows
+# (the drift check still runs in full) and prints `LAYA GATES ROWS OK`, never the sweep's OK line.
+laya-gates-selftest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TSV="${LAYA_GATES_TSV:-scripts/laya_gates.tsv}"
+    ONLY="${LAYA_GATES_ONLY:-}"
+    FULL="${LAYA_GATES_FULL:-0}"
+    export DRY_RUN=1
+    [ -f "$TSV" ] || { echo "LAYA GATES SELFTEST FAILED: the gate table $TSV does not exist" >&2; exit 1; }
+    W="$(mktemp -d)"
+    LOGD="$W/logs"
+    mkdir -p "$LOGD"
+    CFG="crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml"
+    PROOF="models/decide/resolver-proof.txt"
+    BK="$W/backup"
+    mkdir -p "$BK"
+    # Files a case may rewrite (all gitignored) come back byte-identical on every exit path.
+    for f in "$CFG" "$PROOF" models/decide/plan-concentrated.json models/decide/plan-distributed.json; do
+        if [ -f "$f" ]; then mkdir -p "$BK/$(dirname "$f")"; cp -p "$f" "$BK/$f"; fi
+    done
+    cleanup() {
+        local f
+        for f in "$CFG" "$PROOF" models/decide/plan-concentrated.json models/decide/plan-distributed.json; do
+            if [ -f "$BK/$f" ]; then cp -p "$BK/$f" "$f"; elif [ "$f" = "$CFG" ]; then rm -f "$f"; fi
+        done
+        rm -rf "$W"
+    }
+    trap cleanup EXIT
+    # 1. The verdict classifier's case table, then the drift check. Both before any case.
+    just --dump --dump-format json > "$W/dump.json"
+    python3 -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1]))["recipes"]))' "$W/dump.json" > "$W/recipes.txt"
+    python3 - "$W/dump.json" "$W/recipes.txt" "$TSV" "$W/rows.tsv" <<'PY' || { echo "LAYA GATES SELFTEST FAILED: the verdict case table or the drift check (above) failed; no case ran" >&2; exit 1; }
+    import json, re, sys
+    dump, names_file, tsv, rows_out = sys.argv[1:5]
+    VERDICT = re.compile(r"(^|[^A-Za-z_])(OK|PASS|PASSED|FAIL|FAILED|REFUSED|ELIGIBLE)([^A-Za-z_]|$)")
+    def verdict_line(line):
+        if re.match(r"\s*#", line) or "usage" in line or "Usage" in line:
+            return False
+        return bool(VERDICT.search(line))
+    bad = 0
+    for want, line in [
+        (True, 'echo "DEPLOY VERIFY OK"'), (True, 'echo "FAIL: pin mismatch"'), (True, 'echo "REFUSED deploy"'),
+        (True, "printf 'LEG OK: %s\\n'"), (True, "echo PASS"),
+        (False, 'echo "usage: just laya-inspect <apr>"'), (False, "OKAY=1"), (False, "# prints OK"),
+        (False, "NOFAIL=1"), (False, 'echo "passing"'),
+    ]:
+        if verdict_line(line) != want:
+            print(f"VERDICT CASE FAIL: {line!r} classified {not want}, expected {want}")
+            bad += 1
+    if bad:
+        sys.exit(1)
+    print("VERDICT CASE TABLE: 10 cases as expected (5 must-match, 5 must-not-match)")
+    def render(line):
+        return "".join(f if isinstance(f, str) else "<interpolation>" for f in line)
+    recipes = json.load(open(dump))["recipes"]
+    names = [n.strip() for n in open(names_file) if n.strip()]
+    problems = []
+    if "_laya-iam-check" not in names:
+        problems.append("DRIFT: the recipe enumeration does not contain the private recipe _laya-iam-check (a must-match control): it is not the full recipe list")
+    GATE = re.compile(r"\bexit [123]\b|\bexit\(\s*[123]\s*\)|FAIL")
+    gates, capable = set(), {}
+    for n in names:
+        if not (n.startswith("laya") or n.startswith("_laya")) or n not in recipes:
+            continue
+        body = [render(l) for l in recipes[n]["body"]]
+        ex = any(re.match(r"\s*exec\s", l) for l in body)
+        vl = [l.strip() for l in body if verdict_line(l)]
+        capable[n] = (ex, vl)
+        if ex or vl or any(GATE.search(l) for l in body if not re.match(r"\s*#", l)):
+            gates.add(n)
+    lines = open(tsv).read().splitlines()
+    HEADER = "gate_id\ttarget\tmust_fail\tmust_pass\tfinding"
+    if not lines or lines[0] != HEADER:
+        problems.append(f"TABLE: the first line of {tsv} is not the header {HEADER!r}")
+    covered, exempt, ids, out = set(), {}, set(), []
+    for i, raw in enumerate(lines[1:], 2):
+        f = raw.split("\t")
+        if len(f) != 5 or any(not x.strip() for x in f):
+            problems.append(f"TABLE: line {i} does not have five non-empty tab-separated fields: {raw!r}")
+            continue
+        gid, target, mf, mp, finding = f
+        if gid == "not-a-gate":
+            if target not in recipes:
+                problems.append(f"TABLE: line {i} exempts {target}, which is not a recipe")
+            elif mf != "-" or mp != "-" or finding == "-":
+                problems.append(f"TABLE: line {i}: a not-a-gate row is not-a-gate<TAB><recipe><TAB>-<TAB>-<TAB><reason>")
+            exempt[target] = finding
+            continue
+        if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", gid) or gid in ids:
+            problems.append(f"TABLE: line {i}: gate_id {gid!r} is malformed or repeated")
+        ids.add(gid)
+        if target.startswith("external:"):
+            if not re.fullmatch(r"external:08-[0-9][0-9]", target):
+                problems.append(f"TABLE: line {i}: {gid} names no owner plan 08-NN ({target!r})")
+            if gid not in ("parser-guard", "cascade-guard"):
+                problems.append(f"TABLE: line {i}: {gid} may not be external (only parser-guard and cascade-guard are)")
+            if mp != "-":
+                problems.append(f"TABLE: line {i}: an external row is <id><TAB>external:<plan><TAB><case or -><TAB>-<TAB><finding>")
+        else:
+            m = re.fullmatch(r"just (\S+)", target)
+            if m:
+                if m.group(1) not in recipes:
+                    problems.append(f"DRIFT: row {gid} targets the recipe {m.group(1)}, which does not exist")
+                covered.add(m.group(1))
+            elif not re.fullmatch(r"(make|bash) \S+", target):
+                problems.append(f"TABLE: line {i}: target {target!r} is not `just <recipe>`, `make <target>`, `bash <script>` or external:<plan>")
+        out.append("\t".join((gid, target, mf)))
+    for r in sorted(exempt):
+        ex, vl = capable.get(r, (False, []))
+        if ex or vl:
+            why = "it execs another program, whose verdict this check cannot see" if ex else f"e.g. {vl[0][:90]!r}"
+            problems.append(f"DRIFT: {r} prints a verdict and cannot be not-a-gate ({why}); it needs a real row")
+        elif r in covered:
+            problems.append(f"DRIFT: {r} is both a row target and not-a-gate")
+    for g in sorted(gates - covered - set(exempt)):
+        problems.append(f"DRIFT: {g} can exit non-zero on a check (or renders a verdict) but is neither a row target nor a not-a-gate row of {tsv}")
+    for p in problems:
+        print(p)
+    if problems:
+        print(f"DRIFT CHECK FAILED: {len(problems)} problem(s)")
+        sys.exit(1)
+    open(rows_out, "w").write("\n".join(out) + "\n")
+    print(f"DRIFT CHECK OK: {len([n for n in names if n.startswith(('laya', '_laya'))])} laya recipes enumerated (private included), "
+          f"{len(gates)} gates, all covered: {len(covered & gates)} by row targets, {len(exempt)} not-a-gate; {len(out)} rows")
+    for r in sorted(exempt):
+        print(f"  not-a-gate {r}: {exempt[r]}")
+    PY
+    # 2. The rows. One function per gate_id; an unknown id fails BEFORE any case runs.
+    T="crates/aprender-decide/tests/fixtures/laya_tiny"
+    GOLDEN="37d65159b2be0fa091aa840cd56c1a84b73c0bcd9e2df5906d1f8218f5448561"
+    MAIN="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)"
+    DEP_APR="$MAIN/models/decide/laya-stance-64.apr"
+    DEP_RUN="$MAIN/models/decide/laya-stance-64"
+    DEP_DATA="$MAIN/data/decide/tweet-stance-64"
+    BASE="{{laya_model_dir}}"
+    # The aws recorder, first on PATH for the whole sweep: it must stay unused.
+    REC="$W/aws-calls.log"
+    : > "$REC"
+    mkdir -p "$W/recorder"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\necho "aws recorder: laya-gates-selftest never reaches AWS" >&2\nexit 97\n' "$REC" > "$W/recorder/aws"
+    chmod +x "$W/recorder/aws"
+    export PATH="$W/recorder:$PATH"
+    set +e; aws recorder-control > /dev/null 2>&1; crc=$?; set -e
+    [ "$crc" -eq 97 ] && [ "$(wc -l < "$REC" | tr -d ' ')" -eq 1 ] || { echo "LAYA GATES SELFTEST FAILED: the aws recorder did not record its control call" >&2; exit 1; }
+    : > "$REC"
+    # The fake aws for the IAM / teardown rows (FAKE_AWS_MODE selects the failure). Never reaches AWS.
+    mkdir -p "$W/fakeaws"
+    cat > "$W/fakeaws/aws" <<'SH'
+    #!/usr/bin/env bash
+    printf '%s\n' "$*" >> "${FAKE_AWS_LOG:-/dev/null}"
+    mode="${FAKE_AWS_MODE:-ok}"
+    B="aprender-decide-weights-123456789012-dev"
+    case "$1 $2" in
+        "lambda get-function") echo "arn:aws:iam::123456789012:role/decide-fn-role" ;;
+        "sts get-caller-identity") echo "123456789012" ;;
+        "iam list-role-policies")
+            [ "$mode" = list-fail ] && { echo "An error occurred (AccessDenied) when calling the ListRolePolicies operation" >&2; exit 255; }
+            echo '["pmcp-declared"]' ;;
+        "iam get-role-policy") echo "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$B/decide/aprender-mcp-decide/*\"}]}" ;;
+        "iam list-attached-role-policies")
+            [ "$mode" = attached-fail ] && { echo "An error occurred (Throttling) when calling the ListAttachedRolePolicies operation" >&2; exit 255; }
+            echo '["arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"]' ;;
+        "iam get-policy") echo v1 ;;
+        "iam get-policy-version") echo '{"Statement":[{"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}]}' ;;
+        "lambda put-function-concurrency") echo '{}' ;;
+        "lambda get-function-concurrency") echo 0 ;;
+        "iam delete-role-policy")
+            case "$mode" in
+                teardown-nosuch) echo "An error occurred (NoSuchEntity) when calling the DeleteRolePolicy operation: The role policy with name aprender-decide-weights-dev cannot be found." >&2; exit 254 ;;
+                teardown-denied) echo "An error occurred (AccessDenied) when calling the DeleteRolePolicy operation: not authorized" >&2; exit 254 ;;
+                *) exit 0 ;;
+            esac ;;
+        *) echo "fake aws: unexpected call: $*" >&2; exit 97 ;;
+    esac
+    SH
+    chmod +x "$W/fakeaws/aws"
+    FAKE="$W/fakeaws"
+    export FAKE_AWS_LOG="$W/fake-aws-calls.log"
+    CUR=""; ROW_RED=0; RC=0; FULL_SKIPPED=""
+    run() { local name="$1"; shift; set +e; "$@" < /dev/null > "$LOGD/$CUR-$name.log" 2>&1; RC=$?; set -e; }
+    red() { echo "  RED  $CUR: $1" >&2; ROW_RED=1; }
+    logof() { printf '%s' "$LOGD/$CUR-$1.log"; }
+    # must_fail <label> <ERE> <cmd...>: non-zero AND the expected message, or the row is RED.
+    must_fail() {
+        local label="$1" pat="$2"; shift 2
+        run "$label" "$@"
+        if [ "$RC" -ne 0 ] && grep -Eq -- "$pat" "$(logof "$label")"; then
+            echo "  must-fail $label: exit $RC, $(grep -Eo -m 1 -- "$pat.*" "$(logof "$label")" | cut -c 1-150)"
+        else
+            red "must-fail $label: exit $RC, expected non-zero with a line matching '$pat' (log $(logof "$label"))"
+            tail -4 "$(logof "$label")" >&2 || true
+        fi
+    }
+    # must_pass <label> <ERE> <cmd...>: exit 0 AND the expected evidence line, or the row is RED.
+    must_pass() {
+        local label="$1" pat="$2"; shift 2
+        run "$label" "$@"
+        if [ "$RC" -eq 0 ] && grep -Eq -- "$pat" "$(logof "$label")"; then
+            echo "  must-pass $label: exit 0, $(grep -Eo -m 1 -- "$pat.*" "$(logof "$label")" | cut -c 1-150)"
+        else
+            red "must-pass $label: exit $RC, expected 0 with a line matching '$pat' (log $(logof "$label"))"
+            tail -4 "$(logof "$label")" >&2 || true
+        fi
+    }
+    full_only() { FULL_SKIPPED="${FULL_SKIPPED:+$FULL_SKIPPED, }$CUR ($1)"; echo "  FULL tier not run: $1 (LAYA_GATES_FULL=1)"; }
+    need_deployed() {
+        local p
+        for p in "$DEP_APR" "$DEP_RUN/gate-report.json" "$DEP_DATA/eval.jsonl" "$BASE/model.safetensors"; do
+            [ -e "$p" ] || { red "the deployed artifact's inputs are absent ($p): this case cannot measure anything"; return 1; }
+        done
+    }
+    # Shared, memoized: the synthetic fixture artifact, and ONE default-armed deploy selftest.
+    tiny() {
+        [ -f "$W/tiny.apr" ] && return 0
+        just laya-pack-fixture "$T" "$T/data" "$W/tiny.apr" > "$W/tiny.log" 2>&1 && grep -q "sha256=$GOLDEN" "$W/tiny.log" \
+            || { echo "LAYA GATES SELFTEST FAILED: laya-pack-fixture did not reproduce the golden $GOLDEN" >&2; tail -4 "$W/tiny.log" >&2; exit 1; }
+    }
+    ARMED_RC=""
+    armed_deploy_selftest() {
+        [ -n "$ARMED_RC" ] && return 0
+        echo "  (running the default-armed laya-deploy-selftest once: laya-verify of the deployed artifact, multi-GB)"
+        set +e
+        env -u LAYA_ELIGIBLE_APR -u LAYA_ELIGIBLE_RUN -u LAYA_ELIGIBLE_DATA -u LAYA_ELIGIBLE_BASE -u LAYA_DEPLOY_SELFTEST_POSITIVE \
+            just laya-deploy-selftest > "$W/armed-selftest.log" 2>&1
+        ARMED_RC=$?
+        set -e
+        cp models/decide/selftest/cases/positive.log "$W/armed-positive.log" 2>/dev/null || : > "$W/armed-positive.log"
+        cp models/decide/eligibility-aprender-mcp-decide.log "$W/armed-eligibility.log" 2>/dev/null || : > "$W/armed-eligibility.log"
+    }
+    set_pin() { python3 -c 'import re, sys; p, key, value = sys.argv[1:4]; t = open(p).read(); t, n = re.subn(r"^(" + key + r" = )\"[^\"]*\"$", lambda m: m.group(1) + chr(34) + value + chr(34), t, count=1, flags=re.M); assert n == 1, key; open(p, "w").write(t)' "$CFG" "$1" "$2"; }
+    pinned() { python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["environment"]["APRENDER_DECIDE_SHA256"])' "$CFG"; }
+    # PATH with every directory holding an `rtk` replaced by a symlink mirror without it.
+    nortk_path() {
+        local out="" d m f
+        local -a dirs
+        IFS=: read -r -a dirs <<< "$PATH"
+        for d in "${dirs[@]}"; do
+            if [ -n "$d" ] && [ -x "$d/rtk" ]; then
+                m="$W/nortk/$(printf '%s' "$d" | tr '/' '_')"
+                mkdir -p "$m"
+                for f in "$d"/*; do [ "$(basename "$f")" = rtk ] || ln -sf "$f" "$m/"; done
+                d="$m"
+            fi
+            out="${out:+$out:}$d"
+        done
+        printf '%s' "$out"
+    }
+    # ---- one function per gate_id --------------------------------------------------------------
+    row_leg_verdict() {
+        local d="$W/leg"; mkdir -p "$d"
+        printf 'MEASURED ids 14/14\nMEASURED probs max_abs 3.8e-6\nSKIP ladder rung: LAYA_LADDER_BIN not set\n' > "$d/skip-ladder.log"
+        printf 'MEASURED ids 14/14 argmax 14/14\ntest full_model_reproduces_spike_025_fixture ... SKIP: LAYA_MODEL_DIR not set\nMEASURED probs max_abs 3.8e-6\nMEASURED ladder 32 blocks within bars\n' > "$d/libtest-skip.log"
+        printf 'MEASURED ids 14/14 argmax 14/14\nMEASURED probs max_abs 3.8e-6\n' > "$d/no-ladder.log"
+        printf 'test full_model_reproduces_spike_025_fixture ... load: 3.1 s through the F16 .apr path\nMEASURED ids 14/14 argmax 14/14 truncated 1\nMEASURED probs max_abs 3.841e-6 bar 1e-5 logits max_abs 2.146e-5 bar 1e-4 ARCH aarch64\nMEASURED ladder 32 blocks within bars\nok\n' > "$d/laya_parity.log"
+        printf 'VECTOR a verify: REFUSED GateFailed\nFAIL-CLOSED VECTORS REFUSED 2/2 (412 s, ARCH aarch64)\n' > "$d/fail_closed_vectors.log"
+        printf 'DEMO gate_pass sha256=24a44d7e\nDEMO OUTCOME gate_pass decided on the exact bytes (203 s, ARCH aarch64)\n' > "$d/demo_run.log"
+        printf 'NOISE which=fine_tuned rust=8.3e-6 python=8.3e-6 bound=1e-5\nMEDIAN rust=17 python=17\n' > "$d/python_records.log"
+        must_fail skip-ladder 'FAIL: laya_parity is armed but printed SKIP' just _laya-leg-verdict laya_parity "$d/skip-ladder.log"
+        must_fail libtest-skip 'FAIL: laya_parity is armed but printed SKIP' just _laya-leg-verdict laya_parity "$d/libtest-skip.log"
+        must_fail no-ladder "FAIL: laya_parity printed no positive evidence matching 'MEASURED ladder" just _laya-leg-verdict laya_parity "$d/no-ladder.log"
+        must_fail unknown-leg "FAIL: unknown leg 'no_such_leg'" just _laya-leg-verdict no_such_leg "$d/laya_parity.log"
+        local leg
+        for leg in laya_parity fail_closed_vectors demo_run python_records; do
+            must_pass "$leg" "LEG OK: $leg\$" just _laya-leg-verdict "$leg" "$d/$leg.log"
+        done
+    }
+    SCOPED='{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*"}'
+    LOGS='{"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}'
+    grant() { just _laya-grant-check "$1" dry-run-bucket aprender-mcp-decide aprender-decide-weights-dev; }
+    row_grant_check() {
+        local inl="{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED]}}"
+        local att='"kind":"attached","name":"arn:aws:iam::aws:policy/X","document":{"Statement":'
+        must_fail attached-s3-any 'REFUSED grant: attached policy .* an attached managed policy reaches S3' \
+            grant "[$inl,{$att[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::*\"}]}}]"
+        must_fail get-star 'REFUSED grant: .*a wildcard S3 action' \
+            grant "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:Get*\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*\"}]}}]"
+        must_fail decide-prefix-star 'REFUSED grant: .*a wildcard S3 resource' \
+            grant "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/*\"}]}}]"
+        must_fail not-action 'REFUSED grant: .*NotAction/NotResource' \
+            grant "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"NotAction\":\"iam:*\",\"Resource\":\"*\"}]}}]"
+        must_pass stack-declared 'grant ok: checked 1 inline and 1 attached policies' grant "[$inl,{$att[$LOGS]}}]"
+    }
+    row_grant_listing_failure() {
+        must_fail list-fail 'ERROR: IAM read failed: listing the inline policies' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=list-fail just laya-grant
+        if grep -q 'REFUSED grant' "$(logof list-fail)"; then red "a failed listing was reported as a grant verdict"; fi
+        must_fail attached-fail 'ERROR: IAM read failed: listing the attached managed policies' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=attached-fail just laya-grant
+        must_pass ok 'grant ok: checked 1 inline and 1 attached policies' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=ok just laya-grant
+    }
+    row_teardown_classify() {
+        must_fail access-denied 'ERROR: deleting the legacy policy aprender-decide-weights-dev from decide-fn-role failed' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=teardown-denied just laya-teardown
+        must_pass no-such-entity 'no legacy policy aprender-decide-weights-dev on decide-fn-role' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=teardown-nosuch just laya-teardown
+    }
+    row_sha256_helper() {
+        tiny
+        local H F NP
+        H="$(shasum -a 256 "$W/tiny.apr" | awk '{print $1}')"
+        F="$W/foreign-rtk"; mkdir -p "$F"
+        printf '#!/bin/sh\necho "rtk 0.1.0 (Rust Type Kit): unknown subcommand $1"\nexit 0\n' > "$F/rtk"; chmod +x "$F/rtk"
+        must_pass foreign-rtk "sha256   $H" env PATH="$F:$PATH" just laya-deploy-config "$W/tiny.apr" off
+        [ "$RC" -eq 0 ] && [ "$(pinned)" = "$H" ] || red "with a foreign rtk first on PATH the pin is '$(pinned 2>/dev/null || echo none)', not shasum's $H"
+        NP="$(nortk_path)"
+        if env PATH="$NP" sh -c 'command -v rtk' > /dev/null 2>&1; then red "could not build a PATH without rtk"; fi
+        must_pass rtk-absent "sha256   $H" env PATH="$NP" just laya-deploy-config "$W/tiny.apr" off
+        [ "$RC" -eq 0 ] && [ "$(pinned)" = "$H" ] || red "with rtk absent the pin is '$(pinned 2>/dev/null || echo none)', not shasum's $H"
+        set_pin APRENDER_DECIDE_SHA256 0000000000000000000000000000000000000000000000000000000000000000
+        must_fail sha-pin 'REFUSED sha-pin:' env PATH="$F:$PATH" just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint"
+    }
+    row_resolver_proof_sed() {
+        local d="$W/rp"; mkdir -p "$d"
+        printf 'running 1 test\ntest deployment::builder::aprender_resolver_proof::aprender_decide_resolves_from_shared_crates_root ... RESOLVED root=crates server=aprender-mcp-decide -> crates/aprender-mcp-decide-lambda\nCONTROL root=crates/aprender-mcp-decide-lambda server=aprender-mcp-decide -> crates/aprender-mcp-chronos-lambda\nok\n' > "$d/prefixed.log"
+        printf 'running 1 test\ntest deployment::builder::aprender_resolver_proof::aprender_decide_resolves_from_shared_crates_root ... ok\n' > "$d/none.log"
+        must_fail no-resolved 'REFUSED resolver-parse: no RESOLVED line' just _laya-resolver-parse "$d/none.log"
+        must_pass libtest-prefixed '^RESOLVED=crates/aprender-mcp-decide-lambda$' just _laya-resolver-parse "$d/prefixed.log"
+        grep -qx 'CONTROL=crates/aprender-mcp-chronos-lambda' "$(logof libtest-prefixed)" || red "the CONTROL value was not read"
+    }
+    row_resolver_proof() {
+        local nogit="$W/not-a-checkout"; mkdir -p "$nogit"
+        if git -C "$nogit" rev-parse --git-dir > /dev/null 2>&1; then red "environment: $nogit is inside a git checkout"; return; fi
+        must_fail not-git 'is not a git checkout' just laya-resolver-proof "$nogit" 0000000 "$W/rp-scratch"
+        local body; body="$(just --show laya-resolver-proof)"
+        if printf '%s' "$body" | grep -qF 'PARSED="$(just _laya-resolver-parse "$LOG")"' && ! printf '%s' "$body" | grep -qF "s/^RESOLVED root="; then
+            echo "  must-pass wiring: RESOLVED/CONTROL come from _laya-resolver-parse (no column-0 sed)"
+        else
+            red "laya-resolver-proof does not read its tokens through _laya-resolver-parse"
+        fi
+        if [ "$FULL" = "1" ]; then
+            local sdk commit
+            sdk="${LAYA_GATES_SDK:-$HOME/Development/mcp/sdk/rust-mcp-sdk}"
+            commit="$(sed -n 's/^sdk_commit=//p' "$BK/$PROOF")"
+            must_pass real 'RESOLVER PROOF: crates/aprender-mcp-decide-lambda ' just laya-resolver-proof "$sdk" "$commit" "$W/rp-scratch"
+        else
+            full_only "the real resolver proof (cargo-pmcp test in an SDK archive)"
+        fi
+    }
+    row_deploy_selftest_skip() {
+        tiny
+        must_fail synthetic-armed 'FAIL positive dry run: exit 2 without DRY-RUN OK' \
+            env LAYA_ELIGIBLE_APR="$W/tiny.apr" LAYA_ELIGIBLE_RUN="$T" LAYA_ELIGIBLE_DATA="$T/data" LAYA_ELIGIBLE_BASE="$T/checkpoint" just laya-deploy-selftest
+        must_pass disarmed '^DEPLOY SELFTEST OK \(positive dry run SKIPPED: disarmed by LAYA_DEPLOY_SELFTEST_POSITIVE=0\)$' \
+            env LAYA_DEPLOY_SELFTEST_POSITIVE=0 just laya-deploy-selftest
+        if grep -qx 'DEPLOY SELFTEST OK' "$(logof disarmed)"; then red "a skipped positive dry run printed the bare DEPLOY SELFTEST OK"; fi
+        need_deployed || return 0
+        armed_deploy_selftest < /dev/null
+        if [ "$ARMED_RC" -eq 0 ] && grep -q '^DRY-RUN OK aprender-mcp-decide' "$W/armed-selftest.log" && grep -qx 'DEPLOY SELFTEST OK' "$W/armed-selftest.log"; then
+            echo "  must-pass default-armed: exit 0, $(grep -m 1 '^DRY-RUN OK' "$W/armed-selftest.log" | cut -c 1-120), then the bare DEPLOY SELFTEST OK"
+        else
+            red "must-pass default-armed: exit $ARMED_RC without DRY-RUN OK and the bare OK line (log $W/armed-selftest.log)"
+            tail -4 "$W/armed-selftest.log" >&2 || true
+        fi
+    }
+    row_deploy_refusals() {
+        tiny
+        run setup just laya-deploy-config "$W/tiny.apr" off
+        [ "$RC" -eq 0 ] || { red "laya-deploy-config on the synthetic fixture failed"; return; }
+        set_pin APRENDER_DECIDE_S3_URI UNSET-run-just-laya-deploy-config
+        must_fail placeholder 'REFUSED placeholder:' just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint"
+        run regen just laya-deploy-config "$W/tiny.apr" off
+        must_fail eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint"
+        need_deployed || return 0
+        armed_deploy_selftest
+        if grep -q '^DRY-RUN OK aprender-mcp-decide' "$W/armed-positive.log"; then
+            echo "  must-pass deployed: $(grep -m 1 '^DRY-RUN OK' "$W/armed-positive.log" | cut -c 1-120) (the default-armed selftest's positive dry run)"
+        else
+            red "must-pass deployed: the positive dry run printed no DRY-RUN OK (log $W/armed-positive.log)"
+        fi
+    }
+    row_upload_eligibility() {
+        tiny
+        must_fail synthetic 'REFUSED eligibility: .*SyntheticNotDeployable' just laya-upload "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint"
+        if [ "$FULL" = "1" ]; then
+            need_deployed || return 0
+            must_pass deployed '^DRY-RUN: would upload ' just laya-upload "$DEP_APR" "$DEP_RUN" "$DEP_DATA" "$BASE"
+        else
+            full_only "the DRY_RUN upload of the deployed artifact (laya-verify, multi-GB)"
+        fi
+    }
+    row_verify() {
+        tiny
+        must_fail synthetic 'REFUSED SyntheticNotDeployable' just laya-verify "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint"
+        need_deployed || return 0
+        armed_deploy_selftest
+        local H; H="$(shasum -a 256 "$DEP_APR" | awk '{print $1}')"
+        if python3 -c 'import json, sys; v = json.loads([l for l in open(sys.argv[1]) if l.startswith("{")][-1]); sys.exit(0 if v.get("deploy_eligible") is True and v.get("artifact_sha256") == sys.argv[2] else 1)' "$W/armed-eligibility.log" "$H" 2> /dev/null; then
+            echo "  must-pass deployed: laya-verify accepted $H (deploy_eligible true, via the default-armed selftest)"
+        else
+            red "must-pass deployed: no deploy_eligible true for $H in $W/armed-eligibility.log"
+        fi
+    }
+    row_pack() {
+        must_fail synthetic 'REFUSED SyntheticNotDeployable' just laya-pack "$T" "$T/data" "$T/checkpoint" "$W/pack-synthetic.apr"
+        [ ! -e "$W/pack-synthetic.apr" ] || red "a refused pack wrote $W/pack-synthetic.apr"
+        if [ "$FULL" = "1" ]; then
+            need_deployed || return 0
+            must_pass deployed '^PACKED .* sha256=[0-9a-f]{64} ' just laya-pack "$DEP_RUN" "$DEP_DATA" "$BASE" "$W/pack-deployed.apr"
+            rm -f "$W/pack-deployed.apr"
+        else
+            full_only "a real repack of the deployed run (multi-GB)"
+        fi
+    }
+    row_pack_fixture() {
+        mkdir -p "$W/empty-run/data"
+        must_fail no-task 'REFUSED Pack pack: read .*task.json' just laya-pack-fixture "$W/empty-run" "$W/empty-run/data" "$W/pf-refused.apr"
+        [ ! -e "$W/pf-refused.apr" ] || red "a refused pack-fixture wrote $W/pf-refused.apr"
+        must_pass golden "PACKED-FIXTURE .* sha256=$GOLDEN variant=synthetic-fixture" just laya-pack-fixture "$T" "$T/data" "$W/pf.apr"
+    }
+    row_inspect() {
+        tiny
+        head -c 1000 "$W/tiny.apr" > "$W/truncated.apr"
+        must_fail truncated 'REFUSED Artifact load ladder' just laya-inspect "$W/truncated.apr"
+        must_pass tiny "\"artifact_sha256\":\"$GOLDEN\".*\"variant\":\"synthetic-fixture\"" just laya-inspect "$W/tiny.apr"
+    }
+    row_verify_suite() {
+        mkdir -p "$W/no-model"
+        must_fail no-model 'model.safetensors is missing' just laya-verify-suite "$W/no-model"
+        if [ -f "$BASE/model.safetensors" ]; then
+            must_fail no-ladder 'ERROR: the ladder dump .* is missing' env LAYA_LADDER_BIN="$W/no-ladder.bin" just laya-verify-suite "$BASE"
+        else
+            red "the base snapshot $BASE is absent: the ladder refusal cannot be reached"
+        fi
+        local body; body="$(just --show laya-verify-suite)"
+        if printf '%s' "$body" | grep -qF 'just _laya-leg-verdict "$name" "$log" || return 1' \
+            && printf '%s' "$body" | grep -qF 'leg laya_parity LAYA_MODEL_DIR="$model" LAYA_LADDER_BIN="$ladder"' \
+            && ! printf '%s' "$body" | grep -qF "grep -q '^SKIP:'"; then
+            echo "  must-pass wiring: every leg's verdict is _laya-leg-verdict, and laya_parity gets LAYA_LADDER_BIN"
+        else
+            red "laya-verify-suite does not route every leg through _laya-leg-verdict with the ladder armed"
+        fi
+        if [ "$FULL" = "1" ]; then
+            must_pass real '^LAYA VERIFY SUITE OK$' just laya-verify-suite "$BASE"
+            local n; n="$(grep -c '^LEG OK: ' "$(logof real)" || true)"
+            [ "${n:-0}" -eq 4 ] || red "the armed suite printed $n LEG OK lines, not 4"
+        else
+            full_only "the armed laya-verify-suite (four real-weights legs, about 15 min)"
+        fi
+    }
+    row_train_selftest() {
+        local S="$W/uvshim" U; U="$(command -v uv)"; mkdir -p "$S"
+        printf '#!/bin/sh\ncase "$*" in *gate.py*--selftest*) echo "uv shim: gate selftest failed" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' "$U" > "$S/uv"; chmod +x "$S/uv"
+        must_fail gate-step-fails 'uv shim: gate selftest failed' env PATH="$S:$PATH" just laya-train-selftest
+        if grep -q 'LAYA TRAIN SELFTEST OK' "$(logof gate-step-fails)"; then red "a failing step still printed LAYA TRAIN SELFTEST OK"; fi
+        must_pass real '^LAYA TRAIN SELFTEST OK$' just laya-train-selftest
+    }
+    row_deploy_verify() {
+        need_deployed || return 0
+        must_fail one-sample 'samples must be >= 2' just laya-deploy-verify "$DEP_APR" aprender-mcp-decide ze-kasher-dev 1
+        must_fail missing-apr 'does not exist' just laya-deploy-verify "$W/no-such.apr"
+        must_pass dry-run '^DRY-RUN: stopped before the network' just laya-deploy-verify "$DEP_APR"
+    }
+    row_bootstrap_build() {
+        local Z="$W/zigshim"; mkdir -p "$Z"
+        printf '#!/bin/sh\necho "cargo-zigbuild shim: built nothing"\nexit 0\n' > "$Z/cargo-zigbuild"; chmod +x "$Z/cargo-zigbuild"
+        must_fail stale 'ERROR: .*(is older than this build|does not exist after the build)' env PATH="$Z:$PATH" just laya-build-bootstrap
+        must_pass real '^BOOTSTRAP aarch64 OK ' just laya-build-bootstrap
+    }
+    row_edge_health_url() {
+        must_fail health-path 'REFUSED edge-health-url' just _laya-edge-health-url https://aprender-mcp-decide.us-east.true-mcp.com/health
+        must_fail http 'REFUSED edge-health-url' just _laya-edge-health-url http://aprender-mcp-decide.us-east.true-mcp.com/mcp
+        must_pass mcp '^https://aprender-mcp-decide.us-east.true-mcp.com/health$' just _laya-edge-health-url https://aprender-mcp-decide.us-east.true-mcp.com/mcp
+    }
+    row_edge_health_check() {
+        must_fail chronos "REFUSED edge-health: serverId is 'chronos-forecaster'" just _laya-edge-health-check '{"serverId":"chronos-forecaster"}' aprender-mcp-decide
+        must_fail bootstrap-body 'REFUSED edge-health: serverId is None' just _laya-edge-health-check '{"package":"aprender-mcp-decide-lambda","server":"aprender-mcp-decide"}' aprender-mcp-decide
+        must_pass decide '^edge-health ok: serverId aprender-mcp-decide$' just _laya-edge-health-check '{"status":"healthy","serverId":"aprender-mcp-decide"}' aprender-mcp-decide
+    }
+    row_crates_root_swap() {
+        local R="$W/swaproot" C="$W/swapcfg.toml" before after bkdir
+        mkdir -p "$R/.pmcp" "$R/deploy/lib"
+        echo 'name = "setfit-train"' > "$R/.pmcp/deploy.toml"; echo 'stack' > "$R/deploy/lib/stack.ts"; echo 'name = "decide"' > "$C"
+        before="$(cd "$R" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256)"
+        must_fail not-a-dir 'REFUSED swap: deploy root .* is not a directory' just _laya-crates-root-swap "$W/no-such-root" "$C" "$W/snap" true
+        must_pass swap '^RESTORED .* byte-identical' just _laya-crates-root-swap "$R" "$C" "$W/snap" \
+            sh -c 'cmp -s "$1/.pmcp/deploy.toml" "$2" && test ! -e "$1/deploy"' _ "$R" "$C"
+        after="$(cd "$R" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256)"
+        [ "$before" = "$after" ] || red "the swap root was not restored byte-identically"
+        bkdir="models/decide/swap-backup/$(printf '%s' "$R" | tr '/.' '__')"
+        mkdir -p "$bkdir"
+        must_fail leftover-backup 'REFUSED swap: .* exists' just _laya-crates-root-swap "$R" "$C" "$W/snap" true
+        rm -rf "$bkdir"
+    }
+    row_iam_check() {
+        local ok="$W/iam-ok.toml" star="$W/iam-star.toml" two="$W/iam-two.toml"
+        printf '[server]\nname = "aprender-mcp-decide"\n[environment]\nAPRENDER_DECIDE_S3_URI = "s3://b/decide/aprender-mcp-decide/h.apr"\n[[iam.statements]]\neffect = "Allow"\nactions = ["s3:GetObject"]\nresources = ["arn:aws:s3:::b/decide/aprender-mcp-decide/*"]\n' > "$ok"
+        sed 's/actions = \["s3:GetObject"\]/actions = ["s3:*"]/' "$ok" > "$star"
+        { cat "$ok"; printf '[[iam.statements]]\neffect = "Allow"\nactions = ["s3:GetObject"]\nresources = ["arn:aws:s3:::other/x"]\n'; } > "$two"
+        must_fail s3-star 'REFUSED iam: the statement' just _laya-iam-check "$star"
+        must_fail two-statements 'REFUSED iam: expected exactly one' just _laya-iam-check "$two"
+        must_pass scoped '^iam ok: Allow s3:GetObject arn:aws:s3:::b/decide/aprender-mcp-decide/\*' just _laya-iam-check "$ok"
+    }
+    row_resolver_ere() {
+        must_fail pre-08-22-fn 'FAIL fn expected no-match, got match: /// fn name' \
+            make --no-print-directory contract-audit-phase8-selftest 'P8_FN_ERE=(^|[^[:alnum:]_])fn[[:space:]]+$$name[[:space:]]*[(<]'
+        must_fail pre-08-22-recipe 'FAIL recipe expected no-match, got match: name := value' \
+            make --no-print-directory contract-audit-phase8-selftest 'P8_RECIPE_ERE=^$$name([[:space:]][^:]*)?:'
+        must_pass committed 'every resolver ERE as the table expects' make --no-print-directory contract-audit-phase8-selftest
+    }
+    row_dup_bin_names() {
+        grep -v '^bootstrap ' scripts/duplicate_bin_names_allowlist.txt > "$W/allow-no-bootstrap.txt"
+        if cmp -s "$W/allow-no-bootstrap.txt" scripts/duplicate_bin_names_allowlist.txt; then
+            red "the allowlist has no bootstrap line to remove (the intent is not declared)"
+        elif ! cargo metadata --no-deps --format-version 1 > "$W/root-md.json" 2> /dev/null \
+            || ! (cd crates/facades && cargo metadata --no-deps --format-version 1) > "$W/facades-md.json" 2> /dev/null; then
+            red "cargo metadata failed: the guard's engine has nothing to scan"
+        else
+            must_fail no-bootstrap-line 'D  `bootstrap` is declared by 4 packages' \
+                python3 scripts/lib/bin_names.py "$W/allow-no-bootstrap.txt" "root=$W/root-md.json" "facades=$W/facades-md.json"
+        fi
+        must_pass guard '^PASS  every duplicated bin name is declared intentional' bash scripts/check_duplicate_bin_names.sh
+        must_pass self-test '^SELF-TEST PASSED' bash scripts/check_duplicate_bin_names.sh --self-test
+    }
+    row_gates_selftest() {
+        if [ "${LAYA_GATES_DEPTH:-0}" != "0" ]; then red "a nested sweep reached the gates-selftest row (recursion)"; return; fi
+        cp "$TSV" "$W/t-unknown.tsv"; printf 'no-such-gate\tjust laya-verify\tplanted\tplanted\tplanted by gates-selftest\n' >> "$W/t-unknown.tsv"
+        cp "$TSV" "$W/t-exempt.tsv"; printf 'not-a-gate\tlaya-verify\t-\t-\tplanted by gates-selftest\n' >> "$W/t-exempt.tsv"
+        must_fail unknown-id 'unknown gate_id no-such-gate' env LAYA_GATES_DEPTH=1 LAYA_GATES_TSV="$W/t-unknown.tsv" just laya-gates-selftest
+        grep -q '^  must-' "$(logof unknown-id)" && red "a case ran before the unknown gate_id was refused"
+        must_fail verdict-exempt 'DRIFT: laya-verify prints a verdict and cannot be not-a-gate' env LAYA_GATES_DEPTH=1 LAYA_GATES_TSV="$W/t-exempt.tsv" just laya-gates-selftest
+        must_pass one-row '^LAYA GATES ROWS OK 1 of ' env LAYA_GATES_DEPTH=1 LAYA_GATES_ONLY=edge-health-url just laya-gates-selftest
+    }
+    # ---- dispatch -------------------------------------------------------------------------------
+    UNKNOWN=""
+    while IFS=$'\t' read -r -u 3 gid target mf; do
+        case "$target" in external:*) continue ;; esac
+        declare -F "row_${gid//-/_}" > /dev/null || UNKNOWN="$UNKNOWN $gid"
+    done 3< "$W/rows.tsv"
+    if [ -n "$UNKNOWN" ]; then
+        for gid in $UNKNOWN; do echo "FAIL: unknown gate_id $gid: no dispatcher case in laya-gates-selftest" >&2; done
+        echo "LAYA GATES SELFTEST FAILED: unknown gate_id(s):$UNKNOWN (no case ran)" >&2
+        exit 1
+    fi
+    if [ -n "$ONLY" ]; then
+        for gid in ${ONLY//,/ }; do
+            cut -f 1 "$W/rows.tsv" | grep -qx "$gid" || { echo "LAYA GATES SELFTEST FAILED: LAYA_GATES_ONLY names $gid, which is not a row" >&2; exit 1; }
+        done
+    fi
+    TOTAL=0; RAN=0; FAILS=0; REDS=""
+    while IFS=$'\t' read -r -u 3 gid target mf; do
+        TOTAL=$((TOTAL + 1))
+        if [ -n "$ONLY" ] && ! printf ',%s,' "$ONLY" | grep -qF ",$gid,"; then continue; fi
+        RAN=$((RAN + 1))
+        CUR="$gid"; ROW_RED=0; S0=$(date +%s)
+        echo "ROW $gid ($target)"
+        case "$target" in
+            external:*)
+                if [ "$mf" = "-" ]; then
+                    echo "  external: owner plan ${target#external:}; no local case"
+                else
+                    run external sh -c "$mf"
+                    if [ "$RC" -eq 0 ]; then echo "  external case: '$mf' exit 0 (owner plan ${target#external:})"; else red "external case '$mf' exit $RC (log $(logof external))"; tail -4 "$(logof external)" >&2 || true; fi
+                fi
+                ;;
+            *) "row_${gid//-/_}" ;;
+        esac
+        if [ "$ROW_RED" -eq 0 ]; then echo "ROW $gid: GREEN ($(( $(date +%s) - S0 )) s)"; else echo "ROW $gid: RED" >&2; FAILS=$((FAILS + 1)); REDS="$REDS $gid"; fi
+    done 3< "$W/rows.tsv"
+    CALLS="$(wc -l < "$REC" | tr -d ' ')"
+    echo "AWS CALLS: $CALLS"
+    [ "$CALLS" -eq 0 ] || { echo "LAYA GATES SELFTEST FAILED: the aws recorder was called: $(head -3 "$REC" | tr '\n' ';')" >&2; exit 1; }
+    if [ "$FAILS" -ne 0 ]; then
+        echo "LAYA GATES SELFTEST FAILED: $FAILS row(s) RED:$REDS" >&2
+        exit 1
+    fi
+    if [ -n "$ONLY" ]; then
+        echo "LAYA GATES ROWS OK $RAN of $TOTAL (LAYA_GATES_ONLY=$ONLY; not a full sweep)"
+    elif [ -n "$FULL_SKIPPED" ]; then
+        echo "LAYA GATES SELFTEST OK $TOTAL rows (FULL-tier must-pass cases SKIPPED: $FULL_SKIPPED; set LAYA_GATES_FULL=1)"
+    else
+        echo "LAYA GATES SELFTEST OK $TOTAL rows"
+    fi

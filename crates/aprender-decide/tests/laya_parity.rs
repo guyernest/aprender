@@ -295,3 +295,24 @@ fn full_model_reproduces_spike_025_fixture() {
         None => println!("SKIP ladder rung: {ENV_LADDER} not set"),
     }
 }
+
+/// A2-6 (plan 08-22): the probability rung's running maximum must keep a NaN seen EARLIER in the
+/// row. `f64::max` returns the non-NaN operand, so the old `m.max(d)` fold turned `[NaN, 0.1]`
+/// into 0.1 and a NaN row could pass the bar. Not env-gated: it needs no weights.
+#[test]
+fn nan_max_keeps_an_earlier_nan() {
+    let folded = [f64::NAN, 0.1, 0.0]
+        .iter()
+        .fold(0.0f64, |m, &d| nan_max(m, d));
+    assert!(folded.is_nan(), "an earlier NaN was dropped: {folded}");
+    let later = [0.1, f64::NAN].iter().fold(0.0f64, |m, &d| nan_max(m, d));
+    assert!(later.is_nan(), "a later NaN was dropped: {later}");
+    assert_eq!(
+        [0.1, 0.3, 0.2].iter().fold(0.0f64, |m, &d| nan_max(m, d)),
+        0.3
+    );
+    assert!(
+        !within(nan_max(0.0, f64::NAN), 1.0),
+        "a NaN maximum must fail the bar"
+    );
+}

@@ -57,7 +57,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 contract-audit-phase6 contract-audit-phase8 setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests setfit-bench-door-probe setfit-bench-door-probe-build lint-current check-wasm32
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 contract-audit-phase6 contract-audit-phase8 contract-audit-phase8-selftest setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests setfit-bench-door-probe setfit-bench-door-probe-build lint-current check-wasm32
 
 # Default target
 all: tier2
@@ -2554,7 +2554,88 @@ PHASE8_LIVE_EXEMPT :=
 # (2) PHASE8_LIVE_EXEMPT populated and ANOTHER Phase 8 row set to `partial` -> its BIND-002 line is
 #     counted and the gate FAILS, while the exempt equation's own line would have been admitted.
 # Both reverted, then green.
-contract-audit-phase8: ## Audit Phase 8 binding coverage + source resolution (BLOCKING, wired into tier3)
+# THE RESOLVER'S THREE EREs (plan 08-22, V14-a), one definition each, used by contract-audit-phase8 and
+# checked by contract-audit-phase8-selftest's must-match / must-not-match table BEFORE the audit runs
+# (CLAUDE.md Verification rule 7: guard regexes ship a case table). Each is expanded inside a shell
+# double-quoted string where `$$name` / `$$ty` are the row's function and type.
+#   P8_FN_ERE      a `fn <name>` DEFINITION: the line starts (after whitespace) with optional
+#                  visibility/qualifiers (pub, pub(<scope>), const, async, unsafe, extern, default) and
+#                  then `fn`. So doc and line comments (`///`, `//`, `//!`) never resolve a row. The
+#                  pre-08-22 form, `(^|[^[:alnum:]_])fn...`, matched `/// fn name(`.
+#   P8_IMPL_ERE    an inherent or trait `impl` block for the type (unchanged).
+#   P8_RECIPE_ERE  a justfile recipe HEADER: the name, optional parameters, a colon NOT followed by `=`.
+#                  The pre-08-22 form matched a just assignment `name := value`.
+# KNOWN LIMITS, not fixed by a regex: a grep cannot see `#[cfg(test)]`, so a test-only helper with the
+# right name still resolves; `extern "C" fn` (an ABI string) does not match P8_FN_ERE; a recipe
+# parameter default that contains a colon does not match P8_RECIPE_ERE.
+P8_FN_ERE = ^[[:space:]]*((pub(\([^)]*\))?|const|async|unsafe|extern|default)[[:space:]]+)*fn[[:space:]]+$$name[[:space:]]*[(<]
+P8_IMPL_ERE = ^[[:space:]]*impl([[:space:]]*<[^>]*>)?[[:space:]]+([^{;]*[[:space:]]for[[:space:]]+)?$$ty([[:space:]]|<|\{|$$)
+P8_RECIPE_ERE = ^$$name([[:space:]][^:]*)?:([^=]|$$)
+
+# The resolver EREs' case table (plan 08-22): each case is one line written to a temp file and grepped
+# with the SAME variable contract-audit-phase8 uses, name=name and ty=Type. A case that disagrees with
+# its expectation FAILS the target, and contract-audit-phase8 lists this target as a prerequisite, so
+# the audit never runs on EREs that fail their table. Override a variable on the command line (for
+# example the pre-08-22 P8_FN_ERE) to watch the table go RED. The `cfg(test)` case documents the known
+# limit above: it MATCHES, because a grep cannot see the attribute.
+contract-audit-phase8-selftest: ## Must-match / must-not-match case table for the contract-audit-phase8 resolver EREs
+	@d=$$(mktemp -d); \
+	fails=0; \
+	cases=0; \
+	name=name; \
+	ty=Type; \
+	check() { \
+		kind="$$1"; want="$$2"; line="$$3"; \
+		cases=$$((cases + 1)); \
+		printf '%s\n' "$$line" > "$$d/case"; \
+		case "$$kind" in \
+			fn) re="$(P8_FN_ERE)" ;; \
+			impl) re="$(P8_IMPL_ERE)" ;; \
+			recipe) re="$(P8_RECIPE_ERE)" ;; \
+			*) echo "  FAIL unknown ERE kind $$kind"; fails=$$((fails + 1)); return ;; \
+		esac; \
+		if grep -Eq "$$re" "$$d/case"; then got=match; else got=no-match; fi; \
+		if [ "$$got" = "$$want" ]; then \
+			echo "  ok   $$kind $$want: $$line"; \
+		else \
+			echo "  FAIL $$kind expected $$want, got $$got: $$line"; \
+			fails=$$((fails + 1)); \
+		fi; \
+	}; \
+	echo "Resolver ERE case table (P8_FN_ERE / P8_IMPL_ERE / P8_RECIPE_ERE, name=name ty=Type):"; \
+	check fn match 'fn name('; \
+	check fn match 'pub(crate) fn name<T>('; \
+	check fn match '    pub async fn name('; \
+	check fn match 'pub const unsafe fn name('; \
+	check fn match '    fn name() {}  // cfg(test) helper: a grep cannot see the attribute (known limit)'; \
+	check fn no-match '/// fn name('; \
+	check fn no-match '// fn name('; \
+	check fn no-match '//! see fn name('; \
+	check fn no-match '    /// Calls fn name(x) first.'; \
+	check fn no-match 'fn name_other('; \
+	check fn no-match 'fn rename('; \
+	check impl match 'impl Type {'; \
+	check impl match 'impl<T> Trait for Type<T> {'; \
+	check impl match '    impl Type'; \
+	check impl no-match '// impl Type {'; \
+	check impl no-match 'impl TypeOther {'; \
+	check recipe match 'name:'; \
+	check recipe match 'name arg="x":'; \
+	check recipe match 'name a b="c" *rest:'; \
+	check recipe no-match 'name := value'; \
+	check recipe no-match 'name:= value'; \
+	check recipe no-match '    name:'; \
+	check recipe no-match 'name-other:'; \
+	rm -rf "$$d"; \
+	if [ "$$cases" -eq 0 ]; then echo "FAIL: the case table ran no case"; exit 1; fi; \
+	if [ "$$fails" -ne 0 ]; then \
+		echo "FAIL: $$fails of $$cases resolver ERE case(s) disagree with the table: contract-audit-phase8 would"; \
+		echo "resolve (or refuse) rows on the wrong text. Fix the ERE, never the table."; \
+		exit 1; \
+	fi; \
+	echo "contract-audit-phase8-selftest: $$cases cases, every resolver ERE as the table expects"
+
+contract-audit-phase8: contract-audit-phase8-selftest ## Audit Phase 8 binding coverage + source resolution (BLOCKING, wired into tier3)
 	@echo "Auditing binding coverage for the Phase 8 contracts..."
 	@mkdir -p target
 	@exempt_raw="$(strip $(PHASE8_LIVE_EXEMPT))"; \
@@ -2644,7 +2725,7 @@ contract-audit-phase8: ## Audit Phase 8 binding coverage + source resolution (BL
 			continue; \
 		fi; \
 		if [ "$$file" = "justfile" ]; then \
-			if grep -Eq "^$$name([[:space:]][^:]*)?:" justfile; then \
+			if grep -Eq "$(P8_RECIPE_ERE)" justfile; then \
 				resolved=$$((resolved + 1)); \
 			else \
 				echo "RESOLVE- $$c $$e $$m::$$f (no recipe header in justfile)"; \
@@ -2653,9 +2734,9 @@ contract-audit-phase8: ## Audit Phase 8 binding coverage + source resolution (BL
 			continue; \
 		fi; \
 		if [ -n "$$ty" ]; then \
-			hits=$$(grep -rlE "^[[:space:]]*impl([[:space:]]*<[^>]*>)?[[:space:]]+([^{;]*[[:space:]]for[[:space:]]+)?$$ty([[:space:]]|<|\{|$$)" "$$file" || true); \
+			hits=$$(grep -rlE "$(P8_IMPL_ERE)" "$$file" || true); \
 		else \
-			hits=$$(grep -rlE "(^|[^[:alnum:]_])fn[[:space:]]+$$name[[:space:]]*[(<]" "$$file" || true); \
+			hits=$$(grep -rlE "$(P8_FN_ERE)" "$$file" || true); \
 		fi; \
 		if [ -z "$$hits" ]; then \
 			if [ -n "$$ty" ]; then why="no impl block for type '$$ty'"; else why="no fn '$$name'"; fi; \
@@ -2663,7 +2744,7 @@ contract-audit-phase8: ## Audit Phase 8 binding coverage + source resolution (BL
 			unresolvable=$$((unresolvable + 1)); \
 			continue; \
 		fi; \
-		if grep -Eq "(^|[^[:alnum:]_])fn[[:space:]]+$$name[[:space:]]*[(<]" $$hits; then \
+		if grep -Eq "$(P8_FN_ERE)" $$hits; then \
 			resolved=$$((resolved + 1)); \
 		else \
 			echo "RESOLVE- $$c $$e $$m::$$f (no definition site for fn '$$name' in $$hits)"; \
