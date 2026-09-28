@@ -370,6 +370,9 @@ mod tests_clustering_contract;
 #[cfg(test)]
 #[path = "tests_ranking_contract.rs"]
 mod tests_ranking_contract;
+
+#[cfg(test)]
+mod f32_bits_tests;
 pub use classification::{fbeta_score, jaccard_score};
 
 /// Remaps cluster labels to a dense `0..k` range based on the set of DISTINCT
