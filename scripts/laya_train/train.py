@@ -723,6 +723,13 @@ def main(argv=None):
         if (data_dir / "shift.jsonl").is_file():      # the OPTIONAL shift probe (A2): reported, never a gate clause
             shift_rows = data.load_rows(data_dir / "shift.jsonl", task, "shift")
             data.refuse_overlap(train_rows, shift_rows, "shift")
+        # The inputs this run TRAINS on, bound now: the report's inputs_sha256 and the run dir's task.json copy
+        # are taken from these, never re-read from the data dir hours later (a mid-run edit would otherwise be
+        # bound to a model that never saw it). The data dir is re-checked against them before the report.
+        task_bytes = (data_dir / "task.json").read_bytes()
+        input_sha = {"task.json": sha256_bytes(task_bytes)}
+        for name in ("train.jsonl", "eval.jsonl") + (("shift.jsonl",) if shift_rows is not None else ()):
+            input_sha[name] = data.sha256_file(data_dir / name)
         fit_ids, calib_ids, slice_ids, slice_sha = data.calibration_split(
             train_rows, c["calibration_slice_fraction"], c["calibration_slice_min_per_class"], seed,
             len(task["labels"]))
@@ -771,7 +778,7 @@ def main(argv=None):
         P, _ = score_rows(zs_agent, eval_rows, question)
         del zs_agent
         write_json(out / "zero-shot-probs.json", eval_probs_obj(labels, eval_rows, P))
-        (out / "task.json").write_bytes((data_dir / "task.json").read_bytes())
+        (out / "task.json").write_bytes(task_bytes)
         return P
 
     if len(seeds) == 1:
@@ -868,9 +875,9 @@ def main(argv=None):
         "device_is_cpu": info["device_used"] == "cpu",
         "torch_version": torch.__version__,
         "recipe_id": recipe_id,
-        "inputs_sha256": {"task_json": data.sha256_file(data_dir / "task.json"),
-                          "train_jsonl": data.sha256_file(data_dir / "train.jsonl"),
-                          "eval_jsonl": data.sha256_file(data_dir / "eval.jsonl"),
+        "inputs_sha256": {"task_json": input_sha["task.json"],
+                          "train_jsonl": input_sha["train.jsonl"],
+                          "eval_jsonl": input_sha["eval.jsonl"],
                           "base_model": base.digest,
                           "tokenizer_json": data.sha256_file(ck / "tokenizer" / "tokenizer.json")},
         "eval_probs_sha256": data.sha256_file(out / "eval-probs.json"),
@@ -879,8 +886,15 @@ def main(argv=None):
         "rescore_noise_sha256": noise_sha,
     }
     if shift_probe is not None:
-        report["inputs_sha256"]["shift_jsonl"] = data.sha256_file(data_dir / "shift.jsonl")
+        report["inputs_sha256"]["shift_jsonl"] = input_sha["shift.jsonl"]
         report["shift_probe"] = shift_probe
+    # The data dir must still hold exactly what was trained on: a file edited (or a shift.jsonl added / removed)
+    # during the run is refused with no report, never bound to this model.
+    now = {name: data.sha256_file(data_dir / name) for name in ("task.json", "train.jsonl", "eval.jsonl", "shift.jsonl")
+           if (data_dir / name).is_file()}
+    if now != input_sha:
+        changed = sorted(n for n in set(now) | set(input_sha) if now.get(n) != input_sha.get(n))
+        refuse("REFUSED data-changed: %s in %s changed during the run; no gate report is written" % (changed, data_dir))
     write_json(out / "gate-report.json", report)
 
     zs, ft = g["zero_shot"], g["fine_tuned"]

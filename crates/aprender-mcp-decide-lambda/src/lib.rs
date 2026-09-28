@@ -26,14 +26,13 @@ use std::future::Future;
 use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 
-use aprender_decide::artifact::{read_decide_apr_bytes_bounded, ArtifactLimits};
+use aprender_decide::artifact::{read_decide_apr_bytes_bounded, ArtifactLimits, HashedArtifact};
 use aprender_decide::ArtifactError;
 pub use aprender_mcp_decide::{build_server as build_decide_server, Model, ModelLoadError};
 use pmcp::server::streamable_http_server::{StreamableHttpServer, StreamableHttpServerConfig};
-use sha2::{Digest, Sha256};
 
 pub mod probe;
 pub mod s3;
@@ -290,13 +289,6 @@ pub enum ResolveError {
     },
     /// The decide-apr-v1 load ladder refused the bytes.
     Load(ModelLoadError),
-    /// The loaded model reports a different identity than the bytes hashed to.
-    IdentityMismatch {
-        /// sha256 of the bytes.
-        hashed: String,
-        /// `model.identity().artifact_sha256`.
-        served: String,
-    },
     /// A blocking section panicked or was cancelled.
     Join(String),
 }
@@ -312,7 +304,6 @@ impl ResolveError {
             Self::S3(e) => e.kind(),
             Self::HashMismatch { .. } => "hash_mismatch",
             Self::Load(_) => "load",
-            Self::IdentityMismatch { .. } => "identity_mismatch",
             Self::Join(_) => "join",
         }
     }
@@ -337,10 +328,6 @@ impl fmt::Display for ResolveError {
                 "artifact sha256 {actual} is not the pinned {expected}; refused before parsing"
             ),
             Self::Load(e) => write!(f, "{e}"),
-            Self::IdentityMismatch { hashed, served } => write!(
-                f,
-                "loaded model reports identity {served}, but the bytes hashed to {hashed}"
-            ),
             Self::Join(e) => write!(f, "blocking section failed: {e}"),
         }
     }
@@ -354,17 +341,10 @@ pub fn contracted_cap() -> u64 {
     ArtifactLimits::CONTRACTED.max_artifact_bytes()
 }
 
-/// sha256 of `bytes` as lowercase hex.
-#[must_use]
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for b in digest {
-        let _ = write!(out, "{b:02x}");
-    }
-    out
-}
+/// sha256 of `bytes` as lowercase hex — the ladder's own identity function. The cold path
+/// does not call it: it hashes once through [`HashedArtifact`], checks the pin against that
+/// digest, and the ladder mints the served identity from the same digest.
+pub use aprender_decide::artifact::artifact_sha256_hex as sha256_hex;
 
 fn ms_since(t: Instant) -> u128 {
     t.elapsed().as_millis()
@@ -442,8 +422,9 @@ fn host_timeline(
     }
 }
 
-/// Hash `bytes`, compare with `pin` (when present) BEFORE any parse, run the ladder,
-/// then drop the buffer. The blocking work runs on the blocking pool.
+/// Hash `bytes` ONCE, compare with `pin` (when present) BEFORE any parse, run the ladder
+/// minting the identity from that same digest, then drop the buffer. The blocking work runs
+/// on the blocking pool.
 async fn verify_and_build(
     source: &'static str,
     bytes: Vec<u8>,
@@ -452,8 +433,9 @@ async fn verify_and_build(
 ) -> Result<(Model, LoadTimeline), ResolveError> {
     tokio::task::spawn_blocking(move || {
         let t = Instant::now();
-        let actual = sha256_hex(&bytes);
+        let hashed = HashedArtifact::new(&bytes);
         let sha_ms = ms_since(t);
+        let actual = hashed.sha256().to_string();
         if let Some(pin) = pin {
             if pin.as_str() != actual {
                 return Err(ResolveError::HashMismatch {
@@ -463,19 +445,15 @@ async fn verify_and_build(
             }
         }
         let t = Instant::now();
+        // The ladder mints identity.artifact_sha256 from `hashed` — the digest just checked
+        // against the pin — instead of hashing the ~0.85 GB buffer a second time.
         let model =
-            aprender_mcp_decide::load_model_from_bytes(&bytes).map_err(ResolveError::Load)?;
+            aprender_mcp_decide::load_model_from_hashed(&hashed).map_err(ResolveError::Load)?;
         let len = bytes.len() as u64;
         // Peak memory is the bytes plus the widened model; the bytes go now.
+        drop(hashed);
         drop(bytes);
         let build_ms = ms_since(t);
-        let served = model.identity().artifact_sha256.clone();
-        if served != actual {
-            return Err(ResolveError::IdentityMismatch {
-                hashed: actual,
-                served,
-            });
-        }
         let timeline = host_timeline(source, len, fetch_ms, sha_ms, build_ms, actual);
         Ok((model, timeline))
     })
@@ -582,13 +560,11 @@ pub async fn resolve_model(source: &ModelSource) -> Result<(Model, LoadTimeline)
 // The lazy, once-per-container load
 // ===========================================================================
 
-/// A value loaded at most once per process, behind a lock so concurrent first callers
-/// load it once. A FAILED load leaves it empty and the lock released, so the next
-/// caller retries — never a poisoned once-cell.
+/// A value loaded at most once per process: concurrent first callers load it once. A
+/// FAILED load leaves it empty, so the next caller retries — never a poisoned once-cell.
 #[derive(Debug)]
 pub struct LoadOnce<T> {
-    value: OnceLock<Arc<T>>,
-    lock: tokio::sync::Mutex<()>,
+    cell: tokio::sync::OnceCell<Arc<T>>,
 }
 
 impl<T> Default for LoadOnce<T> {
@@ -602,15 +578,14 @@ impl<T> LoadOnce<T> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            value: OnceLock::new(),
-            lock: tokio::sync::Mutex::const_new(()),
+            cell: tokio::sync::OnceCell::const_new(),
         }
     }
 
     /// The loaded value, if any.
     #[must_use]
     pub fn get(&self) -> Option<Arc<T>> {
-        self.value.get().cloned()
+        self.cell.get().cloned()
     }
 
     /// Return the value, loading it with `load` if this is the first successful call.
@@ -624,16 +599,17 @@ impl<T> LoadOnce<T> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        if let Some(v) = self.value.get() {
-            return Ok((Arc::clone(v), false));
-        }
-        let _guard = self.lock.lock().await;
-        if let Some(v) = self.value.get() {
-            return Ok((Arc::clone(v), false));
-        }
-        let loaded = Arc::new(load().await?);
-        let _ = self.value.set(Arc::clone(&loaded));
-        Ok((loaded, true))
+        let mut performed = false;
+        let performed_ref = &mut performed;
+        let value = self
+            .cell
+            .get_or_try_init(|| async move {
+                let loaded = load().await?;
+                *performed_ref = true;
+                Ok(Arc::new(loaded))
+            })
+            .await?;
+        Ok((Arc::clone(value), performed))
     }
 }
 

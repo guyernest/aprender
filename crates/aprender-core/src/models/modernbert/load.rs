@@ -21,7 +21,7 @@
 //! F16 path in the workspace, no hand-written f16 code here.
 
 use super::{Linear, ModernBertConfig, ModernBertEmbeddings, ModernBertEncoder, ModernBertLayer};
-use crate::format::v2::AprV2ReaderRef;
+use crate::format::v2::{AprV2ReaderRef, TensorDType};
 use crate::format::AprV2DequantExt;
 use std::fmt;
 
@@ -126,7 +126,8 @@ pub fn expected_modernbert_tensor_names(config: &ModernBertConfig, prefix: &str)
 /// # Errors
 ///
 /// [`ModernBertLoadError`] naming `name`: missing, a stored shape other than `shape`,
-/// a dtype that cannot be widened (or truncated data), or a non-finite value.
+/// a dtype other than F16 / F32 or a payload that is not exactly `product(shape) x width`
+/// bytes (truncated or padded data), or a non-finite value.
 pub fn load_tensor(
     reader: &AprV2ReaderRef<'_>,
     name: &str,
@@ -148,9 +149,25 @@ pub fn load_tensor(
         name: name.to_string(),
         dtype: format!("{:?}", entry.dtype),
     };
-    let data = reader.get_tensor_as_f32(name).ok_or_else(undecodable)?;
+    // Only the documented domain (F16 / F32), and only a payload of EXACTLY
+    // product(shape) x width bytes: the quantized decoders zero-fill truncated data and zero
+    // non-finite scales, so widening first and checking the output length after would load
+    // a truncated or corrupt quantized weight as zeros.
+    let width: u64 = match entry.dtype {
+        TensorDType::F16 => 2,
+        TensorDType::F32 => 4,
+        _ => return Err(undecodable()),
+    };
     // Checked product: a caller's shape need not come from a checked_mul-proven config.
-    if Some(data.len()) != shape.iter().try_fold(1usize, |a, &b| a.checked_mul(b)) {
+    let elements = shape.iter().try_fold(1usize, |a, &b| a.checked_mul(b));
+    let expected_bytes = elements
+        .and_then(|n| u64::try_from(n).ok())
+        .and_then(|n| n.checked_mul(width));
+    if expected_bytes != Some(entry.size) {
+        return Err(undecodable());
+    }
+    let data = reader.get_tensor_as_f32(name).ok_or_else(undecodable)?;
+    if Some(data.len()) != elements {
         return Err(undecodable());
     }
     if !data.iter().all(|v| v.is_finite()) {
@@ -321,6 +338,43 @@ mod tests {
                     name: name.to_string()
                 },
                 "f16 bits {bits:#06x}"
+            );
+        }
+    }
+
+    /// A dtype outside F16 / F32, or a payload that is not exactly `product(shape) x width`
+    /// bytes, is refused BY NAME before widening. The quantized decoders zero-fill missing
+    /// data, so an empty APR-Q4 weight must not load as a tensor of zeros.
+    #[test]
+    fn refuses_foreign_dtype_and_truncated_payload() {
+        use crate::format::v2::{AprV2Metadata, AprV2Writer, TensorDType};
+        let cfg = fixture_config();
+        let name = "final_norm.weight";
+        let build = |dtype: TensorDType, cut: usize| {
+            let mut w = AprV2Writer::new(AprV2Metadata::default());
+            for (n, shape, raw) in fixture_tensors() {
+                if n == name {
+                    let keep = raw.len().saturating_sub(cut);
+                    let payload = if dtype == TensorDType::F16 {
+                        raw[..keep].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    w.add_tensor(n, dtype, shape, payload);
+                } else {
+                    w.add_tensor(n, TensorDType::F16, shape, raw);
+                }
+            }
+            w.write().expect("write in-memory .apr")
+        };
+        for (label, apr) in [
+            ("empty APR-Q4", build(TensorDType::AprQ4, 0)),
+            ("F16 two bytes short", build(TensorDType::F16, 2)),
+        ] {
+            let err = load(&apr, "", &cfg).expect_err(label);
+            assert!(
+                matches!(&err, ModernBertLoadError::Undecodable { name: n, .. } if n == name),
+                "{label}: {err:?}"
             );
         }
     }

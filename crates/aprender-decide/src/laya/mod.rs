@@ -128,17 +128,29 @@ impl AgentConfig {
     ///
     /// # Errors
     ///
-    /// [`LayaError::AgentConfig`] for malformed JSON, a missing `head_layers` or a
-    /// non-positive `max_len`.
+    /// [`LayaError::AgentConfig`] for malformed JSON, a missing `head_layers`, a
+    /// `head_layers` above [`MAX_HEAD_LAYERS`] or a non-positive `max_len`.
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, LayaError> {
         let c: Self =
             serde_json::from_slice(bytes).map_err(|e| LayaError::AgentConfig(e.to_string()))?;
         if c.max_len == 0 {
             return Err(LayaError::AgentConfig("max_len must be positive".into()));
         }
+        // The count is untrusted (an artifact's own config blob): bounded BEFORE the per-layer
+        // tensor names are derived from it.
+        if c.head_layers > MAX_HEAD_LAYERS {
+            return Err(LayaError::AgentConfig(format!(
+                "head_layers {} is over the supported {MAX_HEAD_LAYERS}",
+                c.head_layers
+            )));
+        }
         Ok(c)
     }
 }
+
+/// The most decision-head layers an agent config may declare. Laya ships 2; the bound keeps
+/// the per-layer tensor names derived from an untrusted count from sizing an allocation.
+pub const MAX_HEAD_LAYERS: usize = 64;
 
 /// Why the Laya method refused.
 #[derive(Debug, Clone, PartialEq)]
@@ -473,8 +485,9 @@ impl Laya {
     }
 }
 
-/// Index of the first maximum (numpy `argmax`); NaN never wins.
-fn argmax(p: &[f32]) -> usize {
+/// Index of the first maximum (numpy `argmax`); NaN never wins. Shared with the
+/// verifier, which must re-derive the served decision with the SAME rule.
+pub(crate) fn argmax<T: PartialOrd>(p: &[T]) -> usize {
     (0..p.len()).fold(0, |m, i| if p[i] > p[m] { i } else { m })
 }
 

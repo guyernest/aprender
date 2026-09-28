@@ -93,6 +93,11 @@ pub const BLOB_TENSORS: [&str; 6] = [
 pub const MAX_ARTIFACT_BYTES: u64 = 1_342_177_280;
 /// decide-apr-v1 `constants.max_tensor_count`.
 pub const MAX_TENSOR_COUNT: u32 = 4096;
+/// The most metadata bytes (the manifest section) a header may declare (decide-apr-v1
+/// `constants.max_metadata_bytes`). Laya-en's is ~2.4 KB. The container reader parses the
+/// section into a JSON tree at 40-50x its size, so rung 2 bounds the declared length BEFORE
+/// the reader may.
+pub const MAX_METADATA_BYTES: u32 = 1_048_576;
 /// The smallest encodable tensor-index entry: u16 name length + u8 dtype + u8 ndim +
 /// u64 offset + u64 size (decide-apr-v1 `constants.min_index_entry_bytes`). The value
 /// is apr-format's own (the reader's index-capacity bound), widened to u64 here.
@@ -368,6 +373,13 @@ pub enum ArtifactError {
         /// File length.
         file_len: u64,
     },
+    /// Rung 2: `metadata_size` over [`MAX_METADATA_BYTES`].
+    MetadataOverCap {
+        /// Declared metadata length.
+        declared: u32,
+        /// The cap.
+        cap: u32,
+    },
     /// Rung 3: the container reader refused the metadata or index.
     Container {
         /// The container error.
@@ -521,7 +533,8 @@ impl ArtifactError {
             | Self::ColumnMajor
             | Self::TensorCountOverCap { .. }
             | Self::IndexExtentTooSmall { .. }
-            | Self::IndexPastEnd { .. } => "2 header_and_index_extent",
+            | Self::IndexPastEnd { .. }
+            | Self::MetadataOverCap { .. } => "2 header_and_index_extent",
             Self::Container { .. }
             | Self::WrongModelType { .. }
             | Self::CustomKeys { .. }
@@ -576,6 +589,9 @@ impl fmt::Display for ArtifactError {
                 data_offset,
                 file_len,
             } => write!(f, "data_offset {data_offset} is past the {file_len}-byte file"),
+            Self::MetadataOverCap { declared, cap } => {
+                write!(f, "metadata_size {declared} exceeds {cap}")
+            }
             Self::Container { reason } => write!(f, "container refused: {reason}"),
             Self::WrongModelType { observed } => {
                 write!(f, "model_type {observed:?}, expected {MODEL_TYPE_TAG:?}")
@@ -659,6 +675,42 @@ impl std::error::Error for ArtifactError {}
 #[must_use]
 pub fn artifact_sha256_hex(bytes: &[u8]) -> String {
     sha256_hex(bytes)
+}
+
+/// Artifact bytes hashed ONCE, by this crate: the digest a caller checks its pin against
+/// BEFORE any parse, and the digest [`crate::Decider::load_hashed`] mints the identity from
+/// instead of hashing the same bytes a second time (a ~0.85 GB software sha256 is ~3 s of a
+/// Lambda cold start).
+///
+/// The fields are private and the only constructor hashes exactly the bytes it holds, so an
+/// identity minted from it is still the ladder's own (decide-apr-v1 `private_mint`).
+#[derive(Debug, Clone)]
+pub struct HashedArtifact<'a> {
+    bytes: &'a [u8],
+    sha256: String,
+}
+
+impl<'a> HashedArtifact<'a> {
+    /// Hash `bytes` — the whole file, the D-11 identity.
+    #[must_use]
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            sha256: artifact_sha256_hex(bytes),
+        }
+    }
+
+    /// Lowercase-hex sha256 of the whole artifact.
+    #[must_use]
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    /// The bytes that were hashed.
+    #[must_use]
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
 }
 
 /// Bytes per element for the dtypes this artifact carries; `None` for any other.
@@ -1222,6 +1274,13 @@ fn rung2_header(bytes: &[u8]) -> Result<(), ArtifactError> {
     if !header.flags.is_layout_valid() {
         return Err(ArtifactError::ColumnMajor);
     }
+    // The reader parses the whole declared metadata section into a JSON tree; bound it first.
+    if header.metadata_size > MAX_METADATA_BYTES {
+        return Err(ArtifactError::MetadataOverCap {
+            declared: header.metadata_size,
+            cap: MAX_METADATA_BYTES,
+        });
+    }
     check_index_extent(
         header.tensor_count,
         header.tensor_index_offset,
@@ -1438,6 +1497,24 @@ pub(crate) fn load_verified_within(
     bytes: &[u8],
     limits: &ArtifactLimits,
 ) -> Result<Decider, ArtifactError> {
+    load_rungs(bytes, limits, || artifact_sha256_hex(bytes))
+}
+
+/// Rungs 1-8 over bytes this crate already hashed ([`HashedArtifact::new`]): the rung-8
+/// identity is that digest, so the bytes are hashed once rather than twice.
+pub(crate) fn load_verified_hashed(hashed: &HashedArtifact<'_>) -> Result<Decider, ArtifactError> {
+    load_rungs(hashed.bytes, &ArtifactLimits::CONTRACTED, || {
+        hashed.sha256.clone()
+    })
+}
+
+/// The ladder itself; `whole_file_sha256` supplies the rung-8 identity (always the sha256
+/// of exactly `bytes`, computed by this crate) and runs only once every rung has passed.
+fn load_rungs(
+    bytes: &[u8],
+    limits: &ArtifactLimits,
+    whole_file_sha256: impl FnOnce() -> String,
+) -> Result<Decider, ArtifactError> {
     // Rungs 1-3.
     let (reader, manifest) = open_within(bytes, limits)?;
     // Rung 4.
@@ -1464,7 +1541,7 @@ pub(crate) fn load_verified_within(
     )?;
     // Rung 8: mint.
     let identity = ModelIdentity {
-        artifact_sha256: artifact_sha256_hex(bytes),
+        artifact_sha256: whole_file_sha256(),
         recipe_id: manifest.recipe_id.clone(),
         method: manifest.method.clone(),
         base: manifest.base.display(),

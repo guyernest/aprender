@@ -659,7 +659,7 @@ mod tests {
     use aprender_mcp_decide::{check_token_budget, precheck, ClassifyArgs, ClassifyLimits};
 
     use super::*;
-    use crate::tests::{serve, tiny_bytes, tiny_model};
+    use crate::tests::{serve, tiny_model};
 
     /// Limits the tiny fixture (rows of at most 64 tokens) can reach: two full rows.
     const SHRUNK: ClassifyLimits = ClassifyLimits {
@@ -805,7 +805,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{} request refused: {e}", shape.as_str()));
             assert_eq!(sample.tokens_total, total, "{}", shape.as_str());
             assert_eq!(sample.texts, texts.len());
-            assert_eq!(sample.artifact_sha256, crate::sha256_hex(tiny_bytes()));
+            assert_eq!(sample.artifact_sha256, crate::tests::tiny_golden_sha256());
         }
     }
 }

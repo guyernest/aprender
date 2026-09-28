@@ -22,6 +22,29 @@ pub(crate) fn tiny_bytes() -> &'static [u8] {
     })
 }
 
+/// The tiny fixture's COMMITTED golden sha256 (aprender-decide FALSIFY-DECIDE-APR-002): an
+/// identity oracle independent of the hash function under test, so the transport's identity
+/// assertions never compare that function with itself.
+pub(crate) fn tiny_golden_sha256() -> &'static str {
+    static GOLDEN: OnceLock<String> = OnceLock::new();
+    GOLDEN.get_or_init(|| {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../aprender-decide/tests/fixtures/laya_tiny.apr.sha256");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .trim()
+            .to_string()
+    })
+}
+
+/// The identity oracle is the committed golden, and the crate's re-exported hash agrees with
+/// it on the packed tiny fixture.
+#[test]
+fn tiny_identity_oracle_is_the_committed_golden() {
+    assert_eq!(tiny_golden_sha256().len(), 64);
+    assert_eq!(sha256_hex(tiny_bytes()), tiny_golden_sha256());
+}
+
 pub(crate) fn tiny_model() -> Arc<Model> {
     static MODEL: OnceLock<Arc<Model>> = OnceLock::new();
     Arc::clone(MODEL.get_or_init(|| {
@@ -44,7 +67,7 @@ pub(crate) async fn serve(model: Arc<Model>) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn loopback_identity_probe_over_real_http() {
     let model = tiny_model();
-    let expected = sha256_hex(tiny_bytes());
+    let expected = tiny_golden_sha256().to_string();
     assert_eq!(model.identity().artifact_sha256, expected);
     let labels = model.task().owned_labels();
     assert_eq!(labels, ["shipping", "billing", "account"]);
@@ -85,7 +108,7 @@ async fn loopback_cold_first_call_is_served_without_initialize() {
     let sample = run_cold_first(&url, None, &texts, "cold-first-test-1")
         .await
         .expect("a tools/call with no preceding initialize is served");
-    assert_eq!(sample.artifact_sha256, sha256_hex(tiny_bytes()));
+    assert_eq!(sample.artifact_sha256, tiny_golden_sha256());
     assert_eq!(sample.texts, 2);
     assert!(sample.tokens_total > 0);
     assert_eq!(sample.probe_id, "cold-first-test-1");
@@ -228,7 +251,7 @@ async fn local_source_resolves_the_tiny_fixture_with_its_pin() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("tiny.apr");
     std::fs::write(&path, tiny_bytes()).expect("write");
-    let pin = Sha256Pin::parse(&sha256_hex(tiny_bytes())).expect("pin");
+    let pin = Sha256Pin::parse(tiny_golden_sha256()).expect("pin");
     let (model, timeline) = resolve_local(&path, Some(&pin), contracted_cap())
         .await
         .expect("resolve");

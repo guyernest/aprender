@@ -796,7 +796,30 @@ pub fn pack_run_dir(run_dir: &Path, data_dir: &Path) -> Result<Vec<u8>, PackErro
 /// [`PackError::UnsupportedDtype`] for the weights, [`PackError::Artifact`] for the in-memory
 /// container, and [`PackError::Rebuild`] when Laya refuses the parts.
 pub fn load_checkpoint_for_scoring(checkpoint_dir: &Path, task: Task) -> Result<Laya, PackError> {
-    let tensors = read_checkpoint_tensors(&read_file(checkpoint_dir, "model.safetensors")?)?;
+    scorer_from_parts(
+        &read_file(checkpoint_dir, "model.safetensors")?,
+        &read_file(checkpoint_dir, "encoder/config.json")?,
+        &read_file(checkpoint_dir, "rl_agent_config.json")?,
+        &read_file(checkpoint_dir, "tokenizer/tokenizer.json")?,
+        task,
+    )
+}
+
+/// The scorer [`load_checkpoint_for_scoring`] builds, from checkpoint files the caller has
+/// ALREADY read (and hashed): what is scored is exactly the bytes the caller checked, with no
+/// window between a hash and a second read of the same path.
+///
+/// # Errors
+///
+/// As [`load_checkpoint_for_scoring`], minus the file reads.
+pub fn scorer_from_parts(
+    model_safetensors: &[u8],
+    encoder_config: &[u8],
+    agent_config: &[u8],
+    tokenizer: &[u8],
+    task: Task,
+) -> Result<Laya, PackError> {
+    let tensors = read_checkpoint_tensors(model_safetensors)?;
     let apr = {
         let mut w = AprV2Writer::new(AprV2Metadata::default());
         for t in tensors {
@@ -813,15 +836,8 @@ pub fn load_checkpoint_for_scoring(checkpoint_dir: &Path, task: Task) -> Result<
             reason: e.to_string(),
         })
     })?;
-    Laya::from_parts(
-        &reader,
-        "",
-        &read_file(checkpoint_dir, "encoder/config.json")?,
-        &read_file(checkpoint_dir, "rl_agent_config.json")?,
-        &read_file(checkpoint_dir, "tokenizer/tokenizer.json")?,
-        task,
-    )
-    .map_err(PackError::Rebuild)
+    Laya::from_parts(&reader, "", encoder_config, agent_config, tokenizer, task)
+        .map_err(PackError::Rebuild)
 }
 
 #[cfg(test)]

@@ -201,8 +201,9 @@ pub struct ModelIdentity {
 
 /// A decision model that passed every rung of the decide-apr-v1 load ladder.
 ///
-/// Its fields are private and it has no public constructor: [`Decider::load_bytes`]
-/// and [`Decider::load_path`] are the only doors, and both run the whole ladder
+/// Its fields are private and it has no public constructor: [`Decider::load_bytes`],
+/// [`Decider::load_hashed`] and [`Decider::load_path`] are the only doors, and all run the
+/// whole ladder
 /// (decide-apr-v1 rung 8, proven by the trybuild case `tests/ui/decider_struct_literal.rs`).
 pub struct Decider {
     method: Box<dyn DecisionMethod>,
@@ -227,6 +228,18 @@ impl Decider {
     /// An [`ArtifactError`] naming the rung that refused.
     pub fn load_bytes(bytes: &[u8]) -> Result<Self, ArtifactError> {
         artifact::load_verified(bytes)
+    }
+
+    /// [`Decider::load_bytes`] over bytes this crate already hashed: the whole ladder runs
+    /// on [`artifact::HashedArtifact::bytes`], and rung 8 mints the identity from that
+    /// digest instead of hashing the same bytes again. For a caller that checks a pinned
+    /// sha256 before any parse (the Lambda's cold start), this is one pass, not two.
+    ///
+    /// # Errors
+    ///
+    /// An [`ArtifactError`] naming the rung that refused.
+    pub fn load_hashed(hashed: &artifact::HashedArtifact<'_>) -> Result<Self, ArtifactError> {
+        artifact::load_verified_hashed(hashed)
     }
 
     /// Open `path`, refuse it by its metadata length before reading, read it bounded

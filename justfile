@@ -1736,7 +1736,8 @@ laya-build-bootstrap:
 # any AWS call: (1) generated config present, (2) no placeholder left, (3) local sha256 ==
 # the config's pin and content-addressed key, (4) resolver proof present, naming the decide
 # package, for the installed cargo-pmcp, (5) ELIGIBILITY: `just laya-verify` accepts the exact
-# file, (6) the S3 object has the local size. DRY_RUN=1 stops after (6) with DRY-RUN OK. Live:
+# file, (6) the S3 object has the local size (live only: first (6a) the config's bucket must be
+# this env's, aprender-decide-weights-<account>-<env>). DRY_RUN=1 stops at (6) with DRY-RUN OK. Live:
 # touch -> DEPLOYING -> cargo pmcp deploy (crates root, swapped) -> compile-log, edge-health
 # serverId and live identity-probe assertions; any identity failure runs `just laya-teardown`
 # (containment).
@@ -1815,6 +1816,14 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
         echo "DRY-RUN OK $SERVER (sha256 $H; nothing deployed)"
         exit 0
     fi
+    # (6a) the config's weights bucket is THIS environment's. A config generated for another env
+    # would otherwise pass every check above, deploy live (replacing the running function), and
+    # only then be refused by laya-grant's bucket ARN -- and contained, i.e. taken down.
+    ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)" \
+        || refuse env "cannot read the AWS account for profile $PROFILE"
+    WANT_BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
+    [ "$BUCKET" = "$WANT_BUCKET" ] \
+        || refuse env "the config's weights bucket is $BUCKET but env=$ENV expects $WANT_BUCKET -- regenerate it: just laya-deploy-config $APR <on|off> $SERVER $ENV $PROFILE"
     REMOTE="$(aws s3api head-object --profile "$PROFILE" --bucket "$BUCKET" --key "$KEY" \
         --query ContentLength --output text 2>/dev/null)" \
         || refuse s3-object "s3://$BUCKET/$KEY is absent -- upload it: just laya-upload $APR {{run}} {{data}} {{base}}"

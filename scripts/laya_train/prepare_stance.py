@@ -33,6 +33,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import contract  # noqa: E402
+from common import jsonl_bytes  # noqa: E402
 from data import DataError, exact_sha256, in_distribution_heldout, normalized_sha256, sha256_bytes  # noqa: E402
 
 REPO = contract.REPO
@@ -97,10 +98,6 @@ def labelled(rows, ids, order, split):
             fail("%s id %s: label %s/%s is not in the contract order" % (split, rid, r["label"], r["label_text"]))
         out.append((rid, r["input"], r["label_text"]))
     return out
-
-
-def jsonl_bytes(rows):
-    return "".join(json.dumps({"text": t, "label": lab}, ensure_ascii=False) + "\n" for t, lab in rows).encode("utf-8")
 
 
 def build(cell):

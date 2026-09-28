@@ -84,6 +84,26 @@ fn tiny_roundtrip() {
     );
 }
 
+/// The hashed door mints exactly the identity the plain door mints: the digest a caller
+/// pinned IS the rung-8 identity (one sha256 pass), and a refusing rung still refuses.
+#[test]
+fn load_hashed_mints_the_same_identity() {
+    let bytes = pack_tiny();
+    let hashed = super::HashedArtifact::new(&bytes);
+    assert_eq!(hashed.sha256(), artifact_sha256_hex(&bytes));
+    assert!(std::ptr::eq(hashed.bytes(), bytes.as_slice()));
+    let via_hash = Decider::load_hashed(&hashed).expect("the ladder accepts the packed fixture");
+    let via_bytes = Decider::load_bytes(&bytes).expect("the ladder accepts the packed fixture");
+    assert_eq!(via_hash.identity(), via_bytes.identity());
+    assert_eq!(via_hash.identity().artifact_sha256, hashed.sha256());
+
+    let mut corrupt = bytes.clone();
+    corrupt[20] ^= 0x01; // inside the CRC-covered header
+    let e = Decider::load_hashed(&super::HashedArtifact::new(&corrupt))
+        .expect_err("a corrupt header is refused on the hashed door too");
+    assert_eq!(e, super::ArtifactError::HeaderChecksum);
+}
+
 /// FALSIFY-DECIDE-APR-004: every checkpoint tensor's raw bytes (F16 weights and the
 /// F32 temperature), dtype and shape, and every blob, round-trip byte-identical
 /// against the run dir — nothing re-rounded through f32, nothing re-serialized.
@@ -160,7 +180,7 @@ fn load_path_door() {
 fn contract_mirror() {
     use super::{
         ArtifactLimits, ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_VERSION, BLOB_TENSORS,
-        CUSTOM_METADATA_KEY, MAX_ARTIFACT_BYTES, MAX_TENSOR_COUNT, METHOD_LAYA,
+        CUSTOM_METADATA_KEY, MAX_ARTIFACT_BYTES, MAX_METADATA_BYTES, MAX_TENSOR_COUNT, METHOD_LAYA,
         MIN_INDEX_ENTRY_BYTES, MODEL_TYPE_TAG, PROBE_INPUTS, PROBE_MAX_ROW_TOKENS,
         PROBE_PROBABILITIES_ABS, PROBE_TASK,
     };
@@ -170,6 +190,10 @@ fn contract_mirror() {
     assert_eq!(
         k["max_tensor_count"].as_u64(),
         Some(u64::from(MAX_TENSOR_COUNT))
+    );
+    assert_eq!(
+        k["max_metadata_bytes"].as_u64(),
+        Some(u64::from(MAX_METADATA_BYTES))
     );
     assert_eq!(
         k["probe_max_row_tokens"].as_u64(),

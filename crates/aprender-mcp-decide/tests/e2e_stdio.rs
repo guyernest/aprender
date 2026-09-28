@@ -335,6 +335,23 @@ fn the_tiny_decide_server_classifies_over_live_stdio() {
         refused,
         "an unknown key must be refused end-to-end: {strict:?}"
     );
+
+    // A malformed argument is refused WITHOUT echoing caller text (refusal_names_bound, ASVS
+    // V7): pmcp's typed-tool path would have returned serde's message, which quotes it.
+    const SECRET: &str = "ZQXJ-e2e-caller-document-4111";
+    let mut unknown_key = serde_json::Map::new();
+    unknown_key.insert("texts".to_string(), serde_json::json!(["a"]));
+    unknown_key.insert(SECRET.to_string(), serde_json::json!(1));
+    for bad in [
+        serde_json::json!({ "texts": SECRET }),
+        serde_json::Value::Object(unknown_key),
+    ] {
+        let message = refusal(&client.call(bad));
+        assert!(
+            message.contains("decide-tool-boundary-v1") && !message.contains(SECRET),
+            "a malformed argument must be refused without echo: {message}"
+        );
+    }
 }
 
 #[test]

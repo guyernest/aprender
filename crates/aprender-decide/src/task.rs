@@ -21,7 +21,6 @@
 
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::fmt;
 
 /// One criterion: its name is the label; its description, when present, is rendered
@@ -161,10 +160,7 @@ impl Task {
             .into_iter()
             .map(|(name, description)| Criterion { name, description })
             .collect();
-        let sha256 = Sha256::digest(bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let sha256 = crate::pack::sha256_hex(bytes);
         Ok(Self {
             instructions: doc.instructions,
             criteria,

@@ -6,7 +6,7 @@ use super::tests::pack_tiny;
 use super::{
     check_index_extent, check_size, expected_bytes, load_verified, load_verified_within,
     read_bounded_within, read_decide_apr_bytes_bounded, write_decide_apr_within, ArtifactError,
-    ArtifactLimits, CUSTOM_METADATA_KEY, MAX_ARTIFACT_BYTES, MAX_TENSOR_COUNT,
+    ArtifactLimits, CUSTOM_METADATA_KEY, MAX_ARTIFACT_BYTES, MAX_METADATA_BYTES, MAX_TENSOR_COUNT,
     MIN_INDEX_ENTRY_BYTES, PROBE_MAX_ROW_TOKENS,
 };
 use crate::pack::PackInputs;
@@ -245,6 +245,68 @@ fn index_past_end() {
             file_len: len,
         }
     );
+}
+
+/// Replace blob `name` with `new` AND re-pin its manifest sha256 — the artifact's author
+/// controls both, so the blob hash alone is not a bound on what the blob declares.
+fn swap_blob(bytes: &[u8], name: &str, new: Vec<u8>) -> Vec<u8> {
+    let sha = crate::pack::sha256_hex(&new);
+    let swapped = edit_tensor(bytes, name, |data| *data = new);
+    edit_manifest(&swapped, |m| {
+        for blob in m["blobs"].as_array_mut().expect("manifest blobs") {
+            if blob["name"] == name {
+                blob["sha256"] = serde_json::Value::String(sha.clone());
+            }
+        }
+    })
+}
+
+/// A self-consistent artifact whose config blobs declare astronomically many layers is a
+/// typed rung-4 refusal, never an allocation sized by the declared count (a 2^62-layer
+/// encoder config used to abort the process inside the config parse).
+#[test]
+fn untrusted_layer_counts_are_bounded_before_derivation() {
+    let b = packed();
+    let r = AprV2ReaderRef::from_bytes(&b).expect("open the packed artifact");
+    let blob_json = |name: &str| -> serde_json::Value {
+        serde_json::from_slice(r.get_tensor_data(name).expect("blob")).expect("blob JSON")
+    };
+    let mut enc = blob_json(super::ENCODER_CONFIG_BLOB);
+    enc.as_object_mut()
+        .expect("encoder config object")
+        .remove("layer_types");
+    enc["num_hidden_layers"] = serde_json::Value::from(1u64 << 62);
+    let mut agent = blob_json(super::AGENT_CONFIG_BLOB);
+    agent["head_layers"] = serde_json::Value::from(1u64 << 40);
+    for (blob, value) in [
+        (super::ENCODER_CONFIG_BLOB, enc),
+        (super::AGENT_CONFIG_BLOB, agent),
+    ] {
+        let forged = swap_blob(&b, blob, serde_json::to_vec(&value).expect("serialize"));
+        let e = refuse(&forged);
+        assert!(
+            matches!(&e, ArtifactError::ConfigBlob { blob: got, .. } if *got == blob),
+            "{blob}: {e}"
+        );
+        assert_eq!(e.rung(), "4 structural", "{blob}");
+    }
+}
+
+/// A forged header (valid CRC) declaring a metadata section over the cap is refused at
+/// rung 2, before the container reader would parse that many bytes into a JSON tree.
+#[test]
+fn metadata_over_cap() {
+    let mut b = packed();
+    forge_header(&mut b, |h| h.metadata_size = MAX_METADATA_BYTES + 1);
+    let e = refuse(&b);
+    assert_eq!(
+        e,
+        ArtifactError::MetadataOverCap {
+            declared: MAX_METADATA_BYTES + 1,
+            cap: MAX_METADATA_BYTES,
+        }
+    );
+    assert_eq!(e.rung(), "2 header_and_index_extent");
 }
 
 /// KANI-DECIDE-APR-001's evidence: the rung-2 predicate over every combination of edge

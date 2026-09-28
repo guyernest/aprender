@@ -41,6 +41,11 @@ def write_json(path, obj, compact=False):
     write_bytes(path, (text + "\n").encode("utf-8"))
 
 
+def jsonl_bytes(rows):
+    """`(text, label)` rows as the train/eval JSONL bytes the pins are taken over."""
+    return "".join(json.dumps({"text": t, "label": lab}, ensure_ascii=False) + "\n" for t, lab in rows).encode("utf-8")
+
+
 def f32_list(t):
     """Exact f32 values as JSON numbers (the f64 repr of each f32)."""
     return [float(x) for x in np.asarray(t, dtype=np.float32).reshape(-1)]

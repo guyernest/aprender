@@ -18,7 +18,9 @@
 //!    metric functions' panicking preconditions can never fire on file data;
 //! 5. re-scores EVERY eval row in Rust ([`rescore`]): the fine-tuned model is the
 //!    [`Decider`] loaded from the PACKED bytes through the whole decide-apr-v1 ladder, the
-//!    zero-shot model is the declared base ([`crate::pack::load_checkpoint_for_scoring`]);
+//!    zero-shot model is the declared base ([`crate::pack::scorer_from_parts`] over the base
+//!    dir's `model.safetensors`, re-hashed on the very bytes it builds from, and its tokenizer,
+//!    bound to the run's `inputs_sha256.tokenizer_json`);
 //!    every probability must agree within its set's bound with the argmax exact. The bound is
 //!    laya-parity-v1 A1's `bound(c, s) = max(floor, k x noise(c, s))`, DERIVED here by
 //!    [`rescore_bounds`] from the hash-bound float64 record `rescore-noise.json` (noise
@@ -49,6 +51,7 @@
 //! `synthetic-fixture` artifacts, which every verify refuses.
 
 use crate::artifact::{self, within, ArtifactError};
+use crate::laya::argmax;
 use crate::pack::{self, sha256_hex, GateCalibration, GateReport, PackError, PackInputs, Recipe};
 use crate::{DecideError, Decider, Decision, DecisionMethod, Task};
 use aprender::calibration::expected_calibration_error_top_label;
@@ -141,6 +144,9 @@ pub enum BaseWhich {
     Contract,
     /// The base dir's `model.safetensors` differs from the recipe's declared sha256.
     BaseDir,
+    /// The base dir's `tokenizer/tokenizer.json` differs from the run's
+    /// (`inputs_sha256.tokenizer_json`; the trainer copies the base tokenizer unchanged).
+    BaseTokenizer,
 }
 
 impl fmt::Display for BaseWhich {
@@ -148,6 +154,7 @@ impl fmt::Display for BaseWhich {
         f.write_str(match self {
             Self::Contract => "contract",
             Self::BaseDir => "base_dir",
+            Self::BaseTokenizer => "base_tokenizer",
         })
     }
 }
@@ -303,6 +310,15 @@ pub enum VerifyError {
         which: ProbsWhich,
         /// The refusal.
         reason: String,
+    },
+    /// The artifact's bytes are not the bytes the given run and data dirs pack to: a weight,
+    /// a config blob or the manifest differs from the run's checkpoint (packing is
+    /// byte-deterministic, so an honest file of this run is byte-identical).
+    ArtifactNotFromRun {
+        /// sha256 of the file.
+        file_sha256: String,
+        /// sha256 of the bytes the run packs to.
+        packed_sha256: String,
     },
     /// The artifact's manifest does not describe the given run and data dirs.
     ManifestMismatch {
@@ -509,6 +525,7 @@ impl VerifyError {
             Self::Read { .. } => "Read",
             Self::DataInvalid { .. } => "DataInvalid",
             Self::Score { .. } => "Score",
+            Self::ArtifactNotFromRun { .. } => "ArtifactNotFromRun",
             Self::ManifestMismatch { .. } => "ManifestMismatch",
             Self::SyntheticNotDeployable { .. } => "SyntheticNotDeployable",
             Self::NotSyntheticFixture { .. } => "NotSyntheticFixture",
@@ -592,6 +609,14 @@ impl fmt::Display for VerifyError {
             Self::Read { path, reason } => write!(f, "{}: {reason}", path.display()),
             Self::DataInvalid { file, line, why } => write!(f, "{file} line {line}: {why}"),
             Self::Score { which, reason } => write!(f, "{which} re-score refused: {reason}"),
+            Self::ArtifactNotFromRun {
+                file_sha256,
+                packed_sha256,
+            } => write!(
+                f,
+                "the artifact (sha256 {file_sha256}) is not the bytes the given run/data dirs \
+                 pack to (sha256 {packed_sha256}): a weight, config blob or manifest byte differs"
+            ),
             Self::ManifestMismatch { field } => write!(
                 f,
                 "the artifact's manifest {field} does not describe the given run/data dirs"
@@ -879,6 +904,30 @@ pub fn read_data_dir(data_dir: &Path) -> Result<DataDir, VerifyError> {
     })
 }
 
+/// laya-finetune-gate-v1 `eval_set.generic_rule`: every criterion has at least one eval row.
+/// The gate's macro-F1 averages over the labels present in `y ∪ pred`, so with a criterion
+/// absent from eval the margin is decided by which model happens to predict it — a fine-tune
+/// worse than zero-shot on every present class can pass. The mirror of `data.load_rows`'s
+/// `eval-class-coverage`.
+///
+/// # Errors
+///
+/// [`VerifyError::DataInvalid`] on `eval_jsonl` naming the first missing criterion.
+pub fn check_eval_coverage(eval: &[DataRow], labels: &[String]) -> Result<(), VerifyError> {
+    match (0..labels.len()).find(|&c| !eval.iter().any(|r| r.label == c)) {
+        None => Ok(()),
+        Some(c) => Err(VerifyError::DataInvalid {
+            file: "eval_jsonl",
+            line: 0,
+            why: format!(
+                "criterion {:?} has no eval row: every criterion needs one for the gate's \
+                 macro-F1 to compare the same labels",
+                labels[c]
+            ),
+        }),
+    }
+}
+
 // ===========================================================================
 // Cheap checks
 // ===========================================================================
@@ -942,6 +991,50 @@ pub fn check_base(
         });
     }
     Ok(())
+}
+
+/// The declared base as the zero-shot scorer, read ONCE and bound before it scores:
+/// `model.safetensors` must hash to the declared base sha256 — the very bytes that are built, so
+/// nothing can swap the file between [`check_base`]'s streamed hash and this load — and
+/// `tokenizer/tokenizer.json` must hash to the run's `inputs_sha256.tokenizer_json` (the
+/// trainer copies the base tokenizer into the checkpoint unchanged), so the baseline is not
+/// tokenized differently from the fine-tune it is compared with.
+///
+/// # Errors
+///
+/// [`VerifyError::Read`], [`VerifyError::BaseMismatch`] (`base_dir` / `base_tokenizer`) or a
+/// [`VerifyError::Pack`] build refusal.
+fn load_declared_base(
+    base_dir: &Path,
+    task: Task,
+    model_sha256: &str,
+    tokenizer_sha256: &str,
+) -> Result<crate::laya::Laya, VerifyError> {
+    let model = read_path(&base_dir.join("model.safetensors"))?;
+    let observed = sha256_hex(&model);
+    if observed != model_sha256 {
+        return Err(VerifyError::BaseMismatch {
+            which: BaseWhich::BaseDir,
+            expected: model_sha256.to_string(),
+            observed,
+        });
+    }
+    let tokenizer = read_path(&base_dir.join("tokenizer/tokenizer.json"))?;
+    let observed = sha256_hex(&tokenizer);
+    if observed != tokenizer_sha256 {
+        return Err(VerifyError::BaseMismatch {
+            which: BaseWhich::BaseTokenizer,
+            expected: tokenizer_sha256.to_string(),
+            observed,
+        });
+    }
+    Ok(pack::scorer_from_parts(
+        &model,
+        &read_path(&base_dir.join("encoder/config.json"))?,
+        &read_path(&base_dir.join("rl_agent_config.json"))?,
+        &tokenizer,
+        task,
+    )?)
 }
 
 fn hash_matches(file: &'static str, recorded: &str, bytes: &[u8]) -> Result<(), VerifyError> {
@@ -1249,13 +1342,8 @@ pub fn validate_probs(
 // Re-score, recompute, gate
 // ===========================================================================
 
-/// Index of the first maximum (numpy `argmax`); NaN never wins.
-fn argmax(p: &[f32]) -> usize {
-    (0..p.len()).fold(0, |m, i| if p[i] > p[m] { i } else { m })
-}
-
 /// `max |a - b|`, NaN-propagating; NaN on a length mismatch.
-fn row_max_abs(a: &[f32], b: &[f32]) -> f64 {
+pub(crate) fn row_max_abs(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() {
         return f64::NAN;
     }
@@ -1346,11 +1434,6 @@ where
 const NOISE_REFERENCE: &str = "float64";
 /// The control forwards the first `min(CONTROL_ROWS, n)` eval rows.
 const CONTROL_ROWS: usize = 5;
-
-/// Index of the first maximum of an f64 row (numpy `argmax`); NaN never wins.
-fn argmax_f64(p: &[f64]) -> usize {
-    (0..p.len()).fold(0, |m, i| if p[i] > p[m] { i } else { m })
-}
 
 fn noise_invalid(
     which: Option<ProbsWhich>,
@@ -1496,7 +1579,7 @@ fn recompute_noise(
                 format!("sum {sum}, not 1 within {PROBS_ROW_SUM_ABS}"),
             ));
         }
-        let (torch, reference) = (argmax(p32), argmax_f64(p64));
+        let (torch, reference) = (argmax(p32), argmax(p64));
         if torch != reference {
             return Err(VerifyError::NoiseArgmaxFlip {
                 which,
@@ -1551,28 +1634,17 @@ pub fn rescore_bounds(
     policy: &VerifyPolicy,
 ) -> Result<[RescoreBound; 2], VerifyError> {
     let floor = policy.rescore_probs_abs;
-    let Some(bytes) = inputs.rescore_noise_json.as_deref() else {
-        return Ok([
-            RescoreBound {
-                which: ProbsWhich::FineTuned,
-                noise: None,
-                bound: floor,
-            },
-            RescoreBound {
-                which: ProbsWhich::ZeroShot,
-                noise: None,
-                bound: floor,
-            },
-        ]);
-    };
-    let rec: pack::RescoreNoise = serde_json::from_slice(bytes)
-        .map_err(|e| noise_invalid(None, None, "json", e.to_string()))?;
-    check_noise_header(&rec, ft_probs.len(), policy)?;
     let mut out = [ProbsWhich::FineTuned, ProbsWhich::ZeroShot].map(|which| RescoreBound {
         which,
         noise: None,
         bound: floor,
     });
+    let Some(bytes) = inputs.rescore_noise_json.as_deref() else {
+        return Ok(out);
+    };
+    let rec: pack::RescoreNoise = serde_json::from_slice(bytes)
+        .map_err(|e| noise_invalid(None, None, "json", e.to_string()))?;
+    check_noise_header(&rec, ft_probs.len(), policy)?;
     for (slot, (set, probs)) in out
         .iter_mut()
         .zip(rec.sets.iter().zip([ft_probs, zs_probs]))
@@ -2070,6 +2142,14 @@ pub fn check_shift_probe(
 ) -> Result<(), VerifyError> {
     let r = &inputs.gate_report;
     let (probe, recorded) = match (&r.shift_probe, &r.inputs_sha256.shift_jsonl) {
+        // Present EXACTLY when the data dir carries shift.jsonl: a report may not drop the
+        // probe (and with it the shift evidence A2 keeps visible) while the data has one.
+        (None, None) if data.shift.is_some() => {
+            return Err(shift_mismatch(
+                "shift_probe",
+                "the data dir carries shift.jsonl but the report names no shift probe".into(),
+            ))
+        }
         (None, None) => return Ok(()),
         (Some(p), Some(h)) => (p, h),
         _ => {
@@ -2202,6 +2282,7 @@ fn cheap_checks(
     let data = read_data_dir(data_dir)?;
     check_inputs(inputs, &data)?;
     let labels = data.task.owned_labels();
+    check_eval_coverage(&data.eval, &labels)?;
     let k = labels.len();
     check_split(
         &data.train,
@@ -2256,7 +2337,12 @@ fn verify_loaded(
         ft_bound.bound,
     )?;
     drop(decider);
-    let base = pack::load_checkpoint_for_scoring(base_dir, checked.task.clone())?;
+    let base = load_declared_base(
+        base_dir,
+        checked.task.clone(),
+        &inputs.recipe.base.sha256,
+        &inputs.gate_report.inputs_sha256.tokenizer_json,
+    )?;
     let zs = rescore(
         ProbsWhich::ZeroShot,
         |t| base.classify(t),
@@ -2383,15 +2469,22 @@ pub fn pack_for_serving(
     Ok(report)
 }
 
-/// Deployment eligibility of the EXACT file `apr` (decide-apr-v1 `deploy_eligibility`): load
-/// it through [`Decider::load_path`] (all eight rungs), require its manifest to describe the
-/// given run and data dirs (recipe_id, report sha256, input hashes, labels), then every step
-/// of [`verify_run`] with the fine-tuned re-score on that loaded file.
+/// Deployment eligibility of the EXACT file `apr` (decide-apr-v1 `deploy_eligibility`): read
+/// it once (bounded, rung 1) and load those bytes through the whole ladder, require its
+/// manifest to describe the given run and data dirs (recipe_id, report sha256, input hashes,
+/// labels), require the file to BE the bytes that run packs to, then every step of
+/// [`verify_run`] with the fine-tuned re-score on that loaded file.
+///
+/// The byte binding is what makes the re-score sufficient: the re-score only exercises the
+/// weights the eval rows and probes reach, so without it a file whose unexercised weights
+/// (e.g. embedding rows of tokens no eval row contains) differ from the run's checkpoint would
+/// verify. Packing is byte-deterministic (FALSIFY-DECIDE-APR-002), so an honest file is
+/// identical to a fresh pack of its run.
 ///
 /// # Errors
 ///
-/// [`VerifyError::Artifact`] for a ladder refusal, [`VerifyError::ManifestMismatch`], or any
-/// [`verify_run`] refusal.
+/// [`VerifyError::Artifact`] for a ladder refusal, [`VerifyError::ManifestMismatch`],
+/// [`VerifyError::ArtifactNotFromRun`], or any [`verify_run`] refusal.
 pub fn verify_path(
     apr: &Path,
     run_dir: &Path,
@@ -2399,7 +2492,13 @@ pub fn verify_path(
     base_dir: &Path,
     policy: &VerifyPolicy,
 ) -> Result<VerifyReport, VerifyError> {
-    let decider = Decider::load_path(apr)?;
+    let io = |e: std::io::Error| ArtifactError::Read {
+        reason: e.to_string(),
+    };
+    let file = std::fs::File::open(apr).map_err(io)?;
+    let declared = file.metadata().map_err(io)?.len();
+    let bytes = artifact::read_decide_apr_bytes_bounded(file, Some(declared))?;
+    let decider = Decider::load_bytes(&bytes)?;
     let inputs = PackInputs::from_run_dir(run_dir, data_dir)?;
     let m = decider.manifest();
     let report_sha = sha256_hex(&inputs.gate_report_json);
@@ -2420,6 +2519,15 @@ pub fn verify_path(
     if m.labels != checked.task.owned_labels() {
         return Err(VerifyError::ManifestMismatch { field: "labels" });
     }
+    let packed = artifact::write_decide_apr(&inputs)?;
+    if packed != bytes {
+        return Err(VerifyError::ArtifactNotFromRun {
+            file_sha256: decider.identity().artifact_sha256.clone(),
+            packed_sha256: sha256_hex(&packed),
+        });
+    }
+    drop(packed);
+    drop(bytes);
     verify_loaded(&inputs, checked, decider, base_dir, policy)
 }
 

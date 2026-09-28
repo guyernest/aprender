@@ -43,6 +43,11 @@
 //!
 //! - any of `vocab_size`, `hidden_size`, `intermediate_size`, `num_hidden_layers`,
 //!   `num_attention_heads`, `global_attn_every_n_layers`, `local_attention` equal to 0;
+//! - `num_hidden_layers` above [`MAX_NUM_HIDDEN_LAYERS`] (checked before any per-layer
+//!   derivation, so an untrusted count never sizes an allocation);
+//! - a `hidden_activation` other than `gelu`, a `rope_type` other than `default`, or a
+//!   non-null `rope_scaling` (HF would compute a different forward; this encoder computes
+//!   only exact GELU and unscaled rotate-half RoPE);
 //! - `hidden_size % num_attention_heads != 0`, or an odd head dim (rotate-half pairs dims);
 //! - an odd `local_attention` (the window is `local_attention / 2` on each side);
 //! - `layer_types` whose length is not `num_hidden_layers`, or a value other than
@@ -65,7 +70,7 @@ pub mod gemm;
 pub mod layer;
 pub mod load;
 
-pub use config::{ModernBertConfig, ModernBertConfigError};
+pub use config::{ModernBertConfig, ModernBertConfigError, MAX_NUM_HIDDEN_LAYERS};
 pub use embeddings::ModernBertEmbeddings;
 pub use encoder::ModernBertEncoder;
 pub use gemm::Linear;

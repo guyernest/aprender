@@ -684,6 +684,67 @@ fn unknown_key_labels_refused() {
     assert!(error.to_string().contains("unknown field"), "{error}");
 }
 
+/// A malformed argument shape is refused through [`parse_args`] as a validation error that
+/// names the contract and NEVER echoes caller text: serde's own message quotes a string
+/// sent where the list belongs, and an unknown key, verbatim.
+#[test]
+fn malformed_arguments_are_refused_without_echo() {
+    const SECRET: &str = "ZQXJ-caller-document-4111";
+    let mut unknown_key = serde_json::Map::new();
+    unknown_key.insert("texts".to_string(), serde_json::Value::from(vec!["a"]));
+    unknown_key.insert(SECRET.to_string(), serde_json::Value::from(1));
+    for (label, bad) in [
+        (
+            "string for the list",
+            serde_json::Value::from(serde_json::Map::from_iter([(
+                "texts".to_string(),
+                serde_json::Value::from(SECRET),
+            )])),
+        ),
+        ("unknown key", serde_json::Value::Object(unknown_key)),
+        ("not an object", serde_json::Value::from(SECRET)),
+    ] {
+        let raw = serde_json::from_value::<ClassifyArgs>(bad.clone()).expect_err(label);
+        assert!(
+            raw.to_string().contains(SECRET),
+            "{label}: serde itself echoes, which is why its message is withheld"
+        );
+        let message = validation_message(&parse_args(bad).expect_err(label));
+        assert!(message.contains(TOOL_CONTRACT), "{label}: {message}");
+        assert!(!message.contains(SECRET), "{label} echoed: {message}");
+    }
+    let ok = parse_args(serde_json::Value::from(serde_json::Map::from_iter([(
+        "texts".to_string(),
+        serde_json::Value::from(vec!["a", "b"]),
+    )])))
+    .expect("the one accepted shape");
+    assert_eq!(ok.texts, ["a", "b"]);
+}
+
+/// decide-tool-boundary-v1 `classify_token_budget`: the contracted count must fit the budget
+/// for the SERVED task's shortest row, or the server refuses to build (instead of
+/// advertising a count every call at which is refused).
+#[test]
+fn served_task_must_fit_the_contracted_count() {
+    let min_row = check_served_task_fits(&model(), &ClassifyLimits::CONTRACTED)
+        .expect("the tiny task fits the contracted tier");
+    assert!(min_row > 0);
+    assert!(
+        min_row * ClassifyLimits::CONTRACTED.max_texts
+            <= ClassifyLimits::CONTRACTED.max_total_tokens
+    );
+    let tight = ClassifyLimits {
+        max_total_tokens: min_row * ClassifyLimits::CONTRACTED.max_texts - 1,
+        ..ClassifyLimits::CONTRACTED
+    };
+    let error = check_served_task_fits(&model(), &tight).expect_err("one token short");
+    assert!(
+        error.to_string().contains("classify_max_total_tokens"),
+        "{error}"
+    );
+    build_server(model(), "decide-fit-test", "0.0.0").expect("the tiny task builds a server");
+}
+
 /// The advertised schema is strict and `texts` is its only, required field.
 #[test]
 fn input_schema_is_strict() {

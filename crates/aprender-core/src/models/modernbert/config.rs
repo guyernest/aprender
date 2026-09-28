@@ -14,6 +14,16 @@ use std::fmt;
 const FULL_ATTENTION: &str = "full_attention";
 const SLIDING_ATTENTION: &str = "sliding_attention";
 
+/// The one activation this encoder computes (`gelu_exact`): HF's `ACT2FN["gelu"]`.
+const SUPPORTED_ACTIVATION: &str = "gelu";
+/// The one RoPE variant this encoder computes: unscaled rotate-half.
+const SUPPORTED_ROPE_TYPE: &str = "default";
+
+/// The most encoder layers a config may declare. Far above any ModernBERT (base 22, large
+/// 28), and low enough that the per-layer flags and tensor names derived from an UNTRUSTED
+/// count (a `.apr`'s embedded config) cannot allocate proportionally to it.
+pub const MAX_NUM_HIDDEN_LAYERS: usize = 1024;
+
 /// Why a ModernBERT `config.json` is outside the supported domain.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModernBertConfigError {
@@ -87,6 +97,25 @@ pub enum ModernBertConfigError {
         /// The product, e.g. `"vocab_size x hidden_size"`.
         field: &'static str,
     },
+    /// `num_hidden_layers` is above [`MAX_NUM_HIDDEN_LAYERS`].
+    TooManyLayers {
+        /// The declared count.
+        value: usize,
+        /// The cap.
+        max: usize,
+    },
+    /// `hidden_activation` is not the exact GELU this encoder computes.
+    UnsupportedActivation {
+        /// The declared activation.
+        value: String,
+    },
+    /// A RoPE variant or scaling other than unscaled `default` RoPE.
+    UnsupportedRope {
+        /// Dotted HF path of the field.
+        field: &'static str,
+        /// The declared value.
+        value: String,
+    },
 }
 
 impl fmt::Display for ModernBertConfigError {
@@ -135,6 +164,18 @@ impl fmt::Display for ModernBertConfigError {
             Self::DimensionOverflow { field } => {
                 write!(f, "modernbert config: {field} overflows usize")
             }
+            Self::TooManyLayers { value, max } => write!(
+                f,
+                "modernbert config: num_hidden_layers {value} is over the supported {max}"
+            ),
+            Self::UnsupportedActivation { value } => write!(
+                f,
+                "modernbert config: hidden_activation {value:?} is unsupported (this encoder computes {SUPPORTED_ACTIVATION:?})"
+            ),
+            Self::UnsupportedRope { field, value } => write!(
+                f,
+                "modernbert config: {field} = {value} is unsupported (this encoder computes unscaled {SUPPORTED_ROPE_TYPE:?} RoPE)"
+            ),
         }
     }
 }
@@ -144,6 +185,10 @@ impl std::error::Error for ModernBertConfigError {}
 #[derive(Deserialize)]
 struct RawRope {
     rope_theta: Option<f64>,
+    /// HF selects the RoPE init function (and its scaling) by this; older configs spell it
+    /// `type`. Read so a non-default variant is refused rather than computed as default.
+    #[serde(default, alias = "type")]
+    rope_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -152,7 +197,9 @@ struct RawRopeParameters {
     sliding_attention: Option<RawRope>,
 }
 
-/// The HF fields this encoder reads; every other HF field is ignored.
+/// The HF fields this encoder reads. Every other HF field is ignored, except those that
+/// change the forward (`hidden_activation`, `rope_type`, `rope_scaling`), which are read so
+/// an unsupported value is refused by name.
 #[derive(Deserialize)]
 struct RawConfig {
     vocab_size: usize,
@@ -173,6 +220,12 @@ struct RawConfig {
     attention_bias: bool,
     #[serde(default)]
     mlp_bias: bool,
+    /// HF default `"gelu"` (exact erf GELU) when absent.
+    #[serde(default)]
+    hidden_activation: Option<String>,
+    /// The legacy scaling block HF folds into `rope_parameters`; only absent/null is served.
+    #[serde(default)]
+    rope_scaling: Option<serde_json::Value>,
 }
 
 /// A validated ModernBERT configuration. Only [`ModernBertConfig::from_json_bytes`]
@@ -240,6 +293,13 @@ impl ModernBertConfig {
                 return Err(ModernBertConfigError::ZeroDimension { field });
             }
         }
+        // Before anything per-layer is derived: the count is untrusted input.
+        if raw.num_hidden_layers > MAX_NUM_HIDDEN_LAYERS {
+            return Err(ModernBertConfigError::TooManyLayers {
+                value: raw.num_hidden_layers,
+                max: MAX_NUM_HIDDEN_LAYERS,
+            });
+        }
         if raw.hidden_size % raw.num_attention_heads != 0 {
             return Err(ModernBertConfigError::HeadsDoNotDivideHidden {
                 hidden_size: raw.hidden_size,
@@ -294,7 +354,42 @@ impl ModernBertConfig {
                 return Err(ModernBertConfigError::UnsupportedBias { field });
             }
         }
+        if let Some(act) = raw
+            .hidden_activation
+            .as_deref()
+            .filter(|a| *a != SUPPORTED_ACTIVATION)
+        {
+            return Err(ModernBertConfigError::UnsupportedActivation {
+                value: act.to_string(),
+            });
+        }
+        if let Some(scaling) = raw.rope_scaling.as_ref().filter(|s| !s.is_null()) {
+            return Err(ModernBertConfigError::UnsupportedRope {
+                field: "rope_scaling",
+                value: scaling.to_string(),
+            });
+        }
         let rope = raw.rope_parameters.as_ref();
+        for (field, r) in [
+            (
+                "rope_parameters.full_attention.rope_type",
+                rope.and_then(|r| r.full_attention.as_ref()),
+            ),
+            (
+                "rope_parameters.sliding_attention.rope_type",
+                rope.and_then(|r| r.sliding_attention.as_ref()),
+            ),
+        ] {
+            if let Some(t) = r
+                .and_then(|r| r.rope_type.as_deref())
+                .filter(|t| *t != SUPPORTED_ROPE_TYPE)
+            {
+                return Err(ModernBertConfigError::UnsupportedRope {
+                    field,
+                    value: t.to_string(),
+                });
+            }
+        }
         let rope_theta_global = theta(
             rope.and_then(|r| r.full_attention.as_ref()),
             "rope_parameters.full_attention.rope_theta",
@@ -600,5 +695,87 @@ mod tests {
             matches!(&err, ModernBertConfigError::Json(m) if m.contains("hidden_size")),
             "{err:?}"
         );
+    }
+
+    /// Fields HF honours in the forward are refused unless they name what this encoder
+    /// computes: exact GELU and unscaled default RoPE (an HF config with SiLU or YaRN would
+    /// otherwise load and produce silently different hidden states).
+    #[test]
+    fn unsupported_forward_semantics_are_refused() {
+        use ModernBertConfigError as E;
+        assert_eq!(
+            with(|v| v["hidden_activation"] = json!("silu")),
+            Err(E::UnsupportedActivation {
+                value: "silu".to_string()
+            })
+        );
+        assert_eq!(
+            with(|v| v["rope_parameters"]["full_attention"]["rope_type"] = json!("yarn")),
+            Err(E::UnsupportedRope {
+                field: "rope_parameters.full_attention.rope_type",
+                value: "yarn".to_string()
+            })
+        );
+        assert_eq!(
+            with(|v| {
+                let s = v["rope_parameters"]["sliding_attention"]
+                    .as_object_mut()
+                    .expect("sliding_attention");
+                s.remove("rope_type");
+                s.insert("type".to_string(), json!("linear"));
+            }),
+            Err(E::UnsupportedRope {
+                field: "rope_parameters.sliding_attention.rope_type",
+                value: "linear".to_string()
+            })
+        );
+        assert!(matches!(
+            with(|v| v["rope_scaling"] = json!({"rope_type": "linear", "factor": 4.0})),
+            Err(E::UnsupportedRope {
+                field: "rope_scaling",
+                ..
+            })
+        ));
+        // The supported spellings still parse: explicit gelu/default, and both absent.
+        with(|v| {
+            v["hidden_activation"] = json!("gelu");
+            v["rope_scaling"] = Value::Null;
+        })
+        .expect("gelu / default / null scaling");
+        with(|v| {
+            let o = v.as_object_mut().expect("object");
+            o.remove("hidden_activation");
+            o.remove("rope_scaling");
+            for layer in ["full_attention", "sliding_attention"] {
+                v["rope_parameters"][layer]
+                    .as_object_mut()
+                    .expect("rope entry")
+                    .remove("rope_type");
+            }
+        })
+        .expect("absent activation / rope_type / scaling mean the HF defaults");
+    }
+
+    /// An untrusted layer count is capped BEFORE the per-layer flags are collected: a huge
+    /// declared count is a typed refusal, never an allocation proportional to it.
+    #[test]
+    fn layer_count_is_capped_before_allocation() {
+        let huge = with(|v| {
+            v.as_object_mut().expect("object").remove("layer_types");
+            v["num_hidden_layers"] = json!(1u64 << 62);
+        });
+        assert_eq!(
+            huge,
+            Err(ModernBertConfigError::TooManyLayers {
+                value: 1usize << 62,
+                max: super::MAX_NUM_HIDDEN_LAYERS,
+            })
+        );
+        let at_cap = with(|v| {
+            v.as_object_mut().expect("object").remove("layer_types");
+            v["num_hidden_layers"] = json!(super::MAX_NUM_HIDDEN_LAYERS);
+        })
+        .expect("the cap itself is supported");
+        assert_eq!(at_cap.num_hidden_layers(), super::MAX_NUM_HIDDEN_LAYERS);
     }
 }

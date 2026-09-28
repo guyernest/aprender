@@ -69,6 +69,10 @@ constants:
   # Laya-en has a few hundred weight tensors (205 in the published checkpoint) plus six blobs. The
   # bound is generous and exists so a header cannot demand an arbitrary index allocation.
   max_tensor_count: 4096
+  # The metadata section is the manifest (~2.4 KB on Laya-en). The container reader parses the
+  # header-declared section into a JSON tree at 40-50x its size, so rung 2 bounds the declared
+  # length before the reader runs: 1 MiB is ~400x headroom and caps that parse near 50 MB.
+  max_metadata_bytes: 1048576
   # A probe row longer than this is refused at pack: it would break decide-tool-boundary-v1
   # probe_budget_ms (2 x 48 x 11 ms = 1056 -> 1100).
   probe_max_row_tokens: 48
@@ -150,7 +154,7 @@ load_ladder:
       rule: 'declared length checked against max_artifact_bytes before the reader is touched; the read is capped at max_artifact_bytes + 1 bytes'
     - rung: 2
       name: header_and_index_extent
-      rule: 'AprV2Header::from_bytes on the first 64 bytes BEFORE any index parser runs: magic, CRC, row-major flag; then tensor_count <= max_tensor_count AND, with checked arithmetic, tensor_count x min_index_entry_bytes <= data_offset - tensor_index_offset <= file length. Review finding verified at crates/apr-format/src/v2/reader_impl.rs:95: the reader reserved the index vector at the header''s declared count, so a small file with a valid header CRC could request a multi-hundred-GB allocation before any structural rung ran. Plan 08-05 also caps the reader''s capacity at what the index bytes can hold, for every APR consumer; this rung stays as the decide-specific bound'
+      rule: 'AprV2Header::from_bytes on the first 64 bytes BEFORE any index parser runs: magic, CRC, row-major flag; metadata_size <= max_metadata_bytes (the reader parses the declared section into a JSON tree); then tensor_count <= max_tensor_count AND, with checked arithmetic, tensor_count x min_index_entry_bytes <= data_offset - tensor_index_offset <= file length. Review finding verified at crates/apr-format/src/v2/reader_impl.rs:95: the reader reserved the index vector at the header''s declared count, so a small file with a valid header CRC could request a multi-hundred-GB allocation before any structural rung ran. Plan 08-05 also caps the reader''s capacity at what the index bytes can hold, for every APR consumer; this rung stays as the decide-specific bound'
     - rung: 3
       name: manifest
       rule: 'model_type == "decide"; exactly one custom key; the manifest string parsed with deny_unknown_fields; schema_version == 1; method known'

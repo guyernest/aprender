@@ -63,7 +63,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import contract  # noqa: E402
 import gate  # noqa: E402
-from common import f32_hex_list, f32_list, save_f16, sha256_bytes, sha256_file, write_bytes, write_json  # noqa: E402
+from common import f32_hex_list, f32_list, jsonl_bytes, save_f16, sha256_bytes, sha256_file, write_bytes, write_json  # noqa: E402
 
 REPO = HERE.parents[1]
 SEED = 20260925
@@ -351,10 +351,6 @@ TOKENIZER_CONFIG = {
     "tokenizer_class": "PreTrainedTokenizerFast",
     "unk_token": "[UNK]",
 }
-
-
-def jsonl_bytes(rows):
-    return "".join(json.dumps({"text": t, "label": lab}, ensure_ascii=False) + "\n" for t, lab in rows).encode("utf-8")
 
 
 def calibration_slice():

@@ -506,6 +506,34 @@ fn base_mismatch_base_dir() {
     );
 }
 
+/// The base's tokenizer is bound to the run's (`inputs_sha256.tokenizer_json`): a base dir
+/// with the pinned weights but another tokenizer would score the zero-shot baseline on a
+/// different tokenization than the fine-tune it is compared with.
+#[test]
+fn base_mismatch_tokenizer() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let other = run.path("other-base");
+    copy_dir(&run.base(), &other);
+    let tok = other.join("tokenizer/tokenizer.json");
+    let mut bytes = std::fs::read(&tok).expect("read base tokenizer");
+    bytes.push(b'\n'); // still valid JSON: only the binding can refuse it
+    std::fs::write(&tok, bytes).expect("write base tokenizer");
+    let inputs = run.inputs();
+    let packed = artifact::write_decide_apr(&inputs).expect("pack");
+    let e = expect_err(verify_run(&inputs, &packed, &run.data(), &other, &policy));
+    assert!(
+        matches!(
+            e,
+            VerifyError::BaseMismatch {
+                which: BaseWhich::BaseTokenizer,
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+}
+
 #[test]
 fn base_mismatch_contract() {
     // The policy carries the CONTRACT's real en-root base; the fixture declares the tiny one.
@@ -554,6 +582,35 @@ fn input_hash_mismatch() {
         ),
         "{e:?}"
     );
+}
+
+/// laya-finetune-gate-v1 `eval_set.generic_rule`: eval.jsonl must hold every criterion.
+/// With one absent, macro-F1 over `y ∪ pred` lets the margin be decided by which model
+/// happens to predict the absent class, so the gate could certify a worse fine-tune.
+#[test]
+fn eval_missing_a_criterion_is_refused() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let p = run.data().join("eval.jsonl");
+    let kept: String = std::fs::read_to_string(&p)
+        .expect("read eval")
+        .lines()
+        .filter(|l| {
+            serde_json::from_str::<Value>(l).expect("eval row")["label"].as_str() != Some("account")
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(&p, kept).expect("write eval");
+    run.rehash();
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::DataInvalid { file: "eval_jsonl", why, .. } if why.contains("account")
+        ),
+        "{e:?}"
+    );
+    assert_eq!(e.exit_code(), 2);
 }
 
 #[test]
@@ -1000,6 +1057,52 @@ fn verify_path_accepts_exact_file() {
         report.artifact_sha256,
         artifact::artifact_sha256_hex(&bytes)
     );
+}
+
+/// `verify_path` binds the WHOLE file to the run. The re-score only exercises the weights the
+/// eval rows reach, so a file whose weights differ from the run's checkpoint where no eval row
+/// or probe looks (here one value of the unused `act_head` family; in the field, embedding rows
+/// of tokens no eval row contains) passes every rung and re-scores identically — and must
+/// still be refused as not the run's bytes.
+#[test]
+fn verify_path_refuses_bytes_the_run_does_not_pack_to() {
+    use aprender::format::v2::{AprV2ReaderRef, AprV2Writer};
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let honest = artifact::write_decide_apr(&run.inputs()).expect("pack");
+    let tampered = {
+        let r = AprV2ReaderRef::from_bytes(&honest).expect("open packed");
+        let mut w = AprV2Writer::new(r.metadata().clone());
+        let mut hit = false;
+        for e in r.tensor_index() {
+            let mut data = r.get_tensor_data(&e.name).expect("tensor data").to_vec();
+            if e.name == "act_head.0.weight" {
+                data[0] ^= 0x01; // lowest mantissa bit of one F16: still finite
+                hit = true;
+            }
+            w.add_tensor(e.name.clone(), e.dtype, e.shape.clone(), data);
+        }
+        assert!(hit, "the fixture carries act_head.0.weight");
+        w.write().expect("repack")
+    };
+    assert_ne!(tampered, honest);
+    Decider::load_bytes(&tampered).expect("the ladder accepts the tampered file");
+    let out = TempDir::new().expect("tempdir");
+    let apr = out.path().join("tampered.apr");
+    std::fs::write(&apr, &tampered).expect("write apr");
+    let e = expect_err(verify_path(
+        &apr,
+        &run.dir,
+        &run.data(),
+        &run.base(),
+        &policy,
+    ));
+    assert!(
+        matches!(&e, VerifyError::ArtifactNotFromRun { file_sha256, .. }
+            if *file_sha256 == artifact::artifact_sha256_hex(&tampered)),
+        "{e:?}"
+    );
+    assert_eq!(e.exit_code(), 2);
 }
 
 /// `verify_path` refuses a file whose manifest describes another run.
@@ -1691,6 +1794,31 @@ fn shift_probe_metric_forged() {
             &e,
             VerifyError::ShiftProbeMismatch {
                 field: "shift_probe.fine_tuned.ece_post",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    assert_eq!(e.exit_code(), 2);
+}
+
+/// The converse of `shift_file_missing`: a data dir that carries shift.jsonl while the report
+/// names no probe is refused — a report may not silently drop the shift evidence.
+#[test]
+fn shift_probe_dropped_while_data_has_shift() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    std::fs::copy(
+        run.data().join("eval.jsonl"),
+        run.data().join("shift.jsonl"),
+    )
+    .expect("shift.jsonl");
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::ShiftProbeMismatch {
+                field: "shift_probe",
                 ..
             }
         ),

@@ -7,7 +7,10 @@
 //! at most [`CONCURRENCY`] in flight and up to [`RETRIES`] attempts per part. Every
 //! attempt is bounded by [`ATTEMPT_TIMEOUT`] and the whole download by
 //! [`DOWNLOAD_DEADLINE`]: attempt counts alone would let one stalled part hold the load
-//! lock indefinitely. 25 s is the 30 s gateway cap minus ~5 s of sha + build; past it
+//! lock indefinitely. A cut attempt keeps the bytes it landed and the retry resumes at the
+//! first missing byte, so the attempt timeout bounds a stall rather than a transfer: at a
+//! fair share of the link a 64 MiB part can need more than one attempt, and re-fetching it
+//! from its first byte would throw that progress away on every cold start. 25 s is the 30 s gateway cap minus ~5 s of sha + build; past it
 //! the caller already has its 504, so the only useful outcome is to release the lock
 //! for the next request.
 //!
@@ -18,6 +21,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -54,7 +58,16 @@ pub trait RangeFetcher: Send + Sync {
     /// Fill `dest` from the object's bytes `[start, start + dest.len())` (the inclusive
     /// range `start..=start + dest.len() - 1`), returning how many bytes were written.
     /// Writing straight into the caller's slice is what keeps the download to one buffer.
-    fn fetch_range<'a>(&'a self, start: u64, dest: &'a mut [u8]) -> FetchFuture<'a, usize>;
+    ///
+    /// `written` is published AS BYTES LAND (a prefix of `dest`): an attempt cut by its
+    /// timeout, or failing mid-body, keeps what it wrote, and the retry resumes at
+    /// `start + written` instead of re-fetching the part from its first byte.
+    fn fetch_range<'a>(
+        &'a self,
+        start: u64,
+        dest: &'a mut [u8],
+        written: &'a AtomicUsize,
+    ) -> FetchFuture<'a, usize>;
 }
 
 /// The download's sizes and bounds.
@@ -282,8 +295,14 @@ fn timed_out(policy: &DownloadPolicy) -> String {
     )
 }
 
-/// Fill one slice from its ranged GET: each attempt bounded by the attempt timeout, up
+/// Fill one slice from its ranged GETs: each attempt bounded by the attempt timeout, up
 /// to `retries` attempts; a body that does not fill the range exactly is refused.
+///
+/// A cut or failed attempt KEEPS the bytes it landed (published through the fetcher's
+/// `written` counter), and the next attempt resumes at the first missing byte. The attempt
+/// timeout therefore bounds a stall, not a transfer: a part that is still making progress
+/// when it is cut (13 parts share the link at cold start, so a fair-share 64 MiB part needs
+/// longer than one attempt) is continued, never re-fetched from its first byte.
 async fn fill_part<F: RangeFetcher + ?Sized>(
     fetcher: &F,
     offset: u64,
@@ -292,23 +311,35 @@ async fn fill_part<F: RangeFetcher + ?Sized>(
 ) -> Result<(), S3LoadError> {
     let expected = dest.len();
     let attempts = policy.retries.max(1);
+    let mut done = 0usize;
     let mut last = String::new();
     for attempt in 1..=attempts {
-        match tokio::time::timeout(policy.attempt_timeout, fetcher.fetch_range(offset, dest)).await
-        {
-            Ok(Ok(got)) if got == expected => return Ok(()),
+        let written = AtomicUsize::new(0);
+        let at = offset.saturating_add(done as u64);
+        let outcome = tokio::time::timeout(
+            policy.attempt_timeout,
+            fetcher.fetch_range(at, &mut dest[done..], &written),
+        )
+        .await;
+        match outcome {
+            Ok(Ok(got)) if done + got == expected => return Ok(()),
             Ok(Ok(got)) => {
                 return Err(S3LoadError::ShortBody {
                     offset,
                     expected,
-                    got,
+                    got: done + got,
                 })
             }
             Ok(Err(e)) => last = e.0,
             Err(_) => last = timed_out(policy),
         }
+        // Keep what landed before the cut (never more than the slice it was given).
+        done += written.load(AtomicOrdering::Acquire).min(expected - done);
+        if done == expected {
+            return Ok(());
+        }
         if attempt < attempts {
-            tracing::warn!(offset, attempt, error = %last, "retrying part");
+            tracing::warn!(offset, attempt, resume_at = done, error = %last, "retrying part");
         }
     }
     Err(S3LoadError::PartFailed {
@@ -366,7 +397,12 @@ impl RangeFetcher for S3Fetcher {
         })
     }
 
-    fn fetch_range<'a>(&'a self, start: u64, dest: &'a mut [u8]) -> FetchFuture<'a, usize> {
+    fn fetch_range<'a>(
+        &'a self,
+        start: u64,
+        dest: &'a mut [u8],
+        progress: &'a AtomicUsize,
+    ) -> FetchFuture<'a, usize> {
         Box::pin(async move {
             if dest.is_empty() {
                 return Ok(0);
@@ -402,6 +438,7 @@ impl RangeFetcher for S3Fetcher {
                 };
                 slot.copy_from_slice(&chunk);
                 written = end;
+                progress.store(written, AtomicOrdering::Release);
             }
             Ok(written)
         })
@@ -427,6 +464,9 @@ mod tests {
         Never,
         Always,
         FirstAttemptAt(u64),
+        /// The first attempt at this offset lands HALF its slice, then hangs: a part that
+        /// was still making progress when its attempt was cut.
+        HalfThenHangAt(u64),
     }
 
     /// An in-memory object with fault injection; records attempts per part.
@@ -471,7 +511,12 @@ mod tests {
             Box::pin(async move { Ok(self.length) })
         }
 
-        fn fetch_range<'a>(&'a self, start: u64, dest: &'a mut [u8]) -> FetchFuture<'a, usize> {
+        fn fetch_range<'a>(
+            &'a self,
+            start: u64,
+            dest: &'a mut [u8],
+            written: &'a AtomicUsize,
+        ) -> FetchFuture<'a, usize> {
             Box::pin(async move {
                 let attempt = {
                     let mut map = self.attempts.lock().expect("attempts lock");
@@ -479,10 +524,21 @@ mod tests {
                     *n += 1;
                     *n
                 };
+                let from = usize::try_from(start).expect("offset fits");
                 let stalls = match self.stall {
                     Stall::Never => false,
                     Stall::Always => true,
                     Stall::FirstAttemptAt(at) => at == start && attempt == 1,
+                    Stall::HalfThenHangAt(at) => {
+                        if at == start && attempt == 1 {
+                            let half = dest.len() / 2;
+                            dest[..half].copy_from_slice(&self.data[from..from + half]);
+                            written.store(half, AtomicOrdering::Release);
+                            true
+                        } else {
+                            false
+                        }
+                    }
                 };
                 if stalls {
                     tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -492,12 +548,12 @@ mod tests {
                         return Err(FetchError(format!("injected failure {attempt}")));
                     }
                 }
-                let from = usize::try_from(start).expect("offset fits");
                 let mut n = dest.len();
                 if self.short_at == Some(start) {
                     n -= 1;
                 }
                 dest[..n].copy_from_slice(&self.data[from..from + n]);
+                written.store(n, AtomicOrdering::Release);
                 Ok(n)
             })
         }
@@ -650,6 +706,28 @@ mod tests {
         assert_eq!(fetcher.attempts_at(0), 4);
     }
 
+    /// A part still making progress when its attempt is cut keeps what landed: the retry
+    /// asks only for the missing tail (a fresh range starting mid-part), never the part again.
+    #[tokio::test(start_paused = true)]
+    async fn cut_attempt_resumes_at_the_first_missing_byte() {
+        let mut fetcher = MemFetcher::new(object());
+        fetcher.stall = Stall::HalfThenHangAt(4);
+        let bytes = download_into_memory_with(&fetcher, 1_000, &SMALL)
+            .await
+            .expect("the resumed part completes");
+        assert_eq!(bytes, object());
+        assert_eq!(
+            fetcher.attempts_at(4),
+            1,
+            "the part's first byte is fetched once"
+        );
+        assert_eq!(
+            fetcher.attempts_at(6),
+            1,
+            "the retry resumes at 4 + 2 landed bytes"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn slow_attempt_is_cut_at_attempt_timeout_and_retried() {
         let mut fetcher = MemFetcher::new(object());
@@ -670,7 +748,7 @@ mod tests {
     #[tokio::test]
     async fn hash_mismatch_is_refused_before_the_ladder_runs() {
         let tiny = tiny_bytes().to_vec();
-        let right = Sha256Pin::parse(&sha256_hex(&tiny)).expect("pin");
+        let right = Sha256Pin::parse(crate::tests::tiny_golden_sha256()).expect("pin");
         let wrong = Sha256Pin::parse(&"0".repeat(64)).expect("pin");
         let policy = DownloadPolicy {
             part_bytes: 4096,
@@ -733,7 +811,7 @@ mod tests {
     async fn retry_after_failure_rearms_the_load_lock() {
         let slot: LoadOnce<Model> = LoadOnce::new();
         let tiny = tiny_bytes().to_vec();
-        let pin = Sha256Pin::parse(&sha256_hex(&tiny)).expect("pin");
+        let pin = Sha256Pin::parse(crate::tests::tiny_golden_sha256()).expect("pin");
         let policy = DownloadPolicy {
             part_bytes: 4096,
             ..DownloadPolicy::DEPLOYED

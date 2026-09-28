@@ -171,6 +171,15 @@ def load_rows(path, task, role):
         rows.append((d["text"], labels.index(d["label"])))
     if not rows:
         raise DataError("%s-empty" % role, "%s has no rows" % path)
+    if role == "eval":
+        # The gate's macro-F1 averages over the labels present in y | pred, so a criterion with
+        # no eval row lets the margin be decided by which model happens to predict it.
+        present = {y for _, y in rows}
+        missing = [lab for i, lab in enumerate(labels) if i not in present]
+        if missing:
+            raise DataError("eval-class-coverage", "%s holds no row of criterion %s: every criterion needs at "
+                            "least one eval row for the gate's macro-F1 to compare the same labels"
+                            % (path.name, missing))
     return rows
 
 
@@ -367,6 +376,10 @@ def selftest():
                lambda: load_rows(write("r3.jsonl", rows_text(base_rows + [{"text": "x", "label": "a", "id": 1}])),
                                  t, "train"))
         expect("eval.jsonl missing", "eval-missing", lambda: load_rows(tmp / "eval.jsonl", t, "eval"))
+        expect("eval.jsonl with no row of one criterion", "eval-class-coverage",
+               lambda: load_rows(write("e1.jsonl", rows_text([r for r in base_rows if r["label"] != "c"])), t, "eval"))
+        case("a shift file may miss a criterion (only eval is gated)",
+             len(load_rows(write("s1.jsonl", rows_text([r for r in base_rows if r["label"] != "c"])), t, "shift")) == 8)
         train = load_rows(write("train.jsonl", rows_text(base_rows)), t, "train")
         case("valid train.jsonl loads as (text, label index)", len(train) == 12 and train[4][1] == 1)
         expect("eval text equal to a train text after NFC/trim/whitespace collapse", "eval-train-overlap",

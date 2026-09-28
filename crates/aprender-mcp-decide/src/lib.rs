@@ -49,7 +49,7 @@ use std::time::Instant;
 use aprender_decide::artifact::read_decide_apr_bytes_bounded;
 use aprender_decide::{ArtifactError, DecideError, Decision, LayaError, PreparedRow};
 use pmcp::types::capabilities::ServerCapabilities;
-use pmcp::Server;
+use pmcp::{Server, SimpleToolExt as _};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -602,8 +602,9 @@ impl std::error::Error for ModelLoadError {}
 /// Load and fully verify a `decide-apr-v1` artifact from a file path.
 ///
 /// The read is bounded by the file's declared length BEFORE the bytes land in memory
-/// (ladder rung 1), then the bytes go through the whole ladder. This and
-/// [`load_model_from_bytes`] are the only load doors; a server never mints its own.
+/// (ladder rung 1), then the bytes go through the whole ladder. This,
+/// [`load_model_from_bytes`] and [`load_model_from_hashed`] are the only load doors; a
+/// server never mints its own.
 ///
 /// # Errors
 ///
@@ -627,36 +628,103 @@ pub fn load_model_from_bytes(bytes: &[u8]) -> Result<Model, ModelLoadError> {
     Model::load_bytes(bytes).map_err(ModelLoadError::Artifact)
 }
 
+/// [`load_model_from_bytes`] over bytes already hashed by
+/// [`aprender_decide::artifact::HashedArtifact::new`] — the door the Lambda crate walks
+/// through after checking its pin against that digest, so the ladder mints the identity
+/// from it instead of hashing ~0.85 GB a second time.
+///
+/// # Errors
+///
+/// [`ModelLoadError::Artifact`] for any refusing rung.
+pub fn load_model_from_hashed(
+    hashed: &aprender_decide::artifact::HashedArtifact<'_>,
+) -> Result<Model, ModelLoadError> {
+    Model::load_hashed(hashed).map_err(ModelLoadError::Artifact)
+}
+
+/// Deserialize the tool arguments, refusing a malformed shape WITHOUT serde's message: for a
+/// string where the list belongs, or an unknown key, serde quotes the offending value or key
+/// — caller text — which `refusal_names_bound` forbids (ASVS V7). The refusal names the
+/// contract and the one accepted shape instead.
+///
+/// # Errors
+///
+/// `pmcp::Error::validation` naming the contract; never the arguments.
+pub fn parse_args(args: serde_json::Value) -> pmcp::Result<ClassifyArgs> {
+    serde_json::from_value(args).map_err(|_| {
+        refusal(format!(
+            "{TOOL_NAME}: the arguments must be exactly {{\"texts\": [string, ...]}} and nothing \
+             else (classify_count_bound precondition: deny_unknown_fields, {CONTRACT}); \
+             detail withheld so no caller text is echoed"
+        ))
+    })
+}
+
+/// decide-tool-boundary-v1 `classify_token_budget`: `classify_max_texts x` the served task's
+/// shortest built row (an empty text: task prefix and markers) must fit
+/// `classify_max_total_tokens` — otherwise the advertised count is one the budget can never
+/// admit, and every call at that count would be refused. Returns that shortest row.
+///
+/// # Errors
+///
+/// `pmcp::Error` when the task cannot be prepared, or when the contracted count does not
+/// fit the budget for this artifact's task.
+pub fn check_served_task_fits(model: &Model, limits: &ClassifyLimits) -> pmcp::Result<usize> {
+    let rows = model
+        .prepare(&[String::new()])
+        .map_err(|e| pmcp::Error::internal(format!("{TOOL_NAME}: {e}")))?;
+    let min_row = rows.first().map_or(0, PreparedRow::tokens);
+    let need = min_row.saturating_mul(limits.max_texts);
+    if need > limits.max_total_tokens {
+        return Err(pmcp::Error::internal(format!(
+            "{TOOL_NAME}: the served task's shortest built row is {min_row} tokens, so \
+             classify_max_texts {} needs {need} > classify_max_total_tokens {} ({CONTRACT}); \
+             this artifact's task cannot be served at the contracted tier",
+            limits.max_texts, limits.max_total_tokens
+        )));
+    }
+    Ok(min_row)
+}
+
 /// Build the MCP server: exactly one `classify` tool over one loaded model.
 ///
 /// The tool runs [`ClassifyService::served`] — the contracted bounds and one
 /// process-wide [`Admission`] — so the blocking section never stalls the protocol loop
-/// and never oversubscribes the CPU.
+/// and never oversubscribes the CPU. Its arguments are parsed by [`parse_args`] (the same
+/// strict schema, advertised from [`ClassifyArgs`]) so no refusal echoes caller text.
 ///
 /// # Errors
 ///
-/// `pmcp::Error` if the server builder refuses the configuration.
+/// `pmcp::Error` if the served task cannot fit the contracted bounds
+/// ([`check_served_task_fits`]) or the server builder refuses the configuration.
 pub fn build_server(model: Arc<Model>, name: &str, version: &str) -> pmcp::Result<Server> {
+    check_served_task_fits(&model, &ClassifyLimits::CONTRACTED)?;
     let description = tool_description(&model);
     let service = ClassifyService::served(model);
+    let tool = pmcp::SimpleTool::new(
+        TOOL_NAME,
+        move |args: serde_json::Value, _extra: pmcp::RequestHandlerExtra| -> ToolFuture {
+            let service = service.clone();
+            Box::pin(async move {
+                let response = service.call(parse_args(args)?).await?;
+                serde_json::to_value(&response)
+                    .map_err(|e| pmcp::Error::internal(format!("response serialization: {e}")))
+            })
+        },
+    )
+    .with_description(description)
+    .with_schema_from::<ClassifyArgs>();
     Server::builder()
         .name(name)
         .version(version)
         .capabilities(ServerCapabilities::tools_only())
-        .tool_typed_with_description::<ClassifyArgs, _, _>(
-            TOOL_NAME,
-            description,
-            move |args, _extra| {
-                let service = service.clone();
-                async move {
-                    let response = service.call(args).await?;
-                    serde_json::to_value(&response)
-                        .map_err(|e| pmcp::Error::internal(format!("response serialization: {e}")))
-                }
-            },
-        )
+        .tool(TOOL_NAME, tool)
         .build()
 }
+
+/// The boxed future a [`pmcp::SimpleTool`] handler returns.
+type ToolFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = pmcp::Result<serde_json::Value>> + Send>>;
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // serde_json::json! / schema_for! expand to .unwrap()

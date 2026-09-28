@@ -142,20 +142,8 @@ pub(crate) fn constant_f64(contract: &str, key: &str) -> f64 {
 /// NaN-visible `delta <= bound`: the crate's one definition, in `artifact`.
 pub(crate) use crate::artifact::within;
 
-/// `max |a - b|` in f64; NaN-propagating, and NaN on a length mismatch.
-pub(crate) fn max_abs(a: &[f32], b: &[f32]) -> f64 {
-    if a.len() != b.len() {
-        return f64::NAN;
-    }
-    a.iter().zip(b).fold(0.0f64, |m, (&x, &y)| {
-        let d = (f64::from(x) - f64::from(y)).abs();
-        if d.is_nan() || m.is_nan() {
-            f64::NAN
-        } else {
-            m.max(d)
-        }
-    })
-}
+/// `max |a - b|` in f64; NaN-propagating, and NaN on a length mismatch: the verifier's own.
+pub(crate) use crate::verify::row_max_abs as max_abs;
 
 #[cfg(test)]
 mod tests {
