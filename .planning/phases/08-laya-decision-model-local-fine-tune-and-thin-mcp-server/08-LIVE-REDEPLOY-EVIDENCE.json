@@ -1,0 +1,71 @@
+{
+  "schema": "laya-live-redeploy-v1",
+  "server": "aprender-mcp-decide",
+  "artifact_sha256": "24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a",
+  "offline_dry_run": {
+    "ok": true,
+    "commit": "e0be0262b6e31a3e55d6ada7a79f39d8d3a555be",
+    "commit_holds_round": "git merge-base --is-ancestor d3de3e741 (08-28's last code commit) HEAD: true; git status --porcelain crates/ empty",
+    "command": "lockf -k /tmp/aprender-laya-real-weights.lock env DRY_RUN=1 just laya-deploy-selftest (MAIN checkout)",
+    "rc": 0,
+    "tracer_gate_rerun": "the plan's Task 1 <verify> re-run as written (under the same lock): rc 0, DRY-RUN OK on 24a44d7e, bare DEPLOY SELFTEST OK, AWS CALLS: 0",
+    "wall_s": 469.76,
+    "run_on": "2026-09-28",
+    "positive_leg": "armed by default on the MAIN checkout's models/decide/laya-stance-64.apr (not skipped)",
+    "lines": [
+      "eligible: laya-verify accepted models/decide/laya-stance-64.apr (sha256 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a)",
+      "DRY-RUN OK aprender-mcp-decide (sha256 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a; nothing deployed)",
+      "BOOTSTRAP aarch64 OK target/aarch64-unknown-linux-gnu/release/bootstrap (26125048 bytes)",
+      "CRATES ROOT: crates/.pmcp/deploy.toml and state sha256 unchanged before/after",
+      "AWS CALLS: 0",
+      "DEPLOY MARKERS: 0",
+      "DEPLOY SELFTEST OK"
+    ],
+    "aws_calls": 0
+  },
+  "offline_load_ab": {
+    "what": "decision input, not a live measurement: the bootstrap's own load path (resolve_model on ModelSource::Local with the sha256 pin, i.e. read + verify_and_build: hash, pin check, decide-apr-v1 ladder incl. probe replay, model build) timed 3x per binary on the same host, same artifact, same release profile, under the real-weights lock",
+    "host": "operator laptop, aarch64-apple-darwin (NOT Lambda/Graviton: absolute ms do not transfer; the A/B delta does)",
+    "harness": "scratch example (never committed) calling aprender_mcp_decide_lambda::resolve_model and printing LoadTimeline",
+    "live_binary_source": "52a12d777 (last commit before the live function's LastModified 23:00:20Z on 2026-09-27; its crate sources equal b30f437da's)",
+    "head_binary_source": "e0be0262b",
+    "live_commit_runs_ms": [
+      {
+        "fetch_ms": 177,
+        "sha_ms": 1496,
+        "build_ms": 2231
+      },
+      {
+        "fetch_ms": 79,
+        "sha_ms": 1488,
+        "build_ms": 2145
+      },
+      {
+        "fetch_ms": 80,
+        "sha_ms": 1510,
+        "build_ms": 2134
+      }
+    ],
+    "head_runs_ms": [
+      {
+        "fetch_ms": 80,
+        "sha_ms": 1546,
+        "build_ms": 689
+      },
+      {
+        "fetch_ms": 77,
+        "sha_ms": 1495,
+        "build_ms": 629
+      },
+      {
+        "fetch_ms": 77,
+        "sha_ms": 1493,
+        "build_ms": 688
+      }
+    ],
+    "identity_both": "24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a",
+    "reading": "build_ms fell by 1446-1602 ms, which is one sha pass on this host (sha_ms 1488-1546): the live binary hashes the buffer twice (sha256_hex, then load_model_from_bytes) and HEAD once (load_model_from_hashed). The ladder rungs added since (08-19 manifest bindings, 08-26 duplicate-tensor scan and probe-row pre-check, 08-21 typed policy) cost at most tens of ms here (ladder = build - second hash: live 624-735 ms, HEAD 629-689 ms).",
+    "lambda_projection_not_a_measurement": "live sha_ms 2655-3511 and build_ms 5193-7538 (08-LIVE-DEPLOY-EVIDENCE cold_samples) put the live ladder at ~2.5-4.0 s after its second hash; HEAD should therefore cut ~2.7-3.5 s from every cold start (sha + build ~5.2-7.5 s instead of 7.8-11.0 s). Only a live cold sample can confirm this."
+  },
+  "decision": null
+}
