@@ -11,18 +11,29 @@
 # hit is NOT this crate in either plausible order (workspace-member order puts
 # aprender-mcp-setfit-lambda first, alphabetical order aprender-mcp-chronos-lambda), so
 # a plain `cargo pmcp deploy --manifest-path crates/aprender-mcp-decide-lambda` would
-# build and ship ANOTHER server's binary under this name without a warning. Plan 08-10 decides
-# the deploy root (and probes the resolver) before anything is deployed. The tell that
-# the right binary shipped is the GET health body, which names
-# `aprender-mcp-decide-lambda`.
+# build and ship ANOTHER server's binary under this name without a warning. Plan 08-10
+# settled the deploy root: the SHARED crates root, `--manifest-path crates` with server
+# name `aprender-mcp-decide`, so the resolver's first branch finds
+# `crates/aprender-mcp-decide-lambda` (`just laya-resolver-proof` executes that resolver).
+# `crates/.pmcp/` and `crates/deploy/` belong to the setfit training server, so
+# `just laya-deploy` swaps them out and restores them byte-identically around the deploy
+# (`_laya-crates-root-swap`; one decide model per workspace, D-ITEM-08-10-A).
+#
+# THE TELL that the right binary shipped is the identity probe over POST
+# (examples/probe.rs): `tools/call classify` answers `model.artifact_sha256` equal to
+# the pinned sha256 below, with the artifact's labels in order. No GET can be the tell:
+# on pmcp.run the edge answers GET `/mcp` and `/health` itself, so no GET reaches the
+# bootstrap (D-ITEM-08-17-A).
 #
 # THE DEPLOY FLOW (plan 08-10; nothing in plan 08-07 touches AWS):
 #   1. pack the trained artifact and upload it content-addressed:
 #        s3://<bucket>/decide/<server>/<sha256>.apr
 #   2. just laya-deploy-config   # fills the UNSET values below into ./deploy.toml
-#   3. cargo pmcp deploy --manifest-path <the deploy root plan 08-10 settles>
+#   3. cargo pmcp deploy --manifest-path crates   # the shared crates root, run by
+#      `just laya-deploy` inside `_laya-crates-root-swap` (plan 08-10, D-ITEM-08-10-A)
 #   4. verify the stack-declared s3:GetObject below is on the function's role (read-only)
-#   5. probe the endpoint (examples/probe.rs): identity, then the cold maximal requests
+#   5. probe the endpoint (examples/probe.rs): the identity probe over POST (sha256 and
+#      labels), then the cold maximal requests
 #
 # The weights are NEVER baked into the package (spikes 021/026: 7-18x worse cold start).
 # They are fetched from S3 at cold start straight into memory: Lambda's /tmp is 512 MB

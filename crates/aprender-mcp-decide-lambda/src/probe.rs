@@ -304,17 +304,29 @@ pub fn classify_payload(result: &Value) -> Result<Value, String> {
     serde_json::from_str(text).map_err(|e| format!("classify text is not JSON: {e}"))
 }
 
-/// Every label appears in `description`, first occurrences in `labels` order.
+/// The literal that opens the labels segment of the served tool description
+/// (`aprender_mcp_decide::tool_description`). Plan 08-28 may reword the description's other
+/// sentences but keeps this segment, so the check reads ONLY this.
+pub const LABELS_SEGMENT: &str = "The labels, in this order: [";
+
+/// The description's `The labels, in this order: [a, b, c]` segment is EXACTLY `labels`:
+/// the list between the brackets, split on `, `, equals the expected list in length and
+/// order (IN-03). A label that occurs in the question text or inside another word
+/// (`none` in `nonetheless`) cannot satisfy it. A missing or unterminated segment, or no
+/// expected labels, is false.
 #[must_use]
 pub fn labels_in_order(description: &str, labels: &[String]) -> bool {
-    let mut from = 0usize;
-    for label in labels {
-        match description[from..].find(label.as_str()) {
-            Some(at) => from += at + label.len(),
-            None => return false,
-        }
-    }
+    let Some(start) = description.find(LABELS_SEGMENT) else {
+        return false;
+    };
+    let rest = &description[start + LABELS_SEGMENT.len()..];
+    let Some(end) = rest.find(']') else {
+        return false;
+    };
     !labels.is_empty()
+        && rest[..end]
+            .split(", ")
+            .eq(labels.iter().map(String::as_str))
 }
 
 fn classify_params(texts: &[String]) -> Value {
@@ -489,17 +501,16 @@ pub enum MaximalError {
     Prepare(aprender_decide::DecideError),
     /// The limits admit no request at all (e.g. `max_texts == 0`).
     EmptyLimits,
-    /// The built request is over the budget the limits declare, so the server would refuse
-    /// it: the count bound is not reachable inside the budget for this task (its shortest
-    /// built row times `max_texts` exceeds `max_total_tokens`). A maximal request that is
-    /// not legal measures nothing (decide-tool-boundary-v1 `served_task_min_row_tokens`).
+    /// The server's own budget function (`aprender_mcp_decide::check_token_budget`) refuses
+    /// the closest request the builder found: the count bound is not reachable inside the
+    /// budget for this task (its shortest built row times `max_texts` exceeds
+    /// `max_total_tokens`). A maximal request that is not legal measures nothing
+    /// (decide-tool-boundary-v1 `served_task_min_row_tokens`).
     OverBudget {
         /// The shape that could not be built legally.
         shape: MaximalShape,
-        /// Built-row tokens of the closest request the builder found.
-        total: usize,
-        /// The budget it had to fit.
-        budget: usize,
+        /// The server's refusal of that request, verbatim (R6: one budget function).
+        refusal: aprender_mcp_decide::ClassifyFailure,
     },
 }
 
@@ -508,13 +519,9 @@ impl std::fmt::Display for MaximalError {
         match self {
             Self::Prepare(e) => write!(f, "the model refused the synthetic text: {e}"),
             Self::EmptyLimits => write!(f, "the limits admit no request"),
-            Self::OverBudget {
-                shape,
-                total,
-                budget,
-            } => write!(
+            Self::OverBudget { shape, refusal } => write!(
                 f,
-                "the {} request builds to {total} tokens, over the budget {budget}: the count \
+                "the {} request is refused by the server's own budget: {refusal}; the count \
                  bound is not reachable inside the budget for this task",
                 shape.as_str()
             ),
@@ -591,8 +598,9 @@ fn largest_within(
 /// # Errors
 ///
 /// [`MaximalError`] if the model refuses the synthetic text, the limits admit nothing,
-/// or the closest request of `shape` is still over the budget
-/// ([`MaximalError::OverBudget`]: the server would refuse it, so it is never returned).
+/// or `aprender_mcp_decide::check_token_budget` — the function the server runs — refuses
+/// the closest request of `shape` ([`MaximalError::OverBudget`]: the server would refuse
+/// it, so it is never returned).
 pub fn build_maximal_request(
     model: &crate::Model,
     limits: &aprender_mcp_decide::ClassifyLimits,
@@ -646,20 +654,16 @@ pub fn build_maximal_request(
             units.iter().map(|&u| synthetic(u, max_bytes)).collect()
         }
     };
-    let total = model
+    let per_text: Vec<usize> = model
         .prepare(&texts)
         .map_err(MaximalError::Prepare)?
         .iter()
         .map(aprender_decide::PreparedRow::tokens)
-        .sum();
-    if total > budget {
-        return Err(MaximalError::OverBudget {
-            shape,
-            total,
-            budget,
-        });
-    }
-    Ok((texts, total))
+        .collect();
+    // Fit is decided by the SERVER's budget function, not a second summation here (R6).
+    aprender_mcp_decide::check_token_budget(limits, &per_text)
+        .map_err(|refusal| MaximalError::OverBudget { shape, refusal })?;
+    Ok((texts, per_text.iter().sum()))
 }
 
 #[cfg(test)]
@@ -754,8 +758,12 @@ mod tests {
         match build_maximal_request(&model, &limits, MaximalShape::Distributed) {
             Err(MaximalError::OverBudget {
                 shape,
-                total,
-                budget,
+                refusal:
+                    aprender_mcp_decide::ClassifyFailure::TokenBudget {
+                        total,
+                        limit: budget,
+                        ..
+                    },
             }) => {
                 assert_eq!(shape, MaximalShape::Distributed);
                 assert_eq!(budget, limits.max_total_tokens);
@@ -806,6 +814,9 @@ mod tests {
         assert!(report.one_tool_named_classify, "{report:?}");
         assert!(report.identity_matches, "{report:?}");
         assert!(!report.response_labels_match, "{report:?}");
+        // IN-03 on the real description: the old substring walk found `billing` in the
+        // segment, then `shipping` and `account` in the criteria lines after it.
+        assert!(!report.description_has_labels_in_order, "{report:?}");
         assert!(!report.ok(), "{report:?}");
     }
 
@@ -837,13 +848,74 @@ mod tests {
         }
     }
 
+    /// IN-03: the labels check reads the exact `The labels, in this order: [...]` segment
+    /// and compares it as a list, so a label in the question text, or inside another word,
+    /// can no longer satisfy it.
     #[test]
-    fn labels_in_order_requires_first_occurrences_in_order() {
-        let labels = ["a1".to_string(), "b2".to_string()];
-        assert!(labels_in_order("x a1 y b2", &labels));
-        assert!(!labels_in_order("x b2 y a1", &labels));
-        assert!(!labels_in_order("x a1 y", &labels));
-        assert!(!labels_in_order("anything", &[]));
+    fn labels_segment_is_parsed_exactly() {
+        let owned = |l: &[&str]| l.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let expected = owned(&["none", "against", "favor"]);
+        // The question contains `none`; the segment lists the labels in ANOTHER order.
+        let question_first = "Classify: \"Is there none of it?\" \
+             The labels, in this order: [against, none, favor].\n- against\n- none\n- favor";
+        assert!(!labels_in_order(question_first, &expected));
+        // `none` occurs only inside `nonetheless`.
+        let inside_a_word =
+            "Classify: \"Q?\" The labels, in this order: [against, favor, nonetheless].";
+        assert!(!labels_in_order(
+            inside_a_word,
+            &owned(&["against", "favor", "none"])
+        ));
+        // The exact segment, in order.
+        let exact = "Classify: \"Is there none of it?\" \
+             The labels, in this order: [none, against, favor].\n- none: x";
+        assert!(labels_in_order(exact, &expected));
+        // A prefix, a superset, a missing segment, an unterminated one and no labels all fail.
+        assert!(!labels_in_order(exact, &owned(&["none", "against"])));
+        assert!(!labels_in_order(
+            exact,
+            &owned(&["none", "against", "favor", "x"])
+        ));
+        assert!(!labels_in_order("none, against, favor", &expected));
+        assert!(!labels_in_order(
+            "The labels, in this order: [none, against, favor",
+            &expected
+        ));
+        assert!(!labels_in_order(exact, &[]));
+
+        // The served description of the tiny fixture: its labels pass, a reordering fails.
+        let model = tiny_model();
+        let description = aprender_mcp_decide::tool_description(&model);
+        let labels = model.task().owned_labels();
+        assert!(labels_in_order(&description, &labels), "{description}");
+        let mut reordered = labels.clone();
+        reordered.swap(0, 1);
+        assert!(!labels_in_order(&description, &reordered), "{description}");
+    }
+
+    /// R6: the builder decides fit with the server's own `check_token_budget`, so its refusal
+    /// IS the server's refusal of the same rows, word for word. (No request separates the old
+    /// plain sum from the server's saturating fold below `usize::MAX`, so the shared function
+    /// is observable through its refusal.)
+    #[test]
+    fn maximal_request_uses_the_server_budget() {
+        let model = tiny_model();
+        let (shortest, _) = row_tokens(&model, "").expect("the empty text builds");
+        let limits = ClassifyLimits {
+            max_texts: 4,
+            max_total_tokens: 4 * shortest - 1,
+            ..SHRUNK
+        };
+        let err = build_maximal_request(&model, &limits, MaximalShape::Distributed)
+            .expect_err("four texts cannot fit 4 x shortest - 1 tokens");
+        assert!(matches!(err, MaximalError::OverBudget { .. }), "{err:?}");
+        // Every share is under the shortest row, so each text is the empty one.
+        let server = check_token_budget(&limits, &[shortest; 4])
+            .expect_err("the server refuses the same rows")
+            .to_string();
+        let message = err.to_string();
+        assert!(message.contains("classify_max_total_tokens"), "{message}");
+        assert!(message.contains(&server), "{message}\n  server: {server}");
     }
 
     #[test]

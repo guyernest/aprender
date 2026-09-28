@@ -73,9 +73,20 @@ fn parse_args() -> Result<Args, String> {
     let mut probe_id = None;
     let mut bearer = None;
     let mut plan_only = false;
-    let mut it = std::env::args().skip(1);
+    // `args_os`, not `args`: `std::env::args` PANICS (exit 101) on an argument that is not
+    // valid UTF-8. Such an argument is a usage error (exit 2), reported by position only,
+    // never quoted, because it may be the bearer token.
+    let mut it = std::env::args_os().skip(1).enumerate().map(|(i, a)| {
+        a.into_string()
+            .map_err(|_| format!("argument {} is not valid UTF-8", i + 1))
+    });
     while let Some(arg) = it.next() {
-        let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
+        let arg = arg?;
+        let mut value = |name: &str| {
+            it.next()
+                .ok_or_else(|| format!("{name} needs a value"))
+                .and_then(std::convert::identity)
+        };
         match arg.as_str() {
             "--url" => url = Some(value("--url")?),
             "--apr" => apr = Some(PathBuf::from(value("--apr")?)),
@@ -193,6 +204,7 @@ async fn main() -> ExitCode {
                         "probe_id": report.probe_id,
                         "one_tool_named_classify": report.one_tool_named_classify,
                         "description_has_labels_in_order": report.description_has_labels_in_order,
+                        "response_labels_match": report.response_labels_match,
                         "identity_matches": report.identity_matches,
                         "artifact_sha256": report.artifact_sha256,
                         "elapsed_ms": elapsed_ms,
