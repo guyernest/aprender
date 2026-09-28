@@ -16,7 +16,9 @@
 //!    contract's pins ([`check_base`], and the zero-shot load);
 //! 2. re-hashes the data dir and the probability files against the report ([`check_inputs`]);
 //! 3. re-derives text-level split disjointness from the data dir and the report's `slice_ids`
-//!    ([`check_split`], the mirror of `scripts/laya_train/data.py`);
+//!    ([`check_split`], the mirror of `scripts/laya_train/data.py`), and holds the report's
+//!    calibration and device records to the relations the contract states for them
+//!    ([`check_report_record`]);
 //! 4. validates both probability files row by row ([`validate_probs`]), so the aprender-core
 //!    metric functions' panicking preconditions can never fire on file data;
 //! 5. re-scores EVERY eval row in Rust ([`rescore`]): the fine-tuned model is the
@@ -30,8 +32,12 @@
 //!    recomputed from its stored rows, reported values only cross-checked, a bound above the
 //!    contract ceiling refused), and exactly the floor when the run carries no record;
 //! 6. recomputes macro-F1 and ECE with aprender-core's ONE implementation of each (OPS-03,
-//!    [`recompute_metrics`]) on those verified probabilities, and decides the gate on the
-//!    recomputed values ([`check_gate`]).
+//!    [`recompute_metrics`]; the eval NLL with its log loss, [`recompute_nll`]) on those
+//!    verified probabilities, and decides the gate on the recomputed values ([`check_gate`]).
+//!
+//! Every leaf of recipe.json and gate-report.json is either bound by one of these checks or
+//! listed report-only with its reason: laya-finetune-gate-v1 `run_field_bindings`, enforced by
+//! the `every_run_field_is_bound_or_report_only` sweep (plan 08-21, class A verify side).
 //!
 //! Under laya-finetune-gate-v1 1.4.0 the cheap checks also RE-DERIVE the shipped seed
 //! ([`check_seed_selection`], A3: every seed's metrics recomputed from its hash-bound
@@ -61,6 +67,7 @@ use crate::pack::{self, sha256_hex, GateCalibration, GateReport, PackError, Pack
 use crate::{DecideError, Decider, Decision, DecisionMethod, Task};
 use aprender::calibration::expected_calibration_error_top_label;
 use aprender::metrics::classification::{f1_score, Average};
+use aprender::metrics::probabilistic::log_loss;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -108,6 +115,10 @@ pub struct VerifyPolicy {
     /// `max(calibration_slice_min_per_class, ceil(fraction x n_class))` slice rows (WR-08, the
     /// rule `scripts/laya_train/data.py` `calibration_split` applies).
     pub calibration_slice_fraction: f64,
+    /// laya-finetune-gate-v1 `constants.calibration_temp_min` (`calibration_fit_bounded`).
+    pub calibration_temp_min: f64,
+    /// laya-finetune-gate-v1 `constants.calibration_temp_max` (`calibration_fit_bounded`).
+    pub calibration_temp_max: f64,
     /// laya-finetune-gate-v1 `base`: the declared base's identity and pins (D-04).
     pub base: BasePins,
     /// laya-finetune-gate-v1 `recipe`, `early_stopping` and `seed_policy.declared_seed`: the
@@ -220,6 +231,10 @@ pub struct GateConstantsView {
     pub calibration_slice_min_per_class: u64,
     /// `calibration_slice_fraction`.
     pub calibration_slice_fraction: f64,
+    /// `calibration_temp_min`.
+    pub calibration_temp_min: f64,
+    /// `calibration_temp_max`.
+    pub calibration_temp_max: f64,
 }
 
 /// laya-finetune-gate-v1 `base`.
@@ -362,6 +377,8 @@ impl VerifyPolicy {
             rescore_bound_max_abs: parity.constants.pack_rescore_bound_max_abs,
             calibration_slice_min_per_class: c.calibration_slice_min_per_class,
             calibration_slice_fraction: c.calibration_slice_fraction,
+            calibration_temp_min: c.calibration_temp_min,
+            calibration_temp_max: c.calibration_temp_max,
             base: BasePins {
                 family: b.family.clone(),
                 checkpoint: b.checkpoint.clone(),
@@ -512,6 +529,9 @@ pub struct Recomputed {
     pub ft_macro_f1: f64,
     /// Fine-tuned ECE after calibration (the eval probabilities carry the applied T).
     pub ece_post: f64,
+    /// Fine-tuned eval NLL, `mean -ln p[y]` of the calibrated probabilities (aprender-core
+    /// `log_loss` of the true-class probability, the house implementation).
+    pub ft_nll: f64,
     /// `ft_macro_f1 - zs_macro_f1`.
     pub margin: f64,
 }
@@ -818,6 +838,15 @@ pub enum VerifyError {
         /// What is wrong.
         why: String,
     },
+    /// A gate-report record disagrees with the relation the contract states for it
+    /// (`calibration_fit_bounded`: `t_applied = clamp(t_fitted)`, `clamp_hit = t_fitted at a
+    /// bound`; `device_recorded`: `device_is_cpu = (device_used == "cpu")`).
+    RecordMismatch {
+        /// The report field.
+        field: &'static str,
+        /// What is wrong.
+        why: String,
+    },
     /// recipe.json differs from the contract's recipe block (D-04, V6-d): a recipe value, the
     /// schedule literal, the seed, the epoch rule, an `early_stopping` field, or
     /// `shots_per_class` against the data dir.
@@ -877,6 +906,7 @@ impl VerifyError {
             Self::SeedPolicyMissing => "SeedPolicyMissing",
             Self::ShiftProbeMismatch { .. } => "ShiftProbeMismatch",
             Self::RecipeMismatch { .. } => "RecipeMismatch",
+            Self::RecordMismatch { .. } => "RecordMismatch",
         }
     }
 }
@@ -1051,7 +1081,9 @@ impl fmt::Display for VerifyError {
                 recomputed,
             } => write!(f, "reported pass={reported} recomputed pass={recomputed}"),
             Self::GateFailed(g) => write!(f, "{g}"),
-            Self::SeedPolicyViolated { field, why } | Self::ShiftProbeMismatch { field, why } => {
+            Self::SeedPolicyViolated { field, why }
+            | Self::ShiftProbeMismatch { field, why }
+            | Self::RecordMismatch { field, why } => {
                 write!(f, "field={field}: {why}")
             }
             Self::SeedPolicyMismatch {
@@ -1739,6 +1771,65 @@ pub fn check_split(
     Ok(())
 }
 
+fn record_mismatch(field: &'static str, why: String) -> VerifyError {
+    VerifyError::RecordMismatch { field, why }
+}
+
+/// The gate-report records the contract states a relation for (plan 08-21, run_field_bindings):
+/// `device_recorded` (`device_is_cpu == (device_used == "cpu")`) and `calibration_fit_bounded`
+/// (`t_fitted` finite, `t_applied == clamp(t_fitted, calibration_temp_min,
+/// calibration_temp_max)` bit for bit, `clamp_hit == (t_fitted <= min OR t_fitted >= max)`, as
+/// `scripts/laya_train/gate.py` `fit_temperature` writes them). `t_applied` itself is bound to the
+/// checkpoint's agent config by the load ladder (decide-apr-v1 rung 4); `t_fitted` cannot be
+/// re-fitted here (the slice logits are not in the run dir), so this binds it through the clamp.
+///
+/// # Errors
+///
+/// [`VerifyError::RecordMismatch`] naming the field.
+pub fn check_report_record(report: &GateReport, policy: &VerifyPolicy) -> Result<(), VerifyError> {
+    let cpu = report.device_used == "cpu";
+    if report.device_is_cpu != cpu {
+        return Err(record_mismatch(
+            "device_is_cpu",
+            format!(
+                "{} but device_used is {:?} (device_recorded: device_is_cpu == (device_used == \"cpu\"))",
+                report.device_is_cpu, report.device_used
+            ),
+        ));
+    }
+    let c = &report.calibration;
+    let (lo, hi) = (policy.calibration_temp_min, policy.calibration_temp_max);
+    if !c.t_fitted.is_finite() {
+        return Err(record_mismatch(
+            "calibration.t_fitted",
+            format!("{} is not finite", c.t_fitted),
+        ));
+    }
+    let applied = hi.min(lo.max(c.t_fitted));
+    if c.t_applied.to_bits() != applied.to_bits() {
+        return Err(record_mismatch(
+            "calibration.t_applied",
+            format!(
+                "{} but clamp(t_fitted {}, {lo}, {hi}) = {applied} (calibration_fit_bounded)",
+                c.t_applied, c.t_fitted
+            ),
+        ));
+    }
+    let at_bound = c.t_fitted <= lo || c.t_fitted >= hi;
+    if c.clamp_hit != at_bound {
+        return Err(record_mismatch(
+            "calibration.clamp_hit",
+            format!(
+                "{} but t_fitted {} is {}at a bound of [{lo}, {hi}] (calibration_fit_bounded)",
+                c.clamp_hit,
+                c.t_fitted,
+                if at_bound { "" } else { "not " }
+            ),
+        ));
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // Probability files
 // ===========================================================================
@@ -2215,6 +2306,18 @@ pub fn recompute_metrics(
     }
 }
 
+/// The eval NLL `mean_i -ln p_i[y_i]` with aprender-core's ONE log-loss implementation
+/// (OPS-03): the binary `log_loss` of each row's true-class probability with label 1 is exactly
+/// `-ln p[y]` (clipped to `[eps, 1 - eps]`; `scripts/laya_train/metrics.py` `nll` clips at 1e-12,
+/// which differs only for a true-class probability below 1e-12).
+///
+/// `probs` must already be validated ([`validate_probs`]) and `labels < k`.
+#[must_use]
+pub fn recompute_nll(probs: &[Vec<f32>], labels: &[usize]) -> f64 {
+    let p_true: Vec<f32> = probs.iter().zip(labels).map(|(p, &y)| p[y]).collect();
+    f64::from(log_loss(&vec![1; p_true.len()], &p_true))
+}
+
 fn threshold_eq(field: &'static str, report: f64, policy: f64) -> Result<(), VerifyError> {
     if report.to_bits() == policy.to_bits() {
         Ok(())
@@ -2321,6 +2424,7 @@ pub fn check_gate(
         tol,
     )?;
     metric_close("margin", report.margin, r.margin, tol)?;
+    metric_close("fine_tuned.nll", report.fine_tuned.nll, r.ft_nll, tol)?;
     let mut failed = Vec::new();
     if !at_least(r.margin, policy.min_macro_f1_margin) {
         failed.push(GateClause::Margin);
@@ -2478,6 +2582,16 @@ fn check_seeds_block<'a>(
             ),
         ));
     }
+    let label = format!("median-ECE seed of {} seeds", seeds.len());
+    if sb.label != label {
+        return Err(seed_violated(
+            "seeds.label",
+            format!(
+                "{:?}, the contract's literal under median_ece is {label:?} (seed_policy.rule)",
+                sb.label
+            ),
+        ));
+    }
     let shipped = sb
         .shipped
         .ok_or_else(|| seed_violated("shipped", "absent under seed_selection".into()))?;
@@ -2493,6 +2607,16 @@ fn check_seeds_block<'a>(
             format!(
                 "the shipped seed {shipped}'s per_seed eval_probs_sha256 {} is not the report's eval-probs.json {}",
                 row.eval_probs_sha256, inputs.gate_report.eval_probs_sha256
+            ),
+        ));
+    }
+    let t_applied = inputs.gate_report.calibration.t_applied;
+    if row.t_applied.to_bits() != t_applied.to_bits() {
+        return Err(seed_violated(
+            "per_seed.t_applied",
+            format!(
+                "the shipped seed {shipped}'s per_seed t_applied {} is not calibration.t_applied {t_applied}",
+                row.t_applied
             ),
         ));
     }
@@ -2804,6 +2928,7 @@ fn cheap_checks(
         policy.calibration_slice_fraction,
         policy.calibration_slice_min_per_class,
     )?;
+    check_report_record(&inputs.gate_report, policy)?;
     let ft_probs = validate_probs(
         ProbsWhich::FineTuned,
         &inputs.eval_probs_json,
@@ -2874,6 +2999,7 @@ fn verify_loaded(
         zs_ece: zs_m.ece,
         ft_macro_f1: ft_m.macro_f1,
         ece_post: ft_m.ece,
+        ft_nll: recompute_nll(&checked.ft_probs, &checked.labels),
         margin: ft_m.macro_f1 - zs_m.macro_f1,
     };
     let n = checked.labels.len();

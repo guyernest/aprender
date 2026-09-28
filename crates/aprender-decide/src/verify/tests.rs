@@ -613,6 +613,28 @@ fn base_mismatch_tokenizer() {
         ),
         "the run binding refuses: {e:?}"
     );
+    // The run and its base dir agree on a tokenizer that is NOT the contract's: only the pin
+    // can refuse it (the run binding is satisfied).
+    let other_pin = sha256_hex(b"a tokenizer the contract does not pin");
+    let pinned_elsewhere = VerifyPolicy {
+        base: BasePins {
+            tokenizer_json_sha256: other_pin.clone(),
+            ..policy.base.clone()
+        },
+        ..policy.clone()
+    };
+    let e = expect_err(run.verify(&pinned_elsewhere));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::BaseMismatch {
+                which: BaseWhich::BaseTokenizer,
+                expected,
+                ..
+            } if *expected == other_pin
+        ),
+        "the contract pin refuses a run/base pair that agree with each other: {e:?}"
+    );
 }
 
 /// A base dir copy with `rel` changed by one appended newline (still valid JSON, so only the
@@ -2303,5 +2325,314 @@ fn shift_file_missing() {
             }
         ),
         "{e:?}"
+    );
+}
+
+// ===========================================================================
+// Plan 08-21 Task 3: every run-dir field is bound or report-only (class A, verify side)
+// ===========================================================================
+
+/// The fullest run copy the helpers make: the three-seed median production copy (seed
+/// selection, early_stopping), a float64 noise record, a shift probe, and the deployed run's
+/// device record (`mps:0`, not the CPU) — every optional recipe.json and gate-report.json field.
+fn fullest_copy(policy: &VerifyPolicy) -> Run {
+    let run = production_copy(policy, true);
+    let (ft, zs) = (
+        f64_rows(&run, "eval-probs.json"),
+        f64_rows(&run, "zero-shot-probs.json"),
+    );
+    write_noise_record(&run, policy, &ft, &zs);
+    add_shift_probe(&run, policy);
+    run.edit_json("gate-report.json", |r| {
+        r["device_used"] = "mps:0".into();
+        r["device_is_cpu"] = false.into();
+    });
+    run
+}
+
+/// Every leaf of `v` as `(JSON pointer, pattern)`, array indices as `[*]` in the pattern.
+fn leaves_of(v: &Value, ptr: &str, pat: &str, out: &mut Vec<(String, String)>) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                leaves_of(x, &format!("{ptr}/{k}"), &format!("{pat}/{k}"), out);
+            }
+        }
+        Value::Array(a) => {
+            for (i, x) in a.iter().enumerate() {
+                leaves_of(x, &format!("{ptr}/{i}"), &format!("{pat}/[*]"), out);
+            }
+        }
+        _ => out.push((ptr.to_string(), pat.to_string())),
+    }
+}
+
+/// The two swept files' leaves, `(file, pointer, pattern)`.
+fn run_leaves(run: &Run) -> Vec<(&'static str, String, String)> {
+    let mut out = Vec::new();
+    for file in ["recipe.json", "gate-report.json"] {
+        let mut leaves = Vec::new();
+        leaves_of(&read_json(&run.path(file)), "", "", &mut leaves);
+        out.extend(leaves.into_iter().map(|(ptr, pat)| (file, ptr, pat)));
+    }
+    out
+}
+
+/// The deterministic mutation of one leaf (plan 08-19's): a 64-hex string gets its first digit
+/// flipped, another string an `x` appended, an integer +1, a float x2+1, a bool flipped, a null
+/// becomes 0.5.
+fn mutate_leaf(v: &Value) -> Value {
+    match v {
+        Value::Bool(b) => (!b).into(),
+        Value::Null => 0.5.into(),
+        Value::String(s) if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            let flipped = if s.starts_with('0') { "1" } else { "0" };
+            format!("{flipped}{}", &s[1..]).into()
+        }
+        Value::String(s) => format!("{s}x").into(),
+        Value::Number(n) => match (n.as_u64(), n.as_i64(), n.as_f64()) {
+            (Some(u), _, _) => (u + 1).into(),
+            (None, Some(i), _) => (i + 1).into(),
+            (None, None, Some(f)) => (f * 2.0 + 1.0).into(),
+            _ => panic!("unrepresentable number {n}"),
+        },
+        other => panic!("not a leaf: {other:?}"),
+    }
+}
+
+/// Set `ptr` of `file` to `value`, then reseal every hash the run records over what changed:
+/// recipe.json's sha256 as the report's recipe_id, and slice_ids' sha256 when a slice id moved.
+/// Nothing else is re-derived, so only the mutated leaf differs.
+fn set_leaf(run: &Run, file: &str, ptr: &str, value: Value) {
+    run.edit_json(file, |v| {
+        *v.pointer_mut(ptr).expect("the leaf exists") = value;
+    });
+    if file == "recipe.json" {
+        let rid = sha(&run.path("recipe.json"));
+        run.edit_json("gate-report.json", |r| r["recipe_id"] = rid.into());
+    }
+    if ptr.starts_with("/calibration/slice_ids/") {
+        run.edit_json("gate-report.json", |r| {
+            let compact = serde_json::to_string(&r["calibration"]["slice_ids"]).expect("ids");
+            r["calibration"]["slice_ids_sha256"] = sha256_hex(compact.as_bytes()).into();
+        });
+    }
+}
+
+/// The verdict line of one verify.
+fn verdict(r: &Result<VerifyReport, VerifyError>) -> String {
+    match r {
+        Ok(_) => "ACCEPTED".into(),
+        Err(e) => format!("REFUSED {} {e}", e.variant_name()),
+    }
+}
+
+/// The contract's run_field_bindings rows, keyed `(file, leaf pattern)`.
+fn binding_rows() -> Vec<serde_yaml::Value> {
+    contract_yaml("laya-finetune-gate-v1.yaml")["run_field_bindings"]["rows"]
+        .as_sequence()
+        .expect("run_field_bindings.rows")
+        .clone()
+}
+
+fn row_str<'a>(row: &'a serde_yaml::Value, key: &str) -> Option<&'a str> {
+    row[key].as_str()
+}
+
+/// A `bound_by` naming a plan after this one (`(plan 08-NN)`, NN > 21) is EXPECTED-OPEN.
+fn later_plan(row: &serde_yaml::Value) -> bool {
+    row_str(row, "bound_by")
+        .and_then(|b| b.split("(plan 08-").nth(1))
+        .and_then(|t| t.get(..2))
+        .and_then(|n| n.parse::<u32>().ok())
+        .is_some_and(|n| n > 21)
+}
+
+/// The slice-membership mutation: slice id `i` replaced by the first fit row of its class, the
+/// list re-sorted — a structurally valid slice with different members.
+fn swap_slice_member(run: &Run, i: usize) -> Value {
+    let rep = read_json(&run.path("gate-report.json"));
+    let mut ids: Vec<u64> = rep["calibration"]["slice_ids"]
+        .as_array()
+        .expect("slice_ids")
+        .iter()
+        .map(|x| x.as_u64().expect("id"))
+        .collect();
+    let train = read_data_dir(&run.data()).expect("data").train;
+    let class = train[usize::try_from(ids[i]).expect("id")].label;
+    let fit = (0..train.len() as u64)
+        .find(|j| !ids.contains(j) && train[usize::try_from(*j).expect("id")].label == class)
+        .expect("a fit row of the same class");
+    ids[i] = fit;
+    ids.sort_unstable();
+    Value::from(ids)
+}
+
+/// CLASS A, verify side: every leaf of the fullest run copy's recipe.json and gate-report.json,
+/// mutated alone and resealed, is refused naming its row (bound) or still verifies
+/// (report_only); expected-open rows are listed, never counted as bound.
+#[test]
+fn every_run_field_is_bound_or_report_only() {
+    let policy = permissive_policy();
+    let base = fullest_copy(&policy);
+    let control = base.verify(&policy).expect("the fullest copy verifies");
+    let shipped_idx = {
+        let rep = read_json(&base.path("gate-report.json"));
+        let shipped = rep["seeds"]["shipped"].as_i64().expect("shipped");
+        rep["seeds"]["per_seed"]
+            .as_array()
+            .expect("per_seed")
+            .iter()
+            .position(|r| r["seed"].as_i64() == Some(shipped))
+            .expect("the shipped row")
+    };
+    let rows = binding_rows();
+    let find = |file: &str, pat: &str| {
+        rows.iter()
+            .find(|r| row_str(r, "file") == Some(file) && row_str(r, "leaf") == Some(pat))
+    };
+    let mut failures = Vec::new();
+    let mut open = Vec::new();
+    let mut checked = 0usize;
+    for (file, ptr, pat) in run_leaves(&base) {
+        let Some(row) = find(file, &pat) else {
+            failures.push(format!("{file}{pat}: no run_field_bindings row"));
+            continue;
+        };
+        let names = row_str(row, "names");
+        let expect_refused =
+            |got: &Result<VerifyReport, VerifyError>, what: &str| match (got, names) {
+                (Err(e), Some(n)) if e.to_string().contains(n) || verdict(got).contains(n) => None,
+                _ => Some(format!(
+                    "{file}{ptr} ({what}): expected a refusal naming {names:?}, got {}",
+                    verdict(got)
+                )),
+            };
+        let expect_accepted = |got: &Result<VerifyReport, VerifyError>, what: &str| match got {
+            Ok(r)
+                if r.recomputed == control.recomputed && r.shipped_seed == control.shipped_seed =>
+            {
+                None
+            }
+            _ => Some(format!(
+                "{file}{ptr} ({what}): report_only, but the verdict changed: {}",
+                verdict(got)
+            )),
+        };
+        let run = fullest_copy(&policy);
+        let old = read_json(&run.path(file))
+            .pointer(&ptr)
+            .expect("leaf")
+            .clone();
+        if later_plan(row) {
+            set_leaf(&run, file, &ptr, mutate_leaf(&old));
+            open.push(format!(
+                "{file}{ptr} -> {} [{}]",
+                verdict(&run.verify(&policy)),
+                row_str(row, "bound_by").unwrap_or_default()
+            ));
+            continue;
+        }
+        checked += 1;
+        let failure = if row_str(row, "report_only").is_some() {
+            set_leaf(&run, file, &ptr, mutate_leaf(&old));
+            expect_accepted(&run.verify(&policy), "report_only")
+        } else if row_str(row, "only") == Some("shipped_seed_row") {
+            let idx: usize = ptr
+                .split('/')
+                .nth(3)
+                .and_then(|i| i.parse().ok())
+                .expect("a per_seed index");
+            set_leaf(&run, file, &ptr, mutate_leaf(&old));
+            let got = run.verify(&policy);
+            if idx == shipped_idx {
+                expect_refused(&got, "the shipped seed's row")
+            } else {
+                expect_accepted(&got, "a non-shipped seed's row")
+            }
+        } else if row_str(row, "membership_report_only").is_some() {
+            let i: usize = ptr
+                .rsplit('/')
+                .next()
+                .and_then(|i| i.parse().ok())
+                .expect("a list index");
+            // Structure: a duplicate id (its neighbour's) is refused.
+            let ids = read_json(&run.path(file))["calibration"]["slice_ids"].clone();
+            let n = ids.as_array().expect("ids").len();
+            set_leaf(&run, file, &ptr, ids[(i + 1) % n].clone());
+            let structure = expect_refused(&run.verify(&policy), "a duplicate id");
+            // Membership: a same-class fit row in its place still verifies.
+            let run = fullest_copy(&policy);
+            let swapped = swap_slice_member(&run, i);
+            set_leaf(&run, file, "/calibration/slice_ids", swapped);
+            let rid = sha256_hex(
+                serde_json::to_string(&read_json(&run.path(file))["calibration"]["slice_ids"])
+                    .expect("ids")
+                    .as_bytes(),
+            );
+            run.edit_json(file, |r| r["calibration"]["slice_ids_sha256"] = rid.into());
+            let membership = expect_accepted(&run.verify(&policy), "a same-class member swap");
+            structure.or(membership)
+        } else {
+            set_leaf(&run, file, &ptr, mutate_leaf(&old));
+            expect_refused(&run.verify(&policy), "bound")
+        };
+        failures.extend(failure);
+    }
+    let count = |f: &dyn Fn(&serde_yaml::Value) -> bool| rows.iter().filter(|r| f(r)).count();
+    let expected_open = count(&later_plan);
+    let report_only = count(&|r| row_str(r, "report_only").is_some());
+    let bound = count(&|r| row_str(r, "bound_by").is_some() && !later_plan(r));
+    for line in &open {
+        println!("EXPECTED-OPEN {line}");
+    }
+    println!(
+        "RUN FIELDS bound={bound} report_only={report_only} expected_open={expected_open} \
+         (rows; {checked} leaves swept, {} expected-open leaves listed)",
+        open.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!(bound + report_only + expected_open, rows.len());
+}
+
+/// The table cannot drift from the fixtures: its `(file, leaf)` patterns are EXACTLY the fullest
+/// run copy's, each row is either bound (with `names`) or report_only, and no pattern repeats.
+#[test]
+fn run_field_bindings_table_matches_fixture_leaves() {
+    let run = fullest_copy(&permissive_policy());
+    let observed: std::collections::BTreeSet<(String, String)> = run_leaves(&run)
+        .into_iter()
+        .map(|(f, _, pat)| (f.to_string(), pat))
+        .collect();
+    let rows = binding_rows();
+    let mut table = std::collections::BTreeSet::new();
+    for r in &rows {
+        let key = (
+            row_str(r, "file").expect("file").to_string(),
+            row_str(r, "leaf").expect("leaf").to_string(),
+        );
+        assert!(table.insert(key.clone()), "a repeated row: {key:?}");
+        let bound = row_str(r, "bound_by").is_some();
+        let report_only = row_str(r, "report_only").is_some();
+        assert!(
+            bound != report_only,
+            "{key:?}: exactly one of bound_by / report_only"
+        );
+        if bound {
+            assert!(
+                row_str(r, "names").is_some_and(|n| !n.is_empty()),
+                "{key:?}: a bound row names its refusal"
+            );
+        }
+        if row_str(r, "only").is_some() {
+            assert_eq!(row_str(r, "only"), Some("shipped_seed_row"), "{key:?}");
+            assert!(row_str(r, "report_only_otherwise").is_some(), "{key:?}");
+        }
+    }
+    let missing: Vec<_> = observed.difference(&table).collect();
+    let stale: Vec<_> = table.difference(&observed).collect();
+    assert!(
+        missing.is_empty() && stale.is_empty(),
+        "leaves with no row: {missing:?}; rows no fixture leaf has: {stale:?}"
     );
 }

@@ -445,6 +445,119 @@ probes_json_schema:
   # reload, through the decide-apr-v1 synthetic probe task.
   probes: 'array of {input_index: integer, tokens: integer (built-row length), label: string, probabilities_f32_hex: array of K strings (f32 bit patterns, 8 hex digits each)}'
 
+# ---------------------------------------------------------------------------------------------
+# CLASS A, VERIFY SIDE (plan 08-21): every leaf of a production run dir's recipe.json and
+# gate-report.json, as a leaf pattern (array indices as [*], optional fields included), is either
+# BOUND — equal to this contract, to a hash of a data-dir / base-dir / probability file, or to a
+# Rust recomputation, refused by the named check with a Display containing `names` — or
+# REPORT_ONLY, with the reason it cannot decide eligibility. A `bound_by` naming a later plan is
+# EXPECTED-OPEN until that plan lands. Enforced by crates/aprender-decide/src/verify/tests.rs
+# `every_run_field_is_bound_or_report_only` (each leaf mutated alone — hex digit flipped, integer
+# +1, float x2+1, bool flipped, string appended, null -> 0.5 — every recorded hash resealed, then
+# verified: a bound row must be refused naming it, a report_only row must still verify) and
+# `run_field_bindings_table_matches_fixture_leaves` (this table's patterns == the fullest run
+# copy's leaves). `only: shipped_seed_row` binds the shipped seed's row and treats the others per
+# `report_only_otherwise`; `membership_report_only` binds a list's structure and states why its
+# membership decides nothing.
+# ---------------------------------------------------------------------------------------------
+run_field_bindings:
+  rule: 'a new recipe.json or gate-report.json field needs a row here before any run dir carrying it verifies: the sweep fails on an unlisted leaf, and on a listed pattern no fixture leaf has'
+  rows:
+    - {file: recipe.json, leaf: '/variant', bound_by: 'check_variant', names: 'is not deployable'}
+    - {file: recipe.json, leaf: '/optimizer', bound_by: 'check_recipe_block', names: 'recipe.json optimizer is'}
+    - {file: recipe.json, leaf: '/encoder_lr', bound_by: 'check_recipe_block', names: 'recipe.json encoder_lr is'}
+    - {file: recipe.json, leaf: '/head_lr', bound_by: 'check_recipe_block', names: 'recipe.json head_lr is'}
+    - {file: recipe.json, leaf: '/eta_min', bound_by: 'check_recipe_block', names: 'recipe.json eta_min is'}
+    - {file: recipe.json, leaf: '/weight_decay', bound_by: 'check_recipe_block', names: 'recipe.json weight_decay is'}
+    - {file: recipe.json, leaf: '/grad_clip', bound_by: 'check_recipe_block', names: 'recipe.json grad_clip is'}
+    - {file: recipe.json, leaf: '/batch_size', bound_by: 'check_recipe_block', names: 'recipe.json batch_size is'}
+    - {file: recipe.json, leaf: '/proper_reward_w_sph', bound_by: 'check_recipe_block', names: 'recipe.json proper_reward_w_sph is'}
+    - {file: recipe.json, leaf: '/proper_reward_w_rps', bound_by: 'check_recipe_block', names: 'recipe.json proper_reward_w_rps is'}
+    - {file: recipe.json, leaf: '/schedule', bound_by: 'check_recipe_block', names: 'recipe.json schedule is'}
+    - {file: recipe.json, leaf: '/shots_per_class', bound_by: 'check_recipe_shots (the largest train.jsonl class count)', names: 'recipe.json shots_per_class is'}
+    - {file: recipe.json, leaf: '/epochs', bound_by: 'check_recipe_block (recipe.epoch_rule)', names: 'recipe.json epochs is'}
+    - {file: recipe.json, leaf: '/seed', bound_by: 'check_recipe_block (seed_policy.declared_seed)', names: 'recipe.json seed is'}
+    - {file: recipe.json, leaf: '/base/family', bound_by: 'check_base', names: 'which=family'}
+    - {file: recipe.json, leaf: '/base/checkpoint', bound_by: 'check_base', names: 'which=checkpoint'}
+    - {file: recipe.json, leaf: '/base/repo', bound_by: 'check_base', names: 'which=repo'}
+    - {file: recipe.json, leaf: '/base/revision', bound_by: 'check_base', names: 'which=revision'}
+    - {file: recipe.json, leaf: '/base/sha256', bound_by: 'PackInputs::from_run_dir (== inputs_sha256.base_model), then check_base (== base.model_safetensors_sha256)', names: 'file=base_model'}
+    - {file: recipe.json, leaf: '/early_stopping/monitor', bound_by: 'check_recipe_block', names: 'recipe.json early_stopping.monitor is'}
+    - {file: recipe.json, leaf: '/early_stopping/mode', bound_by: 'check_recipe_block', names: 'recipe.json early_stopping.mode is'}
+    - {file: recipe.json, leaf: '/early_stopping/eval_every_epochs', bound_by: 'check_recipe_block', names: 'recipe.json early_stopping.eval_every_epochs is'}
+    - {file: recipe.json, leaf: '/early_stopping/first_candidate_epoch', bound_by: 'check_recipe_block', names: 'recipe.json early_stopping.first_candidate_epoch is'}
+    - {file: recipe.json, leaf: '/early_stopping/patience_epochs', bound_by: 'check_recipe_block', names: 'recipe.json early_stopping.patience_epochs is'}
+    - {file: recipe.json, leaf: '/early_stopping/min_delta', bound_by: 'check_recipe_block', names: 'recipe.json early_stopping.min_delta is'}
+    - {file: recipe.json, leaf: '/early_stopping/restore', bound_by: 'check_recipe_block', names: 'recipe.json early_stopping.restore is'}
+    - {file: recipe.json, leaf: '/early_stopping/tie_break', bound_by: 'check_recipe_block', names: 'recipe.json early_stopping.tie_break is'}
+    - {file: recipe.json, leaf: '/seed_selection/policy', bound_by: 'check_seed_decl', names: 'seed_selection.policy is'}
+    - {file: recipe.json, leaf: '/seed_selection/seeds/[*]', bound_by: 'check_seed_decl', names: 'seed_selection.seeds is'}
+    - {file: recipe.json, leaf: '/seed_selection/rank_scale', bound_by: 'check_seed_decl', names: 'seed_selection.rank_scale is'}
+    - {file: recipe.json, leaf: '/seed_selection/tie_break', bound_by: 'check_seed_decl', names: 'seed_selection.tie_break is'}
+    - {file: gate-report.json, leaf: '/schema', bound_by: 'PackInputs::from_run_dir (GATE_REPORT_SCHEMA)', names: 'schema is'}
+    - {file: gate-report.json, leaf: '/pass', bound_by: 'check_gate (recomputed pass)', names: 'reported pass='}
+    - {file: gate-report.json, leaf: '/thresholds/min_macro_f1_margin', bound_by: 'check_thresholds', names: 'field=min_macro_f1_margin'}
+    - {file: gate-report.json, leaf: '/thresholds/max_ece', bound_by: 'check_thresholds', names: 'field=max_ece'}
+    - {file: gate-report.json, leaf: '/thresholds/ece_bins', bound_by: 'check_thresholds', names: 'field=ece_bins'}
+    - {file: gate-report.json, leaf: '/zero_shot/macro_f1', bound_by: 'check_gate (recomputed)', names: 'field=zero_shot.macro_f1'}
+    - {file: gate-report.json, leaf: '/zero_shot/ece', bound_by: 'check_gate (recomputed)', names: 'field=zero_shot.ece'}
+    - {file: gate-report.json, leaf: '/zero_shot/n', bound_by: 'check_gate (recomputed)', names: 'field=zero_shot.n'}
+    - {file: gate-report.json, leaf: '/zero_shot/f_avg', bound_by: 'check_f_avg (plan 08-27)', names: 'f_avg'}
+    - {file: gate-report.json, leaf: '/fine_tuned/macro_f1', bound_by: 'check_gate (recomputed)', names: 'field=fine_tuned.macro_f1'}
+    - {file: gate-report.json, leaf: '/fine_tuned/ece_post', bound_by: 'check_gate (recomputed)', names: 'field=fine_tuned.ece_post'}
+    - {file: gate-report.json, leaf: '/fine_tuned/nll', bound_by: 'check_gate (recomputed)', names: 'field=fine_tuned.nll'}
+    - {file: gate-report.json, leaf: '/fine_tuned/n', bound_by: 'check_gate (recomputed)', names: 'field=fine_tuned.n'}
+    - {file: gate-report.json, leaf: '/fine_tuned/ece_pre', report_only: 'the pre-calibration ECE is computed by train.py from the T = 1 probabilities, which the run dir does not hold; rebuilding them from the calibrated float32 file as softmax(T x ln p) is not exact, and ECE jumps at bin edges, so a recomputation could refuse an honest run. It is in no gate clause and not in the artifact manifest'}
+    - {file: gate-report.json, leaf: '/fine_tuned/f_avg', bound_by: 'check_f_avg (plan 08-27)', names: 'f_avg'}
+    - {file: gate-report.json, leaf: '/margin', bound_by: 'check_gate (recomputed)', names: 'field=margin'}
+    - {file: gate-report.json, leaf: '/calibration/bucket', bound_by: 'decide-apr-v1 rung 4 (check_manifest_bindings: bucket_key of the task)', names: 'calibration.bucket'}
+    - {file: gate-report.json, leaf: '/calibration/t_fitted', bound_by: 'check_report_record (t_applied == clamp(t_fitted), calibration_fit_bounded)', names: 'calibration_fit_bounded'}
+    - {file: gate-report.json, leaf: '/calibration/t_applied', bound_by: 'check_report_record (clamp relation), and decide-apr-v1 rung 4 (the checkpoint agent config)', names: 'calibration.t_applied'}
+    - {file: gate-report.json, leaf: '/calibration/clamp_hit', bound_by: 'check_report_record (t_fitted at a bound)', names: 'calibration.clamp_hit'}
+    - {file: gate-report.json, leaf: '/calibration/slice_size', bound_by: 'check_split (check_slice_ids)', names: 'slice_size'}
+    - {file: gate-report.json, leaf: '/calibration/slice_ids/[*]', bound_by: 'check_split (structure: sorted, unique, in range, per-class need, group-disjoint, hash)', names: 'slice_ids', membership_report_only: 'which structurally valid rows form the slice is not re-derived: data.py draws it with numpy RandomState(declared_seed).permutation, and verify does not re-fit T from it (the slice logits are not in the run dir), so any slice passing check_split decides nothing verify recomputes; the sweep proves both halves (a duplicate id is refused, a same-class swap is accepted)'}
+    - {file: gate-report.json, leaf: '/calibration/slice_ids_sha256', bound_by: 'check_split (check_slice_ids)', names: 'slice_ids hash to'}
+    - {file: gate-report.json, leaf: '/seeds/declared', bound_by: 'check_seeds_block', names: 'field=declared'}
+    - {file: gate-report.json, leaf: '/seeds/n', bound_by: 'check_seeds_block', names: 'field=per_seed'}
+    - {file: gate-report.json, leaf: '/seeds/label', bound_by: 'check_seeds_block (the seed_policy.rule literal)', names: 'field=seeds.label'}
+    - {file: gate-report.json, leaf: '/seeds/policy', bound_by: 'check_seeds_block', names: 'field=seeds.policy'}
+    - {file: gate-report.json, leaf: '/seeds/shipped', bound_by: 'check_seeds_block, check_seed_selection (the median)', names: 'field=shipped'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/seed', bound_by: 'PackInputs::from_run_dir (reads seeds/seed-<s>/), check_seeds_block', names: 'seeds/seed-'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/macro_f1', bound_by: 'check_seed_selection (recomputed)', names: 'field=per_seed.macro_f1'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/ece_post', bound_by: 'check_seed_selection (recomputed)', names: 'field=per_seed.ece_post'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/margin', bound_by: 'check_seed_selection (recomputed)', names: 'field=per_seed.margin'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/f_avg', bound_by: 'check_f_avg (plan 08-27)', names: 'f_avg'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/pass', bound_by: 'check_seed_selection (recomputed)', names: 'field=per_seed.pass'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/t_applied', bound_by: 'check_seeds_block (the shipped row == calibration.t_applied)', names: 'field=per_seed.t_applied', only: 'shipped_seed_row', report_only_otherwise: 'a non-shipped seed''s checkpoint is deleted after selection (seed_policy.retention_rule) and its T is not recorded anywhere else, so no file verify holds can bind it; it enters no verdict'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/rank_key', bound_by: 'check_seed_selection (recomputed)', names: 'field=per_seed.rank_key'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/eval_probs_sha256', bound_by: 'PackInputs::from_run_dir (the seed file hash)', names: 'its per_seed row records'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/model_safetensors_sha256', bound_by: 'check_seeds_block (the shipped row == checkpoint/model.safetensors)', names: 'field=model_safetensors_sha256', only: 'shipped_seed_row', report_only_otherwise: 'a non-shipped seed''s checkpoint is deleted after selection (seed_policy.retention_rule), so its hash names bytes no run dir holds; it enters no verdict'}
+    - {file: gate-report.json, leaf: '/device_used', report_only: 'provenance (D-03): read back from the parameters by the trainer, which verify cannot re-observe. Its CPU-ness is bound through device_is_cpu (device_recorded); the string enters no verdict, and the artifact manifest copies it from this report (decide-apr-v1 rung 4)'}
+    - {file: gate-report.json, leaf: '/device_is_cpu', bound_by: 'check_report_record (device_recorded)', names: 'field=device_is_cpu'}
+    - {file: gate-report.json, leaf: '/torch_version', report_only: 'provenance (D-03): the trainer''s torch version, which verify cannot re-observe; it enters no verdict'}
+    - {file: gate-report.json, leaf: '/recipe_id', bound_by: 'PackInputs::from_run_dir (sha256 of recipe.json)', names: 'file=recipe_json'}
+    - {file: gate-report.json, leaf: '/inputs_sha256/task_json', bound_by: 'check_inputs (the data dir)', names: 'file=task_json'}
+    - {file: gate-report.json, leaf: '/inputs_sha256/train_jsonl', bound_by: 'check_inputs (the data dir)', names: 'file=train_jsonl'}
+    - {file: gate-report.json, leaf: '/inputs_sha256/eval_jsonl', bound_by: 'check_inputs (the data dir)', names: 'file=eval_jsonl'}
+    - {file: gate-report.json, leaf: '/inputs_sha256/base_model', bound_by: 'PackInputs::from_run_dir (== recipe base.sha256, itself == the contract pin and the base dir)', names: 'file=base_model'}
+    - {file: gate-report.json, leaf: '/inputs_sha256/tokenizer_json', bound_by: 'PackInputs::from_run_dir (the checkpoint tokenizer), and the base tokenizer at the zero-shot load', names: 'file=tokenizer_json'}
+    - {file: gate-report.json, leaf: '/inputs_sha256/shift_jsonl', bound_by: 'check_shift_probe (the data dir shift.jsonl)', names: 'field=shift_jsonl'}
+    - {file: gate-report.json, leaf: '/eval_probs_sha256', bound_by: 'check_inputs', names: 'file=eval_probs_json'}
+    - {file: gate-report.json, leaf: '/zero_shot_probs_sha256', bound_by: 'check_inputs', names: 'file=zero_shot_probs_json'}
+    - {file: gate-report.json, leaf: '/probes_sha256', bound_by: 'PackInputs::from_run_dir', names: 'file=probes_json'}
+    - {file: gate-report.json, leaf: '/rescore_noise_sha256', bound_by: 'check_inputs', names: 'file=rescore_noise_json'}
+    - {file: gate-report.json, leaf: '/shift_probe/gate_clause', bound_by: 'check_shift_probe', names: 'field=shift_probe.gate_clause'}
+    - {file: gate-report.json, leaf: '/shift_probe/n', bound_by: 'check_shift_probe', names: 'field=shift_probe.n'}
+    - {file: gate-report.json, leaf: '/shift_probe/zero_shot/macro_f1', bound_by: 'check_shift_probe (recomputed)', names: 'field=shift_probe.zero_shot.macro_f1'}
+    - {file: gate-report.json, leaf: '/shift_probe/zero_shot/ece', bound_by: 'check_shift_probe (recomputed)', names: 'field=shift_probe.zero_shot.ece'}
+    - {file: gate-report.json, leaf: '/shift_probe/zero_shot/f_avg', bound_by: 'check_f_avg (plan 08-27)', names: 'f_avg'}
+    - {file: gate-report.json, leaf: '/shift_probe/fine_tuned/macro_f1', bound_by: 'check_shift_probe (recomputed)', names: 'field=shift_probe.fine_tuned.macro_f1'}
+    - {file: gate-report.json, leaf: '/shift_probe/fine_tuned/ece_post', bound_by: 'check_shift_probe (recomputed)', names: 'field=shift_probe.fine_tuned.ece_post'}
+    - {file: gate-report.json, leaf: '/shift_probe/fine_tuned/f_avg', bound_by: 'check_f_avg (plan 08-27)', names: 'f_avg'}
+    - {file: gate-report.json, leaf: '/shift_probe/margin', bound_by: 'check_shift_probe (recomputed)', names: 'field=shift_probe.margin'}
+    - {file: gate-report.json, leaf: '/shift_probe/probs_sha256', bound_by: 'PackInputs::from_run_dir', names: 'file=shift_probs_json'}
+    - {file: gate-report.json, leaf: '/shift_probe/zero_shot_probs_sha256', bound_by: 'PackInputs::from_run_dir', names: 'file=shift_zero_shot_probs_json'}
+
 equations:
 
   gate_pass:
