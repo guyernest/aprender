@@ -6,13 +6,14 @@
 //! disjoint [`PART_BYTES`] slices of that buffer, each filled by its own ranged GET, with
 //! at most [`CONCURRENCY`] in flight and up to [`RETRIES`] attempts per part. Every
 //! attempt is bounded by [`ATTEMPT_TIMEOUT`] and the whole download by
-//! [`DOWNLOAD_DEADLINE`]: attempt counts alone would let one stalled part hold the load
-//! lock indefinitely. A cut attempt keeps the bytes it landed and the retry resumes at the
+//! [`DOWNLOAD_DEADLINE`]: attempt counts alone would let one stalled part keep the
+//! in-flight load (the `OnceCell` every concurrent first request waits on) pending
+//! indefinitely. A cut attempt keeps the bytes it landed and the retry resumes at the
 //! first missing byte, so the attempt timeout bounds a stall rather than a transfer: at a
 //! fair share of the link a 64 MiB part can need more than one attempt, and re-fetching it
 //! from its first byte would throw that progress away on every cold start. 25 s is the 30 s gateway cap minus ~5 s of sha + build; past it
-//! the caller already has its 504, so the only useful outcome is to release the lock
-//! for the next request.
+//! the caller already has its 504, so the only useful outcome is to fail the load, which
+//! leaves the cell empty so the next request retries.
 //!
 //! A missing content length is refused (never read as 0), and a length over the
 //! decide-apr-v1 cap is refused BEFORE the buffer is allocated. The pin is checked by
@@ -808,7 +809,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_after_failure_rearms_the_load_lock() {
+    async fn failed_load_leaves_the_cell_empty_and_the_next_call_loads() {
         let slot: LoadOnce<Model> = LoadOnce::new();
         let tiny = tiny_bytes().to_vec();
         let pin = Sha256Pin::parse(crate::tests::tiny_golden_sha256()).expect("pin");

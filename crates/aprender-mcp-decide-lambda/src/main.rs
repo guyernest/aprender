@@ -4,34 +4,33 @@
 //! streamable-HTTP server runs as an in-process background task bound to 127.0.0.1,
 //! configured `stateless()`, and each Lambda invocation is proxied to it over loopback.
 //!
-//! The model loads LAZILY, on the first MCP request, behind a load lock so concurrent
-//! first calls load once. It is not loaded in the init phase: default Lambda caps init
-//! near 10 s, below the ~10.4 s download + build of the real artifact (RESEARCH A3). A
-//! failed load (a hash mismatch, a download past its deadline, ...) leaves the lock
-//! re-armed, so the next request retries.
+//! The model loads LAZILY, on the first MCP request (a `POST`; no other method loads —
+//! `GET` is the health body, `OPTIONS` the CORS preflight, anything else a 405), through a
+//! tokio `OnceCell` ([`LoadOnce`]): concurrent first calls share one in-flight load. It is
+//! not loaded in the init phase: default Lambda caps init near 10 s, below the ~10.4 s
+//! download + build of the real artifact (RESEARCH A3). A failed load (a hash mismatch, a
+//! download past its deadline, ...) leaves the cell empty, so the next request retries.
+//! If the loopback server task ever ends, the process exits so Lambda replaces the
+//! environment ([`watch_loopback`]).
 //!
 //! Cold-start evidence: the request that performs the load logs one
 //! `decide.load performed_load=true probe_id=<id> load_ms=<n> ...` line, every other
 //! request logs `performed_load=false`, and the proxied response carries
 //! `x-decide-load: cold;load_ms=<n>` or `warm`. Request text is never logged.
 
-#![allow(clippy::disallowed_methods)]
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use aprender_mcp_decide_lambda::{
-    build_server, load_header_value, load_log_line, parse_probe_id, resolve_model, start_loopback,
-    watch_loopback, LoadOnce, LoadTimeline, ModelSource, LOAD_HEADER, PROBE_ID_HEADER,
+    build_server, health, load_header_value, load_log_line, parse_probe_id, proxied_headers,
+    resolve_model, route, server_name, start_loopback, watch_loopback, LoadOnce, LoadTimeline,
+    ModelSource, Route, ALLOWED_METHODS, PROBE_ID_HEADER,
 };
 use lambda_http::{run, service_fn, Body, Error, Request, Response};
 use once_cell::sync::OnceCell;
 use reqwest::Client;
 use tracing_subscriber::EnvFilter;
-
-const DEFAULT_SERVER_NAME: &str = "aprender-decide";
-const PACKAGE: &str = env!("CARGO_PKG_NAME");
 
 /// What the first MCP request builds: the loopback server over the loaded model.
 struct Loaded {
@@ -41,10 +40,6 @@ struct Loaded {
 
 static LOADED: LoadOnce<Loaded> = LoadOnce::new();
 static HTTP: OnceCell<Client> = OnceCell::new();
-
-fn server_name() -> String {
-    std::env::var("PMCP_SERVER_ID").unwrap_or_else(|_| DEFAULT_SERVER_NAME.to_string())
-}
 
 /// Why the first request could not bring the server up; logged in full, returned to the
 /// caller only as its kind.
@@ -103,6 +98,12 @@ fn http() -> Result<&'static Client, Error> {
     })
 }
 
+/// The JSON body every error answer uses: `{ok: false, error, kind}`.
+#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap()
+fn error_body(error: &str, kind: &str) -> String {
+    serde_json::json!({ "ok": false, "error": error, "kind": kind }).to_string()
+}
+
 fn json_response(status: u16, body: String) -> Result<Response<Body>, Error> {
     Response::builder()
         .status(status)
@@ -120,32 +121,40 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         .path_and_query()
         .map_or_else(|| String::from("/"), |pq| pq.as_str().to_string());
 
-    // Health check — also what pmcp.run's landing page probes. It names THIS package,
-    // so a post-deploy GET tells this binary apart from the Chronos one.
-    if method.as_str() == "GET" {
-        let body = serde_json::json!({
-            "ok": true,
-            "server": server_name(),
-            "package": PACKAGE,
-            "loaded": LOADED.get().is_some(),
-            "message": "Laya decide MCP server (aprender-mcp-decide via aprender-mcp-decide-lambda): one task-bound `classify` tool. POST JSON-RPC to '/' for MCP requests."
-        })
-        .to_string();
-        return json_response(200, body);
-    }
-
-    // CORS preflight.
-    if method.as_str() == "OPTIONS" {
-        return Response::builder()
-            .status(200)
-            .header("access-control-allow-origin", "*")
-            .header("access-control-allow-methods", "POST, OPTIONS, GET")
-            .header(
-                "access-control-allow-headers",
-                "content-type, authorization, mcp-protocol-version, x-decide-probe-id",
-            )
-            .body(Body::Empty)
-            .map_err(|e| Error::from(e.to_string()));
+    // Only a POST reaches LOADED: every other method is answered here, without a load.
+    match route(method.as_str()) {
+        // Health check — also what pmcp.run's landing page probes. It names THIS package,
+        // so a post-deploy GET tells this binary apart from the Chronos one, and it says ok
+        // only when the model-source config parses (A4-6).
+        Route::Health => {
+            let (status, body) = health(&ModelSource::from_env(), LOADED.get().is_some());
+            return json_response(status, body.to_string());
+        }
+        Route::Preflight => {
+            return Response::builder()
+                .status(200)
+                .header("access-control-allow-origin", "*")
+                .header("access-control-allow-methods", ALLOWED_METHODS)
+                .header(
+                    "access-control-allow-headers",
+                    "content-type, authorization, mcp-protocol-version, x-decide-probe-id",
+                )
+                .body(Body::Empty)
+                .map_err(|e| Error::from(e.to_string()));
+        }
+        Route::MethodNotAllowed => {
+            return Response::builder()
+                .status(405)
+                .header("content-type", "application/json")
+                .header("access-control-allow-origin", "*")
+                .header("allow", ALLOWED_METHODS)
+                .body(Body::Text(error_body(
+                    "method not allowed; POST JSON-RPC to '/' for MCP requests",
+                    "method_not_allowed",
+                )))
+                .map_err(|e| Error::from(e.to_string()));
+        }
+        Route::Load => {}
     }
 
     let probe_id = parse_probe_id(
@@ -166,13 +175,10 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
                 probe_id.as_deref().unwrap_or("none"),
                 failure.detail
             );
-            let body = serde_json::json!({
-                "ok": false,
-                "error": "model load failed; the next request retries",
-                "kind": failure.kind,
-            })
-            .to_string();
-            return json_response(503, body);
+            return json_response(
+                503,
+                error_body("model load failed; the next request retries", failure.kind),
+            );
         }
     };
     let load_ms = started.elapsed().as_millis();
@@ -211,19 +217,11 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
     let headers = resp.headers().clone();
     let bytes = resp.bytes().await.map_err(|e| Error::from(e.to_string()))?;
 
-    let mut builder = Response::builder()
-        .status(status.as_u16())
-        .header("access-control-allow-origin", "*")
-        .header(LOAD_HEADER, load_header_value(performed_load, load_ms));
-    for (name, value) in &headers {
-        if let Ok(val) = value.to_str() {
-            if name.as_str().eq_ignore_ascii_case("transfer-encoding")
-                || name.as_str().eq_ignore_ascii_case("content-length")
-            {
-                continue;
-            }
-            builder = builder.header(name.as_str(), val);
-        }
+    // One CORS origin (the bootstrap's own), the load evidence, then the upstream headers
+    // minus access-control-* and framing (IN-06).
+    let mut builder = Response::builder().status(status.as_u16());
+    for (name, value) in proxied_headers(&headers, load_header_value(performed_load, load_ms)) {
+        builder = builder.header(name, value);
     }
     builder
         .body(Body::Binary(bytes.to_vec()))

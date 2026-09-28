@@ -173,6 +173,7 @@ impl<'a> Rpc<'a> {
         })
     }
 
+    #[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap()
     async fn call(
         &mut self,
         method: &'static str,
@@ -329,6 +330,7 @@ pub fn labels_in_order(description: &str, labels: &[String]) -> bool {
             .eq(labels.iter().map(String::as_str))
 }
 
+#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap()
 fn classify_params(texts: &[String]) -> Value {
     json!({ "name": aprender_mcp_decide::TOOL_NAME, "arguments": { "texts": texts } })
 }
@@ -354,6 +356,7 @@ fn tokens_and_truncated(payload: &Value) -> (usize, usize) {
 /// [`ProbeError`] for a transport failure, a non-2xx status or a malformed response.
 /// A WRONG identity or label list is not an error: it is a false check in the report,
 /// and [`ProbeReport::ok`] is false.
+#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap()
 pub async fn run_identity_probe(
     url: &str,
     bearer: Option<&str>,

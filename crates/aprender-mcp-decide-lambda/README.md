@@ -37,10 +37,15 @@ both the tamper guard and the identity every `classify` response reports as
 
 ## Lazy load and cold-start evidence
 
-The model loads on the first MCP request, behind a lock, so concurrent first calls load
-once. It does not load in the init phase, because default Lambda caps init near 10 s. A
-failed load returns HTTP 503 with only the failure kind (the detail goes to the log), and
-the next request retries.
+The model loads on the first MCP request (a `POST`) through a tokio `OnceCell`, so
+concurrent first calls share one load. No other method loads: `GET` answers the health
+body, `OPTIONS` the CORS preflight, and anything else is a 405. The health body says
+`ok: true` only when the model-source config parses; a missing or malformed
+`APRENDER_DECIDE_*` config answers 503 with `ok: false` and `config_error`. It does not
+load in the init phase, because default Lambda caps init near 10 s. A failed load returns
+HTTP 503 with only the failure kind (the detail goes to the log), and the next request
+retries. If the in-process MCP server task ever ends, the process exits so Lambda
+replaces the environment.
 
 The request that performs the load logs
 `decide.load performed_load=true probe_id=<id> load_ms=<n> download_ms=<n> build_ms=<n> graviton=<gen>`.

@@ -67,6 +67,7 @@ pub(crate) async fn serve(model: Arc<Model>) -> String {
 /// WR-06: a loopback server that answered and then ended reaches `exit(1)` through the
 /// watcher the bootstrap spawns — on a REAL loopback server, not a synthetic handle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap()
 async fn loopback_end_exits_the_process() {
     let server = build_server(tiny_model(), "decide-watch-test", "0.0.0").expect("build server");
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
@@ -352,4 +353,168 @@ fn deploy_memory_is_the_contract_tier() {
         "deploy.toml.template memory_mb {memory} != decide-tool-boundary-v1 lambda_memory_mb {tier}: \
          re-derive the budget for the new tier in the contract first"
     );
+}
+
+// ------------------------------------------------ the bootstrap's pure decisions (08-24)
+
+/// V4-c: only a POST may trigger the cold model load; GET and OPTIONS are answered without
+/// it, and every other method is a 405 without it.
+#[test]
+fn non_post_methods_do_not_load() {
+    assert_eq!(route("POST"), Route::Load);
+    assert_eq!(route("GET"), Route::Health);
+    assert_eq!(route("OPTIONS"), Route::Preflight);
+    for method in [
+        "HEAD", "PUT", "DELETE", "PATCH", "TRACE", "CONNECT", "post", "",
+    ] {
+        assert_eq!(route(method), Route::MethodNotAllowed, "{method:?}");
+    }
+    assert_eq!(ALLOWED_METHODS, "POST, GET, OPTIONS");
+}
+
+/// A4-6: the health body says ok only when the model-source config parses; a broken or
+/// missing config is a 503 naming the config error (never the pin's value).
+#[test]
+fn health_is_not_ok_on_invalid_config() {
+    let sha = "a".repeat(64);
+    let good_s3 = ModelSource::from_lookup(lookup(&[
+        (ENV_S3_URI, "s3://bucket/decide/abc.apr"),
+        (ENV_SHA256, &sha),
+    ]));
+    let good_local = ModelSource::from_lookup(lookup(&[(ENV_MODEL, "/m.apr")]));
+    for (source, loaded) in [(&good_s3, false), (&good_local, true)] {
+        let (status, body) = health(source, loaded);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(body["loaded"], loaded, "{body}");
+        assert_eq!(body["package"], PACKAGE, "{body}");
+        assert!(body.get("config_error").is_none(), "{body}");
+    }
+
+    let secret_ish = "Z".repeat(64);
+    let cases = [
+        (ModelSource::from_lookup(lookup(&[])), SourceError::Missing),
+        (
+            ModelSource::from_lookup(lookup(&[(ENV_S3_URI, "s3://b/k"), (ENV_MODEL, "/m")])),
+            SourceError::Ambiguous,
+        ),
+        (
+            ModelSource::from_lookup(lookup(&[(ENV_S3_URI, "s3://b/k")])),
+            SourceError::MissingSha256,
+        ),
+        (
+            ModelSource::from_lookup(lookup(&[(ENV_MODEL, "/m"), (ENV_SHA256, &secret_ish)])),
+            SourceError::BadSha256 { len: 64 },
+        ),
+    ];
+    for (source, expected) in &cases {
+        assert_eq!(source.as_ref().err(), Some(expected));
+        let (status, body) = health(source, false);
+        assert_eq!(status, 503, "{expected:?}: {body}");
+        assert_eq!(body["ok"], false, "{expected:?}: {body}");
+        assert_eq!(body["loaded"], false, "{expected:?}: {body}");
+        assert_eq!(
+            body["config_error"],
+            expected.to_string(),
+            "{expected:?}: {body}"
+        );
+        assert!(!body.to_string().contains(&secret_ish), "{body}");
+    }
+}
+
+/// IN-06: a proxied response carries exactly one access-control-allow-origin, whatever
+/// the upstream sent; framing headers are not forwarded either.
+#[test]
+fn proxied_response_has_one_cors_origin() {
+    use reqwest::header::{HeaderMap, HeaderValue};
+    let mut upstream = HeaderMap::new();
+    upstream.insert(
+        "access-control-allow-origin",
+        HeaderValue::from_static("https://evil.example"),
+    );
+    upstream.insert(
+        "access-control-allow-credentials",
+        HeaderValue::from_static("true"),
+    );
+    upstream.insert("content-type", HeaderValue::from_static("application/json"));
+    upstream.insert("content-length", HeaderValue::from_static("12"));
+    upstream.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+    upstream.insert("mcp-session-id", HeaderValue::from_static("s-1"));
+
+    let mut builder = lambda_http::Response::builder().status(200);
+    for (name, value) in proxied_headers(&upstream, load_header_value(false, 0)) {
+        builder = builder.header(name, value);
+    }
+    let response = builder.body(lambda_http::Body::Empty).expect("a response");
+    let headers = response.headers();
+    let origins: Vec<_> = headers
+        .get_all("access-control-allow-origin")
+        .iter()
+        .collect();
+    assert_eq!(origins, ["*"], "exactly the bootstrap's own origin");
+    assert!(headers.get("access-control-allow-credentials").is_none());
+    assert!(headers.get("content-length").is_none());
+    assert!(headers.get("transfer-encoding").is_none());
+    assert_eq!(headers.get_all(LOAD_HEADER).iter().count(), 1);
+    assert_eq!(
+        headers.get("content-type").map(|v| v.as_bytes()),
+        Some(&b"application/json"[..])
+    );
+    assert_eq!(
+        headers.get("mcp-session-id").map(|v| v.as_bytes()),
+        Some(&b"s-1"[..])
+    );
+}
+
+/// V3-d: a REAL local file one byte over a shrunk cap is refused as too_large on its
+/// declared length — before any byte is read (the only path a static file can reach).
+#[tokio::test]
+async fn local_over_cap_is_too_large() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("over.apr");
+    let cap = tiny_bytes().len() as u64 - 1;
+    std::fs::write(&path, tiny_bytes()).expect("write a real file");
+    let err = resolve_local(&path, None, cap)
+        .await
+        .expect_err("one byte over the shrunk cap");
+    assert_eq!(err.kind(), "too_large", "{err}");
+    match err {
+        ResolveError::TooLarge {
+            what,
+            observed,
+            cap: c,
+        } => assert_eq!((what, observed, c), ("declared_length", cap + 1, cap)),
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+    // At the cap exactly, the same real file is served.
+    let (model, _) = resolve_local(&path, None, cap + 1)
+        .await
+        .expect("at the cap");
+    assert_eq!(model.identity().artifact_sha256, tiny_golden_sha256());
+}
+
+/// V3-d/R2: rung 1's own stream refusal (ArtifactTooLarge) surfaces as too_large, not as
+/// a generic read failure; every other bounded-read error stays `read`. Proven on the
+/// mapping, because a static file cannot reach the stream check once its declared length
+/// passed.
+#[test]
+fn artifact_too_large_maps_to_too_large() {
+    let cap = contracted_cap();
+    let err = map_bounded_read_error(aprender_decide::ArtifactError::ArtifactTooLarge {
+        what: "stream",
+        observed: cap + 1,
+        cap,
+    });
+    assert_eq!(err.kind(), "too_large", "{err}");
+    assert!(
+        matches!(
+            err,
+            ResolveError::TooLarge { what: "stream", observed, cap: c } if observed == cap + 1 && c == cap
+        ),
+        "{err:?}"
+    );
+    let err = map_bounded_read_error(aprender_decide::ArtifactError::Read {
+        reason: "disk gone".into(),
+    });
+    assert_eq!(err.kind(), "read", "{err}");
 }

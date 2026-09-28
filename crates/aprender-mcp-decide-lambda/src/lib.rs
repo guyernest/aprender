@@ -18,9 +18,6 @@
 //! The pin is checked on the bytes BEFORE the decide-apr-v1 ladder parses anything: it
 //! is both the tamper guard (T-08-07-01) and the identity the probe verifies (D-11).
 
-// serde_json::json! expands to .unwrap() internally (same precedent as the server crate).
-#![allow(clippy::disallowed_methods)]
-
 use std::fmt;
 use std::future::Future;
 use std::io::Read as _;
@@ -103,6 +100,122 @@ pub async fn watch_loopback(handle: tokio::task::JoinHandle<()>, exit: impl FnOn
         "decide.loopback ended: {outcome}; exiting so Lambda replaces this environment"
     );
     exit(1);
+}
+
+// ===========================================================================
+// Routing, health and the proxied headers (the bootstrap's pure decisions)
+// ===========================================================================
+
+/// The server name when `PMCP_SERVER_ID` is unset.
+pub const DEFAULT_SERVER_NAME: &str = "aprender-decide";
+/// This package, named in the health body so a post-deploy GET tells this binary apart
+/// from the Chronos one.
+pub const PACKAGE: &str = env!("CARGO_PKG_NAME");
+/// The methods the bootstrap answers: the `allow` header of a 405 and the CORS preflight.
+pub const ALLOWED_METHODS: &str = "POST, GET, OPTIONS";
+
+/// The served server name: `PMCP_SERVER_ID`, else [`DEFAULT_SERVER_NAME`].
+#[must_use]
+pub fn server_name() -> String {
+    std::env::var("PMCP_SERVER_ID").unwrap_or_else(|_| DEFAULT_SERVER_NAME.to_string())
+}
+
+/// What the bootstrap does with a request, decided on its method alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// `GET`: the health body; never loads.
+    Health,
+    /// `OPTIONS`: the CORS preflight; never loads.
+    Preflight,
+    /// `POST`: MCP traffic; the only route that may trigger the cold model load.
+    Load,
+    /// Anything else: 405, never loads.
+    MethodNotAllowed,
+}
+
+/// Route a request by method (V4-c). Only `POST` — MCP traffic — may trigger the ~0.85 GB
+/// cold load; a `HEAD`, a scanner's `PUT` or any other method is a 405 that never touches
+/// the model. Methods are case-sensitive (RFC 9110 §9.1), so `post` is not `POST`.
+#[must_use]
+pub fn route(method: &str) -> Route {
+    match method {
+        "POST" => Route::Load,
+        "GET" => Route::Health,
+        "OPTIONS" => Route::Preflight,
+        _ => Route::MethodNotAllowed,
+    }
+}
+
+const HEALTH_MESSAGE: &str = "Laya decide MCP server (aprender-mcp-decide via aprender-mcp-decide-lambda): one task-bound `classify` tool. POST JSON-RPC to '/' for MCP requests.";
+
+/// The health answer, `(status, body)` (A4-6). `ok` is true only when the model-source
+/// config parses: a container whose `APRENDER_DECIDE_S3_URI` / `APRENDER_DECIDE_SHA256` /
+/// `APRENDER_DECIDE_MODEL` cannot load answers 503 with `ok: false` and `config_error`
+/// naming what is missing or malformed ([`SourceError`]'s Display, which never echoes a
+/// value). Neither answer loads the model: `loaded` only reports whether one already did.
+#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap()
+#[must_use]
+pub fn health(source: &Result<ModelSource, SourceError>, loaded: bool) -> (u16, serde_json::Value) {
+    match source {
+        Ok(_) => (
+            200,
+            serde_json::json!({
+                "ok": true,
+                "server": server_name(),
+                "package": PACKAGE,
+                "loaded": loaded,
+                "message": HEALTH_MESSAGE,
+            }),
+        ),
+        Err(e) => (
+            503,
+            serde_json::json!({
+                "ok": false,
+                "server": server_name(),
+                "package": PACKAGE,
+                "loaded": loaded,
+                "config_error": e.to_string(),
+                "message": "the model-source configuration is invalid; MCP requests cannot load the model until it is fixed",
+            }),
+        ),
+    }
+}
+
+/// The upstream (loopback) response headers the bootstrap forwards (IN-06). Upstream
+/// `access-control-*` headers are dropped — the bootstrap sets its own CORS origin, and a
+/// second one makes browsers reject the response — as are the framing headers
+/// (`transfer-encoding`, `content-length`) the Lambda response recomputes. A value that is
+/// not visible ASCII is not forwarded.
+#[must_use]
+pub fn copy_upstream_headers(upstream: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    upstream
+        .iter()
+        .filter(|(name, _)| {
+            // HeaderName is always lowercase.
+            let name = name.as_str();
+            !(name.starts_with("access-control-")
+                || name == "transfer-encoding"
+                || name == "content-length")
+        })
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+        })
+        .collect()
+}
+
+/// Every header of a proxied response: the bootstrap's own (one CORS origin and the
+/// cold-start evidence), then the forwarded upstream ones.
+#[must_use]
+pub fn proxied_headers(
+    upstream: &reqwest::header::HeaderMap,
+    load_value: String,
+) -> Vec<(String, String)> {
+    let mut headers = vec![
+        ("access-control-allow-origin".to_string(), "*".to_string()),
+        (LOAD_HEADER.to_string(), load_value),
+    ];
+    headers.extend(copy_upstream_headers(upstream));
+    headers
 }
 
 // ===========================================================================
@@ -284,17 +397,19 @@ pub enum ResolveError {
         /// The I/O error.
         source: std::io::Error,
     },
-    /// The artifact's declared length is over the decide-apr-v1 cap — refused before
-    /// any byte was read or any buffer allocated.
+    /// The artifact is over the decide-apr-v1 cap: its declared length (refused before
+    /// any byte was read or any buffer allocated) or, from rung 1's bounded reader, the
+    /// stream (a file that grew during the read).
     TooLarge {
-        /// Which length (`declared_length`).
+        /// Which length (`declared_length` or `stream`).
         what: &'static str,
         /// The observed length.
         observed: u64,
         /// The cap.
         cap: u64,
     },
-    /// The bounded read refused (over cap on the stream, or an I/O error).
+    /// The bounded read failed (an I/O error). Rung 1's over-cap refusal is
+    /// [`Self::TooLarge`], not this.
     Read(ArtifactError),
     /// The S3 download refused (no length, over cap, a failing part, a short body, or
     /// the overall deadline).
@@ -481,8 +596,10 @@ async fn verify_and_build(
 }
 
 /// Resolve a LOCAL artifact: the metadata length is checked against `cap` BEFORE any
-/// read, the read itself goes through decide-apr-v1's bounded reader (capped at
-/// `cap + 1`, because metadata can lie), then the pin (if any), then the ladder.
+/// read (so an over-cap file is never read), the read itself goes through decide-apr-v1's
+/// bounded reader — rung 1, which re-checks the declared length and the stream against the
+/// CONTRACTED cap, because metadata can lie — then the pin (if any), then the ladder. A
+/// rung-1 over-cap refusal is [`ResolveError::TooLarge`] too, never a generic read error.
 ///
 /// # Errors
 ///
@@ -502,6 +619,24 @@ pub async fn resolve_local(
     verify_and_build("local", bytes, pin.cloned(), fetch_ms).await
 }
 
+/// Map a refusal of decide-apr-v1's bounded reader (rung 1) onto [`ResolveError`]: its own
+/// over-cap refusal is `too_large`, like the declared-length refusal above it, and anything
+/// else (an I/O failure) stays `read`. The cap arithmetic lives in rung 1 only (R2).
+fn map_bounded_read_error(e: ArtifactError) -> ResolveError {
+    match e {
+        ArtifactError::ArtifactTooLarge {
+            what,
+            observed,
+            cap,
+        } => ResolveError::TooLarge {
+            what,
+            observed,
+            cap,
+        },
+        other => ResolveError::Read(other),
+    }
+}
+
 fn read_local_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, ResolveError> {
     let io = |source| ResolveError::Io {
         path: path.to_path_buf(),
@@ -517,14 +652,7 @@ fn read_local_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, ResolveError> {
         });
     }
     let bytes = read_decide_apr_bytes_bounded(file.take(cap.saturating_add(1)), Some(declared))
-        .map_err(ResolveError::Read)?;
-    if bytes.len() as u64 > cap {
-        return Err(ResolveError::TooLarge {
-            what: "stream",
-            observed: bytes.len() as u64,
-            cap,
-        });
-    }
+        .map_err(map_bounded_read_error)?;
     Ok(bytes)
 }
 
@@ -579,8 +707,11 @@ pub async fn resolve_model(source: &ModelSource) -> Result<(Model, LoadTimeline)
 // The lazy, once-per-container load
 // ===========================================================================
 
-/// A value loaded at most once per process: concurrent first callers load it once. A
-/// FAILED load leaves it empty, so the next caller retries — never a poisoned once-cell.
+/// A value loaded at most once per process, over a `tokio::sync::OnceCell`: concurrent
+/// first calls wait on ONE in-flight load and share its result, and a FAILED load leaves
+/// the cell empty, so the next request retries — never a poisoned once-cell. There is no
+/// lock to hold or re-arm: a caller that gives up (the gateway's 504) simply stops
+/// waiting, and the load in flight still fills the cell for the next request.
 #[derive(Debug)]
 pub struct LoadOnce<T> {
     cell: tokio::sync::OnceCell<Arc<T>>,
