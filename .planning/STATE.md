@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Completed 08-22-PLAN.md (class C gate honesty: laya_gates.tsv 27 rows + laya-gates-selftest, 14 mutations RED, AWS CALLS 0)"
-last_updated: "2026-09-28T18:58:20.484Z"
+stopped_at: Completed 08-23-PLAN.md (class A served_fields + class B untrusted_input_bounds on aprender-mcp-decide; count-first parse_args; clap argv; unwrap ban restored; 7 mutations RED)
+last_updated: "2026-09-28T19:19:32.258Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: 4ae7219e4bdcf61edd80b83b62a65f84527d33bd
+state_head: 00938dac130a236f038fef50badc9a5ee004a4d2
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 114
+  completed_plans: 115
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 22 of 32 complete (08-01..08-22) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-22 COMPLETE (class C gate honesty: scripts/laya_gates.tsv 27 rows (2 external: parser-guard 08-23, cascade-guard 08-31) + 3 not-a-gate; `just laya-gates-selftest` drift check over every recipe then must-fail/must-pass per row, default sweep OK, FULL tier OK once (armed laya-verify-suite with the ladder rung, 870 s); leg verdict needs MEASURED evidence; laya-grant read-only with attached policies and wildcard refusal; teardown NoSuchEntity; one shasum helper; resolver ERE case table; bootstrap intent; 14 mutations RED; AWS CALLS 0); next 08-23
+Plan: 23 of 32 complete (08-01..08-23) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-23 COMPLETE (class A served half + class B request half on aprender-mcp-decide: parse_args checks the texts COUNT on the JSON array before any String (V5-c; live-stdio leg, RED when removed); one check_count refusal shared with precheck; clap derive argv (parser guard 5 -> 4, aprender-mcp-decide gone; V14-c); crate-wide disallowed_methods allow removed, only `mod args` carries it (IN-05; planted unwrap fails clippy, old allow hid it); decide-tool-boundary-v1 4.0.0 with served_fields (9 response + 3 tools/list rows, artifact_sha256 vs independent sha2) and untrusted_input_bounds (9 rows: swept=6 accepted=1 external=2); 5 code + 2 table mutations RED; Lambda crate untouched, 31/31); next 08-24
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -235,6 +235,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P20 | 15min | 3 tasks | 5 files |
 | Phase 08 P21 | 50min | 3 tasks | 7 files |
 | Phase 08 P22 | 102min | 3 tasks | 7 files |
+| Phase 08 P23 | 17min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -443,6 +444,8 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-20: shared APR v2 index must be strictly increasing (duplicate names refused by both readers); index reservation counted in in-memory entry units; class-B test hooks read back what was actually sized (Vec::capacity after allocation, RoPE-table counter) so sizing mutants turn RED
 - [Phase 08]: 08-21: one typed contract-to-policy mapping (VerifyPolicy::from_contract_views over serde views) for CLI and tests; verify binds every recipe.json / gate-report.json leaf per laya-finetune-gate-v1 run_field_bindings (86 bound, 3 report_only, 5 f_avg expected-open for 08-27), enforced by a mutate-one-leaf sweep; sweep-found leaves bound (nll, t_fitted clamp relation, device_is_cpu, seeds.label, shipped per_seed.t_applied); verify_run is cfg(test)
 - [Phase 08]: 08-22: laya gate enumeration is fail-closed (exit/FAIL/exec/verdict token); an exec-ing recipe cannot be not-a-gate; heavy must-pass cases are a named FULL tier (LAYA_GATES_FULL=1) listed in the default OK line
+- [Phase 08]: 08-23: decide-tool-boundary-v1 4.0.0 (pv diff MAJOR on the classify_count_bound invariant); served_fields and untrusted_input_bounds are top-level tables pv ignores and a crate test sweeps row by row (unknown id or row without a case fails)
+- [Phase 08]: 08-23: frame_stdio accepted (pmcp 2.19.3 has no stdio framing cap; local transport); the sweep asserts the count bound on a 100000-element parsed array and pins pmcp 2.19.3 in Cargo.lock so a bump re-opens it
 
 ### Pending Todos
 
@@ -558,8 +561,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-28T18:58:20.287Z
-Stopped at: Completed 08-22-PLAN.md (class C gate honesty: laya_gates.tsv 27 rows + laya-gates-selftest, 14 mutations RED, AWS CALLS 0)
+Last session: 2026-09-28T19:19:02.228Z
+Stopped at: Completed 08-23-PLAN.md (class A served_fields + class B untrusted_input_bounds on aprender-mcp-decide; count-first parse_args; clap argv; unwrap ban restored; 7 mutations RED)
 Resume file: None
 
 ## Accumulated Context
