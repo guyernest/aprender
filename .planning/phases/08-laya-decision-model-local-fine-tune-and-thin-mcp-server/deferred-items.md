@@ -762,6 +762,12 @@ truth), a checked-in enumeration of its whole surface, one sweeping test or gate
   run-dir field bound or report-only), 08-23 (served fields), 08-25 (probe evidence), 08-27 (f_avg).
 - **B, untrusted-input bounds:** 08-20 (apr-format reader, ModernBERT layer), 08-26 (artifact table and
   sweep), 08-23 (request table and sweep), 08-24 (Lambda-owned request rows).
+- **Added at plan revision (2026-09-28), found missing by the plan checkers:** A4-6 (Lambda GET health
+  said ok:true without reading the config) -> 08-24 Task 2 (`health()`, 503 ok:false on a config error);
+  S4 = R5 + AL2 (tests/fail_closed_vectors.rs duplicated tests/common's helpers and a sha256 helper) ->
+  08-21 Task 1 (`mod common;`, library `artifact_sha256_hex`); the V4-a resume fix (ea940faec) had no
+  red-side proof -> 08-24 Task 3 mutation row. Real-weights legs in waves 17-18 are serialised host-wide
+  through one lock (`heavy`), and an OOM-killed leg is re-run, never read as a refusal.
 - **C, gate honesty:** 08-22 (`scripts/laya_gates.tsv`, `just laya-gates-selftest`).
 - **D, claim honesty:** 08-28 (classify tool claims), 08-31 (`scripts/laya_claims.tsv`, `just laya-claims-check`).
 - **E, Rust-Python agreement:** 08-27 (numeric), 08-29 (Python reader, rows, refusals).
