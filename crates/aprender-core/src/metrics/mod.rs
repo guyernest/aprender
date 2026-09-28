@@ -20,6 +20,8 @@ pub use probabilistic::{
 };
 pub mod drift;
 pub mod evaluator;
+pub mod exact_sum;
+pub use exact_sum::fsum;
 pub mod grad_norm;
 pub mod percentile;
 pub mod perplexity;

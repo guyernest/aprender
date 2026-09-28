@@ -1,0 +1,9 @@
+{
+  "schema": "laya-numeric-cases-v1",
+  "generator": "uv run --project scripts/laya_train --frozen python scripts/laya_train/metrics.py --write-numeric-cases",
+  "hex": "f32 = 8 lowercase hex digits, f64 = 16, big-endian IEEE-754 bits (Rust to_bits)",
+  "min_macro_f1_margin": 0.05,
+  "cases": [
+    {"name":"margin_exact_1_20_9row","k":3,"bins":15,"labels":[0,0,0,1,1,1,2,2,2],"f_avg_labels":null,"probabilities_f32_hex":[["3e666666","3e666666","3f0ccccd"],["3e4ccccc","3e4ccccc","3f19999a"],["3e333334","3e333334","3f266666"],["3f333333","3e19999a","3e19999a"],["3e000000","3f400000","3e000000"],["3dcccccc","3dcccccc","3f4ccccd"],["3f59999a","3d999998","3d999998"],["3d4cccd0","3f666666","3d4cccd0"],["3e666666","3e666666","3f0ccccd"]],"zero_shot_probabilities_f32_hex":[["3e666666","3e666666","3f0ccccd"],["3d4cccd0","3d4cccd0","3f666666"],["3d999998","3d999998","3f59999a"],["3dcccccc","3dcccccc","3f4ccccd"],["3e000000","3e000000","3f400000"],["3e19999a","3e19999a","3f333333"],["3e333334","3e333334","3f266666"],["3e4ccccc","3e4ccccc","3f19999a"],["3e666666","3e666666","3f0ccccd"]],"expected":{"macro_f1_f64_hex":"3fcbbbbbbbbbbbbc","zero_shot_macro_f1_f64_hex":"3fc5555555555555","margin_f64_hex":"3fa999999999999c","margin_pass":true}}
+  ]
+}

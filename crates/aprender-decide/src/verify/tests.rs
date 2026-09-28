@@ -2636,3 +2636,148 @@ fn run_field_bindings_table_matches_fixture_leaves() {
         "leaves with no row: {missing:?}; rows no fixture leaf has: {stale:?}"
     );
 }
+
+// ===========================================================================
+// Numeric agreement (plan 08-27, class E): Rust and Python compute every gate quantity bit for
+// bit, replayed from ONE frozen case file written by scripts/laya_train/metrics.py.
+// ===========================================================================
+
+fn numeric_cases() -> Value {
+    read_json(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/laya_train/numeric_cases.json"),
+    )
+}
+
+fn hex_f64(v: &Value, what: &str) -> f64 {
+    let h = v
+        .as_str()
+        .unwrap_or_else(|| panic!("{what}: an f64 hex string"));
+    f64::from_bits(u64::from_str_radix(h, 16).unwrap_or_else(|e| panic!("{what}: {h}: {e}")))
+}
+
+fn hex_rows(v: &Value, what: &str) -> Vec<Vec<f32>> {
+    v.as_array()
+        .unwrap_or_else(|| panic!("{what}: rows"))
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .unwrap_or_else(|| panic!("{what}: a row"))
+                .iter()
+                .map(|h| {
+                    let h = h.as_str().expect("an f32 hex string");
+                    f32::from_bits(u32::from_str_radix(h, 16).expect("f32 hex"))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A report carrying Python's numbers for one boundary case, for [`check_gate`]: the fixture
+/// report with the contract thresholds, Python's macro-F1s and margin, and Python's margin
+/// verdict as `pass` (ECE and NLL are Rust's own, so only the margin clause can disagree).
+fn boundary_report(
+    policy: &VerifyPolicy,
+    r: &Recomputed,
+    n: usize,
+    zs_f1: f64,
+    ft_f1: f64,
+    margin: f64,
+    margin_pass: bool,
+) -> GateReport {
+    let mut rep: GateReport =
+        serde_json::from_value(read_json(&fixture_dir().join("gate-report.json")))
+            .expect("the fixture report parses");
+    rep.thresholds.min_macro_f1_margin = policy.min_macro_f1_margin;
+    rep.thresholds.max_ece = policy.max_ece;
+    rep.thresholds.ece_bins = policy.ece_bins;
+    rep.zero_shot.macro_f1 = zs_f1;
+    rep.zero_shot.ece = r.zs_ece;
+    rep.zero_shot.n = n as u64;
+    rep.fine_tuned.macro_f1 = ft_f1;
+    rep.fine_tuned.ece_post = r.ece_post;
+    rep.fine_tuned.nll = r.ft_nll;
+    rep.fine_tuned.n = n as u64;
+    rep.margin = margin;
+    rep.pass = margin_pass && within(r.ece_post, policy.max_ece);
+    rep
+}
+
+#[test]
+fn gate_numeric_cases_agree_bit_for_bit() {
+    let doc = numeric_cases();
+    assert_eq!(doc["schema"], "laya-numeric-cases-v1");
+    let policy = contract_policy();
+    assert_eq!(
+        doc["min_macro_f1_margin"]
+            .as_f64()
+            .expect("min_macro_f1_margin")
+            .to_bits(),
+        policy.min_macro_f1_margin.to_bits(),
+        "the case file's margin threshold is the contract's"
+    );
+    let cases = doc["cases"].as_array().expect("cases");
+    assert!(!cases.is_empty(), "no numeric cases");
+    let mut bad: Vec<String> = Vec::new();
+    let mut check = |name: &str, what: &str, got: f64, want: f64| {
+        if got.to_bits() != want.to_bits() {
+            bad.push(format!(
+                "{name} {what}: rust {got:e} ({:016x}) python {want:e} ({:016x})",
+                got.to_bits(),
+                want.to_bits()
+            ));
+        }
+    };
+    let mut verdicts: Vec<String> = Vec::new();
+    for case in cases {
+        let name = case["name"].as_str().expect("name");
+        let k = case["k"].as_u64().expect("k") as usize;
+        let bins = case["bins"].as_u64().expect("bins") as usize;
+        let labels: Vec<usize> = case["labels"]
+            .as_array()
+            .expect("labels")
+            .iter()
+            .map(|v| v.as_u64().expect("label") as usize)
+            .collect();
+        let exp = &case["expected"];
+        let ft = hex_rows(&case["probabilities_f32_hex"], name);
+        let ft_m = recompute_metrics(&ft, &labels, k, bins);
+        check(
+            name,
+            "macro_f1",
+            ft_m.macro_f1,
+            hex_f64(&exp["macro_f1_f64_hex"], name),
+        );
+        if let Some(zs_rows) = case.get("zero_shot_probabilities_f32_hex") {
+            let zs = hex_rows(zs_rows, name);
+            let r = recompute_gate(&zs, &ft, &labels, k, bins);
+            let py_zs = hex_f64(&exp["zero_shot_macro_f1_f64_hex"], name);
+            let py_margin = hex_f64(&exp["margin_f64_hex"], name);
+            let py_pass = exp["margin_pass"].as_bool().expect("margin_pass");
+            check(name, "zero_shot.macro_f1", r.zs_macro_f1, py_zs);
+            check(name, "margin", r.margin, py_margin);
+            let ft_f1 = hex_f64(&exp["macro_f1_f64_hex"], name);
+            let rep = boundary_report(&policy, &r, labels.len(), py_zs, ft_f1, py_margin, py_pass);
+            match check_gate(&rep, &r, labels.len(), &policy) {
+                Ok(failed) => {
+                    let rust_pass = !failed.contains(&GateClause::Margin);
+                    if rust_pass != py_pass {
+                        verdicts.push(format!(
+                            "{name}: rust margin pass {rust_pass}, python {py_pass}"
+                        ));
+                    }
+                }
+                Err(e) => verdicts.push(format!(
+                    "{name}: check_gate refused Python's honest numbers: {e}"
+                )),
+            }
+        }
+    }
+    assert!(
+        bad.is_empty() && verdicts.is_empty(),
+        "Rust and Python disagree on {} value(s) and {} verdict(s):\n{}\n{}",
+        bad.len(),
+        verdicts.len(),
+        bad.join("\n"),
+        verdicts.join("\n")
+    );
+}

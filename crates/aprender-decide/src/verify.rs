@@ -66,7 +66,7 @@ use crate::laya::argmax;
 use crate::pack::{self, sha256_hex, GateCalibration, GateReport, PackError, PackInputs, Recipe};
 use crate::{DecideError, Decider, Decision, DecisionMethod, Task};
 use aprender::calibration::expected_calibration_error_top_label;
-use aprender::metrics::classification::{f1_score, Average};
+use aprender::metrics::classification::macro_f1_f64;
 use aprender::metrics::probabilistic::log_loss;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -512,7 +512,7 @@ impl fmt::Display for GateClause {
 /// Macro-F1 and top-label ECE of one probability set.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
-    /// aprender-core `f1_score(.., Average::Macro)`.
+    /// aprender-core `macro_f1_f64` (f64, exactly-rounded mean).
     pub macro_f1: f64,
     /// aprender-core `expected_calibration_error_top_label`.
     pub ece: f64,
@@ -2286,6 +2286,10 @@ pub fn rescore_bounds(
 
 /// Macro-F1 and top-label ECE with aprender-core's ONE implementation of each (OPS-03).
 ///
+/// Macro-F1 is aprender-core `macro_f1_f64`: f64 per-class F1 and an exactly-rounded mean,
+/// bit-identical to `scripts/laya_train/metrics.py` `macro_f1` (laya-finetune-gate-v1
+/// `numeric_agreement`).
+///
 /// `probs` must already be validated ([`validate_probs`]): non-empty, `k >= 2` columns, rows
 /// summing to 1 and labels `< k` — the metric functions' panicking preconditions.
 #[must_use]
@@ -2299,10 +2303,36 @@ pub fn recompute_metrics(
     let flat: Vec<f32> = probs.iter().flatten().copied().collect();
     let pred: Vec<usize> = probs.iter().map(|p| argmax(p)).collect();
     Metrics {
-        macro_f1: f64::from(f1_score(&pred, labels, Average::Macro)),
+        macro_f1: macro_f1_f64(&pred, labels),
         ece: f64::from(expected_calibration_error_top_label(
             &flat, k, labels, ece_bins,
         )),
+    }
+}
+
+/// The gate metrics of one run from its two probability sets — the ONE place the verifier
+/// derives them: [`recompute_metrics`] on each set, [`recompute_nll`] on the fine-tuned set,
+/// and `margin = ft.macro_f1 - zs.macro_f1` in f64 (the subtraction `scripts/laya_train/gate.py`
+/// `evaluate_gate` does on the same two f64 values).
+///
+/// Both sets must already be validated ([`validate_probs`]) against `labels` and `k`.
+#[must_use]
+pub fn recompute_gate(
+    zs_probs: &[Vec<f32>],
+    ft_probs: &[Vec<f32>],
+    labels: &[usize],
+    k: usize,
+    ece_bins: usize,
+) -> Recomputed {
+    let zs = recompute_metrics(zs_probs, labels, k, ece_bins);
+    let ft = recompute_metrics(ft_probs, labels, k, ece_bins);
+    Recomputed {
+        zs_macro_f1: zs.macro_f1,
+        zs_ece: zs.ece,
+        ft_macro_f1: ft.macro_f1,
+        ece_post: ft.ece,
+        ft_nll: recompute_nll(ft_probs, labels),
+        margin: ft.macro_f1 - zs.macro_f1,
     }
 }
 
@@ -2992,16 +3022,13 @@ fn verify_loaded(
     drop(base);
     let k = checked.task.criteria().len();
     let bins = policy.ece_bins as usize;
-    let zs_m = recompute_metrics(&checked.zs_probs, &checked.labels, k, bins);
-    let ft_m = recompute_metrics(&checked.ft_probs, &checked.labels, k, bins);
-    let recomputed = Recomputed {
-        zs_macro_f1: zs_m.macro_f1,
-        zs_ece: zs_m.ece,
-        ft_macro_f1: ft_m.macro_f1,
-        ece_post: ft_m.ece,
-        ft_nll: recompute_nll(&checked.ft_probs, &checked.labels),
-        margin: ft_m.macro_f1 - zs_m.macro_f1,
-    };
+    let recomputed = recompute_gate(
+        &checked.zs_probs,
+        &checked.ft_probs,
+        &checked.labels,
+        k,
+        bins,
+    );
     let n = checked.labels.len();
     let clauses = check_gate(&inputs.gate_report, &recomputed, n, policy)?;
     if !clauses.is_empty() {
