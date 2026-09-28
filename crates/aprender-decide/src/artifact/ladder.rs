@@ -571,6 +571,64 @@ fn labels_disagree_with_task() {
 }
 
 // ---------------------------------------------------------------------------
+// Rung 4 (e): manifest bindings (decide-apr-v1 manifest.bindings, plan 08-19)
+// ---------------------------------------------------------------------------
+
+/// `manifest.base` is minted into `ModelIdentity.base` (served as `model.base` in every
+/// classify response): a revision that is not the embedded recipe blob's is refused at
+/// rung 4, and so is a variant the recipe does not declare.
+#[test]
+fn manifest_base_disagrees_with_recipe_blob() {
+    let b = edit_manifest(&packed(), |v| {
+        v["base"]["revision"] = serde_json::Value::from("0123456789abcdef0123456789abcdef01234567");
+    });
+    let e = refuse(&b);
+    assert_eq!(
+        e,
+        ArtifactError::ManifestDisagreesWithBlob { field: "base" }
+    );
+    assert_eq!(e.rung(), "4 structural");
+
+    let b = edit_manifest(&packed(), |v| {
+        v["variant"] = serde_json::Value::from("production");
+    });
+    let e = refuse(&b);
+    assert_eq!(
+        e,
+        ArtifactError::ManifestDisagreesWithBlob { field: "variant" }
+    );
+    assert_eq!(e.rung(), "4 structural");
+}
+
+/// The same crafted bytes are refused through every door a server loads by: the in-memory
+/// door, the pre-hashed door the Lambda cold start uses, and the path door the stdio server
+/// uses — none of them needs `verify` to see it.
+#[test]
+fn manifest_bound_at_every_load_door() {
+    let want = ArtifactError::ManifestDisagreesWithBlob { field: "base" };
+    let b = edit_manifest(&packed(), |v| {
+        v["base"]["checkpoint"] = serde_json::Value::from("en-root");
+    });
+    let bytes_door = crate::Decider::load_bytes(&b).expect_err("load_bytes accepted a forged base");
+    assert_eq!(bytes_door, want, "load_bytes");
+    let hashed_door = crate::Decider::load_hashed(&super::HashedArtifact::new(&b))
+        .expect_err("load_hashed accepted a forged base");
+    assert_eq!(hashed_door, want, "load_hashed (the Lambda door)");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("forged-base.apr");
+    std::fs::write(&path, &b).expect("write the forged artifact");
+    let path_door = crate::Decider::load_path(&path).expect_err("load_path accepted a forged base");
+    assert_eq!(path_door, want, "load_path (the stdio door)");
+    // Control: the unforged bytes load through the same three doors.
+    let ok = packed();
+    crate::Decider::load_bytes(&ok).expect("control: load_bytes");
+    crate::Decider::load_hashed(&super::HashedArtifact::new(&ok)).expect("control: load_hashed");
+    let ok_path = dir.path().join("control.apr");
+    std::fs::write(&ok_path, &ok).expect("write the control artifact");
+    crate::Decider::load_path(&ok_path).expect("control: load_path");
+}
+
+// ---------------------------------------------------------------------------
 // Rung 5: non-finite scan
 // ---------------------------------------------------------------------------
 

@@ -123,6 +123,39 @@ manifest:
     device_used: string
     probes: 'array of {input_index, tokens, label, probabilities_f32_hex[]} — copied from probes.json (Python values)'
   no_timestamp: 'no timestamp or host field anywhere: two packs of the same inputs are byte-identical'
+  # CLASS A (provenance binding, LOAD side; plan 08-19). Every manifest leaf equals a value
+  # derived from a sha-bound source, checked by the load ladder on EVERY door (load_bytes,
+  # load_hashed = the Lambda cold start, load_path = the stdio server), with no verify step.
+  # Key: the leaf as a JSON pointer, array indices generalised to [*]. `rung`: the rung that
+  # refuses a manifest whose leaf disagrees with its source. `sources`: each comparison the
+  # leaf takes part in — `recipe:<ptr>` a field of the decide.recipe_json blob, `report:<ptr>`
+  # a field of the decide.gate_report_json blob, `sha256:<blob>` the digest of that blob,
+  # `derived:<what>` a value computed from sha-bound inputs. `source`: the same, in prose.
+  bindings:
+    '/variant':
+      rung: 4
+      sources: ['recipe:/variant']
+      source: 'decide.recipe_json blob variant'
+    '/base/family':
+      rung: 4
+      sources: ['recipe:/base/family']
+      source: 'decide.recipe_json blob base.family'
+    '/base/checkpoint':
+      rung: 4
+      sources: ['recipe:/base/checkpoint']
+      source: 'decide.recipe_json blob base.checkpoint'
+    '/base/repo':
+      rung: 4
+      sources: ['recipe:/base/repo']
+      source: 'decide.recipe_json blob base.repo'
+    '/base/revision':
+      rung: 4
+      sources: ['recipe:/base/revision']
+      source: 'decide.recipe_json blob base.revision'
+    '/base/sha256':
+      rung: 4
+      sources: ['recipe:/base/sha256']
+      source: 'decide.recipe_json blob base.sha256'
 
 blob_tensors:
   # U8 tensors, raw bytes, sha256 recorded in manifest.blobs, verified BEFORE any weight is installed.
@@ -160,7 +193,7 @@ load_ladder:
       rule: 'model_type == "decide"; exactly one custom key; the manifest string parsed with deny_unknown_fields; schema_version == 1; method known'
     - rung: 4
       name: structural
-      rule: 'tensor set derived from the encoder config + agent config (names, dtype, per-entry byte size == product(shape) x dtype width); every blob sha256 matches manifest.blobs; task.json re-parsed and its labels equal manifest.labels'
+      rule: 'tensor set derived from the encoder config + agent config (names, dtype, per-entry byte size == product(shape) x dtype width); every blob sha256 matches manifest.blobs; task.json re-parsed and its labels equal manifest.labels; and every manifest field equals the value of the sha-bound source manifest.bindings names (base and variant: the recipe blob), refused as ManifestDisagreesWithBlob naming the field'
     - rung: 5
       name: non_finite_scan
       rule: 'every widened weight is finite'

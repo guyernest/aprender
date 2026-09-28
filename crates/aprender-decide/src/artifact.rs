@@ -485,6 +485,13 @@ pub enum ArtifactError {
     },
     /// Rung 4: `manifest.agent` disagrees with the agent config blob.
     AgentMismatch,
+    /// Rung 4: a manifest field disagrees with the sha-bound source it summarises (an
+    /// embedded blob, a value derived from one, or the task / agent config the model runs
+    /// with) — decide-apr-v1 `manifest.bindings`. `field` is the dotted manifest field.
+    ManifestDisagreesWithBlob {
+        /// The dotted manifest field (`base`, `variant`, `calibration.t_applied`, ...).
+        field: &'static str,
+    },
     /// Rung 5 (or pack): a weight holds a NaN or an infinity.
     NonFiniteWeight {
         /// Tensor name.
@@ -554,7 +561,8 @@ impl ArtifactError {
             | Self::Task(_)
             | Self::LabelsDisagreeWithTask { .. }
             | Self::RecipeIdMismatch { .. }
-            | Self::AgentMismatch => "4 structural",
+            | Self::AgentMismatch
+            | Self::ManifestDisagreesWithBlob { .. } => "4 structural",
             Self::NonFiniteWeight { .. } => "5 non_finite_scan",
             Self::Rebuild(_) => "6 rebuild",
             Self::ProbeMismatch { .. } => "7 probe_replay",
@@ -647,6 +655,10 @@ impl fmt::Display for ArtifactError {
             Self::AgentMismatch => {
                 write!(f, "manifest agent disagrees with the agent config blob")
             }
+            Self::ManifestDisagreesWithBlob { field } => write!(
+                f,
+                "manifest {field} disagrees with the sha-bound source it summarises (manifest.bindings)"
+            ),
             Self::NonFiniteWeight { name } => write!(f, "tensor {name} holds a non-finite value"),
             Self::Rebuild(e) => write!(f, "rebuild: {e}"),
             Self::ProbeRowOverBudget { index, tokens, cap } => {
@@ -1382,9 +1394,11 @@ fn rung4_structure<'r>(
             observed: names.iter().map(|n| (*n).to_string()).collect(),
         });
     }
-    // In BLOB_TENSORS order (just checked equal to the manifest's).
+    // In BLOB_TENSORS order (just checked equal to the manifest's). Each blob is hashed
+    // exactly once, here; the later bindings reuse these digests.
     let mut data: [&[u8]; 6] = [&[]; 6];
-    for (slot, b) in data.iter_mut().zip(&manifest.blobs) {
+    let mut sha: [String; 6] = Default::default();
+    for ((slot, digest), b) in data.iter_mut().zip(sha.iter_mut()).zip(&manifest.blobs) {
         if reader.get_tensor(&b.name).is_none() {
             return Err(ArtifactError::MissingTensor {
                 name: b.name.clone(),
@@ -1395,7 +1409,8 @@ fn rung4_structure<'r>(
             .ok_or_else(|| ArtifactError::DataOutOfBounds {
                 name: b.name.clone(),
             })?;
-        if sha256_hex(slot) != b.sha256 {
+        *digest = sha256_hex(slot);
+        if *digest != b.sha256 {
             return Err(ArtifactError::BlobHashMismatch {
                 blob: b.name.clone(),
             });
@@ -1403,7 +1418,7 @@ fn rung4_structure<'r>(
     }
     let [tokenizer, task_bytes, encoder_config_bytes, agent_config_bytes, recipe, _gate_report] =
         data;
-    let recipe_sha = sha256_hex(recipe);
+    let [_, _, _, _, recipe_sha, _] = sha;
     if recipe_sha != manifest.recipe_id {
         return Err(ArtifactError::RecipeIdMismatch {
             manifest: manifest.recipe_id.clone(),
@@ -1451,12 +1466,45 @@ fn rung4_structure<'r>(
             task: task_labels,
         });
     }
+
+    // (e) Every other manifest field equals the sha-bound source it summarises
+    //     (decide-apr-v1 `manifest.bindings`).
+    check_manifest_bindings(manifest, &BoundSources { recipe })?;
     Ok(Blobs {
         tokenizer,
         task,
         encoder_config: encoder_config_bytes,
         agent_config: agent_config_bytes,
     })
+}
+
+/// The sha-bound sources rung 4 has verified by the time the manifest bindings run: the
+/// raw recipe and gate-report blobs, the digests (a) computed (never recomputed), and the
+/// task and agent config the model will run with.
+struct BoundSources<'a> {
+    recipe: &'a [u8],
+}
+
+/// Rung 4 (e): every manifest field that is not already bound by rungs 3, 4 (a)-(d) or 7
+/// equals the value of the sha-bound source decide-apr-v1 `manifest.bindings` names. The
+/// first disagreement, in the order below, is refused naming the dotted field.
+///
+/// `ModelIdentity.base` is minted from `manifest.base`; this is what binds it.
+fn check_manifest_bindings(m: &Manifest, src: &BoundSources<'_>) -> Result<(), ArtifactError> {
+    let recipe: crate::pack::Recipe =
+        serde_json::from_slice(src.recipe).map_err(|e| ArtifactError::ConfigBlob {
+            blob: RECIPE_BLOB,
+            reason: e.to_string(),
+        })?;
+    // One line per comparison, so each can be disabled on its own (plan 08-19 mutation proof).
+    let checks: [(&'static str, bool); 2] = [
+        ("variant", m.variant == recipe.variant),
+        ("base", m.base == recipe.base),
+    ];
+    match checks.iter().find(|(_, agrees)| !agrees) {
+        Some(&(field, _)) => Err(ArtifactError::ManifestDisagreesWithBlob { field }),
+        None => Ok(()),
+    }
 }
 
 // ===========================================================================
