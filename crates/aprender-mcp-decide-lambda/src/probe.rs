@@ -820,6 +820,33 @@ mod tests {
         assert!(!report.ok(), "{report:?}");
     }
 
+    /// The right labels from the wrong artifact are not the right deploy: the endpoint
+    /// answers with a sha256 other than the pin, and ONLY the identity check is false.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_fails_when_identity_differs() {
+        let model = tiny_model();
+        let golden = crate::tests::tiny_golden_sha256();
+        let labels = model.task().owned_labels();
+        let url = serve(Arc::clone(&model)).await;
+        // A pin one hex digit away from what the endpoint serves.
+        let flipped = if golden.starts_with('0') { "1" } else { "0" };
+        let pin = format!("{flipped}{}", &golden[1..]);
+        assert_ne!(pin, golden);
+
+        let report = run_identity_probe(&url, None, &pin, &labels, &new_probe_id())
+            .await
+            .expect("identity probe completes");
+        assert_eq!(
+            report.artifact_sha256, golden,
+            "the endpoint reports what it serves"
+        );
+        assert!(report.one_tool_named_classify, "{report:?}");
+        assert!(report.description_has_labels_in_order, "{report:?}");
+        assert!(report.response_labels_match, "{report:?}");
+        assert!(!report.identity_matches, "{report:?}");
+        assert!(!report.ok(), "{report:?}");
+    }
+
     /// `ok()` is the AND of every check the report carries: each one alone, false, fails it.
     #[test]
     fn ok_requires_every_check() {
