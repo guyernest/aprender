@@ -830,3 +830,19 @@ raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
   script's rerun condition never settles. It makes every pack_laya recipe pay a rebuild, so
   `just laya-gates-selftest` spends most of its non-weights time compiling. Not a correctness defect.
   status: open
+
+### Found during plan 08-24 (out of scope)
+
+- **`crates/aprender-mcp-decide-lambda/examples/probe.rs` still opens with a crate-wide
+  `#![allow(clippy::disallowed_methods)]`.** Plan 08-24 removed the lib's and the bootstrap's crate-wide
+  allows (IN-05, Lambda half) but its files list did not include the example, which is its own crate
+  target: an unwrap added anywhere in the probe CLI still passes clippy. Same fix shape: item-level allows
+  on the functions whose `json!` needs them, then a planted-unwrap check.
+  status: open
+- **decide-tool-boundary-v1 `frame_http` and `probe_id_header` rows name tests that do not run their hostile
+  case.** Their `test:` fields still name `tests::server_config_is_stateless` and
+  `tests::probe_id_accepts_only_short_safe_ids`; the hostile cases now run in
+  `tests::lambda_request_rows_are_swept` (plan 08-24). The contract's own header says `test` is "the test
+  that runs the row's hostile case". Plan 08-24 does not own the contract; repointing both rows (and the
+  frame_http `note:`) is a contract edit for whichever plan next versions decide-tool-boundary-v1.
+  status: open
