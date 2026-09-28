@@ -437,6 +437,159 @@ def _contract_value_cases(case):
          rid.startswith(RUN_OF_RECORD_RECIPE_ID), rid[:16])
 
 
+# The back-office sources whose refusal ids the python_refusals table must cover (lifecycle.py is the harness).
+REFUSAL_SOURCES = ("contract.py", "data.py", "gate.py", "prepare_stance.py", "train.py")
+
+
+def _python_refusals_sweep(case):
+    """laya-finetune-gate-v1 `python_refusals` (plan 08-29): run every in_process row's hostile input and require
+    the named refusal; check every lifecycle row's case exists in lifecycle.py and is called; refuse a rule id in
+    the sources with no row, a row with no case, and a case with no row; and run prepare_stance.py as a
+    subprocess on an invalid UTF-8 source split (exit 2, REFUSED, no Traceback)."""
+    import re
+    import subprocess
+    import tempfile
+
+    import contract
+    import gate
+    import prepare_stance
+
+    here = Path(__file__).resolve().parent
+    table = contract.gate_contract()["python_refusals"]["rows"]
+    print("python_refusals sweep (laya-finetune-gate-v1 python_refusals, %d rows):" % len(table))
+    with tempfile.TemporaryDirectory(prefix="laya-refusals-") as tmp:
+        tmp = Path(tmp)
+
+        def write(name, body):
+            q = tmp / name
+            q.write_bytes(body if isinstance(body, bytes) else body.encode("utf-8"))
+            return q
+        good = {"type": "choice", "instructions": "Which?", "criteria": {"a": None, "b": None}}
+        t = load_task(write("task.json", json.dumps(good)))
+        rows = [{"text": "sweep row %d" % i, "label": lab} for i, lab in enumerate("abab")]
+        body = "".join(json.dumps(r) + "\n" for r in rows)
+        bad_utf8 = body.encode("utf-8") + b'{"text": "caf\xe9", "label": "a"}\n'
+        surrogate = body + '{"text": "x \\ud800", "label": "a"}\n'
+        scale = contract.seed_selection_decl()["rank_scale"]
+
+        def median_report_shipping(shipped):
+            per = [{"seed": 13, "macro_f1": 0.6, "ece_post": 0.15, "pass": False},
+                   {"seed": 17, "macro_f1": 0.6, "ece_post": 0.12, "pass": False},
+                   {"seed": 23, "macro_f1": 0.62, "ece_post": 0.05, "pass": True}]
+            top = [r for r in per if r["seed"] == shipped][0]
+            rep = gate._fabricated(0.5, top["macro_f1"], top["ece_post"], passed=top["pass"])
+            rep["seeds"] = {"policy": contract.seed_selection_decl()["policy"], "shipped": shipped, "per_seed": per}
+            return rep
+
+        def nan_stopper():
+            st = gate.EarlyStopper(contract.early_stopping_decl(), 3)
+            for e in (1, 2, 3):
+                st.update(e, float("nan"))
+            return st.record(3)
+
+        def write_once_differing():
+            out = tmp / "prep-out"
+            prepare_stance.write_once(out, {"train.jsonl": b"a\n"})
+            return prepare_stance.write_once(out, {"train.jsonl": b"b\n"})
+        th = dict(contract.thresholds(), max_ece=0.2)
+        cases = {       # (rule, entry) -> fn(role): the hostile input, which must be refused naming the rule
+            ("task-missing", "data.load_task"): lambda r: load_task(tmp / "absent.json"),
+            ("task-schema", "data.load_task"): lambda r: load_task(write("ts.json", "{not json")),
+            ("task-unknown-key", "data.load_task"): lambda r: load_task(write("tu.json", json.dumps(dict(good, labels=[])))),
+            ("task-type", "data.load_task"): lambda r: load_task(write("tt.json", json.dumps(dict(good, type="score")))),
+            ("task-duplicate-criterion", "data.load_task"):
+                lambda r: load_task(write("td.json", '{"type":"choice","instructions":"W","criteria":{"a":null,"a":null}}')),
+            ("task-too-few-criteria", "data.load_task"):
+                lambda r: load_task(write("tf.json", json.dumps(dict(good, criteria={"a": None})))),
+            ("<role>-missing", "data.load_rows"): lambda r: load_rows(tmp / ("absent-%s.jsonl" % r), t, r),
+            ("<role>-row-encoding", "data.load_rows"):
+                lambda r: load_rows(write("enc-%s.jsonl" % r, surrogate if r == "shift" else bad_utf8), t, r),
+            ("<role>-row-schema", "data.load_rows"): lambda r: load_rows(write("sch-%s.jsonl" % r, body + "\n" + body), t, r),
+            ("<role>-row-unknown-key", "data.load_rows"):
+                lambda r: load_rows(write("uk-%s.jsonl" % r, body + '{"text": "x", "label": "a", "id": 1}\n'), t, r),
+            ("<role>-row-label", "data.load_rows"):
+                lambda r: load_rows(write("lab-%s.jsonl" % r, body + '{"text": "x", "label": "zzz"}\n'), t, r),
+            ("<role>-empty", "data.load_rows"): lambda r: load_rows(write("empty-%s.jsonl" % r, b""), t, r),
+            ("eval-class-coverage", "data.load_rows"):
+                lambda r: load_rows(write("cov.jsonl", '{"text": "only a", "label": "a"}\n'), t, "eval"),
+            ("<role>-train-overlap", "data.refuse_overlap"):
+                lambda r: refuse_overlap([("sweep row 0", 0)], [(" sweep  row 0", 0)], r),
+            ("heldout-shot-overlap", "data.in_distribution_heldout"):
+                lambda r: in_distribution_heldout([("validation:0", "  shot   x ", "a")], [], [], [], [], [("shot x", "a")]),
+            ("train-conflicting-labels", "data.group_train"): lambda r: group_train([("same", 0), (" same ", 1)]),
+            ("train-class-too-small", "data.calibration_split"):
+                lambda r: calibration_split([("a%d" % i, 0) for i in range(8)] + [("b0", 1), ("b1", 1)], 0.25, 2, 13, 2),
+            ("contract-value", "contract.number"): lambda r: contract.number("1e-6", "sweep.k", "float"),
+            ("epochs", "contract.resolve_epochs"): lambda r: contract.resolve_epochs("production", 16, 12),
+            ("variant", "contract.resolve_epochs"): lambda r: contract.resolve_epochs("staging", 16, None),
+            ("stopping", "contract.resolve_stopping"): lambda r: contract.resolve_stopping("never"),
+            ("seeds", "contract.resolve_seeds"): lambda r: contract.resolve_seeds(1, "production"),
+            ("seeds", "gate.select_median_seed"):
+                lambda r: gate.select_median_seed([{"seed": 13, "ece_post": 0.1}, {"seed": 17, "ece_post": 0.2}], scale),
+            ("seeds", "gate.verify_report"): lambda r: gate.verify_report(median_report_shipping(23)),
+            ("thresholds", "gate.verify_report"): lambda r: gate.verify_report(gate._fabricated(0.5, 0.9, 0.01, th)),
+            ("pass", "gate.verify_report"): lambda r: gate.verify_report(gate._fabricated(0.5, 0.9, 0.5, passed=True)),
+            ("early-stopping", "gate.EarlyStopper.record"): lambda r: nan_stopper(),
+            ("source-row-encoding", "prepare_stance.read_jsonl"): lambda r: prepare_stance.read_jsonl(write("src.jsonl", bad_utf8)),
+            ("source-row-schema", "prepare_stance.read_jsonl"): lambda r: prepare_stance.read_jsonl(write("srcs.jsonl", "[1, 2]\n")),
+            ("prepare-out-dir", "prepare_stance.write_once"): lambda r: write_once_differing(),
+        }
+        life_src = (here / "lifecycle.py").read_text(encoding="utf-8")
+        swept, life, used = 0, 0, set()
+        for row in table:
+            key = (row["rule"], row["entry"])
+            for role in (row.get("roles") or [None]):
+                rid = row["rule"].replace("<role>", role) if role else row["rule"]
+                name = "python_refusals %s via %s" % (rid, row["entry"])
+                if row.get("sweep") == "lifecycle":
+                    fn = str(row.get("case", ""))
+                    ok = bool(fn) and ("def %s(" % fn) in life_src and life_src.count("%s(" % fn) >= 2
+                    case(name + " [lifecycle %s]" % fn, ok, "" if ok else "lifecycle.py does not define and call %r" % fn)
+                    life += 1
+                    continue
+                if row.get("sweep") != "in_process":
+                    case(name, False, "unknown sweep %r" % (row.get("sweep"),))
+                    continue
+                if key not in cases:
+                    case(name, False, "an in_process row with no sweep case")
+                    continue
+                used.add(key)
+                try:
+                    cases[key](role)
+                    case(name, False, "accepted: %s" % row["hostile_input"][:60])
+                except SystemExit as e:
+                    case(name, False, "exited %s instead of raising REFUSED %s" % (e.code, rid))
+                except Exception as e:
+                    msg = str(e)
+                    ok = msg.startswith("REFUSED %s:" % rid) and getattr(e, "rule", rid) == rid
+                    case(name, ok, msg[:90] if ok else "raised %s: %s" % (type(e).__name__, msg[:80]))
+                swept += 1
+        for key in sorted(set(cases) - used):
+            case("python_refusals sweep case %s via %s has a table row" % key, False, "a case with no row (unknown rule)")
+        in_table = {row["rule"] for row in table}
+        found = set()
+        for src in REFUSAL_SOURCES:
+            text = (here / src).read_text(encoding="utf-8")
+            found |= {m.replace("%s", "<role>") for m in re.findall(r'DataError\(\s*"([^"]+)"', text)}
+            found |= set(re.findall(r'"REFUSED ([a-z][a-z-]*):', text))
+        missing = sorted(found - in_table)
+        case("python_refusals lists every rule id the back-office sources raise (%d found)" % len(found), not missing,
+             "no row for %s" % missing if missing else "")
+
+        src = tmp / "cli-src"
+        src.mkdir()
+        (src / "train.jsonl").write_bytes(b'{"id": "train:0", "input": "caf\xe9", "label": 0}\n')
+        (src / "test.jsonl").write_bytes(b'{"id": "test:0", "input": "fine", "label": 0}\n')
+        out = tmp / "cli-out"
+        proc = subprocess.run([sys.executable, str(here / "prepare_stance.py"), "--cell", "s16", "--src", str(src),
+                               "--out", str(out)], capture_output=True, text=True)
+        both = proc.stdout + proc.stderr
+        case("python_refusals CLI boundary: prepare_stance.py on an invalid UTF-8 split -> exit 2, REFUSED, no traceback",
+             proc.returncode == 2 and "REFUSED source-row-encoding:" in proc.stderr and "Traceback" not in both
+             and not out.exists(), "exit %d: %s" % (proc.returncode, proc.stderr.strip()[:80]))
+    print("PYTHON REFUSALS swept=%d lifecycle=%d" % (swept, life))
+
+
 def selftest():
     """Every data refusal over temporary files, plus split determinism / stratification / text-disjointness
     and the recipe epoch rule. numpy + pyyaml only (no torch)."""
@@ -639,6 +792,7 @@ def selftest():
     _demo_rule_on_local_data(case)
 
     _contract_value_cases(case)
+    _python_refusals_sweep(case)
 
     print("recipe epoch rule (contract.resolve_epochs):")
 

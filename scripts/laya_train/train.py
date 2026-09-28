@@ -281,6 +281,16 @@ def calibration_logits(model, items, k, pad, dev, bs):
     return np.concatenate(out).astype(np.float64)
 
 
+def refuse_if_data_changed(data_dir, input_sha):
+    """The data dir must still hold exactly what was trained on: a file edited (or a shift.jsonl added / removed)
+    during the run is REFUSED data-changed (exit 2) with no report, never bound to this model."""
+    now = {name: data.sha256_file(data_dir / name) for name in ("task.json", "train.jsonl", "eval.jsonl", "shift.jsonl")
+           if (data_dir / name).is_file()}
+    if now != input_sha:
+        changed = sorted(n for n in set(now) | set(input_sha) if now.get(n) != input_sha.get(n))
+        refuse("REFUSED data-changed: %s in %s changed during the run; no gate report is written" % (changed, data_dir))
+
+
 def stopping_record_or_refuse(stopper, epochs_run):
     """gate.EarlyStopper.record, whose typed refusal (no finite calibration monitor, nothing to restore)
     ends the run as `REFUSED early-stopping: ...`, exit 2 -- never a traceback."""
@@ -899,11 +909,7 @@ def main(argv=None):
         report["shift_probe"] = shift_probe
     # The data dir must still hold exactly what was trained on: a file edited (or a shift.jsonl added / removed)
     # during the run is refused with no report, never bound to this model.
-    now = {name: data.sha256_file(data_dir / name) for name in ("task.json", "train.jsonl", "eval.jsonl", "shift.jsonl")
-           if (data_dir / name).is_file()}
-    if now != input_sha:
-        changed = sorted(n for n in set(now) | set(input_sha) if now.get(n) != input_sha.get(n))
-        refuse("REFUSED data-changed: %s in %s changed during the run; no gate report is written" % (changed, data_dir))
+    refuse_if_data_changed(data_dir, input_sha)
     write_json(out / "gate-report.json", report)
 
     zs, ft = g["zero_shot"], g["fine_tuned"]

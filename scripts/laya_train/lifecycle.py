@@ -97,6 +97,9 @@ def main():
         for stopping, epochs in (("early_stopping", 3), ("fixed_epochs", 1)):
             run_one(tmp / stopping, tiny_sha, stopping, epochs, Agent)
         check_seed_refusals(tmp, tiny_sha)
+        check_train_cli_refusals(tmp, tiny_sha)
+        check_data_changed_refusal(tmp)
+        check_noise_control_refusal(tmp, tmp / "fixed_epochs", tiny_sha)
         single = tmp / "fixed_epochs"
         multi = tmp / "fixed_epochs-seeds3"
         run_one(multi, tiny_sha, "fixed_epochs", 1, Agent, seeds=3)
@@ -106,6 +109,107 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("LIFECYCLE OK")
+
+
+def _refused(proc, rule, what):
+    """A train.py subprocess refused `rule`: exit 2, a `REFUSED <rule>:` line on stderr, no traceback."""
+    if proc.returncode != 2 or ("REFUSED %s:" % rule) not in proc.stderr or "Traceback" in proc.stderr:
+        fail("%s was not REFUSED %s with exit 2 and no traceback (exit %d): %s"
+             % (what, rule, proc.returncode, proc.stderr[-300:]))
+
+
+def check_train_cli_refusals(tmp, tiny_sha):
+    """python_refusals rows `base`, `out-dir` and the train.py CLI boundary of `<role>-row-encoding`
+    (laya-finetune-gate-v1 python_refusals, plan 08-29): each refused with exit 2, one REFUSED line, no
+    traceback, before any model loads and without writing into the out dir."""
+    run = lambda cmd: subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ))  # noqa: E731
+    out = tmp / "refused-production-base"
+    proc = run([sys.executable, str(HERE / "train.py"), "--data", str(TINY / "data"), "--out", str(out),
+                "--variant", "production", "--base", str(TINY / "checkpoint"), "--base-sha256", tiny_sha,
+                "--stopping", "fixed_epochs", "--device", "cpu"])
+    _refused(proc, "base", "--variant production with --base")
+    out = tmp / "refused-synthetic-no-base"
+    proc = run([sys.executable, str(HERE / "train.py"), "--data", str(TINY / "data"), "--out", str(out),
+                "--variant", "synthetic-fixture", "--epochs", "1", "--stopping", "fixed_epochs", "--device", "cpu"])
+    _refused(proc, "base", "--variant synthetic-fixture without --base")
+    out = tmp / "refused-out-dir"
+    out.mkdir()
+    (out / "already-here.txt").write_text("x")
+    _refused(run(train_cmd(out, tiny_sha, "fixed_epochs", 1)), "out-dir", "a non-empty --out")
+    if sorted(q.name for q in out.iterdir()) != ["already-here.txt"]:
+        fail("REFUSED out-dir wrote into the out dir: %s" % sorted(q.name for q in out.iterdir()))
+    bad = tmp / "data-bad-utf8"
+    shutil.copytree(TINY / "data", bad)
+    (bad / "train.jsonl").write_bytes((bad / "train.jsonl").read_bytes() + b'{"text": "caf\xe9", "label": "a"}\n')
+    out = tmp / "refused-row-encoding"
+    _refused(run(train_cmd(out, tiny_sha, "fixed_epochs", 1, data_dir=bad)), "train-row-encoding",
+             "a train.jsonl with an invalid UTF-8 byte")
+    if out.exists():
+        fail("REFUSED train-row-encoding created the out dir")
+    print("train.py CLI refusals: base (production --base, synthetic without --base), out-dir (nothing written), "
+          "train-row-encoding (invalid UTF-8) -- each exit 2, one REFUSED line, no traceback")
+
+
+def check_data_changed_refusal(tmp):
+    """python_refusals row `data-changed`: train.refuse_if_data_changed passes an untouched data dir and refuses
+    (exit 2, REFUSED data-changed) one whose eval.jsonl changed, and one that gained a shift.jsonl."""
+    import contextlib
+    import io
+
+    import train
+    d = tmp / "data-changed"
+    shutil.copytree(TINY / "data", d)
+    bound = {n: sha256_file(d / n) for n in ("task.json", "train.jsonl", "eval.jsonl")}
+    train.refuse_if_data_changed(d, bound)                 # unchanged: returns
+    for what, mutate in (("eval.jsonl edited", lambda: (d / "eval.jsonl").write_bytes((d / "eval.jsonl").read_bytes() + b"\n")),
+                         ("a shift.jsonl added", lambda: (d / "shift.jsonl").write_bytes(b"x\n"))):
+        shutil.rmtree(d)
+        shutil.copytree(TINY / "data", d)
+        mutate()
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                train.refuse_if_data_changed(d, bound)
+            fail("data-changed: %s was accepted" % what)
+        except SystemExit as e:
+            if e.code != 2 or not err.getvalue().startswith("REFUSED data-changed: "):
+                fail("data-changed: %s -> exit %r, stderr %r" % (what, e.code, err.getvalue()[:200]))
+    print("data-changed refusal: an edited eval.jsonl and an added shift.jsonl -> REFUSED data-changed, exit 2")
+
+
+def check_noise_control_refusal(tmp, run_dir, tiny_sha):
+    """python_refusals row `noise-control`: when the manual fp32 forward does not reproduce the Scorer's logits
+    (rescore_noise_set returns no record), train.write_noise_record refuses (exit 2, REFUSED noise-control) and
+    writes no rescore-noise.json. The mismatch is injected by replacing rescore_noise_set for this one call."""
+    import argparse
+    import contextlib
+    import io
+
+    import data
+    import train
+    out = tmp / "noise-control"
+    shutil.copytree(run_dir, out)
+    (out / "rescore-noise.json").unlink()
+    task = data.load_task(out / "task.json")
+    eval_rows = data.load_rows(TINY / "data" / "eval.jsonl", task, "eval")
+    base = train.Base(argparse.Namespace(variant="synthetic-fixture", base=str(TINY / "checkpoint"),
+                                         base_sha256=tiny_sha))
+    real = train.rescore_noise_set
+    train.rescore_noise_set = lambda *a, **k: (None, 0.5, [0])
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            train.write_noise_record(out, base, eval_rows, data.laya_question(task), task["labels"])
+        fail("noise-control: a non-zero control was accepted and a record written")
+    except SystemExit as e:
+        if e.code != 2 or not err.getvalue().startswith("REFUSED noise-control: "):
+            fail("noise-control: exit %r, stderr %r" % (e.code, err.getvalue()[:200]))
+    finally:
+        train.rescore_noise_set = real
+    if (out / "rescore-noise.json").exists():
+        fail("noise-control: rescore-noise.json was written despite the refusal")
+    print("noise-control refusal: a control mismatch -> REFUSED noise-control, exit 2, no rescore-noise.json")
 
 
 def check_early_stopping_refusal():

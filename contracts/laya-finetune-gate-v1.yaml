@@ -81,9 +81,11 @@ metadata:
     record is the one the 08-16 run trained under (gate.py at 24cea2a63, best-anchored; its seed-17
     trace replays to the recorded best_epoch 2 under it, although that trace alone does not separate
     the three), so the formula, its tie invariant, FALSIFY-LAYA-GATE-009 and the `tie_break_rule`
-    description now state that rule. Text corrected to the code, never the reverse. `pv diff`
-    classifies the formula and invariant edit MAJOR, so this is published as 5.0.0; the 1.4.0
-    naming above is unchanged.
+    description now state that rule. Text corrected to the code, never the reverse. Additively,
+    `python_refusals` enumerates every refusal the Python back office raises and data.py --selftest
+    sweeps it, and `rescore_noise_schema.k` now says what both readers do: a float64 compared bit for
+    bit (the trainer used to write int(k)). `pv diff` classifies the formula and invariant edit
+    MAJOR, so this is published as 5.0.0; the 1.4.0 naming above is unchanged.
 
     THE GATE IS DECIDED ON RECOMPUTED METRICS, NOT REPORTED ONES. A gate report is a file a
     training run wrote; an edited report must not pass. So the metrics that DECIDE pass are
@@ -468,7 +470,10 @@ rescore_noise_schema:
   # files; the reported values are cross-checked only (laya-parity-v1 rescore_noise_reference).
   schema: 'string: "laya-rescore-noise-v1"'
   reference: 'string: "float64"'
-  k: 'integer: copy of laya-parity-v1 constants.pack_rescore_noise_k; must equal it'
+  # plan 08-29 (WR-09): k is read through contract.number as a FLOAT and written as one (4.0), because the Rust
+  # verifier compares it with the contract's f64 bit for bit; a record of 1.4.0..4.0.0 carrying the integer 4
+  # is the same f64 and still verifies.
+  k: 'number (float64): copy of laya-parity-v1 constants.pack_rescore_noise_k; must equal it bit for bit'
   floor_abs: 'number: copy of laya-parity-v1 equations.pack_rescore_probs_abs.float_tolerance; must equal it'
   control_max_abs: 'number: max |dz| of the manual fp32 forward against the Scorer''s logits on control_rows; must be 0.0'
   control_rows: 'array of integers: the first min(5, n) eval row indices the control forwarded'
@@ -542,6 +547,54 @@ numeric_agreement:
       order: 'multiply, then floor'
       python: 'metrics.py rank_key (gate.rank_key refuses a non-finite ECE, then calls it)'
       rust: 'aprender_decide::verify::rank_key on recompute_metrics'' ECE (check_seed_selection, select_median_seed)'
+
+# ---- plan 08-29 (class E, refusal half): every refusal the Python back office (scripts/laya_train)
+# documents, as a table a self-test SWEEPS. Each row: `rule` (the id after REFUSED; `<role>` expands over
+# `roles`), `entry` (the module.function that raises it), `hostile_input` (one line), `rust_counterpart`
+# (the VerifyError the Rust verifier refuses the same input with, or "none: back-office only"), and
+# `sweep`: in_process (a torch-free case in data.py --selftest must raise it) or lifecycle (it needs torch
+# or the train.py CLI; `case` names the lifecycle.py function that exercises it).
+python_refusals:
+  rule: 'every back-office input refusal is ONE `REFUSED <rule>: <detail>` line and exit 2 at the CLI boundary (train.py refuse(), prepare_stance.py main), never a traceback; the table lists every rule id the back-office sources raise, and data.py --selftest fails on a rule id in the sources with no row, a row with no case, or a case whose refusal names another rule'
+  swept_by: 'scripts/laya_train/data.py --selftest `python_refusals` sweep (inside just laya-train-selftest); prints PYTHON REFUSALS swept=<n> lifecycle=<m>'
+  cli_boundary: 'prepare_stance.py run as a subprocess on a source split with an invalid UTF-8 byte exits 2 with REFUSED source-row-encoding and no Traceback (data.py --selftest); train.py on a train.jsonl with an invalid UTF-8 byte exits 2 with REFUSED train-row-encoding (lifecycle.py check_train_cli_refusals)'
+  not_refusals: 'prepare_stance.fail() (PREPARE FAILED, exit 1) is a consistency check of the pinned public TweetEval dataset against the committed selection manifest and the contract counts, not a tenant-input refusal; Laya''s own ValueError on a wrong --base-sha256 and train.py RuntimeError invariants (ordering, reload hashes) are internal assertions, not documented refusals'
+  rows:
+    - {rule: task-missing, entry: data.load_task, sweep: in_process, hostile_input: 'the data dir holds no task.json', rust_counterpart: 'Read (task.json)'}
+    - {rule: task-schema, entry: data.load_task, sweep: in_process, hostile_input: 'task.json is not UTF-8 JSON, repeats a key, misses a key, or has an empty instructions / criterion name', rust_counterpart: 'Pack(PackError::Schema) on task.json'}
+    - {rule: task-unknown-key, entry: data.load_task, sweep: in_process, hostile_input: 'task.json carries a key outside {type, instructions, criteria}', rust_counterpart: 'Pack(PackError::Schema) on task.json'}
+    - {rule: task-type, entry: data.load_task, sweep: in_process, hostile_input: 'task.json type is not "choice"', rust_counterpart: 'Pack(PackError::Schema) on task.json'}
+    - {rule: task-duplicate-criterion, entry: data.load_task, sweep: in_process, hostile_input: 'a criterion name appears twice in task.json', rust_counterpart: 'Pack(PackError::Schema) on task.json'}
+    - {rule: task-too-few-criteria, entry: data.load_task, sweep: in_process, hostile_input: 'task.json declares one criterion', rust_counterpart: 'Pack(PackError::Schema) on task.json'}
+    - {rule: '<role>-missing', roles: [train, eval], entry: data.load_rows, sweep: in_process, hostile_input: 'the data dir holds no <role>.jsonl', rust_counterpart: 'Read (<role>.jsonl)'}
+    - {rule: '<role>-row-encoding', roles: [train, eval, shift], entry: data.load_rows, sweep: in_process, hostile_input: 'an invalid UTF-8 byte in the file, or a text / label holding a lone surrogate escape (\ud800)', rust_counterpart: 'DataInvalid (str::from_utf8 / serde_json refuse the same bytes)'}
+    - {rule: '<role>-row-schema', roles: [train, eval, shift], entry: data.load_rows, sweep: in_process, hostile_input: 'a blank line, a line that is not a JSON object, a missing key or an empty text', rust_counterpart: 'DataInvalid'}
+    - {rule: '<role>-row-unknown-key', roles: [train, eval, shift], entry: data.load_rows, sweep: in_process, hostile_input: 'a row carrying a key outside {text, label}', rust_counterpart: 'DataInvalid (RowJson deny_unknown_fields)'}
+    - {rule: '<role>-row-label', roles: [train, eval, shift], entry: data.load_rows, sweep: in_process, hostile_input: 'a label that is not a criterion NAME (an unknown name, or an index)', rust_counterpart: 'DataInvalid'}
+    - {rule: '<role>-empty', roles: [train, eval, shift], entry: data.load_rows, sweep: in_process, hostile_input: 'an empty <role>.jsonl', rust_counterpart: 'DataInvalid (no rows)'}
+    - {rule: eval-class-coverage, entry: data.load_rows, sweep: in_process, hostile_input: 'eval.jsonl holds no row of one criterion', rust_counterpart: 'DataInvalid (check_eval_coverage)'}
+    - {rule: '<role>-train-overlap', roles: [eval, shift], entry: data.refuse_overlap, sweep: in_process, hostile_input: 'a <role> text equal to a train text after NFC / trim / whitespace collapse', rust_counterpart: 'SplitOverlap for eval; none for shift: Rust recomputes the shift probe but does not re-check its overlap'}
+    - {rule: heldout-shot-overlap, entry: data.in_distribution_heldout, sweep: in_process, hostile_input: 'a held-out row whose normalized text equals a shot', rust_counterpart: 'none: back-office only (prepare_stance builds the demo eval set)'}
+    - {rule: train-conflicting-labels, entry: data.group_train, sweep: in_process, hostile_input: 'two train rows with the same normalized text under different labels', rust_counterpart: 'ConflictingLabels'}
+    - {rule: train-class-too-small, entry: data.calibration_split, sweep: in_process, hostile_input: 'a class with no more rows than the calibration slice needs', rust_counterpart: 'SliceInvalid'}
+    - {rule: contract-value, entry: contract.number, sweep: in_process, hostile_input: 'a contract number given as a string ("1e-6"), a bool, or a float where an integer is declared (15.0)', rust_counterpart: 'none: back-office only (the Rust verifier deserializes the contract into typed f64 / integer fields)'}
+    - {rule: epochs, entry: contract.resolve_epochs, sweep: in_process, hostile_input: '--epochs at <= 16 shots/class, outside [4, 12] above 16, or missing above 16', rust_counterpart: 'RecipeMismatch'}
+    - {rule: variant, entry: contract.resolve_epochs, sweep: in_process, hostile_input: 'a variant that is neither production nor synthetic-fixture', rust_counterpart: 'RecipeMismatch (and SyntheticNotDeployable for synthetic-fixture)'}
+    - {rule: stopping, entry: contract.resolve_stopping, sweep: in_process, hostile_input: 'a --stopping value outside recipe.stopping_rules', rust_counterpart: 'RecipeMismatch'}
+    - {rule: seeds, entry: contract.resolve_seeds, sweep: in_process, hostile_input: 'production --seeds other than 3, or synthetic --seeds other than 1 or 3', rust_counterpart: 'SeedPolicyViolated / SeedPolicyMissing'}
+    - {rule: seeds, entry: gate.select_median_seed, sweep: in_process, hostile_input: 'an even or empty seed list, a repeated seed, or a non-finite ece_post', rust_counterpart: 'SeedPolicyViolated'}
+    - {rule: seeds, entry: gate.verify_report, sweep: in_process, hostile_input: 'a median-rule report shipping a seed that is not the median of its per_seed rows', rust_counterpart: 'SeedPolicyMismatch'}
+    - {rule: thresholds, entry: gate.verify_report, sweep: in_process, hostile_input: 'a gate report whose thresholds differ from the contract', rust_counterpart: 'ThresholdMismatch'}
+    - {rule: pass, entry: gate.verify_report, sweep: in_process, hostile_input: 'a gate report whose pass disagrees with its metrics', rust_counterpart: 'PassDisagrees'}
+    - {rule: early-stopping, entry: gate.EarlyStopper.record, sweep: in_process, hostile_input: 'an early-stopping run whose calibration monitor was never finite (nothing to restore)', rust_counterpart: 'none: back-office only (training time; Rust reads the stopping record as provenance)'}
+    - {rule: early-stopping, entry: train.stopping_record_or_refuse, sweep: lifecycle, case: check_early_stopping_refusal, hostile_input: 'the same, at the train.py boundary: REFUSED early-stopping, exit 2', rust_counterpart: 'none: back-office only'}
+    - {rule: source-row-encoding, entry: prepare_stance.read_jsonl, sweep: in_process, hostile_input: 'a TweetEval source split with an invalid UTF-8 byte or a lone-surrogate input', rust_counterpart: 'none: back-office only (the public source dataset)'}
+    - {rule: source-row-schema, entry: prepare_stance.read_jsonl, sweep: in_process, hostile_input: 'a source split line that is not a JSON object with an id', rust_counterpart: 'none: back-office only (the public source dataset)'}
+    - {rule: prepare-out-dir, entry: prepare_stance.write_once, sweep: in_process, hostile_input: 'an existing --out holding a differing written file or a foreign non-dot file (a stale shift.jsonl)', rust_counterpart: 'none: back-office only'}
+    - {rule: base, entry: train.Base, sweep: lifecycle, case: check_train_cli_refusals, hostile_input: '--base with the production variant, or synthetic-fixture without --base / --base-sha256', rust_counterpart: 'BaseMismatch'}
+    - {rule: out-dir, entry: train.main, sweep: lifecycle, case: check_train_cli_refusals, hostile_input: 'a non-empty --out (a run dir is written once)', rust_counterpart: 'none: back-office only'}
+    - {rule: noise-control, entry: train.write_noise_record, sweep: lifecycle, case: check_noise_control_refusal, hostile_input: 'the manual fp32 forward differs from the Scorer''s logits on a control row', rust_counterpart: 'RescoreNoiseInvalid (control_max_abs must be 0.0)'}
+    - {rule: data-changed, entry: train.refuse_if_data_changed, sweep: lifecycle, case: check_data_changed_refusal, hostile_input: 'task.json / train / eval / shift edited, added or removed during the run', rust_counterpart: 'InputHashMismatch'}
 
 run_field_bindings:
   rule: 'a new recipe.json or gate-report.json field needs a row here before any run dir carrying it verifies: the sweep fails on an unlisted leaf, and on a listed pattern no fixture leaf has'
