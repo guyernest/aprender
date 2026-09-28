@@ -64,8 +64,13 @@ metadata:
     - 'transformers 5.17 modeling_modernbert.py (SDPA) and Laya laya/common.py @ 4066d5d — the reference semantics.'
     - 'contracts/chronos-bolt-parity-v1.yaml — the parity-contract precedent and the provisional-bar lesson.'
     - 'contracts/setfit-apr-v1.yaml probe_and_parity_tolerances — the NaN-visible within idiom.'
-  depends_on:
-    - decide-apr-v1
+  # No depends_on (plan 08-12, 2026-09-27). The edge runs the other way: decide-apr-v1 and
+  # laya-finetune-gate-v1 consume this contract's bars (pack_rescore_probs_abs), and this contract
+  # names decide-apr-v1 only in prose. The 08-01 back-edge `depends_on: [decide-apr-v1]` closed the
+  # cycle decide-apr-v1 -> laya-finetune-gate-v1 -> laya-parity-v1 -> decide-apr-v1, which
+  # `pv certify` / `pv verify-pipeline` refuse (aprender-contracts-cli certify_on_real_contracts,
+  # verify_pipeline_on_real_contracts, verify_pipeline_json_on_real_contracts).
+  depends_on: []
 
 # FLAT scalars only. The tolerances themselves are each equation's `float_tolerance`, read from
 # there at test time; these are the structural numbers the rungs are keyed on. The ONLY two
