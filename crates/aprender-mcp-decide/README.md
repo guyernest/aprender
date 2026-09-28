@@ -29,9 +29,17 @@ The server advertises exactly one tool:
 | `classify` | `texts: [string]` — 1..=2 texts, each at most 16384 UTF-8 bytes, at most 120 model tokens over the request (the 3,008 MB Lambda tier of `contracts/decide-tool-boundary-v1.yaml`; 8 texts / 1024 tokens at the 10,240 MB target tier). Nothing else (`deny_unknown_fields`). | `model` {`artifact_sha256`, `recipe_id`, `method`, `base`}, `labels` (task order), and `results`, one per text in input order: `label`, `probabilities` (calibrated, one per label in `labels` order — an array, never a map), `tokens`, `truncated`. |
 
 The tool description is built from the artifact: its question, its labels in
-order, and the bounds. Each element of `texts` is ONE complete document; a text
-longer than the model's window is truncated by the model and flagged
-`truncated: true` (D-12).
+order, the bounds, and a truncation sentence derived from the artifact's window
+and the tier's token budget (plan 08-28, A-derive). Each element of `texts` is ONE
+complete document. A truncated text builds a row of the model's full window, so:
+
+- when that window fits `classify_max_total_tokens`, the description says long texts
+  are truncated by the model and flagged `truncated: true` (D-12);
+- when it does not — Laya-en's 512-token window at the 3,008 MB tier's 120-token
+  budget — every text long enough to be truncated is refused by the budget first, so
+  the description says a text whose built row exceeds the budget is refused and to
+  send a shorter excerpt. At the 10,240 MB target tier (1024 tokens) the truncation
+  sentence comes back with no edit.
 
 ## Bounds (`contracts/decide-tool-boundary-v1.yaml`)
 
@@ -53,9 +61,20 @@ longer than the model's window is truncated by the model and flagged
   (`tests/e2e_stdio.rs`) pins this: `classify_max_pending + 1` calls written before
   any reply is read are all classified, in request order.
 
-Every refusal is a validation error naming the contract key and the observed
-value, and never echoes the caller's text. `ClassifyLimits::CONTRACTED` is
-asserted equal to the contract by a unit test.
+Every bound refusal (count, argument shape, byte length, token budget, admission)
+is `pmcp::Error::tool_rejected`, which pmcp 2.19.3 sends as a **successful**
+`tools/call` result with `isError: true` and the refusal message as its one text
+content — never a JSON-RPC error — so a client reads it as a tool answer it can act
+on (plan 08-28, B-iserror). For example, three texts at the 3,008 MB tier:
+
+```json
+{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"classify: 3 texts exceeds classify_max_texts 2 (contracts/decide-tool-boundary-v1.yaml); split the batch"}],"isError":true}}
+```
+
+Model and internal failures (a tokenizer refusal, a forward failure) stay JSON-RPC
+-32603. Every refusal names the contract key and the observed value, and never
+echoes the caller's text. `ClassifyLimits::CONTRACTED` is asserted equal to the
+contract by a unit test.
 
 ## Tests
 

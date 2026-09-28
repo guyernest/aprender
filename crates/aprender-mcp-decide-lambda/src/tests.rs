@@ -164,6 +164,35 @@ async fn loopback_cold_first_call_is_served_without_initialize() {
     assert_eq!(sample.load_header, None);
 }
 
+/// `refusal_names_bound` over THIS crate's transport (plan 08-28, B-iserror): on the stateless
+/// streamable-HTTP loopback server, a bound refusal is a successful `tools/call` response
+/// whose result has `isError: true`. The probe proves the shape by the branch that reads it:
+/// `classify_payload` turns an isError result into `tool error: <text>`, while a JSON-RPC
+/// error would have stopped in `Rpc::call` as `JSON-RPC error: ...`. The refusal names its
+/// bound, and the server keeps serving afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_bound_refusal_is_an_iserror_result() {
+    let url = serve(tiny_model()).await;
+    let over = aprender_mcp_decide::ClassifyLimits::CONTRACTED.max_texts + 1;
+    let texts = vec!["My parcel never arrived.".to_string(); over];
+    match run_cold_first(&url, None, &texts, "refusal-test-1").await {
+        Err(crate::probe::ProbeError::Protocol { method, detail }) => {
+            assert_eq!(method, "tools/call");
+            assert!(
+                detail.starts_with("tool error: ")
+                    && detail.contains("classify_max_texts")
+                    && detail.contains("decide-tool-boundary-v1"),
+                "a bound refusal is an isError tool result naming its bound: {detail}"
+            );
+        }
+        other => panic!("expected an isError tool result, got {other:?}"),
+    }
+    let sample = run_cold_first(&url, None, &texts[..1], "refusal-test-2")
+        .await
+        .expect("an in-band refusal leaves the server serving");
+    assert_eq!(sample.texts, 1);
+}
+
 /// The bootstrap's handler awaits `resolve_model`, and lambda_http requires that future
 /// to be `Send` for every lifetime. `cargo test --lib` never builds the bin, so this
 /// pins the property where the lib tests run.

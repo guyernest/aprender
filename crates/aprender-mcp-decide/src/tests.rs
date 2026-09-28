@@ -109,11 +109,17 @@ fn args(texts: &[&str]) -> ClassifyArgs {
     }
 }
 
-/// The validation message of a refusal; any other error kind fails the test.
-fn validation_message(error: &pmcp::Error) -> String {
+/// The message of a BOUND refusal: `pmcp::Error::ToolRejected` with no `details`, which pmcp
+/// 2.19.3 sends as an `isError: true` tool result (`refusal_names_bound`, plan 08-28
+/// B-iserror). Any other error kind — a validation or internal error, which pmcp sends as
+/// JSON-RPC -32603 — fails the test.
+fn rejection_message(error: &pmcp::Error) -> String {
     match error {
-        pmcp::Error::Validation(message) => message.clone(),
-        other => panic!("expected a validation-class refusal, got {other:?}"),
+        pmcp::Error::ToolRejected {
+            message,
+            details: None,
+        } => message.clone(),
+        other => panic!("expected a bound refusal (tool_rejected, no details), got {other:?}"),
     }
 }
 
@@ -218,7 +224,7 @@ async fn served_service_uses_contracted_limits() {
         .call(args(&over))
         .await
         .expect_err("max_texts + 1 texts");
-    assert_names_key(&validation_message(&error), "classify_max_texts");
+    assert_names_key(&rejection_message(&error), "classify_max_texts");
 }
 
 // ---------------------------------------------------------------- count and bytes
@@ -235,7 +241,7 @@ fn precheck_takes_no_model() {
 #[test]
 fn empty_texts_refused_naming_min_texts() {
     let error = precheck(&ClassifyLimits::CONTRACTED, &args(&[])).expect_err("empty");
-    assert_names_key(&validation_message(&error), "classify_min_texts");
+    assert_names_key(&rejection_message(&error), "classify_min_texts");
 }
 
 /// FALSIFY-DECIDE-TOOL-001: N + 1 = classify_max_texts + 1 texts is refused naming
@@ -245,7 +251,7 @@ fn empty_texts_refused_naming_min_texts() {
 fn one_over_max_texts_refused_naming_max_texts() {
     let n = constant_usize("classify_max_texts") + 1;
     let error = precheck(&ClassifyLimits::CONTRACTED, &args(&vec!["x"; n])).expect_err("N + 1");
-    let message = validation_message(&error);
+    let message = rejection_message(&error);
     assert_names_key(&message, "classify_max_texts");
     assert!(
         message.contains(&format!("{n} texts")),
@@ -288,7 +294,7 @@ fn oversized_text_refused_without_echo() {
     assert_eq!(text.len(), limit + 1);
     let error =
         precheck(&ClassifyLimits::CONTRACTED, &args(&["ok", text])).expect_err("16385 bytes");
-    let message = validation_message(&error);
+    let message = rejection_message(&error);
     assert_names_key(&message, "classify_max_text_bytes");
     assert!(
         message.contains("texts[1]") && message.contains("16385"),
@@ -308,7 +314,7 @@ fn multibyte_text_over_byte_limit_refused() {
     let text = "é".repeat(limit / 2 + 1);
     assert!(text.chars().count() <= limit && text.len() > limit);
     let error = precheck(&ClassifyLimits::CONTRACTED, &args(&[&text])).expect_err("bytes");
-    assert_names_key(&validation_message(&error), "classify_max_text_bytes");
+    assert_names_key(&rejection_message(&error), "classify_max_text_bytes");
 }
 
 /// FALSIFY-DECIDE-TOOL-002 and -005: a text of exactly 16384 bytes passes the byte
@@ -386,7 +392,7 @@ async fn token_budget_refuses_one_over() {
         })
         .await
         .expect_err("one token over is refused");
-    let message = validation_message(&error);
+    let message = rejection_message(&error);
     assert_names_key(&message, "classify_max_total_tokens");
     assert!(
         message.contains(&format!("total {sum} tokens")),
@@ -441,7 +447,7 @@ proptest! {
         match first_failing_key(&limits, &bytes, &built) {
             None => prop_assert!(outcome.is_ok(), "{outcome:?}"),
             Some(key) => {
-                let message = validation_message(&outcome.expect_err("refused"));
+                let message = rejection_message(&outcome.expect_err("refused"));
                 prop_assert!(message.contains(key), "expected {key}: {message}");
             }
         }
@@ -487,7 +493,7 @@ async fn admission_refuses_over_pending() {
     let busy = admission.try_admit().expect_err("third is refused at once");
     assert_eq!(busy.max_pending, 2);
     assert_names_key(
-        &validation_message(&busy.into_pmcp()),
+        &rejection_message(&busy.into_pmcp()),
         "classify_max_pending",
     );
 
@@ -624,11 +630,21 @@ async fn admission_waiting_cancel_frees_pending() {
 
 // ---------------------------------------------------------------- refusals
 
-/// FALSIFY-DECIDE-TOOL-006: every refusal class through the handler path is
-/// validation-class, names the contract and its key, and omits the distinctive text.
+/// FALSIFY-DECIDE-TOOL-006: every refusal class through the handler path is a bound refusal
+/// (`tool_rejected`), names the contract and its key, and omits the distinctive text.
+///
+/// `refusal_names_bound` quantifies over caller texts of at least `refusal_echo_min_chars`
+/// characters (A4-7): a one-character text such as `a` occurs in every message, so a formula
+/// over ANY non-empty text is unsatisfiable. The secret is therefore exactly that long —
+/// the shortest text the formula covers — and distinctive (no substring of any template).
 #[tokio::test]
 async fn every_refusal_names_key_without_text() {
-    const SECRET: &str = "ZQXJ-distinctive-caller-text";
+    const SECRET: &str = "ZQXJ-7f3kq9w";
+    assert_eq!(
+        SECRET.chars().count(),
+        constant_usize("refusal_echo_min_chars"),
+        "the secret sits exactly at the formula's minimum length"
+    );
     let long = format!(
         "{SECRET} {}",
         "y".repeat(ClassifyLimits::CONTRACTED.max_text_bytes)
@@ -640,7 +656,7 @@ async fn every_refusal_names_key_without_text() {
         (args(&[SECRET, &long]), "classify_max_text_bytes"),
     ];
     for (request, key) in cases {
-        let message = validation_message(&service.call(request).await.expect_err(key));
+        let message = rejection_message(&service.call(request).await.expect_err(key));
         assert_names_key(&message, key);
         assert!(
             !message.contains(SECRET),
@@ -656,7 +672,7 @@ async fn every_refusal_names_key_without_text() {
         .call(args(&[SECRET]))
         .await
         .expect_err("over budget");
-    let message = validation_message(&error);
+    let message = rejection_message(&error);
     assert_names_key(&message, "classify_max_total_tokens");
     assert!(
         !message.contains(SECRET),
@@ -665,21 +681,26 @@ async fn every_refusal_names_key_without_text() {
 
     let saturated = ClassifyService::with_limits(model(), shrunk(1, 1));
     let _held = saturated.admission.try_admit().expect("take the only slot");
-    let message = validation_message(&saturated.call(args(&[SECRET])).await.expect_err("busy"));
+    let message = rejection_message(&saturated.call(args(&[SECRET])).await.expect_err("busy"));
     assert_names_key(&message, "classify_max_pending");
     assert!(!message.contains(SECRET), "busy echoed the text: {message}");
 }
 
-/// The error taxonomy: the caller-fixable budget refusal is validation; a model
-/// failure is internal and never carries the tokenizer's (possibly text-quoting) detail.
+/// The error taxonomy (plan 08-28, B-iserror): the caller-fixable budget and admission
+/// refusals are bound refusals (`tool_rejected`, an `isError` tool result on the wire); a
+/// model failure is internal (JSON-RPC -32603) and never carries the tokenizer's (possibly
+/// text-quoting) detail.
 #[test]
-fn error_taxonomy_budget_validation_model_internal() {
+fn error_taxonomy_budget_rejected_model_internal() {
     let budget = ClassifyFailure::TokenBudget {
         total: 9,
         per_text: vec![9],
         limit: 8,
     };
-    assert!(matches!(budget.into_pmcp(), pmcp::Error::Validation(_)));
+    assert_names_key(
+        &rejection_message(&budget.into_pmcp()),
+        "classify_max_total_tokens",
+    );
 
     let tokenizer = ClassifyFailure::Model(DecideError::Laya(LayaError::Tokenizer(
         "cannot tokenize ZQXJ-caller-text".to_string(),
@@ -698,10 +719,10 @@ fn error_taxonomy_budget_validation_model_internal() {
         labels: 3,
     };
     assert!(matches!(label.into_pmcp(), pmcp::Error::Internal(_)));
-    assert!(matches!(
-        Busy { max_pending: 4 }.into_pmcp(),
-        pmcp::Error::Validation(_)
-    ));
+    assert_names_key(
+        &rejection_message(&Busy { max_pending: 4 }.into_pmcp()),
+        "classify_max_pending",
+    );
 }
 
 // ---------------------------------------------------------------- request schema
@@ -717,7 +738,7 @@ fn unknown_key_labels_refused() {
     assert!(error.to_string().contains("unknown field"), "{error}");
 }
 
-/// A malformed argument shape is refused through [`parse_args`] as a validation error that
+/// A malformed argument shape is refused through [`parse_args`] as a bound refusal that
 /// names the contract and NEVER echoes caller text: serde's own message quotes a string
 /// sent where the list belongs, and an unknown key, verbatim.
 #[test]
@@ -742,7 +763,7 @@ fn malformed_arguments_are_refused_without_echo() {
             raw.to_string().contains(SECRET),
             "{label}: serde itself echoes, which is why its message is withheld"
         );
-        let message = validation_message(&parse_args(bad).expect_err(label));
+        let message = rejection_message(&parse_args(bad).expect_err(label));
         assert!(message.contains(TOOL_CONTRACT), "{label}: {message}");
         assert!(!message.contains(SECRET), "{label} echoed: {message}");
     }
@@ -763,7 +784,7 @@ fn malformed_arguments_are_refused_without_echo() {
 fn count_is_checked_before_element_shapes() {
     let over = ClassifyLimits::CONTRACTED.max_texts + 1;
     let numbers: Vec<serde_json::Value> = (0..over).map(serde_json::Value::from).collect();
-    let message = validation_message(
+    let message = rejection_message(
         &parse_args(serde_json::json!({ "texts": numbers })).expect_err("N + 1 non-strings"),
     );
     assert_names_key(&message, "classify_max_texts");
@@ -772,7 +793,7 @@ fn count_is_checked_before_element_shapes() {
         "the count must be refused before the element shape is read: {message}"
     );
     let strings = vec!["x"; over];
-    let via_precheck = validation_message(
+    let via_precheck = rejection_message(
         &precheck(&ClassifyLimits::CONTRACTED, &args(&strings)).expect_err("N + 1 strings"),
     );
     assert_eq!(
@@ -780,7 +801,7 @@ fn count_is_checked_before_element_shapes() {
         "parse_args and precheck share one count message"
     );
 
-    let shape = validation_message(
+    let shape = rejection_message(
         &parse_args(serde_json::json!({ "texts": [1] })).expect_err("a number is not a text"),
     );
     assert!(
@@ -789,7 +810,7 @@ fn count_is_checked_before_element_shapes() {
     );
 
     let empty =
-        validation_message(&parse_args(serde_json::json!({ "texts": [] })).expect_err("empty"));
+        rejection_message(&parse_args(serde_json::json!({ "texts": [] })).expect_err("empty"));
     assert_names_key(&empty, "classify_min_texts");
 }
 
@@ -1084,10 +1105,21 @@ async fn every_served_field_has_a_bound_source() {
                     );
                 }
             }
+            "description.truncation" => {
+                let sentence = truncation_sentence(
+                    model.manifest().agent.max_len,
+                    &ClassifyLimits::CONTRACTED,
+                );
+                assert!(
+                    description.contains(&sentence),
+                    "the description serves the sentence derived from the artifact's window \
+                     and the contracted budget: {sentence}"
+                );
+            }
             other => panic!("served_fields tools_list row {other} has no case in this test"),
         }
     }
-    assert_eq!(list_rows.len(), 3, "question, labels, bounds");
+    assert_eq!(list_rows.len(), 4, "question, labels, bounds, truncation");
     println!(
         "SERVED FIELDS classify_response={} tools_list={}",
         response_rows.len(),
@@ -1100,10 +1132,12 @@ async fn every_served_field_has_a_bound_source() {
 /// The crate that owns the rows this test dispatches.
 const THIS_CRATE: &str = "aprender-mcp-decide";
 
-/// The message of any refusal (validation or internal), for the bound-name check.
+/// The message of any refusal (bound or internal), for the bound-name check.
 fn any_message(error: &pmcp::Error) -> String {
     match error {
-        pmcp::Error::Validation(message) | pmcp::Error::Internal(message) => message.clone(),
+        pmcp::Error::ToolRejected { message, .. }
+        | pmcp::Error::Validation(message)
+        | pmcp::Error::Internal(message) => message.clone(),
         other => other.to_string(),
     }
 }
@@ -1127,15 +1161,15 @@ async fn hostile_case(id: &str) -> Option<Vec<String>> {
             let mut bad = serde_json::Map::new();
             bad.insert("texts".to_string(), serde_json::Value::from(vec!["a"]));
             bad.insert(SECRET.to_string(), serde_json::Value::from(1));
-            let message = validation_message(
+            let message = rejection_message(
                 &parse_args(serde_json::Value::Object(bad)).expect_err("unknown key"),
             );
             assert!(!message.contains(SECRET), "args_shape echoed: {message}");
             vec![message]
         }
         "texts_count_min" => vec![
-            validation_message(&parse_args(texts_value(vec![])).expect_err("[] via parse_args")),
-            validation_message(
+            rejection_message(&parse_args(texts_value(vec![])).expect_err("[] via parse_args")),
+            rejection_message(
                 &service
                     .call(args(&[]))
                     .await
@@ -1147,13 +1181,13 @@ async fn hostile_case(id: &str) -> Option<Vec<String>> {
             // would be the shape refusal instead.
             let numbers = (0..=c.max_texts).map(serde_json::Value::from).collect();
             let on_array =
-                validation_message(&parse_args(texts_value(numbers)).expect_err("N + 1 numbers"));
+                rejection_message(&parse_args(texts_value(numbers)).expect_err("N + 1 numbers"));
             // (b) through the service: N + 1 texts, the FIRST over the byte bound, so a
             // precheck that read bytes before the count would name the byte bound instead.
             let long = "b".repeat(c.max_text_bytes + 1);
             let mut texts = vec![long];
             texts.extend(std::iter::repeat_n("x".to_string(), c.max_texts));
-            let before_bytes = validation_message(
+            let before_bytes = rejection_message(
                 &service
                     .call(ClassifyArgs { texts })
                     .await
@@ -1163,7 +1197,7 @@ async fn hostile_case(id: &str) -> Option<Vec<String>> {
         }
         "text_bytes" => {
             let text = "b".repeat(c.max_text_bytes + 1);
-            vec![validation_message(
+            vec![rejection_message(
                 &service
                     .call(ClassifyArgs { texts: vec![text] })
                     .await
@@ -1182,7 +1216,7 @@ async fn hostile_case(id: &str) -> Option<Vec<String>> {
                 "the hostile case must exceed the budget: {built} <= {}",
                 c.max_total_tokens
             );
-            vec![validation_message(
+            vec![rejection_message(
                 &service
                     .call(ClassifyArgs { texts })
                     .await
@@ -1235,7 +1269,7 @@ fn named_tests_exist(owner: &str, test: &str) -> bool {
 
 /// decide-tool-boundary-v1 `untrusted_input_bounds` (CLASS B, request half): every row owned
 /// by this crate is dispatched by id to its hostile case, whose refusals must each name the
-/// row's bound (and the contract, for a validation refusal); an unknown id, or an owned row
+/// row's bound (and the contract, for a bound refusal); an unknown id, or an owned row
 /// without a case, fails. An accepted row's documented behaviour is asserted instead. A row
 /// owned by another crate must name a test that exists in that crate.
 #[tokio::test]
@@ -1288,7 +1322,7 @@ async fn request_bounds_table_is_swept() {
                         // parsed value, whatever the frame held: 100 000 nulls cost one length
                         // comparison and are refused naming classify_max_texts.
                         let huge = vec![serde_json::Value::Null; 100_000];
-                        let message = validation_message(
+                        let message = rejection_message(
                             &parse_args(texts_value(huge)).expect_err("a huge parsed array"),
                         );
                         assert_names_key(&message, "classify_max_texts");
@@ -1401,6 +1435,8 @@ fn tool_description_lists_labels_in_order_with_guidance() {
             constant_u64(TOOL_CONTRACT, "classify_max_total_tokens")
         ),
     ];
+    // "truncated: true" holds on THIS fixture only because its 64-token window fits the
+    // contracted budget; description_truncation_sentence_matches_tier covers the other branch.
     for phrase in [
         "ONE complete document",
         "NEVER split",
@@ -1416,4 +1452,89 @@ fn tool_description_lists_labels_in_order_with_guidance() {
             "description lacks {phrase:?}: {description}"
         );
     }
+}
+
+/// WR-03, plan 08-28 A-derive: the truncation sentence is derived from the served window
+/// (`agent.max_len`) and the tier's `classify_max_total_tokens`, so the description never
+/// promises `truncated: true` where the budget refuses every text long enough to be cut.
+///
+/// Both branches over the REAL tiny artifact (window 64): the contracted budget (120) admits
+/// a full-window row, so the truncation sentence is served; a budget of one token less than
+/// the window (63) cannot, so the refusal sentence is served instead. Then the two tiers the
+/// contract prices for Laya-en's 512-token window, on the pure helper: 3 008 MB (120) refuses,
+/// 10 240 MB (1024) truncates. The labels segment the Lambda probe parses is unchanged.
+#[test]
+fn description_truncation_sentence_matches_tier() {
+    const TRUNCATES: &str = "Long texts are truncated by the model itself to its window, and \
+                             each such result reports `truncated: true`.";
+    let model = model();
+    let window = model.manifest().agent.max_len;
+    assert_eq!(window, tiny_max_len(), "the manifest window is Laya's own");
+
+    let contracted = ClassifyLimits::CONTRACTED;
+    assert!(
+        window <= contracted.max_total_tokens,
+        "the tiny window fits the contracted budget"
+    );
+    let fits = tool_description_for(&model, &contracted);
+    assert_eq!(
+        fits,
+        tool_description(&model),
+        "the served description is the contracted one"
+    );
+    assert!(
+        fits.contains(TRUNCATES),
+        "a full-window row fits: truncation promised: {fits}"
+    );
+    assert!(!fits.contains("shorter excerpt"), "{fits}");
+
+    let tight = ClassifyLimits {
+        max_total_tokens: window - 1,
+        ..contracted
+    };
+    // Exactly at the window: one full-window row is exactly the budget, which the budget
+    // accepts (classify_token_budget: exactly-at is accepted), so truncation is reachable.
+    let exact = ClassifyLimits {
+        max_total_tokens: window,
+        ..contracted
+    };
+    assert!(
+        tool_description_for(&model, &exact).contains(TRUNCATES),
+        "a {window}-token row fits a {window}-token budget exactly: truncation promised"
+    );
+    let refuses = tool_description_for(&model, &tight);
+    assert!(
+        !refuses.contains("truncated: true"),
+        "a full-window row cannot fit {} tokens, so truncation is unreachable: {refuses}",
+        tight.max_total_tokens
+    );
+    for phrase in [
+        format!("{}-token request budget is refused", tight.max_total_tokens),
+        "classify_max_total_tokens".to_string(),
+        format!("({window} tokens)"),
+        "shorter excerpt".to_string(),
+    ] {
+        assert!(refuses.contains(&phrase), "lacks {phrase:?}: {refuses}");
+    }
+    for description in [&fits, &refuses] {
+        assert!(
+            description.contains("The labels, in this order: [shipping, billing, account]."),
+            "the labels segment the probe parses is byte-identical: {description}"
+        );
+    }
+
+    // Laya-en (window 512 = row_max_tokens) at the contract's two priced tiers.
+    let laya = usize::try_from(constant_u64(TOOL_CONTRACT, "row_max_tokens")).expect("fits");
+    let at_3008 = truncation_sentence(laya, &contracted);
+    assert!(
+        at_3008.contains("120-token request budget is refused")
+            && !at_3008.contains("truncated: true"),
+        "3 008 MB: {at_3008}"
+    );
+    let at_10240 = ClassifyLimits {
+        max_texts: 8,
+        max_total_tokens: 1024,
+        ..contracted
+    };
+    assert_eq!(truncation_sentence(laya, &at_10240), TRUNCATES, "10 240 MB");
 }

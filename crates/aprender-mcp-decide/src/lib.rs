@@ -35,9 +35,13 @@
 //!   HTTP: the `Server` behind a mutex), so that refusal is not reachable from a transport
 //!   (`classify_admission`, plan 08-28).
 //!
-//! Every refusal is `pmcp::Error::validation`, names the contract and the constant key,
-//! reports the OBSERVED value, and never echoes caller text (ASVS V7). Input texts are
-//! never logged; counts and timings are.
+//! Every bound refusal is [`pmcp::Error::tool_rejected`] (plan 08-28, B-iserror): pmcp
+//! 2.19.3's tool dispatch sends it as a successful `tools/call` result with `isError: true`
+//! and the message as its one text content, so a client reads the refusal as a tool answer
+//! it can act on, not as a protocol failure. Model and internal failures stay
+//! `pmcp::Error::internal` (JSON-RPC -32603). Every refusal names the contract and the
+//! constant key, reports the OBSERVED value, and never echoes caller text (ASVS V7). Input
+//! texts are never logged; counts and timings are.
 
 use std::fmt;
 use std::path::Path;
@@ -127,8 +131,11 @@ impl ClassifyLimits {
     };
 }
 
+/// A BOUND refusal: the caller's to fix, so it is an in-band tool result
+/// (`isError: true`), never a JSON-RPC error (`refusal_names_bound`, plan 08-28 B-iserror).
+/// No `details`: the message is the whole refusal, so no structured copy can drift from it.
 fn refusal(message: String) -> pmcp::Error {
-    pmcp::Error::validation(message)
+    pmcp::Error::tool_rejected(message, None)
 }
 
 /// `classify_count_bound`: the ONE count check and its ONE refusal text, shared by
@@ -160,8 +167,8 @@ fn check_count(limits: &ClassifyLimits, n: usize) -> pmcp::Result<()> {
 ///
 /// # Errors
 ///
-/// `pmcp::Error::validation` naming the contract, the violated key and the observed
-/// value; never the text.
+/// A bound refusal (`pmcp::Error::tool_rejected`) naming the contract, the violated key and
+/// the observed value; never the text.
 pub fn precheck(limits: &ClassifyLimits, args: &ClassifyArgs) -> pmcp::Result<()> {
     check_count(limits, args.texts.len())?;
     for (index, text) in args.texts.iter().enumerate() {
@@ -232,12 +239,12 @@ impl fmt::Display for ClassifyFailure {
 impl std::error::Error for ClassifyFailure {}
 
 impl ClassifyFailure {
-    /// Map onto the MCP error taxonomy: the caller-fixable budget refusal is a
-    /// validation error; everything else is internal.
+    /// Map onto the MCP error taxonomy: the caller-fixable budget refusal is a bound
+    /// refusal (an `isError` tool result); everything else is internal (JSON-RPC -32603).
     #[must_use]
     pub fn into_pmcp(self) -> pmcp::Error {
         match self {
-            Self::TokenBudget { .. } => pmcp::Error::validation(self.to_string()),
+            Self::TokenBudget { .. } => refusal(self.to_string()),
             other => pmcp::Error::internal(other.to_string()),
         }
     }
@@ -308,10 +315,11 @@ impl fmt::Display for Busy {
 impl std::error::Error for Busy {}
 
 impl Busy {
-    /// The refusal as an MCP validation error naming `classify_max_pending`.
+    /// The refusal as a bound refusal (an `isError` tool result) naming
+    /// `classify_max_pending`.
     #[must_use]
     pub fn into_pmcp(self) -> pmcp::Error {
-        pmcp::Error::validation(self.to_string())
+        refusal(self.to_string())
     }
 }
 
@@ -497,12 +505,45 @@ impl ClassifyResponse {
     }
 }
 
+/// The description's truncation sentence, DERIVED from the served window and the tier's
+/// budget (plan 08-28, A-derive; WR-03).
+///
+/// A truncated text builds a row of exactly `max_len` tokens (the artifact's
+/// `agent.max_len`). When that row fits `classify_max_total_tokens`, truncation is
+/// reachable and the sentence promises it. When it does not — Laya-en's 512-token window at
+/// the 3 008 MB tier's 120-token budget — every text long enough to be truncated is refused
+/// by the budget first, so the sentence says that instead of promising `truncated: true`.
+#[must_use]
+pub fn truncation_sentence(max_len: usize, limits: &ClassifyLimits) -> String {
+    if max_len <= limits.max_total_tokens {
+        "Long texts are truncated by the model itself to its window, and each such result \
+         reports `truncated: true`."
+            .to_string()
+    } else {
+        format!(
+            "A text whose built row would exceed the {budget}-token request budget is refused \
+             (classify_max_total_tokens) rather than truncated, because the model's own window \
+             ({max_len} tokens) is larger than that budget: send a shorter excerpt of a long \
+             document instead.",
+            budget = limits.max_total_tokens
+        )
+    }
+}
+
 /// The tool description, built FROM THE ARTIFACT: its question, its labels in order
-/// (with their criteria), the bounds, and the one-document guidance.
+/// (with their criteria), the bounds, the one-document guidance, and the truncation
+/// sentence derived from the artifact's window and the contracted budget
+/// ([`truncation_sentence`]).
 #[must_use]
 pub fn tool_description(model: &Model) -> String {
+    tool_description_for(model, &ClassifyLimits::CONTRACTED)
+}
+
+/// [`tool_description`] under `limits`. Private: the served description is always the
+/// contracted one; the unit tests shrink the budget to reach the other truncation branch.
+fn tool_description_for(model: &Model, limits: &ClassifyLimits) -> String {
     let task = model.task();
-    let limits = ClassifyLimits::CONTRACTED;
+    let truncation = truncation_sentence(model.manifest().agent.max_len, limits);
     let labels = task.labels().join(", ");
     let criteria: String = task
         .criteria()
@@ -518,8 +559,7 @@ pub fn tool_description(model: &Model) -> String {
          Each element of `texts` is ONE complete document (e.g. one whole customer message) \
          and yields exactly one decision — NEVER split a single document into multiple \
          elements (fragments decide worse than the whole) and never join separate documents \
-         into one element. Long texts are truncated by the model itself to its window, and \
-         each such result reports `truncated: true`. Returns `model` (the served artifact's \
+         into one element. {truncation} Returns `model` (the served artifact's \
          identity: artifact_sha256, recipe_id, method, base), `labels` (the order above), and \
          `results`, one per text in input order: `label` (the most probable), \
          `probabilities` (calibrated, one per label in `labels` order), `tokens`, \
@@ -570,8 +610,8 @@ impl ClassifyService {
     ///
     /// # Errors
     ///
-    /// Validation errors for every bound and for admission; internal errors for model
-    /// failures.
+    /// Bound refusals (`tool_rejected`) for every bound and for admission; internal errors
+    /// for model failures.
     pub async fn call(&self, args: ClassifyArgs) -> pmcp::Result<ClassifyResponse> {
         precheck(&self.limits, &args)?;
         let ticket = self.admission.try_admit().map_err(Busy::into_pmcp)?;
@@ -681,8 +721,8 @@ pub fn load_model_from_hashed(
 ///
 /// # Errors
 ///
-/// `pmcp::Error::validation` naming the contract (and, for the count, the violated key and
-/// the observed count); never the arguments.
+/// A bound refusal (`pmcp::Error::tool_rejected`) naming the contract (and, for the count,
+/// the violated key and the observed count); never the arguments.
 pub fn parse_args(args: serde_json::Value) -> pmcp::Result<ClassifyArgs> {
     if let Some(texts) = args.get("texts").and_then(serde_json::Value::as_array) {
         check_count(&ClassifyLimits::CONTRACTED, texts.len())?;
@@ -703,8 +743,10 @@ pub fn parse_args(args: serde_json::Value) -> pmcp::Result<ClassifyArgs> {
 ///
 /// # Errors
 ///
-/// `pmcp::Error` when the task cannot be prepared, or when the contracted count does not
-/// fit the budget for this artifact's task.
+/// `pmcp::Error::internal` when the task cannot be prepared; a bound refusal
+/// (`tool_rejected`, naming `classify_max_total_tokens`) when the contracted count does not
+/// fit the budget for this artifact's task. It is a BUILD-time refusal: it stops
+/// [`build_server`], so it never reaches a `tools/call`.
 pub fn check_served_task_fits(model: &Model, limits: &ClassifyLimits) -> pmcp::Result<usize> {
     let rows = model
         .prepare(&[String::new()])
@@ -712,7 +754,7 @@ pub fn check_served_task_fits(model: &Model, limits: &ClassifyLimits) -> pmcp::R
     let min_row = rows.first().map_or(0, PreparedRow::tokens);
     let need = min_row.saturating_mul(limits.max_texts);
     if need > limits.max_total_tokens {
-        return Err(pmcp::Error::internal(format!(
+        return Err(refusal(format!(
             "{TOOL_NAME}: the served task's shortest built row is {min_row} tokens, so \
              classify_max_texts {} needs {need} > classify_max_total_tokens {} ({CONTRACT}); \
              this artifact's task cannot be served at the contracted tier",
@@ -747,7 +789,7 @@ fn build_server_with_limits(
     version: &str,
 ) -> pmcp::Result<Server> {
     check_served_task_fits(&model, &limits)?;
-    let description = tool_description(&model);
+    let description = tool_description_for(&model, &limits);
     let service = ClassifyService::with_limits(model, limits);
     let tool = pmcp::SimpleTool::new(
         TOOL_NAME,

@@ -1,6 +1,6 @@
 contract: decide-tool-boundary
 metadata:
-  version: 5.0.0
+  version: 6.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -64,6 +64,21 @@ metadata:
     probe_id_header now also name `lambda_request_rows_are_swept`, where their hostile cases run
     since plan 08-24.
 
+    v6.0.0 (plan 08-28 Task 3, 2026-09-28; owner decision `A-derive B-iserror`, 08-CONTEXT.md
+    D-09 amendment "gap round 08-28"; one constant ADDED, none moved). (A-derive, WR-03) The
+    tool description promised "Long texts are truncated ... `truncated: true`" at a tier whose
+    120-token budget refuses every 512-token truncated row. The sentence is now DERIVED from the
+    served artifact's agent max_len against classify_max_total_tokens (served_fields
+    description.truncation). (B-iserror, V5-a) Every bound refusal was built as
+    pmcp::Error::validation, which pmcp 2.19.3 sends as JSON-RPC -32603 (Internal) while
+    `refusal_names_bound` called an internal code on a bound refusal a defect. Bound refusals are
+    now pmcp::Error::tool_rejected, which pmcp 2.19.3's tools/call dispatch sends as a SUCCESSFUL
+    result {isError: true, content: [{type: text, text: message}]} (src/server/mod.rs:2458;
+    measured on the wire over live stdio and over the Lambda crate's streamable-HTTP loopback);
+    model and internal failures stay -32603. `refusal_names_bound` also gains the minimum caller
+    text length `refusal_echo_min_chars` (A4-7), without which `texts: ["a"]` made it
+    unsatisfiable. The served surface changes only at the next deploy (plan 08-30).
+
     THE 3 008 MB TIER IS AN EXTRAPOLATION, SHOWN HERE SO THE LIVE SAMPLES CAN FALSIFY EACH TERM.
     Nothing was ever measured at 3 008 MB. Spike 026 measured the same Laya-en weights on default
     Lambda arm64 at 10 240 MB (6 vCPU) and 4 096 MB (4096 / 1769 = 2.315 vCPU), three forced cold
@@ -99,7 +114,12 @@ metadata:
           request would not be a legal request.
     Consequences at this tier: a legal request is one text of at most 120 built tokens (about 63
     tokens of state, a tweet) or two very short ones; a text long enough to be truncated (a row of
-    512) is always refused by the budget, so `truncated: true` is unreachable here. Peak RSS of the
+    512) is always refused by the budget, so `truncated: true` is unreachable here, and since
+    v6.0.0 the served tool description says so: its truncation sentence is derived from the
+    artifact's window and this budget (served_fields description.truncation), so at 3 008 MB it
+    tells the client that a text whose built row exceeds the 120-token budget is refused and to
+    send a shorter excerpt, and at the 10 240 MB target tier (1024 >= 512) it promises truncation
+    again with no edit. Peak RSS of the
     served model measured locally is 2.60-2.65 GB (load plus 2 x 390 tokens), about 350 MB under
     3 008 MB; spike 026 reported Lambda Max Memory Used 3.4-3.65 GB for its own implementation.
     Linux/Lambda memory overhead is unmeasured: an OOM at load is a deploy refusal, never a bound.
@@ -116,10 +136,11 @@ metadata:
     trusting the per-token price for either (`accepted_region_cold`), and every term of (b) is
     logged per cold sample (`decide.load ... download_ms sha_ms build_ms`), so a miss names its term.
 
-    REFUSE, NEVER DEFAULT, NEVER ECHO. Every refusal is `pmcp::Error::validation`, names this
-    contract file and the constant key it enforces, reports the OBSERVED value, and never echoes the
-    offending text (ASVS V7: an oversized string reflected back re-materialises the bytes the bound
-    refuses and puts attacker-controlled content in logs).
+    REFUSE, NEVER DEFAULT, NEVER ECHO. Every bound refusal is `pmcp::Error::tool_rejected` (an
+    `isError: true` tool result on the wire since v6.0.0), names this contract file and the
+    constant key it enforces, reports the OBSERVED value, and never echoes the offending text
+    (ASVS V7: an oversized string reflected back re-materialises the bytes the bound refuses and
+    puts attacker-controlled content in logs).
 
     PROVABILITY HONESTY. `cargo-kani` is not installed in this repository and there is not one
     `#[kani::proof]` harness anywhere under `crates/`. The `kani_harnesses:` entry below is DECLARED
@@ -176,6 +197,13 @@ constants:
   # empty texts to 456 tokens. classify_max_texts x this <= classify_max_total_tokens, and the
   # maximal-request builder refuses to emit a DISTRIBUTED request the budget would refuse.
   served_task_min_row_tokens: 57
+  # The SHORTEST caller text refusal_names_bound's no-echo clause quantifies over (v6.0.0, A4-7).
+  # A one-character text such as `a` occurs in every refusal message, so a clause over ANY
+  # non-empty text is unsatisfiable. 12 characters is past every short word and number the
+  # messages are built from (a, 2, text, texts, tokens, classify, exceeds, UTF-8, bytes); a longer
+  # text that is itself a fixed part of a template (the contract path, a constant key) is excluded
+  # by the clause's `distinctive` condition. The FALSIFY-DECIDE-TOOL-006 texts are exactly this long.
+  refusal_echo_min_chars: 12
   # ---- admission (per process) ----
   classify_max_in_flight: 1
   classify_max_pending: 4
@@ -245,6 +273,9 @@ served_fields:
   - path: description.bounds
     surface: tools_list
     source: 'ClassifyLimits::CONTRACTED, asserted EQUAL to this file''s constants (FALSIFY-DECIDE-TOOL-007)'
+  - path: description.truncation
+    surface: tools_list
+    source: 'aprender_mcp_decide::truncation_sentence(manifest.agent.max_len, ClassifyLimits::CONTRACTED): the artifact''s window (bound at rung 4 to the decide.agent_config blob) against classify_max_total_tokens — the truncation promise when a full-window row fits the budget, otherwise the refusal-and-excerpt sentence (v6.0.0, A-derive; tests::description_truncation_sentence_matches_tier)'
 
 # CLASS B (untrusted-input bounds, REQUEST half; plan 08-23). Every size or count taken from a
 # classify request, in the order the request meets it, with the bound that stops it before it
@@ -321,7 +352,7 @@ equations:
   classify_count_bound:
     formula: 'accept(req) requires classify_min_texts <= len(req.texts) <= classify_max_texts'
     domain: 'untrusted JSON-RPC `tools/call classify` arguments to aprender-mcp-decide or aprender-mcp-decide-lambda'
-    codomain: 'either the next bound is checked, or a pmcp::Error::validation naming classify_max_texts (or classify_min_texts) and the observed count'
+    codomain: 'either the next bound is checked, or a bound refusal (refusal_names_bound: an isError tool result) naming classify_max_texts (or classify_min_texts) and the observed count'
     invariants:
       - 'checked on the PARSED JSON ARRAY before any element is materialised as a String (aprender_mcp_decide::parse_args, plan 08-23): an oversized `texts` list is refused naming classify_max_texts whatever its elements are (three numbers included), before the argument shape is deserialized, and costs no per-element allocation (V5-c)'
       - 'what precedes it is the transport, not this bound: pmcp has already parsed the whole JSON-RPC frame into a JSON value. On stdio pmcp 2.19.3 has NO framing cap (untrusted_input_bounds frame_stdio, accepted); over HTTP StreamableHttpServerConfig::stateless() caps a request at 4 MiB (frame_http). So "an oversized list costs one length comparison" holds only for the work AFTER the frame parse'
@@ -334,7 +365,7 @@ equations:
   classify_text_bytes_bound:
     formula: 'accept(req) requires forall t in req.texts: len_utf8_bytes(t) <= classify_max_text_bytes'
     domain: 'each element of req.texts, an arbitrary-length String on both transports'
-    codomain: 'either tokenization proceeds, or a validation refusal naming the text INDEX, its observed byte length, the key classify_max_text_bytes and its value — never the text'
+    codomain: 'either tokenization proceeds, or a bound refusal naming the text INDEX, its observed byte length, the key classify_max_text_bytes and its value — never the text'
     invariants:
       - 'checked BEFORE tokenization: the tokenizer must read a whole text to find where 512 tokens end, so a byte bound is the only bound that can stop a long text from buying tokenizer CPU'
       - 'on BYTES, not chars: String::len is bytes and bytes are what the tokenizer walks'
@@ -345,7 +376,7 @@ equations:
   classify_token_budget:
     formula: 'accept(req) requires sum(len(build_row(task, t)) for t in req.texts) <= classify_max_total_tokens, where classify_max_total_tokens <= floor((api_gateway_timeout_ms - cold_start_budget_ms - probe_budget_ms - margin_ms) / tier_ms_per_token_at_512) = floor((30000 - 17000 - 3900 - 4000) / 40) = 127 at lambda_memory_mb 3008'
     domain: 'the built Laya rows of an admitted request (task prefix + markers + state, right-truncated to row_max_tokens)'
-    codomain: 'either the forward runs, or a validation refusal naming classify_max_total_tokens, the observed sum and the per-text built lengths — never the texts'
+    codomain: 'either the forward runs, or a bound refusal naming classify_max_total_tokens, the observed sum and the per-text built lengths — never the texts'
     invariants:
       - 'the unit is the BUILT ROW length — the ids the forward actually consumes, at most row_max_tokens per text — not the raw token count of the text, so a truncated text counts 512, not its raw length'
       - 'checked after tokenization and BEFORE any forward: a refused request costs tokenization only'
@@ -360,7 +391,7 @@ equations:
   classify_admission:
     formula: 'for every process p and every set of CONCURRENT callers of aprender_mcp_decide::ClassifyService::call on one service: running(p) <= classify_max_in_flight AND running(p) + waiting(p) <= classify_max_pending; a call arriving when running + waiting == classify_max_pending is refused immediately naming classify_max_pending'
     domain: 'concurrent callers of ClassifyService::call (the library door) sharing one Admission in one server process; through the shipped transports see the transport_dispatch invariant — pmcp 2.19.3 never makes those calls concurrent'
-    codomain: 'either an admission slot (the computation runs or waits in a bounded queue), or an immediate validation refusal naming classify_max_pending'
+    codomain: 'either an admission slot (the computation runs or waits in a bounded queue), or an immediate bound refusal naming classify_max_pending'
     invariants:
       - 'never queued without bound AT THE LIBRARY DOOR: the (classify_max_pending + 1)th concurrent caller of ClassifyService::call is refused at arrival, not parked (proven on Admission directly by the admission_* unit tests; with classify_max_pending 1, five concurrent ClassifyService::call futures on the tiny fixture gave 1 classified and 4 refused, measured by plan 08-28)'
       - 'transport_dispatch (plan 08-28, V5-b): pmcp 2.19.3 SERIALISES tool dispatch on both shipped transports, so at most one classify runs per process and the Busy refusal is NOT reachable from a transport. stdio (aprender-mcp-decide): Server::run hands every inbound request to ONE sequential worker (spawn_request_worker) over an UNBOUNDED channel, so frames a client pipelines wait inside pmcp, bounded only by that client (the local user; untrusted_input_bounds frame_stdio is the same accepted peer). Streamable HTTP (aprender-mcp-decide-lambda): the Server sits behind one tokio Mutex that is held across handle_request_with_context, i.e. across the tool future, so a second request waits for the lock (on Lambda one instance serves one invocation at a time anyway). Measured over live stdio by tests::pipelined_calls_are_serialized_not_refused: classify_max_pending + 1 frames written before any reply is read are all classified, in request order; with classify_max_pending lowered to 1 the same 5 pipelined frames were all classified (3 of 3 runs) where 5 concurrent library callers were 4 of 5 refused'
@@ -387,14 +418,18 @@ equations:
       - 'reproduces Laya''s RIGHT truncation: the state is cut from the end to fit the room the builder leaves after the task prefix and markers'
       - 'a text exactly filling the room is not truncated; one token more is (D-12)'
       - 'the flag is informational and never a refusal: truncation is Laya''s own semantics, served faithfully'
+      - 'the tool description promises the flag only where it is reachable (v6.0.0, A-derive): a truncated row is exactly the artifact''s max_len tokens, so the truncation sentence is served iff max_len <= classify_max_total_tokens, and otherwise the description says such a text is refused by the budget (served_fields description.truncation; tests::description_truncation_sentence_matches_tier covers both branches)'
 
   refusal_names_bound:
-    formula: 'forall refusal e: e.kind == pmcp::Error::validation AND e.message contains "decide-tool-boundary-v1" AND e.message contains the violated constant key AND forall t in req.texts with len(t) > 0: t is not a substring of e.message'
-    domain: 'every refusal the classify tool can produce'
-    codomain: 'a validation-class error whose message names the fix and carries no caller text'
+    formula: 'forall bound refusal e (count, argument shape, byte length, token budget, admission, and the build-time served-task fit): e == pmcp::Error::tool_rejected(e.message, None) AND e.message contains "decide-tool-boundary-v1" AND e.message contains the violated constant key AND forall t in req.texts with len_chars(t) >= refusal_echo_min_chars and t distinctive (not a substring of the refusal templates: the tool name, the contract path, the constant keys and the fixed sentences in aprender_mcp_decide): t is not a substring of e.message'
+    domain: 'every refusal the classify tool can produce for a request the caller can fix'
+    codomain: 'on the wire (pmcp 2.19.3, stdio and streamable HTTP alike): a SUCCESSFUL JSON-RPC response, no `error` member, whose result is {isError: true, content: [{type: text, text: e.message}]} with no structuredContent; the message names the fix and carries no caller text'
     invariants:
-      - 'the caller''s fault stays the caller''s fault: an internal code on any bound refusal is a defect'
-      - 'never echoes the offending text (ASVS V7): reflecting an oversized string re-materialises the refused bytes and puts attacker-controlled content into logs'
+      - 'the caller''s fault stays the caller''s fault (v6.0.0, B-iserror): a bound refusal is an in-band tool result the client can read and act on, never JSON-RPC -32603. pmcp 2.19.3''s tools/call dispatch maps Error::ToolRejected to CallToolResult::rejected (src/server/mod.rs:2458) and every other error to a JSON-RPC error; before v6.0.0 every refusal was pmcp::Error::validation and went out as -32603 (measured). Measured over live stdio by e2e_stdio bound_refusals_are_iserror_results_over_live_stdio (all six request-time bounds) and over the Lambda crate''s streamable-HTTP loopback by tests::loopback_bound_refusal_is_an_iserror_result'
+      - 'model and internal failures are NOT bound refusals and stay pmcp::Error::internal, i.e. JSON-RPC -32603 (a tokenizer refusal with its detail withheld, a forward failure, a label index outside the task, a blocking-task join failure): the caller cannot fix them (tests::error_taxonomy_budget_rejected_model_internal)'
+      - 'the served-task fit (classify_token_budget''s count-reachability invariant) is a bound refusal too, but at BUILD time: it stops build_server, so it reaches an operator''s startup log, never a tools/call'
+      - 'no `details`: the message is the whole refusal, so no structured copy exists that could drift from it or carry caller text'
+      - 'never echoes the offending text (ASVS V7): reflecting an oversized string re-materialises the refused bytes and puts attacker-controlled content into logs. The clause is over texts of at least refusal_echo_min_chars (12) characters that are distinctive, because a one-character text like `a`, or a text that IS a constant key, occurs in the message whatever the server does: the pre-v6.0.0 clause over every non-empty text was unsatisfiable (A4-7)'
       - 'reports OBSERVED values (count, byte length, token sum, index) so the caller learns exactly what to reduce'
 
   accepted_region_cold:
@@ -440,14 +475,14 @@ proof_obligations:
 
   - type: safety
     property: 'No refusal message contains caller text'
-    formal: 'forall req, e = refuse(req): forall t in req.texts, len(t) > 0: not substring(t, e.message)'
+    formal: 'forall req, e = refuse(req): forall t in req.texts, len_chars(t) >= refusal_echo_min_chars AND t distinctive: not substring(t, e.message)'
     applies_to: all
 
 falsification_tests:
 
   - id: FALSIFY-DECIDE-TOOL-001
     rule: 'The count bound admits N = classify_max_texts and refuses N + 1 and 0'
-    prediction: 'A request of classify_max_texts (2) short texts is classified; classify_max_texts + 1 (3) texts and an empty list are refused with validation errors naming classify_max_texts and classify_min_texts respectively.'
+    prediction: 'A request of classify_max_texts (2) short texts is classified; classify_max_texts + 1 (3) texts and an empty list are refused with bound refusals naming classify_max_texts and classify_min_texts respectively.'
     implemented_by: 'plan 08-06 (aprender-mcp-decide precheck tests); renamed from the 8/9-text names by the v2.0.0 tier amendment (plan 08-17) so the names hold at every tier'
     test: 'cargo test -p aprender-mcp-decide --lib tests::empty_texts_refused_naming_min_texts && cargo test -p aprender-mcp-decide --lib tests::one_over_max_texts_refused_naming_max_texts && cargo test -p aprender-mcp-decide --lib tests::max_texts_accepted_and_classified && cargo test -p aprender-mcp-decide --lib tests::count_is_checked_before_element_shapes'
     if_fails: 'The count bound is off by one or absent, so a request the token budget was never priced for reaches the forward.'
@@ -474,18 +509,18 @@ falsification_tests:
     if_fails: 'A map backing reordered the labels: every probability is now attributed to the wrong label and the argmax label may be wrong (RESEARCH Pitfall 2).'
 
   - id: FALSIFY-DECIDE-TOOL-005
-    rule: 'The truncation flag reproduces Laya''s right truncation'
-    prediction: 'A text longer than the state room returns truncated = true and tokens = row_max_tokens; a text exactly filling the room returns truncated = false.'
-    implemented_by: 'plan 08-06 (classify_response tests)'
-    test: 'cargo test -p aprender-mcp-decide --lib tests::truncation_flag_flips_one_past_the_room && cargo test -p aprender-mcp-decide --lib tests::long_text_truncated_short_text_not'
+    rule: 'The truncation flag reproduces Laya''s right truncation, and the tool description promises it only where the budget lets it happen'
+    prediction: 'A text longer than the state room returns truncated = true and tokens = row_max_tokens; a text exactly filling the room returns truncated = false. The served description carries the truncation sentence iff the artifact''s max_len <= classify_max_total_tokens (tiny window 64 at budget 120: promised; at budget 63: the refusal-and-excerpt sentence; Laya-en 512 at 120: refused, at 1024: promised).'
+    implemented_by: 'plan 08-06 (classify_response tests); plan 08-28 (the description branch, A-derive)'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::truncation_flag_flips_one_past_the_room && cargo test -p aprender-mcp-decide --lib tests::long_text_truncated_short_text_not && cargo test -p aprender-mcp-decide --lib tests::description_truncation_sentence_matches_tier'
     if_fails: 'The flag is computed from raw text length or the wrong room: callers cannot tell which answers were made on a cut text (D-12).'
 
   - id: FALSIFY-DECIDE-TOOL-006
-    rule: 'Every refusal names the contract key and omits the caller text'
-    prediction: 'For each refusal class, the validation message contains "decide-tool-boundary-v1" and the violated key, and does not contain the (distinctive) text sent.'
-    implemented_by: 'plan 08-06 (refusal tests)'
-    test: 'cargo test -p aprender-mcp-decide --lib tests::every_refusal_names_key_without_text && cargo test -p aprender-mcp-decide --lib tests::oversized_text_refused_without_echo'
-    if_fails: 'A refusal echoes caller text (ASVS V7) or leaves the caller guessing which bound fired.'
+    rule: 'Every bound refusal is an isError tool result that names the contract key and omits the caller text'
+    prediction: 'For each refusal class, the refusal is pmcp::Error::tool_rejected, its message contains "decide-tool-boundary-v1" and the violated key, and does not contain the distinctive text sent, which is exactly refusal_echo_min_chars (12) characters long. Over live stdio and over the Lambda crate''s HTTP loopback, each arrives as a successful tools/call result with isError true and the message as its one text content, never JSON-RPC -32603; a model failure stays internal.'
+    implemented_by: 'plan 08-06 (refusal tests); plan 08-28 (the isError wire shape, B-iserror, and the minimum text length, A4-7)'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::every_refusal_names_key_without_text && cargo test -p aprender-mcp-decide --lib tests::oversized_text_refused_without_echo && cargo test -p aprender-mcp-decide --lib tests::error_taxonomy_budget_rejected_model_internal && cargo test -p aprender-mcp-decide --test e2e_stdio bound_refusals_are_iserror_results_over_live_stdio && cargo test -p aprender-mcp-decide-lambda --lib tests::loopback_bound_refusal_is_an_iserror_result'
+    if_fails: 'A refusal echoes caller text (ASVS V7), leaves the caller guessing which bound fired, or reaches the client as a protocol failure (-32603) instead of a tool answer it can correct.'
 
   - id: FALSIFY-DECIDE-TOOL-007
     rule: 'Every Rust boundary constant, and the deployed Lambda memory, equals this file'
@@ -536,7 +571,8 @@ qa_gate:
     - 'count, byte and token-budget bounds each refuse one past and accept exactly-at'
     - 'response labels and probabilities ordered by task.json under both serde_json backings'
     - 'truncation flag on an over-room text'
-    - 'every refusal validation-class, naming the key, omitting the text'
+    - 'every bound refusal an isError tool result (tool_rejected) on both transports, naming the key, omitting the text; model failures internal'
+    - 'the served description promises truncation only when the artifact''s window fits the budget'
     - 'admission refuses the pending + 1th concurrent library caller and holds a slot until its blocking work ends; over live stdio pipelined calls are serialised by pmcp and all served in order'
     - 'LIVE, NOT IN CI: both maximal shapes complete cold under 30 s for every proven-cold sample, at lambda_memory_mb (plan 08-17)'
   pass_criteria: 'FALSIFY-DECIDE-TOOL-001..008 pass on every host and each has been observed RED under an induced negative; FALSIFY-DECIDE-TOOL-009 has live evidence for both shapes with every cold sample under api_gateway_timeout_ms.'

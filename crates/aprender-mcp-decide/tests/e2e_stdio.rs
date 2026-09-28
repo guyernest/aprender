@@ -163,17 +163,30 @@ fn payload(call: &serde_json::Value) -> serde_json::Value {
     serde_json::from_str(text).expect("classify payload is JSON")
 }
 
-/// The refusal message of a refused call (JSON-RPC error or an in-band tool error).
+/// The refusal message of a BOUND refusal, which must arrive in the wire shape
+/// `refusal_names_bound` states (plan 08-28, B-iserror): a SUCCESSFUL JSON-RPC response —
+/// no `error` member, so never -32603 — whose `result` is a tool result with
+/// `isError: true`, exactly one text content item carrying the message, and no
+/// `structuredContent` (the refusal has no second, structured copy that could drift).
 fn refusal(call: &serde_json::Value) -> String {
-    if let Some(message) = call["error"]["message"].as_str() {
-        return message.to_string();
-    }
-    assert_eq!(
-        call["result"]["isError"],
-        serde_json::json!(true),
-        "expected a refusal: {call:?}"
+    assert!(
+        call.get("error").is_none(),
+        "a bound refusal must not be a JSON-RPC error: {call}"
     );
-    call["result"]["content"][0]["text"]
+    let result = &call["result"];
+    assert_eq!(
+        result["isError"],
+        serde_json::json!(true),
+        "a bound refusal is an isError tool result: {call}"
+    );
+    assert!(
+        result.get("structuredContent").is_none(),
+        "no structured copy: {call}"
+    );
+    let content = result["content"].as_array().expect("content array");
+    assert_eq!(content.len(), 1, "one content item: {call}");
+    assert_eq!(content[0]["type"], "text", "text content: {call}");
+    content[0]["text"]
         .as_str()
         .expect("refusal text")
         .to_string()
@@ -361,12 +374,10 @@ fn the_tiny_decide_server_classifies_over_live_stdio() {
     );
 
     // Caller-supplied labels are a rejection, not a silently ignored knob (D-09).
-    let strict = client.call(serde_json::json!({ "texts": ["a"], "labels": ["x", "y"] }));
-    let refused =
-        strict.get("error").is_some() || strict["result"]["isError"] == serde_json::json!(true);
+    let strict = refusal(&client.call(serde_json::json!({ "texts": ["a"], "labels": ["x", "y"] })));
     assert!(
-        refused,
-        "an unknown key must be refused end-to-end: {strict:?}"
+        strict.contains("deny_unknown_fields"),
+        "an unknown key must be refused end-to-end: {strict}"
     );
 
     // A malformed argument is refused WITHOUT echoing caller text (refusal_names_bound, ASVS
@@ -420,7 +431,13 @@ fn pipelined_calls_are_serialized_not_refused() {
     let mut last_tokens = 0u64;
     for (i, id) in ids.iter().enumerate() {
         let reply = client.recv(&format!("pipelined call {i}"), CALL_TIMEOUT);
-        if let Some(message) = reply["error"]["message"].as_str() {
+        // A Busy refusal is a bound refusal: an isError tool result since plan 08-28
+        // (B-iserror); a JSON-RPC error is read too, so neither shape can hide one.
+        let refused = reply["error"]["message"].as_str().or_else(|| {
+            (reply["result"]["isError"] == serde_json::json!(true))
+                .then(|| reply["result"]["content"][0]["text"].as_str().unwrap_or(""))
+        });
+        if let Some(message) = refused {
             panic!(
                 "pipelined call {i} of {n} was refused (names classify_max_pending: {}): {message}",
                 message.contains("classify_max_pending")
@@ -448,6 +465,67 @@ fn pipelined_calls_are_serialized_not_refused() {
          all classified in request order",
         limits.max_pending
     );
+}
+
+/// `refusal_names_bound` over the SHIPPED transport (plan 08-28, B-iserror): every bound
+/// refusal the live stdio server can produce — both count bounds, the argument shape, the
+/// unknown key, the per-text byte bound and the token budget — arrives as a successful
+/// `tools/call` result with `isError: true` and its message as the one text content (the
+/// shape [`refusal`] asserts), never as JSON-RPC -32603. Each message names the contract and
+/// its key and carries none of the caller's 12-character distinctive text. A classify on
+/// the same connection afterwards still succeeds: an in-band refusal leaves the server
+/// serving.
+#[test]
+fn bound_refusals_are_iserror_results_over_live_stdio() {
+    const SECRET: &str = "ZQXJ-e2e-4kq";
+    let (_tmp, model) = packed_tiny();
+    let mut client = Client::spawn(&model);
+    let limits = aprender_mcp_decide::ClassifyLimits::CONTRACTED;
+
+    let over_count = vec![SECRET; limits.max_texts + 1];
+    let over_bytes = format!("{SECRET} {}", "y".repeat(limits.max_text_bytes));
+    // Two texts whose built rows are each the tiny 64-token window: 128 > 120.
+    let window_filler = format!("{SECRET} {}", "parcel ".repeat(200));
+    let mut unknown_key = serde_json::Map::new();
+    unknown_key.insert("texts".to_string(), serde_json::json!([SECRET]));
+    unknown_key.insert(SECRET.to_string(), serde_json::json!(1));
+    let cases = [
+        (
+            "classify_max_texts",
+            serde_json::json!({ "texts": over_count }),
+        ),
+        ("classify_min_texts", serde_json::json!({ "texts": [] })),
+        (
+            "deny_unknown_fields",
+            serde_json::json!({ "texts": SECRET }),
+        ),
+        (
+            "deny_unknown_fields",
+            serde_json::Value::Object(unknown_key),
+        ),
+        (
+            "classify_max_text_bytes",
+            serde_json::json!({ "texts": [over_bytes] }),
+        ),
+        (
+            "classify_max_total_tokens",
+            serde_json::json!({ "texts": [window_filler, window_filler] }),
+        ),
+    ];
+    for (key, arguments) in cases {
+        let message = refusal(&client.call(arguments));
+        assert!(
+            message.contains(key) && message.contains("decide-tool-boundary-v1"),
+            "{key}: the in-band refusal names its bound: {message}"
+        );
+        assert!(
+            !message.contains(SECRET),
+            "{key} echoed the text: {message}"
+        );
+    }
+    let out = payload(&client.call(serde_json::json!({ "texts": ["Where is my parcel?"] })));
+    assert_eq!(out["results"].as_array().map(Vec::len), Some(1));
+    println!("refusal_names_bound over live stdio: 6 bound refusals, each an isError result");
 }
 
 #[test]
