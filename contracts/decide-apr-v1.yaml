@@ -1,6 +1,6 @@
 contract: decide-apr
 metadata:
-  version: 1.0.0
+  version: 2.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -132,6 +132,18 @@ manifest:
   # a field of the decide.gate_report_json blob, `sha256:<blob>` the digest of that blob,
   # `derived:<what>` a value computed from sha-bound inputs. `source`: the same, in prose.
   bindings:
+    '/schema':
+      rung: 3
+      sources: ['derived:the rung-3 constant schema == decide-apr-v1']
+      source: 'rung-3 constant ARTIFACT_SCHEMA'
+    '/schema_version':
+      rung: 3
+      sources: ['derived:the rung-3 constant schema_version == 1']
+      source: 'rung-3 constant ARTIFACT_SCHEMA_VERSION'
+    '/method':
+      rung: 3
+      sources: ['derived:the rung-3 constant method in {laya}']
+      source: 'rung-3 constant METHOD_LAYA'
     '/variant':
       rung: 4
       sources: ['recipe:/variant']
@@ -154,8 +166,112 @@ manifest:
       source: 'decide.recipe_json blob base.revision'
     '/base/sha256':
       rung: 4
-      sources: ['recipe:/base/sha256']
-      source: 'decide.recipe_json blob base.sha256'
+      sources: ['recipe:/base/sha256', 'report:/inputs_sha256/base_model']
+      source: 'decide.recipe_json blob base.sha256 AND decide.gate_report_json inputs_sha256.base_model'
+    '/labels/[*]':
+      rung: 4
+      sources: ['derived:the decide.task_json blob criteria in document order']
+      source: 'labels parsed from the decide.task_json blob (D-05)'
+    '/agent/head_layers':
+      rung: 4
+      sources: ['derived:the decide.agent_config blob head_layers']
+      source: 'decide.agent_config blob'
+    '/agent/max_len':
+      rung: 4
+      sources: ['derived:the decide.agent_config blob max_len']
+      source: 'decide.agent_config blob'
+    '/agent/head_max_len':
+      rung: 4
+      sources: ['derived:the decide.agent_config blob head_max_len']
+      source: 'decide.agent_config blob'
+    '/blobs/[*]/name':
+      rung: 4
+      sources: ['derived:blob_tensors, in order']
+      source: 'the contract blob_tensors list'
+    '/blobs/[*]/sha256':
+      rung: 4
+      sources: ['derived:the sha256 of the blob tensor the entry names']
+      source: 'sha256 of the named blob tensor''s bytes'
+    '/recipe_id':
+      rung: 4
+      sources: ['sha256:decide.recipe_json', 'report:/recipe_id']
+      source: 'sha256 of the decide.recipe_json blob AND decide.gate_report_json recipe_id'
+    '/calibration/bucket':
+      rung: 4
+      sources: ['report:/calibration/bucket', 'derived:bucket_key(choice, K of the decide.task_json blob)']
+      source: 'decide.gate_report_json calibration.bucket AND the task''s own bucket key'
+    '/calibration/t_fitted':
+      rung: 4
+      sources: ['report:/calibration/t_fitted']
+      source: 'decide.gate_report_json calibration.t_fitted'
+    '/calibration/t_applied':
+      rung: 4
+      sources: ['report:/calibration/t_applied', 'derived:applied_temperature_f64(the decide.agent_config blob, choice, K of the decide.task_json blob)']
+      source: 'decide.gate_report_json calibration.t_applied AND applied temperature of the agent config blob for the task bucket (bit for bit: the temperature the loaded model applies)'
+    '/calibration/clamp_hit':
+      rung: 4
+      sources: ['report:/calibration/clamp_hit']
+      source: 'decide.gate_report_json calibration.clamp_hit'
+    '/calibration/slice_ids_sha256':
+      rung: 4
+      sources: ['report:/calibration/slice_ids_sha256']
+      source: 'decide.gate_report_json calibration.slice_ids_sha256'
+    '/gate/pass':
+      rung: 4
+      sources: ['report:/pass']
+      source: 'decide.gate_report_json pass'
+    '/gate/margin':
+      rung: 4
+      sources: ['report:/margin']
+      source: 'decide.gate_report_json margin (f64 bits)'
+    '/gate/ece_post':
+      rung: 4
+      sources: ['report:/fine_tuned/ece_post']
+      source: 'decide.gate_report_json fine_tuned.ece_post (f64 bits)'
+    '/gate/report_sha256':
+      rung: 4
+      sources: ['sha256:decide.gate_report_json']
+      source: 'sha256 of the decide.gate_report_json blob'
+    '/inputs_sha256/task_json':
+      rung: 4
+      sources: ['sha256:decide.task_json', 'report:/inputs_sha256/task_json']
+      source: 'sha256 of the decide.task_json blob AND decide.gate_report_json inputs_sha256.task_json'
+    '/inputs_sha256/train_jsonl':
+      rung: 4
+      sources: ['report:/inputs_sha256/train_jsonl']
+      source: 'decide.gate_report_json inputs_sha256.train_jsonl'
+    '/inputs_sha256/eval_jsonl':
+      rung: 4
+      sources: ['report:/inputs_sha256/eval_jsonl']
+      source: 'decide.gate_report_json inputs_sha256.eval_jsonl'
+    '/inputs_sha256/base_model':
+      rung: 4
+      sources: ['report:/inputs_sha256/base_model']
+      source: 'decide.gate_report_json inputs_sha256.base_model'
+    '/inputs_sha256/tokenizer_json':
+      rung: 4
+      sources: ['sha256:tokenizer.blob', 'report:/inputs_sha256/tokenizer_json']
+      source: 'sha256 of the tokenizer.blob blob AND decide.gate_report_json inputs_sha256.tokenizer_json'
+    '/device_used':
+      rung: 4
+      sources: ['report:/device_used']
+      source: 'decide.gate_report_json device_used'
+    '/probes/[*]/input_index':
+      rung: 7
+      sources: ['derived:rung-7 replay against the rebuilt model']
+      source: 'rung-7 probe replay (input order)'
+    '/probes/[*]/tokens':
+      rung: 7
+      sources: ['derived:rung-7 replay against the rebuilt model']
+      source: 'rung-7 probe replay (built-row length)'
+    '/probes/[*]/label':
+      rung: 7
+      sources: ['derived:rung-7 replay against the rebuilt model']
+      source: 'rung-7 probe replay (label exact)'
+    '/probes/[*]/probabilities_f32_hex/[*]':
+      rung: 7
+      sources: ['derived:rung-7 replay against the rebuilt model']
+      source: 'rung-7 probe replay within probe_probabilities_abs'
 
 blob_tensors:
   # U8 tensors, raw bytes, sha256 recorded in manifest.blobs, verified BEFORE any weight is installed.
@@ -232,7 +348,7 @@ deploy_eligibility:
   verify_checks:
     - 'the full load ladder'
     - 'recipe variant == production (laya-finetune-gate-v1 synthetic_not_deployable)'
-    - 'base sha256 equal to the manifest''s declared base'
+    - '(load, every door) the manifest''s base equals the embedded recipe blob''s base, field by field (rung 4, manifest.bindings); (verify, check_base) the recipe''s base.sha256 equals the laya-finetune-gate-v1 base pin and the base dir''s model.safetensors hashes to it, and the base tokenizer hashes to inputs_sha256.tokenizer_json. The recipe''s other base fields against that block, and the base dir''s remaining files against its pins, are plan 08-21 and are NOT checked yet'
     - 'data-dir hashes equal to the manifest''s inputs_sha256'
     - 'split re-verification (laya-finetune-gate-v1 split_disjointness)'
     - 'Rust re-score of every eval row — fine-tuned from the artifact, zero-shot from the base — within the noise-referenced bound(c, s) of laya-parity-v1 pack_rescore_probs_abs (floor 1.0e-5 when the run carries no rescore-noise.json record)'
@@ -264,9 +380,9 @@ equations:
     codomain: 'a typed manifest, or a rung-3 refusal'
 
   blob_integrity:
-    formula: 'forall b in blob_tensors: sha256(bytes(b)) == manifest.blobs[b] AND dtype(b) == U8'
+    formula: 'forall b in blob_tensors: sha256(bytes(b)) == manifest.blobs[b] AND dtype(b) == U8 AND forall leaf f in manifest.bindings: manifest[f] == source(f)'
     domain: 'the six blob tensors'
-    codomain: 'verified blobs, before any weight is installed, or a rung-4 refusal naming the blob'
+    codomain: 'verified blobs, before any weight is installed, and a manifest every leaf of which equals its sha-bound source; or a rung-4 refusal naming the blob or the manifest field (ManifestDisagreesWithBlob)'
 
   tensor_set_derived:
     formula: 'names(index) == expected_names(encoder_config, agent_config) ∪ blob_tensors AND forall e: e.size == product(e.shape) * width(e.dtype)'
@@ -446,6 +562,13 @@ falsification_tests:
     test: 'cargo test -p aprender-decide --lib verify::tests::synthetic_refused && cargo test -p aprender-decide --lib verify::tests::base_mismatch_contract && cargo test -p aprender-decide --lib verify::tests::forged_report'
     if_fails: 'A structurally valid artifact with plausible embedded metrics can be deployed without its gate ever being re-derived.'
 
+  - id: FALSIFY-DECIDE-APR-013
+    rule: 'Every manifest leaf is bound at load to a sha-bound source, on every load door'
+    prediction: 'For every leaf of the packed manifest and every source manifest.bindings names for it, a coherent forgery (all author-controlled hashes re-pinned) that breaks exactly that one binding is refused at the rung the table names; the table''s leaf set equals the manifest''s; a forged base is refused by load_bytes, load_hashed (the Lambda door) and load_path (the stdio door) alike.'
+    implemented_by: 'plan 08-19 (aprender_decide::artifact::check_manifest_bindings, rung 4 (e); the leaf sweep driven by manifest.bindings)'
+    test: 'cargo test -p aprender-decide --lib artifact::ladder::every_manifest_leaf_is_bound && cargo test -p aprender-decide --lib artifact::ladder::manifest_bindings_table_matches_manifest_leaves && cargo test -p aprender-decide --lib artifact::ladder::manifest_bound_at_every_load_door'
+    if_fails: 'A crafted .apr serves a manifest field (model.base in every classify response, the gate or calibration record a reader sees) that its own embedded blobs contradict.'
+
 kani_harnesses:
 
   # DECLARED, NOT EXECUTED. cargo-kani is not installed in this repository and no
@@ -485,12 +608,13 @@ qa_gate:
     - 'marker loss refused, shrunk tasks served'
     - 'bounded read and index-extent bound before any allocation'
     - 'every ladder rung refuses its induced negative'
+    - 'every manifest leaf bound at load to its sha-bound source (manifest.bindings)'
     - 'byte determinism across processes and backings'
     - 'pack-unpack closure; identity equals whole-file sha256'
     - 'probe replay against stored Python values, NaN-visible'
     - 'private mint (trybuild compile-fail)'
     - 'deployability only through pack_laya verify on the exact file'
-  pass_criteria: 'FALSIFY-DECIDE-APR-001..012 pass, each observed RED under its own induced negative.'
+  pass_criteria: 'FALSIFY-DECIDE-APR-001..013 pass, each observed RED under its own induced negative.'
   falsification: >
     Forge a 64-byte header with a valid CRC and tensor_count = 4097: rung 2 must refuse it before
     the index parser runs. Flip one byte of the decide.recipe_json blob: rung 4 must refuse naming

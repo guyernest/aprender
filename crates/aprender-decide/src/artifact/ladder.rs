@@ -1,5 +1,5 @@
-//! FALSIFY-DECIDE-APR-001/-008/-009/-011: every ladder rung refuses its own induced
-//! negative, naming the rung. Negatives are induced by editing the PACKED bytes (or by
+//! FALSIFY-DECIDE-APR-001/-008/-009/-011/-013: every ladder rung refuses its own induced
+//! negative, naming the rung, and every manifest leaf is bound to its sha-bound source. Negatives are induced by editing the PACKED bytes (or by
 //! packing a mutated in-memory [`PackInputs`]) — never by weakening a rung.
 
 use super::tests::pack_tiny;
@@ -14,6 +14,8 @@ use crate::test_support::fixture_dir;
 use aprender::format::v2::{
     AprV2Header, AprV2Metadata, AprV2ReaderRef, AprV2Writer, TensorDType, HEADER_SIZE_V2,
 };
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 type Tensors = Vec<(String, TensorDType, Vec<usize>, Vec<u8>)>;
@@ -626,6 +628,601 @@ fn manifest_bound_at_every_load_door() {
     let ok_path = dir.path().join("control.apr");
     std::fs::write(&ok_path, &ok).expect("write the control artifact");
     crate::Decider::load_path(&ok_path).expect("control: load_path");
+}
+
+// ---------------------------------------------------------------------------
+// Rung 4 (e): every manifest leaf, bound (plan 08-19 Task 2)
+// ---------------------------------------------------------------------------
+
+/// JSON-pointer edits: set each pointer to its value.
+type Edits = Vec<(String, Value)>;
+
+/// A COHERENT forgery. The artifact's author controls every blob and every hash, so a
+/// forger who edits the recipe or the gate report also re-pins what hashes them: the
+/// recipe's digest into `manifest.blobs`, `manifest.recipe_id` and the report's `recipe_id`;
+/// the report's digest into `manifest.blobs` and `manifest.gate.report_sha256`. Explicit
+/// report edits land after the recipe re-pin and explicit manifest edits land last, so an
+/// edit always wins over a re-pin. With no edits the bytes are unchanged.
+fn forge(
+    bytes: &[u8],
+    recipe: &[(String, Value)],
+    report: &[(String, Value)],
+    manifest: &[(String, Value)],
+) -> Vec<u8> {
+    let set = |v: &mut Value, edits: &[(String, Value)]| {
+        for (ptr, new) in edits {
+            *v.pointer_mut(ptr)
+                .unwrap_or_else(|| panic!("forge: no field {ptr}")) = new.clone();
+        }
+    };
+    let r = AprV2ReaderRef::from_bytes(bytes).expect("open the packed artifact");
+    let blob = |name: &str| r.get_tensor_data(name).expect("blob").to_vec();
+    let mut recipe_bytes = blob(super::RECIPE_BLOB);
+    let mut report_bytes = blob(super::GATE_REPORT_BLOB);
+    let mut pins = Edits::new();
+    let mut report_edits = Edits::new();
+    if !recipe.is_empty() {
+        let mut v: Value = serde_json::from_slice(&recipe_bytes).expect("recipe JSON");
+        set(&mut v, recipe);
+        recipe_bytes = serde_json::to_vec(&v).expect("recipe re-serializes");
+        let sha = Value::from(crate::pack::sha256_hex(&recipe_bytes));
+        pins.push(("/blobs/4/sha256".into(), sha.clone()));
+        pins.push(("/recipe_id".into(), sha.clone()));
+        report_edits.push(("/recipe_id".into(), sha));
+    }
+    report_edits.extend(report.iter().cloned());
+    if !report_edits.is_empty() {
+        let mut v: Value = serde_json::from_slice(&report_bytes).expect("report JSON");
+        set(&mut v, &report_edits);
+        report_bytes = serde_json::to_vec(&v).expect("report re-serializes");
+        let sha = Value::from(crate::pack::sha256_hex(&report_bytes));
+        pins.push(("/blobs/5/sha256".into(), sha.clone()));
+        pins.push(("/gate/report_sha256".into(), sha));
+    }
+    let swapped = repack(bytes, |_, tensors| {
+        for t in tensors.iter_mut() {
+            if t.0 == super::RECIPE_BLOB {
+                t.2 = vec![recipe_bytes.len()];
+                t.3 = recipe_bytes.clone();
+            } else if t.0 == super::GATE_REPORT_BLOB {
+                t.2 = vec![report_bytes.len()];
+                t.3 = report_bytes.clone();
+            }
+        }
+    });
+    let all: Edits = pins.into_iter().chain(manifest.iter().cloned()).collect();
+    if all.is_empty() {
+        return swapped;
+    }
+    edit_manifest(&swapped, |v| set(v, &all))
+}
+
+fn edits(pairs: &[(&str, Value)]) -> Edits {
+    pairs
+        .iter()
+        .map(|(p, v)| ((*p).to_string(), v.clone()))
+        .collect()
+}
+
+/// The packed tiny manifest as JSON.
+fn manifest_json(bytes: &[u8]) -> Value {
+    let m = super::inspect_manifest(bytes).expect("the packed manifest");
+    serde_json::to_value(m).expect("manifest to JSON")
+}
+
+/// A hex digest with its first digit changed (same length, still hex).
+fn flip_hex(h: &str) -> String {
+    let first = if h.starts_with('0') { '1' } else { '0' };
+    std::iter::once(first).chain(h.chars().skip(1)).collect()
+}
+
+fn is_hex_digest(s: &str) -> bool {
+    s.len() >= 8 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The sweep's deterministic mutation of one leaf. A stored probe probability moves at
+/// least 0.25, so rung 7 cannot accept it within probe_probabilities_abs.
+fn mutate(pattern: &str, v: &Value) -> Value {
+    if pattern.ends_with("/probabilities_f32_hex/[*]") {
+        let h = v.as_str().expect("probe hex");
+        let p = f32::from_bits(u32::from_str_radix(h, 16).expect("probe hex parses"));
+        let moved = if p >= 0.5 { p - 0.3 } else { p + 0.3 };
+        return Value::from(format!("{:08x}", moved.to_bits()));
+    }
+    match v {
+        Value::String(s) if is_hex_digest(s) => Value::from(flip_hex(s)),
+        Value::String(s) => Value::from(format!("{s}x")),
+        Value::Bool(b) => Value::from(!b),
+        Value::Number(n) if n.is_u64() => Value::from(n.as_u64().expect("u64") + 1),
+        Value::Number(n) if n.is_i64() => Value::from(n.as_i64().expect("i64") + 1),
+        Value::Number(n) => Value::from(n.as_f64().expect("f64") * 2.0 + 1.0),
+        other => panic!("mutate: {pattern} is not a leaf: {other}"),
+    }
+}
+
+/// Every leaf of `v` as `(pointer, pattern)`, the pattern with array indices as `[*]`.
+fn leaves(v: &Value, ptr: &str, pattern: &str, out: &mut Vec<(String, String)>) {
+    match v {
+        Value::Object(map) => {
+            for (k, child) in map {
+                leaves(child, &format!("{ptr}/{k}"), &format!("{pattern}/{k}"), out);
+            }
+        }
+        Value::Array(items) => {
+            for (i, child) in items.iter().enumerate() {
+                leaves(child, &format!("{ptr}/{i}"), &format!("{pattern}/[*]"), out);
+            }
+        }
+        _ => out.push((ptr.to_string(), pattern.to_string())),
+    }
+}
+
+/// One `manifest.bindings` row.
+struct Binding {
+    rung: u64,
+    sources: Vec<String>,
+}
+
+/// decide-apr-v1 `manifest.bindings`, read from the contract.
+fn bindings_table() -> BTreeMap<String, Binding> {
+    let c = crate::test_support::contract_yaml("decide-apr-v1.yaml");
+    c["manifest"]["bindings"]
+        .as_mapping()
+        .expect("decide-apr-v1 manifest.bindings")
+        .iter()
+        .map(|(k, row)| {
+            let leaf = k.as_str().expect("binding key").to_string();
+            let rung = row["rung"].as_u64().expect("binding rung");
+            let sources = row["sources"]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("{leaf}: sources"))
+                .iter()
+                .map(|s| s.as_str().expect("source string").to_string())
+                .collect();
+            (leaf, Binding { rung, sources })
+        })
+        .collect()
+}
+
+/// A settable node of the binding graph: a manifest leaf, or a field of the recipe or
+/// gate-report blob. Every other source (`sha256:`, `derived:`) is a FIXED value.
+fn settable(node: &str) -> bool {
+    ["manifest:", "recipe:", "report:"]
+        .iter()
+        .any(|p| node.starts_with(p))
+}
+
+/// The binding graph over concrete nodes: an edge per (manifest leaf, source).
+fn binding_edges(
+    leaf_ptrs: &[(String, String)],
+    table: &BTreeMap<String, Binding>,
+) -> Vec<(String, String)> {
+    let mut edges = Vec::new();
+    for (ptr, pattern) in leaf_ptrs {
+        if let Some(row) = table.get(pattern) {
+            for s in &row.sources {
+                edges.push((format!("manifest:{ptr}"), s.clone()));
+            }
+        }
+    }
+    edges
+}
+
+/// The settable nodes connected to `start` without crossing `skip`, and whether any of them
+/// is also tied to a fixed source (then the component cannot move as one).
+fn component(start: &str, edges: &[(String, String)], skip: usize) -> (BTreeSet<String>, bool) {
+    let mut seen = BTreeSet::from([start.to_string()]);
+    let mut todo = vec![start.to_string()];
+    let mut pinned = false;
+    while let Some(n) = todo.pop() {
+        for (i, (a, b)) in edges.iter().enumerate() {
+            if i == skip {
+                continue;
+            }
+            let other = if *a == n {
+                b
+            } else if *b == n {
+                a
+            } else {
+                continue;
+            };
+            if !settable(other) {
+                pinned = true;
+            } else if seen.insert(other.clone()) {
+                todo.push(other.clone());
+            }
+        }
+    }
+    (seen, pinned)
+}
+
+/// A forgery that breaks EXACTLY the one binding `edges[i]`: every other binding still
+/// holds. The component of the leaf (without edge i) moves to the mutated value as one; if
+/// that component is tied to a fixed source, the source's component moves instead.
+fn break_only(
+    bytes: &[u8],
+    edges: &[(String, String)],
+    i: usize,
+    pattern: &str,
+    old: &Value,
+) -> Vec<u8> {
+    let (leaf, source) = &edges[i];
+    let (comp, pinned) = component(leaf, edges, i);
+    let comp = if pinned {
+        assert!(
+            settable(source),
+            "{leaf} <-> {source}: both ends are fixed; no forgery breaks only this binding"
+        );
+        let (c, p) = component(source, edges, i);
+        assert!(
+            !p,
+            "{leaf} <-> {source}: both components are tied to a fixed source"
+        );
+        c
+    } else {
+        comp
+    };
+    let new = mutate(pattern, old);
+    let (mut recipe, mut report, mut manifest) = (Edits::new(), Edits::new(), Edits::new());
+    for node in comp {
+        let (kind, ptr) = node.split_once(':').expect("node kind");
+        let target = match kind {
+            "manifest" => &mut manifest,
+            "recipe" => &mut recipe,
+            "report" => &mut report,
+            other => panic!("{node}: {other} is not settable"),
+        };
+        target.push((ptr.to_string(), new.clone()));
+    }
+    forge(bytes, &recipe, &report, &manifest)
+}
+
+/// `/calibration/t_applied` -> `calibration.t_applied`.
+fn dotted(ptr: &str) -> String {
+    ptr.trim_start_matches('/').replace('/', ".")
+}
+
+fn rung_number(e: &ArtifactError) -> u64 {
+    e.rung()
+        .split(' ')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("{e}: not a load rung"))
+}
+
+/// The forge itself changes nothing: with no edits the bytes are byte-identical, and a
+/// recipe or report re-serialized with every hash re-pinned still loads.
+#[test]
+fn manifest_forge_control_loads() {
+    let b = packed();
+    assert_eq!(forge(&b, &[], &[], &[]), b, "no edits: byte-identical");
+    let r = forge(
+        &b,
+        &edits(&[("/seed", Value::from(20_260_925))]),
+        &edits(&[("/device_used", Value::from("cpu"))]),
+        &[],
+    );
+    assert_ne!(r, b, "the blobs were re-serialized and re-pinned");
+    load_verified(&r).expect("a coherent re-pin of unchanged values loads");
+}
+
+fn assert_field(bytes: &[u8], field: &'static str) {
+    let e = refuse(bytes);
+    assert_eq!(e, ArtifactError::ManifestDisagreesWithBlob { field }, "{e}");
+    assert_eq!(e.rung(), "4 structural");
+}
+
+/// `manifest.gate.report_sha256` must be the digest of the EMBEDDED gate report.
+#[test]
+fn manifest_gate_report_sha_disagrees_with_blob() {
+    let b = packed();
+    let m = manifest_json(&b);
+    let flipped = flip_hex(m["gate"]["report_sha256"].as_str().expect("sha"));
+    let f = forge(
+        &b,
+        &[],
+        &[],
+        &edits(&[("/gate/report_sha256", Value::from(flipped))]),
+    );
+    assert_field(&f, "gate.report_sha256");
+}
+
+/// `inputs_sha256.task_json` / `.tokenizer_json` must be the embedded blobs' digests — even
+/// when the embedded report agrees with the manifest's forged value.
+#[test]
+fn manifest_inputs_disagree_with_blobs() {
+    let b = packed();
+    let m = manifest_json(&b);
+    for (ptr, field) in [
+        ("/inputs_sha256/task_json", "inputs_sha256.task_json"),
+        (
+            "/inputs_sha256/tokenizer_json",
+            "inputs_sha256.tokenizer_json",
+        ),
+    ] {
+        let flipped = Value::from(flip_hex(m.pointer(ptr).and_then(Value::as_str).expect(ptr)));
+        let f = forge(
+            &b,
+            &[],
+            &edits(&[(ptr, flipped.clone())]),
+            &edits(&[(ptr, flipped)]),
+        );
+        assert_field(&f, field);
+    }
+}
+
+/// Every `inputs_sha256` field must equal the embedded report's.
+#[test]
+fn manifest_inputs_disagree_with_report() {
+    let b = packed();
+    let m = manifest_json(&b);
+    for (key, field) in [
+        ("task_json", "inputs_sha256.task_json"),
+        ("train_jsonl", "inputs_sha256.train_jsonl"),
+        ("eval_jsonl", "inputs_sha256.eval_jsonl"),
+        ("base_model", "inputs_sha256.base_model"),
+        ("tokenizer_json", "inputs_sha256.tokenizer_json"),
+    ] {
+        let ptr = format!("/inputs_sha256/{key}");
+        let flipped = Value::from(flip_hex(
+            m.pointer(&ptr).and_then(Value::as_str).expect("sha"),
+        ));
+        // The report side moves, so the blob-digest bindings still hold.
+        let f = forge(&b, &[], &edits(&[(&ptr, flipped)]), &[]);
+        assert_field(&f, field);
+    }
+}
+
+/// `base.sha256` must equal the report's `inputs_sha256.base_model`, even when the recipe
+/// (and so `manifest.base`) was re-pinned to agree with the forged value.
+#[test]
+fn manifest_base_sha_disagrees_with_report() {
+    let b = packed();
+    let m = manifest_json(&b);
+    let flipped = Value::from(flip_hex(m["base"]["sha256"].as_str().expect("sha")));
+    let f = forge(
+        &b,
+        &edits(&[("/base/sha256", flipped.clone())]),
+        &[],
+        &edits(&[("/base/sha256", flipped)]),
+    );
+    assert_field(&f, "base.sha256");
+}
+
+/// `recipe_id` must equal the embedded report's `recipe_id` (the recipe blob digest is
+/// already rung 4's RecipeIdMismatch).
+#[test]
+fn manifest_recipe_id_disagrees_with_report() {
+    let b = packed();
+    let m = manifest_json(&b);
+    let flipped = Value::from(flip_hex(m["recipe_id"].as_str().expect("recipe_id")));
+    let f = forge(&b, &[], &edits(&[("/recipe_id", flipped)]), &[]);
+    assert_field(&f, "recipe_id");
+}
+
+/// `gate.pass` / `gate.margin` / `gate.ece_post` must equal the embedded report's (f64 bits).
+#[test]
+fn manifest_gate_summary_disagrees_with_report() {
+    let b = packed();
+    for (ptr, new, field) in [
+        ("/gate/pass", Value::from(true), "gate.pass"),
+        ("/gate/margin", Value::from(0.25), "gate.margin"),
+        ("/gate/ece_post", Value::from(0.01), "gate.ece_post"),
+    ] {
+        let f = forge(&b, &[], &[], &edits(&[(ptr, new)]));
+        assert_field(&f, field);
+    }
+}
+
+/// Every calibration field must equal the embedded report's calibration block.
+#[test]
+fn manifest_calibration_disagrees_with_report() {
+    let b = packed();
+    for (ptr, report_ptr, new, field) in [
+        (
+            "/calibration/t_fitted",
+            "",
+            Value::from(1.5),
+            "calibration.t_fitted",
+        ),
+        (
+            "/calibration/clamp_hit",
+            "",
+            Value::from(true),
+            "calibration.clamp_hit",
+        ),
+        (
+            "/calibration/slice_ids_sha256",
+            "",
+            Value::from("0".repeat(64)),
+            "calibration.slice_ids_sha256",
+        ),
+        // bucket and t_applied are also bound to the task / agent config, so the REPORT
+        // moves and the manifest keeps the value the model actually runs with.
+        (
+            "",
+            "/calibration/bucket",
+            Value::from("choice:2"),
+            "calibration.bucket",
+        ),
+        (
+            "",
+            "/calibration/t_applied",
+            Value::from(1.5),
+            "calibration.t_applied",
+        ),
+    ] {
+        let report = if report_ptr.is_empty() {
+            Edits::new()
+        } else {
+            edits(&[(report_ptr, new.clone())])
+        };
+        let manifest = if ptr.is_empty() {
+            Edits::new()
+        } else {
+            edits(&[(ptr, new.clone())])
+        };
+        let f = forge(&b, &[], &report, &manifest);
+        assert_field(&f, field);
+    }
+}
+
+/// `calibration.bucket` must be the task's bucket (`bucket_key(choice, K)`), even when the
+/// embedded report agrees with the forged value.
+#[test]
+fn manifest_calibration_bucket_disagrees_with_task() {
+    let b = packed();
+    let wrong = edits(&[("/calibration/bucket", Value::from("choice:2"))]);
+    let f = forge(&b, &[], &wrong, &wrong);
+    assert_field(&f, "calibration.bucket");
+}
+
+/// `calibration.t_applied` must be, bit for bit, the temperature the loaded model applies
+/// to the task (the agent config's clamped bucket lookup), even when the report agrees.
+#[test]
+fn manifest_t_applied_disagrees_with_agent() {
+    let b = packed();
+    // 1.5 is a real temperature of the tiny agent config, for another bucket (choice:2).
+    let wrong = edits(&[("/calibration/t_applied", Value::from(1.5))]);
+    let f = forge(&b, &[], &wrong, &wrong);
+    assert_field(&f, "calibration.t_applied");
+    // One ULP away is still a different temperature.
+    let m = manifest_json(&b);
+    let t = m["calibration"]["t_applied"].as_f64().expect("t_applied");
+    let ulp = edits(&[(
+        "/calibration/t_applied",
+        Value::from(f64::from_bits(t.to_bits() + 1)),
+    )]);
+    assert_field(&forge(&b, &[], &ulp, &ulp), "calibration.t_applied");
+}
+
+/// `device_used` must equal the embedded report's.
+#[test]
+fn manifest_device_used_disagrees_with_report() {
+    let b = packed();
+    let f = forge(
+        &b,
+        &[],
+        &[],
+        &edits(&[("/device_used", Value::from("mps:0"))]),
+    );
+    assert_field(&f, "device_used");
+}
+
+/// FALSIFY-DECIDE-APR-013: EVERY leaf of the packed manifest, for EVERY binding the
+/// contract table names for it, is forged so that exactly that one binding breaks — and
+/// the ladder must refuse it at the table's rung. A binding whose check is disabled lets
+/// its forgery load, which this test names.
+#[test]
+fn every_manifest_leaf_is_bound() {
+    let b = packed();
+    let m = manifest_json(&b);
+    let mut ptrs = Vec::new();
+    leaves(&m, "", "", &mut ptrs);
+    let table = bindings_table();
+    let edges = binding_edges(&ptrs, &table);
+    let pattern_of: BTreeMap<&str, &str> = ptrs
+        .iter()
+        .map(|(p, pat)| (p.as_str(), pat.as_str()))
+        .collect();
+    let mut failures = Vec::new();
+    for (i, (leaf, source)) in edges.iter().enumerate() {
+        let ptr = leaf.trim_start_matches("manifest:");
+        let pattern = pattern_of[ptr];
+        let row = &table[pattern];
+        let old = m.pointer(ptr).expect("leaf value");
+        let forged = break_only(&b, &edges, i, pattern, old);
+        match load_verified(&forged) {
+            Ok(_) => failures.push(format!(
+                "{ptr} <-> {source}: LOADED after the binding was broken"
+            )),
+            Err(e) => {
+                let rung = rung_number(&e);
+                if rung != row.rung {
+                    failures.push(format!(
+                        "{ptr} <-> {source}: refused at rung {rung}, the table names {}: {e}",
+                        row.rung
+                    ));
+                }
+                if let ArtifactError::ManifestDisagreesWithBlob { field } = &e {
+                    let d = dotted(ptr);
+                    if !(d == *field || d.starts_with(&format!("{field}."))) {
+                        failures.push(format!(
+                            "{ptr} <-> {source}: refused naming another field: {e}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "every_manifest_leaf_is_bound: {} bindings over {} leaves",
+        edges.len(),
+        ptrs.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "unbound manifest leaves:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The contract table and the manifest agree leaf for leaf: a stale row, or a manifest leaf
+/// added without a binding, fails here naming it. Every source is a known kind and every
+/// `recipe:` / `report:` pointer resolves in the embedded blobs.
+#[test]
+fn manifest_bindings_table_matches_manifest_leaves() {
+    let b = packed();
+    let mut ptrs = Vec::new();
+    leaves(&manifest_json(&b), "", "", &mut ptrs);
+    let observed: BTreeSet<String> = ptrs.into_iter().map(|(_, p)| p).collect();
+    let table = bindings_table();
+    let listed: BTreeSet<String> = table.keys().cloned().collect();
+    let unbound: Vec<_> = observed.difference(&listed).collect();
+    let stale: Vec<_> = listed.difference(&observed).collect();
+    assert!(
+        unbound.is_empty(),
+        "manifest leaves with no manifest.bindings row: {unbound:?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "manifest.bindings rows for no manifest leaf: {stale:?}"
+    );
+
+    let r = AprV2ReaderRef::from_bytes(&b).expect("open the packed artifact");
+    let json = |name: &str| -> Value {
+        serde_json::from_slice(r.get_tensor_data(name).expect("blob")).expect("blob JSON")
+    };
+    let (recipe, report) = (json(super::RECIPE_BLOB), json(super::GATE_REPORT_BLOB));
+    for (leaf, row) in &table {
+        assert!([3, 4, 7].contains(&row.rung), "{leaf}: rung {}", row.rung);
+        assert!(!row.sources.is_empty(), "{leaf}: no source");
+        for s in &row.sources {
+            let (kind, rest) = s
+                .split_once(':')
+                .unwrap_or_else(|| panic!("{leaf}: source {s} has no kind"));
+            match kind {
+                "recipe" => assert!(
+                    recipe.pointer(rest).is_some(),
+                    "{leaf}: {s} is not in the recipe blob"
+                ),
+                "report" => assert!(
+                    report.pointer(rest).is_some(),
+                    "{leaf}: {s} is not in the gate report"
+                ),
+                "sha256" => assert!(
+                    super::BLOB_TENSORS.contains(&rest),
+                    "{leaf}: {s} names no blob"
+                ),
+                "derived" => assert!(!rest.trim().is_empty(), "{leaf}: {s} says nothing"),
+                other => panic!("{leaf}: unknown source kind {other}"),
+            }
+            assert!(
+                !leaf.contains("[*]") || !settable(s),
+                "{leaf}: an array leaf may only bind to a fixed source, not {s}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -36,18 +36,27 @@ pub fn clamp_temperature(t: f64) -> f64 {
     }
 }
 
-/// The temperature Laya applies to a `qtype` question with `k` options:
-/// `temperature_by_options[bucket]`, else `temperature[qtype]`, else 1.0 — clamped.
+/// The temperature Laya applies to a `qtype` question with `k` options, as the f64 the
+/// agent config declares: `temperature_by_options[bucket]`, else `temperature[qtype]`,
+/// else 1.0 — clamped. The ONE definition: [`temperature_for`] casts it for the forward,
+/// and load rung 4 compares `manifest.calibration.t_applied` to it bit for bit.
 #[must_use]
-pub fn temperature_for(agent: &AgentConfig, qtype: QType, k: usize) -> f32 {
+pub(crate) fn applied_temperature_f64(agent: &AgentConfig, qtype: QType, k: usize) -> f64 {
     let t = agent
         .temperature_by_options
         .get(&bucket_key(qtype, k))
         .or_else(|| agent.temperature.get(qtype.index()))
         .copied()
         .unwrap_or(1.0);
+    clamp_temperature(t)
+}
+
+/// The temperature Laya applies to a `qtype` question with `k` options:
+/// `temperature_by_options[bucket]`, else `temperature[qtype]`, else 1.0 — clamped.
+#[must_use]
+pub fn temperature_for(agent: &AgentConfig, qtype: QType, k: usize) -> f32 {
     // Laya divides an f32 logit tensor by this Python float; the division runs in f32.
-    clamp_temperature(t) as f32
+    applied_temperature_f64(agent, qtype, k) as f32
 }
 
 /// `softmax(z / t)` with the spike's f64 accumulation (max-shifted in f32).

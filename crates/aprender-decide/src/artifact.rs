@@ -34,13 +34,16 @@
 //! 2. header and index extent, BEFORE any index parser runs
 //! 3. `model_type`, exactly one custom key, the manifest (`deny_unknown_fields`)
 //! 4. structure: blob hashes, the architecture-derived tensor set, per-entry sizes,
-//!    task labels == manifest labels
+//!    task labels == manifest labels, and every other manifest field equal to the
+//!    sha-bound source decide-apr-v1 `manifest.bindings` names (recipe, gate report,
+//!    blob digests, the task's bucket and the agent config's applied temperature)
 //! 5. non-finite scan
 //! 6. rebuild ([`Laya::from_parts`] over the zero-copy [`AprV2ReaderRef`])
 //! 7. probe replay against the stored Python values
 //! 8. mint — [`Decider`] has private fields, and this module is its only constructor.
 
-use crate::laya::{AgentConfig, Laya};
+use crate::laya::temperature::{applied_temperature_f64, bucket_key};
+use crate::laya::{AgentConfig, Laya, QType};
 use crate::pack::{sha256_hex, CheckpointTensor, PackInputs};
 use crate::{DecideError, Decider, DecisionMethod, ModelIdentity, Task, TaskError};
 use aprender::format::v2::{
@@ -1416,9 +1419,9 @@ fn rung4_structure<'r>(
             });
         }
     }
-    let [tokenizer, task_bytes, encoder_config_bytes, agent_config_bytes, recipe, _gate_report] =
+    let [tokenizer, task_bytes, encoder_config_bytes, agent_config_bytes, recipe, gate_report] =
         data;
-    let [_, _, _, _, recipe_sha, _] = sha;
+    let [tokenizer_sha, task_sha, _, _, recipe_sha, gate_report_sha] = sha;
     if recipe_sha != manifest.recipe_id {
         return Err(ArtifactError::RecipeIdMismatch {
             manifest: manifest.recipe_id.clone(),
@@ -1469,7 +1472,18 @@ fn rung4_structure<'r>(
 
     // (e) Every other manifest field equals the sha-bound source it summarises
     //     (decide-apr-v1 `manifest.bindings`).
-    check_manifest_bindings(manifest, &BoundSources { recipe })?;
+    check_manifest_bindings(
+        manifest,
+        &BoundSources {
+            recipe,
+            gate_report,
+            gate_report_sha: &gate_report_sha,
+            task_sha: &task_sha,
+            tokenizer_sha: &tokenizer_sha,
+            task: &task,
+            agent: &agent,
+        },
+    )?;
     Ok(Blobs {
         tokenizer,
         task,
@@ -1483,6 +1497,18 @@ fn rung4_structure<'r>(
 /// task and agent config the model will run with.
 struct BoundSources<'a> {
     recipe: &'a [u8],
+    gate_report: &'a [u8],
+    gate_report_sha: &'a str,
+    task_sha: &'a str,
+    tokenizer_sha: &'a str,
+    task: &'a Task,
+    agent: &'a AgentConfig,
+}
+
+/// f64 equality on the bit pattern: what the report records is what the manifest says,
+/// exactly; a NaN is never equal to anything.
+fn same_f64(a: f64, b: f64) -> bool {
+    !a.is_nan() && a.to_bits() == b.to_bits()
 }
 
 /// Rung 4 (e): every manifest field that is not already bound by rungs 3, 4 (a)-(d) or 7
@@ -1496,10 +1522,76 @@ fn check_manifest_bindings(m: &Manifest, src: &BoundSources<'_>) -> Result<(), A
             blob: RECIPE_BLOB,
             reason: e.to_string(),
         })?;
-    // One line per comparison, so each can be disabled on its own (plan 08-19 mutation proof).
-    let checks: [(&'static str, bool); 2] = [
+    let report: crate::pack::GateReport =
+        serde_json::from_slice(src.gate_report).map_err(|e| ArtifactError::ConfigBlob {
+            blob: GATE_REPORT_BLOB,
+            reason: e.to_string(),
+        })?;
+    let (inputs, r_in) = (&m.inputs_sha256, &report.inputs_sha256);
+    let (cal, r_cal) = (&m.calibration, &report.calibration);
+    // The task this model answers: `choice` (the only D-05 type) with K = its criteria.
+    let k = src.task.criteria().len();
+    let bucket = bucket_key(QType::Choice, k);
+    let applied = applied_temperature_f64(src.agent, QType::Choice, k);
+    // One entry per comparison, so each can be disabled on its own (plan 08-19 mutation
+    // proof); the first disagreement in this order is the refusal.
+    let checks: [(&'static str, bool); 23] = [
         ("variant", m.variant == recipe.variant),
         ("base", m.base == recipe.base),
+        (
+            "gate.report_sha256",
+            m.gate.report_sha256 == src.gate_report_sha,
+        ),
+        ("inputs_sha256.task_json", inputs.task_json == src.task_sha),
+        (
+            "inputs_sha256.tokenizer_json",
+            inputs.tokenizer_json == src.tokenizer_sha,
+        ),
+        (
+            "inputs_sha256.task_json",
+            inputs.task_json == r_in.task_json,
+        ),
+        (
+            "inputs_sha256.train_jsonl",
+            inputs.train_jsonl == r_in.train_jsonl,
+        ),
+        (
+            "inputs_sha256.eval_jsonl",
+            inputs.eval_jsonl == r_in.eval_jsonl,
+        ),
+        (
+            "inputs_sha256.base_model",
+            inputs.base_model == r_in.base_model,
+        ),
+        (
+            "inputs_sha256.tokenizer_json",
+            inputs.tokenizer_json == r_in.tokenizer_json,
+        ),
+        ("base.sha256", m.base.sha256 == r_in.base_model),
+        ("recipe_id", m.recipe_id == report.recipe_id),
+        ("gate.pass", m.gate.pass == report.pass),
+        ("gate.margin", same_f64(m.gate.margin, report.margin)),
+        (
+            "gate.ece_post",
+            same_f64(m.gate.ece_post, report.fine_tuned.ece_post),
+        ),
+        ("calibration.bucket", cal.bucket == r_cal.bucket),
+        (
+            "calibration.t_fitted",
+            same_f64(cal.t_fitted, r_cal.t_fitted),
+        ),
+        (
+            "calibration.t_applied",
+            same_f64(cal.t_applied, r_cal.t_applied),
+        ),
+        ("calibration.clamp_hit", cal.clamp_hit == r_cal.clamp_hit),
+        (
+            "calibration.slice_ids_sha256",
+            cal.slice_ids_sha256 == r_cal.slice_ids_sha256,
+        ),
+        ("calibration.bucket", cal.bucket == bucket),
+        ("calibration.t_applied", same_f64(cal.t_applied, applied)),
+        ("device_used", m.device_used == report.device_used),
     ];
     match checks.iter().find(|(_, agrees)| !agrees) {
         Some(&(field, _)) => Err(ArtifactError::ManifestDisagreesWithBlob { field }),
