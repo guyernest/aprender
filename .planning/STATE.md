@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: Completed 08-23-PLAN.md (class A served_fields + class B untrusted_input_bounds on aprender-mcp-decide; count-first parse_args; clap argv; unwrap ban restored; 7 mutations RED)
-last_updated: "2026-09-28T19:19:32.258Z"
+stopped_at: "Completed 08-25-PLAN.md (probe identity: response_labels_match in ok(), exact labels-segment parse, check_token_budget shared, args_os exit 2, template comments; 5 mutations RED)"
+last_updated: "2026-09-28T19:34:16.412Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: 00938dac130a236f038fef50badc9a5ee004a4d2
+state_head: c30e1e8e66cf1bd89961c08721793c0bac2dea96
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 115
+  completed_plans: 116
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 23 of 32 complete (08-01..08-23) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-23 COMPLETE (class A served half + class B request half on aprender-mcp-decide: parse_args checks the texts COUNT on the JSON array before any String (V5-c; live-stdio leg, RED when removed); one check_count refusal shared with precheck; clap derive argv (parser guard 5 -> 4, aprender-mcp-decide gone; V14-c); crate-wide disallowed_methods allow removed, only `mod args` carries it (IN-05; planted unwrap fails clippy, old allow hid it); decide-tool-boundary-v1 4.0.0 with served_fields (9 response + 3 tools/list rows, artifact_sha256 vs independent sha2) and untrusted_input_bounds (9 rows: swept=6 accepted=1 external=2); 5 code + 2 table mutations RED; Lambda crate untouched, 31/31); next 08-24
+Plan: 24 of 32 complete (08-01..08-23, 08-25; 08-25 ran before 08-24 by wave order) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-25 COMPLETE (deploy-evidence half of class A on the probe: ProbeReport.response_labels_match, ok() = AND of one-classify-tool, exact labels segment, response labels, sha256 (V12-a); labels_in_order parses the literal `The labels, in this order: [...]` segment (IN-03; the old walk accepted [billing, shipping, account] on the real tiny description via the criteria lines); build_maximal_request decides fit with check_token_budget and OverBudget carries the server's refusal (R6); probe example args_os, non-UTF-8 argv exit 2 (old build 101, V12-c); deploy.toml.template comments: POST identity probe is the tell, shared crates root (IN-04), non-comment lines cmp-identical; 5 mutations RED + 1 equivalent survivor recorded; 35/35 lib tests; no AWS); next 08-24
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -236,6 +236,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P21 | 50min | 3 tasks | 7 files |
 | Phase 08 P22 | 102min | 3 tasks | 7 files |
 | Phase 08 P23 | 17min | 3 tasks | 7 files |
+| Phase 08 P25 | 12min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -446,6 +447,7 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-22: laya gate enumeration is fail-closed (exit/FAIL/exec/verdict token); an exec-ing recipe cannot be not-a-gate; heavy must-pass cases are a named FULL tier (LAYA_GATES_FULL=1) listed in the default OK line
 - [Phase 08]: 08-23: decide-tool-boundary-v1 4.0.0 (pv diff MAJOR on the classify_count_bound invariant); served_fields and untrusted_input_bounds are top-level tables pv ignores and a crate test sweeps row by row (unknown id or row without a case fails)
 - [Phase 08]: 08-23: frame_stdio accepted (pmcp 2.19.3 has no stdio framing cap; local transport); the sweep asserts the count bound on a 100000-element parsed array and pins pmcp 2.19.3 in Cargo.lock so a bump re-opens it
+- [Phase 08]: 08-25: the deploy probe's ok() is the AND of four checks against the local artifact (one classify tool, exact labels segment, response labels, sha256); MaximalError::OverBudget carries the server's check_token_budget refusal verbatim (one budget function)
 
 ### Pending Todos
 
@@ -561,8 +563,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-28T19:19:02.228Z
-Stopped at: Completed 08-23-PLAN.md (class A served_fields + class B untrusted_input_bounds on aprender-mcp-decide; count-first parse_args; clap argv; unwrap ban restored; 7 mutations RED)
+Last session: 2026-09-28T19:34:16.212Z
+Stopped at: Completed 08-25-PLAN.md (probe identity: response_labels_match in ok(), exact labels-segment parse, check_token_budget shared, args_os exit 2, template comments; 5 mutations RED)
 Resume file: None
 
 ## Accumulated Context
