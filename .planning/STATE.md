@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Completed 08-27-PLAN.md (class E numeric agreement: f64 exactly-summed macro-F1/ECE/f_avg/margin/rank_key in Rust and Python, 23-case frozen file bit for bit, check_f_avg, laya-finetune-gate-v1 4.0.0; deployed 24a44d7e eligible seed 17)"
-last_updated: "2026-09-28T21:41:00.016Z"
+stopped_at: "Completed 08-29-PLAN.md (class E, Python half: typed contract reader with float noise k, Rust str::lines row split, row-encoding / early-stopping typed refusals, python_refusals 35-row table swept 42+5, laya-finetune-gate-v1 5.0.0 best-anchored early-stopping text)"
+last_updated: "2026-09-28T22:13:09.411Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: 97034f84b284917d0cfa8a0cdb886f9ef2d67899
+state_head: 1c8ff55f00a85d2ed788693571ed4aeafc41b4c5
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 119
+  completed_plans: 120
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 27 of 32 complete (08-01..08-27; 08-25 ran before 08-24 by wave order) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-27 COMPLETE (class E, numeric half: every gate quantity — macro-F1, f_avg, top-label ECE, margin, rank key — is one f64 computation with exactly-rounded sums in both languages (aprender-core metrics::fsum = math.fsum; macro_f1_f64, mean_f1_over_labels_f64, expected_calibration_error_top_label_f64 ADDED beside the f32 fns, whose bits are frozen by f32_bits_tests committed alone at e5edfef6a); scripts/laya_train/numeric_cases.json 23 cases (9-row / 30-row exact-1/20 margins, 459x3 rank grid-line ECE, 20 random) replayed bit for bit by metrics.py --selftest and verify gate_numeric_cases_agree_bit_for_bit (130 quantities); check_f_avg binds the 5 f_avg rows (sweep bound=91 expected_open=0); laya-finetune-gate-v1 4.0.0 numeric_agreement; mutations RED on both sides (per-bin conf-sum mutants proved equivalent, 287/287 exact); deployed 24a44d7e eligible seed 17, rank keys 849/442/371 unchanged; vectors REFUSED 2/2; python_records MEDIAN 23/23); next 08-28
+Plan: 28 of 32 complete (08-01..08-27 and 08-29; 08-25 ran before 08-24 by wave order; 08-28 is open in Wave 19) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-29 COMPLETE (class E, Python half: contract.number is the one typed reader for every contract number (ContractValueError, REFUSED contract-value; noise k written as the float 4.0 Rust compares bit for bit, armed python_records NOISE x2 + MEDIAN 23/23); data.jsonl_lines == Rust str::lines (U+0085/2028/2029 one row); <role>-row-encoding refusals (invalid UTF-8, lone surrogate); EarlyStopper.record REFUSED early-stopping and train.py exit 2; laya-finetune-gate-v1 5.0.0 states ONE early-stopping rule, best-anchored, the rule of record (gate.py 24cea2a63; seed-17 trace replays 2/5/patience; [1.0,0.9993,0.9988] distinguishes 3/1/2); python_refusals 35 rows swept 42 in-process + 5 lifecycle, CLI boundary exit 2; five mutations RED; no threshold/constant/recipe/early_stopping value moved, recipe_id 6a5489af rebuilt); Phase 8 NOT complete; next 08-28 (Wave 19), then Waves 20-22
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -240,6 +240,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P24 | 16min | 3 tasks | 8 files |
 | Phase 08 P26 | 41min | 3 tasks | 9 files |
 | Phase 08 P27 | 55min | 3 tasks | 12 files |
+| Phase 08 P29 | 25 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -457,6 +458,8 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-26: load-time probe rows are checked against probe_max_row_tokens BEFORE the replay forward; tokenizer_pipeline is an accepted class-B row (only verify binds the tokenizer)
 - [Phase 08]: 08-27: Rust-Python agreement by construction — every gate quantity (macro-F1, f_avg, top-label ECE, margin, rank key) is one f64 computation with exactly-rounded sums (aprender-core metrics::fsum = Python math.fsum), declared in laya-finetune-gate-v1 4.0.0 numeric_agreement and replayed bit for bit from scripts/laya_train/numeric_cases.json in both languages
 - [Phase 08]: 08-27: the f64 gate metrics are ADDED beside aprender-core's f32 f1_score / expected_calibration_error_top_label, never swapped in — the f32 bits are frozen by metrics::f32_bits_tests (committed alone); f_avg is recomputed by verify::check_f_avg under train.py's null rule, so all 5 f_avg run_field_bindings rows are bound (bound=91, expected_open=0)
+- [Phase 08]: 08-29: the early-stopping rule of record is best-anchored (m_e < m_best - min_delta), re-derived from the code that trained the 08-16 run (gate.py 24cea2a63); its seed-17 trace alone cannot separate the candidate rules, so contract text is corrected to the code, never the reverse (laya-finetune-gate-v1 5.0.0)
+- [Phase 08]: 08-29: every contract number the Python back office reads goes through contract.number (no coercion); rescore-noise.json k is written as a float, the value Rust compares bit for bit
 
 ### Pending Todos
 
@@ -572,8 +575,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-28T21:40:14.217Z
-Stopped at: Completed 08-27-PLAN.md (class E numeric agreement: f64 exactly-summed macro-F1/ECE/f_avg/margin/rank_key in Rust and Python, 23-case frozen file bit for bit, check_f_avg, laya-finetune-gate-v1 4.0.0; deployed 24a44d7e eligible seed 17)
+Last session: 2026-09-28T22:12:38.799Z
+Stopped at: Completed 08-29-PLAN.md (class E, Python half: typed contract reader with float noise k, Rust str::lines row split, row-encoding / early-stopping typed refusals, python_refusals 35-row table swept 42+5, laya-finetune-gate-v1 5.0.0 best-anchored early-stopping text)
 Resume file: None
 
 ## Accumulated Context
