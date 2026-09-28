@@ -822,3 +822,11 @@ raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
   reverted: same failure, so it is writer/fixture drift, not the strict-index change. The other three golden
   targets (which READ the fixtures) pass. Not in CI's explicit `--test` list, which is why it stayed dark.
   status: open
+
+### Found during plan 08-22 (out of scope, pre-existing)
+
+- **aprender-compute, aprender-core and aprender-decide recompile on EVERY `cargo run --release -p aprender-decide`**
+  (about 17 s each, measured twice back to back on `just laya-inspect` with no source change). Some build
+  script's rerun condition never settles. It makes every pack_laya recipe pay a rebuild, so
+  `just laya-gates-selftest` spends most of its non-weights time compiling. Not a correctness defect.
+  status: open
