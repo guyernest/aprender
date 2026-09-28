@@ -814,3 +814,11 @@ wire-code side note (08-28), V4-b and any redeploy (08-30), D-14 publication (08
 
 V8-a, V8-b, V12-d, V4-d, V9-c, V9-e, and the behaviour half of V14-d (its comment half is 08-31);
 raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
+
+### Found during plan 08-20 (out of scope, pre-existing)
+
+- **apr-format golden_v2_f32_writer_is_byte_identical fails at HEAD 70125a6b1** (writer produces 516 bytes,
+  `crates/apr-format/tests/fixtures/golden_v2.apr` holds 1092). Measured with plan 08-20's reader change
+  reverted: same failure, so it is writer/fixture drift, not the strict-index change. The other three golden
+  targets (which READ the fixtures) pass. Not in CI's explicit `--test` list, which is why it stayed dark.
+  status: open

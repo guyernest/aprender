@@ -516,3 +516,51 @@ fn forged_tensor_count_is_refused_by_both_readers() {
         "refused promptly"
     );
 }
+
+// ============================================================================
+// Duplicate tensor names (WR-01 / AL5, plan 08-20): the index must be STRICTLY
+// increasing. Every lookup (`get_tensor`, `get_tensor_data`) takes the FIRST match,
+// so a second entry of the same name would ride behind the first unvalidated.
+// ============================================================================
+
+/// An APR v2 file written by `AprV2Writer` that names `dup` twice (different
+/// payloads) next to one other tensor. The writer sorts but does not deduplicate, so
+/// this is exactly what an author-controlled file can carry.
+fn duplicate_name_file() -> Vec<u8> {
+    let mut writer = AprV2Writer::new(AprV2Metadata::new("dup"));
+    writer.add_f32_tensor("dup", vec![2], &[1.0, 2.0]);
+    writer.add_f32_tensor("dup", vec![2], &[9.0, 9.0]);
+    writer.add_f32_tensor("other", vec![1], &[3.0]);
+    writer.write().expect("writer accepts duplicate names")
+}
+
+fn assert_duplicate_refusal(result: Result<(), V2FormatError>, reader: &str) {
+    match result {
+        Err(V2FormatError::InvalidTensorIndex(msg)) => assert!(
+            msg.contains("duplicate") && msg.contains("dup"),
+            "{reader}: refusal must say duplicate and name the tensor, got {msg:?}"
+        ),
+        other => panic!("{reader}: expected InvalidTensorIndex(duplicate), got {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_tensor_names_are_refused_by_both_readers() {
+    let data = duplicate_name_file();
+    assert_duplicate_refusal(AprV2Reader::from_bytes(&data).map(|_| ()), "AprV2Reader");
+    assert_duplicate_refusal(
+        AprV2ReaderRef::from_bytes(&data).map(|_| ()),
+        "AprV2ReaderRef",
+    );
+
+    // Control: the same shape of file with distinct names still opens in both readers.
+    let mut writer = AprV2Writer::new(AprV2Metadata::new("dup"));
+    writer.add_f32_tensor("dup", vec![2], &[1.0, 2.0]);
+    writer.add_f32_tensor("dup2", vec![2], &[9.0, 9.0]);
+    writer.add_f32_tensor("other", vec![1], &[3.0]);
+    let control = writer.write().expect("control writes");
+    let owned = AprV2Reader::from_bytes(&control).expect("distinct names open (owned)");
+    assert_eq!(owned.tensor_names(), vec!["dup", "dup2", "other"]);
+    let borrowed = AprV2ReaderRef::from_bytes(&control).expect("distinct names open (ref)");
+    assert_eq!(borrowed.tensor_names().len(), 3);
+}

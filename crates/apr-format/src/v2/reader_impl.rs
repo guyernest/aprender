@@ -126,12 +126,21 @@ fn parse_tensor_index_section(
         })?;
     }
 
-    // Verify tensor names are sorted
-    for i in 1..tensor_index.len() {
-        if tensor_index[i].name < tensor_index[i - 1].name {
-            return Err(V2FormatError::InvalidTensorIndex(
-                "tensor index not sorted".to_string(),
-            ));
+    // Verify tensor names are STRICTLY increasing (WR-01 / AL5, plan 08-20). Every
+    // lookup (`get_tensor`, `get_tensor_data`) takes the first match, so an index that
+    // names a tensor twice would let a second, never-validated entry ride behind the
+    // first. Equal adjacent names are therefore refused, not merely out-of-order ones.
+    for pair in tensor_index.windows(2) {
+        let (prev, cur) = (&pair[0].name, &pair[1].name);
+        if cur == prev {
+            return Err(V2FormatError::InvalidTensorIndex(format!(
+                "duplicate tensor name {cur:?} in tensor index"
+            )));
+        }
+        if cur < prev {
+            return Err(V2FormatError::InvalidTensorIndex(format!(
+                "tensor index not sorted: {cur:?} follows {prev:?}"
+            )));
         }
     }
 
