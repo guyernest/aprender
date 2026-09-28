@@ -1448,7 +1448,7 @@ laya-verify apr run data base:
     exec cargo run --release -p aprender-decide --example pack_laya -- \
         verify "{{apr}}" --run "{{run}}" --data "{{data}}" --base "{{base}}"
 
-# Identity of a decide .apr (bounded/header/manifest rungs): sha256, recipe_id, base, variant, labels
+# Identity of a decide .apr (load rungs 1-4, so every field is bound to its blobs): sha256, recipe_id, base, variant, labels
 # and the embedded gate summary. Makes NO eligibility claim -- that is `just laya-verify`.
 laya-inspect file:
     #!/usr/bin/env bash

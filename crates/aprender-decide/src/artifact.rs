@@ -33,7 +33,7 @@
 //! 1. bounded read ([`read_decide_apr_bytes_bounded`]; in-memory length check)
 //! 2. header and index extent, BEFORE any index parser runs
 //! 3. `model_type`, exactly one custom key, the manifest (`deny_unknown_fields`)
-//! 4. structure: blob hashes, the architecture-derived tensor set, per-entry sizes,
+//! 4. structure: unique index names, blob hashes, the architecture-derived tensor set, per-entry sizes,
 //!    task labels == manifest labels, and every other manifest field equal to the
 //!    sha-bound source decide-apr-v1 `manifest.bindings` names (recipe, gate report,
 //!    blob digests, the task's bucket and the agent config's applied temperature)
@@ -52,7 +52,7 @@ use aprender::format::v2::{
 use aprender::models::modernbert::{expected_modernbert_tensor_names, ModernBertConfig};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 // ===========================================================================
@@ -437,6 +437,12 @@ pub enum ArtifactError {
         /// Why.
         reason: String,
     },
+    /// Rung 4: the tensor index names a tensor twice (WR-01, decide side). Rungs 4 (c) and 5
+    /// look entries up by name (first match), so a second entry would escape both.
+    DuplicateTensor {
+        /// The first repeated name, in index order.
+        name: String,
+    },
     /// Rung 4 (or pack): an expected tensor is absent.
     MissingTensor {
         /// Tensor name.
@@ -556,6 +562,7 @@ impl ArtifactError {
             Self::ManifestBlobs { .. }
             | Self::BlobHashMismatch { .. }
             | Self::ConfigBlob { .. }
+            | Self::DuplicateTensor { .. }
             | Self::MissingTensor { .. }
             | Self::UnexpectedTensor { .. }
             | Self::DtypeMismatch { .. }
@@ -628,6 +635,9 @@ impl fmt::Display for ArtifactError {
                 write!(f, "blob {blob} does not hash to the manifest value")
             }
             Self::ConfigBlob { blob, reason } => write!(f, "{blob} refused: {reason}"),
+            Self::DuplicateTensor { name } => {
+                write!(f, "the tensor index names {name} more than once")
+            }
             Self::MissingTensor { name } => write!(f, "missing tensor {name}"),
             Self::UnexpectedTensor { name } => write!(f, "unexpected tensor {name}"),
             Self::DtypeMismatch {
@@ -824,6 +834,16 @@ pub(crate) fn expected_weights(
     }
     out.insert("temperature".to_string(), TensorDType::F32);
     out
+}
+
+/// The first name that repeats in `names`, in iteration order: a set walk, so it does not
+/// rely on the container keeping its index sorted (an adjacent-pair check would). `None`
+/// when every name is unique. Its memory is bounded by rung 2's `max_tensor_count`.
+pub(crate) fn first_repeated_tensor_name<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let mut seen = HashSet::new();
+    names.into_iter().find(|n| !seen.insert(*n))
 }
 
 /// The set rule: `observed` names equal `expected` names exactly. Missing is reported
@@ -1360,15 +1380,22 @@ fn open_within<'a>(
     Ok((reader, manifest))
 }
 
-/// The manifest of an artifact, through rungs 1-3 only (identity for 08-09's
-/// `inspect`). This is NOT an eligibility check: decide-apr-v1 `deploy_eligibility`
-/// is `pack_laya verify` on the exact file.
+/// The manifest of an artifact, through rungs 1-4 (identity for 08-09's `inspect`).
+///
+/// Rung 4 binds every manifest leaf to its sha-bound source (decide-apr-v1
+/// `manifest.bindings`, plan 08-19), so the identity returned is the one the embedded blobs
+/// say, never a free-standing claim (IN-02, A2-3). The weights are not scanned (rung 5), the
+/// model is not rebuilt (rung 6) and the probes are not replayed (rung 7): this is IDENTITY,
+/// NOT an eligibility check. decide-apr-v1 `deploy_eligibility` is `pack_laya verify` on the
+/// exact file.
 ///
 /// # Errors
 ///
-/// A rung 1-3 [`ArtifactError`].
+/// A rung 1-4 [`ArtifactError`].
 pub fn inspect_manifest(bytes: &[u8]) -> Result<Manifest, ArtifactError> {
-    open_within(bytes, &ArtifactLimits::CONTRACTED).map(|(_, m)| m)
+    let (reader, manifest) = open_within(bytes, &ArtifactLimits::CONTRACTED)?;
+    rung4_structure(&reader, &manifest)?;
+    Ok(manifest)
 }
 
 // ===========================================================================
@@ -1387,6 +1414,17 @@ fn rung4_structure<'r>(
     reader: &'r AprV2ReaderRef<'_>,
     manifest: &Manifest,
 ) -> Result<Blobs<'r>, ArtifactError> {
+    // (0) Every index name is unique (WR-01, decide side), BEFORE any lookup by name: (a),
+    //     (c) and rung 5 resolve a name to its FIRST entry, so a repeated name would hide its
+    //     second entry from every check. The apr-format reader refuses a repeat at rung 3
+    //     (plan 08-20); this walk does not depend on that, or on the index's sort order.
+    if let Some(name) =
+        first_repeated_tensor_name(reader.tensor_index().iter().map(|e| e.name.as_str()))
+    {
+        return Err(ArtifactError::DuplicateTensor {
+            name: name.to_string(),
+        });
+    }
     // (a) Blobs first: present and hashing to the manifest — before any config they
     //     carry is trusted to derive the weight set. Their dtype / size / bounds are
     //     checked with every other entry in (c); a hash over the in-bounds bytes is

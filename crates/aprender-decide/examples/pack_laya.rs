@@ -26,8 +26,9 @@
 //! re-runs every `pack` check on those bytes (`verify::verify_path`). On accept it prints one
 //! JSON line carrying `deploy_eligible`; on refusal the same `REFUSED ...` line as `pack`.
 //!
-//! `inspect` runs the bounded / header / manifest rungs and prints identity only — it has no
-//! eligibility field and makes no eligibility claim.
+//! `inspect` reads the file through the bounded rung-1 reader and runs load rungs 1-4 (bounded
+//! read, header, manifest, structure — which binds every manifest leaf to its sha-bound source),
+//! then prints identity only: it has no eligibility field and makes no eligibility claim.
 //!
 //! `pack-fixture` writes ONLY `synthetic-fixture` artifacts (`verify::pack_fixture`), which
 //! every `verify` refuses; any other variant is refused with nothing written.
@@ -206,7 +207,17 @@ fn cmd_inspect(a: &Args) -> Result<ExitCode, String> {
         return Err("inspect takes only the FILE operand".into());
     }
     let apr = Args::need(a.operand.as_ref(), "the FILE operand")?;
-    let bytes = std::fs::read(&apr).map_err(|e| format!("{}: {e}", apr.display()))?;
+    // Rung 1 on the file itself: the declared length is checked before the file is read, and
+    // the read is capped at the cap + 1 whatever the metadata says (no unbounded fs::read).
+    let file = std::fs::File::open(&apr).map_err(|e| format!("{}: {e}", apr.display()))?;
+    let declared = file
+        .metadata()
+        .map_err(|e| format!("{}: {e}", apr.display()))?
+        .len();
+    let bytes = match artifact::read_decide_apr_bytes_bounded(file, Some(declared)) {
+        Ok(bytes) => bytes,
+        Err(e) => return Ok(refused(&VerifyError::Artifact(e))),
+    };
     Ok(match artifact::inspect_manifest(&bytes) {
         Ok(m) => {
             let line = obj(vec![
@@ -269,8 +280,17 @@ fn run(argv: &[String]) -> Result<ExitCode, String> {
 }
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    run(&argv).unwrap_or_else(|msg| {
+    // `args_os`, not `args`: `std::env::args` panics on a non-UTF-8 argument. Every argument
+    // here is a path the CLI prints back, so a non-UTF-8 one is a usage refusal (exit 2).
+    let argv: Result<Vec<String>, _> = std::env::args_os()
+        .skip(1)
+        .map(std::ffi::OsString::into_string)
+        .collect();
+    let result = match argv {
+        Ok(argv) => run(&argv),
+        Err(_) => Err(format!("an argument is not valid UTF-8; {USAGE}")),
+    };
+    result.unwrap_or_else(|msg| {
         println!("REFUSED Usage {msg} (nothing written)");
         ExitCode::from(2)
     })

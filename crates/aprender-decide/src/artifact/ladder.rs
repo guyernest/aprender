@@ -557,6 +557,99 @@ fn recipe_blob_hash() {
     );
 }
 
+/// WR-01, decide side: the rung-4 repeat walk names the first repeated name whatever the
+/// order of the index — an adjacent repeat, a non-adjacent one — and `None` when every
+/// name is unique. This is the red-side proof of the rung-4 logic: while plan 08-20's
+/// reader refuses a repeated name at rung 3, no real artifact reaches the rung-4 call.
+#[test]
+fn repeated_name_walk_names_the_first_repeat() {
+    assert_eq!(
+        super::first_repeated_tensor_name(["a", "b", "b", "c"]),
+        Some("b"),
+        "adjacent repeat"
+    );
+    assert_eq!(
+        super::first_repeated_tensor_name(["a", "b", "c", "a"]),
+        Some("a"),
+        "non-adjacent repeat (not visible to a sorted-neighbour check)"
+    );
+    assert_eq!(
+        super::first_repeated_tensor_name(["b", "a", "b", "a"]),
+        Some("b"),
+        "the FIRST repeat in index order"
+    );
+    assert_eq!(super::first_repeated_tensor_name(["a", "b", "c"]), None);
+    assert_eq!(super::first_repeated_tensor_name(Vec::<&str>::new()), None);
+}
+
+/// WR-01, decide side: an artifact whose index names one encoder weight twice (the writer
+/// wrote both entries) is refused at load through the stdio door, and the refusal names the
+/// tensor. While plan 08-20's reader change stands the refusal is the container's (rung 3,
+/// `duplicate tensor name ...`); rung 4's `DuplicateTensor` is the decide-side backstop.
+#[test]
+fn duplicate_tensor_name_is_refused_at_load() {
+    let b = packed();
+    let name = AprV2ReaderRef::from_bytes(&b)
+        .expect("open the packed artifact")
+        .tensor_index()
+        .iter()
+        .map(|e| e.name.clone())
+        .find(|n| n.starts_with("encoder."))
+        .expect("an encoder weight");
+    let dup = repack(&b, |_, tensors| {
+        let copy = tensors
+            .iter()
+            .find(|t| t.0 == name)
+            .cloned()
+            .expect("the weight to duplicate");
+        tensors.push(copy);
+    });
+    assert_eq!(
+        header(&dup).tensor_count,
+        header(&b).tensor_count + 1,
+        "the writer wrote both entries"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("duplicate-name.apr");
+    std::fs::write(&path, &dup).expect("write the forged artifact");
+    let e = crate::Decider::load_path(&path).expect_err("a repeated tensor name loaded");
+    match &e {
+        ArtifactError::DuplicateTensor { name: got } => {
+            assert_eq!(got, &name, "{e}");
+            assert_eq!(e.rung(), "4 structural");
+        }
+        ArtifactError::Container { reason } => {
+            assert!(
+                reason.contains("duplicate") && reason.contains(&name),
+                "the container refusal must name the repeated tensor: {e}"
+            );
+            assert_eq!(e.rung(), "3 manifest");
+        }
+        other => panic!("refused for another reason: {other}"),
+    }
+    println!(
+        "duplicate_tensor_name_is_refused_at_load: {name} refused at rung {}: {e}",
+        e.rung()
+    );
+}
+
+/// `inspect` prints identity only after rungs 1-4, so a manifest whose base its own recipe
+/// blob contradicts is refused by `inspect_manifest` too (IN-02, A2-3); the packed control
+/// inspects.
+#[test]
+fn inspect_refuses_a_manifest_its_blobs_contradict() {
+    super::inspect_manifest(&packed()).expect("control: the packed artifact inspects");
+    let b = edit_manifest(&packed(), |v| {
+        v["base"]["revision"] = serde_json::Value::from("0123456789abcdef0123456789abcdef01234567");
+    });
+    let e = super::inspect_manifest(&b).expect_err("inspect printed a contradicted identity");
+    assert_eq!(
+        e,
+        ArtifactError::ManifestDisagreesWithBlob { field: "base" }
+    );
+    assert_eq!(e.rung(), "4 structural");
+}
+
 #[test]
 fn labels_disagree_with_task() {
     let b = edit_manifest(&packed(), |v| {
