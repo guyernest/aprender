@@ -347,3 +347,7 @@ None.
 ---
 *Phase: 08-laya-decision-model-local-fine-tune-and-thin-mcp-server*
 *Completed: 2026-09-28*
+
+## Self-Check: PASSED
+
+- FOUND scripts/laya_gates.tsv and this SUMMARY; FOUND commits 778417a86, 47494e1c6, 4e6894882, 4ae7219e4.

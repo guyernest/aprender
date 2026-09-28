@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Completed 08-21-PLAN.md (class-A run-dir binding at verify: typed contract views, base/recipe/slice binding, run_field_bindings sweep)"
-last_updated: "2026-09-28T17:12:58.605Z"
+stopped_at: "Completed 08-22-PLAN.md (class C gate honesty: laya_gates.tsv 27 rows + laya-gates-selftest, 14 mutations RED, AWS CALLS 0)"
+last_updated: "2026-09-28T18:58:20.484Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: 19a3224e09205496f6e2edbb93d6f4cbc7e246e0
+state_head: 4ae7219e4bdcf61edd80b83b62a65f84527d33bd
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 113
+  completed_plans: 114
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 21 of 32 complete (08-01..08-21) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-21 COMPLETE (class A verify side: one typed contract-to-policy mapping; base identity fields + base-dir file pins; recipe block, shots and epoch rule; slice fraction; run_field_bindings 94 rows swept (86 bound, 3 report_only, 5 f_avg expected-open for 08-27); 22 single-check mutations RED; deployed 24a44d7e still eligible, seed 17; fail-closed vectors 2/2 unchanged); next 08-22
+Plan: 22 of 32 complete (08-01..08-22) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-22 COMPLETE (class C gate honesty: scripts/laya_gates.tsv 27 rows (2 external: parser-guard 08-23, cascade-guard 08-31) + 3 not-a-gate; `just laya-gates-selftest` drift check over every recipe then must-fail/must-pass per row, default sweep OK, FULL tier OK once (armed laya-verify-suite with the ladder rung, 870 s); leg verdict needs MEASURED evidence; laya-grant read-only with attached policies and wildcard refusal; teardown NoSuchEntity; one shasum helper; resolver ERE case table; bootstrap intent; 14 mutations RED; AWS CALLS 0); next 08-23
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -234,6 +234,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P19 | 24 min | 3 tasks | 4 files |
 | Phase 08 P20 | 15min | 3 tasks | 5 files |
 | Phase 08 P21 | 50min | 3 tasks | 7 files |
+| Phase 08 P22 | 102min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -441,6 +442,7 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-19: verify_checks[2] states what check_base enforces today; field-by-field base equality at verify is plan 08-21, NOT checked yet
 - [Phase 08]: 08-20: shared APR v2 index must be strictly increasing (duplicate names refused by both readers); index reservation counted in in-memory entry units; class-B test hooks read back what was actually sized (Vec::capacity after allocation, RoPE-table counter) so sizing mutants turn RED
 - [Phase 08]: 08-21: one typed contract-to-policy mapping (VerifyPolicy::from_contract_views over serde views) for CLI and tests; verify binds every recipe.json / gate-report.json leaf per laya-finetune-gate-v1 run_field_bindings (86 bound, 3 report_only, 5 f_avg expected-open for 08-27), enforced by a mutate-one-leaf sweep; sweep-found leaves bound (nll, t_fitted clamp relation, device_is_cpu, seeds.label, shipped per_seed.t_applied); verify_run is cfg(test)
+- [Phase 08]: 08-22: laya gate enumeration is fail-closed (exit/FAIL/exec/verdict token); an exec-ing recipe cannot be not-a-gate; heavy must-pass cases are a named FULL tier (LAYA_GATES_FULL=1) listed in the default OK line
 
 ### Pending Todos
 
@@ -556,8 +558,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-28T17:12:14.077Z
-Stopped at: Completed 08-21-PLAN.md (class-A run-dir binding at verify: typed contract views, base/recipe/slice binding, run_field_bindings sweep)
+Last session: 2026-09-28T18:58:20.287Z
+Stopped at: Completed 08-22-PLAN.md (class C gate honesty: laya_gates.tsv 27 rows + laya-gates-selftest, 14 mutations RED, AWS CALLS 0)
 Resume file: None
 
 ## Accumulated Context
