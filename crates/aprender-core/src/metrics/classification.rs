@@ -398,6 +398,37 @@ pub fn macro_f1_f64(y_pred: &[usize], y_true: &[usize]) -> f64 {
     super::fsum(f1s) / present.len() as f64
 }
 
+/// The mean f64 F1 over the GIVEN labels with an exactly-rounded mean — the Laya gate's `f_avg`
+/// (TweetEval stance: `against`, `favor`; laya-finetune-gate-v1 `numeric_agreement.f_avg`).
+///
+/// ```text
+/// f_avg = fsum(F1_c for c in labels) / |labels|        F1_c as in macro_f1_f64
+/// ```
+///
+/// A label absent from both `y_true` and `y_pred` scores 0 (`zero_division = 0`), exactly as
+/// `scripts/laya_train/metrics.py` `f_avg`, which this equals bit for bit.
+///
+/// # Panics
+///
+/// Panics if the inputs differ in length, are empty, or `labels` is empty.
+#[must_use]
+pub fn mean_f1_over_labels_f64(y_pred: &[usize], y_true: &[usize], labels: &[usize]) -> f64 {
+    assert_eq!(y_pred.len(), y_true.len(), "Vectors must have same length");
+    assert!(!y_true.is_empty(), "Vectors cannot be empty");
+    assert!(!labels.is_empty(), "f_avg needs at least one label");
+    let n_classes = y_true
+        .iter()
+        .chain(y_pred.iter())
+        .chain(labels.iter())
+        .max()
+        .map_or(0, |&m| m + 1);
+    let (tp, fp, fn_counts, _) = compute_tp_fp_fn(y_pred, y_true, n_classes);
+    let f1s = labels
+        .iter()
+        .map(|&c| class_f1_f64(tp[c], fp[c], fn_counts[c]));
+    super::fsum(f1s) / labels.len() as f64
+}
+
 /// Compute per-class precision scores.
 ///
 /// Returns a vector of precision values, one per class (ordered by class index).
@@ -732,5 +763,20 @@ mod tests_macro_f1_f64 {
         assert!(ft - zs >= 0.05);
         // Present-label rule is the f32 function's (PMAT-844): perfect {0, 2} -> 1.
         assert_eq!(macro_f1_f64(&[0, 2, 0, 2], &[0, 2, 0, 2]), 1.0);
+    }
+
+    /// f_avg: the mean over the GIVEN labels; a label absent everywhere scores 0.
+    #[test]
+    fn mean_f1_over_labels_f64_follows_metrics_py() {
+        // Always predicts 0 on y = [0, 1, 2, 0]: F1(1) = F1(2) = 0.
+        assert_eq!(
+            mean_f1_over_labels_f64(&[0, 0, 0, 0], &[0, 1, 2, 0], &[1, 2]),
+            0.0
+        );
+        // pred = [0, 0, 0, 1] on y = [0, 1, 0, 1]: F1(0) = 4/5, F1(1) = 2/3.
+        let got = mean_f1_over_labels_f64(&[0, 0, 0, 1], &[0, 1, 0, 1], &[0, 1]);
+        assert_eq!(got.to_bits(), ((0.8_f64 + 2.0 / 3.0) / 2.0).to_bits());
+        // A label index beyond every observed class is absent: 0, not a panic.
+        assert_eq!(mean_f1_over_labels_f64(&[0, 1], &[0, 1], &[5]), 0.0);
     }
 }

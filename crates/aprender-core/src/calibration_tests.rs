@@ -569,3 +569,29 @@ fn brier_multiclass_refuses_label_count_mismatch() {
     // Two rows of probabilities, one label.
     let _ = brier_score_multiclass(&[0.5, 0.3, 0.2, 0.1, 0.2, 0.7], 3, &[0]);
 }
+
+/// Plan 08-27: the f64 exactly-summed top-label ECE (the Laya gate's) matches every frozen house
+/// case within the fixture band and the hand-computed cases exactly, and leaves the f32
+/// function's results where they were (frozen bit for bit in metrics::f32_bits_tests).
+#[test]
+fn top_label_ece_f64_matches_house_cases_and_hand_values() {
+    for case in &fixture_cases(ECE_FIXTURES) {
+        let id = case["id"].as_str().expect("case has an id");
+        let (probs, n_classes) = flat_probabilities(case);
+        let labels = fixture_labels(case);
+        let n_bins = case["n_bins"].as_u64().expect("case has n_bins") as usize;
+        let got = expected_calibration_error_top_label_f64(&probs, n_classes, &labels, n_bins);
+        let want = case["ece"].as_f64().expect("ece");
+        assert!(
+            (got - want).abs() < f64::from(FIXTURE_TOL),
+            "f64 top-label ECE on '{id}': got {got}, reference {want}"
+        );
+    }
+    // Always predicts class 0 at 0.6 on y = [0, 1, 2, 0]: one bin, acc 0.5, conf 0.6 (as f32).
+    let probs = [0.6_f32, 0.2, 0.2].repeat(4);
+    let ece = expected_calibration_error_top_label_f64(&probs, 3, &[0, 1, 2, 0], 15);
+    assert_eq!(ece.to_bits(), (f64::from(0.6_f32) - 0.5).to_bits());
+    // A saturated row lands in the top bin (the clamp), as in the f32 function.
+    let ece = expected_calibration_error_top_label_f64(&[1.0, 0.0, 0.0, 1.0], 2, &[0, 0], 15);
+    assert_eq!(ece, 0.5);
+}

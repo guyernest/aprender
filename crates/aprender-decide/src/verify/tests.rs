@@ -1451,9 +1451,8 @@ fn recompute_matches_house_ece_cases() {
             .collect();
         let m = recompute_metrics(&probs, &labels, k, bins);
         let flat: Vec<f32> = probs.iter().flatten().copied().collect();
-        let house = f64::from(expected_calibration_error_top_label(
-            &flat, k, &labels, bins,
-        ));
+        // The gate's house ECE is the f64 exactly-summed one (plan 08-27 numeric_agreement).
+        let house = expected_calibration_error_top_label_f64(&flat, k, &labels, bins);
         assert_eq!(m.ece.to_bits(), house.to_bits(), "{id}: not the house ECE");
         let want = c["ece"].as_f64().expect("ece");
         assert!(
@@ -2702,6 +2701,21 @@ fn boundary_report(
     rep
 }
 
+/// `expected[key]` as an f64, or `None` for a JSON null.
+fn hex_opt(exp: &Value, key: &str, what: &str) -> Option<f64> {
+    let v = &exp[key];
+    (!v.is_null()).then(|| hex_f64(v, what))
+}
+
+/// The argmax predictions the verifier scores a set with.
+fn preds(probs: &[Vec<f32>]) -> Vec<usize> {
+    probs.iter().map(|p| crate::laya::argmax(p)).collect()
+}
+
+/// CLASS E (plan 08-27): every case of numeric_cases.json — the reviewers' two exact-1/20
+/// margin cases, the rank grid-line case and the seeded random cases — gives Rust the SAME BITS
+/// as `metrics.py` for macro-F1, ECE, f_avg, the margin and the rank key, and the same margin
+/// verdict through [`check_gate`].
 #[test]
 fn gate_numeric_cases_agree_bit_for_bit() {
     let doc = numeric_cases();
@@ -2715,19 +2729,26 @@ fn gate_numeric_cases_agree_bit_for_bit() {
         policy.min_macro_f1_margin.to_bits(),
         "the case file's margin threshold is the contract's"
     );
+    let rank_scale = doc["rank_scale"].as_f64().expect("rank_scale");
+    assert_eq!(
+        rank_scale.to_bits(),
+        policy.seed_rank_scale.to_bits(),
+        "the case file's rank_scale is the contract's"
+    );
     let cases = doc["cases"].as_array().expect("cases");
-    assert!(!cases.is_empty(), "no numeric cases");
+    assert!(cases.len() >= 23, "only {} numeric cases", cases.len());
     let mut bad: Vec<String> = Vec::new();
-    let mut check = |name: &str, what: &str, got: f64, want: f64| {
-        if got.to_bits() != want.to_bits() {
+    fn check(bad: &mut Vec<String>, name: &str, what: &str, got: Option<f64>, want: Option<f64>) {
+        if got.map(f64::to_bits) != want.map(f64::to_bits) {
             bad.push(format!(
-                "{name} {what}: rust {got:e} ({:016x}) python {want:e} ({:016x})",
-                got.to_bits(),
-                want.to_bits()
+                "{name} {what}: rust {got:?} ({:?}) python {want:?} ({:?})",
+                got.map(|g| format!("{:016x}", g.to_bits())),
+                want.map(|w| format!("{:016x}", w.to_bits()))
             ));
         }
-    };
+    }
     let mut verdicts: Vec<String> = Vec::new();
+    let mut quantities = 0usize;
     for case in cases {
         let name = case["name"].as_str().expect("name");
         let k = case["k"].as_u64().expect("k") as usize;
@@ -2738,23 +2759,62 @@ fn gate_numeric_cases_agree_bit_for_bit() {
             .iter()
             .map(|v| v.as_u64().expect("label") as usize)
             .collect();
+        let fav: Option<Vec<usize>> = case["f_avg_labels"].as_array().map(|a| {
+            a.iter()
+                .map(|v| v.as_u64().expect("f_avg label") as usize)
+                .collect()
+        });
         let exp = &case["expected"];
         let ft = hex_rows(&case["probabilities_f32_hex"], name);
-        let ft_m = recompute_metrics(&ft, &labels, k, bins);
-        check(
-            name,
-            "macro_f1",
-            ft_m.macro_f1,
-            hex_f64(&exp["macro_f1_f64_hex"], name),
-        );
+        let set = |bad: &mut Vec<String>, prefix: &str, probs: &[Vec<f32>]| {
+            let m = recompute_metrics(probs, &labels, k, bins);
+            let key = |q: &str| format!("{prefix}{q}");
+            check(
+                bad,
+                name,
+                &key("macro_f1"),
+                Some(m.macro_f1),
+                hex_opt(exp, &key("macro_f1_f64_hex"), name),
+            );
+            check(
+                bad,
+                name,
+                &key("ece"),
+                Some(m.ece),
+                hex_opt(exp, &key("ece_f64_hex"), name),
+            );
+            let f = fav
+                .as_deref()
+                .map(|ls| mean_f1_over_labels_f64(&preds(probs), &labels, ls));
+            check(
+                bad,
+                name,
+                &key("f_avg"),
+                f,
+                hex_opt(exp, &key("f_avg_f64_hex"), name),
+            );
+            (m, 2 + usize::from(f.is_some()))
+        };
+        let (ft_m, q) = set(&mut bad, "", &ft);
+        quantities += q;
+        let key = rank_key(0, ft_m.ece, policy.seed_rank_scale).expect("a rank key");
+        let want_key = exp["rank_key"].as_i64().expect("rank_key");
+        if key != want_key {
+            bad.push(format!(
+                "{name} rank_key: rust {key} python {want_key} (ece {:e})",
+                ft_m.ece
+            ));
+        }
+        quantities += 1;
         if let Some(zs_rows) = case.get("zero_shot_probabilities_f32_hex") {
             let zs = hex_rows(zs_rows, name);
+            quantities += set(&mut bad, "zero_shot_", &zs).1;
             let r = recompute_gate(&zs, &ft, &labels, k, bins);
             let py_zs = hex_f64(&exp["zero_shot_macro_f1_f64_hex"], name);
             let py_margin = hex_f64(&exp["margin_f64_hex"], name);
             let py_pass = exp["margin_pass"].as_bool().expect("margin_pass");
-            check(name, "zero_shot.macro_f1", r.zs_macro_f1, py_zs);
-            check(name, "margin", r.margin, py_margin);
+            check(&mut bad, name, "margin", Some(r.margin), Some(py_margin));
+            quantities += 1;
             let ft_f1 = hex_f64(&exp["macro_f1_f64_hex"], name);
             let rep = boundary_report(&policy, &r, labels.len(), py_zs, ft_f1, py_margin, py_pass);
             match check_gate(&rep, &r, labels.len(), &policy) {
@@ -2772,6 +2832,10 @@ fn gate_numeric_cases_agree_bit_for_bit() {
             }
         }
     }
+    println!(
+        "NUMERIC CASES {} cases, {quantities} quantities bit for bit",
+        cases.len()
+    );
     assert!(
         bad.is_empty() && verdicts.is_empty(),
         "Rust and Python disagree on {} value(s) and {} verdict(s):\n{}\n{}",
@@ -2780,4 +2844,159 @@ fn gate_numeric_cases_agree_bit_for_bit() {
         bad.join("\n"),
         verdicts.join("\n")
     );
+}
+
+/// A stance-task report and its sets for the f_avg tests: 6 eval rows over
+/// `demo.criteria_order`, two gate seeds and a 4-row shift probe, every f_avg honest.
+fn stance_f_avg_case(policy: &VerifyPolicy) -> (GateReport, Vec<String>, FAvgSets) {
+    let labels = policy.stance_criteria_order.clone();
+    let row = |p: usize| -> Vec<f32> {
+        let mut r = vec![0.1_f32; 3];
+        r[p] = 0.8;
+        r
+    };
+    let rows = |ps: &[usize]| ps.iter().map(|&p| row(p)).collect::<Vec<_>>();
+    let y = vec![0, 1, 2, 1, 2, 0];
+    let shift_y = vec![1, 2, 2, 0];
+    let sets = FAvgSets {
+        eval_labels: y.clone(),
+        zero_shot: rows(&[0, 0, 2, 0, 1, 0]),
+        fine_tuned: rows(&[0, 1, 2, 1, 1, 0]),
+        per_seed: vec![
+            (13, rows(&[0, 1, 2, 2, 2, 0])),
+            (17, rows(&[0, 1, 2, 1, 1, 0])),
+        ],
+        shift: Some((shift_y.clone(), rows(&[1, 2, 0, 0]), rows(&[0, 2, 2, 1]))),
+    };
+    let rule = f_avg_labels(&labels, &policy.stance_criteria_order)
+        .expect("the stance rule")
+        .expect("the contract's criteria order is the stance task");
+    let fav =
+        |probs: &[Vec<f32>], y: &[usize]| Some(mean_f1_over_labels_f64(&preds(probs), y, &rule));
+    let mut rep: GateReport =
+        serde_json::from_value(read_json(&fixture_dir().join("gate-report.json")))
+            .expect("the fixture report parses");
+    rep.zero_shot.f_avg = fav(&sets.zero_shot, &y);
+    rep.fine_tuned.f_avg = fav(&sets.fine_tuned, &y);
+    rep.seeds.per_seed = Some(
+        sets.per_seed
+            .iter()
+            .map(|(seed, probs)| pack::PerSeedRow {
+                seed: *seed,
+                macro_f1: 0.5,
+                f_avg: fav(probs, &y),
+                ece_post: 0.05,
+                margin: 0.1,
+                pass: true,
+                t_applied: 1.0,
+                rank_key: 500,
+                eval_probs_sha256: "0".repeat(64),
+                model_safetensors_sha256: "0".repeat(64),
+            })
+            .collect(),
+    );
+    let (sy, sft, szs) = sets.shift.as_ref().expect("shift sets");
+    rep.shift_probe = Some(pack::ShiftProbe {
+        gate_clause: false,
+        n: sy.len() as u64,
+        zero_shot: pack::ShiftZeroShot {
+            macro_f1: 0.3,
+            f_avg: fav(szs, sy),
+            ece: 0.1,
+        },
+        fine_tuned: pack::ShiftFineTuned {
+            macro_f1: 0.4,
+            f_avg: fav(sft, sy),
+            ece_post: 0.1,
+        },
+        margin: 0.1,
+        probs_sha256: "0".repeat(64),
+        zero_shot_probs_sha256: "0".repeat(64),
+    });
+    (rep, labels, sets)
+}
+
+/// Each report location that carries an f_avg, as a setter.
+fn f_avg_slots() -> Vec<(&'static str, fn(&mut GateReport) -> &mut Option<f64>)> {
+    vec![
+        ("zero_shot.f_avg", |r| &mut r.zero_shot.f_avg),
+        ("fine_tuned.f_avg", |r| &mut r.fine_tuned.f_avg),
+        ("per_seed.f_avg", |r| {
+            &mut r.seeds.per_seed.as_mut().expect("per_seed")[1].f_avg
+        }),
+        ("shift_probe.zero_shot.f_avg", |r| {
+            &mut r.shift_probe.as_mut().expect("shift").zero_shot.f_avg
+        }),
+        ("shift_probe.fine_tuned.f_avg", |r| {
+            &mut r.shift_probe.as_mut().expect("shift").fine_tuned.f_avg
+        }),
+    ]
+}
+
+/// V6-e: a forged f_avg anywhere in the report is refused naming its field; the honest report
+/// is accepted.
+#[test]
+fn f_avg_forged_refused() {
+    let policy = contract_policy();
+    let (honest, labels, sets) = stance_f_avg_case(&policy);
+    check_f_avg(&honest, &labels, &sets, &policy).expect("the honest stance report is accepted");
+    for (field, slot) in f_avg_slots() {
+        let mut rep = honest.clone();
+        let v = slot(&mut rep).as_mut().expect("an honest stance f_avg");
+        *v += 10.0 * policy.metric_recompute_abs;
+        let err =
+            check_f_avg(&rep, &labels, &sets, &policy).expect_err("a forged f_avg must be refused");
+        assert!(
+            matches!(err, VerifyError::ReportedMetricMismatch { field: f, .. } if f == field)
+                && err.to_string().contains(&format!("field={field}")),
+            "{field}: expected ReportedMetricMismatch naming it, got {err}"
+        );
+        // Within the recompute band is accepted (the band is the contract's, not zero).
+        let mut near = honest.clone();
+        *slot(&mut near).as_mut().expect("f_avg") += 0.5 * policy.metric_recompute_abs;
+        check_f_avg(&near, &labels, &sets, &policy)
+            .unwrap_or_else(|e| panic!("{field}: within the band was refused: {e}"));
+    }
+}
+
+/// V6-e: the trainer's null rule — a stance task with a null f_avg, or a non-stance task with
+/// one set, is refused naming the field.
+#[test]
+fn f_avg_null_rule_enforced() {
+    let policy = contract_policy();
+    let (honest, labels, sets) = stance_f_avg_case(&policy);
+    for (field, slot) in f_avg_slots() {
+        let mut rep = honest.clone();
+        *slot(&mut rep) = None;
+        let err = check_f_avg(&rep, &labels, &sets, &policy)
+            .expect_err("a null stance f_avg must be refused");
+        assert!(
+            matches!(err, VerifyError::RecordMismatch { field: f, .. } if f == field),
+            "{field}: expected RecordMismatch naming it, got {err}"
+        );
+    }
+    // The same labels in another order are not the stance task: every f_avg must be null.
+    let other: Vec<String> = labels.iter().rev().cloned().collect();
+    assert_eq!(
+        f_avg_labels(&other, &policy.stance_criteria_order).expect("rule"),
+        None
+    );
+    let mut nulls = honest.clone();
+    for (_, slot) in f_avg_slots() {
+        *slot(&mut nulls) = None;
+    }
+    for row in nulls.seeds.per_seed.as_mut().expect("per_seed") {
+        row.f_avg = None;
+    }
+    check_f_avg(&nulls, &other, &sets, &policy).expect("a non-stance report of nulls is accepted");
+    for (field, slot) in f_avg_slots() {
+        let mut rep = nulls.clone();
+        *slot(&mut rep) = Some(0.5);
+        let err = check_f_avg(&rep, &other, &sets, &policy)
+            .expect_err("a non-stance f_avg must be refused");
+        assert!(
+            matches!(err, VerifyError::RecordMismatch { field: f, .. } if f == field),
+            "{field}: expected RecordMismatch naming it, got {err}"
+        );
+    }
 }

@@ -72,7 +72,8 @@ def f_avg(P, y, labels):
     if not labels:
         raise ValueError("f_avg needs at least one label index")
     pred = P.argmax(1)
-    return float(np.mean([_f1(pred, y, int(c)) for c in labels]))
+    f1s = [_f1(pred, y, int(c)) for c in labels]
+    return math.fsum(f1s) / len(f1s)
 
 
 def ece_top_label(P, y, bins=15):
@@ -84,13 +85,21 @@ def ece_top_label(P, y, bins=15):
     correct = (pred == y).astype(np.float64)
     idx = np.minimum(np.floor(conf * bins).astype(np.int64), bins - 1)
     n = len(y)
-    ece = 0.0
+    terms = []
     for b in range(bins):
         sel = idx == b
         nb = int(sel.sum())
         if nb:
-            ece += (nb / n) * abs(correct[sel].mean() - conf[sel].mean())
-    return float(ece)
+            acc = math.fsum(correct[sel].tolist()) / nb
+            mean_conf = math.fsum(conf[sel].tolist()) / nb
+            terms.append((nb / n) * abs(acc - mean_conf))
+    return math.fsum(terms)
+
+
+def rank_key(ece_post, rank_scale):
+    """laya-finetune-gate-v1 seed_policy.rank_rule: floor(ece_post x rank_scale) as an int, the
+    INTEGER scale multiplied in (gate.rank_key refuses a non-finite ECE, then calls this)."""
+    return int(math.floor(float(ece_post) * int(rank_scale)))
 
 
 def nll(P, y):
@@ -146,22 +155,6 @@ def _pred_row(k, pred, conf):
     return [float(v) for v in row]
 
 
-def _macro_f1_head_f32(pred, y):
-    """aprender-core f1_score(.., Average::Macro) as it computes in f32 (2PR/(P+R), a sequential
-    f32 sum, / count) -- used ONLY to pick a constructed case on which that path disagrees."""
-    f = np.float32
-    s = f(0.0)
-    labels = sorted(set(y) | set(pred))
-    for c in labels:
-        tp = sum(1 for p, t in zip(pred, y) if p == c and t == c)
-        fp = sum(1 for p, t in zip(pred, y) if p == c and t != c)
-        fn = sum(1 for p, t in zip(pred, y) if p != c and t == c)
-        pr = f(0.0) if tp + fp == 0 else f(tp) / f(tp + fp)
-        rc = f(0.0) if tp + fn == 0 else f(tp) / f(tp + fn)
-        s = s + (f(0.0) if pr + rc == f(0.0) else (f(2.0) * pr * rc) / (pr + rc))
-    return float(s / f(len(labels)))
-
-
 def _splits(n, k):
     """Every way to split n rows over k predicted classes, in lexicographic order."""
     if k == 1:
@@ -172,71 +165,192 @@ def _splits(n, k):
             yield (i,) + rest
 
 
-def _confusion_f1(cm):
-    """(exact rational macro-F1, the f64 metrics.py value, HEAD's f32 value) of a K x K matrix."""
+def _cm_counts(cm):
+    k = len(cm)
+    tp = [cm[c][c] for c in range(k)]
+    fp = [sum(cm[r][c] for r in range(k) if r != c) for c in range(k)]
+    fn = [sum(cm[c][j] for j in range(k) if j != c) for c in range(k)]
+    present = [c for c in range(k) if sum(cm[c]) > 0 or fp[c] > 0]
+    return tp, fp, fn, present
+
+
+def _cm_f64(cm):
+    """metrics.py macro_f1 of a confusion matrix (the same 2.0 * tp / den and fsum mean)."""
+    tp, fp, fn, present = _cm_counts(cm)
+    f1s = [0.0 if 2 * tp[c] + fp[c] + fn[c] == 0 else 2.0 * tp[c] / (2 * tp[c] + fp[c] + fn[c])
+           for c in present]
+    return math.fsum(f1s) / len(f1s)
+
+
+def _cm_exact(cm):
     from fractions import Fraction
+    tp, fp, fn, present = _cm_counts(cm)
+    den = [2 * tp[c] + fp[c] + fn[c] for c in present]
+    return sum((Fraction(0) if d == 0 else Fraction(2 * tp[c], d)) for c, d in zip(present, den)) / len(present)
+
+
+def _cm_head_f32(cm):
+    """aprender-core f1_score(.., Average::Macro) as HEAD computes it in f32 (2PR/(P+R), a
+    sequential f32 sum, / count) -- used ONLY to pick constructed cases that path gets wrong."""
+    f = np.float32
+    tp, fp, fn, present = _cm_counts(cm)
+    s = f(0.0)
+    for c in present:
+        pr = f(0.0) if tp[c] + fp[c] == 0 else f(tp[c]) / f(tp[c] + fp[c])
+        rc = f(0.0) if tp[c] + fn[c] == 0 else f(tp[c]) / f(tp[c] + fn[c])
+        s = s + (f(0.0) if pr + rc == f(0.0) else (f(2.0) * pr * rc) / (pr + rc))
+    return float(s / f(len(present)))
+
+
+def _cm_rows(cm):
     k = len(cm)
     y = [r for r in range(k) for c in range(k) for _ in range(cm[r][c])]
     pred = [c for r in range(k) for c in range(k) for _ in range(cm[r][c])]
-    labels = sorted(set(y) | set(pred))
-    exact = []
-    for c in labels:
-        tp = cm[c][c]
-        den = 2 * tp + sum(cm[r][c] for r in range(k) if r != c) + sum(cm[c][j] for j in range(k) if j != c)
-        exact.append(Fraction(0) if den == 0 else Fraction(2 * tp, den))
-    f1s = [_f1(np.array(pred), np.array(y), c) for c in labels]
-    return sum(exact) / len(exact), math.fsum(f1s) / len(f1s), _macro_f1_head_f32(pred, y), y, pred
+    return y, pred
 
 
 def _exact_margin_case(counts, name, py_pass):
     """The first (zero-shot, fine-tuned) pair of confusion matrices over true-class counts
-    `counts` (lexicographic order) whose EXACT rational macro-F1 margin is 1/20 -- the gate
-    boundary -- and on which metrics.py's f64 verdict is `py_pass` while HEAD's f32 path decides
-    the other way: the reviewers' V7-a / A5-2 disagreement, reconstructed."""
+    `counts` (lexicographic, then f64 order) whose EXACT rational macro-F1 margin is 1/20 -- the
+    gate boundary -- and on which metrics.py's f64 verdict is `py_pass` while HEAD's f32 path
+    decides the other way: the reviewers' V7-a / A5-2 disagreement, reconstructed."""
+    import bisect
     import itertools
     from fractions import Fraction
     k = len(counts)
-    by_exact = {}
+    seen = {}
     for cm in itertools.product(*[list(_splits(n, k)) for n in counts]):
-        exact, v64, v32, y, pred = _confusion_f1(cm)
-        by_exact.setdefault(exact, []).append((v64, v32, y, pred))
-    for zs_exact in sorted(by_exact):
-        for zs in by_exact[zs_exact]:
-            for ft in by_exact.get(zs_exact + Fraction(1, 20), []):
-                if (ft[0] - zs[0] >= CASE_MIN_MARGIN) != py_pass:
-                    continue
-                if (ft[1] - zs[1] >= CASE_MIN_MARGIN) == py_pass:
-                    continue
-                y = zs[2]
-                if ft[2] != y:
-                    raise RuntimeError("row order drifted between the two matrices")
-                confs = [0.55 + 0.05 * (i % 8) for i in range(len(y))]
-                return {
-                    "name": name, "k": k, "bins": 15, "labels": list(y), "f_avg_labels": None,
-                    "probabilities_f32_hex": [[f32_hex(v) for v in _pred_row(k, p, c)]
-                                              for p, c in zip(ft[3], confs)],
-                    "zero_shot_probabilities_f32_hex": [[f32_hex(v) for v in _pred_row(k, p, c)]
-                                                        for p, c in zip(zs[3], reversed(confs))],
-                }
+        seen.setdefault((_cm_f64(cm), _cm_head_f32(cm)), cm)
+    table = sorted(seen.items())
+    keys = [v64 for (v64, _), _ in table]
+    for (zs64, zs32), zs_cm in table:
+        lo = bisect.bisect_left(keys, zs64 + CASE_MIN_MARGIN - 1e-12)
+        hi = bisect.bisect_right(keys, zs64 + CASE_MIN_MARGIN + 1e-12)
+        for (ft64, ft32), ft_cm in table[lo:hi]:
+            if (ft64 - zs64 >= CASE_MIN_MARGIN) != py_pass or (ft32 - zs32 >= CASE_MIN_MARGIN) == py_pass:
+                continue
+            if _cm_exact(ft_cm) - _cm_exact(zs_cm) != Fraction(1, 20):
+                continue
+            y, ft_pred = _cm_rows(ft_cm)
+            y_zs, zs_pred = _cm_rows(zs_cm)
+            if y != y_zs:
+                raise RuntimeError("row order drifted between the two matrices")
+            confs = [0.55 + 0.05 * (i % 8) for i in range(len(y))]
+            return {
+                "name": name, "k": k, "bins": 15, "labels": y, "f_avg_labels": None,
+                "probabilities_f32_hex": [[f32_hex(v) for v in _pred_row(k, p, c)]
+                                          for p, c in zip(ft_pred, confs)],
+                "zero_shot_probabilities_f32_hex": [[f32_hex(v) for v in _pred_row(k, p, c)]
+                                                    for p, c in zip(zs_pred, reversed(confs))],
+            }
     raise RuntimeError("no exact-margin case over counts %s" % (counts,))
 
 
+def _ece_head_f32(rows, y, bins):
+    """aprender-core expected_calibration_error_top_label as HEAD computes it in f32 (f32 bin
+    index, sequential f32 bin sums, f32 accumulation) -- used ONLY to pick the grid-line case."""
+    f = np.float32
+    sums = [f(0.0)] * bins
+    hits = [f(0.0)] * bins
+    counts = [0] * bins
+    for row, label in zip(rows, y):
+        r = [f(v) for v in row]
+        pred = max(range(len(r)), key=lambda j: (r[j], -j))
+        conf = r[pred]
+        b = min(int(conf * f(bins)), bins - 1)
+        sums[b] = sums[b] + conf
+        hits[b] = hits[b] + (f(1.0) if pred == label else f(0.0))
+        counts[b] += 1
+    n = f(len(y))
+    ece = f(0.0)
+    for b in range(bins):
+        if counts[b]:
+            c = f(counts[b])
+            ece = ece + (c / n) * abs(sums[b] / c - hits[b] / c)
+    return float(ece)
+
+
+def _random_rows(rng, n, k, sharp):
+    """n float32 rows of k probabilities (argmax sharpened by `sharp`) and labels drawn from them."""
+    rows, y = [], []
+    for _ in range(n):
+        w = rng.random_sample(k) + 1e-3
+        w = w ** sharp
+        p = (w / w.sum()).astype(np.float32)
+        rows.append([float(v) for v in p])
+        cum = np.cumsum(p.astype(np.float64))
+        y.append(int(min(np.searchsorted(cum, rng.random_sample() * cum[-1], side="right"), k - 1)))
+    return rows, y
+
+
+def _rank_grid_case(name, rank_scale, n=459, k=3, bins=15):
+    """The first seeded 459 x 3 set whose rank key floor(ece x rank_scale) differs between
+    metrics.py's f64 ECE and HEAD's f32 ECE: an ECE on a 1e-4 grid line, decided by the last bit
+    (the reviewers' 0.0679999937 vs 0.0680000111 pair, reconstructed)."""
+    for seed in range(1, 200000):
+        rng = np.random.RandomState(0x0827_0000 + seed)
+        rows, y = _random_rows(rng, n, k, 2)
+        e64 = ece_top_label(np.array(rows), np.array(y), bins)
+        e32 = _ece_head_f32(rows, y, bins)
+        if rank_key(e64, rank_scale) != rank_key(e32, rank_scale):
+            return {"name": name, "k": k, "bins": bins, "labels": y, "f_avg_labels": [1, 2],
+                    "probabilities_f32_hex": [[f32_hex(v) for v in r] for r in rows],
+                    "search_seed": seed}
+    raise RuntimeError("no grid-line case found")
+
+
+def _random_case(i):
+    """Seeded random case i: N 3..600 rows (case 1 at the floor, N = 3), K = 2 + i mod 5 (every
+    K in 2..6 four times), 15 bins; a zero-shot set on even i."""
+    rng = np.random.RandomState(0x0827_1000 + i)
+    n = 3 + int(rng.randint(598))
+    n = 3 if i == 1 else n
+    k = 2 + i % 5
+    sharp = [1, 2, 4][int(rng.randint(3))]
+    rows, y = _random_rows(rng, n, k, sharp)
+    case = {"name": "random_%02d" % i, "k": k, "bins": 15, "labels": y,
+            "f_avg_labels": [1, 2] if k >= 3 else None,
+            "probabilities_f32_hex": [[f32_hex(v) for v in r] for r in rows]}
+    if i % 2 == 0:
+        zs_rows, _ = _random_rows(rng, n, k, 1)
+        case["zero_shot_probabilities_f32_hex"] = [[f32_hex(v) for v in r] for r in zs_rows]
+    return case
+
+
+CASE_RANK_SCALE = 10000
+N_RANDOM_CASES = 20
+
+
 def case_expected(case):
-    """The exact f64 results of one case, as metrics.py computes them (hex)."""
+    """The exact f64 results of one case, as metrics.py computes them (hex; rank_key an int)."""
     y = np.array(case["labels"], dtype=np.int64)
+    bins = int(case["bins"])
+    fav = case.get("f_avg_labels")
+
+    def block(P, prefix):
+        out = {prefix + "macro_f1_f64_hex": f64_hex(macro_f1(P, y)),
+               prefix + "ece_f64_hex": f64_hex(ece_top_label(P, y, bins)),
+               prefix + "f_avg_f64_hex": None if fav is None else f64_hex(f_avg(P, y, list(fav)))}
+        return out
+
     P = probs_from_hex(case["probabilities_f32_hex"])
-    out = {"macro_f1_f64_hex": f64_hex(macro_f1(P, y))}
+    out = block(P, "")
+    out["rank_key"] = rank_key(ece_top_label(P, y, bins), CASE_RANK_SCALE)
     if "zero_shot_probabilities_f32_hex" in case:
-        zs = macro_f1(probs_from_hex(case["zero_shot_probabilities_f32_hex"]), y)
-        margin = macro_f1(P, y) - zs
-        out["zero_shot_macro_f1_f64_hex"] = f64_hex(zs)
+        Z = probs_from_hex(case["zero_shot_probabilities_f32_hex"])
+        out.update(block(Z, "zero_shot_"))
+        margin = macro_f1(P, y) - macro_f1(Z, y)
         out["margin_f64_hex"] = f64_hex(margin)
         out["margin_pass"] = bool(math.isfinite(margin) and margin >= CASE_MIN_MARGIN)
     return out
 
 
 def build_numeric_cases():
-    cases = [_exact_margin_case((3, 3, 3), "margin_exact_1_20_9row", py_pass=True)]
+    cases = [
+        _exact_margin_case((3, 3, 3), "margin_exact_1_20_9row", py_pass=True),
+        _exact_margin_case((10, 10, 10), "margin_exact_1_20_30row", py_pass=False),
+        _rank_grid_case("rank_grid_line_459x3", CASE_RANK_SCALE),
+    ] + [_random_case(i) for i in range(N_RANDOM_CASES)]
     for c in cases:
         c["expected"] = case_expected(c)
     return {
@@ -245,6 +359,7 @@ def build_numeric_cases():
                      "--write-numeric-cases",
         "hex": "f32 = 8 lowercase hex digits, f64 = 16, big-endian IEEE-754 bits (Rust to_bits)",
         "min_macro_f1_margin": CASE_MIN_MARGIN,
+        "rank_scale": CASE_RANK_SCALE,
         "cases": cases,
     }
 
@@ -317,8 +432,9 @@ def selftest():
     ncases = doc.get("cases") or []
     if doc.get("schema") != NUMERIC_SCHEMA or not ncases:
         failures.append("numeric cases: missing or wrong schema")
-    if doc.get("min_macro_f1_margin") != CASE_MIN_MARGIN:
-        failures.append("numeric cases: min_macro_f1_margin is not %r" % CASE_MIN_MARGIN)
+    if doc.get("min_macro_f1_margin") != CASE_MIN_MARGIN or doc.get("rank_scale") != CASE_RANK_SCALE:
+        failures.append("numeric cases: min_macro_f1_margin / rank_scale are not %r / %r"
+                        % (CASE_MIN_MARGIN, CASE_RANK_SCALE))
     for c in ncases:
         got, want = case_expected(c), c["expected"]
         ok = got == want

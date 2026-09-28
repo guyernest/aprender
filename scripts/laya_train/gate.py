@@ -196,7 +196,7 @@ def rank_key(ece_post, rank_scale):
     x = float(ece_post)
     if not math.isfinite(x):
         raise GateError("REFUSED seeds: ece_post %r is not finite, so it has no rank key" % (ece_post,))
-    return int(math.floor(x * int(rank_scale)))
+    return metrics.rank_key(x, rank_scale)
 
 
 def select_median_seed(rows, rank_scale):

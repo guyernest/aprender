@@ -303,6 +303,62 @@ pub fn expected_calibration_error_top_label(
     )
 }
 
+/// Top-label ECE in f64 with exactly-rounded sums — the Laya gate's `ece_top_label`
+/// (contracts/laya-finetune-gate-v1.yaml `numeric_agreement.ece_top_label`).
+///
+/// ```text
+/// conf_i, pred_i = max_k p_ik, argmax_k p_ik        (first max on ties; conf widened f32 -> f64)
+/// bin(i)         = min(floor(conf_i x n_bins), n_bins - 1)          in f64
+/// acc_b          = fsum(correct_i for i in b) / n_b
+/// conf_b         = fsum(conf_i for i in b) / n_b
+/// ECE            = fsum over occupied bins, in bin order, of (n_b / N) x |acc_b - conf_b|
+/// ```
+///
+/// Bit-identical to `scripts/laya_train/metrics.py` `ece_top_label`, which computes the same
+/// expression with `math.fsum` on the f64-widened probabilities. It shares the input validation
+/// and the top-label rule with [`expected_calibration_error_top_label`], which it does NOT
+/// replace: that function's f32 results are frozen for its other callers.
+///
+/// # Panics
+///
+/// As [`expected_calibration_error_top_label`].
+#[must_use]
+pub fn expected_calibration_error_top_label_f64(
+    probabilities: &[f32],
+    n_classes: usize,
+    labels: &[usize],
+    n_bins: usize,
+) -> f64 {
+    contract_pre_expected_calibration_error_top_label!(probabilities);
+    assert!(n_bins > 0, "multiclass calibration: n_bins must be >= 1");
+    let n_samples = multiclass_rows(probabilities, n_classes, labels);
+    let mut conf_in: Vec<Vec<f64>> = vec![Vec::new(); n_bins];
+    let mut correct_in: Vec<usize> = vec![0; n_bins];
+    for (i, &label) in labels.iter().enumerate() {
+        let (conf, pred) = top_label(&probabilities[i * n_classes..(i + 1) * n_classes]);
+        let conf = f64::from(conf);
+        let bin = ((conf * n_bins as f64).floor() as usize).min(n_bins - 1);
+        conf_in[bin].push(conf);
+        if pred == label {
+            correct_in[bin] += 1;
+        }
+    }
+    let n = n_samples as f64;
+    let terms = conf_in
+        .iter()
+        .zip(&correct_in)
+        .filter(|(confs, _)| !confs.is_empty())
+        .map(|(confs, &correct)| {
+            let n_b = confs.len() as f64;
+            // fsum of `correct` 1.0s is the integer count, exactly: the cast IS that sum.
+            let acc = correct as f64 / n_b;
+            let mean_conf = crate::metrics::fsum(confs.iter().copied()) / n_b;
+            (n_b / n) * (acc - mean_conf).abs()
+        })
+        .collect::<Vec<f64>>();
+    crate::metrics::fsum(terms)
+}
+
 /// Multiclass Brier score, original (Brier 1950) UNNORMALISED definition (D-07).
 ///
 /// ```text

@@ -1,6 +1,6 @@
 contract: laya-finetune-gate
 metadata:
-  version: 3.0.0
+  version: 4.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -59,6 +59,19 @@ metadata:
     schema field or recorded outcome changed; `pv diff` classifies any invariant edit MAJOR, so this
     is published as 3.0.0, and the 1.4.0 naming above is unchanged.
 
+    NUMERIC AGREEMENT (plan 08-27, 2026-09-28, class E; no threshold, formula meaning, seed,
+    schema field or recorded outcome moved). Until this plan Rust recomputed macro-F1 and the ECE
+    in f32 while the Python trainer used f64 with numpy sums, so at an exact threshold the two
+    could decide differently (V7-a: a 9-row set whose margin is exactly 1/20 PASSED in Python and
+    FAILED in Rust; V7-b: about 1 in 2000 random 459-row sets moved a rank key), and the
+    `why_quantized` premise "the same ECE to well under 1e-12" was false. Every gate quantity is
+    now ONE declared f64 computation with exactly-rounded sums in both languages
+    (`numeric_agreement`), met bit for bit on a frozen case file both languages replay, and
+    `f_avg` is recomputed (check_f_avg). The gate's ECE and macro-F1 are aprender-core's new f64
+    paths; the f32 functions other phases use are unchanged, frozen bit for bit. `pv diff`
+    classifies the amended ece_top_label formula and invariants MAJOR, so this is published as
+    4.0.0; the 1.4.0 naming above is unchanged.
+
     THE GATE IS DECIDED ON RECOMPUTED METRICS, NOT REPORTED ONES. A gate report is a file a
     training run wrote; an edited report must not pass. So the metrics that DECIDE pass are
     recomputed in Rust (plan 08-09) from `eval-probs.json` and `zero-shot-probs.json`, after every
@@ -70,8 +83,9 @@ metadata:
     be edited.
 
     THE ECE IS THE HOUSE ECE (OPS-03). `ece_top_label` is aprender-core's
-    `calibration::expected_calibration_error_top_label` (contracts/calibration-v1.yaml), floor
-    binning with a top-bin clamp. Recorded deviation: spike 024's `fewshot015.metrics` bins
+    `calibration::expected_calibration_error_top_label_f64` — the f64, exactly-summed companion of
+    `expected_calibration_error_top_label` (contracts/calibration-v1.yaml), with the same floor
+    binning and top-bin clamp (plan 08-27, `numeric_agreement`). Recorded deviation: spike 024's `fewshot015.metrics` bins
     right-closed, `(lo, hi]`; the two differ only for a confidence exactly on a bin edge. One Rust
     ECE implementation outweighs byte-matching an informational spike number.
 
@@ -148,7 +162,7 @@ seed_policy:
   report_rule: 'all three runs are reported, in gate-report `seeds.per_seed` (seed order) and in variance-report.json; a non-median seed''s numbers never enter gate_pass'
   retention_rule: 'every seed trains in `seeds/seed-<s>/`; after selection the median seed''s checkpoint becomes `checkpoint/` and the others'' checkpoints are deleted; every seed''s `seeds/seed-<s>/eval-probs.json` is kept and hash-bound (per_seed eval_probs_sha256); the non-shipped seeds are RECOMPUTED in Rust from those files but NOT re-scored'
   honesty: 'the median is selected WITH eval labels. Median-of-3 is not best-of-3: the shipped run''s ECE is the middle draw, not the minimum, so the report is not optimistically biased the way a best-seed choice is — but it IS a selection on the gate eval set and is recorded as one. Chosen because spike 027 measured MPS training as not bitwise reproducible: one replicate turned a FAIL into a PASS, ECE moving by up to 0.048'
-  why_quantized: 'Python and Rust compute the same ECE from the same probabilities to well under 1e-12; ranking on the 1e-4 grid makes both sides order the seeds identically unless the two ECEs of one seed fall on opposite sides of a grid line. Rust therefore recomputes rank_key(s) from its own ece_post and refuses any seed whose recomputed rank_key differs from the rank_key Python reported (gate-report seeds.per_seed[].rank_key) rather than guessing; a value merely near a grid line whose two keys agree is accepted, because reading "near" as within gate_metric_recompute_abs (1e-5) of a 1e-4 grid line would refuse about 20 % of honest seeds (text aligned by plan 08-12 to the rule plan 08-15 implemented, verify::check_seed_selection)'
+  why_quantized: 'Python and Rust compute the same ECE from the same probabilities BIT FOR BIT by construction (`numeric_agreement`: one f64 formula, exactly-rounded sums, the same order, replayed on the frozen case file scripts/laya_train/numeric_cases.json by both languages; plan 08-27), so both sides order the seeds identically, including an ECE that sits exactly on a 1e-4 grid line. Rust still recomputes rank_key(s) from its own ece_post and refuses any seed whose recomputed rank_key differs from the rank_key Python reported (gate-report seeds.per_seed[].rank_key) rather than guessing: with the two computations identical, that refusal fires only on a report whose rank_key or probabilities were edited. A value merely near a grid line whose two keys agree is accepted, because reading "near" as within gate_metric_recompute_abs (1e-5) of a 1e-4 grid line would refuse about 20 % of honest seeds (verify::check_seed_selection)'
   legacy_rule: 'a recipe.json without `seed_selection` is judged under the 1.x rule — the declared seed ships — and is NEVER deploy-eligible under 1.4.0: verify refuses it with SeedPolicyMissing, but only AFTER the re-scores and the gate, so a legacy run whose gate fails still reports GateFailed'
 
 eval_set:
@@ -460,6 +474,55 @@ probes_json_schema:
 # `report_only_otherwise`; `membership_report_only` binds a list's structure and states why its
 # membership decides nothing.
 # ---------------------------------------------------------------------------------------------
+# ---- plan 08-27 (class E): ONE f64 computation per gate quantity, met bit for bit by the Python
+# trainer and the Rust verifier. Structured, so a top-level key (the constants block stays flat).
+numeric_agreement:
+  rule: 'every gate quantity is computed in f64 with exactly-rounded summation, in the order stated, by aprender-core (Rust, the ONE implementation per operation, OPS-03) and by scripts/laya_train/metrics.py (Python math.fsum); an exactly-rounded sum does not depend on term order or summation tree, so both languages return bit-identical values and identical verdicts on every input, including an exact 0.05 margin and an ECE on a 1e-4 rank grid line. aprender-core''s f32 f1_score and expected_calibration_error_top_label are NOT these computations and are unchanged (frozen by metrics::f32_bits_tests::f32_metrics_are_bit_identical_to_the_frozen_snapshot)'
+  summation: 'exactly-rounded (Python math.fsum / aprender_core metrics::fsum, a safe port of CPython math_fsum: Shewchuk partials plus the half-way correct-rounding step)'
+  inputs: 'the probability files'' float32 values widened exactly to f64 (train.py as64); pred = the first argmax; labels the eval (or shift) rows'' true labels'
+  case_file: scripts/laya_train/numeric_cases.json
+  case_schema: laya-numeric-cases-v1
+  case_generator: 'uv run --project scripts/laya_train --frozen python scripts/laya_train/metrics.py --write-numeric-cases (byte-reproducible): the reviewers'' constructed boundary cases (a 9-row and a 30-row exact-1/20 margin, a 459-row rank grid-line ECE, each one HEAD''s f32 path decided differently) and 20 seeded random cases (N 3..600, K 2..6, 15 bins), expected values as f64 bit patterns'
+  replayed_by:
+    - 'Python: scripts/laya_train/metrics.py --selftest (inside just laya-train-selftest)'
+    - 'Rust: cargo test -p aprender-decide --lib verify::tests::gate_numeric_cases_agree_bit_for_bit'
+  quantities:
+    macro_f1:
+      formula: 'L = sorted(labels present in y UNION pred); F1_c = 2 tp_c / (2 tp_c + fp_c + fn_c), 0 when the denominator is 0; macro_f1 = fsum(F1_c for c in L) / |L|'
+      precision: f64
+      summation: exactly-rounded
+      order: 'per-class F1 by one division each, then one fsum over L, then one division by |L|'
+      python: 'metrics.py macro_f1'
+      rust: 'aprender-core metrics::classification::macro_f1_f64, called by aprender_decide::verify::recompute_metrics'
+    f_avg:
+      formula: 'f_avg = fsum(F1_c for c in S) / |S|, F1_c as in macro_f1; S = [index(against), index(favor)] exactly when the task''s labels are demo.criteria_order, else f_avg is null'
+      precision: f64
+      summation: exactly-rounded
+      order: 'per-label F1, one fsum over S in the given order, one division'
+      python: 'metrics.py f_avg with train.py f_avg_labels'
+      rust: 'aprender-core metrics::classification::mean_f1_over_labels_f64, called by aprender_decide::verify::check_f_avg (zero_shot, fine_tuned, every per_seed row, both shift sets; the null rule is verify::f_avg_labels)'
+    ece_top_label:
+      formula: 'the ece_top_label equation: acc_b = fsum(correct in b) / n_b, conf_b = fsum(conf in b) / n_b, ECE = fsum((n_b / N) * |acc_b - conf_b|) over occupied bins'
+      precision: f64
+      summation: exactly-rounded
+      order: 'bin index floor(conf x ece_bins) in f64 clamped to ece_bins - 1; per bin one fsum of correct and one of conf, each divided by n_b; one term per occupied bin in bin order; one fsum of the terms'
+      python: 'metrics.py ece_top_label'
+      rust: 'aprender-core calibration::expected_calibration_error_top_label_f64, called by aprender_decide::verify::recompute_metrics'
+    margin:
+      formula: 'margin = macro_f1(fine_tuned) - macro_f1(zero_shot); PASS clause margin >= gate_min_macro_f1_margin'
+      precision: f64
+      summation: 'one f64 subtraction of the two exactly-summed macro-F1s'
+      order: 'fine-tuned minus zero-shot'
+      python: 'gate.py evaluate_gate (and train.py per seed / shift probe)'
+      rust: 'aprender_decide::verify::recompute_gate (Recomputed.margin), judged by check_gate; per seed in check_seed_selection'
+    rank_key:
+      formula: 'rank_key = floor(ece_post x rank_scale) as an integer, rank_scale the integer seed_policy.rank_scale multiplied in'
+      precision: f64
+      summation: 'one f64 multiplication of the exactly-summed ECE, then floor'
+      order: 'multiply, then floor'
+      python: 'metrics.py rank_key (gate.rank_key refuses a non-finite ECE, then calls it)'
+      rust: 'aprender_decide::verify::rank_key on recompute_metrics'' ECE (check_seed_selection, select_median_seed)'
+
 run_field_bindings:
   rule: 'a new recipe.json or gate-report.json field needs a row here before any run dir carrying it verifies: the sweep fails on an unlisted leaf, and on a listed pattern no fixture leaf has'
   rows:
@@ -502,13 +565,13 @@ run_field_bindings:
     - {file: gate-report.json, leaf: '/zero_shot/macro_f1', bound_by: 'check_gate (recomputed)', names: 'field=zero_shot.macro_f1'}
     - {file: gate-report.json, leaf: '/zero_shot/ece', bound_by: 'check_gate (recomputed)', names: 'field=zero_shot.ece'}
     - {file: gate-report.json, leaf: '/zero_shot/n', bound_by: 'check_gate (recomputed)', names: 'field=zero_shot.n'}
-    - {file: gate-report.json, leaf: '/zero_shot/f_avg', bound_by: 'check_f_avg (plan 08-27)', names: 'f_avg'}
+    - {file: gate-report.json, leaf: '/zero_shot/f_avg', bound_by: 'check_f_avg (the trainer''s null rule, then the recomputed f64 mean)', names: 'field=zero_shot.f_avg'}
     - {file: gate-report.json, leaf: '/fine_tuned/macro_f1', bound_by: 'check_gate (recomputed)', names: 'field=fine_tuned.macro_f1'}
     - {file: gate-report.json, leaf: '/fine_tuned/ece_post', bound_by: 'check_gate (recomputed)', names: 'field=fine_tuned.ece_post'}
     - {file: gate-report.json, leaf: '/fine_tuned/nll', bound_by: 'check_gate (recomputed)', names: 'field=fine_tuned.nll'}
     - {file: gate-report.json, leaf: '/fine_tuned/n', bound_by: 'check_gate (recomputed)', names: 'field=fine_tuned.n'}
     - {file: gate-report.json, leaf: '/fine_tuned/ece_pre', report_only: 'the pre-calibration ECE is computed by train.py from the T = 1 probabilities, which the run dir does not hold; rebuilding them from the calibrated float32 file as softmax(T x ln p) is not exact, and ECE jumps at bin edges, so a recomputation could refuse an honest run. It is in no gate clause and not in the artifact manifest'}
-    - {file: gate-report.json, leaf: '/fine_tuned/f_avg', bound_by: 'check_f_avg (plan 08-27)', names: 'f_avg'}
+    - {file: gate-report.json, leaf: '/fine_tuned/f_avg', bound_by: 'check_f_avg (the trainer''s null rule, then the recomputed f64 mean)', names: 'field=fine_tuned.f_avg'}
     - {file: gate-report.json, leaf: '/margin', bound_by: 'check_gate (recomputed)', names: 'field=margin'}
     - {file: gate-report.json, leaf: '/calibration/bucket', bound_by: 'decide-apr-v1 rung 4 (check_manifest_bindings: bucket_key of the task)', names: 'calibration.bucket'}
     - {file: gate-report.json, leaf: '/calibration/t_fitted', bound_by: 'check_report_record (t_applied == clamp(t_fitted), calibration_fit_bounded)', names: 'calibration_fit_bounded'}
@@ -526,7 +589,7 @@ run_field_bindings:
     - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/macro_f1', bound_by: 'check_seed_selection (recomputed)', names: 'field=per_seed.macro_f1'}
     - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/ece_post', bound_by: 'check_seed_selection (recomputed)', names: 'field=per_seed.ece_post'}
     - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/margin', bound_by: 'check_seed_selection (recomputed)', names: 'field=per_seed.margin'}
-    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/f_avg', bound_by: 'check_f_avg (plan 08-27)', names: 'f_avg'}
+    - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/f_avg', bound_by: 'check_f_avg (the trainer''s null rule, then the recomputed f64 mean)', names: 'field=per_seed.f_avg'}
     - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/pass', bound_by: 'check_seed_selection (recomputed)', names: 'field=per_seed.pass'}
     - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/t_applied', bound_by: 'check_seeds_block (the shipped row == calibration.t_applied)', names: 'field=per_seed.t_applied', only: 'shipped_seed_row', report_only_otherwise: 'a non-shipped seed''s checkpoint is deleted after selection (seed_policy.retention_rule) and its T is not recorded anywhere else, so no file verify holds can bind it; it enters no verdict'}
     - {file: gate-report.json, leaf: '/seeds/per_seed/[*]/rank_key', bound_by: 'check_seed_selection (recomputed)', names: 'field=per_seed.rank_key'}
@@ -550,10 +613,10 @@ run_field_bindings:
     - {file: gate-report.json, leaf: '/shift_probe/n', bound_by: 'check_shift_probe', names: 'field=shift_probe.n'}
     - {file: gate-report.json, leaf: '/shift_probe/zero_shot/macro_f1', bound_by: 'check_shift_probe (recomputed)', names: 'field=shift_probe.zero_shot.macro_f1'}
     - {file: gate-report.json, leaf: '/shift_probe/zero_shot/ece', bound_by: 'check_shift_probe (recomputed)', names: 'field=shift_probe.zero_shot.ece'}
-    - {file: gate-report.json, leaf: '/shift_probe/zero_shot/f_avg', bound_by: 'check_f_avg (plan 08-27)', names: 'f_avg'}
+    - {file: gate-report.json, leaf: '/shift_probe/zero_shot/f_avg', bound_by: 'check_f_avg (the trainer''s null rule, then the recomputed f64 mean)', names: 'field=shift_probe.zero_shot.f_avg'}
     - {file: gate-report.json, leaf: '/shift_probe/fine_tuned/macro_f1', bound_by: 'check_shift_probe (recomputed)', names: 'field=shift_probe.fine_tuned.macro_f1'}
     - {file: gate-report.json, leaf: '/shift_probe/fine_tuned/ece_post', bound_by: 'check_shift_probe (recomputed)', names: 'field=shift_probe.fine_tuned.ece_post'}
-    - {file: gate-report.json, leaf: '/shift_probe/fine_tuned/f_avg', bound_by: 'check_f_avg (plan 08-27)', names: 'f_avg'}
+    - {file: gate-report.json, leaf: '/shift_probe/fine_tuned/f_avg', bound_by: 'check_f_avg (the trainer''s null rule, then the recomputed f64 mean)', names: 'field=shift_probe.fine_tuned.f_avg'}
     - {file: gate-report.json, leaf: '/shift_probe/margin', bound_by: 'check_shift_probe (recomputed)', names: 'field=shift_probe.margin'}
     - {file: gate-report.json, leaf: '/shift_probe/probs_sha256', bound_by: 'PackInputs::from_run_dir', names: 'file=shift_probs_json'}
     - {file: gate-report.json, leaf: '/shift_probe/zero_shot_probs_sha256', bound_by: 'PackInputs::from_run_dir', names: 'file=shift_zero_shot_probs_json'}
@@ -569,17 +632,18 @@ equations:
       - 'a reported metric further than gate_metric_recompute_abs from its Rust recomputation is refused; a reported `pass` disagreeing with the recomputed one is refused — recomputing pass from REPORTED metrics would let an edited report pass'
       - 'the gate compares against the zero-shot DECLARED BASE on the SAME eval rows, not against a remembered number'
       - 'the ECE is ece_post, computed with the APPLIED temperature (calibration_fit_bounded)'
+      - 'macro_f1, ece_post and the margin are the numeric_agreement f64 computations, bit-identical in the trainer and the verifier, so an honest run at an exact threshold (a margin of exactly 0.05, an ECE of exactly 0.10) is decided the same way on both sides and never refused PassDisagrees'
     preconditions:
       - 'split_disjointness holds for the run'
 
   ece_top_label:
-    formula: 'conf_i = max_k p_ik; pred_i = argmax_k p_ik; bin(i) = min(floor(conf_i * ece_bins), ece_bins - 1); ECE = sum_b (n_b / N) * |acc_b - conf_b|'
+    formula: 'conf_i = max_k p_ik (float32 widened to f64); pred_i = argmax_k p_ik (first max); bin(i) = min(floor(conf_i * ece_bins), ece_bins - 1) in f64; acc_b = fsum(correct_i in b) / n_b; conf_b = fsum(conf_i in b) / n_b; ECE = fsum over occupied bins in bin order of (n_b / N) * |acc_b - conf_b|, fsum exactly rounded (numeric_agreement)'
     domain: 'N rows of K probabilities (rows sum to 1) with true labels'
     codomain: 'ECE in [0, 1]'
     invariants:
-      - 'THE HOUSE DEFINITION: aprender-core calibration::expected_calibration_error_top_label (contracts/calibration-v1.yaml), frozen cases scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json'
+      - 'THE HOUSE DEFINITION: aprender-core calibration::expected_calibration_error_top_label_f64, the f64 exactly-summed companion of expected_calibration_error_top_label (contracts/calibration-v1.yaml); frozen cases scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json (within 1e-6) and scripts/laya_train/numeric_cases.json (bit for bit)'
       - 'recorded deviation: spike 024 binned right-closed (lo, hi]; the two differ only for a confidence exactly on a bin edge. One Rust ECE implementation (OPS-03) outweighs byte-matching an informational spike number'
-      - 'the Python trainer reports with the same floor binning; the Rust verifier is the authority'
+      - 'the Python trainer (metrics.py ece_top_label, math.fsum) returns the SAME BITS as the Rust verifier on every input (numeric_agreement); the Rust verifier is the authority'
 
   calibration_fit_bounded:
     formula: 'T_fitted = argmin_{T in [calibration_temp_min, calibration_temp_max]} NLL(softmax(z / T), y) over the calibration slice; T_applied = clamp(T_fitted, calibration_temp_min, calibration_temp_max); clamp_hit = (T_fitted at a bound)'
@@ -752,7 +816,7 @@ falsification_tests:
 
   - id: FALSIFY-LAYA-GATE-003
     rule: 'The ECE matches the house definition on the frozen cases'
-    prediction: 'The verifier''s ECE equals aprender::calibration::expected_calibration_error_top_label on every case of scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json, and the Python trainer''s ECE matches within gate_metric_recompute_abs on the synthetic fixture.'
+    prediction: 'The verifier''s ECE equals aprender::calibration::expected_calibration_error_top_label_f64 bit for bit on every case of scripts/setfit_fixtures/claims_stats/ece_top_label_cases.json and lies within gate_metric_recompute_abs of the frozen reference; the Python trainer''s ECE equals it bit for bit (FALSIFY-LAYA-GATE-015).'
     implemented_by: 'plans 08-08 (Python half: metrics.py --selftest replays every frozen house case to 1e-6, inside just laya-train-selftest) and 08-09 (Rust verifier: recompute_metrics is bit-identical to the house ECE on every frozen case, and within gate_metric_recompute_abs of the frozen reference)'
     test_harness: 'just laya-train-selftest'
     test: 'cargo test -p aprender-decide --lib verify::tests::recompute_matches_house_ece_cases'
@@ -837,6 +901,14 @@ falsification_tests:
     implemented_by: 'plan 08-15 wrote the env-gated test (crates/aprender-decide/tests/demo_run.rs: armed by LAYA_MODEL_DIR + LAYA_DEMO_RUN=1, SKIP otherwise, so CI compiles it only; it reads demo_s64 and, while outcome is pending, prints that SKIP and passes); plan 08-16 arms it after writing demo_s64.outcome and outcome_record.'
     test: 'cargo test -p aprender-decide --release --test demo_run declared_demo_run_matches_its_outcome_of_record'
     if_fails: 'The recorded outcome of the declared run and what the shipped bytes actually do disagree: the record describes something that is not deployed.'
+
+  - id: FALSIFY-LAYA-GATE-015
+    rule: 'The trainer and the verifier compute every gate quantity bit for bit (numeric_agreement), and f_avg is recomputed'
+    prediction: 'On every case of scripts/laya_train/numeric_cases.json — the exact-1/20 margin cases, the rank grid-line case and the seeded random cases — Rust macro_f1, ece, f_avg, margin and rank_key equal metrics.py''s bit patterns and check_gate decides the margin clause as Python does; a forged f_avg in any of the five report locations, a null stance f_avg, or a non-null non-stance f_avg is refused naming the field.'
+    implemented_by: 'plan 08-27 (aprender-core metrics::fsum, macro_f1_f64, mean_f1_over_labels_f64, expected_calibration_error_top_label_f64; metrics.py on math.fsum; verify::check_f_avg)'
+    test_harness: 'just laya-train-selftest'
+    test: 'cargo test -p aprender-decide --lib verify::tests::gate_numeric_cases_agree_bit_for_bit && cargo test -p aprender-decide --lib verify::tests::f_avg_forged_refused && cargo test -p aprender-decide --lib verify::tests::f_avg_null_rule_enforced'
+    if_fails: 'Two implementations of one number: an honest run at an exact threshold can be refused (or a rank key can move), and a report can carry an f_avg no one checked.'
 
 kani_harnesses:
 

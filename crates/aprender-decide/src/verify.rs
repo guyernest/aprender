@@ -65,8 +65,8 @@ use crate::artifact::{self, within, ArtifactError};
 use crate::laya::argmax;
 use crate::pack::{self, sha256_hex, GateCalibration, GateReport, PackError, PackInputs, Recipe};
 use crate::{DecideError, Decider, Decision, DecisionMethod, Task};
-use aprender::calibration::expected_calibration_error_top_label;
-use aprender::metrics::classification::macro_f1_f64;
+use aprender::calibration::expected_calibration_error_top_label_f64;
+use aprender::metrics::classification::{macro_f1_f64, mean_f1_over_labels_f64};
 use aprender::metrics::probabilistic::log_loss;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -132,6 +132,10 @@ pub struct VerifyPolicy {
     pub seed_rank_scale: f64,
     /// laya-finetune-gate-v1 `seed_policy.tie_break` (`smaller_seed`).
     pub seed_tie_break: String,
+    /// laya-finetune-gate-v1 `demo.criteria_order`: a task whose labels are exactly this list
+    /// is the stance task, whose report carries `f_avg` over [`F_AVG_STANCE_LABELS`]; every
+    /// other task's `f_avg` is null ([`f_avg_labels`], the rule `train.py` applies).
+    pub stance_criteria_order: Vec<String>,
 }
 
 /// laya-finetune-gate-v1 `base`: what a production run must declare as its base, and what the
@@ -214,6 +218,15 @@ pub struct GateContractView {
     pub recipe: RecipeBlockView,
     /// `early_stopping`.
     pub early_stopping: EarlyStoppingBlockView,
+    /// `demo`.
+    pub demo: DemoBlockView,
+}
+
+/// laya-finetune-gate-v1 `demo` (the part the verifier reads).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DemoBlockView {
+    /// `criteria_order`.
+    pub criteria_order: Vec<String>,
 }
 
 /// laya-finetune-gate-v1 `constants` (the part the verifier reads).
@@ -419,6 +432,7 @@ impl VerifyPolicy {
             seed_selection_seeds: s.variance_seeds.clone(),
             seed_rank_scale: s.rank_scale,
             seed_tie_break: s.tie_break.clone(),
+            stance_criteria_order: gate.demo.criteria_order.clone(),
         }
     }
 }
@@ -514,7 +528,7 @@ impl fmt::Display for GateClause {
 pub struct Metrics {
     /// aprender-core `macro_f1_f64` (f64, exactly-rounded mean).
     pub macro_f1: f64,
-    /// aprender-core `expected_calibration_error_top_label`.
+    /// aprender-core `expected_calibration_error_top_label_f64` (f64, exactly-rounded sums).
     pub ece: f64,
 }
 
@@ -2286,9 +2300,11 @@ pub fn rescore_bounds(
 
 /// Macro-F1 and top-label ECE with aprender-core's ONE implementation of each (OPS-03).
 ///
-/// Macro-F1 is aprender-core `macro_f1_f64`: f64 per-class F1 and an exactly-rounded mean,
-/// bit-identical to `scripts/laya_train/metrics.py` `macro_f1` (laya-finetune-gate-v1
-/// `numeric_agreement`).
+/// Both are aprender-core's f64 paths with exactly-rounded sums — `macro_f1_f64` and
+/// `expected_calibration_error_top_label_f64` — bit-identical to `scripts/laya_train/metrics.py`
+/// `macro_f1` and `ece_top_label` (laya-finetune-gate-v1 `numeric_agreement`, replayed by
+/// `verify::tests::gate_numeric_cases_agree_bit_for_bit`), so the margin, the ECE clause and the
+/// rank key are decided on the same bits in both languages.
 ///
 /// `probs` must already be validated ([`validate_probs`]): non-empty, `k >= 2` columns, rows
 /// summing to 1 and labels `< k` — the metric functions' panicking preconditions.
@@ -2304,9 +2320,7 @@ pub fn recompute_metrics(
     let pred: Vec<usize> = probs.iter().map(|p| argmax(p)).collect();
     Metrics {
         macro_f1: macro_f1_f64(&pred, labels),
-        ece: f64::from(expected_calibration_error_top_label(
-            &flat, k, labels, ece_bins,
-        )),
+        ece: expected_calibration_error_top_label_f64(&flat, k, labels, ece_bins),
     }
 }
 
@@ -2916,6 +2930,222 @@ pub fn check_shift_probe(
     )
 }
 
+/// The stance pair `scripts/laya_train/train.py` averages F1 over for `f_avg`
+/// (`[labels.index("against"), labels.index("favor")]`).
+pub const F_AVG_STANCE_LABELS: [&str; 2] = ["against", "favor"];
+
+/// The trainer's `f_avg` rule: the indices of [`F_AVG_STANCE_LABELS`] exactly when the task's
+/// labels ARE `demo.criteria_order` (the stance task), else `None` (every `f_avg` is null).
+///
+/// # Errors
+///
+/// [`VerifyError::RecordMismatch`] when the contract's criteria order lacks a stance label (the
+/// trainer's `labels.index` would raise on it).
+pub fn f_avg_labels(
+    task_labels: &[String],
+    criteria_order: &[String],
+) -> Result<Option<Vec<usize>>, VerifyError> {
+    if task_labels != criteria_order {
+        return Ok(None);
+    }
+    F_AVG_STANCE_LABELS
+        .iter()
+        .map(|name| {
+            task_labels.iter().position(|l| l == name).ok_or_else(|| {
+                record_mismatch(
+                    "f_avg",
+                    format!("demo.criteria_order {criteria_order:?} has no {name:?} label"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+/// The probability sets whose `f_avg` a report records, validated: the eval sets, every gate
+/// seed's eval set, and the shift probe's two sets (1.4.0).
+#[derive(Debug, Clone, Default)]
+pub struct FAvgSets {
+    /// The eval rows' true labels.
+    pub eval_labels: Vec<usize>,
+    /// `zero-shot-probs.json`.
+    pub zero_shot: Vec<Vec<f32>>,
+    /// `eval-probs.json`.
+    pub fine_tuned: Vec<Vec<f32>>,
+    /// `(seed, seeds/seed-<s>/eval-probs.json)`, in the report's per_seed order.
+    pub per_seed: Vec<(i64, Vec<Vec<f32>>)>,
+    /// `(shift labels, shift-probs.json, shift-zero-shot-probs.json)`.
+    pub shift: Option<(Vec<usize>, Vec<Vec<f32>>, Vec<Vec<f32>>)>,
+}
+
+/// One reported `f_avg` against the rule and its recomputation.
+fn f_avg_close(
+    seed: Option<i64>,
+    field: &'static str,
+    reported: Option<f64>,
+    probs: &[Vec<f32>],
+    y: &[usize],
+    rule: Option<&[usize]>,
+    tol: f64,
+) -> Result<(), VerifyError> {
+    let who = seed.map_or_else(String::new, |s| format!("seed {s}: "));
+    match (rule, reported) {
+        (None, None) => Ok(()),
+        (None, Some(v)) => Err(record_mismatch(
+            field,
+            format!(
+                "{who}reported {v}, but the task's labels are not demo.criteria_order, so the trainer writes null"
+            ),
+        )),
+        (Some(_), None) => Err(record_mismatch(
+            field,
+            format!(
+                "{who}null, but the task's labels are demo.criteria_order, so the trainer writes the stance f_avg"
+            ),
+        )),
+        (Some(labels), Some(v)) => {
+            let pred: Vec<usize> = probs.iter().map(|p| argmax(p)).collect();
+            let recomputed = mean_f1_over_labels_f64(&pred, y, labels);
+            metric_close_for(seed, field, v, recomputed, tol)
+        }
+    }
+}
+
+/// laya-finetune-gate-v1 `numeric_agreement.f_avg` (plan 08-27, V6-e): every `f_avg` the
+/// report records — zero-shot, fine-tuned, each `seeds.per_seed` row and both shift-probe sets
+/// — follows the trainer's null rule ([`f_avg_labels`]) and, when set, is within
+/// `metric_recompute_abs` of its RECOMPUTATION (aprender-core `mean_f1_over_labels_f64`, the
+/// f64 exactly-rounded mean `metrics.py` `f_avg` equals bit for bit). `f_avg` enters no gate
+/// clause; it is bound so a report cannot carry a number verify never checked.
+///
+/// # Errors
+///
+/// [`VerifyError::RecordMismatch`] (the null rule, or a per_seed / shift set the report and the
+/// run dir disagree on) or [`VerifyError::ReportedMetricMismatch`] (a forged value), naming the
+/// field.
+pub fn check_f_avg(
+    report: &GateReport,
+    task_labels: &[String],
+    sets: &FAvgSets,
+    policy: &VerifyPolicy,
+) -> Result<(), VerifyError> {
+    let rule = f_avg_labels(task_labels, &policy.stance_criteria_order)?;
+    let rule = rule.as_deref();
+    let tol = policy.metric_recompute_abs;
+    let y = &sets.eval_labels;
+    f_avg_close(
+        None,
+        "zero_shot.f_avg",
+        report.zero_shot.f_avg,
+        &sets.zero_shot,
+        y,
+        rule,
+        tol,
+    )?;
+    f_avg_close(
+        None,
+        "fine_tuned.f_avg",
+        report.fine_tuned.f_avg,
+        &sets.fine_tuned,
+        y,
+        rule,
+        tol,
+    )?;
+    let rows = report.seeds.per_seed.as_deref().unwrap_or_default();
+    if rows.len() != sets.per_seed.len() {
+        return Err(record_mismatch(
+            "per_seed.f_avg",
+            format!(
+                "{} per_seed rows but {} seed probability sets",
+                rows.len(),
+                sets.per_seed.len()
+            ),
+        ));
+    }
+    for (row, (seed, probs)) in rows.iter().zip(&sets.per_seed) {
+        if row.seed != *seed {
+            return Err(record_mismatch(
+                "per_seed.f_avg",
+                format!("row seed {} read with seed {seed}'s file", row.seed),
+            ));
+        }
+        f_avg_close(
+            Some(*seed),
+            "per_seed.f_avg",
+            row.f_avg,
+            probs,
+            y,
+            rule,
+            tol,
+        )?;
+    }
+    match (&report.shift_probe, &sets.shift) {
+        (None, None) => Ok(()),
+        (Some(probe), Some((shift_y, ft, zs))) => {
+            f_avg_close(
+                None,
+                "shift_probe.zero_shot.f_avg",
+                probe.zero_shot.f_avg,
+                zs,
+                shift_y,
+                rule,
+                tol,
+            )?;
+            f_avg_close(
+                None,
+                "shift_probe.fine_tuned.f_avg",
+                probe.fine_tuned.f_avg,
+                ft,
+                shift_y,
+                rule,
+                tol,
+            )
+        }
+        _ => Err(record_mismatch(
+            "shift_probe.f_avg",
+            "the report and the run dir disagree on whether a shift probe exists".into(),
+        )),
+    }
+}
+
+/// The [`FAvgSets`] of a run: the two validated eval sets plus every seed file and the shift
+/// probe's files, validated again here (each was already validated, hash-bound and recomputed
+/// by [`check_seed_selection`] / [`check_shift_probe`]).
+fn f_avg_sets(
+    inputs: &PackInputs,
+    data: &DataDir,
+    labels: &[String],
+    ft_probs: &[Vec<f32>],
+    zs_probs: &[Vec<f32>],
+) -> Result<FAvgSets, VerifyError> {
+    let per_seed = inputs
+        .seed_eval_probs
+        .iter()
+        .map(|(seed, bytes)| {
+            validate_probs(ProbsWhich::Seed(*seed), bytes, &data.eval, labels).map(|p| (*seed, p))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let shift = match (
+        &data.shift,
+        &inputs.shift_probs_json,
+        &inputs.shift_zero_shot_probs_json,
+    ) {
+        (Some(rows), Some(ft), Some(zs)) => Some((
+            rows.iter().map(|r| r.label).collect(),
+            validate_probs(ProbsWhich::ShiftFineTuned, ft, rows, labels)?,
+            validate_probs(ProbsWhich::ShiftZeroShot, zs, rows, labels)?,
+        )),
+        _ => None,
+    };
+    Ok(FAvgSets {
+        eval_labels: data.eval.iter().map(|r| r.label).collect(),
+        zero_shot: zs_probs.to_vec(),
+        fine_tuned: ft_probs.to_vec(),
+        per_seed,
+        shift,
+    })
+}
+
 // ===========================================================================
 // The pipeline
 // ===========================================================================
@@ -2975,6 +3205,8 @@ fn cheap_checks(
     check_thresholds(&inputs.gate_report, policy)?;
     let shipped_seed = check_seed_selection(inputs, &data, policy)?;
     check_shift_probe(inputs, &data, policy)?;
+    let sets = f_avg_sets(inputs, &data, &labels, &ft_probs, &zs_probs)?;
+    check_f_avg(&inputs.gate_report, &labels, &sets, policy)?;
     Ok(Checked {
         texts: data.eval.iter().map(|r| r.text.clone()).collect(),
         labels: data.eval.iter().map(|r| r.label).collect(),
