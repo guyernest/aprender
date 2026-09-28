@@ -7,6 +7,7 @@ time. A threshold chosen after seeing a result is not a gate (D-07), so the valu
 
 No torch import: gate.py and data.py self-tests run with numpy + pyyaml only.
 """
+import math
 from pathlib import Path
 
 import yaml
@@ -29,6 +30,52 @@ def _load(path):
 def load_yaml(path):
     """Any committed contract, parsed once (e.g. laya-parity-v1 tolerances for the lifecycle re-score)."""
     return _load(path)
+
+
+class ContractValueError(ValueError):
+    """A contract number of the wrong kind: `rule` is "contract-value", the message names the key and
+    the observed value. Never a silent coercion: int(2.5) == 2 would write a record every Rust verify
+    then refuses (WR-09), and PyYAML reads `1e-6` (no dot) as the STRING "1e-6" (V13-d)."""
+
+    rule = "contract-value"
+
+    def __init__(self, key, value, why):
+        super().__init__("REFUSED contract-value: %s is %r (%s); %s" % (key, value, type(value).__name__, why))
+        self.key = key
+
+
+def number(value, key, kind):
+    """THE typed reader for every number the back office takes from a contract (plan 08-29, class E).
+
+    kind "float": a Python float is returned as is; an int is widened EXACTLY (refused if float64
+    cannot hold it); a non-finite value is refused. kind "int": only a Python int is accepted -- a
+    float is refused even when integral (15.0), because a contract that declares an integer and holds
+    a float is not what either reader was written against. A bool (YAML true) or a str (YAML `1e-6`)
+    is refused for both kinds. `key` names the value in the refusal (e.g. "constants.ece_bins")."""
+    if kind not in ("int", "float"):
+        raise ValueError("contract.number: kind %r is neither int nor float" % (kind,))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ContractValueError(key, value, "%s is declared and a %s is never coerced"
+                                 % ("an integer" if kind == "int" else "a float", type(value).__name__))
+    if kind == "int":
+        if not isinstance(value, int):
+            raise ContractValueError(key, value, "an integer is declared; a float is never truncated or coerced, "
+                                                 "even when integral")
+        return value
+    if isinstance(value, int):
+        widened = float(value)
+        if int(widened) != value:
+            raise ContractValueError(key, value, "a float64 cannot hold this integer exactly")
+        return widened
+    if not math.isfinite(value):
+        raise ContractValueError(key, value, "a contract number must be finite")
+    return value
+
+
+def _num(block, key, kind, where):
+    if key not in block:
+        raise KeyError("%s has no %s.%s" % (GATE_CONTRACT.relative_to(REPO), where, key))
+    return number(block[key], "%s.%s" % (where, key), kind)
 
 
 def gate_contract():
@@ -56,20 +103,32 @@ def noise_policy():
     ceiling = constants.pack_rescore_bound_max_abs. bound = max(floor, k x noise); the trainer only
     RECORDS the noise, the Rust verifier derives and enforces the bound (plan 08-15)."""
     p = parity_contract()
-    return (int(p["constants"]["pack_rescore_noise_k"]),
-            float(p["equations"]["pack_rescore_probs_abs"]["float_tolerance"]),
-            float(p["constants"]["pack_rescore_bound_max_abs"]))
+    # k is a FLOAT: the Rust verifier reads it as f64 and requires the record's k bit for bit equal
+    # (verify.rs `rec.k.to_bits() != policy.rescore_noise_k.to_bits()`); int() would truncate a 2.5.
+    return (_num(p["constants"], "pack_rescore_noise_k", "float", "laya-parity-v1 constants"),
+            _num(p["equations"]["pack_rescore_probs_abs"], "float_tolerance", "float",
+                 "laya-parity-v1 equations.pack_rescore_probs_abs"),
+            _num(p["constants"], "pack_rescore_bound_max_abs", "float", "laya-parity-v1 constants"))
 
 
 def constants():
     return gate_contract()["constants"]
 
 
+def constant(key, kind):
+    """constants.<key> through the typed reader (kind "int" or "float")."""
+    return _num(constants(), key, kind, "constants")
+
+
+def recipe_number(key, kind):
+    """recipe.<key> through the typed reader (kind "int" or "float")."""
+    return _num(recipe(), key, kind, "recipe")
+
+
 def thresholds():
     """The gate thresholds in the gate-report `thresholds` shape, read from the contract."""
-    c = constants()
-    return {"min_macro_f1_margin": c["gate_min_macro_f1_margin"], "max_ece": c["gate_max_ece"],
-            "ece_bins": int(c["ece_bins"])}
+    return {"min_macro_f1_margin": constant("gate_min_macro_f1_margin", "float"),
+            "max_ece": constant("gate_max_ece", "float"), "ece_bins": constant("ece_bins", "int")}
 
 
 def recipe():
@@ -160,9 +219,8 @@ def resolve_epochs(variant, shots_per_class, epochs_arg):
     production: <= 16 shots/class is FIXED to epochs_at_most_16_per_class (an --epochs is refused, not
     ignored); above 16 an --epochs in [epochs_above_16_min, epochs_above_16_max] is REQUIRED.
     synthetic-fixture: the caller's --epochs (required, 0 <= epochs <= epochs_above_16_max)."""
-    r = recipe()
-    fixed = int(r["epochs_at_most_16_per_class"])
-    lo, hi = int(r["epochs_above_16_min"]), int(r["epochs_above_16_max"])
+    fixed = recipe_number("epochs_at_most_16_per_class", "int")
+    lo, hi = recipe_number("epochs_above_16_min", "int"), recipe_number("epochs_above_16_max", "int")
     if variant == "synthetic-fixture":
         if epochs_arg is None or not (0 <= int(epochs_arg) <= hi):
             raise RecipeError("REFUSED epochs: the synthetic-fixture variant needs --epochs in [0, %d]" % hi)
@@ -201,8 +259,8 @@ def early_stopping_decl():
     es = gate_contract()["early_stopping"]
     out = {k: es[k] for k in EARLY_STOPPING_KEYS}
     for k in ("eval_every_epochs", "first_candidate_epoch", "patience_epochs"):
-        out[k] = int(out[k])
-    out["min_delta"] = float(out["min_delta"])
+        out[k] = _num(es, k, "int", "early_stopping")
+    out["min_delta"] = _num(es, "min_delta", "float", "early_stopping")
     return out
 
 
@@ -223,11 +281,12 @@ def recipe_json(variant, shots_per_class, epochs, seed, base_block, stopping="fi
     seed_selection_decl() for every three-seed run, so for every production run -- and a single-seed
     run keeps the 1.x bytes (the legacy rule)."""
     r = recipe()
+    f = lambda key: recipe_number(key, "float")  # noqa: E731
     out = {
-        "variant": variant, "optimizer": r["optimizer"], "encoder_lr": r["encoder_lr"], "head_lr": r["head_lr"],
-        "eta_min": r["eta_min"], "weight_decay": r["weight_decay"], "grad_clip": r["grad_clip"],
-        "batch_size": int(r["batch_size"]), "proper_reward_w_sph": r["proper_reward_w_sph"],
-        "proper_reward_w_rps": r["proper_reward_w_rps"], "schedule": "cosine",
+        "variant": variant, "optimizer": r["optimizer"], "encoder_lr": f("encoder_lr"), "head_lr": f("head_lr"),
+        "eta_min": f("eta_min"), "weight_decay": f("weight_decay"), "grad_clip": f("grad_clip"),
+        "batch_size": recipe_number("batch_size", "int"), "proper_reward_w_sph": f("proper_reward_w_sph"),
+        "proper_reward_w_rps": f("proper_reward_w_rps"), "schedule": "cosine",
         "shots_per_class": int(shots_per_class), "epochs": int(epochs), "seed": int(seed), "base": base_block,
     }
     if stopping == "early_stopping":
@@ -248,11 +307,20 @@ def production_base_block():
             "sha256": b["model_safetensors_sha256"]}
 
 
+def declared_seed():
+    """seed_policy.declared_seed through the typed reader."""
+    return _num(seed_policy(), "declared_seed", "int", "seed_policy")
+
+
 def seed_selection_decl():
     """The recipe.json `seed_selection` object (1.4.0, A3), copied from seed_policy."""
     sp = seed_policy()
-    return {"policy": str(sp["selection"]), "seeds": [int(s) for s in sp["variance_seeds"]],
-            "rank_scale": int(sp["rank_scale"]), "tie_break": str(sp["tie_break"])}
+    return {"policy": str(sp["selection"]), "seeds": _seeds(sp),
+            "rank_scale": _num(sp, "rank_scale", "int", "seed_policy"), "tie_break": str(sp["tie_break"])}
+
+
+def _seeds(sp):
+    return [number(s, "seed_policy.variance_seeds[%d]" % i, "int") for i, s in enumerate(sp["variance_seeds"])]
 
 
 def resolve_seeds(n, variant="production"):
@@ -264,9 +332,9 @@ def resolve_seeds(n, variant="production"):
     production_seeds_required (the median rule). Any other N is refused: the median rule needs an odd N
     and no legacy multi-seed variant is written any more."""
     sp = seed_policy()
-    pool = [int(s) for s in sp["variance_seeds"]]
-    declared = int(sp["declared_seed"])
-    need = int(sp["production_seeds_required"])
+    pool = _seeds(sp)
+    declared = declared_seed()
+    need = _num(sp, "production_seeds_required", "int", "seed_policy")
     if not pool or pool[0] != declared:
         raise RecipeError("REFUSED seeds: seed_policy.variance_seeds %s must start with the declared seed %d"
                           % (pool, declared))
@@ -305,4 +373,25 @@ def probe_policy():
     d = decide_contract()
     pp = d["probe_policy"]
     task = {k: pp["probe_task"][k] for k in ("type", "instructions", "criteria")}
-    return task, list(pp["inputs"]), int(d["constants"]["probe_max_row_tokens"])
+    return task, list(pp["inputs"]), _num(d["constants"], "probe_max_row_tokens", "int", "decide-apr-v1 constants")
+
+
+def check_numbers():
+    """Every contract number the trainer reads, read once through `number` -- train.py calls this in its
+    refusal block, so a mistyped contract value refuses (REFUSED contract-value, exit 2) before any model
+    loads, never as a traceback hours into a run."""
+    noise_policy()
+    thresholds()
+    early_stopping_decl()
+    seed_selection_decl()
+    resolve_seeds(None, "production")
+    for key in ("gate_metric_recompute_abs", "calibration_temp_min", "calibration_temp_max",
+                "calibration_slice_fraction"):
+        constant(key, "float")
+    for key in ("calibration_slice_min_per_class", "declared_seed"):
+        constant(key, "int")
+    for key in ("encoder_lr", "head_lr", "eta_min", "weight_decay", "grad_clip", "proper_reward_w_sph",
+                "proper_reward_w_rps"):
+        recipe_number(key, "float")
+    for key in ("batch_size", "epochs_at_most_16_per_class", "epochs_above_16_min", "epochs_above_16_max"):
+        recipe_number(key, "int")

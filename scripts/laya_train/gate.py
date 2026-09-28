@@ -296,7 +296,7 @@ def _recompute_run_dir(vec, case):
     labels = task["labels"]
     fav = [labels.index("against"), labels.index("favor")] if "against" in labels and "favor" in labels else None
     g = evaluate_gate(zs, ft, ft, y, fav)
-    tol = float(contract.constants()["gate_metric_recompute_abs"])
+    tol = contract.constant("gate_metric_recompute_abs", "float")
     deltas = [abs(g["zero_shot"]["macro_f1"] - rep["zero_shot"]["macro_f1"]),
               abs(g["fine_tuned"]["macro_f1"] - rep["fine_tuned"]["macro_f1"]),
               abs(g["fine_tuned"]["ece_post"] - rep["fine_tuned"]["ece_post"]), abs(g["margin"] - rep["margin"])]
@@ -443,8 +443,7 @@ def selftest():
         case("NaN probabilities refused", True, str(e)[:70])
 
     print("bounded temperature fit (FALSIFY-LAYA-GATE-004):")
-    c = contract.constants()
-    lo, hi = float(c["calibration_temp_min"]), float(c["calibration_temp_max"])
+    lo, hi = contract.constant("calibration_temp_min", "float"), contract.constant("calibration_temp_max", "float")
     rng = np.random.RandomState(0)
     yy = rng.randint(0, 3, size=40)        # memorised and confidently wrong half the time: optimum T >> 5
     wrong = (yy + 1) % 3

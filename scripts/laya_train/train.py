@@ -286,8 +286,8 @@ def train_seed(seed, base, requested, question, fit_rows, k, epochs, stopping="f
 
     `calib_rows` (train-side, the calibration slice) is read ONLY by the early-stopping monitor. This
     function is never given eval rows, so eval cannot influence the stopping epoch or the weights."""
-    rc = contract.recipe()
-    c = contract.constants()
+    rn = contract.recipe_number
+    t_min, t_max = contract.constant("calibration_temp_min", "float"), contract.constant("calibration_temp_max", "float")
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -308,11 +308,11 @@ def train_seed(seed, base, requested, question, fit_rows, k, epochs, stopping="f
     model.train()
     enc = [p for n, p in model.named_parameters() if n.startswith("encoder.")]
     rest = [p for n, p in model.named_parameters() if not n.startswith("encoder.")]
-    opt = torch.optim.AdamW([{"params": enc, "lr": float(rc["encoder_lr"])},
-                             {"params": rest, "lr": float(rc["head_lr"])}], weight_decay=float(rc["weight_decay"]))
-    bs = int(rc["batch_size"])
+    opt = torch.optim.AdamW([{"params": enc, "lr": rn("encoder_lr", "float")},
+                             {"params": rest, "lr": rn("head_lr", "float")}], weight_decay=rn("weight_decay", "float"))
+    bs = rn("batch_size", "int")
     steps = epochs * math.ceil(len(items) / bs)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps), eta_min=float(rc["eta_min"]))
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps), eta_min=rn("eta_min", "float"))
     pad, dev = agent.tok.pad_token_id, agent.device
     losses = []
     stopper, best_state, calib_items, yc = None, None, None, None
@@ -337,11 +337,11 @@ def train_seed(seed, base, requested, question, fit_rows, k, epochs, stopping="f
             q = torch.softmax(z / t_loss, -1)
             onehot = F.one_hot(yb, k).float()
             rl = -proper_reward(q, onehot, qt, mm[:, :k].float(),
-                                w_sph=float(rc["proper_reward_w_sph"]), w_rps=float(rc["proper_reward_w_rps"])).mean()
+                                w_sph=rn("proper_reward_w_sph", "float"), w_rps=rn("proper_reward_w_rps", "float")).mean()
             loss = ce + rl + 0.0 * act.sum()
             opt.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(rc["grad_clip"]))
+            torch.nn.utils.clip_grad_norm_(model.parameters(), rn("grad_clip", "float"))
             opt.step()
             sched.step()
             losses.append(float(ce.item()))
@@ -349,7 +349,7 @@ def train_seed(seed, base, requested, question, fit_rows, k, epochs, stopping="f
         epochs_run = epoch
         if stopper is not None and stopper.evaluates(epoch):
             zc = calibration_logits(model, calib_items, k, pad, dev, bs)
-            m, t_star = gate.calibration_monitor(zc, yc, c["calibration_temp_min"], c["calibration_temp_max"])
+            m, t_star = gate.calibration_monitor(zc, yc, t_min, t_max)
             improved, stop = stopper.update(epoch, m, t_star)
             if improved:        # an exact copy of this epoch's weights (restore: best)
                 best_state = {n: v.detach().to("cpu", copy=True) for n, v in model.state_dict().items()}
@@ -425,14 +425,14 @@ def score_rows(agent, rows, question):
 
 def calibrate_and_score(ck, sha_before, calib_rows, eval_rows, question, k, stopping):
     """F16 reload -> calibration fit -> T written -> reload again -> eval probabilities."""
-    c = contract.constants()
     assert_checkpoint_fixed(ck, stopping)
     agent = reload_checked(ck, sha_before)
     bucket = temp_bucket(QTYPES["choice"], k)
     t_pre = agent.temperature_by_options.get(bucket, agent.temperature[QTYPES["choice"]])
     _, zc = score_rows(agent, calib_rows, question)
     yc = np.array([y for _, y in calib_rows])
-    t_fit, t_applied, clamp_hit = gate.fit_temperature(zc, yc, c["calibration_temp_min"], c["calibration_temp_max"])
+    t_fit, t_applied, clamp_hit = gate.fit_temperature(zc, yc, contract.constant("calibration_temp_min", "float"),
+                                                       contract.constant("calibration_temp_max", "float"))
     del agent
     cfg_path = ck / "rl_agent_config.json"
     cfg = json.loads(cfg_path.read_bytes())
@@ -707,13 +707,12 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv)
     t_start = time.time()
-    c = contract.constants()
-    sp = contract.seed_policy()
-    seed = int(sp["declared_seed"])
     data_dir, out = Path(args.data), Path(args.out)
 
-    # 1. data (and every recipe refusal, before any model loads or any file is written)
+    # 1. data (and every recipe and contract-value refusal, before any model loads or any file is written)
     try:
+        contract.check_numbers()
+        seed = contract.declared_seed()
         seeds = contract.resolve_seeds(args.seeds, args.variant)
         task = data.load_task(data_dir / "task.json")
         train_rows = data.load_rows(data_dir / "train.jsonl", task, "train")
@@ -731,13 +730,14 @@ def main(argv=None):
         for name in ("train.jsonl", "eval.jsonl") + (("shift.jsonl",) if shift_rows is not None else ()):
             input_sha[name] = data.sha256_file(data_dir / name)
         fit_ids, calib_ids, slice_ids, slice_sha = data.calibration_split(
-            train_rows, c["calibration_slice_fraction"], c["calibration_slice_min_per_class"], seed,
+            train_rows, contract.constant("calibration_slice_fraction", "float"),
+            contract.constant("calibration_slice_min_per_class", "int"), seed,
             len(task["labels"]))
         epochs = None
         shots_per_class = max(data.class_counts(train_rows, len(task["labels"])))
         epochs = contract.resolve_epochs(args.variant, shots_per_class, args.epochs)
         stopping = contract.resolve_stopping(args.stopping)
-    except (data.DataError, contract.RecipeError) as e:
+    except (data.DataError, contract.RecipeError, contract.ContractValueError) as e:
         refuse(str(e))
     base = Base(args)
     if out.exists() and any(out.iterdir()):

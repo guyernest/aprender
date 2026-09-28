@@ -355,8 +355,8 @@ TOKENIZER_CONFIG = {
 
 def calibration_slice():
     """Seeded, stratified synthetic slice of the train rows: max(min_per_class, ceil(fraction * n_c)) per class."""
-    c = contract.constants()
-    frac, min_pc = float(c["calibration_slice_fraction"]), int(c["calibration_slice_min_per_class"])
+    frac = contract.constant("calibration_slice_fraction", "float")
+    min_pc = contract.constant("calibration_slice_min_per_class", "int")
     rng = np.random.RandomState(SEED)
     ids = []
     for label in TASK["criteria"]:
@@ -553,7 +553,6 @@ def build_laya_tiny():
     write_json(LT_DIR / "zero-shot-probs.json", eval_probs)
 
     # ---- gate-report.json: gate.evaluate_gate on the synthetic eval rows; zero-shot == fine-tuned, so no gate ran ----
-    c = contract.constants()
     y = np.array([labels.index(lab) for _, lab in EVAL])
     P = np.array([f32_list(p) for p in P])               # exactly the probabilities written above
     P_pre = gate.softmax(np.array(Z), 1.0)               # T = 1: before any calibration
@@ -562,7 +561,7 @@ def build_laya_tiny():
         fail("laya_tiny: zero-shot and fine-tuned are the same model, so margin must be 0.0 and pass false")
     bucket = temp_bucket(QTYPES["choice"], len(labels))
     t_applied = agent.temperature_by_options[bucket]
-    t_min, t_max = float(c["calibration_temp_min"]), float(c["calibration_temp_max"])
+    t_min, t_max = contract.constant("calibration_temp_min", "float"), contract.constant("calibration_temp_max", "float")
     slice_ids = calibration_slice()
     report = {
         "schema": "laya-gate-report-v1",

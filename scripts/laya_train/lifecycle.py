@@ -277,7 +277,7 @@ def check_noise_record(out, report, rows, labels):
         fail("rescore-noise.json keys %s != rescore_noise_schema %s" % (sorted(rec), want))
     if (rec["schema"], rec["reference"]) != ("laya-rescore-noise-v1", "float64"):
         fail("rescore-noise.json schema / reference %s / %s" % (rec["schema"], rec["reference"]))
-    if not (isinstance(rec["k"], int) and rec["k"] == k_mult and rec["floor_abs"] == floor):
+    if not (isinstance(rec["k"], float) and rec["k"] == k_mult and rec["floor_abs"] == floor):
         fail("rescore-noise.json k / floor_abs %r / %r != laya-parity-v1 %r / %r" % (rec["k"], rec["floor_abs"], k_mult, floor))
     if rec["control_max_abs"] != 0.0 or rec["control_rows"] != list(range(min(5, n))):
         fail("rescore-noise.json control %r on rows %s" % (rec["control_max_abs"], rec["control_rows"]))

@@ -313,6 +313,91 @@ def _demo_rule_on_local_data(case):
                                                      sha256_bytes(files["eval.jsonl"])[:16]))
 
 
+# The run of record's recipe_id (plan 08-16, models/decide/laya-stance-64, deployed as 24a44d7e...): the
+# typed reader must leave every recipe.json byte where it was.
+RUN_OF_RECORD_RECIPE_ID = "6a5489afa3462f56"
+
+
+def _with_contract(path, mutate, fn):
+    """fn() with the parsed contract at `path` replaced by a mutated deep copy; always restored."""
+    import copy
+
+    import contract
+    key = str(path)
+    orig = contract.load_yaml(path)
+    patched = copy.deepcopy(orig)
+    mutate(patched)
+    contract._CACHE[key] = patched
+    try:
+        return fn()
+    finally:
+        contract._CACHE[key] = orig
+
+
+def _contract_value_cases(case):
+    """contract.number, the ONE typed reader (plan 08-29, WR-09 / V13-d): no contract number is coerced."""
+    import contract
+    import yaml
+
+    print("contract-value: the typed contract-number reader (contract.number):")
+
+    def accepts(name, fn, want):
+        try:
+            got = fn()
+            case("contract-value " + name, type(got) is type(want) and got == want, "%r" % (got,))
+        except contract.ContractValueError as e:
+            case("contract-value " + name, False, "refused: %s" % str(e)[:90])
+
+    def refuses(name, fn, key):
+        try:
+            got = fn()
+            case("contract-value " + name, False, "accepted %r" % (got,))
+        except contract.ContractValueError as e:
+            case("contract-value " + name, e.rule == "contract-value" and str(e).startswith("REFUSED contract-value: ")
+                 and key in str(e), str(e)[:100])
+
+    parity = contract.PARITY_CONTRACT
+
+    def set_k(v):
+        return lambda p: p["constants"].__setitem__("pack_rescore_noise_k", v)
+    accepts("k = 4 (the committed integer) is read as the float 4.0", lambda: contract.noise_policy()[0], 4.0)
+    accepts("k = 2.5 stays 2.5 (never int(2.5) = 2)",
+            lambda: _with_contract(parity, set_k(2.5), lambda: contract.noise_policy()[0]), 2.5)
+    one_e_6 = yaml.safe_load("v: 1e-6")["v"]
+    case("contract-value PyYAML reads `1e-6` (no dot) as a string", one_e_6 == "1e-6", "%r" % (one_e_6,))
+    refuses('k = "1e-6" (a YAML string) is refused naming the key',
+            lambda: _with_contract(parity, set_k(one_e_6), contract.noise_policy),
+            "laya-parity-v1 constants.pack_rescore_noise_k")
+    refuses("k = true is refused naming the key", lambda: _with_contract(parity, set_k(True), contract.noise_policy),
+            "laya-parity-v1 constants.pack_rescore_noise_k")
+    gate_c = contract.GATE_CONTRACT
+    refuses("ece_bins = 15.0 is refused (an integer is declared; never coerced)",
+            lambda: _with_contract(gate_c, lambda c: c["constants"].__setitem__("ece_bins", 15.0), contract.thresholds),
+            "constants.ece_bins")
+    refuses("seed_policy.rank_scale = 1e4 (a float) is refused",
+            lambda: _with_contract(gate_c, lambda c: c["seed_policy"].__setitem__("rank_scale", 1e4),
+                                   contract.seed_selection_decl), "seed_policy.rank_scale")
+    refuses("recipe.epochs_above_16_max = true is refused",
+            lambda: _with_contract(gate_c, lambda c: c["recipe"].__setitem__("epochs_above_16_max", True),
+                                   lambda: contract.resolve_epochs("production", 64, 8)), "recipe.epochs_above_16_max")
+    refuses("early_stopping.min_delta = \"1e-3\" (a YAML string) is refused",
+            lambda: _with_contract(gate_c, lambda c: c["early_stopping"].__setitem__("min_delta", "1e-3"),
+                                   contract.early_stopping_decl), "early_stopping.min_delta")
+    refuses("check_numbers (train.py's refusal block) refuses a string encoder_lr",
+            lambda: _with_contract(gate_c, lambda c: c["recipe"].__setitem__("encoder_lr", "2.5e-5"),
+                                   contract.check_numbers), "recipe.encoder_lr")
+    try:
+        contract.check_numbers()
+        case("contract-value the committed contracts pass check_numbers", True)
+    except contract.ContractValueError as e:
+        case("contract-value the committed contracts pass check_numbers", False, str(e)[:100])
+    recipe = contract.recipe_json("production", 64, 12, contract.declared_seed(), contract.production_base_block(),
+                                  "early_stopping", contract.seed_selection_decl())
+    rid = sha256_bytes(json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    case("contract-value recipe.json of the run of record rebuilds to recipe_id %s..." % RUN_OF_RECORD_RECIPE_ID,
+         rid.startswith(RUN_OF_RECORD_RECIPE_ID), rid[:16])
+
+
 def selftest():
     """Every data refusal over temporary files, plus split determinism / stratification / text-disjointness
     and the recipe epoch rule. numpy + pyyaml only (no torch)."""
@@ -334,8 +419,8 @@ def selftest():
         except DataError as e:
             case(name, e.rule == rule, str(e)[:110])
 
-    c = contract.constants()
-    frac, min_pc = float(c["calibration_slice_fraction"]), int(c["calibration_slice_min_per_class"])
+    frac = contract.constant("calibration_slice_fraction", "float")
+    min_pc = contract.constant("calibration_slice_min_per_class", "int")
     good_task = {"type": "choice", "instructions": "Which?", "criteria": {"a": "first", "b": None, "c": "third"}}
 
     with tempfile.TemporaryDirectory(prefix="laya-data-selftest-") as tmp:
@@ -449,6 +534,8 @@ def selftest():
            lambda: in_distribution_heldout(val + [("validation:9", "  Shot  b", "none"), ("validation:8", " shot\tb ", "none")],
                                            pool, shot_ids, excluded, members, shots))
     _demo_rule_on_local_data(case)
+
+    _contract_value_cases(case)
 
     print("recipe epoch rule (contract.resolve_epochs):")
 

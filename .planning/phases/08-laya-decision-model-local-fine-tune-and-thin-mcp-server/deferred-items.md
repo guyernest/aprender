@@ -846,3 +846,13 @@ raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
   that runs the row's hostile case". Plan 08-24 does not own the contract; repointing both rows (and the
   frame_http `note:`) is a contract edit for whichever plan next versions decide-tool-boundary-v1.
   status: open
+
+### Found during plan 08-29 (out of scope)
+
+- **`just laya-fixtures` is no longer byte-identical: `laya_tiny/gate-report.json` `fine_tuned.ece_pre`
+  regenerates as 0.014317405789640192 (committed 0.014317405789640136).** Measured on a pristine detached
+  worktree at 6ea8d0cc6 (before any 08-29 edit), so it is pre-existing: plan 08-27 moved metrics.py's ECE
+  to exactly-summed f64 (221556654) and the fixture, last written by d8030eab6 (08-02), was not
+  regenerated. 5.6e-17 apart, far inside gate_metric_recompute_abs; Rust recomputes rather than trusting
+  it. Regenerating the committed fixture is a fixtures-owning plan's call (it moves a CI fixture's bytes).
+  status: open
