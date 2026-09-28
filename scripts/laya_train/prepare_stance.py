@@ -34,7 +34,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import contract  # noqa: E402
 from common import jsonl_bytes  # noqa: E402
-from data import DataError, exact_sha256, in_distribution_heldout, normalized_sha256, sha256_bytes  # noqa: E402
+from data import (DataError, decode_jsonl, exact_sha256, in_distribution_heldout, normalized_sha256,  # noqa: E402
+                  refuse_unencodable, sha256_bytes)
 
 REPO = contract.REPO
 SRC = REPO / "data" / "tweet-eval-stance"
@@ -51,15 +52,25 @@ DESCRIPTIONS = {
 
 
 def fail(msg):
+    """A consistency check on the pinned public dataset or the committed manifest failed (exit 1)."""
     print("PREPARE FAILED: " + msg, file=sys.stderr)
     sys.exit(1)
 
 
 def read_jsonl(path):
+    """{id: row} and the id order of a source split, rows split exactly as Rust's str::lines (data.jsonl_lines).
+    An invalid UTF-8 byte or a lone-surrogate input is REFUSED source-row-encoding and a line that is not a
+    JSON object with an `id` REFUSED source-row-schema (DataError -> `REFUSED <rule>`, exit 2 in main)."""
     rows = {}
     order = []
-    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        r = json.loads(line)
+    for n, line in enumerate(decode_jsonl(path.read_bytes(), "source", path.name), 1):
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise DataError("source-row-schema", "%s line %d is not JSON (%s)" % (path.name, n, e))
+        if not isinstance(r, dict) or "id" not in r:
+            raise DataError("source-row-schema", "%s line %d is not a JSON object with an id" % (path.name, n))
+        refuse_unencodable(r.get("input"), "source", path.name, n, "input")
         if r["id"] in rows:
             fail("%s line %d repeats id %s" % (path.name, n, r["id"]))
         rows[r["id"]] = r
@@ -100,8 +111,10 @@ def labelled(rows, ids, order, split):
     return out
 
 
-def build(cell):
-    """{file name: bytes} for a cell, plus a printable summary (counts and hashes only)."""
+def build(cell, src=None):
+    """{file name: bytes} for a cell, plus a printable summary (counts and hashes only). `src` is the
+    source dataset dir (default data/tweet-eval-stance)."""
+    src = SRC if src is None else Path(src)
     block_name, _ = CELLS[cell]
     decl = contract.gate_contract()[block_name]
     order = list(decl["criteria_order"])
@@ -109,10 +122,10 @@ def build(cell):
         fail("criteria descriptions %s are not in the contract order %s" % (list(DESCRIPTIONS), order))
     need = ["train.jsonl", "test.jsonl"] + (["validation.jsonl"] if cell == "s64" else [])
     for name in need:
-        if not (SRC / name).is_file():
-            fail("%s is missing; run: apr data tweet-eval-stance --output data/tweet-eval-stance" % (SRC / name))
-    train, train_order = read_jsonl(SRC / "train.jsonl")
-    test, test_order = read_jsonl(SRC / "test.jsonl")
+        if not (src / name).is_file():
+            fail("%s is missing; run: apr data tweet-eval-stance --output data/tweet-eval-stance" % (src / name))
+    train, train_order = read_jsonl(src / "train.jsonl")
+    test, test_order = read_jsonl(src / "test.jsonl")
     payload, shots = verified_shots(decl["selection"], order, decl["shots_per_class"], train)
     test_rows = [(t, lab) for _, t, lab in labelled(test, test_order, order, "test")]
     task = {"type": "choice", "instructions": INSTRUCTIONS, "criteria": DESCRIPTIONS}
@@ -124,15 +137,12 @@ def build(cell):
             fail("test split has %d rows, the contract demo declares %s" % (len(test_rows), decl["eval_rows"]))
         files["eval.jsonl"] = jsonl_bytes(test_rows)
         return files, {"train": counts(shots), "eval": counts(test_rows)}
-    validation, val_order = read_jsonl(SRC / "validation.jsonl")
+    validation, val_order = read_jsonl(src / "validation.jsonl")
     ex = payload["exclusions"]
     members = [tuple(m) for g in ex["groups"] for m in g["members"]]
-    try:
-        heldout = in_distribution_heldout(
-            labelled(validation, val_order, order, "validation"), labelled(train, train_order, order, "train"),
-            [e["id"] for e in payload["ordered_examples"]], ex["excluded_train_ids"], members, shots)
-    except DataError as e:
-        fail(str(e))
+    heldout = in_distribution_heldout(         # DataError heldout-shot-overlap -> REFUSED, exit 2 (main)
+        labelled(validation, val_order, order, "validation"), labelled(train, train_order, order, "train"),
+        [e["id"] for e in payload["ordered_examples"]], ex["excluded_train_ids"], members, shots)
     got_counts = counts(heldout)
     if len(heldout) != int(decl["eval_rows"]) or got_counts != [int(x) for x in decl["eval_class_counts"]]:
         fail("eval_set.demo_rule built %d rows %s; demo_s64 declares %s rows %s (criteria order %s)"
@@ -149,13 +159,18 @@ def build(cell):
 
 
 def write_once(out, files):
-    """Write `files` into `out`; an existing non-empty `out` must already hold exactly these bytes."""
-    if out.exists() and any(out.iterdir()):
-        present = sorted(q.name for q in out.iterdir())
-        same = present == sorted(files) and all((out / n).read_bytes() == b for n, b in files.items())
-        if not same:
-            fail("%s exists and differs from what this run would write (files %s); refusing to overwrite"
-                 % (out, present))
+    """Write `files` into `out`; an existing non-empty `out` must already hold exactly these bytes.
+
+    Only the files this run writes are compared, and dotfiles already in `out` (a Finder .DS_Store) are
+    ignored (D3-5). Any OTHER extra file is still refused: a stale shift.jsonl beside a cell that writes
+    none would be read by train.py as a shift probe. REFUSED prepare-out-dir (a DataError; exit 2 in main)."""
+    present = sorted(q.name for q in out.iterdir() if not q.name.startswith(".")) if out.exists() else []
+    if present:
+        extra = sorted(set(present) - set(files))
+        differ = sorted(n for n, b in files.items() if not (out / n).is_file() or (out / n).read_bytes() != b)
+        if extra or differ:
+            raise DataError("prepare-out-dir", "%s exists and differs from what this run would write (differing or "
+                            "missing %s, foreign %s); refusing to overwrite" % (out, differ, extra))
         return "unchanged (byte-identical)"
     out.mkdir(parents=True, exist_ok=True)
     for name, body in files.items():
@@ -168,10 +183,15 @@ def main(argv=None):
     ap.add_argument("--cell", choices=sorted(CELLS), default="s64",
                     help="s64 (default, demo_s64: in-distribution eval by rule + shift probe) or s16 (the 1.2.0 demo)")
     ap.add_argument("--out", default=None, help="data dir (default data/decide/tweet-stance-<16|64>)")
+    ap.add_argument("--src", default=None, help="source dataset dir (default data/tweet-eval-stance)")
     args = ap.parse_args(argv)
     out = Path(args.out) if args.out else REPO / "data" / "decide" / CELLS[args.cell][1]
-    files, summary = build(args.cell)
-    status = write_once(out, files)
+    try:
+        files, summary = build(args.cell, args.src)
+        status = write_once(out, files)
+    except DataError as e:                     # every input refusal: one REFUSED <rule> line, exit 2, no traceback
+        print(str(e), file=sys.stderr)
+        return 2
     try:
         where = out.resolve().relative_to(REPO)
     except ValueError:
@@ -180,7 +200,8 @@ def main(argv=None):
     for name in sorted(files):
         print("  %-12s %4d lines  sha256 %s" % (name, files[name].count(b"\n"), sha256_bytes(files[name])))
     print("PREPARE OK")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

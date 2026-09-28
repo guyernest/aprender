@@ -135,6 +135,40 @@ def laya_question(task):
 
 # ------------------------------------------------------------------------------------------ rows
 
+def jsonl_lines(text):
+    """The lines of `text` exactly as Rust's `str::lines` (verify.rs parse_rows) yields them: split on
+    '\n' ONLY, one '\r' immediately before a '\n' stripped, a final '\n' ending no extra line. Python's
+    str.splitlines also breaks on U+0085, U+2028, U+2029, \x0b, \x0c and \x1c-\x1e, so a tweet holding
+    one would be one row in Rust and two in Python (WR-05)."""
+    parts = text.split("\n")
+    tail = parts.pop()                              # after the last '\n': "" or an unterminated line
+    out = [p[:-1] if p.endswith("\r") else p for p in parts]
+    if tail:
+        out.append(tail)                            # an unterminated last line keeps its '\r' (as Rust)
+    return out
+
+
+def decode_jsonl(raw, role, name):
+    """UTF-8 bytes -> jsonl_lines; an invalid byte is REFUSED `<role>-row-encoding` (Rust's from_utf8
+    refuses the same file), never a UnicodeDecodeError traceback."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise DataError("%s-row-encoding" % role, "%s is not valid UTF-8 (byte %d: %s)" % (name, e.start, e.reason))
+    return jsonl_lines(text)
+
+
+def refuse_unencodable(value, role, name, n, field):
+    """A JSON string holding a lone surrogate escape (\\ud800) decodes in Python but not in Rust
+    (serde_json refuses it), and cannot be written as UTF-8: REFUSED `<role>-row-encoding`."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as e:
+            raise DataError("%s-row-encoding" % role, "%s line %d %s holds a lone surrogate (U+%04X at %d); it is "
+                            "not UTF-8 and Rust refuses the row" % (name, n, field, ord(value[e.start]), e.start))
+
+
 def load_rows(path, task, role):
     """[(text, label_index)] from a jsonl file; `role` (train | eval | shift) names the file in refusals."""
     if role not in ROW_ROLES:
@@ -144,7 +178,7 @@ def load_rows(path, task, role):
         raise DataError("%s-missing" % role, "%s does not exist (%s.jsonl is required)" % (path, role))
     labels = task["labels"]
     rows = []
-    for n, line in enumerate(path.read_bytes().decode("utf-8").splitlines(), 1):
+    for n, line in enumerate(decode_jsonl(path.read_bytes(), role, path.name), 1):
         if not line.strip():
             raise DataError("%s-row-schema" % role, "%s line %d is blank" % (path.name, n))
         try:
@@ -160,6 +194,8 @@ def load_rows(path, task, role):
         if sorted(keys) != sorted(ROW_KEYS):
             raise DataError("%s-row-schema" % role, "%s line %d must hold exactly %s" % (path.name, n, list(ROW_KEYS)))
         d = dict(obj)
+        refuse_unencodable(d["text"], role, path.name, n, "text")
+        refuse_unencodable(d["label"], role, path.name, n, "label")
         if not isinstance(d["text"], str) or not d["text"].strip():
             raise DataError("%s-row-schema" % role, "%s line %d text must be a non-empty string" % (path.name, n))
         if not isinstance(d["label"], str):
@@ -305,7 +341,10 @@ def _demo_rule_on_local_data(case):
     except SystemExit:                             # prepare_stance.fail() printed PREPARE FAILED: <why> above
         case(name, False, "prepare_stance refused the s64 cell (PREPARE FAILED above)")
         return
-    rows = [json.loads(ln) for ln in files["eval.jsonl"].decode("utf-8").splitlines()]
+    except DataError as e:
+        case(name, False, str(e)[:110])
+        return
+    rows = [json.loads(ln) for ln in decode_jsonl(files["eval.jsonl"], "eval", "eval.jsonl")]
     order = list(decl["criteria_order"])
     got = [sum(1 for r in rows if r["label"] == lab) for lab in order]
     case(name, len(rows) == int(decl["eval_rows"]) and got == [int(x) for x in decl["eval_class_counts"]],
@@ -418,6 +457,8 @@ def selftest():
             case(name, False, "accepted")
         except DataError as e:
             case(name, e.rule == rule, str(e)[:110])
+        except Exception as e:                        # a traceback-class escape is a FAIL, never a crash
+            case(name, False, "raised %s, not a DataError %s: %s" % (type(e).__name__, rule, str(e)[:70]))
 
     frac = contract.constant("calibration_slice_fraction", "float")
     min_pc = contract.constant("calibration_slice_min_per_class", "int")
@@ -480,6 +521,68 @@ def selftest():
         fit, sl, _, _ = calibration_split(just_enough, frac, min_pc, 13, 3)
         case("a class with calibration_slice_min_per_class + 1 shots is accepted",
              class_counts([just_enough[i] for i in fit], 3)[2] >= 1)
+
+        print("row splitting (Rust str::lines: '\\n' only, one '\\r' before it stripped) and row-encoding refusals:")
+
+        def loads(name, fn, check):
+            try:
+                got = fn()
+                case(name, check(got), "%d rows" % len(got))
+            except Exception as e:
+                case(name, False, "raised %s: %s" % (type(e).__name__, str(e)[:80]))
+        for cp in ("\u0085", "\u2028", "\u2029"):
+            one = {"text": "one tweet%swith U+%04X inside" % (cp, ord(cp)), "label": "a"}
+            loads("row-split: a text holding U+%04X (ensure_ascii=False) is ONE row, as in Rust" % ord(cp),
+                  lambda one=one, cp=cp: load_rows(write("sep-%04x.jsonl" % ord(cp), rows_text(base_rows + [one])), t, "train"),
+                  lambda got, one=one: len(got) == 13 and got[-1] == (one["text"], 0))
+        crlf = tmp / "crlf.jsonl"
+        crlf.write_bytes(rows_text(base_rows).replace("\n", "\r\n").encode("utf-8"))
+        loads("row-split: a CRLF file loads with the '\\r' stripped (the LF rows exactly)", lambda: load_rows(crlf, t, "train"),
+              lambda got: got == load_rows(write("lf.jsonl", rows_text(base_rows)), t, "train"))
+        rust_lines = (("a\nb", ["a", "b"]), ("a\r\nb\r\n", ["a", "b"]), ("a\n\n", ["a", ""]), ("a\r", ["a\r"]),
+                      ("a\rb\n", ["a\rb"]), ("", []), ("\n", [""]), ("x\u2028y\u0085z\n", ["x\u2028y\u0085z"]),
+                      ("a\n\r\n", ["a", ""]))
+        split = globals().get("jsonl_lines")
+        bad = [src for src, want in rust_lines if split is None or split(src) != want]
+        case("row-split: jsonl_lines == Rust str::lines on the rustc 1.98 case table (%d cases)" % len(rust_lines),
+             not bad, "differs on %r" % (bad,) if bad else "")
+        bad_utf8 = tmp / "bad-utf8.jsonl"
+        bad_utf8.write_bytes(rows_text(base_rows[:3]).encode("utf-8") + b'{"text": "caf\xe9", "label": "a"}\n')
+        expect("train.jsonl with an invalid UTF-8 byte -> train-row-encoding (not UnicodeDecodeError)",
+               "train-row-encoding", lambda: load_rows(bad_utf8, t, "train"))
+        expect("eval.jsonl with an invalid UTF-8 byte -> eval-row-encoding", "eval-row-encoding",
+               lambda: load_rows(bad_utf8, t, "eval"))
+        expect("a text holding a lone surrogate escape (\\ud800) -> train-row-encoding", "train-row-encoding",
+               lambda: load_rows(write("sur1.jsonl", rows_text(base_rows) + '{"text": "bad \\ud800 text", "label": "a"}\n'),
+                                 t, "train"))
+        expect("a label holding a lone surrogate escape (\\udc00) -> shift-row-encoding", "shift-row-encoding",
+               lambda: load_rows(write("sur2.jsonl", rows_text(base_rows) + '{"text": "fine", "label": "\\udc00"}\n'),
+                                 t, "shift"))
+
+        print("prepare_stance.write_once (a re-run into an existing out dir):")
+        import prepare_stance                      # torch-free
+        files = {"task.json": b"{}\n", "train.jsonl": b"row\n"}
+        prep = tmp / "prep"
+        prepare_stance.write_once(prep, files)
+        (prep / ".DS_Store").write_bytes(b"\x00\x01")
+
+        def rerun(name, fn, want_rule):
+            try:
+                status = fn()
+                case(name, want_rule is None and str(status).startswith("unchanged"), "%s" % status)
+            except DataError as e:
+                case(name, e.rule == want_rule, str(e)[:100])
+            except SystemExit as e:
+                case(name, False, "exited %s instead of a %s" % (e.code, "re-run" if want_rule is None else "REFUSED " + want_rule))
+            except Exception as e:
+                case(name, False, "raised %s: %s" % (type(e).__name__, str(e)[:70]))
+        rerun("a byte-identical re-run beside a .DS_Store succeeds (dotfiles are not compared)",
+              lambda: prepare_stance.write_once(prep, files), None)
+        rerun("a written file that differs is still refused (prepare-out-dir)",
+              lambda: prepare_stance.write_once(prep, dict(files, **{"train.jsonl": b"other\n"})), "prepare-out-dir")
+        (prep / "shift.jsonl").write_bytes(b"stale\n")
+        rerun("a foreign non-dot file (a stale shift.jsonl train.py would read) is still refused",
+              lambda: prepare_stance.write_once(prep, files), "prepare-out-dir")
 
         print("NFC / whitespace normalization (nfc-trim-ws-v1, the Rust split_whitespace set):")
         case("NFC composes e + U+0301", normalize("é") == "é")
@@ -561,6 +664,9 @@ def selftest():
 
 
 if __name__ == "__main__":
+    # One DataError class: prepare_stance / gate `import data`, which must be THIS module, not a second copy
+    # whose DataError the self-test's `except DataError` would not catch.
+    sys.modules.setdefault("data", sys.modules[__name__])
     if sys.argv[1:] == ["--selftest"]:
         sys.exit(selftest())
     print("usage: python data.py --selftest", file=sys.stderr)

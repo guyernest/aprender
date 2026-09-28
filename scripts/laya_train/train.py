@@ -281,6 +281,15 @@ def calibration_logits(model, items, k, pad, dev, bs):
     return np.concatenate(out).astype(np.float64)
 
 
+def stopping_record_or_refuse(stopper, epochs_run):
+    """gate.EarlyStopper.record, whose typed refusal (no finite calibration monitor, nothing to restore)
+    ends the run as `REFUSED early-stopping: ...`, exit 2 -- never a traceback."""
+    try:
+        return stopper.record(epochs_run)
+    except data.DataError as e:
+        refuse(str(e))
+
+
 def train_seed(seed, base, requested, question, fit_rows, k, epochs, stopping="fixed_epochs", calib_rows=None):
     """The spike-024 ft_laya.py loop on Laya's own rows; returns (agent, info).
 
@@ -363,7 +372,7 @@ def train_seed(seed, base, requested, question, fit_rows, k, epochs, stopping="f
     train_s = time.time() - t0
     stop_record = None
     if stopper is not None:
-        stop_record = stopper.record(epochs_run)
+        stop_record = stopping_record_or_refuse(stopper, epochs_run)
         model.load_state_dict(best_state)
         log("STOP seed=%d rule=early_stopping best_epoch=%d best_calib_nll=%.6f epochs_run=%d reason=%s"
             % (seed, stop_record["best_epoch"], stop_record["best_monitor"], epochs_run, stop_record["reason"]))

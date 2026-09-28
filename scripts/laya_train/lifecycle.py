@@ -61,6 +61,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import contract  # noqa: E402
 from common import sha256_bytes, sha256_file, tree_sha256  # noqa: E402
+from data import jsonl_lines  # noqa: E402  (rows split as Rust's str::lines)
 
 REPO = contract.REPO
 TINY = REPO / "crates" / "aprender-decide" / "tests" / "fixtures" / "laya_tiny"
@@ -89,6 +90,7 @@ def main():
             if "SHA-256 mismatch" not in str(e):
                 fail("wrong-sha load raised an unexpected ValueError: %s" % e)
     print("digest mapping: right sha loads, wrong sha refused by Laya (ValueError: SHA-256 mismatch)")
+    check_early_stopping_refusal()
 
     tmp = Path(tempfile.mkdtemp(prefix="laya-lifecycle-"))
     try:
@@ -104,6 +106,33 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("LIFECYCLE OK")
+
+
+def check_early_stopping_refusal():
+    """train.py's boundary for EarlyStopper's typed refusal (plan 08-29, IN-08): an early-stopping run whose
+    calibration monitor was never finite ends as ONE `REFUSED early-stopping: ...` line on stderr and exit 2
+    (train.stopping_record_or_refuse), never a ValueError traceback hours into a run."""
+    import contextlib
+    import io
+
+    import gate
+    import train
+    st = gate.EarlyStopper(contract.early_stopping_decl(), 3)
+    for e in (1, 2, 3):
+        st.update(e, float("nan"))
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            train.stopping_record_or_refuse(st, 3)
+    except SystemExit as e:
+        if e.code != 2 or not err.getvalue().startswith("REFUSED early-stopping: ") or "Traceback" in err.getvalue():
+            fail("early-stopping with no finite monitor: exit %r, stderr %r" % (e.code, err.getvalue()[:200]))
+    except Exception as e:  # noqa: BLE001 -- the defect this check exists for
+        fail("early-stopping with no finite monitor raised %s instead of REFUSED early-stopping, exit 2: %s"
+             % (type(e).__name__, e))
+    else:
+        fail("early-stopping with no finite monitor was accepted (a record with nothing to restore)")
+    print("early-stopping refusal: no finite calibration monitor -> REFUSED early-stopping, exit 2 (train.py boundary)")
 
 
 def keep_run(run_dir, data_dir):
@@ -174,11 +203,11 @@ def check_shift_probe(tmp, tiny_sha, without, Agent):
             fail("%s is not bound by shift_probe.%s, or the run without shift.jsonl wrote it" % (name, key))
     if with_rep["inputs_sha256"]["shift_jsonl"] != sha256_file(data_dir / "shift.jsonl"):
         fail("inputs_sha256.shift_jsonl is not the sha256 of shift.jsonl")
-    if probe["n"] != len((data_dir / "shift.jsonl").read_text().splitlines()):
+    if probe["n"] != len(jsonl_lines((data_dir / "shift.jsonl").read_text(encoding="utf-8"))):
         fail("shift_probe.n %s is not the shift.jsonl row count" % probe["n"])
     bad = tmp / "data-shift-overlap"
     shutil.copytree(data_dir, bad)
-    first_train = (TINY / "data" / "train.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    first_train = jsonl_lines((TINY / "data" / "train.jsonl").read_text(encoding="utf-8"))[0]
     (bad / "shift.jsonl").write_text((data_dir / "shift.jsonl").read_text(encoding="utf-8") + first_train + "\n",
                                      encoding="utf-8")
     refused = tmp / "refused-shift-overlap"

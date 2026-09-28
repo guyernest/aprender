@@ -1,6 +1,6 @@
 contract: laya-finetune-gate
 metadata:
-  version: 4.0.0
+  version: 5.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -71,6 +71,19 @@ metadata:
     paths; the f32 functions other phases use are unchanged, frozen bit for bit. `pv diff`
     classifies the amended ece_top_label formula and invariants MAJOR, so this is published as
     4.0.0; the 1.4.0 naming above is unchanged.
+
+    TEXT ALIGNMENT 5.0.0 (plan 08-29, 2026-09-28, class E and V13-c; no threshold, constant, recipe
+    value, seed, early_stopping value, schema field or recorded outcome moved). The contract stated
+    three different early-stopping rules: `early_stopping.improvement_rule` the best-anchored one the
+    trainer implements (m_e < m_best - min_delta), the `early_stopping_train_side` formula a
+    running minimum, and FALSIFY-LAYA-GATE-009 and `tie_break_rule` "the earliest epoch within
+    min_delta of the minimum". On m = [1.0, 0.9993, 0.9988] they pick epochs 3, 1 and 2. The rule of
+    record is the one the 08-16 run trained under (gate.py at 24cea2a63, best-anchored; its seed-17
+    trace replays to the recorded best_epoch 2 under it, although that trace alone does not separate
+    the three), so the formula, its tie invariant, FALSIFY-LAYA-GATE-009 and the `tie_break_rule`
+    description now state that rule. Text corrected to the code, never the reverse. `pv diff`
+    classifies the formula and invariant edit MAJOR, so this is published as 5.0.0; the 1.4.0
+    naming above is unchanged.
 
     THE GATE IS DECIDED ON RECOMPUTED METRICS, NOT REPORTED ONES. A gate report is a file a
     training run wrote; an edited report must not pass. So the metrics that DECIDE pass are
@@ -230,7 +243,14 @@ early_stopping:
   restore: best
   restore_rule: 'the weights after best_epoch are restored (an exact copy taken when that epoch improved), then saved F16 as the shipped checkpoint'
   tie_break: earliest
-  tie_break_rule: 'a later epoch must beat the best by MORE than min_delta, so among epochs within min_delta of each other the earliest is kept'
+  # plan 08-29 (V13-c): tie_break_rule's text is corrected TO THE CODE, never the reverse. The best-anchored
+  # rule below is what gate.EarlyStopper implemented when the 08-16 run of record trained (gate.py at
+  # 24cea2a63; that run's per-epoch trace is checkpoint/rl_agent_config.json `training.stopping`, replayed
+  # by gate.py --selftest RUN_OF_RECORD_STOPPING). The old text, 'among epochs within min_delta of each
+  # other the earliest is kept', is false on m = [1.0, 0.9993, 0.9988]. `tie_break: earliest` and every
+  # other key of this block are unchanged, and recipe.json copies `tie_break`, not this text, so no
+  # recipe_id moves.
+  tie_break_rule: 'best-anchored: a later epoch replaces the best only when it beats m_best (the monitor of the current best epoch) by MORE than min_delta, so an epoch within min_delta of the CURRENT BEST never replaces it and the earlier best is kept; two epochs within min_delta of EACH OTHER need not keep the earlier: on m = [1.0, 0.9993, 0.9988] (min_delta 0.001) epoch 2 does not beat 1.0 by more than min_delta and epoch 3 does, so epoch 3 is kept'
   schedule: 'UNCHANGED: cosine over max_epochs * ceil(n_fit / batch_size) steps, as fixed_epochs; stopping truncates it, it is never re-planned'
   monitor_precision: 'fp32 weights in eval mode on the training device, no grad, batched by recipe.batch_size with the training collate — a SELECTION signal only. Every REPORTED score (calibration fit, gate metrics, eval / zero-shot / probe files) is still computed on the F16 reload (f16_reload_scoring); T*_e is not the reported t_fitted.'
   data_rule: 'The calibration slice is the SAME text-group-disjoint slice (split_disjointness, declared_seed) used for the temperature fit, and the ONLY data the monitor reads. It is used twice (stopping and T); both uses are train-side. eval.jsonl NEVER influences stopping, the restored epoch or T: the trainer never passes eval rows to training, and no eval probability is computed before the checkpoint is fixed (enforced by an ordering assertion in train.py: the stopping record and checkpoint/model.safetensors precede eval-probs.json).'
@@ -727,13 +747,17 @@ equations:
       - 'the zero-shot baseline is the declared base loaded the same way'
 
   early_stopping_train_side:
-    formula: 'best_epoch = min { e in [first_candidate_epoch, epochs_run] : m_e < min_{first_candidate_epoch <= j < e} m_j - min_delta (vacuous for e = first_candidate_epoch) AND no later epoch improves on m_e }, m_e = calibration_nll_at_fitted_t on the CALIBRATION slice; stop when e - best_epoch >= patience_epochs or e == max_epochs; shipped weights = weights after best_epoch'
+    # plan 08-29 (V13-c): the formula used to state a RUNNING-MINIMUM rule (m_e < min_{j < e} m_j -
+    # min_delta), which disagrees with early_stopping.improvement_rule and with the trainer on traces
+    # such as [1.0, 0.9993, 0.9988]. It now states the best-anchored rule verbatim from improvement_rule,
+    # the rule the 08-16 run of record used: a description fix to the rule of record, not a rule change.
+    formula: 'BEST-ANCHORED (early_stopping.improvement_rule, implemented by gate.EarlyStopper): m_best := +inf and best_epoch := none; for each evaluated epoch e >= first_candidate_epoch in order, epoch e improves iff m_e is finite AND m_e < m_best - min_delta (strict), and only then m_best := m_e and best_epoch := e (m_best is updated ONLY on improvement, so best_epoch is the last improving epoch and an epoch within min_delta of the current m_best never replaces it); m_e = calibration_nll_at_fitted_t on the CALIBRATION slice; epoch 0 (the untrained base) is never a candidate; a non-finite m_e never improves; stop after epoch e when e - best_epoch >= patience_epochs (best_epoch read as first_candidate_epoch - 1 before any improvement) or e == max_epochs; shipped weights = weights after best_epoch; no finite m_e at all is REFUSED early-stopping (nothing to restore)'
     domain: 'a training run whose recipe.json carries the `early_stopping` object (the early_stopping block)'
     codomain: 'the restored best-epoch weights and the training.stopping record in rl_agent_config.json, both fixed BEFORE any eval probability exists'
     invariants:
       - 'the monitor reads the calibration slice only; eval.jsonl rows never reach the training function, the monitor, the restored epoch or the temperature fit'
       - 'no eval probability is computed before the stopping record and the checkpoint are on disk (ordering assertion in train.py; mtime(checkpoint/model.safetensors) <= mtime(eval-probs.json))'
-      - 'epoch 0 (the untrained base) is never a candidate; ties go to the earliest epoch; a non-finite monitor never improves'
+      - 'epoch 0 (the untrained base) is never a candidate; an epoch within min_delta of the current best (an exact tie included) never replaces it, so the earlier best is kept; a non-finite monitor never improves'
       - 'the cosine schedule is the fixed_epochs one over max_epochs; stopping truncates it'
     preconditions:
       - 'split_disjointness holds for the run (the calibration slice is text-group-disjoint from fit)'
@@ -860,7 +884,7 @@ falsification_tests:
 
   - id: FALSIFY-LAYA-GATE-009
     rule: 'Early stopping is decided on the calibration slice alone, before any eval score, and restores the best epoch'
-    prediction: 'On a synthetic monitor trace the rule picks the earliest epoch within min_delta of the minimum, stops patience_epochs after it, and never picks epoch 0 or a non-finite epoch; a real early-stopping run logs its STOP line before CHECKPOINT COMPLETE and SCORING START, and checkpoint/model.safetensors is not newer than eval-probs.json.'
+    prediction: 'On synthetic monitor traces the best-anchored rule picks the epoch the early_stopping_train_side formula names (epoch e improves iff m_e < m_best - min_delta): on [1.0, 0.9993, 0.9988] with min_delta 0.001 it picks epoch 3, where a running-minimum rule would pick epoch 1 and an earliest-within-min_delta-of-the-minimum rule epoch 2; it stops patience_epochs after the best epoch, never picks epoch 0 or a non-finite epoch, refuses a run with no finite monitor (REFUSED early-stopping), and replays the 08-16 run of record''s seed-17 trace to its recorded best_epoch 2, epochs_run 5, reason patience; a real early-stopping run logs its STOP line before CHECKPOINT COMPLETE and SCORING START, and checkpoint/model.safetensors is not newer than eval-probs.json.'
     implemented_by: 'plan 08-08 (gate.py --selftest synthetic monitor trace; lifecycle.py STOP-before-SCORING and mtime order; inside just laya-train-selftest)'
     test_harness: 'just laya-train-selftest'
     if_fails: 'The shipped epoch was chosen with eval data or after eval was scored (D-04 / D-07), or the restored weights are not the best epoch.'

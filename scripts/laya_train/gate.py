@@ -46,6 +46,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import contract  # noqa: E402
+import data  # noqa: E402  (torch-free: DataError, the back office's typed refusal)
 import metrics  # noqa: E402
 
 
@@ -93,10 +94,13 @@ def fit_temperature(z, y, t_min, t_max, iters=200):
 class EarlyStopper:
     """laya-finetune-gate-v1 `early_stopping` / equation early_stopping_train_side, torch-free.
 
-    Fed one calibration-slice monitor value per evaluated epoch (never an eval number). Epoch e
-    improves iff m_e is finite and m_e < m_best - min_delta (strict, so ties keep the EARLIEST
-    epoch); epochs before first_candidate_epoch (epoch 0 = the untrained base) are never candidates.
-    Stops when e - best_epoch >= patience_epochs, or at max_epochs."""
+    Fed one calibration-slice monitor value per evaluated epoch (never an eval number). The BEST-ANCHORED
+    rule: epoch e improves iff m_e is finite and m_e < m_best - min_delta, m_best being the monitor of the
+    last improving epoch (+inf before the first) and updated only on improvement -- so an epoch within
+    min_delta of the current best never replaces it (ties keep the EARLIER epoch). Epochs before
+    first_candidate_epoch (epoch 0 = the untrained base) are never candidates. Stops when
+    e - best_epoch >= patience_epochs, or at max_epochs. This is the rule the 08-16 run of record used
+    (RUN_OF_RECORD_STOPPING); record() with no finite monitor is REFUSED early-stopping (a DataError)."""
 
     def __init__(self, decl, max_epochs):
         if (decl["monitor"], decl["mode"], decl["restore"], decl["tie_break"]) != (
@@ -134,7 +138,8 @@ class EarlyStopper:
 
     def record(self, epochs_run):
         if self.best_epoch is None:
-            raise ValueError("early stopping saw no finite calibration monitor value; nothing to restore")
+            raise data.DataError("early-stopping", "no evaluated epoch produced a finite calibration monitor "
+                                 "value (%d epoch(s) run), so there is no best epoch to restore" % int(epochs_run))
         return {"rule": "early_stopping", "monitor": "calibration_nll_at_fitted_t", "per_epoch": list(self.trace),
                 "best_epoch": self.best_epoch, "best_monitor": self.best, "epochs_run": int(epochs_run),
                 "reason": self.reason or "max_epochs"}
@@ -307,6 +312,88 @@ def _recompute_run_dir(vec, case):
          "margin=%.4f ece_post=%.4f" % (g["margin"], g["fine_tuned"]["ece_post"]))
 
 
+# The run of record (plan 08-16, models/decide/laya-stance-64, shipped seed 17, deployed as 24a44d7e...):
+# checkpoint/rl_agent_config.json `training.stopping`, copied exactly. Replayed through EarlyStopper it
+# must give the recorded best_epoch / epochs_run / reason.
+RUN_OF_RECORD_STOPPING = {
+    "run_dir": "models/decide/laya-stance-64", "seed": 17,
+    "monitors": [0.756670608641795, 0.7521509716564435, 0.8539618408615052, 0.8706240461957222, 0.9254170977443964],
+    "best_epoch": 2, "epochs_run": 5, "reason": "patience", "max_epochs": 12}
+
+
+def _running_min_rule(trace, first, min_delta):
+    """The rule early_stopping_train_side USED to state (laya-finetune-gate-v1 <= 4.0.0): e improves iff
+    m_e < min_{first <= j < e} m_j - min_delta (vacuous at e = first); the LAST improving epoch is best."""
+    best = None
+    for e, m in enumerate(trace, first):
+        prior = trace[:e - first]
+        if not prior or m < min(prior) - min_delta:
+            best = e
+    return best
+
+
+def _within_min_delta_of_minimum_rule(trace, first, min_delta):
+    """The rule FALSIFY-LAYA-GATE-009 and tie_break_rule USED to state: the earliest epoch whose monitor is
+    within min_delta of the minimum."""
+    lo = min(trace)
+    return min(e for e, m in enumerate(trace, first) if m - lo <= min_delta)
+
+
+def _best_anchored_cases(case, decl):
+    """V13-c: the early-stopping contract states ONE rule, the best-anchored rule the trainer implements."""
+    md = float(decl["min_delta"])
+    first = int(decl["first_candidate_epoch"])
+    trace = [1.0, 0.9993, 0.9988]                # epochs 1..3
+    st = EarlyStopper(decl, 12)
+    for e, m in enumerate(trace, first):
+        st.update(e, m)
+    got = st.best_epoch
+    rmin, wmin = _running_min_rule(trace, first, md), _within_min_delta_of_minimum_rule(trace, first, md)
+    case("best-anchored: trace %s (min_delta %g) -> epoch 3, since 0.9988 < m_best 1.0 - min_delta" % (trace, md),
+         got == 3 and rmin == 1 and wmin == 2,
+         "best-anchored %s; running-min %s; earliest-within-min_delta-of-min %s: the trace distinguishes all three, "
+         "and tie_break_rule's old 'among epochs within min_delta of each other the earliest is kept' would keep "
+         "epoch 2 (2 and 3 are within min_delta)" % (got, rmin, wmin))
+    c = contract.gate_contract()
+    formula = c["equations"]["early_stopping_train_side"]["formula"]
+    f009 = [t for t in c["falsification_tests"] if t["id"] == "FALSIFY-LAYA-GATE-009"][0]["prediction"]
+    tbr = c["early_stopping"]["tie_break_rule"]
+    stale = [where for where, text, gone in (
+        ("early_stopping_train_side.formula", formula, "min_{first_candidate_epoch <= j < e}"),
+        ("FALSIFY-LAYA-GATE-009.prediction", f009, "earliest epoch within min_delta of the minimum"),
+        ("early_stopping.tie_break_rule", tbr, "among epochs within min_delta of each other the earliest is kept"))
+        if gone in text]
+    missing = [where for where, text in (("early_stopping_train_side.formula", formula),
+                                         ("FALSIFY-LAYA-GATE-009.prediction", f009),
+                                         ("early_stopping.tie_break_rule", tbr)) if "best-anchored" not in text.lower()]
+    case("best-anchored: the equation, FALSIFY-LAYA-GATE-009 and tie_break_rule all state the best-anchored rule",
+         not stale and not missing and "m_best - min_delta" in formula
+         and c["early_stopping"]["improvement_rule"].startswith("epoch e improves iff m_e < m_best - min_delta"),
+         "stale wording in %s; no 'best-anchored' in %s" % (stale or "none", missing or "none"))
+    rec = RUN_OF_RECORD_STOPPING
+    st = EarlyStopper(decl, rec["max_epochs"])
+    stopped = None
+    for e, m in enumerate(rec["monitors"], first):
+        _, stop = st.update(e, m)
+        if stop:
+            stopped = e
+            break
+    r = st.record(stopped)
+    case("best-anchored: the run of record's seed-%d trace replays to best_epoch %d, epochs_run %d, %s"
+         % (rec["seed"], rec["best_epoch"], rec["epochs_run"], rec["reason"]),
+         (r["best_epoch"], r["epochs_run"], r["reason"]) == (rec["best_epoch"], rec["epochs_run"], rec["reason"]),
+         "got %s / %s / %s" % (r["best_epoch"], r["epochs_run"], r["reason"]))
+    cfg = contract.REPO / rec["run_dir"] / "checkpoint" / "rl_agent_config.json"
+    if not cfg.is_file():
+        print("  SKIP run-of-record stopping record: %s not present (gitignored local evidence)"
+              % cfg.relative_to(contract.REPO))
+        return
+    stp = json.loads(cfg.read_text())["training"]["stopping"]
+    case("best-anchored: the constants above equal the run dir's recorded training.stopping",
+         [p["monitor"] for p in stp["per_epoch"]] == rec["monitors"]
+         and (stp["best_epoch"], stp["epochs_run"], stp["reason"]) == (rec["best_epoch"], rec["epochs_run"], rec["reason"]))
+
+
 def selftest():
     failures = []
 
@@ -317,7 +404,9 @@ def selftest():
 
     th = contract.thresholds()
     print("gate decision on fabricated reports (thresholds from the contract: %s):" % th)
-    # 0.55 - 0.5 = 0.050000000000000044 in f64 (the same subtraction the Rust verifier does).
+    # 0.55 - 0.5 = 0.050000000000000044 in f64: the same subtraction the Rust verifier does, which is true
+    # because both sides compute margin as ONE f64 subtraction of exactly-summed macro-F1s
+    # (laya-finetune-gate-v1 numeric_agreement.quantities.margin, plan 08-27).
     for name, zs, ft, ece, want in (
             ("margin 0.049 fails", 0.5, 0.549, 0.05, False),
             ("margin 0.05 with ECE 0.10 passes (both bounds inclusive)", 0.5, 0.55, 0.10, True),
@@ -477,8 +566,8 @@ def selftest():
             stopped_at = e
             break
     rec = st.record(stopped_at)
-    case("earliest epoch within min_delta of the minimum is kept (epoch 2, not 3 or 4)", rec["best_epoch"] == 2,
-         "best_epoch=%s" % rec["best_epoch"])
+    case("an epoch within min_delta of the CURRENT BEST never replaces it (epoch 2 kept, not 3 or 4)",
+         rec["best_epoch"] == 2, "best_epoch=%s" % rec["best_epoch"])
     case("stops patience_epochs after the best epoch (at 2 + %d), never sees epoch 6" % decl["patience_epochs"],
          stopped_at == 2 + int(decl["patience_epochs"]) and rec["reason"] == "patience",
          "stopped_at=%s reason=%s" % (stopped_at, rec["reason"]))
@@ -490,15 +579,20 @@ def selftest():
     st = EarlyStopper(decl, 12)
     for e in range(1, 4):
         st.update(e, float("nan"))
+    import data                                  # torch-free; DataError is the back office's typed refusal
+    name = "early-stopping: no finite monitor at all -> REFUSED early-stopping (typed), nothing to restore"
     try:
         st.record(3)
-        case("no finite monitor at all -> refused, nothing to restore", False, "accepted")
-    except ValueError:
-        case("no finite monitor at all -> refused, nothing to restore", True)
+        case(name, False, "accepted")
+    except data.DataError as e:
+        case(name, e.rule == "early-stopping" and str(e).startswith("REFUSED early-stopping: "), str(e)[:80])
+    except Exception as e:
+        case(name, False, "raised %s, not the typed refusal: %s" % (type(e).__name__, str(e)[:60]))
     st = EarlyStopper(decl, 2)
     st.update(1, 0.9)
     _, stop = st.update(2, 0.8)
     case("an improving run stops at max_epochs", stop and st.record(2)["reason"] == "max_epochs")
+    _best_anchored_cases(case, decl)
 
     if failures:
         print("GATE SELFTEST FAILED: %s" % ", ".join(failures))
