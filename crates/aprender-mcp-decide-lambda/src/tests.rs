@@ -94,7 +94,11 @@ async fn loopback_end_exits_the_process() {
         .send()
         .await
         .expect("initialize is answered");
-    assert_eq!(resp.status().as_u16(), 200, "the loopback answered initialize");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "the loopback answered initialize"
+    );
 
     // The server task ends; the watcher must reach exit(1).
     handle.abort();
