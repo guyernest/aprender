@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 26/32 plans executed; gap round 08-19..08-32 planned in waves 17-22 (2026-09-28; revised after plan checking). Executed history: 18 plans in 16 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; 08-11 complete: D-18 go/no-go recorded as a human-decided HOLD (hold-no-aws). Gap closure 08-13..08-18 added 2026-09-27 (user decision, option 1 from spikes 027/028): declare A1 noise-referenced pack bar + A2 in-distribution eval set + A3 median-of-three seed policy, wire them, ONE declared s64 gate run, then a human-approved live deploy; 08-12 close-out moves to Wave 16)
+**Plans:** 27/32 plans executed; gap round 08-19..08-32 planned in waves 17-22 (2026-09-28; revised after plan checking). Executed history: 18 plans in 16 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; 08-11 complete: D-18 go/no-go recorded as a human-decided HOLD (hold-no-aws). Gap closure 08-13..08-18 added 2026-09-27 (user decision, option 1 from spikes 027/028): declare A1 noise-referenced pack bar + A2 in-distribution eval set + A3 median-of-three seed policy, wire them, ONE declared s64 gate run, then a human-approved live deploy; 08-12 close-out moves to Wave 16)
 
 Plans:
 **Wave 1**
@@ -729,7 +729,7 @@ Plans:
 
 - [x] 08-24-PLAN.md — Lambda runtime: dead loopback exits, POST-only loads, config-checked health (A4-6), one CORS origin, too_large mapping, honest OnceCell docs, item-scoped lint allows incl. probe.rs, Lambda request rows swept, V4-a resume mutant
 - [x] 08-26-PLAN.md — class B artifact side: duplicate names at rung 4, criteria bound, tokenizer truncation off, header version, rung-7 replay, bounded inspect, contract table + sweep
-- [ ] 08-27-PLAN.md — class E numeric: f64 + exactly-rounded sums in aprender-core and metrics.py, frozen boundary cases replayed bit-for-bit by both, f_avg recomputed, shared f32 metrics pinned by a to_bits snapshot
+- [x] 08-27-PLAN.md — class E numeric: f64 + exactly-rounded sums in aprender-core and metrics.py, frozen boundary cases replayed bit-for-bit by both, f_avg recomputed, shared f32 metrics pinned by a to_bits snapshot
 
 **Wave 19** *(blocked on Wave 18 completion; 08-28 moved here 2026-09-28 because it edits probe.rs after 08-24)*
 

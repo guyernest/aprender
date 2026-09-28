@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Completed 08-26-PLAN.md (class B artifact half: DuplicateTensor, max_criteria 510, tokenizer truncation/padding disabled, rung-2 version, rung-7 ProbeReplay, probe rows bounded before the replay forward, 30-row untrusted_input_bounds swept 18/6/6; M1-M6 RED)"
-last_updated: "2026-09-28T20:41:23.704Z"
+stopped_at: "Completed 08-27-PLAN.md (class E numeric agreement: f64 exactly-summed macro-F1/ECE/f_avg/margin/rank_key in Rust and Python, 23-case frozen file bit for bit, check_f_avg, laya-finetune-gate-v1 4.0.0; deployed 24a44d7e eligible seed 17)"
+last_updated: "2026-09-28T21:41:00.016Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: 0f6a021d81fb2ee36a05d48605e9c5104033a266
+state_head: 97034f84b284917d0cfa8a0cdb886f9ef2d67899
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 118
+  completed_plans: 119
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 26 of 32 complete (08-01..08-26; 08-25 ran before 08-24 by wave order) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-26 COMPLETE (class B, artifact half: rung 4 DuplicateTensor via a set walk (WR-01 decide side; the 08-20 reader still refuses first at rung 3); inspect runs rungs 1-4 on a bounded read, non-UTF-8 argv exit 2 (IN-02); task MAX_CRITERIA = decide-apr-v1 max_criteria = 510 refused while reading, HashSet duplicates (V1-b; plan's 128 corrected by measurement); tokenizer truncation/padding disabled (V9-a); rung-2 version (V9-d); rung-7 ProbeReplay (V9-b); probe rows checked before the replay forward (new); decide-apr-v1 3.0.0 untrusted_input_bounds 30 rows swept 18/6/6; M1-M6 RED; deployed 24a44d7e eligible seed 17; parity 3.841e-6 LEG OK); next 08-27
+Plan: 27 of 32 complete (08-01..08-27; 08-25 ran before 08-24 by wave order) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-27 COMPLETE (class E, numeric half: every gate quantity — macro-F1, f_avg, top-label ECE, margin, rank key — is one f64 computation with exactly-rounded sums in both languages (aprender-core metrics::fsum = math.fsum; macro_f1_f64, mean_f1_over_labels_f64, expected_calibration_error_top_label_f64 ADDED beside the f32 fns, whose bits are frozen by f32_bits_tests committed alone at e5edfef6a); scripts/laya_train/numeric_cases.json 23 cases (9-row / 30-row exact-1/20 margins, 459x3 rank grid-line ECE, 20 random) replayed bit for bit by metrics.py --selftest and verify gate_numeric_cases_agree_bit_for_bit (130 quantities); check_f_avg binds the 5 f_avg rows (sweep bound=91 expected_open=0); laya-finetune-gate-v1 4.0.0 numeric_agreement; mutations RED on both sides (per-bin conf-sum mutants proved equivalent, 287/287 exact); deployed 24a44d7e eligible seed 17, rank keys 849/442/371 unchanged; vectors REFUSED 2/2; python_records MEDIAN 23/23); next 08-28
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -239,6 +239,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P25 | 12min | 3 tasks | 3 files |
 | Phase 08 P24 | 16min | 3 tasks | 8 files |
 | Phase 08 P26 | 41min | 3 tasks | 9 files |
+| Phase 08 P27 | 55min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -454,6 +455,8 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-24: Lambda crate unwrap ban is crate-wide again (item-level json! allows only; planted unwraps in lib.rs, probe.rs, main.rs fail clippy); its two untrusted_input_bounds rows are swept by lambda_request_rows_are_swept (frame_http exactly 413 with an at-bound 200 control)
 - [Phase 08]: 08-26: decide-apr-v1 max_criteria = 510 (max_len 512 - 2), not max_len/4 = 128 — measured on Laya-en one-token names serve to K = 253
 - [Phase 08]: 08-26: load-time probe rows are checked against probe_max_row_tokens BEFORE the replay forward; tokenizer_pipeline is an accepted class-B row (only verify binds the tokenizer)
+- [Phase 08]: 08-27: Rust-Python agreement by construction — every gate quantity (macro-F1, f_avg, top-label ECE, margin, rank key) is one f64 computation with exactly-rounded sums (aprender-core metrics::fsum = Python math.fsum), declared in laya-finetune-gate-v1 4.0.0 numeric_agreement and replayed bit for bit from scripts/laya_train/numeric_cases.json in both languages
+- [Phase 08]: 08-27: the f64 gate metrics are ADDED beside aprender-core's f32 f1_score / expected_calibration_error_top_label, never swapped in — the f32 bits are frozen by metrics::f32_bits_tests (committed alone); f_avg is recomputed by verify::check_f_avg under train.py's null rule, so all 5 f_avg run_field_bindings rows are bound (bound=91, expected_open=0)
 
 ### Pending Todos
 
@@ -569,8 +572,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-28T20:41:23.483Z
-Stopped at: Completed 08-26-PLAN.md (class B artifact half: DuplicateTensor, max_criteria 510, tokenizer truncation/padding disabled, rung-2 version, rung-7 ProbeReplay, probe rows bounded before the replay forward, 30-row untrusted_input_bounds swept 18/6/6; M1-M6 RED)
+Last session: 2026-09-28T21:40:14.217Z
+Stopped at: Completed 08-27-PLAN.md (class E numeric agreement: f64 exactly-summed macro-F1/ECE/f_avg/margin/rank_key in Rust and Python, 23-case frozen file bit for bit, check_f_avg, laya-finetune-gate-v1 4.0.0; deployed 24a44d7e eligible seed 17)
 Resume file: None
 
 ## Accumulated Context
