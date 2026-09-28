@@ -82,16 +82,50 @@ fn parse_metadata_section(
 /// reader runs (aprender-decide's rung 2) uses this one definition.
 pub const MIN_INDEX_ENTRY_BYTES: usize = 20;
 
+/// The unit the index reservation is counted in: the LARGER of an entry's on-disk
+/// minimum and its in-memory size. A parsed `TensorIndexEntry` holds a `String` and a
+/// `Vec` besides its scalars, so it is several times the 20-byte on-disk minimum;
+/// counting capacity in on-disk units let a forged count reserve ~3.6x the file size
+/// (V2-b, plan 08-20).
+pub(super) const INDEX_RESERVE_UNIT_BYTES: usize = {
+    let in_memory = std::mem::size_of::<TensorIndexEntry>();
+    if in_memory > MIN_INDEX_ENTRY_BYTES {
+        in_memory
+    } else {
+        MIN_INDEX_ENTRY_BYTES
+    }
+};
+
 /// The tensor-index vector's initial capacity: the declared `tensor_count`, but never
-/// more entries than the `remaining` index bytes could encode.
+/// more entries than would occupy, IN MEMORY, the `remaining` index bytes the file
+/// actually holds.
 ///
 /// `tensor_count` comes from the header, and the header CRC covers only the header, so
 /// a small file with a valid CRC can declare `u32::MAX` entries. Reserving that many
-/// up front would request hundreds of GB before the first entry is parsed. The parse
-/// loop still iterates `tensor_count` times and fails on the first entry the bytes
-/// cannot hold, so a valid file behaves exactly as before.
+/// up front would request hundreds of GB before the first entry is parsed. Bounding in
+/// on-disk units is not enough either: that still reserves `size_of::<TensorIndexEntry>()
+/// / 20` times the index bytes. With the in-memory unit the up-front reservation never
+/// exceeds the bytes the file supplies; a valid index that holds more entries than that
+/// simply grows the vector as it parses. The parse loop still iterates `tensor_count`
+/// times and fails on the first entry the bytes cannot hold, so a valid file behaves
+/// exactly as before.
 pub(super) fn index_capacity(tensor_count: u32, remaining: usize) -> usize {
-    (tensor_count as usize).min(remaining / MIN_INDEX_ENTRY_BYTES)
+    (tensor_count as usize).min(remaining / INDEX_RESERVE_UNIT_BYTES)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The capacity the most recent `parse_tensor_index_section` on this thread actually
+    /// reserved, read back from `Vec::capacity` AFTER the allocation — so a change to how
+    /// the reservation is computed cannot slip past the test that watches it. A counting
+    /// global allocator is not available (`unsafe_code = "forbid"`).
+    static LAST_INDEX_RESERVE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: the index capacity (in entries) the last parse on this thread reserved.
+#[cfg(test)]
+pub(super) fn last_index_reserve() -> usize {
+    LAST_INDEX_RESERVE.with(std::cell::Cell::get)
 }
 
 /// Parse and bounds-check the tensor index section (FALSIFY-PARSE-001).
@@ -112,6 +146,8 @@ fn parse_tensor_index_section(
 
     let remaining_index_bytes = data.len().saturating_sub(pos);
     let mut tensor_index = Vec::with_capacity(index_capacity(tensor_count, remaining_index_bytes));
+    #[cfg(test)]
+    LAST_INDEX_RESERVE.with(|c| c.set(tensor_index.capacity()));
     for _ in 0..tensor_count {
         // `data.get(pos..)` returns None only when pos > data.len(); pos == len
         // yields an empty slice, which TensorIndexEntry::from_bytes rejects

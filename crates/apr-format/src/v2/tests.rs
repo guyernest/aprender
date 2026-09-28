@@ -462,12 +462,23 @@ fn test_flags_all_bits() {
 
 #[test]
 fn index_capacity_is_bounded_by_the_index_bytes() {
-    use super::reader_impl::index_capacity;
-    assert_eq!(index_capacity(u32::MAX, 100), 5);
+    use super::reader_impl::{index_capacity, INDEX_RESERVE_UNIT_BYTES};
+    // The unit is counted in memory, never in the 20-byte on-disk minimum (V2-b).
+    let unit = INDEX_RESERVE_UNIT_BYTES;
+    assert!(unit >= std::mem::size_of::<TensorIndexEntry>());
+    assert!(unit >= MIN_INDEX_ENTRY_BYTES);
+    assert!(
+        unit > MIN_INDEX_ENTRY_BYTES,
+        "a TensorIndexEntry (String + Vec + scalars) outweighs its on-disk minimum"
+    );
+    assert_eq!(index_capacity(u32::MAX, 5 * unit), 5);
+    assert_eq!(index_capacity(u32::MAX, 5 * unit + unit - 1), 5);
     assert_eq!(index_capacity(3, 10_000), 3);
     assert_eq!(index_capacity(0, 0), 0);
-    assert_eq!(index_capacity(7, 19), 0);
-    assert_eq!(index_capacity(7, 20), 1);
+    assert_eq!(index_capacity(7, unit - 1), 0);
+    assert_eq!(index_capacity(7, unit), 1);
+    // 100 on-disk bytes encode five minimal entries, but reserve for at most one.
+    assert_eq!(index_capacity(u32::MAX, 100), 100 / unit);
     assert_eq!(index_capacity(u32::MAX, usize::MAX), u32::MAX as usize);
 }
 
@@ -563,4 +574,44 @@ fn duplicate_tensor_names_are_refused_by_both_readers() {
     assert_eq!(owned.tensor_names(), vec!["dup", "dup2", "other"]);
     let borrowed = AprV2ReaderRef::from_bytes(&control).expect("distinct names open (ref)");
     assert_eq!(borrowed.tensor_names().len(), 3);
+}
+
+/// V2-b / V2-c (plan 08-20): the INITIAL reservation for a forged `tensor_count` must fit
+/// the index bytes the file actually holds, counted in in-memory entries (a
+/// `TensorIndexEntry` is a String + a Vec + scalars, several times the 20-byte on-disk
+/// minimum). The earlier refusal test passed with its own fix reverted on macOS, because
+/// a 309 GB `with_capacity` succeeds lazily there; this one reads back the reservation.
+#[test]
+fn forged_tensor_count_reserves_nothing_proportional() {
+    use super::reader_impl::last_index_reserve;
+    let data = forged_tensor_count_file(u32::MAX);
+    let header = AprV2Header::from_bytes(&data).expect("header parses");
+    let index_bytes = data.len() - header.tensor_index_offset as usize;
+    let entry = std::mem::size_of::<TensorIndexEntry>();
+    for (reader, refused) in [
+        (
+            "AprV2Reader",
+            matches!(
+                AprV2Reader::from_bytes(&data),
+                Err(V2FormatError::InvalidTensorIndex(_))
+            ),
+        ),
+        (
+            "AprV2ReaderRef",
+            matches!(
+                AprV2ReaderRef::from_bytes(&data),
+                Err(V2FormatError::InvalidTensorIndex(_))
+            ),
+        ),
+    ] {
+        assert!(refused, "{reader}: the forged count is still refused");
+        let reserved = last_index_reserve();
+        assert!(
+            reserved.saturating_mul(entry) <= index_bytes,
+            "{reader}: reserved {reserved} entries x {entry} B = {} B for a {index_bytes}-byte \
+             index (declared tensor_count {})",
+            reserved.saturating_mul(entry),
+            u32::MAX
+        );
+    }
 }

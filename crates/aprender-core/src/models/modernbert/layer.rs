@@ -87,8 +87,23 @@ pub(crate) struct RopeTable {
     cos: Vec<f32>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many RoPE tables this thread has started to build — lets a test prove a
+    /// guard ran BEFORE `RopeTable::new` sized anything from a caller's `l`.
+    static ROPE_TABLES_STARTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: RoPE tables this thread has started to build.
+#[cfg(test)]
+pub(crate) fn rope_tables_started() -> usize {
+    ROPE_TABLES_STARTED.with(std::cell::Cell::get)
+}
+
 impl RopeTable {
     pub(crate) fn new(inv_freq: &[f32], l: usize) -> Self {
+        #[cfg(test)]
+        ROPE_TABLES_STARTED.with(|c| c.set(c.get() + 1));
         let half = inv_freq.len();
         let (mut sin, mut cos) = (Vec::with_capacity(l * half), Vec::with_capacity(l * half));
         for pos in 0..l {
@@ -284,9 +299,16 @@ impl ModernBertLayer {
     /// Apply the layer in place to `x` (`[l, d]`); `window` is the local half-window
     /// (ignored on a global layer).
     ///
+    /// `l` and `x` are caller-controlled, so both are checked BEFORE the RoPE table is
+    /// sized from `l` (WR-04 / V10-b, plan 08-20): an empty row or an `l` that disagrees
+    /// with `x` is a typed error, never a slice panic, an overflow or an allocation
+    /// proportional to a claimed length.
+    ///
     /// # Errors
     ///
-    /// Any [`ModernBertError`] from the primitives (shape or GEMM).
+    /// [`ModernBertError::EmptyInput`] when `l == 0`; [`ModernBertError::InputShape`]
+    /// when `x` is not `[l, d]` (including an `l * d` that overflows); any other
+    /// [`ModernBertError`] from the primitives (shape or GEMM).
     pub fn forward(
         &self,
         x: &mut [f32],
@@ -294,6 +316,10 @@ impl ModernBertLayer {
         config: &ModernBertConfig,
         window: usize,
     ) -> Result<(), ModernBertError> {
+        if l == 0 {
+            return Err(ModernBertError::EmptyInput);
+        }
+        check_len("layer.x", x.len(), &[l, config.hidden_size()])?;
         let hd = config.head_dim();
         check_rope_geometry(config.num_attention_heads(), hd)?;
         let theta = if self.global {
@@ -319,6 +345,10 @@ impl ModernBertLayer {
         let heads = config.num_attention_heads();
         let hd = config.head_dim();
         let eps = config.norm_eps();
+        // With l == 0 every length check below passes (0 == 0) and `&qkv[d..]` panics.
+        if l == 0 {
+            return Err(ModernBertError::EmptyInput);
+        }
         check_len("layer.x", x.len(), &[l, d])?;
         check_rope_geometry(heads, hd)?;
         check_len("rope.x", heads * hd, &[d])?;
@@ -378,7 +408,11 @@ impl ModernBertLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::{attention, gelu_exact, key_range, layer_norm, rope_inv_freq};
+    use super::{
+        attention, gelu_exact, key_range, layer_norm, rope_inv_freq, rope_tables_started,
+        RopeTable,
+    };
+    use crate::models::modernbert::test_support::fixture_encoder;
     use crate::models::modernbert::ModernBertError;
 
     /// `gelu_exact` matches `0.5 * x * (1 + erf(x / sqrt 2))` to 1e-7. Reference values
@@ -482,6 +516,67 @@ mod tests {
             }
             assert_eq!(key_range(i, l, None), (0, l));
         }
+    }
+
+    /// WR-04 / V10-b (plan 08-20): the public layer refuses an empty row with
+    /// `EmptyInput` BEFORE it builds a RoPE table, instead of passing every length
+    /// check with `l == 0` and panicking on `&qkv[d..]`.
+    #[test]
+    fn layer_forward_empty_row_is_refused() {
+        let enc = fixture_encoder();
+        let (cfg, layer) = (enc.config(), &enc.layers()[0]);
+        let before = rope_tables_started();
+        let mut x: Vec<f32> = Vec::new();
+        assert!(matches!(
+            layer.forward(&mut x, 0, cfg, 64),
+            Err(ModernBertError::EmptyInput)
+        ));
+        assert_eq!(
+            rope_tables_started(),
+            before,
+            "the empty row was refused before any RoPE table was built"
+        );
+    }
+
+    /// The crate-internal entry point the encoder uses carries the same guard, so a
+    /// caller that builds its own (empty) table cannot reach the slicing either.
+    #[test]
+    fn layer_forward_with_rope_empty_row_is_refused() {
+        let enc = fixture_encoder();
+        let (cfg, layer) = (enc.config(), &enc.layers()[0]);
+        let rope = RopeTable::new(&rope_inv_freq(cfg.rope_theta_global(), cfg.head_dim()), 0);
+        let mut x: Vec<f32> = Vec::new();
+        assert!(matches!(
+            layer.forward_with_rope(&mut x, 0, cfg, 64, &rope),
+            Err(ModernBertError::EmptyInput)
+        ));
+    }
+
+    /// A caller `l` that disagrees with `x` — here one so large that `l * half` would
+    /// overflow the RoPE table's capacity — is a typed shape error returned BEFORE the
+    /// table is sized from it: no panic, no allocation proportional to `l`.
+    #[test]
+    fn layer_forward_huge_l_is_refused_before_rope() {
+        let enc = fixture_encoder();
+        let (cfg, layer) = (enc.config(), &enc.layers()[0]);
+        let before = rope_tables_started();
+        let mut x = vec![0.0f32; cfg.hidden_size()];
+        let got = layer.forward(&mut x, usize::MAX / 2, cfg, 64);
+        assert!(
+            matches!(
+                got,
+                Err(ModernBertError::InputShape {
+                    what: "layer.x",
+                    ..
+                })
+            ),
+            "expected InputShape(layer.x), got {got:?}"
+        );
+        assert_eq!(
+            rope_tables_started(),
+            before,
+            "the mis-sized row was refused before any RoPE table was built"
+        );
     }
 
     /// The reusable primitives refuse inconsistent buffers with a typed error.
