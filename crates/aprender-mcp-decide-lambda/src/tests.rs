@@ -64,6 +64,49 @@ pub(crate) async fn serve(model: Arc<Model>) -> String {
     format!("http://{bound}")
 }
 
+/// WR-06: a loopback server that answered and then ended reaches `exit(1)` through the
+/// watcher the bootstrap spawns — on a REAL loopback server, not a synthetic handle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_end_exits_the_process() {
+    let server = build_server(tiny_model(), "decide-watch-test", "0.0.0").expect("build server");
+    let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+    let (bound, handle) = start_loopback(server, addr).await.expect("bind loopback");
+
+    // The server is live: a POST initialize is answered.
+    let init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": crate::probe::PROBE_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "watch-test", "version": "0.0.0" }
+        }
+    });
+    let resp = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client")
+        .post(format!("http://{bound}/"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(init.to_string())
+        .send()
+        .await
+        .expect("initialize is answered");
+    assert_eq!(resp.status().as_u16(), 200, "the loopback answered initialize");
+
+    // The server task ends; the watcher must reach exit(1).
+    handle.abort();
+    let code = Arc::new(std::sync::Mutex::new(None::<i32>));
+    let seen = Arc::clone(&code);
+    watch_loopback(handle, move |c| {
+        *seen.lock().expect("exit-code slot") = Some(c);
+    })
+    .await;
+    assert_eq!(*code.lock().expect("exit-code slot"), Some(1));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn loopback_identity_probe_over_real_http() {
     let model = tiny_model();

@@ -86,6 +86,25 @@ pub async fn start_loopback(
         .await
 }
 
+/// Watch the loopback MCP server task (WR-06). While the container is healthy that task
+/// never ends on its own, so ANY end — a panic, a cancellation, or the accept loop
+/// returning — leaves every later request proxied to a dead `base_url`. Log the outcome at
+/// error level and call `exit(1)` so Lambda replaces the environment instead of routing
+/// traffic to it forever.
+///
+/// `exit` is injected so a test can observe the call without ending the test process; the
+/// bootstrap passes `std::process::exit`.
+pub async fn watch_loopback(handle: tokio::task::JoinHandle<()>, exit: impl FnOnce(i32)) {
+    let outcome = match handle.await {
+        Ok(()) => "returned".to_string(),
+        Err(e) => e.to_string(),
+    };
+    tracing::error!(
+        "decide.loopback ended: {outcome}; exiting so Lambda replaces this environment"
+    );
+    exit(1);
+}
+
 // ===========================================================================
 // Where the model comes from
 // ===========================================================================

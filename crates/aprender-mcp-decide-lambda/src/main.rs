@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use aprender_mcp_decide_lambda::{
     build_server, load_header_value, load_log_line, parse_probe_id, resolve_model, start_loopback,
-    LoadOnce, LoadTimeline, ModelSource, LOAD_HEADER, PROBE_ID_HEADER,
+    watch_loopback, LoadOnce, LoadTimeline, ModelSource, LOAD_HEADER, PROBE_ID_HEADER,
 };
 use lambda_http::{run, service_fn, Body, Error, Request, Response};
 use once_cell::sync::OnceCell;
@@ -81,11 +81,9 @@ async fn load() -> Result<Loaded, LoadFailure> {
             kind: "bind",
             detail: e.to_string(),
         })?;
-    tokio::spawn(async move {
-        if let Err(e) = handle.await {
-            tracing::error!("loopback server task ended: {e}");
-        }
-    });
+    // A loopback that ends would leave `LOADED` pointing at a dead base_url for every later
+    // request; the watcher ends the process instead, so Lambda replaces the environment.
+    tokio::spawn(watch_loopback(handle, |code| std::process::exit(code)));
     tracing::info!(
         "{name}: MCP server on {bound}, serving artifact_sha256={}",
         timeline.artifact_sha256
