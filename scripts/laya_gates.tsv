@@ -1,2 +1,7 @@
 gate_id	target	must_fail	must_pass	finding
 leg-verdict	just _laya-leg-verdict	canned SKIP-ladder log / libtest-prefixed SKIP log / missing MEASURED ladder / unknown leg name	canned full-evidence log for each of the four legs	V11-a,AL7,D3-1
+grant-check	just _laya-grant-check	an attached managed policy with s3:GetObject on arn:aws:s3:::* / s3:Get* on the wanted prefix / s3:GetObject on decide/* / an Allow with NotAction: each REFUSED grant	the stack-declared inline read plus a logs-only attached managed policy: grant ok naming the inline and attached counts	WR-07
+grant-listing-failure	just laya-grant	fake aws: list-role-policies exits 255 -> exit 1 "IAM read failed", never "REFUSED grant"	fake aws: the stack-declared inline read and a logs-only attached policy -> exit 0 "grant ok"	V11-b
+teardown-classify	just laya-teardown	fake aws: delete-role-policy AccessDenied -> exit 1 naming the failure (containment already done)	fake aws: delete-role-policy NoSuchEntity -> exit 0 "no legacy policy"	V11-b
+sha256-helper	just laya-deploy-config	laya-deploy on a config whose pin was mutated, foreign rtk first on PATH -> REFUSED sha-pin	foreign rtk first on PATH, and rtk absent from PATH: laya-deploy-config pins exactly the digest shasum -a 256 prints	V11-c
+resolver-proof-sed	just _laya-resolver-parse	a canned log with no RESOLVED line -> exit 1	a canned libtest-prefixed log (test <name> ... RESOLVED root=crates ...) -> RESOLVED=crates/aprender-mcp-decide-lambda	D3-1

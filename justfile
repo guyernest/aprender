@@ -1532,8 +1532,9 @@ laya-resolver-proof sdk commit work:
         exit 1
     fi
     grep -q 'test result: ok. 1 passed' "$LOG" || { echo "ERROR: the filter did not run exactly one test (log: $LOG)" >&2; exit 1; }
-    RESOLVED="$(sed -n 's/^RESOLVED root=crates server=aprender-mcp-decide -> //p' "$LOG" | head -n 1)"
-    CONTROL="$(sed -n 's/^CONTROL root=[^ ]* server=aprender-mcp-decide -> //p' "$LOG" | head -n 1)"
+    PARSED="$(just _laya-resolver-parse "$LOG")" || { echo "ERROR: the resolver test printed no RESOLVED line (log: $LOG)" >&2; exit 1; }
+    RESOLVED="$(printf '%s\n' "$PARSED" | sed -n 's/^RESOLVED=//p')"
+    CONTROL="$(printf '%s\n' "$PARSED" | sed -n 's/^CONTROL=//p')"
     test "$RESOLVED" = "$EXPECT" || { echo "ERROR: the resolver returned '$RESOLVED', not $EXPECT" >&2; exit 1; }
     mkdir -p models/decide
     {
@@ -1552,6 +1553,22 @@ laya-resolver-proof sdk commit work:
     echo "RESOLVER PROOF: $RESOLVED (control: root $EXPECT -> $CONTROL)"
     echo "  cargo-pmcp $INST_VER, source $FULL (builder.rs last changed in $BUILDER_LAST)"
     echo "  wrote $PROOF (gitignored)"
+
+# The RESOLVED / CONTROL values of a resolver-proof test log (plan 08-22, D3-1). The tokens are read
+# ANYWHERE on a line: under --nocapture libtest writes `test <name> ... ` onto the first output line,
+# so a column-0 anchor can miss them. Prints `RESOLVED=<dir>` and `CONTROL=<dir>` (the first of each);
+# no RESOLVED line exits 1. Pure: no cargo. Row `resolver-proof-sed` of scripts/laya_gates.tsv.
+[positional-arguments]
+_laya-resolver-parse log:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    LOG="$1"
+    [ -f "$LOG" ] || { echo "REFUSED resolver-parse: $LOG does not exist" >&2; exit 1; }
+    first() { awk -v pat="$1" 'match($0, pat) { print substr($0, RSTART + RLENGTH); exit }' "$LOG"; }
+    RESOLVED="$(first 'RESOLVED root=crates server=aprender-mcp-decide -> ')"
+    CONTROL="$(first 'CONTROL root=[^ ]* server=aprender-mcp-decide -> ')"
+    [ -n "$RESOLVED" ] || { echo "REFUSED resolver-parse: no RESOLVED line in $LOG" >&2; exit 1; }
+    printf 'RESOLVED=%s\nCONTROL=%s\n' "$RESOLVED" "$CONTROL"
 
 # Write the gitignored crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml from its tracked
 # template for <apr>: server name, s3://<bucket>/decide/<server>/<sha256>.apr, the sha256 pin,
@@ -1575,7 +1592,9 @@ laya-deploy-config apr auth server="aprender-mcp-decide" env="dev" profile="ze-k
     # shared-crates-root: only this name resolves to the decide package (see the section header).
     test "$SERVER" = "aprender-mcp-decide" || { echo "ERROR: server must be aprender-mcp-decide under the shared-crates-root deploy (got '$SERVER')" >&2; exit 2; }
     test -f "$APR" || { echo "ERROR: $APR does not exist" >&2; exit 2; }
-    sha256() { if command -v rtk >/dev/null 2>&1; then rtk proxy shasum -a 256 "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
+    # shasum directly (plan 08-22, V11-c): the rtk hook never rewrites a command inside a recipe, so a
+    # proxy branch added nothing and made the identity pin depend on which `rtk` is on PATH.
+    sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
     H="$(sha256 "$APR")"
     if [ "${DRY_RUN:-0}" = "1" ]; then
         BUCKET="dry-run-bucket"
@@ -1785,7 +1804,9 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     PROOF="models/decide/resolver-proof.txt"
     EXPECT_PKG="crates/aprender-mcp-decide-lambda"
     refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
-    sha256() { if command -v rtk >/dev/null 2>&1; then rtk proxy shasum -a 256 "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
+    # shasum directly (plan 08-22, V11-c): the rtk hook never rewrites a command inside a recipe, so a
+    # proxy branch added nothing and made the identity pin depend on which `rtk` is on PATH.
+    sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
     case "$ENV" in
         dev|prod) ;;
         *) refuse env "'$ENV' is not a known environment (expected dev or prod)" ;;
@@ -2229,6 +2250,13 @@ laya-deploy-selftest:
     grant_case refuse bucket-wide "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/*\"}]}}]"
     grant_case refuse legacy-still-on "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED]}},{\"name\":\"aprender-decide-weights-dev\",\"document\":{\"Statement\":[$SCOPED]}}]"
     grant_case refuse not-json 'nope'
+    # WR-07 (plan 08-22): attached managed policies, wildcard actions/resources and NotAction are broad.
+    LOGS='{"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}'
+    grant_case accept attached-logs-only "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$XRAY,$SCOPED]}},{\"name\":\"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole\",\"kind\":\"attached\",\"document\":{\"Statement\":[$LOGS]}}]"
+    grant_case refuse attached-s3-any "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED]}},{\"name\":\"arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess\",\"kind\":\"attached\",\"document\":{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::*\"}]}}]"
+    grant_case refuse get-star "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:Get*\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*\"}]}}]"
+    grant_case refuse decide-prefix-star "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/*\"}]}}]"
+    grant_case refuse not-action "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"NotAction\":\"iam:*\",\"Resource\":\"*\"}]}}]"
     # Wiring: laya-grant only READS IAM, and laya-deploy runs the config check and the role check.
     GRANT_BODY="$(just --show laya-grant)"
     if printf '%s' "$GRANT_BODY" | grep -q 'just _laya-grant-check' \
@@ -2335,7 +2363,9 @@ laya-upload apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     ENV="{{ trim_start_match(env, "env=") }}"
     P="{{profile}}"
     refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
-    sha256() { if command -v rtk >/dev/null 2>&1; then rtk proxy shasum -a 256 "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
+    # shasum directly (plan 08-22, V11-c): the rtk hook never rewrites a command inside a recipe, so a
+    # proxy branch added nothing and made the identity pin depend on which `rtk` is on PATH.
+    sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
     case "$ENV" in
         dev|prod) ;;
         *) refuse env "'$ENV' is not a known environment (expected dev or prod)" ;;
@@ -2380,10 +2410,15 @@ laya-upload apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     [ "$REMOTE" = "$SIZE" ] || { echo "ERROR: s3://$BUCKET/$KEY is '$REMOTE' bytes after the upload, $APR is $SIZE" >&2; exit 1; }
     echo "UPLOADED s3://$BUCKET/$KEY ($SIZE bytes, sha256 $H)"
 
-# Grant the deployed decide function read access to its OWN weights prefix only: an inline role
-# policy aprender-decide-weights-<env> with s3:GetObject on decide/<server>/* and s3:ListBucket
-# conditioned on that prefix (without ListBucket a missing key reads 403, not 404). The role is
-# discovered from the function (pmcp.run owns it). Idempotent; RE-RUN after any pmcp.run redeploy.
+# READ-ONLY check (08-17 option 1; plan 08-22, WR-07 / V11-b) that the deployed function's role holds
+# the STACK-DECLARED weights read -- s3:GetObject on decide/<server>/* of this env's weights bucket,
+# which cargo-pmcp renders from the deploy config's [[iam.statements]] into the role's default
+# inline policy -- and no other S3 grant. It reads every INLINE policy (list-role-policies,
+# get-role-policy) and every ATTACHED managed policy (list-attached-role-policies, get-policy,
+# get-policy-version) of the role and hands them to `_laya-grant-check`. It creates, attaches and
+# deletes nothing, so there is nothing to re-run after a redeploy: the stack re-declares the grant.
+# A failed IAM read exits 1 as an IAM READ FAILURE, never as a missing grant. The role is
+# discovered from the function (pmcp.run owns it).
 laya-grant server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2394,39 +2429,78 @@ laya-grant server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
         dev|prod) ;;
         *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
     esac
+    read_failed() { echo "ERROR: IAM read failed: $1 -- the role's policies are UNKNOWN, not missing; nothing was concluded" >&2; exit 1; }
     ROLE_ARN="$(aws lambda get-function --profile "$P" --function-name "$SERVER" \
         --query Configuration.Role --output text 2>/dev/null)" || {
-        echo "ERROR: no Lambda named '$SERVER' -- deploy it first: just laya-deploy ..." >&2
+        echo "ERROR: no Lambda named '$SERVER' (or it cannot be read) -- deploy it first: just laya-deploy ..." >&2
         exit 1
     }
     ROLE="${ROLE_ARN##*/}"
-    ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
+    ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)" \
+        || { echo "ERROR: cannot read the AWS account for profile $P" >&2; exit 1; }
     BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
-    # Every inline policy on the role, as one JSON list of {name, document}. Read-only calls only.
-    DOCS="["
-    SEP=""
-    for NAME in $(aws iam list-role-policies --profile "$P" --role-name "$ROLE" --query 'PolicyNames[]' --output text); do
-        DOC="$(aws iam get-role-policy --profile "$P" --role-name "$ROLE" --policy-name "$NAME" --query PolicyDocument --output json)"
-        DOCS="$DOCS$SEP{\"name\": \"$NAME\", \"document\": $DOC}"
-        SEP=","
-    done
-    DOCS="$DOCS]"
-    just _laya-grant-check "$DOCS" "$BUCKET" "$SERVER" "aprender-decide-weights-${ENV}" \
-        | sed "s/$BUCKET/<weights-bucket>/g"
-    echo "  role: $ROLE"
+    W="$(mktemp -d)"
+    trap 'rm -rf "$W"' EXIT
+    # Every read's status is checked on its own: a failed listing must not read as an empty one.
+    NAMES="$(aws iam list-role-policies --profile "$P" --role-name "$ROLE" --query 'PolicyNames' --output json)" \
+        || read_failed "listing the inline policies of $ROLE (aws iam list-role-policies)"
+    ARNS="$(aws iam list-attached-role-policies --profile "$P" --role-name "$ROLE" --query 'AttachedPolicies[].PolicyArn' --output json)" \
+        || read_failed "listing the attached managed policies of $ROLE (aws iam list-attached-role-policies)"
+    lines() { python3 -c 'import json, sys; v = json.loads(sys.argv[1]); assert isinstance(v, list) and all(isinstance(x, str) for x in v); print("\n".join(v))' "$1"; }
+    lines "$NAMES" > "$W/inline.txt" || read_failed "list-role-policies on $ROLE did not return a JSON list of names"
+    lines "$ARNS" > "$W/attached.txt" || read_failed "list-attached-role-policies on $ROLE did not return a JSON list of ARNs"
+    i=0
+    while IFS= read -r NAME; do
+        [ -n "$NAME" ] || continue
+        i=$((i + 1))
+        printf '%s' "$NAME" > "$W/inline-$i.name"
+        aws iam get-role-policy --profile "$P" --role-name "$ROLE" --policy-name "$NAME" --query PolicyDocument --output json > "$W/inline-$i.json" \
+            || read_failed "reading inline policy $NAME of $ROLE (aws iam get-role-policy)"
+    done < "$W/inline.txt"
+    j=0
+    while IFS= read -r ARN; do
+        [ -n "$ARN" ] || continue
+        j=$((j + 1))
+        printf '%s' "$ARN" > "$W/attached-$j.name"
+        VER="$(aws iam get-policy --profile "$P" --policy-arn "$ARN" --query Policy.DefaultVersionId --output text)" \
+            || read_failed "reading attached policy $ARN (aws iam get-policy)"
+        aws iam get-policy-version --profile "$P" --policy-arn "$ARN" --version-id "$VER" --query PolicyVersion.Document --output json > "$W/attached-$j.json" \
+            || read_failed "reading version $VER of attached policy $ARN (aws iam get-policy-version)"
+    done < "$W/attached.txt"
+    DOCS="$(python3 - "$W" "$i" "$j" <<'PY'
+    import json, sys
+    d, ni, nj = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    out = []
+    for kind, n in (("inline", ni), ("attached", nj)):
+        for k in range(1, n + 1):
+            out.append({"name": open(f"{d}/{kind}-{k}.name").read(), "kind": kind,
+                        "document": json.load(open(f"{d}/{kind}-{k}.json"))})
+    print(json.dumps(out))
+    PY
+    )" || read_failed "a policy document of $ROLE is not JSON"
+    if ! just _laya-grant-check "$DOCS" "$BUCKET" "$SERVER" "aprender-decide-weights-${ENV}" > "$W/check.log" 2>&1; then
+        sed "s/$BUCKET/<weights-bucket>/g" "$W/check.log" >&2
+        exit 1
+    fi
+    sed "s/$BUCKET/<weights-bucket>/g" "$W/check.log"
+    echo "  role: $ROLE ($i inline, $j attached)"
 
-# Decide whether a role's inline policies (<docs>: a JSON list of {name, document}) carry the
-# stack-declared weights read: some Allow statement whose Action is exactly s3:GetObject and whose
-# Resource is exactly arn:aws:s3:::<bucket>/decide/<server>/*. Refuses (exit 1) when it is absent,
-# when any statement grants s3:* or s3:GetObject bucket-wide, or when the legacy out-of-band policy
-# <legacy> is still attached (08-17 option 1 retired it; the stack is the only grant). Pure: no
-# network. Exercised by laya-deploy-selftest's GRANT table.
+# Decide whether a role's policies (<docs>: a JSON list of {name, kind: inline|attached, document};
+# a missing kind is inline) carry the stack-declared weights read and NO OTHER S3 grant (plan 08-22,
+# WR-07). Accepts only when some INLINE Allow statement has Action exactly s3:GetObject and Resource
+# exactly arn:aws:s3:::<bucket>/decide/<server>/*, and nothing else in the list reaches S3. Refuses
+# (exit 1, naming the policy and statement) on: any Allow with NotAction or NotResource; any S3 action
+# carrying `*` or `?` (s3:Get*, s3:*, *); any S3 resource carrying `*` or `?` other than exactly that
+# ARN; any other S3 action or resource; ANY attached managed policy granting an S3 action; and the
+# legacy out-of-band policy <legacy> (08-17 option 1 retired it). It checks the documents it is given:
+# permission boundaries, SCPs and bucket policies are not inspected, and the success line says so.
+# Pure: no network. Exercised by laya-deploy-selftest's GRANT table and row grant-check.
 [positional-arguments]
 _laya-grant-check docs bucket server legacy:
     #!/usr/bin/env bash
     set -euo pipefail
     python3 - "$1" "$2" "$3" "$4" <<'PY'
-    import json, sys
+    import fnmatch, json, sys
     docs, bucket, server, legacy = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
     def refuse(msg):
         print(f"REFUSED grant: {msg}", file=sys.stderr); sys.exit(1)
@@ -2434,29 +2508,57 @@ _laya-grant-check docs bucket server legacy:
         pols = json.loads(docs)
     except ValueError:
         refuse("the policy list is not JSON")
+    if not isinstance(pols, list):
+        refuse("the policy list is not a JSON list")
     want = f"arn:aws:s3:::{bucket}/decide/{server}/*"
     listify = lambda v: v if isinstance(v, list) else [v]
-    found = None
+    wild = lambda s: "*" in s or "?" in s
+    def reaches_s3(action):
+        svc = action.split(":", 1)[0].lower()
+        return action == "*" or fnmatch.fnmatchcase("s3", svc)
+    found, counts = None, {"inline": 0, "attached": 0}
     for p in pols:
-        if p.get("name") == legacy:
+        if not isinstance(p, dict):
+            refuse(f"entry {p!r} is not a name/kind/document object")
+        name, kind = p.get("name"), p.get("kind", "inline")
+        if kind not in counts:
+            refuse(f"policy {name}: unknown kind {kind!r}")
+        counts[kind] += 1
+        if kind == "inline" and name == legacy:
             refuse(f"the legacy out-of-band policy {legacy} is still on the role; the stack is the only grant")
-        for s in listify(p.get("document", {}).get("Statement", [])):
+        doc = p.get("document")
+        if not isinstance(doc, dict):
+            refuse(f"{kind} policy {name}: the document is not a JSON object")
+        for n, s in enumerate(listify(doc.get("Statement", [])), 1):
+            if not isinstance(s, dict):
+                refuse(f"{kind} policy {name} statement {n}: not an object")
             if s.get("Effect") != "Allow":
                 continue
-            acts, res = listify(s.get("Action", [])), listify(s.get("Resource", []))
-            s3acts = [a for a in acts if a.lower().startswith("s3:") or a == "*"]
+            where = f"{kind} policy {name} statement {n}"
+            if "NotAction" in s or "NotResource" in s:
+                refuse(f"{where} is an Allow with NotAction/NotResource: it grants everything it does not name")
+            acts = [str(a) for a in listify(s.get("Action", []))]
+            res = [str(r) for r in listify(s.get("Resource", []))]
+            s3acts = [a for a in acts if reaches_s3(a)]
             if not s3acts:
                 continue
-            if any(a in ("*", "s3:*") for a in s3acts):
-                refuse(f"{p.get('name')} grants {s3acts} -- broader than s3:GetObject")
-            broad = [r for r in res if r in ("*", f"arn:aws:s3:::{bucket}/*", f"arn:aws:s3:::{bucket}", "arn:aws:s3:::*")]
-            if broad:
-                refuse(f"{p.get('name')} grants {s3acts} on {broad} -- broader than decide/{server}/*")
-            if acts == ["s3:GetObject"] and res == [want]:
-                found = p.get("name")
+            if kind == "attached":
+                refuse(f"{where} grants {s3acts} on {res}: an attached managed policy reaches S3, and the stack grant must be the only S3 read")
+            broad_acts = [a for a in s3acts if wild(a)]
+            if broad_acts:
+                refuse(f"{where} grants {broad_acts}: a wildcard S3 action is broader than s3:GetObject")
+            broad_res = [r for r in res if r != want and wild(r)]
+            if broad_res:
+                refuse(f"{where} grants {s3acts} on {broad_res}: a wildcard S3 resource broader than decide/{server}/*")
+            if [a.lower() for a in acts] == ["s3:getobject"] and res == [want]:
+                found = name
+                continue
+            refuse(f"{where} grants {s3acts} on {res}: an S3 grant other than the stack-declared s3:GetObject on {want}")
     if not found:
         refuse(f"no inline policy grants exactly s3:GetObject on {want}")
-    print(f"grant ok: policy {found} (stack-declared) allows s3:GetObject on {want} and nothing broader")
+    print(f"grant ok: checked {counts['inline']} inline and {counts['attached']} attached policies of the role;"
+          f" {found} (stack-declared) allows s3:GetObject on {want} and no other S3 grant is in them"
+          f" (permission boundary, SCPs and bucket policy not inspected)")
     PY
 
 # Measure decide-tool-boundary-v1 accepted_region_cold LIVE (the post-spike deploy; not this phase).
@@ -2632,10 +2734,22 @@ laya-teardown server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
     # is stack-managed and is NEVER touched here: deleting it would be drift the next deploy
     # silently re-creates. It stays attached while contained, and grants nothing usable: with
     # reserved concurrency 0 no invocation runs. `cargo pmcp deploy destroy` (below) removes it.
-    if aws iam delete-role-policy --profile "$P" --role-name "$ROLE" --policy-name "aprender-decide-weights-${ENV}" 2>/dev/null; then
+    # Only NoSuchEntity means "absent" (plan 08-22, V11-b); any other failure is reported, not hidden.
+    set +e
+    DERR="$(aws iam delete-role-policy --profile "$P" --role-name "$ROLE" --policy-name "aprender-decide-weights-${ENV}" 2>&1 > /dev/null)"
+    drc=$?
+    set -e
+    if [ "$drc" -eq 0 ]; then
         echo "  removed LEGACY out-of-band policy aprender-decide-weights-${ENV} from $ROLE"
     else
-        echo "  no legacy policy aprender-decide-weights-${ENV} on $ROLE (expected since 08-17 option 1)"
+        case "$DERR" in
+            *NoSuchEntity*) echo "  no legacy policy aprender-decide-weights-${ENV} on $ROLE (expected since 08-17 option 1)" ;;
+            *)
+                echo "ERROR: deleting the legacy policy aprender-decide-weights-${ENV} from $ROLE failed (exit $drc): $DERR" >&2
+                echo "       containment IS in place ($SERVER at reserved concurrency 0); the legacy policy's state is unknown" >&2
+                exit 1
+                ;;
+        esac
     fi
     echo "  stack-declared weights read left in place (stack-managed; inert at reserved concurrency 0)"
     ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"

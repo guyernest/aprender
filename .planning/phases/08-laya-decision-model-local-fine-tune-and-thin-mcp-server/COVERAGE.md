@@ -11,13 +11,15 @@
 | s3.head_object (runtime loader: object length before allocation) | INTEGRATE | |
 | s3.get_object_ranged (runtime loader: 16-way 64 MiB parts into memory) | INTEGRATE | |
 | s3.put_object (runtime) | OPT-OUT | the served function is read-only by design; uploads happen once, from the laptop recipe (`aws s3 cp`) |
-| s3.list_objects (runtime) | OPT-OUT | not needed — the key is content-addressed and pinned by sha256; ListBucket is granted only prefix-scoped so a missing key reads 404 |
+| s3.list_objects (runtime) | OPT-OUT | not needed — the key is content-addressed and pinned by sha256. The stack grants s3:GetObject on `decide/<server>/*` only and no s3:ListBucket, so a missing key reads 403 AccessDenied, not 404 |
 | s3.delete_object | OPT-OUT | explicitly out of scope for automation — `laya-teardown` prints the `aws s3 rm` command for the human |
 | s3.multipart_upload / presigned_urls / select / versioning / lifecycle_rules | OPT-OUT | not needed — immutable content-addressed objects, no client-side downloads, no expiry by design |
 | s3.create_bucket + public_access_block + default_encryption + tagging (recipe) | INTEGRATE | |
 | s3.cp upload + head-object size check (recipe) | INTEGRATE | |
-| iam.put_role_policy / delete_role_policy (recipe grant and teardown) | INTEGRATE | |
-| iam.create_role / attach_managed_policy | OPT-OUT | the function role is owned by pmcp.run; the phase only adds a scoped inline policy (the pmcp-train-grant precedent) |
+| iam.list_role_policies / get_role_policy / list_attached_role_policies / get_policy / get_policy_version (`laya-grant`: READ-ONLY check of the stack-declared grant, every read's status checked) | INTEGRATE | |
+| iam.delete_role_policy (`laya-teardown`: removes the LEGACY pre-08-17 out-of-band policy by name; NoSuchEntity reads as absent, any other failure exits 1) | INTEGRATE | |
+| iam.put_role_policy | OPT-OUT | no longer used — since 08-17 option 1 the weights read is stack-declared (`[[iam.statements]]` in the deploy config, rendered by cargo-pmcp into the role's default policy); `laya-grant` only reads |
+| iam.create_role / attach_managed_policy | OPT-OUT | the function role and its policies are owned by pmcp.run's stack; the phase writes no IAM, and `laya-grant` refuses any attached managed policy that reaches S3 |
 | lambda.get_function (role discovery) | INTEGRATE | |
 | lambda.update_function_configuration (per-sample cold-start forcing) | INTEGRATE | |
 | lambda.put_function_concurrency / get_function_concurrency (containment) | INTEGRATE | |
