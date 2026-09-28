@@ -27,10 +27,13 @@
 //!   text never buys tokenizer CPU on the protocol loop.
 //! - [`classify_blocking`] runs inside ONE admitted blocking section and does the rest:
 //!   tokenize once ([`Model::prepare`]), check the built-row TOKEN BUDGET, then score.
-//! - [`Admission`] bounds the whole process: at most `classify_max_in_flight` computations
-//!   run and at most `classify_max_pending` requests are admitted; the next is refused at
-//!   once. The permits move into the blocking closure, so a slot is released only when
-//!   the CPU work it paid for has ended.
+//! - [`Admission`] bounds concurrent callers of [`ClassifyService::call`]: at most
+//!   `classify_max_in_flight` computations run and at most `classify_max_pending` calls are
+//!   admitted; the next is refused at once. The permits move into the blocking closure, so
+//!   a slot is released only when the CPU work it paid for has ended. Through the shipped
+//!   transports pmcp 2.19.3 dispatches one tool call at a time (stdio: one worker; streamable
+//!   HTTP: the `Server` behind a mutex), so that refusal is not reachable from a transport
+//!   (`classify_admission`, plan 08-28).
 //!
 //! Every refusal is `pmcp::Error::validation`, names the contract and the constant key,
 //! reports the OBSERVED value, and never echoes caller text (ASVS V7). Input texts are

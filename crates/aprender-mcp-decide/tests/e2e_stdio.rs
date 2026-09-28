@@ -93,12 +93,8 @@ impl Client {
         client
     }
 
-    fn request(
-        &mut self,
-        method: &str,
-        params: serde_json::Value,
-        timeout: Duration,
-    ) -> serde_json::Value {
+    /// Write one request frame WITHOUT waiting for its reply; returns its id.
+    fn send(&mut self, method: &str, params: serde_json::Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let line =
@@ -109,12 +105,27 @@ impl Client {
             .expect("write request");
         self.stdin.write_all(b"\n").expect("write newline");
         self.stdin.flush().expect("flush");
+        id
+    }
+
+    /// Read the next reply line, whichever request it answers.
+    fn recv(&mut self, what: &str, timeout: Duration) -> serde_json::Value {
         let reply = self
             .rx
             .recv_timeout(timeout)
-            .unwrap_or_else(|e| panic!("timed out waiting for {method} #{id}: {e}"));
-        let value: serde_json::Value = serde_json::from_str(&reply)
-            .unwrap_or_else(|e| panic!("non-JSON line for {method}: {e}\n{reply}"));
+            .unwrap_or_else(|e| panic!("timed out waiting for {what}: {e}"));
+        serde_json::from_str(&reply)
+            .unwrap_or_else(|e| panic!("non-JSON line for {what}: {e}\n{reply}"))
+    }
+
+    fn request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> serde_json::Value {
+        let id = self.send(method, params);
+        let value = self.recv(&format!("{method} #{id}"), timeout);
         assert_eq!(value["id"], id, "reply id for {method}");
         value
     }
@@ -180,6 +191,17 @@ fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../aprender-decide/tests/fixtures/laya_tiny")
 }
 
+/// Pack the tiny fixture with the production packer into a real `.apr` on disk. The
+/// tempdir is returned so the file outlives the server that serves it.
+fn packed_tiny() -> (tempfile::TempDir, PathBuf) {
+    let dir = fixture_dir();
+    let bytes = aprender_decide::pack_run_dir(&dir, &dir.join("data")).expect("pack laya_tiny");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let model = tmp.path().join("laya_tiny.apr");
+    std::fs::write(&model, &bytes).expect("write packed .apr");
+    (tmp, model)
+}
+
 fn probs_abs() -> f64 {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/laya-parity-v1.yaml");
     let text = std::fs::read_to_string(&path).expect("read laya-parity-v1");
@@ -211,10 +233,7 @@ fn assert_labels_in_order(description: &str, labels: &[&str]) {
 #[test]
 fn the_tiny_decide_server_classifies_over_live_stdio() {
     let dir = fixture_dir();
-    let bytes = aprender_decide::pack_run_dir(&dir, &dir.join("data")).expect("pack laya_tiny");
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let model = tmp.path().join("laya_tiny.apr");
-    std::fs::write(&model, &bytes).expect("write packed .apr");
+    let (_tmp, model) = packed_tiny();
 
     let mut client = Client::spawn(&model);
 
@@ -366,6 +385,69 @@ fn the_tiny_decide_server_classifies_over_live_stdio() {
             "a malformed argument must be refused without echo: {message}"
         );
     }
+}
+
+/// `classify_admission` over the SHIPPED transport (plan 08-28, V5-b).
+///
+/// pmcp 2.19.3's stdio server hands every inbound request to ONE sequential worker over an
+/// unbounded channel (`Server::run` -> `spawn_request_worker`), so `ClassifyService::call`
+/// is never concurrent through this transport and the `Busy` refusal is not reachable from
+/// it. `classify_max_pending + 1` calls written back to back, before any reply is read, must
+/// therefore ALL be classified, in request order — none refused naming
+/// `classify_max_pending`. Each text is one word longer than the last, so every reply is tied
+/// to its request by content (its built-row length), not only by its JSON-RPC id.
+#[test]
+fn pipelined_calls_are_serialized_not_refused() {
+    let (_tmp, model) = packed_tiny();
+    let mut client = Client::spawn(&model);
+
+    let limits = aprender_mcp_decide::ClassifyLimits::CONTRACTED;
+    let n = limits.max_pending + 1;
+    let texts: Vec<String> = (1..=n).map(|k| vec!["parcel"; k].join(" ")).collect();
+    let ids: Vec<u64> = texts
+        .iter()
+        .map(|text| {
+            client.send(
+                "tools/call",
+                serde_json::json!({
+                    "name": aprender_mcp_decide::TOOL_NAME,
+                    "arguments": { "texts": [text] }
+                }),
+            )
+        })
+        .collect();
+
+    let mut last_tokens = 0u64;
+    for (i, id) in ids.iter().enumerate() {
+        let reply = client.recv(&format!("pipelined call {i}"), CALL_TIMEOUT);
+        if let Some(message) = reply["error"]["message"].as_str() {
+            panic!(
+                "pipelined call {i} of {n} was refused (names classify_max_pending: {}): {message}",
+                message.contains("classify_max_pending")
+            );
+        }
+        assert_eq!(reply["id"], *id, "reply {i} arrives in request order");
+        let out = payload(&reply);
+        let results = out["results"].as_array().expect("results");
+        assert_eq!(results.len(), 1, "reply {i}: one result for its one text");
+        assert_eq!(
+            results[0]["truncated"],
+            serde_json::json!(false),
+            "reply {i}: the texts stay inside the tiny window, so tokens order them"
+        );
+        let tokens = results[0]["tokens"].as_u64().expect("tokens");
+        assert!(
+            tokens > last_tokens,
+            "reply {i} answers text {i}: its built row ({tokens}) is longer than the previous \
+             reply's ({last_tokens})"
+        );
+        last_tokens = tokens;
+    }
+    println!(
+        "classify_admission over live stdio: {n} pipelined calls (classify_max_pending {} + 1) \
+         all classified in request order",
+        limits.max_pending
+    );
 }
 
 #[test]

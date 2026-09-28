@@ -39,10 +39,19 @@ longer than the model's window is truncated by the model and flagged
   tokenize): the text count, then each text's UTF-8 byte length.
 - **Inside one admitted blocking section** (`classify_blocking`): tokenize once,
   check the sum of built-row tokens against the budget, then score.
-- **Admission, per process:** at most `classify_max_in_flight` (1) computation runs
-  and at most `classify_max_pending` (4) requests are admitted; the next is refused
-  at once. A slot is released only when its blocking work ends, so a disconnected
-  caller cannot free CPU that is still being spent.
+- **Admission, per process (the library door):** among concurrent callers of
+  `ClassifyService::call`, at most `classify_max_in_flight` (1) computation runs and
+  at most `classify_max_pending` (4) calls are admitted; the next is refused at once.
+  A slot is released only when its blocking work ends, so a disconnected caller
+  cannot free CPU that is still being spent.
+- **Through the shipped transports, dispatch is serial.** pmcp 2.19.3 runs one tool
+  call at a time: on stdio a single worker drains an unbounded queue, so calls a
+  client pipelines wait inside pmcp (bounded only by that client); over streamable
+  HTTP (the Lambda crate) the server sits behind a mutex held across the tool call.
+  So at most one classify runs per process, and the `classify_max_pending` refusal is
+  not reachable from a transport. `pipelined_calls_are_serialized_not_refused`
+  (`tests/e2e_stdio.rs`) pins this: `classify_max_pending + 1` calls written before
+  any reply is read are all classified, in request order.
 
 Every refusal is a validation error naming the contract key and the observed
 value, and never echoes the caller's text. `ClassifyLimits::CONTRACTED` is

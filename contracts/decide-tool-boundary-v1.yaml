@@ -1,6 +1,6 @@
 contract: decide-tool-boundary
 metadata:
-  version: 4.0.0
+  version: 5.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -51,6 +51,18 @@ metadata:
     added: `served_fields` (class A, served half: every served field and its sha-bound source)
     and `untrusted_input_bounds` (class B, request half: every request-derived size and its
     bound), each swept by a test that fails when a row loses its source or its bound.
+
+    v5.0.0 (plan 08-28, 2026-09-28; no constant moved). `classify_admission` claimed the
+    (classify_max_pending + 1)th concurrent request through a transport is refused at arrival. No
+    shipped transport can produce that: pmcp 2.19.3 serialises tool dispatch (stdio: one worker
+    over an unbounded channel; streamable HTTP: the Server behind a Mutex held across the tool
+    future), so ClassifyService::call is never concurrent through either (V5-b). The equation now
+    states the bound where it holds (concurrent callers of the library door) and the transport
+    behaviour as its own invariant, pinned over live stdio by
+    `pipelined_calls_are_serialized_not_refused` (FALSIFY-DECIDE-TOOL-008). `pv diff` classifies
+    the formula/domain/invariant edit MAJOR, hence 5.0.0. The external rows frame_http and
+    probe_id_header now also name `lambda_request_rows_are_swept`, where their hostile cases run
+    since plan 08-24.
 
     THE 3 008 MB TIER IS AN EXTRAPOLATION, SHOWN HERE SO THE LIVE SAMPLES CAN FALSIFY EACH TERM.
     Nothing was ever measured at 3 008 MB. Spike 026 measured the same Laya-en weights on default
@@ -259,8 +271,8 @@ untrusted_input_bounds:
     disposition: enforced
     checked_by: 'pmcp StreamableHttpServerConfig::stateless() max_request_bytes (DEFAULT_MAX_REQUEST_BYTES, 4 MiB), read_body_with_limit, via aprender_mcp_decide_lambda::server_config'
     owner_crate: aprender-mcp-decide-lambda
-    test: 'cargo test -p aprender-mcp-decide-lambda --lib tests::server_config_is_stateless'
-    note: 'the named test asserts the config is stateless, not the 4 MiB value; the aprender-mcp-decide sweep cross-checks the literal against pmcp''s stateless().max_request_bytes'
+    test: 'cargo test -p aprender-mcp-decide-lambda --lib tests::lambda_request_rows_are_swept && cargo test -p aprender-mcp-decide-lambda --lib tests::server_config_is_stateless'
+    note: 'the hostile case runs in lambda_request_rows_are_swept (plan 08-24): exactly 4194304 bytes is classified and 4194305 bytes is exactly HTTP 413; server_config_is_stateless asserts the config is stateless; the aprender-mcp-decide sweep cross-checks the literal against pmcp''s stateless().max_request_bytes'
   - id: args_shape
     bound: deny_unknown_fields
     disposition: enforced
@@ -302,7 +314,7 @@ untrusted_input_bounds:
     disposition: enforced
     checked_by: 'aprender_mcp_decide_lambda::parse_probe_id (1..=PROBE_ID_MAX_LEN [A-Za-z0-9-] characters; anything else ignored, never logged)'
     owner_crate: aprender-mcp-decide-lambda
-    test: 'cargo test -p aprender-mcp-decide-lambda --lib tests::probe_id_accepts_only_short_safe_ids'
+    test: 'cargo test -p aprender-mcp-decide-lambda --lib tests::lambda_request_rows_are_swept && cargo test -p aprender-mcp-decide-lambda --lib tests::probe_id_accepts_only_short_safe_ids'
 
 equations:
 
@@ -346,11 +358,13 @@ equations:
       - 'classify_text_bytes_bound holds for every text, so tokenization is bounded'
 
   classify_admission:
-    formula: 'running(p) <= classify_max_in_flight AND running(p) + waiting(p) <= classify_max_pending for every process p; a request arriving when running + waiting == classify_max_pending is refused immediately'
-    domain: 'concurrent classify requests reaching one server process (stdio or one Lambda instance)'
+    formula: 'for every process p and every set of CONCURRENT callers of aprender_mcp_decide::ClassifyService::call on one service: running(p) <= classify_max_in_flight AND running(p) + waiting(p) <= classify_max_pending; a call arriving when running + waiting == classify_max_pending is refused immediately naming classify_max_pending'
+    domain: 'concurrent callers of ClassifyService::call (the library door) sharing one Admission in one server process; through the shipped transports see the transport_dispatch invariant — pmcp 2.19.3 never makes those calls concurrent'
     codomain: 'either an admission slot (the computation runs or waits in a bounded queue), or an immediate validation refusal naming classify_max_pending'
     invariants:
-      - 'never queued without bound: the (classify_max_pending + 1)th concurrent request is refused at arrival, not parked'
+      - 'never queued without bound AT THE LIBRARY DOOR: the (classify_max_pending + 1)th concurrent caller of ClassifyService::call is refused at arrival, not parked (proven on Admission directly by the admission_* unit tests; with classify_max_pending 1, five concurrent ClassifyService::call futures on the tiny fixture gave 1 classified and 4 refused, measured by plan 08-28)'
+      - 'transport_dispatch (plan 08-28, V5-b): pmcp 2.19.3 SERIALISES tool dispatch on both shipped transports, so at most one classify runs per process and the Busy refusal is NOT reachable from a transport. stdio (aprender-mcp-decide): Server::run hands every inbound request to ONE sequential worker (spawn_request_worker) over an UNBOUNDED channel, so frames a client pipelines wait inside pmcp, bounded only by that client (the local user; untrusted_input_bounds frame_stdio is the same accepted peer). Streamable HTTP (aprender-mcp-decide-lambda): the Server sits behind one tokio Mutex that is held across handle_request_with_context, i.e. across the tool future, so a second request waits for the lock (on Lambda one instance serves one invocation at a time anyway). Measured over live stdio by tests::pipelined_calls_are_serialized_not_refused: classify_max_pending + 1 frames written before any reply is read are all classified, in request order; with classify_max_pending lowered to 1 the same 5 pipelined frames were all classified (3 of 3 runs) where 5 concurrent library callers were 4 of 5 refused'
+      - 'what Admission still buys through a transport: the in-flight permit moves into the blocking closure, so a caller that disconnects cannot start a second forward while the first is still running; a pmcp bump that dispatches concurrently would make classify_max_pending the live bound again, and pipelined_calls_are_serialized_not_refused would then catch any refusal it produces'
       - 'tokenization runs INSIDE the admitted blocking section, never on the async handler path, so admission counts all per-request CPU work'
       - 'a caller that disconnects while its computation runs does NOT free the slot early: the slot is released only when the blocking work finishes, so admission counts real CPU work rather than live connections'
       - 'classify_max_in_flight = 1 because one forward already uses every core the GEMM can reach; a second concurrent forward only lengthens both'
@@ -481,11 +495,11 @@ falsification_tests:
     if_fails: 'A bound changed in exactly one place: the published boundary and the served one disagree, or the function runs at a memory size the budget was never priced for.'
 
   - id: FALSIFY-DECIDE-TOOL-008
-    rule: 'Admission refuses the (pending + 1)th concurrent request and releases a slot only when its blocking work ends'
-    prediction: 'With classify_max_pending held busy, one more request is refused immediately naming classify_max_pending; a caller dropped mid-computation keeps its slot until the blocking work finishes.'
-    implemented_by: 'plan 08-06 (try_admit tests)'
-    test: 'cargo test -p aprender-mcp-decide --lib tests::admission_refuses_over_pending && cargo test -p aprender-mcp-decide --lib tests::admission_slot_held_until_blocking_ends && cargo test -p aprender-mcp-decide --lib tests::admission_waiting_cancel_frees_pending && cargo test -p aprender-mcp-decide --lib tests::admission_limits_match_contract'
-    if_fails: 'Requests queue without bound, or a disconnect frees a slot whose CPU work is still running: admission no longer counts real work.'
+    rule: 'Admission refuses the (pending + 1)th concurrent caller of ClassifyService::call and releases a slot only when its blocking work ends; through the shipped stdio transport pmcp serialises dispatch, so pipelined calls are all served in order and none is refused'
+    prediction: 'With classify_max_pending held busy, one more caller is refused immediately naming classify_max_pending; a caller dropped mid-computation keeps its slot until the blocking work finishes. Over live stdio, classify_max_pending + 1 tools/call frames written before any reply is read are all classified, in request order, and none is refused naming classify_max_pending.'
+    implemented_by: 'plan 08-06 (try_admit tests); plan 08-28 (the live-stdio pipelined test, V5-b)'
+    test: 'cargo test -p aprender-mcp-decide --lib tests::admission_refuses_over_pending && cargo test -p aprender-mcp-decide --lib tests::admission_slot_held_until_blocking_ends && cargo test -p aprender-mcp-decide --lib tests::admission_waiting_cancel_frees_pending && cargo test -p aprender-mcp-decide --lib tests::admission_limits_match_contract && cargo test -p aprender-mcp-decide --test e2e_stdio pipelined_calls_are_serialized_not_refused'
+    if_fails: 'Requests queue without bound at the library door, or a disconnect frees a slot whose CPU work is still running: admission no longer counts real work. If only the pipelined test fails, the transport now dispatches concurrently (a pmcp change) or a call was lost or reordered: re-derive transport_dispatch before trusting classify_admission through the transport.'
 
   - id: FALSIFY-DECIDE-TOOL-009
     rule: 'The maximal legal classify completes under the API Gateway cap on a cold instance, for both shapes and every cold sample'
@@ -523,7 +537,7 @@ qa_gate:
     - 'response labels and probabilities ordered by task.json under both serde_json backings'
     - 'truncation flag on an over-room text'
     - 'every refusal validation-class, naming the key, omitting the text'
-    - 'admission refuses pending + 1 and holds a slot until its blocking work ends'
+    - 'admission refuses the pending + 1th concurrent library caller and holds a slot until its blocking work ends; over live stdio pipelined calls are serialised by pmcp and all served in order'
     - 'LIVE, NOT IN CI: both maximal shapes complete cold under 30 s for every proven-cold sample, at lambda_memory_mb (plan 08-17)'
   pass_criteria: 'FALSIFY-DECIDE-TOOL-001..008 pass on every host and each has been observed RED under an induced negative; FALSIFY-DECIDE-TOOL-009 has live evidence for both shapes with every cold sample under api_gateway_timeout_ms.'
   falsification: >
