@@ -1095,6 +1095,237 @@ async fn every_served_field_has_a_bound_source() {
     );
 }
 
+// ---------------------------------------------------------------- request bounds sweep
+
+/// The crate that owns the rows this test dispatches.
+const THIS_CRATE: &str = "aprender-mcp-decide";
+
+/// The message of any refusal (validation or internal), for the bound-name check.
+fn any_message(error: &pmcp::Error) -> String {
+    match error {
+        pmcp::Error::Validation(message) | pmcp::Error::Internal(message) => message.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// `{"texts": items}` as a raw JSON value, the way pmcp hands it to the handler.
+fn texts_value(items: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::Value::from(serde_json::Map::from_iter([(
+        "texts".to_string(),
+        serde_json::Value::Array(items),
+    )]))
+}
+
+/// The hostile case of one ENFORCED row owned by this crate: every refusal it provokes, each
+/// of which must name the row's bound. `None` for an id this dispatcher has no case for.
+async fn hostile_case(id: &str) -> Option<Vec<String>> {
+    let c = ClassifyLimits::CONTRACTED;
+    let service = ClassifyService::served(model());
+    let messages = match id {
+        "args_shape" => {
+            const SECRET: &str = "ZQXJ-sweep-unknown-key";
+            let mut bad = serde_json::Map::new();
+            bad.insert("texts".to_string(), serde_json::Value::from(vec!["a"]));
+            bad.insert(SECRET.to_string(), serde_json::Value::from(1));
+            let message = validation_message(
+                &parse_args(serde_json::Value::Object(bad)).expect_err("unknown key"),
+            );
+            assert!(!message.contains(SECRET), "args_shape echoed: {message}");
+            vec![message]
+        }
+        "texts_count_min" => vec![
+            validation_message(&parse_args(texts_value(vec![])).expect_err("[] via parse_args")),
+            validation_message(
+                &service
+                    .call(args(&[]))
+                    .await
+                    .expect_err("[] via the service"),
+            ),
+        ],
+        "texts_count_max" => {
+            // (a) on the JSON array: N + 1 NON-strings, so a count checked after the shape
+            // would be the shape refusal instead.
+            let numbers = (0..=c.max_texts).map(serde_json::Value::from).collect();
+            let on_array =
+                validation_message(&parse_args(texts_value(numbers)).expect_err("N + 1 numbers"));
+            // (b) through the service: N + 1 texts, the FIRST over the byte bound, so a
+            // precheck that read bytes before the count would name the byte bound instead.
+            let long = "b".repeat(c.max_text_bytes + 1);
+            let mut texts = vec![long];
+            texts.extend(std::iter::repeat_n("x".to_string(), c.max_texts));
+            let before_bytes = validation_message(
+                &service
+                    .call(ClassifyArgs { texts })
+                    .await
+                    .expect_err("N + 1 texts"),
+            );
+            vec![on_array, before_bytes]
+        }
+        "text_bytes" => {
+            let text = "b".repeat(c.max_text_bytes + 1);
+            vec![validation_message(
+                &service
+                    .call(ClassifyArgs { texts: vec![text] })
+                    .await
+                    .expect_err("classify_max_text_bytes + 1"),
+            )]
+        }
+        "built_tokens_total" => {
+            // classify_max_texts texts, each under the byte bound, whose BUILT rows sum past
+            // the contracted budget (the tiny window truncates each to max_len).
+            let long = "The customer has written several times about the parcel. ".repeat(20);
+            assert!(long.len() <= c.max_text_bytes);
+            let texts = vec![long; c.max_texts];
+            let built: usize = built_lengths(&texts).iter().sum();
+            assert!(
+                built > c.max_total_tokens,
+                "the hostile case must exceed the budget: {built} <= {}",
+                c.max_total_tokens
+            );
+            vec![validation_message(
+                &service
+                    .call(ClassifyArgs { texts })
+                    .await
+                    .expect_err("over the contracted budget"),
+            )]
+        }
+        "served_task_min_row" => {
+            let min_row = check_served_task_fits(&model(), &c).expect("the tiny task fits");
+            let tight = ClassifyLimits {
+                max_total_tokens: min_row * c.max_texts - 1,
+                ..c
+            };
+            // pmcp::Server is not Debug, so no expect_err.
+            match build_server_with_limits(model(), tight, "sweep", "0.0.0") {
+                Ok(_) => panic!("build_server refuses a task the budget cannot serve at the count"),
+                Err(error) => vec![any_message(&error)],
+            }
+        }
+        _ => return None,
+    };
+    Some(messages)
+}
+
+/// Does `fn <name>(` exist in the owner crate's source? `test` is `cargo test -p <crate> ...
+/// <path>::<name>`; each `&&`-joined command is checked.
+fn named_tests_exist(owner: &str, test: &str) -> bool {
+    let root = repo_path(&format!("crates/{owner}"));
+    let mut source = String::new();
+    for dir in ["src", "tests"] {
+        let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.path().extension().is_some_and(|e| e == "rs") {
+                source.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+            }
+        }
+    }
+    let commands: Vec<&str> = test.split("&&").map(str::trim).collect();
+    !commands.is_empty()
+        && commands.iter().all(|cmd| {
+            cmd.contains(&format!("-p {owner} "))
+                && cmd
+                    .split_whitespace()
+                    .last()
+                    .and_then(|path| path.rsplit("::").next())
+                    .is_some_and(|name| source.contains(&format!("fn {name}(")))
+        })
+}
+
+/// decide-tool-boundary-v1 `untrusted_input_bounds` (CLASS B, request half): every row owned
+/// by this crate is dispatched by id to its hostile case, whose refusals must each name the
+/// row's bound (and the contract, for a validation refusal); an unknown id, or an owned row
+/// without a case, fails. An accepted row's documented behaviour is asserted instead. A row
+/// owned by another crate must name a test that exists in that crate.
+#[tokio::test]
+async fn request_bounds_table_is_swept() {
+    let rows = contract_rows("untrusted_input_bounds");
+    let (mut swept, mut accepted, mut external) = (0usize, 0usize, 0usize);
+    let mut ids = std::collections::BTreeSet::new();
+    for row in &rows {
+        let table = "untrusted_input_bounds";
+        let id = row_str(row, table, "id");
+        assert!(ids.insert(id.to_string()), "duplicate row {id}");
+        let bound = match row.get("bound") {
+            Some(serde_yaml::Value::Number(n)) => n.to_string(),
+            _ => row_str(row, table, "bound").to_string(),
+        };
+        row_str(row, table, "checked_by");
+        let test = row_str(row, table, "test");
+        let owner = row_str(row, table, "owner_crate");
+        let disposition = row_str(row, table, "disposition");
+
+        if owner != THIS_CRATE {
+            assert!(
+                named_tests_exist(owner, test),
+                "{id}: owner {owner} must name a test that exists in it: {test}"
+            );
+            if id == "frame_http" {
+                let cap =
+                    pmcp::server::streamable_http_server::StreamableHttpServerConfig::stateless()
+                        .max_request_bytes;
+                assert_eq!(
+                    bound,
+                    cap.to_string(),
+                    "frame_http literal vs pmcp stateless()"
+                );
+            }
+            external += 1;
+            continue;
+        }
+        assert!(
+            named_tests_exist(owner, test),
+            "{id}: the named test must exist in {owner}: {test}"
+        );
+
+        match disposition {
+            "accepted" => {
+                row_str(row, table, "reason");
+                match id {
+                    "frame_stdio" => {
+                        // The frame is unbounded on stdio, so the count bound must apply on the
+                        // parsed value, whatever the frame held: 100 000 nulls cost one length
+                        // comparison and are refused naming classify_max_texts.
+                        let huge = vec![serde_json::Value::Null; 100_000];
+                        let message = validation_message(
+                            &parse_args(texts_value(huge)).expect_err("a huge parsed array"),
+                        );
+                        assert_names_key(&message, "classify_max_texts");
+                        assert!(message.contains("100000 texts"), "{message}");
+                        // The "no stdio framing cap" claim is about pmcp 2.19.3; a bump re-opens it.
+                        let lock = std::fs::read_to_string(repo_path("Cargo.lock"))
+                            .expect("read Cargo.lock");
+                        assert!(
+                            lock.contains("name = \"pmcp\"\nversion = \"2.19.3\""),
+                            "pmcp moved off 2.19.3: re-verify frame_stdio's accepted reason"
+                        );
+                    }
+                    other => panic!("accepted row {other} has no documented-behaviour case"),
+                }
+                accepted += 1;
+            }
+            "enforced" => {
+                let messages = hostile_case(id)
+                    .await
+                    .unwrap_or_else(|| panic!("owned row {id} has no hostile case in this test"));
+                assert!(!messages.is_empty(), "{id}: the case provoked no refusal");
+                for message in &messages {
+                    assert!(
+                        message.contains(&bound) && message.contains(TOOL_CONTRACT),
+                        "{id}: the refusal must name {bound} and {TOOL_CONTRACT}: {message}"
+                    );
+                }
+                swept += 1;
+            }
+            other => panic!("{id}: unknown disposition {other}"),
+        }
+    }
+    assert_eq!(swept + accepted + external, rows.len());
+    assert!(swept > 0 && external > 0, "a vacuous sweep is not a sweep");
+    println!("REQUEST BOUNDS swept={swept} accepted={accepted} external={external}");
+}
+
 /// Grow a text one filler word at a time and return the built row at `words` words.
 fn filler_row(words: usize) -> PreparedRow {
     let text = vec!["a"; words].join(" ");

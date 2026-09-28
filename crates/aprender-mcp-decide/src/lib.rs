@@ -731,9 +731,21 @@ pub fn check_served_task_fits(model: &Model, limits: &ClassifyLimits) -> pmcp::R
 /// `pmcp::Error` if the served task cannot fit the contracted bounds
 /// ([`check_served_task_fits`]) or the server builder refuses the configuration.
 pub fn build_server(model: Arc<Model>, name: &str, version: &str) -> pmcp::Result<Server> {
-    check_served_task_fits(&model, &ClassifyLimits::CONTRACTED)?;
+    build_server_with_limits(model, ClassifyLimits::CONTRACTED, name, version)
+}
+
+/// [`build_server`] under other limits. Private: the only public door serves
+/// [`ClassifyLimits::CONTRACTED`]; the unit tests shrink a bound here to show the
+/// served-task fit check refuses at build time.
+fn build_server_with_limits(
+    model: Arc<Model>,
+    limits: ClassifyLimits,
+    name: &str,
+    version: &str,
+) -> pmcp::Result<Server> {
+    check_served_task_fits(&model, &limits)?;
     let description = tool_description(&model);
-    let service = ClassifyService::served(model);
+    let service = ClassifyService::with_limits(model, limits);
     let tool = pmcp::SimpleTool::new(
         TOOL_NAME,
         move |args: serde_json::Value, _extra: pmcp::RequestHandlerExtra| -> ToolFuture {

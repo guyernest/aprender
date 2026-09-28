@@ -47,7 +47,10 @@ metadata:
     parse_args built a Vec<String> before precheck counted (V5-c: 3M empty texts cost 764 MB RSS
     on stdio). The count is now checked on the parsed JSON array before any element is
     materialised, and the invariant says exactly that, naming what still precedes it (pmcp's
-    frame parse). `pv diff` classifies the invariant edit MAJOR, hence 4.0.0.
+    frame parse). `pv diff` classifies the invariant edit MAJOR, hence 4.0.0. Two tables are
+    added: `served_fields` (class A, served half: every served field and its sha-bound source)
+    and `untrusted_input_bounds` (class B, request half: every request-derived size and its
+    bound), each swept by a test that fails when a row loses its source or its bound.
 
     THE 3 008 MB TIER IS AN EXTRAPOLATION, SHOWN HERE SO THE LIVE SAMPLES CAN FALSIFY EACH TERM.
     Nothing was ever measured at 3 008 MB. Spike 026 measured the same Laya-en weights on default
@@ -230,6 +233,76 @@ served_fields:
   - path: description.bounds
     surface: tools_list
     source: 'ClassifyLimits::CONTRACTED, asserted EQUAL to this file''s constants (FALSIFY-DECIDE-TOOL-007)'
+
+# CLASS B (untrusted-input bounds, REQUEST half; plan 08-23). Every size or count taken from a
+# classify request, in the order the request meets it, with the bound that stops it before it
+# sizes work. The ARTIFACT half (sizes read from the .apr) belongs to decide-apr-v1 (plan 08-26).
+# `bound`: a constants key, or a literal when the bound is not this file's (frame_http,
+# probe_id_header), or `none` for an accepted row. `checked_by`: the function that refuses.
+# `owner_crate`: the crate whose code checks it. `disposition`: `enforced` or `accepted` (an
+# accepted row carries `reason:` and the sweep asserts its documented behaviour instead).
+# `test`: the test that runs the row's hostile case.
+# Enforced by `cargo test -p aprender-mcp-decide --lib tests::request_bounds_table_is_swept`: every
+# row owned by aprender-mcp-decide is dispatched by id to a hostile case whose refusal must name
+# `bound` (an unknown id, or an owned row without a case, FAILS); every row owned by another crate
+# must name a test that exists in that crate's source.
+untrusted_input_bounds:
+  - id: frame_stdio
+    bound: none
+    disposition: accepted
+    reason: 'pmcp 2.19.3 has no stdio framing cap: it reads a newline-delimited frame and parses it into a JSON value before any tool code runs. Accepted: the stdio transport is local, spawned by the user''s own MCP client, so the peer that could send a huge frame is the user. The count bound applies on the parsed value (texts_count_max), so an oversized list costs one length comparison after the parse; the sweep pins pmcp at 2.19.3 in Cargo.lock so a pmcp bump re-opens this row'
+    checked_by: 'none (pmcp stdio transport); aprender_mcp_decide::parse_args bounds the parsed value'
+    owner_crate: aprender-mcp-decide
+    test: 'cargo test -p aprender-mcp-decide --lib tests::request_bounds_table_is_swept'
+  - id: frame_http
+    bound: 4194304
+    disposition: enforced
+    checked_by: 'pmcp StreamableHttpServerConfig::stateless() max_request_bytes (DEFAULT_MAX_REQUEST_BYTES, 4 MiB), read_body_with_limit, via aprender_mcp_decide_lambda::server_config'
+    owner_crate: aprender-mcp-decide-lambda
+    test: 'cargo test -p aprender-mcp-decide-lambda --lib tests::server_config_is_stateless'
+    note: 'the named test asserts the config is stateless, not the 4 MiB value; the aprender-mcp-decide sweep cross-checks the literal against pmcp''s stateless().max_request_bytes'
+  - id: args_shape
+    bound: deny_unknown_fields
+    disposition: enforced
+    checked_by: 'aprender_mcp_decide::parse_args (serde deny_unknown_fields; serde''s message withheld)'
+    owner_crate: aprender-mcp-decide
+    test: 'cargo test -p aprender-mcp-decide --lib tests::request_bounds_table_is_swept && cargo test -p aprender-mcp-decide --lib tests::malformed_arguments_are_refused_without_echo'
+  - id: texts_count_min
+    bound: classify_min_texts
+    disposition: enforced
+    checked_by: 'aprender_mcp_decide::parse_args on the JSON array, and precheck, both through check_count'
+    owner_crate: aprender-mcp-decide
+    test: 'cargo test -p aprender-mcp-decide --lib tests::request_bounds_table_is_swept'
+  - id: texts_count_max
+    bound: classify_max_texts
+    disposition: enforced
+    checked_by: 'aprender_mcp_decide::parse_args on the JSON array before any String is built (plan 08-23), and precheck before the byte bound, both through check_count'
+    owner_crate: aprender-mcp-decide
+    test: 'cargo test -p aprender-mcp-decide --lib tests::request_bounds_table_is_swept && cargo test -p aprender-mcp-decide --lib tests::count_is_checked_before_element_shapes'
+  - id: text_bytes
+    bound: classify_max_text_bytes
+    disposition: enforced
+    checked_by: 'aprender_mcp_decide::precheck, per text, before tokenization'
+    owner_crate: aprender-mcp-decide
+    test: 'cargo test -p aprender-mcp-decide --lib tests::request_bounds_table_is_swept'
+  - id: built_tokens_total
+    bound: classify_max_total_tokens
+    disposition: enforced
+    checked_by: 'aprender_mcp_decide::classify_blocking -> check_token_budget, after one tokenization and before any forward'
+    owner_crate: aprender-mcp-decide
+    test: 'cargo test -p aprender-mcp-decide --lib tests::request_bounds_table_is_swept'
+  - id: served_task_min_row
+    bound: classify_max_total_tokens
+    disposition: enforced
+    checked_by: 'aprender_mcp_decide::build_server -> check_served_task_fits (classify_max_texts x the served task''s shortest built row <= classify_max_total_tokens), at build time, so no advertised count is one the budget always refuses (ea940faec)'
+    owner_crate: aprender-mcp-decide
+    test: 'cargo test -p aprender-mcp-decide --lib tests::request_bounds_table_is_swept && cargo test -p aprender-mcp-decide --lib tests::served_task_must_fit_the_contracted_count'
+  - id: probe_id_header
+    bound: 64
+    disposition: enforced
+    checked_by: 'aprender_mcp_decide_lambda::parse_probe_id (1..=PROBE_ID_MAX_LEN [A-Za-z0-9-] characters; anything else ignored, never logged)'
+    owner_crate: aprender-mcp-decide-lambda
+    test: 'cargo test -p aprender-mcp-decide-lambda --lib tests::probe_id_accepts_only_short_safe_ids'
 
 equations:
 
