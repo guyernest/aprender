@@ -35,8 +35,18 @@
 //! top-level custom keys the serialized JSON key order varies per process, so the
 //! container checksum over it is not reproducible and the closure check fails
 //! intermittently — the worst kind of red. ONE key holding one
-//! `serde_json::Map` is reproducible, because `serde_json::Map` is BTreeMap-backed
-//! and no workspace crate enables `preserve_order`.
+//! `serde_json::Map` is reproducible once that map's key order is fixed.
+//!
+//! That order used to be fixed by luck: `serde_json::Map` is BTreeMap-backed
+//! (sorted) UNLESS some crate in the build turns on `preserve_order`, which
+//! `pmcp` does for every build that links it (`aprender-mcp-setfit`, `aprender-forecast`'s
+//! dev-dependencies, and so any package selection wide enough to unify them in,
+//! CI's `--workspace` nextest line included). Under `preserve_order` the map keeps
+//! INSERTION order, so the same view hashed differently depending on which crates
+//! were compiled alongside `aprender-core`. [`write_setfit_apr`] therefore
+//! CANONICALISES the document (every object, at every depth, rebuilt with its keys in
+//! sorted order) before it is serialised: the bytes are the sorted ones under either
+//! backing, which is what the committed golden was produced under.
 //!
 //! # Why `created_at` stays `None` (Pitfall 2)
 //!
@@ -1105,6 +1115,31 @@ fn compute_probes(view: &SetFitArtifactView) -> Result<Vec<Value>, SetFitArtifac
     Ok(records)
 }
 
+/// Rebuild `value` with every JSON object's keys in sorted (byte-wise) order, at every
+/// depth, descending through arrays.
+///
+/// With `serde_json`'s default BTreeMap backing this is the identity. With
+/// `preserve_order` (an IndexMap, which `pmcp` unifies into any build that links it) it is
+/// what makes the serialised bytes equal to the sorted ones, so the artifact hash does
+/// not depend on which other crates were compiled with `aprender-core`.
+fn canonical_sorted(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(canonical_sorted_map(map)),
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical_sorted).collect()),
+        other => other,
+    }
+}
+
+/// [`canonical_sorted`] for an object: entries sorted by key, values canonicalised.
+fn canonical_sorted_map(map: JsonMap<String, Value>) -> JsonMap<String, Value> {
+    let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .into_iter()
+        .map(|(key, value)| (key, canonical_sorted(value)))
+        .collect()
+}
+
 /// Step 7 of [`write_setfit_apr`]: hand the tensors and the ONE document to the
 /// APR v2 container.
 fn write_container(
@@ -1113,7 +1148,10 @@ fn write_container(
     doc: JsonMap<String, Value>,
 ) -> Result<Vec<u8>, SetFitArtifactError> {
     let mut custom: HashMap<String, Value> = HashMap::with_capacity(1);
-    custom.insert(CUSTOM_METADATA_KEY.to_string(), Value::Object(doc));
+    custom.insert(
+        CUSTOM_METADATA_KEY.to_string(),
+        Value::Object(canonical_sorted_map(doc)),
+    );
 
     let metadata = AprV2Metadata {
         model_type: MODEL_TYPE_TAG.to_string(),
@@ -1349,10 +1387,11 @@ fn guard_subdocument_nulls(doc: &JsonMap<String, Value>) -> Result<(), SetFitArt
 /// Build the normative `SetFitArtifactDoc` as ONE `serde_json::Map`.
 ///
 /// The insertion order below is the contract's declaration order, for a reader's
-/// benefit only: `serde_json::Map` is BTreeMap-backed (no workspace crate enables
-/// `preserve_order`), so the SERIALIZED key order is sorted and does not depend
-/// on the order of these calls. That is precisely what makes the bytes
-/// reproducible.
+/// benefit only: [`write_container`] passes the finished document through
+/// [`canonical_sorted_map`], so the SERIALIZED key order is sorted and does not
+/// depend on the order of these calls or on whether `serde_json`'s
+/// `preserve_order` feature is unified into the build. That is precisely what
+/// makes the bytes reproducible.
 fn build_artifact_doc(
     view: &SetFitArtifactView,
     hf_name_map: &BTreeMap<String, String>,
@@ -4232,6 +4271,75 @@ mod determinism {
             artifact_sha256_hex(&normalized_for_cross_arch(&bytes)),
             GOLDEN_SHA256_FIXTURE_VIEW_FULL_PIN_SHAPE
         );
+    }
+
+    /// Which `serde_json` map backing this test binary compiled. The determinism
+    /// tests below must hold under BOTH: standalone (`-p aprender-core --features
+    /// setfit`, BTreeMap, `OFF`) and in any package selection that unifies `pmcp`'s
+    /// `serde_json/preserve_order` in (`-p aprender-core -p aprender-mcp-setfit`, CI's
+    /// `--workspace` nextest line, `ON`). This prints which one each run was.
+    #[test]
+    fn backing_canary() {
+        let map: JsonMap<String, Value> =
+            serde_json::from_str(r#"{"b":1,"a":2}"#).expect("parse canary map");
+        let insertion_ordered = map.keys().next().map(String::as_str) == Some("b");
+        println!(
+            "serde_json backing: preserve_order={}",
+            if insertion_ordered { "ON" } else { "OFF" }
+        );
+    }
+
+    /// Every object in `value`, at every depth, lists its keys in sorted order.
+    fn assert_keys_sorted(path: &str, value: &Value) {
+        match value {
+            Value::Object(map) => {
+                let keys: Vec<&String> = map.keys().collect();
+                let mut sorted = keys.clone();
+                sorted.sort();
+                assert_eq!(keys, sorted, "object at {path} is not key-sorted");
+                for (k, v) in map {
+                    assert_keys_sorted(&format!("{path}.{k}"), v);
+                }
+            }
+            Value::Array(items) => {
+                for (i, v) in items.iter().enumerate() {
+                    assert_keys_sorted(&format!("{path}[{i}]"), v);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn canonical_sorted_orders_every_object_at_every_depth() {
+        // Parsed in FILE order under `preserve_order` (so the hostile input is
+        // unsorted there) and sorted under the default backing (where the
+        // canonicaliser is the identity and the expectation holds trivially).
+        let raw: Value = serde_json::from_str(
+            r#"{"b":{"y":1,"x":[{"d":1,"c":2},7]},"a":null,"c":[],"a2":{"z":0,"m":1}}"#,
+        )
+        .expect("parse");
+        let out = serde_json::to_string(&canonical_sorted(raw)).expect("serialize");
+        assert_eq!(
+            out,
+            r#"{"a":null,"a2":{"m":1,"z":0},"b":{"x":[{"c":2,"d":1},7],"y":1},"c":[]}"#
+        );
+    }
+
+    /// The bytes the WRITER emits list the `setfit` document's keys sorted at every
+    /// depth, whichever map backing the build compiled: the property the committed
+    /// golden depends on, asserted on the written container itself rather than only
+    /// through a hash of it.
+    #[test]
+    fn the_written_document_is_key_sorted_whatever_the_map_backing() {
+        let bytes = write_setfit_apr(&fixture_view_full_pin_shape()).expect("writable");
+        let reader = AprV2Reader::from_bytes(&bytes).expect("parseable");
+        let doc = reader
+            .metadata()
+            .custom
+            .get(CUSTOM_METADATA_KEY)
+            .expect("the one custom key");
+        assert_keys_sorted(CUSTOM_METADATA_KEY, doc);
     }
 
     #[test]
