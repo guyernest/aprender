@@ -1065,15 +1065,15 @@ D-ITEM-08-30-A (/tmp) and D-ITEM-08-30-B (648 vs 800). New entries:
   **Reason:** pre-existing, outside every Phase 8 file.
   **Owner:** aprender-core maintainers.
   **Re-open trigger:** `cargo clippy -p aprender-core --lib -- -D warnings` becoming a required gate.
-- **Hand-rolled argv parsers in aprender-mcp-chronos, aprender-mcp-forecast, aprender-mcp-setfit and
-  aprender-mcp-setfit-train** (`check_no_hand_rolled_parsers.sh`, re-run 2026-09-29: 36 binary crates
+- **D-ITEM-08-33-C: Hand-rolled argv parsers in aprender-mcp-chronos, aprender-mcp-forecast,
+  aprender-mcp-setfit and aprender-mcp-setfit-train** (`check_no_hand_rolled_parsers.sh`, re-run 2026-09-29: 36 binary crates
   scanned, 4 hand-rolled, exit 1; aprender-mcp-decide is not among them since 08-23).
   status: open
   **Reason:** not Phase 8's crates (the SetFit and forecasting servers of earlier phases); the next CI
   run's red on this guard is theirs.
   **Owner:** the phases that own those servers; the fix shape is 08-23's (a clap derive `Cli`).
   **Re-open trigger:** the guard is CI-required, so it is red until they are fixed.
-- **aprender-contrastive-data is publishable but absent from the release cascade's TIERS**
+- **D-ITEM-08-33-D: aprender-contrastive-data is publishable but absent from the release cascade's TIERS**
   (`check_cascade_covers_all_crates.sh`, re-run 2026-09-29 after `publish-false`: 74 publishable crates,
   R1 lists only aprender-contrastive-data, exit 1).
   status: open
@@ -1186,3 +1186,31 @@ contract-hygiene gates before the decide integration fragments 510/520. Evidence
   status: open
   **Owner:** aprender-train maintainers. **Re-open trigger:** a Linux CI run failing them, or a macOS gate that
   includes them.
+
+### Found during plan 08-34
+
+- **D-ITEM-08-34-A: three macOS host limits in the workspace lib universe (none Phase 8's).** Measured with CI's
+  own nextest line on this macOS host, each byte-identical crate to upstream 2817c6d97, each expected green on
+  Linux: `aprender-cgp` `profilers::system::tests::test_read_system_memory_total_mb` (reads `/proc/meminfo`),
+  `aprender-orchestrate` `agent::driver::apr_serve::tests::test_find_apr_binary` (needs an `apr` on PATH; this host
+  pins its binary), `aprender-test-lib` `brick::pipeline::tests::test_uuid_v4_generates_unique_ids` (run id is
+  `SystemTime` nanos; macOS clock granularity gives fewer than 90 unique of 100, 3 of 3 reruns red here).
+  status: open
+  **Owner:** their crates' maintainers. **Re-open trigger:** a Linux CI run failing any of them.
+- **D-ITEM-08-34-B: `aprender-core` `setfit::artifact::determinism::the_fixture_artifact_hash_matches_the_committed_golden`
+  fails in the workspace lib universe and is NOT a host limit.** The fixture artifact hashes to `7169eac8...`
+  against the committed golden `831c64c5...` whenever serde_json's `preserve_order` (unified in by pmcp) is in the
+  build, and matches the golden without it (fragment 010: `-p aprender-core --features setfit`). At upstream
+  2817c6d97 the workspace does not enable `aprender-core/setfit`, so the test is not in upstream's workspace lib
+  run (upstream CI green on 2817c6d97 and 00052c012); on this branch `aprender-mcp-setfit` enables it, so it joins
+  partition 1/3 of CI's workspace-test and is expected RED on Linux.
+  status: open, BLOCKING (found by the 08-34 audit before the push; nothing was pushed)
+  **Owner:** Phase 3/4 SetFit artifact writer. **Fix shape:** make `write_setfit_apr`'s JSON key order independent
+  of serde_json's `preserve_order` (canonicalise before serialising), or scope the golden to the unification the
+  workspace really has; either is a code change, so it needs its own plan and a new golden check under both
+  feature sets.
+- **D-ITEM-08-34-C: `scripts/check_baseline_ratchets.sh` is red on this host for tool versions alone.** Three
+  `tool_version` rows (pmat recorded 3.41.1, runner 3.15.0, twice; bashrs recorded 7.4.1, runner 6.66.3) and the
+  vacuity row they cause; every ratchet row read against upstream's tip is `ok`.
+  status: open (host limit; expected green where the pinned tools are installed)
+  **Owner:** the host. **Re-open trigger:** a CI run failing the guard.
