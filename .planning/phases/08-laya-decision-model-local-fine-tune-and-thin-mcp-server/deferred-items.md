@@ -856,3 +856,14 @@ raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
   regenerated. 5.6e-17 apart, far inside gate_metric_recompute_abs; Rust recomputes rather than trusting
   it. Regenerating the committed fixture is a fixtures-owning plan's call (it moves a CI fixture's bytes).
   status: open
+
+### Found during plan 08-30
+
+- **D-ITEM-08-30-A: the owner's /tmp (ephemeral storage up to 10 GB) idea is recorded, not acted on.**
+  The owner reported the account can configure /tmp up to 10 GB and suggested local storage may load faster
+  than the S3 path (08-LIVE-REDEPLOY-EVIDENCE.json `owner_note_10gb`). Caveat, unchanged: /tmp is per
+  execution environment and EMPTY on every cold start, so it helps warm reuse, not the cold load this
+  boundary is priced for, unless the model is baked into a container image or mounted from EFS. The memory
+  half of that note became the `restore-10240-tier` decision (decide-tool-boundary-v1 7.0.0); the /tmp half
+  is a separate hosting change with its own measurement.
+  status: open

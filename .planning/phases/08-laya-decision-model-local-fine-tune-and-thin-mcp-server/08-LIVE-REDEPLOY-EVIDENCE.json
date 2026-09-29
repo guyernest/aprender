@@ -92,5 +92,17 @@
       "08-CONTEXT.md D-18 amendment 2026-09-28 (follow-up)",
       "deferred-items.md D-ITEM-08-30-A"
     ]
+  },
+  "tier_decision": {
+    "choice": "restore-10240-tier",
+    "date": "2026-09-28",
+    "decided_by": "the user (project owner), answering the 08-30 Task 3 tier checkpoint",
+    "owner_quote": "Please use the RAM memory that is needed, as we had to down grade the token count due to the memory size. The 8000 MB is only a test I did for the option to above 3008 MB.",
+    "interpretation": "the 3,008 MB tier was a forced downgrade; restore D-18's 10,240 MB tier, re-derived in decide-tool-boundary-v1 7.0.0 (commit 26b1ebf44). The live function's 8000 MB (set by the owner in the console, CloudTrail) is a test, not a target; the redeploy sets 10,240 MB",
+    "stop_guard_answer": "Stop and ask again",
+    "stop_guard": "if DOWNLOAD_DEADLINE = min(25 s, 30 s - R), R = max over samples of (sha_ms + build_ms + probe replay + the maximal classify) + margin_ms, lands below the max measured successful download_ms, that constant is NOT deployed: stop and return a checkpoint with the measured terms",
+    "on_aws_refusal": "if AWS refuses 10,240 MB, stop with a checkpoint; never fall back to 8000 or 3008",
+    "aws_writes_authorized": "cargo pmcp deploys of aprender-mcp-decide with the same artifact 24a44d7e at 10,240 MB, the recipe's DECIDE_COLD_BUMP env updates, and its containment; nothing else",
+    "owner_note_10gb_status": "its memory half is superseded by this decision; its /tmp caveat stays recorded unchanged and not acted on (D-ITEM-08-30-A)"
   }
 }
