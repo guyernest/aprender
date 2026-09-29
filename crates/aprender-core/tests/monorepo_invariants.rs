@@ -809,6 +809,17 @@ const PROFILE_SPEC_ALLOWLIST: &[(&str, &str)] = &[
     // 1.8.0..=1.11.0 apart from the f16 feature). The cost-free fix is structural —
     // split the facade out of the workspace root — and is tracked in #2571.
     ("dev", "proptest"),
+    // Phase 6 (RESEARCH Pitfall 9): the Prophet MAP fit is ~5x slower unoptimised.
+    // Measured 2026-09-05 (M4 Pro, warm, `cargo test -p aprender-mcp-forecast --lib e2e`,
+    // one real 2905-point Peyton fit): 64 s wall without this block, 13 s with it, so the
+    // 06-03 seven-fixture ladder projects 448 s vs 91 s. Removing it is RED against the
+    // rule the block was added under — 7 x single-fit wall > 60 s, the VALIDATION.md
+    // feedback-latency target and nextest's slow-timeout period — a LATENCY red, not a
+    // correctness one; the root manifest comment carries the full measurement and the
+    // `-v` proof that the override reaches `cargo test`. Same structural fix as
+    // proptest (#2571). Excused when this branch met FALSIFY-INSTALL-001 in the 08-32
+    // upstream merge.
+    ("dev", "aprender-forecast"),
 ];
 
 /// Parse `[profile.<profile>.package.<spec>]` headers out of the root manifest.
