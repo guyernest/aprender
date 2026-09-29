@@ -103,7 +103,15 @@
     "stop_guard": "if DOWNLOAD_DEADLINE = min(25 s, 30 s - R), R = max over samples of (sha_ms + build_ms + probe replay + the maximal classify) + margin_ms, lands below the max measured successful download_ms, that constant is NOT deployed: stop and return a checkpoint with the measured terms",
     "on_aws_refusal": "if AWS refuses 10,240 MB, stop with a checkpoint; never fall back to 8000 or 3008",
     "aws_writes_authorized": "cargo pmcp deploys of aprender-mcp-decide with the same artifact 24a44d7e at 10,240 MB, the recipe's DECIDE_COLD_BUMP env updates, and its containment; nothing else",
-    "owner_note_10gb_status": "its memory half is superseded by this decision; its /tmp caveat stays recorded unchanged and not acted on (D-ITEM-08-30-A)"
+    "owner_note_10gb_status": "its memory half is superseded by this decision; its /tmp caveat stays recorded unchanged and not acted on (D-ITEM-08-30-A)",
+    "cap_decision": {
+      "choice": "raise-pmcp-run-cap",
+      "date": "2026-09-28",
+      "decided_by": "the user (project owner), answering the 08-30 Task 3 checkpoint raised by live_attempts[0]",
+      "owner_confirmation": "Yes, deploy now",
+      "owner_statement_as_relayed": "pmcp.run's MemorySize cap is lifted",
+      "outcome": "NOT confirmed by the service: live_attempts[1] was refused with the identical message, so the cap still applies to this deployment path"
+    }
   },
   "live_attempts": [
     {
@@ -128,6 +136,32 @@
       "aws_writes_to_the_function": 0,
       "cold_samples": 0,
       "fallback": "NONE, per the owner's instruction: no deploy at 8000 or 3008 was attempted; the plan stops at a checkpoint"
+    },
+    {
+      "attempt": 2,
+      "after_decision": "raise-pmcp-run-cap",
+      "started": "2026-09-29T01:18:20Z",
+      "ended": "2026-09-29T01:23:15Z",
+      "commit": "5fa0e7df9e3566137e5b2f30058c5b529def0dd1",
+      "crates_clean_at_commit": "git status --porcelain crates/ empty before the run",
+      "contract": "decide-tool-boundary-v1 7.0.0 (lambda_memory_mb 10240), unchanged",
+      "auth_precheck": "aws sts get-caller-identity --profile ze-kasher-dev: rc 0 (user arn, account scrubbed); cargo pmcp deploy outputs (read-only) refreshed the pmcp.run token (target dev, api_url host PMCP_RUN_API_HOST)",
+      "config": "just laya-deploy-config models/decide/laya-stance-64.apr off aprender-mcp-decide dev ze-kasher-dev: rc 0, memory_mb = 10240, pin 24a44d7e..., iam ok (s3:GetObject on decide/aprender-mcp-decide/* only)",
+      "command": "lockf -k /tmp/aprender-laya-real-weights.lock just laya-deploy models/decide/laya-stance-64.apr models/decide/laya-stance-64 data/decide/tweet-stance-64 <laya base snapshot 55cf4c4e> aprender-mcp-decide dev ze-kasher-dev (the committed recipe, unchanged)",
+      "rc": 1,
+      "passed_before_refusal": [
+        "eligible: laya-verify accepted models/decide/laya-stance-64.apr (sha256 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a)",
+        "the config's bucket is this env's; the S3 object has the local size",
+        "cargo pmcp compiled aprender-mcp-decide-lambda v0.63.0 (bootstrap 17.22 MB) and rendered the stack: 'Applied [server] sizing - McpFunction: MemorySize 256 -> 10240'",
+        "bootstrap + template uploaded to pmcp.run's staging bucket through its presigned URLs"
+      ],
+      "refusal": "Error: Failed to create deployment. Caused by: GraphQL errors: Failed to upload deployment: Lambda function McpFunction: MemorySize 10240 out of range (128-3008 MB)",
+      "refused_by": "pmcp.run's deployment API (server-side GraphQL validation), identical to attempt 1, BEFORE any CloudFormation or Lambda change",
+      "crates_root": "RESTORED crates byte-identical (state sha256 7c6f25eb46e83347d66e32a9e0cfae39c5556c58383dab2c109b3c061773aa03)",
+      "live_function_after": "read-only get-function-configuration: MemorySize 8000, LastModified 2026-09-28T23:45:00.000+0000 (unchanged), CodeSha256 ym8u6yb5j+EM26BzkSdUCGTk4qFBCl3gSibjVtyFsT0= (unchanged), State Active, LastUpdateStatus Successful, Timeout 30, EphemeralStorage 512; get-function-concurrency: unset (unchanged)",
+      "aws_writes_to_the_function": 0,
+      "cold_samples": 0,
+      "fallback": "NONE, per the owner's instruction ('STOP if pmcp.run refuses again; do not fall back to 8000/3008'): the plan stops at a checkpoint"
     }
   ]
 }
