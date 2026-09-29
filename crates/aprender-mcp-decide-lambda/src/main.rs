@@ -20,14 +20,15 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use aprender_mcp_decide_lambda::{
-    build_server, health, load_header_value, load_log_line, parse_probe_id, proxied_headers,
-    resolve_model, route, server_name, start_loopback, watch_loopback, LoadOnce, LoadTimeline,
-    ModelSource, Route, ALLOWED_METHODS, PROBE_ID_HEADER,
+    build_server, download_budget, health, load_header_value, load_log_line, parse_probe_id,
+    proxied_headers, remaining_before, resolve_model_within, route, s3, server_name,
+    start_loopback, watch_loopback, LoadOnce, LoadTimeline, ModelSource, Route, ALLOWED_METHODS,
+    PROBE_ID_HEADER,
 };
-use lambda_http::{run, service_fn, Body, Error, Request, Response};
+use lambda_http::{run, service_fn, Body, Error, Request, RequestExt as _, Response};
 use once_cell::sync::OnceCell;
 use reqwest::Client;
 use tracing_subscriber::EnvFilter;
@@ -49,15 +50,23 @@ struct LoadFailure {
 }
 
 /// Resolve the model (S3 into memory, or a local path), then start the loopback server.
-async fn load() -> Result<Loaded, LoadFailure> {
+/// `download_deadline` bounds the S3 download ([`download_budget`] of the invocation that
+/// starts the load, V4-b).
+async fn load(download_deadline: Duration) -> Result<Loaded, LoadFailure> {
     let source = ModelSource::from_env().map_err(|e| LoadFailure {
         kind: "config",
         detail: e.to_string(),
     })?;
-    let (model, timeline) = resolve_model(&source).await.map_err(|e| LoadFailure {
-        kind: e.kind(),
-        detail: e.to_string(),
-    })?;
+    tracing::info!(
+        "decide.load download_budget_ms={}",
+        download_deadline.as_millis()
+    );
+    let (model, timeline) = resolve_model_within(&source, download_deadline)
+        .await
+        .map_err(|e| LoadFailure {
+            kind: e.kind(),
+            detail: e.to_string(),
+        })?;
     let name = server_name();
     let server = build_server(Arc::new(model), &name, env!("CARGO_PKG_VERSION")).map_err(|e| {
         LoadFailure {
@@ -165,8 +174,18 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
     )
     .map(str::to_string);
 
+    // The invocation's own deadline bounds the download too (V4-b): a load this request
+    // starts must leave POST_DOWNLOAD_RESERVE for the sha, the ladder and the classify.
+    let remaining = remaining_before(
+        event
+            .lambda_context_ref()
+            .map(|ctx| SystemTime::UNIX_EPOCH + Duration::from_millis(ctx.deadline)),
+        SystemTime::now(),
+    );
+    let budget = download_budget(remaining, s3::POST_DOWNLOAD_RESERVE);
+
     let started = Instant::now();
-    let (loaded, performed_load) = match LOADED.get_or_try_load(load).await {
+    let (loaded, performed_load) = match LOADED.get_or_try_load(|| load(budget)).await {
         Ok(v) => v,
         Err(failure) => {
             tracing::error!(

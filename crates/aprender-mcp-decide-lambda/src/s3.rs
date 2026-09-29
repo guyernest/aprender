@@ -11,9 +11,18 @@
 //! indefinitely. A cut attempt keeps the bytes it landed and the retry resumes at the
 //! first missing byte, so the attempt timeout bounds a stall rather than a transfer: at a
 //! fair share of the link a 64 MiB part can need more than one attempt, and re-fetching it
-//! from its first byte would throw that progress away on every cold start. 25 s is the 30 s gateway cap minus ~5 s of sha + build; past it
-//! the caller already has its 504, so the only useful outcome is to fail the load, which
-//! leaves the cell empty so the next request retries.
+//! from its first byte would throw that progress away on every cold start.
+//!
+//! The deadline is DERIVED from live cold samples, not guessed (plan 08-30, V4-b): the
+//! work that must still fit after the download (sha256 + load ladder with its probe
+//! replay + the maximal classify) plus decide-tool-boundary-v1's `margin_ms` is
+//! [`POST_DOWNLOAD_RESERVE`], and [`DOWNLOAD_DEADLINE`] is the 30 s gateway cap minus
+//! it — see that constant for the samples. A download past it cannot be answered inside
+//! the cap anyway (the caller already has its 504), so the only useful outcome is to
+//! fail the load, which leaves the cell empty so the next request retries. The handler
+//! also bounds the download by the invocation's own remaining time
+//! ([`crate::download_budget`]), so a load started late in an invocation is cut before
+//! Lambda kills the invocation mid-build.
 //!
 //! A missing content length is refused (never read as 0), and a length over the
 //! decide-apr-v1 cap is refused BEFORE the buffer is allocated. The pin is checked by
@@ -35,8 +44,35 @@ pub const CONCURRENCY: usize = 16;
 pub const RETRIES: u32 = 5;
 /// One attempt's bound; a slower attempt is cut and retried.
 pub const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(8);
-/// The whole download's bound (the 30 s gateway cap minus sha + build).
-pub const DOWNLOAD_DEADLINE: Duration = Duration::from_secs(25);
+/// The largest measured post-download cost of one cold maximal request at
+/// decide-tool-boundary-v1's 10,240 MB tier: `sha_ms + build_ms + classify_ms` (build_ms
+/// is the decide-apr-v1 ladder INCLUDING its 2-row probe replay, plus the model build;
+/// classify_ms is Lambda duration minus load_ms). Plan 08-30's four proven-cold samples
+/// (08-LIVE-REDEPLOY-EVIDENCE.json `live_attempts[2].cold_samples`, Graviton2, identity
+/// 24a44d7e...): #1 CONCENTRATED 3484 + 2824 + 8908 = 15216, #2 DISTRIBUTED
+/// 3484 + 2904 + 6588 = 12976, #3 CONCENTRATED 3498 + 2852 + 8911 = **15261**, #4
+/// DISTRIBUTED 3484 + 2837 + 6621 = 12942. The max is sample 3.
+pub const MEASURED_POST_DOWNLOAD_MS: u64 = 15_261;
+/// decide-tool-boundary-v1 `margin_ms` (asserted equal to the contract by a test).
+pub const CONTRACT_MARGIN_MS: u64 = 4_000;
+/// decide-tool-boundary-v1 `api_gateway_timeout_ms` (asserted equal to the contract).
+pub const GATEWAY_CAP_MS: u64 = 30_000;
+/// What must still fit after the download: [`MEASURED_POST_DOWNLOAD_MS`] +
+/// [`CONTRACT_MARGIN_MS`] = 15261 + 4000 = 19261 ms (R in plan 08-30).
+pub const POST_DOWNLOAD_RESERVE: Duration =
+    Duration::from_millis(MEASURED_POST_DOWNLOAD_MS + CONTRACT_MARGIN_MS);
+/// The whole download's bound: min(25 s, cap - R) = min(25000, 30000 - 19261) = **10739 ms**.
+///
+/// Derived at 10,240 MB from plan 08-30's four proven-cold samples (see
+/// [`MEASURED_POST_DOWNLOAD_MS`]); their download_ms were 8954, 9065, 8927 and 8986, so
+/// the largest (sample 2, 9065) clears it by 1674 ms. The 3,008 MB tier's downloads
+/// (13494-17831 ms, plans 08-17/08-18) are NOT its reference set: that tier is superseded
+/// (decide-tool-boundary-v1 7.0.0) and this constant is priced for the deployed one only.
+/// It was 25 s ("the cap minus ~5 s of sha + build") until plan 08-30, which measured
+/// sha + build alone at 6.3-6.4 s and the maximal classify at up to 8.9 s after it.
+/// A re-measure at another tier or artifact re-derives it; it is never raised to absorb a
+/// slow download.
+pub const DOWNLOAD_DEADLINE: Duration = Duration::from_millis(10_739);
 
 /// A boxed, `Send` fetch future (object-safe, so `dyn RangeFetcher` works too).
 pub type FetchFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, FetchError>> + Send + 'a>>;
@@ -695,16 +731,16 @@ mod tests {
         match err {
             S3LoadError::DeadlineExceeded { elapsed_ms } => {
                 assert!(
-                    (25_000..26_000).contains(&elapsed_ms),
+                    (10_739..11_739).contains(&elapsed_ms),
                     "abandoned at {elapsed_ms} ms"
                 );
             }
             other => panic!("expected DeadlineExceeded, got {other:?}"),
         }
         assert!(waited >= DOWNLOAD_DEADLINE && waited < DOWNLOAD_DEADLINE + ATTEMPT_TIMEOUT);
-        // Each stalled attempt was cut at ATTEMPT_TIMEOUT and retried: 8, 16, 24 s -> 4
-        // attempts on each of the first two parts before the 25 s deadline.
-        assert_eq!(fetcher.attempts_at(0), 4);
+        // Each stalled attempt was cut at ATTEMPT_TIMEOUT and retried: the retry at 8 s is
+        // still stalled when the 10.739 s deadline abandons the download -> 2 attempts.
+        assert_eq!(fetcher.attempts_at(0), 2);
     }
 
     /// A part still making progress when its attempt is cut keeps what landed: the retry

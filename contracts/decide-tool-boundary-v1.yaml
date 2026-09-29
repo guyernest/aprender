@@ -1,6 +1,6 @@
 contract: decide-tool-boundary
 metadata:
-  version: 7.0.0
+  version: 8.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -95,6 +95,16 @@ metadata:
     window (512) fits the budget, so the derived description promises truncation again
     (served_fields description.truncation) with no code edit.
 
+    v8.0.0 (plan 08-30 Task 3, 2026-09-28; owner decision `keep-800-apply-10739`, 08-CONTEXT.md
+    D-18; no constant moved). The 10 240 MB tier was measured live: 4 proven-cold samples, 2 per
+    shape, all under the cap (22 647-27 015 ms client-side). Two priced cold terms were exceeded
+    (build including the probe replay by 420-500 ms on every sample; gateway overhead by 1855 ms
+    on one), and the per-term-max rule re-derives 648 tokens from the samples. The owner KEPT 800
+    tokens / 8 texts on the acceptance rule (every recorded cold sample < 30 000 ms) instead of
+    re-deriving; (b) below and the classify_token_budget invariant now show the priced and the
+    measured terms side by side and say exactly that. `pv diff` classifies the invariant edit
+    MAJOR, hence 8.0.0.
+
     THE 10 240 MB TIER (v7.0.0, THE CONTRACTED TIER). 10 240 MB is 6 vCPU. Every term below is a
     MEASUREMENT: the spike-026 records at this very tier (Graviton2, three forced cold starts,
     .planning/spikes/026-laya-mcp-default-lambda/results/lambda-10g.jsonl) for the terms spike 026
@@ -120,6 +130,32 @@ metadata:
           10 240 and 4 096 MB. If it does not recover at 10 240 MB, the CONCENTRATED sample lands
           near or past the cap; the live samples decide, every term is logged per sample, and a
           sample at or over 30 000 ms is contained (never absorbed by raising margin_ms).
+          MEASURED AT 10 240 MB (plan 08-30; 4 proven-cold samples, 2 per shape, Graviton2,
+          identity 24a44d7e..., record 08-LIVE-REDEPLOY-EVIDENCE.json live_attempts[2]), each
+          term PRICED above against MEASURED:
+          - gateway + client overhead: priced 896; measured 624-797 on samples 2-4 and 2751
+            on sample 1, a spike 1855 ms OVER the price;
+          - download: priced 9151; measured 8927-9065, within (it recovered at this tier: the
+            3 008 MB tier's 13494-17831 ms does not recur);
+          - sha256 pin: priced 3511; measured 3484-3498, within;
+          - build including the 2-row probe replay (build_ms): priced 1304 + (c)'s 1100 =
+            2404; measured 2824-2904, OVER by 420-500 ms on every sample;
+          - the maximal classify (Lambda duration minus load_ms): CONCENTRATED 800 tokens
+            priced 800 x 12 = 9600, measured 8908-8911 (11.14 ms/token incl. the proxy),
+            within; DISTRIBUTED measured 6588-6621.
+          Client wall: CONCENTRATED 27015 and 25076 ms, DISTRIBUTED 22922 and 22647 ms; the
+          worst (sample 1, 27015) is 2985 ms under the cap and under the 29 700 ms envelope.
+          Re-deriving (b) by its own per-term-max rule from these samples would give 2751 +
+          9065 + 3498 + 2904 = 18218 ms, room 30000 - 18218 - 4000 = 7782 ms, floor(7782 /
+          12) = 648 tokens, below the declared 800. The owner chose NOT to re-derive
+          (decision `keep-800-apply-10739`, 2026-09-28, 08-CONTEXT.md D-18): the budget
+          stays 800 built tokens / 8 texts, accepted on accepted_region_cold's own rule
+          (every recorded cold sample of both shapes under api_gateway_timeout_ms), and no
+          constant moves. The priced terms above stay the v7.0.0 derivation, and the
+          measured terms stand beside them so the two overshoots are visible, not absorbed.
+          The measured post-download cost (sha + build + classify, max 15261 ms, sample 3)
+          plus margin_ms sizes the Lambda loader's S3 download deadline: 30000 - 19261 =
+          10739 ms (aprender-mcp-decide-lambda s3::DOWNLOAD_DEADLINE).
       (c) The probe replay every cold load performs: 2 probes x `probe_max_row_tokens` (48,
           decide-apr-v1) x 11.05 ms = 1061 ms, declared UP to `probe_budget_ms` 1100.
       (d) Room for inference: 30000 - 15000 - 1100 - 4000 (`margin_ms`, unchanged) = 9900 ms,
@@ -440,7 +476,8 @@ equations:
     invariants:
       - 'the unit is the BUILT ROW length — the ids the forward actually consumes, at most row_max_tokens per text — not the raw token count of the text, so a truncated text counts 512, not its raw length'
       - 'checked after tokenization and BEFORE any forward: a refused request costs tokenization only'
-      - '800 is the declared value, DOWN from the derived 825: the remainder is headroom for Graviton-generation variance, which spike 026 measured as a ~1.5x lottery. Every term is a MEASUREMENT at 10 240 MB (spike 026) except the sha256 pin, measured live at 3 008 MB and single-threaded (description, THE 10 240 MB TIER); the live cold samples falsify it term by term, the S3 download first'
+      - '800 is the declared value, DOWN from the derived 825: the remainder is headroom for Graviton-generation variance, which spike 026 measured as a ~1.5x lottery. Every PRICED term is a measurement at 10 240 MB (spike 026) except the sha256 pin, measured live at 3 008 MB and single-threaded (description, THE 10 240 MB TIER)'
+      - 'MEASURED at 10 240 MB by plan 08-30 (4 proven-cold samples, 08-LIVE-REDEPLOY-EVIDENCE.json live_attempts[2]): download 8927-9065 (priced 9151), sha256 3484-3498 (priced 3511) and the maximal classify 8908-8911 (priced 9600) are within their prices; build including the probe replay 2824-2904 is OVER its 2404 by 420-500 ms on every sample, and gateway overhead 2751 on one sample is OVER its 896 by 1855 ms. The per-term-max re-derivation from these samples gives floor((30000 - (2751 + 9065 + 3498 + 2904) - 4000) / 12) = 648 < 800. 800 is KEPT by the owner''s decision keep-800-apply-10739 (2026-09-28, 08-CONTEXT.md D-18) on accepted_region_cold''s acceptance rule alone: every recorded cold sample of both shapes completed under api_gateway_timeout_ms (worst 27015 ms). The budget is therefore accepted by measurement of the whole request, NOT by its per-term derivation, which it exceeds; a cold sample at or over the cap re-opens it'
       - 'the budget is priced for lambda_memory_mb and for no other size: the tier moved 3 008 MB -> 10 240 MB in v7.0.0 by re-deriving every envelope constant here and changing the deploy memory with it, never by editing one number'
       - 'classify_max_texts x (the served task''s shortest built row) <= classify_max_total_tokens: a count the budget can never admit is not a bound, it is a lie in the tool description'
       - 'the price is per token at 512, i.e. it already charges the concentrated shape whose attention cost is largest; the per-token price is NOT trusted for either shape — accepted_region_cold measures both live'

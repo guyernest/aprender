@@ -416,11 +416,34 @@
         "max_download_ms_3008_tier_08_17_08_18": 17831,
         "stop_guard_this_tier_only": "clear: 10739 >= 9065 (1674 ms headroom)",
         "stop_guard_as_recorded_in_decision_orchestrator_stop_guard": "TRIPS: 10739 < 17831 (that guard names 08-17/08-18's 13494-17831 ms downloads, measured at the superseded 3,008 MB tier)",
-        "applied": false,
-        "why_not_applied": "the stop-guard trips under its recorded reading and a measured term would move a decide-tool-boundary-v1 constant; the plan stops for the owner. DOWNLOAD_DEADLINE stays 25 s; no code changed"
+        "applied": "pending_redeploy: committed in the keep-800-apply-10739 code commit; live_attempts[3] records the deploy and re-measure",
+        "why_not_applied_at_the_time": "the stop-guard trips under its recorded reading and a measured term would move a decide-tool-boundary-v1 constant; the plan stops for the owner. DOWNLOAD_DEADLINE stays 25 s; no code changed"
       },
       "aws_writes_to_the_function": "1 deploy (MemorySize 8000 -> 10240, new code) + 4 DECIDE_COLD_BUMP env updates",
       "containment": "not needed: every sample < 30000 ms; the function stays live at 10,240 MB with reserved concurrency unset"
     }
-  ]
+  ],
+  "deadline_decision": {
+    "choice": "keep-800-apply-10739",
+    "date": "2026-09-28",
+    "decided_by": "the user (project owner), answering the 08-30 Task 3 checkpoint raised by live_attempts[2].deadline_derivation (the fifth checkpoint of this plan)",
+    "meaning": [
+      "decide-tool-boundary-v1 keeps 8 texts / 800 built tokens at 10,240 MB, accepted on accepted_region_cold's own rule (every recorded cold sample < 30,000 ms), NOT re-derived: the per-term-max rule applied to live_attempts[2] would give 648 tokens, and the owner chose 800",
+      "the contract's (b) derivation and the classify_token_budget invariant state the priced and the measured 10,240 MB terms side by side (build + probe replay over by 420-500 ms on every sample; gateway overhead 2751 ms on sample 1, 1855 ms over its 896 price); pv diff: invariants changed -> MAJOR, 7.0.0 -> 8.0.0; no constant moved",
+      "s3::DOWNLOAD_DEADLINE = 10739 ms, derived from the 10,240 MB samples (R = 15261 + 4000 = 19261; min(25000, 30000 - 19261)); download_budget(remaining, reserve) makes the handler also respect the invocation deadline (V4-b)",
+      "redeploy via the committed recipe and take 4 more proven-cold samples (2 per shape); flip accepted_region_cold to implemented on the live 10,240 MB record"
+    ],
+    "stop_guard_reference_set_correction": {
+      "was": "decision.orchestrator_stop_guard compared the derived deadline with 'the max measured download_ms across the cold samples (this round's and 08-17/08-18's 13494-17831 ms)'",
+      "is": "the 10,240 MB tier's own successful downloads only: live_attempts[2] samples 1-4 (8954, 9065, 8927, 8986 ms; max 9065) and the re-measure samples of this decision",
+      "why": "the 08-17/08-18 downloads were measured at 3,008 MB, a tier decide-tool-boundary-v1 7.0.0 superseded; a deadline priced for the deployed 10,240 MB function is not falsified by a superseded tier's network share. Recorded explicitly here, not silently: under the old reading the guard TRIPS (10739 < 17831); under the corrected one it CLEARS (10739 >= 9065, 1674 ms headroom)",
+      "corrected_by": "the owner's keep-800-apply-10739 instruction"
+    },
+    "stop_conditions_for_the_re_measure": [
+      "any cold sample >= 30,000 ms: run the plan's containment (just laya-teardown) first, then stop",
+      "any cut download failing a call (a download exceeding 10739 ms -> s3_deadline 503)",
+      "pmcp.run refusing the deploy"
+    ],
+    "aws_writes_authorized": "cargo pmcp deploy of aprender-mcp-decide with artifact 24a44d7e at 10,240 MB, the plan's DECIDE_COLD_BUMP env updates, and its containment. Nothing else."
+  }
 }

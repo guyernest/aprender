@@ -62,7 +62,9 @@ name = "UNSET-run-just-laya-deploy-config"
 memory_mb = 10240
 # Matches the API Gateway HTTP API's own 30-second integration timeout, which cannot be
 # raised. A larger number would only be a longer wait for a response the gateway has
-# already given up on. The loader's DOWNLOAD_DEADLINE (25 s) sits inside it.
+# already given up on. The loader's DOWNLOAD_DEADLINE (10.739 s, derived from the 10,240 MB
+# cold samples of plan 08-30) sits inside it, and the handler also caps the download at the
+# invocation's remaining time minus the post-download reserve (19.261 s).
 timeout_seconds = 30
 
 # `just laya-deploy-config` replaces the UNSET values with the uploaded object's URI and

@@ -384,6 +384,146 @@ fn deploy_memory_is_the_contract_tier() {
     );
 }
 
+// ------------------------------------------- the download deadline (08-30, V4-b)
+
+/// The deadline's inputs are the contract's, and the constant is the derivation's value:
+/// DOWNLOAD_DEADLINE = min(25 s, api_gateway_timeout_ms - (measured post-download + margin_ms)).
+/// Moving the cap or the margin in the contract without re-deriving here turns this red.
+#[test]
+fn download_deadline_is_derived_from_the_contract_and_the_samples() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let contract =
+        std::fs::read_to_string(root.join("../../contracts/decide-tool-boundary-v1.yaml"))
+            .expect("read the contract");
+    let cap = single_integer(
+        &contract,
+        "api_gateway_timeout_ms",
+        ": ",
+        "decide-tool-boundary-v1",
+    );
+    let margin = single_integer(&contract, "margin_ms", ": ", "decide-tool-boundary-v1");
+    assert_eq!(
+        s3::GATEWAY_CAP_MS,
+        cap,
+        "gateway cap drifted from the contract"
+    );
+    assert_eq!(
+        s3::CONTRACT_MARGIN_MS,
+        margin,
+        "margin drifted from the contract"
+    );
+
+    let reserve = s3::MEASURED_POST_DOWNLOAD_MS + margin;
+    assert_eq!(reserve, 19_261, "R = 15261 + 4000 (plan 08-30 samples)");
+    assert_eq!(s3::POST_DOWNLOAD_RESERVE, Duration::from_millis(reserve));
+    let derived = 25_000u64.min(cap - reserve);
+    assert_eq!(derived, 10_739);
+    assert_eq!(s3::DOWNLOAD_DEADLINE, Duration::from_millis(derived));
+    assert_eq!(s3::DownloadPolicy::DEPLOYED.deadline, s3::DOWNLOAD_DEADLINE);
+    // It clears the largest download measured at this tier (sample 2, 9065 ms).
+    assert!(s3::DOWNLOAD_DEADLINE > Duration::from_millis(9_065));
+}
+
+/// download_budget = min(DOWNLOAD_DEADLINE, remaining - reserve), saturating at zero.
+#[test]
+fn download_budget_is_the_smaller_of_the_deadline_and_what_the_invocation_leaves() {
+    let ms = Duration::from_millis;
+    let reserve = s3::POST_DOWNLOAD_RESERVE;
+
+    // A fresh 30 s invocation: remaining - R = 10739 exactly -> the deadline.
+    assert_eq!(download_budget(ms(30_000), reserve), ms(10_739));
+    // More time than the deadline needs: capped at the deadline, never more.
+    assert_eq!(download_budget(ms(60_000), reserve), s3::DOWNLOAD_DEADLINE);
+    assert_eq!(
+        download_budget(Duration::MAX, reserve),
+        s3::DOWNLOAD_DEADLINE
+    );
+    // A late start: the invocation, not the constant, binds.
+    assert_eq!(download_budget(ms(29_900), reserve), ms(10_639));
+    assert_eq!(download_budget(ms(25_000), reserve), ms(5_739));
+    // One ms over the reserve buys one ms; exactly at it, and under it, buy nothing.
+    assert_eq!(download_budget(reserve + ms(1), reserve), ms(1));
+    assert_eq!(download_budget(reserve, reserve), Duration::ZERO);
+    assert_eq!(download_budget(ms(10_000), reserve), Duration::ZERO);
+    assert_eq!(download_budget(Duration::ZERO, reserve), Duration::ZERO);
+    // A zero reserve leaves only the deadline's cap.
+    assert_eq!(download_budget(ms(5_000), Duration::ZERO), ms(5_000));
+    assert_eq!(
+        download_budget(ms(20_000), Duration::ZERO),
+        s3::DOWNLOAD_DEADLINE
+    );
+}
+
+#[test]
+fn remaining_before_counts_down_to_zero_and_is_unbounded_without_a_deadline() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+    let ms = Duration::from_millis;
+    assert_eq!(remaining_before(Some(now + ms(29_937)), now), ms(29_937));
+    assert_eq!(remaining_before(Some(now), now), Duration::ZERO);
+    assert_eq!(remaining_before(Some(now - ms(5)), now), Duration::ZERO);
+    assert_eq!(remaining_before(None, now), Duration::MAX);
+    // No deadline falls back to the constant; a passed one to nothing.
+    let reserve = s3::POST_DOWNLOAD_RESERVE;
+    assert_eq!(
+        download_budget(remaining_before(None, now), reserve),
+        s3::DOWNLOAD_DEADLINE
+    );
+    assert_eq!(
+        download_budget(remaining_before(Some(now - ms(5)), now), reserve),
+        Duration::ZERO
+    );
+}
+
+/// A zero budget abandons the download at once as `s3_deadline` (the cell stays empty
+/// for the next invocation); the budget reaches the download through the policy.
+#[tokio::test(start_paused = true)]
+async fn zero_budget_download_is_abandoned_as_a_deadline() {
+    let source = ModelSource::S3 {
+        bucket: "b".into(),
+        key: "k".into(),
+        sha256: Sha256Pin::parse(&"a".repeat(64)).expect("pin"),
+    };
+    let future = resolve_model_within(&source, Duration::ZERO);
+    fn assert_send<T: Send>(_: &T) {}
+    assert_send(&future);
+    drop(future);
+
+    let tiny = tiny_bytes().to_vec();
+    let pin = Sha256Pin::parse(tiny_golden_sha256()).expect("pin");
+    let policy = s3::DownloadPolicy {
+        deadline: download_budget(Duration::from_millis(1_000), s3::POST_DOWNLOAD_RESERVE),
+        ..s3::DownloadPolicy::DEPLOYED
+    };
+    assert_eq!(policy.deadline, Duration::ZERO);
+    let fetcher = StallingFetcher(tiny.len() as u64);
+    let err = resolve_from_fetcher(&fetcher, &pin, contracted_cap(), &policy)
+        .await
+        .expect_err("a zero budget cannot download");
+    assert_eq!(err.kind(), "s3_deadline", "{err:?}");
+}
+
+/// A fetcher whose ranges never arrive.
+struct StallingFetcher(u64);
+
+impl s3::RangeFetcher for StallingFetcher {
+    fn content_length(&self) -> s3::FetchFuture<'_, Option<u64>> {
+        let n = self.0;
+        Box::pin(async move { Ok(Some(n)) })
+    }
+
+    fn fetch_range<'a>(
+        &'a self,
+        _start: u64,
+        _dest: &'a mut [u8],
+        _written: &'a std::sync::atomic::AtomicUsize,
+    ) -> s3::FetchFuture<'a, usize> {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok(0)
+        })
+    }
+}
+
 // ------------------------------------------------ the bootstrap's pure decisions (08-24)
 
 /// V4-c: only a POST may trigger the cold model load; GET and OPTIONS are answered without

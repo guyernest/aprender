@@ -24,7 +24,7 @@ use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use aprender_decide::artifact::{read_decide_apr_bytes_bounded, ArtifactLimits, HashedArtifact};
 use aprender_decide::ArtifactError;
@@ -676,12 +676,50 @@ pub async fn resolve_from_fetcher<F: s3::RangeFetcher + ?Sized>(
     verify_and_build("s3", bytes, Some(pin.clone()), fetch_ms).await
 }
 
-/// Resolve the served model from `source` under the contracted cap.
+/// Resolve the served model from `source` under the contracted cap, the S3 download bounded
+/// by [`s3::DOWNLOAD_DEADLINE`].
 ///
 /// # Errors
 ///
 /// A [`ResolveError`] naming the step that refused.
 pub async fn resolve_model(source: &ModelSource) -> Result<(Model, LoadTimeline), ResolveError> {
+    resolve_model_within(source, s3::DOWNLOAD_DEADLINE).await
+}
+
+/// How long the S3 download may run inside one invocation (V4-b, plan 08-30):
+/// `min(DOWNLOAD_DEADLINE, remaining - reserve)`, saturating at zero.
+///
+/// `remaining` is what is left of the Lambda invocation that starts the load (its context
+/// deadline minus now, see [`remaining_before`]); `reserve` is the post-download work that
+/// must still fit ([`s3::POST_DOWNLOAD_RESERVE`]). A load started with less than `reserve`
+/// left gets a ZERO budget: the download is abandoned at once as `s3_deadline`, the cell
+/// stays empty, and the next invocation — with its own full deadline — retries, instead of
+/// this one being killed by Lambda mid-build.
+#[must_use]
+pub fn download_budget(remaining: Duration, reserve: Duration) -> Duration {
+    s3::DOWNLOAD_DEADLINE.min(remaining.saturating_sub(reserve))
+}
+
+/// What is left before `deadline` at `now`: zero once it has passed, and unbounded when the
+/// invocation carries no deadline (never on Lambda; a local run), so [`download_budget`]
+/// then falls back to [`s3::DOWNLOAD_DEADLINE`].
+#[must_use]
+pub fn remaining_before(deadline: Option<SystemTime>, now: SystemTime) -> Duration {
+    deadline.map_or(Duration::MAX, |d| {
+        d.duration_since(now).unwrap_or(Duration::ZERO)
+    })
+}
+
+/// [`resolve_model`] with the S3 download bounded by `download_deadline` (the handler
+/// passes [`download_budget`]). A local source ignores it: no network, no deadline.
+///
+/// # Errors
+///
+/// A [`ResolveError`] naming the step that refused.
+pub async fn resolve_model_within(
+    source: &ModelSource,
+    download_deadline: Duration,
+) -> Result<(Model, LoadTimeline), ResolveError> {
     match source {
         ModelSource::Local { path, sha256 } => {
             resolve_local(path, sha256.as_ref(), contracted_cap()).await
@@ -692,13 +730,11 @@ pub async fn resolve_model(source: &ModelSource) -> Result<(Model, LoadTimeline)
             sha256,
         } => {
             let fetcher = s3::S3Fetcher::from_default_config(bucket, key).await;
-            resolve_from_fetcher(
-                &fetcher,
-                sha256,
-                contracted_cap(),
-                &s3::DownloadPolicy::DEPLOYED,
-            )
-            .await
+            let policy = s3::DownloadPolicy {
+                deadline: download_deadline,
+                ..s3::DownloadPolicy::DEPLOYED
+            };
+            resolve_from_fetcher(&fetcher, sha256, contracted_cap(), &policy).await
         }
     }
 }
