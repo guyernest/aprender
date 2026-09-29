@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Completed 08-30-PLAN.md (live redeploy at 10,240 MB, keep-800-apply-10739: DOWNLOAD_DEADLINE 10739 ms + invocation-deadline budget; 8 proven-cold samples 22.6-27.0 s; decide-tool-boundary-v1 9.0.0, accepted_region_cold implemented)"
-last_updated: "2026-09-29T02:53:01.127Z"
+stopped_at: "Completed 08-31-PLAN.md (class D: 133-row claims ledger + laya-claims-check; D-14 publish-false; argmax NaN fix; gap-round final statuses; next 08-32)"
+last_updated: "2026-09-29T05:08:01.828Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: 8473ea04d28eecce4f154c52dba7e5950f7b3a2e
+state_head: 23a640e6ad264679e9a90d3e8b25d9330a87d0df
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 122
+  completed_plans: 123
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 30 of 32 complete (08-01..08-30; 08-25 ran before 08-24 by wave order; Wave 20 done) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-30 COMPLETE (V4-b closed LIVE: owner decisions redeploy-and-measure, restore-10240-tier, keep-800-apply-10739; aprender-mcp-decide redeployed at 10,240 MB serving b615d8244, 8 texts / 800 built tokens; 8 proven-cold maximal samples 22,647-27,015 ms < 30,000 (worst slack 2,985 ms), warm 866-980 ms; s3::DOWNLOAD_DEADLINE 10739 ms derived from the samples + download_budget honouring the invocation deadline; decide-tool-boundary-v1 9.0.0, accepted_region_cold implemented, contract-audit-phase8 green without PHASE8_LIVE_EXEMPT; per-term derivation gives 648 < 800, accepted on the whole-request rule, D-ITEM-08-30-B open); Phase 8 NOT complete; next Waves 21-22 (08-31, 08-32)
+Plan: 31 of 32 complete (08-01..08-31; 08-25 ran before 08-24 by wave order; Wave 21 done) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-31 COMPLETE (class D closed as a gate: scripts/laya_claims.tsv 133 rows, `just laya-claims-check` OK, 5 gate mutants RED, python kind exercised; D-14 owner decision publish-false 2026-09-29: aprender-decide is publish = false, cascade guard no longer lists it (aprender-contrastive-data remains, not Phase 8's), pinned by publish_is_false_until_the_crate_name_is_confirmed and gate row cascade-guard; argmax NaN never wins (IN-01); tests/ui.rs header (IN-04); deferred-items.md gap-round final statuses for every 08-REVIEW / 08-CODE-REVIEW-FINDINGS finding; nothing published); live: aprender-mcp-decide at 10,240 MB serving b615d8244, 8 texts / 800 built tokens, isError refusals; Phase 8 NOT complete; next Wave 22 (08-32)
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -243,6 +243,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P29 | 25 min | 3 tasks | 9 files |
 | Phase 08 P28 | 22min | 3 tasks | 7 files |
 | Phase 08 P30 | 3h50m | 3 tasks | 17 files |
+| Phase 08 P31 | 2h14m | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -465,6 +466,8 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-28: owner decision A-derive B-iserror (D-09 amendment 'gap round 08-28'): the served truncation sentence is derived from the artifact's agent max_len vs classify_max_total_tokens, and every bound refusal is pmcp::Error::tool_rejected (an isError tool result on the wire, measured over stdio and the Lambda HTTP loopback); model/internal failures stay JSON-RPC -32603; effective only at the next deploy (plan 08-30)
 - [Phase 08]: 08-28: refusal_names_bound quantifies over distinctive caller texts of at least refusal_echo_min_chars (12, a decide-tool-boundary-v1 constant the test reads); the old any-non-empty-text clause was unsatisfiable (A4-7)
 - [Phase 08]: 08-30: owner keep-800-apply-10739 - decide-tool-boundary-v1 keeps 8 texts / 800 tokens at 10,240 MB on the acceptance rule (8 proven-cold samples 22.6-27.0 s < 30 s) although the per-term-max rule gives 648; contract 9.0.0 shows priced vs measured; s3::DOWNLOAD_DEADLINE 10739 ms derived from the samples; download_budget(remaining, reserve) honours the invocation deadline (V4-b); accepted_region_cold implemented; live at 10,240 MB serving b615d8244
+- [Phase 08]: 08-31: owner decision publish-false (D-14, 2026-09-29) - aprender-decide is publish = false until the crate name is confirmed; not in the cascade TIERS; kept by publish_is_false_until_the_crate_name_is_confirmed and gate row cascade-guard; nothing published
+- [Phase 08]: 08-31: class D ledger scripts/laya_claims.tsv (133 rows) derives its FALSIFY and untrusted_input_bounds rows from the contracts' own cargo commands, one row per owner target, each named test matched exactly (never cargo's substring filter); a corrected claim needs a ledger row in the same commit
 
 ### Pending Todos
 
@@ -580,8 +583,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-29T02:52:53.919Z
-Stopped at: Completed 08-30-PLAN.md (live at 10,240 MB serving b615d8244; decide-tool-boundary-v1 9.0.0; accepted_region_cold implemented; next 08-31)
+Last session: 2026-09-29T05:07:51.894Z
+Stopped at: Completed 08-31-PLAN.md (class D: 133-row claims ledger + laya-claims-check; D-14 publish-false; argmax NaN fix; gap-round final statuses; next 08-32)
 Resume file: None
 
 ## Accumulated Context

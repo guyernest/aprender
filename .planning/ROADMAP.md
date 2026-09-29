@@ -645,7 +645,7 @@ crate with Laya as its first method (Kev/Jev later). Decisions: `08-CONTEXT.md`.
 template (`crates/aprender-mcp-setfit/`) and the spike-020 `gemm_blis` layout.
 **Source evidence:** `.claude/skills/spike-findings-aprender/references/laya-decision-model.md`,
 `laya-rust-inference.md`, `aws-mcp-model-hosting.md` (spikes 024, 025, 026 — all VALIDATED).
-**Plans:** 30/32 plans executed; gap round 08-19..08-32 planned in waves 17-22 (2026-09-28; revised after plan checking). Executed history: 18 plans in 16 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; 08-11 complete: D-18 go/no-go recorded as a human-decided HOLD (hold-no-aws). Gap closure 08-13..08-18 added 2026-09-27 (user decision, option 1 from spikes 027/028): declare A1 noise-referenced pack bar + A2 in-distribution eval set + A3 median-of-three seed policy, wire them, ONE declared s64 gate run, then a human-approved live deploy; 08-12 close-out moves to Wave 16)
+**Plans:** 31/32 plans executed; gap round 08-19..08-32 planned in waves 17-22 (2026-09-28; revised after plan checking). Executed history: 18 plans in 16 waves (08-08 complete under option 3: the D-19 demo's recorded outcome is GATE FAIL, both runs kept as fail-closed vectors; 08-09 complete under option A: both vectors refused in Rust by pack and verify; 08-10 complete under shared-crates-root: resolver executed on this workspace, deploy refusals proven offline; 08-11 complete: D-18 go/no-go recorded as a human-decided HOLD (hold-no-aws). Gap closure 08-13..08-18 added 2026-09-27 (user decision, option 1 from spikes 027/028): declare A1 noise-referenced pack bar + A2 in-distribution eval set + A3 median-of-three seed policy, wire them, ONE declared s64 gate run, then a human-approved live deploy; 08-12 close-out moves to Wave 16)
 
 Plans:
 **Wave 1**
@@ -742,7 +742,7 @@ Plans:
 
 **Wave 21** *(blocked on Wave 20 completion)*
 
-- [ ] 08-31-PLAN.md — class D: scripts/laya_claims.tsv + `just laya-claims-check`, pack-free load path, argmax/ui.rs, owner decision on aprender-decide publication (D-14), deferred-items final statuses
+- [x] 08-31-PLAN.md — class D: scripts/laya_claims.tsv + `just laya-claims-check`, pack-free load path, argmax/ui.rs, owner decision on aprender-decide publication (D-14), deferred-items final statuses
 
 **Wave 22** *(blocked on Wave 21 completion)*
 
