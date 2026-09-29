@@ -931,6 +931,10 @@ raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
   status: open
   **Owner:** the aprender-contracts maintainers (skip non-contract YAML in the test, or move binding.yaml).
   **Re-open trigger:** book_coverage added to a required CI line.
+  **Refreshed 2026-09-29 (08-32 close-out):** after the upstream merge the failure is unchanged (binding.yaml
+  still has no `metadata:`); it is one of the five local failures in 08-CI-RUN-EVIDENCE.json (B5). Upstream's
+  contract-hygiene gates that now sit beside it ARE in CI's Integration-tests step, and they are the subject
+  of plan 08-33; this one is not (it is not in any explicit-test-commands.d fragment).
 - **The gap regression skips apr-format `golden_v2_f32_writer_is_byte_identical` by exact name** (the 08-20
   entry above, still open); every other apr-format test runs and must pass.
 
@@ -1061,3 +1065,72 @@ D-ITEM-08-30-A (/tmp) and D-ITEM-08-30-B (648 vs 800). New entries:
   **Owner:** the aprender-contrastive-data owner.
   **Re-open trigger:** the guard is CI-required, so it is red until it is added to TIERS or marked
   `publish = false`.
+
+## Plan 08-32 close-out (2026-09-29): merge, draft PR #4634, CI evidence
+
+Context: 08-32's must-have "workspace-test = success on the pushed head" is UNMET. The branch was scrubbed,
+merged with upstream main (301 commits) and pushed as one draft PR (#4634, head 30bc2baaa at the time of the
+runs). All CI runs are `action_required` (fork PR awaiting a paiml maintainer) and would stop at upstream's
+contract-hygiene gates before the decide integration fragments 510/520. Evidence: `08-CI-RUN-EVIDENCE.json`.
+
+- **D-ITEM-08-32-B: upstream's shrink-only contract-hygiene baselines are exceeded by this branch's contracts.**
+  Measured locally after the merge (aprender-contracts-cli, CI Integration-tests fragments 336/338/455):
+  389 passed, 5 failed. (i) `formal:` entries outside the declared vocabulary 1464 -> 1569 (+105; Phase 8's
+  share is 25: decide-apr 6, decide-tool-boundary 6, laya-finetune-gate 9, laya-parity 4); (ii) kernel-kind
+  contracts without `metadata.valid_under` 386 -> 398 (+12); (iii) `pv validate` errors: neon-blis-v1
+  (`kind:` at top level instead of under `metadata:`) and spectral-indices-v1 (no `kani_harnesses`);
+  (iv) `the_tracked_repo_graph_is_fresh` (regenerate); (v) = D-ITEM-08-32-A.
+  status: decided; planned as 08-33
+  **Owner decision (2026-09-29):** "Repair all (new gap plan)". The repair is not done in 08-32 and its plan is
+  not written here.
+  **Owner:** plan 08-33 (the orchestrator plans it next).
+  **Re-open trigger:** 08-33 does not bring the five failures to zero, or upstream tightens a baseline again.
+- **D-ITEM-08-32-C: 17 of the 19 Phase 3/4 "SetFit tests (feature-gated)" CI legs were not re-homed.**
+  Upstream restructured ci.yml (ci/sections.yml, #4433/#4441/#4471); this branch's old step (19 cargo commands,
+  03-10/04-11) had no place in the new shape. Upstream fragments 010 and 020 already run the aprender-core
+  setfit lib tests and the setfit conformance target; the other 17 legs (aprender-train, apr-cli and
+  aprender-serve setfit legs and the cargo-check cells) are not run by CI on this branch.
+  status: open
+  **Owner decision (2026-09-29):** "Defer to deferred-items".
+  **Reason:** upstream fragments 010/020 cover the setfit lib tests + conformance; the other 17 legs need new
+  `ci/explicit-test-commands.d` fragments; deferring keeps the PR's CI footprint small, since upstream CI takes
+  about 90 minutes.
+  **Owner:** the Phase 3/4 SetFit owner.
+  **Re-open trigger:** a SetFit regression that fragments 010/020 do not catch. (This also means Phase 4's
+  SAFE-02 "in CI" clause stays open.)
+- **D-ITEM-08-32-D: `contract-audit-phase6` fails identically before the merge.** 9 Phase 6.1 equations are
+  unbound. Not Phase 8's; it is a tier3 target, not a CI gate.
+  status: open
+  **Owner:** Phase 6.1.
+  **Re-open trigger:** contract-audit-phase6 becoming a required gate.
+- **D-ITEM-08-32-E: two tests are Linux-only and fail on macOS.** `aprender-mcp`
+  `exec_marker_bin_survives_a_transient_etxtbsy` (the file is identical to upstream) and the `aprender-profile`
+  crate. Both are expected green on CI's Linux runners.
+  status: open
+  **Reason:** platform-specific, not Phase 8's; local macOS runs of the phase regression skip or ignore them.
+  **Owner:** their crates' maintainers.
+  **Re-open trigger:** a Linux CI run failing either, or a macOS gate that includes them.
+- **D-ITEM-08-32-F: `pr-review-quorum` fails on #4634 with "missing signed review receipt".** A paiml process
+  (pull_request_target), not Phase 8 code. It needs a signed `pr-review` receipt for the PR.
+  status: open
+  **Owner:** whoever opens the reviewable PR(s) (see the PR-shape decision below).
+  **Re-open trigger:** the PR leaves draft or is split.
+- **D-ITEM-08-32-G: pmcp is pinned to 2.19.3 while upstream is on 2.21.0** (`519dc4125`). Phase 8's
+  `request_bounds_table_is_swept` tripwire and the tool-boundary contract are verified on 2.19.3; upstream's
+  2.21.0 was not measured against them.
+  status: open
+  **Reason:** the merge would otherwise have moved the transport under a contract proven on 2.19.3.
+  **Owner:** Phase 8 / the pmcp upgrade.
+  **Re-open trigger:** re-verify the tool-boundary contract on 2.21.0 (run the sweeps, the e2e_stdio target and
+  the Lambda probe), then lift the pin; or upstream requiring 2.21.0 for another crate.
+- **D-ITEM-08-32-H: PR shape.** #4634 stays ONE draft PR purely to obtain CI evidence ("Keep one draft for CI",
+  2026-09-29); the user arranges maintainer approval upstream. Splitting into reviewable PRs (serving and
+  contracts first; training code for upstream's .71-.75 window per the maintainer's note) is planned after
+  phase verification.
+  status: open
+  **Owner:** the user, after `/gsd-verify-work` on Phase 8.
+  **Re-open trigger:** phase verification finishing, or the draft becoming unmergeable (it is BEHIND main now).
+- **D-ITEM-08-30-A (existing, still open): the 10 GB /tmp note.** Unchanged by 08-32.
+- **Scrub note.** SHAs cited in 08-01..08-32 SUMMARY and evidence files written before the scrub are pre-scrub;
+  resolve them via `08-SCRUB-COMMIT-MAP.tsv`. Entries above that cite `d37f2fefc` or `4dcf9b21f` are upstream
+  commits and did not change.
