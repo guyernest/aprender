@@ -4,6 +4,11 @@ metadata:
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
+  # ONT-7 (plan 08-33): the bounds and refusals hold in the committed tree. Only obligation [20]
+  # (the pool speed-up ratio) names a host (aarch64 release) and that is where it is EVALUATED, an
+  # evidence note on one obligation and not a restriction of the contract, so no host_class qualifier.
+  valid_under:
+    world: committed
   description: >
     THE TOOL BOUNDARY both forecasting MCP servers are held to. One `forecast` tool, stateless
     (D-01: the request carries the series, the fit or the zero-shot forward runs inside the call,
@@ -1048,17 +1053,17 @@ proof_obligations:
 
   - type: bound
     property: 'The fit server Rust bounds are equal to the contract constants, not merely similar to them'
-    formal: 'types::MIN_POINTS == constants.fit_min_points AND types::MAX_POINTS == constants.fit_max_points AND types::MAX_HORIZON == constants.fit_max_horizon'
+    formal: 'types::MIN_POINTS == constants.fit_min_points ∧ types::MAX_POINTS == constants.fit_max_points ∧ types::MAX_HORIZON == constants.fit_max_horizon'
     applies_to: all
 
   - type: bound
     property: 'The Chronos door Rust bounds are equal to the contract constants'
-    formal: 'chronos::CHRONOS_MIN_POINTS == constants.chronos_min_points AND chronos::CHRONOS_MAX_POINTS == constants.chronos_max_points AND chronos::CHRONOS_MAX_HORIZON == constants.chronos_max_horizon'
+    formal: 'chronos::CHRONOS_MIN_POINTS == constants.chronos_min_points ∧ chronos::CHRONOS_MAX_POINTS == constants.chronos_max_points ∧ chronos::CHRONOS_MAX_HORIZON == constants.chronos_max_horizon'
     applies_to: all
 
   - type: invariant
     property: 'A ds array that is unsorted, duplicated or contains an impossible calendar date is refused before any fit is entered'
-    formal: 'forall ds: not(strictly_ascending(ds) and all_calendar_dates(ds)) implies result is Validation'
+    formal: '∀ ds: not(strictly_ascending(ds) and all_calendar_dates(ds)) ⇒ result is Validation'
     applies_to: all
 
   - type: invariant
@@ -1068,17 +1073,17 @@ proof_obligations:
 
   - type: completeness
     property: 'The frequency allowlist is closed: exactly D, W and MS are accepted and every other value refuses by name'
-    formal: 'forall f: future_days(_, _, f) = Ok(_) iff f in {D, W, MS}'
+    formal: '∀ f: future_days(_, _, f) = Ok(_) ↔ f in {D, W, MS}'
     applies_to: all
 
   - type: bound
     property: 'interval_width is accepted only strictly inside the open unit interval'
-    formal: 'forall w: accept(w) iff 0.0 < w and w < 1.0'
+    formal: '∀ w: accept(w) ↔ 0.0 < w and w < 1.0'
     applies_to: all
 
   - type: invariant
     property: 'A cap is accepted only on the logistic growth arm; on every other arm — explicit linear, explicit flat, or the defaulted arm carrying no growth key — it is a validation refusal, never an accepted-and-dropped knob'
-    formal: 'forall args: args.cap is Some and args.growth != logistic implies result is Validation'
+    formal: '∀ args: args.cap is Some and args.growth ≠ logistic ⇒ result is Validation'
     applies_to: all
 
   - type: invariant
@@ -1093,32 +1098,32 @@ proof_obligations:
 
   - type: completeness
     property: 'The advertised schema is strict and names exactly the three required fields'
-    formal: 'schema_for!(ForecastArgs).additionalProperties == false and required == {ds, y, horizon}'
+    formal: 'schema_for!(ForecastArgs).additionalProperties == false ∧ required == {ds, y, horizon}'
     applies_to: all
 
   - type: completeness
     property: 'Every unknown enum value for model, growth or seasonality_mode refuses with a message listing the accepted set'
-    formal: 'forall v not in accepted(field): result is Validation and message contains accepted(field)'
+    formal: '∀ v not in accepted(field): result is Validation and message contains accepted(field)'
     applies_to: all
 
   - type: bound
     property: 'Every holiday name is bounded in BYTES at the door, before it is cloned into any design column'
-    formal: 'forall args, forall h in args.holidays: result is Ok implies len_bytes(h.name) <= constants.fit_max_holiday_name_len'
+    formal: '∀ args, ∀ h in args.holidays: result is Ok ⇒ len_bytes(h.name) ≤ constants.fit_max_holiday_name_len'
     applies_to: fit
 
   - type: invariant
     property: 'The refusal for an oversized holiday name names the holiday index and the observed byte length and never the name itself'
-    formal: 'forall h with len_bytes(h.name) > constants.fit_max_holiday_name_len: result is Validation and message contains index(h) and len_bytes(h.name) and not contains h.name'
+    formal: '∀ h with len_bytes(h.name) > constants.fit_max_holiday_name_len: result is Validation and message contains index(h) and len_bytes(h.name) and not contains h.name'
     applies_to: fit
 
   - type: invariant
     property: 'The aggregate holiday-date ceiling is enforced INSIDE the loop, so a request already known to be over it never parses the remaining holidays'
-    formal: 'forall args: running_sum(k) > constants.fit_max_holiday_dates_total implies result is Validation and forall j > k: h_j.dates were never parsed'
+    formal: '∀ args: running_sum(k) > constants.fit_max_holiday_dates_total ⇒ result is Validation and ∀ j > k: h_j.dates were never parsed'
     applies_to: fit
 
   - type: bound
     property: 'The NeuralProphet training work one request may buy is bounded at the door, before the first np::train, on a contract-owned value'
-    formal: 'forall args with model == neuralprophet: result is Ok implies request_train_cost(args) <= constants.fit_max_np_train_cost'
+    formal: '∀ args with model == neuralprophet: result is Ok ⇒ request_train_cost(args) ≤ constants.fit_max_np_train_cost'
     applies_to: fit
 
   - type: invariant
@@ -1128,7 +1133,7 @@ proof_obligations:
 
   - type: invariant
     property: 'A Chronos horizon past the native window is refused without opt-in, and warned about with it'
-    formal: 'horizon > constants.chronos_native_horizon implies (allow_long_horizon or result is Validation) and (allow_long_horizon implies response.warning.is_some())'
+    formal: 'horizon > constants.chronos_native_horizon ⇒ (allow_long_horizon or result is Validation) and (allow_long_horizon ⇒ response.warning.is_some())'
     applies_to: all
 
   - type: invariant
@@ -1138,22 +1143,22 @@ proof_obligations:
 
   - type: soundness
     property: 'Every refusal in this contract reaches the client as a validation-class JSON-RPC error, never an internal one'
-    formal: 'forall refusal r in this contract: code(r) == code(pmcp::Error::validation)'
+    formal: '∀ refusal r in this contract: code(r) == code(pmcp::Error::validation)'
     applies_to: all
 
   - type: determinism
     property: 'A response computed under a concurrency_requests-wide burst is bit-identical to the same response computed alone'
-    formal: 'forall req: signature(concurrent(req)) == signature(sequential(req)) and max_abs_diff == 0.0'
+    formal: '∀ req: signature(concurrent(req)) == signature(sequential(req)) and max_abs_diff == 0.0'
     applies_to: all
 
   - type: bound
     property: 'On the gated host, the pooled server clears the speed-up floor; the ratio is measured by a benchmark recipe and never asserted by a unit test'
-    formal: 'best_of(constants.pool_speedup_best_of, sequential_wall / concurrent_wall) >= constants.pool_speedup_min_x10 / 10 (evaluated by `just forecast-pool-ratio`, aarch64 release only)'
+    formal: 'best_of(constants.pool_speedup_best_of, sequential_wall / concurrent_wall) ≥ constants.pool_speedup_min_x10 / 10 (evaluated by `just forecast-pool-ratio`, aarch64 release only)'
     applies_to: all
 
   - type: determinism
     property: 'The seed is per request and defaults to 42; no RNG state is carried between requests'
-    formal: 'forall req: seed(req) == req.seed.unwrap_or(constants.default_seed) and forall req1 req2: result(req1) is independent of order(req1, req2)'
+    formal: '∀ req: seed(req) == req.seed.unwrap_or(constants.default_seed) and ∀ req1 req2: result(req1) is independent of order(req1, req2)'
     applies_to: all
 
   - type: bound
@@ -1163,7 +1168,7 @@ proof_obligations:
 
   - type: completeness
     property: 'The door surface is fully enumerated: every caller-settable field has a knobs entry and every knobs entry names a field that exists, and every non-pending cost axis names a bound that exists'
-    formal: 'knobs(door_surface) == properties(schema_for!(ForecastArgs)) union properties(schema_for!(HolidayArg)) and forall a in cost_axes: a.bound in keys(constants) or (a.bound == measured_at_structural_maximum and a.measured_seconds < 2.0) or a.bound matches unbounded_pending_*'
+    formal: 'knobs(door_surface) == properties(schema_for!(ForecastArgs)) union properties(schema_for!(HolidayArg)) and ∀ a in cost_axes: a.bound in keys(constants) or (a.bound == measured_at_structural_maximum and a.measured_seconds < 2.0) or a.bound matches unbounded_pending_*'
     applies_to: all
 
   - type: bound
@@ -1173,7 +1178,7 @@ proof_obligations:
 
   - type: bound
     property: 'The SC1 wall holds across the whole surface where the cost is decided — every accepted composition of frequency, growth arm and holiday shape — and not only on the two shapes the phase happened to bench'
-    formal: 'forall c in freq x growth x holiday_shape: accept(request(c)) and wall_release(request(c)) < sc1_wall_seconds'
+    formal: '∀ c in freq x growth x holiday_shape: accept(request(c)) and wall_release(request(c)) < sc1_wall_seconds'
     applies_to: fit
 
 falsification_tests:

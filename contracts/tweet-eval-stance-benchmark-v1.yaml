@@ -36,6 +36,11 @@ metadata:
   version: 2.0.0
   created: '2026-08-07'
   author: PAIML Engineering
+  kind: kernel
+  # ONT-7 (plan 08-33): `kind: kernel` was the schema default and is now written out; the dataset
+  # rules hold in the committed tree, so the one declared world and no qualifier.
+  valid_under:
+    world: committed
   description: >
     Canonical TweetEval abortion stance data and evaluation contract. Owns the
     dataset-specific half of DATA-01 and DATA-02 (split and class conservation,
@@ -146,9 +151,9 @@ proof_obligations:
       (class counts, whose fixture relabels one row while holding the row count
       fixed so the class-count branch is the one exercised).
     formal: >
-      rows(train) == 587 && rows(validation) == 66 && rows(test) == 280 &&
-      class_counts(train) == [159, 319, 109] &&
-      class_counts(validation) == [18, 36, 12] &&
+      rows(train) == 587 ∧ rows(validation) == 66 ∧ rows(test) == 280 ∧
+      class_counts(train) == [159, 319, 109] ∧
+      class_counts(validation) == [18, 36, 12] ∧
       class_counts(test) == [45, 189, 46]
     applies_to: all
 
@@ -165,7 +170,7 @@ proof_obligations:
       manifest could attest arbitrary local bytes to an upstream revision, and every
       downstream reproducibility claim built on that manifest would be unfounded.
       Discharged by FALSIFY-TWEET-EVAL-006.
-    formal: manifest.source.revision_verified == run_downloaded_from_pinned_revision
+    formal: manifest.source.revision_verified ≡ run_downloaded_from_pinned_revision
     applies_to: all
 
   - type: equivalence
@@ -191,7 +196,7 @@ proof_obligations:
       those digests out of `dataset_attestation` rather than computing a second set, so a
       split entry cannot describe bytes the attestation does not.
     formal: >
-      for every source file f: recorded_sha256[f] == sha256(buffer[f]) &&
+      for every source file f: recorded_sha256[f] == sha256(buffer[f]) ∧
       parsed_rows[f] == parse(buffer[f])
     applies_to: all
 
@@ -208,9 +213,9 @@ proof_obligations:
       cell of the benchmark. A seed must therefore be supplied explicitly and
       validated against this set rather than defaulted.
     formal: >
-      contracted_seeds == [13, 17, 23, 29, 31, 37, 41, 43, 47, 53] &&
-      manifest.few_shot.seeds == contracted_seeds &&
-      42 not_in contracted_seeds
+      contracted_seeds == [13, 17, 23, 29, 31, 37, 41, 43, 47, 53] ∧
+      manifest.few_shot.seeds == contracted_seeds ∧
+      42 ∉ contracted_seeds
     applies_to: all
 
   - type: safety
@@ -236,7 +241,7 @@ proof_obligations:
       substance — an unvalidated label index reaches no indexing operation — but the
       falsifying mutation moved with the code, so the recipe above is the current one.
     formal: >
-      for every accepted row r: 0 <= r.label && r.label < 3 &&
+      for every accepted row r: 0 ≤ r.label ∧ r.label < 3 ∧
       r.label_text == LABEL_NAMES[r.label]
     applies_to: all
 
@@ -302,8 +307,8 @@ proof_obligations:
       This closes the third of the three DATA-02 failure classes D-07 scoped to Phase 2
       (the other two being duplicate IDs and cross-split duplicate content).
     formal: >
-      forall rows r in split(role R): r.source_split == R else SplitRoleMismatch(R, r.source_split) &&
-      forall roles k in attestation.splits union buffers: k in profile.ROLES else ConflictingSourceRole(profile, k)
+      ∀ rows r in split(role R): r.source_split == R else SplitRoleMismatch(R, r.source_split) ∧
+      ∀ roles k in attestation.splits union buffers: k in profile.ROLES else ConflictingSourceRole(profile, k)
     applies_to: all
 
   - type: soundness
@@ -331,9 +336,9 @@ proof_obligations:
       Version 2 is also the version that declares the setfit profile's row-level
       `source_split` change recorded under `profiles.setfit.row_source_split`.
     formal: >
-      manifest.schema_version == DATASET_ATTESTATION_SCHEMA_VERSION == 2 &&
-      SUPPORTED_DATASET_ATTESTATION_SCHEMA_VERSIONS == [2] &&
-      read(manifest with schema_version != 2) == Err naming [2] and "--force" &&
+      manifest.schema_version == DATASET_ATTESTATION_SCHEMA_VERSION == 2 ∧
+      SUPPORTED_DATASET_ATTESTATION_SCHEMA_VERSIONS == [2] ∧
+      read(manifest with schema_version ≠ 2) == Err naming [2] and "--force" ∧
       no field of a rejected manifest is inferred, defaulted, or upgraded
     applies_to: all
 
@@ -364,10 +369,10 @@ proof_obligations:
       directory through `from_attested_bytes` and rolls the write back if the boundary
       rejects it, so a directory this command emits is one the gate has actually opened.
     formal: >
-      exposes(Split<R>) => from_attested_bytes returned Ok &&
-      split_hash_check precedes parse(buffer) &&
-      forall attested fields f: recomputed(f) == attested(f) &&
-      prepare writes D => from_attested_bytes(D) == Ok
+      exposes(Split<R>) ⇒ from_attested_bytes returned Ok ∧
+      split_hash_check precedes parse(buffer) ∧
+      ∀ attested fields f: recomputed(f) == attested(f) ∧
+      prepare writes D ⇒ from_attested_bytes(D) == Ok
     applies_to: all
 
 # ============================================================================

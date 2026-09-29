@@ -4,6 +4,10 @@ metadata:
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
+  # ONT-7 (plan 08-33): the parity bars are asserted in the committed tree; the contract states no
+  # host restriction of its own (its qa_gate records what was measured where), so no qualifier.
+  valid_under:
+    world: committed
   description: >
     The FROZEN correctness bar for `crates/aprender-forecast`'s Chronos-Bolt zero-shot forward
     (`src/bolt.rs`), its safetensors decoder (`src/safetensors.rs`) and its tool door
@@ -318,47 +322,47 @@ proof_obligations:
 
   - type: invariant
     property: 'The Chronos door refuses horizon 0, horizon above the ceiling, and a horizon past the native window without the flag — as Validation, with the fix named'
-    formal: 'validate is Err(Validation) iff h = 0 or h > constants.max_horizon or (h > constants.native_horizon and not allow_long_horizon); the third message contains "allow_long_horizon"'
+    formal: 'validate is Err(Validation) ↔ h = 0 or h > constants.max_horizon or (h > constants.native_horizon and not allow_long_horizon); the third message contains "allow_long_horizon"'
     applies_to: all
 
   - type: invariant
     property: 'A rolled-forward horizon carries a warning naming the rollout, and the forward/rollout counts are the documented arithmetic'
-    formal: 'warning.is_some() iff h > constants.native_horizon; at h = 365: diagnostics.forwards = constants.rollout_forwards_for_365 && diagnostics.rollouts = 5'
+    formal: 'warning.is_some() ↔ h > constants.native_horizon; at h = 365: diagnostics.forwards = constants.rollout_forwards_for_365 ∧ diagnostics.rollouts = 5'
     applies_to: all
 
   - type: invariant
     property: 'The shipped rollout is the nine-path re-quantiled scheme, and the pre-2025 median-only scheme is NOT what the oracle ran'
-    formal: 'delta_nine_path <= equations.rollout_365_abs.float_tolerance && delta_median_only > 0.1 against the same oracle'
+    formal: 'delta_nine_path ≤ equations.rollout_365_abs.float_tolerance ∧ delta_median_only > 0.1 against the same oracle'
     applies_to: all
 
   - type: invariant
     property: 'Both weight layouts are resident, deliberately, and the memory cost is an asserted printed number rather than a comment'
-    formal: 'resident_elements = 2 * matrix_elements + non_matrix_elements, and matrix_elements + non_matrix_elements = 8652672 for chronos-bolt-tiny'
+    formal: 'resident_elements = 2 * matrix_elements + non_matrix_elements ∧ matrix_elements + non_matrix_elements = 8652672 for chronos-bolt-tiny'
     applies_to: all
 
   - type: invariant
     property: 'Multi-row products route to the packed BLIS GEMM and not to the plain-loop path'
-    formal: 'forall rows > 1: proj(fast = true, ...) = linear_fast(...) bitwise, and != linear(...) for at least one seeded input'
+    formal: '∀ rows > 1: proj(fast = true, ...) = linear_fast(...) bitwise, and ≠ linear(...) for at least one seeded input'
     applies_to: all
 
   - type: invariant
     property: 'Single-row products route to the 8-accumulator dot and not to gemv'
-    formal: 'proj(fast = true, row1_gemv = false, rows = 1, ...) = linear(...) bitwise, and != linear_fast(...) for at least one of 20 seeded inputs'
+    formal: 'proj(fast = true, row1_gemv = false, rows = 1, ...) = linear(...) bitwise, and ≠ linear_fast(...) for at least one of 20 seeded inputs'
     applies_to: all
 
   - type: invariant
     property: 'No model weight is committable: the ignore rules cover the fetched tree and git reports nothing under models/'
-    formal: 'git status --porcelain -- models/ is empty && git check-ignore -q models/chronos-bolt-tiny/f32/model.safetensors'
+    formal: 'git status --porcelain -- models/ is empty ∧ git check-ignore -q models/chronos-bolt-tiny/f32/model.safetensors'
     applies_to: all
 
   - type: determinism
     property: 'The fetch recipe verifies all three files on every invocation, and a tampered file makes it fail'
-    formal: 'a second, all-files-present run exits 0 and echoes all three sha256 pins without downloading; a one-byte flip in the f32 model makes it exit non-zero naming a sha256 mismatch'
+    formal: 'a second, all-files-present run exits 0 ∧ echoes all three sha256 pins without downloading; a one-byte flip in the f32 model makes it exit non-zero naming a sha256 mismatch'
     applies_to: all
 
   - type: invariant
     property: 'Weight-dependent tests are COUNTED skips when unarmed and real tests when armed'
-    formal: 'unarmed: ignored >= 1 with the arming reason; armed: ignored = 0 and matching test lines >= 8'
+    formal: 'unarmed: ignored ≥ 1 with the arming reason; armed: ignored = 0 and matching test lines ≥ 8'
     applies_to: all
 
 falsification_tests:

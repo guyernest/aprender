@@ -42,6 +42,11 @@ metadata:
   created: '2026-08-09'
   updated: '2026-08-11'
   author: PAIML Engineering
+  kind: kernel
+  # ONT-7 (plan 08-33): `kind: kernel` was the schema default and is now written out; the lifecycle
+  # rules hold in the committed tree, so the one declared world and no qualifier.
+  valid_under:
+    world: committed
   version_note: >
     2.0.0 — `pv diff` suggested MAJOR and this takes it. Two amendments from the phase-3 cleanup
     review, both narrowing what the lifecycle admits, so existing callers can break:
@@ -1246,7 +1251,7 @@ proof_obligations:
     run-level embedding floor holds. There is exactly ONE validating function in the tree, so
     a future caller cannot route around the gate by adding a second door.
   formal: >
-    exists! validate_evidence && (SetFitRun<EncoderTuned> constructible => exists PassedEvidence)
+    ∃! validate_evidence ∧ (SetFitRun<EncoderTuned> constructible ⇒ ∃ PassedEvidence)
   applies_to: all
 
 - type: safety
@@ -1256,7 +1261,7 @@ proof_obligations:
     NoTestifyingParameters. SAFE-03 is therefore automatic under D-09 rather than dependent on
     a caller remembering to check, and the gradient-free exclusion cannot be used to
     manufacture a vacuous pass.
-  formal: 'trainable_set == {} => Err(NoTrainableParameters) && gated_set == {} => Err(NoTestifyingParameters)'
+  formal: 'trainable_set == {} ⇒ Err(NoTrainableParameters) ∧ gated_set == {} ⇒ Err(NoTestifyingParameters)'
   applies_to: all
 
 - type: invariant
@@ -1265,7 +1270,7 @@ proof_obligations:
     test using serde_yaml, not duplicated as literals and compared by substring search.
     Editing either side alone turns the test red, which is what makes T-3-21 (loosening an
     epsilon after a failing comparison) require a contract edit that `pv diff` flags.
-  formal: 'for all c in classes: Thresholds::eps(c) == parse(this_file).evidence_gate.table[c].eps'
+  formal: '∀ c in classes: Thresholds::eps(c) == parse(this_file).evidence_gate.table[c].eps'
   applies_to: all
 
 - type: soundness
@@ -1273,7 +1278,7 @@ proof_obligations:
     OBLIG-STL-REGIME-FAIL-CLOSED: the calibration-regime membership check is the FIRST
     statement of validate_evidence, so a run outside the calibrated set is refused before any
     threshold measured elsewhere is applied to it.
-  formal: 'calibration_regime_id not in CALIBRATED_REGIMES => Err(UncalibratedRegime) before any per-parameter comparison'
+  formal: 'calibration_regime_id not in CALIBRATED_REGIMES ⇒ Err(UncalibratedRegime) before any per-parameter comparison'
   applies_to: all
 
 - type: invariant
@@ -1290,14 +1295,14 @@ proof_obligations:
     OBLIG-STL-GRADIENT-FREE-RECORDED-NOT-GATED: members of attention_key_bias appear in the
     evidence table and contribute to no verdict. The class boundary is pinned by a measurement
     that runs in every cargo test, so it degrades into folklore only if that test is deleted.
-  formal: 'for all p in attention_key_bias: p in table.rows && p not in gated_set'
+  formal: '∀ p in attention_key_bias: p in table.rows ∧ p not in gated_set'
   applies_to: all
 
 - type: invariant
   property: >
     OBLIG-STL-DIGESTS-IN-BAND: consumed_pair_digest and batch_boundary_digest are absorbed at
     consumption and never recomputed from configuration.
-  formal: 'absorb_batch_digests occurs within the pair-pull loop and not in run_tuning''s body'
+  formal: 'absorb_batch_digests ∈ the pair-pull loop ∧ absorb_batch_digests ∉ run_tuning''s body'
   applies_to: all
 
 - type: soundness
@@ -1306,7 +1311,7 @@ proof_obligations:
     hashes, compares, carries a tolerance or constructs a lifecycle state. artifact_hash is a
     free function, not a trait method, and the trait is sealed by a private-module supertrait.
     An implementor can therefore change the FORMAT and cannot change the VERDICT.
-  formal: 'methods(SetFitCodec) == {format_id, serialize, deserialize} && artifact_hash not in methods(SetFitCodec) && SetFitCodec: sealed::Sealed'
+  formal: 'methods(SetFitCodec) == {format_id, serialize, deserialize} ∧ artifact_hash not in methods(SetFitCodec) ∧ SetFitCodec: sealed::Sealed'
   applies_to: all
 
 - type: soundness
@@ -1316,7 +1321,7 @@ proof_obligations:
     bytes, requires serialize(deserialize(b)) == b, and rebuilds the comparison object from the
     reloaded bundle alone. A codec that returns an object it was not handed is refused by the
     closure check before the rebuild runs.
-  formal: 'SetFitRun<ArtifactReloadedAndVerified> constructible => codec.serialize(codec.deserialize(b)) == b && comparison_object == rebuild(codec.deserialize(b))'
+  formal: 'SetFitRun<ArtifactReloadedAndVerified> constructible ⇒ codec.serialize(codec.deserialize(b)) == b ∧ comparison_object == rebuild(codec.deserialize(b))'
   applies_to: all
 
 - type: invariant
@@ -1327,7 +1332,7 @@ proof_obligations:
     exact tokenizer bytes with sha256(bytes) == architecture.tokenizer_sha256, and the
     vocabulary remap without which a slice encoder gathers the wrong embedding row for every
     token.
-  formal: 'for all r in probe_rows: bits(embed(rebuild(bytes), r)) == bits(embed(original, r))'
+  formal: '∀ r in probe_rows: bits(embed(rebuild(bytes), r)) == bits(embed(original, r))'
   applies_to: all
 
 - type: safety
@@ -1347,7 +1352,7 @@ proof_obligations:
     pair_order_digest and batch_boundaries move 03-05's in-band recordings through the states
     and are never recomputed from configuration; none of the ten returns &mut, and none
     consumes the run into another state.
-  formal: 'pair_order_digest() == evidence.table.consumed_pair_digest && batch_boundaries() == evidence.table.batch_boundary_list'
+  formal: 'pair_order_digest() == evidence.table.consumed_pair_digest ∧ batch_boundaries() == evidence.table.batch_boundary_list'
   applies_to: all
 
 - type: invariant
@@ -1355,7 +1360,7 @@ proof_obligations:
     OBLIG-STL-RESOLVED-CONFIG-ONE-WAY: ResolvedSetFitConfig stays Serialize-but-not-Deserialize
     (T-3-50), the bundle carries a separate provenance record, and there is no conversion from
     that record back into a runtime resolved configuration.
-  formal: 'not exists TryFrom<ResolvedConfigRecord> for ResolvedSetFitConfig && Deserialize not in derives(ResolvedSetFitConfig)'
+  formal: 'not ∃ TryFrom<ResolvedConfigRecord> for ResolvedSetFitConfig ∧ Deserialize not in derives(ResolvedSetFitConfig)'
   applies_to: all
 
 - type: soundness
@@ -1365,7 +1370,7 @@ proof_obligations:
     value itself. No public constructor exists, no public function in evaluate.rs takes a float
     parameter, and the artifact hash is read off the run rather than accepted. The single
     float-taking door is #[cfg(test)] pub(super) and is named by the guard.
-  formal: 'ValidationEvaluation constructible => produced by evaluate_validation && not exists pub fn in evaluate.rs with a float parameter'
+  formal: 'ValidationEvaluation constructible ⇒ produced by evaluate_validation ∧ not ∃ pub fn in evaluate.rs with a float parameter'
   applies_to: all
 
 - type: invariant
@@ -1377,7 +1382,7 @@ proof_obligations:
     admitted candidate carries a FINITE value: total_cmp orders +NaN above +infinity, so an
     unfiltered non-finite candidate would be selected rather than ignored, and the rule can only
     stay a total order if the refusal happens at admission instead.
-  formal: 'chosen_index == rule(candidates) && (forall i: is_finite(value_i)) && lock_hash == sha256(canonical_bytes(lock)) && not exists parameter `chosen` in from_candidates'
+  formal: 'chosen_index == rule(candidates) ∧ (∀ i: is_finite(value_i)) ∧ lock_hash == sha256(canonical_bytes(lock)) ∧ not ∃ parameter `chosen` in from_candidates'
   applies_to: all
 
 - type: safety
@@ -1388,7 +1393,7 @@ proof_obligations:
     dataset fingerprint against the supplied canonical dataset's, returning the test split out of
     that same dataset so the rows admitted are the rows whose provenance was checked.
     Split<CompatibilityTest> is a different type that cannot reach the grant.
-  formal: 'mint(lock, model) = Ok => lock.chosen_artifact_hash == model.artifact_hash() && grant(t, m, d) = Ok => t.artifact_hash == m.artifact_hash() && t.dataset_fingerprint == d.dataset_fingerprint() && result.test == d.test()'
+  formal: 'mint(lock, model) = Ok ⇒ lock.chosen_artifact_hash == model.artifact_hash() ∧ grant(t, m, d) = Ok ⇒ t.artifact_hash == m.artifact_hash() ∧ t.dataset_fingerprint == d.dataset_fingerprint() ∧ result.test == d.test()'
   applies_to: all
 
 falsification_tests:

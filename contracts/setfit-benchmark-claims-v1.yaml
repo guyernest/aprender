@@ -114,6 +114,9 @@ metadata:
   created: '2026-08-17'
   author: PAIML Engineering
   kind: kernel
+  # ONT-7 (plan 08-33): the benchmark-claim rules hold in the committed tree; no qualifier is claimed.
+  valid_under:
+    world: committed
   description: >
     The Phase 5 CLAIMS CONTRACT: what a benchmark row contains, what makes a benchmark run
     COMPLETE, what makes two rows COMPARABLE, what evidence a "no selection happened" claim
@@ -844,12 +847,12 @@ proof_obligations:
       rule means something other than what this contract says.
       Discharged by FALSIFY-CLAIMS-001.
     formal: >
-      expectation_set.expected_cells == |methods| * |shots| * |seeds| == 40 &&
-      set(RunManifest::expectation()) == set(methods x shots x seeds) &&
-      |RunManifest::expectation()| == 40 &&
-      no_duplicates(methods) && no_duplicates(shots) && no_duplicates(seeds) &&
+      expectation_set.expected_cells == |methods| * |shots| * |seeds| == 40 ∧
+      set(RunManifest::expectation()) == set(methods x shots x seeds) ∧
+      |RunManifest::expectation()| == 40 ∧
+      no_duplicates(methods) ∧ no_duplicates(shots) ∧ no_duplicates(seeds) ∧
       expectation_set.deferred_two_method_scope.deferred_expected_cells
-        == |deferred_methods| * |shots| * |seeds| == 80 &&
+        == |deferred_methods| * |shots| * |seeds| == 80 ∧
       set(expectation_set.methods) subset_of set(expectation_set.deferred_two_method_scope.deferred_methods)
     applies_to: all
 
@@ -865,7 +868,7 @@ proof_obligations:
       the value is returned protects nothing, because the value has already escaped.
       Discharged by FALSIFY-CLAIMS-002.
     formal: >
-      from_bytes(b) == Ok(v) => sha256(canonical_compact(v.payload)) == v.semantic_hash &&
+      from_bytes(b) == Ok(v) ⇒ sha256(canonical_compact(v.payload)) == v.semantic_hash ∧
       digest_check precedes return
     applies_to: all
 
@@ -883,7 +886,7 @@ proof_obligations:
       downgrades "exactly" to "up to an RNG seed".
       Discharged by FALSIFY-CLAIMS-003.
     formal: >
-      forall f in fields(BenchRow): f not_in forbidden_field_name_substrings &&
+      ∀ f in fields(BenchRow): f ∉ forbidden_field_name_substrings ∧
       deny_unknown_fields(every struct in BenchRow)
     applies_to: all
 
@@ -902,8 +905,8 @@ proof_obligations:
       MethodEvidence = Setfit{evidence_table_hash, apr_artifact_sha256, lock{lock_hash, role, rule, lock_record_path}}
                      | Lora{base_model_sha256, base_model_bytes, adapter_sha256, epochs_requested,
                             epochs_completed, early_stopping_disabled, val_split, no_selection_attestation,
-                            candidate_ledger_sha256, candidates_trained, candidate_ledger_path} &&
-      forall field f in either variant: type(f) is not Option
+                            candidate_ledger_sha256, candidates_trained, candidate_ledger_path} ∧
+      ∀ field f in either variant: type(f) is not Option
     applies_to: all
 
   - type: conservation
@@ -919,8 +922,8 @@ proof_obligations:
       that produced the published number is no longer the run on disk.
       Discharged by FALSIFY-CLAIMS-005.
     formal: >
-      record(m, c, h) == Ok(idempotent) iff status(c) == complete && row_sha256(c) == h ;
-      record(m, c, h') == Err(CellAlreadyRecorded{c, existing, incoming: h'}) iff status(c) == complete && row_sha256(c) != h'
+      record(m, c, h) == Ok(idempotent) ↔ status(c) == complete ∧ row_sha256(c) == h ;
+      record(m, c, h') == Err(CellAlreadyRecorded{c, existing, incoming: h'}) ↔ status(c) == complete ∧ row_sha256(c) ≠ h'
     applies_to: all
 
   - type: ordering
@@ -935,8 +938,8 @@ proof_obligations:
       aggregate, which can only be checked against a defined canonical order.
       Discharged by FALSIFY-CLAIMS-006.
     formal: >
-      expectation() == sort_by(method_index asc, shots asc, seed asc) &&
-      forall listings L in manifest, report: order(L) == order(expectation())
+      expectation() == sort_by(method_index asc, shots asc, seed asc) ∧
+      ∀ listings L in manifest, report: order(L) == order(expectation())
     applies_to: all
 
   - type: soundness
@@ -960,10 +963,10 @@ proof_obligations:
       a test-only constructor.
       Discharged by FALSIFY-CLAIMS-007 and FALSIFY-CLAIMS-008.
     formal: >
-      report(dir) == Ok => |complete_cells| == 40 &&
-        forall c: sha256(bytes(row_file(c))) == manifest.row_sha256(c) && row(c).cell == c ;
-      DEFERRED: forall (s, d): row(setfit, s, d).selection_manifest_hash == row(lora, s, d).selection_manifest_hash ;
-      |cells(manifest)| == 0 => Err ; set(cells(manifest)) != expectation_set => Err
+      report(dir) == Ok ⇒ |complete_cells| == 40 ∧
+        ∀ c: sha256(bytes(row_file(c))) == manifest.row_sha256(c) ∧ row(c).cell == c ;
+      DEFERRED: ∀ (s, d): row(setfit, s, d).selection_manifest_hash == row(lora, s, d).selection_manifest_hash ;
+      |cells(manifest)| == 0 ⇒ Err ; set(cells(manifest)) ≠ expectation_set ⇒ Err
     applies_to: all
 
   - type: equivalence
@@ -988,8 +991,8 @@ proof_obligations:
       exact dishonesty this contract exists to prevent.
       Discharged by FALSIFY-CLAIMS-009.
     formal: >
-      setfit_row valid => sha256(read(lock.lock_record_path)) == lock.lock_hash ;
-      lora_row valid => sha256(read(candidate_ledger_path)) == candidate_ledger_sha256 &&
+      setfit_row valid ⇒ sha256(read(lock.lock_record_path)) == lock.lock_hash ;
+      lora_row valid ⇒ sha256(read(candidate_ledger_path)) == candidate_ledger_sha256 ∧
                         line_count(candidate_ledger) == candidates_trained == 1
     applies_to: all
 
@@ -1026,11 +1029,11 @@ proof_obligations:
       deferred with an empty domain under D-19, and a green here discharges no part of it.
       Discharged by FALSIFY-CLAIMS-011.
     formal: >
-      report(dir) == Ok => forall c in ACTIVE expectation set:
+      report(dir) == Ok ⇒ ∀ c in ACTIVE expectation set:
         let m = selection_manifest(dir, c) in
-          sha256(m.payload.to_canonical_bytes()) == m.semantic_hash &&
-          m.semantic_hash == row(c).selection_manifest_hash &&
-          m.payload.shots_per_class == c.shots && m.payload.root_seed == c.seed ;
+          sha256(m.payload.to_canonical_bytes()) == m.semantic_hash ∧
+          m.semantic_hash == row(c).selection_manifest_hash ∧
+          m.payload.shots_per_class == c.shots ∧ m.payload.root_seed == c.seed ;
       path(m) is a function of c alone, NOT of row(c)
     applies_to: all
 
@@ -1074,18 +1077,18 @@ proof_obligations:
 
       Discharged by FALSIFY-CLAIMS-012.
     formal: >
-      report(dir) == Ok => forall c in ACTIVE expectation set:
+      report(dir) == Ok ⇒ ∀ c in ACTIVE expectation set:
         let q = row(c).quality, R = recompute(q.confusion_matrix, q.ordered_labels) in
-          q.n_test_rows == R.n_rows &&
-          to_bits(q.f_avg) == to_bits(R.f_avg) &&
-          to_bits(q.macro_f1) == to_bits(R.macro_f1) &&
-          to_bits(q.mcc) == to_bits(R.mcc) &&
-          map(to_bits, q.per_class_precision) == map(to_bits, R.per_class_precision) &&
-          map(to_bits, q.per_class_recall) == map(to_bits, R.per_class_recall) &&
-          map(to_bits, q.per_class_f1) == map(to_bits, R.per_class_f1) &&
-          q.f_avg_bits == to_bits(q.f_avg) && q.macro_f1_bits == to_bits(q.macro_f1) &&
-          q.mcc_bits == to_bits(q.mcc) &&
-          q.ece_top_label_validation_bits == to_bits(q.ece_top_label_validation) &&
+          q.n_test_rows == R.n_rows ∧
+          to_bits(q.f_avg) == to_bits(R.f_avg) ∧
+          to_bits(q.macro_f1) == to_bits(R.macro_f1) ∧
+          to_bits(q.mcc) == to_bits(R.mcc) ∧
+          map(to_bits, q.per_class_precision) == map(to_bits, R.per_class_precision) ∧
+          map(to_bits, q.per_class_recall) == map(to_bits, R.per_class_recall) ∧
+          map(to_bits, q.per_class_f1) == map(to_bits, R.per_class_f1) ∧
+          q.f_avg_bits == to_bits(q.f_avg) ∧ q.macro_f1_bits == to_bits(q.macro_f1) ∧
+          q.mcc_bits == to_bits(q.mcc) ∧
+          q.ece_top_label_validation_bits == to_bits(q.ece_top_label_validation) ∧
           q.brier_multiclass_validation_bits == to_bits(q.brier_multiclass_validation) ;
       recompute opens NO file: its entire input is row(c) itself
     applies_to: all
@@ -1113,11 +1116,11 @@ proof_obligations:
       paragraph a reader may never reach.
       Discharged by FALSIFY-CLAIMS-010.
     formal: >
-      row.cold_measured_in_child_process == true &&
-      row.warmup_count == 3 && row.throughput_batch_size present &&
-      train_peak_rss_bytes != inference_peak_rss_bytes as FIELDS (two distinct fields, always both present) &&
-      mechanism(m) in {child_max_rss_time_l, child_max_rss_vm_hwm, sysinfo_sampled_<hz>} &&
-      mechanism(m) == sysinfo_sampled_<hz> => peak_rss_sample_interval_hz present
+      row.cold_measured_in_child_process == true ∧
+      row.warmup_count == 3 ∧ row.throughput_batch_size present ∧
+      train_peak_rss_bytes ≠ inference_peak_rss_bytes as FIELDS (two distinct fields, always both present) ∧
+      mechanism(m) in {child_max_rss_time_l, child_max_rss_vm_hwm, sysinfo_sampled_<hz>} ∧
+      mechanism(m) == sysinfo_sampled_<hz> ⇒ peak_rss_sample_interval_hz present
     applies_to: all
 
 falsification_tests:

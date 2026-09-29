@@ -4,6 +4,9 @@ metadata:
   created: '2026-09-05'
   author: PAIML Engineering
   kind: kernel
+  # ONT-7 (plan 08-33): the parity bars hold in the committed tree; no qualifier is claimed.
+  valid_under:
+    world: committed
   description: >
     The FROZEN correctness bar for `crates/aprender-forecast`'s Prophet 1.4.0 port (D-04): every
     tolerance the parity ladder asserts lives HERE, once, and is read at test time via
@@ -344,12 +347,12 @@ proof_obligations:
 
   - type: equivalence
     property: 'Rust data preparation reproduces Prophet 1.4.0 Stan data block exactly, from the raw (ds, y) alone, on every committed fixture'
-    formal: 'forall fixture: max_abs_diff(design, stan_data) <= equations.data_prep_exact.float_tolerance'
+    formal: '∀ fixture: max_abs_diff(design, stan_data) ≤ equations.data_prep_exact.float_tolerance'
     applies_to: all
 
   - type: bound
     property: 'The Rust objective evaluated at Python MAP is within 1e-9 of Python own -lp, on every committed fixture that publishes -lp'
-    formal: 'forall fixture with lp: |f_rust(theta_py) + log_posterior_at_map_unnormalized| <= equations.objective_at_python_map_abs.float_tolerance'
+    formal: '∀ fixture with lp: |f_rust(theta_py) + log_posterior_at_map_unnormalized| ≤ equations.objective_at_python_map_abs.float_tolerance'
     applies_to: all
 
   - type: bound
@@ -369,7 +372,7 @@ proof_obligations:
 
   - type: bound
     property: 'The Rust MAP fit never lands more than 0.5 objective units above Python MAP on any committed fixture'
-    formal: 'forall fixture: f_rust(theta_fit) - f_python <= equations.fitted_objective_slack.float_tolerance'
+    formal: '∀ fixture: f_rust(theta_fit) - f_python ≤ equations.fitted_objective_slack.float_tolerance'
     applies_to: all
 
   - type: bound
@@ -384,27 +387,27 @@ proof_obligations:
 
   - type: invariant
     property: 'The returned component decomposition reconstructs the returned yhat: trend*(1+multiplicative_terms)+additive_terms == yhat'
-    formal: 'forall i: |trend_i*(1+mul_i) + add_i - yhat_i| <= equations.components_rebuild_yhat_abs.float_tolerance'
+    formal: '∀ i: |trend_i*(1+mul_i) + add_i - yhat_i| ≤ equations.components_rebuild_yhat_abs.float_tolerance'
     applies_to: all
 
   - type: bound
     property: 'Mean 80% band width over history and over future rows is within 2% of the Python reference on all seven fixtures'
-    formal: 'forall fixture: |w_rust - w_py| <= equations.band_width_rel.float_tolerance * w_py'
+    formal: '∀ fixture: |w_rust - w_py| ≤ equations.band_width_rel.float_tolerance * w_py'
     applies_to: all
 
   - type: bound
     property: 'Mean 80% band width over the last 30 forecast rows is within 2% of uncertainty.future_band_last30_mean_width'
-    formal: 'forall spike003 fixture: |w30_rust - w30_py| <= equations.band_width_last30_rel.float_tolerance * w30_py'
+    formal: '∀ spike003 fixture: |w30_rust - w30_py| ≤ equations.band_width_last30_rel.float_tolerance * w30_py'
     applies_to: all
 
   - type: bound
     property: 'Mean future TREND band width is within 5% of uncertainty.future_trend_band_mean_width'
-    formal: 'forall spike003 fixture: |wt_rust - wt_py| <= equations.trend_band_width_rel.float_tolerance * wt_py'
+    formal: '∀ spike003 fixture: |wt_rust - wt_py| ≤ equations.trend_band_width_rel.float_tolerance * wt_py'
     applies_to: all
 
   - type: determinism
     property: 'The D-09 fit recipe terminates within max_rounds restarts with a Stalled or Converged status and without hitting the cooperative budget, on every committed fixture'
-    formal: 'forall fixture: info.rounds <= constants.max_rounds && info.status in {Stalled, Converged} && info.budget_hit == false'
+    formal: '∀ fixture: info.rounds ≤ constants.max_rounds ∧ info.status in {Stalled, Converged} ∧ info.budget_hit == false'
     applies_to: all
 
   - type: equivalence

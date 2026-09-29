@@ -4,6 +4,9 @@ metadata:
   created: '2026-09-05'
   author: PAIML Engineering
   kind: kernel
+  # ONT-7 (plan 08-33): the parity bars hold in the committed tree; no qualifier is claimed.
+  valid_under:
+    world: committed
   description: >
     The FROZEN correctness bar for `crates/aprender-forecast`'s NeuralProphet-lite port
     (`src/np.rs`) and for the D-10 training rules that make it work (SC3). Every number the
@@ -241,42 +244,42 @@ proof_obligations:
 
   - type: equivalence
     property: 'Rust NeuralProphet-lite data preparation reproduces NeuralProphet 0.9.0 own normalisation, time scaling and changepoint grid from the raw (ds, y) alone'
-    formal: 'max_abs_diff(NpData::new(ds, y, n_train, 10, 0.8), oracle.trend_seasonality.data_params + changepoints_t) <= equations.data_prep_vs_oracle_abs.float_tolerance'
+    formal: 'max_abs_diff(NpData::new(ds, y, n_train, 10, 0.8), oracle.trend_seasonality.data_params + changepoints_t) ≤ equations.data_prep_vs_oracle_abs.float_tolerance'
     applies_to: all
 
   - type: equivalence
     property: 'The auto batch and auto epoch formulas reproduce NeuralProphet own reported values exactly, as integers'
-    formal: 'auto_batch(n_train) == constants.np_peyton_batch && auto_epochs(n_train) == constants.np_peyton_epochs'
+    formal: 'auto_batch(n_train) == constants.np_peyton_batch ∧ auto_epochs(n_train) == constants.np_peyton_epochs'
     applies_to: all
 
   - type: bound
     property: 'The lag-free model forecasts 365 days ahead on the Peyton Manning holdout at least as well as the SC3 bar'
-    formal: 'mae_365ahead <= equations.lag_free_holdout_mae.float_tolerance'
+    formal: 'mae_365ahead ≤ equations.lag_free_holdout_mae.float_tolerance'
     applies_to: all
 
   - type: bound
     property: 'The AR-Net with 30 lags and one hidden layer of 32 beats the oracle own naive one-step baseline'
-    formal: 'mae_1step_rust < oracle.naive_1step_mae_test - equations.ar_net_vs_naive_margin.float_tolerance'
+    formal: 'mae_1step_rust < oracle.naive_1step_mae_test − equations.ar_net_vs_naive_margin.float_tolerance'
     applies_to: all
 
   - type: invariant
     property: 'The Huber loss is graph-connected: after backward() every model parameter has a gradient with at least one non-zero entry'
-    formal: 'forall p in model.parameters(): p.grad() = Some(g) && max_i |g_i| > equations.huber_grad_min_abs.float_tolerance'
+    formal: '∀ p in model.parameters(): p.grad() = Some(g) ∧ max_i |g_i| > equations.huber_grad_min_abs.float_tolerance'
     applies_to: all
 
   - type: invariant
     property: 'The Huber loss is assembled from graph-connected ops with a constant mask, never from a detached data round trip'
-    formal: 'weighted_huber has no `Tensor::new(raw_data)` on the value path; the mask tensor carries no requires_grad'
+    formal: 'weighted_huber: ¬∃ `Tensor::new(raw_data)` on the value path ∧ ¬ requires_grad on the mask tensor'
     applies_to: all
 
   - type: bound
     property: 'The auto batch size is a strict mini-batch and stays inside the documented clamp over the whole supported range'
-    formal: 'forall n in [constants.min_rows_for_mini_batch, types::MAX_POINTS]: auto_batch(n) < n && constants.auto_batch_min <= auto_batch(n) <= constants.auto_batch_max'
+    formal: '∀ n in [constants.min_rows_for_mini_batch, types::MAX_POINTS]: auto_batch(n) < n ∧ constants.auto_batch_min ≤ auto_batch(n) ≤ constants.auto_batch_max'
     applies_to: all
 
   - type: determinism
     property: 'A completed fit leaves the thread-local autograd tape empty, so the next fit on that thread starts clean'
-    formal: 'graph_tape_len() == 0 after train() and after a completed forecast(model = neuralprophet)'
+    formal: 'graph_tape_len() after train() == 0 ∧ graph_tape_len() after a completed forecast(model = neuralprophet) == 0'
     applies_to: all
 
   - type: invariant
@@ -286,17 +289,17 @@ proof_obligations:
 
   - type: invariant
     property: 'Fourier seasonality features are phased on days since 1900-01-01, NeuralProphet own epoch'
-    formal: 'fourier_feats(day, ..) depends on day only through (day - days_from_civil(constants.fourier_epoch_year, 1, 1))'
+    formal: '∃ f: fourier_feats(day, ..) = f(day − days_from_civil(constants.fourier_epoch_year, 1, 1))'
     applies_to: all
 
   - type: bound
     property: 'A planted additive event effect is recovered by the event block on EVERY indicator column, at n_lags = 0 and at n_lags > 0 alike, rather than being absorbed by the trend, the seasonality or the AR term'
-    formal: 'forall j in event columns: |w_j * NpData::scale - effect| / |effect| <= equations.event_effect_recovery_rel.float_tolerance, for n_lags in {0, 7}'
+    formal: '∀ j in event columns: |w_j * NpData::scale - effect| / |effect| ≤ equations.event_effect_recovery_rel.float_tolerance, for n_lags in {0, 7}'
     applies_to: all
 
   - type: determinism
     property: 'The event block is bitwise reproducible at a fixed seed and genuinely seed-dependent, and its autograd tape cost is flat in the event-column count'
-    formal: 'bits(train(d, cfg_E, s).event_weights()) == bits(train(d, cfg_E, s).event_weights()) AND bits(train(d, cfg_E, s).event_weights()) != bits(train(d, cfg_E, s2).event_weights()) for s2 != s, both at equations.event_training_determinism_bitwise.float_tolerance = 0.0; AND tape_len_per_step(E1) - tape_len_per_step(0) == tape_len_per_step(E2) - tape_len_per_step(0) for any two E1, E2 > 0, at equations.event_tape_length_flat_in_columns.float_tolerance = 0.0'
+    formal: 'bits(train(d, cfg_E, s).event_weights()) == bits(train(d, cfg_E, s).event_weights()) ∧ bits(train(d, cfg_E, s).event_weights()) ≠ bits(train(d, cfg_E, s2).event_weights()) for s2 ≠ s, both at equations.event_training_determinism_bitwise.float_tolerance = 0.0; ∧ tape_len_per_step(E1) - tape_len_per_step(0) == tape_len_per_step(E2) - tape_len_per_step(0) for any two E1, E2 > 0, at equations.event_tape_length_flat_in_columns.float_tolerance = 0.0'
     status: proven
     evidence: 'crates/aprender-forecast/src/events.rs::tests::fixed_seed_event_training_is_bit_identical_and_a_different_seed_differs and ::tests::the_tape_does_not_grow_with_the_event_column_count; and through the PUBLIC DOOR, crates/aprender-forecast/src/forecast.rs::tests::door_level_event_training_is_deterministic_at_a_fixed_seed'
 
