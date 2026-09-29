@@ -141,8 +141,10 @@ equations:
         `#[serde(flatten)]` (header_impl.rs:297-299), and HashMap iteration order is not specified.
         N top-level custom keys therefore serialize in an unspecified order and the container
         checksum over them is not reproducible across processes. ONE key holding one
-        `serde_json::Map` object is reproducible, because serde_json::Map is BTreeMap-backed and no
-        workspace crate enables `preserve_order`.'
+        `serde_json::Map` object is reproducible because the writer canonicalises that document
+        (every object, at every depth, rebuilt with its keys sorted) before serialising it, so its
+        bytes are the same whether serde_json is BTreeMap-backed or `preserve_order` is unified in
+        (pmcp enables it for any build that links it).'
       - 'THE TOKENIZER BYTES TRAVEL, NOT JUST THEIR DIGEST. An artifact carrying only
         `tokenizer_sha256` can DETECT a substituted tokenizer and cannot REBUILD the right one, so a
         reload from it could not re-encode a single string. This restates
@@ -165,7 +167,7 @@ equations:
     codomain: 'a deny_unknown_fields struct that parses fail-closed or not at all'
     preconditions:
       - 'aprender-core owns this type and CANNOT name the aprender-train types behind four of the five sub-documents, so each arrives already reduced to a serde_json::Value by the writer'
-      - 'no workspace crate enables serde_json''s preserve_order feature, so serde_json::Map is BTreeMap-backed and key order is sorted'
+      - 'the writer canonicalises the document (recursively sorted keys) before serialising, so key order is sorted whether or not serde_json''s preserve_order feature is unified into the build'
     postconditions:
       - 'an unknown key is a typed parse refusal, never a silently ignored field'
       - 'schema and schema_version are checked before any other field is read, so a future schema cannot be partially interpreted by this build'
@@ -205,9 +207,10 @@ equations:
         — which owns the doc — CANNOT NAME those types: train depends on core, never the reverse.
         `EncoderArchitecture` is the one exception that core does own, and it is carried the same
         way so the five are handled uniformly by one walk.'
-      - 'THEIR KEY ORDER IS DETERMINISTIC. `serde_json::Map` is BTreeMap-backed by default and no
-        workspace crate enables `preserve_order`, so `to_value` over a struct yields sorted keys and
-        the same struct value always yields the same bytes.'
+      - 'THEIR KEY ORDER IS DETERMINISTIC. `to_value` over a struct yields keys in declaration order
+        under `preserve_order` and sorted otherwise, so the writer canonicalises the whole document
+        (recursively sorted keys) before serialising, and the same struct value always yields the same
+        bytes under either backing.'
       - '`provenance` IS ONE OF THE FIVE AND NOT AN EXCEPTION. It is `to_value(bundle.provenance)`
         exactly like the other four, so the null walk of `nullable_path_allowlist` covers it on the
         same terms. Recording this explicitly because a reader who treats provenance as "just
