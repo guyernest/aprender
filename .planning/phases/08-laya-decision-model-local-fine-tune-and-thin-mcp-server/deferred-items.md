@@ -918,6 +918,22 @@ raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
   3.5 s of software sha256) and re-pricing (b) from these samples.
   status: open
 
+### Found during plan 08-32 (out of scope, pre-existing)
+
+- **D-ITEM-08-32-A: `aprender-contracts-cli` `every_contract_generates_book_page` (tests/book_coverage.rs) is red
+  at the pre-Phase-8 base.** It calls `parse_contract` on every top-level `contracts/*.yaml`, and
+  `contracts/binding.yaml` (a binding registry, not a contract, present since 4dcf9b21f #2277, 2026-07-04) has no
+  `metadata:` field: `Failed to parse YAML: missing field 'metadata'`. Control: a detached worktree at d37f2fefc
+  (origin/main, before any Phase 8 commit) fails identically (rc 101). Phase 8 changed neither the test,
+  binding.yaml nor the schema parser. `just laya-gap-regression` skips it by exact name and prints the skip; the
+  contract-cycle guard (`certify_on_real_contracts`, `verify_pipeline_on_real_contracts`,
+  `verify_pipeline_json_on_real_contracts`) runs by name and passes. Not in CI's explicit `--test` line.
+  status: open
+  **Owner:** the aprender-contracts maintainers (skip non-contract YAML in the test, or move binding.yaml).
+  **Re-open trigger:** book_coverage added to a required CI line.
+- **The gap regression skips apr-format `golden_v2_f32_writer_is_byte_identical` by exact name** (the 08-20
+  entry above, still open); every other apr-format test runs and must pass.
+
 ## Gap round 08-19..08-32: final status (plan 08-31, 2026-09-29)
 
 Every finding of `08-REVIEW.md` (1 critical, 9 warnings, 8 info) and `08-CODE-REVIEW-FINDINGS.md` (the

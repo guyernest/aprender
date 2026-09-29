@@ -3333,6 +3333,19 @@ laya-gates-selftest:
         [ "$(grep -c '^self-case [a-z]*: exit ' "$(logof missing-anchor)")" -eq 3 ] || red "missing-anchor: the recipe's three self-cases did not all run and fail as designed before the ledger"
         must_pass ledger '^LAYA CLAIMS OK [0-9]+ rows' just laya-claims-check
     }
+    row_gap_regression() {
+        # A cargo shim first on PATH: `zero` exits 0 having run no test (the CR-02 shape of a stale name
+        # filter), `fail` exits 101. Class A must FAIL on both; the real class A must pass.
+        local S="$W/cargoshim"; mkdir -p "$S"
+        printf '#!/bin/sh\nif [ "${GAP_SHIM_MODE:-zero}" = fail ]; then echo "cargo shim: a test failed" >&2; exit 101; fi\necho "running 0 tests"\necho "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s"\nexit 0\n' > "$S/cargo"
+        chmod +x "$S/cargo"
+        must_fail zero-match '^FAIL CLASS A manifest-and-run-fields: 0 passed' env PATH="$S:$PATH" LAYA_GAP_ONLY=A just laya-gap-regression
+        must_fail stage-exit '^FAIL CLASS A manifest-and-run-fields: exit 101' env PATH="$S:$PATH" GAP_SHIM_MODE=fail LAYA_GAP_ONLY=A just laya-gap-regression
+        if grep -q 'LAYA GAP' "$(logof zero-match)" "$(logof stage-exit)"; then red "a failing class still printed a LAYA GAP OK line"; fi
+        must_fail unknown-class "^FAIL LAYA_GAP_ONLY: unknown class 'F'" env LAYA_GAP_ONLY=F just laya-gap-regression
+        must_pass class-a '^LAYA GAP STAGES OK \(A; not the full regression\)' env LAYA_GAP_ONLY=A just laya-gap-regression
+        grep -q '^PASS CLASS A$' "$(logof class-a)" || red "class-a: no PASS CLASS A line"
+    }
     # ---- dispatch -------------------------------------------------------------------------------
     UNKNOWN=""
     while IFS=$'\t' read -r -u 3 gid target mf; do
@@ -3567,3 +3580,164 @@ laya-claims-check:
     done
     # 2. The ledger.
     python3 "$W/claims.py" check "$TSV" "$W/cache"
+
+# ---------------------------------------------------------------------------
+# The gap round as a whole (plan 08-32): each of plans 08-19..08-31 proved its own class slice; this is
+# the goal-backward check that they compose, on the final tree and the real deployed artifact.
+# ---------------------------------------------------------------------------
+
+# Re-prove every class invariant of the 08-19..08-31 gap round, then the phase regression, in one run:
+#   CLASS A  manifest leaf sweep, run-field sweep, served-fields sweep, the lambda probe checks
+#   CLASS B  the artifact / request / Lambda bounds sweeps, apr-format and the ModernBERT bound tests
+#   CLASS C  just laya-gates-selftest, make contract-audit-phase8 (with its ERE case table)
+#   CLASS D  just laya-claims-check
+#   CLASS E  the bit-for-bit numeric replay (Rust side) and laya-train-selftest (Python side, with
+#            METRICS SELFTEST OK and the PYTHON REFUSALS sweep line)
+#   REGRESSION  the three decide crates' tests, clippy -D warnings, fmt, pv validate on the four Phase 8
+#            contracts, monorepo_invariants + readme_contract, the aprender-contracts-cli tests (the
+#            contract-cycle guard), laya-verify-suite (real weights, every LEG OK, the ladder rung
+#            MEASURED) and laya-verify of the deployed artifact from the MAIN checkout
+#            (deploy_eligible true, the pinned sha256 below, shipped seed 17).
+# Every stage logs to one temp dir (printed first). A stage whose exit is non-zero, whose evidence line
+# is absent, or whose named-test run passes a different number of tests than it names prints
+# `FAIL <CLASS> <stage>: <why> (log <path>)` and the recipe exits 1: a name filter that matches nothing
+# exits 0 in cargo (REVIEW CR-02), so the passed count is the check, never the exit status alone.
+# Success prints `PASS CLASS A` .. `PASS CLASS E`, `PASS REGRESSION` and `LAYA GAP REGRESSION OK`.
+# LAYA_GAP_ONLY=<A,B,C,D,E,REGRESSION> runs only those classes and prints `LAYA GAP STAGES OK`, never
+# the full OK line (row gap-regression of scripts/laya_gates.tsv uses it). The default run reads real
+# weights (laya-gates-selftest's armed leg, laya-verify-suite, laya-verify), so run it under the host's
+# real-weights lock (`lockf -k /tmp/aprender-laya-real-weights.lock just laya-gap-regression`); it does
+# not take the lock itself, because laya-gates-selftest re-enters it for class A.
+laya-gap-regression:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ONLY="${LAYA_GAP_ONLY:-}"
+    CLASSES="A B C D E REGRESSION"
+    for c in ${ONLY//,/ }; do
+        case " $CLASSES " in *" $c "*) ;; *) echo "FAIL LAYA_GAP_ONLY: unknown class '$c' (known: $CLASSES)" >&2; exit 1 ;; esac
+    done
+    DEPLOYED_SHA="24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a"
+    DEPLOYED_SEED=17
+    MAIN="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)"
+    L="$(mktemp -d "${TMPDIR:-/tmp}/laya-gap-regression.XXXXXX")"
+    echo "LOGS $L"
+    CLS=""
+    wanted() { [ -z "$ONLY" ] && return 0; case ",$ONLY," in *",$1,"*) return 0 ;; esac; return 1; }
+    fail() { echo "FAIL $CLS $1: $2 (log $3)" >&2; tail -8 "$3" >&2 || true; exit 1; }
+    # The sum of libtest's `N passed` over every `test result:` line of a log.
+    passed() { awk '/^test result: /{ for (i = 2; i <= NF; i++) if ($i == "passed;") s += $(i - 1) } END { print s + 0 }' "$1"; }
+    # run <stage> <cmd...>: the command's status, read on its own line; non-zero is a FAIL.
+    run() {
+        local stage="$1" rc; shift
+        LOG="$L/${CLS// /-}-$stage.log"
+        set +e
+        "$@" < /dev/null > "$LOG" 2>&1
+        rc=$?
+        set -e
+        [ "$rc" -eq 0 ] || fail "$stage" "exit $rc" "$LOG"
+    }
+    # need <stage> <ERE>: the last run's log must carry a line matching ERE.
+    need() { grep -Eq -- "$2" "$LOG" || fail "$1" "no line matching '$2'" "$LOG"; }
+    # tests <stage> <want> <cargo args...>: exit 0 AND exactly <want> tests passed (`+` = at least one).
+    tests() {
+        local stage="$1" want="$2" n; shift 2
+        run "$stage" cargo test "$@"
+        n="$(passed "$LOG")"
+        if [ "$want" = "+" ]; then
+            [ "$n" -ge 1 ] || fail "$stage" "0 passed: the run matched no test and proves nothing" "$LOG"
+        else
+            [ "$n" -eq "$want" ] || fail "$stage" "$n passed, but the stage names exactly $want test(s)" "$LOG"
+        fi
+        echo "  ok $stage: $n passed"
+    }
+    # evidence <stage> <ERE>...: `run` already happened; every ERE must match, the first is echoed.
+    evidence() {
+        local stage="$1" re; shift
+        for re in "$@"; do need "$stage" "$re"; done
+        echo "  ok $stage: $(grep -Eo -m 1 -- "$1.*" "$LOG" | cut -c 1-150)"
+    }
+    if wanted A; then
+        CLS="CLASS A"
+        tests manifest-and-run-fields 4 -p aprender-decide --lib -- --exact \
+            artifact::ladder::every_manifest_leaf_is_bound artifact::ladder::manifest_bindings_table_matches_manifest_leaves \
+            verify::tests::every_run_field_is_bound_or_report_only verify::tests::run_field_bindings_table_matches_fixture_leaves
+        tests served-fields 1 -p aprender-mcp-decide --lib -- --exact tests::every_served_field_has_a_bound_source
+        tests lambda-probe + -p aprender-mcp-decide-lambda --lib -- probe::
+        echo "PASS CLASS A"
+    fi
+    if wanted B; then
+        CLS="CLASS B"
+        tests artifact-bounds 1 -p aprender-decide --lib -- --exact artifact::ladder::artifact_bounds_table_is_swept
+        tests request-bounds 1 -p aprender-mcp-decide --lib -- --exact tests::request_bounds_table_is_swept
+        tests lambda-request-rows 1 -p aprender-mcp-decide-lambda --lib -- --exact tests::lambda_request_rows_are_swept
+        # golden_v2_f32_writer_is_byte_identical is red at every commit since before 08-20 (writer 516 B,
+        # fixture 1092 B; deferred-items.md "Found during plan 08-20", open, not Phase 8's): skipped by its
+        # exact path, never by a substring, and the skip is printed so it is never silent.
+        tests apr-format + -p apr-format -- --exact --skip golden_v2_f32_writer_is_byte_identical
+        echo "  skipped apr-format: golden_v2_f32_writer_is_byte_identical (deferred-items 08-20, pre-existing writer/fixture drift)"
+        tests modernbert + -p aprender-core --lib models::modernbert
+        echo "PASS CLASS B"
+    fi
+    if wanted C; then
+        CLS="CLASS C"
+        run gates-selftest just laya-gates-selftest
+        evidence gates-selftest '^LAYA GATES SELFTEST OK [0-9]+ rows' '^AWS CALLS: 0$' '^DRIFT CHECK OK: '
+        run contract-audit-phase8 make --no-print-directory contract-audit-phase8
+        evidence contract-audit-phase8 '^Phase 8 binding audit: 4 contract\(s\) audited' \
+            'every resolver ERE as the table expects' '^Phase 8 source resolution: resolved [1-9][0-9]* '
+        echo "PASS CLASS C"
+    fi
+    if wanted D; then
+        CLS="CLASS D"
+        run claims-check just laya-claims-check
+        evidence claims-check '^LAYA CLAIMS OK [1-9][0-9]* rows' '^self-case anchor: exit ' '^self-case test: exit ' '^self-case kind: exit '
+        echo "PASS CLASS D"
+    fi
+    if wanted E; then
+        CLS="CLASS E"
+        tests numeric-replay 1 -p aprender-decide --lib -- --exact verify::tests::gate_numeric_cases_agree_bit_for_bit
+        run train-selftest just laya-train-selftest
+        evidence train-selftest '^METRICS SELFTEST OK ' '^PYTHON REFUSALS swept=[1-9]' '^LAYA TRAIN SELFTEST OK$'
+        echo "PASS CLASS E"
+    fi
+    if wanted REGRESSION; then
+        CLS="REGRESSION"
+        tests decide-crates + -p aprender-decide -p aprender-mcp-decide -p aprender-mcp-decide-lambda
+        run clippy cargo clippy -p aprender-decide -p aprender-mcp-decide -p aprender-mcp-decide-lambda -p apr-format \
+            --all-targets --no-deps -- -D warnings
+        echo "  ok clippy: -D warnings clean on the three decide crates and apr-format"
+        run fmt cargo fmt -p aprender-decide -p aprender-mcp-decide -p aprender-mcp-decide-lambda -p apr-format -p aprender-core -- --check
+        echo "  ok fmt: rustfmt --check clean"
+        if command -v pv > /dev/null 2>&1; then PV=(pv); else PV=(cargo run --release -q -p aprender-contracts-cli --bin pv --); fi
+        for c in contracts/decide-tool-boundary-v1.yaml contracts/laya-finetune-gate-v1.yaml contracts/laya-parity-v1.yaml contracts/decide-apr-v1.yaml; do
+            run "pv-$(basename "$c" .yaml)" "${PV[@]}" validate "$c"
+            evidence "pv-$(basename "$c" .yaml)" '^0 error\(s\)'
+        done
+        tests invariants + -p aprender-core --test monorepo_invariants --test readme_contract
+        # The contract-cycle guard by name (the three tests the 08-01 dependency cycle broke, plan 08-12), then
+        # the rest of the crate. every_contract_generates_book_page is red on the pre-Phase-8 base d37f2fefc as
+        # well (it parses contracts/binding.yaml, which has no `metadata:`; deferred-items "Found during plan
+        # 08-32"), so it is skipped by its exact name and the skip is printed.
+        tests contract-cycle 3 -p aprender-contracts-cli --lib -- --exact commands::certify::tests::certify_on_real_contracts \
+            commands::verify_pipeline::tests::verify_pipeline_on_real_contracts commands::verify_pipeline::tests::verify_pipeline_json_on_real_contracts
+        tests contracts-cli + -p aprender-contracts-cli -- --exact --skip every_contract_generates_book_page
+        echo "  skipped contracts-cli: every_contract_generates_book_page (deferred-items 08-32, red on the pre-Phase-8 base)"
+        run verify-suite just laya-verify-suite
+        evidence verify-suite '^LAYA VERIFY SUITE OK$' '^LEG OK: laya_parity$' '^LEG OK: fail_closed_vectors$' '^LEG OK: demo_run$' \
+            '^LEG OK: python_records$' 'MEASURED ladder [0-9]+ blocks within bars'
+        run laya-verify just laya-verify "$MAIN/models/decide/laya-stance-64.apr" "$MAIN/models/decide/laya-stance-64" \
+            "$MAIN/data/decide/tweet-stance-64" "{{laya_model_dir}}"
+        python3 - "$LOG" "$DEPLOYED_SHA" "$DEPLOYED_SEED" <<'PY' || fail laya-verify "no JSON line with deploy_eligible true, sha256 $DEPLOYED_SHA and shipped_seed $DEPLOYED_SEED" "$LOG"
+    import json, sys
+    log, sha, seed = sys.argv[1], sys.argv[2], int(sys.argv[3])
+    v = json.loads([l for l in open(log) if l.startswith("{")][-1])
+    sys.exit(0 if v.get("deploy_eligible") is True and v.get("artifact_sha256") == sha and v.get("shipped_seed") == seed else 1)
+    PY
+        echo "  ok laya-verify: deploy_eligible true, sha256 $DEPLOYED_SHA, shipped_seed $DEPLOYED_SEED"
+        echo "PASS REGRESSION"
+    fi
+    if [ -n "$ONLY" ]; then
+        echo "LAYA GAP STAGES OK ($ONLY; not the full regression)"
+    else
+        echo "LAYA GAP REGRESSION OK"
+    fi
